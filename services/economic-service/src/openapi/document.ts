@@ -2,6 +2,7 @@ import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
 import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
 import { toJsonSchema, type JsonSchema } from './zod-schema';
+import { TRANSACTION_RESPONSES, TRANSACTION_VIEW_SCHEMAS } from './transaction-view';
 import {
   listEntriesQuerySchema,
   reverseJournalSchema,
@@ -32,8 +33,12 @@ import {
   updateCommissionRuleSchema,
 } from '../commission/dto';
 import {
+  createParticipationRuleSchema,
+  createRecognitionRuleSchema,
   createRewardRuleSchema,
   listRewardRulesQuerySchema,
+  myParticipationQuerySchema,
+  myRecognitionQuerySchema,
   myRewardsQuerySchema,
   updateRewardRuleSchema,
 } from '../reward/dto';
@@ -68,6 +73,8 @@ const REQUEST_BODIES: Record<string, JsonSchema> = {
   'PATCH /v1/commissions/rules/{id}': toJsonSchema(updateCommissionRuleSchema),
   'POST /v1/rewards/rules': toJsonSchema(createRewardRuleSchema),
   'PATCH /v1/rewards/rules/{id}': toJsonSchema(updateRewardRuleSchema),
+  'POST /v1/rewards/participation-rules': toJsonSchema(createParticipationRuleSchema),
+  'POST /v1/rewards/recognition-rules': toJsonSchema(createRecognitionRuleSchema),
   'POST /v1/payment-intents/{id}/refund': toJsonSchema(refundPaymentSchema),
   'POST /v1/payment-intents/{id}/reconciliation/requeue': toJsonSchema(operatorDecisionSchema),
   'POST /v1/payment-intents/{id}/reconciliation/resolutions': toJsonSchema(proposeResolutionSchema),
@@ -89,6 +96,8 @@ const QUERY_SCHEMAS: Record<string, JsonSchema> = {
   'GET /v1/commissions/rules': toJsonSchema(listCommissionRulesQuerySchema),
   'GET /v1/rewards/me': toJsonSchema(myRewardsQuerySchema),
   'GET /v1/rewards/rules': toJsonSchema(listRewardRulesQuerySchema),
+  'GET /v1/rewards/me/participation': toJsonSchema(myParticipationQuerySchema),
+  'GET /v1/rewards/me/recognition': toJsonSchema(myRecognitionQuerySchema),
   'GET /v1/payment-intents': toJsonSchema(listPaymentsQuerySchema),
 };
 
@@ -120,6 +129,12 @@ const IDEMPOTENT_ROUTES = new Set([
   'POST /v1/payment-intents/{id}/reconciliation/resolutions',
   'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/approve',
   'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/reject',
+  // Moves no money, but a retried version would replace the one in force for
+  // every organization (review of #328, r1). Required by the service; the
+  // gateway's `rewards` prefix carries no requirement, so it forwards the key.
+  'POST /v1/rewards/participation-rules',
+  // The same for levels and badges: one version in force for everyone.
+  'POST /v1/rewards/recognition-rules',
 ]);
 
 /**
@@ -141,6 +156,7 @@ const LIST = [...COMMON, 400] as const;
 
 const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/wallets/provider': COMMON,
+  'GET /v1/wallets/provider/disclosure': COMMON,
   'GET /v1/wallets/me': COMMON,
   'GET /v1/wallets/{id}': READ_ONE,
   'GET /v1/wallets/{id}/holds': READ_ONE,
@@ -169,6 +185,16 @@ const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/rewards/rules': COMMON,
   'POST /v1/rewards/rules': WRITE,
   'PATCH /v1/rewards/rules/{id}': WRITE,
+  // A query that fails its schema — a `userId` included — is a 400.
+  'GET /v1/rewards/me/participation': [...COMMON, 400],
+  'GET /v1/rewards/participation-rules': COMMON,
+  // No 404: nothing is named. 409: a stale `expectedCurrentVersion`, or the key.
+  'POST /v1/rewards/participation-rules': [...COMMON, 400, 409],
+  // Any query parameter at all — a `userId` — is a 400.
+  'GET /v1/rewards/me/recognition': [...COMMON, 400],
+  'GET /v1/rewards/recognition-rules': COMMON,
+  // As the participation rule.
+  'POST /v1/rewards/recognition-rules': [...COMMON, 400, 409],
   'GET /v1/payment-intents': LIST,
   'GET /v1/payment-intents/{id}': READ_ONE,
   'POST /v1/payment-intents/{id}/refund': WRITE,
@@ -177,6 +203,7 @@ const ERRORS: Record<string, readonly number[]> = {
   'POST /v1/payment-intents/{id}/reconciliation/resolutions': WRITE,
   'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/approve': WRITE,
   'POST /v1/payment-intents/{id}/reconciliation/resolutions/{resolutionId}/reject': WRITE,
+  'GET /v1/internal/obligations/by-source/STATEMENT/{statementId}': READ_ONE,
 };
 
 const STATUS_TEXT: Record<number, string> = {
@@ -184,10 +211,62 @@ const STATUS_TEXT: Record<number, string> = {
   401: 'No credentials, or a token that is expired or invalid',
   403: 'Authenticated, but the role or the requested organization is not permitted. The oversight role (AUDITOR) is refused every endpoint in this service',
   404: 'Not found — also returned for a resource owned by another organization, so its existence is never disclosed',
-  409: 'Conflict: an illegal state transition, an idempotency key reused with a different body, or a request already in flight',
+  409: 'Conflict: an illegal state transition, a stale expected version (OPTIMISTIC_LOCK_FAILED), an idempotency key reused with a different body, or a request already in flight',
   422: 'The request is well-formed but a business rule refuses it — INSUFFICIENT_BALANCE, LEDGER_UNBALANCED, or a domain rule',
   500: 'Unexpected server error',
 };
+
+/**
+ * A status said more precisely for one route, where it has a refusal of its
+ * own that a client branches on.
+ */
+const ROUTE_STATUS_TEXT: Record<string, Partial<Record<number, string>>> = {
+  'POST /v1/transactions': {
+    422:
+      'A business rule refuses the obligation, and nothing was recorded: INSUFFICIENT_BALANCE ' +
+      '(holdFunds), a domain rule (BUSINESS_RULE_VIOLATION) — or BUSINESS_LINE_REQUIRED: ' +
+      'settlement fails closed without a commission rule (docs/24 Q-29; on outside development ' +
+      'and test, `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`), so a new obligation must name ' +
+      '`businessLine`. Only marketplace-service recording its own `ORDER` may leave it out ' +
+      '(docs/24 Q-130)',
+  },
+  'POST /v1/settlements': {
+    422:
+      'A business rule refuses the settlement, and nothing moved: INSUFFICIENT_BALANCE, ' +
+      'LEDGER_UNBALANCED, a domain rule (BUSINESS_RULE_VIOLATION) — or NO_ACTIVE_RULE: no ' +
+      'active commission rule covers the transaction’s business line, and settlement fails ' +
+      'closed (docs/24 Q-29; on outside development and test, ' +
+      '`ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`). The funds stay held; the same ' +
+      'settlement succeeds once a rule for the line — a 0% rule included — is in force',
+  },
+};
+
+/**
+ * The same statuses on the internal routes (`/v1/internal/…`, ADR-061 § 4),
+ * which answer one named service and no user at all.
+ */
+const INTERNAL_STATUS_TEXT: Record<number, string> = {
+  403: 'Authenticated, but not the service this route answers: any user token (whatever its roles), another service’s internal token, or an internal token signed for no organization',
+  404: 'Not found — also returned for a record of any organization but the one the internal token is signed for, so its existence is never disclosed',
+};
+
+/**
+ * The internal routes' credential: a service's internal token in
+ * `X-Internal-Token` and nothing else. `AuthGuard` judges a request that also
+ * carries `Authorization` on that bearer token, as a user — so the internal
+ * routes cannot be described by the bearer scheme.
+ */
+export const INTERNAL_TOKEN_SCHEME = 'internalToken';
+
+const INTERNAL_TOKEN_SECURITY_SCHEME = {
+  type: 'apiKey',
+  in: 'header',
+  name: 'X-Internal-Token',
+  description:
+    'A service’s internal token (ADR-061 § 4), signed for the organization it acts for. Sent alone: a request that also carries an `Authorization` bearer token is judged on that token, as a user.',
+} as const;
+
+const isInternalPath = (path: string): boolean => path.startsWith('/v1/internal/');
 
 /**
  * `Retry-After` on an idempotent route's 409 (docs/06 § 6.8). Optional: only
@@ -202,18 +281,58 @@ const RETRY_AFTER_HEADER = {
   schema: { type: 'integer', minimum: RETRY_AFTER_MIN_SECONDS, maximum: RETRY_AFTER_MAX_SECONDS },
 };
 
+/**
+ * Success bodies outside the transaction views (`transaction-view.ts`), by
+ * component name, and the routes that send them. Held to the route's answer
+ * by `api-wallet.int-spec.ts` with `schemaMismatches`, both ways.
+ */
+const OTHER_VIEW_SCHEMAS: Record<string, JsonSchema> = {
+  PaymentDisclosure: {
+    type: 'object',
+    required: ['simulated'],
+    properties: {
+      simulated: {
+        type: 'boolean',
+        description:
+          'True while no real money moves (the simulated provider, ADR-024): a screen that ' +
+          'shows or moves money draws «حالت نمایشی» (Q-14).',
+      },
+    },
+  },
+};
+
+const OTHER_RESPONSES: Record<string, string> = {
+  'GET /v1/wallets/provider/disclosure': 'PaymentDisclosure',
+};
+
+const RESPONSES: Record<string, string> = { ...TRANSACTION_RESPONSES, ...OTHER_RESPONSES };
+
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
   // The one error shape every Rasta service returns. Referenced rather than
   // inlined per response, so a client generates a single error type.
   document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  // The transaction a response carries, and the disclosure — referenced for the same reason.
+  for (const [name, schema] of Object.entries({
+    ...TRANSACTION_VIEW_SCHEMAS,
+    ...OTHER_VIEW_SCHEMAS,
+  })) {
+    document.components.schemas[name] = schema as never;
+  }
+  document.components.securitySchemes ??= {};
+  document.components.securitySchemes[INTERNAL_TOKEN_SCHEME] = INTERNAL_TOKEN_SECURITY_SCHEME;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
       if (!isOperation(operation)) continue;
 
       const key = `${method.toUpperCase()} ${path}`;
+      const internal = isInternalPath(path);
+
+      // Only the internal token reaches an internal route; a bearer token there
+      // is a user, and refused.
+      if (internal) operation.security = [{ [INTERNAL_TOKEN_SCHEME]: [] }];
 
       const body = REQUEST_BODIES[key];
       if (body) {
@@ -245,17 +364,24 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
         ];
       }
 
-      // A success body, unless the route genuinely returns none.
-      const success = method.toUpperCase() === 'POST' && !body ? '200' : successStatus(method);
+      // The success body, under the status the handler answers with.
+      const success = successStatus(key, operation);
+      const view = RESPONSES[key];
       operation.responses ??= {};
       operation.responses[success] = {
         description: 'Success',
-        content: { 'application/json': { schema: {} } },
+        content: {
+          'application/json': { schema: view ? { $ref: `#/components/schemas/${view}` } : {} },
+        },
       };
 
       for (const status of ERRORS[key] ?? []) {
         operation.responses[String(status)] = {
-          description: STATUS_TEXT[status] ?? 'Error',
+          description:
+            ROUTE_STATUS_TEXT[key]?.[status] ??
+            (internal ? INTERNAL_STATUS_TEXT[status] : undefined) ??
+            STATUS_TEXT[status] ??
+            'Error',
           ...(status === 409 && IDEMPOTENT_ROUTES.has(key)
             ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
             : {}),
@@ -270,8 +396,29 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   return document;
 }
 
-function successStatus(method: string): string {
-  return method.toUpperCase() === 'POST' ? '201' : '200';
+/**
+ * The status a route answers success with: the one Nest wrote into the
+ * document for it — the handler's `@HttpCode`, or without one Nest's default
+ * (201 for a POST, 200 otherwise), which is also what the route sends.
+ *
+ * Read from the route, never guessed from the request. Guessing that a POST
+ * with a body creates something documented the dispute, resolution, refund
+ * and cancel views under a 201 those routes never send, and left their real
+ * 200 with no schema (Codex on #322). A route with no success status, or
+ * more than one, is refused: there is nothing to attach the body to that
+ * would not be a guess.
+ */
+function successStatus(key: string, operation: MutableOperation): string {
+  const declared = Object.keys(operation.responses ?? {}).filter((status) =>
+    /^2\d\d$/.test(status),
+  );
+  if (declared.length !== 1) {
+    throw new Error(
+      `OpenAPI: ${key} declares ${declared.length} success statuses (${declared.join(', ')}); ` +
+        'exactly one is needed to document its body',
+    );
+  }
+  return declared[0]!;
 }
 
 /**
@@ -295,6 +442,7 @@ function toQueryParameters(schema: JsonSchema): Record<string, unknown>[] {
 }
 
 interface MutableOperation {
+  security?: Record<string, string[]>[];
   requestBody?: unknown;
   parameters?: unknown[];
   responses?: Record<string, unknown>;

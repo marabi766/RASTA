@@ -139,9 +139,10 @@ export type SubmitQualificationDto = z.infer<typeof submitQualificationSchema>;
 export const approveQualificationSchema = z
   .object({
     /**
-     * The reviewer's own account of the decision. **Private**: it is stored,
-     * shown to the supplier's own organization and to platform operators, and
-     * never published on an event or through the directory.
+     * The reviewer's own account of the decision. **Private to reviewers**: it
+     * is stored and shown to platform operators outside the supplier's
+     * organization, never to the supplier's own organization, never published
+     * on an event and never in the directory.
      */
     note: plainText().min(1).max(2000).optional(),
   })
@@ -152,12 +153,13 @@ export type ApproveQualificationDto = z.infer<typeof approveQualificationSchema>
 export const rejectQualificationSchema = z
   .object({
     /**
-     * Why, stated for the supplier. Required, and published on
-     * `SUPPLIER_REJECTED` — a rejection the supplier cannot see the reason for
-     * is a decision they can never act on.
+     * Why, stated for the supplier. Required, stored on the qualification as
+     * `rejectionReason` (readable on the supplier's own record) and published
+     * on `SUPPLIER_REJECTED` — a rejection the supplier cannot see the reason
+     * for is a decision they can never act on.
      */
     reason: statedReason,
-    /** The reviewer's private note. Never published. */
+    /** The reviewer's private note: reviewers only, never the supplier, never published. */
     note: plainText().min(1).max(2000).optional(),
   })
   .strict();
@@ -171,6 +173,17 @@ export type RejectQualificationDto = z.infer<typeof rejectQualificationSchema>;
 export const suspendSupplierSchema = z
   .object({
     reason: statedReason,
+    /**
+     * The newest suspension episode the operator saw on the supplier's record —
+     * `suspensions[0].id` of the detail view — or `null` when it showed none.
+     * Required, `null` included, so a client cannot forget it.
+     *
+     * Compared atomically with the suspension: if an episode was opened (and
+     * closed) since, the operator decided about a record that no longer exists,
+     * and the answer is `409` with `details[].code` `SUSPENSION_EPISODE_CHANGED`
+     * and nothing written (Codex review of PR 366, finding 2).
+     */
+    latestSuspensionId: identifier.nullable(),
   })
   .strict();
 
@@ -186,6 +199,15 @@ export const reinstateSupplierSchema = z
      * Stored in `suspension.reinstatement_note`, on the episode it closes.
      */
     reason: statedReason,
+    /**
+     * The open episode this lifts — the detail view's suspension with
+     * `open: true`. Compared atomically with the lifting: if another episode is
+     * open now (the one the operator read was lifted and the supplier suspended
+     * again), the answer is `409` with `details[].code`
+     * `SUSPENSION_EPISODE_CHANGED` and nothing is written, so one episode's
+     * explanation never closes another (Codex review of PR 366, finding 2).
+     */
+    suspensionId: identifier,
   })
   .strict();
 
@@ -301,8 +323,22 @@ export const qualificationViewSchema = z
     submittedAt: z.string(),
     decidedBy: z.string().nullable(),
     decidedAt: z.string().nullable(),
-    /** Private. Present only in the detail view. */
-    decisionNote: z.string().nullable(),
+    /**
+     * The reviewer's private note. **Present only for a reviewer**: a platform
+     * operator who is not a member of the supplier's organization
+     * (`mayReadReviewerNote`). The key is absent — not null — for the
+     * supplier's own organization, so "no note" and "not yours to read" are
+     * never the same answer. Never in the directory, never on an event.
+     */
+    decisionNote: z.string().nullable().optional(),
+    /**
+     * Why a rejection was made, stated for the supplier: present on a
+     * `REJECTED` qualification for every reader of the detail view, and null
+     * on every other state. Also null on a rejection recorded before this
+     * field existed whose event had already left the outbox — nothing is
+     * invented for it.
+     */
+    rejectionReason: z.string().nullable(),
     evidence: z.array(z.object({ documentId: z.string(), label: z.string().nullable() }).strict()),
     /**
      * Whether this approval counts right now.
@@ -393,11 +429,22 @@ export type StandingSnapshotPage = z.infer<typeof standingSnapshotPageSchema>;
 
 /**
  * One organization's current standing, read at the moment of asking: the same
- * shape as a snapshot item, plus the database instant it was read at. An
+ * shape as a snapshot item, plus its GOODS_SUPPLY approval and the database
+ * instant it was read at. An
  * organization with no supplier profile is a 200 with no approval and no episodes
  * (not a 404: only the owner's own not-found means "there is none", ADR-061 § 4,
  * and "nothing recorded" is already an answer — not qualified).
  */
-export const standingOfSchema = standingSnapshotItemSchema.extend({ asOf: z.string() }).strict();
+export const standingOfSchema = standingSnapshotItemSchema
+  .extend({
+    /**
+     * When its GOODS_SUPPLY qualification was approved (the latest approval), for
+     * procurement-service (ADR-070 § 7). Additive: the paged snapshot does not carry
+     * it, and construction-service reads past it.
+     */
+    goodsSupplyApprovedAt: z.string().nullable(),
+    asOf: z.string(),
+  })
+  .strict();
 
 export type StandingOf = z.infer<typeof standingOfSchema>;

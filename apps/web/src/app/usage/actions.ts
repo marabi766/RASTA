@@ -2,8 +2,10 @@
 
 import { redirect } from 'next/navigation';
 
-import { currentSession } from '@/server/current-session';
+import { MONEY_EFFECTS } from '@/lib/demo-mode';
+import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { mayDispatch } from '@/server/money-gate';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { parseUsageForm, recordUsage, usageFormValues } from '@/server/usage';
 
@@ -25,7 +27,9 @@ import type { UsageFormState } from './form-state';
  *   2. CSRF — refused before the body is even read into a request;
  *   3. the submission id — refused if it is not one this server minted;
  *   4. the form, in Persian, for what a form can see;
- *   5. the gateway, which is where every real decision is made.
+ *   5. the provider, read again: a usage record is a reward trigger, and the
+ *      form drawn while it was known is not sent once it is not (`mayDispatch`);
+ *   6. the gateway, which is where every real decision is made.
  *
  * Nothing token-shaped is in the state this returns; the state is rendered
  * into the page and would be visible to any script on it.
@@ -36,7 +40,7 @@ export async function submitUsage(
   form: FormData,
 ): Promise<UsageFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
@@ -54,6 +58,10 @@ export async function submitUsage(
       fieldErrors: parsed.fieldErrors,
       message: null,
     };
+  }
+
+  if (!(await mayDispatch(session, MONEY_EFFECTS.usageRecord))) {
+    return { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
   }
 
   const result = await recordUsage(session, parsed.request);

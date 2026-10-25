@@ -217,8 +217,10 @@ test('reads unquoted identifiers, schema-qualified names and expression keys', (
 
 // L7-44, economic-service: every report classified as a legitimate exemption
 // (none needed a fix migration). Without the exemptions the check reports
-// exactly these twelve, so each one is load-bearing.
+// exactly these thirteen, so each one is load-bearing.
 const ECONOMIC_EXEMPT = [
+  // ADR-045 (D-057): the same lookup, by business line.
+  'commission_rule_business_line_status_valid_from_idx',
   'commission_rule_transaction_type_status_valid_from_idx',
   'ix_payment_intent_unfinished_refund',
   'ix_payment_reconciliation_open_window',
@@ -264,6 +266,7 @@ const OPTED_IN = {
     'ix_offer_status_price',
     'ix_order_history_order',
     'ix_order_supplier_status',
+    'ix_return_request_supplier',
     'uq_offer_price_version',
     'uq_order_line_offer',
   ],

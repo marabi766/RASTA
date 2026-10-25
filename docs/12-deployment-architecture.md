@@ -273,6 +273,24 @@ Tag روی main (v0.x.y)
 **ترتیب Migration.** Job Migration **پیش از** Rollout اجرا می‌شود و باید سازگار به عقب باشد
 (نسخه قدیم و جدید هم‌زمان زنده‌اند). تغییر شکننده = الگوی Expand/Contract در سه استقرار.
 
+**Topicهای Kafka و سقف اندازه (PR #378 r2، r4).** مخزن Chart یا Manifestی برای Topicها ندارد؛ تنها جای ساختن آن‌ها
+[`create-topics.sh`](../infrastructure/docker/kafka/create-topics.sh) است که از
+[`topics.txt`](../infrastructure/docker/kafka/topics.txt) می‌خواند. هر Topic سقف `max.message.bytes` **صریح** دارد:
+Topic مبدا و `.retry` همان پیش‌فرض Kafka 3.9 (۱٬۰۴۸٬۵۸۸ بایت)، و هر DLQ ۱٬۰۵۰٬۵۶۵ بایت: بزرگ‌ترین سقف مبداهایش + سقف
+Headerهای افزوده‌ی DLQ (`DLQ_ADDED_HEADERS_MAX_BYTES`) + بیشترین رشد GZIP (`gzipGrowthMaxBytes`، وابسته به اندازه).
+`pnpm run check:kafka-topic-limits` در CI برنامه را می‌سنجد. یک اجرای تنهای اسکریپت روی Broker موجود **هیچ سقفی را پایین
+نمی‌آورد**: اول سقف واقعی (Effective، به‌ارث‌رسیده هم) همه را می‌خواند و اگر نتواند بی‌تغییر شکست می‌خورد، بعد DLQها را
+بالای مبداهایشان می‌برد و فقط سپس مبداها را، یکی‌یکی؛ Broker هر محیطی که پیش از این تغییر ساخته شده یک بار باید آن را با
+Admin اجرا کند. نویسنده‌ی هم‌زمان (PR #378 r5، D-066) فقط وقتی دیده می‌شود که تغییرش پیش از خواندن دوباره‌ی همان Topic،
+درست پیش از نوشتن، برسد؛ آن وقت اجرا بی تغییر بیشتر می‌ایستد. تغییر Config در Kafka شرطی نیست، پس **پیش‌شرط** این است که
+در طول اجرا Provisioner دوم، Alter دستی یا تغییر پیش‌فرض Broker نباشد (Compose یک `kafka-init` در هر Stack، هر Job در CI
+Broker خودش).
+این جا **همه‌ی** Dead letterها را تضمین نمی‌کند: فقط برای مبدای بی‌فشرده‌سازی (یا GZIPی که کوچکش نکرده) ثابت شده، برای
+GZIP پیش‌فرض اندازه‌گیری شده، و سه فرار شناخته‌شده دارد (مبدا با سطح GZIP بالاتر، Dead letterهای Parked در fleet،
+بازنویسی JSONB) که طراحی جدا دارند (تصمیم PM D-063). در آن موارد ارسال DLQ با `MESSAGE_TOO_LARGE` رد می‌شود، مثل main:
+Consumer مشترک کرش می‌کند و تا ری‌استارت سرویس نمی‌خواند، و رکورد فقط تا Retention مبدا می‌ماند. شرح کامل و فرمان دستی:
+[`runbooks/replay-dlq.md`](runbooks/replay-dlq.md). رسیدن پیام به DLQ اثر آن را نمی‌سازد؛ تا بازپخش، آن اثر نیست.
+
 ---
 
 ## ۱۲٫۶ پیکربندی و Secret
@@ -314,7 +332,8 @@ Tag روی main (v0.x.y)
 مالی، و **اثبات توازن دفتر کل**.
 
 Runbookها: [`runbooks/restore-database.md`](runbooks/restore-database.md) ·
-[`runbooks/disaster-recovery.md`](runbooks/disaster-recovery.md)
+[`runbooks/disaster-recovery.md`](runbooks/disaster-recovery.md) ·
+[`runbooks/backup-restore-drill.md`](runbooks/backup-restore-drill.md) (تمرین محلی با گزارش JSON)
 
 ### سناریوهای فاجعه
 

@@ -55,8 +55,9 @@ docker buildx imagetools inspect postgis/postgis:16-3.4 | sed -n 's/^Digest: *//
 docker buildx imagetools inspect postgis/postgis:16-3.4 | sed -n 's/^MediaType: *//p'   # index یا manifest list
 ```
 
-اگر MediaType یک Manifest تکی است (`postgis/postgis` و `clamav/clamav` فقط `amd64` منتشر می‌کنند)، همان Manifest تنها
-چیزی است که می‌شود Pin کرد؛ Index وجود ندارد.
+اگر MediaType یک Manifest تکی است (`postgis/postgis` فقط `amd64` منتشر می‌کند)، همان Manifest تنها چیزی است که می‌شود
+Pin کرد؛ Index وجود ندارد. `clamav/clamav` فقط `amd64` دارد ولی Index منتشر می‌کند (`amd64` + Attestation)؛ Digest همان
+Index را Pin کنید.
 
 ۲. Digest را در **همهٔ** جاهای جدول بالا با هم جایگزین کنید — یک Commit، نه یکی‌یکی:
 
@@ -68,7 +69,7 @@ pnpm check:dockerfile-pins
 docker compose --profile all --profile observability --profile search --profile tools config -q
 ```
 
-۳. PR را باز کنید. Jobهایی که این Containerها را بالا می‌آورند — چهار Job ‏`integration-*`، `migration-reversibility`، `e2e`،
+۳. PR را باز کنید. Jobهایی که این Containerها را بالا می‌آورند — پنج Job ‏`integration-*` (از جمله `integration-backup-drill` با PostgreSQL و بدون Broker)، سه Leg ‏`migration-reversibility-chain`، `migration-guards`، `e2e`،
 `web-browser`، `broker-authorisation`، `prometheus-rules`، `security`، `clamav-signatures` — تصویر را با همان Digest Pull
 می‌کنند؛ Digest اشتباه همان‌جا با `manifest unknown` شکست می‌خورد.
 

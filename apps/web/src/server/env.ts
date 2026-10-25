@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+import {
+  MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS,
+  MAX_REPLAY_MARGIN_SECONDS,
+  projectCreateWindowFits,
+  replayMarginCoversClockBudget,
+} from './unresolved-request-policy';
+
 /**
  * Server-only configuration for the portal (ADR-059).
  *
@@ -63,6 +70,29 @@ function roleList(name: string, fallback: string, alsoRefused: readonly string[]
     )
     .refine((roles) => !roles.some((role) => refused.includes(role)), {
       message: `${name} may not name ${refused.join(' or ')}`,
+    });
+}
+
+/** A closed code, as contract-service keeps it: upper-case words, 2 to 64 characters. */
+const REASON_CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/** A comma-separated list of closed codes, trimmed, at least one, none twice. */
+function reasonCodeList(name: string, fallback: string) {
+  return z
+    .string()
+    .default(fallback)
+    .transform((raw) =>
+      raw
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    )
+    .refine((codes) => codes.length > 0, { message: `${name} must name at least one reason` })
+    .refine((codes) => codes.every((code) => REASON_CODE.test(code)), {
+      message: `${name} names a code that is not upper-case words`,
+    })
+    .refine((codes) => new Set(codes).size === codes.length, {
+      message: `${name} names a reason twice`,
     });
 }
 
@@ -151,6 +181,50 @@ const schema = z.object({
   WEB_PROJECT_READER_ROLES: roleList('WEB_PROJECT_READER_ROLES', ''),
 
   /**
+   * Who may open a tender's bids and read them afterwards
+   * (`server/tender-owner.ts`). This **mirrors** construction-service's
+   * `CONSTRUCTION_TENDER_OPEN_ROLES` and must be changed together with it:
+   * empty (the default) means the owner's own role set, `WEB_PROJECT_ROLES`,
+   * as there. `SYSTEM_ADMIN` and `CONTRACTOR` are refused here as they are
+   * there — neither opens or reads a bid (ADR-066 § 4). It decides only which
+   * forms are drawn; the service decides again.
+   */
+  WEB_TENDER_OPEN_ROLES: roleList('WEB_TENDER_OPEN_ROLES', '', ['SYSTEM_ADMIN', 'CONTRACTOR']),
+
+  /**
+   * Who may evaluate a tender's opened bids and read the matrix, and who may
+   * award an evaluated tender (`server/tender-evaluation.ts`). These **mirror**
+   * construction-service's `CONSTRUCTION_TENDER_EVALUATE_ROLES` and
+   * `CONSTRUCTION_TENDER_AWARD_ROLES` and must be changed together with them:
+   * empty (the default) means the owner's own role set, `WEB_PROJECT_ROLES`,
+   * as there. `SYSTEM_ADMIN` and `CONTRACTOR` are refused as they are there.
+   */
+  WEB_TENDER_EVALUATE_ROLES: roleList('WEB_TENDER_EVALUATE_ROLES', '', [
+    'SYSTEM_ADMIN',
+    'CONTRACTOR',
+  ]),
+  WEB_TENDER_AWARD_ROLES: roleList('WEB_TENDER_AWARD_ROLES', '', ['SYSTEM_ADMIN', 'CONTRACTOR']),
+
+  /**
+   * The optional conflict-of-interest rules in force (`server/tender-evaluation.ts`).
+   * This **mirrors** construction-service's `CONSTRUCTION_COI_RULES` — the same
+   * closed set, the same default (`AWARDER_NOT_EVALUATOR`, on unless switched
+   * off; an empty value switches every rule off) — and must be changed together
+   * with it. A name outside the set stops the portal at boot, as it stops the
+   * service. It decides only which forms are drawn; the service decides again.
+   */
+  WEB_TENDER_COI_RULES: z
+    .string()
+    .default('AWARDER_NOT_EVALUATOR')
+    .transform((raw) =>
+      raw
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    )
+    .pipe(z.array(z.enum(['AWARDER_NOT_EVALUATOR', 'EVALUATOR_NOT_TENDER_AUTHOR']))),
+
+  /**
    * Which roles are shown the Inventory link (`server/portal-nav.ts`).
    *
    * These **mirror** inventory-service's `INVENTORY_OPERATOR_ROLES` and
@@ -164,6 +238,202 @@ const schema = z.object({
   WEB_INVENTORY_READER_ROLES: roleList('WEB_INVENTORY_READER_ROLES', 'ORGANIZATION_ADMIN', [
     PLATFORM_ROLE,
   ]),
+
+  /**
+   * Which roles are shown the Contracts link, on the employer's side
+   * (`server/portal-nav.ts`). The contractor's side needs `CONTRACTOR`, fixed
+   * in contract-service (ADR-068 § 7), so it has no setting here — the same
+   * shape as the bidder side of Tenders.
+   *
+   * This **mirrors** contract-service's `CONTRACT_READER_ROLES` (default
+   * `ORGANIZATION_ADMIN`) and must be changed together with it. It decides
+   * only whether a link is drawn; the service still decides who may read, and
+   * a refusal is rendered as an outcome. `AUDITOR` is refused at boot, as the
+   * service refuses it on both sides.
+   *
+   * contract-service has no separate "extra reader" role the way
+   * construction-service's projects do, so there is one setting here, not a
+   * pair — see docs/16 § ۱۶٫۶ for the note that explains this choice.
+   */
+  WEB_CONTRACT_READER_ROLES: roleList('WEB_CONTRACT_READER_ROLES', 'ORGANIZATION_ADMIN'),
+
+  /**
+   * How long marketplace-service keeps an idempotency record, in hours — the
+   * window in which a return command re-sent under its original key is a
+   * replay rather than a new command (`server/return-replay.ts`). A return
+   * request run again under a fresh record is a **second request** for the
+   * same goods, so past this window the portal never re-sends one.
+   *
+   * This **mirrors** marketplace-service's `MARKETPLACE_IDEMPOTENCY_TTL_HOURS`
+   * (same bounds, 1..168) and must be changed together with it, or set lower.
+   * The default is that setting's floor, as for economic-service's below.
+   */
+  WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending a
+   * return command, in seconds: room for the request to reach
+   * marketplace-service. Same bounds as the dispute margin.
+   */
+  WEB_RETURN_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 60)
+    .default(10 * 60),
+
+  /**
+   * Who, on the employer's side, is drawn the forms that cancel a draft,
+   * propose an amendment and plan or change a milestone (`server/contract-commands.ts`).
+   *
+   * These **mirror** contract-service's `CONTRACT_CANCEL_ROLES`,
+   * `CONTRACT_AMENDMENT_ROLES` and `CONTRACT_MILESTONE_ROLES` (each default
+   * `ORGANIZATION_ADMIN`; empty means nobody, as there) and must be changed
+   * together with them. The contract view carries no list of what the caller
+   * may do, so this is how the page knows; they decide only what is drawn —
+   * the service decides again, and a refusal is said in fixed words. Who signs
+   * for the employer is not one of these: it is the `contract.signature`
+   * policy in force, which the page reads.
+   */
+  WEB_CONTRACT_CANCEL_ROLES: roleList('WEB_CONTRACT_CANCEL_ROLES', 'ORGANIZATION_ADMIN'),
+  WEB_CONTRACT_AMENDMENT_ROLES: roleList('WEB_CONTRACT_AMENDMENT_ROLES', 'ORGANIZATION_ADMIN'),
+  WEB_CONTRACT_MILESTONE_ROLES: roleList('WEB_CONTRACT_MILESTONE_ROLES', 'ORGANIZATION_ADMIN'),
+
+  /**
+   * The closed lists of reasons a draft is cancelled for and an amendment is
+   * proposed for — the choices the two forms offer. These **mirror**
+   * contract-service's `CONTRACT_CANCEL_REASON_CODES` and
+   * `CONTRACT_AMENDMENT_REASON_CODES` (same defaults, same shape) and must be
+   * changed together with them: a code the service does not list is refused
+   * (`CANCEL_REASON_NOT_ALLOWED`, `AMENDMENT_REASON_NOT_ALLOWED`) and said in
+   * fixed words. The codes have no legal meaning; a code the portal has no
+   * Persian word for is offered as itself (`lib/contract-command-fields.ts`).
+   */
+  WEB_CONTRACT_CANCEL_REASON_CODES: reasonCodeList(
+    'WEB_CONTRACT_CANCEL_REASON_CODES',
+    'TERMS_NOT_AGREED,CONTRACTOR_WITHDREW,AWARD_ERROR,OTHER',
+  ),
+  WEB_CONTRACT_AMENDMENT_REASON_CODES: reasonCodeList(
+    'WEB_CONTRACT_AMENDMENT_REASON_CODES',
+    'SCOPE_CHANGE,PRICE_ADJUSTMENT,SCHEDULE_CHANGE,OTHER',
+  ),
+
+  /**
+   * Whether a draft one side has already signed is still drawn a cancel form.
+   * This **mirrors** contract-service's `CONTRACT_CANCEL_AFTER_SIGNATURE`
+   * (default false, Q-95 (4)) and must be changed together with it.
+   */
+  WEB_CONTRACT_CANCEL_AFTER_SIGNATURE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+
+  /**
+   * How long economic-service keeps an idempotency record, in hours — the
+   * window in which a dispute command re-sent under its original key is a
+   * replay rather than a new command (`server/dispute-replay.ts`, PR 319
+   * review 2, finding 2).
+   *
+   * This **mirrors** economic-service's `ECONOMIC_IDEMPOTENCY_TTL_HOURS`
+   * (same bounds, 1..168) and must be changed together with it, or set lower.
+   * The default is that setting's **floor**, not its default: a value lower
+   * than the service's only offers the re-send for less time than it could
+   * be; a higher one would offer a re-send the service may execute as new.
+   */
+  WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending a
+   * dispute command, in seconds: room for the request to travel from the
+   * portal to economic-service, so a re-send let through just before the
+   * deadline cannot arrive after the record is gone. At most half an hour,
+   * so the window is never shorter than thirty minutes.
+   */
+  WEB_DISPUTE_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 60)
+    .default(10 * 60),
+
+  /**
+   * How long contract-service keeps an idempotency record, in hours — the
+   * window in which a statement or contract command re-sent under its
+   * original key is a replay rather than a new command
+   * (`server/statement-replay.ts`, `server/contract-command-replay.ts`). A
+   * draft, an amendment or a milestone run again under a fresh record is a
+   * **second one**, so past this window the portal never re-sends one.
+   *
+   * This **mirrors** contract-service's `CONTRACT_IDEMPOTENCY_TTL_HOURS`
+   * (same bounds, 1..168) and must be changed together with it, or set lower.
+   * The default is that setting's floor, as for economic-service's above.
+   *
+   * The project-create window (this retention less the margin below, plus the
+   * portal's 30 s clock allowance) may not exceed
+   * `PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS` (`@rasta/contracts`, 3 300 s):
+   * construction-service refuses a replay deadline past its own retention
+   * less its fence budget, and refuses to start unless it can accept that
+   * much. Beyond it the portal refuses to start (`loadWebServerEnv`), so an
+   * honest client never meets the refusal. With 1 h that means a margin of at
+   * least 330 s.
+   */
+  WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending a
+   * statement command, in seconds: room for the request to reach
+   * contract-service. Same bounds as the dispute margin.
+   */
+  WEB_CONTRACT_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 60)
+    .default(10 * 60),
+
+  /**
+   * How long construction-service keeps an idempotency record, in hours — the
+   * window in which a bid re-sent under its original key is answered with its
+   * stored receipt rather than run again (`server/bid-replay.ts`).
+   *
+   * This is the portal's own bound on construction-service's
+   * `CONSTRUCTION_IDEMPOTENCY_TTL_HOURS` (the service accepts 1..168 and keeps
+   * records that long): it must not exceed the service's setting, and it may be
+   * no more than `MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS` (1), the longest
+   * retention that can boot at all given the cap below
+   * (`unresolved-request-policy.ts` derives it; a larger value could only fail
+   * at start, so the schema refuses it here). The default is the service
+   * setting's floor.
+   *
+   * The project-create window (this retention less the margin below, plus the
+   * portal's 30 s clock allowance) may not exceed
+   * `PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS` (`@rasta/contracts`, 3 300 s):
+   * construction-service refuses a replay deadline past its own retention
+   * less its fence budget, and refuses to start unless it can accept that
+   * much. Beyond it the portal refuses to start (`loadWebServerEnv`), so an
+   * honest client never meets the refusal. With 1 h that means a margin of at
+   * least 330 s.
+   */
+  WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS)
+    .default(1),
+
+  /**
+   * How much earlier than that retention the portal stops re-sending a bid
+   * command, in seconds: room for the request to reach construction-service.
+   * Same bounds as the dispute margin, and at least `2 × MAX_CLOCK_SKEW_MS +
+   * MAX_REQUEST_TIMEOUT_MS` (75 s: `unresolved-request-policy.ts`) — below that
+   * the portal refuses to start (`loadWebServerEnv`).
+   */
+  WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(MAX_REPLAY_MARGIN_SECONDS)
+    .default(10 * 60),
 
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
@@ -192,6 +462,29 @@ export function loadWebServerEnv(
   // replicas, and two replicas without shared coordination race for every
   // refresh token (ADR-059 addendum).
   if (source.NODE_ENV === 'production' && !source.WEB_REDIS_URL) missing.push('WEB_REDIS_URL');
+
+  // The clock budget of the replay deadlines (`unresolved-request-policy.ts`):
+  // the margin must cover two clock skews and one request, or a key could be
+  // resent after the service forgot it. Refuse to start rather than run without.
+  if (
+    parsed.success &&
+    !replayMarginCoversClockBudget(parsed.data.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS)
+  ) {
+    missing.push('WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS');
+  }
+  // The window itself must fit what construction-service accepts: its replay fence refuses a deadline
+  // later than its retention less B, and both sides are held to one shared constant
+  // (`PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS`). The portal cannot read the service's settings, so it is
+  // this side that refuses to start when its own window is too long (D-067).
+  if (
+    parsed.success &&
+    !projectCreateWindowFits(
+      parsed.data.WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS,
+      parsed.data.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS,
+    )
+  ) {
+    missing.push('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+  }
 
   if (!parsed.success || missing.length > 0) {
     // Names only, never values: this object holds the session key.

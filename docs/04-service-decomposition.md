@@ -124,6 +124,11 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 می‌سازد که PostgreSQL با لغو یکی از دو درخواست معتبر (`40P01`) می‌شکند. شواهد: `test/hierarchy-lock-order.int-spec.ts`
 (درهم‌تنیدگی با مانع و `pg_stat_activity`، بدون `sleep`). هزینه: تغییر وضعیت، ساخت و جابه‌جایی پشت هم
 صف می‌کشند؛ اینها عملیات نادرِ مدیرِ سامانه‌اند. تلاش مجدد راه‌حل نیست و اضافه نشده است.
+Seed نمایشی (`prisma/seed.ts` از راه `seedOrganization`) هم همین قفل را نخست می‌گیرد و ردیف و `path` را در
+یک تراکنش می‌نویسد، با مسیر کنونیِ والد که زیر همین قفل خوانده شده است؛ ردیفِ ACTIVE زیر والدِ تعلیق‌شده یا
+غیرفعال را نمی‌سازد (`ANCESTOR_NOT_ACTIVE`)، و ردیف را ژرف‌تر از `MAX_HIERARCHY_DEPTH` خودِ سرویس، با همان
+قاعده و ژرفای والد که زیر همین قفل خوانده شده، نمی‌گذارد (`HIERARCHY_TOO_DEEP`). شواهد:
+`test/seed-hierarchy-lock.int-spec.ts`.
 
 ---
 
@@ -155,6 +160,12 @@ Adjacency List خالص. دلیل: پرس‌وجوی «همه دهیاری‌ه�
 خودش را می‌چسباند؛ در نتیجه `ActivateAsset` برای B سند مالکیت یا کارت ثبتِ **خودِ B** را می‌خواهد. اگر دارایی به A برگردد، ردیف‌های
 قدیمیِ A (که هیچ‌گاه از A جدا نشد) دوباره در پروندهٔ A دیده می‌شود و ردیف‌های B نزد B می‌ماند. `ASSET_TRANSFERRED` هیچ شناسهٔ مدرکی
 نمی‌برد. بیمه (Q-66) تصمیم جدایی دارد: بیمه‌نامه با خودرو می‌رود چون واقعیتی دربارهٔ خودروست، نه فایلِ مالِ کسی.
+
+**مدارک پروندهٔ خسارت (Q-128، تصمیم موقت).** پروندهٔ خسارت فقط ارجاع به مدرک `document-service` نگه می‌دارد
+(`insurance_claim_document`)، نه فایل. شناسه پیش از نوشتن از `document-service` پرسیده می‌شود (REST با توکن سرویس، امضاشده با
+سازمانِ مالک دارایی)؛ مدرک سازمان دیگر، ناموجود یا مال دارایی دیگر همه یک `404` یکسان است. فقط پروندهٔ باز (`SUBMITTED`،
+`UNDER_REVIEW`) مدرک می‌گیرد، حداکثر ۲۰ مدرک، بدون حذف. در انتقال، پرونده با دارایی می‌رود ولی ارجاع‌ها نزد سازمان چسباننده
+می‌مانند (همان قاعدهٔ Q-99).
 
 ---
 
@@ -271,7 +282,7 @@ fleet رونوشت `asset_ref` را از رویداد می‌سازد و واب�
 | **Publishes**    | `DEMAND_SUBMITTED` · `DEMAND_AGGREGATED` · `RFQ_ISSUED` · `QUOTATION_SUBMITTED` · `QUOTATIONS_EVALUATED` · `PURCHASE_ORDER_ISSUED` · `GOODS_RECEIVED` · `QUALITY_CHECK_RECORDED`                                                                       |
 | **Consumes**     | `SUPPLIER_QUALIFIED` · `ORGANIZATION_*`                                                                                                                                                                                                                |
 | **Dependencies** | PostgreSQL · Kafka · Temporal (پنجره تجمیع، مهلت RFQ) · `supplier-service`                                                                                                                                                                             |
-| **مرز امنیتی**   | پیشنهاد قیمت تا پایان مهلت **رمزنگاری‌شده در حالت سکون** و غیرقابل مشاهده حتی برای اپراتور.                                                                                                                                                            |
+| **مرز امنیتی**   | پیشنهاد قیمت تا بازگشایی **مهرشده و رمزنگاری‌شده در حالت سکون**، هر خواندن ممیزی‌شده؛ سطح ادعا ADR-066 (اپراتور از نظر رمزنگاری بیرون نیست، D-055).                                                                                                    |
 | **Scale**        | کم. تجمیع یک کار زمان‌بندی‌شده Temporal است.                                                                                                                                                                                                           |
 | **Failure**      | افت آن نیازهای در انتظار را نگه می‌دارد؛ پنجره تجمیع پس از بازیابی اجرا می‌شود.                                                                                                                                                                        |
 
@@ -279,6 +290,21 @@ fleet رونوشت `asset_ref` را از رویداد می‌سازد و واب�
 و هم‌مشخصات گروه می‌شوند → اگر مجموع مقدار ≥ `minAggregationThreshold` باشد، `RFQ` صادر
 می‌شود؛ در غیر این صورت به پنجره بعدی منتقل یا به `marketplace` ارجاع می‌شود.
 هر سه پارامتر (طول پنجره، آستانه، سیاست انتقال) **پیکربندی سازمانی**اند.
+
+> **یادداشت طراحی COM-007 ([ADR-070](adr/ADR-070-procurement-service-boundary-and-lifecycle.md)، 2026-10-15؛ هیچ کدی هنوز نیست).** جدول و
+> الگوریتم بالا با این تفاوت‌ها ساخته می‌شوند: (۱) **بی Temporal** — پنجره و مهلت ستون ماندگارند، ساعت پایگاه داده پس از قفل تصمیم می‌گیرد و
+> بستن کار جاروکننده است (§ ۱۱، D-055). (۲) پایان پنجره RFQ **صادر نمی‌کند**؛ تجمیع `READY` می‌شود و صدور فرمان انسانی `POST /aggregations/{id}/rfq`
+> است، چون `procurementNature`، دعوت، معیار و مهلت پیش‌فرض ندارند. (۳) تجمیع فقط درون یک سازمان و کلید `(سازمان، productId)` است (Q-119، Q-120).
+> (۴) **مرز امنیتی** همان سطح ADR-066 است: پیشنهاد قیمت تا بازگشایی مهرشده، رمزنگاری‌شده در حالت سکون و هر خواندنش ممیزی‌شده — اجراشده در
+> برنامه و افشاگر دستکاری؛ اپراتوری که KEK، پایگاه داده و اجرای کد را با هم دارد از نظر رمزنگاری بیرون نیست (D-043، D-055). (۵) **Consumes:** فقط
+> `ORGANIZATION_MOVED` (آشتی سیاست موافقت سفارش)؛ صلاحیت تأمین‌کننده در لحظهٔ تصمیم از `supplier-service` پرسیده می‌شود و مصرف‌کنندهٔ `SUPPLIER_*`
+> ساخته نمی‌شود. (۶) `PURCHASE_ORDER_ISSUED` بی مبلغ و `QUOTATIONS_EVALUATED` بی امتیاز است؛ procurement هیچ پولی حرکت نمی‌دهد (§ ۸، Q-124).
+> (۷) صدور سفارش بی سیاست فعال `procurement.purchase_order` رد می‌شود (Q-122). برنامهٔ برش‌ها: [ADR-070 implementation plan](adr/ADR-070-implementation-plan.md).
+>
+> **وضعیت: برش PR 1 ساخته شد (2026-10-16).** `services/procurement-service` (پورت ۳۱۰۷): `DemandRequest` و `DemandAggregation` با
+> `POST/GET /v1/demand-requests[/{id}]`، `POST /v1/demand-requests/{id}/withdraw` و `GET /v1/aggregations[/{id}]`
+> (`docs/api/procurement-service.openapi.json`)؛ پیوستن زیر قفل ردیف تجمیع با ساعت پایگاه داده پس از قفل؛ نیازی که در `closesAt` یا پس از آن برسد
+> پنجره را در همان تراکنش می‌بندد. جاروکننده، لغو تجمیع، تنظیمات به‌ازای سازمان و هر چیز پس از آن برش‌های بعدی‌اند.
 
 ---
 
@@ -348,6 +374,17 @@ marketplace (گام ۵) پیاده شده‌اند؛ موتور محاسبه (گ
 
 یک تأییدیه **نمی‌گوید** مدرکی واکشی، باز، اسکن یا معتبر تشخیص داده شده است؛
 می‌گوید یک اپراتور پلتفرمِ نام‌برده در زمانی مشخص یک درخواست را تأیید کرده است.
+
+**چه کسی چه می‌خواند، و تعلیق به کدام دوره بسته است (بازبینی Codex روی PR 366).**
+یادداشت خصوصی بازبین (`decisionNote`) فقط به بازبین پلتفرم برمی‌گردد: `SYSTEM_ADMIN`/`UNION_ADMIN` که عضو سازمان
+تأمین‌کننده نیست (`mayReadReviewerNote`، همان قاعدهٔ کل `org_ids` خودقضاوتی)؛ برای سازمان خود تأمین‌کننده کلید
+اصلاً در پاسخ نیست، و در هیچ رویدادی منتشر نمی‌شود. دلیل رد (`rejectionReason`) که برای تأمین‌کننده نوشته شده، از
+مهاجرت `20261023120000_qualification_rejection_reason` روی خود ردیف صلاحیت هم ذخیره و در پاسخ جزئیات به هر
+خوانندهٔ آن داده می‌شود (رد‌های قدیمی‌تر از روی ردیف‌های باقی‌ماندهٔ Outbox پر شدند؛ بقیه `null`). تعلیق و رفع تعلیق
+دورهٔ تعلیقی را که روی آن تصمیم گرفته شده نام می‌برند — `latestSuspensionId` (تازه‌ترین دوره یا `null`) و
+`suspensionId` (دورهٔ باز) — و سرویس آن را پس از قفل ردیف تأمین‌کننده در همان تراکنش می‌سنجد؛ ناهمخوانی `409`
+`OPTIMISTIC_LOCK_FAILED` با `details[].code` برابر `SUSPENSION_EPISODE_CHANGED` است و چیزی نوشته نمی‌شود. تأیید و رد
+این شکل را ندارند: صلاحیت در مسیر است و تصمیم پایانی است (`state = 'SUBMITTED'` در همان UPDATE).
 
 ---
 
@@ -474,7 +511,7 @@ Cursor؛ هر سازمانِ دارای تأیید `CONTRACTING` یا دورهٔ
 (Fail Closed). Snapshot و رویداد زنده با هم تکرارپذیرند. **این مدل خواندنی مشورتی است (بازبینی دور دوم Codex):** برای فهرست و UI است، نه منبع تصمیم؛
 چون پس از قطعی بلندتر از نگه‌داشت لاگ (هفت روز) تعلیقِ منقضی‌شده را نمی‌بیند، و تعلیقی که در `supplier-service` Commit شده ولی Outbox هنوز
 نرسانده را هم. **صلاحیت برای پیشنهاد تصمیمی قطعی است:** هنگام ثبت، `construction-service` وضعیت همان یک پیمانکار را با
-`GET /v1/suppliers/standing-snapshot/{organizationId}` (همان `@AllowService` و توکن بی مستأجر) از `supplier-service` می‌پرسد (بیرون از
+`GET /v1/suppliers/standing-snapshot/{organizationId}` (توکن بی مستأجر؛ `@AllowService` این مسیر `procurement-service` را هم دارد و لحظهٔ تأیید `GOODS_SUPPLY` را هم می‌دهد، ADR-070 § ۷) از `supplier-service` می‌پرسد (بیرون از
 تراکنش و قفل مناقصه) و اگر در دسترس نبود `503/504` می‌دهد، یعنی Fail Closed (`StandingAuthority`). همین مسیر، بازسازی پس از `down.sql` است
 (`docs/runbooks/contractor-standing-bootstrap.md`).
 
@@ -504,14 +541,15 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 خواندن** (از جمله ردشده) `bid_access_log` و `BID_ACCESSED` دارد. بازگشایی Idempotent است (بار دوم همان نما با `alreadyOpened`، بی‌رویداد).
 پیش از بازگشایی کارفرما فقط شمار و مهر زمان دریافت را می‌بیند. **چهارچشمی برای بازگشایی** (Q-91، موقت تا تأیید صاحب محصول): بازگشایی به پیشنهاد یک کاربر مجاز و تأیید کاربر دوم نیاز دارد، هیچ‌کدام عضو سازمان پیشنهاددهنده نیست؛
 `CONSTRUCTION_TENDER_OPEN_FOUR_EYES` (پیش‌فرض روشن؛ خاموش فقط در `development` و `test`). **هنگام تأیید** عضویت _فعلی_ هر دو نفر (پیشنهاددهنده
-و تأییدکننده) دوباره از `identity-service` (`GET /v1/users/{id}/organizations`، فقط `construction-service`، توکن بی‌مستأجر) خوانده می‌شود، نه آنچه هنگام
+و تأییدکننده) دوباره از `identity-service` (`GET /v1/users/{id}/organizations`، فقط `construction-service` و `procurement-service`، توکن بی‌مستأجر) خوانده می‌شود، نه آنچه هنگام
 پیشنهاد بود؛ ناخوانا بودن ⇒ `502/504` و هیچ‌چیز باز نمی‌شود (`IDENTITY_SERVICE_URL`، `CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS`). خودِ پیشنهاد هم
 یک ردیف `bid_access_log` و `BID_ACCESSED` (هدف `PROPOSE_OPENING`، بی `bidId`) در همان تراکنش می‌گذارد. بررسی تعارض منافع **پیش از** هر پاسخی دربارهٔ
 وضعیت مناقصه (`NOT_CLOSED`/`NOT_OPENED`) انجام می‌شود. `down.sql` مهاجرت تا وقتی بازگشایی یا پیشنهادی در انتظار ثبت شده باشد رد می‌کند.
 **عضویت خواننده در هر مسیر سمت کارفرما** (فهرست و خواندن پیشنهاد، لاگ دسترسی، بازگشایی تکراری، پیشنهاد و پس‌گرفتن) از عضویت زندهٔ identity
 (ساعت پایگاه‌دادهٔ identity) سنجیده می‌شود (Fail Closed؛ `identity_unavailable`، هشدار): پاسخ identity مرجع است و توکن فقط می‌تواند محدود کند، نه بیفزاید —
 باید عضویت زندهٔ سازمان کارفرما با نقش مجاز بازگشایی در کار باشد و نقش‌های ممنوع (`SYSTEM_ADMIN`، `CONTRACTOR`، `AUDITOR`: یک فهرست برای توکن و برای نقش زنده) را نداشته باشد، وگرنه (مدیرِ ابطال‌شده با توکن هنوز معتبر) رد می‌شود. پیشنهاددهنده می‌تواند پیشنهادش را پس بگیرد
-(`POST /v1/tenders/{id}/open-bids/proposal/withdraw`)، و تأییدی که او را عضو پیشنهاددهنده بیابد رد می‌کند و پیشنهاد را پاک می‌کند. **باقیماندهٔ مستند** (بدون قفل
+(`POST /v1/tenders/{id}/open-bids/proposal/withdraw`، با نام پیشنهاد: `proposedAt`؛ پیشنهاد دیگری برقرار ⇒ `409 PROPOSAL_SUPERSEDED`
+و هیچ تغییری — وظیفهٔ ۰۶۰، docs/06 § ۶٫۸)، و تأییدی که او را عضو پیشنهاددهنده بیابد رد می‌کند و پیشنهاد را پاک می‌کند. **باقیماندهٔ مستند** (بدون قفل
 میان‌سرویسی؛ ADR-066 § ۴): پس از Commit بازگشایی، عضویت دو نفر در بازهٔ زودترین خواندن identity در تأیید/لحظهٔ تصمیم تا پاسخ (`GET …/organizations?from=`) دوباره پرسیده می‌شود؛ تضاد ⇒ هشدار
 بحرانی و `BID_OPENING_CONFLICT_DETECTED`.
 
@@ -578,7 +616,7 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 | **Queries**      | `GetContract` · `ListContracts` · `GetStatements` · `GetContractFinancialSummary`                                                                                                                                  |
 | **REST**         | `POST /contracts` · `GET /contracts/{id}` · `POST /contracts/{id}/sign` · `POST /contracts/{id}/amendments` · `POST /contracts/{id}/statements` · `POST /statements/{id}/approvals` · `POST /contracts/{id}/close` |
 | **Publishes**    | `CONTRACT_CREATED` · `CONTRACT_SIGNED` · `CONTRACT_AMENDED` · `STATEMENT_SUBMITTED` · `STATEMENT_APPROVED` · `STATEMENT_REJECTED` · `CONTRACT_COMPLETED`                                                           |
-| **Consumes**     | `TENDER_AWARDED` (ایجاد پیش‌نویس قرارداد) · `PROJECT_PROGRESS_UPDATED` · `PAYMENT_COMPLETED`                                                                                                                       |
+| **Consumes**     | `TENDER_AWARDED` (ایجاد پیش‌نویس قرارداد) · `PROJECT_PROGRESS_UPDATED` · `SETTLEMENT_COMPLETED` (تسویهٔ صورت‌وضعیت؛ فقط محرک، تأیید از economic)                                                                   |
 | **Dependencies** | PostgreSQL · Kafka · Temporal (چرخه تأیید صورت‌وضعیت) · `document-service`                                                                                                                                         |
 | **مرز امنیتی**   | فقط طرفین قرارداد و اپراتور پلتفرم. تأیید فنی و مالی **باید توسط دو نقش متفاوت** انجام شود (تفکیک وظایف).                                                                                                          |
 | **Scale**        | کم.                                                                                                                                                                                                                |
@@ -631,6 +669,18 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 >   ویرایش فقط تا پیش از ارجاع صورت‌وضعیت (`first_referenced_at` که PR 4 می‌گذارد؛ `422 MILESTONE_REFERENCED`)؛ حذف نیست؛ `GET …/milestones[/{mid}]` برای دو طرف (پیمانکار فقط می‌خواند).
 > - هر فرمان `Idempotency-Key` دارد؛ سازمان دیگر ⇒ `404`؛ رد در `details[].code` (حوزه‌های `amendment` و `milestone`). **هر ردِ طرفِ قرارداد برای نبود اختیار یا تفکیک وظایف** (نقش، سیاست، «نویسندهٔ سیاست دیگر کارفرما را اداره نمی‌کند»، عضو هر دو طرف، یک نفر برای هر دو سو، مدیر پلتفرمی که برای سازمانِ یک طرف عمل می‌کند) در امضا و لغو قرارداد، الحاقیه و Milestone رویداد حسابرسی `CONTRACT_AUTHORITY_REFUSED` در تراکنشی جدا می‌نویسد، و ردِ «چهار چشم» در تأیید سیاست `APPROVAL_POLICY_APPROVAL_REFUSED`؛ نشدنِ نوشتنش `503` است و فرمانِ خواسته‌شده اثری ندارد — اما تعلیقِ مستقلِ سیاستِ رهاشده (امضای قرارداد یا الحاقیه با `POLICY_AUTHOR_NOT_GOVERNING`، Q-83) پیش از آن انجام شده و می‌ماند. **استثنای مستندِ «سازمان دیگر ⇒ `404`» (بازبینی #243، تصمیم مدیر پروژه، بی تغییر رفتار):** `SYSTEM_ADMIN` که برای سازمان الف عمل می‌کند همیشه `403` می‌گیرد، جز وقتی نوشتنِ رد شکست بخورد: آن‌گاه برای قراردادی که الف طرف آن است `503` و برای قراردادِ ناموجود یا قراردادی که الف طرفش نیست همچنان `403` — نشانهٔ باریکی از وجود قرارداد، فقط برای مدیر پلتفرم و فقط هنگام شکستِ نوشتنِ حسابرسی. **ردِ وضعیت قرارداد** (مثلاً لغو قراردادِ امضاشده، `CONTRACT_NOT_DRAFT`/`SIGNATURE_RECORDED`، گذار نامعتبر) **ثبت نمی‌شود** (#243، تصمیم مدیر پروژه). ردِ دارای `Idempotency-Key` یک‌بار ثبت می‌شود (`refusal_audit_dedupe`، انقضا نسبت به لحظهٔ گرفتن کلید).
 > - Migration `20261007100000_amendments_milestones` برگشت‌پذیر؛ `down.sql` با وجود هر الحاقیه، امضا، بازبینی، Milestone یا شمارندهٔ غیرصفر **رد می‌کند و چیزی تغییر نمی‌دهد**. **ساخته نشده:** صورت‌وضعیت (PR 4)، زنجیره‌های تأیید (PR 5)، تسویه (PR 6)، Gateway (PR 7).
+>
+> **CON-003 PR 6a — خواندن داخلی تسویه** (ADR-068 § ۶ (۲)؛ صورت‌وضعیت، زنجیره‌ها و تصمیم‌ها در یادداشت‌های PR 4 تا 6 همان ADR):
+>
+> - `GET /v1/internal/statements/{id}` فقط برای توکن داخلیِ `economic-service` امضاشده برای **کارفرما** (الگوی ADR-061 § ۴، همان maintenance و fleet): هر کاربر، هر سرویس دیگر و توکن بی سازمان `403`؛ هر سازمان دیگر (پیمانکار هم) `404` مثل نبودن.
+>   پاسخ از ردیف و با هر وضعیتی: وضعیت، خالص (رشته، واحد فرعی)، `IRR` (Q-73 (۲))، پرداخت‌کننده = کارفرما، ذی‌نفع = پیمانکار، لحظهٔ تأیید مالی؛ economic هر چه `APPROVED` نیست را رد می‌کند. مبلغ هرگز روی `STATEMENT_APPROVED` نیست.
+>
+> **CON-003 PR 6c — `SETTLED` با تأیید economic** (ADR-068 § ۶ (۳) و (۵)؛ Q-97 (۶)):
+>
+> - رویداد پایان تسویه **`SETTLEMENT_COMPLETED`** است، نه `PAYMENT_COMPLETED` (دریافت شارژ کیف پول). Consumer `contract-service.settlement-completed` روی `rasta.economic.v1` (DLQ `rasta.contract.v1.dlq`) آن را فقط **محرک** می‌گیرد: رویداد صورت‌وضعیت را نام نمی‌برد،
+>   پس صورت‌وضعیت‌های `APPROVED` کارفرما (= `tenantId` = پرداخت‌کننده) که پیمانکارشان دریافت‌کننده است یافته و برای هرکدام، بیرون از تراکنش، از `GET /v1/internal/obligations/by-source/STATEMENT/{id}` (#340) پرسیده می‌شود؛
+>   صورت‌وضعیتی که تعهدش همان `transactionId` رویداد است، فقط با پاسخ economic (`SETTLED`، `fullySettled`، مبلغ = خالص، همان تسویه) `SETTLED` می‌شود (`STATEMENT_SETTLED`، بی مبلغ). قرارداد `COMPLETED` بی صورت‌وضعیت باز و با `Σ تسویه‌شده = Σ خالص تأییدشده` در همان تراکنش `SETTLED` می‌شود (`CONTRACT_SETTLED`).
+> - economic در دسترس نیست ⇒ تلاش دوباره و سپس DLQ `UPSTREAM_UNAVAILABLE`؛ ناهمخوانی ⇒ DLQ فوری `SOURCE_UNCONFIRMED`؛ در هر دو هیچ نوشتنی. فرمان `complete` (`SIGNED → COMPLETED`) هنوز ساخته نشده است.
 
 ---
 
@@ -645,7 +695,8 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 >
 > **مصرف رویداد، واقعی در برابر مستند (ADR-032).** فقط سه رویداد مصرف می‌شوند —
 > `MAINTENANCE_APPROVED`، `USAGE_RECORDED` و `MAINTENANCE_COMPLETED` — چون فقط
-> قرارداد این سه واقعاً تعریف شده است. `ORDER_*`، `STATEMENT_APPROVED`،
+> قرارداد این سه واقعاً تعریف شده است (و از CON-003 PR 6b، `STATEMENT_APPROVED` —
+> فقط محرک؛ صورت‌وضعیت و مبلغش از contract-service خوانده می‌شود، ADR-068 § ۶). `ORDER_*`،
 > `PURCHASE_ORDER_ISSUED` و `GOODS_RECEIVED` **موکول**اند: نبودِ تولیدکننده
 > به‌تنهایی مانع نیست، اما نوشتن آن Handler‌ها یعنی این سرویس شکل Payload سرویس
 > دیگری را اختراع کند. **هیچ Handler خالی‌ای برایشان وجود ندارد** — یک
@@ -670,11 +721,16 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 | **Queries**      | `GetWallet` · `GetBalance` · `ListTransactions` · `GetJournal` · `GetLedgerEntries` · `GetTrialBalance` · `GetCommissionRevenue` · `GetRewardBalance`                                                                                                                                                  |
 | **REST**         | `GET /wallets/me` · `POST /wallets/{id}/top-up` **(Idempotency-Key)** · `POST /transactions` **(Idempotency-Key)** · `GET /transactions/{id}` · `GET /transactions` · `GET /ledger/accounts/{id}/entries` · `GET /ledger/trial-balance` · `GET /commissions` · `GET /rewards/me` · `POST /settlements` |
 | **Publishes**    | `WALLET_OPENED` · `FUNDS_HELD` · `FUNDS_RELEASED` · `PAYMENT_AUTHORIZED` · `PAYMENT_COMPLETED` · `PAYMENT_FAILED` · `COMMISSION_APPLIED` · `REWARD_GRANTED` · `REWARD_LEVEL_CHANGED` · `SETTLEMENT_COMPLETED` · `JOURNAL_POSTED`                                                                       |
-| **Consumes**     | **واقعی:** `MAINTENANCE_APPROVED` · `USAGE_RECORDED` · `MAINTENANCE_COMPLETED`. **برنامه‌ریزی‌شده:** `STATEMENT_APPROVED` پس از تعریف Producer. اثرهای مالی سفارش با فرمان احراز‌شده از Temporal می‌آیند، نه Consumer رویداد (ADR-040).                                                                |
+| **Consumes**     | **واقعی:** `MAINTENANCE_APPROVED` · `USAGE_RECORDED` · `MAINTENANCE_COMPLETED` · `STATEMENT_APPROVED` (مبلغ از API، ADR-068 § ۶). اثرهای مالی سفارش با فرمان احراز‌شده از Temporal می‌آیند، نه Consumer رویداد (ADR-040).                                                                              |
 | **Dependencies** | PostgreSQL · Kafka · Redis (قفل کیف پول) · Temporal (Saga تسویه)                                                                                                                                                                                                                                       |
 | **مرز امنیتی**   | **بالاترین.** هر عمل نیازمند Idempotency-Key. هر تغییر در Audit. **استانداری (`AUDITOR`) دسترسی ندارد** — فقط تجمیع در `analytics`.                                                                                                                                                                    |
 | **Scale**        | نوشتن‌سنگین در `ledger_entry` → پارتیشن ماهانه، فقط الحاقی.                                                                                                                                                                                                                                            |
 | **Failure**      | افت آن پرداخت را می‌خواباند. **هیچ داده مالی گم نمی‌شود** — Outbox و Saga تضمین می‌کنند.                                                                                                                                                                                                               |
+
+> **خواندن داخلی تعهد صورت‌وضعیت** (ADR-068 § ۶ (۳)، پیش‌نیاز CON-003 PR 6c):
+>
+> - `GET /v1/internal/obligations/by-source/STATEMENT/{statementId}` فقط برای توکن داخلیِ `contract-service` امضاشده برای **پرداخت‌کننده (کارفرما)** (الگوی ADR-061 § ۴، همان `GET /v1/internal/statements/{id}`): هر کاربر، هر سرویس دیگر و توکن بی سازمان `403`؛ هر سازمان دیگر (ذی‌نفع هم) `404` مثل نبودن.
+>   پاسخ از ردیف‌های economic و با هر وضعیتی: شناسهٔ تعهد، `statementId`، وضعیت، مبلغ (رشته، واحد فرعی)، ارز، دو طرف، تسویه و لحظه‌اش، و `fullySettled` (فقط `SETTLED` با تسویهٔ کل مبلغ). پایان تسویه را `SETTLEMENT_COMPLETED` اعلام می‌کند، نه `PAYMENT_COMPLETED` (شارژ کیف پول).
 
 ---
 
@@ -793,6 +849,13 @@ Gateway پیشوند `open-tenders` را نیز از یافتهٔ #223 F1 به �
 | **Consumes**    | همه Topicهای دامنه                                                                                                                           |
 | **مرز امنیتی**  | **تنها سرویسی که `AUDITOR` به آن دسترسی دارد** — و فقط به Endpointهای تجمیعی.                                                                |
 | **CONSTRAINT**  | KPIهای وابسته به خط مبنا تا پر شدن `baseline_metric` وضعیت `INSUFFICIENT_BASELINE` برمی‌گردانند — **نه صفر، نه تخمین.**                      |
+| **ADR**         | [ADR-071](adr/ADR-071-analytics-read-models-and-governed-views.md) — `Proposed`. فقط Kafka؛ Q-141، Q-142                                     |
+
+> **وضعیت (RUN-001 PR 1، 2026-10-17).** سرویس ساخته شد (پورت ۳۱۱۶، `rasta_analytics`، تقسیم نقش D-045، بی Outbox): نخستین Fact،
+> `fact_maintenance` از `MAINTENANCE_COMPLETED` (فقط‌الحاقی، یکتا به‌ازای سازمان و درخواست، نشانگر `processed_event` در همان
+> تراکنش) و `GET /v1/dashboards/fleet` برای سازمان فعال (پیش‌فرض `ORGANIZATION_ADMIN` و `FLEET_MANAGER`؛ `AUDITOR` رد). Consumer
+> پیش‌فرض خاموش است و فقط با اتصال احرازشده به بروکر روشن می‌شود. بقیهٔ Factها، `kpi_snapshot`، `baseline_metric` و نمای
+> حاکمیتی برش‌های بعدی [برنامهٔ اجرا](adr/ADR-071-implementation-plan.md)اند.
 
 ---
 

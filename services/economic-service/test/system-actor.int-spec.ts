@@ -159,7 +159,7 @@ describe('a system actor', () => {
     const commission = await asSystem(() =>
       wiring.commissions.createRule({
         organizationId: org.a,
-        transactionType: 'LOGISTICS',
+        businessLine: 'LOGISTICS',
         rateBasisPoints: 120,
         // `status` omitted: the service supplies the default rather than
         // leaving a rule in an undefined state.
@@ -373,8 +373,14 @@ describe('a system actor', () => {
       expect(Number.isFinite(age)).toBe(true);
       expect(age).toBeGreaterThanOrEqual(0);
 
-      // The default retention, taken rather than passed.
-      expect(await store.purgePublished()).toBeGreaterThanOrEqual(0);
+      // The purge's batch at the default retention (D-052), across the table.
+      const purged = await store.purgePublished({
+        retentionSeconds: 168 * 60 * 60,
+        limit: 10_000,
+        statementTimeoutMs: 5000,
+        maxWaitMs: 2000,
+      });
+      expect(purged.deleted).toBeGreaterThanOrEqual(0);
     } finally {
       await runUnscoped('the suite removes the control row it seeded', () =>
         prisma.client.outboxMessage.deleteMany({ where: { id: foreignId } }),

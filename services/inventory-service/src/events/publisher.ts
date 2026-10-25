@@ -114,6 +114,12 @@ export const ID_PREFIX = {
   shipment: ID_PREFIXES.shipment,
   shipmentLeg: 'SHL',
   trackingEvent: 'TRK',
+  returnShipment: ID_PREFIXES.returnShipment,
+  returnShipmentLine: 'RSL',
+  returnTrackingEvent: 'RTK',
+  returnDisposition: 'RDP',
+  /** A marketplace dispatch reservation withdrawn here on reconciliation (Q-133 (9)(a)). */
+  returnDispatchWithdrawal: 'RDW',
 } as const;
 
 /**

@@ -159,22 +159,66 @@ describe('registering', () => {
 describe('reading one profile', () => {
   const seeded = () => harness([aSupplier({ qualifications: [APPROVED] })]);
 
-  it('gives the owning organization the private record', async () => {
+  it('gives the owning organization the private record, without the reviewer note', async () => {
+    // Codex review of PR 366, finding 1: the reviewer's note is the platform's
+    // record, and the supplier reads the rejection reason written for it instead.
     const h = seeded();
 
     const supplier = await asOwner(() => h.service.get('SUP_1'));
 
-    expect(supplier.qualifications[0].decisionNote).toContain('referee');
     expect(supplier.qualifications[0].evidence[0].documentId).toBe('DOC_PRIVATE');
+    expect(Object.keys(supplier.qualifications[0])).not.toContain('decisionNote');
+    expect(JSON.stringify(supplier)).not.toContain('referee');
   });
 
-  it('gives a platform operator the private record, in order to review it', async () => {
+  it.each([['ORGANIZATION_ADMIN'], ['WORKSHOP'], ['CONTRACTOR']])(
+    'gives no reviewer note to the owning organization as %s either',
+    async (role) => {
+      const h = seeded();
+
+      const supplier = await asOwner(() => h.service.get('SUP_1'), [role]);
+
+      expect(JSON.stringify(supplier)).not.toContain('referee');
+    },
+  );
+
+  it('gives a platform operator the private record and the note, in order to review it', async () => {
     const h = seeded();
 
-    await expect(asOperatorOf(OTHER_ORG, () => h.service.get('SUP_1'))).resolves.toMatchObject({
-      id: 'SUP_1',
-    });
+    const supplier = await asOperatorOf(OTHER_ORG, () => h.service.get('SUP_1'));
+
+    expect(supplier.id).toBe('SUP_1');
+    expect(supplier.qualifications[0].decisionNote).toContain('referee');
   });
+
+  it.each([
+    ['acting for the union, a member of the supplier', 'UNION_ADMIN', OTHER_ORG, [SUPPLIER_ORG]],
+    ['acting for the supplier itself', 'SYSTEM_ADMIN', SUPPLIER_ORG, []],
+  ])(
+    'gives no reviewer note to a platform operator %s',
+    async (_label, role, organizationId, organizationIds) => {
+      // The membership-set rule of assertNotDecidingOwnCase: the supplier's side
+      // reading its own file, whichever role the person holds.
+      const h = seeded();
+
+      const supplier = await runWithContext(
+        {
+          requestId: 'req-1',
+          correlationId: 'corr-1',
+          organizationIds: [organizationId, ...organizationIds],
+          authType: 'USER',
+          roles: [role],
+          organizationId,
+          userId: 'USR_BOTH',
+          startedAt: 0,
+        } as RequestContext,
+        () => h.service.get('SUP_1'),
+      );
+
+      expect(supplier.qualifications[0].evidence[0].documentId).toBe('DOC_PRIVATE');
+      expect(Object.keys(supplier.qualifications[0])).not.toContain('decisionNote');
+    },
+  );
 
   it('answers 404 for another tenant', async () => {
     const h = seeded();
@@ -349,5 +393,44 @@ describe('ListQualifiedFor', () => {
     );
 
     expect(JSON.stringify(page.items)).not.toContain('DOC_PRIVATE');
+  });
+});
+
+describe('the standing reads check their caller in the service too, not only in @AllowService', () => {
+  const asService = <T>(callerService: string, fn: () => Promise<T>, organizationId?: string) =>
+    runWithContext(
+      {
+        requestId: 'req-1',
+        correlationId: 'corr-1',
+        authType: 'SERVICE',
+        callerService,
+        roles: [],
+        startedAt: 0,
+        ...(organizationId ? { organizationId } : {}),
+      } as unknown as RequestContext,
+      fn,
+    );
+
+  it('refuses procurement-service the paged snapshot, before anything is read', async () => {
+    const h = harness();
+    expect(
+      await codeOf(() =>
+        asService('procurement-service', () => h.service.standingSnapshot({ limit: 10 })),
+      ),
+    ).toBe('FORBIDDEN');
+  });
+
+  it('refuses a tenant-signed procurement-service token, and another service, on one organization', async () => {
+    const h = harness();
+    expect(
+      await codeOf(() =>
+        asService('procurement-service', () => h.service.standingOf(SUPPLIER_ORG), OTHER_ORG),
+      ),
+    ).toBe('FORBIDDEN');
+    expect(
+      await codeOf(() =>
+        asService('marketplace-service', () => h.service.standingOf(SUPPLIER_ORG)),
+      ),
+    ).toBe('FORBIDDEN');
   });
 });

@@ -9,13 +9,15 @@ import {
 import { InMemoryEventPublisher } from '../src/outbox/kafka.publisher';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
+import { StatementSettlementConsumer } from '../src/consumers/statement-settlement.consumer';
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
 import { AppModule } from '../src/app.module';
-import { PAYMENT_PROVIDER } from '../src/tokens';
+import { ENV, PAYMENT_PROVIDER } from '../src/tokens';
+import { loadEconomicEnv } from '../src/config/env';
 import type { PaymentProvider } from '../src/payment/provider';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, PLATFORM_ORGANIZATION_ID } from './helpers';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 
 /**
@@ -99,11 +101,28 @@ export function bearer(claims: TestClaims): string {
   return `test.${Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url')}`;
 }
 
-/** A financial administrator for one organization. */
-export function admin(organizationId: string, roles = ['ORGANIZATION_ADMIN']): string {
+/**
+ * A financial administrator for one organization.
+ *
+ * **One person per organization, roles and `person`**: every call with the
+ * same three is the same subject and platform user id. An idempotency key is
+ * bound to the actor who sent it (review of #287), so a retry built from a
+ * second `admin()` call must still be the same person; two people with the
+ * same roles — a proposer and an approver — are told apart by `person`.
+ */
+export function admin(
+  organizationId: string,
+  roles = ['ORGANIZATION_ADMIN'],
+  person = 'admin',
+): string {
+  const identity = createHash('sha256')
+    .update(JSON.stringify([organizationId, [...roles].sort(), person]))
+    .digest('hex')
+    .slice(0, 16)
+    .toUpperCase();
   return bearer({
-    sub: `sub-${ulid()}`,
-    rastaUserId: `USR-APITEST-${ulid().slice(-8)}`,
+    sub: `sub-${identity}`,
+    rastaUserId: `USR-APITEST-${identity}`,
     organizationId,
     organizationIds: [organizationId],
     roles,
@@ -116,9 +135,14 @@ export function auditor(organizationId: string): string {
   return admin(organizationId, ['AUDITOR']);
 }
 
-/** A platform administrator — cross-tenant reads and journal reversal. */
+/**
+ * A platform administrator — the system administrator, who acts for any
+ * organization. A union administrator acts for another organization only
+ * within its union's subtree (docs/24 Q-136), which needs organization-service:
+ * `union-admin-financial-authority.int-spec.ts` stands one up.
+ */
 export function platformAdmin(organizationId = 'ORG-APITEST-PLATFORM-SCOPE'): string {
-  return admin(organizationId, ['UNION_ADMIN']);
+  return admin(organizationId, ['SYSTEM_ADMIN']);
 }
 
 const decodeClaims = (token: string): TestClaims => {
@@ -153,15 +177,21 @@ function applyEnvironment(): void {
   // The consumers are replaced below, so nothing dials these (ADR-061 § 4).
   process.env.MAINTENANCE_SERVICE_URL ??= 'http://127.0.0.1:9';
   process.env.FLEET_SERVICE_URL ??= 'http://127.0.0.1:9';
+  process.env.CONTRACT_SERVICE_URL ??= 'http://127.0.0.1:9';
+  // Nothing listens here: a suite that does not stand organization-service up
+  // and still asks it (a union administrator acting for another organization,
+  // docs/24 Q-136) gets the fail-closed 503, never a stray answer.
+  process.env.ORGANIZATION_SERVICE_URL ??= 'http://127.0.0.1:9';
   process.env.ECONOMIC_PLATFORM_ORGANIZATION_ID = PLATFORM_ORGANIZATION_ID;
   // The reconciliation is a timer that reports and never repairs; it has its
   // own suite and only adds noise here.
   process.env.ECONOMIC_BALANCE_AUDIT_ENABLED = 'false';
 }
 
+/** Stopped as an `OutboxShutdown` worker, like the consumers it stands in for. */
 const inertConsumer = {
   onModuleInit: async () => undefined,
-  onModuleDestroy: async () => undefined,
+  stop: async () => undefined,
 };
 
 /** A relay that never polls. See the note on the overrides above. */
@@ -224,7 +254,21 @@ export function internalToken(
   );
 }
 
+/**
+ * Verifies an internal token this service minted — what organization-service's
+ * guard does. For a suite that stands organization-service up (docs/24 Q-136).
+ */
+export function verifyInternalToken(token: string, audience: string) {
+  return new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300).verify(token, audience);
+}
+
 export interface StartApiOptions {
+  /**
+   * Settings this app is built with over the suite's own, read through the
+   * same `loadEconomicEnv` the service boots with — so a value it refuses at
+   * boot is refused here too. Nothing else in the process sees them.
+   */
+  environment?: NodeJS.ProcessEnv;
   /**
    * Replaces the payment provider bound at `PAYMENT_PROVIDER`.
    *
@@ -250,6 +294,12 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
   const publisher = new InMemoryEventPublisher();
 
   let builder = Test.createTestingModule({ imports: [AppModule] });
+  if (options.environment) {
+    const environment = { ...process.env, ...options.environment };
+    builder = builder
+      .overrideProvider(ENV)
+      .useFactory({ factory: () => loadEconomicEnv(environment) });
+  }
   if (options.paymentProvider) {
     builder = builder.overrideProvider(PAYMENT_PROVIDER).useValue(options.paymentProvider);
   }
@@ -258,6 +308,8 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
     .overrideProvider(KafkaEventPublisher)
     .useValue(publisher)
     .overrideProvider(SettlementAuthorityConsumer)
+    .useValue(inertConsumer)
+    .overrideProvider(StatementSettlementConsumer)
     .useValue(inertConsumer)
     .overrideProvider(RewardTriggerConsumer)
     .useValue(inertConsumer)

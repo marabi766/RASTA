@@ -1,3 +1,5 @@
+import Link from 'next/link';
+
 import {
   Alert,
   Button,
@@ -27,6 +29,9 @@ import type {
   TransactionPage,
   Wallet,
 } from '@/server/wallet';
+import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
+import { demoModeOf } from '@/lib/demo-mode';
+import { providerNotice } from '@/lib/wallet-fields';
 import { TopUpForm } from './TopUpForm';
 
 /**
@@ -47,6 +52,11 @@ import { TopUpForm } from './TopUpForm';
  * If that read fails, the form is withheld rather than shown without its
  * disclosure — an amount field with nothing above it would look like an
  * ordinary payment box.
+ *
+ * The same read labels the whole screen, by the rule every money screen
+ * follows (`DemoModeNotice`, Q-14): «حالت نمایشی» above the balances and the
+ * history while the provider is simulated, and, when it could not be read,
+ * that it is unknown — the balances are shown either way, never unlabelled.
  */
 
 export interface WalletScreenProps {
@@ -213,7 +223,14 @@ function TransactionRows({ page, query }: { page: TransactionPage; query: Transa
         <tbody>
           {page.items.map((transaction) => (
             <tr key={transaction.id} className="border-b border-border">
-              <td className="p-3">{transactionTypeLabel(transaction.transactionType)}</td>
+              <td className="p-3">
+                <Link
+                  href={`/transactions/${encodeURIComponent(transaction.id)}`}
+                  className="underline"
+                >
+                  {transactionTypeLabel(transaction.transactionType)}
+                </Link>
+              </td>
               <td className="p-3">{formatMoney(transaction.netAmountMinor)}</td>
               <td className="p-3">
                 <StatusBadge
@@ -254,6 +271,9 @@ export function WalletScreen({
   return (
     <>
       <PageHeader title="کیف پول و تراکنش" description="موجودی سازمان فعال شما و تاریخچهٔ آن." />
+      {/* Over the balances and the history too, whichever of them read (Q-14): «حالت نمایشی», or
+          that the provider is unknown — never an unlabelled balance. */}
+      <DemoModeNotice mode={demoModeOf(provider)} />
 
       {wallet.kind === 'FORBIDDEN' ? <NoAccessState /> : null}
       {wallet.kind === 'UNAVAILABLE' ? (
@@ -281,9 +301,9 @@ export function WalletScreen({
           <Section headingId="top-up" title="افزایش موجودی">
             {provider.kind === 'OK' ? (
               <>
-                <Alert tone="info" title={provider.data.simulated ? 'حالت نمایشی' : undefined}>
-                  {provider.data.notice}
-                </Alert>
+                {/* Worded here from the provider's `simulated` flag, never the service's
+                    English sentence; the «حالت نمایشی» label itself is drawn once, above. */}
+                <Alert tone="info">{providerNotice(provider.data.simulated)}</Alert>
                 <TopUpForm
                   walletId={wallet.data.id}
                   csrfToken={csrfToken}
@@ -294,10 +314,7 @@ export function WalletScreen({
               // Withheld rather than shown without its disclosure — an amount
               // field with nothing above it would look like an ordinary
               // payment box (docs/16 § ۱۶٫۱۱, ADR-024).
-              <EmptyState
-                title="افزایش موجودی اکنون در دسترس نیست"
-                description="اطلاعات روش پرداخت خوانده نشد. بعداً دوباره سر بزنید."
-              />
+              <MoneyActionWithheld title="افزایش موجودی اکنون در دسترس نیست" />
             )}
           </Section>
         </>

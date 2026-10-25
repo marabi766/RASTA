@@ -1,22 +1,42 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ulid } from 'ulid';
-import { ID_PREFIXES } from '@rasta/contracts';
+import { ERROR_CODES, ID_PREFIXES } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { WalletRepository } from '../wallet/wallet.repository';
 import { TransactionRepository, type TransactionFilter } from './transaction.repository';
 import { nextStatus } from './state-machine';
-import { assertMayRefund, assertTransactionVisible, canCommitOrganization } from '../access/access';
+import {
+  assertMayDisputeDirectly,
+  assertMayRefund,
+  assertTransactionVisible,
+  canActFinanciallyFor,
+  reconfirmFinancialAuthority,
+  recordFinancialCommand,
+  type FinancialAuthority,
+  type FinancialCommand,
+  type RefundableTransaction,
+} from '../access/access';
+import { OrganizationHierarchy } from '../organization/organization-hierarchy';
 import { formatMinor, parseMinor } from '../shared/money';
 import { isUniqueViolation } from '../ledger/ledger.repository';
 import { LedgerService } from '../ledger/ledger.service';
+import { CommissionService } from '../commission/commission.service';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { financialTransactionDuration, transactionsCreatedTotal } from '../observability/metrics';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { ENV } from '../tokens';
-import type { Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
-import type { CreateTransactionDto, DisputeTransactionDto, ResolveDisputeDto } from './dto';
+import type { IdempotentAnswer } from '../shared/idempotency';
+import { databaseNow } from '../shared/database-clock';
+import type { BusinessLine, Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
+import { BUSINESS_LINE_REQUIRED_MESSAGE, mayRecordWithoutLine } from './recorded-sources';
+import {
+  STATEMENT_SOURCE_TYPE,
+  type CreateTransactionDto,
+  type DisputeTransactionDto,
+  type ResolveDisputeDto,
+} from './dto';
 
 /**
  * Transactions — the obligations everything else in this service acts on.
@@ -40,6 +60,8 @@ export class TransactionService {
     private readonly walletRepository: WalletRepository,
     @Inject(ENV) private readonly env: EconomicEnv,
     private readonly ledger: LedgerService,
+    private readonly commissions: CommissionService,
+    private readonly hierarchy: OrganizationHierarchy,
   ) {}
 
   // ==========================================================================
@@ -58,7 +80,10 @@ export class TransactionService {
    * Both happen in one transaction, so a hold that fails for insufficient
    * balance leaves no orphaned obligation behind.
    */
-  async create(dto: CreateTransactionDto): Promise<TransactionDetail> {
+  async create(
+    dto: CreateTransactionDto,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const organizationId = getOrganizationId();
     const actor = getContext().userId ?? SERVICE_NAME;
     const grossAmountMinor = parseMinor(dto.grossAmountMinor, 'grossAmountMinor');
@@ -68,6 +93,17 @@ export class TransactionService {
     }
     if (dto.holdFunds && !dto.counterpartyOrganizationId) {
       throw RastaError.businessRule('Funds can only be held against a transaction with a payee');
+    }
+    // Failing closed at settlement (docs/24 Q-29) means nothing at all if
+    // leaving the line out is enough to be charged nothing: a new obligation
+    // names its line, but for the source flows `recorded-sources.ts` names,
+    // identified by who verifiably records them (review of #364 round 1, F1).
+    if (
+      this.env.ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE &&
+      dto.businessLine === undefined &&
+      !mayRecordWithoutLine(getContext(), dto.sourceType, dto.transactionType)
+    ) {
+      throw new RastaError(ERROR_CODES.BUSINESS_LINE_REQUIRED, BUSINESS_LINE_REQUIRED_MESSAGE);
     }
 
     // Resolved *before* the transaction opens, and that placement is the fix
@@ -88,6 +124,16 @@ export class TransactionService {
       const created = await this.prisma.transaction(async (tx) => {
         const id = `${ID_PREFIXES.transaction}_${ulid()}`;
         const occurredAt = dto.occurredAt ? new Date(dto.occurredAt) : new Date();
+        const pricing = dto.counterpartyOrganizationId
+          ? await this.commissions.pricingOf(tx, {
+              organizationId: dto.counterpartyOrganizationId,
+              transactionType: dto.transactionType,
+              businessLine: dto.businessLine ?? null,
+              occurredAt,
+              grossAmountMinor,
+              currency: dto.currency ?? 'IRR',
+            })
+          : UNPRICED;
 
         await this.repository.create(
           tx,
@@ -96,6 +142,8 @@ export class TransactionService {
             organizationId,
             counterpartyOrganizationId: dto.counterpartyOrganizationId ?? null,
             transactionType: dto.transactionType,
+            businessLine: dto.businessLine ?? null,
+            ...pricing,
             status: 'CREATED',
             grossAmountMinor,
             currency: dto.currency ?? 'IRR',
@@ -157,7 +205,7 @@ export class TransactionService {
           },
         );
 
-        return id;
+        return this.answered(tx, id, answer);
       });
 
       transactionsCreatedTotal.inc({
@@ -166,7 +214,7 @@ export class TransactionService {
         source: 'api',
       });
 
-      return this.get(created);
+      return created;
     } catch (error) {
       throw await this.duplicateSourceOr(error, organizationId, dto);
     } finally {
@@ -226,12 +274,23 @@ export class TransactionService {
       organizationId: string;
       counterpartyOrganizationId: string;
       transactionType: TransactionType;
+      /**
+       * Stated by the consumer that knows what the fact is (ADR-045 § 4), or
+       * null where the line is an open question (docs/24 Q-130): priced then
+       * by the type-only rules alone.
+       */
+      businessLine: BusinessLine | null;
       grossAmountMinor: bigint;
       currency: string;
       occurredAt: Date;
       sourceType: string;
       sourceReference: string;
-      causationId?: string;
+      /**
+       * The event that authorised it. Required: it, and the absent
+       * Idempotency-Key, are how `ck_transaction_recorded_source` tells a row
+       * recorded from an event from one written over HTTP.
+       */
+      causationId: string;
     },
   ): Promise<{ id: string; created: boolean }> {
     const existing = await this.repository.findBySource(
@@ -243,6 +302,16 @@ export class TransactionService {
     if (existing) return { id: existing.id, created: false };
 
     const id = `${ID_PREFIXES.transaction}_${ulid()}`;
+    // At the approval's own time, under the cutover: an approval given before
+    // business lines priced anything is priced as it would have been then.
+    const pricing = await this.commissions.pricingOf(tx, {
+      organizationId: input.counterpartyOrganizationId,
+      transactionType: input.transactionType,
+      businessLine: input.businessLine,
+      occurredAt: input.occurredAt,
+      grossAmountMinor: input.grossAmountMinor,
+      currency: input.currency,
+    });
 
     const written = await this.repository.createForSource(
       tx,
@@ -251,6 +320,8 @@ export class TransactionService {
         organizationId: input.organizationId,
         counterpartyOrganizationId: input.counterpartyOrganizationId,
         transactionType: input.transactionType,
+        businessLine: input.businessLine,
+        ...pricing,
         // Straight to PENDING_SETTLEMENT: the authorising fact is the event
         // itself. The state machine permits this edge from CREATED, and the
         // row is written in its post-transition state rather than moved twice.
@@ -261,7 +332,7 @@ export class TransactionService {
         sourceType: input.sourceType,
         sourceReference: input.sourceReference,
         correlationId: getContext().correlationId,
-        causationId: input.causationId ?? null,
+        causationId: input.causationId,
         createdBy: SERVICE_NAME,
       },
       this.legsFor(
@@ -318,10 +389,9 @@ export class TransactionService {
   /**
    * The parties to a transaction and what each is owed.
    *
-   * At creation both legs carry the gross: the commission split is not known
-   * until settlement selects the rule in force, and writing a guess here would
-   * be a number nobody computed. The settlement records the actual split on
-   * the transaction and on the `commission` row.
+   * At creation both legs carry the gross: the rule is chosen now
+   * (`pricing_*`), but the split is computed and posted at settlement, which
+   * records it on the transaction and on the `commission` row.
    */
   private legsFor(
     transactionId: string,
@@ -364,14 +434,36 @@ export class TransactionService {
    * potentially two different people: confirming that the goods arrived, and
    * releasing the money. Collapsing them would make the product document's
    * "تأیید دریافت" control indistinguishable from the payment.
+   *
+   * A service's authorisation also keeps which service asked and under which
+   * `idempotencyKey`, on the row, for good. The stored answer expires; this
+   * does not. It is how the order saga proves its own authorisation took
+   * effect when its retry comes after that expiry and finds the transaction
+   * DISPUTED — a state a dispute reaches from HELD too, with no authorisation
+   * at all (docs/23 D-053). A person's key is their client's, and the row is
+   * shown to the payee, so it is not kept.
    */
-  async authoriseSettlement(transactionId: string): Promise<TransactionDetail> {
-    const actor = getContext().userId ?? SERVICE_NAME;
-    const at = new Date();
-    return this.move(transactionId, 'AUTHORISE_SETTLEMENT', actor, at, {
-      settlementAuthorisedAt: at,
-      settlementAuthorisedBy: actor,
-    });
+  async authoriseSettlement(
+    transactionId: string,
+    answer?: IdempotentAnswer<TransactionDetail>,
+    idempotencyKey?: string,
+  ): Promise<TransactionDetail> {
+    const context = getContext();
+    const actor = context.userId ?? SERVICE_NAME;
+    // The signed caller, never a header (ADR-035).
+    const service = context.authType === 'SERVICE' ? (context.callerService ?? null) : null;
+    return this.move(
+      transactionId,
+      'AUTHORISE_SETTLEMENT',
+      actor,
+      (at) => ({
+        settlementAuthorisedAt: at,
+        settlementAuthorisedBy: actor,
+        settlementAuthorisedService: service,
+        settlementAuthorisationKey: service ? (idempotencyKey ?? null) : null,
+      }),
+      answer,
+    );
   }
 
   /**
@@ -380,31 +472,61 @@ export class TransactionService {
    * There is no timeout that clears it and no automatic resolution: the state
    * machine has no edge from `DISPUTED` to `SETTLED`, only to
    * `PENDING_SETTLEMENT` by an explicit human decision, or to `REFUNDED`.
+   *
+   * An order's obligation is disputed only by the order saga (docs/24 Q-138,
+   * `assertMayDisputeDirectly`).
    */
-  async dispute(transactionId: string, dto: DisputeTransactionDto): Promise<TransactionDetail> {
+  async dispute(
+    transactionId: string,
+    dto: DisputeTransactionDto,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
-    const at = new Date();
-    return this.move(transactionId, 'DISPUTE', actor, at, {
-      disputedAt: at,
-      disputedBy: actor,
-      disputeReason: dto.reason,
-    });
+    return this.move(
+      transactionId,
+      'DISPUTE',
+      actor,
+      (at) => ({ disputedAt: at, disputedBy: actor, disputeReason: dto.reason }),
+      answer,
+    );
   }
 
   /**
    * Resolves a dispute back into the settlement queue.
    *
+   * With `dto.disputeId`, the decision is about that dispute and no other:
+   * refused unless the transaction still holds it (Codex on #318 round 2, N1).
+   * The order saga names the dispute its operator decided; without the name,
+   * a dispute resolved here and replaced by another meanwhile was the one
+   * decided, and the new one was cleared with it.
+   *
    * A human decision, recorded with who made it. It does not settle — it only
    * unblocks, so that releasing the money remains a separate, deliberate act.
+   *
+   * The resolution goes in a column of its own. It used to be written over
+   * `disputeReason`, so a resolved transaction no longer said what the dispute
+   * had been about; rows resolved before migration
+   * `20261016160000_transaction_dispute_resolution` still hold the resolution
+   * there, with `disputeResolution` NULL (docs/23 D-060).
    */
-  async resolveDispute(transactionId: string, dto: ResolveDisputeDto): Promise<TransactionDetail> {
+  async resolveDispute(
+    transactionId: string,
+    dto: ResolveDisputeDto,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
-    const at = new Date();
-    return this.move(transactionId, 'RESOLVE_DISPUTE', actor, at, {
-      disputeResolvedAt: at,
-      disputeResolvedBy: actor,
-      disputeReason: dto.resolution,
-    });
+    return this.move(
+      transactionId,
+      'RESOLVE_DISPUTE',
+      actor,
+      (at) => ({
+        disputeResolvedAt: at,
+        disputeResolvedBy: actor,
+        disputeResolution: dto.resolution,
+      }),
+      answer,
+      dto.disputeId,
+    );
   }
 
   /**
@@ -419,7 +541,11 @@ export class TransactionService {
    * Q-62). Checked under the row lock, against the status the state machine is
    * about to read, so the two cannot disagree.
    */
-  async refund(transactionId: string, reason: string): Promise<TransactionDetail> {
+  async refund(
+    transactionId: string,
+    reason: string,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
     const stop = financialTransactionDuration.startTimer({
       service: SERVICE_NAME,
@@ -427,10 +553,10 @@ export class TransactionService {
     });
 
     try {
-      await this.prisma.transaction(async (tx) => {
+      const { detail, authority } = await this.prisma.transaction(async (tx) => {
         const transaction = await this.repository.lockForUpdate(tx, transactionId);
         if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-        assertMayRefund(transaction, { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED });
+        const lockedRowAuthority = await this.authorizeAct(transaction, 'REFUND');
 
         const target = nextStatus(transactionId, transaction.status, 'REFUND');
 
@@ -445,6 +571,13 @@ export class TransactionService {
         if (!locked) throw RastaError.internal('Wallet vanished while locking it');
 
         const hold = await this.walletRepository.findActiveHold(tx, wallet.id, transactionId);
+
+        // The wallet lock was the last lock this refund takes: ask the
+        // hierarchy again, so a union administrator's authority is the one
+        // confirmed after that wait, immediately before the refund journal
+        // (docs/23 D-054; Codex on #314 round 3, F2).
+        const authority = await reconfirmFinancialAuthority(lockedRowAuthority, this.hierarchy);
+
         if (hold) {
           // The refund journal is the payer's — it moves the payer's escrow back
           // into the payer's wallet — but the caller may be another party: the
@@ -483,23 +616,30 @@ export class TransactionService {
           by: actor,
           at: refundedAt,
         });
-      });
 
-      return this.get(transactionId);
+        return { detail: await this.answered(tx, transactionId, answer), authority };
+      });
+      recordFinancialCommand(transactionId, authority);
+      return detail;
     } finally {
       stop();
     }
   }
 
   /** Cancels a transaction nothing has moved against yet. */
-  async cancel(transactionId: string, reason: string): Promise<TransactionDetail> {
+  async cancel(
+    transactionId: string,
+    reason: string,
+    answer?: IdempotentAnswer<TransactionDetail>,
+  ): Promise<TransactionDetail> {
     const actor = getContext().userId ?? SERVICE_NAME;
-    const at = new Date();
-    return this.move(transactionId, 'CANCEL', actor, at, {
-      failureReason: reason,
-      cancelledAt: at,
-      cancelledBy: actor,
-    });
+    return this.move(
+      transactionId,
+      'CANCEL',
+      actor,
+      (at) => ({ failureReason: reason, cancelledAt: at, cancelledBy: actor }),
+      answer,
+    );
   }
 
   /**
@@ -510,28 +650,57 @@ export class TransactionService {
    * that a caller who is neither payer nor payee gets a 404 rather than
    * discovering the transaction exists. The actor and the instant go on the
    * row (through `extra`) and on the `TRANSACTION_STATUS_CHANGED` record, in
-   * the same transaction as the move.
+   * the same transaction as the move — and so does the answer, read from the
+   * row the move wrote (see {@link answered}).
+   *
+   * The instant is the database clock's, read once the row lock is held
+   * (`databaseNow`): two moves of one transaction are dated in the order the
+   * lock let them happen, whichever host made each. It used to be the
+   * caller's clock, read before the wait — a re-dispute that waited behind a
+   * resolution was dated before it, and the resolution read as the new
+   * dispute's (Codex on #322 round 4, finding 1). Which dispute a resolution
+   * decided is now the database's record, `resolvedDisputeId`, not an
+   * inference from these instants (docs/23 D-060).
+   *
+   * `heldDispute`, when given, is the dispute the transaction must hold for
+   * the move to happen — read under the same lock, so it cannot be replaced
+   * between the check and the write (see {@link resolveDispute}).
    */
   private async move(
     transactionId: string,
     event: 'AUTHORISE_SETTLEMENT' | 'DISPUTE' | 'RESOLVE_DISPUTE' | 'CANCEL',
     actor: string,
-    at: Date,
-    extra: Prisma.TransactionUncheckedUpdateManyInput,
+    extra: (at: Date) => Prisma.TransactionUncheckedUpdateManyInput,
+    answer?: IdempotentAnswer<TransactionDetail>,
+    heldDispute?: string,
   ): Promise<TransactionDetail> {
-    await this.prisma.transaction(async (tx) => {
+    const { detail, authority } = await this.prisma.transaction(async (tx) => {
       const transaction = await this.repository.lockForUpdate(tx, transactionId);
       if (!transaction) throw RastaError.notFound('Transaction', transactionId);
-      assertTransactionVisible(transaction);
-      canCommitOrganization(transaction.organizationId);
+      // Judged here, under the row lock and in the transaction that commits the
+      // move, so the authority and the state it moves are read together; the
+      // hierarchy question, when there is one, is asked here too (Q-136). No
+      // lock is taken after the row's, so this answer is already the last
+      // thing read before the write — nothing to ask again (docs/23 D-054).
+      const authority = await this.authorizeAct(transaction, event);
 
       const target = nextStatus(transactionId, transaction.status, event);
+      if (heldDispute !== undefined && transaction.disputeId !== heldDispute) {
+        // Fixed words: the identities stay out of the envelope and the log.
+        throw RastaError.invalidStateTransition(
+          'Transaction',
+          transaction.status,
+          target,
+          'The transaction no longer holds the dispute this decision is about',
+        );
+      }
+      const at = await databaseNow(tx);
       const moved = await this.repository.transition(
         tx,
         transactionId,
         transaction.status,
         target,
-        extra,
+        extra(at),
       );
       if (moved === 0) throw RastaError.optimisticLockFailed('Transaction', transactionId);
 
@@ -542,9 +711,87 @@ export class TransactionService {
         by: actor,
         at,
       });
-    });
 
-    return this.get(transactionId);
+      return { detail: await this.answered(tx, transactionId, answer), authority };
+    });
+    recordFinancialCommand(transactionId, authority);
+    return detail;
+  }
+
+  /**
+   * Who may make one of the five transaction commands on this transaction, and
+   * on what authority: a refund by its own rule (docs/24 Q-62), the other four
+   * by {@link canActFinanciallyFor} — and both, for acting from another
+   * organization, by that one rule of docs/24 Q-136. A non-party learns
+   * nothing — `NOT_FOUND` first, always.
+   *
+   * A statement's obligation is never refunded or cancelled, by anyone
+   * ({@link refuseStatementWithdrawal}): judged after visibility and before
+   * any role, so every party gets the same refusal.
+   *
+   * An order's obligation is disputed and resolved only by the order saga
+   * ({@link assertMayDisputeDirectly}, docs/24 Q-138): judged after the
+   * authority to act at all, so a caller who could not act on the
+   * transaction is refused exactly as before.
+   */
+  private async authorizeAct(
+    transaction: ActedTransaction,
+    command: TransactionCommand,
+  ): Promise<FinancialAuthority> {
+    assertTransactionVisible(transaction);
+    refuseStatementWithdrawal(transaction, command);
+    if (command === 'REFUND') {
+      return assertMayRefund(
+        transaction,
+        { payeeMayRefund: this.env.ECONOMIC_REFUND_BY_PAYEE_ENABLED },
+        this.hierarchy,
+      );
+    }
+    const authority = await canActFinanciallyFor(
+      command,
+      transaction.organizationId,
+      this.hierarchy,
+    );
+    if (command === 'DISPUTE' || command === 'RESOLVE_DISPUTE') {
+      assertMayDisputeDirectly(transaction);
+    }
+    return authority;
+  }
+
+  /**
+   * The checks of {@link authorizeAct}, against the transaction as it is now,
+   * without the command — the replay guard of an idempotent command on it
+   * (review of #287, finding 1). A caller who could not make the command now
+   * is refused exactly as that command would refuse them: a stored answer
+   * shows the transaction, so it goes only to whom the transaction would.
+   */
+  async assertMayReplay(transactionId: string, act: TransactionAct): Promise<void> {
+    const transaction = await this.repository.findByIdForParty(transactionId);
+    if (!transaction) throw RastaError.notFound('Transaction', transactionId);
+    if (act === 'READ') assertTransactionVisible(transaction);
+    else await this.authorizeAct(transaction, act);
+  }
+
+  /**
+   * The transaction as the command that just changed it leaves it, read in
+   * that command's own transaction `tx` — and, for an idempotent request,
+   * stored there as its key's answer.
+   *
+   * It used to be read after the commit, and that read was a failure point
+   * after the effect: inside the idempotency store's work, a read that failed
+   * released the key of a state change that had happened, and the same-key
+   * retry was refused `INVALID_STATE_TRANSITION` against the state it had
+   * itself moved (review of #283, finding 2). Read here, a failure rolls the
+   * change back with it; once this commits, the key is COMPLETED.
+   */
+  private async answered(
+    tx: ExtendedPrismaClient,
+    transactionId: string,
+    answer: IdempotentAnswer<TransactionDetail> | undefined,
+  ): Promise<TransactionDetail> {
+    const detail = await this.get(transactionId, tx);
+    await answer?.respond(tx, detail);
+    return detail;
   }
 
   /**
@@ -605,8 +852,8 @@ export class TransactionService {
    * would hide it from the payee, who is legitimately a party to it. The
    * explicit check refuses everyone else with a 404 (docs/09).
    */
-  async get(id: string): Promise<TransactionDetail> {
-    const transaction = await this.repository.findByIdForParty(id);
+  async get(id: string, client?: ExtendedPrismaClient): Promise<TransactionDetail> {
+    const transaction = await this.repository.findByIdForParty(id, client);
     // Not logged: a settlement passes the client's body text here, and one that
     // names nothing is just that text (S-09). A path id is in the logged path.
     if (!transaction) throw RastaError.notFound('Transaction');
@@ -618,6 +865,55 @@ export class TransactionService {
     return this.repository.list(getOrganizationId(), filter);
   }
 }
+
+/**
+ * A transaction without a payee — a top-up — attracts no commission and never
+ * settles, so there is nothing to price.
+ */
+const UNPRICED = { pricingOutcome: null, pricingRuleId: null } as const;
+
+/**
+ * Refuses a refund or a cancellation of a contract statement's obligation —
+ * to every caller, from every state (docs/24 Q-97, temporary decision of
+ * 2026-10-17).
+ *
+ * Nothing was held for such an obligation, so either command moves no money
+ * and only ends it: `REFUNDED` and `CANCELLED` are terminal, and a replay of
+ * the approval finds the ended row and records nothing. The statement would
+ * stay approved and never be paid — a waiver of an approved payable, where
+ * ADR-068 § 6 (I3) corrects an approved statement only by a compensating
+ * statement, never by withdrawing it (review of #329 round 1, finding 1).
+ * Until a statement-specific policy exists, neither command applies.
+ *
+ * A dispute still does: it only freezes. `DISPUTED` leaves by
+ * `RESOLVE_DISPUTE` back to `PENDING_SETTLEMENT`, or by `REFUND` — refused
+ * here — so for this obligation it is a freeze a platform decision lifts.
+ *
+ * Fixed words, no identifiers (S-09).
+ */
+function refuseStatementWithdrawal(
+  transaction: { sourceType: string | null },
+  command: TransactionCommand,
+): void {
+  if (transaction.sourceType !== STATEMENT_SOURCE_TYPE) return;
+  if (command !== 'REFUND' && command !== 'CANCEL') return;
+  throw RastaError.businessRule(STATEMENT_WITHDRAWAL_REFUSED);
+}
+
+export const STATEMENT_WITHDRAWAL_REFUSED =
+  "An approved statement's obligation is not refunded or cancelled; the statement is corrected only by a compensating statement";
+
+/** What a caller asks to do to a transaction — see `TransactionService.authorizeAct`. */
+export type TransactionAct = 'READ' | TransactionCommand;
+
+/** The facts `authorizeAct` reads off a transaction. */
+type ActedTransaction = RefundableTransaction & {
+  sourceType: string | null;
+  transactionType: string;
+};
+
+/** The five financial commands made on `/v1/transactions/:id` (settlement is its own resource). */
+export type TransactionCommand = Exclude<FinancialCommand, 'SETTLE'>;
 
 type StatusChangeAction =
   | 'CREATE'
@@ -642,11 +938,20 @@ export interface TransactionDetail {
   sourceType: string | null;
   sourceReference: string | null;
   disputedAt: Date | null;
+  disputedBy: string | null;
   disputeReason: string | null;
+  disputeResolvedAt: Date | null;
+  disputeResolvedBy: string | null;
+  disputeResolution: string | null;
   settledAt: Date | null;
   failureReason: string | null;
   createdAt: Date;
   createdBy: string;
+  settlementAuthorisedAt: Date | null;
+  settlementAuthorisedService: string | null;
+  settlementAuthorisationKey: string | null;
+  disputeId: string | null;
+  resolvedDisputeId: string | null;
   legs: {
     id: string;
     organizationId: string;

@@ -27,6 +27,7 @@ import { PolicyAccess, UNION_ROLE, type PolicyAuthorRole } from './policy.access
 import { PolicyRepository, type PolicyWithSteps } from './policy.repository';
 import {
   assertPolicyTransition,
+  isStatementChainWorkflow,
   type PolicyStateName,
   type WorkflowKey,
 } from './policy.state-machine';
@@ -59,7 +60,9 @@ class SelfApprovalRefused extends Error {
 /**
  * Approval policies: who writes them, who puts them in force (ADR-023, ADR-063, ADR-068 § 5,
  * Q-70 (7) decided 2026-09-26) — construction-service's mechanism, for the policy that says which
- * roles of an employer's organization accept a contract for it (`contract.signature`).
+ * roles of an employer's organization accept a contract for it (`contract.signature`) and, since
+ * CON-003 PR 5, for the two approval chains of its statements (`contract.statement.technical`,
+ * `contract.statement.financial`; Q-96 (1)) — the same governance for all three.
  *
  * ```
  *   create        submit                           approve (SYSTEM_ADMIN)
@@ -119,16 +122,31 @@ export class PolicyService implements OnModuleInit {
     const author = this.access.assertPolicyAuthor();
     await this.assertMayGovern(author.role, author.organizationId, dto.organizationId);
 
+    const chain = isStatementChainWorkflow(dto.workflowKey);
     // For `contract.signature` the authority is a role of the governed organization itself: the
     // employer decides which of its own roles accept a contract for it, and no other
-    // organization's role can (the database refuses the same, when a signature is recorded).
+    // organization's role can (the database refuses the same, when a signature is recorded). A
+    // statement chain's step may name any organization (Q-96 (1)).
     const foreign = dto.steps.filter((step) => step.authorityOrganizationId !== dto.organizationId);
-    if (foreign.length > 0) {
+    if (!chain && foreign.length > 0) {
       throw ruleRefusal(
         'A signing policy names roles of the organization it governs, and no other',
         'policy',
         ['AUTHORITY_NOT_GOVERNED_ORGANIZATION'],
         { organizationId: dto.organizationId },
+      );
+    }
+    // Amount bounds say which statements a chain step applies to; a signing step has none (the
+    // database refuses the same, `ck_step_bounds_statement_only`).
+    const bounded = dto.steps.some(
+      (step) => step.minAmountMinor !== undefined || step.maxAmountMinor !== undefined,
+    );
+    if (!chain && bounded) {
+      throw ruleRefusal(
+        'Only a statement approval chain’s steps have amount bounds',
+        'policy',
+        ['AMOUNT_BOUNDS_NOT_APPLICABLE'],
+        { workflowKey: dto.workflowKey },
       );
     }
 
@@ -166,6 +184,8 @@ export class PolicyService implements OnModuleInit {
             authorityOrganizationId: step.authorityOrganizationId,
             authorityRole: step.authorityRole,
             authorityLabel: step.authorityLabel,
+            minAmountMinor: step.minAmountMinor === undefined ? null : BigInt(step.minAmountMinor),
+            maxAmountMinor: step.maxAmountMinor === undefined ? null : BigInt(step.maxAmountMinor),
           })),
         );
 

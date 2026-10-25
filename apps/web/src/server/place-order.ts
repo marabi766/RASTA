@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { BIDI_CONTROL, toLatinDigits, toPersianDigits } from '@/lib/format';
 import {
   EMPTY_PLACE_ORDER_FORM,
@@ -11,6 +12,7 @@ import {
 
 import type { WebSession } from './session';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { rolesGuardAdmits } from './roles-guard';
 
 /**
  * Placing an order, through the gateway: `POST /v1/orders`.
@@ -51,8 +53,8 @@ const PLACING_ROLES: readonly string[] = [
   'PROCUREMENT_USER',
 ];
 
-export function canPlaceOrder(effectiveRoles: readonly string[]): boolean {
-  return effectiveRoles.some((role) => PLACING_ROLES.includes(role));
+export function canPlaceOrder(roles: readonly string[]): boolean {
+  return rolesGuardAdmits(roles, PLACING_ROLES);
 }
 
 export function placeOrderFormValues(form: FormData): PlaceOrderFormValues {
@@ -75,12 +77,14 @@ const quantitySchema = z
   .pipe(
     z
       .number()
-      .int()
       .min(1, 'تعداد باید دست‌کم ۱ باشد')
+      // Before `.int()`: 400 digits parse to Infinity, which is both too big and
+      // not an integer, and the person should read the first (the limit).
       .max(
         LIMITS.quantity.max,
         `تعداد نباید بیش از ${toPersianDigits(String(LIMITS.quantity.max))} باشد`,
-      ),
+      )
+      .int('تعداد را به‌صورت عدد صحیح وارد کنید'),
   );
 
 const placeOrderSchema = z.object({
@@ -108,14 +112,7 @@ export type ParsedPlaceOrderForm =
 export function parsePlaceOrderForm(values: PlaceOrderFormValues): ParsedPlaceOrderForm {
   const parsed = placeOrderSchema.safeParse(values);
   if (!parsed.success) {
-    const fieldErrors: Partial<Record<PlaceOrderField, string>> = {};
-    for (const issue of parsed.error.issues) {
-      const field = issue.path[0];
-      if (typeof field === 'string') {
-        fieldErrors[field as PlaceOrderField] ??= issue.message;
-      }
-    }
-    return { ok: false, fieldErrors };
+    return { ok: false, fieldErrors: firstIssuePerField(parsed.error, PLACE_ORDER_FIELDS) };
   }
 
   const { offerId, quantity } = parsed.data;
@@ -130,6 +127,11 @@ export const PLACE_ORDER_FIELD_MAPPING: FieldMapping<PlaceOrderField> = {
   messages: {
     'An organization cannot order from itself': 'سازمان شما نمی‌تواند از پیشنهاد خودش سفارش بدهد.',
     'An order must have a positive total': 'مجموع سفارش باید بیشتر از صفر باشد.',
+    // Q-110: the service refuses an order note. The form never sends one (see
+    // `parsePlaceOrderForm`: the body is `{ lines }` and nothing else); this is
+    // only the Persian for a post that got past it.
+    'An order note is not stored yet (open question Q-110); leave it out':
+      'یادداشت سفارش هنوز ذخیره نمی‌شود؛ بدون یادداشت ثبت کنید.',
     'Missing Idempotency-Key': 'درخواست دوباره ارسال شد؛ صفحه را تازه کنید.',
   },
   byCode: {

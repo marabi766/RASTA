@@ -16,8 +16,89 @@ import {
   milestoneRows,
   reasons,
   seedSigned,
+  type SignedContract,
 } from './amendment-helpers';
-import { cleanup, eventsOf, seedDraft, wire, type Wiring } from './helpers';
+import {
+  activateStatementPolicies,
+  cleanup,
+  eventsOf,
+  seedDraft,
+  wire,
+  type Wiring,
+} from './helpers';
+
+/** The user id a harness token (`person()`) carries: what the events must name as the actor. */
+const actorOf = (token: string): string =>
+  (
+    JSON.parse(Buffer.from(token.slice('test.'.length), 'base64url').toString('utf8')) as {
+      rastaUserId: string;
+    }
+  ).rastaUserId;
+
+/**
+ * PostgreSQL's clock: the producers stamp a milestone and its event with the transaction's `now()`
+ * (`src/shared/clock.ts`), so the test window is read from the same clock, not from Node's.
+ */
+const databaseNow = async (w: Wiring): Promise<number> =>
+  (
+    await w.prisma.client.$queryRawUnsafe<{ now: Date }[]>('SELECT clock_timestamp() AS now')
+  )[0]!.now.getTime();
+
+/** A valid ISO instant that lies within the test window [from, to] (epoch ms). */
+function expectInstantWithin(value: unknown, from: number, to: number): void {
+  expect(typeof value).toBe('string');
+  const at = Date.parse(value as string);
+  expect(new Date(at).toISOString()).toBe(value);
+  expect(at).toBeGreaterThanOrEqual(from);
+  expect(at).toBeLessThanOrEqual(to);
+}
+
+/**
+ * Every key and every string or number leaf of a payload that is NOT a known identifier or an
+ * instant: ids (`id`, `...Id`, `...By`) are random ULIDs/UUIDs that contain any short run of digits
+ * or letters by chance (CI flake on 2026-10-22: "2027" inside a milestone id), and instants are
+ * pinned structurally by `expectInstantWithin`. Content is looked for in what is left.
+ */
+function contentOf(payload: unknown): { keys: string[]; leaves: (string | number)[] } {
+  const keys: string[] = [];
+  const leaves: (string | number)[] = [];
+  const walk = (key: string, value: unknown): void => {
+    if (Array.isArray(value)) return value.forEach((item) => walk(key, item));
+    if (value !== null && typeof value === 'object') {
+      for (const [k, v] of Object.entries(value)) {
+        keys.push(k);
+        walk(k, v);
+      }
+      return;
+    }
+    if (/^id$|Id$|By$|At$/.test(key)) return;
+    if (typeof value === 'string' || typeof value === 'number') leaves.push(value);
+  };
+  walk('', payload);
+  return { keys, leaves };
+}
+
+/** The milestone's title, planned day (in any date form) and share must appear nowhere in `events`. */
+function expectNoMilestoneContent(
+  events: unknown,
+  content: { titleFragment: string; day: string; shareBp: number },
+): void {
+  const { keys, leaves } = contentOf(events);
+  for (const key of ['title', 'plannedDate', 'plannedShareBp']) expect(keys).not.toContain(key);
+  const [year, month, day] = content.day.split('-');
+  const date = new RegExp(`${year}[-/.]?${month}[-/.]?${day}`);
+  const share = new RegExp(`(?<![0-9])${content.shareBp}(?![0-9])`);
+  const fragment = content.titleFragment.toLowerCase();
+  for (const leaf of leaves) {
+    if (typeof leaf === 'number') {
+      expect(leaf).not.toBe(content.shareBp);
+      continue;
+    }
+    expect(leaf.toLowerCase()).not.toContain(fragment);
+    expect(leaf).not.toMatch(date);
+    expect(leaf).not.toMatch(share);
+  }
+}
 
 /**
  * CON-003 PR 3 (ADR-068 § 9, Q-100): the planned milestones of a SIGNED contract, from the real
@@ -66,14 +147,25 @@ describe('milestones of a signed contract', () => {
     http(api).get(`/v1/contracts/${contractId}/milestones`).set('authorization', `Bearer ${token}`);
   const refusedEvents = (employer: string) =>
     eventsOf(w.prisma, employer, 'CONTRACT_AUTHORITY_REFUSED');
-  /** What only a statement (PR 4) does: marks the milestone as referenced. */
-  const reference = (id: string) =>
-    runUnscoped('the suite stands in for the statement of PR 4', () =>
-      w.prisma.client.milestone.updateMany({
-        where: { id },
-        data: { firstReferencedAt: new Date() },
-      }),
-    );
+  /**
+   * What only a statement does (CON-003 PR 5): the contractor submits one with a line against the
+   * milestone, which marks it referenced. The database refuses any other way (`milestone_guard`).
+   */
+  const reference = async (c: SignedContract, milestoneId: string) => {
+    await activateStatementPolicies(w, c.employer);
+    const drafted = await http(api)
+      .post(`/v1/contracts/${c.id}/statements`)
+      .set('authorization', `Bearer ${c.contractorToken}`)
+      .set('idempotency-key', idemKey('stm'))
+      .send({ lines: [{ description: 'Foundations', amountMinor: '100', milestoneId }] })
+      .expect(201);
+    await http(api)
+      .post(`/v1/contracts/${c.id}/statements/${drafted.body.id}/submit`)
+      .set('authorization', `Bearer ${c.contractorToken}`)
+      .set('idempotency-key', idemKey('stm-submit'))
+      .send({})
+      .expect(200);
+  };
 
   beforeAll(async () => {
     api = await startApi({ CONTRACT_MILESTONE_LIMIT: '3' });
@@ -89,7 +181,9 @@ describe('milestones of a signed contract', () => {
   describe('POST /v1/contracts/{id}/milestones', () => {
     it('the employer plans one: a date, not an instant, with its event and no free text on the topic', async () => {
       const c = await signed();
+      const from = await databaseNow(w);
       const res = await plan(c.id, c.employerToken, body({ plannedShareBp: 2500 })).expect(201);
+      const to = await databaseNow(w);
       expect(res.body).toMatchObject({
         contractId: c.id,
         organizationId: c.employer,
@@ -104,21 +198,27 @@ describe('milestones of a signed contract', () => {
       const [row] = await milestoneRows(w, c.id);
       expect(row!.plannedDate.toISOString()).toBe('2026-12-01T00:00:00.000Z');
       expect(row!.firstReferencedAt).toBeNull();
+      expect(res.body.createdAt).toBe(row!.createdAt.toISOString());
 
       const events = await eventsOf(w.prisma, c.employer, 'CONTRACT_MILESTONE_PLANNED');
       expect(events).toHaveLength(1);
-      expect(events[0]!.payload).toEqual({
+      const { plannedAt, ...planned } = events[0]!.payload;
+      expect(planned).toEqual({
         contractId: c.id,
         milestoneId: res.body.id,
         organizationId: c.employer,
         contractorOrganizationId: c.contractor,
-        plannedBy: expect.any(String),
-        plannedAt: expect.any(String),
+        plannedBy: actorOf(c.employerToken),
       });
-      const text = JSON.stringify(events);
-      expect(text).not.toContain('Foundation');
-      expect(text).not.toContain('2026-12-01');
-      expect(text).not.toContain('2500');
+      // One instant, the one the milestone was stored with (D-5), inside the window.
+      expectInstantWithin(plannedAt, from, to);
+      expect(plannedAt).toBe(row!.createdAt.toISOString());
+      expect(events[0]!.occurredAt).toBe(plannedAt);
+      expectNoMilestoneContent(events, {
+        titleFragment: 'Foundation',
+        day: '2026-12-01',
+        shareBp: 2500,
+      });
     });
 
     it('the share is optional, and a day is exact whatever the time zone: the calendar edges and a leap day', async () => {
@@ -248,6 +348,7 @@ describe('milestones of a signed contract', () => {
   describe('PATCH /v1/contracts/{id}/milestones/{milestoneId}', () => {
     it('changes what is given and leaves the rest; the version moves; the event names no content', async () => {
       const c = await signed();
+      const from = await databaseNow(w);
       const made = (await plan(c.id, c.employerToken, body({ plannedShareBp: 1000 })).expect(201))
         .body;
 
@@ -270,13 +371,34 @@ describe('milestones of a signed contract', () => {
         plannedShareBp: null,
         version: 3,
       });
+      const to = await databaseNow(w);
       const [row] = await milestoneRows(w, c.id);
       expect(row).toMatchObject({ title: 'Piles complete', plannedShareBp: null, version: 3 });
       expect(row!.plannedDate.toISOString()).toBe('2027-01-15T00:00:00.000Z');
+      expect(moved.body.updatedAt).toBe(row!.updatedAt.toISOString());
 
       const events = await eventsOf(w.prisma, c.employer, 'CONTRACT_MILESTONE_CHANGED');
-      expect(events.map((e) => e.payload.version)).toEqual([2, 3]);
-      expect(JSON.stringify(events)).not.toMatch(/Piles|2027|1000/);
+      expect(events).toHaveLength(2);
+      events.forEach((event, n) => {
+        const { changedAt, ...changed } = event.payload;
+        expect(changed).toEqual({
+          contractId: c.id,
+          milestoneId: made.id,
+          organizationId: c.employer,
+          contractorOrganizationId: c.contractor,
+          version: n + 2,
+          changedBy: actorOf(c.employerToken),
+        });
+        // One instant, the one the change was stored with (D-5), inside the window.
+        expectInstantWithin(changedAt, from, to);
+        expect(changedAt).toBe([renamed, moved][n]!.body.updatedAt);
+        expect(event.occurredAt).toBe(changedAt);
+      });
+      expectNoMilestoneContent(events, {
+        titleFragment: 'Piles',
+        day: '2027-01-15',
+        shareBp: 1000,
+      });
     });
 
     it('a change that changes nothing answers the milestone as it is and writes nothing: no version, no event', async () => {
@@ -307,7 +429,16 @@ describe('milestones of a signed contract', () => {
     it('is refused for a milestone a statement refers to: 422 MILESTONE_REFERENCED, by the service and by the database', async () => {
       const c = await signed();
       const made = (await plan(c.id, c.employerToken).expect(201)).body;
-      await reference(made.id);
+      // Marked by hand, the database refuses: only a submitted statement's line references it.
+      await expect(
+        runUnscoped('the suite tries the shortcut the statement used to stand in for', () =>
+          w.prisma.client.milestone.updateMany({
+            where: { id: made.id },
+            data: { firstReferencedAt: new Date() },
+          }),
+        ),
+      ).rejects.toThrow(/ck_milestone_referenced_by_submission/);
+      await reference(c, made.id);
 
       const res = await change(c.id, made.id, c.employerToken, { title: 'Too late' }).expect(422);
       expect(reasons(res.body)).toEqual(['milestone:MILESTONE_REFERENCED']);

@@ -1,3 +1,4 @@
+import { ProcurementThresholdPolicy } from '../src/organization/procurement-threshold-policy';
 import { VersioningType, type INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import {
@@ -239,6 +240,8 @@ export async function startApi(): Promise<ApiHarness> {
     .useValue(inertRelay)
     // The HTTP client to organization-service is proven against its contract
     // in organization-directory.int-spec.ts; here the hierarchy is given.
+    .overrideProvider(ProcurementThresholdPolicy)
+    .useValue({ get: async () => null })
     .overrideProvider(OrganizationDirectory)
     .useValue(hierarchy)
     // The receipt chain is audit-service's; the real client is proven against its contract in

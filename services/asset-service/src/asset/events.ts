@@ -38,6 +38,8 @@ export const INSURANCE_EVENTS = {
   INSURANCE_CLAIM_REVIEW_STARTED: 'INSURANCE_CLAIM_REVIEW_STARTED',
   INSURANCE_CLAIM_DECIDED: 'INSURANCE_CLAIM_DECIDED',
   INSURANCE_CLAIM_SETTLEMENT_RECORDED: 'INSURANCE_CLAIM_SETTLEMENT_RECORDED',
+  /** A document held by document-service was attached to the claim (docs/24 Q-128). */
+  INSURANCE_CLAIM_DOCUMENT_ATTACHED: 'INSURANCE_CLAIM_DOCUMENT_ATTACHED',
 } as const;
 
 export type AssetEventName = (typeof ASSET_EVENTS)[keyof typeof ASSET_EVENTS];
@@ -269,6 +271,15 @@ export const insuranceClaimSettlementRecordedPayload = z.object({
   recordedBy: z.string(),
 });
 
+/** The reference only: the file, its name and its content never travel on a topic. */
+export const insuranceClaimDocumentAttachedPayload = z.object({
+  assetId: z.string(),
+  organizationId: z.string(),
+  claimId: z.string(),
+  documentId: z.string(),
+  attachedBy: z.string(),
+});
+
 export const ASSET_EVENT_SCHEMAS = {
   [ASSET_EVENTS.ASSET_CREATED]: assetCreatedPayload,
   [ASSET_EVENTS.ASSET_UPDATED]: assetUpdatedPayload,
@@ -291,6 +302,7 @@ export const INSURANCE_EVENT_SCHEMAS = {
   [INSURANCE_EVENTS.INSURANCE_CLAIM_REVIEW_STARTED]: insuranceClaimReviewStartedPayload,
   [INSURANCE_EVENTS.INSURANCE_CLAIM_DECIDED]: insuranceClaimDecidedPayload,
   [INSURANCE_EVENTS.INSURANCE_CLAIM_SETTLEMENT_RECORDED]: insuranceClaimSettlementRecordedPayload,
+  [INSURANCE_EVENTS.INSURANCE_CLAIM_DOCUMENT_ATTACHED]: insuranceClaimDocumentAttachedPayload,
 } as const satisfies Record<InsuranceEventName, z.ZodTypeAny>;
 
 /** Validates before the payload reaches the outbox, so a malformed event never

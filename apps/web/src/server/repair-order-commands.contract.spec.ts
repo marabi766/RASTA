@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { referenceId } from '@rasta/contracts';
 import ts from 'typescript';
 
+import { guardAdmitsAlone } from '@/test/service-source';
+
 import {
   CANCEL_REPAIR_FIELD_MAPPING,
   COMPLETE_REPAIR_FIELD_MAPPING,
@@ -138,7 +140,9 @@ describe('who may use the commands', () => {
       });
       expect(admitted.length).toBeGreaterThan(0);
       const offered = EVERY_ROLE.filter((role) => canManageMaintenance([role]));
-      expect(offered.sort()).toEqual(EVERY_ROLE.filter((role) => admitted.includes(role)).sort());
+      expect(offered.sort()).toEqual(
+        EVERY_ROLE.filter((role) => guardAdmitsAlone(role, admitted)).sort(),
+      );
     },
   );
 
@@ -285,10 +289,27 @@ describe('the request bodies', () => {
     const literal = topLevelConst(dto, 'MAX_AMOUNT_MINOR').getText().replace(/[_n]/g, '');
     expect(literal).toBe(MAX_AMOUNT_MINOR);
     expect(BigInt(MAX_AMOUNT_MINOR)).toBe(2n ** 63n - 1n);
-    // The schema the three amounts share is the platform's, narrowed by that bound.
+    // The schema the three amounts share is the platform's, narrowed by that bound: every
+    // amount the pattern admits converts to its bigint and is compared with it.
     const bounded = squash(topLevelConst(dto, 'boundedAmountMinorSchema').getText()) ?? '';
-    expect(bounded).toContain('amountMinorSchema');
-    expect(bounded).toContain('BigInt(value) <= MAX_AMOUNT_MINOR');
+    expect(bounded).toMatch(/^amountMinorSchema\b/);
+    expect(bounded).toContain(
+      '.refine( (value) => { const amount = digitsToBigInt(value); ' +
+        'return amount === undefined || amount <= MAX_AMOUNT_MINOR; },',
+    );
+    expect(squash(dto.text)).toMatch(
+      /import \{[^}]*\bdigitsToBigInt\b[^}]*\} from '@rasta\/contracts';/,
+    );
+    // …and the conversion is exact for a string of digits — undefined only for anything else,
+    // which `amountMinorSchema`'s own pattern already refuses.
+    const money = readFileSync(
+      join(ROOT, 'packages', 'contracts', 'src', 'common', 'money.ts'),
+      'utf8',
+    );
+    expect(squash(money)).toContain(
+      'export function digitsToBigInt(value: string): bigint | undefined { ' +
+        'return /^\\d+$/.test(value) ? BigInt(value) : undefined; }',
+    );
   });
 
   it('still checks a computed line and every stored total against that bound, as refusals', () => {
@@ -349,6 +370,8 @@ describe('the sentences the portal translates', () => {
     'dto.ts',
   ]
     .map((file) => read(file))
+    // The shared text rule's closed message lives in @rasta/contracts now.
+    .concat(readFileSync(join(ROOT, 'packages', 'contracts', 'src', 'common', 'text.ts'), 'utf8'))
     .join('\n');
 
   const normalise = (text: string) => text.replace(/'\s*\+\s*\n?\s*'/g, '').replace(/\s+/g, ' ');

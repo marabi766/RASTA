@@ -1,4 +1,10 @@
 import { z } from 'zod';
+import {
+  RETURN_DISPATCH_EVENTS,
+  RETURN_DISPATCH_EVENT_SCHEMAS,
+  RETURN_REQUEST_EVENTS,
+  RETURN_REQUEST_EVENT_SCHEMAS,
+} from '@rasta/contracts';
 
 /**
  * Events published by marketplace-service, on `rasta.marketplace.v1`.
@@ -56,6 +62,11 @@ export const MARKETPLACE_EVENTS = {
   ORDER_FAILED: 'ORDER_FAILED',
   ORDER_SETTLEMENT_STARTED: 'ORDER_SETTLEMENT_STARTED',
   ORDER_SETTLEMENT_FAILED: 'ORDER_SETTLEMENT_FAILED',
+  // RUN-005 (ADR-048): the return request, marketplace's half of reverse logistics. The names
+  // and wire shapes are cross-service contracts (`@rasta/contracts`, `return-requests.ts`).
+  ...RETURN_REQUEST_EVENTS,
+  // A dispatch reservation released by reconciliation: its audit record (Codex r2 on #339).
+  ...RETURN_DISPATCH_EVENTS,
 } as const;
 
 export type MarketplaceEventName = (typeof MARKETPLACE_EVENTS)[keyof typeof MARKETPLACE_EVENTS];
@@ -447,6 +458,8 @@ export const MARKETPLACE_EVENT_SCHEMAS = {
   [MARKETPLACE_EVENTS.ORDER_FAILED]: orderFailedPayload,
   [MARKETPLACE_EVENTS.ORDER_SETTLEMENT_STARTED]: orderSettlementStartedPayload,
   [MARKETPLACE_EVENTS.ORDER_SETTLEMENT_FAILED]: orderSettlementFailedPayload,
+  ...RETURN_REQUEST_EVENT_SCHEMAS,
+  ...RETURN_DISPATCH_EVENT_SCHEMAS,
 } as const satisfies Record<MarketplaceEventName, z.ZodTypeAny>;
 
 /**

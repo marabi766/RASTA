@@ -103,3 +103,19 @@ test('the UTC query covers the database, both roles and a per-database override'
     assert.ok(TIMEZONE_FINDINGS_SQL.includes(needle), needle);
   }
 });
+
+test('the disposable analytics superuser stays in its two dedicated test tasks', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { parse } = await import('yaml');
+  const workflow = parse(
+    readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8'),
+  );
+  const steps = Object.values(workflow.jobs).flatMap((job) => job.steps ?? []);
+  const privileged = steps.filter((step) => step.env?.TEST_ANALYTICS_ADMIN_URL);
+  assert.deepEqual(privileged.map((step) => step.name).sort(), [
+    'Analytics coverage gate',
+    'Analytics database privilege integration tests',
+  ]);
+  assert.ok(!steps.some((step) => step.env?.DATABASE_URL_ANALYTICS_TEST_ADMIN));
+  assert.ok(!steps.find((step) => step.name === 'Integration tests').env.TEST_ANALYTICS_ADMIN_URL);
+});

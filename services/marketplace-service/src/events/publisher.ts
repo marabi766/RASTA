@@ -90,6 +90,12 @@ export const ID_PREFIX = {
   review: 'REV',
   history: 'OSH',
   priceHistory: 'OPH',
+  returnRequest: 'RET',
+  returnLine: 'RTL',
+  returnHistory: 'RSH',
+  /** A dispatch reservation (Q-133 (5)), and the reconciliation that released one (Q-133 (9)(a)). */
+  returnDispatchReservation: 'RDR',
+  returnDispatchRelease: 'RDL',
 } as const;
 
 export function newId(prefix: (typeof ID_PREFIX)[keyof typeof ID_PREFIX]): string {

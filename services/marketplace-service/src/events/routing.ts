@@ -39,12 +39,22 @@ export const AGGREGATE_OF = {
   ORDER_FAILED: 'Order',
   ORDER_SETTLEMENT_STARTED: 'Order',
   ORDER_SETTLEMENT_FAILED: 'Order',
+  RETURN_REQUESTED: 'ReturnRequest',
+  RETURN_AUTHORIZED: 'ReturnRequest',
+  RETURN_REJECTED: 'ReturnRequest',
+  RETURN_CANCELLED: 'ReturnRequest',
+  RETURN_IN_TRANSIT: 'ReturnRequest',
+  RETURN_RECEIVED: 'ReturnRequest',
+  RETURN_INSPECTED: 'ReturnRequest',
+  RETURN_RESOLVED: 'ReturnRequest',
+  RETURN_DISPATCH_RELEASED: 'ReturnRequest',
 } as const satisfies Record<MarketplaceEventName, string>;
 
 export const PARTITION_SCOPES = {
   ORDER: 'ORDER',
   OFFER: 'OFFER',
   PRODUCT: 'PRODUCT',
+  RETURN_REQUEST: 'RETURN_REQUEST',
 } as const;
 
 export type PartitionScope = (typeof PARTITION_SCOPES)[keyof typeof PARTITION_SCOPES];
@@ -115,6 +125,29 @@ export const PARTITION_KEY_POLICY: { [N in MarketplaceEventName]: PartitionRule<
   // caveat as the saga steps above — co-partitioned, not ordered (D-027).
   OFFER_DRAFTED: (payload) => ({ scope: 'OFFER', key: payload.offerId }),
   OFFER_UPDATED: (payload) => ({ scope: 'OFFER', key: payload.offerId }),
+
+  /**
+   * A return request is its own lifecycle (ADR-048 § 3): requested, authorized, then — in
+   * inventory-service — received and inspected. Ordered by the request, not by its order: one
+   * order can carry several requests and each must stay in order with itself. As for the saga
+   * steps above, co-partitioned and not delivered in order (D-027); `returnVersion` and
+   * `streamSeq` say what happened first.
+   */
+  RETURN_REQUESTED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  RETURN_AUTHORIZED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  RETURN_REJECTED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  RETURN_CANCELLED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  // The physical half as the request states it (RUN-005 PR 3): the same request's stream, not
+  // the shipment's — a consumer of this topic follows the request, versions 3 to 6.
+  RETURN_IN_TRANSIT: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  RETURN_RECEIVED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  RETURN_INSPECTED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  RETURN_RESOLVED: (payload) => ({ scope: 'RETURN_REQUEST', key: payload.returnRequestId }),
+  // A reservation's release is the request's too, beside the steps it sits between.
+  RETURN_DISPATCH_RELEASED: (payload) => ({
+    scope: 'RETURN_REQUEST',
+    key: payload.returnRequestId,
+  }),
 
   /** A product is its own lifecycle; nothing else is ordered against it (L7-14). */
   PRODUCT_CREATED: (payload) => ({ scope: 'PRODUCT', key: payload.productId }),

@@ -1,6 +1,6 @@
 import { withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
-import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaClient } from '../src/generated/prisma';
 import { LedgerRepository } from '../src/ledger/ledger.repository';
@@ -14,6 +14,10 @@ import { RewardService } from '../src/reward/reward.service';
 import { SettlementService } from '../src/settlement/settlement.service';
 import { PaymentReconciliationRepository } from '../src/payment/payment-reconciliation.repository';
 import { loadEconomicEnv, type EconomicEnv } from '../src/config/env';
+import type {
+  HierarchyQuestion,
+  OrganizationHierarchy,
+} from '../src/organization/organization-hierarchy';
 import type { Logger } from '@rasta/logging';
 
 /**
@@ -131,6 +135,7 @@ export function testEnv(): EconomicEnv {
     // (`source-facts.fake.ts`). A closed port, so a slip fails fast.
     MAINTENANCE_SERVICE_URL: 'http://127.0.0.1:9',
     FLEET_SERVICE_URL: 'http://127.0.0.1:9',
+    CONTRACT_SERVICE_URL: 'http://127.0.0.1:9',
     ...process.env,
     DATABASE_URL: databaseUrl(),
     ECONOMIC_PLATFORM_ORGANIZATION_ID: PLATFORM_ORGANIZATION_ID,
@@ -151,6 +156,10 @@ export const silentLogger = {
   trace: () => undefined,
   child: () => silentLogger,
 } as unknown as Logger;
+
+const unreachableHierarchy: HierarchyQuestion = {
+  withinVersion: () => Promise.reject(RastaError.upstreamUnavailable('organization-service')),
+};
 
 export interface Wiring {
   prisma: PrismaService;
@@ -173,13 +182,18 @@ export interface Wiring {
  * also starts two Kafka consumers, an outbox relay and a reconciliation timer;
  * a suite that wanted a repository would be starting a broker subscription.
  */
-export function wire(prisma: PrismaService): Wiring {
-  const env = testEnv();
+/** `env` defaults to {@link testEnv}; a suite that needs another setting passes its own. */
+export function wire(prisma: PrismaService, env: EconomicEnv = testEnv()): Wiring {
   const ledgerRepository = new LedgerRepository(prisma);
   const ledger = new LedgerService(ledgerRepository, prisma, env, silentLogger);
   const walletRepository = new WalletRepository(prisma);
   const wallets = new WalletService(walletRepository, ledger, prisma);
   const transactionRepository = new TransactionRepository(prisma);
+  // No suite built here asks the hierarchy: a union administrator acting for
+  // another organization is `union-admin-financial-authority.int-spec.ts`'s,
+  // over HTTP. Asked anyway, it fails closed as an unreachable owner would.
+  const hierarchy = unreachableHierarchy as unknown as OrganizationHierarchy;
+  const commissions = new CommissionService(prisma, ledger);
   const transactions = new TransactionService(
     prisma,
     transactionRepository,
@@ -187,8 +201,9 @@ export function wire(prisma: PrismaService): Wiring {
     walletRepository,
     env,
     ledger,
+    commissions,
+    hierarchy,
   );
-  const commissions = new CommissionService(prisma, ledger);
   const rewards = new RewardService(prisma, ledger, wallets, env);
   const settlements = new SettlementService(
     prisma,
@@ -197,6 +212,8 @@ export function wire(prisma: PrismaService): Wiring {
     walletRepository,
     transactionRepository,
     commissions,
+    hierarchy,
+    env,
   );
 
   const paymentReconciliation = new PaymentReconciliationRepository(prisma, env);
@@ -551,21 +568,85 @@ export async function cleanup(
              OR counterparty_organization_id LIKE ANY($1::text[]))`,
       orgs,
     );
-    await client.$executeRawUnsafe(
-      `DELETE FROM commission WHERE transaction_id IN (
-         SELECT id FROM "transaction"
-          WHERE organization_id LIKE ANY($1::text[])
-             OR counterparty_organization_id LIKE ANY($1::text[]))`,
-      orgs,
-    );
-
-    // The operator path's history is append-only at the database (ADR-064 B3).
-    // Lifted for this run's own organizations only, inside one transaction
-    // that restores the triggers on every exit path — and by the **owner**
-    // connection, never the runtime one, which cannot lift a trigger (D-045).
+    // The operator path's history is append-only at the database (ADR-064 B3),
+    // and so is a posted commission (ADR-045 § 3). Lifted for this run's own
+    // organizations only, inside one transaction that restores the triggers
+    // on every exit path — and by the **owner** connection, never the runtime
+    // one, which cannot lift a trigger (D-045).
+    // This run's rules, whoever they are scoped to (see the rule delete below).
+    const author = `${ITEST_ACTOR}-%`;
     const historyOwner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
     try {
       await historyOwner.$transaction(async (tx) => {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE commission DISABLE TRIGGER trg_commission_append_only',
+        );
+        // By transaction as well as by organization: a commission is filed
+        // under the payee, which may be another run's counterparty. And by
+        // rule: the rule delete below reaches this run's rules by author, and
+        // a charge still naming one would block it (`rule_id` is RESTRICT, so
+        // a rule that priced a charge is never silently unlinked from it).
+        await tx.$executeRawUnsafe(
+          `DELETE FROM commission
+            WHERE organization_id LIKE ANY($1::text[])
+               OR transaction_id IN (
+                    SELECT id FROM "transaction"
+                     WHERE organization_id LIKE ANY($1::text[])
+                        OR counterparty_organization_id LIKE ANY($1::text[]))
+               OR rule_id IN (
+                    SELECT id FROM commission_rule
+                     WHERE organization_id LIKE ANY($1::text[])
+                        OR created_by LIKE $2)`,
+          orgs,
+          author,
+        );
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE commission ENABLE TRIGGER trg_commission_append_only',
+        );
+
+        // And an obligation names the rule it was priced with (docs/23
+        // D-057), RESTRICT as well and fixed by a trigger. One filed under
+        // another run's organizations may name a platform-wide rule of this
+        // run; its pricing is unlinked rather than the row deleted.
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "transaction" DISABLE TRIGGER trg_transaction_pricing_fixed',
+        );
+        await tx.$executeRawUnsafe(
+          `UPDATE "transaction" SET pricing_outcome = NULL, pricing_rule_id = NULL
+            WHERE pricing_rule_id IN (
+                    SELECT id FROM commission_rule
+                     WHERE organization_id LIKE ANY($1::text[])
+                        OR created_by LIKE $2)`,
+          orgs,
+          author,
+        );
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "transaction" ENABLE TRIGGER trg_transaction_pricing_fixed',
+        );
+
+        // A statement obligation is never deleted (CON-003 PR 6b), so this
+        // run's own go here, with the guard lifted in this transaction only;
+        // their legs, settlements and commissions are already gone above.
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "transaction" DISABLE TRIGGER trg_transaction_statement_obligation_fixed',
+        );
+        await tx.$executeRawUnsafe(
+          `DELETE FROM "transaction"
+            WHERE source_type = 'STATEMENT'
+              AND (organization_id LIKE ANY($1::text[])
+                   OR counterparty_organization_id LIKE ANY($1::text[]))`,
+          orgs,
+        );
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "transaction" ENABLE TRIGGER trg_transaction_statement_obligation_fixed',
+        );
+
         for (const [table, trigger] of [
           ['payment_reconciliation_resolution', 'trg_payment_resolution_append_only'],
           ['payment_reconciliation_requeue', 'trg_payment_requeue_append_only'],
@@ -586,7 +667,6 @@ export async function cleanup(
 
     for (const table of [
       'settlement',
-      'commission',
       'reward',
       'reward_balance',
       // Children first: each foreign key here is ON DELETE RESTRICT.
@@ -633,8 +713,7 @@ export async function cleanup(
     // expected two.
     //
     // So the disjunct stays and is bound to the run instead, which is what
-    // `ITEST_ACTOR` exists for.
-    const author = `${ITEST_ACTOR}-%`;
+    // `ITEST_ACTOR` exists for (`author`, above).
     await client.$executeRawUnsafe(
       `DELETE FROM commission_rule
         WHERE organization_id LIKE ANY($1::text[])

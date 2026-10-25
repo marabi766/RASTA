@@ -13,8 +13,10 @@ import {
   EventConsumer,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
   OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -46,10 +48,14 @@ import { LedgerBalanceAudit } from './wallet/balance-audit';
 import { TransactionRepository } from './transaction/transaction.repository';
 import { TransactionService } from './transaction/transaction.service';
 import { TransactionController } from './transaction/transaction.controller';
+import { InternalObligationController } from './transaction/internal-obligation.controller';
+import { StatementObligationService } from './transaction/statement-obligation';
 import { CommissionService } from './commission/commission.service';
 import { CommissionController } from './commission/commission.controller';
 import { RewardService } from './reward/reward.service';
 import { RewardController } from './reward/reward.controller';
+import { ParticipationService } from './reward/participation.service';
+import { RecognitionService } from './reward/recognition.service';
 import { PaymentService } from './payment/payment.service';
 import { PaymentReconciliationRepository } from './payment/payment-reconciliation.repository';
 import { PaymentController } from './payment/payment.controller';
@@ -63,11 +69,13 @@ import { SettlementService } from './settlement/settlement.service';
 import { SettlementController } from './settlement/settlement.controller';
 import { IdempotencyStore } from './shared/idempotency';
 import { SettlementAuthorityConsumer } from './consumers/settlement-authority.consumer';
+import { StatementSettlementConsumer } from './consumers/statement-settlement.consumer';
 import { RewardTriggerConsumer } from './consumers/reward-trigger.consumer';
 import { transactionsDisputed, transactionsPendingSettlement } from './observability/metrics';
 import { HealthController, MetricsController } from './health/health.controller';
 import { ENV, LOGGER, PAYMENT_PROVIDER, SOURCE_FACTS } from './tokens';
 import { SourceFactsClient, type SourceFacts } from './provenance/source-facts.client';
+import { OrganizationHierarchy } from './organization/organization-hierarchy';
 import { ECONOMIC_DLQ_TOPIC, loadEconomicEnv, SERVICE_NAME, type EconomicEnv } from './config/env';
 
 /**
@@ -81,6 +89,11 @@ import { ECONOMIC_DLQ_TOPIC, loadEconomicEnv, SERVICE_NAME, type EconomicEnv } f
  *                         product document's mandatory control before
  *                         settlement. Losing one means a workshop is never
  *                         paid.
+ *   statement-settlement  `rasta.contract.v1` — STATEMENT_APPROVED, an approved
+ *                         contract statement's obligation (ADR-068 § 6). Its
+ *                         own group: the contract topic carries every contract
+ *                         and statement event, and its lag must not delay a
+ *                         repair's approval, nor the reverse.
  *   reward-trigger        `rasta.fleet.v1` and `rasta.maintenance.v1` — the
  *                         behaviours that earn points. Losing one means a
  *                         missed reward.
@@ -94,19 +107,23 @@ import { ECONOMIC_DLQ_TOPIC, loadEconomicEnv, SERVICE_NAME, type EconomicEnv } f
  * nothing for every repair approved before that.
  */
 const MAINTENANCE_TOPICS = ['rasta.maintenance.v1'];
+const CONTRACT_TOPICS = ['rasta.contract.v1'];
 const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
 
-// A note on the providers nothing below injects — the two consumers,
-// `LedgerBalanceAudit` and `PaymentReconciliationSweeper`. Nest instantiates every provider a module declares, so
-// their `onModuleInit` runs and they subscribe and start their timer without
-// anyone holding a reference. Injecting them into `AppModule` purely to keep
-// them alive would be a lie about the dependency.
+// A note on the providers that start themselves — the two consumers,
+// `LedgerBalanceAudit` and `PaymentReconciliationSweeper`. Nest instantiates
+// every provider a module declares, so their `onModuleInit` runs and they
+// subscribe and start their timer without anyone holding a reference.
+// Injecting them into `AppModule` purely to keep them alive would be a lie
+// about the dependency. `OutboxShutdown` injects the sweeper and the two
+// consumers because it stops them.
 
 @Module({
   controllers: [
     WalletController,
     LedgerController,
     TransactionController,
+    InternalObligationController,
     SettlementController,
     CommissionController,
     RewardController,
@@ -158,8 +175,11 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     WalletService,
     TransactionRepository,
     TransactionService,
+    StatementObligationService,
     CommissionService,
     RewardService,
+    ParticipationService,
+    RecognitionService,
     PaymentService,
     PaymentReconciliationRepository,
     PaymentReconciler,
@@ -204,7 +224,28 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
         new SourceFactsClient({
           maintenanceBaseUrl: env.MAINTENANCE_SERVICE_URL,
           fleetBaseUrl: env.FLEET_SERVICE_URL,
+          contractBaseUrl: env.CONTRACT_SERVICE_URL,
           timeoutMs: env.ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS,
+          tokens: new InternalTokenService(
+            env.INTERNAL_TOKEN_SECRET,
+            env.INTERNAL_TOKEN_ISSUER,
+            env.INTERNAL_TOKEN_TTL_SECONDS,
+          ),
+        }),
+    },
+
+    /**
+     * The owner of the organization hierarchy (A-13), asked whether a union
+     * administrator acts for an organization within its union (docs/24 Q-136).
+     * Its own `InternalTokenService`, as `SOURCE_FACTS` above.
+     */
+    {
+      provide: OrganizationHierarchy,
+      inject: [ENV],
+      useFactory: (env: EconomicEnv) =>
+        new OrganizationHierarchy({
+          baseUrl: env.ORGANIZATION_SERVICE_URL,
+          timeoutMs: env.ECONOMIC_ORGANIZATION_REQUEST_TIMEOUT_MS,
           tokens: new InternalTokenService(
             env.INTERNAL_TOKEN_SECRET,
             env.INTERNAL_TOKEN_ISSUER,
@@ -243,6 +284,40 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
           prisma,
           transactions,
           sources,
+        ),
+    },
+
+    {
+      provide: StatementSettlementConsumer,
+      inject: [ENV, LOGGER, PrismaService, TransactionService, SOURCE_FACTS],
+      useFactory: (
+        env: EconomicEnv,
+        logger: Logger,
+        prisma: PrismaService,
+        transactions: TransactionService,
+        sources: SourceFacts,
+      ) =>
+        new StatementSettlementConsumer(
+          (handler) =>
+            new EventConsumer(
+              {
+                ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-statement-settlement`),
+                groupId: 'economic-service.statement-settlement',
+                topics: CONTRACT_TOPICS,
+                deadLetterTopic: ECONOMIC_DLQ_TOPIC,
+                fromBeginning: true,
+              },
+              handler,
+              {
+                log: (m) => logger.info(m),
+                warn: (m) => logger.warn(m),
+                error: (m, trace) => logger.error({ err: trace }, m),
+              },
+            ),
+          prisma,
+          transactions,
+          sources,
+          env.ECONOMIC_STATEMENT_BUSINESS_LINE ?? null,
         ),
     },
 
@@ -310,14 +385,55 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     },
 
     {
-      // D-052: the relay and the balance audit stop together in the destroy
-      // phase, by one deadline inside SHUTDOWN_TIMEOUT_MS.
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: EconomicEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      // D-052: the relay, the purge, the payment reconciler, the two consumers
+      // and the balance audit stop together in the destroy phase, by one
+      // deadline inside SHUTDOWN_TIMEOUT_MS. The reconciler too (as #247 r3):
+      // stopped later, it kept writing outbox rows while the relay drained. The
+      // consumers too (Codex r1 on #277): stopped later, in their own
+      // onApplicationShutdown and with no bound, their wait came on top of the
+      // relay's; those hooks now only join this stop. The balance audit too
+      // (#279, phase 3): it reads the ledger page by page in transactions.
       provide: OutboxShutdown,
-      inject: [OutboxRelay, LedgerBalanceAudit, ENV],
-      useFactory: (relay: OutboxRelay, audit: LedgerBalanceAudit, env: EconomicEnv) =>
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        PaymentReconciliationSweeper,
+        SettlementAuthorityConsumer,
+        StatementSettlementConsumer,
+        RewardTriggerConsumer,
+        LedgerBalanceAudit,
+        KafkaEventPublisher,
+        ENV,
+      ],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        reconciler: PaymentReconciliationSweeper,
+        settlements: SettlementAuthorityConsumer,
+        statements: StatementSettlementConsumer,
+        rewards: RewardTriggerConsumer,
+        audit: LedgerBalanceAudit,
+        publisher: KafkaEventPublisher,
+        env: EconomicEnv,
+      ) =>
         new OutboxShutdown({
           relay,
-          workers: [audit],
+          purge,
+          workers: [reconciler, settlements, statements, rewards, audit],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
@@ -354,6 +470,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
     private readonly outboxShutdown: OutboxShutdown,
     private readonly store: PrismaOutboxStore,
     private readonly ledger: LedgerService,
@@ -380,6 +497,7 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     await this.ledger.ensurePlatformAccounts('IRR');
 
     this.relay.start();
+    this.purge.start();
 
     const sample = async () => {
       try {
@@ -411,8 +529,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // The relay and the balance audit already stopped in OutboxShutdown's
-    // onModuleDestroy, concurrently and by one deadline; this joins that stop.
+    // The relay, the purge, the payment reconciler, the two consumers and the
+    // balance audit already stopped in OutboxShutdown's onModuleDestroy,
+    // concurrently and by one deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }

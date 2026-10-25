@@ -662,13 +662,851 @@ export const ASSET_DATA_ROLLBACK = {
   ],
 };
 
+const COMMISSION_BUSINESS_LINES = '20261016120000_commission_business_lines';
+
+/** A transaction as the schema before business lines holds it (or after, with a line). */
+const TRANSACTION_MIGCHECK = (id, line = null) => `
+INSERT INTO "transaction" ("id", "organization_id", "counterparty_organization_id", "transaction_type",
+  ${line ? '"business_line", ' : ''}"gross_amount_minor", "occurred_at", "correlation_id", "updated_at", "created_by")
+VALUES ('${id}', 'ORG-MIGCHECK', 'ORG-MIGCHECK-PAYEE', 'LOGISTICS', ${line ? `'${line}', ` : ''}1000,
+  now(), 'COR-MIGCHECK', now(), 'USR-MIGCHECK');`;
+
+/** A commission row; `extra` is the post-migration columns, when they exist. */
+const COMMISSION_MIGCHECK = (id, transactionId, ruleId, rate, amount, extra = null) => `
+INSERT INTO "commission" ("id", "organization_id", "transaction_id", "rule_id", "rate_basis_points",
+  "gross_amount_minor", "amount_minor", "currency", "applied_at"${extra ? ', "business_line", "outcome"' : ''})
+VALUES ('${id}', 'ORG-MIGCHECK-PAYEE', '${transactionId}', ${ruleId ? `'${ruleId}'` : 'NULL'}, ${rate},
+  1000, ${amount}, 'IRR', now()${extra ? `, ${extra}` : ''});`;
+
+/**
+ * The append-only trigger in the schema under test — never another schema's.
+ * In a scratch schema the service's own `public` holds the same objects, so an
+ * unscoped catalogue lookup would count both.
+ */
+const COMMISSION_TRIGGER_HERE = `SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+   WHERE t.tgname = 'trg_commission_append_only' AND c.relnamespace = current_schema()::regnamespace`;
+
+/** Removes every commission probe row; the owner lifts the append-only trigger for them only. */
+const COMMISSION_MIGCHECK_CLEANUP = `
+DO $$
+BEGIN
+  IF EXISTS (${COMMISSION_TRIGGER_HERE}) THEN
+    EXECUTE 'ALTER TABLE "commission" DISABLE TRIGGER "trg_commission_append_only"';
+  END IF;
+  DELETE FROM "commission" WHERE organization_id = 'ORG-MIGCHECK-PAYEE';
+  IF EXISTS (${COMMISSION_TRIGGER_HERE}) THEN
+    EXECUTE 'ALTER TABLE "commission" ENABLE TRIGGER "trg_commission_append_only"';
+  END IF;
+END $$;
+DELETE FROM "commission_rule" WHERE id LIKE 'CMR_MIGCHECK_%';
+DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_%';`;
+
+/**
+ * Commission by business line (ADR-045, docs/23 D-057), rolled back and
+ * re-applied over rows rather than an empty schema.
+ *
+ * Rows from before business lines survive the round trip exactly: their
+ * outcome is derived from `rule_id`, the only fact that already said it, and
+ * dropped again without loss. Rows that carry a line cannot be expressed by
+ * the earlier schema — a line-wide rule has no type to fall back to — so the
+ * rollback refuses them before it changes anything. The forward migration
+ * refuses, in words, a charge with no rule it cannot classify honestly.
+ */
+const COMMISSION_BUSINESS_LINES_STEPS = [
+  {
+    label: 'commission: down to the schema before business lines (empty)',
+    runDownScript: [COMMISSION_BUSINESS_LINES],
+  },
+  {
+    label: 'commission: a priced and an unpriced charge, as the old engine wrote them',
+    sql: [
+      `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+         "valid_from", "status", "created_by", "updated_at", "updated_by")
+       VALUES ('CMR_MIGCHECK_OLD', 'ORG-MIGCHECK-PAYEE', 'LOGISTICS', 250, now(), 'ACTIVE',
+         'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_PRICED'),
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_UNPRICED'),
+      COMMISSION_MIGCHECK(
+        'CMS_MIGCHECK_PRICED',
+        'TXN_MIGCHECK_PRICED',
+        'CMR_MIGCHECK_OLD',
+        250,
+        25,
+      ),
+      COMMISSION_MIGCHECK('CMS_MIGCHECK_UNPRICED', 'TXN_MIGCHECK_UNPRICED', null, 0, 0),
+    ].join('\n'),
+  },
+  { label: 'commission: up again over them', reapply: true },
+  {
+    label: 'commission: outcomes derived from the rule, no line invented anywhere',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "commission"
+         WHERE (id, outcome::text) IN (('CMS_MIGCHECK_PRICED', 'RULE_APPLIED'),
+                                       ('CMS_MIGCHECK_UNPRICED', 'NO_ACTIVE_RULE'))
+           AND business_line IS NULL;
+        IF found <> 2 THEN RAISE EXCEPTION 'the outcome backfill is wrong (found %)', found; END IF;
+        SELECT count(*) INTO found FROM "transaction"
+         WHERE id LIKE 'TXN_MIGCHECK_%' AND business_line IS NOT NULL;
+        IF found <> 0 THEN RAISE EXCEPTION 'a line was inferred for % transaction(s)', found; END IF;
+        SELECT count(*) INTO found FROM "commission_rule"
+         WHERE id = 'CMR_MIGCHECK_OLD' AND business_line IS NULL AND transaction_type = 'LOGISTICS';
+        IF found <> 1 THEN RAISE EXCEPTION 'the type-only rule changed meaning'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'commission: the pricing cutover is recorded once, by this migration',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "commission_pricing_cutover"
+         WHERE id = 1 AND migration_name = '${COMMISSION_BUSINESS_LINES}';
+        IF found <> 1 THEN RAISE EXCEPTION 'the pricing cutover is not recorded (found %)', found; END IF;
+      END $$;`,
+  },
+  {
+    label: 'commission: a rule that has been in force keeps its status (D-057)',
+    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+            "valid_from", "valid_to", "status", "created_by", "updated_at", "updated_by")
+          VALUES ('CMR_MIGCHECK_PAST', 'ORG-MIGCHECK-OTHER', 'LOGISTICS', 100,
+            '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');
+          UPDATE "commission_rule" SET "status" = 'INACTIVE' WHERE id = 'CMR_MIGCHECK_PAST';`,
+    mustFail: 'keeps its status',
+  },
+  {
+    label: 'commission: two active rules of one scope never overlap (D-057)',
+    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+            "valid_from", "valid_to", "status", "created_by", "updated_at", "updated_by")
+          VALUES ('CMR_MIGCHECK_EARLIER', 'ORG-MIGCHECK-OVERLAP', 'LOGISTICS', 100,
+            '2020-01-01', '2020-02-01', 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK'),
+                 ('CMR_MIGCHECK_OVERLAP', 'ORG-MIGCHECK-OVERLAP', 'LOGISTICS', 500,
+            '2020-01-15', NULL, 'ACTIVE', 'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+    mustFail: 'ex_commission_rule_type_only_no_overlap',
+  },
+  {
+    label: 'commission: a posted charge is append-only',
+    sql: `UPDATE "commission" SET amount_minor = 0 WHERE id = 'CMS_MIGCHECK_PRICED';`,
+    mustFail: 'append-only',
+  },
+  {
+    label: 'commission: an outcome that contradicts its rule is refused',
+    sql: COMMISSION_MIGCHECK(
+      'CMS_MIGCHECK_LIE',
+      'TXN_MIGCHECK_UNPRICED',
+      null,
+      0,
+      0,
+      `NULL, 'RULE_APPLIED'`,
+    ),
+    mustFail: 'ck_commission_outcome',
+  },
+  {
+    label: 'commission: a rule naming neither a line nor a type is refused',
+    sql: `INSERT INTO "commission_rule" ("id", "rate_basis_points", "valid_from", "created_by", "updated_at", "updated_by")
+          VALUES ('CMR_MIGCHECK_NONE', 1, now(), 'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+    mustFail: 'ck_commission_rule_scope',
+  },
+  {
+    label: 'commission: down succeeds over rows without a line, and keeps them',
+    runDownScript: [COMMISSION_BUSINESS_LINES],
+  },
+  {
+    label: 'commission: every row as it was, the rule still named, the type NOT NULL again',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "commission"
+         WHERE (id, rule_id, amount_minor) IN (('CMS_MIGCHECK_PRICED', 'CMR_MIGCHECK_OLD', 25))
+            OR (id = 'CMS_MIGCHECK_UNPRICED' AND rule_id IS NULL AND amount_minor = 0);
+        IF found <> 2 THEN RAISE EXCEPTION 'the rollback lost a charge (found %)', found; END IF;
+        SELECT count(*) INTO found FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'commission_rule'
+           AND column_name = 'transaction_type' AND is_nullable = 'NO';
+        IF found <> 1 THEN RAISE EXCEPTION 'commission_rule.transaction_type is nullable after down'; END IF;
+      END $$;`,
+  },
+  { label: 'commission: up again', reapply: true },
+  {
+    label: 'commission: a line-wide rule, and a transaction and its charge under a line',
+    sql: [
+      `INSERT INTO "commission_rule" ("id", "organization_id", "business_line", "rate_basis_points",
+         "valid_from", "status", "created_by", "updated_at", "updated_by")
+       VALUES ('CMR_MIGCHECK_LINE', 'ORG-MIGCHECK-PAYEE', 'PARTS', 100, now(), 'ACTIVE',
+         'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_LINE', 'PARTS'),
+      COMMISSION_MIGCHECK(
+        'CMS_MIGCHECK_LINE',
+        'TXN_MIGCHECK_LINE',
+        'CMR_MIGCHECK_LINE',
+        100,
+        10,
+        `'PARTS', 'RULE_APPLIED'`,
+      ),
+    ].join('\n'),
+  },
+  {
+    label: 'commission: the rollback refuses while any row carries a line',
+    runDownScript: [COMMISSION_BUSINESS_LINES],
+    mustFail: 'carry a business line; refusing to roll back beneath them',
+  },
+  {
+    label: 'commission: …and changed nothing — columns, trigger and ledger row all there',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "commission" WHERE id = 'CMS_MIGCHECK_LINE' AND business_line = 'PARTS';
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback touched the rows'; END IF;
+        SELECT count(*) INTO found FROM (${COMMISSION_TRIGGER_HERE}) here;
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback dropped the trigger'; END IF;
+        SELECT count(*) INTO found FROM "_prisma_migrations"
+         WHERE migration_name = '${COMMISSION_BUSINESS_LINES}' AND rolled_back_at IS NULL;
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback left the ledger'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'commission: clear the line rows, and down again',
+    sql: COMMISSION_MIGCHECK_CLEANUP,
+  },
+  { label: 'commission: down (no line anywhere)', runDownScript: [COMMISSION_BUSINESS_LINES] },
+  {
+    label: 'commission: two active type-only rules for one organization and type, overlapping',
+    sql: `INSERT INTO "commission_rule" ("id", "organization_id", "transaction_type", "rate_basis_points",
+            "valid_from", "status", "created_by", "updated_at", "updated_by")
+          VALUES ('CMR_MIGCHECK_DUP_A', 'ORG-MIGCHECK-DUP', 'LOGISTICS', 100, '2020-01-01', 'ACTIVE',
+                  'USR-MIGCHECK', now(), 'USR-MIGCHECK'),
+                 ('CMR_MIGCHECK_DUP_B', 'ORG-MIGCHECK-DUP', 'LOGISTICS', 500, '2020-06-01', 'ACTIVE',
+                  'USR-MIGCHECK', now(), 'USR-MIGCHECK');`,
+  },
+  {
+    label: 'commission: the forward migration refuses them, naming the query that finds them',
+    deployMustFail:
+      'pair(s) of active rules for one organization and type in force at the same time',
+  },
+  {
+    label: 'commission: an operator closes one (in the probe: removes both)',
+    sql: `DELETE FROM "commission_rule" WHERE id LIKE 'CMR_MIGCHECK_DUP_%';`,
+  },
+  {
+    label: 'commission: resolve the migration refused for overlap',
+    resolveRolledBack: COMMISSION_BUSINESS_LINES,
+  },
+  {
+    label: 'commission: a charge with no rule behind it, which nothing can classify',
+    sql: [
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_ORPHAN'),
+      COMMISSION_MIGCHECK('CMS_MIGCHECK_ORPHAN', 'TXN_MIGCHECK_ORPHAN', null, 100, 10),
+    ].join('\n'),
+  },
+  {
+    label: 'commission: the forward migration refuses it in words',
+    deployMustFail: 'carry a charge but no rule; refusing to classify them',
+  },
+  {
+    label: 'commission: …having changed nothing',
+    sql: `
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'commission'
+                      AND column_name IN ('outcome', 'business_line')) THEN
+          RAISE EXCEPTION 'the refused migration left a column behind';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_type
+                    WHERE typname IN ('BusinessLine', 'CommissionOutcome')
+                      AND typnamespace = current_schema()::regnamespace) THEN
+          RAISE EXCEPTION 'the refused migration left a type behind';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_tables
+                    WHERE schemaname = current_schema() AND tablename = 'commission_pricing_cutover') THEN
+          RAISE EXCEPTION 'the refused migration left the pricing cutover behind';
+        END IF;
+      END $$;`,
+  },
+  {
+    label: 'commission: an operator settles the row (in the probe: removes it)',
+    sql: `DELETE FROM "commission" WHERE id = 'CMS_MIGCHECK_ORPHAN';`,
+  },
+  {
+    label: 'commission: resolve the refused migration',
+    resolveRolledBack: COMMISSION_BUSINESS_LINES,
+  },
+  { label: 'commission: up again: it applies', reapply: true },
+  {
+    label: 'commission: clean up the probe rows and the rolled-back ledger row',
+    sql: `${COMMISSION_MIGCHECK_CLEANUP}
+          DELETE FROM "_prisma_migrations"
+           WHERE migration_name = '${COMMISSION_BUSINESS_LINES}' AND rolled_back_at IS NOT NULL;`,
+  },
+];
+
+const TRANSACTION_DISPUTE_RESOLUTION = '20261016160000_transaction_dispute_resolution';
+
+/** A transaction's dispute fields, as `resolve-dispute` and `dispute` wrote them. */
+const DISPUTE_MIGCHECK = (id, reason, disputedAt, resolvedAt) => `
+UPDATE "transaction"
+   SET status = '${resolvedAt ? 'PENDING_SETTLEMENT' : 'DISPUTED'}',
+       disputed_at = '${disputedAt}', disputed_by = 'USR-MIGCHECK', dispute_reason = '${reason}',
+       dispute_resolved_at = ${resolvedAt ? `'${resolvedAt}'` : 'NULL'},
+       dispute_resolved_by = ${resolvedAt ? `'USR-MIGCHECK-PLATFORM'` : 'NULL'}
+ WHERE id = '${id}';`;
+
+/** Every dispute probe row, exactly as the release before the migration left it. */
+const DISPUTE_ROWS_UNTOUCHED = `
+DO $$
+DECLARE found INT;
+BEGIN
+  SELECT count(*) INTO found FROM "transaction"
+   WHERE (id, dispute_reason, dispute_resolved_at IS NOT NULL) IN (
+           ('TXN_MIGCHECK_DSP_RESOLVED', 'resolution text written over the reason', true),
+           ('TXN_MIGCHECK_DSP_AGAIN', 'a second objection after the first was resolved', true),
+           ('TXN_MIGCHECK_DSP_OPEN', 'an objection nobody has resolved yet', false));
+  IF found <> 3 THEN RAISE EXCEPTION 'a dispute row changed (found % of 3 as they were)', found; END IF;
+END $$;`;
+
+/**
+ * The resolution's own column (docs/23 D-060), rolled back and re-applied over
+ * disputes the previous release wrote: one resolved (its reason overwritten by
+ * the resolution), one disputed again after a resolution, one still open. Up
+ * guesses nothing — every reason stays as it was and every resolution starts
+ * NULL. Down refuses while any row holds a resolution, before changing
+ * anything, and once none does it drops the column and leaves the reasons.
+ */
+const TRANSACTION_DISPUTE_RESOLUTION_STEPS = [
+  {
+    label: 'dispute resolution: down to the schema before the column (empty)',
+    runDownScript: [TRANSACTION_DISPUTE_RESOLUTION],
+  },
+  {
+    label: 'dispute resolution: disputes as the previous release wrote them',
+    sql: [
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_DSP_RESOLVED'),
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_DSP_AGAIN'),
+      TRANSACTION_MIGCHECK('TXN_MIGCHECK_DSP_OPEN'),
+      DISPUTE_MIGCHECK(
+        'TXN_MIGCHECK_DSP_RESOLVED',
+        'resolution text written over the reason',
+        '2026-10-01T10:00:00Z',
+        '2026-10-02T10:00:00Z',
+      ),
+      DISPUTE_MIGCHECK(
+        'TXN_MIGCHECK_DSP_AGAIN',
+        'a second objection after the first was resolved',
+        '2026-10-03T10:00:00Z',
+        '2026-10-02T10:00:00Z',
+      ),
+      DISPUTE_MIGCHECK(
+        'TXN_MIGCHECK_DSP_OPEN',
+        'an objection nobody has resolved yet',
+        '2026-10-01T10:00:00Z',
+        null,
+      ),
+    ].join('\n'),
+  },
+  { label: 'dispute resolution: up again over them', reapply: true },
+  {
+    label: 'dispute resolution: no row guessed — every reason as it was, every resolution NULL',
+    sql: `${DISPUTE_ROWS_UNTOUCHED}
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "transaction"
+         WHERE id LIKE 'TXN_MIGCHECK_DSP_%' AND dispute_resolution IS NOT NULL;
+        IF found <> 0 THEN RAISE EXCEPTION 'a resolution was backfilled for % row(s)', found; END IF;
+      END $$;`,
+  },
+  {
+    label: 'dispute resolution: a resolution recorded beside its reason, as the new release does',
+    sql: `UPDATE "transaction" SET dispute_resolution = 'decided in the supplier''s favour'
+           WHERE id = 'TXN_MIGCHECK_DSP_OPEN';`,
+  },
+  {
+    label: 'dispute resolution: the rollback refuses while any row holds a resolution',
+    runDownScript: [TRANSACTION_DISPUTE_RESOLUTION],
+    mustFail: 'hold a dispute resolution; refusing to drop dispute_resolution',
+  },
+  {
+    label: 'dispute resolution: …and changed nothing — the column, the resolution, the ledger row',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "transaction"
+         WHERE id = 'TXN_MIGCHECK_DSP_OPEN' AND dispute_resolution = 'decided in the supplier''s favour';
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback touched the resolution'; END IF;
+        SELECT count(*) INTO found FROM "_prisma_migrations"
+         WHERE migration_name = '${TRANSACTION_DISPUTE_RESOLUTION}' AND rolled_back_at IS NULL;
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback left the ledger'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'dispute resolution: the resolution cleared (in the probe), and down again',
+    sql: `UPDATE "transaction" SET dispute_resolution = NULL WHERE id = 'TXN_MIGCHECK_DSP_OPEN';`,
+  },
+  {
+    label: 'dispute resolution: down succeeds with no resolution anywhere',
+    runDownScript: [TRANSACTION_DISPUTE_RESOLUTION],
+  },
+  {
+    label: 'dispute resolution: the column is gone and every reason is still there',
+    sql: `${DISPUTE_ROWS_UNTOUCHED}
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'transaction'
+                      AND column_name = 'dispute_resolution') THEN
+          RAISE EXCEPTION 'dispute_resolution survived its rollback';
+        END IF;
+        IF EXISTS (SELECT 1 FROM "_prisma_migrations"
+                    WHERE migration_name = '${TRANSACTION_DISPUTE_RESOLUTION}') THEN
+          RAISE EXCEPTION 'the rollback left its ledger row';
+        END IF;
+      END $$;`,
+  },
+  { label: 'dispute resolution: up again', reapply: true },
+  {
+    label: 'dispute resolution: clean up the probe rows',
+    sql: `DELETE FROM "transaction_leg" WHERE transaction_id LIKE 'TXN_MIGCHECK_DSP_%';
+          DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_DSP_%';`,
+  },
+];
+
+const TRANSACTION_RESOLVED_DISPUTE = '20261022120000_transaction_resolved_dispute';
+
+/** One lifecycle move of a probe row, as the service writes it: the dispute triggers see a status change. */
+const RSD_MOVE = (id, set) => `UPDATE "transaction" SET ${set} WHERE id = '${id}';`;
+const RSD_DISPUTE = (id, reason, at) =>
+  RSD_MOVE(
+    id,
+    `status = 'DISPUTED', disputed_at = '${at}', disputed_by = 'USR-MIGCHECK', dispute_reason = '${reason}'`,
+  );
+const RSD_RESOLVE = (id, decision, at) =>
+  RSD_MOVE(
+    id,
+    `status = 'PENDING_SETTLEMENT', dispute_resolved_at = '${at}', dispute_resolved_by = 'USR-MIGCHECK-PLATFORM', dispute_resolution = '${decision}'`,
+  );
+
+/** Each probe row's `resolved_dispute_id` against its `dispute_id`: `same`, `null`, or `kept` (the value in `RSD_KEPT`). */
+const RSD_EXPECT = (label, rows) => `
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT id, dispute_id, resolved_dispute_id FROM "transaction"
+            WHERE id LIKE 'TXN_MIGCHECK_RSD_%' ORDER BY id LOOP
+    IF r.id IN (${rows.same.map((id) => `'${id}'`).join(', ') || "''"})
+       AND (r.resolved_dispute_id IS NULL OR r.resolved_dispute_id <> r.dispute_id) THEN
+      RAISE EXCEPTION '${label}: % should name its own dispute (%), names %', r.id, r.dispute_id, r.resolved_dispute_id;
+    END IF;
+    IF r.id IN (${rows.none.map((id) => `'${id}'`).join(', ') || "''"}) AND r.resolved_dispute_id IS NOT NULL THEN
+      RAISE EXCEPTION '${label}: % should have no resolved dispute, has %', r.id, r.resolved_dispute_id;
+    END IF;
+  END LOOP;
+END $$;`;
+
+const RSD_ROWS = ['PENDING', 'SETTLED', 'REFUNDED', 'OPEN', 'NEVER'].map(
+  (row) => `TXN_MIGCHECK_RSD_${row}`,
+);
+
+/** The backfill's write, to every probe row and without its filter: the trigger decides what is kept. */
+const RSD_ATTRIBUTE_ALL = `UPDATE "transaction" SET resolved_dispute_id = dispute_id
+  WHERE id LIKE 'TXN_MIGCHECK_RSD_%';`;
+
+/** The dispute fields of every probe row, exactly as the previous release wrote them. */
+const RSD_FIELDS_UNTOUCHED = `
+DO $$
+DECLARE found INT;
+BEGIN
+  SELECT count(*) INTO found FROM "transaction"
+   WHERE (id, status::text, dispute_reason, dispute_resolution, dispute_id IS NOT NULL) IN (
+           ('TXN_MIGCHECK_RSD_PENDING', 'PENDING_SETTLEMENT', 'short on arrival', 'counted again: complete', true),
+           ('TXN_MIGCHECK_RSD_SETTLED', 'SETTLED', 'short on arrival', 'counted again: complete', true),
+           ('TXN_MIGCHECK_RSD_REFUNDED', 'REFUNDED', 'the invoice names another supplier', 'counted again: complete', true),
+           ('TXN_MIGCHECK_RSD_OPEN', 'DISPUTED', 'the invoice names another supplier', 'counted again: complete', true))
+     AND disputed_at IS NOT NULL AND dispute_resolved_at IS NOT NULL;
+  IF found <> 4 THEN RAISE EXCEPTION 'a dispute probe row changed (found % of 4 as they were)', found; END IF;
+  SELECT count(*) INTO found FROM "transaction"
+   WHERE id = 'TXN_MIGCHECK_RSD_NEVER' AND status = 'HELD' AND disputed_at IS NULL AND dispute_id IS NULL;
+  IF found <> 1 THEN RAISE EXCEPTION 'the undisputed probe row changed'; END IF;
+END $$;`;
+
+/**
+ * Which dispute a resolution decided (docs/23 D-060), rolled back and
+ * re-applied over transactions the previous release wrote: resolved and
+ * waiting for settlement, resolved and settled, resolved then disputed again
+ * and refunded from DISPUTED, resolved then disputed again and still open,
+ * and one never disputed. Up changes the catalogue and no row (Codex on #352,
+ * finding 1): every row NULL, the reasons and resolutions as they were. A
+ * write to every row — what the backfill (economic-service
+ * resolved-dispute-backfill.ts) and a later move do — attributes only what is
+ * certain, the first two, whose latest dispute was resolved, whatever it
+ * sets, and leaves the refunded and the open ones NULL. The trigger then
+ * attributes a resolution written by anyone, and a write can neither forge nor
+ * clear one. Down refuses nothing and leaves every other dispute field; after
+ * a second up the same write attributes the same rows again.
+ */
+const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
+  {
+    label: 'resolved dispute: down to the schema before the column (empty)',
+    runDownScript: [TRANSACTION_RESOLVED_DISPUTE],
+  },
+  {
+    label: 'resolved dispute: disputes as the previous release wrote them',
+    sql: [
+      ...['PENDING', 'SETTLED', 'REFUNDED', 'OPEN', 'NEVER'].map((row) =>
+        TRANSACTION_MIGCHECK(`TXN_MIGCHECK_RSD_${row}`),
+      ),
+      RSD_MOVE('TXN_MIGCHECK_RSD_NEVER', `status = 'HELD'`),
+      ...['PENDING', 'SETTLED', 'REFUNDED', 'OPEN'].flatMap((row) => [
+        RSD_MOVE(`TXN_MIGCHECK_RSD_${row}`, `status = 'HELD'`),
+        RSD_DISPUTE(`TXN_MIGCHECK_RSD_${row}`, 'short on arrival', '2026-10-20T10:00:00Z'),
+        RSD_RESOLVE(`TXN_MIGCHECK_RSD_${row}`, 'counted again: complete', '2026-10-20T11:00:00Z'),
+      ]),
+      RSD_MOVE(
+        'TXN_MIGCHECK_RSD_SETTLED',
+        `status = 'SETTLED', settled_at = '2026-10-20T12:00:00Z', net_amount_minor = gross_amount_minor`,
+      ),
+      // Disputed again, dated before the resolution: the previous release read
+      // its clock before the row lock (Codex on #322 round 4, finding 1).
+      ...['REFUNDED', 'OPEN'].map((row) =>
+        RSD_DISPUTE(
+          `TXN_MIGCHECK_RSD_${row}`,
+          'the invoice names another supplier',
+          '2026-10-20T10:59:00Z',
+        ),
+      ),
+      RSD_MOVE(
+        'TXN_MIGCHECK_RSD_REFUNDED',
+        `status = 'REFUNDED', refunded_at = '2026-10-20T13:00:00Z', refunded_by = 'USR-MIGCHECK-PLATFORM'`,
+      ),
+    ].join('\n'),
+  },
+  { label: 'resolved dispute: up again over them', reapply: true },
+  {
+    label: 'resolved dispute: up writes no row; every field as it was',
+    sql: `${RSD_FIELDS_UNTOUCHED}
+      ${RSD_EXPECT('after up', { same: [], none: RSD_ROWS })}`,
+  },
+  {
+    label: 'resolved dispute: a write to every row attributes only the certain ones',
+    sql: `${RSD_ATTRIBUTE_ALL}
+      ${RSD_FIELDS_UNTOUCHED}
+      ${RSD_EXPECT('after the backfill’s write', {
+        same: ['TXN_MIGCHECK_RSD_PENDING', 'TXN_MIGCHECK_RSD_SETTLED'],
+        none: ['TXN_MIGCHECK_RSD_REFUNDED', 'TXN_MIGCHECK_RSD_OPEN', 'TXN_MIGCHECK_RSD_NEVER'],
+      })}`,
+  },
+  {
+    label:
+      'resolved dispute: a resolution written by anyone is attributed; a forged one is not kept',
+    sql: `${RSD_MOVE('TXN_MIGCHECK_RSD_OPEN', `status = 'PENDING_SETTLEMENT', dispute_resolved_at = '2026-10-20T14:00:00Z', resolved_dispute_id = 'TXD_FORGED'`)}
+      ${RSD_MOVE('TXN_MIGCHECK_RSD_PENDING', `resolved_dispute_id = 'TXD_FORGED'`)}
+      ${RSD_MOVE('TXN_MIGCHECK_RSD_NEVER', `resolved_dispute_id = 'TXD_FORGED'`)}
+      ${RSD_EXPECT('after the trigger', {
+        same: ['TXN_MIGCHECK_RSD_PENDING', 'TXN_MIGCHECK_RSD_SETTLED', 'TXN_MIGCHECK_RSD_OPEN'],
+        none: ['TXN_MIGCHECK_RSD_REFUNDED', 'TXN_MIGCHECK_RSD_NEVER'],
+      })}`,
+  },
+  {
+    label: 'resolved dispute: down succeeds over attributed rows',
+    runDownScript: [TRANSACTION_RESOLVED_DISPUTE],
+  },
+  {
+    label:
+      'resolved dispute: the column and its trigger are gone; every dispute and its identity stay',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'transaction'
+                      AND column_name = 'resolved_dispute_id') THEN
+          RAISE EXCEPTION 'resolved_dispute_id survived its rollback';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+                    WHERE t.tgname = 'trg_transaction_resolved_dispute'
+                      AND c.relnamespace = current_schema()::regnamespace) THEN
+          RAISE EXCEPTION 'the resolved-dispute trigger survived its rollback';
+        END IF;
+        SELECT count(*) INTO found FROM "transaction"
+         WHERE id LIKE 'TXN_MIGCHECK_RSD_%' AND dispute_id IS NOT NULL AND dispute_reason IS NOT NULL
+           AND dispute_resolution = 'counted again: complete';
+        IF found <> 4 THEN RAISE EXCEPTION 'the rollback touched a dispute (found % of 4)', found; END IF;
+        IF EXISTS (SELECT 1 FROM "_prisma_migrations"
+                    WHERE migration_name = '${TRANSACTION_RESOLVED_DISPUTE}') THEN
+          RAISE EXCEPTION 'the rollback left its ledger row';
+        END IF;
+      END $$;`,
+  },
+  { label: 'resolved dispute: up again', reapply: true },
+  {
+    label: 'resolved dispute: after the second up, the same write attributes the same rows again',
+    sql: `${RSD_EXPECT('after the second up', { same: [], none: RSD_ROWS })}
+      ${RSD_ATTRIBUTE_ALL}
+      ${RSD_EXPECT('after the second backfill’s write', {
+        same: ['TXN_MIGCHECK_RSD_PENDING', 'TXN_MIGCHECK_RSD_SETTLED', 'TXN_MIGCHECK_RSD_OPEN'],
+        none: ['TXN_MIGCHECK_RSD_REFUNDED', 'TXN_MIGCHECK_RSD_NEVER'],
+      })}`,
+  },
+  {
+    label: 'resolved dispute: clean up the probe rows',
+    sql: `DELETE FROM "transaction_leg" WHERE transaction_id LIKE 'TXN_MIGCHECK_RSD_%';
+          DELETE FROM "transaction" WHERE organization_id = 'ORG-MIGCHECK' AND id LIKE 'TXN_MIGCHECK_RSD_%';`,
+  },
+];
+
+const PARTICIPATION_RULE = '20261016190000_participation_rule';
+
+/** A reward evaluation row; `subject` adds the two columns this migration brings. */
+const EVALUATION_MIGCHECK = (sourceReference, outcome, subject) => `
+INSERT INTO "reward_source_evaluation"
+  ("organization_id", "trigger_event", "source_reference", "origin", "event_id", "outcome"${subject ? ', "subject_user_id", "occurred_at"' : ''})
+VALUES ('ORG-MIGCHECK', 'USAGE_RECORDED', '${sourceReference}', 'EVENT', 'EVT-${sourceReference}', '${outcome}'${subject ? `, '${subject}', now()` : ''});`;
+
+const PARTICIPATION_RULE_MIGCHECK = (id, version) => `
+INSERT INTO "participation_rule" ("id", "version", "window_days", "contributions", "created_by")
+VALUES ('${id}', ${version}, 30, '[{"triggerEvent":"USAGE_RECORDED","weight":1,"maxPerWindow":null}]', 'USR-MIGCHECK');`;
+
+/**
+ * The participation score (ADR-047, docs/24 Q-139), rolled back and re-applied
+ * over rows. Evaluations written before it keep no subject and count for
+ * nobody; the rule's versions are append-only, and the rollback refuses while
+ * one exists rather than erase the record of what was in force. Once none
+ * does, it drops the two columns and keeps every evaluation row.
+ */
+const PARTICIPATION_RULE_STEPS = [
+  {
+    label: 'participation: down to the schema before it (empty)',
+    runDownScript: [PARTICIPATION_RULE],
+  },
+  {
+    label: 'participation: an evaluation as the previous release wrote it',
+    sql: EVALUATION_MIGCHECK('USG_MIGCHECK_OLD', 'NO_RULE'),
+  },
+  { label: 'participation: up again over it', reapply: true },
+  {
+    label: 'participation: the old evaluation names nobody; a new one names its subject',
+    sql: `${EVALUATION_MIGCHECK('USG_MIGCHECK_NEW', 'NO_RULE', 'USR-MIGCHECK-SUBJECT')}
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "reward_source_evaluation"
+         WHERE source_reference = 'USG_MIGCHECK_OLD' AND subject_user_id IS NULL AND occurred_at IS NULL;
+        IF found <> 1 THEN RAISE EXCEPTION 'the old evaluation was given a subject'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'participation: a subject without an instant is refused',
+    sql: `UPDATE "reward_source_evaluation" SET occurred_at = NULL WHERE source_reference = 'USG_MIGCHECK_NEW';`,
+    mustFail: 'ck_reward_source_evaluation_subject',
+  },
+  {
+    label: 'participation: a fact recorded by nobody names no subject',
+    sql: EVALUATION_MIGCHECK('USG_MIGCHECK_NOBODY', 'NO_SUBJECT', 'USR-MIGCHECK-SUBJECT'),
+    mustFail: 'ck_reward_source_evaluation_subject',
+  },
+  {
+    label: 'participation: a version that counts nothing is refused',
+    sql: `INSERT INTO "participation_rule" ("id", "version", "window_days", "contributions", "created_by")
+          VALUES ('PRL_MIGCHECK_EMPTY', 1, 30, '[]', 'USR-MIGCHECK');`,
+    mustFail: 'ck_participation_rule_contributions',
+  },
+  {
+    label: 'participation: a first version',
+    sql: PARTICIPATION_RULE_MIGCHECK('PRL_MIGCHECK_1', 1),
+  },
+  {
+    label: 'participation: a version is never edited',
+    sql: `UPDATE "participation_rule" SET window_days = 1 WHERE id = 'PRL_MIGCHECK_1';`,
+    mustFail: 'append-only',
+  },
+  {
+    label: 'participation: a version is never deleted',
+    sql: `DELETE FROM "participation_rule" WHERE id = 'PRL_MIGCHECK_1';`,
+    mustFail: 'append-only',
+  },
+  {
+    label: 'participation: the rollback refuses while a version exists',
+    runDownScript: [PARTICIPATION_RULE],
+    mustFail: 'refusing to drop the record of what was in force',
+  },
+  {
+    label: 'participation: …and changed nothing',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "participation_rule" WHERE id = 'PRL_MIGCHECK_1';
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback dropped the version'; END IF;
+        SELECT count(*) INTO found FROM "reward_source_evaluation"
+         WHERE source_reference = 'USG_MIGCHECK_NEW' AND subject_user_id = 'USR-MIGCHECK-SUBJECT';
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback dropped the subject'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'participation: the owner removes the probe version (guard lifted in this script only)',
+    sql: `ALTER TABLE "participation_rule" DISABLE TRIGGER "trg_participation_rule_append_only";
+          DELETE FROM "participation_rule" WHERE id LIKE 'PRL_MIGCHECK_%';
+          ALTER TABLE "participation_rule" ENABLE TRIGGER "trg_participation_rule_append_only";`,
+  },
+  {
+    label: 'participation: down succeeds with no version, and keeps every evaluation',
+    runDownScript: [PARTICIPATION_RULE],
+  },
+  {
+    label: 'participation: both evaluations still there, the subject columns gone',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "reward_source_evaluation"
+         WHERE source_reference IN ('USG_MIGCHECK_OLD', 'USG_MIGCHECK_NEW');
+        IF found <> 2 THEN RAISE EXCEPTION 'the rollback lost an evaluation (found %)', found; END IF;
+        SELECT count(*) INTO found FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'reward_source_evaluation'
+           AND column_name IN ('subject_user_id', 'occurred_at');
+        IF found <> 0 THEN RAISE EXCEPTION 'the rollback left a subject column'; END IF;
+      END $$;`,
+  },
+  { label: 'participation: up again', reapply: true },
+  {
+    label: 'participation: clean up the probe rows',
+    sql: `DELETE FROM "reward_source_evaluation" WHERE organization_id = 'ORG-MIGCHECK';`,
+  },
+];
+
+const RECOGNITION_RULE = '20261017120000_recognition_rule';
+
+const RECOGNITION_RULE_MIGCHECK = (id, version, basis, levels, badges) => `
+INSERT INTO "recognition_rule" ("id", "version", "basis", "levels", "badges", "created_by")
+VALUES ('${id}', ${version}, '${basis}', '${levels}', '${badges}', 'USR-MIGCHECK');`;
+
+/**
+ * Levels and badges (COM-012 criterion 2, docs/24 Q-140), rolled back and
+ * re-applied over rows. A version names its basis from a closed set and at
+ * least one level or badge; it is append-only, and the rollback refuses while
+ * one exists rather than erase the record of what was in force.
+ */
+const RECOGNITION_RULE_STEPS = [
+  {
+    label: 'recognition: down to the schema before it (empty)',
+    runDownScript: [RECOGNITION_RULE],
+  },
+  {
+    label: 'recognition: the reward balances it reads on, as the previous release wrote them',
+    sql: `INSERT INTO "reward_balance" ("organization_id", "user_id", "total_points", "updated_at")
+          VALUES ('ORG-MIGCHECK', 'USR-MIGCHECK-HOLDER', 40, now());`,
+  },
+  { label: 'recognition: up again over them', reapply: true },
+  {
+    label: 'recognition: a basis outside the two is refused',
+    sql: RECOGNITION_RULE_MIGCHECK(
+      'RCR_MIGCHECK_X',
+      1,
+      'LOGINS',
+      '[{"rank":1,"name":"L1","threshold":0}]',
+      '[]',
+    ),
+    mustFail: 'ck_recognition_rule_basis',
+  },
+  {
+    label: 'recognition: a version that recognises nothing is refused',
+    sql: RECOGNITION_RULE_MIGCHECK('RCR_MIGCHECK_X', 1, 'PARTICIPATION_SCORE', '[]', '[]'),
+    mustFail: 'ck_recognition_rule_terms',
+  },
+  {
+    label: 'recognition: a first version',
+    sql: RECOGNITION_RULE_MIGCHECK(
+      'RCR_MIGCHECK_1',
+      1,
+      'REWARD_POINTS_CUMULATIVE',
+      '[{"rank":1,"name":"L1","threshold":0}]',
+      '[{"code":"B1","name":"B1","threshold":10}]',
+    ),
+  },
+  {
+    label: 'recognition: a version number is used once',
+    sql: RECOGNITION_RULE_MIGCHECK(
+      'RCR_MIGCHECK_2',
+      1,
+      'PARTICIPATION_SCORE',
+      '[]',
+      '[{"code":"B2","name":"B2","threshold":1}]',
+    ),
+    mustFail: 'Unique constraint failed on the fields: (`version`)',
+  },
+  {
+    label: 'recognition: a version is never edited',
+    sql: `UPDATE "recognition_rule" SET basis = 'PARTICIPATION_SCORE' WHERE id = 'RCR_MIGCHECK_1';`,
+    mustFail: 'append-only',
+  },
+  {
+    label: 'recognition: a version is never deleted',
+    sql: `DELETE FROM "recognition_rule" WHERE id = 'RCR_MIGCHECK_1';`,
+    mustFail: 'append-only',
+  },
+  {
+    label: 'recognition: the rollback refuses while a version exists',
+    runDownScript: [RECOGNITION_RULE],
+    mustFail: 'refusing to drop the record of what was in force',
+  },
+  {
+    label: 'recognition: …and changed nothing',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "recognition_rule" WHERE id = 'RCR_MIGCHECK_1';
+        IF found <> 1 THEN RAISE EXCEPTION 'the refused rollback dropped the version'; END IF;
+      END $$;`,
+  },
+  {
+    label: 'recognition: the owner removes the probe version (guard lifted in this script only)',
+    sql: `ALTER TABLE "recognition_rule" DISABLE TRIGGER "trg_recognition_rule_append_only";
+          DELETE FROM "recognition_rule" WHERE id LIKE 'RCR_MIGCHECK_%';
+          ALTER TABLE "recognition_rule" ENABLE TRIGGER "trg_recognition_rule_append_only";`,
+  },
+  {
+    label: 'recognition: down succeeds with no version, and keeps every reward balance',
+    runDownScript: [RECOGNITION_RULE],
+  },
+  {
+    label: 'recognition: the balance is still there, the table gone',
+    sql: `
+      DO $$
+      DECLARE found INT;
+      BEGIN
+        SELECT count(*) INTO found FROM "reward_balance"
+         WHERE organization_id = 'ORG-MIGCHECK' AND user_id = 'USR-MIGCHECK-HOLDER' AND total_points = 40;
+        IF found <> 1 THEN RAISE EXCEPTION 'the rollback lost a reward balance'; END IF;
+        IF to_regclass('recognition_rule') IS NOT NULL THEN
+          RAISE EXCEPTION 'the rollback left the recognition_rule table';
+        END IF;
+      END $$;`,
+  },
+  { label: 'recognition: up again', reapply: true },
+  {
+    label: 'recognition: clean up the probe rows',
+    sql: `DELETE FROM "reward_balance" WHERE organization_id = 'ORG-MIGCHECK';`,
+  },
+];
+
 export const ECONOMIC_DATA_ROLLBACK = {
   migration: '20260930200000_payment_reconciliation_task',
-  label: 'intents B0 left marked, and the open tasks they get',
+  label:
+    'intents B0 left marked, and the open tasks they get; then charges and rules before and under business lines; then disputes before and beside their resolution column',
   steps: [
     {
       label: 'down: the rollback succeeds while no task is open (the resolutions first)',
       runDownScript: [
+        // An index on the resolution table, which 20261001100000's down drops:
+        // rolled back with it, or its ledger row stays and the re-apply below
+        // never recreates the index — masked while it was the newest
+        // migration, exposed by the next one's exact-inverse check (#287 r2).
+        '20261004120000_payment_resolution_intent_index',
         // Its foreign key needs the intent's (organization_id, id) index,
         // which 20260930200000's down script drops.
         '20261003100000_payment_refund_decline',
@@ -801,6 +1639,8 @@ export const ECONOMIC_DATA_ROLLBACK = {
         END
         $$;`,
     },
+    ...PARTICIPATION_RULE_STEPS,
+    ...RECOGNITION_RULE_STEPS,
     {
       label: 'cleanup: the probe rows are removed before the chain reversal',
       // The append-only trigger is lifted for the probe's own row only, in this
@@ -811,6 +1651,9 @@ export const ECONOMIC_DATA_ROLLBACK = {
             DELETE FROM "payment_reconciliation_task" WHERE organization_id = 'ORG-MIGCHECK';
             DELETE FROM "payment_intent" WHERE organization_id = 'ORG-MIGCHECK';`,
     },
+    ...COMMISSION_BUSINESS_LINES_STEPS,
+    ...TRANSACTION_DISPUTE_RESOLUTION_STEPS,
+    ...TRANSACTION_RESOLVED_DISPUTE_STEPS,
   ],
 };
 
@@ -1249,6 +2092,12 @@ export const EXPECTED = {
     // D-045: the runtime role owns nothing and cannot create the scratch schema
     // or database; the migrator owns rasta_economic.
     connectAs: 'migrator',
+    // `CREATE EXTENSION IF NOT EXISTS btree_gist` for the commission rules'
+    // no-overlap exclusions (docs/23 D-057); its down script leaves it, as
+    // organization-service's does, because the bootstrap installs it too.
+    keptExtensions: {
+      '20261016120000_commission_business_lines': ['btree_gist'],
+    },
     tables: [
       'wallet',
       'ledger_account',
@@ -1260,6 +2109,14 @@ export const EXPECTED = {
       'payment_reconciliation_resolution',
       'payment_reconciliation_requeue',
       'payment_refund_decline',
+      // The instant line rules began to price (docs/23 D-057).
+      'commission_pricing_cutover',
+      // The participation rule's versions (ADR-047, docs/24 Q-139).
+      'participation_rule',
+      // The levels-and-badges versions (COM-012, docs/24 Q-140).
+      'recognition_rule',
+      // A source key taken off a transaction, kept with its decision (#334 r3).
+      'transaction_source_quarantine',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -1268,16 +2125,78 @@ export const EXPECTED = {
       // The operator path's history (ADR-064 § 6): never deleted, decided once.
       'trg_payment_resolution_append_only',
       'trg_payment_requeue_append_only',
+      // A posted commission is corrected by a reversal entry, never edited (ADR-045 § 3).
+      'trg_commission_append_only',
+      // What was in force at an instant stays what it was (docs/23 D-057).
+      'trg_commission_rule_effective_dated',
+      'trg_commission_pricing_cutover_fixed',
+      'trg_transaction_pricing_fixed',
+      // A statement's obligation is never changed nor deleted (ADR-068 § 6).
+      'trg_transaction_statement_obligation_fixed',
+      // A participation rule version is never edited: the next one replaces it.
+      'trg_participation_rule_append_only',
+      'trg_participation_rule_no_truncate',
+      // Nor is a levels-and-badges version.
+      'trg_recognition_rule_append_only',
+      'trg_recognition_rule_no_truncate',
+      // A quarantined source key is never changed nor deleted.
+      'trg_transaction_source_quarantine_append_only',
+      'trg_transaction_source_quarantine_no_truncate',
+    ],
+    // ADR-045: the business line a commission is charged under, and what the step decided.
+    types: ['BusinessLine', 'CommissionOutcome'],
+    functions: [
+      'reject_commission_mutation',
+      'commission_rule_effective_dated',
+      // One scope's rule changes and the pricings that read them take turns (D-057).
+      'commission_rule_scope_key',
+      'commission_rule_scope_change',
+      'commission_pricing_scope_lock',
+      'reject_commission_pricing_cutover_mutation',
+      'reject_transaction_repricing',
+      'reject_statement_obligation_change',
+      'reject_participation_rule_mutation',
+      'reject_recognition_rule_mutation',
+      'reject_transaction_source_quarantine_mutation',
+      // The correction 20261017130000's preflight names (an operator's tool).
+      'quarantine_transaction_source',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
       'ck_wallet_balances',
+      // A rule names a line or a type; an outcome never contradicts its rule (ADR-045 § 2).
+      'ck_commission_rule_scope',
+      'ck_commission_outcome',
+      // Two active rules of one scope never overlap in time (docs/23 D-057).
+      'ex_commission_rule_type_only_no_overlap',
+      'ex_commission_rule_line_no_overlap',
+      'ex_commission_rule_line_type_no_overlap',
+      'ck_commission_rule_organization_not_blank',
+      // An obligation's recorded pricing names a rule exactly when one applied.
+      'ck_transaction_pricing',
+      'transaction_pricing_rule_id_fkey',
+      // Only economic-service records MAINTENANCE_REQUEST / PAYMENT_INTENT rows (recorded-sources.ts).
+      'ck_transaction_recorded_source',
+      // ORDER is recorded by a service over the API, never by a person (recorded-sources.ts).
+      'ck_transaction_order_source',
+      'ck_transaction_source_quarantine_decision',
+      'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',
       // Separation of duties on an operator resolution (ADR-064 § 6).
       'ck_payment_resolution_four_eyes',
       // The creator's stable identity: both or neither (ADR-064 § 6).
       'ck_payment_intent_creator_identity',
+      // Only the STATEMENT_APPROVED consumer records a statement's obligation (ADR-068 § 6).
+      'ck_transaction_statement_obligation',
+      // A participation subject is a person with an instant; versions are numbered once.
+      'ck_reward_source_evaluation_subject',
+      'ck_participation_rule_contributions',
+      'ux_participation_rule_version',
+      // A version's basis is one of two, it recognises something, and is numbered once.
+      'ck_recognition_rule_basis',
+      'ck_recognition_rule_terms',
+      'ux_recognition_rule_version',
     ],
     // One obligation per business fact per payer. A down script that dropped
     // it without the forward migration restoring it would bring back the
@@ -1288,6 +2207,10 @@ export const EXPECTED = {
       'ux_payment_resolution_pending',
       // The operator view's tenant-leading access path (#218 r1).
       'ix_payment_resolution_org_intent',
+      // A person's verified facts in one organization: the breakdown's access path.
+      'ix_reward_source_evaluation_subject',
+      // A quarantined key, per tenant, as the row carried it (#334 r3).
+      'ix_transaction_source_quarantine_key',
     ],
     dataRollback: ECONOMIC_DATA_ROLLBACK,
   },
@@ -1334,9 +2257,56 @@ export const EXPECTED = {
         ],
       },
     },
-    tables: ['product', 'offer', 'order', 'order_line', 'fulfillment', 'order_status_history'],
-    triggers: [],
+    tables: [
+      'product',
+      'offer',
+      'order',
+      'order_line',
+      'fulfillment',
+      'order_status_history',
+      // 20261015120000_saga_step (D-053): replay records of saga activities.
+      'saga_step',
+      // 20261016100000_return_request (RUN-005, ADR-048): the return request, its lines, its history.
+      'return_request',
+      'return_line',
+      'return_status_history',
+      // 20261017160000_return_dispatch_reservation (Q-133 (9)(a)): a reconciliation's release.
+      'return_dispatch_release',
+    ],
+    triggers: [
+      'tg_return_request_guard',
+      'tg_return_request_no_truncate',
+      'tg_return_request_history_check',
+      'tg_return_line_guard',
+      'tg_return_line_no_truncate',
+      'tg_return_status_history_guard',
+      'tg_return_status_history_no_truncate',
+      'tg_return_dispatch_release_guard',
+      'tg_return_dispatch_release_no_truncate',
+    ],
+    functions: [
+      'return_request_guard',
+      'return_request_history_check',
+      'return_line_guard',
+      'return_status_history_guard',
+      'return_dispatch_release_guard',
+    ],
     constraints: [
+      'ck_return_request_status',
+      'ck_return_request_status_coherent',
+      'ck_return_request_version_matches_status',
+      'ck_return_request_parties',
+      'ck_return_line_quantity_positive',
+      'ck_return_history_status',
+      // 20261016140000_return_request_physical (RUN-005 PR 3): which shipment, and its report.
+      'ck_return_request_shipment_id',
+      'ck_return_request_report_document_id',
+      // 20261017160000_return_dispatch_reservation (Codex r1 on #336, F2): the reservation's columns.
+      'ck_return_request_dispatch_reservation',
+      'ck_return_dispatch_release_ids',
+      'ck_return_dispatch_release_actors',
+      'fk_return_dispatch_release_request',
+      'ck_saga_step_key_not_blank',
       'ck_order_settled_after_receipt',
       'ck_order_completed_has_settlement',
       'ck_order_line_total_consistent',
@@ -1352,7 +2322,18 @@ export const EXPECTED = {
     // Added by 20260929120100_order_idempotency_key_unique (review of #141):
     // one Idempotency-Key places at most one order per organization, even
     // after its idempotency record is gone.
-    indexes: ['uq_order_org_idempotency_key'],
+    indexes: [
+      'uq_order_org_idempotency_key',
+      'ux_return_request_org_id',
+      'ux_return_request_command',
+      'ux_return_history_command',
+      'ux_return_history_version',
+      'ux_return_line_order_line',
+      'ux_return_request_shipment',
+      'ux_return_dispatch_release_reservation',
+      'ux_return_dispatch_release_command',
+      'ix_return_dispatch_release_request',
+    ],
     types: ['ResponsibilityAttribution'],
     dataRollback: MARKETPLACE_DATA_ROLLBACK,
   },
@@ -1647,6 +2628,8 @@ export const EXPECTED = {
     // 20260930180000_tender_publication: a tender's key is never deleted and its
     // public half never changes.
     triggers: [
+      'tg_approval_threshold_snapshot',
+      'tg_tender_procurement_estimate',
       'tg_tender_criterion_freeze',
       'tg_tender_publish_requires_criteria',
       'tg_tender_status_transition',
@@ -1702,6 +2685,7 @@ export const EXPECTED = {
       'bid_evaluation_guard',
       'bid_recusal_guard',
       'bid_score_guard',
+      'guard_tender_procurement_estimate',
       'tender_award_guard',
       'tender_award_recorded',
       'bid_award_recorded',
@@ -1728,6 +2712,9 @@ export const EXPECTED = {
       // A completed idempotency key always names the resource it created.
       'ck_idempotency_completed_has_result',
       'ck_idempotency_claim_token_not_blank',
+      // 20261024120000_idempotency_replay_deadline (PM decision D-065): a stored replay deadline never
+      // lies past its record's own expiry.
+      'ck_idempotency_replay_deadline_within_expiry',
       // The tenant-bound foreign key: a need can only reference a project of
       // its own organization.
       'project_need_organization_id_project_id_fkey',
@@ -1770,6 +2757,8 @@ export const EXPECTED = {
       // its project's tenant, names who acted, has a real bidding window, is
       // never published on a default, and a cancellation says why.
       'tender_organization_id_project_id_fkey',
+      'ck_tender_estimate_nonnegative',
+      'ck_tender_threshold_warning',
       'ck_tender_text_not_blank',
       'ck_tender_actor_recorded',
       'ck_tender_version_positive',
@@ -1909,7 +2898,8 @@ export const EXPECTED = {
       'ux_approval_policy_version',
       'ux_approval_policy_active',
       'ux_approval_policy_step_order',
-      'ux_approval_policy_step_authority',
+      // `ux_approval_policy_step_authority` is dropped by 20261016120000 (CON-003 PR 5): one step
+      // per authority holds for signing policies only, in `approval_policy_step_guard`.
     ],
     constraints: [
       'ck_contract_cancellation',
@@ -1976,6 +2966,14 @@ export const EXPECTED = {
       'shipment',
       'shipment_leg',
       'tracking_event',
+      // 20261016120000_return_shipments (RUN-005): goods coming back, their lines and tracking.
+      'return_shipment',
+      'return_shipment_line',
+      'return_tracking_event',
+      // 20261016130000_return_inspection_resolution: what becomes of received goods.
+      'return_disposition',
+      // 20261017170000_return_dispatch_withdrawal: reservations withdrawn on reconciliation.
+      'return_dispatch_withdrawal',
     ],
     types: ['StockMovementType', 'StockReservationStatus'],
     triggers: [
@@ -1997,6 +2995,18 @@ export const EXPECTED = {
       'tg_shipment_leg_no_truncate',
       'tg_tracking_event_guard',
       'tg_tracking_event_no_truncate',
+      'tg_return_shipment_guard',
+      'tg_return_shipment_no_truncate',
+      'tg_return_shipment_history_check',
+      'tg_return_shipment_line_guard',
+      'tg_return_shipment_line_no_truncate',
+      'tg_return_tracking_event_guard',
+      'tg_return_tracking_event_no_truncate',
+      'tg_return_disposition_guard',
+      'tg_return_disposition_no_truncate',
+      'tg_return_shipment_dispatch_fence',
+      'tg_return_dispatch_withdrawal_guard',
+      'tg_return_dispatch_withdrawal_no_truncate',
     ],
     functions: [
       'warehouse_guard',
@@ -2010,6 +3020,13 @@ export const EXPECTED = {
       'shipment_history_check',
       'shipment_leg_guard',
       'tracking_event_guard',
+      'return_shipment_guard',
+      'return_shipment_history_check',
+      'return_shipment_line_guard',
+      'return_tracking_event_guard',
+      'return_disposition_guard',
+      'return_shipment_dispatch_fence',
+      'return_dispatch_withdrawal_guard',
     ],
     indexes: [
       'ux_warehouse_org_id',
@@ -2028,6 +3045,15 @@ export const EXPECTED = {
       'ux_tracking_event_command',
       'ux_shipment_leg_sequence',
       'ux_tracking_event_once',
+      'ux_return_shipment_org_id',
+      'ux_return_shipment_command',
+      'ux_return_shipment_request',
+      'ux_return_shipment_line_order_line',
+      'ux_return_tracking_event_command',
+      'ux_return_tracking_event_sequence',
+      'ux_return_disposition_line',
+      'ux_return_dispatch_withdrawal_reservation',
+      'ix_return_dispatch_withdrawal_request',
     ],
     constraints: [
       'fk_stock_item_warehouse',
@@ -2060,6 +3086,171 @@ export const EXPECTED = {
       'ck_shipment_leg_carrier',
       'ck_tracking_event_type',
       'ck_tracking_event_occurred_before_recorded',
+      'fk_return_shipment_destination_warehouse',
+      'fk_return_shipment_line_shipment',
+      'fk_return_tracking_event_shipment',
+      'ck_return_shipment_status',
+      'ck_return_shipment_status_coherent',
+      'ck_return_shipment_version_matches_status',
+      'ck_return_shipment_buyer',
+      'ck_return_shipment_carrier',
+      'ck_return_shipment_line_quantities',
+      'ck_return_tracking_event_type',
+      'fk_return_disposition_shipment',
+      'ck_return_shipment_inspection',
+      'ck_return_disposition_value',
+      'ck_return_disposition_quantity_positive',
+      // 20261017170000_return_dispatch_withdrawal (Q-133 (9)(a)): the dispatch fence.
+      'ck_return_shipment_dispatch_reservation',
+      'ck_return_dispatch_withdrawal_ids',
+      'ck_return_dispatch_withdrawal_actor_recorded',
+      'ck_idempotency_state',
+      'ck_idempotency_completed_has_response',
+      'ck_outbox_claim_triple',
+      'ck_outbox_claim_count_nonneg',
+      'ck_outbox_attempts_nonneg',
+      'ck_outbox_next_attempt_requires_failure',
+      'ck_outbox_published_is_clean',
+    ],
+  },
+  /**
+   * analytics-service (RUN-001 PR 1, ADR-071). The first fact and the consumer's idempotency
+   * marker; no outbox — the service publishes nothing — so `verify-outbox-claim-migration.mjs`
+   * has nothing of it to fold.
+   *
+   * The objects listed carry the claims a dashboard rests on: one fact per completion
+   * (`fact_maintenance_pkey` on organization + request), a fact is never changed or erased (both
+   * halves of the append-only control, since a row trigger does not cover TRUNCATE), and nothing
+   * stored is a negative cost or downtime, a non-code type or a non-ISO currency.
+   */
+  analytics: {
+    // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is created —
+    // and migrated — as the migrator, which owns rasta_analytics.
+    connectAs: 'migrator',
+    tables: ['fact_maintenance', 'processed_event'],
+    types: [],
+    triggers: [
+      'tg_fact_maintenance_append_only',
+      'tg_fact_maintenance_no_truncate',
+      'tg_fact_maintenance_recorded_at',
+    ],
+    functions: ['fact_maintenance_append_only', 'fact_recorded_at_now'],
+    indexes: ['fact_maintenance_pkey', 'ix_fact_maintenance_org_completed', 'processed_event_pkey'],
+    constraints: [
+      'ck_processed_event_ids',
+      'ck_fact_maintenance_ids',
+      'ck_fact_maintenance_type',
+      'ck_fact_maintenance_downtime_nonneg',
+      'ck_fact_maintenance_cost_nonneg',
+      'ck_fact_maintenance_currency',
+    ],
+  },
+  /**
+   * procurement-service (COM-007 PR 1, ADR-070). One initial migration that folds the domain
+   * schema, the idempotency store and the outbox together, as inventory's does, so its outbox
+   * objects are verified here rather than by the by-name outbox verifiers
+   * (`verify-outbox-claim-migration.mjs` lists it as folded).
+   *
+   * The domain objects listed are the ones carrying a claim a reader would otherwise take on
+   * trust: one OPEN window per (organization, product), a demand only in a window of its own
+   * organization and product and only inside it, a window that ended keeps its contents, its
+   * totals are always its demands', and neither table is ever erased. Every status is text under
+   * a CHECK: there is no type to list.
+   */
+  procurement: {
+    // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is
+    // created — and migrated — as the migrator, which owns rasta_procurement.
+    connectAs: 'migrator',
+    tables: [
+      'demand_aggregation',
+      'demand_request',
+      'idempotency_key',
+      'outbox_message',
+      'outbox_stream_sequence',
+      // COM-007 PR 6: an RFQ, its frozen criteria and its explicit invitations.
+      'rfq',
+      'rfq_criterion',
+      'rfq_invitation',
+    ],
+    types: [],
+    triggers: [
+      'tg_demand_aggregation_guard',
+      'tg_demand_aggregation_no_truncate',
+      'tg_demand_aggregation_totals_check',
+      'tg_demand_request_guard',
+      'tg_demand_request_no_truncate',
+      'tg_demand_request_totals_check',
+      // COM-007 PR 6: born PUBLISHED of a READY aggregation, its lifecycle and deadline, issued
+      // atomically with its aggregation's READY -> RFQ_ISSUED, its criteria and invitations frozen.
+      'tg_rfq_born',
+      'tg_rfq_guard',
+      'tg_rfq_no_truncate',
+      'tg_rfq_issue_check',
+      'tg_rfq_criterion_guard',
+      'tg_rfq_criterion_no_truncate',
+      'tg_rfq_criterion_count_check',
+      'tg_rfq_invitation_guard',
+      'tg_rfq_invitation_no_truncate',
+      'tg_rfq_invitation_count_check',
+    ],
+    functions: [
+      'demand_aggregation_guard',
+      'demand_request_guard',
+      'demand_aggregation_totals_check',
+      'rfq_born_guard',
+      'rfq_guard',
+      'rfq_child_guard',
+      'rfq_issue_check',
+    ],
+    indexes: [
+      'ux_demand_aggregation_org_id',
+      'ux_demand_aggregation_open',
+      'ux_demand_aggregation_org_id_product',
+      'ix_demand_aggregation_org_status',
+      'ux_demand_request_org_id',
+      'ix_demand_request_org_status',
+      'ix_demand_request_aggregation',
+      // COM-007 PR 2: the window sweeper's two queues.
+      'ix_demand_aggregation_sweep_open',
+      'ix_demand_aggregation_sweep_follow',
+      // COM-007 PR 6: one RFQ per aggregation, the RFQ close sweeper's queue, the supplier's reads.
+      'ux_rfq_aggregation',
+      'ux_rfq_org_id_aggregation',
+      'ix_rfq_close_due',
+      'ix_rfq_invitation_supplier',
+    ],
+    constraints: [
+      'fk_demand_request_aggregation',
+      // COM-007 PR 6: an RFQ and its aggregation name each other; the buyer never invites itself.
+      'fk_rfq_aggregation',
+      'fk_demand_aggregation_rfq',
+      'ck_rfq_status',
+      'ck_rfq_closed',
+      'ck_rfq_cancelled',
+      'ck_rfq_invitation_not_buyer',
+      'ck_rfq_criterion_values',
+      // COM-007 PR 2: demands still to follow an ended window, the sweeper's claim, a cancellation.
+      'ck_demand_aggregation_follow',
+      'ck_demand_aggregation_sweep_claim',
+      'ck_demand_aggregation_cancelled',
+      'ck_demand_aggregation_status',
+      'ck_demand_aggregation_identifiers',
+      'ck_demand_aggregation_window',
+      'ck_demand_aggregation_snapshot',
+      'ck_demand_aggregation_counts',
+      'ck_demand_aggregation_closed',
+      'ck_demand_aggregation_rfq',
+      'ck_demand_aggregation_version_positive',
+      'ck_demand_aggregation_timestamps_ordered',
+      'ck_demand_request_status',
+      'ck_demand_request_identifiers',
+      'ck_demand_request_quantity_positive',
+      'ck_demand_request_note',
+      'ck_demand_request_actor_recorded',
+      'ck_demand_request_withdrawal',
+      'ck_demand_request_closed',
+      'ck_demand_request_version_positive',
+      'ck_demand_request_timestamps_ordered',
       'ck_idempotency_state',
       'ck_idempotency_completed_has_response',
       'ck_outbox_claim_triple',
@@ -2163,6 +3354,7 @@ export const EXPECTED = {
       'asset_transfer',
       'idempotency_key',
       'insurance_claim',
+      'insurance_claim_document',
       'insurance_policy',
       'organization_ref',
       'outbox_message',
@@ -2175,6 +3367,7 @@ export const EXPECTED = {
     constraints: [
       'ck_claim_approved_amount_non_negative',
       'ck_claim_claimed_amount_non_negative',
+      'ck_claim_document_ids_not_blank',
       'ck_claim_decided_iff_decision_recorded',
       'ck_claim_rejected_has_no_approved_amount',
       'ck_claim_settled_iff_settlement_recorded',

@@ -51,15 +51,18 @@ describe('the committed OpenAPI document', () => {
     'inventory-service.openapi.json',
   );
 
-  const operations = () =>
+  const allOperations = () =>
     Object.entries(buildInventoryOpenApiDocument(app).paths ?? {}).flatMap(([path, item]) =>
       Object.entries(item as Record<string, Operation>).map(([method, operation]) => ({
         key: `${method.toUpperCase()} ${path}`,
         operation,
       })),
     );
+  const INTERNAL = ' /v1/internal/';
+  /** The business routes: a user's bearer token, an Idempotency-Key on every command. */
+  const operations = () => allOperations().filter((entry) => !entry.key.includes(INTERNAL));
   const operation = (key: string): Operation =>
-    operations().find((entry) => entry.key === key)!.operation;
+    allOperations().find((entry) => entry.key === key)!.operation;
 
   it('matches the generator byte for byte (run `pnpm openapi:generate` after changing the API)', () => {
     const generated = formatDocument(buildInventoryOpenApiDocument(app), committedPath);
@@ -67,9 +70,16 @@ describe('the committed OpenAPI document', () => {
   });
 
   it('publishes the warehouse, stock, reservation (PR 1) and shipment (PR 2) routes, each closed', () => {
+    expect(
+      allOperations()
+        .map((o) => o.key)
+        .sort(),
+    ).toEqual(Object.keys(RESPONSE_BODIES).sort());
     const keys = operations().map((o) => o.key);
-    expect(keys.sort()).toEqual(Object.keys(RESPONSE_BODIES).sort());
     expect(keys.sort()).toEqual([
+      'GET /v1/return-shipments',
+      'GET /v1/return-shipments/{id}',
+      'GET /v1/return-shipments/{id}/tracking',
       'GET /v1/shipments',
       'GET /v1/shipments/{id}',
       'GET /v1/shipments/{id}/tracking',
@@ -80,6 +90,10 @@ describe('the committed OpenAPI document', () => {
       'GET /v1/stock/{id}',
       'GET /v1/warehouses',
       'GET /v1/warehouses/{id}',
+      'POST /v1/return-shipments',
+      'POST /v1/return-shipments/{id}/inspection',
+      'POST /v1/return-shipments/{id}/receive',
+      'POST /v1/return-shipments/{id}/resolution',
       'POST /v1/shipments',
       'POST /v1/shipments/{id}/deliver',
       'POST /v1/shipments/{id}/dispatch',
@@ -155,6 +169,48 @@ describe('the committed OpenAPI document', () => {
     ]) {
       expect([key, operation(key).responses['422']]).toEqual([key, undefined]);
     }
+  });
+
+  it('publishes the two internal routes for marketplace-service under the X-Internal-Token scheme, with no Idempotency-Key and no 404 (Q-133 (9))', () => {
+    const document = buildInventoryOpenApiDocument(app);
+    expect(document.components?.securitySchemes?.internalToken).toEqual(
+      expect.objectContaining({ type: 'apiKey', in: 'header', name: 'X-Internal-Token' }),
+    );
+    expect(
+      allOperations()
+        .filter((entry) => entry.key.includes(INTERNAL))
+        .map((entry) => entry.key)
+        .sort(),
+    ).toEqual([
+      'GET /v1/internal/return-requests/{id}/return-shipment',
+      'POST /v1/internal/return-requests/{id}/dispatch-withdrawal',
+    ]);
+    const read = operation('GET /v1/internal/return-requests/{id}/return-shipment');
+    const withdraw = operation('POST /v1/internal/return-requests/{id}/dispatch-withdrawal');
+    for (const internal of [read, withdraw]) {
+      expect(internal.security).toEqual([{ internalToken: [] }]);
+      expect(internal.parameters.filter((p) => p.in === 'header')).toEqual([]);
+      expect(internal.responses['404']).toBeUndefined();
+      expect(internal.responses['200']).toBeDefined();
+    }
+    const statuses = (op: Operation) => Object.keys(op.responses).sort();
+    expect(statuses(read)).toEqual(['200', '400', '401', '403', '500']);
+    expect(statuses(withdraw)).toEqual(['200', '400', '401', '403', '409', '422', '500']);
+    expect(
+      Object.keys(
+        withdraw.responses['200']?.content?.['application/json']?.schema.properties ?? {},
+      ).sort(),
+    ).toEqual(['outcome', 'reservationId', 'returnRequestId', 'returnShipment', 'withdrawnAt']);
+  });
+
+  it('types a dispatch refused for a withdrawn reservation as the 409 it is', () => {
+    const codes = (
+      operation('POST /v1/return-shipments').responses['409']?.content?.['application/json']
+        ?.schema as {
+        properties: { details: { items: { properties: { code: { enum: string[] } } } } };
+      }
+    ).properties.details.items.properties.code.enum;
+    expect(codes).toContain('RETURN_DISPATCH_WITHDRAWN');
   });
 
   it('answers 201 when something is created, 200 otherwise', () => {

@@ -15,7 +15,18 @@ import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { ReservationSweeper } from '../src/reservation/reservation.sweeper';
-import { databaseUrl, newProductId } from './helpers';
+import {
+  startMarketplaceFake,
+  type FakeReturnRequest,
+  type MarketplaceFake,
+} from './marketplace-fake';
+import {
+  databaseUrl,
+  newOrderLineId,
+  newOrderReference,
+  newProductId,
+  newReturnRequestId,
+} from './helpers';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness contract-service built,
@@ -33,6 +44,8 @@ export interface ApiHarness {
   app: INestApplication;
   prisma: PrismaService;
   publisher: InMemoryEventPublisher;
+  /** marketplace-service's internal return routes, on a real port (`marketplace-fake.ts`). */
+  marketplace: MarketplaceFake;
   close(): Promise<void>;
 }
 
@@ -124,7 +137,15 @@ function applyEnvironment(overrides: Record<string, string>): () => void {
 const inert = { start: () => undefined, stop: async () => undefined };
 
 export async function startApi(env: Record<string, string> = {}): Promise<ApiHarness> {
-  const restoreEnvironment = applyEnvironment(env);
+  // The owner of return requests, asked before a return shipment is recorded (A-13): a stand-in
+  // on a real port that verifies this run's internal tokens. A short deadline, so the suite that
+  // proves a silent owner refuses the dispatch does not wait the default three seconds.
+  const marketplace = await startMarketplaceFake(INTERNAL_SECRET);
+  const restoreEnvironment = applyEnvironment({
+    MARKETPLACE_SERVICE_URL: marketplace.url,
+    INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS: '1000',
+    ...env,
+  });
   const publisher = new InMemoryEventPublisher();
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
@@ -184,8 +205,10 @@ export async function startApi(env: Record<string, string> = {}): Promise<ApiHar
     app,
     prisma: moduleRef.get(PrismaService),
     publisher,
+    marketplace,
     close: async () => {
       await app.close();
+      await marketplace.close();
       restoreEnvironment();
     },
   };
@@ -245,7 +268,67 @@ export function client(api: ApiHarness, token: string) {
       post(`/v1/shipments/${shipmentId}/deliver`, body, k),
     shipment: (id: string) => get(`/v1/shipments/${id}`),
     tracking: (id: string) => get(`/v1/shipments/${id}/tracking`),
+    /**
+     * Goods of a return, `quantity` of one fresh order line, coming back to `destinationWarehouseId`.
+     * Unless marketplace already holds the request it names, it is first stored there as the body
+     * says — AUTHORIZED, with this caller's organization as supplier — so the shipment is checked
+     * against a request that agrees with it. A suite proving a mismatch registers its own first.
+     */
+    dispatchReturn: (
+      destinationWarehouseId: string,
+      buyerOrganizationId: string,
+      extra: object = {},
+      k?: string,
+    ) => {
+      const body = {
+        returnRequestId: newReturnRequestId(),
+        orderId: newOrderReference(),
+        buyerOrganizationId,
+        destinationWarehouseId,
+        lines: [{ orderLineId: newOrderLineId(), productId: newProductId(), quantity: 3 }],
+        carrierName: 'Road freight',
+        carrierReference: 'WB-2001',
+        ...extra,
+      };
+      if (!api.marketplace.requests.has(body.returnRequestId)) registerRequestOf(api, token, body);
+      return post('/v1/return-shipments', body, k);
+    },
+    receiveReturn: (id: string, body: object, k?: string) =>
+      post(`/v1/return-shipments/${id}/receive`, body, k),
+    inspectReturn: (id: string, body: object = {}, k?: string) =>
+      post(`/v1/return-shipments/${id}/inspection`, body, k),
+    resolveReturn: (id: string, body: object, k?: string) =>
+      post(`/v1/return-shipments/${id}/resolution`, body, k),
+    returnShipment: (id: string) => get(`/v1/return-shipments/${id}`),
+    returnTracking: (id: string) => get(`/v1/return-shipments/${id}/tracking`),
   };
+}
+
+/**
+ * Stores in marketplace the request a dispatch body describes, as the organization `token` acts
+ * for supplies it: AUTHORIZED, the same order, buyer, lines and quantities.
+ */
+export function registerRequestOf(
+  api: ApiHarness,
+  token: string,
+  body: {
+    returnRequestId: string;
+    orderId: string;
+    buyerOrganizationId: string;
+    lines: { orderLineId: string; productId: string; quantity: number }[];
+  },
+  overrides: Partial<FakeReturnRequest> = {},
+): FakeReturnRequest {
+  const supplier = decodeClaims(token).organizationId;
+  if (!supplier) throw new Error('registerRequestOf needs a token that acts for one organization');
+  return api.marketplace.register({
+    returnRequestId: body.returnRequestId,
+    orderId: body.orderId,
+    buyerOrganizationId: body.buyerOrganizationId,
+    supplierOrganizationId: supplier,
+    lines: body.lines.map((line) => ({ ...line })),
+    ...overrides,
+  });
 }
 
 /**

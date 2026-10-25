@@ -1,11 +1,13 @@
 import { Body, Controller, Get, Headers, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AllowService, Roles, zodPipe } from '@rasta/nest-common';
-import { TransactionService } from './transaction.service';
+import { AllowService, RastaError, Roles, getContext, zodPipe } from '@rasta/nest-common';
+import { mayRecordSource, RECORDED_SOURCE_REFUSAL } from './recorded-sources';
+import { TransactionService, type TransactionDetail } from './transaction.service';
 import { IdempotencyStore, targeted } from '../shared/idempotency';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import { assertNotAuditor } from '../access/access';
 import {
+  storedTransactionDetailView,
   toTransactionDetailView,
   toTransactionView,
   type TransactionRowLike,
@@ -83,7 +85,7 @@ export class TransactionController {
     summary: 'List transactions, newest first',
     description:
       'By default the transactions this organization owes. Set `includeIncoming=true` for the ' +
-      'payee view — what it is owed. Filter by status, type, source reference and an ' +
+      'payee view — what it is owed. Filter by status, type, source type, source reference and an ' +
       '`occurredAt` window. Cursor-paginated.',
   })
   async list(@Query(zodPipe(listTransactionsQuerySchema)) query: ListTransactionsQuery) {
@@ -107,7 +109,15 @@ export class TransactionController {
     summary: 'One transaction, with its legs, commission and settlement',
     description:
       'Visible to the payer and to the payee. Anyone else gets 404, never 403 — a 403 would ' +
-      'confirm that the transaction exists.',
+      'confirm that the transaction exists. The dispute fields describe the latest dispute: ' +
+      'who raised it and why, and who resolved it, when and how. `resolvedDisputeId` names ' +
+      'the dispute that resolution decided: equal to `disputeId`, it is the latest dispute’s; ' +
+      'different, an earlier one’s. Null on a transaction resolved before it was kept and not ' +
+      'attributable for certain — there the record does not say which dispute the resolution ' +
+      'decided, and the instants do not either: a re-dispute can be dated before a resolution ' +
+      'it waited behind. A transaction resolved before the resolution had a field of its own ' +
+      'holds the resolution text in `disputeReason`, with `disputeResolution` null and ' +
+      '`disputeResolvedAt` set (docs/23 D-060).',
   })
   async get(@Param('id') id: string) {
     const transaction = await this.transactions.get(id);
@@ -126,19 +136,40 @@ export class TransactionController {
       'With `holdFunds=true` the money is moved into escrow in the same transaction, so there ' +
       'is no window in which the obligation exists and the funds are still spendable. ' +
       'Refused with 422 INSUFFICIENT_BALANCE if the wallet cannot cover it — and the whole ' +
-      'request rolls back, leaving no orphaned obligation. Requires an `Idempotency-Key`.',
+      'request rolls back, leaving no orphaned obligation. Requires an `Idempotency-Key`. ' +
+      '`sourceType` `MAINTENANCE_REQUEST`, `PAYMENT_INTENT` and `STATEMENT` are refused to every ' +
+      'caller, and `ORDER` to everyone but marketplace-service recording a `MARKETPLACE_ORDER` ' +
+      '(400 VALIDATION_FAILED on `sourceType`). Where settlement fails closed without a ' +
+      'commission rule (docs/24 Q-29, on outside development and test), `businessLine` is ' +
+      'required — 422 BUSINESS_LINE_REQUIRED, nothing recorded — except for marketplace-service ' +
+      'recording its own `ORDER` (docs/24 Q-130).',
   })
   async create(
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body(zodPipe(createTransactionSchema)) dto: CreateTransactionDto,
   ) {
     assertNotAuditor();
+    // With the schema's rule, and like it before any replay: a source type
+    // its owner records (`ORDER`) is that owner's alone (recorded-sources.ts).
+    if (!mayRecordSource(getContext(), dto.sourceType, dto.transactionType)) {
+      throw RastaError.validation([
+        { path: 'sourceType', code: 'custom', message: RECORDED_SOURCE_REFUSAL },
+      ]);
+    }
     const key = requireIdempotencyKey(idempotencyKey);
 
-    return this.idempotency.run('POST /v1/transactions', key, dto, 201, async () => {
-      const created = await this.transactions.create({ ...dto, idempotencyKey: key });
-      return toTransactionDetailView(created as never);
-    });
+    return this.idempotency.run(
+      'POST /v1/transactions',
+      key,
+      dto,
+      201,
+      (answer) => this.transactions.create({ ...dto, idempotencyKey: key }, answer.map(detailView)),
+      // No target in the path: the stored answer names the transaction it made.
+      {
+        mayReplay: (stored) => this.transactions.assertMayReplay(createdId(stored), 'READ'),
+        stored: storedTransactionDetailView,
+      },
+    );
   }
 
   @Post(':id/authorise-settlement')
@@ -164,8 +195,11 @@ export class TransactionController {
       key,
       targeted(id),
       200,
-      async () =>
-        toTransactionDetailView((await this.transactions.authoriseSettlement(id)) as never),
+      (answer) => this.transactions.authoriseSettlement(id, answer.map(detailView), key),
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'AUTHORISE_SETTLEMENT'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -178,7 +212,11 @@ export class TransactionController {
     description:
       'A registered objection halts settlement entirely and indefinitely (docs/10 § 10.5). ' +
       'There is no timeout that clears it and no automatic resolution: the state machine has ' +
-      'no path from DISPUTED to SETTLED. A human resolves it, or the funds are refunded.',
+      'no path from DISPUTED to SETTLED. A human resolves it, or the funds are refunded. ' +
+      'A MARKETPLACE_ORDER transaction is disputed only through its order ' +
+      '(`POST /v1/orders/{id}/disputes`), whose saga mirrors the dispute here as ' +
+      'marketplace-service; anyone else is refused with 422 BUSINESS_RULE_VIOLATION ' +
+      '(docs/24 Q-138).',
   })
   async dispute(
     @Param('id') id: string,
@@ -193,7 +231,11 @@ export class TransactionController {
       key,
       targeted(id, dto),
       200,
-      async () => toTransactionDetailView((await this.transactions.dispute(id, dto)) as never),
+      (answer) => this.transactions.dispute(id, dto, answer.map(detailView)),
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'DISPUTE'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -210,7 +252,10 @@ export class TransactionController {
       'transaction and must be able to mirror the resolution back — otherwise a dispute ' +
       'decided in the supplier’s favour could never settle. The decision itself is still a ' +
       'platform-operator act: marketplace-service only reaches here after its own ' +
-      '`assertDisputeResolver` has required a platform role of the person who decided.',
+      '`assertDisputeResolver` has required a platform role of the person who decided. ' +
+      'A MARKETPLACE_ORDER transaction is resolved only that way: anyone else is refused ' +
+      'with 422 BUSINESS_RULE_VIOLATION (docs/24 Q-138). The resolution is kept in ' +
+      '`disputeResolution`, beside the reason the dispute was raised for.',
   })
   async resolveDispute(
     @Param('id') id: string,
@@ -225,8 +270,11 @@ export class TransactionController {
       key,
       targeted(id, dto),
       200,
-      async () =>
-        toTransactionDetailView((await this.transactions.resolveDispute(id, dto)) as never),
+      (answer) => this.transactions.resolveDispute(id, dto, answer.map(detailView)),
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'RESOLVE_DISPUTE'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
 
@@ -241,10 +289,12 @@ export class TransactionController {
       'rather than reversing the hold: the hold really happened and was then cancelled, and an ' +
       'auditor needs to be able to tell those apart. Requires an `Idempotency-Key`. ' +
       'Never available to the payer, from any state (403): a payer that could refund its own ' +
-      'escrow could step around the dispute resolution. Available to platform scope, to ' +
+      'escrow could step around the dispute resolution. Available to a system administrator, ' +
+      'to a union administrator for a payer within its union’s subtree (docs/24 Q-136), to ' +
       'marketplace-service as its order saga, and to the payee’s financial administrator — ' +
-      'except while DISPUTED, which needs platform scope (docs/24 Q-62). A caller that is ' +
-      'not a party gets 404.',
+      'except while DISPUTED, which needs one of the first two (docs/24 Q-62). A caller that ' +
+      'is not a party gets 404. An approved contract statement’s obligation ' +
+      '(`sourceType = STATEMENT`) is never refunded, by anyone (422, docs/24 Q-97).',
   })
   async refund(
     @Param('id') id: string,
@@ -259,9 +309,10 @@ export class TransactionController {
       key,
       targeted(id, dto),
       200,
-      async () => {
-        const result = await this.transactions.refund(id, dto.reason);
-        return toTransactionDetailView(result as never);
+      (answer) => this.transactions.refund(id, dto.reason, answer.map(detailView)),
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'REFUND'),
+        stored: storedTransactionDetailView,
       },
     );
   }
@@ -274,7 +325,9 @@ export class TransactionController {
     summary: 'Abandon a transaction nothing has moved against',
     description:
       'Only from CREATED. Once funds are held the correct act is a refund, which returns them ' +
-      'explicitly rather than leaving them in escrow behind a cancelled obligation.',
+      'explicitly rather than leaving them in escrow behind a cancelled obligation. An ' +
+      'approved contract statement’s obligation (`sourceType = STATEMENT`) is never ' +
+      'cancelled, by anyone (422, docs/24 Q-97).',
   })
   async cancel(
     @Param('id') id: string,
@@ -289,8 +342,29 @@ export class TransactionController {
       key,
       targeted(id, dto),
       200,
-      async () =>
-        toTransactionDetailView((await this.transactions.cancel(id, dto.reason)) as never),
+      (answer) => this.transactions.cancel(id, dto.reason, answer.map(detailView)),
+      {
+        mayReplay: () => this.transactions.assertMayReplay(id, 'CANCEL'),
+        stored: storedTransactionDetailView,
+      },
     );
   }
+}
+
+/**
+ * The response every transaction command answers with. Built by the service
+ * inside the command's own transaction, from the row it wrote, and stored
+ * there as the key's answer (`IdempotentAnswer`).
+ */
+function detailView(transaction: TransactionDetail) {
+  return toTransactionDetailView(transaction as never);
+}
+
+/** The transaction a stored creation answer names. A creation records no refusal. */
+function createdId(stored: unknown): string {
+  const id = (stored as { id?: unknown } | undefined)?.id;
+  if (typeof id !== 'string') {
+    throw RastaError.internal('A stored transaction creation names no transaction');
+  }
+  return id;
 }

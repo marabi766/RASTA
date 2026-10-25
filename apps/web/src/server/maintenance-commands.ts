@@ -1,6 +1,7 @@
-import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
+import { DISPLAY_TEXT_PATTERN, ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
 import {
   APPROVE_REQUEST_FIELDS,
@@ -21,6 +22,7 @@ import { localDateToIso } from './drivers';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
+import { rolesGuardAdmits } from './roles-guard';
 
 /**
  * Writing to maintenance-service through the gateway (ADR-058 § 3, ADR-059 § 3).
@@ -55,8 +57,8 @@ const REPORTER_ROLES: readonly string[] = [
   'DRIVER',
 ];
 
-export function canReportMaintenance(effectiveRoles: readonly string[]): boolean {
-  return effectiveRoles.some((role) => REPORTER_ROLES.includes(role));
+export function canReportMaintenance(roles: readonly string[]): boolean {
+  return rolesGuardAdmits(roles, REPORTER_ROLES);
 }
 
 // ---------------------------------------------------------------------------
@@ -147,14 +149,7 @@ export function parseReportRequestForm(values: ReportRequestFormValues): ParsedR
   const parsed = reportRequestFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<ReportRequestField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (typeof field === 'string' && isReportRequestField(field) && !fieldErrors[field]) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isReportRequestField) };
 }
 
 function isReportRequestField(value: string): value is ReportRequestField {
@@ -228,19 +223,17 @@ export function reportMaintenanceRequest(
  */
 const MANAGER_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN'];
 
-export function canManageMaintenance(effectiveRoles: readonly string[]): boolean {
-  return effectiveRoles.some((role) => MANAGER_ROLES.includes(role));
+export function canManageMaintenance(roles: readonly string[]): boolean {
+  return rolesGuardAdmits(roles, MANAGER_ROLES);
 }
 
 /**
- * The service's own `displayText` character class, which it applies to every
- * free-text field of these three commands. A copy, because the portal may not
- * import a service (A-02); `maintenance-commands.contract.spec.ts` fails the
- * moment the two disagree. Letters of the Arabic and Latin scripts, digits of
- * any script, combining marks, spaces, ZWNJ and a short list of punctuation.
+ * The service's own `displayText` rule, which it applies to every free-text
+ * field of these commands — the pattern itself, imported from
+ * `@rasta/contracts` (`DISPLAY_TEXT_PATTERN`), not copied. The policy (what
+ * whitespace, zero-width and control characters pass) is documented there.
  */
-export const MAINTENANCE_DISPLAY_TEXT =
-  /^[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s\u200c()«»'’\-.,/:+]+$/u;
+export const MAINTENANCE_DISPLAY_TEXT = DISPLAY_TEXT_PATTERN;
 
 export const DISPLAY_TEXT_MESSAGE = 'فقط حروف فارسی و لاتین، عدد و نشانه‌های ساده مجاز است';
 
@@ -282,20 +275,8 @@ export function readFields<F extends string>(
   return values;
 }
 
-export function firstIssues<F extends string>(
-  error: z.ZodError,
-  fields: readonly F[],
-): Partial<Record<F, string>> {
-  const fieldErrors: Partial<Record<F, string>> = {};
-  for (const issue of error.issues) {
-    const field = issue.path[0];
-    if (typeof field === 'string' && (fields as readonly string[]).includes(field)) {
-      const key = field as F;
-      if (!fieldErrors[key]) fieldErrors[key] = issue.message;
-    }
-  }
-  return fieldErrors;
-}
+/** Kept under its old name for the command parsers below; the one implementation is `@/lib/form-issues`. */
+export const firstIssues = firstIssuePerField;
 
 // ---- Refer to a workshop ---------------------------------------------------
 

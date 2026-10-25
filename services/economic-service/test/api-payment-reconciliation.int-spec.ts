@@ -21,8 +21,8 @@ describe('payment reconciliation operator routes (HTTP)', () => {
   const other = apiTenant('RECON-OP-OTHER');
   const creator = admin(org);
   const refunder = admin(org, ['UNION_ADMIN']);
-  const alice = admin(org, ['SYSTEM_ADMIN']);
-  const bob = admin(org, ['SYSTEM_ADMIN']);
+  const alice = admin(org, ['SYSTEM_ADMIN'], 'alice');
+  const bob = admin(org, ['SYSTEM_ADMIN'], 'bob');
   const mallory = admin(other, ['SYSTEM_ADMIN']);
 
   /** A provider whose refund takes effect and whose answer is then lost. */

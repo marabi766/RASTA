@@ -1,4 +1,13 @@
-import { OutboxRelay, type OutboxRow } from '@rasta/nest-common';
+import { expireClaim, makeDue } from '@rasta/testing';
+import {
+  claimPendingSql,
+  OutboxRelay,
+  OutboxReleaseAbandoned,
+  releaseWithin,
+  type OutboxReleaseBound,
+  type OutboxRow,
+  type OutboxSqlClient,
+} from '@rasta/nest-common';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import {
   createProtocolSchema,
@@ -7,6 +16,7 @@ import {
   GatedPublisher,
   holdLockOnOldest,
   newProtocolPrisma,
+  PROTOCOL_SCHEMA,
   readRow,
   seedRow,
   truncate,
@@ -21,10 +31,10 @@ import type { PrismaService } from '../src/prisma/prisma.service';
  * expiry comparison is PostgreSQL's — all three live in SQL, so testing them
  * against a fake would only assert the fake.
  *
- * Every test is deterministic: no sleeps and no wall-clock races. Expiry is
- * produced by claiming with `leaseSeconds = 0` or by moving `claim_expires_at`
- * into the past, and a long publish is produced by a publisher that does not
- * return until the test releases it.
+ * Cross-statement expiry uses the shared expireClaim helper, one second in
+ * the past, so millisecond rounding cannot leave a fixture in the future.
+ * Exact boundaries use one transaction and the millisecond test clock below.
+ * A long publish is gated until the test releases it; no expiry sleeps are used.
  *
  * The suite owns its own schema (see `outbox-claim.helpers.ts`). `claimPending`
  * is deliberately unscoped and returns the oldest rows in the table, so on a
@@ -90,7 +100,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     // delivered. Nothing took the row back, so the token is still the truth.
     await seedRow(a, 'EXPIRED_UNRECLAIMED');
 
-    const claimed = await claim(storeA, 10, 0);
+    const claimed = await claim(storeA, 10);
+    await expireClaim(a, ['EXPIRED_UNRECLAIMED']);
     expect(claimed.rows).toHaveLength(1);
 
     const acknowledged = await storeA.markPublished(['EXPIRED_UNRECLAIMED'], claimed.token!);
@@ -99,12 +110,21 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     expect((await readRow(a, 'EXPIRED_UNRECLAIMED')).published_at).not.toBeNull();
   });
 
+  it.each([expireClaim, makeDue])('%p refuses a missing fixture id', async (setEligibility) => {
+    await seedRow(a, 'EXISTING_FIXTURE', { attempts: 1 });
+    await claim(storeA);
+    await expect(setEligibility(a, ['EXISTING_FIXTURE', 'WRONG_ID'])).rejects.toThrow(
+      'must update every requested fixture',
+    );
+  });
+
   // -- 3 ---------------------------------------------------------------------
 
   it('3: an expired and reclaimed token cannot acknowledge', async () => {
     await seedRow(a, 'EXPIRED_RECLAIMED');
 
-    const first = await claim(storeA, 10, 0);
+    const first = await claim(storeA, 10);
+    await expireClaim(a, ['EXPIRED_RECLAIMED']);
     const second = await claim(storeB, 10, LEASE, 'worker-b');
     expect(second.rows.map((row) => row.id)).toEqual(['EXPIRED_RECLAIMED']);
 
@@ -118,7 +138,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
 
   it('4: a stale claimant cannot markFailed', async () => {
     await seedRow(a, 'STALE_FAIL');
-    const first = await claim(storeA, 10, 0);
+    const first = await claim(storeA, 10);
+    await expireClaim(a, ['STALE_FAIL']);
     await claim(storeB, 10, LEASE, 'worker-b');
 
     const updated = await storeA.markFailed('STALE_FAIL', first.token!, 'boom', BACKOFF);
@@ -133,10 +154,11 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
 
   it('5: a stale claimant cannot release', async () => {
     await seedRow(a, 'STALE_RELEASE');
-    const first = await claim(storeA, 10, 0);
+    const first = await claim(storeA, 10);
+    await expireClaim(a, ['STALE_RELEASE']);
     const second = await claim(storeB, 10, LEASE, 'worker-b');
 
-    const released = await storeA.release(['STALE_RELEASE'], first.token!);
+    const released = await storeA.release(['STALE_RELEASE'], first.token!, releaseWithin(5_000));
 
     expect(released).toBe(0);
     // The new owner's claim is untouched: a stale release must not hand its
@@ -148,7 +170,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
 
   it('6: a stale claimant cannot renew', async () => {
     await seedRow(a, 'STALE_RENEW');
-    const first = await claim(storeA, 10, 0);
+    const first = await claim(storeA, 10);
+    await expireClaim(a, ['STALE_RENEW']);
     await claim(storeB, 10, LEASE, 'worker-b');
 
     const renewed = await storeA.renew(['STALE_RENEW'], first.token!, LEASE, 5000);
@@ -324,7 +347,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     const first = await claim(storeA, 10);
     const firstOrder = first.rows.map((row) => row.id);
 
-    await storeA.release(firstOrder, first.token!);
+    await storeA.release(firstOrder, first.token!, releaseWithin(5_000));
     const second = await claim(storeB, 10, LEASE, 'worker-b');
 
     expect(firstOrder).toEqual([...ids].sort());
@@ -395,7 +418,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
       publisher,
       batchSize: N,
       leaseSeconds: LEASE,
-      backoff: { baseSeconds: 0, maxSeconds: 0 },
+      backoff: BACKOFF,
       logger: silent,
     });
 
@@ -407,7 +430,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     expect(distinct.size).toBe(N);
     for (let i = 0; i < N; i += 1) expect(distinct.has(`LOSS${i}`)).toBe(true);
     // At-least-once: attempts may exceed N, and here they do.
-    expect(delivered.length).toBeGreaterThanOrEqual(N);
+    expect(delivered.length).toBeGreaterThan(N);
   });
 
   // -- 16 --------------------------------------------------------------------
@@ -479,7 +502,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     expect(await storeA.renew(ids, claimed.token!, LEASE, 5000)).toEqual([]);
     expect(await storeA.markPublished(ids, claimed.token!)).toBe(0);
     expect(await storeA.markFailed(ids[0], claimed.token!, 'x', BACKOFF)).toBe(0);
-    expect(await storeA.release(ids, claimed.token!)).toBe(0);
+    expect(await storeA.release(ids, claimed.token!, releaseWithin(5_000))).toBe(0);
   });
 
   // -- 19 --------------------------------------------------------------------
@@ -496,7 +519,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
       markPublished: (ids: readonly string[], token: string) => storeA.markPublished(ids, token),
       markFailed: (id: string, token: string, error: string, backoff: typeof BACKOFF) =>
         storeA.markFailed(id, token, error, backoff),
-      release: (ids: readonly string[], token: string) => storeA.release(ids, token),
+      release: (ids: readonly string[], token: string, bound: OutboxReleaseBound) =>
+        storeA.release(ids, token, bound),
       oldestPendingAgeSeconds: () => storeA.oldestPendingAgeSeconds(),
       renew: async (ids: readonly string[], token: string, lease: number, deadline: number) => {
         attempts += 1;
@@ -560,7 +584,10 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     const tick = relay.tick();
     await gate.started;
 
-    await relay.stop();
+    // A zero grace: the stop does not wait for SD0. The release is bounded by
+    // the shared deadline `OutboxShutdown` passes — with no deadline the grace
+    // bounds it too, and a zero grace would leave nothing for it (#291 r2).
+    await relay.stop({ deadlineAt: Date.now() + 5_000 });
 
     // The two that never left are released: no token, no failure recorded, no
     // backoff — so they are due immediately rather than parked until expiry.
@@ -645,6 +672,99 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
 
     publisher.finish();
     await tick;
+  });
+
+  // -- the release's own bound (#291 r2) -------------------------------------
+
+  it('a release blocked on a row lock ends by its own statement timeout and leaves the claim', async () => {
+    // The relay stops waiting for a release at its stop's bound in any case;
+    // this is the database giving up then too, not holding the UPDATE (and a
+    // pooled connection) behind a lock after the process has moved on.
+    await seedRow(a, 'SD_BLOCKED');
+    const claimed = await claim(storeA, 10);
+    const held = await holdLockOnOldest(b, 1, `id = 'SD_BLOCKED'`);
+    expect(held.ids).toEqual(['SD_BLOCKED']);
+
+    let backstop: NodeJS.Timeout | undefined;
+    try {
+      const outcome = await Promise.race([
+        storeA.release(['SD_BLOCKED'], claimed.token!, releaseWithin(300)).then(
+          (released) => `released ${released}`,
+          (error: unknown) => String(error),
+        ),
+        new Promise<string>((resolve) => {
+          backstop = setTimeout(() => resolve('still waiting after 10 s'), 10_000);
+        }),
+      ]);
+      // Whichever bound reports first — the statement's, or Prisma's
+      // transaction timeout, both what was left of the bound (#291 r3: no
+      // margin past it) — the release did not release.
+      expect(outcome).toMatch(/57014|statement timeout|expired transaction/);
+      // And the database gave up too: no UPDATE is left waiting on the lock.
+      // Prisma's timeout alone would not end it; the statement timeout does.
+      expect(await updatesWaitingOnALock(b)).toBe(0);
+    } finally {
+      clearTimeout(backstop);
+      await held.release();
+    }
+
+    // Not released: the token still holds the row, and its lease decides.
+    expect((await readRow(a, 'SD_BLOCKED')).claim_token).toBe(claimed.token);
+  });
+
+  /**
+   * Release UPDATEs still waiting on a row lock, once any ending now has had
+   * a moment to (the backend reports a cancelled statement asynchronously).
+   */
+  async function updatesWaitingOnALock(prisma: PrismaService): Promise<number> {
+    let waiting = 0;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const [row] = await prisma.client.$queryRawUnsafe<{ n: number }[]>(
+        `SELECT count(*)::int AS n
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND pid <> pg_backend_pid()
+            AND state = 'active'
+            AND wait_event_type = 'Lock'
+            AND query LIKE 'UPDATE outbox_message%SET claim_token%'`,
+      );
+      waiting = row?.n ?? 0;
+      if (waiting === 0) return 0;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return waiting;
+  }
+
+  // -- a release outlived by its stop (#291 r3) ------------------------------
+
+  /**
+   * A bound that reads `ms` for its first `reads` reads and zero after: the
+   * release reads it before the transaction, for its `SET LOCAL`, before the
+   * UPDATE and after it — so `reads` picks the step at which the stop stops
+   * waiting, without a timer.
+   */
+  const spentAfter = (reads: number, ms = 5_000): OutboxReleaseBound => {
+    let left = reads;
+    return { remainingMs: () => (left-- > 0 ? ms : 0) };
+  };
+
+  it.each([
+    ['once its connection is held: nothing is written', 1],
+    ['once its UPDATE has returned: the UPDATE is rolled back, not committed', 3],
+  ])('a release whose stop stopped waiting %s', async (_when, reads) => {
+    await seedRow(a, 'SD_OUTLIVED');
+    const claimed = await claim(storeA, 10);
+
+    await expect(
+      storeA.release(['SD_OUTLIVED'], claimed.token!, spentAfter(reads)),
+    ).rejects.toThrow(OutboxReleaseAbandoned);
+
+    // Still the stop's claim, untouched: the lease decides.
+    const row = await readRow(a, 'SD_OUTLIVED');
+    expect(row.claim_token).toBe(claimed.token);
+    expect(row.claim_expires_at).not.toBeNull();
+    // And the connection came back clean: the next release on it succeeds.
+    expect(await storeA.release(['SD_OUTLIVED'], claimed.token!, releaseWithin(5_000))).toBe(1);
   });
 
   // -- 23 --------------------------------------------------------------------
@@ -1007,23 +1127,23 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
          AND (claim_expires_at IS NULL OR claim_expires_at <= now())
          AND (next_attempt_at  IS NULL OR next_attempt_at  <= now())`;
 
-    /** The four streams the claim query actually walks. */
-    const STREAMS = `
-      SELECT id FROM outbox_message
-       WHERE published_at IS NULL AND claim_expires_at IS NULL AND next_attempt_at IS NULL
-      UNION ALL
-      SELECT id FROM outbox_message
-       WHERE published_at IS NULL AND next_attempt_at IS NULL
-         AND claim_expires_at IS NOT NULL AND claim_expires_at <= now()
-      UNION ALL
-      SELECT id FROM outbox_message
-       WHERE published_at IS NULL AND claim_expires_at IS NULL
-         AND next_attempt_at IS NOT NULL AND next_attempt_at <= now()
-      UNION ALL
-      SELECT id FROM outbox_message
-       WHERE published_at IS NULL
-         AND claim_expires_at IS NOT NULL AND next_attempt_at IS NOT NULL
-         AND GREATEST(claim_expires_at, next_attempt_at) <= now()`;
+    /** Execute the actual candidate CTEs too: the final re-check can mask a widened stream. */
+    let STREAMS: string;
+    beforeAll(async () => {
+      const capture = jest.fn().mockResolvedValue([]);
+      await claimPendingSql(
+        { $queryRawUnsafe: capture, $executeRawUnsafe: jest.fn() },
+        { limit: 100, owner: 'capture', token: 'capture', leaseSeconds: LEASE },
+      );
+      const statement = capture.mock.calls[0]![0] as string;
+      const candidates = /,\s*candidates AS\s*\(/i.exec(statement);
+      expect(candidates).not.toBeNull();
+      // These fixtures are fewer than 100 rows. Inline only that test limit;
+      // the captured prefix otherwise has no bound parameters or mutations.
+      STREAMS = `${statement.slice(0, candidates!.index).replaceAll('$4', '100')}
+        SELECT id FROM fresh UNION ALL SELECT id FROM lease
+        UNION ALL SELECT id FROM retry UNION ALL SELECT id FROM paired`;
+    });
 
     /** One row per case ADR-050 enumerates, oldest first so the order is fixed. */
     const CASES: Array<{ id: string; sql: string; eligible: boolean }> = [
@@ -1063,82 +1183,146 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
         sql: `NULL, NULL, NULL, NULL, now() - interval '1 min'`,
         eligible: false,
       },
-      // The boundary. Written as exactly `now()`, which by the time the query
-      // runs is in the past, so `<= now()` holds — and both forms must agree.
+      // Exact equality with the transaction-local millisecond clock below.
       { id: 'EQ9_BOUNDARY_NOW', sql: `'tk', 'ow', now(), NULL, NULL`, eligible: true },
+      { id: 'EQ10_RETRY_NOW', sql: `NULL, NULL, NULL, now(), NULL`, eligible: true },
+      { id: 'EQ11_BOTH_NOW', sql: `'tk', 'ow', now(), now(), NULL`, eligible: true },
+      {
+        id: 'EQ12_LEASE_NEXT_TICK',
+        sql: `'tk', 'ow', now() + interval '1 millisecond', NULL, NULL`,
+        eligible: false,
+      },
+      {
+        id: 'EQ13_RETRY_NEXT_TICK',
+        sql: `NULL, NULL, NULL, now() + interval '1 millisecond', NULL`,
+        eligible: false,
+      },
+      {
+        id: 'EQ14_PAIRED_LEASE_NEXT_TICK',
+        sql: `'tk', 'ow', now() + interval '1 millisecond', now(), NULL`,
+        eligible: false,
+      },
+      {
+        id: 'EQ15_PAIRED_RETRY_NEXT_TICK',
+        sql: `'tk', 'ow', now(), now() + interval '1 millisecond', NULL`,
+        eligible: false,
+      },
     ];
 
-    const ids = async (query: string): Promise<string[]> => {
-      const rows = await a.client.$queryRawUnsafe<{ id: string }[]>(
+    const ids = async (tx: OutboxSqlClient, query: string): Promise<string[]> => {
+      const rows = await tx.$queryRawUnsafe<{ id: string }[]>(
         `SELECT id FROM (${query}) q WHERE id LIKE 'EQ%' ORDER BY id`,
       );
       return rows.map((row) => row.id);
     };
 
-    beforeEach(async () => {
-      for (const [index, testCase] of CASES.entries()) {
-        await a.client.$executeRawUnsafe(
-          `INSERT INTO outbox_message
-             (id, aggregate_type, aggregate_id, event_name, event_version, topic,
-              partition_key, payload, headers, correlation_id, created_at, attempts,
-              claim_count, claim_token, claim_owner, claim_expires_at, next_attempt_at,
-              published_at)
-           VALUES ($1,'Probe',$1,'PROBE',1,'t.probe',$1,'{}'::jsonb,'{}'::jsonb,$1,
-                   now() - make_interval(mins => ${20 - index}), 1, 0, ${testCase.sql})`,
-          testCase.id,
+    /**
+     * Built-in now() has microseconds; timestamptz(3) rounds them, possibly forward.
+     * A transaction alone cannot make those clocks equal. Opt into the isolated
+     * schema's millisecond clock for this transaction only, leaving both the
+     * migrated column and the shared claim SQL unchanged. All other protocol
+     * tests use pg_catalog.now() through PostgreSQL's default search path.
+     * The claim SQL must use unqualified now() to resolve this test clock;
+     * pg_catalog.now(), CURRENT_TIMESTAMP and other clock functions bypass it.
+     */
+    const withCases = async (check: (tx: OutboxSqlClient) => Promise<void>): Promise<void> => {
+      await a.client.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL search_path TO "${PROTOCOL_SCHEMA}", pg_catalog`);
+        const clock = await tx.$queryRawUnsafe<{ active: boolean }[]>(
+          `SELECT now() = date_trunc('milliseconds', pg_catalog.now())
+               AND to_regprocedure('now()') = '"${PROTOCOL_SCHEMA}".now()'::regprocedure AS active`,
         );
-      }
-    });
+        expect(clock).toEqual([{ active: true }]);
+        for (const [index, testCase] of CASES.entries()) {
+          await tx.$executeRawUnsafe(
+            `INSERT INTO outbox_message
+               (id, aggregate_type, aggregate_id, event_name, event_version, topic,
+                partition_key, payload, headers, correlation_id, created_at, attempts,
+                claim_count, claim_token, claim_owner, claim_expires_at, next_attempt_at,
+                published_at)
+             VALUES ($1,'Probe',$1,'PROBE',1,'t.probe',$1,'{}'::jsonb,'{}'::jsonb,$1,
+                     now() - make_interval(mins => ${20 - index}), 1, 0, ${testCase.sql})`,
+            testCase.id,
+          );
+        }
+        // Compare inside PostgreSQL: JS Date would discard submillisecond differences.
+        const boundary = await tx.$queryRawUnsafe<{ equal: boolean; precision: number }[]>(
+          `SELECT claim_expires_at = now() AS equal,
+                  (SELECT datetime_precision FROM information_schema.columns
+                    WHERE table_schema = $1 AND table_name = 'outbox_message'
+                      AND column_name = 'claim_expires_at') AS precision
+             FROM outbox_message WHERE id = 'EQ9_BOUNDARY_NOW'`,
+          PROTOCOL_SCHEMA,
+        );
+        expect(boundary).toEqual([{ equal: true, precision: 3 }]);
+        await check(tx);
+      });
+    };
 
     it('agrees with the original predicate on every enumerated case', async () => {
-      expect(await ids(STREAMS)).toEqual(await ids(ORIGINAL));
+      await withCases(async (tx) => {
+        expect(await ids(tx, STREAMS)).toEqual(await ids(tx, ORIGINAL));
+      });
     });
 
     it('selects exactly the rows ADR-050 says are eligible', async () => {
-      const expected = CASES.filter((c) => c.eligible)
-        .map((c) => c.id)
-        .sort();
+      await withCases(async (tx) => {
+        const expected = CASES.filter((c) => c.eligible)
+          .map((c) => c.id)
+          .sort();
 
-      expect(await ids(ORIGINAL)).toEqual(expected);
-      expect(await ids(STREAMS)).toEqual(expected);
+        expect(await ids(tx, ORIGINAL)).toEqual(expected);
+        expect(await ids(tx, STREAMS)).toEqual(expected);
+      });
     });
 
     it('has an empty symmetric difference, in both directions', async () => {
-      const rows = await a.client.$queryRawUnsafe<{ side: string; id: string }[]>(
-        `WITH orig AS (${ORIGINAL}), streams AS (${STREAMS})
+      await withCases(async (tx) => {
+        const rows = await tx.$queryRawUnsafe<{ side: string; id: string }[]>(
+          `WITH orig AS (${ORIGINAL}), streams AS (${STREAMS})
          SELECT 'only_in_original' AS side, id FROM (SELECT id FROM orig EXCEPT SELECT id FROM streams) x
          UNION ALL
          SELECT 'only_in_streams', id FROM (SELECT id FROM streams EXCEPT SELECT id FROM orig) y`,
-      );
+        );
 
-      expect(rows).toEqual([]);
+        expect(rows).toEqual([]);
+      });
     });
 
     it('keeps the streams mutually exclusive, so no row is claimed twice', async () => {
-      // The union is `UNION ALL`, so an overlap would put one row in a batch
-      // twice and hand Kafka a duplicate from a single claim.
-      const rows = await a.client.$queryRawUnsafe<{ id: string }[]>(
-        `SELECT id FROM (${STREAMS}) s GROUP BY id HAVING count(*) > 1`,
-      );
+      await withCases(async (tx) => {
+        // The union is `UNION ALL`, so an overlap would put one row in a batch
+        // twice and hand Kafka a duplicate from a single claim.
+        const rows = await tx.$queryRawUnsafe<{ id: string }[]>(
+          `SELECT id FROM (${STREAMS}) s GROUP BY id HAVING count(*) > 1`,
+        );
 
-      expect(rows).toEqual([]);
+        expect(rows).toEqual([]);
+      });
     });
 
     it('claims exactly the eligible rows through the real claim query', async () => {
-      // Not the predicate in isolation: the statement the relay actually runs,
-      // including the candidate merge, the re-check and the reservation.
-      const claimed = await claim(storeA, 100);
+      await withCases(async (tx) => {
+        // Not the predicate in isolation: the statement the relay actually runs,
+        // including the candidate merge, the re-check and the reservation.
+        const claimed = await claimPendingSql(tx, {
+          limit: 100,
+          owner: 'worker-equality',
+          token: 'boundary-test-token',
+          leaseSeconds: LEASE,
+        });
 
-      expect(
-        claimed.rows
-          .map((row) => row.id)
-          .filter((id) => id.startsWith('EQ'))
-          .sort(),
-      ).toEqual(
-        CASES.filter((c) => c.eligible)
-          .map((c) => c.id)
-          .sort(),
-      );
+        expect(
+          claimed.rows
+            .map((row) => row.id)
+            .filter((id) => id.startsWith('EQ'))
+            .sort(),
+        ).toEqual(
+          CASES.filter((c) => c.eligible)
+            .map((c) => c.id)
+            .sort(),
+        );
+      });
     });
   });
 

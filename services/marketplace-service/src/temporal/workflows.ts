@@ -10,7 +10,12 @@ import {
   setHandler,
   sleep,
 } from '@temporalio/workflow';
-import type { OrderActivities, SagaOrderView, SettledResult } from './activities';
+import type {
+  DisputedObligation,
+  OrderActivities,
+  SagaOrderView,
+  SettledResult,
+} from './activities';
 
 /**
  * `OrderSagaWorkflow` — the platform's first real Temporal workflow (ADR-039).
@@ -127,8 +132,9 @@ const {
 /**
  * Reads, and writes to this service's own database: retried until they answer.
  *
- * Each of these is idempotent — a read, or a transition that returns quietly
- * when the order is already where it was sent. Retrying them costs nothing.
+ * Each of these is idempotent — a read, or a step that records its outcome
+ * under its own key and answers a retry from that record, wherever the order
+ * has moved since (D-053). Retrying them costs nothing.
  * Giving up on them is what cost money: a local write that failed after an
  * economic step succeeded used to be treated as though the economic step had
  * failed, and the saga then recorded the opposite of what had happened. A
@@ -142,6 +148,7 @@ const {
   markFailed,
   markSettling,
   markSettlementFailed,
+  markObligationDisputed,
   markCompleted,
   markCancelled,
   recordReminder,
@@ -197,6 +204,72 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   setHandler(orderCancelled, look);
   setHandler(disputeResolved, look);
 
+  // The dispute economic-service has been told about and not yet told is
+  // resolved. An id, not a flag: a second dispute on the same order is a
+  // different dispute, and is mirrored under its own key.
+  let mirroredDispute: string | undefined;
+  // economic-service's identity of that same dispute, when it gave one. The
+  // resolution names it, so it decides that dispute and not one raised there
+  // since (Codex on #318 round 2, N1). Undefined for a dispute mirrored by a
+  // step recorded before economic-service had identities: resolved unnamed.
+  let mirroredEconomicDispute: string | undefined;
+
+  /** The order now, with the mirrored dispute's resolution when there is one. */
+  const read = (): Promise<SagaOrderView> =>
+    mirroredDispute === undefined ? readOrder(orderId) : readOrder(orderId, mirroredDispute);
+
+  /**
+   * Tells economic-service that the dispute it holds is decided, with that
+   * dispute's own resolution — read by its id, since a party may have raised
+   * the next one before the saga looked.
+   */
+  async function mirrorResolution(order: SagaOrderView, fallback: string): Promise<void> {
+    if (!mirroredDispute) return;
+    // A read recorded before `mirroredDispute` was part of it has only the
+    // most recent dispute, which then was this one.
+    const resolution = order.mirroredDispute?.resolution ?? order.dispute?.resolution ?? fallback;
+    const transactionId = heldTransaction(order);
+    await (mirroredEconomicDispute === undefined
+      ? resolveObligationDispute(orderId, transactionId, mirroredDispute, resolution)
+      : resolveObligationDispute(
+          orderId,
+          transactionId,
+          mirroredDispute,
+          resolution,
+          mirroredEconomicDispute,
+        ));
+    mirroredDispute = undefined;
+    mirroredEconomicDispute = undefined;
+  }
+
+  /**
+   * The order takes the dispute economic-service holds (D-053). The dispute
+   * it files counts as mirrored at once: economic-service told the saga about
+   * it, not the other way round. Named here rather than when the saga next
+   * reads the order DISPUTED, because an operator may decide it before that
+   * read, and the saga must still mirror that decision back (Codex on #318
+   * round 1, finding 1). Unnamed, the saga read RECEIPT_CONFIRMED, found the
+   * obligation still DISPUTED, and filed a second dispute over it.
+   *
+   * The step records economic-service's identity of the dispute beside the
+   * order's, and the decision is mirrored naming it: if that dispute was
+   * resolved there and another raised before the step ran, the order took
+   * stale words, and economic-service refuses to let a decision about them
+   * clear the new one (Codex on #318 round 2, N1).
+   */
+  async function takeObligationDispute(obligation: DisputedObligation): Promise<void> {
+    const taken = await markObligationDisputed(
+      orderId,
+      obligation.reason,
+      obligation.economicDisputeId ?? null,
+    );
+    if (taken.disputeId) {
+      mirroredDispute = taken.disputeId;
+      // Absent from a step recorded before the identity existed.
+      mirroredEconomicDispute = taken.economicDisputeId ?? undefined;
+    }
+  }
+
   /**
    * Waits for the order to leave `waitingIn`, re-reading it on every signal
    * and at least every `recheckMs`.
@@ -233,7 +306,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         // read is in flight may be about a commit the read did not see, and it
         // must wake the next wait rather than be swallowed.
         nudged = false;
-        const order = await readOrder(orderId);
+        const order = await read();
         if (order.status !== waitingIn) return order;
 
         if (window && windowElapsed) {
@@ -266,10 +339,50 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       const held = await createObligation(orderId);
       return { held: true, transactionId: held.transactionId };
     } catch (error) {
-      const found = await findObligation(orderId);
-      if (found) return { held: true, transactionId: found.transactionId };
+      const found = await findOwnObligation();
+      if (found) return { held: true, transactionId: found };
       return { held: false, reason: describe(error) };
     }
+  }
+
+  /**
+   * The order's obligation as economic-service holds it, or null if it holds
+   * none — adopted only on the terms the saga records it with.
+   *
+   * A transaction naming this order on any other terms is somebody else's
+   * (review of #334 round 1, F1). The saga stops: it adopts nothing, records
+   * nothing on the order, authorises, settles and refunds nothing, and
+   * whatever is held stays held for a person — failing the order or
+   * refunding instead would be deciding about money it cannot account for.
+   *
+   * The order's own obligation in any status but HELD is not adopted either
+   * (review of #334 round 2, F1): the saga stops the same way, naming the
+   * status and what it says of the funds — returned, paid out, never held,
+   * or not proven held — so a person decides from that, not from a
+   * FUNDS_HELD the order would otherwise have recorded.
+   */
+  async function findOwnObligation(): Promise<string | null> {
+    const found = await findObligation(orderId);
+    if (found && 'notHeld' in found) {
+      status.phase = 'OBLIGATION_NOT_HELD';
+      throw ApplicationFailure.nonRetryable(
+        `economic-service holds order ${orderId}'s obligation as ${found.status}, which does not ` +
+          `prove its funds are held (funds ${found.funds}); it is not adopted, and nothing is ` +
+          'recorded on the order',
+        'OBLIGATION_NOT_HELD',
+        { transactionId: found.transactionId, status: found.status, funds: found.funds },
+      );
+    }
+    if (found && 'mismatch' in found) {
+      status.phase = 'OBLIGATION_MISMATCH';
+      throw ApplicationFailure.nonRetryable(
+        `economic-service holds a transaction for order ${orderId} on terms the order did not set ` +
+          `(${found.differ.join(', ')}); it is not adopted, and funds remain held for a human decision`,
+        'OBLIGATION_TERMS_MISMATCH',
+        found.transactionIds,
+      );
+    }
+    return found?.transactionId ?? null;
   }
 
   /**
@@ -278,7 +391,15 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    */
   async function settleOrder(transactionId: string): Promise<boolean> {
     status.phase = 'SETTLING';
-    await authoriseSettlement(orderId, transactionId);
+    // Disputed in economic-service after the saga's own authorisation, and
+    // found so by a retry once the stored answer had expired: the order takes
+    // the dispute and the saga reads it again (D-053). An activity recorded
+    // before this answer existed returns undefined — authorised.
+    const authorisation = await authoriseSettlement(orderId, transactionId);
+    if (authorisation?.disputed) {
+      await takeObligationDispute(authorisation);
+      return false;
+    }
 
     for (let attempt = 1; attempt <= SETTLEMENT_ATTEMPTS; attempt += 1) {
       status.settlementAttempts = attempt;
@@ -290,9 +411,9 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       // `DISPUTED -> RECEIPT_CONFIRMED` — erasing the dispute.
       if ((await markSettling(orderId)) !== 'SETTLING') return false;
 
-      let settlement: SettledResult;
+      let settled: SettledResult | DisputedObligation;
       try {
-        settlement = await settle(orderId, transactionId);
+        settled = await settle(orderId, transactionId);
       } catch (error) {
         await markSettlementFailed(orderId);
         if (attempt === SETTLEMENT_ATTEMPTS) {
@@ -313,6 +434,16 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         await sleep(`${attempt * 30} seconds`);
         continue;
       }
+
+      if ('disputed' in settled) {
+        // Disputed in economic-service since it was authorised (D-053). No
+        // attempt can settle it until an operator decides: this one ends, and
+        // the order takes the dispute instead of the next attempt.
+        await markSettlementFailed(orderId);
+        await takeObligationDispute(settled);
+        return false;
+      }
+      const settlement = settled;
 
       // The money has moved. Recording it is not part of the settlement and
       // cannot fail it: it shared a `catch` with `settle()` once, and a local
@@ -338,7 +469,7 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
   //
   // Not two: creating the obligation and holding the money separately leaves a
   // window in which the buyer can spend what they have just committed.
-  let order = await readOrder(orderId);
+  let order = await read();
 
   if (order.status === 'PENDING') {
     status.phase = 'CREATING_OBLIGATION';
@@ -356,15 +487,10 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
       // and the loop below refunds it.
       await markFundsHeld(orderId, hold.transactionId);
     }
-    order = await readOrder(orderId);
+    order = await read();
   }
 
   // ---- 2. Follow the order until it ends ----------------------------------
-  // The dispute economic-service has been told about and not yet told is
-  // resolved. An id, not a flag: a second dispute on the same order is a
-  // different dispute, and is mirrored under its own key.
-  let mirroredDispute: string | undefined;
-
   for (;;) {
     switch (order.status) {
       case 'FUNDS_HELD':
@@ -403,15 +529,22 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
           );
         }
         if (mirroredDispute !== order.dispute.id) {
+          // The dispute economic-service holds was decided and a party raised
+          // this one before the saga looked: economic-service hears of the
+          // decision first, or it would refuse this dispute as already there.
+          await mirrorResolution(order, 'Dispute resolved: SETTLE');
           // economic-service is told too, so a direct settlement command there
           // is refused independently of anything this service does (ADR-040 § 5).
-          await disputeObligation(
+          const economicDispute = await disputeObligation(
             orderId,
             heldTransaction(order),
             order.dispute.id,
             order.dispute.reason,
           );
           mirroredDispute = order.dispute.id;
+          // Null from an economic-service without identities; undefined from
+          // a step recorded before this one answered with it.
+          mirroredEconomicDispute = economicDispute ?? undefined;
         }
         // No window. A dispute that expired into anything would be worse than
         // one that waits: money would move because nobody looked.
@@ -420,38 +553,21 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
 
       case 'RECEIPT_CONFIRMED':
       case 'SETTLING':
-        if (mirroredDispute) {
-          // The resolution is mirrored back, or economic-service would still
-          // refuse to settle a transaction it believes is disputed.
-          await resolveObligationDispute(
-            orderId,
-            heldTransaction(order),
-            mirroredDispute,
-            order.dispute?.resolution ?? 'Dispute resolved: SETTLE',
-          );
-          mirroredDispute = undefined;
-        }
+        // The resolution is mirrored back, or economic-service would still
+        // refuse to settle a transaction it believes is disputed.
+        await mirrorResolution(order, 'Dispute resolved: SETTLE');
         if (await settleOrder(heldTransaction(order))) return 'COMPLETED';
-        order = await readOrder(orderId);
+        order = await read();
         break;
 
       // ---- Compensation ---------------------------------------------------
       case 'CANCELLING': {
-        if (mirroredDispute) {
-          await resolveObligationDispute(
-            orderId,
-            heldTransaction(order),
-            mirroredDispute,
-            order.dispute?.resolution ?? 'Dispute resolved: REFUND',
-          );
-          mirroredDispute = undefined;
-        }
+        await mirrorResolution(order, 'Dispute resolved: REFUND');
         status.phase = 'COMPENSATING';
         const reason = order.cancellationReason ?? 'Cancelled';
         // An order cancelled before its hold was recorded may still have one:
         // economic-service is asked rather than assumed, as in step 1.
-        const transactionId =
-          order.economicTransactionId ?? (await findObligation(orderId))?.transactionId;
+        const transactionId = order.economicTransactionId ?? (await findOwnObligation());
         if (transactionId) await compensate(orderId, transactionId, reason);
         await markCancelled(orderId, reason);
         status.phase = 'CANCELLED';

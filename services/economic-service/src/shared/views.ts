@@ -193,6 +193,7 @@ export interface TransactionRowLike {
   organizationId: string;
   counterpartyOrganizationId: string | null;
   transactionType: string;
+  businessLine: string | null;
   status: string;
   grossAmountMinor: bigint;
   commissionAmountMinor: bigint;
@@ -202,7 +203,11 @@ export interface TransactionRowLike {
   sourceType: string | null;
   sourceReference: string | null;
   disputedAt: Date | null;
+  disputedBy: string | null;
   disputeReason: string | null;
+  disputeResolvedAt: Date | null;
+  disputeResolvedBy: string | null;
+  disputeResolution: string | null;
   settledAt: Date | null;
   failureReason: string | null;
   createdAt: Date;
@@ -215,6 +220,7 @@ export function toTransactionView(row: TransactionRowLike): TransactionView {
     organizationId: row.organizationId,
     counterpartyOrganizationId: row.counterpartyOrganizationId,
     transactionType: row.transactionType,
+    businessLine: row.businessLine,
     status: row.status,
     grossAmountMinor: formatMinor(row.grossAmountMinor),
     commissionAmountMinor: formatMinor(row.commissionAmountMinor),
@@ -224,7 +230,11 @@ export function toTransactionView(row: TransactionRowLike): TransactionView {
     sourceType: row.sourceType,
     sourceReference: row.sourceReference,
     disputedAt: iso(row.disputedAt),
+    disputedBy: row.disputedBy,
     disputeReason: row.disputeReason,
+    disputeResolvedAt: iso(row.disputeResolvedAt),
+    disputeResolvedBy: row.disputeResolvedBy,
+    disputeResolution: row.disputeResolution,
     settledAt: iso(row.settledAt),
     failureReason: row.failureReason,
     createdAt: row.createdAt.toISOString(),
@@ -238,14 +248,32 @@ export function toTransactionDetailView(
     commission: {
       id: string;
       ruleId: string | null;
+      outcome: string;
       rateBasisPoints: number;
       amountMinor: bigint;
     } | null;
     settlement: { id: string; journalId: string; settledAt: Date } | null;
+    // Optional so that a row built by hand without them — the documented
+    // view's own spec builds one — still makes a view; absent reads as null.
+    // A row read from the database always has them.
+    settlementAuthorisedAt?: Date | null;
+    settlementAuthorisedService?: string | null;
+    settlementAuthorisationKey?: string | null;
+    disputeId?: string | null;
+    resolvedDisputeId?: string | null;
   },
 ): TransactionDetailView {
   return {
     ...toTransactionView(row),
+    settlementAuthorisation: row.settlementAuthorisedAt
+      ? {
+          authorisedAt: row.settlementAuthorisedAt.toISOString(),
+          service: row.settlementAuthorisedService ?? null,
+          idempotencyKey: row.settlementAuthorisationKey ?? null,
+        }
+      : null,
+    disputeId: row.disputeId ?? null,
+    resolvedDisputeId: row.resolvedDisputeId ?? null,
     legs: row.legs.map((leg) => ({
       role: leg.role,
       organizationId: leg.organizationId,
@@ -256,6 +284,7 @@ export function toTransactionDetailView(
       ? {
           id: row.commission.id,
           ruleId: row.commission.ruleId,
+          outcome: row.commission.outcome,
           rateBasisPoints: row.commission.rateBasisPoints,
           amountMinor: formatMinor(row.commission.amountMinor),
         }
@@ -270,6 +299,20 @@ export function toTransactionDetailView(
   };
 }
 
+/**
+ * A transaction command's stored answer, as it is replayed (Codex on #352,
+ * finding 2). One stored by the release before `resolvedDisputeId` existed
+ * lacks it, and the documented view requires it: it is replayed with `null`,
+ * which the view documents as "not attributed by identity": a reader cannot
+ * tell which dispute that answer's resolution decided, and says so. An
+ * answer that has the field is replayed as stored.
+ */
+export function storedTransactionDetailView(
+  answer: TransactionDetailView | Omit<TransactionDetailView, 'resolvedDisputeId'>,
+): TransactionDetailView {
+  return 'resolvedDisputeId' in answer ? answer : { ...answer, resolvedDisputeId: null };
+}
+
 // ---------------------------------------------------------------------------
 // Commission
 // ---------------------------------------------------------------------------
@@ -277,7 +320,8 @@ export function toTransactionDetailView(
 export interface CommissionRuleRow {
   id: string;
   organizationId: string | null;
-  transactionType: string;
+  businessLine: string | null;
+  transactionType: string | null;
   rateBasisPoints: number;
   minAmountMinor: bigint | null;
   maxAmountMinor: bigint | null;
@@ -291,6 +335,7 @@ export function toCommissionRuleView(row: CommissionRuleRow): CommissionRuleView
   return {
     id: row.id,
     organizationId: row.organizationId,
+    businessLine: row.businessLine,
     transactionType: row.transactionType,
     rateBasisPoints: row.rateBasisPoints,
     minAmountMinor: row.minAmountMinor === null ? null : formatMinor(row.minAmountMinor),
@@ -307,6 +352,8 @@ export interface CommissionRow {
   transactionId: string;
   organizationId: string;
   ruleId: string | null;
+  businessLine: string | null;
+  outcome: string;
   rateBasisPoints: number;
   grossAmountMinor: bigint;
   amountMinor: bigint;
@@ -320,6 +367,8 @@ export function toCommissionView(row: CommissionRow): CommissionView {
     transactionId: row.transactionId,
     organizationId: row.organizationId,
     ruleId: row.ruleId,
+    businessLine: row.businessLine,
+    outcome: row.outcome,
     rateBasisPoints: row.rateBasisPoints,
     grossAmountMinor: formatMinor(row.grossAmountMinor),
     amountMinor: formatMinor(row.amountMinor),

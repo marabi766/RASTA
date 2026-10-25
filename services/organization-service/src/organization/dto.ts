@@ -4,7 +4,9 @@ import {
   seedIdSchema,
   ID_PREFIXES,
   plainText,
+  withMaxKeys,
   withoutBidiControlDeep,
+  numberInput,
 } from '@rasta/contracts';
 
 /**
@@ -40,7 +42,19 @@ export const CONTACT_KINDS = ['ADMINISTRATIVE', 'FINANCIAL', 'TECHNICAL', 'EMERG
 export const organizationTypeSchema = z.enum(ORGANIZATION_TYPES);
 export type OrganizationTypeValue = z.infer<typeof organizationTypeSchema>;
 
-/** Persian display names, allowing ZWNJ (نیم‌فاصله) and the usual punctuation. *
+/**
+ * Persian display names, allowing ZWNJ (نیم‌فاصله) and the usual punctuation.
+ *
+ * Deliberately narrower than the shared `displayText` (no `:`, `+`, `;`, `?`,
+ * `!`, `%`, quotes). Whitespace stays `\s`, exactly as before the display-text
+ * work: a stored name may hold a tab or a line break, and the unchanged PATCH
+ * of it must keep validating (tightening it is a separate change that
+ * canonicalises the stored names first). The one addition is the Persian comma
+ * «،» (U+060C): a legal name a person types can hold one — «شرکت راه‌سازان،
+ * عمران و توسعه» — and the old class refused it with the same English message
+ * as free text. Not shared with `displayText`: this class is the
+ * organisation-name policy, nothing else.
+ *
  * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
  * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
  * One pattern, so the published OpenAPI `pattern` states both rules.
@@ -51,7 +65,7 @@ const displayName = z
   .min(2)
   .max(200)
   .regex(
-    /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/]+$/u,
+    /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/\u060c]+$/u,
     'Name contains unsupported characters',
   );
 
@@ -84,10 +98,20 @@ const locationInput = z
 // ---------------------------------------------------------------------------
 
 /**
+ * How many top-level attributes `metadata` may carry. The seeded organizations
+ * use one or two (`role`, `note`, `households`); a hundred is room for a new
+ * type's attributes, not a target. Counted before any entry is parsed
+ * (GHSA-mrhx-c7xc-m3w5, see `withMaxKeys`).
+ */
+export const MAX_METADATA_KEYS = 100;
+
+/**
  * Free-form attributes: any shape, but no bidi control in any key or string
  * value at any depth (#209) — they are stored and shown like any other text.
  */
-const freeFormMetadata = withoutBidiControlDeep(z.record(z.unknown()));
+const freeFormMetadata = withoutBidiControlDeep(
+  withMaxKeys(z.record(z.unknown()), MAX_METADATA_KEYS),
+);
 
 export const createOrganizationSchema = z
   .object({
@@ -214,12 +238,12 @@ export type AddLocationDto = z.infer<typeof addLocationSchema>;
 
 export const nearbyQuerySchema = z
   .object({
-    latitude: z.coerce.number().min(-90).max(90),
-    longitude: z.coerce.number().min(-180).max(180),
+    latitude: numberInput(z.number().min(-90).max(90)),
+    longitude: numberInput(z.number().min(-180).max(180)),
     /** Search radius in metres. Capped so one query cannot scan the country. */
-    radiusMeters: z.coerce.number().int().min(1).max(500_000).default(50_000),
+    radiusMeters: numberInput(z.number().int().min(1).max(500_000)).default(50_000),
     type: organizationTypeSchema.optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).default(25),
   })
   .strict();
 

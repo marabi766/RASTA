@@ -8,6 +8,7 @@ import {
   UnprocessableEventError,
   type EventConsumer,
   type HandlerOutcome,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -166,8 +167,23 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     await this.consumer.start();
   }
 
-  async onApplicationShutdown(): Promise<void> {
-    await this.consumer.stop();
+  /**
+   * An `OutboxShutdown` worker: stopped in Nest's destroy phase, beside the
+   * relay, the purge and the payment sweep, by the shutdown's one deadline; a
+   * fact still in flight (the owner's answer, or a grant) is abandoned
+   * uncommitted and delivered again, and resumes its evaluation claim as any
+   * redelivery does. Before, this class's own `onApplicationShutdown` stopped it
+   * with no bound, after the relay had drained, so the waits added up past
+   * SHUTDOWN_TIMEOUT_MS (Codex r1 on #277). One stop per process; a later call
+   * joins it.
+   */
+  stop(options?: OutboxStopOptions): Promise<void> {
+    return this.consumer.stop(options);
+  }
+
+  /** Joins the stop `OutboxShutdown` began; returns at once. */
+  onApplicationShutdown(): Promise<void> {
+    return this.stop();
   }
 
   async handle(envelope: EventEnvelope): Promise<HandlerOutcome> {
@@ -461,6 +477,7 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
         this.prisma.client,
         envelope,
         claim,
+        fact,
         outcome,
         ruleIds,
       );
@@ -483,7 +500,7 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     // re-emitted under a new event id. That is a retroactive grant, and one
     // belongs to an authorised backfill, not to a replay.
     return this.prisma.transaction(async (tx) => {
-      const held = await this.claimEvaluation(tx, envelope, claim, outcome, []);
+      const held = await this.claimEvaluation(tx, envelope, claim, fact, outcome, []);
       if (!held) return null;
       // Only the delivery that wrote the row marks the event: a concurrent
       // delivery of the same event that wrote it first commits its own
@@ -508,6 +525,7 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
     client: Pick<PrismaService['client'], 'rewardSourceEvaluation'>,
     envelope: EventEnvelope,
     claim: Claim,
+    fact: ConfirmedFact,
     outcome: EvaluationOutcome,
     ruleIds: readonly string[],
   ): Promise<{ inserted: boolean; evaluation: Evaluation } | null> {
@@ -523,6 +541,11 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
           eventId: envelope.eventId,
           outcome,
           ruleIds: [...ruleIds],
+          // Whose behaviour the fact was and when, as the owner recorded it:
+          // what a participation score counts, whether or not a reward rule
+          // paid (ADR-047). Nobody when the owner recorded no user.
+          subjectUserId: fact.subject,
+          occurredAt: fact.subject ? fact.occurredAt : null,
         },
       ],
       skipDuplicates: true,

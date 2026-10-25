@@ -8,9 +8,11 @@ import {
   PageHeader,
   Section,
 } from '@/ui';
-import { timelineCategoryLabel, timelineCategoryOptions } from '@/lib/labels';
+import { timelineCategoryLabel, timelineCategoryOptions, timelineTitleLabel } from '@/lib/labels';
 import { formatJalaliDateLong, formatMoney } from '@/lib/format';
 import type { AssetTimelinePage, AssetTimelineQuery, ReadResult } from '@/server/assets';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
+import type { DemoMode } from '@/lib/demo-mode';
 
 /**
  * Full asset history (docs/16 § 16.6, `/assets/[id]/timeline`).
@@ -31,6 +33,8 @@ export interface TimelineScreenProps {
   readonly result: ReadResult<AssetTimelinePage>;
   readonly assetId: string;
   readonly query: AssetTimelineQuery;
+  /** What the provider says (`fetchDemoMode`, Q-14), over the entries' amounts. Nothing here moves money. */
+  readonly demoMode: DemoMode;
 }
 
 function hrefWith(
@@ -101,7 +105,7 @@ function EntryRows({
       <ol className="flex flex-col gap-4">
         {page.items.map((entry) => (
           <li key={entry.id} className="border-s-2 border-border ps-4">
-            <p className="text-content">{entry.title}</p>
+            <p className="text-content">{timelineTitleLabel(entry.title)}</p>
             <p className="text-sm text-content-muted">
               {timelineCategoryLabel(entry.category)} · {formatJalaliDateLong(entry.occurredAt)}
               {entry.amountMinor ? ` · ${formatMoney(entry.amountMinor)}` : ''}
@@ -126,7 +130,7 @@ function EntryRows({
   );
 }
 
-export function TimelineScreen({ result, assetId, query }: TimelineScreenProps) {
+export function TimelineScreen({ result, assetId, query, demoMode }: TimelineScreenProps) {
   const filtered = Boolean(query.category);
   const dossierHref = `/assets/${encodeURIComponent(assetId)}`;
 
@@ -141,6 +145,8 @@ export function TimelineScreen({ result, assetId, query }: TimelineScreenProps) 
           </ButtonLink>
         }
       />
+
+      <DemoModeNotice mode={demoMode} />
 
       <Section headingId="filters" title="پالایش">
         <Filters assetId={assetId} query={query} />

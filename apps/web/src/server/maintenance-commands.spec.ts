@@ -9,6 +9,7 @@ import {
   REPORT_REQUEST_FIELD_MAPPING,
 } from './maintenance-commands';
 import { EMPTY_REPORT_REQUEST_FORM } from '@/lib/maintenance-fields';
+import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 
 /**
@@ -71,7 +72,11 @@ describe('who is offered the report form', () => {
   );
 
   it('offers it when any one held role qualifies', () => {
-    expect(canReportMaintenance(['AUDITOR', 'OPERATOR'])).toBe(true);
+    expect(canReportMaintenance(['FLEET_MANAGER', 'SUPPLIER'])).toBe(true);
+  });
+
+  it('offers it to nobody holding AUDITOR, whatever else they hold — the guard refuses the oversight role first', () => {
+    expect(canReportMaintenance(['AUDITOR', 'OPERATOR'])).toBe(false);
   });
 });
 
@@ -307,12 +312,15 @@ describe('writing a report', () => {
     const { impl } = recording(400, {
       code: 'VALIDATION_FAILED',
       message: 'Request validation failed',
-      details: [{ path: 'title', message: 'too short' }],
+      details: [{ path: 'title', message: 'String must contain at least 2 character(s)' }],
     });
 
     const result = await reportMaintenanceRequest(SESSION, REQUEST, 'sub_abc', impl);
 
-    expect(result).toMatchObject({ kind: 'INVALID', fieldErrors: { title: 'too short' } });
+    expect(result).toMatchObject({
+      kind: 'INVALID',
+      fieldErrors: { title: 'این متن دست‌کم ۲ نویسه باشد' },
+    });
   });
 
   it('says the duplicate-report refusal in Persian, as a message for the form', async () => {
@@ -332,7 +340,7 @@ describe('writing a report', () => {
     });
   });
 
-  it('shows a sentence it does not know as it arrived, never hidden', async () => {
+  it('shows the generic Persian sentence for one it does not know, never the English', async () => {
     const { impl } = recording(422, {
       code: 'BUSINESS_RULE_VIOLATION',
       message: 'A rule this portal has never heard of',
@@ -342,7 +350,7 @@ describe('writing a report', () => {
 
     expect(result).toMatchObject({
       kind: 'INVALID',
-      message: 'A rule this portal has never heard of',
+      message: GENERIC_REFUSAL_MESSAGE,
     });
   });
 
@@ -378,5 +386,23 @@ describe('writing a report', () => {
     const result = await reportMaintenanceRequest(SESSION, REQUEST, 'sub_abc', impl);
 
     expect(result).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
+  });
+});
+
+describe('Persian punctuation «،» «؛» «؟» in the report form', () => {
+  it('passes a title and description with them on to the service, which applies the one shared rule', () => {
+    const parsed = parseReportRequestForm({
+      assetId: 'AST_01J00000000000000000000000',
+      type: 'PREVENTIVE',
+      title: 'سرویس دوره‌ای، لودر',
+      description: 'تعویض روغن؛ فیلتر هم؟',
+      severity: '',
+      outOfServiceAt: '',
+      dueDate: '',
+    });
+    expect(parsed).toMatchObject({
+      ok: true,
+      request: { title: 'سرویس دوره‌ای، لودر', description: 'تعویض روغن؛ فیلتر هم؟' },
+    });
   });
 });

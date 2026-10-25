@@ -22,6 +22,14 @@ const ORDER = 'ORD_1';
 const OTHER_ORDER = 'ORD_2';
 const BUYER = 'ORG-BUYER';
 const SUPPLIER = 'ORG-SUPPLIER';
+const RETURN = 'RET_01JBQ0000000000000000000AB';
+const RETURN_FACTS = {
+  returnRequestId: RETURN,
+  orderId: 'ORD_01JBQ0000000000000000000CD',
+  buyerOrganizationId: BUYER,
+  supplierOrganizationId: SUPPLIER,
+  lines: [{ orderLineId: 'OLN_1', productId: 'PRD_1', quantity: 1 }],
+};
 
 const PAYLOADS = {
   OFFER_PUBLISHED: {
@@ -198,6 +206,70 @@ const PAYLOADS = {
     currency: 'IRR',
     failedAt: '2026-08-29T00:00:04.700Z',
   },
+  RETURN_REQUESTED: {
+    ...RETURN_FACTS,
+    returnVersion: 1,
+    requestedBy: 'USR-1',
+    requestedAt: '2026-10-16T00:00:01.000Z',
+  },
+  RETURN_AUTHORIZED: {
+    ...RETURN_FACTS,
+    returnVersion: 2,
+    authorizedBy: 'USR-2',
+    authorizedAt: '2026-10-16T00:00:02.000Z',
+  },
+  RETURN_REJECTED: {
+    ...RETURN_FACTS,
+    returnVersion: 2,
+    rejectedBy: 'USR-2',
+    rejectedAt: '2026-10-16T00:00:02.000Z',
+  },
+  RETURN_CANCELLED: {
+    ...RETURN_FACTS,
+    returnVersion: 3,
+    cancelledFrom: 'AUTHORIZED' as const,
+    cancelledBy: 'USR-1',
+    cancelledAt: '2026-10-16T00:00:03.000Z',
+  },
+  RETURN_IN_TRANSIT: {
+    ...RETURN_FACTS,
+    returnVersion: 3,
+    returnShipmentId: 'RSP_01JBQ0000000000000000000EF',
+    inTransitAt: '2026-10-16T00:00:03.000Z',
+  },
+  RETURN_RECEIVED: {
+    ...RETURN_FACTS,
+    returnVersion: 4,
+    returnShipmentId: 'RSP_01JBQ0000000000000000000EF',
+    receivedLines: [{ orderLineId: 'OLN_1', receivedQuantity: 1 }],
+    receivedAt: '2026-10-16T00:00:04.000Z',
+  },
+  RETURN_INSPECTED: {
+    ...RETURN_FACTS,
+    returnVersion: 5,
+    returnShipmentId: 'RSP_01JBQ0000000000000000000EF',
+    reportDocumentId: null,
+    inspectedAt: '2026-10-16T00:00:05.000Z',
+  },
+  RETURN_RESOLVED: {
+    ...RETURN_FACTS,
+    returnVersion: 6,
+    returnShipmentId: 'RSP_01JBQ0000000000000000000EF',
+    outcomes: [{ orderLineId: 'OLN_1', disposition: 'SCRAP' as const, quantity: 1 }],
+    resolvedAt: '2026-10-16T00:00:06.000Z',
+  },
+  RETURN_DISPATCH_RELEASED: {
+    returnRequestId: RETURN,
+    orderId: 'ORD_01JBQ0000000000000000000CD',
+    buyerOrganizationId: BUYER,
+    supplierOrganizationId: SUPPLIER,
+    releaseId: 'RDL_01JBQ0000000000000000000GH',
+    reservationId: 'RDR_01JBQ0000000000000000000JK',
+    reservedAt: '2026-10-16T00:00:02.000Z',
+    withdrawnAt: '2026-10-16T00:00:03.000Z',
+    releasedBy: 'USR_1',
+    releasedAt: '2026-10-16T00:00:04.000Z',
+  },
 } satisfies { [N in MarketplaceEventName]: Parameters<(typeof PARTITION_KEY_POLICY)[N]>[0] };
 
 const EXPECTED: { [N in MarketplaceEventName]: { scope: PartitionScope; key: string } } = {
@@ -218,6 +290,15 @@ const EXPECTED: { [N in MarketplaceEventName]: { scope: PartitionScope; key: str
   ORDER_FAILED: { scope: 'ORDER', key: ORDER },
   ORDER_SETTLEMENT_STARTED: { scope: 'ORDER', key: ORDER },
   ORDER_SETTLEMENT_FAILED: { scope: 'ORDER', key: ORDER },
+  RETURN_REQUESTED: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_AUTHORIZED: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_REJECTED: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_CANCELLED: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_IN_TRANSIT: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_RECEIVED: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_INSPECTED: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_RESOLVED: { scope: 'RETURN_REQUEST', key: RETURN },
+  RETURN_DISPATCH_RELEASED: { scope: 'RETURN_REQUEST', key: RETURN },
 };
 
 const NAMES = Object.values(MARKETPLACE_EVENTS);
@@ -231,10 +312,10 @@ describe('every published marketplace event has a partition decision', () => {
     expect(resolve(name)).toEqual(EXPECTED[name]);
   });
 
-  it('covers exactly the seventeen events this service publishes', () => {
+  it('covers exactly the twenty-six events this service publishes', () => {
     expect(Object.keys(EXPECTED).sort()).toEqual([...NAMES].sort());
     expect(Object.keys(PARTITION_KEY_POLICY).sort()).toEqual([...NAMES].sort());
-    expect(NAMES).toHaveLength(17);
+    expect(NAMES).toHaveLength(26);
   });
 });
 
@@ -330,6 +411,15 @@ describe('aggregate identity is separate from partition ordering', () => {
       ORDER_FAILED: 'Order',
       ORDER_SETTLEMENT_STARTED: 'Order',
       ORDER_SETTLEMENT_FAILED: 'Order',
+      RETURN_REQUESTED: 'ReturnRequest',
+      RETURN_AUTHORIZED: 'ReturnRequest',
+      RETURN_REJECTED: 'ReturnRequest',
+      RETURN_CANCELLED: 'ReturnRequest',
+      RETURN_IN_TRANSIT: 'ReturnRequest',
+      RETURN_RECEIVED: 'ReturnRequest',
+      RETURN_INSPECTED: 'ReturnRequest',
+      RETURN_RESOLVED: 'ReturnRequest',
+      RETURN_DISPATCH_RELEASED: 'ReturnRequest',
     });
   });
 

@@ -2,6 +2,21 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
+import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
+
+/** Restated in `apps/web/eslint.config.mjs`, which does not extend this file. */
+const NO_ZOD_COERCE = [
+  {
+    selector: "MemberExpression[object.name='z'][property.name='coerce']",
+    message:
+      'z.coerce converts unchecked input (a TypeError is a 500). Use numberInput from @rasta/contracts.',
+  },
+  {
+    selector: "ImportDeclaration[source.value=/^zod/] ImportSpecifier[imported.name='coerce']",
+    message:
+      'z.coerce converts unchecked input (a TypeError is a 500). Use numberInput from @rasta/contracts.',
+  },
+];
 
 /**
  * Root ESLint flat config for the Rasta monorepo.
@@ -39,6 +54,11 @@ const base = tseslint.config(
       '@typescript-eslint/no-non-null-assertion': 'warn',
       'no-console': ['error', { allow: ['warn', 'error'] }],
       eqeqeq: ['error', 'always', { null: 'ignore' }],
+      // `z.coerce.*` converts whatever the client sent before any type check:
+      // `Number({"toString":null})` throws, and a 400 becomes a 500. A request
+      // schema takes `numberInput` from @rasta/contracts instead; `env.ts`,
+      // whose input is `process.env` (only strings), is exempt below.
+      'no-restricted-syntax': ['error', ...NO_ZOD_COERCE],
       'no-restricted-imports': [
         'error',
         {
@@ -72,6 +92,24 @@ const base = tseslint.config(
     rules: {
       'no-console': ['error', { allow: ['log', 'info', 'warn', 'error'] }],
     },
+  },
+  {
+    // Workspaces re-export this config, so paths must match from their cwd too.
+    files: ['**/src/**/*.ts', '**/dev/**/*.ts', '**/prisma/**/*.ts', 'scripts/**/*.{js,mjs,cjs}'],
+    ignores: [
+      '**/*.spec.ts',
+      '**/*.test.ts',
+      '**/*.test.mjs',
+      '**/*.int-spec.ts',
+      '**/*.e2e-spec.ts',
+      '**/test/**',
+    ],
+    plugins: { internal: { rules: { transport: internalTokenTransport } } },
+    rules: { 'internal/transport': 'error' },
+  },
+  {
+    files: ['**/env.ts'],
+    rules: { 'no-restricted-syntax': 'off' },
   },
   {
     files: ['**/*.spec.ts', '**/*.e2e-spec.ts', '**/*.int-spec.ts', '**/test/**/*.ts'],

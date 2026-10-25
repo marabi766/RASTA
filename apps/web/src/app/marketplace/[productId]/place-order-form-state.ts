@@ -1,3 +1,5 @@
+import type { ProviderRefusal } from '@/lib/demo-mode';
+import type { SessionRefusal } from '@/lib/session-refusal';
 import type { PlaceOrderField, PlaceOrderFormValues } from '@/lib/place-order-fields';
 
 /**
@@ -20,7 +22,10 @@ export type PlaceOrderFormState =
       /** A refusal the service did not attach to a field — most often a business rule. */
       readonly message: string | null;
     }
-  | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' }
+  | {
+      readonly kind: 'REFUSED';
+      readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' | ProviderRefusal;
+    }
   /** Nothing was sent: this browser could not keep a record of the order, so it could not be placed safely. */
   | { readonly kind: 'STORAGE_UNAVAILABLE' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
@@ -43,8 +48,10 @@ export type PlaceOrderFormState =
    * *original* request's: no later answer to a retry replaces them. What a retry
    * left behind is only a note on top — `retryRefused` (answered with a
    * refusal), `retryUnknown` (answered with nothing that can be judged, or a
-   * status the portal cannot tell from "maybe"), `sessionEnded` (the portal's
-   * own gate refused the call, so no answer came back at all). `viewOnly` is a
+   * status the portal cannot tell from "maybe"), `sessionEnded` (the portal said,
+   * authoritatively, that this browser's session has ended: the action's own
+   * `NO_SESSION`, or `401` from `/auth/session` after a call that threw — a
+   * session only unavailable for now is `retryUnknown`). `viewOnly` is a
    * restored order whose submission id this login can no longer send.
    */
   | {

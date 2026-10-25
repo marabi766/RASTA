@@ -35,6 +35,9 @@ describe('supplier standing snapshot', () => {
     workshop: apiTenant('SNAP-WORKSHOP'),
     pending: apiTenant('SNAP-PENDING'),
     neverQualified: apiTenant('SNAP-NEVER'),
+    goods: apiTenant('SNAP-GOODS'),
+    goodsPending: apiTenant('SNAP-GOODS-PENDING'),
+    both: apiTenant('SNAP-BOTH'),
   };
   const organizations = [platformOrg, ...Object.values(orgs)];
   const ids: Record<string, string> = {};
@@ -70,17 +73,27 @@ describe('supplier standing snapshot', () => {
     }
   }
 
-  const suspend = (key: keyof typeof orgs) =>
+  /** The supplier's episodes as an operator reads them, newest first. */
+  const episodes = async (key: keyof typeof orgs) =>
+    (await http().get(`/v1/suppliers/${ids[key]}`).set('authorization', asPlatform()).expect(200))
+      .body.suspensions as { id: string; open: boolean }[];
+  const suspend = async (key: keyof typeof orgs) =>
     http()
       .post(`/v1/suppliers/${ids[key]}/suspend`)
       .set('authorization', asPlatform())
-      .send({ reason: 'A private reason for suspending' })
+      .send({
+        reason: 'A private reason for suspending',
+        latestSuspensionId: (await episodes(key))[0]?.id ?? null,
+      })
       .expect(200);
-  const reinstate = (key: keyof typeof orgs) =>
+  const reinstate = async (key: keyof typeof orgs) =>
     http()
       .post(`/v1/suppliers/${ids[key]}/reinstate`)
       .set('authorization', asPlatform())
-      .send({ reason: 'A private reason for lifting it' })
+      .send({
+        reason: 'A private reason for lifting it',
+        suspensionId: (await episodes(key)).find((episode) => episode.open)?.id,
+      })
       .expect(200);
 
   const snapshot = async (query = 'limit=200', token?: string) =>
@@ -126,6 +139,16 @@ describe('supplier standing snapshot', () => {
 
     await register('neverQualified', ['CONTRACTING']);
     await suspend('neverQualified');
+
+    await register('goods', ['GOODS_SUPPLY']);
+    await qualify('goods', 'GOODS_SUPPLY', true);
+
+    await register('goodsPending', ['GOODS_SUPPLY']);
+    await qualify('goodsPending', 'GOODS_SUPPLY', false);
+
+    await register('both', ['CONTRACTING', 'GOODS_SUPPLY']);
+    await qualify('both', 'CONTRACTING', true);
+    await qualify('both', 'GOODS_SUPPLY', true);
   }, 180_000);
 
   afterAll(async () => {
@@ -173,6 +196,15 @@ describe('supplier standing snapshot', () => {
       expect((await http().get(path).set('x-internal-token', relay)).status).toBe(401);
     });
 
+    it('refuses procurement-service: the paged snapshot stays construction-service’s alone', async () => {
+      for (const token of [
+        await internalToken('procurement-service'),
+        await internalToken('procurement-service', { organizationId: orgs.goods }),
+      ]) {
+        expect((await snapshot('limit=10', token)).status).toBe(403);
+      }
+    });
+
     it('refuses fields it does not know and a limit past the platform bound', async () => {
       expect((await snapshot('limit=10&organizationId=ORG-X')).status).toBe(400);
       expect((await snapshot('limit=201')).status).toBe(400);
@@ -212,6 +244,13 @@ describe('supplier standing snapshot', () => {
       // Nothing to say about standing: qualified only for something else, or still undecided.
       expect(byOrg.has(orgs.workshop)).toBe(false);
       expect(byOrg.has(orgs.pending)).toBe(false);
+      // GOODS_SUPPLY is the single-organization read's additive field, never the snapshot's.
+      expect(byOrg.has(orgs.goods)).toBe(false);
+      expect(byOrg.get(orgs.both)).toEqual({
+        organizationId: orgs.both,
+        contractingApprovedAt: expect.stringMatching(/Z$/),
+        suspensions: [],
+      });
     });
 
     it('leaks nothing a person typed: no name, reason, note, statement, evidence or actor', async () => {
@@ -256,6 +295,7 @@ describe('supplier standing snapshot', () => {
         organizationId: orgs.approved,
         contractingApprovedAt: expect.stringMatching(/Z$/),
         suspensions: [],
+        goodsSupplyApprovedAt: null,
         asOf: expect.stringMatching(/Z$/),
       });
 
@@ -316,6 +356,82 @@ describe('supplier standing snapshot', () => {
       for (const secret of ['must never leave', 'private', 'DOC-', 'reason', 'note']) {
         expect({ secret, found: text.includes(secret) }).toEqual({ secret, found: false });
       }
+    });
+
+    describe('procurement-service (ADR-070 § 7): GOODS_SUPPLY, same token contract', () => {
+      const asProcurement = async (organizationId: string) =>
+        one(organizationId, await internalToken('procurement-service'));
+
+      it('answers procurement-service with a tenant-less token: the latest GOODS_SUPPLY approval, as recorded', async () => {
+        const goods = await asProcurement(orgs.goods);
+        expect(goods.status).toBe(200);
+        expect(goods.body).toEqual({
+          organizationId: orgs.goods,
+          contractingApprovedAt: null,
+          suspensions: [],
+          goodsSupplyApprovedAt: expect.stringMatching(/Z$/),
+          asOf: expect.stringMatching(/Z$/),
+        });
+        // The instant is the approval's own, not the read's.
+        const approval = await runUnscoped('the suite reads the approval it made', () =>
+          api.prisma.client.qualification.findFirst({
+            where: { supplierId: ids.goods, capability: 'GOODS_SUPPLY', state: 'APPROVED' },
+          }),
+        );
+        expect(goods.body.goodsSupplyApprovedAt).toBe(approval!.decidedAt!.toISOString());
+
+        // The two capabilities are answered apart; each null until approved.
+        const both = (await asProcurement(orgs.both)).body;
+        expect(both.contractingApprovedAt).toMatch(/Z$/);
+        expect(both.goodsSupplyApprovedAt).toMatch(/Z$/);
+        for (const org of [orgs.goodsPending, orgs.approved, orgs.workshop, 'ORG-NOBODY-HERE']) {
+          const answer = await asProcurement(org);
+          expect(answer.status).toBe(200);
+          expect(answer.body).toMatchObject({ organizationId: org, goodsSupplyApprovedAt: null });
+        }
+        // And the suspension episodes, which an invitation must see as well.
+        expect((await asProcurement(orgs.suspended)).body.suspensions).toEqual([
+          expect.objectContaining({ reinstatedAt: null }),
+        ]);
+      });
+
+      it('gives construction-service the same answer, the additive field included', async () => {
+        const forProcurement = (await asProcurement(orgs.both)).body;
+        const forConstruction = (await one(orgs.both)).body;
+        expect({ ...forConstruction, asOf: 'x' }).toEqual({ ...forProcurement, asOf: 'x' });
+      });
+
+      it('refuses procurement-service with a tenant-signed token, as a relay, and everyone else', async () => {
+        const path = `/v1/suppliers/standing-snapshot/${orgs.goods}`;
+        for (const bearer of [
+          asPlatform(),
+          asSupplier(orgs.goods),
+          `Bearer ${procurementUser(orgs.both)}`,
+          `Bearer ${auditorActor(orgs.both)}`,
+        ]) {
+          expect((await http().get(path).set('authorization', bearer)).status).toBe(403);
+        }
+        for (const token of [
+          await internalToken('procurement-service', { organizationId: orgs.both }),
+          await internalToken('procurement-service', { organizationId: orgs.goods }),
+          await internalToken('fleet-service'),
+        ]) {
+          expect((await one(orgs.goods, token)).status).toBe(403);
+        }
+        const relay = await internalToken('procurement-service', { purpose: 'RELAY' });
+        expect((await one(orgs.goods, relay)).status).toBe(401);
+      });
+
+      it('leaks nothing a person typed', async () => {
+        const text = JSON.stringify([
+          (await asProcurement(orgs.goods)).body,
+          (await asProcurement(orgs.both)).body,
+          (await asProcurement(orgs.suspended)).body,
+        ]);
+        for (const secret of ['must never leave', 'private', 'DOC-', 'reason', 'note']) {
+          expect({ secret, found: text.includes(secret) }).toEqual({ secret, found: false });
+        }
+      });
     });
   });
 

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { businessLineSchema } from '@rasta/contracts';
 import {
   EnvValidationError,
   authEnvSchema,
@@ -7,6 +8,7 @@ import {
   databaseEnvSchema,
   kafkaEnvSchema,
   loadEnv,
+  outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { economicOperationBudgets } from './operation-budgets';
 
@@ -22,6 +24,7 @@ import { economicOperationBudgets } from './operation-budgets';
 export const economicEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),
@@ -188,6 +191,30 @@ export const economicEnvSchema = baseEnvSchema
     ECONOMIC_REFUND_BY_PAYEE_ENABLED: booleanEnv(true),
 
     /**
+     * Whether settling a transaction whose business line has no active
+     * commission rule is refused (`422 NO_ACTIVE_RULE`) rather than settled at
+     * zero (docs/24 Q-29, decided 2026-10-23).
+     *
+     * Unset, it is on outside development and test and off in them — what
+     * `loadEconomicEnv` resolves it to, reading `NODE_ENV` as given, as the
+     * four-eyes opt-out does — so a local stack and the suites settle as they
+     * always have unless they turn it on. Turning it off is refused outside
+     * development and test: a settlement that silently charges nothing is
+     * revenue that is never recorded. The pilot runs on an explicit 0% rule
+     * per line (Q-08), so on, nothing is refused that was configured.
+     *
+     * Every business line is commission-bearing until docs/24 Q-130 says which
+     * are not. A transaction its source recorded **without** a line is not
+     * refused: no rule can be written for one any more (docs/23 D-057), so it
+     * would never settle; it stays `NO_ACTIVE_RULE` at zero, as before, and is
+     * counted (`rasta_economic_commission_applications_total{matched="false"}`).
+     */
+    ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: z.preprocess(
+      (value) => (value === '' ? undefined : value),
+      booleanEnv(false).optional(),
+    ),
+
+    /**
      * The services that own the facts this service makes money from (ADR-061 § 4).
      *
      * Required, with no default. Without them, the settlement consumer cannot
@@ -196,9 +223,49 @@ export const economicEnvSchema = baseEnvSchema
      */
     MAINTENANCE_SERVICE_URL: z.string().url(),
     FLEET_SERVICE_URL: z.string().url(),
+    /** The owner of an approved contract statement (ADR-068 § 6 (2)); required for the same reason. */
+    CONTRACT_SERVICE_URL: z.string().url(),
+
+    /**
+     * The business line a contract statement's obligation is recorded under
+     * (ADR-045 § 1), or none.
+     *
+     * Unset by default, and that default is the temporary decision of docs/24
+     * Q-130 (D-057), not a guess: only a source that knows its line sends one,
+     * and whether a statement is always `CONSTRUCTION` is exactly what Q-130
+     * asks. Unset, a statement is priced by the type-only rules for
+     * `CONSTRUCTION_STATEMENT` and, with none, recorded `NO_ACTIVE_RULE`. The
+     * answer is this setting, not a code change (Q-97 note, CON-003 PR 6b).
+     * Read when an obligation is recorded; the line it was recorded under never
+     * changes afterwards.
+     */
+    ECONOMIC_STATEMENT_BUSINESS_LINE: z.preprocess(
+      (value) => (value === '' ? undefined : value),
+      businessLineSchema.optional(),
+    ),
 
     /** One source read, body included. A timeout is retried, never acted on. */
     ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+
+    /**
+     * Where a union administrator's subtree is confirmed (docs/24 Q-136):
+     * organization-service, the owner of the hierarchy (A-13), asked as
+     * construction-service and contract-service ask it.
+     */
+    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+
+    /**
+     * How long that question may take, body included. It is asked under the
+     * transaction's row lock, so it is kept far below the transaction's own
+     * timeout (`CONTENTION_TRANSACTION_TIMEOUT_MS`); no answer in time refuses
+     * the command with 504 and nothing is written (fail closed).
+     */
+    ECONOMIC_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(30_000)
+      .default(3000),
 
     /** How long a stored idempotency key is honoured (docs/06 § 6.8). */
     ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
@@ -279,7 +346,13 @@ export const economicEnvSchema = baseEnvSchema
     }
   });
 
-export type EconomicEnv = z.infer<typeof economicEnvSchema>;
+/** The settings as the schema parses them, before `loadEconomicEnv` resolves the defaults it alone can. */
+export type EconomicEnvInput = z.infer<typeof economicEnvSchema>;
+
+export type EconomicEnv = Omit<EconomicEnvInput, 'ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE'> & {
+  /** Resolved: never unset once loaded (`settlementRequiresCommissionRule`). */
+  ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: boolean;
+};
 
 export function loadEconomicEnv(source: NodeJS.ProcessEnv = process.env): EconomicEnv {
   const env = loadEnv(
@@ -296,7 +369,15 @@ export function loadEconomicEnv(source: NodeJS.ProcessEnv = process.env): Econom
     { operationBudgets: economicOperationBudgets },
   );
   assertFourEyesOptOut(source, env);
-  return env;
+  return {
+    ...env,
+    ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: settlementRequiresCommissionRule(source, env),
+  };
+}
+
+/** Where nobody's money is real, read from `NODE_ENV` as given (`assertFourEyesOptOut`). */
+function isDevelopmentOrTest(source: NodeJS.ProcessEnv): boolean {
+  return source.NODE_ENV === 'development' || source.NODE_ENV === 'test';
 }
 
 /**
@@ -305,12 +386,33 @@ export function loadEconomicEnv(source: NodeJS.ProcessEnv = process.env): Econom
  * opt-out is: the schema would default an unset one to `development`, and an
  * operator who forgot it must not lose the second pair of eyes by accident.
  */
-function assertFourEyesOptOut(source: NodeJS.ProcessEnv, env: EconomicEnv): void {
+function assertFourEyesOptOut(source: NodeJS.ProcessEnv, env: EconomicEnvInput): void {
   if (env.ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES) return;
-  if (source.NODE_ENV === 'development' || source.NODE_ENV === 'test') return;
+  if (isDevelopmentOrTest(source)) return;
   throw new EnvValidationError([
     {
       path: 'ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES',
+      message: 'may be false only when NODE_ENV is development or test',
+    },
+  ]);
+}
+
+/**
+ * Whether a settlement with no active commission rule for its line is refused
+ * (docs/24 Q-29). Unset: on, except in development and test. Off is refused
+ * anywhere else — the boot guard of the four-eyes opt-out, for the same
+ * reason: an unset or mistyped `NODE_ENV` must not switch a control off.
+ */
+function settlementRequiresCommissionRule(
+  source: NodeJS.ProcessEnv,
+  env: EconomicEnvInput,
+): boolean {
+  const configured = env.ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE;
+  if (configured === undefined) return !isDevelopmentOrTest(source);
+  if (configured || isDevelopmentOrTest(source)) return configured;
+  throw new EnvValidationError([
+    {
+      path: 'ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE',
       message: 'may be false only when NODE_ENV is development or test',
     },
   ]);

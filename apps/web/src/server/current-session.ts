@@ -1,6 +1,8 @@
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { webServerEnv } from './env';
 import { SESSION_COOKIE, openSession, sessionSecondsLeft, type WebSession } from './session';
+import type { SessionRefusal } from '@/lib/session-refusal';
+import { isRefreshUnavailable } from './session-state';
 
 /**
  * Reading the current session.
@@ -48,4 +50,22 @@ export async function currentSession(now: number = Date.now()): Promise<WebSessi
   if (!session) return null;
   if (session.accessTokenExpiresAt <= Math.floor(now / 1000)) return null;
   return session;
+}
+
+/**
+ * When `currentSession()` found none: whether that may be temporary — the
+ * access token ran out and its refresh is unavailable right now
+ * (`session-state.ts`) — rather than the session having ended.
+ */
+export async function sessionTemporarilyUnavailable(): Promise<boolean> {
+  return isRefreshUnavailable(await headers());
+}
+
+/**
+ * Why `currentSession()` found none, for an action's refusal
+ * (`lib/session-refusal.ts`): `SESSION_UNAVAILABLE` when the refresh is only
+ * unavailable for now, `NO_SESSION` — the session has ended — otherwise.
+ */
+export async function missingSessionReason(): Promise<SessionRefusal> {
+  return (await sessionTemporarilyUnavailable()) ? 'SESSION_UNAVAILABLE' : 'NO_SESSION';
 }

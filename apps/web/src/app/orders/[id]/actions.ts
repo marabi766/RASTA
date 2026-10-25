@@ -2,8 +2,10 @@
 
 import { redirect } from 'next/navigation';
 
-import { currentSession } from '@/server/current-session';
+import { MONEY_EFFECTS } from '@/lib/demo-mode';
+import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { mayDispatch } from '@/server/money-gate';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { issueOrderCommand, orderCommandFormValues, parseOrderCommand } from '@/server/orders';
 
@@ -19,7 +21,9 @@ import type { OrderCommandFormState } from './form-state';
  *
  * Same order as every write in this portal (ADR-059 § 3, § 5): session, CSRF,
  * submission id, the form, then the gateway — each gate returning before the
- * next runs.
+ * next runs. Between the form and the gateway, a command that moves money
+ * (`MONEY_EFFECTS.order`) is sent only while the provider can be read
+ * (`mayDispatch`): the page withholds it otherwise, and so does this.
  *
  * **Which command is allowed is not checked here.** marketplace-service
  * decides that against the record when the command runs; this action only
@@ -33,7 +37,7 @@ export async function submitOrderCommand(
   form: FormData,
 ): Promise<OrderCommandFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
@@ -53,6 +57,10 @@ export async function submitOrderCommand(
       fieldErrors: parsed.fieldErrors,
       message: null,
     };
+  }
+
+  if (!(await mayDispatch(session, MONEY_EFFECTS.order[parsed.request.command]))) {
+    return { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
   }
 
   const result = await issueOrderCommand(session, orderId, parsed.request, submissionId);

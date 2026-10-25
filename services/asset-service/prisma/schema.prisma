@@ -426,13 +426,44 @@ model InsuranceClaim {
   createdBy String   @map("created_by")
   updatedBy String   @map("updated_by")
 
-  policy InsurancePolicy @relation(fields: [policyId], references: [id])
+  policy    InsurancePolicy         @relation(fields: [policyId], references: [id])
+  documents InsuranceClaimDocument[]
 
   @@index([policyId])
   @@index([organizationId, status])
   /// The list a dossier reads: every claim on one machine, newest incident first.
   @@index([assetId, incidentAt(sort: Desc)])
   @@map("insurance_claim")
+}
+
+/// A reference from a claim to a file document-service holds (docs/24 Q-128).
+///
+/// Only the id lives here, checked against document-service before the row is
+/// written. The row is the attaching organization's: a transfer moves the claim
+/// but not this row, so the new owner reads the claim without the previous
+/// owner's files (the Q-99 rule).
+model InsuranceClaimDocument {
+  id String @id
+
+  claimId        String @map("claim_id")
+  assetId        String @map("asset_id")
+  organizationId String @map("organization_id")
+
+  documentId String @map("document_id")
+
+  /// Set once, when document-service reported the file deleted after it was
+  /// attached. The reference stays: it is the claim's record of what was filed.
+  documentRemovedAt DateTime? @map("document_removed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+
+  claim InsuranceClaim @relation(fields: [claimId], references: [id])
+
+  @@index([organizationId, documentId], map: "insurance_claim_document_org_doc_idx")
+  @@unique([organizationId, claimId, documentId], map: "insurance_claim_document_org_claim_doc_key")
+  @@index([organizationId, claimId, createdAt], map: "insurance_claim_document_org_claim_created_idx")
+  @@map("insurance_claim_document")
 }
 
 enum ClaimStatus {

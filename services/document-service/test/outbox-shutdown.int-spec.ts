@@ -209,6 +209,8 @@ describe('document-service shutdown: the scan worker by the outbox deadline (D-0
           publishes.count += 1;
           return never<void>();
         },
+        // OutboxShutdown closes the publisher after the drain (D-052 phase 4b).
+        stop: async () => undefined,
       })
       .overrideProvider(MALWARE_SCANNER)
       .useValue(scanner)

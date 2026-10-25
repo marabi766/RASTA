@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { ERROR_STATUS, type ErrorCode } from '@rasta/contracts';
-import { RastaError, getOrganizationId, runUnscoped } from '@rasta/nest-common';
+import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { isUniqueViolation } from '../ledger/ledger.repository';
 import { idempotentReplaysTotal } from '../observability/metrics';
@@ -28,6 +28,7 @@ export { CLAIM_WAIT_MS };
  * | new key                            | execute, store the response, return   |
  * | same key, same body                | the stored response, no re-execution  |
  * | same key, different body           | `409 IDEMPOTENCY_KEY_REUSED`          |
+ * | same key, different actor          | `409 IDEMPOTENCY_KEY_REUSED`          |
  * | key currently in flight            | `409 CONFLICT` + `Retry-After: 1`     |
  * | missing key on a required endpoint | `400 VALIDATION_FAILED`               |
  *
@@ -50,6 +51,52 @@ export { CLAIM_WAIT_MS };
  * CONFLICT` rather than a re-execution until the record expires. For a
  * financial write that is the right way round — a caller retrying too early is
  * a nuisance, and a caller charged twice is an incident.
+ *
+ * ## Why the answer is stored inside the effect's transaction
+ *
+ * The work receives an {@link IdempotentAnswer} and stores its response — or
+ * a declared terminal refusal — through it, inside the transaction that
+ * applies its effect, from the rows that transaction wrote. The effect and its
+ * completed key are one commit, so nothing that fails after that commit can
+ * free the key: {@link release} only ever removes an `IN_PROGRESS` row, and the
+ * row is `COMPLETED` by then. A retry with the same key replays the answer.
+ *
+ * The response used to be stored after the commit, and the work's own
+ * post-commit steps — reading the transaction back for the response — ran
+ * inside the `try` that releases the claim. A read that failed there freed the
+ * key of an applied state change; the retry was judged against the moved state
+ * and refused `INVALID_STATE_TRANSITION`, and the order saga never learnt that
+ * its authorisation had succeeded (review of #283, finding 2; docs/23 D-054).
+ *
+ * ## Who may be answered from a record
+ *
+ * A record answers **the actor who made it, and only while that actor may
+ * still reach its object** (review of #287, finding 1). The key was scoped to
+ * the acting organization, the endpoint and — through the hash — the target,
+ * but not to the person: a `SYSTEM_ADMIN` acting in A authorised a B↔C
+ * transaction with key K, and an `ORGANIZATION_ADMIN` of A who sent the same
+ * target and K was handed B and C's transaction, where a fresh key got
+ * `NOT_FOUND`. Two rules close it:
+ *
+ *   - the record carries a hash of the actor who reserved it — the verified
+ *     issuer and subject, or the calling service ({@link requestActor}); the
+ *     same key from anyone else is `409
+ *     IDEMPOTENCY_KEY_REUSED` — the answer to the same key with another body —
+ *     and never a replay;
+ *   - before any stored answer is returned, the endpoint's own object checks
+ *     run again, as the caller now is ({@link ReplayGuard}) — not the
+ *     transition, only who may see and act on its object. A caller who lost
+ *     that access gets the `NOT_FOUND` (or `403`) a fresh request gets.
+ *
+ * ## Whose claim a completion completes
+ *
+ * Each reservation carries a random claim token, and completing, recording a
+ * refusal and releasing all require it (review of #287, finding 2). Matching
+ * by key and state alone let a request whose claim had expired and been
+ * replaced complete the replacement: its effect committed under another
+ * request's key, and that request's retries replayed the wrong answer. A stale
+ * token matches nothing, so the late effect rolls back with a retryable
+ * conflict and the replacement claim is left to its owner.
  */
 @Injectable()
 export class IdempotencyStore {
@@ -67,21 +114,21 @@ export class IdempotencyStore {
    * Reserves the key, or reports what to do instead.
    *
    * Returns:
-   *   `{ kind: 'PROCEED' }`  — the caller owns the key and should do the work
-   *   `{ kind: 'REPLAY' }`   — a stored response to return unchanged
+   *   `{ kind: 'PROCEED', token }` — the caller owns the key, under `token`,
+   *                                  and should do the work
+   *   `{ kind: 'REPLAY' }`         — a stored response, for {@link run} to
+   *                                  return once its replay guard has passed
    *
-   * and throws for the two conflict cases, because they are errors rather than
+   * and throws for the conflict cases — another body or another actor under
+   * the key, or the key in flight — because they are errors rather than
    * outcomes.
    */
-  async claim(
-    endpoint: string,
-    key: string,
-    body: unknown,
-  ): Promise<{ kind: 'PROCEED' } | { kind: 'REPLAY'; status: number; body: unknown }> {
+  async claim(endpoint: string, key: string, body: unknown): Promise<Claim> {
     const requestHash = this.hash(body);
+    const actorHash = this.hash(requestActor());
     const deadline = Date.now() + CLAIM_WAIT_MS;
     for (let attempt = 1; attempt <= CLAIM_ATTEMPTS; attempt += 1) {
-      const outcome = await this.claimOnce(endpoint, key, requestHash, deadline);
+      const outcome = await this.claimOnce(endpoint, key, requestHash, actorHash, deadline);
       if (outcome !== RETRY_CLAIM) return outcome;
     }
     // Every attempt found the key vanishing under it: other requests are
@@ -108,24 +155,33 @@ export class IdempotencyStore {
     endpoint: string,
     key: string,
     requestHash: string,
+    actorHash: string,
     deadline: number,
-  ): Promise<
-    { kind: 'PROCEED' } | { kind: 'REPLAY'; status: number; body: unknown } | typeof RETRY_CLAIM
-  > {
+  ): Promise<Claim | typeof RETRY_CLAIM> {
     const organizationId = getOrganizationId();
     const now = new Date();
     const expiresAt = new Date(
       now.getTime() + this.env.ECONOMIC_IDEMPOTENCY_TTL_HOURS * 60 * 60 * 1000,
     );
+    const claimToken = randomUUID();
 
     try {
       // Waits behind an uncommitted removal of the same key — within the budget only.
       await this.withinBudget(endpoint, deadline, (tx) =>
         tx.idempotencyKey.create({
-          data: { key, organizationId, endpoint, requestHash, state: 'IN_PROGRESS', expiresAt },
+          data: {
+            key,
+            organizationId,
+            endpoint,
+            requestHash,
+            actorHash,
+            claimToken,
+            state: 'IN_PROGRESS',
+            expiresAt,
+          },
         }),
       );
-      return { kind: 'PROCEED' };
+      return { kind: 'PROCEED', token: claimToken };
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
     }
@@ -149,7 +205,14 @@ export class IdempotencyStore {
       return RETRY_CLAIM;
     }
 
-    if (existing.requestHash !== requestHash) {
+    // Another body, or another actor: a different request under the same key,
+    // refused alike and with nothing of the record (review of #287, finding
+    // 1). A record from before actors were bound has none; it is answered only
+    // through the replay guard, and only until it expires.
+    if (
+      existing.requestHash !== requestHash ||
+      (existing.actorHash !== null && existing.actorHash !== actorHash)
+    ) {
       throw RastaError.idempotencyKeyReused();
     }
 
@@ -194,21 +257,30 @@ export class IdempotencyStore {
   }
 
   /**
-   * Records the response so a retry can replay it.
+   * Records the answer so a retry can replay it — **inside the work's own
+   * transaction** `tx`, the one that applies its effect.
    *
-   * Deliberately **not** inside the caller's transaction. Recording the
-   * response is not part of the financial effect: if the effect committed and
-   * this write then failed, the money has moved and a retry would find
-   * `IN_PROGRESS` and be refused — annoying, and safe. If it shared the
-   * transaction, a failure here would roll back a settlement that had already
-   * succeeded, which is not.
+   * A failure here rolls the effect back with it: the claim is then released
+   * and a retry with the same key runs the work, which never happened. A
+   * claim that is no longer this request's `IN_PROGRESS` reservation — it
+   * outlived its retention and was purged, or taken over by another request
+   * under a new token — matches nothing, and that throws too, so the effect is
+   * never committed without its key, nor under another request's.
    */
-  async complete(endpoint: string, key: string, status: number, body: unknown): Promise<void> {
+  private async complete(
+    tx: ExtendedPrismaClient,
+    endpoint: string,
+    key: string,
+    token: string,
+    status: number,
+    body: unknown,
+  ): Promise<void> {
     const organizationId = getOrganizationId();
-    await this.prisma.client.idempotencyKey.updateMany({
-      where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
+    const { count } = await tx.idempotencyKey.updateMany({
+      where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
       data: { state: 'COMPLETED', responseStatus: status, responseBody: body as object },
     });
+    if (count !== 1) throw claimLost(endpoint);
   }
 
   /**
@@ -216,13 +288,14 @@ export class IdempotencyStore {
    *
    * A failed attempt must not block a corrected retry: a settlement refused
    * for insufficient balance should be retryable once the wallet is topped up,
-   * with the same key. Only `IN_PROGRESS` rows are removed, so a completed
-   * response is never dropped.
+   * with the same key. Only this request's own `IN_PROGRESS` reservation is
+   * removed — never a completed response, and never the claim another request
+   * took over after this one's expired.
    */
-  async release(endpoint: string, key: string): Promise<void> {
+  async release(endpoint: string, key: string, token: string): Promise<void> {
     const organizationId = getOrganizationId();
     await this.prisma.client.idempotencyKey.deleteMany({
-      where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
+      where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
     });
   }
 
@@ -233,42 +306,84 @@ export class IdempotencyStore {
    * sequence is written once. A handler that forgot the `release` on failure
    * would leave a key wedged until expiry, and that is exactly the kind of
    * detail that is got wrong when it is repeated per endpoint.
+   *
+   * `work` answers through `answer`, inside the transaction that applies its
+   * effect, and what it answered is what this returns — the same body a
+   * replay returns. A work that returns normally must have answered in a
+   * transaction that committed.
+   *
+   * `options.mayReplay` is required: no endpoint can return a stored answer
+   * without saying who may still have it (see the class comment).
+   *
+   * `options.stored` brings a stored success answer to the shape this release
+   * documents before it is replayed: one stored by an earlier release lacks
+   * what was added since, and is returned as it was otherwise (Codex on #352,
+   * finding 2).
    */
   async run<T>(
     endpoint: string,
     key: string,
     body: unknown,
     successStatus: number,
-    work: () => Promise<T>,
-    options?: { terminalRefusals?: TerminalRefusals },
+    work: (answer: IdempotentAnswer<T>) => Promise<unknown>,
+    options: {
+      mayReplay: ReplayGuard<T>;
+      terminalRefusals?: TerminalRefusals;
+      stored?: (answer: T) => T;
+    },
   ): Promise<T> {
     const claim = await this.claim(endpoint, key, body);
     if (claim.kind === 'REPLAY') {
-      if (claim.status >= REFUSAL_STATUS_FLOOR) {
-        throw replayedRefusal(claim.body, options?.terminalRefusals);
-      }
-      return claim.body as T;
+      const refused = claim.status >= REFUSAL_STATUS_FLOOR;
+      // Before anything of the record leaves: what a fresh request would be
+      // refused, the replay is refused too.
+      await options.mayReplay(refused ? undefined : (claim.body as T));
+      if (refused) throw replayedRefusal(claim.body, options.terminalRefusals);
+      return options.stored ? options.stored(claim.body as T) : (claim.body as T);
     }
+    const { token } = claim;
 
-    // Only a failure of `work` releases the claim. A failure to record the
-    // response comes after the work committed — the money has moved — so the
-    // claim is kept and the error surfaces: retries meet the in-flight 409
-    // until the claim expires, rather than a freed key executing the work a
-    // second time (review of #141). The release used to cover both.
-    let result: T;
+    let answered: { response: T } | undefined;
+    const answer = new IdempotentAnswer<T>(
+      async (tx, response) => {
+        await this.complete(tx, endpoint, key, token, successStatus, response);
+        answered = { response };
+      },
+      async (tx, refusal) => {
+        // An undeclared refusal is not one the store can replay: it is left
+        // to the release below, and the effect it ends is never rolled back
+        // for it.
+        if (!declaredBy(options.terminalRefusals, refusal)) return;
+        await this.complete(tx, endpoint, key, token, refusal.status, {
+          refusal: refusal.refusal,
+        });
+      },
+    );
+
     try {
-      result = await work();
+      await work(answer);
     } catch (error) {
-      const declared =
+      // Unconditional, and safe to be: an answer stored in a transaction that
+      // committed left the row COMPLETED, which the release never removes —
+      // whatever failed afterwards, a retry replays it. A transaction that
+      // rolled back took its answer with it, and the key is freed.
+      if (
         error instanceof TerminalRefusalError &&
-        options?.terminalRefusals !== undefined &&
-        isDeclared(options.terminalRefusals, error.refusal);
-      if (declared && (await this.completeRefusal(endpoint, key, error))) throw error;
-      await this.release(endpoint, key);
+        declaredBy(options.terminalRefusals, error) &&
+        (await this.completeRefusal(endpoint, key, token, error))
+      ) {
+        throw error;
+      }
+      await this.release(endpoint, key, token);
       throw error;
     }
-    await this.complete(endpoint, key, successStatus, result);
-    return result;
+    if (!answered) {
+      // A programming error: the work may have committed without its answer.
+      // The claim stays IN_PROGRESS for its retention, so retries are refused
+      // rather than run a second time.
+      throw RastaError.internal(`Idempotent work for ${endpoint} did not store its answer`);
+    }
+    return answered.response;
   }
 
   /**
@@ -277,16 +392,22 @@ export class IdempotencyStore {
    * recorded; when not, the caller releases the key as it does for any other
    * error, because a refusal the store could not record is not one it can
    * replay.
+   *
+   * For a refusal that ends work with no effect. One that ends a transaction
+   * which did change something — a declined refund returning its hold — is
+   * recorded in that transaction through {@link IdempotentAnswer.refuse}, and
+   * this then finds the row COMPLETED and matches nothing.
    */
   private async completeRefusal(
     endpoint: string,
     key: string,
+    token: string,
     error: TerminalRefusalError,
   ): Promise<boolean> {
     const organizationId = getOrganizationId();
     try {
       const { count } = await this.prisma.client.idempotencyKey.updateMany({
-        where: { organizationId, endpoint, key, state: 'IN_PROGRESS' },
+        where: { organizationId, endpoint, key, claimToken: token, state: 'IN_PROGRESS' },
         data: {
           state: 'COMPLETED',
           responseStatus: error.status,
@@ -357,11 +478,107 @@ export class TerminalRefusalError extends RastaError {
   }
 }
 
+/** Stores an answer in the transaction that applies the effect it answers for. */
+type Store<A> = (tx: ExtendedPrismaClient, answer: A) => Promise<void>;
+
+/**
+ * How an idempotent command answers its key: **inside the transaction that
+ * applies its effect**, built from the rows that transaction wrote (review of
+ * #283, finding 2). The effect and the completed key then commit together, so
+ * a failure after the commit — a read, a serialisation, a lost connection —
+ * can only ever be answered by replaying what was applied, never by freeing
+ * the key as if nothing had been.
+ *
+ * Call it as late in the transaction as possible: anything after it that fails
+ * rolls the answer back with the effect, which is correct, but is wasted work.
+ * A work that answers twice — a first transaction that rolled back, a second
+ * that committed — leaves the later answer, which is the committed one.
+ */
+export class IdempotentAnswer<T> {
+  constructor(
+    private readonly storeResponse: Store<T>,
+    private readonly storeRefusal: Store<TerminalRefusalError>,
+  ) {}
+
+  /** The success response — exactly what this request and every replay return. */
+  respond(tx: ExtendedPrismaClient, response: T): Promise<void> {
+    return this.storeResponse(tx, response);
+  }
+
+  /**
+   * A declared terminal refusal the work throws **after** this transaction
+   * commits, recorded with the effect that ended in it. An undeclared one is
+   * ignored: the store releases the key for it as for any other error.
+   */
+  refuse(tx: ExtendedPrismaClient, refusal: TerminalRefusalError): Promise<void> {
+    return this.storeRefusal(tx, refusal);
+  }
+
+  /**
+   * The same answer for a service that returns its own result type: `view`
+   * turns that result into the response, inside the same transaction.
+   */
+  map<R>(view: (result: R) => T): IdempotentAnswer<R> {
+    return new IdempotentAnswer<R>(
+      (tx, result) => this.storeResponse(tx, view(result)),
+      this.storeRefusal,
+    );
+  }
+}
+
+/** What {@link IdempotencyStore.claim} reserved, or the stored answer it found. */
+export type Claim =
+  { kind: 'PROCEED'; token: string } | { kind: 'REPLAY'; status: number; body: unknown };
+
+/**
+ * The endpoint's own object checks, run again before a stored answer is
+ * returned — as the caller now is, against the object as it now is (review of
+ * #287, finding 1). Throws what a fresh request would be refused with: the
+ * `NOT_FOUND` of an object the caller cannot see, the `403` of one it may see
+ * but not act on. It never re-runs the transition: whether the command could
+ * be applied again is not the question, who may see what it did is.
+ *
+ * `stored` is the success response being replayed, or `undefined` for a
+ * recorded refusal. A route with no target in its path (creating a
+ * transaction) has only the response to name its object.
+ */
+export type ReplayGuard<T> = (stored: T | undefined) => Promise<void>;
+
+/**
+ * Who sent this request, as the record binds it: for a person the verified
+ * token's stable identity — issuer and subject — and for a service call the
+ * calling service. The acting organization and the endpoint are the record's
+ * primary key; the target is in the request hash ({@link targeted}). Roles are
+ * not part of it: they are what the replay guard asks about, as they are now.
+ *
+ * **Not the platform user id** (review of #287 r2, finding 1). `userId` is
+ * `rasta_uid` when the token carries it and the IdP subject when it does not
+ * (`AuthGuard`), so the same person's token gaining or losing that claim on a
+ * refresh made two actors of one, and their retry was refused `409
+ * IDEMPOTENCY_KEY_REUSED` instead of answered. The platform id stays what it
+ * was: the attribution an endpoint writes (`settledBy`, `postedBy`, …).
+ */
+export function requestActor(): Record<string, string | null> {
+  const context = getContext();
+  if (context.authType === 'SERVICE') {
+    return { authType: context.authType, callerService: context.callerService ?? null };
+  }
+  return {
+    authType: context.authType,
+    issuer: context.issuer ?? null,
+    subject: context.subject ?? null,
+  };
+}
+
 /** A stored status at or above this is a recorded refusal, not a response body. */
 const REFUSAL_STATUS_FLOOR = 400;
 
 function isDeclared(refusals: TerminalRefusals, name: string): boolean {
   return Object.prototype.hasOwnProperty.call(refusals, name);
+}
+
+function declaredBy(refusals: TerminalRefusals | undefined, error: TerminalRefusalError): boolean {
+  return refusals !== undefined && isDeclared(refusals, error.refusal);
 }
 
 /**
@@ -410,6 +627,20 @@ function inFlight(endpoint: string): RastaError {
     internalContext: { endpoint },
     retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS,
   });
+}
+
+/**
+ * The claim this request took is no longer `IN_PROGRESS` — it outlived its
+ * retention and was purged, perhaps taken over by a retry — so its work must
+ * not commit. Retryable: the key is either free again or another request's,
+ * and a retry learns which.
+ */
+function claimLost(endpoint: string): RastaError {
+  return new RastaError(
+    'CONFLICT',
+    'This request took too long and its Idempotency-Key lapsed; retry shortly',
+    { internalContext: { endpoint }, retryAfterSeconds: IN_FLIGHT_RETRY_AFTER_SECONDS },
+  );
 }
 
 /**

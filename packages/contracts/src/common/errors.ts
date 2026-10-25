@@ -43,6 +43,12 @@ export const ERROR_CODES = {
   CONFLICT: 'CONFLICT',
   /** Same idempotency key, different request body. */
   IDEMPOTENCY_KEY_REUSED: 'IDEMPOTENCY_KEY_REUSED',
+  /**
+   * The caller said (`Idempotency-Replay-Deadline`) until when this request may still be executed
+   * under its key, and the service's own clock is past it. Refused before any write: THIS attempt
+   * did nothing; an earlier attempt under the same key may have (PM decision D-065).
+   */
+  REPLAY_WINDOW_CLOSED: 'REPLAY_WINDOW_CLOSED',
   /** The aggregate is not in a state that permits this transition. */
   INVALID_STATE_TRANSITION: 'INVALID_STATE_TRANSITION',
   OPTIMISTIC_LOCK_FAILED: 'OPTIMISTIC_LOCK_FAILED',
@@ -60,6 +66,21 @@ export const ERROR_CODES = {
   BUSINESS_RULE_VIOLATION: 'BUSINESS_RULE_VIOLATION',
   INSUFFICIENT_BALANCE: 'INSUFFICIENT_BALANCE',
   LEDGER_UNBALANCED: 'LEDGER_UNBALANCED',
+  /**
+   * A settlement refused because no active commission rule covers the
+   * transaction's business line (docs/24 Q-29). Nothing moved; the funds stay
+   * where they were, and the same settlement succeeds once a rule — a 0% one
+   * included (Q-08) — is in force for the line.
+   */
+  NO_ACTIVE_RULE: 'NO_ACTIVE_RULE',
+  /**
+   * A new obligation recorded without a business line while settlement fails
+   * closed (docs/24 Q-29): no rule could ever price it, so it would settle
+   * with nothing charged. Nothing was recorded; send the line. Only the source
+   * flows named in economic-service's `recorded-sources.ts` record without
+   * one, identified by their verified caller (docs/24 Q-130).
+   */
+  BUSINESS_LINE_REQUIRED: 'BUSINESS_LINE_REQUIRED',
 
   // 429
   RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
@@ -118,6 +139,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   ALREADY_EXISTS: 409,
   CONFLICT: 409,
   IDEMPOTENCY_KEY_REUSED: 409,
+  REPLAY_WINDOW_CLOSED: 409,
   INVALID_STATE_TRANSITION: 409,
   OPTIMISTIC_LOCK_FAILED: 409,
   ACTOR_IDENTITY_UNKNOWN: 422,
@@ -125,6 +147,8 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   BUSINESS_RULE_VIOLATION: 422,
   INSUFFICIENT_BALANCE: 422,
   LEDGER_UNBALANCED: 422,
+  NO_ACTIVE_RULE: 422,
+  BUSINESS_LINE_REQUIRED: 422,
   RATE_LIMIT_EXCEEDED: 429,
   INTERNAL_ERROR: 500,
   UPSTREAM_UNAVAILABLE: 503,

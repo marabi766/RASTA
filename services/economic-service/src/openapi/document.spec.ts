@@ -1,4 +1,4 @@
-import { enrichOpenApiDocument } from './document';
+import { enrichOpenApiDocument, INTERNAL_TOKEN_SCHEME } from './document';
 import { INVALID_CURSOR_MESSAGE } from '../shared/cursor';
 import type { OpenAPIObject } from '@nestjs/swagger';
 
@@ -20,6 +20,8 @@ import type { OpenAPIObject } from '@nestjs/swagger';
 describe('enrichOpenApiDocument', () => {
   const emptyDocument = (): OpenAPIObject =>
     ({ openapi: '3.0.0', info: { title: 't', version: '1' } }) as OpenAPIObject;
+  /** An operation as Nest emits it: the handler's success status, nothing else. */
+  const nest = (status: string) => ({ responses: { [status]: { description: '' } } });
 
   it('publishes the one error shape every service returns, even for an empty document', () => {
     // Referenced rather than inlined per response, so a client generates a
@@ -49,7 +51,7 @@ describe('enrichOpenApiDocument', () => {
       '/v1/wallets/me': {
         summary: 'not an operation',
         parameters: [],
-        get: { responses: {} },
+        get: nest('200'),
       },
     } as never;
 
@@ -68,7 +70,7 @@ describe('enrichOpenApiDocument', () => {
       '/v1/wallets/{id}/top-up': {
         post: {
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-          responses: {},
+          ...nest('201'),
         },
       },
     } as never;
@@ -90,7 +92,7 @@ describe('enrichOpenApiDocument', () => {
 
   it('flattens a query schema into one parameter each, carrying descriptions', () => {
     const document = emptyDocument();
-    document.paths = { '/v1/transactions': { get: { responses: {} } } } as never;
+    document.paths = { '/v1/transactions': { get: nest('200') } } as never;
 
     const enriched = enrichOpenApiDocument(document);
     const operation = (enriched.paths['/v1/transactions'] as Record<string, never>)
@@ -104,25 +106,92 @@ describe('enrichOpenApiDocument', () => {
     for (const parameter of operation.parameters) expect(parameter.in).toBe('query');
   });
 
-  it('gives a POST that takes no body a 200 rather than a 201', () => {
-    // `POST /v1/transactions/{id}/authorise-settlement` creates nothing; a
-    // document promising 201 would have clients waiting for a Location header
-    // that never arrives.
+  it('publishes the business line a commission rule requires, and the commission filters (ADR-045)', () => {
     const document = emptyDocument();
     document.paths = {
-      '/v1/transactions/{id}/authorise-settlement': { post: { responses: {} } },
-      '/v1/transactions': { post: { responses: {} } },
+      '/v1/commissions/rules': { post: nest('201'), get: nest('200') },
+      '/v1/commissions': { get: nest('200') },
     } as never;
 
     const enriched = enrichOpenApiDocument(document);
-    const authorise = (
-      enriched.paths['/v1/transactions/{id}/authorise-settlement'] as Record<string, never>
-    ).post as unknown as { responses: Record<string, unknown> };
-    const create = (enriched.paths['/v1/transactions'] as Record<string, never>)
-      .post as unknown as { responses: Record<string, unknown> };
+    const rules = enriched.paths['/v1/commissions/rules'] as Record<string, never>;
+    const body = JSON.stringify((rules.post as unknown as { requestBody: unknown }).requestBody);
+    // Required, closed to the seven lines of the contract — never free text.
+    expect(body).toMatch(/"required":\[[^\]]*"businessLine"/);
+    expect(body).toContain('MARKETPLACE_SERVICE');
 
-    expect(authorise.responses['200']).toBeDefined();
-    expect(create.responses['201']).toBeDefined();
+    const names = (path: string, operation: Record<string, never>) =>
+      (operation.get as unknown as { parameters: { name: string }[] }).parameters.map(
+        (parameter) => `${path}?${parameter.name}`,
+      );
+    expect(names('rules', rules)).toContain('rules?businessLine');
+    const charges = enriched.paths['/v1/commissions'] as Record<string, never>;
+    expect(names('commissions', charges)).toEqual(
+      expect.arrayContaining(['commissions?businessLine', 'commissions?outcome']),
+    );
+  });
+
+  it.each(['/v1/rewards/participation-rules', '/v1/rewards/recognition-rules'])(
+    'publishes %s version creation as idempotent and preconditioned (#328 r1)',
+    (path) => {
+      const document = emptyDocument();
+      // As Nest emits it: the route's `@HttpCode(201)` (#322 documents only the declared status).
+      document.paths = { [path]: { post: nest('201') } } as never;
+
+      const enriched = enrichOpenApiDocument(document);
+      const create = (enriched.paths[path] as Record<string, never>).post as unknown as {
+        parameters: { name: string; in: string; required: boolean }[];
+        requestBody: unknown;
+        responses: Record<string, { headers?: Record<string, unknown> }>;
+      };
+      const key = create.parameters.find((parameter) => parameter.name === 'Idempotency-Key');
+      expect(key).toMatchObject({ in: 'header', required: true });
+      expect(JSON.stringify(create.requestBody)).toMatch(
+        /"required":\[[^\]]*"expectedCurrentVersion"/,
+      );
+      expect(create.responses['409']?.headers?.['Retry-After']).toBeDefined();
+    },
+  );
+
+  it('documents the success body under the status the route declares, never a guessed one', () => {
+    // `dispute` takes a body and answers 200 (`@HttpCode(200)`). Guessed from
+    // the body, it was documented as a 201 carrying the view, and its real
+    // 200 carried nothing (Codex on #322).
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/transactions/{id}/authorise-settlement': { post: nest('200') },
+      '/v1/transactions/{id}/dispute': { post: nest('200') },
+      '/v1/transactions': { post: nest('201') },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const responsesOf = (path: string) =>
+      (
+        (enriched.paths[path] as Record<string, never>).post as unknown as {
+          responses: Record<string, { content?: unknown }>;
+        }
+      ).responses;
+    const successes = (path: string) =>
+      Object.keys(responsesOf(path)).filter((status) => status.startsWith('2'));
+
+    expect(successes('/v1/transactions/{id}/authorise-settlement')).toEqual(['200']);
+    expect(successes('/v1/transactions/{id}/dispute')).toEqual(['200']);
+    expect(JSON.stringify(responsesOf('/v1/transactions/{id}/dispute')['200']?.content)).toContain(
+      '#/components/schemas/TransactionDetailView',
+    );
+    expect(successes('/v1/transactions')).toEqual(['201']);
+  });
+
+  it.each([
+    ['no success status', { responses: {} }],
+    ['two success statuses', { responses: { '200': {}, '201': {} } }],
+  ])('refuses a route that declares %s rather than guess', (_, operation) => {
+    const document = emptyDocument();
+    document.paths = { '/v1/transactions/{id}/refund': { post: operation } } as never;
+
+    expect(() => enrichOpenApiDocument(document)).toThrow(
+      /POST \/v1\/transactions\/\{id\}\/refund declares \d success statuses/,
+    );
   });
 
   it('declares an optional integer Retry-After on an idempotent route’s 409, and only there', () => {
@@ -130,8 +199,8 @@ describe('enrichOpenApiDocument', () => {
     // Idempotency-Key has no in-flight state, so its 409 must not promise one.
     const document = emptyDocument();
     document.paths = {
-      '/v1/settlements': { post: { responses: {} } },
-      '/v1/ledger/journals/{id}/reverse': { post: { responses: {} } },
+      '/v1/settlements': { post: nest('201') },
+      '/v1/ledger/journals/{id}/reverse': { post: nest('201') },
     } as never;
 
     const enriched = enrichOpenApiDocument(document);
@@ -154,7 +223,7 @@ describe('enrichOpenApiDocument', () => {
 
   it('describes each documented error status, and falls back rather than omitting one', () => {
     const document = emptyDocument();
-    document.paths = { '/v1/settlements': { post: { responses: {} } } } as never;
+    document.paths = { '/v1/settlements': { post: nest('201') } } as never;
 
     const enriched = enrichOpenApiDocument(document);
     const operation = (enriched.paths['/v1/settlements'] as Record<string, never>)
@@ -172,6 +241,46 @@ describe('enrichOpenApiDocument', () => {
     );
   });
 
+  it('names NO_ACTIVE_RULE on the settlement’s 422, and only there (docs/24 Q-29)', () => {
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/settlements': { post: nest('201') },
+      '/v1/transactions': { post: nest('201') },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const unprocessable = (path: string) =>
+      (
+        (enriched.paths[path] as Record<string, never>).post as unknown as {
+          responses: Record<string, { description: string }>;
+        }
+      ).responses['422']?.description;
+
+    expect(unprocessable('/v1/settlements')).toContain('NO_ACTIVE_RULE');
+    expect(unprocessable('/v1/settlements')).toContain('INSUFFICIENT_BALANCE');
+    expect(unprocessable('/v1/transactions')).not.toContain('NO_ACTIVE_RULE');
+  });
+
+  it('names BUSINESS_LINE_REQUIRED on the obligation’s 422, and only there (docs/24 Q-29)', () => {
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/settlements': { post: nest('201') },
+      '/v1/transactions': { post: nest('201') },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const unprocessable = (path: string) =>
+      (
+        (enriched.paths[path] as Record<string, never>).post as unknown as {
+          responses: Record<string, { description: string }>;
+        }
+      ).responses['422']?.description;
+
+    expect(unprocessable('/v1/transactions')).toContain('BUSINESS_LINE_REQUIRED');
+    expect(unprocessable('/v1/transactions')).toContain('INSUFFICIENT_BALANCE');
+    expect(unprocessable('/v1/settlements')).not.toContain('BUSINESS_LINE_REQUIRED');
+  });
+
   it.each([
     '/v1/transactions',
     '/v1/settlements',
@@ -184,7 +293,7 @@ describe('enrichOpenApiDocument', () => {
     // so, on the response and on the parameter, so a client can tell a
     // refused cursor from the end of the list.
     const document = emptyDocument();
-    document.paths = { [path]: { get: { responses: {} } } } as never;
+    document.paths = { [path]: { get: nest('200') } } as never;
 
     const enriched = enrichOpenApiDocument(document);
     const operation = (enriched.paths[path] as Record<string, never>).get as unknown as {
@@ -198,9 +307,54 @@ describe('enrichOpenApiDocument', () => {
     expect(cursor?.description).toContain('400 VALIDATION_FAILED');
   });
 
+  describe('internal routes (ADR-061 § 4)', () => {
+    const INTERNAL = '/v1/internal/obligations/by-source/STATEMENT/{statementId}';
+
+    const enrichedWith = (path: string) => {
+      const document = emptyDocument();
+      // As Nest emits a plain @Get: 200 (#322 documents only the declared status).
+      document.paths = { [path]: { get: nest('200') } } as never;
+      const enriched = enrichOpenApiDocument(document);
+      return {
+        enriched,
+        operation: (enriched.paths[path] as Record<string, never>).get as unknown as {
+          security?: unknown;
+          responses: Record<string, { description: string }>;
+        },
+      };
+    };
+
+    it('declares the internal token as an apiKey in X-Internal-Token, not a bearer token', () => {
+      const { enriched } = enrichedWith(INTERNAL);
+
+      expect(enriched.components?.securitySchemes?.[INTERNAL_TOKEN_SCHEME]).toMatchObject({
+        type: 'apiKey',
+        in: 'header',
+        name: 'X-Internal-Token',
+      });
+    });
+
+    it('requires that scheme alone on an internal route, with its own 403 and 404', () => {
+      const { operation } = enrichedWith(INTERNAL);
+
+      expect(operation.security).toEqual([{ [INTERNAL_TOKEN_SCHEME]: [] }]);
+      expect(Object.keys(operation.responses).sort()).toEqual(['200', '401', '403', '404', '500']);
+      expect(operation.responses['403']?.description).toContain('user token');
+      expect(operation.responses['403']?.description).toContain('signed for no organization');
+      expect(operation.responses['404']?.description).toContain('internal token is signed for');
+    });
+
+    it('gives a public route neither the internal scheme nor the internal wording', () => {
+      const { operation } = enrichedWith('/v1/transactions/{id}');
+
+      expect(operation.security).toBeUndefined();
+      expect(operation.responses['403']?.description).toContain('AUDITOR');
+    });
+  });
+
   it('leaves a route it knows nothing about with a success response and no body', () => {
     const document = emptyDocument();
-    document.paths = { '/v1/not-a-real-route': { get: { responses: {} } } } as never;
+    document.paths = { '/v1/not-a-real-route': { get: nest('200') } } as never;
 
     const enriched = enrichOpenApiDocument(document);
     const operation = (enriched.paths['/v1/not-a-real-route'] as Record<string, never>)

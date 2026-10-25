@@ -1,8 +1,10 @@
 import { ulid } from 'ulid';
-import { SENSITIVE_KEYS, REDACTED } from '@rasta/logging';
+import { SENSITIVE_KEYS } from '@rasta/logging';
 import type { AuditChange, EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { toContractRefusalProjection } from './contract-refusal-projection';
+import { toCommissionRuleChanges } from './commission-rule-change-projection';
+import { toSettlementRefusalProjection } from './settlement-refusal-projection';
 import { AUDIT_DOMAIN_TOPIC_OWNERS, type AuditDomainTopic } from './audit-producer-topology';
 
 /**
@@ -18,7 +20,7 @@ import { AUDIT_DOMAIN_TOPIC_OWNERS, type AuditDomainTopic } from './audit-produc
  */
 
 /** The domain-projector consumer group. Also the `processed_event` key. */
-export const DOMAIN_PROJECTOR_CONSUMER = 'audit-service.domain-projector';
+export { DOMAIN_PROJECTOR_CONSUMER } from './domain-projector-consumer';
 
 /**
  * The ten topics AUD-001 subscribes to.
@@ -78,12 +80,14 @@ export interface AuditEventRecord {
   traceparent: string | null;
   sourceStreamSeq: bigint | null;
 
-  // Path B only (AUD-004 Phase B, `audit-trail.mapper.ts`). A path-A record
-  // never carries these keys — a domain envelope has nothing to put in them,
-  // and leaving them off keeps "there is nowhere for a payload to go" a
-  // structural fact of path A rather than a convention. The repository writes
-  // an absent key as SQL NULL, and the record hash already covers all six
-  // (`CANONICAL_FIELDS`), so a path-A row hashes exactly as it did before.
+  // Path B (AUD-004 Phase B, `audit-trail.mapper.ts`). A path-A record carries
+  // none of these keys — a domain envelope has nothing to put in them — with
+  // three allow-listed exceptions, each its own projection: a contract refusal's
+  // `reason`, a commission rule change's `changes`
+  // (`commission-rule-change-projection.ts`), and a refused settlement's
+  // `reason` and `changes` (`settlement-refusal-projection.ts`). The repository writes an absent
+  // key as SQL NULL, and the record hash already covers all six
+  // (`CANONICAL_FIELDS`), so every other path-A row hashes exactly as before.
 
   errorCode?: string | null;
   reason?: string | null;
@@ -156,37 +160,21 @@ export function isSensitiveKey(key: string): boolean {
   return SENSITIVE.has(key.toLowerCase());
 }
 
-/**
- * How AUD-001 represents a payload: it does not.
- *
- * ADR-053 § 5 allows only a bounded, redacted, structured delta in `changes`,
- * and path A cannot build one — a domain envelope carries the new state, not
- * before/after pairs. The honest options were a raw dump or nothing, and a raw
- * dump is the failure the ADR spends a section refusing: it would put bid
- * amounts, sealed payloads and national identifiers into the one table nobody
- * is allowed to delete from.
- *
- * So `changes` stays null in AUD-001 and the payload is never persisted. This
- * function exists for the diagnostics path only — it is what a log line or an
- * error may say about a payload — and it returns key names, never values.
- */
-export function describePayloadKeys(payload: unknown): string {
-  if (payload === null || payload === undefined) return '(none)';
-  if (typeof payload !== 'object' || Array.isArray(payload)) return `(${typeof payload})`;
-
-  const keys = Object.keys(payload as Record<string, unknown>);
-  if (keys.length === 0) return '(empty)';
-
-  // Names only, and sensitive names masked even so: a key called
-  // `nationalIdHash` tells an observer the field exists, which is as much as a
-  // diagnostic needs.
-  const shown = keys
-    .slice(0, 20)
-    .map((key) => (isSensitiveKey(key) ? REDACTED : key))
-    .join(',');
-
-  return keys.length > 20 ? `${shown},…(${keys.length} keys)` : shown;
-}
+// How AUD-001 represents a payload: it does not.
+//
+// ADR-053 § 5 allows only a bounded, redacted, structured delta in `changes`,
+// and path A cannot build one — a domain envelope carries the new state, not
+// before/after pairs. The honest options were a raw dump or nothing, and a raw
+// dump is the failure the ADR spends a section refusing: it would put bid
+// amounts, sealed payloads and national identifiers into the one table nobody
+// is allowed to delete from.
+//
+// So `changes` stays null in AUD-001 and the payload is never persisted — except
+// for the one event that *is* a before/after pair: `COMMISSION_RULE_CHANGED`,
+// whose allow-listed, validated delta `commission-rule-change-projection.ts`
+// builds (docs/23 D-057). A diagnostic does not describe the payload either,
+// not even by its key names, which a producer chooses (`refusal-diagnostics.ts`,
+// PR #378 r1 F3).
 
 /** The columns a record takes from its envelope and delivery, on either path. */
 export type AuditEnvelopeProvenance = Pick<
@@ -259,10 +247,18 @@ export function toAuditEventRecord(
   const rawActorId = envelope.actor ? envelope.actor.id : envelope.producer;
   const actorId = boundOptional(rawActorId, LIMITS.actorId);
 
-  // The one family of published events that records a refusal: contract-service's (S-06). Its
-  // closed action and reason replace the event name and the default SUCCESS; nothing else of the
-  // payload is read.
+  // The published events that record a refusal (S-06). Contract-service's: its closed action and
+  // reason replace the event name and the default SUCCESS; nothing else of the payload is read.
   const refusal = toContractRefusalProjection(envelope, delivery);
+
+  // Economic's refused settlement (docs/24 Q-29): REFUSED under its own name, the closed reason,
+  // and the business line and transaction type, unchanged, in `changes`. Validated against
+  // economic's contract and allow-listed; refused to the dead-letter topic otherwise.
+  const settlementRefusal = toSettlementRefusalProjection(envelope, delivery);
+
+  // The one published before/after pair: a commission rule's terms (docs/23 D-057). Allow-listed
+  // and validated against economic's contract; refused to the dead-letter topic otherwise.
+  const ruleChanges = toCommissionRuleChanges(envelope, delivery);
 
   return {
     ...toEnvelopeProvenance(envelope, delivery),
@@ -282,11 +278,15 @@ export function toAuditEventRecord(
     resourceType: bound(envelope.aggregateType, LIMITS.resourceType),
     resourceId: boundOptional(envelope.aggregateId, LIMITS.resourceId),
 
-    // A published domain event is a change that already happened — except the contract refusals
-    // above. Every other refusal never reaches a topic, which is why path B exists.
-    outcome: refusal ? 'REFUSED' : 'SUCCESS',
+    // A published domain event is a change that already happened — except the refusals above.
+    // Every other refusal never reaches a topic, which is why path B exists.
+    outcome: refusal || settlementRefusal ? 'REFUSED' : 'SUCCESS',
     occurrenceCount: 1,
     // Absent, not null, on every other path-A record: its hash is unchanged.
     ...(refusal ? { reason: refusal.reason } : {}),
+    ...(settlementRefusal
+      ? { reason: settlementRefusal.reason, changes: settlementRefusal.changes }
+      : {}),
+    ...(ruleChanges ? { changes: ruleChanges } : {}),
   };
 }

@@ -130,6 +130,12 @@ describe('the schema models nothing COM-006 has not decided', () => {
       'Shipment',
       'ShipmentLeg',
       'TrackingEvent',
+      'ReturnShipment',
+      'ReturnShipmentLine',
+      'ReturnTrackingEvent',
+      'ReturnDisposition',
+      // Q-133 (9)(a): a marketplace dispatch reservation withdrawn here on reconciliation.
+      'ReturnDispatchWithdrawal',
       'IdempotencyKey',
     ]);
   });

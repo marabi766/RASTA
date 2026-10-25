@@ -65,7 +65,7 @@ const page = (
 
 describe('the project list', () => {
   it('shows each project with a status word, a Persian-digit estimate and a link to it', () => {
-    render(<ProjectsScreen result={page([PROJECT])} query={{}} />);
+    render(<ProjectsScreen demoMode="REAL" result={page([PROJECT])} query={{}} />);
 
     expect(screen.getByRole('link', { name: PROJECT.title })).toHaveAttribute(
       'href',
@@ -84,7 +84,13 @@ describe('the project list', () => {
   });
 
   it('marks the active filter and keeps it in the next-page link', () => {
-    render(<ProjectsScreen result={page([PROJECT], 'c2')} query={{ status: 'APPROVED' }} />);
+    render(
+      <ProjectsScreen
+        demoMode="REAL"
+        result={page([PROJECT], 'c2')}
+        query={{ status: 'APPROVED' }}
+      />,
+    );
 
     expect(screen.getByRole('link', { name: 'تأییدشده' })).toHaveAttribute('aria-current', 'page');
     expect(screen.getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
@@ -94,15 +100,15 @@ describe('the project list', () => {
   });
 
   it('says so when there are none, with and without a filter', () => {
-    const { rerender } = render(<ProjectsScreen result={page([])} query={{}} />);
+    const { rerender } = render(<ProjectsScreen demoMode="REAL" result={page([])} query={{}} />);
     expect(screen.getByText('این سازمان هنوز پروژه‌ای ثبت نکرده است.')).toBeInTheDocument();
 
-    rerender(<ProjectsScreen result={page([])} query={{ status: 'DRAFT' }} />);
+    rerender(<ProjectsScreen demoMode="REAL" result={page([])} query={{ status: 'DRAFT' }} />);
     expect(screen.getByText('پروژه‌ای در وضعیت «پیش‌نویس» نیست.')).toBeInTheDocument();
   });
 
   it('renders a refusal as no access', () => {
-    render(<ProjectsScreen result={{ kind: 'FORBIDDEN' }} query={{}} />);
+    render(<ProjectsScreen demoMode="REAL" result={{ kind: 'FORBIDDEN' }} query={{}} />);
     expect(screen.getByText('فهرست پروژه‌های این سازمان در اختیار شما نیست.')).toBeInTheDocument();
   });
 
@@ -112,31 +118,30 @@ describe('the project list', () => {
   ] as const)(
     'renders a degraded read ($kind) with the correlation id and fixed text',
     (result) => {
-      render(<ProjectsScreen result={result} query={{}} />);
+      render(<ProjectsScreen demoMode="REAL" result={result} query={{}} />);
       expect(screen.getByText(/فهرست پروژه‌ها خوانده نشد/)).toBeInTheDocument();
       expect(screen.getByText(/corr-1/)).toBeInTheDocument();
     },
   );
 
-  it('has no accessibility violations in any state', async () => {
-    for (const result of [
-      page([PROJECT], 'c2'),
-      page([]),
-      { kind: 'FORBIDDEN' } as const,
-      { kind: 'NOT_FOUND' } as const,
-      { kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' } as const,
-      { kind: 'MALFORMED', correlationId: 'corr-1' } as const,
-    ]) {
-      const { container, unmount } = render(<ProjectsScreen result={result} query={{}} />);
-      expect(await axe(container)).toHaveNoViolations();
-      unmount();
-    }
+  // One test per state, here and in the detail below: each axe run gets the
+  // whole default timeout to itself instead of sharing one across the states.
+  it.each([
+    ['more to page', page([PROJECT], 'c2')],
+    ['empty', page([])],
+    ['refused', { kind: 'FORBIDDEN' } as const],
+    ['not found', { kind: 'NOT_FOUND' } as const],
+    ['unavailable', { kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' } as const],
+    ['malformed', { kind: 'MALFORMED', correlationId: 'corr-1' } as const],
+  ])('has no accessibility violations (%s)', async (_name, result) => {
+    const { container } = render(<ProjectsScreen demoMode="REAL" result={result} query={{}} />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });
 
 describe('the project detail', () => {
   it('shows the record, the scope of work and the needs summary', () => {
-    render(<ProjectDetailScreen result={{ kind: 'OK', data: DETAIL }} />);
+    render(<ProjectDetailScreen demoMode="REAL" result={{ kind: 'OK', data: DETAIL }} />);
 
     expect(screen.getByRole('heading', { name: PROJECT.title })).toBeInTheDocument();
     expect(screen.getByText('خاکبرداری و تسطیح')).toBeInTheDocument();
@@ -147,6 +152,7 @@ describe('the project detail', () => {
   it('says there is no scope of work, and shows the reason when the service gave one', () => {
     render(
       <ProjectDetailScreen
+        demoMode="REAL"
         result={{
           kind: 'OK',
           data: { ...DETAIL, scopeOfWork: '', needsSummary: null, statusReason: 'نیاز به اصلاح' },
@@ -159,7 +165,9 @@ describe('the project detail', () => {
   });
 
   it('answers another tenant’s project exactly as one that does not exist', () => {
-    const { container } = render(<ProjectDetailScreen result={{ kind: 'NOT_FOUND' }} />);
+    const { container } = render(
+      <ProjectDetailScreen demoMode="REAL" result={{ kind: 'NOT_FOUND' }} />,
+    );
     expect(screen.getByText('این پروژه پیدا نشد')).toBeInTheDocument();
     // No id, and no hint that it exists elsewhere.
     expect(container.textContent).not.toContain('PRJ_');
@@ -167,11 +175,14 @@ describe('the project detail', () => {
   });
 
   it('renders refusal and degraded outcomes with fixed text', () => {
-    const { rerender } = render(<ProjectDetailScreen result={{ kind: 'FORBIDDEN' }} />);
+    const { rerender } = render(
+      <ProjectDetailScreen demoMode="REAL" result={{ kind: 'FORBIDDEN' }} />,
+    );
     expect(screen.getByText('این پروژه در اختیار شما نیست.')).toBeInTheDocument();
 
     rerender(
       <ProjectDetailScreen
+        demoMode="REAL"
         result={{ kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' }}
       />,
     );
@@ -179,18 +190,15 @@ describe('the project detail', () => {
     expect(screen.getByText(/corr-9/)).toBeInTheDocument();
   });
 
-  it('has no accessibility violations in any state', async () => {
-    for (const result of [
-      { kind: 'OK', data: DETAIL } as const,
-      { kind: 'NOT_FOUND' } as const,
-      { kind: 'FORBIDDEN' } as const,
-      { kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' } as const,
-      { kind: 'MALFORMED', correlationId: 'corr-2' } as const,
-    ]) {
-      const { container, unmount } = render(<ProjectDetailScreen result={result} />);
-      expect(await axe(container)).toHaveNoViolations();
-      unmount();
-    }
+  it.each([
+    ['shown', { kind: 'OK', data: DETAIL } as const],
+    ['not found', { kind: 'NOT_FOUND' } as const],
+    ['refused', { kind: 'FORBIDDEN' } as const],
+    ['unavailable', { kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' } as const],
+    ['malformed', { kind: 'MALFORMED', correlationId: 'corr-2' } as const],
+  ])('has no accessibility violations (%s)', async (_name, result) => {
+    const { container } = render(<ProjectDetailScreen demoMode="REAL" result={result} />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });
 
@@ -243,7 +251,7 @@ describe('a malformed timestamp, from the response to the page', () => {
     });
     const result = await fetchProjects(session);
 
-    const { container } = render(<ProjectsScreen result={result} query={{}} />);
+    const { container } = render(<ProjectsScreen demoMode="REAL" result={result} query={{}} />);
     expect(screen.getByText(/فهرست پروژه‌ها خوانده نشد/)).toBeInTheDocument();
     expect(screen.getByText(/corr-list/)).toBeInTheDocument();
     expect(container.textContent).not.toContain(UPSTREAM);
@@ -258,7 +266,7 @@ describe('a malformed timestamp, from the response to the page', () => {
       });
       const result = await fetchProject(session, 'PRJ_1');
 
-      const { container } = render(<ProjectDetailScreen result={result} />);
+      const { container } = render(<ProjectDetailScreen demoMode="REAL" result={result} />);
       expect(screen.getByText(/جزئیات پروژه خوانده نشد/)).toBeInTheDocument();
       expect(screen.getByText(/corr-detail/)).toBeInTheDocument();
       expect(container.textContent).not.toContain(UPSTREAM);
@@ -272,7 +280,33 @@ describe('a malformed timestamp, from the response to the page', () => {
     });
     const result = await fetchProject(session, 'PRJ_1');
 
-    render(<ProjectDetailScreen result={result} />);
+    render(<ProjectDetailScreen demoMode="REAL" result={result} />);
     expect(screen.getByRole('heading', { name: PROJECT.title })).toBeInTheDocument();
+  });
+});
+
+describe('the project list and the project: «حالت نمایشی» over the estimates (Q-14)', () => {
+  const LABEL = 'حالت نمایشی';
+  const UNKNOWN = 'وضعیت درگاه پرداخت معلوم نیست';
+
+  it.each([
+    ['SIMULATED', LABEL],
+    ['UNKNOWN', UNKNOWN],
+  ] as const)('draws %s’s notice on both', (demoMode, text) => {
+    const list = render(<ProjectsScreen demoMode={demoMode} result={page([PROJECT])} query={{}} />);
+    expect(list.getByText(text)).toBeInTheDocument();
+    list.unmount();
+    render(<ProjectDetailScreen demoMode={demoMode} result={{ kind: 'OK', data: DETAIL }} />);
+    expect(screen.getByText(text)).toBeInTheDocument();
+  });
+
+  it('draws none on either once the provider is real', () => {
+    const list = render(<ProjectsScreen demoMode="REAL" result={page([PROJECT])} query={{}} />);
+    expect(list.queryByText(LABEL)).toBeNull();
+    expect(list.queryByText(UNKNOWN)).toBeNull();
+    list.unmount();
+    render(<ProjectDetailScreen demoMode="REAL" result={{ kind: 'OK', data: DETAIL }} />);
+    expect(screen.queryByText(LABEL)).toBeNull();
+    expect(screen.queryByText(UNKNOWN)).toBeNull();
   });
 });

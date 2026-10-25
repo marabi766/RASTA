@@ -15,6 +15,8 @@ export const REFUSAL_AREAS = {
   policy: 'Approval policy cannot be written',
   amendment: 'Amendment cannot be made',
   milestone: 'Milestone cannot be planned',
+  statement: 'Statement cannot be drafted or submitted',
+  decision: 'Statement cannot be decided',
 } as const;
 export type RefusalArea = keyof typeof REFUSAL_AREAS;
 
@@ -42,6 +44,8 @@ export const REFUSAL_REASONS = {
   },
   policy: {
     AUTHORITY_NOT_GOVERNED_ORGANIZATION: 422,
+    /** Amount bounds on a step of a workflow that is not a statement chain (CON-003 PR 5). */
+    AMOUNT_BOUNDS_NOT_APPLICABLE: 422,
   },
   /** Proposing and signing an amendment (CON-003 PR 3, Q-100); the signing reasons are the contract's own. */
   amendment: {
@@ -67,6 +71,64 @@ export const REFUSAL_REASONS = {
     CONTRACT_NOT_SIGNED: 422,
     MILESTONE_REFERENCED: 422,
     MILESTONE_LIMIT_REACHED: 422,
+  },
+  /** Drafting (CON-003 PR 4) and submitting (PR 5) a statement (ADR-068 § 5, Q-96). */
+  statement: {
+    /** The contractor drafts and submits; the employer's approvers decide (Q-96). */
+    AUTHOR_NOT_CONTRACTOR: 403,
+    CONTRACT_NOT_SIGNED: 422,
+    /** A deduction that is not a rule the employer configured and keeps in force (Q-96 (6)). */
+    DEDUCTION_NOT_CONFIGURED: 422,
+    /** The deductions would take more than the gross (ADR-068 § 5: net ≥ 0). */
+    STATEMENT_NET_NEGATIVE: 422,
+    /** The lines sum past the largest amount a bigint stores. */
+    STATEMENT_EXCEEDS_LIMIT: 422,
+    /** A line's milestone is not a planned milestone of this contract (Q-100 (4)). */
+    MILESTONE_NOT_OF_CONTRACT: 422,
+    /** Only a draft is submitted. */
+    STATEMENT_NOT_DRAFT: 422,
+    /** The submitter's stable identity is unknown, so no approval could keep them out (#188). */
+    ACTOR_IDENTITY_UNKNOWN: 422,
+    /** No `contract.statement.technical` policy is in force for the employer: no submission (Q-96 (1)). */
+    TECHNICAL_POLICY_REQUIRED: 422,
+    /** No `contract.statement.financial` policy is in force for the employer. */
+    FINANCIAL_POLICY_REQUIRED: 422,
+    /** The technical policy in force has no step that applies to this statement's gross. */
+    TECHNICAL_STEP_NOT_APPLICABLE: 422,
+    /** The financial policy in force has no step that applies to this statement's gross. */
+    FINANCIAL_STEP_NOT_APPLICABLE: 422,
+    /** A step that applies names the contractor's own organization: it never approves its own claim. */
+    APPROVAL_STEP_NAMES_CONTRACTOR: 422,
+    /** The union that wrote a chain's policy in force no longer governs the employer (Q-70 (7)). */
+    POLICY_AUTHOR_NOT_GOVERNING: 422,
+  },
+  /** Deciding a step of a submitted statement's approval chain (CON-003 PR 6, ADR-068 § 5, Q-96). */
+  decision: {
+    /** The caller's organization is not the authority the named step's snapshot names. */
+    NOT_STEP_AUTHORITY: 403,
+    /** Separation of duties: the decider is also a member of the contractor's organization. */
+    MEMBER_OF_CONTRACTOR: 403,
+    /** Separation of duties: the decider is the person who submitted the statement (Q-96 (3)). */
+    SUBMITTER_MAY_NOT_DECIDE: 422,
+    /** Separation of duties: the decider already decided a step of this statement, in either chain. */
+    ALREADY_DECIDED_STATEMENT: 422,
+    /** The decider and the submitter, or an earlier decider, cannot be told apart (#188). */
+    ACTOR_IDENTITY_UNKNOWN: 422,
+    CONTRACT_NOT_SIGNED: 422,
+    /** A draft: nothing to decide yet. */
+    STATEMENT_NOT_SUBMITTED: 422,
+    /** APPROVED or REJECTED: final (Q-96 (7)). */
+    STATEMENT_DECIDED: 422,
+    /** The named step is not one of the statement's snapshot. */
+    STEP_NOT_IN_CHAIN: 422,
+    /** The financial chain opens only after the technical one is done (Q-96 (2)). */
+    CHAIN_NOT_OPEN: 422,
+    /** An earlier step of the chain is still undecided: the steps are decided in their order. */
+    STEP_NOT_NEXT: 422,
+    /** The named step has been decided (by another person, or at the same moment). */
+    STEP_DECIDED: 409,
+    /** Approving it would take the approved gross past the price and the amendments (Q-96 (5)). */
+    APPROVED_TOTAL_EXCEEDS_CAP: 422,
   },
 } as const satisfies Record<RefusalArea, Record<string, 403 | 409 | 422>>;
 

@@ -50,6 +50,7 @@ describe('contract refusals in the audit store (real PostgreSQL)', () => {
     action: string,
     reason: string,
     occurredAt: Date,
+    side = 'EMPLOYER',
   ): { source: EventEnvelope } => ({
     source: envelope(
       'CONTRACT_AUTHORITY_REFUSED',
@@ -57,7 +58,7 @@ describe('contract refusals in the audit store (real PostgreSQL)', () => {
         contractId,
         organizationId: ORG,
         action,
-        side: 'EMPLOYER',
+        side,
         subjectId: null,
         reason,
         policyId,
@@ -93,6 +94,10 @@ describe('contract refusals in the audit store (real PostgreSQL)', () => {
       ),
       envelope('CONTRACT_SIGNED', { contractId }, at(13)),
       authorityRefused('CANCEL_CONTRACT', 'PLATFORM_ADMINISTRATOR', at(14)).source,
+      authorityRefused('DRAFT_STATEMENT', 'NOT_CONTRACTOR', at(16)).source,
+      authorityRefused('SUBMIT_STATEMENT', 'ROLE_NOT_PERMITTED', at(17)).source,
+      authorityRefused('APPROVE_STATEMENT', 'NOT_STEP_AUTHORITY', at(18), 'APPROVER').source,
+      authorityRefused('REJECT_STATEMENT', 'SUBMITTER_MAY_NOT_DECIDE', at(19)).source,
       {
         ...envelope(
           'APPROVAL_POLICY_APPROVAL_REFUSED',
@@ -135,16 +140,32 @@ describe('contract refusals in the audit store (real PostgreSQL)', () => {
     const items = response.body.items as { action: string; reason: string; outcome: string }[];
     expect(items.map((item) => [item.action, item.reason, item.outcome]).sort()).toEqual([
       ['APPROVE_POLICY', 'SELF_APPROVAL', 'REFUSED'],
+      ['APPROVE_STATEMENT', 'NOT_STEP_AUTHORITY', 'REFUSED'],
       ['CANCEL_CONTRACT', 'PLATFORM_ADMINISTRATOR', 'REFUSED'],
+      ['DRAFT_STATEMENT', 'NOT_CONTRACTOR', 'REFUSED'],
       ['PLAN_MILESTONE', 'NOT_EMPLOYER', 'REFUSED'],
+      ['REJECT_STATEMENT', 'SUBMITTER_MAY_NOT_DECIDE', 'REFUSED'],
       ['SIGN_AMENDMENT', 'MEMBER_OF_BOTH_PARTIES', 'REFUSED'],
       ['SIGN_CONTRACT', 'SIGNATURE_POLICY_REQUIRED', 'REFUSED'],
+      ['SUBMIT_STATEMENT', 'ROLE_NOT_PERMITTED', 'REFUSED'],
     ]);
   });
 
   it('narrows by the closed action, and leaves a success a success', async () => {
     const refused = await search({ outcome: 'REFUSED', action: 'SIGN_AMENDMENT' });
     expect(refused.body.items).toHaveLength(1);
+    const drafts = await search({ outcome: 'REFUSED', action: 'DRAFT_STATEMENT' });
+    expect(drafts.body.items.map((item: { reason: string }) => item.reason)).toEqual([
+      'NOT_CONTRACTOR',
+    ]);
+    const submissions = await search({ outcome: 'REFUSED', action: 'SUBMIT_STATEMENT' });
+    expect(submissions.body.items.map((item: { reason: string }) => item.reason)).toEqual([
+      'ROLE_NOT_PERMITTED',
+    ]);
+    const approvals = await search({ outcome: 'REFUSED', action: 'APPROVE_STATEMENT' });
+    expect(approvals.body.items.map((item: { reason: string }) => item.reason)).toEqual([
+      'NOT_STEP_AUTHORITY',
+    ]);
 
     const succeeded = await search({ outcome: 'SUCCESS' });
     expect(succeeded.body.items).toHaveLength(1);

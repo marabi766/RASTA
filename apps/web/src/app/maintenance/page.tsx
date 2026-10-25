@@ -3,7 +3,7 @@ import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchMaintenanceRequests, type MaintenanceRequestListQuery } from '@/server/maintenance';
 import { canReportMaintenance } from '@/server/maintenance-commands';
-import { fetchCurrentUser } from '@/server/identity';
+import { tokenWriteRoles } from '@/server/realm-roles';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { MaintenanceScreen } from './MaintenanceScreen';
@@ -32,6 +32,10 @@ export default async function MaintenancePage({
 }) {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/maintenance');
+  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  // the set the service decides on — not `/v1/users/me`, which runs ahead of the
+  // token until it is refreshed.
+  const roles = tokenWriteRoles(session.accessToken);
 
   const params = await searchParams;
   const query: MaintenanceRequestListQuery = {
@@ -41,16 +45,12 @@ export default async function MaintenancePage({
     cursor: one(params.cursor),
   };
 
-  const [result, currentUser] = await Promise.all([
-    fetchMaintenanceRequests(session, query),
-    fetchCurrentUser(session),
-  ]);
+  const result = await fetchMaintenanceRequests(session, query);
 
-  // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a failed identity
-  // read shows no form rather than one that might not work, and
+  // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a token whose roles
+  // cannot be read shows no form rather than one that might not work, and
   // maintenance-service decides again on every submit.
-  const canReport =
-    currentUser.kind === 'USER' && canReportMaintenance(currentUser.user.effectiveRoles);
+  const canReport = roles !== null && canReportMaintenance(roles);
 
   return (
     <AppShell
@@ -64,7 +64,7 @@ export default async function MaintenancePage({
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/maintenance" current={currentUser} />}
+      sidebar={<PortalSidebar session={session} currentHref="/maintenance" />}
     >
       <MaintenanceScreen
         result={result}

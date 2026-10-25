@@ -1,3 +1,4 @@
+import { CompressionTypes } from 'kafkajs';
 import { DLQ_REASONS } from '@rasta/contracts';
 import { dlqMessagesTotal } from '@rasta/observability';
 import {
@@ -119,14 +120,37 @@ describe('EventConsumer.stop by a deadline (Codex on #267)', () => {
     });
 
     it('waits for a handler that ends in time, and commits it', async () => {
-      const h = await started(() => new Promise<void>((resolve) => setTimeout(resolve, 150)));
+      // The handler ends when the test says so, not after a wall-clock delay: on a loaded runner
+      // a 20 ms sleep before stop() could eat most of a 150 ms handler and fail a lower bound on
+      // stop's duration (main be0f5fa7, #311, #318). What matters is the order — stop() resolves
+      // only after the handler has finished — and that is checked directly.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let handlerStarted = false;
+      let handlerFinished = false;
+      const h = await started(async () => {
+        handlerStarted = true;
+        await gate;
+        handlerFinished = true;
+      });
       const delivered = h.kafka.deliver(message('8'));
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await until(() => handlerStarted);
 
-      const tookMs = await timedStop(h.consumer, 2000);
+      let stopped = false;
+      let finishedWhenStopped = false;
+      const stopping = timedStop(h.consumer, 2000).then((tookMs) => {
+        stopped = true;
+        finishedWhenStopped = handlerFinished;
+        return tookMs;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(stopped).toBe(false);
+
+      release();
+      const tookMs = await stopping;
       await delivered;
 
-      expect(tookMs).toBeGreaterThanOrEqual(100);
+      expect(finishedWhenStopped).toBe(true);
       expect(tookMs).toBeLessThan(1000);
       expect(h.kafka.committed).toEqual(['8']);
       expect(h.kafka.disconnected).toBe(true);
@@ -398,7 +422,12 @@ describe('EventConsumer.stop by a deadline (Codex on #267)', () => {
       await h.consumer.stop({ deadlineAt: Date.now() + 2000 });
 
       expect(h.producer.sent).toEqual([
-        { topic: DLQ_TOPIC, acks: -1, messages: expect.any(Array) },
+        {
+          topic: DLQ_TOPIC,
+          acks: -1,
+          compression: CompressionTypes.GZIP,
+          messages: expect.any(Array),
+        },
       ]);
       expect(h.kafka.committed).toEqual(['21']);
       expect(h.producer.disconnects).toBe(1);

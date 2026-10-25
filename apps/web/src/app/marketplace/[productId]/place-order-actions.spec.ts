@@ -27,8 +27,15 @@ const redirect = jest.fn((url: string) => {
   throw new Error(`NEXT_REDIRECT:${url}`);
 });
 
-jest.mock('@/server/current-session', () => ({ currentSession: () => currentSession() }));
+const missingSessionReason = jest.fn();
+jest.mock('@/server/current-session', () => ({
+  currentSession: () => currentSession(),
+  missingSessionReason: () => missingSessionReason(),
+}));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
+// The provider gate is open here: what it refuses, against a fake gateway, is
+// `app/money-actions-gate.spec.ts`.
+jest.mock('@/server/money-gate', () => ({ mayDispatch: async () => true }));
 jest.mock('@/server/place-order', () => {
   const actual = jest.requireActual('@/server/place-order');
   return { ...actual, placeOrder: (...args: unknown[]) => placeOrder(...args) };
@@ -68,6 +75,8 @@ function formData(
 
 beforeEach(() => {
   currentSession.mockResolvedValue(SESSION);
+  missingSessionReason.mockReset();
+  missingSessionReason.mockResolvedValue('NO_SESSION');
   placeOrder.mockReset();
   placeOrder.mockResolvedValue({
     kind: 'CREATED',
@@ -83,6 +92,16 @@ describe('placing an order — the full order of checks', () => {
     expect(await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD))).toEqual({
       kind: 'REFUSED',
       reason: 'NO_SESSION',
+    });
+    expect(placeOrder).not.toHaveBeenCalled();
+  });
+
+  it('refuses a post whose session is only unavailable as SESSION_UNAVAILABLE, not "ended"', async () => {
+    currentSession.mockResolvedValue(null);
+    missingSessionReason.mockResolvedValue('SESSION_UNAVAILABLE');
+    expect(await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD))).toEqual({
+      kind: 'REFUSED',
+      reason: 'SESSION_UNAVAILABLE',
     });
     expect(placeOrder).not.toHaveBeenCalled();
   });
@@ -290,12 +309,36 @@ describe('placing an order — what the service answers', () => {
     placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_5' });
     const first = await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD, { submission }));
     if (first.kind !== 'UNCONFIRMED') throw new Error('expected UNCONFIRMED');
-    currentSession.mockResolvedValue(null);
+    const form = formData(first.values, { submission, csrf: 'not-the-token' });
 
-    expect(await submitPlaceOrder(first, formData(first.values, { submission }))).toMatchObject({
-      kind: 'UNCONFIRMED',
-      submissionId: submission,
-      retryRefused: true,
+    expect(await submitPlaceOrder(first, form)).toEqual({ ...first, retryRefused: true });
+    expect(placeOrder).toHaveBeenCalledTimes(1);
+  });
+
+  describe('a retry that finds no session', () => {
+    async function unconfirmed() {
+      const submission = mintSubmissionId(SESSION);
+      placeOrder.mockResolvedValueOnce({ kind: 'UNKNOWN_OUTCOME', correlationId: 'COR_6' });
+      const first = await submitPlaceOrder(IDLE_PLACE_ORDER_FORM, formData(GOOD, { submission }));
+      if (first.kind !== 'UNCONFIRMED') throw new Error('expected UNCONFIRMED');
+      currentSession.mockResolvedValue(null);
+      return { first, form: formData(first.values, { submission }) };
+    }
+
+    it('says the session ended — authoritatively — when it has (NO_SESSION)', async () => {
+      const { first, form } = await unconfirmed();
+      missingSessionReason.mockResolvedValue('NO_SESSION');
+      expect(await submitPlaceOrder(first, form)).toEqual({ ...first, sessionEnded: true });
+      expect(placeOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it('stays unknown, with its retry, when the refresh is only unavailable (SESSION_UNAVAILABLE)', async () => {
+      const { first, form } = await unconfirmed();
+      missingSessionReason.mockResolvedValue('SESSION_UNAVAILABLE');
+      const state = await submitPlaceOrder(first, form);
+      expect(state).toEqual({ ...first, retryUnknown: true });
+      expect(state).not.toHaveProperty('sessionEnded');
+      expect(placeOrder).toHaveBeenCalledTimes(1);
     });
   });
 

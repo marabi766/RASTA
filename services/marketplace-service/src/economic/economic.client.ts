@@ -1,6 +1,7 @@
+import { internalFetch } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError } from '@rasta/nest-common';
-import { ERROR_CODES, type ErrorCode } from '@rasta/contracts';
+import { ERROR_CODES, type ApiError, type ErrorCode } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { ECONOMIC_SERVICE, SERVICE_NAME, type MarketplaceEnv } from '../config/env';
 import { economicCallDuration, economicCallsTotal } from '../observability/metrics';
@@ -45,7 +46,49 @@ export interface TransactionView {
   commissionAmountMinor: string;
   netAmountMinor: string;
   currency: string;
+  sourceType: string | null;
   sourceReference: string | null;
+}
+
+/**
+ * What `GET /v1/transactions/{id}` answers with: the transaction as its payer
+ * sees it now, with the settlement that closed it, if one did. Only the
+ * fields the saga reads.
+ */
+export interface TransactionDetailView extends TransactionView {
+  disputedAt: string | null;
+  /**
+   * The objection, kept through the resolution. On a transaction resolved
+   * before economic-service kept the resolution apart — or by an
+   * economic-service older than that — the resolution, written over it.
+   */
+  disputeReason: string | null;
+  /**
+   * The resolution, once resolved (docs/23 D-060). Null on a transaction
+   * resolved before economic-service kept it apart; absent from an
+   * economic-service older than the field.
+   */
+  disputeResolution?: string | null;
+  /**
+   * The latest dispute's identity: new each time the transaction is disputed,
+   * assigned by economic-service and kept through the resolution. What a
+   * resolution names so that it decides that dispute and no other (D-053).
+   * Absent from an economic-service older than the field.
+   */
+  disputeId?: string | null;
+  settlement: { id: string; journalId: string; settledAt: string } | null;
+  /**
+   * When it was authorised for settlement and, if a service did it, which
+   * service and under which `Idempotency-Key`. economic-service keeps this for
+   * good, unlike the command's stored answer: it is how the saga knows its own
+   * authorisation took effect on a transaction disputed since (D-053). Absent
+   * from an economic-service older than the field.
+   */
+  settlementAuthorisation?: {
+    authorisedAt: string;
+    service: string | null;
+    idempotencyKey: string | null;
+  } | null;
 }
 
 /**
@@ -72,6 +115,108 @@ export interface SettlementView {
 
 /** The economic transaction type an order's obligation is recorded as. */
 const OBLIGATION_TYPE = 'MARKETPLACE_ORDER';
+
+/** The source type it is recorded under, with the order id as the reference. */
+const OBLIGATION_SOURCE_TYPE = 'ORDER';
+
+/** What the saga records an order's obligation with: read from the order alone. */
+export interface ObligationTerms {
+  orderId: string;
+  buyerOrganizationId: string;
+  supplierOrganizationId: string;
+  totalAmountMinor: bigint;
+  currency: string;
+}
+
+/**
+ * Which of the terms `createObligation` sends `transaction` does not carry,
+ * by name; empty when it is exactly the obligation the saga records.
+ *
+ * Every term, not the key: payer, payee, amount, currency, type, source type
+ * and reference. A row under the order's key on other terms is somebody
+ * else's — 1 rial to an accomplice, recorded first by the buyer's
+ * administrator, was settled as the order's payment (review of #334 round 1,
+ * F1). Amounts compare as economic-service writes them, decimal minor units.
+ */
+export function termsDiffer(terms: ObligationTerms, transaction: TransactionView): string[] {
+  const differ: string[] = [];
+  if (transaction.organizationId !== terms.buyerOrganizationId) differ.push('payer');
+  if (transaction.counterpartyOrganizationId !== terms.supplierOrganizationId) {
+    differ.push('payee');
+  }
+  if (transaction.grossAmountMinor !== terms.totalAmountMinor.toString()) differ.push('amount');
+  if (transaction.currency !== terms.currency) differ.push('currency');
+  if (transaction.transactionType !== OBLIGATION_TYPE) differ.push('transactionType');
+  if (transaction.sourceType !== OBLIGATION_SOURCE_TYPE) differ.push('sourceType');
+  if (transaction.sourceReference !== terms.orderId) differ.push('sourceReference');
+  return differ;
+}
+
+/**
+ * What a found obligation's status says about the buyer's money.
+ *
+ * - `HELD`: in escrow now. The only status that proves it: economic-service
+ *   places the hold and moves the obligation to HELD in one transaction, and
+ *   every way the money leaves escrow moves it on.
+ * - `UNPROVEN`: PENDING_SETTLEMENT or DISPUTED. Reached from HELD with the
+ *   hold still in place, but also from CREATED with none (an obligation with
+ *   no escrow, ADR-032) — and a status the saga's own creation never leaves
+ *   it in, so somebody else moved it.
+ * - `RETURNED`: REFUNDED — back with the buyer.
+ * - `PAID_OUT`: SETTLED.
+ * - `NEVER_HELD`: CREATED, CANCELLED, FAILED.
+ *
+ * A status this service does not know is `UNPROVEN`, never `HELD`.
+ */
+export type ObligationFunds = 'HELD' | 'UNPROVEN' | 'RETURNED' | 'PAID_OUT' | 'NEVER_HELD';
+
+export function fundsOf(status: string): ObligationFunds {
+  switch (status) {
+    case 'HELD':
+      return 'HELD';
+    case 'REFUNDED':
+      return 'RETURNED';
+    case 'SETTLED':
+      return 'PAID_OUT';
+    case 'CREATED':
+    case 'CANCELLED':
+    case 'FAILED':
+      return 'NEVER_HELD';
+    default:
+      return 'UNPROVEN';
+  }
+}
+
+/** One page of `GET /v1/transactions`. */
+interface TransactionPage {
+  items: TransactionView[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+/** The lookup's page: economic-service's largest. */
+const OBLIGATION_LOOKUP_PAGE_SIZE = 100;
+
+/**
+ * Pages the lookup reads before it gives up on a complete answer. The exact
+ * key has at most one row per payer, so a second page already means
+ * economic-service is not answering the question asked.
+ */
+export const OBLIGATION_LOOKUP_PAGES = 10;
+
+/**
+ * The lookup did not reach the end of economic-service's answer. Nothing can
+ * be concluded from part of it — not "nothing is held", not "only somebody
+ * else's row" — so the saga stops instead (`OBLIGATION_LOOKUP_INCOMPLETE`).
+ */
+export class ObligationLookupIncomplete extends Error {
+  constructor(readonly pagesRead: number) {
+    super(
+      `economic-service's answer to the obligation lookup did not end within ${pagesRead} page(s)`,
+    );
+    this.name = 'ObligationLookupIncomplete';
+  }
+}
 
 /** Keys derived from identity, so a retry is a replay rather than a new act. */
 export const idempotencyKeyFor = {
@@ -112,14 +257,9 @@ export class EconomicClient {
    * hold itself, and a separate check would be a TOCTOU: between the check and
    * the hold the money can go.
    */
-  async createObligation(input: {
-    orderId: string;
-    buyerOrganizationId: string;
-    supplierOrganizationId: string;
-    totalAmountMinor: bigint;
-    currency: string;
-    correlationId: string;
-  }): Promise<TransactionView> {
+  async createObligation(
+    input: ObligationTerms & { correlationId: string },
+  ): Promise<TransactionView> {
     return this.call<TransactionView>('createObligation', {
       method: 'POST',
       path: '/v1/transactions',
@@ -131,7 +271,7 @@ export class EconomicClient {
         counterpartyOrganizationId: input.supplierOrganizationId,
         grossAmountMinor: input.totalAmountMinor.toString(),
         currency: input.currency,
-        sourceType: 'ORDER',
+        sourceType: OBLIGATION_SOURCE_TYPE,
         sourceReference: input.orderId,
         holdFunds: true,
       },
@@ -139,7 +279,8 @@ export class EconomicClient {
   }
 
   /**
-   * The obligation recorded for this order, if there is one.
+   * Every transaction economic-service holds for the buyer under the order's
+   * source key — `ORDER/<order id>` — as an order's obligation type.
    *
    * The saga's answer to "did the hold happen?" when `createObligation` ended
    * without a definite reply. A timeout, an exhausted retry or a lost response
@@ -148,28 +289,89 @@ export class EconomicClient {
    * buyer's money stayed held. economic-service keeps at most one obligation
    * per payer and source fact (`ux_transaction_source_fact`), so this read is
    * a complete answer, not a best guess.
+   *
+   * The exact key, not the reference alone: rows naming the order under any
+   * other source type are not candidates, and are not read. Asked by
+   * reference and type only, the list's first page — 25 rows, newest first —
+   * was all the saga saw, and 25 newer rows under other source types, which
+   * the buyer's administrator may record freely, hid the genuine obligation
+   * behind them: the saga stopped on a mismatch with the funds held (review
+   * of #334 round 2, F2). Every page is still read, to `OBLIGATION_LOOKUP_PAGES`;
+   * an answer that does not end by then is not taken as complete
+   * (`ObligationLookupIncomplete`).
+   *
+   * Every candidate, not the first: a row under the order's key is not the
+   * order's obligation because of the key. Which one is — if any — is decided
+   * on its terms (`termsDiffer`) and its status (`fundsOf`), by the caller
+   * that knows them.
    */
-  async findObligation(input: {
+  async findObligations(input: {
     orderId: string;
     buyerOrganizationId: string;
     correlationId: string;
-  }): Promise<TransactionView | null> {
-    const query = new URLSearchParams({
-      sourceReference: input.orderId,
-      transactionType: OBLIGATION_TYPE,
-    });
-    const page = await this.call<{ items: TransactionView[] }>('findObligation', {
+  }): Promise<TransactionView[]> {
+    const found: TransactionView[] = [];
+    let cursor: string | null = null;
+    for (let page = 1; ; page += 1) {
+      const query = new URLSearchParams({
+        transactionType: OBLIGATION_TYPE,
+        sourceType: OBLIGATION_SOURCE_TYPE,
+        sourceReference: input.orderId,
+        limit: String(OBLIGATION_LOOKUP_PAGE_SIZE),
+        ...(cursor === null ? {} : { cursor }),
+      });
+      const answer: TransactionPage = await this.call<TransactionPage>('findObligation', {
+        method: 'GET',
+        path: `/v1/transactions?${query.toString()}`,
+        organizationId: input.buyerOrganizationId,
+        correlationId: input.correlationId,
+      });
+      found.push(
+        ...answer.items.filter(
+          (item) =>
+            item.sourceType === OBLIGATION_SOURCE_TYPE &&
+            item.sourceReference === input.orderId &&
+            item.transactionType === OBLIGATION_TYPE,
+        ),
+      );
+      if (!answer.hasMore) return found;
+      if (page === OBLIGATION_LOOKUP_PAGES || !answer.nextCursor) {
+        throw new ObligationLookupIncomplete(page);
+      }
+      cursor = answer.nextCursor;
+    }
+  }
+
+  /**
+   * The order's obligation as economic-service has it now, or null if
+   * `transactionId` is not this order's obligation.
+   *
+   * The saga's answer to "did my command already happen?" when a retry is
+   * refused for the transaction's state (D-053). economic-service replays a
+   * command's stored answer only for `ECONOMIC_IDEMPOTENCY_TTL_HOURS`; a retry
+   * after that is judged against the state the first attempt produced and
+   * refused. Read as the payer, with the same service token as the command;
+   * checked against the order and the obligation type, so a transaction that
+   * is somebody else's — or another order's — can never prove anything.
+   */
+  async readObligation(input: {
+    orderId: string;
+    transactionId: string;
+    buyerOrganizationId: string;
+    correlationId: string;
+  }): Promise<TransactionDetailView | null> {
+    const transaction = await this.call<TransactionDetailView>('readObligation', {
       method: 'GET',
-      path: `/v1/transactions?${query.toString()}`,
+      path: `/v1/transactions/${input.transactionId}`,
       organizationId: input.buyerOrganizationId,
       correlationId: input.correlationId,
     });
-    return (
-      page.items.find(
-        (item) =>
-          item.sourceReference === input.orderId && item.transactionType === OBLIGATION_TYPE,
-      ) ?? null
-    );
+    const ours =
+      transaction.id === input.transactionId &&
+      transaction.organizationId === input.buyerOrganizationId &&
+      transaction.sourceReference === input.orderId &&
+      transaction.transactionType === OBLIGATION_TYPE;
+    return ours ? transaction : null;
   }
 
   /** Marks the obligation ready to settle. Only reachable after receipt. */
@@ -256,8 +458,8 @@ export class EconomicClient {
     buyerOrganizationId: string;
     reason: string;
     correlationId: string;
-  }): Promise<TransactionView> {
-    return this.call<TransactionView>('dispute', {
+  }): Promise<TransactionDetailView> {
+    return this.call<TransactionDetailView>('dispute', {
       method: 'POST',
       path: `/v1/transactions/${input.transactionId}/dispute`,
       organizationId: input.buyerOrganizationId,
@@ -274,11 +476,18 @@ export class EconomicClient {
    * economic-service refuses to settle a DISPUTED transaction, and only this
    * call reopens it. The decision itself was made by a platform operator —
    * `assertDisputeResolver` required that before the saga ever got here.
+   *
+   * With `economicDisputeId`, economic-service applies it only while the
+   * transaction still holds that dispute, and refuses it
+   * `INVALID_STATE_TRANSITION` otherwise: the operator decided that one, not
+   * whichever economic-service holds now (Codex on #318 round 2, N1).
    */
   async resolveDispute(input: {
     orderId: string;
     /** The dispute being resolved. Part of the idempotency key. */
     disputeId: string;
+    /** economic-service's identity of the same dispute, when the saga has it. */
+    economicDisputeId?: string;
     transactionId: string;
     buyerOrganizationId: string;
     resolution: string;
@@ -290,7 +499,10 @@ export class EconomicClient {
       organizationId: input.buyerOrganizationId,
       idempotencyKey: idempotencyKeyFor.resolveDispute(input.orderId, input.disputeId),
       correlationId: input.correlationId,
-      body: { resolution: input.resolution },
+      body: {
+        resolution: input.resolution,
+        ...(input.economicDisputeId === undefined ? {} : { disputeId: input.economicDisputeId }),
+      },
     });
   }
 
@@ -322,7 +534,7 @@ export class EconomicClient {
 
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await internalFetch(url, {
         method: request.method,
         headers: {
           'content-type': 'application/json',
@@ -361,13 +573,20 @@ export class EconomicClient {
     // generic one, so "insufficient balance" reaches the buyer as that and not
     // as an internal error. The message is theirs; the status follows from the
     // code, which is how every other refusal on the platform behaves.
-    const body = parsed as { error?: { code?: string; message?: string } } | undefined;
-    const reported = body?.error?.code;
+    //
+    // The body is the platform's `ApiError`, `code` and `message` at its top
+    // level, as the shared exception filter writes it. This used to read
+    // `error.code`, a shape no service sends: every refusal became
+    // UPSTREAM_UNAVAILABLE, and a retry refused for the transaction's state
+    // never reached the obligation read that answers it (D-053, review of
+    // #287).
+    const body = parsed as Partial<Pick<ApiError, 'code' | 'message'>> | undefined;
+    const reported = body?.code;
     const code: ErrorCode =
       reported && reported in ERROR_CODES
         ? (reported as ErrorCode)
         : ERROR_CODES.UPSTREAM_UNAVAILABLE;
-    const message = body?.error?.message ?? 'The financial service refused this operation';
+    const message = body?.message ?? 'The financial service refused this operation';
 
     throw new RastaError(code, message, {
       internalContext: { operation, status: response.status },

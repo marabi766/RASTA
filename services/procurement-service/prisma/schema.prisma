@@ -1,0 +1,334 @@
+// procurement-service — demand aggregation, RFQs and purchase orders (COM-007, ADR-070, docs/04 § 4.9).
+// COM-007 PR 1: an organization's demand requests and the demand aggregation each joins.
+//
+// Everything here is owned by this service alone (AGENTS.md A-01). There is no foreign key into
+// another service's database: `productId` is marketplace's opaque `PRD_<ULID>` and is never
+// checked there (Q-105, Q-120).
+//
+// ## The tenant is the buyer
+//
+// `organization_id` is the buyer's organization on both tables (ADR-070 § 10). A demand
+// references its aggregation through `(organization_id, aggregation_id, product_id)`, so a demand
+// can never join another organization's aggregation (Q-119 (1), provisional) nor another
+// product's. The relation is declared in SQL only (`migration.sql`); this schema lists the columns
+// the reads use.
+//
+// ## Statuses are text under a CHECK
+//
+// Never a PostgreSQL enum: a value added to an enum cannot be rolled back (ADR-068 § 2). Every
+// status of both lifecycles is in its CHECK from this first migration, the later ones included.
+//
+// Every instant is `timestamptz(3)` from the first migration (D-048).
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../src/generated/prisma"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// One window of demand for one product of one organization (ADR-070 § 2). At most one OPEN per
+/// (organization, product): the partial unique index `ux_demand_aggregation_open`.
+model DemandAggregation {
+  id             String @id
+  organizationId String @map("organization_id")
+  productId      String @map("product_id")
+
+  /// OPEN | READY | RFQ_ISSUED | REFERRED | LAPSED | CANCELLED (CHECK ck_demand_aggregation_status).
+  status String
+
+  /// The window, half-open: [openedAt, closesAt). Both from the database clock.
+  openedAt DateTime @map("opened_at") @db.Timestamptz(3)
+  closesAt DateTime @map("closes_at") @db.Timestamptz(3)
+
+  /// The settings snapshot taken when the window opened (docs/08 § 8.9): later changes never reach it.
+  windowHours     Int     @map("window_hours")
+  minQuantity     Int     @map("min_quantity")
+  shortfallPolicy String  @map("shortfall_policy")
+  /// null = the environment defaults (Q-10); a per-organization setting's version from PR 3.
+  settingVersion  Int?    @map("setting_version")
+
+  /// Sum and count of the demands still SUBMITTED; changed only under this row's lock. The sum is
+  /// at most MAX_QUANTITY (2147483647, CHECK ck_demand_aggregation_counts; ADR-070 § 2).
+  totalQuantity  BigInt @map("total_quantity")
+  demandCount    Int    @map("demand_count")
+  extensionCount Int    @map("extension_count")
+
+  /// When the window ended (the aggregation left OPEN); null while OPEN.
+  closedAt DateTime? @map("closed_at") @db.Timestamptz(3)
+  /// The RFQ issued from it (ADR-070 plan PR 6); null until then.
+  rfqId    String?   @map("rfq_id")
+
+  /// READY → CANCELLED (ADR-070 plan PR 2): when, who and why, all three or none
+  /// (CHECK ck_demand_aggregation_cancelled). The reason is read through the API, never an event.
+  cancelledAt  DateTime? @map("cancelled_at") @db.Timestamptz(3)
+  cancelledBy  String?   @map("cancelled_by")
+  cancelReason String?   @map("cancel_reason")
+
+  /// Live demands of a window that ended REFERRED or LAPSED not yet moved with it: the end moves a
+  /// bounded batch, the sweeper the rest (CHECK ck_demand_aggregation_follow).
+  demandsToFollow Int @default(0) @map("demands_to_follow")
+
+  /// The digest of the demands the window ended with (`demandIdsDigest`, its end event's
+  /// `demandIdsSha256`); null while OPEN and while it is being built. Built in bounded batches
+  /// (PR-338 r1 F1): the resumable SHA-256 state, the last id taken (byte order) and how many were
+  /// taken; the state is cleared when the digest is written (CHECK ck_demand_aggregation_digest).
+  /// Bookkeeping: changing it moves no version.
+  demandIdsSha256  String? @map("demand_ids_sha256")
+  endDigestState   Bytes?  @map("end_digest_state")
+  endDigestCursor  String? @map("end_digest_cursor")
+  endDigestCounted Int     @default(0) @map("end_digest_counted")
+
+  /// The window sweeper's claim (lease + fence) and its failed attempts with their backoff
+  /// (ADR-070 § 2, the pattern of ADR-065 § 3). Bookkeeping: changing it moves no version.
+  sweepLeaseUntil    DateTime? @map("sweep_lease_until") @db.Timestamptz(3)
+  sweepFence         String?   @map("sweep_fence")
+  sweepAttempts      Int       @default(0) @map("sweep_attempts")
+  sweepNextAttemptAt DateTime? @map("sweep_next_attempt_at") @db.Timestamptz(3)
+
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(1)
+
+  @@unique([organizationId, id], map: "ux_demand_aggregation_org_id")
+  @@index([organizationId, status, id], map: "ix_demand_aggregation_org_status")
+  @@map("demand_aggregation")
+}
+
+/// One organization's need for a quantity of one product (ADR-070 § 2). Never edited: a
+/// correction is a withdrawal with a reason and a new demand.
+/// One version of an organization's aggregation settings (COM-007 PR 3, ADR-070 § 2, Q-119 (2)).
+/// Append-only and numbered 1, 2, 3… per organization (`aggregation_setting_guard`): the largest is
+/// in force for windows opened from then on; a window keeps the version it opened with
+/// (`DemandAggregation.settingVersion`, `fk_demand_aggregation_setting`, declared in SQL).
+model AggregationSetting {
+  organizationId  String   @map("organization_id")
+  version         Int
+  windowHours     Int      @map("window_hours")
+  minQuantity     Int      @map("min_quantity")
+  shortfallPolicy String   @map("shortfall_policy")
+  recordedBy      String   @map("recorded_by")
+  recordedAt      DateTime @map("recorded_at") @db.Timestamptz(3)
+  correlationId   String   @map("correlation_id")
+
+  @@id([organizationId, version], map: "aggregation_setting_pkey")
+  @@map("aggregation_setting")
+}
+
+model DemandRequest {
+  id             String @id
+  organizationId String @map("organization_id")
+  aggregationId  String @map("aggregation_id")
+  productId      String @map("product_id")
+
+  /// Whole units of the product's base unit (Q-105, Q-120).
+  quantity Int
+  /// Optional free text; read through the API only, never on an event (Q-120).
+  note     String?
+
+  /// SUBMITTED | WITHDRAWN | REFERRED | LAPSED (CHECK ck_demand_request_status).
+  status String
+
+  submittedAt            DateTime @map("submitted_at") @db.Timestamptz(3)
+  submittedBy            String   @map("submitted_by")
+  submittedCorrelationId String   @map("submitted_correlation_id")
+
+  withdrawnAt     DateTime? @map("withdrawn_at") @db.Timestamptz(3)
+  withdrawnBy     String?   @map("withdrawn_by")
+  /// The reason the withdrawal named; API only, never on an event.
+  withdrawReason  String?   @map("withdraw_reason")
+
+  /// When the window it joined ended with REFER or CLOSE (REFERRED, LAPSED).
+  closedAt DateTime? @map("closed_at") @db.Timestamptz(3)
+
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(1)
+
+  @@unique([organizationId, id], map: "ux_demand_request_org_id")
+  @@index([organizationId, status, id], map: "ix_demand_request_org_status")
+  @@index([organizationId, aggregationId, status], map: "ix_demand_request_aggregation")
+  @@map("demand_request")
+}
+
+/// A request for quotation issued from a READY aggregation (ADR-070 § 3, COM-007 plan PR 6): one
+/// per aggregation, born PUBLISHED in the transaction that moves the aggregation to RFQ_ISSUED.
+/// Its criteria and invitations are frozen with it (`tg_rfq_issue_check` and the count checks); its
+/// deadline is a column judged on the database clock (`rfq_guard` refuses a close before it). The
+/// relations to the aggregation are declared in SQL only (`fk_rfq_aggregation`,
+/// `fk_demand_aggregation_rfq`).
+model Rfq {
+  id             String @id
+  organizationId String @map("organization_id")
+  aggregationId  String @map("aggregation_id")
+  productId      String @map("product_id")
+
+  /// The aggregation's total, frozen at issue: the quantity every quotation prices (Q-122).
+  totalQuantity     Int    @map("total_quantity")
+  /// FORMAL_TENDER | INQUIRY | RFP | MARKETPLACE_DEAL, required, no default (ADR-023, Q-03).
+  procurementNature String @map("procurement_nature")
+  /// PUBLISHED | CLOSED | EVALUATING | EVALUATED | AWARDED | CANCELLED (CHECK ck_rfq_status).
+  status            String
+
+  /// Quotations are taken before it, the RFQ is closed at or after it: [issuedAt, quotationClosingAt).
+  quotationClosingAt DateTime @map("quotation_closing_at") @db.Timestamptz(3)
+
+  criteriaCount   Int    @map("criteria_count")
+  /// SHA-256 (hex) of the criteria's canonical form (`criteriaDigest`): what RFQ_ISSUED names them by.
+  criteriaDigest  String @map("criteria_digest")
+  invitationCount Int    @map("invitation_count")
+
+  /// The RFQ's sealing key (ADR-066 § 2): the public half in the clear, the private half only
+  /// wrapped by a KEK of PROCUREMENT_RFQ_KEKS. Never changed.
+  keyId             String @unique(map: "ux_rfq_key_id") @map("key_id")
+  publicKeyPem      String @map("public_key_pem")
+  kekId             String @map("kek_id")
+  wrapNonce         Bytes  @map("wrap_nonce")
+  wrappedPrivateKey Bytes  @map("wrapped_private_key")
+  wrapTag           Bytes  @map("wrap_tag")
+
+  issuedAt            DateTime @map("issued_at") @db.Timestamptz(3)
+  issuedBy            String   @map("issued_by")
+  issuedCorrelationId String   @map("issued_correlation_id")
+
+  /// PUBLISHED → CLOSED: when, and by whom — null when the close sweeper closed it.
+  closedAt DateTime? @map("closed_at") @db.Timestamptz(3)
+  closedBy String?   @map("closed_by")
+
+  /// → CANCELLED: when, who, the reason code (from the configured list) and the buyer's optional text
+  /// (API only, never an event).
+  cancelledAt      DateTime? @map("cancelled_at") @db.Timestamptz(3)
+  cancelledBy      String?   @map("cancelled_by")
+  cancelReasonCode String?   @map("cancel_reason_code")
+  cancelReason     String?   @map("cancel_reason")
+
+  /// The close sweeper's claim (lease + fence) and its failed attempts with their backoff.
+  /// Bookkeeping: changing it moves no version.
+  sweepLeaseUntil    DateTime? @map("sweep_lease_until") @db.Timestamptz(3)
+  sweepFence         String?   @map("sweep_fence")
+  sweepAttempts      Int       @default(0) @map("sweep_attempts")
+  sweepNextAttemptAt DateTime? @map("sweep_next_attempt_at") @db.Timestamptz(3)
+
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
+  version   Int      @default(1)
+
+  @@unique([organizationId, id], map: "ux_rfq_org_id")
+  @@unique([organizationId, aggregationId], map: "ux_rfq_aggregation")
+  @@unique([organizationId, id, aggregationId], map: "ux_rfq_org_id_aggregation")
+  @@index([organizationId, status, id], map: "ix_rfq_org_status")
+  @@map("rfq")
+}
+
+/// A criterion of an RFQ (ADR-067 § 1), copied in by the issue and frozen with it.
+model RfqCriterion {
+  organizationId String @map("organization_id")
+  rfqId          String @map("rfq_id")
+  /// 1-based, the order the issue listed them in.
+  position       Int
+  code           String
+  label          String
+  weightBp       Int    @map("weight_bp")
+  /// MANUAL_SCORE | PASS_FAIL (Q-88).
+  scoringMethod  String @map("scoring_method")
+  maxScore       Int    @map("max_score")
+
+  @@id([organizationId, rfqId, position], map: "rfq_criterion_pkey")
+  @@unique([organizationId, rfqId, code], map: "ux_rfq_criterion_code")
+  @@map("rfq_criterion")
+}
+
+/// An explicit invitation (Q-121 (1)). The tenant is the buyer; the invited supplier is another
+/// organization, which reads its RFQs by `supplierOrganizationId` across the tenant guard.
+model RfqInvitation {
+  organizationId         String   @map("organization_id")
+  rfqId                  String   @map("rfq_id")
+  supplierOrganizationId String   @map("supplier_organization_id")
+  invitedAt              DateTime @map("invited_at") @db.Timestamptz(3)
+
+  @@id([organizationId, rfqId, supplierOrganizationId], map: "rfq_invitation_pkey")
+  @@index([supplierOrganizationId, rfqId], map: "ix_rfq_invitation_supplier")
+  @@map("rfq_invitation")
+}
+
+/// Idempotent commands (docs/06 § 6.8): this service's own store.
+model IdempotencyKey {
+  key            String @map("key")
+  organizationId String @map("organization_id")
+  endpoint       String
+
+  /// SHA-256 over the canonical request and the caller.
+  requestHash String @map("request_hash")
+  /// Minted per claim; the command's transaction locks and completes the row by it.
+  claimToken  String @map("claim_token")
+
+  responseStatus Int?   @map("response_status")
+  responseBody   Json?  @map("response_body")
+  /// IN_PROGRESS | COMPLETED (CHECK ck_idempotency_state).
+  state          String
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// While IN_PROGRESS: the claim's lease, after which a retry may take the key over under a
+  /// new token. Once COMPLETED: PROCUREMENT_IDEMPOTENCY_TTL_HOURS after the response.
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@id([organizationId, endpoint, key])
+  @@index([expiresAt])
+  @@map("idempotency_key")
+}
+
+model OutboxMessage {
+  id String @id
+
+  aggregateType String @map("aggregate_type")
+  aggregateId   String @map("aggregate_id")
+  eventName     String @map("event_name")
+  eventVersion  Int    @default(1) @map("event_version")
+
+  topic        String
+  /// `aggregationId` for a demand's and a window's events, the organization for a setting's,
+  /// `rfqId` for an RFQ's (docs/07 § 7.7, ADR-070 § 9).
+  partitionKey String @map("partition_key")
+
+  payload Json
+  headers Json
+
+  organizationId String? @map("organization_id")
+  correlationId  String  @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  publishedAt DateTime? @map("published_at") @db.Timestamptz(3)
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  /// ADR-050 durable claim. `claimToken` is the only fence.
+  claimToken     String?   @map("claim_token")
+  claimOwner     String?   @map("claim_owner")
+  claimExpiresAt DateTime? @map("claim_expires_at") @db.Timestamptz(3)
+  claimCount     Int       @default(0) @map("claim_count")
+  nextAttemptAt  DateTime? @map("next_attempt_at") @db.Timestamptz(3)
+
+  /// ADR-051 B3: allocated by `EventPublisher.enqueue` inside the caller's
+  /// transaction. `isStreamHead` stays false: head maintenance is B4.
+  streamSeq    BigInt? @map("stream_seq")
+  isStreamHead Boolean @default(false) @map("is_stream_head")
+
+  @@index([publishedAt, createdAt], map: "ix_outbox_pending")
+  @@map("outbox_message")
+}
+
+/// ADR-051 — one row per ordered stream (`topic + partitionKey`).
+model OutboxStreamSequence {
+  topic        String
+  partitionKey String @map("partition_key")
+
+  nextSeq      BigInt @default(1) @map("next_seq")
+  publishedSeq BigInt @default(0) @map("published_seq")
+
+  @@id([topic, partitionKey])
+  @@map("outbox_stream_sequence")
+}

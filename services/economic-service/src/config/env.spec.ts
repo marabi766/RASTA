@@ -23,6 +23,7 @@ const base = {
   INTERNAL_TOKEN_SECRET: 'a_secret_that_is_at_least_thirty_two_chars',
   MAINTENANCE_SERVICE_URL: 'http://localhost:3105',
   FLEET_SERVICE_URL: 'http://localhost:3104',
+  CONTRACT_SERVICE_URL: 'http://localhost:3111',
 } as NodeJS.ProcessEnv;
 
 describe('loadEconomicEnv', () => {
@@ -52,13 +53,30 @@ describe('loadEconomicEnv', () => {
   it('will not start without the services that own the facts it makes money from', () => {
     // ADR-061 § 4. With no maintenance-service to ask, no approval can be
     // confirmed and every obligation would dead-letter. Refused at boot.
-    for (const name of ['MAINTENANCE_SERVICE_URL', 'FLEET_SERVICE_URL']) {
+    for (const name of ['MAINTENANCE_SERVICE_URL', 'FLEET_SERVICE_URL', 'CONTRACT_SERVICE_URL']) {
       expect(() => loadEconomicEnv({ ...base, [name]: undefined })).toThrow(EnvValidationError);
       expect(() => loadEconomicEnv({ ...base, [name]: 'maintenance-service' })).toThrow(
         EnvValidationError,
       );
     }
     expect(loadEconomicEnv(base).ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS).toBe(3000);
+  });
+
+  it('records a statement under no business line unless one is configured (Q-130), and only a declared one', () => {
+    // docs/24 Q-130 asks whether a statement is always CONSTRUCTION; until it
+    // is answered no line is sent (D-057), and the answer is this setting.
+    expect(loadEconomicEnv(base).ECONOMIC_STATEMENT_BUSINESS_LINE).toBeUndefined();
+    expect(
+      loadEconomicEnv({ ...base, ECONOMIC_STATEMENT_BUSINESS_LINE: '' })
+        .ECONOMIC_STATEMENT_BUSINESS_LINE,
+    ).toBeUndefined();
+    expect(
+      loadEconomicEnv({ ...base, ECONOMIC_STATEMENT_BUSINESS_LINE: 'CONSTRUCTION' })
+        .ECONOMIC_STATEMENT_BUSINESS_LINE,
+    ).toBe('CONSTRUCTION');
+    expect(() =>
+      loadEconomicEnv({ ...base, ECONOMIC_STATEMENT_BUSINESS_LINE: 'ROADWORKS' }),
+    ).toThrow(EnvValidationError);
   });
 
   it('defaults the platform operator organization rather than naming one', () => {
@@ -270,6 +288,50 @@ describe('loadEconomicEnv', () => {
         }),
       ).toThrow(/ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES/);
     }
+  });
+
+  it('fails a settlement without a rule closed by default outside development and test, and refuses to turn that off there (Q-29)', () => {
+    const required = (env: NodeJS.ProcessEnv) =>
+      loadEconomicEnv({ ...base, ...env }).ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE;
+
+    // Unset: on, unless NODE_ENV — as given — is development or test.
+    for (const NODE_ENV of ['staging', 'production', undefined]) {
+      expect(required({ NODE_ENV })).toBe(true);
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: '' })).toBe(true);
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'true' })).toBe(
+        true,
+      );
+    }
+    for (const NODE_ENV of ['development', 'test']) {
+      expect(required({ NODE_ENV })).toBe(false);
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: '' })).toBe(false);
+      // Turned on explicitly, it is on there too.
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'true' })).toBe(
+        true,
+      );
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'false' })).toBe(
+        false,
+      );
+    }
+
+    // Off is refused at boot anywhere else, an unset NODE_ENV included.
+    for (const NODE_ENV of ['staging', 'production', undefined]) {
+      expect(() =>
+        loadEconomicEnv({
+          ...base,
+          NODE_ENV,
+          ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'false',
+        }),
+      ).toThrow(/ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE/);
+    }
+    // Not a boolean is refused everywhere, rather than read as either.
+    expect(() =>
+      loadEconomicEnv({
+        ...base,
+        NODE_ENV: 'test',
+        ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'maybe',
+      }),
+    ).toThrow(EnvValidationError);
   });
 
   it('refuses to start without the identity provider or the internal secret', () => {

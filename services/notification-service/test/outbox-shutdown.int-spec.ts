@@ -224,7 +224,8 @@ async function boot(behaviour: Behaviour): Promise<{
     },
   };
 
-  // Like the real publisher: refuses once the destroy phase has closed it.
+  // Like the real publisher: refuses once `OutboxShutdown` has closed it, after
+  // the drain (D-052 phase 4b).
   let publisherClosed = false;
   const publisher = {
     publish: (): Promise<void> => {
@@ -234,7 +235,7 @@ async function boot(behaviour: Behaviour): Promise<{
       return Promise.resolve();
     },
     isHealthy: async () => true,
-    onModuleDestroy: async () => {
+    stop: async () => {
       publisherClosed = true;
     },
   };

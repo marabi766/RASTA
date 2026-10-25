@@ -53,7 +53,7 @@ model Warehouse {
   /// PostGIS point (WGS 84). Prisma has no geography type: written and read in SQL.
   location Unsupported("geography(Point, 4326)")?
   /// ACTIVE only in PR 1 (CHECK ck_warehouse_status).
-  status   String @default("ACTIVE")
+  status   String                                 @default("ACTIVE")
 
   createdAt            DateTime @map("created_at") @db.Timestamptz(3)
   createdBy            String   @map("created_by")
@@ -257,6 +257,145 @@ model TrackingEvent {
   @@unique([organizationId, commandKeyHash], map: "ux_tracking_event_command")
   @@unique([organizationId, shipmentId, shipmentVersion], map: "ux_tracking_event_sequence")
   @@map("tracking_event")
+}
+
+// ---------------------------------------------------------------------------
+// Return shipments (RUN-005 PR 2, ADR-048 § 2, § 3)
+// ---------------------------------------------------------------------------
+
+/// The physical movement of goods BACK to one of the owner's warehouses — inventory's half of
+/// reverse logistics (ADR-048 § 2). Marketplace owns the return request and verifies every event
+/// of this stream against it; this table never reads it. IN_TRANSIT → RECEIVED, once each
+/// (`tg_return_shipment_guard`). Moves no stock: returned goods are not sellable (ADR-048 § 4).
+/// Written and read in SQL (`src/return/return-shipment.repository.ts`): the sender's read crosses
+/// tenants by design.
+model ReturnShipment {
+  id String @id
+
+  /// The owner of the destination warehouse, and the tenant. Q-133: the order's supplier.
+  organizationId         String  @map("organization_id")
+  destinationWarehouseId String  @map("destination_warehouse_id")
+  /// The sender: may read it, never moves it. Opaque (Q-113).
+  buyerOrganizationId    String  @map("buyer_organization_id")
+  /// Opaque `RET_` / `ORD_` references into marketplace.
+  returnRequestId        String  @map("return_request_id")
+  orderId                String  @map("order_id")
+  carrierName            String? @map("carrier_name")
+  carrierReference       String? @map("carrier_reference")
+  /// How many lines it was created with: fixed once created (`tg_return_shipment_line_guard`).
+  lineCount              Int     @map("line_count")
+  /// IN_TRANSIT | RECEIVED | INSPECTED | RESOLVED (CHECK ck_return_shipment_status).
+  status                 String  @default("IN_TRANSIT")
+  commandKeyHash         String  @map("command_key_hash")
+
+  createdAt                  DateTime  @map("created_at") @db.Timestamptz(3)
+  createdBy                  String    @map("created_by")
+  createdCorrelationId       String    @map("created_correlation_id")
+  receivedAt                 DateTime? @map("received_at") @db.Timestamptz(3)
+  receivedBy                 String?   @map("received_by")
+  inspectedAt                DateTime? @map("inspected_at") @db.Timestamptz(3)
+  inspectedBy                String?   @map("inspected_by")
+  /// Free text of the inspector, kept here and never on an event.
+  inspectionNote             String?   @map("inspection_note")
+  /// A file in document-service, by id; never resolved here.
+  inspectionReportDocumentId String?   @map("inspection_report_document_id")
+  resolvedAt                 DateTime? @map("resolved_at") @db.Timestamptz(3)
+  resolvedBy                 String?   @map("resolved_by")
+  updatedAt                  DateTime  @map("updated_at") @db.Timestamptz(3)
+  /// 1..4 — one per status reached (CHECK ck_return_shipment_version_matches_status).
+  version                    Int       @default(1)
+  /// The marketplace dispatch reservation (`RDR_<ULID>`) it was recorded under; never one this
+  /// service withdrew (`tg_return_shipment_dispatch_fence`, Q-133 (9)(a)). NULL only on a shipment
+  /// recorded before reservations existed.
+  dispatchReservationId      String?   @map("dispatch_reservation_id")
+
+  @@unique([organizationId, id], map: "ux_return_shipment_org_id")
+  @@unique([organizationId, commandKeyHash], map: "ux_return_shipment_command")
+  @@unique([organizationId, returnRequestId], map: "ux_return_shipment_request")
+  @@index([organizationId, status, id], map: "ix_return_shipment_org_status")
+  @@index([buyerOrganizationId, id], map: "ix_return_shipment_buyer")
+  @@map("return_shipment")
+}
+
+/// One order line of a return shipment: how many were said to be coming and, once it is RECEIVED,
+/// how many arrived. Written with its shipment; its received quantity is set once
+/// (`tg_return_shipment_line_guard`). No price.
+model ReturnShipmentLine {
+  id String @id
+
+  organizationId   String   @map("organization_id")
+  returnShipmentId String   @map("return_shipment_id")
+  orderLineId      String   @map("order_line_id")
+  productId        String   @map("product_id")
+  expectedQuantity Int      @map("expected_quantity")
+  receivedQuantity Int?     @map("received_quantity")
+  createdAt        DateTime @map("created_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, returnShipmentId, orderLineId], map: "ux_return_shipment_line_order_line")
+  @@map("return_shipment_line")
+}
+
+/// What happened to a return shipment, append-only and in order (`tg_return_tracking_event_guard`):
+/// one event per status it reached.
+model ReturnTrackingEvent {
+  id String @id
+
+  organizationId   String   @map("organization_id")
+  returnShipmentId String   @map("return_shipment_id")
+  /// IN_TRANSIT | RECEIVED | INSPECTED | RESOLVED (CHECK ck_return_tracking_event_type).
+  type             String
+  /// The shipment version this event records (= the event's `returnShipmentVersion` and `streamSeq`).
+  shipmentVersion  Int      @map("shipment_version")
+  occurredAt       DateTime @map("occurred_at") @db.Timestamptz(3)
+  recordedAt       DateTime @map("recorded_at") @db.Timestamptz(3)
+  recordedBy       String   @map("recorded_by")
+  correlationId    String   @map("correlation_id")
+  commandKeyHash   String   @map("command_key_hash")
+
+  @@unique([organizationId, commandKeyHash], map: "ux_return_tracking_event_command")
+  @@unique([organizationId, returnShipmentId, shipmentVersion], map: "ux_return_tracking_event_sequence")
+  @@map("return_tracking_event")
+}
+
+/// What becomes of received goods (RUN-005 PR 2b, ADR-048 § 1): one row per line and disposition,
+/// whose quantity is how many went that way. Written with the resolution that makes it, never
+/// changed (`tg_return_disposition_guard`); per line the quantities add up to what was received
+/// (`tg_return_shipment_history_check`). Moves no stock and no money.
+model ReturnDisposition {
+  id String @id
+
+  organizationId   String   @map("organization_id")
+  returnShipmentId String   @map("return_shipment_id")
+  orderLineId      String   @map("order_line_id")
+  /// RESTOCK | REPAIR | REPLACE | RETURN_TO_SUPPLIER | SCRAP | RECYCLE (CHECK ck_return_disposition_value).
+  disposition      String
+  quantity         Int
+  createdAt        DateTime @map("created_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, returnShipmentId, orderLineId, disposition], map: "ux_return_disposition_line")
+  @@map("return_disposition")
+}
+
+/// A marketplace dispatch reservation this service withdrew, on marketplace's reconciliation, while
+/// the return had no shipment here (Q-133 (9)(a)): no shipment carrying it is ever recorded
+/// (`tg_return_shipment_dispatch_fence`), so marketplace may release it. Append-only.
+model ReturnDispatchWithdrawal {
+  /// `RDW_<ULID>`.
+  id String @id
+
+  /// The organization whose books the shipment would have been in: the request's supplier.
+  organizationId  String   @map("organization_id")
+  /// Opaque `RET_` / `RDR_` references into marketplace.
+  returnRequestId String   @map("return_request_id")
+  reservationId   String   @map("reservation_id")
+  withdrawnAt     DateTime @map("withdrawn_at") @db.Timestamptz(3)
+  /// The service whose internal token asked (marketplace-service).
+  withdrawnBy     String   @map("withdrawn_by")
+  correlationId   String   @map("correlation_id")
+
+  @@unique([organizationId, reservationId], map: "ux_return_dispatch_withdrawal_reservation")
+  @@index([organizationId, returnRequestId], map: "ix_return_dispatch_withdrawal_request")
+  @@map("return_dispatch_withdrawal")
 }
 
 // ---------------------------------------------------------------------------

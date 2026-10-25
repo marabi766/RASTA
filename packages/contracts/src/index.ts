@@ -19,14 +19,18 @@ export {
 export type { IdPrefix, OrganizationId, UserId, AssetId } from './common/identifiers';
 
 export {
+  DISPLAY_TEXT_PATTERN,
   WITHOUT_BIDI_CONTROL,
   WITHOUT_CONTROL_CHARACTER,
   UNSUPPORTED_CHARACTERS,
   containsBidiControl,
+  displayText,
   plainText,
   referenceId,
   withoutBidiControlDeep,
 } from './common/text';
+
+export { withMaxKeys } from './common/bounds';
 
 export {
   CURRENCIES,
@@ -42,11 +46,19 @@ export {
   addMoney,
   subtractMoney,
   applyBasisPoints,
+  digitsToBigInt,
 } from './common/money';
 export type { Currency, Money, SignedMoney } from './common/money';
 
+export { numberInput } from './common/number-input';
+
+export { BUSINESS_LINES, businessLineSchema } from './common/business-line';
+export type { BusinessLine } from './common/business-line';
+
 export { ERROR_CODES, ERROR_STATUS, errorDetailSchema, apiErrorSchema } from './common/errors';
 export type { ErrorCode, ErrorDetail, ApiError } from './common/errors';
+
+export { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from './common/replay-window';
 
 export {
   DEFAULT_PAGE_SIZE,
@@ -120,8 +132,17 @@ export {
   brokerAcls,
   brokerAclDocument,
   brokerTopics,
+  brokerTopicLine,
+  deadLetterSources,
   BROKER_PROFILES,
 } from './events/broker-acls';
+export {
+  TOPIC_MESSAGE_MAX_BYTES,
+  DLQ_HEADER_VALUE_MAX_BYTES,
+  DLQ_ADDED_HEADERS_MAX_BYTES,
+  gzipGrowthMaxBytes,
+  deadLetterMessageMaxBytes,
+} from './events/dead-letter-size';
 export type {
   AclBinding,
   AclOperation,
@@ -165,6 +186,27 @@ export {
 } from './events/ops-replay';
 export type { ReplayPosition, ReplayExecutedPayloadV1 } from './events/ops-replay';
 export {
+  PROCUREMENT_RFQ_EVENTS,
+  PROCUREMENT_RFQ_EVENT_SCHEMAS,
+  RFQ_AGGREGATE,
+  PROCUREMENT_NATURES,
+  RFQ_STATES,
+  DEFAULT_RFQ_CANCELLATION_CODES,
+  RESERVED_RFQ_CANCELLATION_CODES,
+  RFQ_CANCELLATION_CODE_PATTERN,
+  RFQ_CLOSE_TRIGGERS,
+  RFQ_MAX_INVITEES_LIMIT,
+  rfqIssuedPayloadSchema,
+  rfqClosedPayloadSchema,
+  rfqCancelledPayloadSchema,
+} from './events/procurement-rfq';
+export type {
+  ProcurementRfqEventName,
+  RfqIssuedPayload,
+  RfqClosedPayload,
+  RfqCancelledPayload,
+} from './events/procurement-rfq';
+export {
   INVENTORY_SHIPMENT_EVENTS,
   INVENTORY_SHIPMENT_EVENT_SCHEMAS,
   SHIPMENT_AGGREGATE,
@@ -172,12 +214,77 @@ export {
   shipmentDispatchedPayloadSchema,
   shipmentDeliveredPayloadSchema,
 } from './events/inventory-shipments';
+export {
+  INVENTORY_RETURN_EVENTS,
+  INVENTORY_RETURN_EVENT_SCHEMAS,
+  RETURN_SHIPMENT_AGGREGATE,
+  returnShipmentLineSchema,
+  receivedReturnShipmentLineSchema,
+  returnShipmentDispatchedPayloadSchema,
+  returnShipmentReceivedPayloadSchema,
+  returnShipmentInspectedPayloadSchema,
+  returnShipmentResolvedPayloadSchema,
+  returnDispositionLineSchema,
+  RETURN_DISPOSITIONS,
+  INVENTORY_RETURN_DISPATCH_EVENTS,
+  INVENTORY_RETURN_DISPATCH_EVENT_SCHEMAS,
+  returnDispatchWithdrawnPayloadSchema,
+} from './events/inventory-returns';
+export type {
+  InventoryReturnEventName,
+  ReturnShipmentLine,
+  ReceivedReturnShipmentLine,
+  ReturnShipmentDispatchedPayload,
+  ReturnShipmentReceivedPayload,
+  ReturnShipmentInspectedPayload,
+  ReturnShipmentResolvedPayload,
+  ReturnDispositionLine,
+  ReturnDisposition,
+  InventoryReturnDispatchEventName,
+  ReturnDispatchWithdrawnPayload,
+} from './events/inventory-returns';
+export {
+  RETURN_REQUEST_EVENTS,
+  RETURN_REQUEST_EVENT_SCHEMAS,
+  RETURN_REQUEST_AGGREGATE,
+  returnLineSchema,
+  returnRequestedPayloadSchema,
+  returnAuthorizedPayloadSchema,
+  returnRejectedPayloadSchema,
+  returnCancelledPayloadSchema,
+  returnInTransitPayloadSchema,
+  returnReceivedPayloadSchema,
+  returnInspectedPayloadSchema,
+  returnResolvedPayloadSchema,
+  RETURN_DISPATCH_EVENTS,
+  RETURN_DISPATCH_EVENT_SCHEMAS,
+  returnDispatchReleasedPayloadSchema,
+} from './events/return-requests';
+export type {
+  ReturnRequestEventName,
+  ReturnLine,
+  ReturnRequestedPayload,
+  ReturnAuthorizedPayload,
+  ReturnRejectedPayload,
+  ReturnCancelledPayload,
+  ReturnInTransitPayload,
+  ReturnReceivedPayload,
+  ReturnInspectedPayload,
+  ReturnResolvedPayload,
+  ReturnDispatchEventName,
+  ReturnDispatchReleasedPayload,
+} from './events/return-requests';
 export type {
   InventoryShipmentEventName,
   ShipmentCreatedPayload,
   ShipmentDispatchedPayload,
   ShipmentDeliveredPayload,
 } from './events/inventory-shipments';
+export {
+  PROCUREMENT_THRESHOLDS_KEY,
+  procurementThresholdsSchema,
+} from './common/procurement-thresholds';
+export type { ProcurementThresholds } from './common/procurement-thresholds';
 export type {
   AuditOutcome,
   AuditTrailActor,

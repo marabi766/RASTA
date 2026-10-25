@@ -7,7 +7,10 @@ import {
   PageHeader,
   Section,
 } from '@/ui';
+import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
+import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
 import { productKindLabel } from '@/lib/labels';
+import { qualificationStateLabel } from '@/lib/supplier-fields';
 import { formatMoney, toPersianDigits } from '@/lib/format';
 import type { OffersPage, Product, ReadResult } from '@/server/marketplace';
 
@@ -28,11 +31,21 @@ import { PlaceOrderForm } from './PlaceOrderForm';
  * (`docs/16 § ۱۶٫۱۱`, ADR-041).
  */
 
+/**
+ * The marketplace's existing wording for an approved supplier, kept as it was
+ * on main: the supplier screens spell the shared label without a hamza (PR 366
+ * r5/r6), and which spelling the product uses is still an open owner question,
+ * so this screen does not follow that change.
+ */
+const APPROVED_OFFER_LABEL = 'تأییدشده';
+
 export interface OffersScreenProps {
   readonly product: ReadResult<Product>;
   readonly offers: ReadResult<OffersPage>;
   readonly productId: string;
   readonly sort?: string;
+  /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
+  readonly demoMode: DemoMode;
   /**
    * What placing an order needs from the page: the signed-in session's CSRF
    * token, a minter for the form's submission id (bound to that session, which
@@ -131,7 +144,9 @@ function OfferRows({ offers }: { offers: OffersPage }) {
             <td className="p-3 text-content-muted">
               {offer.supplierQualification === 'UNAVAILABLE'
                 ? 'هنوز فعال نیست'
-                : offer.supplierQualification}
+                : offer.supplierQualification === 'APPROVED'
+                  ? APPROVED_OFFER_LABEL
+                  : qualificationStateLabel(offer.supplierQualification)}
             </td>
           </tr>
         ))}
@@ -144,10 +159,12 @@ function OrderSection({
   offers,
   ordering,
   productId,
+  demoMode,
 }: {
   offers: OffersPage;
   ordering: NonNullable<OffersScreenProps['ordering']>;
   productId: string;
+  demoMode: DemoMode;
 }) {
   // A plain link back to this page: a full navigation, so a new submission id is minted.
   const newOrderHref = `/marketplace/${encodeURIComponent(productId)}`;
@@ -159,7 +176,10 @@ function OrderSection({
 
   return (
     <Section headingId="place-order" title="سفارش از یکی از پیشنهادها">
-      {orderable.length === 0 ? (
+      {/* Placing an order holds its amount in escrow: not offered while the provider is unknown (Q-14). */}
+      {!mayOffer(demoMode, MONEY_EFFECTS.placeOrder) ? (
+        <MoneyActionWithheld title="ثبت سفارش اکنون در دسترس نیست" />
+      ) : orderable.length === 0 ? (
         <EmptyState
           title="پیشنهادی برای سفارش نیست"
           description="هیچ پیشنهاد منتشرشده‌ای از سازمانی غیر از سازمان شما برای این کالا یا خدمت نیست."
@@ -179,7 +199,14 @@ function OrderSection({
   );
 }
 
-export function OffersScreen({ product, offers, productId, sort, ordering }: OffersScreenProps) {
+export function OffersScreen({
+  product,
+  offers,
+  productId,
+  sort,
+  ordering,
+  demoMode,
+}: OffersScreenProps) {
   const title =
     product.kind === 'OK'
       ? product.data.name
@@ -197,6 +224,8 @@ export function OffersScreen({ product, offers, productId, sort, ordering }: Off
             : undefined
         }
       />
+
+      <DemoModeNotice mode={demoMode} />
 
       {product.kind === 'NOT_FOUND' ? (
         <EmptyState
@@ -234,7 +263,12 @@ export function OffersScreen({ product, offers, productId, sort, ordering }: Off
       ) : null}
 
       {product.kind === 'OK' && offers.kind === 'OK' && ordering ? (
-        <OrderSection offers={offers.data} ordering={ordering} productId={productId} />
+        <OrderSection
+          offers={offers.data}
+          ordering={ordering}
+          productId={productId}
+          demoMode={demoMode}
+        />
       ) : null}
     </>
   );

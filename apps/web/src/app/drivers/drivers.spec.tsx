@@ -202,6 +202,16 @@ describe('the registration form', () => {
     expect(getByText(/نشست شما پایان یافته است/)).toBeInTheDocument();
   });
 
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    const { container, getByText, queryByText } = renderForm({
+      kind: 'REFUSED',
+      reason: 'SESSION_UNAVAILABLE',
+    });
+    expect(getByText(/همین حالا در دسترس نیست/)).toBeInTheDocument();
+    expect(queryByText(/پایان یافته/)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it('shows the correlation id on an outage', () => {
     const { getByText } = renderForm({ kind: 'FAILED', status: 503, correlationId: 'corr-sample' });
     expect(getByText(/corr-sample/)).toBeInTheDocument();
@@ -212,7 +222,7 @@ describe('the registration form', () => {
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
     });
-    expect(getByText(/نتوانستیم تأیید کنیم/)).toBeInTheDocument();
+    expect(getByText(/نتوانستیم بدانیم که این درخواست ثبت شد یا نه/)).toBeInTheDocument();
     expect(getByText(/صفحه را تازه کنید/)).toBeInTheDocument();
     expect(getByText(/corr-sample/)).toBeInTheDocument();
     expect(container.textContent).not.toMatch(/چیزی ذخیره نشد|ثبت انجام نشد/);

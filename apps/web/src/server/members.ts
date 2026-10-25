@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
 import type {
   RevokeMembershipField,
@@ -121,11 +122,27 @@ export function updateMemberRolesFormValues(form: FormData): UpdateMemberRolesFo
  * audit trail. Asking for it in the form is the difference between a person
  * writing a reason and a client inventing one.
  */
+/**
+ * How many `roles` values a posted form may carry. The checkbox group offers
+ * at most the platform's eleven roles; fifty leaves room for a malformed page
+ * that posts each one twice, and stops a request whose length alone is the
+ * defect. This form de-duplicates before it sends (below), so identity-service
+ * receives at most eleven distinct roles. identity-service itself caps the
+ * **raw** posted list at eleven elements (its DTO counts elements, duplicates
+ * included) and writes the membership row as received, without
+ * de-duplicating; only the Keycloak attributes built from the rows are
+ * de-duplicated (`platform-attributes.ts`).
+ */
+export const MAX_POSTED_ROLES = 50;
+
 export const updateMemberRolesFormSchema = z.object({
   membershipId: z.string().trim().min(1, 'عضویت مشخص نیست'),
   roles: z
     .array(z.string().trim().min(1))
     .min(1, 'دست‌کم یک نقش را انتخاب کنید')
+    // Before the de-duplication below: what a posted form may carry at all
+    // (GHSA-mrhx-c7xc-m3w5). See MAX_POSTED_ROLES.
+    .max(MAX_POSTED_ROLES, 'تعداد نقش‌های فرستاده‌شده بیش از حد است')
     // A checkbox group can post the same value twice if the page is malformed.
     .transform((roles) => [...new Set(roles)]),
   reason: z
@@ -147,14 +164,10 @@ export function parseUpdateMemberRolesForm(
   const parsed = updateMemberRolesFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<UpdateMemberRolesField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (field === 'membershipId' || field === 'roles' || field === 'reason') {
-      fieldErrors[field] ??= issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.error, ['membershipId', 'roles', 'reason'] as const),
+  };
 }
 
 export const UPDATE_MEMBER_ROLES_FIELD_MAPPING: FieldMapping<UpdateMemberRolesField> = {
@@ -217,12 +230,10 @@ export function parseRevokeMembershipForm(
   const parsed = revokeMembershipFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<RevokeMembershipField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (field === 'membershipId' || field === 'reason') fieldErrors[field] ??= issue.message;
-  }
-  return { ok: false, fieldErrors };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.error, ['membershipId', 'reason'] as const),
+  };
 }
 
 export const REVOKE_MEMBERSHIP_FIELD_MAPPING: FieldMapping<RevokeMembershipField> = {

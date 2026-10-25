@@ -18,12 +18,15 @@ import {
   blockerLabel,
   inspectionResultLabel,
   timelineCategoryLabel,
+  timelineTitleLabel,
 } from '@/lib/labels';
 import { formatJalaliDateLong, formatMoney, toPersianDigits } from '@/lib/format';
 import type { AssetDossier, ReadResult } from '@/server/assets';
 import type { RecordNotice } from '@/lib/asset-record-fields';
 import type { DocumentNotice } from '@/lib/asset-document-fields';
 import type { AvailabilityNotice } from '@/lib/fleet-availability-fields';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
+import type { DemoMode } from '@/lib/demo-mode';
 
 /**
  * The electronic dossier (docs/16 § 16.6, `/assets/[id]`).
@@ -81,6 +84,12 @@ export interface DossierScreenProps {
    * machine (`server/flash.ts`), never from a bare query value. Not rendered at
    * all when the read failed.
    */
+  /**
+   * What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or
+   * that it is unknown — over the costs and the insurance premiums and insured
+   * values below. Nothing here moves money, so nothing is withheld.
+   */
+  readonly demoMode: DemoMode;
   readonly notice?:
     | 'created'
     | 'updated'
@@ -201,6 +210,7 @@ export function DossierScreen({
   records,
   documents,
   availability,
+  demoMode,
   notice,
 }: DossierScreenProps) {
   if (result.kind === 'FORBIDDEN') {
@@ -266,6 +276,7 @@ export function DossierScreen({
         }
       />
 
+      <DemoModeNotice mode={demoMode} />
       {notice ? <Alert tone={NOTICES[notice].tone}>{NOTICES[notice].text}</Alert> : null}
 
       <Section headingId="identity" title="شناسنامه">
@@ -368,7 +379,7 @@ export function DossierScreen({
           <ol className="flex flex-col gap-4">
             {recentActivity.map((entry) => (
               <li key={entry.id} className="border-s-2 border-border ps-4">
-                <p className="text-content">{entry.title}</p>
+                <p className="text-content">{timelineTitleLabel(entry.title)}</p>
                 <p className="text-sm text-content-muted">
                   {timelineCategoryLabel(entry.category)} · {formatJalaliDateLong(entry.occurredAt)}
                   {entry.amountMinor ? ` · ${formatMoney(entry.amountMinor)}` : ''}

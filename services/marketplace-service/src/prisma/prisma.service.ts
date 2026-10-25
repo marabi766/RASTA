@@ -33,6 +33,12 @@ export const TENANT_SCOPED_MODELS = [
   'OrderDispute',
   'Review',
   'IdempotencyKey',
+  'SagaStep',
+  // RUN-005: a return request is the buyer's, like the order it returns.
+  'ReturnRequest',
+  'ReturnLine',
+  'ReturnStatusHistory',
+  'ReturnDispatchRelease',
 ] as const;
 
 /**

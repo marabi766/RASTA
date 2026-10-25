@@ -1,5 +1,5 @@
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
-import { AllExceptionsFilter, AuthGuard, RolesGuard } from '@rasta/nest-common';
+import { AllExceptionsFilter, AuthGuard, OutboxShutdown, RolesGuard } from '@rasta/nest-common';
 import { AppModule } from './app.module';
 import { IdentityRolesGuard } from './security-events/identity-roles.guard';
 import { RefusalAuditExceptionFilter } from './security-events/refusal-audit.filter';
@@ -8,7 +8,8 @@ import { SECURITY_EVENT_RELAY } from './security-events/security-event.relay';
 /**
  * The composition root's refusal-audit wiring (AUD-004 Phase C1): the refusal
  * filter replaces the bare platform filter, and both relays share one
- * lifecycle — started on init, stopped on shutdown.
+ * lifecycle — started on init, stopped on shutdown (by `OutboxShutdown`, with
+ * the purge, since D-052; the wiring is `app.module.shutdown.spec.ts`).
  */
 
 type Provider = { provide?: unknown; useClass?: unknown };
@@ -55,12 +56,14 @@ describe('AppModule refusal-audit wiring', () => {
     expect(providers().some((provider) => provider.provide === SECURITY_EVENT_RELAY)).toBe(true);
   });
 
-  it('asserts the connected role first, then starts both relays on init and stops both on shutdown', async () => {
+  it('asserts the connected role first, then starts both relays and the purge on init and stops them on shutdown', async () => {
     const order: string[] = [];
     const domain = relay();
     const security = relay();
+    const purge = relay();
     domain.start.mockImplementation(() => order.push('domain relay'));
     security.start.mockImplementation(() => order.push('security relay'));
+    purge.start.mockImplementation(() => order.push('purge'));
     const prisma = { assertRuntimeRole: jest.fn(async () => void order.push('role check')) };
     const module = new AppModule(
       prisma as never,
@@ -68,21 +71,26 @@ describe('AppModule refusal-audit wiring', () => {
       store() as never,
       security as never,
       store() as never,
+      purge as never,
+      new OutboxShutdown({ relay: domain, purge, workers: [security], budgetMs: 1000 }),
     );
 
     await module.onModuleInit();
-    expect(order).toEqual(['role check', 'domain relay', 'security relay']);
+    expect(order).toEqual(['role check', 'domain relay', 'security relay', 'purge']);
     expect(domain.start).toHaveBeenCalledTimes(1);
     expect(security.start).toHaveBeenCalledTimes(1);
+    expect(purge.start).toHaveBeenCalledTimes(1);
 
     await module.onApplicationShutdown();
     expect(domain.stop).toHaveBeenCalledTimes(1);
     expect(security.stop).toHaveBeenCalledTimes(1);
+    expect(purge.stop).toHaveBeenCalledTimes(1);
   });
 
   it('starts nothing when connected as anything but the runtime role (D-045)', async () => {
     const domain = relay();
     const security = relay();
+    const purge = relay();
     const prisma = {
       assertRuntimeRole: jest.fn(async () => {
         throw new Error(
@@ -96,10 +104,13 @@ describe('AppModule refusal-audit wiring', () => {
       store() as never,
       security as never,
       store() as never,
+      purge as never,
+      new OutboxShutdown({ relay: domain, purge, workers: [security], budgetMs: 1000 }),
     );
 
     await expect(module.onModuleInit()).rejects.toThrow(/refuses to start/);
     expect(domain.start).not.toHaveBeenCalled();
     expect(security.start).not.toHaveBeenCalled();
+    expect(purge.start).not.toHaveBeenCalled();
   });
 });

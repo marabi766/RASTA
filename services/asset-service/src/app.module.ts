@@ -62,6 +62,7 @@ import { InsuranceExpirySweepScheduler } from './insurance/expiry-sweep.schedule
 import { ClaimService } from './insurance/claim.service';
 import { TimelineConsumer } from './consumers/timeline.consumer';
 import { AssetWorkStateClient } from './consumers/work-state';
+import { DocumentRemovalConsumer } from './consumers/document-removal.consumer';
 import { HealthController, MetricsController } from './health/health.controller';
 import { loadAssetEnv, SERVICE_NAME, type AssetEnv } from './config/env';
 
@@ -198,10 +199,53 @@ const CONSUMED_TOPICS = [
       provide: ClaimService,
       inject: [AssetRepository, AssetService, ENV],
       useFactory: (repository: AssetRepository, assets: AssetService, env: AssetEnv) =>
-        new ClaimService(repository, assets, {
-          decisionRoles: env.INSURANCE_CLAIM_DECISION_ROLES,
-          approvalCeilingMinor: env.INSURANCE_CLAIM_APPROVAL_CEILING_MINOR,
-        }),
+        new ClaimService(
+          repository,
+          assets,
+          {
+            decisionRoles: env.INSURANCE_CLAIM_DECISION_ROLES,
+            approvalCeilingMinor: env.INSURANCE_CLAIM_APPROVAL_CEILING_MINOR,
+          },
+          {
+            maxDocuments: env.INSURANCE_CLAIM_MAX_DOCUMENTS,
+            statusesAllowingAttach: env.INSURANCE_CLAIM_DOCUMENT_STATUSES,
+          },
+        ),
+    },
+
+    {
+      // Q-128: document-service's deletion of a file an insurance claim holds a
+      // reference to. Its own group and topic; the reference is marked, never removed.
+      provide: DocumentRemovalConsumer,
+      inject: [ENV, LOGGER, AssetRepository, AssetService, DOCUMENT_LOOKUP],
+      useFactory: (
+        env: AssetEnv,
+        logger: Logger,
+        repository: AssetRepository,
+        assets: AssetService,
+        lookup: DocumentLookup,
+      ) =>
+        new DocumentRemovalConsumer(
+          (handler) =>
+            new EventConsumer(
+              {
+                ...kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-document-removal`),
+                groupId: 'asset-service.document-removal',
+                topics: ['rasta.document.v1'],
+                deadLetterTopic: 'rasta.asset.v1.dlq',
+                fromBeginning: true,
+              },
+              handler,
+              {
+                log: (m) => logger.info(m),
+                warn: (m) => logger.warn(m),
+                error: (m, trace) => logger.error({ err: trace }, m),
+              },
+            ),
+          repository,
+          assets,
+          lookup,
+        ),
     },
 
     {
@@ -312,6 +356,8 @@ const CONSUMED_TOPICS = [
         OutboxPurgeScheduler,
         InsuranceExpirySweepScheduler,
         TimelineConsumer,
+        DocumentRemovalConsumer,
+        KafkaEventPublisher,
         ENV,
       ],
       useFactory: (
@@ -319,12 +365,16 @@ const CONSUMED_TOPICS = [
         purge: OutboxPurgeScheduler,
         expirySweep: InsuranceExpirySweepScheduler,
         timeline: TimelineConsumer,
+        documentRemoval: DocumentRemovalConsumer,
+        publisher: KafkaEventPublisher,
         env: AssetEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [expirySweep, timeline],
+          workers: [expirySweep, timeline, documentRemoval],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },

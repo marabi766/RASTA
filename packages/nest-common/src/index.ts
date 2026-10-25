@@ -54,6 +54,7 @@ export {
 // Authentication -------------------------------------------------------------
 export { TokenVerifier, InternalTokenService } from './auth/token-verifier';
 export { internalGet } from './auth/internal-get';
+export { internalFetch } from './http/internal-fetch';
 export {
   currentActor,
   compareActors,
@@ -110,6 +111,16 @@ export {
 } from './filters/exception.filter';
 
 export {
+  NestLoggerAdapter,
+  bootstrapLogger,
+  installNestLogger,
+  logFatal,
+  scrubLogValue,
+} from './logging/nest-logger';
+export { kafkaLogCreator } from './kafka/log-creator';
+export type { LoggerHost } from './logging/nest-logger';
+
+export {
   ZodValidationPipe,
   zodPipe,
   toErrorDetails,
@@ -136,6 +147,23 @@ export {
   KafkaConnectionConfigError,
 } from './kafka/connection';
 export type { KafkaConnectionOptions, KafkaConnectionEnv } from './kafka/connection';
+export { boundedDisconnect, kafkaShutdownDeadline } from './kafka/bounded-disconnect';
+export type {
+  BoundedDisconnectOptions,
+  Disconnectable,
+  DisconnectLogger,
+  DisconnectOutcome,
+} from './kafka/bounded-disconnect';
+export {
+  KafkaReadinessProbe,
+  kafkaProbeTimeoutMs,
+  KAFKA_PROBE_MAX_TIMEOUT_MS,
+} from './kafka/readiness-probe';
+export type {
+  AdminFactory,
+  KafkaReadinessProbeOptions,
+  ProbeLogger,
+} from './kafka/readiness-probe';
 
 // Event consumption ----------------------------------------------------------
 export {
@@ -143,6 +171,9 @@ export {
   ConsumerStoppingError,
   UnprocessableEventError,
   deadLetterHeaders,
+  DeadLetterHeaderError,
+  DLQ_ADDED_HEADERS_MAX_BYTES,
+  utf8Prefix,
   HANDLER_MESSAGE_MAX,
   CONSUMER_SESSION_TIMEOUT_MS,
   DEFAULT_MAX_RETRIES,
@@ -171,6 +202,8 @@ export {
   buildHeaders as envelopeHeaders,
   orderForPublish,
   OutboxRelay,
+  OutboxReleaseAbandoned,
+  releaseWithin,
   renewalIntervalMs,
   renewalDeadlineMs,
   RENEWAL_INTERVAL_DIVISOR,
@@ -186,6 +219,7 @@ export type {
   EventPublisher,
   OutboxRelayOptions,
   OutboxStopOptions,
+  OutboxReleaseBound,
   BuildOutboxOptions,
   OutboxClaim,
   ClaimRequest,
@@ -196,6 +230,7 @@ export {
   markPublishedSql,
   markFailedSql,
   releaseSql,
+  boundedReleaseSql,
   renewSql,
   oldestPendingAgeSecondsSql,
   activeLeaseCountSql,

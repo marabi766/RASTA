@@ -51,6 +51,8 @@ export const SERVICES = [
   'construction',
   'contract',
   'inventory',
+  'analytics',
+  'procurement',
   'organization',
   'fleet',
   'identity',
@@ -201,10 +203,39 @@ export const EXEMPTIONS = {
     },
   },
   inventory: {
+    ix_return_shipment_buyer: {
+      index: 'return_shipment (buyer_organization_id, id)',
+      reason:
+        "the sender's own return shipments (GET /v1/return-shipments, /{id}, /{id}/tracking; RUN-005, ADR-048 § 2): a return shipment belongs to the organization that owns its destination warehouse, but the sender asking is another tenant, whose organization is buyer_organization_id — the column this index leads with, and the predicate of that read (ReturnShipmentRepository returnVisibleTo, raw SQL)",
+    },
     ix_shipment_consignee: {
       index: 'shipment (consignee_organization_id, id)',
       reason:
         "the consignee's own shipments (GET /v1/shipments, /{id}, /{id}/tracking; ADR-056 § 5): a shipment belongs to the organization that owns its origin warehouse, but the consignee asking is another tenant, whose organization is consignee_organization_id — the column this index leads with, and the predicate of that read (ShipmentRepository visibleTo, raw SQL)",
+    },
+  },
+  // procurement: the window sweeper's two queues (COM-007 PR 2, ADR-070 § 2).
+  procurement: {
+    ix_demand_aggregation_sweep_open: {
+      index: 'demand_aggregation (closes_at, id)',
+      reason:
+        'the window sweeper claims OPEN windows past closes_at for every tenant at once, earliest end first (WindowSweepRepository.claimDue, runUnscoped); a partial index on status = OPEN — one per (organization, product) — so it is small, and each window is then ended under its own organization_id',
+    },
+    ix_demand_aggregation_sweep_follow: {
+      index: 'demand_aggregation (closes_at, id)',
+      reason:
+        'the window sweeper claims ended windows whose demands are still following them for every tenant at once (WindowSweepRepository.claimDue, runUnscoped); a partial index on demands_to_follow > 0, empty but for windows larger than one batch, and each is then worked under its own organization_id',
+    },
+    // COM-007 PR 6 (ADR-070 § 3, § 10): the RFQ close sweeper's queue, and the invited supplier's reads.
+    ix_rfq_close_due: {
+      index: 'rfq (quotation_closing_at, id)',
+      reason:
+        'the RFQ close sweeper claims PUBLISHED RFQs past their deadline for every tenant at once, earliest deadline first (RfqRepository.claimDue, runUnscoped); a partial index on status = PUBLISHED, and each RFQ is then closed under its own organization_id',
+    },
+    ix_rfq_invitation_supplier: {
+      index: 'rfq_invitation (supplier_organization_id, rfq_id)',
+      reason:
+        "an invited supplier's own RFQs (GET /v1/rfqs?side=SUPPLIER, GET /v1/rfqs/{id}; ADR-070 § 10): an invitation belongs to the buyer's organization, but the supplier asking is another tenant, whose organization is supplier_organization_id — the column this index leads with, and the predicate of that read (RfqRepository, runUnscoped)",
     },
   },
   contract: {
@@ -319,6 +350,11 @@ export const EXEMPTIONS = {
     },
   },
   marketplace: {
+    ix_return_request_supplier: {
+      index: 'return_request (supplier_organization_id, id)',
+      reason:
+        "the supplier's own return requests (GET /v1/returns?role=SUPPLIER; RUN-005): a request belongs to the buyer's organization, but the supplier asking is another tenant, whose organization is supplier_organization_id — the column this index leads with, and the predicate of that read (ReturnRepository.list with role SUPPLIER, runUnscoped)",
+    },
     ix_offer_product_status: {
       index: 'offer (product_id, status)',
       reason:
@@ -400,6 +436,11 @@ export const EXEMPTIONS = {
   // lookups name the rule's key, not a tenant (TENANT_SCOPE_EXEMPTIONS in
   // services/economic-service/src/prisma/prisma.service.ts).
   economic: {
+    commission_rule_business_line_status_valid_from_idx: {
+      index: 'commission_rule (business_line, status, valid_from)',
+      reason:
+        'platform-wide (organization_id NULL) and tenant rules matched together by business line (ADR-045; CommissionService.candidateRules and listRules, runUnscoped with an explicit OR on organization_id)',
+    },
     commission_rule_transaction_type_status_valid_from_idx: {
       index: 'commission_rule (transaction_type, status, valid_from)',
       reason:

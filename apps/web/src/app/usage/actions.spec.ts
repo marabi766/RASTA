@@ -37,8 +37,14 @@ const redirect = jest.fn((url: string) => {
   throw new Error(`NEXT_REDIRECT:${url}`);
 });
 
-jest.mock('@/server/current-session', () => ({ currentSession: () => currentSession() }));
+jest.mock('@/server/current-session', () => ({
+  currentSession: () => currentSession(),
+  missingSessionReason: async () => 'NO_SESSION',
+}));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
+// The provider gate is open here: what it refuses, against a fake gateway, is
+// `app/money-actions-gate.spec.ts`.
+jest.mock('@/server/money-gate', () => ({ mayDispatch: async () => true }));
 jest.mock('@/server/usage', () => {
   const actual = jest.requireActual('@/server/usage');
   return { ...actual, recordUsage: (...args: unknown[]) => recordUsage(...args) };

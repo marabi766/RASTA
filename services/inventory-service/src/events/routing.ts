@@ -1,4 +1,4 @@
-import { SHIPMENT_AGGREGATE } from '@rasta/contracts';
+import { RETURN_SHIPMENT_AGGREGATE, SHIPMENT_AGGREGATE } from '@rasta/contracts';
 import type { InventoryEventName, InventoryEventPayload } from './events';
 
 /**
@@ -30,11 +30,18 @@ export const AGGREGATE_OF = {
   SHIPMENT_CREATED: SHIPMENT_AGGREGATE,
   SHIPMENT_DISPATCHED: SHIPMENT_AGGREGATE,
   SHIPMENT_DELIVERED: SHIPMENT_AGGREGATE,
+  RETURN_SHIPMENT_DISPATCHED: RETURN_SHIPMENT_AGGREGATE,
+  RETURN_SHIPMENT_RECEIVED: RETURN_SHIPMENT_AGGREGATE,
+  RETURN_SHIPMENT_INSPECTED: RETURN_SHIPMENT_AGGREGATE,
+  RETURN_SHIPMENT_RESOLVED: RETURN_SHIPMENT_AGGREGATE,
+  RETURN_DISPATCH_WITHDRAWN: 'ReturnDispatchWithdrawal',
 } as const satisfies Record<InventoryEventName, string>;
 
 export const PARTITION_SCOPES = {
   STOCK_ITEM: 'STOCK_ITEM',
   SHIPMENT: 'SHIPMENT',
+  RETURN_SHIPMENT: 'RETURN_SHIPMENT',
+  RETURN_REQUEST: 'RETURN_REQUEST',
   WAREHOUSE: 'WAREHOUSE',
 } as const;
 
@@ -66,6 +73,28 @@ export const PARTITION_KEY_POLICY: { [N in InventoryEventName]: PartitionRule<N>
   SHIPMENT_CREATED: (payload) => ({ scope: 'SHIPMENT', key: payload.shipmentId }),
   SHIPMENT_DISPATCHED: (payload) => ({ scope: 'SHIPMENT', key: payload.shipmentId }),
   SHIPMENT_DELIVERED: (payload) => ({ scope: 'SHIPMENT', key: payload.shipmentId }),
+  // ---- the return-shipment stream: one partition per return shipment, STRICT ----
+  RETURN_SHIPMENT_DISPATCHED: (payload) => ({
+    scope: 'RETURN_SHIPMENT',
+    key: payload.returnShipmentId,
+  }),
+  RETURN_SHIPMENT_RECEIVED: (payload) => ({
+    scope: 'RETURN_SHIPMENT',
+    key: payload.returnShipmentId,
+  }),
+  RETURN_SHIPMENT_INSPECTED: (payload) => ({
+    scope: 'RETURN_SHIPMENT',
+    key: payload.returnShipmentId,
+  }),
+  RETURN_SHIPMENT_RESOLVED: (payload) => ({
+    scope: 'RETURN_SHIPMENT',
+    key: payload.returnShipmentId,
+  }),
+  // ---- a request's dispatch fence: by the request — there is no shipment to key it by ----
+  RETURN_DISPATCH_WITHDRAWN: (payload) => ({
+    scope: 'RETURN_REQUEST',
+    key: payload.returnRequestId,
+  }),
 };
 
 /**

@@ -143,7 +143,7 @@ describeWithKafka('supplier event flow over Kafka', () => {
 
   afterAll(async () => {
     await consumer?.disconnect();
-    await publisher?.onModuleDestroy();
+    await publisher?.stop();
     await cleanup(prisma, organizations);
     await prisma?.onModuleDestroy();
   }, 60_000);
@@ -194,7 +194,11 @@ describeWithKafka('supplier event flow over Kafka', () => {
     );
 
     await asOperator(
-      () => wiring.suspensions.suspend(supplier.id, { reason: 'under review' } as never),
+      () =>
+        wiring.suspensions.suspend(supplier.id, {
+          reason: 'under review',
+          latestSuspensionId: null,
+        }),
       platformOrg,
     );
 

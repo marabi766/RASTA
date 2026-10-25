@@ -15,6 +15,8 @@ import { EndAssignmentForm } from './drivers/[id]/EndAssignmentForm';
 import { PlaceOrderForm } from './marketplace/[productId]/PlaceOrderForm';
 import { ReportRequestForm } from './maintenance/ReportRequestForm';
 import { RecordCostForm, RecordPartForm } from './maintenance/[id]/RepairOrderForms';
+import { StatementCommandForm } from './contracts/[id]/StatementCommandForm';
+import { SubmitQualificationForm } from './suppliers/SupplierForms';
 
 /**
  * A `<select>` keeps the choice a person made after an attempt is refused.
@@ -73,6 +75,35 @@ jest.mock('./maintenance/[id]/repair-actions', () => {
     submitRecordLabour: refuse,
     submitRecordCost: refuse,
   };
+});
+
+jest.mock('./contracts/[id]/statement-actions', () => {
+  const { REFUSED_SUBMISSION } = jest.requireActual('@/test/refusal');
+  const { draftFormLines } = jest.requireActual('@/lib/statement-draft');
+  // The statement forms keep their rows, not `values`: the same refusal, in that shape.
+  const refuseDraft = async (...args: unknown[]) => ({
+    kind: 'INVALID',
+    command: 'DRAFT',
+    submissionId: REFUSED_SUBMISSION,
+    rows: draftFormLines(args[args.length - 1] as FormData),
+    fieldErrors: {},
+    message: 'refused',
+  });
+  return { submitStatementDraft: refuseDraft, submitStatementCommand: refuseDraft };
+});
+
+jest.mock('./suppliers/supplier-actions', () => {
+  const { REFUSED_SUBMISSION } = jest.requireActual('@/test/refusal');
+  const { submitFormValues } = jest.requireActual('@/lib/supplier-commands');
+  // The qualification form keeps structured values (evidence rows): the same refusal, in that shape.
+  const refuseRequest = async (...args: unknown[]) => ({
+    kind: 'INVALID',
+    submissionId: REFUSED_SUBMISSION,
+    values: submitFormValues(args[args.length - 1] as FormData),
+    fieldErrors: {},
+    message: 'refused',
+  });
+  return { submitQualificationRequest: refuseRequest };
 });
 
 const CSRF = 'csrf-token-for-this-session';
@@ -194,6 +225,39 @@ const CASES = [
     form: 'record repair part (source)',
     select: 'source',
     mount: () => <RecordPartForm {...REPAIR_IDENTITY} />,
+  },
+  {
+    form: 'draft statement (a line’s milestone)',
+    select: 'line.0.milestoneId',
+    mount: () => (
+      <StatementCommandForm
+        scope={{ contractId: 'CTR_1', statementId: null }}
+        command="DRAFT"
+        csrfToken={CSRF}
+        submissionId={SUBMISSION}
+        replay={{ token: 'stamp', until: Date.now() + 60_000 }}
+        binding={{ owner: 'owner-tag', session: 'session-tag' }}
+        sessionMaxAgeSeconds={3600}
+        milestones={[
+          { id: 'MST_1', title: 'نخست' },
+          { id: 'MST_2', title: 'دوم' },
+        ]}
+        pageHref="/contracts/CTR_1"
+      />
+    ),
+  },
+  {
+    form: 'send a supplier qualification request (capability)',
+    select: 'capability',
+    mount: () => (
+      <SubmitQualificationForm
+        supplierId="SUP_01J00000000000000000000000"
+        csrfToken={CSRF}
+        submissionId={SUBMISSION}
+        baseline={BASELINE}
+        capabilities={['GOODS_SUPPLY', 'CONTRACTING']}
+      />
+    ),
   },
   {
     form: 'record repair cost (category)',

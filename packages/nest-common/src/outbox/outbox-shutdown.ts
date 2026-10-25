@@ -26,6 +26,16 @@ import type { OutboxStopOptions } from './outbox';
  * kept polling while the relay drained and then waited for its own unit of
  * work on top of the relay's — the same sum this coordinator exists to avoid.
  *
+ * The service's Kafka publisher (`publishers`) closes last, once that drain
+ * has returned, and by the same deadline (D-052 phase 4b, Codex r1 on #293).
+ * Its own `onModuleDestroy` ran beside this one and counted a budget of its
+ * own; where the relay still drained in `onApplicationShutdown`, that drain
+ * began only after the publisher had spent its budget, and the two added up
+ * past SHUTDOWN_TIMEOUT_MS. Closed here, the publisher gets what the drain
+ * left of the one budget — none, when the relay waited the deadline out on a
+ * publish the broker never answered, and then its close is abandoned at once —
+ * and the relay never publishes through a producer that is already closing.
+ *
  * `stop()` is one promise: a later call — `onApplicationShutdown` confirming
  * the stop, a repeated signal — joins it, and once it has returned, returns at
  * once. Cross-cutting mechanism only (ADR-018).
@@ -46,6 +56,12 @@ export interface OutboxShutdownOptions {
    * of work in a state another instance can take over.
    */
   workers?: readonly OutboxStoppable[];
+  /**
+   * Closed after the relay, the purge and the workers have returned — whether
+   * they stopped or failed to — by the same deadline: the service's Kafka
+   * publisher, whose producer the relay publishes through.
+   */
+  publishers?: readonly OutboxStoppable[];
   /** The shared budget, from the first `stop()` (`outboxShutdownBudgetMs`). */
   budgetMs: number;
   /** Injection seam for the tests; nothing else should pass this. */
@@ -65,7 +81,10 @@ export class OutboxShutdown {
     this.now = options.now ?? Date.now;
   }
 
-  /** Drains the relay, the purge and the workers concurrently, all by one deadline. */
+  /**
+   * Drains the relay, the purge and the workers concurrently, then closes the
+   * publishers, all by one deadline.
+   */
   stop(): Promise<void> {
     this.stopping ??= this.drain();
     return this.stopping;
@@ -78,10 +97,19 @@ export class OutboxShutdown {
 
   private async drain(): Promise<void> {
     const deadlineAt = this.now() + this.options.budgetMs;
-    await Promise.all([
-      this.options.relay.stop({ deadlineAt }),
-      this.options.purge?.stop({ deadlineAt }),
-      ...(this.options.workers ?? []).map((worker) => worker.stop({ deadlineAt })),
-    ]);
+    try {
+      await Promise.all([
+        this.options.relay.stop({ deadlineAt }),
+        this.options.purge?.stop({ deadlineAt }),
+        ...(this.options.workers ?? []).map((worker) => worker.stop({ deadlineAt })),
+      ]);
+    } finally {
+      // After the drain, never beside it: a publish still in flight is the
+      // relay's to finish or abandon, by the deadline, before its producer
+      // closes. A drain that failed still leaves a producer to close.
+      await Promise.all(
+        (this.options.publishers ?? []).map((publisher) => publisher.stop({ deadlineAt })),
+      );
+    }
   }
 }

@@ -17,11 +17,7 @@ import {
 } from '@/server/tenders';
 
 import { TendersScreen, formatBidWindow, type TendersView } from './TendersScreen';
-import {
-  IdentityUnavailableDetailScreen,
-  OpenTenderDetailScreen,
-  OwnTenderDetailScreen,
-} from './[id]/TenderDetailScreen';
+import { OpenTenderDetailScreen, OwnTenderDetailScreen } from './[id]/TenderDetailScreen';
 
 /**
  * What `/tenders` and `/tenders/[id]` render: every outcome the server read can
@@ -74,6 +70,8 @@ const OWN_DETAIL: TenderDetail = {
   statusReasonCode: null,
   publishedAt: '2026-10-19T08:00:00.000Z',
   createdAt: '2026-10-18T08:00:00.000Z',
+  version: 3,
+  statusChangedByCaller: false,
 };
 
 const OPEN_DETAIL: OpenTenderDetail = {
@@ -111,6 +109,22 @@ const sides = (
   own: ReadResult<TenderPage> | null,
   open: ReadResult<OpenTenderPage> | null,
 ): TendersView => ({ kind: 'SIDES', own, open });
+
+it('shows the persisted procurement threshold warning on the tender screen', () => {
+  render(
+    <OwnTenderDetailScreen
+      result={{
+        kind: 'OK',
+        data: { ...OWN_DETAIL, procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE' },
+      }}
+      criteria={null}
+    />,
+  );
+  expect(screen.getByRole('alert')).toHaveTextContent('هشدار مبلغ و نوع فرایند');
+  expect(screen.getByRole('alert')).toHaveTextContent('پیکربندی‌شده');
+  expect(screen.getByRole('alert').textContent).not.toMatch(/[\u0654أإؤئ]/u);
+  expect(screen.getByRole('alert')).toHaveTextContent('انتخاب نوع فرایند دستی است');
+});
 
 describe('the tender list, owner side', () => {
   it('shows each tender with a status word, a Jalali window in Persian digits and a link to it', () => {
@@ -215,47 +229,27 @@ describe('the tender list, bidder side', () => {
   });
 });
 
-describe('the tender list, when the roles could not be read', () => {
-  it('asks nothing and says so', () => {
-    render(
-      <TendersScreen view={{ kind: 'IDENTITY_UNAVAILABLE', correlationId: 'corr-3' }} query={{}} />,
-    );
-    expect(screen.getByText(/نقش شما در این سازمان خوانده نشد/)).toBeInTheDocument();
-    expect(screen.getByText(/corr-3/)).toBeInTheDocument();
-    expect(screen.queryByRole('link')).not.toBeInTheDocument();
-  });
-});
+// One test per state, here and in both detail screens below: each axe run gets
+// the whole default timeout to itself instead of sharing one across the states.
+describe('the tender list has no accessibility violations in any state', () => {
+  const failures = [
+    { kind: 'FORBIDDEN' } as const,
+    { kind: 'NOT_FOUND' } as const,
+    { kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' } as const,
+    { kind: 'MALFORMED', correlationId: 'corr-1' } as const,
+  ];
 
-describe('the tender detail, when the roles could not be read', () => {
-  it('chooses no door, asks nothing and says so', async () => {
-    const { container } = render(<IdentityUnavailableDetailScreen correlationId="corr-4" />);
-    expect(screen.getByText(/نقش شما در این سازمان خوانده نشد/)).toBeInTheDocument();
-    expect(screen.getByText(/corr-4/)).toBeInTheDocument();
+  it.each<[string, TendersView]>([
+    ['both sides, more to page', sides(ownPage([OWN], 'c2'), openPage([OPEN], 'b2'))],
+    ['both sides empty', sides(ownPage([]), openPage([]))],
+    ...failures.flatMap((failure): [string, TendersView][] => [
+      [`own side ${failure.kind}`, sides(failure, null)],
+      [`open side ${failure.kind}`, sides(null, failure)],
+    ]),
+  ])('passes jest-axe (%s)', async (_name, view) => {
+    const { container } = render(<TendersScreen view={view} query={{}} />);
     expect(await axe(container)).toHaveNoViolations();
   });
-});
-
-describe('the tender list has no accessibility violations in any state', () => {
-  it('passes jest-axe', async () => {
-    const failures = [
-      { kind: 'FORBIDDEN' } as const,
-      { kind: 'NOT_FOUND' } as const,
-      { kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' } as const,
-      { kind: 'MALFORMED', correlationId: 'corr-1' } as const,
-    ];
-    const views: TendersView[] = [
-      sides(ownPage([OWN], 'c2'), openPage([OPEN], 'b2')),
-      sides(ownPage([]), openPage([])),
-      { kind: 'IDENTITY_UNAVAILABLE', correlationId: 'corr-3' },
-      ...failures.flatMap((failure) => [sides(failure, null), sides(null, failure)]),
-    ];
-
-    for (const view of views) {
-      const { container, unmount } = render(<TendersScreen view={view} query={{}} />);
-      expect(await axe(container)).toHaveNoViolations();
-      unmount();
-    }
-  }, 60_000);
 });
 
 describe('the owner’s tender detail', () => {
@@ -354,43 +348,35 @@ describe('the owner’s tender detail', () => {
     expect(screen.getByText(/corr-9/)).toBeInTheDocument();
   });
 
-  it('has no accessibility violations in any state', async () => {
-    const states: {
-      result: ReadResult<TenderDetail>;
-      criteria: ReadResult<TenderCriteria> | null;
-    }[] = [
-      { result: { kind: 'OK', data: OWN_DETAIL }, criteria: { kind: 'OK', data: CRITERIA } },
+  it.each<[string, ReadResult<TenderDetail>, ReadResult<TenderCriteria> | null]>([
+    ['with criteria', { kind: 'OK', data: OWN_DETAIL }, { kind: 'OK', data: CRITERIA }],
+    [
+      'cancelled, no criteria',
       {
-        result: {
-          kind: 'OK',
-          data: {
-            ...OWN_DETAIL,
-            status: 'CANCELLED',
-            statusReasonCode: 'OWNER_REQUEST',
-            statusReason: 'x',
-          },
+        kind: 'OK',
+        data: {
+          ...OWN_DETAIL,
+          status: 'CANCELLED',
+          statusReasonCode: 'OWNER_REQUEST',
+          statusReason: 'x',
         },
-        criteria: { kind: 'OK', data: { items: [], totalWeightBp: 0, complete: false } },
       },
-      { result: { kind: 'OK', data: OWN_DETAIL }, criteria: { kind: 'FORBIDDEN' } },
-      {
-        result: { kind: 'OK', data: OWN_DETAIL },
-        criteria: { kind: 'MALFORMED', correlationId: 'c' },
-      },
-      { result: { kind: 'NOT_FOUND' }, criteria: null },
-      { result: { kind: 'FORBIDDEN' }, criteria: null },
-      { result: { kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' }, criteria: null },
-      { result: { kind: 'MALFORMED', correlationId: 'corr-2' }, criteria: null },
-    ];
-
-    for (const state of states) {
-      const { container, unmount } = render(
-        <OwnTenderDetailScreen result={state.result} criteria={state.criteria} />,
-      );
-      expect(await axe(container)).toHaveNoViolations();
-      unmount();
-    }
-  }, 60_000);
+      { kind: 'OK', data: { items: [], totalWeightBp: 0, complete: false } },
+    ],
+    ['criteria refused', { kind: 'OK', data: OWN_DETAIL }, { kind: 'FORBIDDEN' }],
+    [
+      'criteria malformed',
+      { kind: 'OK', data: OWN_DETAIL },
+      { kind: 'MALFORMED', correlationId: 'c' },
+    ],
+    ['not found', { kind: 'NOT_FOUND' }, null],
+    ['refused', { kind: 'FORBIDDEN' }, null],
+    ['unavailable', { kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' }, null],
+    ['malformed', { kind: 'MALFORMED', correlationId: 'corr-2' }, null],
+  ])('has no accessibility violations (%s)', async (_name, result, criteria) => {
+    const { container } = render(<OwnTenderDetailScreen result={result} criteria={criteria} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
 });
 
 describe('the bidder’s tender detail', () => {
@@ -425,21 +411,20 @@ describe('the bidder’s tender detail', () => {
     }
   });
 
-  it('has no accessibility violations in any state', async () => {
-    const results: ReadResult<OpenTenderDetail>[] = [
-      { kind: 'OK', data: OPEN_DETAIL },
+  it.each<[string, ReadResult<OpenTenderDetail>]>([
+    ['with criteria', { kind: 'OK', data: OPEN_DETAIL }],
+    [
+      'no criteria, no scope',
       { kind: 'OK', data: { ...OPEN_DETAIL, criteria: [], scopeOfWork: '' } },
-      { kind: 'NOT_FOUND' },
-      { kind: 'FORBIDDEN' },
-      { kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' },
-      { kind: 'MALFORMED', correlationId: 'corr-2' },
-    ];
-    for (const result of results) {
-      const { container, unmount } = render(<OpenTenderDetailScreen result={result} />);
-      expect(await axe(container)).toHaveNoViolations();
-      unmount();
-    }
-  }, 60_000);
+    ],
+    ['not found', { kind: 'NOT_FOUND' }],
+    ['refused', { kind: 'FORBIDDEN' }],
+    ['unavailable', { kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' }],
+    ['malformed', { kind: 'MALFORMED', correlationId: 'corr-2' }],
+  ])('has no accessibility violations (%s)', async (_name, result) => {
+    const { container } = render(<OpenTenderDetailScreen result={result} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
 });
 
 /**

@@ -145,8 +145,9 @@ const gaps = (warning) => /fail to reach Kafka: (.*?)\. Copy /.exec(warning)?.[1
 
 const CURRENT_EXAMPLE = envOf(readFileSync(join(ROOT, '.env.example'), 'utf8'));
 
-test('the broker has one password variable per service, fourteen in all', () => {
-  assert.equal(kafkaServicesFromPrincipals().length, 14);
+test('the broker has one password variable per service, sixteen in all', () => {
+  // procurement-service and analytics-service each joined the broker (COM-007, RUN-001).
+  assert.equal(kafkaServicesFromPrincipals().length, 16);
   for (const service of kafkaServicesFromPrincipals()) {
     const variable = `KAFKA_SASL_PASSWORD_${service.replace(/-service$/, '').toUpperCase()}`;
     assert.ok(CURRENT_EXAMPLE[variable], `.env.example does not set ${variable}`);

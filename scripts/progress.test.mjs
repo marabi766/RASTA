@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { calculateProgress, renderProgressReport, validateBacklog } from './progress-lib.mjs';
+import { validateBacklogSchema } from './progress-schema.mjs';
 
-const baseline = JSON.parse(
-  await readFile(new URL('../planning/backlog.json', import.meta.url), 'utf8'),
-);
+const backlogUrl = new URL('../planning/backlog.json', import.meta.url);
+const schemaUrl = new URL('../planning/backlog.schema.json', import.meta.url);
+const baseline = JSON.parse(await readFile(backlogUrl, 'utf8'));
+const schema = JSON.parse(await readFile(schemaUrl, 'utf8'));
 
 function copy() {
   return structuredClone(baseline);
@@ -19,11 +25,181 @@ test('the repository baseline is valid and preserves the approved horizons', () 
   // is accepted, so they are updated in the same commit as the acceptance —
   // that coupling is the point: a status change nobody meant to make fails here.
   assert.equal(progress.mvp.committed, 563);
-  assert.equal(progress.mvp.earned, 217);
-  assert.equal(progress.mvp.percent, 38.5);
+  assert.equal(progress.mvp.earned, 385);
+  assert.equal(progress.mvp.percent, 68.4);
   assert.equal(progress.fullProduct.committed, 786);
-  assert.equal(progress.fullProduct.earned, 217);
-  assert.equal(progress.fullProduct.percent, 27.6);
+  assert.equal(progress.fullProduct.earned, 385);
+  assert.equal(progress.fullProduct.percent, 49);
+});
+
+test('a logged acceptance names who decided and only records that are ACCEPTED', () => {
+  const logged = baseline.changeLog.filter((entry) => entry.type === 'ITEM_ACCEPTED');
+  assert.ok(logged.length > 0);
+  assert.deepEqual(validateBacklog(baseline), []);
+
+  const unapproved = copy();
+  unapproved.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED').approvalRef = null;
+  assert.ok(
+    validateBacklog(unapproved).some(
+      (error) => error.includes("'ITEM_ACCEPTED'") && error.includes('requires an approvalRef'),
+    ),
+  );
+  assert.ok(
+    validateBacklogSchema(unapproved, schema).some((error) => error.includes('approvalRef')),
+  );
+
+  // The log may not claim an acceptance the status contradicts, in either order
+  // of mistake: a record withdrawn from ACCEPTED without a correction, or one
+  // never accepted at all. (The withdrawn record's own STATUS_CORRECTED entry
+  // in the baseline precedes its acceptance, so it explains nothing.)
+  const withdrawn = copy();
+  const id = logged[0].recordIds[0];
+  withdrawn.items.find((item) => item.id === id).status = 'IN_PROGRESS';
+  const notAccepted = copy();
+  notAccepted.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED').recordIds = [
+    notAccepted.items.find((item) => item.status === 'IN_PROGRESS').id,
+  ];
+  for (const backlog of [withdrawn, notAccepted]) {
+    assert.ok(
+      validateBacklog(backlog).some((error) =>
+        error.includes('requires recordIds that exist and are ACCEPTED'),
+      ),
+    );
+  }
+
+  const missingIds = copy();
+  delete missingIds.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED').recordIds;
+  assert.ok(
+    validateBacklogSchema(missingIds, schema).some((error) =>
+      error.includes("must have required property 'recordIds'"),
+    ),
+  );
+});
+
+test('a mistaken acceptance is corrected by appending an approved STATUS_CORRECTED entry', () => {
+  // docs/25 § 25.4: the acceptance stays in the log as history; a later
+  // approved correction of the same record explains its current status.
+  const acceptance = baseline.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED');
+  const id = acceptance.recordIds[0];
+  function withdrawnWith(...entries) {
+    const backlog = copy();
+    backlog.items.find((item) => item.id === id).status = 'IN_PROGRESS';
+    backlog.changeLog.push(...entries);
+    return backlog;
+  }
+  const correction = {
+    date: acceptance.date,
+    type: 'STATUS_CORRECTED',
+    reason: `${id} was accepted by mistake and is back in progress.`,
+    recordedBy: 'Project manager',
+    approvalRef: 'Product owner correction, test fixture',
+    recordIds: [id],
+  };
+
+  const corrected = withdrawnWith(correction);
+  assert.deepEqual(validateBacklog(corrected), []);
+  assert.deepEqual(validateBacklogSchema(corrected, schema), []);
+  assert.deepEqual(
+    corrected.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED'),
+    acceptance,
+  );
+
+  // Anything short of that is still an unexplained contradiction.
+  const otherId = baseline.items.find((item) => item.status === 'IN_PROGRESS').id;
+  const reaccepted = withdrawnWith(correction, { ...acceptance, recordIds: [id] });
+  const unexplained = {
+    unapproved: withdrawnWith({ ...correction, approvalRef: null }),
+    'blank approval': withdrawnWith({ ...correction, approvalRef: ' ' }),
+    'another record': withdrawnWith({ ...correction, recordIds: [otherId] }),
+    'dated before the acceptance': withdrawnWith({ ...correction, date: '2026-10-14' }),
+    'a different change type': withdrawnWith({ ...correction, type: 'POINTS_CHANGED' }),
+    're-accepted after the correction': reaccepted,
+  };
+  for (const [name, backlog] of Object.entries(unexplained)) {
+    assert.ok(
+      validateBacklog(backlog).some((error) =>
+        error.includes('requires recordIds that exist and are ACCEPTED'),
+      ),
+      name,
+    );
+  }
+
+  // A correction never vouches for a record that does not exist.
+  const missing = withdrawnWith({ ...correction, recordIds: [id, 'NOPE-001'] });
+  missing.changeLog.find((entry) => entry.type === 'ITEM_ACCEPTED').recordIds.push('NOPE-001');
+  assert.ok(
+    validateBacklog(missing).some((error) =>
+      error.includes('requires recordIds that exist and are ACCEPTED'),
+    ),
+  );
+});
+
+test('the repository baseline satisfies its declared JSON Schema', () => {
+  assert.deepEqual(validateBacklogSchema(baseline, schema), []);
+});
+
+test('the instance $schema keyword is declared, not tolerated by accident', () => {
+  // The exact drift a Draft 2020-12 validator reported on PR #299: the schema
+  // forbade additional properties and never declared the instance's `$schema`.
+  const undeclared = structuredClone(schema);
+  delete undeclared.properties.$schema;
+  assert.deepEqual(validateBacklogSchema(baseline, undeclared), [
+    "schema: / has unexpected property '$schema'",
+  ]);
+});
+
+test('an undeclared property is refused at every level the schema closes', () => {
+  const backlog = copy();
+  backlog.owner = 'nobody';
+  backlog.governance.velocity = 10;
+  backlog.items[0].completion = 0.5;
+  backlog.items[0].evidence.push({ kind: 'PR', ref: '#1', note: 'n', url: 'x' });
+  backlog.stories[0].userStory.because = 'reasons';
+  backlog.changeLog[0].approvedBy = 'someone';
+  // The semantic validator does not look for unknown keys; the schema must.
+  assert.deepEqual(validateBacklog(backlog), []);
+  const errors = validateBacklogSchema(backlog, schema);
+  for (const expected of [
+    "/ has unexpected property 'owner'",
+    "/governance has unexpected property 'velocity'",
+    "/items/0 has unexpected property 'completion'",
+    `/items/0/evidence/${backlog.items[0].evidence.length - 1} has unexpected property 'url'`,
+    "/stories/0/userStory has unexpected property 'because'",
+    "/changeLog/0 has unexpected property 'approvedBy'",
+  ]) {
+    assert.ok(errors.includes(`schema: ${expected}`), `missing: ${expected}\n${errors.join('\n')}`);
+  }
+  assert.equal(errors.length, 6);
+});
+
+test('schema formats are enforced where the semantic shape check is looser', () => {
+  const backlog = copy();
+  backlog.asOf = '2026-13-45';
+  assert.deepEqual(validateBacklog(backlog), []);
+  assert.deepEqual(validateBacklogSchema(backlog, schema), [
+    'schema: /asOf must match format "date"',
+  ]);
+});
+
+test('the progress command fails on a schema violation', async (t) => {
+  const script = fileURLToPath(new URL('./progress.mjs', import.meta.url));
+  const root = await mkdtemp(path.join(tmpdir(), 'progress-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, 'planning'));
+  await copyFile(schemaUrl, path.join(root, 'planning', 'backlog.schema.json'));
+  const run = () =>
+    spawnSync(process.execPath, [script, 'validate'], { cwd: root, encoding: 'utf8' });
+
+  await copyFile(backlogUrl, path.join(root, 'planning', 'backlog.json'));
+  const clean = run();
+  assert.equal(clean.status, 0, clean.stderr);
+
+  const backlog = copy();
+  backlog.items[0].completion = 0.5;
+  await writeFile(path.join(root, 'planning', 'backlog.json'), JSON.stringify(backlog));
+  const drifted = run();
+  assert.equal(drifted.status, 1);
+  assert.match(drifted.stderr, /schema: \/items\/0 has unexpected property 'completion'/);
 });
 
 test('decomposed features contribute child stories exactly once', () => {
@@ -34,7 +210,12 @@ test('decomposed features contribute child stories exactly once', () => {
     documentStories.reduce((sum, story) => sum + story.points, 0),
     documentFeature.points,
   );
-  assert.equal(progress.fullProduct.units, baseline.items.length - 1 + baseline.stories.length);
+  // Each decomposed feature (COM-004, RUN-005) leaves the count and its stories join it.
+  const decomposed = new Set(baseline.stories.map((story) => story.parentItemId)).size;
+  assert.equal(
+    progress.fullProduct.units,
+    baseline.items.length - decomposed + baseline.stories.length,
+  );
   assert.equal(progress.fullProduct.committed, 786);
 });
 

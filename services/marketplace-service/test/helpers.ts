@@ -1,13 +1,19 @@
 import { withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
-import { runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import { RastaError, runWithContext, runUnscoped, type RequestContext } from '@rasta/nest-common';
+import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
 import { IdempotencyStore } from '../src/shared/idempotency';
-import { OrderRepository } from '../src/order/order.repository';
+import { OrderRepository, type SagaStep } from '../src/order/order.repository';
 import { OrderService } from '../src/order/order.service';
+import { ReturnRepository } from '../src/returns/return.repository';
+import { ReturnService } from '../src/returns/return.service';
+import type { ReturnGoodsOwner } from '../src/returns/return-goods';
 import { CatalogueService } from '../src/offer/catalogue.service';
+import type { HierarchyQuestion } from '../src/organization/organization-hierarchy';
 import { loadMarketplaceEnv, type MarketplaceEnv } from '../src/config/env';
+import type { DisputedObligation, SettledResult } from '../src/temporal/activities';
 
 /**
  * Scaffolding for the integration tests.
@@ -110,6 +116,7 @@ export interface Wiring {
   idempotency: IdempotencyStore;
   repository: OrderRepository;
   orders: OrderService;
+  returns: ReturnService;
   catalogue: CatalogueService;
 }
 
@@ -121,15 +128,42 @@ export interface Wiring {
  * these suites depend on a timer. economic-service learned that one under
  * `--coverage`, where the relay emptied the table before the test could read it.
  */
-export function wire(prisma: PrismaService): Wiring {
-  const env = testEnv();
+/**
+ * organization-service as no suite built here reaches it: a union administrator
+ * deciding a dispute for another organization asks it and is refused 503, as
+ * an unreachable owner would refuse it (docs/24 Q-136). The suites that decide
+ * as a union administrator pass their own — `dispute-decision-authority.int-spec.ts`
+ * asks a real HTTP stand-in.
+ */
+export const unreachableHierarchy: HierarchyQuestion = {
+  withinVersion: () => Promise.reject(RastaError.upstreamUnavailable('organization-service')),
+};
+
+/**
+ * inventory-service as the hand-wired suites meet it: it holds no shipment of any return, and
+ * withdraws any reservation asked (Q-133 (9)). What it answers on a real port, and when it holds
+ * one, is `api-return-reconciliation.int-spec.ts`'s, over `inventory-fake.ts`.
+ */
+export const noGoodsAnywhere: ReturnGoodsOwner = {
+  shipmentOf: async () => null,
+  withdraw: async () => ({ outcome: 'WITHDRAWN', withdrawnAt: new Date() }),
+};
+
+export function wire(
+  prisma: PrismaService,
+  overrides: Partial<MarketplaceEnv> = {},
+  hierarchy: HierarchyQuestion = unreachableHierarchy,
+  goods: ReturnGoodsOwner = noGoodsAnywhere,
+): Wiring {
+  const env = { ...testEnv(), ...overrides };
   const events = new EventPublisher(env);
   const idempotency = new IdempotencyStore(prisma, env);
   const repository = new OrderRepository(prisma);
-  const orders = new OrderService(prisma, repository, events, env);
+  const orders = new OrderService(prisma, repository, events, env, hierarchy);
+  const returns = new ReturnService(prisma, new ReturnRepository(prisma), events, env, goods);
   const catalogue = new CatalogueService(prisma, events);
 
-  return { prisma, env, events, idempotency, repository, orders, catalogue };
+  return { prisma, env, events, idempotency, repository, orders, returns, catalogue };
 }
 
 /**
@@ -179,6 +213,55 @@ export function key(prefix: string): string {
   return `${prefix}-${ulid()}`;
 }
 
+/**
+ * A saga step of its own, as each separately scheduled activity has (D-053).
+ * A Temporal retry is the same step again: keep the value and pass it twice.
+ * `scheduledAt` is when the workflow scheduled it: now, unless the case needs
+ * the gap a real saga leaves between two steps.
+ */
+export function sagaStep(scheduledAt: Date = new Date()): SagaStep {
+  return { key: `order-test/run-test/${ulid()}`, scheduledAt };
+}
+
+/**
+ * Removes the return requests the named organizations wrote (RUN-005). The service never deletes
+ * one — each table's trigger refuses it — so the suite's own removal goes through the **owner**
+ * connection and lifts each guard for one transaction, never through the runtime client under
+ * test, or the suites would teach the code to do it. Without the owner URL there is nothing it can
+ * do, and a suite that wrote a return fails at the order delete that follows, saying why.
+ */
+async function purgeReturns(orgs: readonly string[]): Promise<void> {
+  const url = process.env.DATABASE_URL_MARKETPLACE_MIGRATOR;
+  if (!url) return;
+  const owner = new PrismaClient({ datasources: { db: { url: withUtcSession(url) } } });
+  try {
+    await owner.$transaction(async (tx) => {
+      for (const [table, trigger] of [
+        ['return_dispatch_release', 'tg_return_dispatch_release_guard'],
+        ['return_status_history', 'tg_return_status_history_guard'],
+        ['return_line', 'tg_return_line_guard'],
+        ['return_request', 'tg_return_request_guard'],
+      ] as const) {
+        await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
+        await tx.$executeRawUnsafe(
+          `DELETE FROM "${table}" WHERE "organization_id" = ANY($1::text[])`,
+          [...orgs],
+        );
+        await tx.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER "${trigger}"`);
+      }
+    });
+  } finally {
+    await owner.$disconnect();
+  }
+}
+
+/** A settlement the case expects to have happened, not a dispute found instead. */
+export function settledResult(result: SettledResult | DisputedObligation): SettledResult {
+  if ('disputed' in result)
+    throw new Error(`Expected a settlement, found a dispute: ${result.reason}`);
+  return result;
+}
+
 /** Removes everything the named organizations wrote. */
 export async function cleanup(
   prisma: PrismaService,
@@ -186,6 +269,8 @@ export async function cleanup(
 ): Promise<void> {
   const orgs = [...organizationIds];
   const client = prisma.client;
+
+  await purgeReturns(orgs);
 
   await runUnscoped('the integration suite removes what it wrote, across tenants', async () => {
     await client.$executeRawUnsafe(
@@ -198,6 +283,10 @@ export async function cleanup(
     );
     await client.$executeRawUnsafe(
       `DELETE FROM order_status_history WHERE organization_id = ANY($1::text[])`,
+      orgs,
+    );
+    await client.$executeRawUnsafe(
+      `DELETE FROM saga_step WHERE organization_id = ANY($1::text[])`,
       orgs,
     );
     await client.$executeRawUnsafe(

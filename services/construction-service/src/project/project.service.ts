@@ -58,9 +58,15 @@ export class ProjectService {
 
   /**
    * CreateProject. With an `Idempotency-Key`, a retry of the same request
-   * returns the first response instead of creating a second project.
+   * returns the first response instead of creating a second project. With a
+   * replay deadline too (`shared/idempotency.ts`, the replay fence), a retry
+   * past it is refused instead of running again once the key has expired.
    */
-  async create(dto: CreateProjectDto, idempotencyKey?: string): Promise<ProjectView> {
+  async create(
+    dto: CreateProjectDto,
+    idempotencyKey?: string,
+    replayDeadlineMs?: number,
+  ): Promise<ProjectView> {
     const { organizationId, actor } = this.access.assertCanWrite();
     this.assertOperationTypeAllowed(dto.operationType);
 
@@ -112,7 +118,15 @@ export class ProjectService {
       return view;
     };
 
-    return this.idempotency.run(CREATE_PROJECT_ENDPOINT, idempotencyKey, dto, 201, work);
+    return this.idempotency.run(
+      CREATE_PROJECT_ENDPOINT,
+      idempotencyKey,
+      { requester: actor, body: dto },
+      201,
+      work,
+      undefined,
+      replayDeadlineMs,
+    );
   }
 
   /** GetProject — the caller's own organization only; any other answers 404. */

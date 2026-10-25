@@ -10,11 +10,17 @@ import { formatMinor } from '../shared/money';
 import { ledgerEntriesTotal, journalsPostedTotal } from '../observability/metrics';
 import { ENV, LOGGER } from '../tokens';
 import { ECONOMIC_TOPIC, SERVICE_NAME, type EconomicEnv } from '../config/env';
-import { ECONOMIC_EVENTS, validateEconomicPayload, type EconomicEventName } from '../events/events';
+import {
+  ECONOMIC_EVENTS,
+  ECONOMIC_EVENT_VERSIONS,
+  validateEconomicPayload,
+  type EconomicEventName,
+} from '../events/events';
 import { AGGREGATE_OF, resolvePartitionKey } from '../events/routing';
 import { allocateStreamSeqSql, buildOutboxRow } from '@rasta/nest-common';
 import type { Logger as StructuredLogger } from '@rasta/logging';
 import type { AccountPurpose, JournalType } from '../generated/prisma';
+import type { SettlementBooks } from '../access/access';
 
 /**
  * The ledger — the platform's source of financial truth (ADR-013).
@@ -147,6 +153,11 @@ export class LedgerService {
    * `trg_journal_balanced`. That is not redundancy for its own sake: step 1
    * protects the caller's experience, and the trigger protects the ledger from
    * any future code path that forgets to call this method.
+   *
+   * `books` is the settlement's leave to post on the payer's books for a
+   * platform administrator acting for another organization (`access.ts`
+   * `settlementBooks`); without it the header is written for the request's own
+   * organization or not at all.
    */
   async post(
     tx: ExtendedPrismaClient,
@@ -160,6 +171,7 @@ export class LedgerService {
       reverses?: { journalId: string; reason: string };
     },
     postedBy: string,
+    books?: SettlementBooks,
   ): Promise<PostedJournal> {
     const journalId = `${ID_PREFIXES.journal}_${ulid()}`;
     const postedAt = draft.postedAt ?? new Date();
@@ -169,18 +181,22 @@ export class LedgerService {
 
     const correlationId = getContext().correlationId;
 
-    await this.repository.createJournal(tx, {
-      id: journalId,
-      organizationId: draft.organizationId,
-      transactionId: draft.transactionId ?? null,
-      journalType: draft.reverses ? 'REVERSAL' : draft.journalType,
-      description: draft.description,
-      postedAt,
-      postedBy,
-      reversesId: draft.reverses?.journalId ?? null,
-      reversalReason: draft.reverses?.reason ?? null,
-      correlationId,
-    });
+    await this.repository.createJournal(
+      tx,
+      {
+        id: journalId,
+        organizationId: draft.organizationId,
+        transactionId: draft.transactionId ?? null,
+        journalType: draft.reverses ? 'REVERSAL' : draft.journalType,
+        description: draft.description,
+        postedAt,
+        postedBy,
+        reversesId: draft.reverses?.journalId ?? null,
+        reversalReason: draft.reverses?.reason ?? null,
+        correlationId,
+      },
+      books,
+    );
 
     const rows = draft.entries.map((entry) => ({
       id: `${ID_PREFIXES.ledgerEntry}_${ulid()}`,
@@ -442,6 +458,8 @@ export class LedgerService {
         aggregateType: AGGREGATE_OF[input.eventName],
         aggregateId: input.aggregateId,
         eventName: input.eventName,
+        // The version the payload was just validated against (docs/07 § 7.8).
+        eventVersion: ECONOMIC_EVENT_VERSIONS[input.eventName],
         topic: ECONOMIC_TOPIC,
         payload,
         organizationId: input.organizationId,

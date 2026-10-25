@@ -2,6 +2,7 @@ import { TZDate } from '@date-fns/tz';
 import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { BIDI_CONTROL, DISPLAY_TIME_ZONE, normalizePersianText, toLatinDigits } from '@/lib/format';
 import {
   CHANGE_STATUS_FIELDS,
@@ -21,6 +22,7 @@ import { renderableDate } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { rolesGuardAdmits } from './roles-guard';
 
 export { fetchDriverAssignments } from './assignments';
 export type { AssignmentPage, AssignmentSummary } from './assignments';
@@ -51,7 +53,7 @@ export type { ReadResult };
  * The screen reads this to decide which forms to render — a Route Guard as
  * UX, explicitly not as security (`docs/16 § ۱۶٫۱۱`): fleet-service applies
  * its own guard again on every write regardless of what this function said,
- * and a caller whose identity read failed sees no write form rather than one
+ * and a token whose roles cannot be read offers no write form rather than one
  * that might work.
  */
 const DRIVER_MANAGEMENT_ROLES: readonly string[] = [
@@ -60,8 +62,8 @@ const DRIVER_MANAGEMENT_ROLES: readonly string[] = [
   'UNION_ADMIN',
 ];
 
-export function canManageDrivers(effectiveRoles: readonly string[]): boolean {
-  return effectiveRoles.some((role) => DRIVER_MANAGEMENT_ROLES.includes(role));
+export function canManageDrivers(roles: readonly string[]): boolean {
+  return rolesGuardAdmits(roles, DRIVER_MANAGEMENT_ROLES);
 }
 
 // ---------------------------------------------------------------------------
@@ -335,18 +337,7 @@ export function parseCreateDriverForm(values: CreateDriverFormValues): ParsedCre
   const parsed = createDriverFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<CreateDriverField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (
-      typeof field === 'string' &&
-      isCreateDriverField(field) &&
-      fieldErrors[field] === undefined
-    ) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isCreateDriverField) };
 }
 
 function isCreateDriverField(value: string): value is CreateDriverField {
@@ -431,18 +422,7 @@ export function parseUpdateDriverForm(values: UpdateDriverFormValues): ParsedUpd
   const parsed = updateDriverFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<UpdateDriverField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (
-      typeof field === 'string' &&
-      isUpdateDriverField(field) &&
-      fieldErrors[field] === undefined
-    ) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isUpdateDriverField) };
 }
 
 function isUpdateDriverField(value: string): value is UpdateDriverField {
@@ -521,18 +501,7 @@ export function parseChangeStatusForm(values: ChangeStatusFormValues): ParsedCha
   const parsed = changeStatusFormSchema.safeParse(values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<ChangeStatusField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (
-      typeof field === 'string' &&
-      isChangeStatusField(field) &&
-      fieldErrors[field] === undefined
-    ) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isChangeStatusField) };
 }
 
 function isChangeStatusField(value: string): value is ChangeStatusField {

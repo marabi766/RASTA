@@ -27,6 +27,7 @@ describe('TOPIC_CONSUMERS', () => {
           'rasta.maintenance.v1',
           'rasta.marketplace.v1',
           'rasta.construction.v1',
+          'rasta.document.v1',
         ],
         deadLetterTopic: 'rasta.asset.v1.dlq',
       },
@@ -38,8 +39,9 @@ describe('TOPIC_CONSUMERS', () => {
         subscribes: ['rasta.fleet.v1', 'rasta.asset.v1'],
         deadLetterTopic: 'rasta.maintenance.v1.dlq',
       },
+      // CON-003 PR 6b: STATEMENT_APPROVED, confirmed by contract-service before any obligation.
       'economic-service': {
-        subscribes: ['rasta.maintenance.v1', 'rasta.fleet.v1'],
+        subscribes: ['rasta.maintenance.v1', 'rasta.fleet.v1', 'rasta.contract.v1'],
         deadLetterTopic: 'rasta.economic.v1.dlq',
       },
       'notification-service': {
@@ -54,9 +56,15 @@ describe('TOPIC_CONSUMERS', () => {
       },
       // CON-003: the draft contract of an awarded tender (TENDER_AWARDED, confirmed by the owner),
       // and the signing policy's follow-up to an organization move (ORGANIZATION_MOVED, Q-83).
+      // CON-003 PR 6c: SETTLEMENT_COMPLETED, confirmed by economic-service before a statement settles.
       'contract-service': {
-        subscribes: ['rasta.construction.v1', 'rasta.organization.v1'],
+        subscribes: ['rasta.construction.v1', 'rasta.organization.v1', 'rasta.economic.v1'],
         deadLetterTopic: 'rasta.contract.v1.dlq',
+      },
+      // RUN-005: the physical half of a return, mirrored onto marketplace's own request.
+      'marketplace-service': {
+        subscribes: ['rasta.inventory.v1'],
+        deadLetterTopic: 'rasta.marketplace.v1.dlq',
       },
       'supplier-service': {
         subscribes: ['rasta.marketplace.v1'],
@@ -65,6 +73,11 @@ describe('TOPIC_CONSUMERS', () => {
       'audit-service': {
         subscribes: Object.keys(TOPIC_PRODUCERS),
         deadLetterTopic: 'rasta.audit.v1.dlq',
+      },
+      // RUN-001 PR 1: the first read model, MAINTENANCE_COMPLETED → fact_maintenance (ADR-071).
+      'analytics-service': {
+        subscribes: ['rasta.maintenance.v1'],
+        deadLetterTopic: 'rasta.analytics.v1.dlq',
       },
     });
   });
@@ -147,11 +160,11 @@ describe('consumerDeclarationProblem', () => {
 
   it('refuses an undeclared service', () => {
     expect(
-      consumerDeclarationProblem('marketplace-service', {
+      consumerDeclarationProblem('organization-service', {
         ...fleet,
-        groupId: 'marketplace-service.x',
+        groupId: 'organization-service.x',
       }),
-    ).toMatch(/marketplace-service is not declared/);
+    ).toMatch(/organization-service is not declared/);
     expect(isDeclaredConsumer('toString')).toBe(false);
   });
 

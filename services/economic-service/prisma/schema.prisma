@@ -414,7 +414,23 @@ model Transaction {
   counterpartyOrganizationId String? @map("counterparty_organization_id")
 
   transactionType TransactionType   @map("transaction_type")
+  /// Why the platform may earn from it (ADR-045 § 1) — sent by the service
+  /// that owns the fact, never inferred from the type. NULL on rows recorded
+  /// before migration `20261016120000_commission_business_lines`, and on
+  /// rows whose source does not send one yet (docs/24 Q-130): those are
+  /// priced only by the type-only rules that predate business lines.
+  businessLine    BusinessLine?     @map("business_line")
   status          TransactionStatus @default(CREATED)
+
+  /// The commission pricing decided when the source fact was recorded, at
+  /// `occurredAt` (docs/23 D-057): the rule, or `NO_ACTIVE_RULE`. Settlement
+  /// charges exactly this, whatever happens to the rules afterwards, and
+  /// `trg_transaction_pricing_fixed` keeps it from changing. NULL on rows
+  /// recorded before migration `20261016120000_commission_business_lines` and
+  /// on rows without a payee, which settlement prices at `occurredAt` as before.
+  pricingOutcome CommissionOutcome? @map("pricing_outcome")
+  pricingRuleId  String?            @map("pricing_rule_id")
+  pricingRule    CommissionRule?    @relation("TransactionPricingRule", fields: [pricingRuleId], references: [id], onDelete: Restrict)
 
   /// What is owed. Fixed at creation and never recomputed — for a maintenance
   /// obligation this is exactly the figure the owner approved (ADR-028).
@@ -432,7 +448,14 @@ model Transaction {
   occurredAt DateTime @map("occurred_at")
 
   /// What caused this, in the owning service's identifier space. Never a
-  /// foreign key — that row is in another database (ADR-005).
+  /// foreign key — that row is in another database (ADR-005). The types
+  /// economic-service records itself (`src/transaction/recorded-sources.ts`)
+  /// are refused on POST /v1/transactions, and `MAINTENANCE_REQUEST` /
+  /// `PAYMENT_INTENT` rows have their writer's shape
+  /// (`ck_transaction_recorded_source`, migration
+  /// `20261017130000_transaction_recorded_source`). `ORDER` is
+  /// marketplace-service's alone on that route, and a person's row cannot
+  /// carry it (`ck_transaction_order_source`).
   sourceType      String? @map("source_type")
   sourceReference String? @map("source_reference")
 
@@ -449,6 +472,12 @@ model Transaction {
   disputeReason     String?   @map("dispute_reason")
   disputeResolvedAt DateTime? @map("dispute_resolved_at")
   disputeResolvedBy String?   @map("dispute_resolved_by")
+  /// What the resolver decided, beside the reason rather than over it. NULL
+  /// until a resolution, and on rows resolved before migration
+  /// `20261016160000_transaction_dispute_resolution`, whose `disputeReason`
+  /// holds the resolution text instead — left there: the migration does not
+  /// guess which text was which (docs/23 D-060).
+  disputeResolution String?   @map("dispute_resolution")
 
   /// Who confirmed receipt, cancelled or refunded, and when (economic batch 2,
   /// item b). Every lifecycle step is also announced as
@@ -461,6 +490,33 @@ model Transaction {
   refundedAt             DateTime? @map("refunded_at")
   refundedBy             String?   @map("refunded_by")
 
+  /// The service command that authorised it for settlement, when a service
+  /// did: the signed caller and that command's Idempotency-Key. NULL for a
+  /// person, and on rows authorised before migration
+  /// `20261016140000_settlement_authorisation_command`. What lets the order
+  /// saga prove its own authorisation took effect once the stored answer has
+  /// expired and the transaction is DISPUTED (docs/23 D-053).
+  settlementAuthorisedService String? @map("settlement_authorised_service")
+  settlementAuthorisationKey  String? @map("settlement_authorisation_key")
+
+  /// The latest dispute's identity. Assigned by the database, never by a
+  /// writer: trigger `trg_transaction_dispute_identity` gives every move into
+  /// DISPUTED a new one and keeps it otherwise, whatever an UPDATE sets
+  /// (migration `20261016170000_transaction_dispute_identity`). Kept through
+  /// the resolution. A resolution that names it is applied only while the
+  /// transaction still holds that dispute (docs/23 D-053).
+  disputeId String? @map("dispute_id")
+
+  /// The dispute the recorded resolution decided — `disputeId` as it was when
+  /// the row left DISPUTED for PENDING_SETTLEMENT. Assigned by the database,
+  /// never by a writer: trigger `trg_transaction_resolved_dispute` sets it on
+  /// that move and keeps it otherwise (migration
+  /// `20261022120000_transaction_resolved_dispute`). Equal to `disputeId`: the
+  /// resolution is the latest dispute's; different: an earlier one's. NULL
+  /// before any resolution, and on rows resolved before the migration that it
+  /// could not attribute for certain (docs/23 D-060).
+  resolvedDisputeId String? @map("resolved_dispute_id")
+
   settledAt DateTime? @map("settled_at")
 
   failureReason String? @map("failure_reason")
@@ -469,9 +525,10 @@ model Transaction {
   updatedAt DateTime @updatedAt @map("updated_at")
   createdBy String   @map("created_by")
 
-  legs       TransactionLeg[]
-  commission Commission?
-  settlement Settlement?
+  legs             TransactionLeg[]
+  commission       Commission?
+  settlement       Settlement?
+  sourceQuarantine TransactionSourceQuarantine?
 
   @@unique([organizationId, idempotencyKey])
   /// "What have I not settled yet" and "this order's transaction".
@@ -480,9 +537,36 @@ model Transaction {
   /// a partial index Prisma cannot express, written in migration
   /// `20260924120000_transaction_source_fact_unique`. One obligation per
   /// business fact per payer: two approvals of one repair cannot both settle.
+  /// `sourceType = 'STATEMENT'` is reserved for the STATEMENT_APPROVED
+  /// consumer (`ck_transaction_statement_obligation`), and such a row's terms
+  /// never change nor is it deleted (`trg_transaction_statement_obligation_fixed`,
+  /// migration `20261017100000_transaction_statement_obligation`, ADR-068 § 6).
   @@index([organizationId, sourceType, sourceReference])
   @@index([counterpartyOrganizationId, status])
+  @@index([pricingRuleId])
   @@map("transaction")
+}
+
+/// A source key an operator took off a transaction, kept with the decision
+/// behind it (migration `20261017125000_transaction_source_quarantine`). The
+/// transaction keeps everything else and holds no key any more, so it collides
+/// with nothing. Written only by `quarantine_transaction_source(id, decision)`
+/// — the correction 20261017130000's preflight names — never by this service.
+/// Append-only (`trg_transaction_source_quarantine_append_only`).
+model TransactionSourceQuarantine {
+  transactionId   String   @id @map("transaction_id")
+  organizationId  String   @map("organization_id")
+  sourceType      String   @map("source_type")
+  /// NULL when the row claimed a reserved type with no reference (#334 r3 F1).
+  sourceReference String?  @map("source_reference")
+  decision        String
+  quarantinedBy   String   @map("quarantined_by")
+  quarantinedAt   DateTime @default(now()) @map("quarantined_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([organizationId, sourceType, sourceReference], map: "ix_transaction_source_quarantine_key")
+  @@map("transaction_source_quarantine")
 }
 
 /// The transaction categories commission rules are written against
@@ -497,6 +581,20 @@ enum TransactionType {
   PROCUREMENT_ORDER
   /// Money entering a wallet. Never commissioned.
   WALLET_TOP_UP
+}
+
+/// The economic reason for a commissionable transaction (ADR-045 § 1).
+///
+/// Mirrors `BUSINESS_LINES` in `@rasta/contracts`, and `business-line.spec.ts`
+/// holds the two equal. Adding a line is a contract change and a migration.
+enum BusinessLine {
+  PARTS
+  INSURANCE
+  MAINTENANCE
+  LOGISTICS
+  PROCUREMENT
+  CONSTRUCTION
+  MARKETPLACE_SERVICE
 }
 
 enum TransactionStatus {
@@ -819,14 +917,26 @@ enum PaymentIntentStatus {
 /// A commission rate, versioned in time (docs/10 § 10.7, ADR-023).
 ///
 /// **CONSTRAINT from the product document:** "تعیین درصد دقیق کارمزد … ساختگی
-/// و پیشینی نیست". No rate is hard-coded anywhere in this service and no
-/// commercial default is seeded. Q-08 is open; the answer will be an INSERT,
-/// not a deployment.
+/// و پیشینی نیست". No rate is hard-coded in this service's code and no
+/// commercial default is seeded. The one rate in the repository is the guarded
+/// demonstration seed's 200 bps (`prisma/seed.ts`, behind its flag, labelled
+/// "نمونه — نیازمند تصویب") — sample data, never a production default. Q-08 is
+/// open; the answer will be an INSERT, not a deployment.
 ///
-/// Matching, in order: an organization-specific rule beats a global one; among
-/// equals, the one valid at the transaction's `occurredAt` with the latest
-/// `validFrom` wins. **No active rule means no commission** — not an error and
-/// not a guess (docs/10 § 10.7).
+/// Matching, in order: an organization-specific rule beats a global one; then
+/// a rule narrowed to the transaction type beats one for the whole business
+/// line; the rule valid at the transaction's `occurredAt` applies. Two active
+/// rules of one scope never overlap in time (`ex_commission_rule_*_no_overlap`),
+/// so there is no tie to break. **No active rule means `NO_ACTIVE_RULE`** — a
+/// recorded outcome, not an error and not a guess (ADR-045 § 2, docs/24 Q-29).
+///
+/// Effective-dated (docs/23 D-057): created from now on, never backdated; terms
+/// fixed; status fixed once the rule has come into force; ended by `validTo`,
+/// at or after the present (`trg_commission_rule_effective_dated`).
+///
+/// Since ADR-045 a rule is written for a business line, optionally narrowed to
+/// one transaction type. Rules from before it (`businessLine` NULL) keep their
+/// meaning and price only transactions that carry no line (docs/23 D-057).
 model CommissionRule {
   /// `CMR_<ULID>`.
   id String @id
@@ -837,7 +947,12 @@ model CommissionRule {
   /// `commission.repository.ts`.
   organizationId String? @map("organization_id")
 
-  transactionType TransactionType @map("transaction_type")
+  /// Required for every rule written since ADR-045; NULL only on the
+  /// type-only rules that predate it. `ck_commission_rule_scope` keeps a rule
+  /// from naming neither.
+  businessLine    BusinessLine?    @map("business_line")
+  /// The whole line when NULL; one transaction type within it otherwise.
+  transactionType TransactionType? @map("transaction_type")
 
   /// Integer basis points. 250 = 2.5% (ADR-022). Never a float, so "2.5%" is
   /// exactly 250 and cannot become 0.024999999999999998.
@@ -863,16 +978,44 @@ model CommissionRule {
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy String   @map("updated_by")
 
-  commissions Commission[]
+  commissions        Commission[]
+  pricedTransactions Transaction[] @relation("TransactionPricingRule")
 
   @@index([transactionType, status, validFrom])
   @@index([organizationId, transactionType, status])
+  @@index([businessLine, status, validFrom])
   @@map("commission_rule")
 }
 
 enum RuleStatus {
   ACTIVE
   INACTIVE
+}
+
+/// The instant line rules began to price (docs/23 D-057), written once by
+/// migration `20261016120000_commission_business_lines` with the database
+/// clock. A source fact that occurred before it is priced by the type-only
+/// rules exactly as before, even when it is recorded afterwards with a line.
+/// One row; `trg_commission_pricing_cutover_fixed` refuses any change.
+model CommissionPricingCutover {
+  id              Int      @id @default(1) @db.SmallInt
+  linePricingFrom DateTime @map("line_pricing_from")
+  migrationName   String   @map("migration_name")
+
+  @@map("commission_pricing_cutover")
+}
+
+/// What the commission step decided for one transaction (ADR-045 § 2).
+///
+/// Kept apart from the amount because a zero says nothing on its own: a rule
+/// configured at zero and no rule at all look identical as `0`, and mean
+/// opposite things to whoever has to explain the month's revenue.
+enum CommissionOutcome {
+  /// An active rule matched; `amountMinor` is what it produced, zero included.
+  RULE_APPLIED
+  /// Commissionable, and no active rule matched. Charged nothing, and
+  /// reportable as such — production behaviour is docs/24 Q-29.
+  NO_ACTIVE_RULE
 }
 
 /// Commission actually charged on one transaction.
@@ -883,6 +1026,9 @@ enum RuleStatus {
 ///
 /// The rate is copied onto the row rather than only referenced, so the charge
 /// remains explicable after the rule is superseded.
+///
+/// **Append-only** (`trg_commission_append_only`): a posted commission is
+/// corrected by a reversal entry, never edited (ADR-045 § 3).
 model Commission {
   /// `CMS_<ULID>`.
   id String @id
@@ -893,6 +1039,12 @@ model Commission {
 
   transactionId String  @unique @map("transaction_id")
   ruleId        String? @map("rule_id")
+
+  /// The transaction's line, copied so revenue is reported per line without a
+  /// join (ADR-045 Consequences). NULL where the transaction carries none.
+  businessLine BusinessLine?     @map("business_line")
+  /// `NO_ACTIVE_RULE` exactly when `ruleId` is NULL (`ck_commission_outcome`).
+  outcome      CommissionOutcome
 
   rateBasisPoints  Int    @map("rate_basis_points")
   grossAmountMinor BigInt @map("gross_amount_minor")
@@ -905,9 +1057,11 @@ model Commission {
   appliedAt DateTime @map("applied_at")
 
   transaction Transaction     @relation(fields: [transactionId], references: [id])
-  rule        CommissionRule? @relation(fields: [ruleId], references: [id])
+  /// RESTRICT: a rule that priced a charge is never deleted (rules are closed).
+  rule        CommissionRule? @relation(fields: [ruleId], references: [id], onDelete: Restrict)
 
   @@index([organizationId, appliedAt(sort: Desc)])
+  @@index([organizationId, businessLine, outcome])
   @@map("commission")
 }
 
@@ -1063,8 +1217,58 @@ model RewardSourceEvaluation {
 
   evaluatedAt DateTime @default(now()) @map("evaluated_at")
 
+  /// Whose behaviour the fact was, as its owner recorded it (`recordedBy`,
+  /// `completedBy`), and when it happened: what a participation score counts
+  /// (ADR-047). Null on a fact recorded by no user, on backfilled rows, and on
+  /// every row written before 20261016190000_participation_rule. Indexed by
+  /// `ix_reward_source_evaluation_subject` (organization, subject, instant),
+  /// partial, in the migration.
+  subjectUserId String?   @map("subject_user_id")
+  occurredAt    DateTime? @map("occurred_at")
+
   @@id([organizationId, triggerEvent, sourceReference])
   @@map("reward_source_evaluation")
+}
+
+/// One version of the participation rule (ADR-047 § 1, docs/24 Q-139): which
+/// verified facts count toward a `ParticipationScore`, with what weight, at
+/// most how many per window, and the window. Platform-wide; the highest
+/// version is in force from its creation. Append-only: a change is a new
+/// version (`trg_participation_rule_append_only`). None is seeded.
+model ParticipationRule {
+  /// `PRL_<ULID>`.
+  id            String   @id
+  version       Int      @unique(map: "ux_participation_rule_version")
+  windowDays    Int      @map("window_days")
+  /// `[{ triggerEvent, weight, maxPerWindow? }]`, validated by the service.
+  contributions Json
+  label         String?
+  createdAt     DateTime @default(now()) @map("created_at")
+  createdBy     String   @map("created_by")
+
+  @@map("participation_rule")
+}
+
+/// A version of the levels and badges (COM-012 criterion 2, ADR-047 § 1):
+/// platform-wide, the highest version in force from its creation, never
+/// edited or deleted (`trg_recognition_rule_append_only`, migration
+/// 20261017120000_recognition_rule). `basis` names what every threshold in it
+/// is measured on; nothing is seeded (docs/24 Q-140).
+model RecognitionRule {
+  /// `RCR_<ULID>`.
+  id        String   @id
+  version   Int      @unique(map: "ux_recognition_rule_version")
+  /// `REWARD_POINTS_CUMULATIVE` or `PARTICIPATION_SCORE`.
+  basis     String
+  /// `[{ rank, name, threshold }]`, ranks 1…n, thresholds rising.
+  levels    Json
+  /// `[{ code, name, threshold }]`.
+  badges    Json
+  label     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+
+  @@map("recognition_rule")
 }
 
 /// The reward evaluation cutover (PR #110 round 2 #3, round 3 #1-#2): one
@@ -1167,6 +1371,13 @@ model Settlement {
   settledAt DateTime @map("settled_at")
   settledBy String   @map("settled_by")
 
+  /// The organization the settler acted for: the payer itself, or — for a
+  /// system administrator settling another organization's transaction — the
+  /// one they were acting in (docs/23 D-054). `settledBy` is who; the journal
+  /// and `organizationId` are whose books. NULL only on rows settled before
+  /// 20261016120000_settlement_acting_organization.
+  actingOrganizationId String? @map("acting_organization_id")
+
   transaction Transaction @relation(fields: [transactionId], references: [id])
 
   @@index([organizationId, settledAt(sort: Desc)])
@@ -1196,6 +1407,14 @@ model IdempotencyKey {
   /// body is `409 IDEMPOTENCY_KEY_REUSED`, never a silent replay of the wrong
   /// response.
   requestHash String @map("request_hash")
+
+  /// SHA-256 of the actor who reserved the key. The same key from another
+  /// actor is `409 IDEMPOTENCY_KEY_REUSED`, never a replay. Null on records
+  /// written before it existed (docs/23 D-054).
+  actorHash  String? @map("actor_hash")
+  /// Random, per reservation: only the request holding it may complete,
+  /// refuse or release the claim (docs/23 D-054).
+  claimToken String? @map("claim_token")
 
   responseStatus Int?             @map("response_status")
   responseBody   Json?            @map("response_body")

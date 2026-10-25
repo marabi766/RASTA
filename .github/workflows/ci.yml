@@ -38,6 +38,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The tip and its parents: a pull request's merge commit's first
+          # parent is the branch it merges into, which the withheld-settings
+          # list is compared with (step "Every service's own settings ...").
+          # A push's previous main is fetched by that step.
+          fetch-depth: 2
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
@@ -68,6 +74,9 @@ jobs:
         run: |
           pnpm run test:service-boundaries-lib
           pnpm run check:service-boundaries
+
+      - name: Outbox test eligibility clock guard
+        run: pnpm run test:outbox-test-clock
 
       - name: Local PostgreSQL defaults contract
         # `.env.example` must point host-side PostgreSQL at 127.0.0.1, not
@@ -100,12 +109,22 @@ jobs:
         # $GITHUB_ENV, a job-level env or a launched service; the admin's
         # directory goes to the broker bootstrap and the broker tests alone
         # (reviews of #131).
+        #
+        # And every topic states its planned max.message.bytes; each
+        # dead-letter topic lists its sources and is planned above them by the
+        # added-header bound and the GZIP margin (PR #378 r2 F1, r4 F2), and
+        # create-topics.sh's helpers parse describe output fail-closed. That
+        # headroom is not a guarantee for every dead letter (dead-letter-size.ts
+        # names the known escapes).
         run: |
           pnpm run test:kafka-acl-lib
           pnpm run test:kafka-credential-scope
           pnpm run check:kafka-credential-scope
           pnpm run test:kafka-outbox-tables
           pnpm run test:replay-dlq-lib
+          pnpm run test:kafka-topic-limits-lib
+          pnpm run test:disposable-broker-guard
+          pnpm run check:kafka-topic-limits
 
       - name: Role passwords are distinct and checked before any role changes
         # L7-33: the bootstrap and `pnpm db:rotate-role-passwords` refuse two
@@ -114,6 +133,9 @@ jobs:
         # refuses the same on the host. Runs both bash scripts against a stub
         # psql that records every call.
         run: pnpm run test:infra-preflight
+
+      - name: Backup restore drill comparisons and cleanup
+        run: pnpm run test:backup-restore-drill-lib
 
       - name: Database runtime-role rules (D-045)
         # Every service is placed exactly once — split or audit — and one in
@@ -144,12 +166,40 @@ jobs:
         # dry run). Codex r1 and r4 on #268.
         run: pnpm run test:database-turbo-env
 
+      - name: Every service's own settings reach it through turbo
+        # Every task that starts a service passes every key of that service's
+        # own schema, save the ones withheld before this check
+        # (scripts/service-env-turbo-withheld.json, which only shrinks); and
+        # the root commands resolve asset-service's claim-document settings
+        # (turbo dry run). Codex r2 on #304.
+        #
+        # The list may only shrink: each entry must already be listed in the
+        # base's copy, so a change cannot list a new setting instead of
+        # declaring it, alone or swapped for one it removes (Codex r3 on
+        # #304). The base (scripts/service-env-withheld-base.mjs): the merge
+        # commit's first parent on a pull request; on a push the main it
+        # replaced, github.event.before, fetched — not HEAD^1, a commit of the
+        # same push when it carries several (Codex r1 on #316). No previous
+        # main, or one that cannot be fetched, fails the step.
+        env:
+          SERVICE_ENV_WITHHELD_PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          base="$(node scripts/service-env-withheld-base.mjs)"
+          SERVICE_ENV_WITHHELD_BASE="$base" pnpm run test:service-env-turbo
+
       - name: Optional database-side statement timeout for the runtime roles
         # Behind PgBouncer the services' own statement_timeout option is
         # dropped, so the bootstrap, the split and the rotation can set one
         # on each runtime role — only where POSTGRES_STATEMENT_TIMEOUT_MS_<SVC>
         # asks for it, refused when malformed, never on a migrator (#268 r4).
         run: pnpm run test:session-statement-timeout
+
+      - name: Marketplace saga deployment gate (D-053)
+        # The check a marketplace-service deployment runs between stopping the
+        # old replicas and starting the new: passes only on no poller and no
+        # pending order-saga activity, blocks on everything it cannot verify
+        # (docs/runbooks/marketplace-saga-deploy.md). Codex r2 on #283.
+        run: pnpm run test:marketplace-saga-drain-check
 
       - name: Image scope rule
         # The rule that decides which images a pull request builds and scans
@@ -205,10 +255,13 @@ jobs:
       - name: Integration split is aggregated
         # The integration work runs as parallel `integration-*` jobs and
         # `integration` ("Integration and security tests", the required check)
-        # only aggregates them. Static: every split job is needed by it, it
-        # runs always() and fails unless all succeeded, each step of the old
-        # single job runs in exactly one split job, and every step has the
-        # broker, bucket, scanner, Redis or database it reads.
+        # only aggregates them. Every split job is needed by it, it runs
+        # always() and nothing else, and its verdict script, executed here
+        # against each job failed, cancelled and skipped, fails on all of
+        # them. Each step of the old single job runs in exactly one split job,
+        # with its declared command, env and time limit, no `if:` and no
+        # `continue-on-error`, and has the broker, bucket, scanner, Redis or
+        # database it reads.
         run: pnpm run test:ci-integration-split
 
       - name: Image pre-pull retries only transient registry errors
@@ -239,11 +292,9 @@ jobs:
           pnpm run test:grafana-live-isolation-lib
 
       - name: Image scan coverage gate
-        # Runs here, in a job that fires on pull requests, rather than beside
-        # the `containers` job it protects — that one only runs on a push to
-        # main, so it cannot catch a service being added without an image
-        # build until the omission has already merged. Three services have
-        # landed unscanned this way (PROJECT_MEMORY § 22).
+        # Checks every service's image coverage on PRs and main, independently
+        # of the affected-image selection below. Three services once landed
+        # unscanned without this coverage gate (PROJECT_MEMORY § 22).
         run: |
           pnpm run ci:image-matrix
           pnpm run test:image-matrix
@@ -291,6 +342,12 @@ jobs:
         # SDK started (Codex on #281). After Build: main.ts loads the built
         # packages and the generated Prisma client.
         run: pnpm run test:dev-loader
+
+      - name: Services trace Kafka from the built entry point
+        # Each built dist/main.js, loaded up to its app.module, must have
+        # kafkajs wrapped by the OpenTelemetry instrumentation: an import that
+        # loads kafkajs before initTelemetry() leaves it untraced (audit-service).
+        run: pnpm run test:telemetry-order
 
   # ---------------------------------------------------------------------------
   # Security. Every gate here fails the build rather than warning: a warning
@@ -505,6 +562,11 @@ jobs:
           pnpm --filter @rasta/document-service run db:migrate
           pnpm --filter @rasta/marketplace-service run db:migrate
           pnpm --filter @rasta/economic-service run db:migrate
+          pnpm --filter @rasta/construction-service run db:migrate
+          pnpm --filter @rasta/inventory-service run db:migrate
+          pnpm --filter @rasta/contract-service run db:migrate
+          pnpm --filter @rasta/supplier-service run db:migrate
+          pnpm --filter @rasta/audit-service run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
@@ -522,6 +584,41 @@ jobs:
           DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
           DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
           DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
+          # EXP-004: a contractor's bid (`e2e/tender-bids.spec.ts`) is accepted
+          # only while supplier-service says, at that moment, that its
+          # organization is qualified for CONTRACTING.
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
+          # EXP-004: /projects and /inventory read construction-service and
+          # inventory-service through the gateway; their live isolation
+          # scenarios (`e2e/tenant-isolation.spec.ts`) need both running.
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          # EXP-004: `/contracts/[id]` reads and commands a contract's statements
+          # through contract-service (`e2e/contract-statements.spec.ts`).
+          DATABASE_URL_CONTRACT: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public
+          DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
+          # EXP-004: a tender's bids are opened only against the receipts
+          # audit-service holds (`e2e/tender-owner.spec.ts`). Migrated as the
+          # schema owner, run below as the runtime role (ADR-053 § 6).
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
+
+      - name: Load the signed contract the statement scenarios act on
+        # contract-service has no route that creates a contract (one is drafted
+        # only from TENDER_AWARDED, ADR-068 § 3), so the scenarios start from a
+        # SIGNED contract and the two statement chains in force, written as
+        # contract-service's own runtime role through every guard its database
+        # keeps. The file says why, and what each row is. The contract command
+        # scenarios write a fresh contract per test the same way
+        # (`e2e/contract-fixture.ts`), signing under this file's policy.
+        env:
+          PGPASSWORD: rasta_contract_dev_password
+        run: >-
+          psql -v ON_ERROR_STOP=1 -h localhost -U rasta_contract -d rasta_contract
+          -f apps/web/e2e/fixtures/contract-statements.sql
 
       - name: Seed the live users and both tenants' machines, drivers and schedules
         # operator.one is the same platform user in identity, Keycloak and
@@ -552,6 +649,18 @@ jobs:
           # that does not exist.
           DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
 
+      - name: Load the completed orders the return scenarios act on
+        # `e2e/returns.spec.ts` (EXP-003, RUN-005): a return is asked only of
+        # a COMPLETED order, which only a settlement this job never runs makes.
+        # The fixture says why it is rows, and writes them as the service's own
+        # runtime role through every CHECK the tables keep; on the seed's
+        # tenants and cement offer, so after the seed.
+        env:
+          PGPASSWORD: rasta_marketplace_dev_password
+        run: >-
+          psql -v ON_ERROR_STOP=1 -h localhost -U rasta_marketplace -d rasta_marketplace
+          -f apps/web/e2e/fixtures/marketplace-returns.sql
+
       - name: Build portal and live-path services
         # Build the exact deployable artifacts this job starts, plus their
         # workspace dependencies. Services run from dist, never watch mode.
@@ -567,6 +676,11 @@ jobs:
           --filter=@rasta/document-service...
           --filter=@rasta/marketplace-service...
           --filter=@rasta/economic-service...
+          --filter=@rasta/construction-service...
+          --filter=@rasta/inventory-service...
+          --filter=@rasta/contract-service...
+          --filter=@rasta/supplier-service...
+          --filter=@rasta/audit-service...
 
       - name: Start MinIO and create the document bucket
         # EXP-002 slice 7: the portal attaches a file by having its server ask
@@ -616,7 +730,7 @@ jobs:
           docker logs rasta-web-e2e-keycloak
           exit 1
 
-      - name: Start identity, fleet, organization, asset, maintenance and api-gateway
+      - name: Start identity, fleet, organization, asset, maintenance, supplier, audit, construction, inventory, contract and api-gateway
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
@@ -738,12 +852,17 @@ jobs:
           # mode, so an order stays PENDING: no saga runs and no wallet is
           # touched — the suite places orders and reads them, and cannot move
           # money (economic-service is in this stack for the settlement
-          # scenarios only, and no order reaches it).
+          # scenarios only, and no order reaches it). The return window is a
+          # value for this throwaway stack only — Q-132 leaves the real one
+          # open, and with none set every return is refused — so the return
+          # scenarios (`e2e/returns.spec.ts`) have a window to be inside of,
+          # and one the fixture's old order is past.
           ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service marketplace-service)" && \
             eval "${kafka_credentials}" && \
             cd services/marketplace-service && \
             PORT=3106 SERVICE_NAME=marketplace-service \
             MARKETPLACE_TEMPORAL_ENABLED=false \
+            MARKETPLACE_RETURN_WINDOW_DAYS=30 \
             DATABASE_URL=postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public \
             node dist/main.js > /tmp/rasta-web-e2e-logs/marketplace.log 2>&1 & )
 
@@ -759,6 +878,75 @@ jobs:
             DATABASE_URL=postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public \
             ECONOMIC_BALANCE_AUDIT_ENABLED=false \
             node dist/main.js > /tmp/rasta-web-e2e-logs/economic.log 2>&1 & )
+
+          # EXP-004 — supplier-service: a contractor may bid only while
+          # supplier-service says, at that moment, that its organization is
+          # qualified for CONTRACTING and not suspended (BIDDER_NOT_ELIGIBLE
+          # otherwise). The bid scenarios (`e2e/tender-bids.spec.ts`) register
+          # their contractor and have system.admin approve its qualification
+          # through it. Started before construction-service, which loads its
+          # standing read model from this service's snapshot (and retries until
+          # it can).
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service supplier-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/supplier-service && \
+            PORT=3108 SERVICE_NAME=supplier-service \
+            DATABASE_URL=postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/supplier.log 2>&1 & )
+
+          # EXP-004 — audit-service: the owner scenarios
+          # (`e2e/tender-owner.spec.ts`) open a tender's bids, which
+          # construction-service does only once audit-service holds every
+          # bid's receipt (from the bid events on Kafka) and the chain agrees
+          # with its own. The runtime role, never the migrator: audit-service
+          # must not be able to alter or drop what it writes (ADR-053 § 6).
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service audit-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/audit-service && \
+            PORT=3115 SERVICE_NAME=audit-service \
+            DATABASE_URL_AUDIT=postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/audit.log 2>&1 & )
+
+          # EXP-004 — construction-service: the `/projects` live-isolation
+          # scenarios (`e2e/tenant-isolation.spec.ts`) create a real project
+          # per tenant through `POST /v1/projects` and read it back through
+          # the portal, and the bid scenarios (`e2e/tender-bids.spec.ts`)
+          # publish a tender per test and bid on it. A tender is published only
+          # with a key-encryption key to wrap its private key (ADR-066 § 2):
+          # minted for this run, masked, and handed to this one process alone,
+          # as the API e2e job does — no other service holds it.
+          tender_kek="$(openssl rand -base64 32)"
+          echo "::add-mask::${tender_kek}"
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service construction-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/construction-service && \
+            PORT=3110 SERVICE_NAME=construction-service \
+            DATABASE_URL=postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public \
+            CONSTRUCTION_TENDER_KEKS="e2e-run:${tender_kek}" \
+            CONSTRUCTION_TENDER_KEK_CURRENT=e2e-run \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/construction.log 2>&1 & )
+          unset tender_kek
+
+          # EXP-004 — inventory-service: the `/inventory` live-isolation
+          # scenarios create a real warehouse per tenant through
+          # `POST /v1/warehouses` and read it back through the portal.
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service inventory-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/inventory-service && \
+            PORT=3109 SERVICE_NAME=inventory-service \
+            DATABASE_URL=postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/inventory.log 2>&1 & )
+
+          # EXP-004 — contract-service: the statement scenarios draft, submit
+          # and decide a statement of the fixture's contract through the portal.
+          # Its Kafka consumers (TENDER_AWARDED, ORGANIZATION_MOVED) start and
+          # see nothing; no setting here widens a role.
+          ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service contract-service)" && \
+            eval "${kafka_credentials}" && \
+            cd services/contract-service && \
+            PORT=3111 SERVICE_NAME=contract-service \
+            DATABASE_URL=postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public \
+            node dist/main.js > /tmp/rasta-web-e2e-logs/contract.log 2>&1 & )
 
           # The per-person allowance (GATEWAY_RATE_LIMIT_MAX, 300 a minute per
           # user and route prefix by default) is sized for one human. Here three
@@ -794,20 +982,33 @@ jobs:
               http://localhost:3106/health/ready || true)"
             economic="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3112/health/ready || true)"
+            supplier="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3108/health/ready || true)"
+            # 200 only once its projector has joined its consumer group.
+            audit="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3115/health/ready || true)"
+            construction="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3110/health/ready || true)"
+            inventory="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3109/health/ready || true)"
+            contract="$(curl -s -o /dev/null -w '%{http_code}' \
+              http://localhost:3111/health/ready || true)"
             gateway="$(curl -s -o /dev/null -w '%{http_code}' \
               http://localhost:3000/v1/usage-records || true)"
             if [ "$identity" = "200" ] && [ "$fleet" = "200" ] \
                && [ "$organization" = "200" ] && [ "$asset" = "200" ] \
                && [ "$maintenance" = "200" ] && [ "$document" = "200" ] \
                && [ "$marketplace" = "200" ] && [ "$economic" = "200" ] \
-               && [ "$gateway" = "401" ]; then
+               && [ "$supplier" = "200" ] && [ "$audit" = "200" ] \
+               && [ "$construction" = "200" ] && [ "$inventory" = "200" ] \
+               && [ "$contract" = "200" ] && [ "$gateway" = "401" ]; then
               echo "portal live stack ready after ${attempt} attempt(s)"
               exit 0
             fi
             sleep 3
           done
 
-          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, document=${document}, marketplace=${marketplace}, economic=${economic}, gateway=${gateway})"
+          echo "portal live stack failed (identity=${identity}, fleet=${fleet}, organization=${organization}, asset=${asset}, maintenance=${maintenance}, document=${document}, marketplace=${marketplace}, economic=${economic}, supplier=${supplier}, audit=${audit}, construction=${construction}, inventory=${inventory}, contract=${contract}, gateway=${gateway})"
           cat /tmp/rasta-web-e2e-logs/identity.log
           cat /tmp/rasta-web-e2e-logs/fleet.log
           cat /tmp/rasta-web-e2e-logs/organization.log
@@ -816,6 +1017,11 @@ jobs:
           cat /tmp/rasta-web-e2e-logs/document.log
           cat /tmp/rasta-web-e2e-logs/marketplace.log
           cat /tmp/rasta-web-e2e-logs/economic.log
+          cat /tmp/rasta-web-e2e-logs/supplier.log
+          cat /tmp/rasta-web-e2e-logs/audit.log
+          cat /tmp/rasta-web-e2e-logs/construction.log
+          cat /tmp/rasta-web-e2e-logs/inventory.log
+          cat /tmp/rasta-web-e2e-logs/contract.log
           cat /tmp/rasta-web-e2e-logs/gateway.log
           exit 1
 
@@ -842,9 +1048,13 @@ jobs:
 
       - name: Refresh coordination against a real Redis
         # The coordinator's lease, fencing (the Lua itself), lost-lease and TTL
-        # tests, against this job's Redis service. REQUIRED makes a missing
-        # URL fail the step instead of quietly skipping the real run.
-        run: pnpm --filter @rasta/web exec jest src/server/refresh-coordinator
+        # tests, and the pending-write store's reserve/settle/release/capacity
+        # scripts (src/server/unresolved-request.spec.ts) and the supplier writes
+        # on top of them (lost response, two tabs, stale confirmation, Redis
+        # down; src/app/suppliers/supplier-actions.redis.spec.ts), against this
+        # job's Redis service. REQUIRED makes a missing URL fail the step instead of
+        # quietly skipping the real run.
+        run: pnpm --filter @rasta/web exec jest src/server/refresh-coordinator src/server/unresolved-request src/app/suppliers/supplier-actions.redis src/app/suppliers/supplier-store-integrity
         env:
           WEB_TEST_REDIS_URL: redis://localhost:6379
           WEB_TEST_REDIS_REQUIRED: 'true'
@@ -858,6 +1068,34 @@ jobs:
         run: pnpm --filter @rasta/web exec playwright test
         env:
           WEB_LIVE_STACK_E2E: 'true'
+          # EXP-004: construction-service and inventory-service are up in this
+          # job (above), so `/projects` and `/inventory` live-isolation
+          # scenarios run for real instead of skipping.
+          WEB_LIVE_STACK_E2E_EXP004: 'true'
+          # contract-service is up and its fixtures loaded (above), so the
+          # statement and contract command scenarios
+          # (`e2e/contract-statements.spec.ts`, `e2e/contract-commands.spec.ts`)
+          # run for real.
+          # They provision their contractor and second approver through
+          # identity-service and give each a password through Keycloak's admin
+          # API, with this run's KEYCLOAK_ADMIN_PASSWORD (job environment).
+          WEB_LIVE_STACK_E2E_CONTRACTS: 'true'
+          # EXP-003 returns: the fixture's completed orders are loaded and
+          # marketplace-service has a return window (above). The scenario
+          # provisions its third organization's person through identity-service
+          # and the Keycloak admin API, with this run's KEYCLOAK_ADMIN_PASSWORD
+          # (job environment).
+          WEB_LIVE_STACK_E2E_RETURNS: 'true'
+          # The contract command scenarios write their own contract per test, as
+          # contract-service's runtime role (`e2e/contract-fixture.ts`), so a
+          # retry runs against new state (PR 342 review 1, finding 2).
+          WEB_E2E_CONTRACT_DATABASE_URL: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract
+          # construction-service holds a tender key, and supplier-service and
+          # audit-service are up (above), so the bid and owner scenarios
+          # (`e2e/tender-bids.spec.ts`, `e2e/tender-owner.spec.ts`) run for
+          # real: they make their own owner, policies, project and people
+          # through the platform's routes, and draft a tender per test.
+          WEB_LIVE_STACK_E2E_TENDERS: 'true'
           WEB_E2E_FLEET_URL: http://localhost:3104
           WEB_E2E_MAINTENANCE_URL: http://localhost:3105
           API_GATEWAY_URL: http://localhost:3000
@@ -887,6 +1125,16 @@ jobs:
           tail -n 200 /tmp/rasta-web-e2e-logs/marketplace.log || true
           echo '--- economic-service ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/economic.log || true
+          echo '--- supplier-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/supplier.log || true
+          echo '--- audit-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/audit.log || true
+          echo '--- construction-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/construction.log || true
+          echo '--- inventory-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/inventory.log || true
+          echo '--- contract-service ---'
+          tail -n 200 /tmp/rasta-web-e2e-logs/contract.log || true
           echo '--- api-gateway ---'
           tail -n 200 /tmp/rasta-web-e2e-logs/gateway.log || true
           echo '--- keycloak ---'
@@ -963,7 +1211,12 @@ jobs:
   # `integration` itself keeps the name branch protection and the merge queue
   # know, "Integration and security tests", and passes only when all four
   # passed. `scripts/ci-integration-split.test.mjs` fails if a job named
-  # `integration-*` is left out of it.
+  # `integration-*` is left out of it, and holds every test and guard step to
+  # the inventory in `scripts/ci-integration-split-lib.mjs`: its exact
+  # command, the env it was declared with, and a limit of its own (the
+  # PostgreSQL guards and retry replay 5 minutes, test independence 8; they
+  # took 2–60 s on run 38676719548). No step here, and no job, may carry
+  # `if:` or `continue-on-error`.
   #
   # Service containers rather than Testcontainers here: GitHub provisions them
   # before the job starts, which is faster and avoids docker-in-docker.
@@ -999,6 +1252,22 @@ jobs:
           - 6379:6379
         options: >-
           --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      # notification-service's SMTP suites (`email-delivery`, `mail-channel`)
+      # read the messages back through Mailpit's HTTP API. Same image and
+      # digest as `docker-compose.yml`. The steps that run them set
+      # REQUIRE_MAILPIT=1, so an unreachable Mailpit fails the suite instead of
+      # skipping it (`services/notification-service/test/mailpit.ts`).
+      mailpit:
+        image: axllent/mailpit:v1.22@sha256:f7f7c31de4de59540ad6515a0ca057a77525bca2069b6e747d873ca66c10fe08
+        ports:
+          - 1025:1025
+          - 8025:8025
+        options: >-
+          --health-cmd "/mailpit readyz"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
@@ -1054,7 +1323,7 @@ jobs:
         run: |
           scripts/ci-pull-image.sh \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
       - name: Start MinIO and create the document bucket
         # `docker run` rather than a `services:` container, and not by
@@ -1146,7 +1415,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -1205,16 +1474,18 @@ jobs:
         # the three-way collision the shared-registration step exists to avoid
         # (ADR-053 plan, Step Zero).
         #
-        # `audit` and `notification` are both registered in `Migration
-        # reversibility` too, each the moment it had a real migration to
-        # reverse and not before — a vacuous entry is worse than none (that step
-        # is in the `migration-reversibility` job since #198). `audit`
+        # `audit` and `notification` are both registered in migration
+        # reversibility too, each the moment it had a real migration to
+        # reverse and not before — a vacuous entry is worse than none (that
+        # check left this job for its own with #198, and is split across the
+        # `migration-reversibility-chain` shards since task 082). `audit`
         # arrived there with AUD-001 and `notification` with NTF-001, both
         # under the whole-chain `verify-migration-reversible.mjs <service>`.
         # `identity` is registered there as well, by the two named verifiers
         # that reach the migrations the whole-chain harness cannot — AUD-004's
-        # `security_event_outbox` and AUD-003's `audit_correction_command`. All
-        # three services' urls are therefore present in that step.
+        # `security_event_outbox` and AUD-003's `audit_correction_command`, in
+        # `migration-guards`. All three services' urls are therefore present
+        # in those steps.
         #
         # `notification` is deliberately absent from two other multi-service
         # steps, because neither would use it:
@@ -1254,6 +1525,10 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -1267,7 +1542,9 @@ jobs:
         # PostgreSQL they measured shared WAL load, not the upsert (docs/14
         # § 14.3). Never `turbo run test:integration` directly — that runs
         # the workspace phase only; `check:test-phases` enforces it.
-        timeout-minutes: 12
+        # 16 is a STOPGAP (owner decision 2026-10-24): main measured 7m26s to
+        # 11m29s against the old 12. The sharding PR returns it to 12.
+        timeout-minutes: 16
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
@@ -1276,6 +1553,10 @@ jobs:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
+          REQUIRE_MAILPIT: '1'
+          MAILPIT_API_URL: http://localhost:8025
+          NOTIFICATION_SMTP_HOST: localhost
+          NOTIFICATION_SMTP_PORT: '1025'
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
@@ -1300,6 +1581,10 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -1324,6 +1609,15 @@ jobs:
           DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: '8760'
           REDIS_URL: redis://localhost:6379
 
+      - name: Analytics database privilege integration tests
+        timeout-minutes: 5
+        run: pnpm --filter @rasta/analytics-service run test:db-privileges
+        env:
+          NODE_ENV: test
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          TEST_ANALYTICS_ADMIN_URL: postgresql://rasta:rasta_ci_password@localhost:5432/postgres?schema=public
+
       - name: Outbox stream-sequence protocol (ADR-051 B3)
         # The producer-side allocation protocol: strictly increasing sequences
         # on one stream, two transactions serializing on the counter row, a
@@ -1335,6 +1629,7 @@ jobs:
         # Every url the suite touches is passed explicitly. Skipping a service
         # because its variable is missing would turn a missing gate into a
         # green one, which is the failure `pnpm test:e2e` used to have.
+        timeout-minutes: 5
         run: pnpm run test:outbox-b3
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
@@ -1364,6 +1659,7 @@ jobs:
         # lib/supplier-privilege-split.bash and the remaining migrations; the
         # suite checks the rows survive and the runtime role gets 42501 for
         # DISABLE TRIGGER, ALTER, DROP and DROP DATABASE.
+        timeout-minutes: 5
         run: pnpm run test:supplier-privilege-split
         env:
           PGHOST: localhost
@@ -1380,6 +1676,7 @@ jobs:
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service
         # must be split (audit its own way), so a new one that is not fails.
+        timeout-minutes: 5
         run: pnpm run check:db-runtime-privileges
         env:
           PGHOST: localhost
@@ -1392,6 +1689,7 @@ jobs:
         # unsplit service is — owned by its runtime role — must be reported in
         # full; after lib/service-privilege-split.bash it must be reported
         # clean, its rows intact and its trigger out of the runtime role's reach.
+        timeout-minutes: 5
         run: pnpm run test:db-runtime-privileges
         env:
           PGHOST: localhost
@@ -1406,6 +1704,7 @@ jobs:
         # (@rasta/config), the migration runner (scripts/prisma.mjs) and the
         # demo seeds must each open their sessions in UTC regardless, and the
         # runner's copy of the URL function must agree with the services'.
+        timeout-minutes: 5
         run: pnpm run test:db-session-utc
         env:
           PGHOST: localhost
@@ -1421,6 +1720,7 @@ jobs:
         # every service's clients are opened on that URL and no other.
         # DATABASE_STATEMENT_TIMEOUT_MS is opt-in: unset, the session keeps
         # the database's own; set, a longer statement is cancelled with 57014.
+        timeout-minutes: 5
         run: pnpm run test:db-pool-config
         env:
           PGHOST: localhost
@@ -1489,7 +1789,7 @@ jobs:
         # other workspace packages to their dist. In the single job, the
         # `Integration tests` step's turbo `^build` produced those before any
         # of these steps ran; here nothing else does. Packages only, as in
-        # `migration-reversibility`: no service is built or started here.
+        # `migration-guards`: no service is built or started here.
         run: pnpm exec turbo run build --filter='./packages/*'
 
       - name: Start the authenticated Kafka broker
@@ -1511,7 +1811,7 @@ jobs:
         run: |
           scripts/ci-pull-image.sh \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
       - name: Start MinIO and create the document bucket
         # document-service's suites are in the tenant isolation step's
@@ -1565,7 +1865,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -1646,6 +1946,10 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -1672,6 +1976,7 @@ jobs:
         #
         # Scoped to the one file the defect was found in. Widening it is a
         # deliberate act, not a default, because each name costs a jest start.
+        timeout-minutes: 8
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
@@ -1748,6 +2053,10 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -1781,6 +2090,7 @@ jobs:
         # [retry-replay]. No other step's scope changes; `check:kafka-credential-scope`
         # allows exactly this step to take it. It fails, rather than skips,
         # without the credential.
+        timeout-minutes: 5
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh replay)"
           eval "${kafka_credentials}"
@@ -1854,7 +2164,7 @@ jobs:
         # other workspace packages to their dist. In the single job, the
         # `Integration tests` step's turbo `^build` produced those before any
         # of these steps ran; here nothing else does. Packages only, as in
-        # `migration-reversibility`: no service is built or started here.
+        # `migration-guards`: no service is built or started here.
         run: pnpm exec turbo run build --filter='./packages/*'
 
       - name: Start the authenticated Kafka broker
@@ -1902,6 +2212,10 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -1966,7 +2280,7 @@ jobs:
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
 
   integration-coverage:
-    name: Coverage gates (economic, marketplace, document, supplier, audit, notification, organization)
+    name: Coverage gates (economic, marketplace, document, supplier, audit, notification, organization, procurement, analytics)
     runs-on: ubuntu-latest
     # About 10.5 minutes on main run 38600385830 (setup ~4m, the seven gates
     # 399 s together, economic the longest at 115 s). Each keeps its own 8.
@@ -1984,6 +2298,22 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U rasta"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      # notification-service's SMTP suites (`email-delivery`, `mail-channel`)
+      # read the messages back through Mailpit's HTTP API. Same image and
+      # digest as `docker-compose.yml`. The steps that run them set
+      # REQUIRE_MAILPIT=1, so an unreachable Mailpit fails the suite instead of
+      # skipping it (`services/notification-service/test/mailpit.ts`).
+      mailpit:
+        image: axllent/mailpit:v1.22@sha256:f7f7c31de4de59540ad6515a0ca057a77525bca2069b6e747d873ca66c10fe08
+        ports:
+          - 1025:1025
+          - 8025:8025
+        options: >-
+          --health-cmd "/mailpit readyz"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
@@ -2025,7 +2355,7 @@ jobs:
         # other workspace packages to their dist. In the single job, the
         # `Integration tests` step's turbo `^build` produced those before any
         # of these steps ran; here nothing else does. Packages only, as in
-        # `migration-reversibility`: no service is built or started here.
+        # `migration-guards`: no service is built or started here.
         run: pnpm exec turbo run build --filter='./packages/*'
 
       - name: Start the authenticated Kafka broker
@@ -2047,7 +2377,7 @@ jobs:
         run: |
           scripts/ci-pull-image.sh \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
       - name: Start MinIO and create the document bucket
         # For the document coverage gate. Same images, bucket and private
@@ -2099,7 +2429,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
           # Loading ~110 MB of signatures takes a while, and the socket exists
           # before the engine is ready — so this asks clamd itself, which
@@ -2180,6 +2510,10 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -2333,6 +2667,10 @@ jobs:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           NODE_ENV: test
           KAFKA_BROKERS: localhost:9092
+          REQUIRE_MAILPIT: '1'
+          MAILPIT_API_URL: http://localhost:8025
+          NOTIFICATION_SMTP_HOST: localhost
+          NOTIFICATION_SMTP_PORT: '1025'
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
 
@@ -2361,13 +2699,97 @@ jobs:
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
           DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
 
+      - name: Procurement coverage gate
+        # `docs/14` § 14.2 puts procurement-service with the other services, in the 75% band
+        # (COM-007 PR 1, ADR-070). Both projects: the aggregation's row lock that serialises
+        # demands, the partial unique index of one open window, the triggers that keep a demand
+        # inside its window and a window's totals its demands', and the tenant guard against
+        # real rows exist only against a real database.
+        timeout-minutes: 8
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/procurement-service run test:coverage
+        env:
+          KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
+
+      - name: Analytics coverage gate
+        # `docs/14` § 14.2 puts analytics-service in the 75% band, set in its `jest.config.js`
+        # (ADR-071 PR 1). Both projects: the append-only fact tables, the runtime-role
+        # refusals and the shutdown ordering are exercised only by the integration suites
+        # against a real PostgreSQL, so a unit-only number would not be the service's.
+        timeout-minutes: 8
+        run: |
+          kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
+          eval "${kafka_credentials}"
+          pnpm --filter @rasta/analytics-service run test:coverage
+        env:
+          KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
+          NODE_ENV: test
+          KAFKA_BROKERS: localhost:9092
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          # Disposable test admin: wrong-role guard must prevent an otherwise authorized ACL change.
+          TEST_ANALYTICS_ADMIN_URL: postgresql://rasta:rasta_ci_password@localhost:5432/postgres?schema=public
+
+  # Independent database-only gate: creates its own migrated fixture databases.
+  integration-backup-drill:
+    name: Backup restore PostgreSQL drill
+    runs-on: ubuntu-latest
+    needs: quality
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+        env:
+          POSTGRES_USER: rasta
+          POSTGRES_PASSWORD: rasta_ci_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rasta"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Provision databases, roles and extensions
+        env:
+          PGPASSWORD: rasta_ci_password
+          RASTA_DB_BOOTSTRAP: compose
+          POSTGRES_USER: rasta
+        run: |
+          export PGHOST=localhost PGPORT=5432
+          bash infrastructure/docker/postgres/00-init-databases.sh
+      - name: Backup restore SQL on a disposable database
+        timeout-minutes: 5
+        run: pnpm run test:backup-restore-drill-pg
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+
   # The check branch protection and the merge queue require by name. It runs
   # always(), not on the default success(): a job skipped because a job it
   # needs failed reports "skipped", which a required check counts as passing.
   # So this runs whatever happened and fails unless every split job succeeded,
   # whether one failed, was cancelled, timed out or was skipped (when
-  # `quality` fails, all four are skipped and so this fails too). `containers`
-  # still needs `integration`, and so all four through it.
+  # `quality` fails, all five are skipped and so this fails too). `containers`
+  # still needs `integration`, and so all five through it.
   integration:
     name: Integration and security tests
     runs-on: ubuntu-latest
@@ -2377,9 +2799,13 @@ jobs:
       - integration-security
       - integration-coverage-critical
       - integration-coverage
+      - integration-backup-drill
     if: ${{ always() }}
     steps:
       - name: Every integration job passed
+        # Named, not the runner's default (bash -e, no pipefail): the split
+        # guard runs this script under exactly the shell set here.
+        shell: bash
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
@@ -2396,22 +2822,236 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Migration reversibility and the database-only guards, beside the
-  # integration job rather than after it (#198).
+  # integration jobs rather than after them (#198), and since task 082 split
+  # into parallel jobs, each against a PostgreSQL of its own: the one job had
+  # reached 1417 s of reversibility alone against a 28-minute bound on main
+  # run 40006639729, and grew with every migration.
   #
-  # Every step here needs only PostgreSQL — no Kafka, MinIO, ClamAV or Redis —
-  # and reversibility alone took 18 of the integration job's 40 minutes on
-  # main run 37083060427. Same image, same provisioning script and role split
-  # (D-045), same migrator credentials passed through the environment and
-  # never on a command line (#191); the commands are exactly the ones the
-  # integration job ran.
+  #   migration-reversibility-chain  the whole-chain check, one matrix leg per
+  #                                  shard of services (sized by that run's
+  #                                  per-service times);
+  #   migration-guards               the by-name verifiers and the database
+  #                                  guards;
+  #   migration-reversibility        the aggregate: the check branch protection
+  #                                  and the merge queue require by name.
+  #
+  # Every step needs only PostgreSQL — no Kafka, MinIO, ClamAV or Redis. Same
+  # image, same provisioning script and role split (D-045), same migrator
+  # credentials passed through the environment and never on a command line
+  # (#191); the commands are exactly the ones the single job ran, and
+  # `pnpm run test:migration` still runs all of them in one sequence locally.
+  # `scripts/ci-migration-reversibility-lib.mjs` refuses a service with
+  # migrations that no shard verifies, a step dropped, and an aggregate that
+  # could pass without every job here succeeding.
   # ---------------------------------------------------------------------------
-  migration-reversibility:
-    name: Migration reversibility and database guards
+  migration-reversibility-chain:
+    name: Migration reversibility, whole chain (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # About 22 minutes of work (setup ~2m, reversibility ~18m, the rest ~1m on
-    # main run 37098128390); 35 leaves honest headroom without letting a hang
-    # run on. The reversibility step has its own, tighter bound.
-    timeout-minutes: 35
+    # Setup about 2 minutes; the heaviest shard's chain about 6.2 minutes on
+    # that run's per-service times. The step has its own, tighter bound.
+    timeout-minutes: 20
+    needs: quality
+    strategy:
+      # Every shard reports, so one red service does not hide another.
+      fail-fast: false
+      matrix:
+        # Balanced on main run 40006639729's times (seconds): economic 233,
+        # document 58, notification 49, procurement 29 = 369; construction 96,
+        # marketplace 81, fleet 75, audit 49, supplier 41, analytics 17 = 359;
+        # asset 90, identity 88, contract 65, maintenance 49, organization 44,
+        # inventory 32 = 368. A new service goes into the lightest shard; the
+        # guard fails until it is in one.
+        include:
+          - shard: 1/3
+            services: economic document notification procurement
+          - shard: 2/3
+            services: construction marketplace fleet audit supplier analytics
+          - shard: 3/3
+            services: asset identity contract maintenance organization inventory
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+        env:
+          POSTGRES_USER: rasta
+          POSTGRES_PASSWORD: rasta_ci_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rasta"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Provision databases, roles and extensions
+        env:
+          PGPASSWORD: rasta_ci_password
+          # A throwaway cluster, bootstrapped as compose bootstraps its own:
+          # unset role passwords take the published development defaults,
+          # which lib/role-passwords.bash allows only under this flag.
+          RASTA_DB_BOOTSTRAP: compose
+          POSTGRES_USER: rasta
+        run: |
+          # The same script the local stack uses, so CI and a developer
+          # laptop provision identically. Divergence here is how "works on my
+          # machine" starts.
+          export PGHOST=localhost PGPORT=5432
+          psql -U rasta -d postgres -c "SELECT 1" >/dev/null
+          bash infrastructure/docker/postgres/00-init-databases.sh
+
+      - name: Apply migrations
+        # `integration-suites`' step, unchanged. The whole-chain checks build
+        # their own scratch schema or database beside each service's real one;
+        # the runtime-privileges check below reads the real, migrated databases,
+        # as it did when it ran after every check in one job.
+        run: pnpm run db:migrate
+        env:
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_CONTRACT: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public
+          DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
+          DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
+
+      - name: Migration reversibility, whole chain
+        # AGENTS.md § 7 requires every migration to be reversible, and until
+        # this check existed nothing had ever run a down script. up → down → up
+        # against a throwaway schema, asserting between each step that every
+        # object the migration owns is there, gone, and back — and that each
+        # `down.sql` removed its own `_prisma_migrations` row so the rollback
+        # can be rolled forward again. This leg runs it for its shard's
+        # services, one after another, exactly as `test:migration` does.
+        #
+        # Every service with migrations is covered by the whole-chain check.
+        # The five whose initial migration once had no down.sql (identity,
+        # organization, asset, fleet, maintenance) were beyond it until the
+        # platform-safety pass; each is now verified up → down → up like the
+        # rest, and `scripts/verify-migration-reversible-lib.test.mjs` fails if
+        # a service with migrations is in no shard above (or in two), or
+        # missing from `test:migration`.
+        #
+        # The whole-chain check proves each down.sql an *exact* inverse: after
+        # every down script the schema must match, object for object, the
+        # state recorded just before that migration (built by applying each
+        # migration.sql in turn), and the ledger must no longer list it. The
+        # one documented allowance is marketplace's NOT VALID rollback.
+        #
+        # organization and asset run in a throwaway database cloned from
+        # template1 rather than a schema, because their migrations use ltree
+        # and geography unqualified; the service roles hold CREATEDB for this.
+        #
+        # Each command exits on its own failure (`|| exit 1`), not only through
+        # the runner's `bash -e`: under a shell without errexit the loop would
+        # end with its last service's status, and a failed one before it would
+        # pass. The guard also refuses such a shell on any step here.
+        #
+        # About twice the heaviest shard's 369 s.
+        timeout-minutes: 13
+        run: |
+          test -n "${MIGRATION_SERVICES}" || exit 1
+          for service in ${MIGRATION_SERVICES}; do
+            node scripts/verify-migration-reversible.mjs "${service}" || exit 1
+          done
+        env:
+          MIGRATION_SERVICES: ${{ matrix.services }}
+          DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
+          DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ORGANIZATION_MIGRATOR: postgresql://rasta_organization_migrator:rasta_organization_migrator_dev_password@localhost:5432/rasta_organization?schema=public
+          DATABASE_URL_ASSET: postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_ASSET_MIGRATOR: postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public
+          DATABASE_URL_FLEET: postgresql://rasta_fleet:rasta_fleet_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_FLEET_MIGRATOR: postgresql://rasta_fleet_migrator:rasta_fleet_migrator_dev_password@localhost:5432/rasta_fleet?schema=public
+          DATABASE_URL_MAINTENANCE: postgresql://rasta_maintenance:rasta_maintenance_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_MAINTENANCE_MIGRATOR: postgresql://rasta_maintenance_migrator:rasta_maintenance_migrator_dev_password@localhost:5432/rasta_maintenance?schema=public
+          DATABASE_URL_ECONOMIC: postgresql://rasta_economic:rasta_economic_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_ECONOMIC_MIGRATOR: postgresql://rasta_economic_migrator:rasta_economic_migrator_dev_password@localhost:5432/rasta_economic?schema=public
+          DATABASE_URL_MARKETPLACE: postgresql://rasta_marketplace:rasta_marketplace_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_MARKETPLACE_MIGRATOR: postgresql://rasta_marketplace_migrator:rasta_marketplace_migrator_dev_password@localhost:5432/rasta_marketplace?schema=public
+          DATABASE_URL_DOCUMENT: postgresql://rasta_document:rasta_document_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_DOCUMENT_MIGRATOR: postgresql://rasta_document_migrator:rasta_document_migrator_dev_password@localhost:5432/rasta_document?schema=public
+          DATABASE_URL_SUPPLIER: postgresql://rasta_supplier:rasta_supplier_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_SUPPLIER_MIGRATOR: postgresql://rasta_supplier_migrator:rasta_supplier_migrator_dev_password@localhost:5432/rasta_supplier?schema=public
+          DATABASE_URL_CONSTRUCTION: postgresql://rasta_construction:rasta_construction_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_CONSTRUCTION_MIGRATOR: postgresql://rasta_construction_migrator:rasta_construction_migrator_dev_password@localhost:5432/rasta_construction?schema=public
+          DATABASE_URL_CONTRACT: postgresql://rasta_contract:rasta_contract_dev_password@localhost:5432/rasta_contract?schema=public
+          DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
+          DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
+          DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
+          DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
+
+      - name: Runtime roles own nothing (D-045), after the reversals
+        # `integration-suites` runs this check too. It ran there after the steps
+        # above, so it also proved that no up → down → up cycle left an object
+        # owned by a runtime role; this copy keeps that proof with the cycles.
+        # A service's runtime database role must hold DML and nothing more: no
+        # ownership of its database, a schema, a table, a function or a type;
+        # no CREATE; no TRUNCATE, REFERENCES or TRIGGER; nothing on the
+        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
+        # Owning a table is what lets SQL running as the service ALTER TABLE
+        # … DISABLE TRIGGER and lift an integrity guard. Runs against every
+        # service database this job bootstrapped and migrated; every service
+        # must be split (audit its own way), so a new one that is not fails.
+        run: pnpm run check:db-runtime-privileges
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+
+  migration-guards:
+    name: Migration verifiers and database guards
+    runs-on: ubuntu-latest
+    # Setup about 2.5 minutes, the by-name verifiers about 5.3 minutes, the
+    # guards about 1.2 minutes on main run 40006639729.
+    timeout-minutes: 20
     needs: quality
     services:
       postgres:
@@ -2471,8 +3111,10 @@ jobs:
       - name: Apply migrations
         # `integration-suites`' step, unchanged, and why it is needed here: the
         # in-place outbox-claim verifier and the seed guard work on each
-        # service's real, migrated database; the whole-chain checks build their
-        # own scratch schema or database beside it.
+        # service's real, migrated database. So it must come first, and the
+        # in-place verifier runs before the seed guard and the privileges
+        # check, as it did in the single job: both read the database it has
+        # just reversed and rolled forward again.
         run: pnpm run db:migrate
         env:
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
@@ -2499,44 +3141,30 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
-      - name: Migration reversibility
-        # AGENTS.md § 7 requires every migration to be reversible, and until
-        # this step existed nothing had ever run a down script. up → down → up
-        # against a throwaway schema, asserting between each step that every
-        # object the migration owns is there, gone, and back — and, for the
-        # named verifiers, that every object it does *not* own survived, and
-        # that each `down.sql` removed its own `_prisma_migrations` row so the
-        # rollback can be rolled forward again. Its own job since #198: 18 of the
-        # integration job's 40 minutes were this step.
-        timeout-minutes: 28
-        run: pnpm run test:migration
+      - name: Migration reversibility, by-name verifiers
+        # These still run beside the whole-chain check: ADR-050's claim
+        # migration on every service database (`--in-place`, on the database
+        # migrated above), and identity's security-event and audit-correction
+        # tables, which check behaviour the catalogue comparison does not
+        # (constraints refusing rows, triggers firing). Same order as in
+        # `test:migration`. Each exits on its own failure, as the chain's loop.
+        #
+        # About twice their 320 s.
+        timeout-minutes: 11
+        run: |
+          node scripts/verify-outbox-claim-migration.mjs --in-place || exit 1
+          node scripts/verify-security-event-outbox-migration.mjs || exit 1
+          node scripts/verify-audit-correction-command-migration.mjs || exit 1
         env:
-          # Every service with migrations is now covered by the whole-chain
-          # check. The five whose initial migration once had no down.sql
-          # (identity, organization, asset, fleet, maintenance) were beyond it
-          # until the platform-safety pass; each is now verified up → down → up
-          # like the rest, and `scripts/verify-migration-reversible-lib.test.mjs`
-          # fails if a service with migrations is missing from this chain.
-          #
-          # The whole-chain check proves each down.sql an *exact* inverse: after
-          # every down script the schema must match, object for object, the
-          # state recorded just before that migration (built by applying each
-          # migration.sql in turn), and the ledger must no longer list it. The
-          # one documented allowance is marketplace's NOT VALID rollback.
-          #
-          # organization and asset run in a throwaway database cloned from
-          # template1 rather than a schema, because their migrations use ltree
-          # and geography unqualified; the service roles hold CREATEDB for this.
-          #
-          # The by-name verifiers still run: ADR-050's claim migration on every
-          # service database (`--in-place`), and identity's security-event and
-          # audit-correction tables, which check behaviour the catalogue
-          # comparison does not (constraints refusing rows, triggers firing).
           DATABASE_URL_IDENTITY: postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_IDENTITY_MIGRATOR: postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public
           DATABASE_URL_ORGANIZATION: postgresql://rasta_organization:rasta_organization_dev_password@localhost:5432/rasta_organization?schema=public
@@ -2561,6 +3189,10 @@ jobs:
           DATABASE_URL_CONTRACT_MIGRATOR: postgresql://rasta_contract_migrator:rasta_contract_migrator_dev_password@localhost:5432/rasta_contract?schema=public
           DATABASE_URL_INVENTORY: postgresql://rasta_inventory:rasta_inventory_dev_password@localhost:5432/rasta_inventory?schema=public
           DATABASE_URL_INVENTORY_MIGRATOR: postgresql://rasta_inventory_migrator:rasta_inventory_migrator_dev_password@localhost:5432/rasta_inventory?schema=public
+          DATABASE_URL_ANALYTICS: postgresql://rasta_analytics:rasta_analytics_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_ANALYTICS_MIGRATOR: postgresql://rasta_analytics_migrator:rasta_analytics_migrator_dev_password@localhost:5432/rasta_analytics?schema=public
+          DATABASE_URL_PROCUREMENT: postgresql://rasta_procurement:rasta_procurement_dev_password@localhost:5432/rasta_procurement?schema=public
+          DATABASE_URL_PROCUREMENT_MIGRATOR: postgresql://rasta_procurement_migrator:rasta_procurement_migrator_dev_password@localhost:5432/rasta_procurement?schema=public
           DATABASE_URL_NOTIFICATION: postgresql://rasta_notification:rasta_notification_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_NOTIFICATION_MIGRATOR: postgresql://rasta_notification_migrator:rasta_notification_migrator_dev_password@localhost:5432/rasta_notification?schema=public
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
@@ -2641,6 +3273,37 @@ jobs:
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
 
+  # The required check, by name. It runs always(), not on the default
+  # success(): a job skipped because a job it needs failed reports "skipped",
+  # which a required check counts as passing. So it runs whatever happened and
+  # fails unless every leg of the chain matrix and the guards job succeeded —
+  # a matrix job's result is "success" only when every leg's is. `containers`
+  # needs this job, and so all of them through it.
+  migration-reversibility:
+    name: Migration reversibility and database guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - migration-reversibility-chain
+      - migration-guards
+    if: ${{ always() }}
+    steps:
+      - name: Every migration job passed
+        shell: bash
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          node -e '
+            const needs = JSON.parse(process.env.NEEDS);
+            const names = Object.keys(needs);
+            for (const name of names) console.log(name + ": " + needs[name].result);
+            const failed = names.filter((name) => needs[name].result !== "success");
+            if (names.length === 0 || failed.length > 0) {
+              console.error("not passed: " + (failed.join(", ") || "no jobs at all"));
+              process.exit(1);
+            }
+          '
+
   # ---------------------------------------------------------------------------
   # Broker authorisation, on a broker of its own.
   #
@@ -2654,7 +3317,7 @@ jobs:
   broker-authorisation:
     name: Broker authorisation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: quality
 
     steps:
@@ -2693,14 +3356,28 @@ jobs:
         # a topic's owner writes it, a service reads what it subscribes to
         # under its own group namespace, dead-letter and retry topics, refused
         # credentials and PLAINTEXT, no topic creation, and the idempotent
-        # producer on WRITE alone. Both refuse to run without the bootstrap's
-        # environment rather than skip.
+        # producer on WRITE alone. Last, nothing consuming after them, the
+        # size limits (PR #378 r4, r5): create-topics.sh against topics of its
+        # own, one run after another — a single run never lowering a limit,
+        # effective (inherited) limits read first, unreadable describe output
+        # and a failing alter stopping it, dead-letter topics raised before
+        # sources, a second provisioner caught by the re-read before a write
+        # and the window after it pinned as undetected; it sets the cluster
+        # default message.max.bytes and puts back what was there — and the
+        # known escape (i) pinned: a GZIP level-9 record whose dead letter
+        # does not fit leaves the consumer crashed with its offset uncommitted
+        # (it leaves that record on rasta.organization.v1). Those two refuse
+        # to start without RASTA_DISPOSABLE_BROKER=1, declared here only: this
+        # job's broker is its own (ci-up.sh), thrown away with the runner.
+        # All refuse to run without the bootstrap's environment rather than
+        # skip.
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh admin)"
           eval "${kafka_credentials}"
           pnpm exec turbo run build --filter=@rasta/nest-common
           REPLAY_TEST_DISPOSABLE_BROKER=1 pnpm run test:replay-dlq-broker
           pnpm run test:kafka-acl-broker
+          RASTA_DISPOSABLE_BROKER=1 pnpm run test:kafka-limits-broker
         env:
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
@@ -2780,7 +3457,7 @@ jobs:
             quay.io/keycloak/keycloak:26.0@sha256:09a381c715ab0b111835b70f2905955274843a219c6f27efb348e4d9f4086858 \
             temporalio/admin-tools:1.26.2@sha256:37e2e33dbd7b86a12fa1daecf48f5b42544956ae503a83bd45460587f25591f2 \
             "$MINIO_IMAGE" "$MC_IMAGE" \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
       - name: Start Keycloak with the platform realm
         # A `docker run` rather than a service container, because the realm
@@ -3026,7 +3703,7 @@ jobs:
             -v /tmp/clamav-socket:/run/clamav \
             -v "$PWD/infrastructure/docker/clamav/clamd.conf:/etc/clamav/clamd.conf:ro" \
             --entrypoint clamd \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
 
           for attempt in $(seq 1 60); do
             if docker exec rasta-e2e-clamav clamdscan --ping 1 >/dev/null 2>&1; then
@@ -3436,8 +4113,8 @@ jobs:
         run: |
           set -euo pipefail
           scripts/ci-pull-image.sh \
-            clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
-          docker tag clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0 \
+            clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+          docker tag clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6 \
             rasta/clamav-pinned:ci
 
       - name: Scan the image
@@ -3452,7 +4129,7 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
-          # One time-boxed exception, expiring 2026-10-16 (see the file and
+          # One time-boxed exception, expiring 2026-10-31 (see the file and
           # ADR-049). This input appears on this step only.
           trivyignores: .trivyignore.clamav
 
@@ -3492,8 +4169,7 @@ jobs:
           grep -Eq 'is up-to-date|updated \(version' /tmp/freshclam.log
 
   # ---------------------------------------------------------------------------
-  # Container build and image scan. Only on main, because it is the slowest
-  # stage and a PR has already been gated by everything above.
+  # Container build and image scan: affected images on PRs, every image on main.
   # ---------------------------------------------------------------------------
   container-scope:
     name: Images to build and scan
@@ -3507,6 +4183,27 @@ jobs:
           # The pull request's base must be present to diff against.
           fetch-depth: 0
 
+      # Reuse the existing root YAML parser only for PR analysis. --all on a
+      # main push still runs directly, without installing dependencies.
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        if: github.event_name == 'pull_request'
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: github.event_name == 'pull_request'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install scope parser from the frozen workspace lockfile
+        if: github.event_name == 'pull_request'
+        run: pnpm install --filter . --frozen-lockfile --ignore-scripts
+
+      - name: Prove workflow narrowing with the filtered parser install
+        if: github.event_name == 'pull_request'
+        run: node scripts/container-scope-proof.mjs
+
       - name: Decide which images this change affects
         id: scope
         # L7-35: images were built and scanned only after merge, so a broken
@@ -3516,8 +4213,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            services="$(git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" \
-              | node scripts/container-scope.mjs)"
+            services="$(node scripts/container-scope.mjs --base "${{ github.event.pull_request.base.sha }}")"
           else
             services="$(node scripts/container-scope.mjs --all)"
           fi
@@ -3584,3 +4280,7 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
+          # One time-boxed exception, expiring 2026-10-30: the zod advisory
+          # the dependency audit already ignores until the zod 4 migration
+          # (see the file and pnpm-workspace.yaml auditConfig).
+          trivyignores: .trivyignore.services

@@ -32,12 +32,19 @@ initTelemetry({
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { VersioningType } from '@nestjs/common';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { SwaggerModule } from '@nestjs/swagger';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
-import { installGracefulShutdown, preflightRuntimeRole } from '@rasta/nest-common';
+import {
+  installGracefulShutdown,
+  bootstrapLogger,
+  installNestLogger,
+  logFatal,
+  preflightRuntimeRole,
+} from '@rasta/nest-common';
 import { PrismaClient } from './generated/prisma';
 import { AppModule } from './app.module';
+import { identityDocumentConfig } from './openapi-config';
 
 async function bootstrap(): Promise<void> {
   // D-045: refuse to start as anything but the runtime role before Nest builds a
@@ -53,9 +60,13 @@ async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     // Nest's own logger is replaced by pino at the module level; this keeps
     // bootstrap noise out of the structured stream.
-    logger: env.NODE_ENV === 'development' ? ['log', 'warn', 'error'] : ['warn', 'error'],
+    logger: bootstrapLogger(env, SERVICE_NAME),
     bufferLogs: true,
   });
+
+  // Every `new Logger(...)` and Nest itself write through the pino logger, so
+  // message scrubbing and capping apply to them too (installNestLogger).
+  installNestLogger(app);
 
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
 
@@ -90,18 +101,7 @@ async function bootstrap(): Promise<void> {
   app.useBodyParser('json', { limit: '256kb' });
 
   if (allowsDeveloperTooling(env)) {
-    const document = SwaggerModule.createDocument(
-      app,
-      new DocumentBuilder()
-        .setTitle('Rasta — Identity Service')
-        .setDescription(
-          'Source of truth for who you are and what role you hold in which organization. ' +
-            'Keycloak owns authentication; this service owns membership.',
-        )
-        .setVersion(env.SERVICE_VERSION)
-        .addBearerAuth()
-        .build(),
-    );
+    const document = SwaggerModule.createDocument(app, identityDocumentConfig(env.SERVICE_VERSION));
     SwaggerModule.setup('docs', app, document);
   }
 
@@ -124,6 +124,6 @@ async function bootstrap(): Promise<void> {
 }
 
 bootstrap().catch((error) => {
-  console.error(`[${SERVICE_NAME}] failed to start`, error);
+  logFatal({ serviceName: SERVICE_NAME }, `[${SERVICE_NAME}] failed to start`, error);
   process.exit(1);
 });

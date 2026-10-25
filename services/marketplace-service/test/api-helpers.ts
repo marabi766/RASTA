@@ -14,6 +14,7 @@ import { InMemoryEventPublisher, KafkaEventPublisher } from '../src/outbox/kafka
 import { OrderSagaWorker } from '../src/temporal/worker';
 import { OrderSagaClient } from '../src/temporal/saga.client';
 import { databaseUrl } from './helpers';
+import { startInventoryFake, type InventoryFake } from './inventory-fake';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule`.
@@ -72,6 +73,8 @@ export interface ApiHarness {
   app: INestApplication;
   prisma: PrismaService;
   publisher: InMemoryEventPublisher;
+  /** inventory-service's dispatch-fence routes, on a real port (`inventory-fake.ts`). */
+  inventory: InventoryFake;
   close(): Promise<void>;
 }
 
@@ -130,9 +133,18 @@ export function supplier(organizationId: string): string {
   return actor(organizationId, ['SUPPLIER']);
 }
 
-/** A platform operator — the only role that may resolve a dispute. */
+/**
+ * The platform operator, who may resolve a dispute on any order. A union
+ * administrator may too, but only for a buyer within its union’s subtree
+ * (docs/24 Q-136) — {@link unionAdmin}, `dispute-decision-authority.int-spec.ts`.
+ */
 export function platformAdmin(organizationId = 'ORG-APITEST-PLATFORM'): string {
-  return actor(organizationId, ['UNION_ADMIN']);
+  return actor(organizationId, ['SYSTEM_ADMIN']);
+}
+
+/** A union administrator acting for `organizationId` — its union. */
+export function unionAdmin(organizationId: string, userId?: string): string {
+  return actor(organizationId, ['UNION_ADMIN'], userId);
 }
 
 /** The province oversight role, which must reach nothing in this service. */
@@ -183,6 +195,11 @@ export function internalToken(
   );
 }
 
+/** Verifies a token the booted application minted for `audience`, with this run's secret. */
+export function verifyInternalToken(token: string, audience: string) {
+  return new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300).verify(token, audience);
+}
+
 /**
  * The environment the booted application sees.
  *
@@ -199,6 +216,10 @@ function applyEnvironment(): void {
   process.env.OIDC_AUDIENCE ??= 'rasta-api';
   process.env.INTERNAL_TOKEN_SECRET = INTERNAL_SECRET;
   process.env.KAFKA_BROKERS ??= 'localhost:9092';
+  // organization-service, asked only when a union administrator decides a
+  // dispute for another organization (docs/24 Q-136): unreachable unless a
+  // suite stands one up, so the question fails closed.
+  process.env.ORGANIZATION_SERVICE_URL ??= 'http://127.0.0.1:9';
   // Nothing built here reaches the broker (the relay and consumers are
   // inert), so the app may be built without this service's broker
   // credential: the explicit opt-out, honoured only under NODE_ENV test
@@ -219,6 +240,13 @@ const inertWorker = {
 
 export async function startApi(): Promise<ApiHarness> {
   applyEnvironment();
+  // The owner of a return's goods, asked before an AUTHORIZED return is cancelled and when a
+  // dispatch reservation is reconciled (Q-133 (9)): a stand-in on a real port that verifies this
+  // run's internal tokens and, unless a suite says otherwise, holds no shipment. A short deadline,
+  // so the suite proving a silent inventory refuses does not wait the default two seconds.
+  const inventory = await startInventoryFake(INTERNAL_SECRET);
+  process.env.INVENTORY_SERVICE_URL = inventory.url;
+  process.env.MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS = '500';
 
   const publisher = new InMemoryEventPublisher();
 
@@ -270,8 +298,10 @@ export async function startApi(): Promise<ApiHarness> {
     app,
     prisma: moduleRef.get(PrismaService),
     publisher,
+    inventory,
     close: async () => {
       await app.close();
+      await inventory.close();
     },
   };
 }

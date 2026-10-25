@@ -13,6 +13,7 @@ import type { MarketplaceEnv } from '../config/env';
 import { OrderService } from '../order/order.service';
 import { EconomicClient } from '../economic/economic.client';
 import { createActivities } from './activities';
+import { installTemporalRuntimeLogger } from './runtime-logger';
 
 /**
  * The worker that runs `OrderSagaWorkflow`.
@@ -61,6 +62,9 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
     }
 
     try {
+      // Before the first connection: the SDK's runtime is built on first use,
+      // with a raw stderr logger, and cannot be given another afterwards.
+      installTemporalRuntimeLogger(this.env);
       this.connection = await NativeConnection.connect({ address: this.env.TEMPORAL_ADDRESS });
 
       this.worker = await Worker.create({

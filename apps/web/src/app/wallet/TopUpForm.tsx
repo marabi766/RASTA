@@ -3,9 +3,11 @@
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
+import { ProviderUnknownRefusal } from '@/app/DemoModeNotice';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { EMPTY_TOP_UP_FORM } from '@/lib/wallet-fields';
+import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import { submitTopUp } from './actions';
 import { IDLE_TOP_UP_FORM, type TopUpFormState } from './form-state';
@@ -73,11 +75,15 @@ function FormBanner({ state }: { state: TopUpFormState }) {
     return <Alert tone="warning">{state.message}</Alert>;
   }
 
+  if (state.kind === 'REFUSED' && state.reason === 'PROVIDER_UNKNOWN') {
+    return <ProviderUnknownRefusal />;
+  }
+
   if (state.kind === 'REFUSED') {
     return (
       <Alert tone="danger">
-        {state.reason === 'NO_SESSION'
-          ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
+        {isSessionRefusal(state.reason)
+          ? SESSION_REFUSAL_MESSAGES[state.reason]
           : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.'}
       </Alert>
     );

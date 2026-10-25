@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { BUSINESS_LINES } from '@rasta/contracts';
+import { COMMISSION_OUTCOMES } from '../commission/rule-engine';
 
 /**
  * Events published by economic-service, on `rasta.economic.v1`.
@@ -48,9 +50,12 @@ export const ECONOMIC_EVENTS = {
   REWARD_GRANTED: 'REWARD_GRANTED',
   REWARD_LEVEL_CHANGED: 'REWARD_LEVEL_CHANGED',
   SETTLEMENT_COMPLETED: 'SETTLEMENT_COMPLETED',
+  SETTLEMENT_REFUSED: 'SETTLEMENT_REFUSED',
   JOURNAL_POSTED: 'JOURNAL_POSTED',
   COMMISSION_RULE_CHANGED: 'COMMISSION_RULE_CHANGED',
   REWARD_RULE_CHANGED: 'REWARD_RULE_CHANGED',
+  PARTICIPATION_RULE_CHANGED: 'PARTICIPATION_RULE_CHANGED',
+  RECOGNITION_RULE_CHANGED: 'RECOGNITION_RULE_CHANGED',
   TRANSACTION_STATUS_CHANGED: 'TRANSACTION_STATUS_CHANGED',
 } as const;
 
@@ -431,8 +436,17 @@ export const paymentReconciliationOperatorActionPayload = z.object({
  * `ruleId` is nullable and that case is real rather than defensive: with no
  * active rule the commission is zero, and a zero commission with no rule is
  * exactly what ADR-023 requires the platform to record instead of guessing.
+ *
+ * ## Versions (docs/07 § 7.8)
+ *
+ * **v1** is the shape published before ADR-045, kept as a decoder so that
+ * every v1 record already in the log, a dead-letter topic or a replay still
+ * reads. **v2** — published from ADR-045 on — adds `businessLine` and
+ * `outcome`, both required: revenue per line, and `NO_ACTIVE_RULE` named
+ * rather than left to be read off a null `ruleId`. `businessLine` is null
+ * where the transaction's source sent none (docs/24 Q-130).
  */
-export const commissionAppliedPayload = z.object({
+export const commissionAppliedPayloadV1 = z.object({
   commissionId: z.string(),
   transactionId: z.string(),
   organizationId: z.string(),
@@ -443,6 +457,26 @@ export const commissionAppliedPayload = z.object({
   currency,
   appliedAt: z.string(),
 });
+
+export const commissionAppliedPayloadV2 = z
+  .object({
+    commissionId: z.string(),
+    transactionId: z.string(),
+    organizationId: z.string(),
+    ruleId: z.string().nullable(),
+    businessLine: z.enum(BUSINESS_LINES).nullable(),
+    outcome: z.enum(COMMISSION_OUTCOMES),
+    rateBasisPoints: z.number().int().min(0).max(10_000),
+    grossAmountMinor: amountMinor,
+    amountMinor,
+    currency,
+    appliedAt: z.string(),
+  })
+  .refine(
+    // As `ck_commission_outcome` holds the row: the two never tell two stories.
+    (applied) => (applied.outcome === 'NO_ACTIVE_RULE') === (applied.ruleId === null),
+    'outcome is NO_ACTIVE_RULE exactly when ruleId is null',
+  );
 
 // ---------------------------------------------------------------------------
 // Reward
@@ -574,6 +608,55 @@ export const settlementCompletedPayload = z.object({
 });
 
 /**
+ * Why a settlement was refused with nothing moved — a closed list, recorded as
+ * the refusal's audit trail (`SETTLEMENT_REFUSED`).
+ *
+ * `NO_ACTIVE_RULE`: no active commission rule covers the transaction's
+ * business line, and settlement fails closed (docs/24 Q-29).
+ */
+export const SETTLEMENT_REFUSAL_REASONS = ['NO_ACTIVE_RULE'] as const;
+
+/**
+ * The transaction types a settlement can be refused for: every type an
+ * obligation is recorded as (`TRANSACTION_TYPES`, `transaction/dto.ts` —
+ * `events.spec.ts` holds the two equal); a top-up never settles. A closed list
+ * here because audit-service stores the type of a refusal it projects, and
+ * stores only what it can name (`settlement-refusal-projection.ts`).
+ */
+export const SETTLEMENT_REFUSAL_TRANSACTION_TYPES = [
+  'MARKETPLACE_ORDER',
+  'MAINTENANCE_SERVICE',
+  'LOGISTICS',
+  'CONSTRUCTION_STATEMENT',
+  'PROCUREMENT_ORDER',
+] as const;
+
+/**
+ * A settlement was refused, and nothing it would have written was: no journal,
+ * no commission, no settlement, the transaction and the hold as they were.
+ *
+ * The audit record of the refusal (AGENTS.md S-06), written in the
+ * settlement's own transaction once everything it wrote has been rolled back
+ * to a savepoint, and committed before the 422 is answered: no refusal is
+ * answered without its record. One per refused attempt. audit-service is the
+ * consumer and projects it as `outcome=REFUSED` with the reason, the line and
+ * the transaction type; an operator reads `reason` to know what to configure.
+ */
+export const settlementRefusedPayload = z
+  .object({
+    transactionId: z.string(),
+    organizationId: z.string(),
+    payerOrganizationId: z.string(),
+    payeeOrganizationId: z.string(),
+    transactionType: z.enum(SETTLEMENT_REFUSAL_TRANSACTION_TYPES),
+    businessLine: z.enum(BUSINESS_LINES),
+    reason: z.enum(SETTLEMENT_REFUSAL_REASONS),
+    refusedBy: z.string(),
+    refusedAt: z.string(),
+  })
+  .strict();
+
+/**
  * A journal was posted.
  *
  * audit-service and analytics-service consume it, and between them they are
@@ -619,10 +702,31 @@ const changeIsCoherent = (change: { change: 'CREATED' | 'UPDATED'; before: unkno
 
 const CHANGE_KINDS = ['CREATED', 'UPDATED'] as const;
 
-/** A commission rule's terms at one moment — the thing an auditor compares. */
-const commissionRuleTerms = z.object({
+/** A commission rule's terms at one moment, as v1 carried them: a type-only rule. */
+const commissionRuleTermsV1 = z.object({
   organizationId: z.string().nullable(),
   transactionType: z.string(),
+  rateBasisPoints: z.number().int().min(0).max(10_000),
+  minAmountMinor: amountMinor.nullable(),
+  maxAmountMinor: amountMinor.nullable(),
+  validFrom: z.string(),
+  validTo: z.string().nullable(),
+  status: z.string(),
+  label: z.string().nullable(),
+});
+
+/**
+ * A commission rule's terms at one moment — the thing an auditor compares
+ * (v2, ADR-045). `transactionType` is nullable, which v1 consumers would
+ * misread as a different rule, hence the new version rather than an optional
+ * field.
+ */
+const commissionRuleTermsV2 = z.object({
+  organizationId: z.string().nullable(),
+  /** Null only on a type-only rule from before business lines (docs/23 D-057). */
+  businessLine: z.enum(BUSINESS_LINES).nullable(),
+  /** Null for a rule that covers its whole line. */
+  transactionType: z.string().nullable(),
   rateBasisPoints: z.number().int().min(0).max(10_000),
   minAmountMinor: amountMinor.nullable(),
   maxAmountMinor: amountMinor.nullable(),
@@ -643,16 +747,30 @@ const commissionRuleTerms = z.object({
  *
  * The rate itself never appears as a change: once a rule exists its rate is
  * fixed, and a new rate is a new rule. So an `UPDATED` record shows a rule
- * closed, deactivated or relabelled — never repriced.
+ * ended, withdrawn, reinstated or relabelled — never repriced (docs/23 D-057).
+ *
+ * v1 is the type-only shape published before ADR-045, kept as a decoder; v2
+ * is published from ADR-045 on (docs/07 § 7.8).
  */
-export const commissionRuleChangedPayload = z
+export const commissionRuleChangedPayloadV1 = z
   .object({
     ruleId: z.string(),
     change: z.enum(CHANGE_KINDS),
     changedBy: z.string(),
     changedAt: z.string(),
-    before: commissionRuleTerms.nullable(),
-    after: commissionRuleTerms,
+    before: commissionRuleTermsV1.nullable(),
+    after: commissionRuleTermsV1,
+  })
+  .refine(changeIsCoherent, 'before is null exactly when the rule was created');
+
+export const commissionRuleChangedPayloadV2 = z
+  .object({
+    ruleId: z.string(),
+    change: z.enum(CHANGE_KINDS),
+    changedBy: z.string(),
+    changedAt: z.string(),
+    before: commissionRuleTermsV2.nullable(),
+    after: commissionRuleTermsV2,
   })
   .refine(changeIsCoherent, 'before is null exactly when the rule was created');
 
@@ -684,6 +802,83 @@ export const rewardRuleChangedPayload = z
   })
   .refine(changeIsCoherent, 'before is null exactly when the rule was created');
 
+/** A participation rule version's terms (ADR-047 § 1, docs/24 Q-139). */
+const participationRuleTerms = z.object({
+  version: z.number().int().positive(),
+  windowDays: z.number().int().positive(),
+  contributions: z
+    .array(
+      z.object({
+        triggerEvent: z.string(),
+        weight: z.number().int().positive(),
+        maxPerWindow: z.number().int().positive().nullable(),
+      }),
+    )
+    .min(1),
+  label: z.string().nullable(),
+});
+
+/**
+ * A new participation rule version, and who created it — the audit record of
+ * the rule (AGENTS.md S-06). A version is never edited, so `change` is only
+ * ever `CREATED` and `before` is the version it replaced, or null for the
+ * first: the before/after pair the other rule events carry, across versions.
+ */
+export const participationRuleChangedPayload = z
+  .object({
+    ruleId: z.string(),
+    change: z.literal('CREATED'),
+    changedBy: z.string(),
+    changedAt: z.string(),
+    before: participationRuleTerms.nullable(),
+    after: participationRuleTerms,
+  })
+  .refine(
+    (payload) => payload.after.version === (payload.before ? payload.before.version + 1 : 1),
+    'after is the version following before, and the first version follows none',
+  );
+
+/** A levels-and-badges version's terms (COM-012 criterion 2, docs/24 Q-140). */
+const recognitionRuleTerms = z.object({
+  version: z.number().int().positive(),
+  basis: z.enum(['REWARD_POINTS_CUMULATIVE', 'PARTICIPATION_SCORE']),
+  levels: z.array(
+    z.object({
+      rank: z.number().int().positive(),
+      name: z.string(),
+      threshold: z.number().int().nonnegative(),
+    }),
+  ),
+  badges: z.array(
+    z.object({ code: z.string(), name: z.string(), threshold: z.number().int().nonnegative() }),
+  ),
+  label: z.string().nullable(),
+});
+
+/**
+ * A new levels-and-badges version, and who created it — the audit record of
+ * the configuration (AGENTS.md S-06). As for the participation rule, a version
+ * is never edited: `change` is only `CREATED`, and `before` is the version it
+ * replaced, or null for the first.
+ */
+export const recognitionRuleChangedPayload = z
+  .object({
+    ruleId: z.string(),
+    change: z.literal('CREATED'),
+    changedBy: z.string(),
+    changedAt: z.string(),
+    before: recognitionRuleTerms.nullable(),
+    after: recognitionRuleTerms,
+  })
+  .refine(
+    (payload) => payload.after.version === (payload.before ? payload.before.version + 1 : 1),
+    'after is the version following before, and the first version follows none',
+  );
+
+/**
+ * The schema each event is published with now — its current version
+ * ({@link ECONOMIC_EVENT_VERSIONS}).
+ */
 export const ECONOMIC_EVENT_SCHEMAS = {
   [ECONOMIC_EVENTS.WALLET_OPENED]: walletOpenedPayload,
   [ECONOMIC_EVENTS.FUNDS_HELD]: fundsHeldPayload,
@@ -699,15 +894,77 @@ export const ECONOMIC_EVENT_SCHEMAS = {
   [ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_RESOLVED]: paymentReconciliationResolvedPayload,
   [ECONOMIC_EVENTS.PAYMENT_RECONCILIATION_OPERATOR_ACTION]:
     paymentReconciliationOperatorActionPayload,
-  [ECONOMIC_EVENTS.COMMISSION_APPLIED]: commissionAppliedPayload,
+  [ECONOMIC_EVENTS.COMMISSION_APPLIED]: commissionAppliedPayloadV2,
   [ECONOMIC_EVENTS.REWARD_GRANTED]: rewardGrantedPayload,
   [ECONOMIC_EVENTS.REWARD_LEVEL_CHANGED]: rewardLevelChangedPayload,
   [ECONOMIC_EVENTS.SETTLEMENT_COMPLETED]: settlementCompletedPayload,
+  [ECONOMIC_EVENTS.SETTLEMENT_REFUSED]: settlementRefusedPayload,
   [ECONOMIC_EVENTS.JOURNAL_POSTED]: journalPostedPayload,
-  [ECONOMIC_EVENTS.COMMISSION_RULE_CHANGED]: commissionRuleChangedPayload,
+  [ECONOMIC_EVENTS.COMMISSION_RULE_CHANGED]: commissionRuleChangedPayloadV2,
   [ECONOMIC_EVENTS.REWARD_RULE_CHANGED]: rewardRuleChangedPayload,
+  [ECONOMIC_EVENTS.PARTICIPATION_RULE_CHANGED]: participationRuleChangedPayload,
+  [ECONOMIC_EVENTS.RECOGNITION_RULE_CHANGED]: recognitionRuleChangedPayload,
   [ECONOMIC_EVENTS.TRANSACTION_STATUS_CHANGED]: transactionStatusChangedPayload,
 } as const satisfies Record<EconomicEventName, z.ZodTypeAny>;
+
+/**
+ * The `eventVersion` each event is published with (docs/07 § 7.8). 1 unless a
+ * breaking change gave it a new one; the envelope carries it, and a consumer
+ * decodes by it ({@link decodeEconomicPayload}).
+ *
+ * ADR-045 is the one breaking change so far: both commission events gained
+ * required fields, and a rule's `transactionType` became nullable.
+ */
+export const ECONOMIC_EVENT_VERSIONS = {
+  ...(Object.fromEntries(Object.values(ECONOMIC_EVENTS).map((name) => [name, 1])) as Record<
+    EconomicEventName,
+    number
+  >),
+  [ECONOMIC_EVENTS.COMMISSION_APPLIED]: 2,
+  [ECONOMIC_EVENTS.COMMISSION_RULE_CHANGED]: 2,
+} as const satisfies Record<EconomicEventName, number>;
+
+/**
+ * Every version of every event a reader may meet: the current one, and each
+ * earlier one still in the log. A version is never removed while records of
+ * it may be replayed (docs/07 § 7.8).
+ */
+export const ECONOMIC_EVENT_DECODERS: Readonly<
+  Record<EconomicEventName, Readonly<Record<number, z.ZodTypeAny>>>
+> = {
+  ...(Object.fromEntries(
+    Object.entries(ECONOMIC_EVENT_SCHEMAS).map(([name, schema]) => [
+      name,
+      { 1: schema } as Record<number, z.ZodTypeAny>,
+    ]),
+  ) as Record<EconomicEventName, Record<number, z.ZodTypeAny>>),
+  [ECONOMIC_EVENTS.COMMISSION_APPLIED]: {
+    1: commissionAppliedPayloadV1,
+    2: commissionAppliedPayloadV2,
+  },
+  [ECONOMIC_EVENTS.COMMISSION_RULE_CHANGED]: {
+    1: commissionRuleChangedPayloadV1,
+    2: commissionRuleChangedPayloadV2,
+  },
+};
+
+/**
+ * Decodes a payload by the version its envelope names.
+ *
+ * A version this service never published is refused rather than read as the
+ * nearest one: the shape it describes is unknown.
+ */
+export function decodeEconomicPayload(
+  eventName: EconomicEventName,
+  eventVersion: number,
+  payload: unknown,
+): unknown {
+  const schema = ECONOMIC_EVENT_DECODERS[eventName][eventVersion];
+  if (!schema) {
+    throw new Error(`${eventName} has no version ${String(eventVersion)}`);
+  }
+  return schema.parse(payload);
+}
 
 /**
  * Validates before the payload reaches the outbox.

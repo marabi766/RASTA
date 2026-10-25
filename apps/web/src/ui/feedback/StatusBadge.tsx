@@ -61,6 +61,11 @@ export const STATUS_TONES: Readonly<Record<string, StatusTone>> = {
   // An assigned machine is a working machine. EXP-002 added the three asset
   // statuses docs/16 § 16.5 had not tabulated; the table there now names them.
   ASSIGNED: 'success',
+  // A signed contract is in force and work may proceed under it — the
+  // contract's own "good" steady state, same as APPROVED/COMPLETED (EXP-004).
+  SIGNED: 'success',
+  // An amendment both parties have signed is binding (EXP-004).
+  EFFECTIVE: 'success',
 
   PENDING_APPROVAL: 'warning',
   BID_OPEN: 'warning',
@@ -71,6 +76,9 @@ export const STATUS_TONES: Readonly<Record<string, StatusTone>> = {
   // A driver barred pending review — not terminal, unlike DEACTIVATED below,
   // so it reads as "needs attention" rather than "gone" (EXP-002).
   SUSPENDED: 'warning',
+  // An amendment proposed by the employer, waiting on a signature from
+  // either party, is something a reader should notice (EXP-004).
+  PROPOSED: 'warning',
 
   REJECTED: 'danger',
   CANCELLED: 'danger',
@@ -126,6 +134,19 @@ const STATUS_LABELS: Readonly<Record<string, string>> = {
   OPEN: 'باز',
   SUSPENDED: 'معلق',
   DEACTIVATED: 'از رده خارج',
+  SIGNED: 'امضاشده',
+  PROPOSED: 'پیشنهادشده',
+  EFFECTIVE: 'اجراشده',
+  // Orders: the same words `orderStatusLabel` (lib/order-fields.ts) uses, so a
+  // badge drawn without an explicit label still reads Persian.
+  PENDING: 'در انتظار نگه‌داشت وجه',
+  FUNDS_HELD: 'وجه نگه‌داشته شد',
+  CONFIRMED: 'پذیرفته‌شده توسط فروشنده',
+  AWAITING_RECEIPT_CONFIRMATION: 'تحویل‌شده، منتظر تایید خریدار',
+  RECEIPT_CONFIRMED: 'دریافت تایید شد',
+  SETTLING: 'در حال تسویه',
+  DISPUTED: 'در اختلاف',
+  CANCELLING: 'در حال لغو',
 };
 
 export function StatusBadge({

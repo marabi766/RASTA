@@ -3,7 +3,11 @@ import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { PlatformAdministratorRefused, sideOf, type Acting } from '../access/access';
 import { ContractRepository } from '../contract/contract.repository';
-import type { AUTHORITY_REFUSED_ACTIONS, AUTHORITY_REFUSED_REASONS } from '../events/events';
+import type {
+  AUTHORITY_REFUSED_ACTIONS,
+  AUTHORITY_REFUSED_REASONS,
+  AUTHORITY_REFUSED_SIDES,
+} from '../events/events';
 import { EventPublisher } from '../events/publisher';
 import { PrismaService } from '../prisma/prisma.service';
 import { transactionNow } from '../shared/clock';
@@ -14,11 +18,12 @@ export type AuthorityRefusedReason = (typeof AUTHORITY_REFUSED_REASONS)[number];
 
 export interface AuthorityRefusal {
   readonly action: AuthorityRefusedAction;
-  readonly side: 'EMPLOYER' | 'CONTRACTOR';
+  /** A party, or for a decision an organization the statement's chains name (`APPROVER`). */
+  readonly side: (typeof AUTHORITY_REFUSED_SIDES)[number];
   readonly contractId: string;
   /** The contract's organization — the employer's. */
   readonly organizationId: string;
-  /** The amendment or milestone the action named; null when it was to create one. */
+  /** The amendment, milestone or statement the action named; null when it was to create one. */
   readonly subjectId: string | null;
   readonly reason: AuthorityRefusedReason;
   /** The policy that was in force and stranded; null otherwise. */
@@ -28,10 +33,10 @@ export interface AuthorityRefusal {
 /**
  * The durable audit record of an authority-bound action a **party** was refused (S-06), for want of
  * authority or for separation of duties: signing or cancelling the contract, proposing or signing
- * an amendment, planning or editing a milestone. `CONTRACT_AUTHORITY_REFUSED` goes
- * through the outbox in a transaction of its own — the command's transaction rolled back (or never
- * began), and a refusal that left no trace would be invisible to the audit that must show who tried
- * to act for an employer without the authority.
+ * an amendment, planning or editing a milestone, drafting a statement.
+ * `CONTRACT_AUTHORITY_REFUSED` goes through the outbox in a transaction of its own — the command's
+ * transaction rolled back (or never began), and a refusal that left no trace would be invisible to
+ * the audit that must show who tried to act for a party without the authority.
  *
  * When the record cannot be written the caller is not answered with the normal refusal: it gets a
  * retryable 503, so the same request can be made again and leave its trace. The requested command had
@@ -55,8 +60,8 @@ export class AuthorityRefusals {
   ) {}
 
   /**
-   * The caller of a party's command, as `assertCaller` (`ContractAccess.assertCanCommand` or
-   * `assertCanCommandAmendments`) judges it. When that refuses the platform administrator acting for
+   * The caller of a party's command, as `assertCaller` (`ContractAccess.assertCanCommand`,
+   * `assertCanCommandAmendments` or `assertCanCommandStatements`) judges it. When that refuses the platform administrator acting for
    * an organization a party to the named contract, the refusal is recorded like a party's own
    * (`PLATFORM_ADMINISTRATOR`) before it is answered; for any other contract it is answered alone.
    * The answer is the same `403` either way. Every other refusal of `assertCaller` (the oversight

@@ -7,6 +7,7 @@ import {
   newPrisma,
   outboxFor,
   publishOffer,
+  sagaStep,
   tenants,
   wire,
   type Wiring,
@@ -104,7 +105,7 @@ describe('order lifecycle (real database)', () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await placeOrder(offerId, 1);
 
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
 
     const history = await runUnscoped('the suite reads the history it produced', () =>
@@ -126,17 +127,21 @@ describe('order lifecycle (real database)', () => {
     const order = await placeOrder(offerId, 3);
     const transactionId = `TXN_${ulid()}`;
 
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, transactionId));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, transactionId, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
     await asSupplier(() => wiring.orders.fulfill(order.id, { trackingReference: 'WB-1' }));
     await asBuyer(() => wiring.orders.confirmReceipt(order.id, {}));
-    await asSaga(() => wiring.orders.markSettling(order.id));
+    await asSaga(() => wiring.orders.markSettling(order.id, sagaStep()));
     await asSaga(() =>
-      wiring.orders.markCompleted(order.id, {
-        settlementId: `STL_${ulid()}`,
-        commissionAmountMinor: '7500',
-        netAmountMinor: '292500',
-      }),
+      wiring.orders.markCompleted(
+        order.id,
+        {
+          settlementId: `STL_${ulid()}`,
+          commissionAmountMinor: '7500',
+          netAmountMinor: '292500',
+        },
+        sagaStep(),
+      ),
     );
 
     const final = await asBuyer(() => wiring.orders.get(order.id));
@@ -173,11 +178,11 @@ describe('order lifecycle (real database)', () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await placeOrder(offerId, 1);
 
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
     await asSupplier(() => wiring.orders.fulfill(order.id, {}));
 
-    await expect(asSaga(() => wiring.orders.markSettling(order.id))).rejects.toThrow(
+    await expect(asSaga(() => wiring.orders.markSettling(order.id, sagaStep()))).rejects.toThrow(
       expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }),
     );
 
@@ -197,22 +202,26 @@ describe('order lifecycle (real database)', () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await placeOrder(offerId, 1);
 
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
     await asSupplier(() => wiring.orders.fulfill(order.id, {}));
     await asBuyer(() => wiring.orders.confirmReceipt(order.id, {}));
-    await asSaga(() => wiring.orders.markSettling(order.id));
+    await asSaga(() => wiring.orders.markSettling(order.id, sagaStep()));
     await asSaga(() =>
-      wiring.orders.markCompleted(order.id, {
-        settlementId: `STL_${ulid()}`,
-        commissionAmountMinor: '0',
-        netAmountMinor: '250000',
-      }),
+      wiring.orders.markCompleted(
+        order.id,
+        {
+          settlementId: `STL_${ulid()}`,
+          commissionAmountMinor: '0',
+          netAmountMinor: '250000',
+        },
+        sagaStep(),
+      ),
     );
 
     // A terminal order has no outgoing edge, so a replayed command cannot
     // produce a second financial effect.
-    await expect(asSaga(() => wiring.orders.markSettling(order.id))).rejects.toThrow(
+    await expect(asSaga(() => wiring.orders.markSettling(order.id, sagaStep()))).rejects.toThrow(
       /already COMPLETED/,
     );
   });
@@ -221,7 +230,7 @@ describe('order lifecycle (real database)', () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await placeOrder(offerId, 1);
 
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
     await asSupplier(() => wiring.orders.fulfill(order.id, {}));
     await asBuyer(() => wiring.orders.confirmReceipt(order.id, {}));
@@ -235,7 +244,9 @@ describe('order lifecycle (real database)', () => {
     // The saga's step yields to the dispute: it moves nothing and reports what
     // it found, so the saga waits on the dispute instead of counting a failed
     // settlement attempt — which is what used to erase it.
-    await expect(asSaga(() => wiring.orders.markSettling(order.id))).resolves.toBe('DISPUTED');
+    await expect(asSaga(() => wiring.orders.markSettling(order.id, sagaStep()))).resolves.toBe(
+      'DISPUTED',
+    );
 
     const disputed = await asBuyer(() => wiring.orders.get(order.id));
     expect(disputed.status).toBe('DISPUTED');
@@ -252,7 +263,7 @@ describe('order lifecycle (real database)', () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await placeOrder(offerId, 1);
 
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
     await asSupplier(() => wiring.orders.fulfill(order.id, {}));
     await asBuyer(() =>
@@ -268,7 +279,7 @@ describe('order lifecycle (real database)', () => {
     expect(stillDisputed.receiptConfirmedAt).toBeNull();
 
     // And an operator can still resolve it, which is what that edge is for.
-    await asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+    await asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
       wiring.orders.resolveDispute(order.id, {
         outcome: 'SETTLE',
         resolution: 'the supplier provided evidence of correct delivery',
@@ -302,13 +313,13 @@ describe('order lifecycle (real database)', () => {
     // internal RPC, a test) skips that layer and calls the service directly.
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await placeOrder(offerId, 1);
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asBuyer(() =>
       wiring.orders.raiseDispute(order.id, { reason: 'the part delivered was the wrong one' }),
     );
 
     await expect(
-      asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+      asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
         wiring.orders.resolveDispute(order.id, {
           outcome: 'SETTLE',
           resolution: 'a resolution with a responsibility nobody defined',
@@ -327,12 +338,12 @@ describe('order lifecycle (real database)', () => {
     // field.
     const { offerId } = await publishOffer(wiring, org.supplier, { availableQuantity: 5 });
     const order = await placeOrder(offerId, 1);
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asBuyer(() =>
       wiring.orders.raiseDispute(order.id, { reason: 'the goods never left the warehouse' }),
     );
 
-    await asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+    await asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
       wiring.orders.resolveDispute(order.id, {
         outcome: 'REFUND',
         resolution: 'the supplier never shipped the goods',
@@ -344,7 +355,7 @@ describe('order lifecycle (real database)', () => {
     expect(cancelling.status).toBe('CANCELLING');
 
     await asSaga(() =>
-      wiring.orders.markCancelled(order.id, 'the supplier never shipped the goods'),
+      wiring.orders.markCancelled(order.id, 'the supplier never shipped the goods', sagaStep()),
     );
 
     const closed = await asBuyer(() => wiring.orders.get(order.id));
@@ -363,10 +374,10 @@ describe('order lifecycle (real database)', () => {
   it('refuses to resolve a dispute on an order that has none', async () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await placeOrder(offerId, 1);
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
 
     await expect(
-      asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, () =>
+      asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, () =>
         wiring.orders.resolveDispute(order.id, {
           outcome: 'REFUND',
           resolution: 'resolving something that was never disputed',
@@ -380,7 +391,7 @@ describe('order lifecycle (real database)', () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await placeOrder(offerId, 1);
 
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asBuyer(() =>
       wiring.orders.raiseDispute(order.id, { reason: 'the goods never arrived at all' }),
     );
@@ -422,7 +433,7 @@ describe('order lifecycle (real database)', () => {
     expect(order.economicTransactionId).toBeNull();
 
     await asBuyer(() => wiring.orders.cancel(order.id, { reason: 'changed our minds' }));
-    await asSaga(() => wiring.orders.markCancelled(order.id, 'changed our minds'));
+    await asSaga(() => wiring.orders.markCancelled(order.id, 'changed our minds', sagaStep()));
 
     const closed = await asBuyer(() => wiring.orders.get(order.id));
     expect(closed.status).toBe('CANCELLED');
@@ -531,9 +542,9 @@ describe('order lifecycle (real database)', () => {
     const { offerId } = await publishOffer(wiring, org.supplier, { availableQuantity: 4 });
     const order = await placeOrder(offerId, 3);
 
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asBuyer(() => wiring.orders.cancel(order.id, { reason: 'no longer needed' }));
-    await asSaga(() => wiring.orders.markCancelled(order.id, 'no longer needed'));
+    await asSaga(() => wiring.orders.markCancelled(order.id, 'no longer needed', sagaStep()));
 
     const offer = await runUnscoped('the suite reads the offer the cancelled order released', () =>
       prisma.client.offer.findUnique({ where: { id: offerId } }),
@@ -552,12 +563,14 @@ describe('order lifecycle (real database)', () => {
     const { offerId } = await publishOffer(wiring, org.supplier);
     const order = await placeOrder(offerId, 1);
 
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
     await asSupplier(() => wiring.orders.fulfill(order.id, {}));
 
-    await asSaga(() => wiring.orders.recordReminder(order.id));
-    await asSaga(() => wiring.orders.recordReminder(order.id));
+    await asSaga(() => wiring.orders.recordReminder(order.id, sagaStep()));
+    // The next reminder is scheduled a reminder interval later: a day at least.
+    const nextDay = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await asSaga(() => wiring.orders.recordReminder(order.id, sagaStep(nextDay)));
 
     const after = await asBuyer(() => wiring.orders.get(order.id));
     expect(after.status).toBe('AWAITING_RECEIPT_CONFIRMATION');
@@ -581,17 +594,21 @@ describe('order lifecycle (real database)', () => {
       asBuyer(() => wiring.orders.submitReview(order.id, { rating: 5 })),
     ).rejects.toThrow(/completed order/);
 
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
     await asSupplier(() => wiring.orders.fulfill(order.id, {}));
     await asBuyer(() => wiring.orders.confirmReceipt(order.id, {}));
-    await asSaga(() => wiring.orders.markSettling(order.id));
+    await asSaga(() => wiring.orders.markSettling(order.id, sagaStep()));
     await asSaga(() =>
-      wiring.orders.markCompleted(order.id, {
-        settlementId: `STL_${ulid()}`,
-        commissionAmountMinor: '0',
-        netAmountMinor: '250000',
-      }),
+      wiring.orders.markCompleted(
+        order.id,
+        {
+          settlementId: `STL_${ulid()}`,
+          commissionAmountMinor: '0',
+          netAmountMinor: '250000',
+        },
+        sagaStep(),
+      ),
     );
 
     const review = await asBuyer(() => wiring.orders.submitReview(order.id, { rating: 4 }));

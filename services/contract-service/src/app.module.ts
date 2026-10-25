@@ -12,7 +12,10 @@ import {
   AUTH_OPTIONS,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
+  OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   RolesGuard,
   TokenVerifier,
@@ -20,6 +23,7 @@ import {
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import {
   outboxAckFencedTotal,
@@ -41,6 +45,14 @@ import {
   OrganizationMovedConsumer,
   organizationMovesConsumerFactory,
 } from './events/organization-moved.consumer';
+import {
+  SettlementCompletedConsumer,
+  settlementCompletedConsumerFactory,
+} from './events/settlement-completed.consumer';
+import { ObligationSourceClient } from './settlement/obligation-source.client';
+import { SettlementReconciliationSweeper } from './settlement/settlement-reconciliation.sweeper';
+import { StatementSettler } from './settlement/statement-settler';
+import { SettlementRepository } from './settlement/settlement.repository';
 import { PolicyReconciliationRepository } from './policy/policy-reconciliation.repository';
 import { PolicyReconciliationSweeper } from './policy/policy-reconciliation.sweeper';
 import { PolicySuspensionService } from './policy/policy-suspension.service';
@@ -59,6 +71,12 @@ import { AmendmentService } from './amendment/amendment.service';
 import { MilestoneController } from './milestone/milestone.controller';
 import { MilestoneRepository } from './milestone/milestone.repository';
 import { MilestoneService } from './milestone/milestone.service';
+import { StatementController } from './statement/statement.controller';
+import { StatementDecisionService } from './statement/statement-decision.service';
+import { StatementRepository } from './statement/statement.repository';
+import { StatementService } from './statement/statement.service';
+import { InternalStatementController } from './statement/internal-statement.controller';
+import { StatementSettlementService } from './statement/settlement-fact';
 import { AuthorityRefusals } from './signing/authority-refusals';
 import { SigningAuthority } from './signing/signing-authority';
 import { PolicyAccess } from './policy/policy.access';
@@ -68,7 +86,7 @@ import { PolicyService } from './policy/policy.service';
 import { OrganizationDirectory } from './organization/organization-directory';
 import { IdempotencyStore } from './shared/idempotency';
 import { HealthController, MetricsController } from './health/health.controller';
-import { AWARD_SOURCE, ENV, LOGGER } from './tokens';
+import { AWARD_SOURCE, ENV, LOGGER, OBLIGATION_SOURCE } from './tokens';
 import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
 
 /**
@@ -81,15 +99,22 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
  * and a read API for the two parties. No Temporal (nothing here has a deadline; silence is never
  * consent, ADR-043). Since PR 2 a second consumer (`ORGANIZATION_MOVED`, a trigger that queues a
  * re-check — Q-83) and the sweeper that works that queue suspend a signing policy whose union has
- * lost the employer; nothing a user calls writes through either. Statements, their separate
- * technical and financial approvals and the settlement boundary with economic-service are later
- * changes (ADR-068 § 9) and bring their own wiring.
+ * lost the employer; nothing a user calls writes through either. Since PR 4 the contractor drafts
+ * statements, since PR 5 submits them with a snapshot of the technical and financial approval
+ * chains, and since PR 6 each step of those chains is decided by the authority it names. Since
+ * PR 6a economic-service reads a statement here (`GET /v1/internal/statements/{id}`, its service
+ * token only) to build its obligation. Since PR 6c a third consumer (`SETTLEMENT_COMPLETED`, a
+ * trigger) settles a statement once economic-service itself confirms its obligation paid in full —
+ * asked before anything is written — and the contract once every approved statement is
+ * (ADR-068 § 6 (3)).
  */
 @Module({
   controllers: [
     ContractController,
     AmendmentController,
     MilestoneController,
+    StatementController,
+    InternalStatementController,
     PolicyController,
     HealthController,
     MetricsController,
@@ -138,6 +163,10 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     AmendmentService,
     MilestoneRepository,
     MilestoneService,
+    StatementRepository,
+    StatementService,
+    StatementDecisionService,
+    StatementSettlementService,
     PolicyAccess,
     PolicyRepository,
     PolicyService,
@@ -236,6 +265,89 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
         ),
     },
 
+    // ADR-068 § 6 (3), I5: a statement is SETTLED only on economic-service's own answer, read
+    // authenticated and signed for the employer — never on the event's word.
+    SettlementRepository,
+    {
+      provide: OBLIGATION_SOURCE,
+      inject: [ENV, InternalTokenService],
+      useFactory: (env: ContractEnv, tokens: InternalTokenService) =>
+        new ObligationSourceClient({
+          baseUrl: env.ECONOMIC_SERVICE_URL,
+          timeoutMs: env.CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS,
+          tokens,
+        }),
+    },
+
+    {
+      provide: SettlementCompletedConsumer,
+      inject: [
+        ENV,
+        LOGGER,
+        PrismaService,
+        ContractRepository,
+        SettlementRepository,
+        EventPublisher,
+        OBLIGATION_SOURCE,
+      ],
+      useFactory: (
+        env: ContractEnv,
+        logger: Logger,
+        prisma: PrismaService,
+        contracts: ContractRepository,
+        settlements: SettlementRepository,
+        publisher: EventPublisher,
+        obligations: ObligationSourceClient,
+      ) =>
+        new SettlementCompletedConsumer(
+          settlementCompletedConsumerFactory(
+            kafkaConnection(env, `${env.KAFKA_CLIENT_ID}-settlement-completed`),
+            logger,
+            {
+              maxRetries: env.CONTRACT_CONSUMER_MAX_RETRIES,
+              retryBackoffMs: env.CONTRACT_CONSUMER_RETRY_BACKOFF_MS,
+            },
+          ),
+          prisma,
+          contracts,
+          settlements,
+          publisher,
+          obligations,
+          logger,
+        ),
+    },
+
+    {
+      // #343 r1 F1: settles the APPROVED statements economic-service settled whose event never
+      // arrived — on economic's own answer, through the consumer's one write.
+      provide: SettlementReconciliationSweeper,
+      inject: [
+        ENV,
+        PrismaService,
+        ContractRepository,
+        SettlementRepository,
+        EventPublisher,
+        OBLIGATION_SOURCE,
+      ],
+      useFactory: (
+        env: ContractEnv,
+        prisma: PrismaService,
+        contracts: ContractRepository,
+        settlements: SettlementRepository,
+        publisher: EventPublisher,
+        obligations: ObligationSourceClient,
+      ) =>
+        new SettlementReconciliationSweeper(
+          new StatementSettler(prisma, contracts, settlements, publisher),
+          settlements,
+          obligations,
+          {
+            intervalMs: env.CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS,
+            batchSize: env.CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE,
+          },
+        ),
+    },
+
     {
       provide: OutboxRelay,
       inject: [PrismaOutboxStore, KafkaEventPublisher, ENV, LOGGER],
@@ -267,6 +379,57 @@ import { loadContractEnv, SERVICE_NAME, type ContractEnv } from './config/env';
     },
 
     {
+      // D-052: published rows past OUTBOX_PURGE_RETENTION_HOURS, in bounded batches.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: ContractEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      // D-052: the relay, the purge, the reconciliation sweep and the three consumers stop
+      // together in the destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. The sweep too
+      // (as #247 r3): stopped later, it kept writing outbox rows while the relay drained. The
+      // consumers too (Codex r1 on #277): stopped later, one after the other in
+      // onApplicationShutdown and with no bound, their waits came on top of the relay's.
+      provide: OutboxShutdown,
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        PolicyReconciliationSweeper,
+        TenderAwardedConsumer,
+        OrganizationMovedConsumer,
+        SettlementCompletedConsumer,
+        SettlementReconciliationSweeper,
+        KafkaEventPublisher,
+        ENV,
+      ],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        reconciliation: PolicyReconciliationSweeper,
+        awarded: TenderAwardedConsumer,
+        moves: OrganizationMovedConsumer,
+        settlements: SettlementCompletedConsumer,
+        settlementReconciliation: SettlementReconciliationSweeper,
+        publisher: KafkaEventPublisher,
+        env: ContractEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [reconciliation, awarded, moves, settlements, settlementReconciliation],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV, InternalTokenService],
       useFactory: (env: ContractEnv, internalTokens: InternalTokenService): AuthGuardOptions => ({
@@ -293,9 +456,13 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
+    private readonly purge: OutboxPurgeScheduler,
+    private readonly outboxShutdown: OutboxShutdown,
     private readonly awarded: TenderAwardedConsumer,
     private readonly moves: OrganizationMovedConsumer,
+    private readonly settlements: SettlementCompletedConsumer,
     private readonly sweeper: PolicyReconciliationSweeper,
+    private readonly settlementReconciliation: SettlementReconciliationSweeper,
     private readonly reconciliations: PolicyReconciliationRepository,
     private readonly store: PrismaOutboxStore,
     private readonly idempotency: IdempotencyStore,
@@ -317,8 +484,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // never auto-creates topics), not leave a service that looks healthy and never hears an award.
     await this.awarded.start();
     await this.moves.start();
+    await this.settlements.start();
     this.sweeper.start();
+    this.settlementReconciliation.start();
     this.relay.start();
+    this.purge.start();
 
     const sample = async () => {
       try {
@@ -356,9 +526,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
   async onApplicationShutdown(): Promise<void> {
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-    await this.awarded.stop();
-    await this.moves.stop();
-    await this.sweeper.stop();
-    await this.relay.stop();
+    // The relay, the purge, the sweep and the three consumers already stopped in OutboxShutdown's
+    // onModuleDestroy, concurrently and by one deadline; this joins that stop and returns at once.
+    await this.outboxShutdown.stop();
   }
 }

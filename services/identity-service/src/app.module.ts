@@ -12,12 +12,16 @@ import {
   AUTH_OPTIONS,
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
+  OutboxPurgeScheduler,
   OutboxRelay,
+  OutboxShutdown,
+  outboxPurgeSettings,
   RequestContextMiddleware,
   TokenVerifier,
   type AuthGuardOptions,
   kafkaConnection,
 } from '@rasta/nest-common';
+import { outboxShutdownBudgetMs } from '@rasta/config';
 import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
 import { EventConsumer, toLogContext } from '@rasta/nest-common';
 import {
@@ -306,6 +310,55 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
     },
 
     {
+      // D-052: published `outbox_message` rows past OUTBOX_PURGE_RETENTION_HOURS,
+      // in bounded batches. `security_event_outbox` is a separate table and is
+      // not purged.
+      provide: OutboxPurgeScheduler,
+      inject: [PrismaOutboxStore, ENV, LOGGER],
+      useFactory: (store: PrismaOutboxStore, env: IdentityEnv, logger: Logger) =>
+        new OutboxPurgeScheduler({
+          store,
+          service: SERVICE_NAME,
+          logger,
+          ...outboxPurgeSettings(env),
+        }),
+    },
+    {
+      // D-052: both relays, the purge, the expiry scanner and the Keycloak
+      // projection consumer stop together in the destroy phase, by one deadline
+      // inside SHUTDOWN_TIMEOUT_MS. Before, the relays stopped in
+      // `onApplicationShutdown`, after the consumer's unbounded stop, while the
+      // scanner went on writing outbox rows.
+      provide: OutboxShutdown,
+      inject: [
+        OutboxRelay,
+        OutboxPurgeScheduler,
+        SECURITY_EVENT_RELAY,
+        MembershipExpiryScanner,
+        KeycloakProjectionConsumer,
+        KafkaEventPublisher,
+        ENV,
+      ],
+      useFactory: (
+        relay: OutboxRelay,
+        purge: OutboxPurgeScheduler,
+        securityRelay: OutboxRelay,
+        scanner: MembershipExpiryScanner,
+        projection: KeycloakProjectionConsumer,
+        publisher: KafkaEventPublisher,
+        env: IdentityEnv,
+      ) =>
+        new OutboxShutdown({
+          relay,
+          purge,
+          workers: [securityRelay, scanner, projection],
+          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          publishers: [publisher],
+          budgetMs: outboxShutdownBudgetMs(env),
+        }),
+    },
+
+    {
       provide: AUTH_OPTIONS,
       inject: [ENV],
       // The platform options, plus refusal-audit observation of the guard's
@@ -347,6 +400,8 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     private readonly store: PrismaOutboxStore,
     @Inject(SECURITY_EVENT_RELAY) private readonly securityRelay: OutboxRelay,
     private readonly securityStore: SecurityEventOutboxStore,
+    private readonly purge: OutboxPurgeScheduler,
+    private readonly outboxShutdown: OutboxShutdown,
   ) {}
 
   configure(consumer: MiddlewareConsumer): void {
@@ -362,13 +417,15 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
 
     this.relay.start();
     this.securityRelay.start();
+    this.purge.start();
     this.startOutboxGauges();
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // Let an in-flight batch finish so it is not republished on restart. Both
-    // relays settle what they own; neither waits beyond its shutdown grace.
-    await Promise.all([this.relay.stop(), this.securityRelay.stop()]);
+    // Both relays, the purge, the expiry scanner and the projection consumer
+    // already stopped in OutboxShutdown's onModuleDestroy, concurrently and by
+    // one deadline; this joins that stop and returns at once.
+    await this.outboxShutdown.stop();
     if (this.gaugeTimer) clearInterval(this.gaugeTimer);
   }
 

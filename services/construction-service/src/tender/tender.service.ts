@@ -33,6 +33,8 @@ const WORKFLOW = 'tender.cancellation' as const;
 
 /** The endpoint template idempotent tender creation is stored under (docs/06 § 6.8). */
 export const CREATE_TENDER_ENDPOINT = 'POST /v1/projects/:id/tenders';
+/** A cancellation's first answer is kept by `Idempotency-Key` (task 060): a retry never opens a second round. */
+export const CANCEL_TENDER_ENDPOINT = 'POST /v1/tenders/:id/cancel';
 
 /**
  * CreateTender, GetTender, ListTenders, UpdateTender, CancelTender.
@@ -109,6 +111,8 @@ export class TenderService {
               projectId,
               title: dto.title,
               scopeOfWork: dto.scopeOfWork,
+              estimatedCostMinor:
+                dto.estimatedCostMinor === undefined ? null : BigInt(dto.estimatedCostMinor),
               procurementNature: dto.procurementNature ?? null,
               visibility: dto.visibility ?? null,
               bidOpeningAt: dto.bidOpeningAt ? new Date(dto.bidOpeningAt) : null,
@@ -149,7 +153,7 @@ export class TenderService {
     return this.idempotency.run(
       CREATE_TENDER_ENDPOINT,
       idempotencyKey,
-      targeted(projectId, dto),
+      targeted(projectId, { requester: actor, body: dto }),
       201,
       work,
     );
@@ -224,6 +228,11 @@ export class TenderService {
           if (dto.scopeOfWork !== undefined) {
             set('scopeOfWork', dto.scopeOfWork, dto.scopeOfWork !== current.scopeOfWork);
           }
+          if (dto.estimatedCostMinor !== undefined) {
+            const estimate =
+              dto.estimatedCostMinor === null ? null : BigInt(dto.estimatedCostMinor);
+            set('estimatedCostMinor', estimate, estimate !== current.estimatedCostMinor);
+          }
           if (dto.procurementNature !== undefined) {
             set(
               'procurementNature',
@@ -289,9 +298,15 @@ export class TenderService {
    * cancels and uses the approval up in the same transaction, under the tender's lock. The prose reason stays
    * in the database; the event carries the closed code — `OWNER_REQUEST`, or `NO_QUALIFIED_BID` for an
    * EVALUATING tender in which no bid was qualified (the cancellation `evaluate` refuses to complete,
-   * ADR-067 § 2; asked for explicitly, checked under the lock, and by the database).
+   * ADR-067 § 2; asked for explicitly, checked under the lock, and by the database). An optional
+   * `Idempotency-Key`, claimed inside the gate's refusal audit once the caller is authorised, keeps the
+   * first answer — 202 or 200 — with the round or the cancellation it answers for (task 060).
    */
-  async cancel(tenderId: string, dto: CancelTenderDto): Promise<Gated<TenderView>> {
+  async cancel(
+    tenderId: string,
+    dto: CancelTenderDto,
+    idempotencyKey?: string,
+  ): Promise<Gated<TenderView>> {
     const { organizationId, actor } = this.access.assertCanWrite();
     const caller: GateCaller = {
       userId: actor,
@@ -303,115 +318,138 @@ export class TenderService {
     assertOwnTender(first, organizationId);
 
     const own = { organizationId, id: tenderId, projectId: first.projectId };
-    return this.gate.guarded(own, WORKFLOW, caller, async () => {
-      // Asked before any transaction: no row lock is held across a network call.
-      const confirmedPolicyId = await this.gate.confirmPolicy(organizationId, WORKFLOW);
-      if (confirmedPolicyId === null) throw approvalPolicyRequired(WORKFLOW);
+    return this.gate.guarded(own, WORKFLOW, caller, () =>
+      this.idempotency.run(
+        CANCEL_TENDER_ENDPOINT,
+        idempotencyKey,
+        targeted(tenderId, { requester: actor, body: dto }),
+        200,
+        (record) => this.cancelGated(tenderId, dto, caller, record),
+      ),
+    );
+  }
 
-      // Read inside the transaction, like `update`, so the answer is the state this cancellation produced.
-      const outcome = await withFinancialSpan(
-        'construction.tender.cancel',
-        () =>
-          this.prisma.transaction(async (tx): Promise<Gated<TenderView> | 'STALE'> => {
-            const at = await transactionNow(tx);
-            const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
-            if (locked.version !== dto.expectedVersion) {
-              const stale = await this.gate.endIfBehind(
-                tx,
-                {
-                  organizationId,
-                  id: tenderId,
-                  projectId: locked.projectId,
-                  version: locked.version,
-                },
-                WORKFLOW,
-                caller,
-                at,
-              );
-              if (stale) return 'STALE';
-              throw this.conflict(tenderId);
-            }
-            assertTenderTransition(tenderId, locked.status, 'CANCELLED');
-            if (dto.reasonCode === 'NO_QUALIFIED_BID') {
-              const qualified = await tx.bid.count({ where: { tenderId, status: 'QUALIFIED' } });
-              if (locked.status !== 'EVALUATING' || qualified > 0) {
-                throw ruleRefusal(
-                  'Cancel refused: NO_QUALIFIED_BID is the reason of an EVALUATING tender in which no bid was qualified',
-                  'cancellation',
-                  ['REASON_CODE_NOT_APPLICABLE'],
-                  { tenderId, status: locked.status },
-                );
-              }
-            }
+  private async cancelGated(
+    tenderId: string,
+    dto: CancelTenderDto,
+    caller: GateCaller,
+    record: RecordCompletion<Gated<TenderView>>,
+  ): Promise<Gated<TenderView>> {
+    const { organizationId, userId: actor } = caller;
+    // Asked before any transaction: no row lock is held across a network call.
+    const confirmedPolicyId = await this.gate.confirmPolicy(organizationId, WORKFLOW);
+    if (confirmedPolicyId === null) throw approvalPolicyRequired(WORKFLOW);
 
-            const tender = { organizationId, id: tenderId, projectId: locked.projectId };
-            const resolution = await this.gate.resolve(tx, {
-              tender: { ...tender, version: locked.version },
-              binding: {
-                workflowKey: WORKFLOW,
-                reason: dto.reason,
-                reasonCode: dto.reasonCode,
-              },
-              confirmedPolicyId,
-              caller,
-              at,
-            });
-            if (resolution.kind === 'STALE') return 'STALE';
-            if (resolution.kind === 'REQUESTED') {
-              return {
-                executed: false,
-                request: toRequestView(
-                  resolution.request,
-                  await this.approvalRequests.steps(tx, resolution.request),
-                ),
-              };
-            }
-
-            const matched = await this.repository.transitionTender(tx, {
-              tenderId,
-              from: locked.status,
-              to: 'CANCELLED',
-              expectedVersion: dto.expectedVersion,
-              reason: dto.reason,
-              reasonCode: dto.reasonCode,
-              actor,
-              at,
-            });
-            if (matched === 0) throw this.conflict(tenderId);
-            await this.gate.consume(
+    // Read inside the transaction, like `update`, so the answer is the state this cancellation produced.
+    const outcome = await withFinancialSpan(
+      'construction.tender.cancel',
+      () =>
+        this.prisma.transaction(async (tx): Promise<Gated<TenderView> | 'STALE'> => {
+          const at = await transactionNow(tx);
+          const locked = await this.lockOrNotFound(tx, organizationId, tenderId);
+          if (locked.version !== dto.expectedVersion) {
+            const stale = await this.gate.endIfBehind(
               tx,
-              resolution.request,
-              { ...tender, version: locked.version },
+              {
+                organizationId,
+                id: tenderId,
+                projectId: locked.projectId,
+                version: locked.version,
+              },
+              WORKFLOW,
               caller,
               at,
             );
+            if (stale) return 'STALE';
+            throw this.conflict(tenderId);
+          }
+          assertTenderTransition(tenderId, locked.status, 'CANCELLED');
+          if (dto.reasonCode === 'NO_QUALIFIED_BID') {
+            const qualified = await tx.bid.count({ where: { tenderId, status: 'QUALIFIED' } });
+            if (locked.status !== 'EVALUATING' || qualified > 0) {
+              throw ruleRefusal(
+                'Cancel refused: NO_QUALIFIED_BID is the reason of an EVALUATING tender in which no bid was qualified',
+                'cancellation',
+                ['REASON_CODE_NOT_APPLICABLE'],
+                { tenderId, status: locked.status },
+              );
+            }
+          }
 
-            await this.events.enqueue(tx, {
-              eventName: 'TENDER_CANCELLED',
-              aggregateId: tenderId,
+          const tender = { organizationId, id: tenderId, projectId: locked.projectId };
+          const resolution = await this.gate.resolve(tx, {
+            tender: { ...tender, version: locked.version },
+            binding: {
+              workflowKey: WORKFLOW,
+              reason: dto.reason,
+              reasonCode: dto.reasonCode,
+            },
+            confirmedPolicyId,
+            caller,
+            at,
+          });
+          if (resolution.kind === 'STALE') return 'STALE';
+          if (resolution.kind === 'REQUESTED') {
+            const asked: Gated<TenderView> = {
+              executed: false,
+              request: toRequestView(
+                resolution.request,
+                await this.approvalRequests.steps(tx, resolution.request),
+              ),
+            };
+            await record(tx, tenderId, asked, 202);
+            return asked;
+          }
+
+          const matched = await this.repository.transitionTender(tx, {
+            tenderId,
+            from: locked.status,
+            to: 'CANCELLED',
+            expectedVersion: dto.expectedVersion,
+            reason: dto.reason,
+            reasonCode: dto.reasonCode,
+            actor,
+            at,
+          });
+          if (matched === 0) throw this.conflict(tenderId);
+          await this.gate.consume(
+            tx,
+            resolution.request,
+            { ...tender, version: locked.version },
+            caller,
+            at,
+          );
+
+          await this.events.enqueue(tx, {
+            eventName: 'TENDER_CANCELLED',
+            aggregateId: tenderId,
+            organizationId,
+            payload: {
+              tenderId,
+              projectId: locked.projectId,
               organizationId,
-              payload: {
-                tenderId,
-                projectId: locked.projectId,
-                organizationId,
-                from: locked.status,
-                reasonCode: dto.reasonCode,
-                approvalRequestId: resolution.request.id,
-                cancelledBy: actor,
-                cancelledAt: at.toISOString(),
-              },
-              occurredAt: at,
-            });
-            return { executed: true, result: await this.view(organizationId, tenderId, tx) };
-          }),
-        { 'rasta.tender.command': 'cancel' },
-      );
-      if (outcome === 'STALE') throw approvalStale(WORKFLOW);
-      if (outcome.executed) {
-        tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'cancel' });
-      }
-      return outcome;
-    });
+              from: locked.status,
+              reasonCode: dto.reasonCode,
+              approvalRequestId: resolution.request.id,
+              cancelledBy: actor,
+              cancelledAt: at.toISOString(),
+            },
+            occurredAt: at,
+          });
+          const cancelled: Gated<TenderView> = {
+            executed: true,
+            result: await this.view(organizationId, tenderId, tx),
+          };
+          await record(tx, tenderId, cancelled, 200);
+          return cancelled;
+        }),
+      { 'rasta.tender.command': 'cancel' },
+    );
+    if (outcome === 'STALE') throw approvalStale(WORKFLOW);
+    if (outcome.executed) {
+      tenderTransitionsTotal.inc({ service: SERVICE_NAME, command: 'cancel' });
+    }
+    return outcome;
   }
 
   // -- helpers ----------------------------------------------------------------

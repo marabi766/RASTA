@@ -117,7 +117,7 @@ spec:
         - { name: clamav-socket, mountPath: /run/clamav }
 
     - name: clamav
-      image: clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+      image: clamav/clamav@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
       command: ['clamd'] # نه /init، که برای ساخت /run/clamav به root نیاز دارد
       securityContext:
         runAsUser: 100
@@ -141,7 +141,7 @@ spec:
         - { name: clamd-config, mountPath: /etc/clamav/clamd.conf, subPath: clamd.conf }
 
     - name: clamav-freshclam
-      image: clamav/clamav@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+      image: clamav/clamav@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
       command: ['freshclam', '--daemon', '--foreground']
       securityContext: { runAsUser: 100, runAsGroup: 101, runAsNonRoot: true }
       volumeMounts:
@@ -174,6 +174,18 @@ spec:
 ۴. در صورت شکست: helm rollback خودکار
 ```
 
+### گام‌های یک‌باره پس از استقرار
+
+بعضی Migrationها فقط Schema را عوض می‌کنند و نوشتن داده را به دستوری جدا می‌سپارند تا قفل جدول کوتاه بماند. چنین دستوری
+خودکار اجرا نمی‌شود و جزو همان انتشار است: پس از Smoke Test اجرا کن و نتیجه را در Change Record ثبت کن.
+
+| انتشار                                                                             | دستور                                                                                                                                                           | Runbook                                                                 |
+| ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| economic-service با Migration `20261022120000_transaction_resolved_dispute` (#352) | اول Dry Run: `pnpm --dir services/economic-service db:backfill:resolved-dispute`؛ سپس همان با `--apply`. قابل ادامه با `--after <lastId>`؛ اجرای دوباره امن است | [`resolved-dispute-backfill`](../runbooks/resolved-dispute-backfill.md) |
+
+تا اجرا نشده، حل اعتراض ردیف‌هایی که به آن‌ها نرسیده در پورتال «نامعلوم» نشان داده می‌شود (به اعتراض نمایش‌داده‌شده نسبت
+داده نمی‌شود)؛ نسبت غلطی پیش نمی‌آید، ولی این ردیف‌ها تا اجرا اطلاعات کمتری نشان می‌دهند.
+
 ### استثنا: نخستین استقرار هماهنگی تمدید نشست پورتال (`apps/web`، PR #113)
 
 نسخه‌های پورتال پیش از این تغییر، وقتی یک Refresh Token دو بار خرج شود و Keycloak دومی را رد کند
@@ -190,6 +202,22 @@ spec:
 همین قاعده برای **Rollback** به نسخهٔ پیش از این تغییر هم برقرار است. پورتال تاکنون در هیچ محیط ماندگاری مستقر نشده،
 پس «رقص دو انتشار» لازم نیست؛ از استقرار دوم به بعد Rolling Update عادی درست است (بازبینی Codex #113 R2-5، ADR-059).
 `WEB_REDIS_URL` هم در production الزامی است و بی آن پورتال بالا نمی‌آید.
+
+### پیش از انتشار economic-service با تسویهٔ بسته در خطا: قواعد صفر درصد پایلوت (docs/24 Q-29، Q-08)
+
+از این انتشار، بیرون از `development` و `test` تسویهٔ تراکنشی که خط کسب‌وکار دارد و هیچ قاعدهٔ کارمزد فعالی خطش را
+نمی‌پوشاند با `422 NO_ACTIVE_RULE` رد می‌شود (`ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`؛ `false` آنجا هنگام راه‌اندازی رد
+می‌شود). پایلوت با یک قاعدهٔ **صفر درصدِ صریح** برای هر خط اجرا می‌شود، پس **پیش از** این انتشار در هر محیط ماندگار:
+
+1. **فهرست خشک:** برای هر هفت خط `GET /v1/commissions/rules?businessLine=<LINE>` با `SYSTEM_ADMIN` سکو؛ هنوز چیزی نساز.
+2. برای هر خطی که قاعدهٔ سراسری نافذ ندارد یک `POST /v1/commissions/rules` با `rateBasisPoints: 0` و برچسب پایلوت.
+3. فهرست را دوباره بگیر: هر خط دقیقاً یک قاعدهٔ سراسری نافذ؛ نتیجه را در Change Record ثبت کن.
+
+جزئیات، بدنهٔ درخواست و پاسخ به `409`: Runbook [`settlement-no-active-rule`](../runbooks/settlement-no-active-rule.md). اگر انتشار
+زودتر برسد پولی جابه‌جا نمی‌شود، ولی تسویهٔ خطوط بی‌قاعده تا ساخت قاعده رد می‌شود و هشدار `RastaSettlementNoActiveRule` می‌آید.
+از همین انتشار تعهد **تازه** بی `businessLine` در `POST /v1/transactions` با `422 BUSINESS_LINE_REQUIRED` رد می‌شود، جز سفارش
+Marketplace که خود marketplace-service ثبت می‌کند؛ هر فراخوان دیگری که امروز بی خط می‌فرستد پیش از انتشار باید خط را بفرستد.
+ردیف‌های بی‌خطِ پیشین، سفارش Marketplace و صورت‌وضعیت (تا پاسخ Q-130) رد نمی‌شوند و مانند پیش با صفر تسویه می‌شوند.
 
 ## Rollback
 

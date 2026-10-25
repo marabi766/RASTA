@@ -178,6 +178,13 @@ export function assertCanRegisterSupplier(): void {
 export const STANDING_SNAPSHOT_CALLER = 'construction-service';
 
 /**
+ * The services allowed to ask for one organization's standing now: construction-service
+ * for a bid (ADR-061 § 4), procurement-service for an RFQ invitation and a quotation
+ * (ADR-070 § 7, `GOODS_SUPPLY`). The paged snapshot stays construction-service's alone.
+ */
+export const STANDING_OF_CALLERS = ['construction-service', 'procurement-service'] as const;
+
+/**
  * Whether the caller is construction-service, acting platform-wide.
  *
  * The only service-to-service entry in this service, opened deliberately with a
@@ -195,6 +202,25 @@ export function assertCallerIsConstructionService(): void {
     context.organizationId !== undefined
   ) {
     throw RastaError.forbidden('Only construction-service may read the supplier standing snapshot');
+  }
+}
+
+/**
+ * Whether the caller may read one organization's standing now: one of
+ * {@link STANDING_OF_CALLERS}, acting platform-wide. The same three refusals as
+ * {@link assertCallerIsConstructionService}: a person with any role, any other
+ * service, and a token signed for a tenant.
+ */
+export function assertCallerMayReadStandingOf(): void {
+  const context = getContext();
+  if (
+    context.authType !== 'SERVICE' ||
+    !STANDING_OF_CALLERS.some((caller) => caller === context.callerService) ||
+    context.organizationId !== undefined
+  ) {
+    throw RastaError.forbidden(
+      'Only construction-service or procurement-service may read the standing of a supplier',
+    );
   }
 }
 
@@ -347,6 +373,26 @@ export function assertNotDecidingOwnCase(supplier: SupplierOwnership): void {
       'A supplier organization may not decide its own qualification, suspension or reinstatement',
     );
   }
+}
+
+/**
+ * Whether the caller may read a reviewer's private decision note on this
+ * supplier's qualifications.
+ *
+ * The note is written by a platform reviewer for the platform's record, so it
+ * is projected to the people who could have written it: platform scope, and
+ * **not** a member of the supplier's organization (Codex review of PR 366,
+ * finding 1). The second half is the same membership-set rule as
+ * {@link assertNotDecidingOwnCase}, for the same reason: a `UNION_ADMIN` who
+ * also belongs to the supplier is the supplier's side reading its own file, and
+ * the role they hold does not change that. The supplier's own organization reads
+ * the rejection reason, which is the part written for it.
+ *
+ * A predicate rather than an assertion: it shapes what a reader the caller has
+ * already admitted is shown, and never refuses a read.
+ */
+export function mayReadReviewerNote(supplier: SupplierOwnership): boolean {
+  return hasPlatformScope() && !isMemberOfOrganization(supplier.organizationId);
 }
 
 /**

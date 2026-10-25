@@ -141,6 +141,7 @@ describe.each(FORMS)('$name', (form) => {
     [{ kind: 'REFUSED', reason: 'NO_SESSION' } as const, /نشست شما پایان یافته/],
     [{ kind: 'REFUSED', reason: 'BASELINE' } as const, /منقضی شده است/],
     [{ kind: 'REFUSED', reason: 'CSRF' } as const, /معتبر شناخته نشد/],
+    [{ kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' } as const, /فرستاده نشد و چیزی تغییر نکرد/],
     [{ kind: 'FORBIDDEN', correlationId: 'corr-403' } as const, /corr-403/],
     [{ kind: 'NOT_FOUND', correlationId: null } as const, /پیدا نشد یا در سازمان فعال شما نیست/],
     [{ kind: 'FAILED', status: 503, correlationId: 'corr-503' } as const, /corr-503/],
@@ -149,6 +150,14 @@ describe.each(FORMS)('$name', (form) => {
     setState(state);
     form.render();
     expect(screen.getByRole('alert')).toHaveTextContent(expected);
+  });
+
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    setState({ kind: 'REFUSED', reason: 'SESSION_UNAVAILABLE' });
+    const { container } = form.render();
+    expect(screen.getByRole('alert')).toHaveTextContent(/همین حالا در دسترس نیست/);
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/پایان یافته/);
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   it('never claims a write was not made when its outcome is unknown', () => {

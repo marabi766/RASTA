@@ -2,8 +2,10 @@
 
 import { redirect } from 'next/navigation';
 
-import { currentSession } from '@/server/current-session';
+import { MONEY_EFFECTS } from '@/lib/demo-mode';
+import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { mayDispatch } from '@/server/money-gate';
 import {
   placeOrder,
   parsePlaceOrderForm,
@@ -18,8 +20,10 @@ import { withRetryNote, type PlaceOrderFormState } from './place-order-form-stat
  * The place-order form's one server action.
  *
  * Same order as every write in this portal (ADR-059 § 3, § 5): session, CSRF,
- * submission id, the form, then the gateway — each gate returning before the
- * next runs. An order is placed against an *offer*, which the form posts; the
+ * submission id, the form, the provider read again (placing an order holds
+ * money, so nothing is sent while it is unknown — `mayDispatch`), then the
+ * gateway — each gate returning before the next runs. A retry is gated the same
+ * way: it is the same hold. An order is placed against an *offer*, which the form posts; the
  * service — not the portal — decides whether that offer is published, large
  * enough, and from another organization.
  *
@@ -39,7 +43,14 @@ export async function submitPlaceOrder(
   // or 422 on the retry says nothing about the original. The state stays — the
   // original correlation id, key and values with it: a retry that itself came
   // back unconfirmed (a 5xx, a 401/405/429 the portal cannot tell from "maybe")
-  // must not swap them for the retry's own.
+  // must not swap them for the retry's own. The one authoritative thing a retry
+  // can learn is that this browser's session has ended (`NO_SESSION`) — not one
+  // whose refresh is only unavailable for now, which stays unknown with its
+  // retry, exactly as on a dispute command (`transactions/[id]/actions.ts`).
+  if (state.kind === 'REFUSED') {
+    if (state.reason === 'NO_SESSION') return withRetryNote(previous, 'sessionEnded');
+    if (state.reason === 'SESSION_UNAVAILABLE') return withRetryNote(previous, 'retryUnknown');
+  }
   return withRetryNote(previous, state.kind === 'UNCONFIRMED' ? 'retryUnknown' : 'retryRefused');
 }
 
@@ -49,7 +60,7 @@ function sentQuantity(request: PlaceOrderRequest): string {
 
 async function attempt(form: FormData): Promise<PlaceOrderFormState> {
   const session = await currentSession();
-  if (!session) return { kind: 'REFUSED', reason: 'NO_SESSION' };
+  if (!session) return { kind: 'REFUSED', reason: await missingSessionReason() };
 
   const csrf = verifyCsrf(session, form);
   if (!csrf.ok) return { kind: 'REFUSED', reason: 'CSRF' };
@@ -67,6 +78,10 @@ async function attempt(form: FormData): Promise<PlaceOrderFormState> {
       fieldErrors: parsed.fieldErrors,
       message: null,
     };
+  }
+
+  if (!(await mayDispatch(session, MONEY_EFFECTS.placeOrder))) {
+    return { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
   }
 
   const result = await placeOrder(session, parsed.request, submissionId);

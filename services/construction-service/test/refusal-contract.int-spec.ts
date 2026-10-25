@@ -108,9 +108,13 @@ describe('the refusal contract: real refusals against the generated OpenAPI docu
       ['get', `/v1/tenders/${tenderId}/bids/${bidId}`],
       ['get', `/v1/tenders/${tenderId}/bid-access-log`],
     ] as const) {
-      const res = await (http() as unknown as Record<string, (p: string) => request.Test>)
+      const req = (http() as unknown as Record<string, (p: string) => request.Test>)
         [method](path)
         .set(conflicted);
+      // A withdrawal names a proposal (task 060); refused before it is looked at.
+      const res = await (path.endsWith('/withdraw')
+        ? req.send({ proposedAt: '2026-01-01T00:00:00.000Z' })
+        : req);
       expect({ path, status: res.status, reasons: reasonsOf(res.body) }).toEqual({
         path,
         status: 403,

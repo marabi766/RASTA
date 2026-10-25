@@ -815,7 +815,8 @@ describe('awarding an evaluated tender', () => {
         const line = lines.find((l) => l.includes(tenderId));
         expect(line).toContain(bids[0]!.bidId);
         expect(line).toContain('UPSTREAM_UNAVAILABLE');
-        expect(line).not.toMatch(/1000|amount|price/i);
+        // 1000 as a number of its own: the line's ULIDs can contain it by chance.
+        expect(line).not.toMatch(/(?<![\w-])1000(?![\w-])|amount|price/i);
 
         // Not claimed again until the backoff has passed.
         expect((await w.awardCheckSweeper.runOnce(tenderId)).claimed).toBe(0);

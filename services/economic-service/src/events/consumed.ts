@@ -13,10 +13,14 @@ import { z } from 'zod';
  *                            settleable obligation and moves no money.
  *   `USAGE_RECORDED`         fleet-service. A reward trigger.
  *   `MAINTENANCE_COMPLETED`  maintenance-service. A reward trigger.
+ *   `STATEMENT_APPROVED`     contract-service (ADR-068 § 6, CON-003 PR 6b).
+ *                            Identifiers only (Q-97 (2)): the statement is read
+ *                            from its owner, and the settleable obligation is
+ *                            built from that answer. Moves no money.
  *
  * **Deferred, and named rather than stubbed:** `ORDER_CREATED`,
  * `ORDER_RECEIPT_CONFIRMED`, `ORDER_CANCELLED`, `ORDER_DISPUTED`,
- * `STATEMENT_APPROVED`, `PURCHASE_ORDER_ISSUED`, `GOODS_RECEIVED`.
+ * `PURCHASE_ORDER_ISSUED`, `GOODS_RECEIVED`.
  *
  * Not because their producers are missing — that alone is no obstacle, and
  * maintenance-service had a consumer waiting a long time for one. Because
@@ -46,6 +50,7 @@ export const CONSUMED_EVENTS = {
   MAINTENANCE_APPROVED: 'MAINTENANCE_APPROVED',
   MAINTENANCE_COMPLETED: 'MAINTENANCE_COMPLETED',
   USAGE_RECORDED: 'USAGE_RECORDED',
+  STATEMENT_APPROVED: 'STATEMENT_APPROVED',
 } as const;
 
 export type ConsumedEventName = (typeof CONSUMED_EVENTS)[keyof typeof CONSUMED_EVENTS];
@@ -78,6 +83,13 @@ const amountMinor = z.string().regex(/^\d{1,30}$/);
  *   `costBreakdown`            carried for audit. Not used to compute
  *                              anything — the total is authoritative.
  */
+/**
+ * maintenance-service sums the breakdown by cost category, so it has one row
+ * per category: five today (`COST_CATEGORIES`, maintenance `dto.ts`). Ten
+ * times that leaves room for categories added later.
+ */
+export const MAX_COST_BREAKDOWN_ROWS = 50;
+
 export const maintenanceApprovedSchema = z
   .object({
     requestId: z.string().min(1),
@@ -90,6 +102,9 @@ export const maintenanceApprovedSchema = z
     currency: z.string().min(3),
     costBreakdown: z
       .array(z.object({ category: z.string(), amountMinor, currency: z.string() }).passthrough())
+      // One row per cost category (five today); the cap only stops a payload
+      // whose length alone makes it a defect (GHSA-mrhx-c7xc-m3w5).
+      .max(MAX_COST_BREAKDOWN_ROWS)
       .optional(),
   })
   .passthrough();
@@ -166,6 +181,38 @@ export type UsageRecordedEvent = z.infer<typeof usageRecordedSchema>;
 export const USAGE_RECORDED_FIELDS: readonly string[] = Object.keys(usageRecordedSchema.shape);
 
 /**
+ * A contract statement's financial chain approved it (ADR-068 § 6 (1)): a
+ * **fact, not a payment order**, and identifiers only (Q-97 (2)) — no amount,
+ * no deduction, no approver. Every field here is a claim the consumer compares
+ * with contract-service's own answer before it records anything; the amount,
+ * the payer and the beneficiary are taken from that answer alone.
+ *
+ *   `organizationId`            the employer: the payer, and the tenant the
+ *                               owner is asked in.
+ *   `contractorOrganizationId`  the beneficiary, as the event claims it.
+ *   `approvedAt`                the instant the obligation arose — the date the
+ *                               commission rule is selected against.
+ *
+ * `statementNumber` is published too and read by nobody here.
+ */
+export const statementApprovedSchema = z
+  .object({
+    contractId: z.string().min(1),
+    statementId: z.string().min(1),
+    organizationId: z.string().min(1),
+    contractorOrganizationId: z.string().min(1),
+    approvedAt: z.string(),
+  })
+  .passthrough();
+
+export type StatementApprovedEvent = z.infer<typeof statementApprovedSchema>;
+
+/** The names `statementApprovedSchema` declares (S-09, L7-26). */
+export const STATEMENT_APPROVED_FIELDS: readonly string[] = Object.keys(
+  statementApprovedSchema.shape,
+);
+
+/**
  * Events this service will consume once their contracts are real.
  *
  * Listed as data rather than as a comment so that the deferral is greppable
@@ -177,7 +224,6 @@ export const DEFERRED_CONSUMPTION = [
   'ORDER_RECEIPT_CONFIRMED',
   'ORDER_CANCELLED',
   'ORDER_DISPUTED',
-  'STATEMENT_APPROVED',
   'PURCHASE_ORDER_ISSUED',
   'GOODS_RECEIVED',
 ] as const;

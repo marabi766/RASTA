@@ -12,6 +12,7 @@ import {
   key,
   newPrisma,
   publishOffer,
+  sagaStep,
   tenants,
   waitFor,
   wire,
@@ -64,7 +65,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
     asActor({ organizationId: org.supplier, roles: ['SUPPLIER'], userId: 'USR-SUPPLIER' }, fn);
 
   const asOperator = <T>(fn: () => Promise<T>) =>
-    asActor({ organizationId: org.other, roles: ['UNION_ADMIN'], userId: 'USR-OPS' }, fn);
+    asActor({ organizationId: org.other, roles: ['SYSTEM_ADMIN'], userId: 'USR-OPS' }, fn);
 
   const asSaga = <T>(fn: () => Promise<T>) =>
     asActor(
@@ -124,7 +125,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
 
   afterAll(async () => {
     await consumer?.disconnect();
-    await publisher?.onModuleDestroy();
+    await publisher?.stop();
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
     await prisma?.onModuleDestroy();
   }, 60_000);
@@ -198,7 +199,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
     const order = await asBuyer(() =>
       wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('ev-dispute')),
     );
-    await asSaga(() => wiring.orders.markFundsHeld(order.id, id('TXN')));
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, id('TXN'), sagaStep()));
     await asSupplier(() => wiring.orders.confirm(order.id));
     await asBuyer(() =>
       wiring.orders.raiseDispute(order.id, {
@@ -233,7 +234,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
       wiring.orders.cancel(order.id, { reason: 'no longer needed, over the broker suite' }),
     );
     await asSaga(() =>
-      wiring.orders.markCancelled(order.id, 'no longer needed, over the broker suite'),
+      wiring.orders.markCancelled(order.id, 'no longer needed, over the broker suite', sagaStep()),
     );
 
     await drain('ORDER_CANCELLED', order.id);
@@ -254,7 +255,7 @@ describeWithKafka('marketplace performance-signal events over Kafka', () => {
         wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('ev-idem')),
       );
       await asBuyer(() => wiring.orders.cancel(order.id, { reason: 'idempotency probe' }));
-      await asSaga(() => wiring.orders.markCancelled(order.id, 'idempotency probe'));
+      await asSaga(() => wiring.orders.markCancelled(order.id, 'idempotency probe', sagaStep()));
 
       const before = await prisma.client.outboxMessage.findFirstOrThrow({
         where: { aggregateId: order.id, eventName: 'ORDER_CANCELLED' },

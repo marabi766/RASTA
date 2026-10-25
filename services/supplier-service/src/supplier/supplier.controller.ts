@@ -26,7 +26,12 @@ import {
   type SubmitQualificationDto,
   type SuspendSupplierDto,
 } from './dto';
-import { DIRECTORY_ROLES, PLATFORM_ROLES, SUPPLIER_SIDE_ROLES } from '../access/access';
+import {
+  DIRECTORY_ROLES,
+  PLATFORM_ROLES,
+  STANDING_OF_CALLERS,
+  SUPPLIER_SIDE_ROLES,
+} from '../access/access';
 
 /**
  * The supplier HTTP surface (`docs/04` § 4.10, `docs/06`).
@@ -122,16 +127,18 @@ export class SupplierController {
   }
 
   @Get('standing-snapshot/:organizationId')
-  @AllowService('construction-service')
+  @AllowService(...STANDING_OF_CALLERS)
   @ApiOperation({
-    summary: 'One contractor’s standing now (authoritative), for a bid decision',
+    summary: 'One organization’s standing now (authoritative), for a bid or an RFQ decision',
     description:
-      'The single-organization variant of the snapshot, with the same service-only access: ' +
-      '`construction-service` with a token signed for no tenant, 403 for anyone else. Read at ' +
+      'The single-organization variant of the snapshot, service-only: `construction-service` ' +
+      '(a bid) or `procurement-service` (an RFQ invitation or a quotation, ADR-070 § 7) with a ' +
+      'token signed for no tenant, 403 for anyone else. Read at ' +
       'the moment of asking, so it includes a suspension committed here and not yet relayed on ' +
       '`rasta.supplier.v1`, and one whose event has expired from the log. Always 200: an ' +
       'organization with no profile answers with no approval and no episodes. Identifiers and ' +
-      'instants only; `asOf` is the database instant it was read at. A literal two-segment path, ' +
+      'instants only: the latest CONTRACTING and GOODS_SUPPLY approvals, the suspension ' +
+      'episodes, and `asOf`, the database instant it was read at. A literal two-segment path, ' +
       'declared before `:id`.',
   })
   async standingOf(@Param('organizationId') organizationId: string) {
@@ -178,7 +185,11 @@ export class SupplierController {
       'The caller’s own organization, or a platform operator. A supplier owned by another ' +
       'organization answers 404 rather than 403, so its existence is never disclosed — the ' +
       'directory is where a stranger legitimately sees that a supplier exists, and it ' +
-      'returns a different, catalogue-safe object.',
+      'returns a different, catalogue-safe object. A qualification’s `decisionNote` (the ' +
+      'reviewer’s private note) is present only for a platform operator who is not a member ' +
+      'of the supplier’s organization; the supplier’s own organization never receives the ' +
+      'key. A rejected qualification’s `rejectionReason` is the reason stated for the ' +
+      'supplier, and every reader of this record receives it.',
   })
   async get(@Param('id') id: string) {
     return this.suppliers.get(id);
@@ -235,8 +246,10 @@ export class SupplierController {
     summary: 'Reject a submitted qualification',
     description:
       'The mirror of approval, with the same authorization and the same terminality. The ' +
-      'stated `reason` is published on SUPPLIER_REJECTED so the supplier can act on it; the ' +
-      'optional `note` is the reviewer’s private record and is never published.',
+      'stated `reason` is stored on the qualification as `rejectionReason`, readable on the ' +
+      'supplier’s own record, and published on SUPPLIER_REJECTED, so the supplier can act on ' +
+      'it; the optional `note` is the reviewer’s private record — returned to reviewers only, ' +
+      'never to the supplier’s organization, and never published.',
   })
   async rejectQualification(
     @Param('id') id: string,
@@ -260,7 +273,9 @@ export class SupplierController {
       'qualifications rather than revoking them: a suspended supplier is returned as ' +
       'qualified for nothing, and reinstating restores exactly what was approved before with ' +
       'no new decision. Publishes SUPPLIER_SUSPENDED, whose `until` is always null because ' +
-      'a suspension runs until an explicit reinstatement.',
+      'a suspension runs until an explicit reinstatement. `latestSuspensionId` names the ' +
+      'newest episode the operator read (null for none); if a newer one was recorded since, ' +
+      'the answer is 409 `SUSPENSION_EPISODE_CHANGED` and nothing is written.',
   })
   async suspend(
     @Param('id') id: string,
@@ -278,7 +293,10 @@ export class SupplierController {
       'Closes the open suspension episode by stamping it with the lifting operator and ' +
       'reason; the episode is never deleted, so who suspended the supplier and why stays ' +
       'answerable. Publishes SUPPLIER_REINSTATED for the closed episode, in the same ' +
-      'transaction, so a consumer that hid this supplier on SUPPLIER_SUSPENDED learns to stop.',
+      'transaction, so a consumer that hid this supplier on SUPPLIER_SUSPENDED learns to stop. ' +
+      '`suspensionId` names the episode being lifted; if another episode is open now, the ' +
+      'answer is 409 `SUSPENSION_EPISODE_CHANGED` and nothing is written, so one episode’s ' +
+      'explanation never closes another.',
   })
   async reinstate(
     @Param('id') id: string,

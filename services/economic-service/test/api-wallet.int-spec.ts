@@ -1,8 +1,13 @@
+import { inspect } from 'node:util';
 import request from 'supertest';
 import type { Server } from 'node:http';
 import { admin, apiTenant, auditor, bearer, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
-import { runUnscoped } from '@rasta/nest-common';
+import { EXCEPTION_FILTER_LOGGER, runUnscoped } from '@rasta/nest-common';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { enrichOpenApiDocument } from '../src/openapi/document';
+import { schemaMismatches } from '../src/openapi/schema-mismatches';
+import type { JsonSchema } from '../src/openapi/zod-schema';
 
 /**
  * The wallet and payment HTTP surface, every path including the refusals.
@@ -43,6 +48,73 @@ describe('wallet API', () => {
 
     expect(response.body.simulated).toBe(true);
     expect(response.body.provider).toBe('mock');
+  });
+
+  describe('the disclosure every money screen asks (Q-14)', () => {
+    const asked = (token: string) =>
+      request(http).get('/v1/wallets/provider/disclosure').set('authorization', `Bearer ${token}`);
+
+    it.each([
+      ['a contractor, with no other role', ['CONTRACTOR']],
+      ['a plain member: a driver', ['DRIVER']],
+      ['a plain member: an operator', ['OPERATOR']],
+      ['a workshop', ['WORKSHOP']],
+      ['a supplier', ['SUPPLIER']],
+      ['a procurement user', ['PROCUREMENT_USER']],
+      ['a fleet manager', ['FLEET_MANAGER']],
+      ['an organization administrator', ['ORGANIZATION_ADMIN']],
+    ])('answers %s with `simulated` alone', async (_who, roles) => {
+      const response = await asked(admin(org, roles)).expect(200);
+      // Not the provider's name or notice: those stay behind `GET /v1/wallets/provider`.
+      expect(response.body).toEqual({ simulated: true });
+    });
+
+    it('widens nothing else: the same contractor and driver are still refused the provider and the wallet', async () => {
+      for (const roles of [['CONTRACTOR'], ['DRIVER']]) {
+        const token = `Bearer ${admin(org, roles)}`;
+        await request(http).get('/v1/wallets/provider').set('authorization', token).expect(403);
+        await request(http).get('/v1/wallets/me').set('authorization', token).expect(403);
+      }
+    });
+
+    it('is tenant-scoped: refused for an organization the caller is not a member of, and to the oversight role', async () => {
+      const response = await request(http)
+        .get('/v1/wallets/provider/disclosure')
+        .set('authorization', `Bearer ${admin(org, ['CONTRACTOR'])}`)
+        .set('x-organization-id', other)
+        .expect(403);
+      expect(response.body.code).toBe('TENANT_MISMATCH');
+      await asked(auditor(org)).expect(403);
+      // A membership that grants no role grants nothing on the platform (ADR-060 § 4), this read
+      // included: such a caller reaches no money screen to label.
+      expect((await asked(admin(org, [])).expect(403)).body.code).toBe('TENANT_MISMATCH');
+      await request(http).get('/v1/wallets/provider/disclosure').expect(401);
+    });
+
+    it('answers what the OpenAPI document says, both ways', async () => {
+      const document = enrichOpenApiDocument(
+        SwaggerModule.createDocument(
+          harness.app,
+          new DocumentBuilder().setTitle('t').setVersion('0.0.0').build(),
+        ),
+      );
+      const responses = document.paths['/v1/wallets/provider/disclosure']?.get?.responses ?? {};
+      expect(Object.keys(responses).sort()).toEqual(['200', '401', '403', '500']);
+      const schema = (
+        responses['200'] as unknown as { content: Record<string, { schema: JsonSchema }> }
+      ).content['application/json']!.schema;
+      expect(schema).toEqual({ $ref: '#/components/schemas/PaymentDisclosure' });
+
+      const response = await asked(admin(org, ['CONTRACTOR'])).expect(200);
+      const components = (document.components?.schemas ?? {}) as Record<string, JsonSchema>;
+      expect(
+        schemaMismatches(schema, response.body, 'GET /v1/wallets/provider/disclosure', components),
+      ).toEqual([]);
+      // And the check is not vacuous: a field the document does not carry is refused.
+      expect(
+        schemaMismatches(schema, { ...response.body, provider: 'mock' }, 'x', components),
+      ).not.toEqual([]);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -316,6 +388,165 @@ describe('wallet API', () => {
       .expect(400);
 
     expect(response.body.code).toBe('VALIDATION_FAILED');
+  });
+
+  // Task 011: the positivity refinement ran after the pattern had failed and `BigInt('1.5')`
+  // threw out of the validation pipe — a 500, with the client's text in the error log (#385 r1
+  // F1 reproduced it with an invoice reference). Through the real AppModule, guards and filter,
+  // with a token that reaches the validator.
+  describe('a malformed top-up amount', () => {
+    const SENTINEL = 'private-invoice-reference-123';
+
+    /** Every line the service could write: the filter's logger at each level, and the streams. */
+    function captureLogs(): { text: () => string; restore: () => void } {
+      const logger = harness.app.get<Record<string, unknown>>(EXCEPTION_FILTER_LOGGER);
+      const spies = [
+        ...['fatal', 'error', 'warn', 'info', 'debug', 'trace']
+          .filter((level) => typeof logger[level] === 'function')
+          .map((level) => jest.spyOn(logger as Record<string, () => void>, level)),
+        jest.spyOn(process.stdout, 'write'),
+        jest.spyOn(process.stderr, 'write'),
+      ];
+      return {
+        text: () =>
+          inspect(
+            spies.flatMap((spy): unknown[][] => spy.mock.calls),
+            { depth: null, maxStringLength: null },
+          ),
+        restore: () => spies.forEach((spy) => spy.mockRestore()),
+      };
+    }
+
+    const intentsOf = (organizationId: string) =>
+      runUnscoped('the suite counts the intents a refusal must not create', () =>
+        harness.prisma.client.paymentIntent.count({ where: { organizationId } }),
+      );
+    const keysOf = (key: string) =>
+      runUnscoped('the suite looks for the key a refusal must not reserve', () =>
+        harness.prisma.client.idempotencyKey.count({ where: { key } }),
+      );
+
+    it.each([
+      ['a fraction', '1.5'],
+      ['letters', 'abc'],
+      ['nothing', ''],
+      ['free text', SENTINEL],
+    ])(
+      'refuses %s with the standard 400 — nothing charged, no key reserved, the text in no log line',
+      async (_label, amountMinor) => {
+        const wallet = await request(http)
+          .get('/v1/wallets/me')
+          .set('authorization', `Bearer ${admin(org)}`)
+          .expect(200);
+        const intentsBefore = await intentsOf(org);
+        const key = id('api-topup-malformed');
+        const logs = captureLogs();
+
+        let response: request.Response;
+        try {
+          response = await request(http)
+            .post(`/v1/wallets/${wallet.body.id}/top-up`)
+            .set('authorization', `Bearer ${admin(org)}`)
+            .set('idempotency-key', key)
+            .send({ amountMinor })
+            .expect(400);
+          expect(logs.text()).not.toContain(SENTINEL);
+        } finally {
+          logs.restore();
+        }
+
+        expect(response.body).toEqual({
+          code: 'VALIDATION_FAILED',
+          message: expect.any(String),
+          details: [
+            {
+              path: 'amountMinor',
+              code: 'invalid_string',
+              message: 'Amount must be a non-negative integer string in minor units',
+            },
+          ],
+          correlationId: expect.any(String),
+          timestamp: expect.any(String),
+          path: `/v1/wallets/${wallet.body.id}/top-up`,
+        });
+        expect(JSON.stringify(response.body)).not.toContain(SENTINEL);
+        expect(await intentsOf(org)).toBe(intentsBefore);
+        expect(await keysOf(key)).toBe(0);
+      },
+    );
+
+    it('lets the corrected request under the same key charge once, and replays it after', async () => {
+      const wallet = await request(http)
+        .get('/v1/wallets/me')
+        .set('authorization', `Bearer ${admin(org)}`)
+        .expect(200);
+      const before = BigInt(wallet.body.ledgerBalanceMinor);
+      const intentsBefore = await intentsOf(org);
+      const key = id('api-topup-corrected');
+      const topUp = (amountMinor: string) =>
+        request(http)
+          .post(`/v1/wallets/${wallet.body.id}/top-up`)
+          .set('authorization', `Bearer ${admin(org)}`)
+          .set('idempotency-key', key)
+          .send({ amountMinor });
+
+      await topUp('12.5').expect(400);
+      const first = await topUp('125').expect(201);
+      const replay = await topUp('125').expect(201);
+
+      expect(replay.body.paymentIntentId).toBe(first.body.paymentIntentId);
+      expect(await intentsOf(org)).toBe(intentsBefore + 1);
+      const after = await request(http)
+        .get('/v1/wallets/me')
+        .set('authorization', `Bearer ${admin(org)}`)
+        .expect(200);
+      expect(BigInt(after.body.ledgerBalanceMinor)).toBe(before + 125n);
+    });
+
+    it('refuses zero, accepts one, and refuses one past a BIGINT, as before', async () => {
+      const wallet = await request(http)
+        .get('/v1/wallets/me')
+        .set('authorization', `Bearer ${admin(org)}`)
+        .expect(200);
+      const send = (amountMinor: string) =>
+        request(http)
+          .post(`/v1/wallets/${wallet.body.id}/top-up`)
+          .set('authorization', `Bearer ${admin(org)}`)
+          .set('idempotency-key', id('api-topup-bound'))
+          .send({ amountMinor });
+
+      const zero = await send('0').expect(400);
+      expect(zero.body.details).toEqual([
+        { path: 'amountMinor', code: 'custom', message: 'A top-up must be positive' },
+      ]);
+      await send('1').expect(201);
+      const past = await send('9223372036854775808').expect(400);
+      expect(past.body.details).toEqual([
+        {
+          path: 'amountMinor',
+          code: 'custom',
+          message: 'Amount exceeds the largest storable amount (2^63 - 1 minor units)',
+        },
+      ]);
+    });
+
+    it('still keeps another organization’s wallet out of reach: 404 for a good amount', async () => {
+      const theirs = await request(http)
+        .get('/v1/wallets/me')
+        .set('authorization', `Bearer ${admin(other)}`)
+        .expect(200);
+      const intentsBefore = await intentsOf(other);
+
+      const response = await request(http)
+        .post(`/v1/wallets/${theirs.body.id}/top-up`)
+        .set('authorization', `Bearer ${admin(org)}`)
+        .set('idempotency-key', id('api-topup-foreign'))
+        .send({ amountMinor: '1000' })
+        .expect(404);
+
+      expect(response.body.code).toBe('NOT_FOUND');
+      expect(await intentsOf(other)).toBe(intentsBefore);
+    });
   });
 
   // -------------------------------------------------------------------------

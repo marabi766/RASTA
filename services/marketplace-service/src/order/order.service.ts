@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
@@ -9,10 +9,16 @@ import {
   assertOrderVisible,
   viewerParties,
   assertSupplier,
+  recordDisputeDecision,
+  type DisputeAuthority,
   type OrderParties,
 } from '../access/access';
+import {
+  OrganizationHierarchy,
+  type HierarchyQuestion,
+} from '../organization/organization-hierarchy';
 import { ENV } from '../tokens';
-import { SERVICE_NAME, type MarketplaceEnv } from '../config/env';
+import { ECONOMIC_SERVICE, SERVICE_NAME, type MarketplaceEnv } from '../config/env';
 import {
   disputesRaisedTotal,
   orderRefusalsTotal,
@@ -22,8 +28,13 @@ import {
 } from '../observability/metrics';
 import { isUniqueViolation, violatedConstraint } from '../shared/prisma-errors';
 import type { RecordResponse } from '../shared/idempotency';
-import { OrderRepository, type LockedOrderRow } from './order.repository';
-import { assertTransition } from './state-machine';
+import {
+  OrderRepository,
+  type LockedOrderRow,
+  type SagaActivity,
+  type SagaStep,
+} from './order.repository';
+import { ORDER_TRANSITIONS, assertTransition, isTerminal } from './state-machine';
 import { availableOrderActions } from './order-actions';
 import { priceOrder, type PriceableOffer } from './pricing';
 import type {
@@ -37,7 +48,7 @@ import type {
   ResolveDisputeDto,
   SubmitReviewDto,
 } from './dto';
-import type { OrderStatus } from '../generated/prisma';
+import type { OrderStatus, Prisma } from '../generated/prisma';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -57,10 +68,15 @@ const COMMAND_AUTHORISATION = {
   fulfill: (order: OrderParties) => assertSupplier(order, 'record fulfilment for this order'),
   confirmReceipt: (order: OrderParties) => assertBuyer(order, 'confirm receipt'),
   raiseDispute: (order: OrderParties) => assertBuyer(order, 'raise a dispute'),
-  resolveDispute: () => assertDisputeResolver(),
+  // The one check that asks organization-service (docs/24 Q-136).
+  resolveDispute: (order: OrderParties, hierarchy: HierarchyQuestion) =>
+    assertDisputeResolver(order, hierarchy),
   cancel: (order: OrderParties) => assertBuyer(order, 'cancel this order'),
   review: (order: OrderParties) => assertBuyer(order, 'review this order'),
-} satisfies Record<string, (order: OrderParties) => void>;
+} satisfies Record<
+  string,
+  (order: OrderParties, hierarchy: HierarchyQuestion) => unknown | Promise<unknown>
+>;
 
 export type OrderCommand = keyof typeof COMMAND_AUTHORISATION;
 
@@ -97,11 +113,14 @@ function isOrderKeyIndex(target: string | undefined): boolean {
  */
 @Injectable()
 export class OrderService {
+  private readonly logger = new Logger(OrderService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly repository: OrderRepository,
     private readonly events: EventPublisher,
     @Inject(ENV) private readonly env: MarketplaceEnv,
+    @Inject(OrganizationHierarchy) private readonly hierarchy: HierarchyQuestion,
   ) {}
 
   // =========================================================================
@@ -292,7 +311,7 @@ export class OrderService {
     if (!row) throw RastaError.notFound('Order', orderId);
 
     assertOrderVisible(row);
-    COMMAND_AUTHORISATION[command](row);
+    await COMMAND_AUTHORISATION[command](row, this.hierarchy);
   }
 
   async list(query: ListOrdersQuery): Promise<{ items: OrderView[]; nextCursor: string | null }> {
@@ -512,7 +531,9 @@ export class OrderService {
    * The outcome re-enters the normal path rather than jumping to an end state:
    * `SETTLE` returns the order to `RECEIPT_CONFIRMED` so the saga settles it,
    * and `REFUND` moves it to `CANCELLING` so the saga compensates. Neither
-   * moves money here.
+   * moves money here — but each decides that money moves, on the buyer's
+   * books, so a union administrator decides only for a buyer within its
+   * union's subtree ({@link assertDisputeResolver}, docs/24 Q-136).
    */
   async resolveDispute(
     orderId: string,
@@ -522,13 +543,19 @@ export class OrderService {
     const context = getContext();
     const target: OrderStatus = dto.outcome === 'SETTLE' ? 'RECEIPT_CONFIRMED' : 'CANCELLING';
     const resolvedAt = new Date();
+    let authority: DisputeAuthority | undefined;
 
-    return this.transition(orderId, target, {
+    const view = await this.transition(orderId, target, {
       record,
       // The mirror of the restriction on `confirmReceipt`: an operator resolves
       // a dispute, and there is nothing to resolve on an order that has none.
       from: ['DISPUTED'],
-      authorise: COMMAND_AUTHORISATION.resolveDispute,
+      // Under the order's row lock: nothing else the decision writes is
+      // locked after this, so organization-service's answer is the last thing
+      // read before the decision is written.
+      authorise: async (order) => {
+        authority = await COMMAND_AUTHORISATION.resolveDispute(order, this.hierarchy);
+      },
       apply: async (tx, order) => {
         // Read before the update names the dispute the event below is about —
         // the same pattern `raiseDispute` uses, and for the same reason: after
@@ -591,6 +618,8 @@ export class OrderService {
       },
       reason: dto.resolution,
     });
+    if (authority) recordDisputeDecision(orderId, dto.outcome, authority);
+    return view;
   }
 
   /** The buyer cancels. Compensation is the saga's job, not this method's. */
@@ -703,8 +732,17 @@ export class OrderService {
    * compensates. Refusing here used to send the saga into its "nothing has
    * moved" branch, which tried `CANCELLING -> FAILED`, failed on that too, and
    * left the order stuck in `CANCELLING` with the buyer's funds held.
+   *
+   * A retry is recognised by its step record and, failing that, by the
+   * obligation itself: `economic_transaction_id` is unique and written only
+   * here, so an order carrying this transaction has had this hold recorded,
+   * whatever a party has done to it since (D-053).
    */
-  async markFundsHeld(orderId: string, transactionId: string): Promise<OrderStatus> {
+  async markFundsHeld(
+    orderId: string,
+    transactionId: string,
+    saga: SagaStep,
+  ): Promise<OrderStatus> {
     const recordHold = async (
       tx: ExtendedPrismaClient,
       order: LockedOrderRow,
@@ -734,11 +772,13 @@ export class OrderService {
       });
     };
 
-    return this.systemTransition(orderId, 'FUNDS_HELD', {
+    return this.systemTransition(orderId, 'FUNDS_HELD', saga, {
+      activity: 'markFundsHeld',
       from: ['PENDING'],
       apply: (tx, order) => recordHold(tx, order, 'FUNDS_HELD'),
       yieldTo: ['CANCELLING'],
       onYield: (tx, order) => recordHold(tx, order, 'CANCELLING'),
+      appliedTo: (order) => order.economicTransactionId === transactionId,
     });
   }
 
@@ -749,8 +789,9 @@ export class OrderService {
    * first: that order did not fail, it was cancelled, and the saga closes it
    * as cancelled. Nothing was held, so there is nothing to refund.
    */
-  async markFailed(orderId: string, reason: string): Promise<OrderStatus> {
-    return this.systemTransition(orderId, 'FAILED', {
+  async markFailed(orderId: string, reason: string, saga: SagaStep): Promise<OrderStatus> {
+    return this.systemTransition(orderId, 'FAILED', saga, {
+      activity: 'markFailed',
       from: ['PENDING'],
       yieldTo: ['CANCELLING'],
       reason,
@@ -784,11 +825,18 @@ export class OrderService {
    * Returns `DISPUTED` without changing anything when a dispute committed
    * after the saga last looked. The saga then goes back to waiting on the
    * dispute rather than treating the refusal as a failed settlement attempt.
+   *
+   * Returns `CANCELLING` the same way when that dispute has since been
+   * resolved as a refund: the saga reads the order and compensates. Reached
+   * when the step runs late — a retry whose first attempt yielded on a worker
+   * older than its record, or a worker down while the dispute was decided —
+   * and refusing it ended the saga with the funds held (D-053).
    */
-  async markSettling(orderId: string): Promise<OrderStatus> {
-    return this.systemTransition(orderId, 'SETTLING', {
+  async markSettling(orderId: string, saga: SagaStep): Promise<OrderStatus> {
+    return this.systemTransition(orderId, 'SETTLING', saga, {
+      activity: 'markSettling',
       from: ['RECEIPT_CONFIRMED'],
-      yieldTo: ['DISPUTED'],
+      yieldTo: ['DISPUTED', 'CANCELLING'],
       apply: async (tx, order) => {
         await runUnscoped('the saga records that settlement is in flight', () =>
           tx.order.update({ where: { id: order.id }, data: { status: 'SETTLING' } }),
@@ -813,8 +861,9 @@ export class OrderService {
    * refused `markSettling` counted as a failed attempt, and this call then
    * moved the order out of `DISPUTED` with nobody having decided anything.
    */
-  async markSettlementFailed(orderId: string): Promise<OrderStatus> {
-    return this.systemTransition(orderId, 'RECEIPT_CONFIRMED', {
+  async markSettlementFailed(orderId: string, saga: SagaStep): Promise<OrderStatus> {
+    return this.systemTransition(orderId, 'RECEIPT_CONFIRMED', saga, {
+      activity: 'markSettlementFailed',
       from: ['SETTLING'],
       apply: async (tx, order) => {
         await runUnscoped('the saga returns an order whose settlement attempt failed', () =>
@@ -830,6 +879,93 @@ export class OrderService {
     });
   }
 
+  /**
+   * economic-service has the obligation DISPUTED, and the saga authorised it
+   * first: the order is disputed too, with the objection economic-service
+   * holds (D-053; Codex on #287 round 4, finding 2).
+   *
+   * Someone with authority over the transaction disputed it there rather than
+   * here, after the saga's authorisation committed. Settlement is refused for
+   * as long as the dispute stands, so trying it only spends the saga's
+   * attempts and ends it with the funds held. As the order's own dispute,
+   * it takes the path every dispute takes: the saga mirrors it (economic
+   * already holds it, with these words), waits, and mirrors an operator's
+   * decision back — `SETTLE` settles, `REFUND` refunds.
+   *
+   * **From `RECEIPT_CONFIRMED` only**, the state the saga authorises and
+   * returns a failed settlement attempt to. An order a party disputed here
+   * meanwhile is already `DISPUTED`, and keeps that dispute; one whose dispute
+   * an operator has since resolved as a refund is `CANCELLING`, and the step
+   * yields to it — the saga refunds.
+   *
+   * **Returns the dispute it filed**, recorded with the step (Codex on #318
+   * round 1, finding 1). economic-service already holds it, so the saga counts
+   * it as mirrored from the moment it exists, not from the moment it next
+   * reads the order DISPUTED. An operator can decide it before that read; the
+   * saga then still mirrors that decision back, rather than finding economic
+   * DISPUTED again and filing a second dispute over the same objection. Null
+   * when the step filed nothing: it yielded, or a party's dispute was there.
+   *
+   * **Recorded with economic-service's identity of the dispute it takes**
+   * (`economicDisputeId`, read with `reason`), and answered with it: the pair
+   * is what the saga resolves by — this order's dispute, decided here, is that
+   * one there and no other raised since (Codex on #318 round 2, N1). Null when
+   * the step filed nothing, or economic-service gave no identity.
+   */
+  async markObligationDisputed(
+    orderId: string,
+    reason: string,
+    saga: SagaStep,
+    economicDisputeId: string | null = null,
+  ): Promise<{ status: OrderStatus; disputeId: string | null; economicDisputeId: string | null }> {
+    const disputeId = newId(ID_PREFIX.dispute);
+    const { status, detail } = await this.systemStep(orderId, 'DISPUTED', saga, {
+      activity: 'markObligationDisputed',
+      from: ['RECEIPT_CONFIRMED'],
+      yieldTo: ['CANCELLING'],
+      reason: 'The obligation was disputed in economic-service',
+      movedWith: economicDisputeId === null ? { disputeId } : { disputeId, economicDisputeId },
+      apply: async (tx, order) => {
+        await runUnscoped('the saga files the dispute economic-service holds on the order', () =>
+          tx.orderDispute.create({
+            data: {
+              id: disputeId,
+              organizationId: order.organizationId,
+              orderId: order.id,
+              reason,
+              status: 'OPEN',
+              // Raised there, by whoever economic-service recorded.
+              raisedBy: ECONOMIC_SERVICE,
+            },
+          }),
+        );
+        await runUnscoped(
+          'the saga records the dispute on an order on behalf of neither party',
+          () => tx.order.update({ where: { id: order.id }, data: { status: 'DISPUTED' } }),
+        );
+        await this.events.enqueue(tx, {
+          eventName: MARKETPLACE_EVENTS.ORDER_DISPUTED,
+          aggregateId: order.id,
+          organizationId: order.organizationId,
+          payload: {
+            orderId: order.id,
+            disputeId,
+            buyerOrganizationId: order.organizationId,
+            supplierOrganizationId: order.supplierOrganizationId,
+            reason,
+            raisedBy: ECONOMIC_SERVICE,
+            raisedAt: new Date().toISOString(),
+          },
+        });
+      },
+    });
+    return {
+      status,
+      disputeId: detail.disputeId ?? null,
+      economicDisputeId: detail.economicDisputeId ?? null,
+    };
+  }
+
   /** Settlement succeeded. The only path to `COMPLETED`. */
   async markCompleted(
     orderId: string,
@@ -838,8 +974,10 @@ export class OrderService {
       commissionAmountMinor: string;
       netAmountMinor: string;
     },
+    saga: SagaStep,
   ): Promise<OrderStatus> {
-    return this.systemTransition(orderId, 'COMPLETED', {
+    return this.systemTransition(orderId, 'COMPLETED', saga, {
+      activity: 'markCompleted',
       from: ['SETTLING'],
       apply: async (tx, order) => {
         const completedAt = new Date();
@@ -880,8 +1018,9 @@ export class OrderService {
    * Compensation finished, or there was nothing to compensate. Published only
    * after the refund, if one was owed, succeeded.
    */
-  async markCancelled(orderId: string, reason: string): Promise<OrderStatus> {
-    return this.systemTransition(orderId, 'CANCELLED', {
+  async markCancelled(orderId: string, reason: string, saga: SagaStep): Promise<OrderStatus> {
+    return this.systemTransition(orderId, 'CANCELLED', saga, {
+      activity: 'markCancelled',
       from: ['CANCELLING'],
       reason,
       apply: async (tx, order) => {
@@ -929,10 +1068,27 @@ export class OrderService {
    * **Moves no money and changes no state** (ADR-043). The history row has
    * `fromStatus === toStatus` and kind `REMINDER`, which the database enforces:
    * recording it as a transition would claim something happened that did not.
+   *
+   * Counted once per reminder, not once per attempt: a Temporal retry of a
+   * reminder that committed finds its step record and changes nothing
+   * (D-053). The next reminder is a different scheduled activity, so a
+   * different step. A reminder counted before its record could exist is
+   * recognised by its history row, written since the activity was scheduled:
+   * the previous reminder is at least a day older.
    */
-  async recordReminder(orderId: string): Promise<void> {
-    await this.prisma.transaction(async (tx) => {
+  async recordReminder(orderId: string, saga: SagaStep): Promise<void> {
+    const counted = await this.prisma.transaction(async (tx) => {
       const order = await this.repository.lockOrder(tx, orderId);
+      if (await this.repository.findSagaStep(tx, order, saga, 'recordReminder')) return false;
+
+      const countedBefore = await this.repository.hasSagaHistorySince(tx, order, {
+        kind: 'REMINDER',
+        since: sagaWindowStart(saga),
+      });
+      if (countedBefore) {
+        await this.repository.recordSagaStep(tx, order, saga, 'recordReminder', undefined);
+        return false;
+      }
 
       await runUnscoped('an overdue order is counted by the saga, for neither party', () =>
         tx.order.update({
@@ -949,13 +1105,63 @@ export class OrderService {
         toStatus: order.status,
         reason: 'The configured window elapsed and the order is still waiting',
       });
+      await this.repository.recordSagaStep(tx, order, saga, 'recordReminder', undefined);
+      return true;
     });
+    if (!counted) return;
 
     const order = await this.repository.findForParty(orderId);
     remindersRecordedTotal.inc({
       service: SERVICE_NAME,
       status: order?.status ?? 'UNKNOWN',
     });
+  }
+
+  /**
+   * Runs a saga step whose effect is in economic-service, once per scheduled
+   * activity (D-053).
+   *
+   * economic-service keys each call on the order and replays its stored
+   * answer to a repeat — for as long as it keeps that answer
+   * (`ECONOMIC_IDEMPOTENCY_TTL_HOURS`). A retry that comes later, because the
+   * worker was down for that long, would be judged against the transaction's
+   * current state and refused. So the answer is also kept here, and a retry
+   * that finds it does not call at all.
+   *
+   * Kept after the call, not with it: there is no transaction spanning two
+   * services. A failure to keep it is logged and the answer still returned —
+   * failing the step would report money that moved as money that did not —
+   * and the retry, if one comes, is answered by economic-service's replay.
+   */
+  async onceForSaga<T>(
+    order: { id: string; organizationId: string },
+    saga: SagaStep,
+    activity: SagaActivity,
+    call: () => Promise<T>,
+  ): Promise<T> {
+    const recorded = await this.repository.findSagaStep(this.prisma.client, order, saga, activity);
+    // Written below by this same activity from a value of type T, under a key
+    // no other activity can hold (findSagaStep refuses a mismatch).
+    if (recorded) return (recorded.result ?? undefined) as T;
+
+    const result = await call();
+    try {
+      await this.repository.recordSagaStep(
+        this.prisma.client,
+        order,
+        saga,
+        activity,
+        // The economic steps return plain records of strings, or nothing: JSON
+        // is their own shape.
+        result as Prisma.InputJsonValue | undefined,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Saga step ${activity} of order ${order.id} took effect but was not recorded ` +
+          `(${error instanceof Error ? error.name : 'unknown error'}); a retry relies on economic-service's replay`,
+      );
+    }
+    return result;
   }
 
   /** What the saga needs to know to drive an order without re-reading it. */
@@ -990,13 +1196,23 @@ export class OrderService {
    * text passed on to economic-service, comes from here, so a signal that was
    * lost, repeated or sent to the wrong order can make the saga look sooner
    * but can never tell it something the order does not say.
+   *
+   * `mirroredDisputeId` is the dispute economic-service holds for the order
+   * as far as the saga knows; its resolution is what the saga mirrors back.
+   * It need not be the most recent one: an operator can decide it and a party
+   * raise the next before the saga reads the order again.
    */
-  async sagaView(orderId: string): Promise<{
+  async sagaView(
+    orderId: string,
+    mirroredDisputeId?: string,
+  ): Promise<{
     status: OrderStatus;
     economicTransactionId: string | null;
     cancellationReason: string | null;
     /** The most recent dispute's reason and, once decided, its resolution. */
     dispute: { id: string; reason: string; resolution: string | null } | null;
+    /** `mirroredDisputeId`'s dispute on this order, when one was named. */
+    mirroredDispute?: { id: string; resolution: string | null } | null;
   }> {
     const row = await this.repository.findForParty(orderId);
     if (!row) throw RastaError.notFound('Order', orderId);
@@ -1008,12 +1224,22 @@ export class OrderService {
         select: { id: true, reason: true, resolution: true },
       }),
     );
+    const mirroredDispute =
+      mirroredDisputeId === undefined
+        ? undefined
+        : await runUnscoped('the saga reads the dispute it mirrored, on the order it drives', () =>
+            this.prisma.client.orderDispute.findFirst({
+              where: { id: mirroredDisputeId, orderId: row.id },
+              select: { id: true, resolution: true },
+            }),
+          );
 
     return {
       status: row.status,
       economicTransactionId: row.economicTransactionId,
       cancellationReason: row.cancellationReason,
       dispute,
+      ...(mirroredDispute === undefined ? {} : { mirroredDispute }),
     };
   }
 
@@ -1034,7 +1260,8 @@ export class OrderService {
     handlers: {
       /** Stores the idempotent response, as the transaction's last statement. */
       record: RecordResponse<OrderView> | undefined;
-      authorise: (order: LockedOrderRow) => void;
+      /** Awaited under the row lock, before the transition is checked or applied. */
+      authorise: (order: LockedOrderRow) => unknown;
       apply: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<void>;
       reason?: string;
       /**
@@ -1065,7 +1292,7 @@ export class OrderService {
       // and gets the 403 below when they try the other side's command — they
       // can already see the order, so 404 would be a lie to them.
       assertOrderVisible(order);
-      handlers.authorise(order);
+      await handlers.authorise(order);
 
       if (handlers.from && !handlers.from.includes(order.status)) {
         orderRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'WRONG_SOURCE_STATE' });
@@ -1124,60 +1351,146 @@ export class OrderService {
    * and returns the state it found, and the saga takes the path that state
    * calls for. Any other unexpected state is still refused.
    *
-   * Returns the order's status after the call.
+   * ## A retry answers what the first attempt answered (D-053)
+   *
+   * Temporal re-runs an activity whose completion it did not record — a worker
+   * that crashed or shut down after the commit, a lost response — and by then
+   * a party may have moved the order on. Recognising the retry by "the order
+   * is already where this step sends it" stopped working at that moment: a
+   * hold recorded, then confirmed by the supplier, then retried, was refused
+   * `CONFIRMED -> FUNDS_HELD` as a business rule, and the saga failed with the
+   * buyer's money held and nothing left to release it.
+   *
+   * So every outcome — moved, yielded or already there — is recorded under
+   * the step's own key in the same transaction, and a retry that finds the
+   * record returns it and does nothing else. The record is read under the
+   * order's lock, so two attempts of one step cannot both act.
+   *
+   * ## A step older than its record (D-053, Codex on #283)
+   *
+   * A first attempt that ran on a worker older than `saga_step` left no
+   * record, only its effect — and that effect includes the history row it
+   * wrote in the same transaction. So a retry with no record that the order's
+   * state would refuse looks for that row: this step's edge (`from` → `to`,
+   * with its reason), written since Temporal first scheduled this activity.
+   * Every edge a saga step takes is taken by that step alone, the workflow
+   * runs one step at a time, and it waits on this one; so such a row is this
+   * step's own. The same edge written by an earlier step is older than this
+   * activity's scheduling by at least the settlement backoff (30 s), or is
+   * an edge an order takes once; the allowance for clocks
+   * (`SAGA_CLOCK_SKEW_MS`) is well inside that.
+   *
+   * Returns the order's status after the call — for a retry, after the first.
    */
   private async systemTransition(
     orderId: string,
     to: OrderStatus,
-    step: {
-      from: readonly OrderStatus[];
-      apply: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<unknown>;
-      yieldTo?: readonly OrderStatus[];
-      /** Runs inside the lock when the step yields. */
-      onYield?: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<unknown>;
-      reason?: string;
-    },
+    saga: SagaStep,
+    step: SystemStepOptions,
   ): Promise<OrderStatus> {
+    return (await this.systemStep(orderId, to, saga, step)).status;
+  }
+
+  /**
+   * `systemTransition`, with what the step recorded beside the status: its
+   * `movedWith` when it moved the order — for a retry, when the first attempt
+   * did — and nothing otherwise.
+   */
+  private async systemStep(
+    orderId: string,
+    to: OrderStatus,
+    saga: SagaStep,
+    step: SystemStepOptions,
+  ): Promise<{ status: OrderStatus; detail: Record<string, string> }> {
     const outcome = await this.prisma.transaction(async (tx) => {
       const order = await this.repository.lockOrder(tx, orderId);
 
-      if (order.status === to) {
-        // A Temporal retry re-running a completed activity. Not an error: the
-        // effect it wanted is already there, which is what makes the activity
-        // idempotent.
-        return { status: to, moved: false };
+      const recorded = await this.repository.findSagaStep(tx, order, saga, step.activity);
+      if (recorded) {
+        return {
+          status: recordedStatus(order.id, recorded.result),
+          detail: recordedDetail(recorded.result),
+          moved: false,
+        };
       }
 
-      if (step.yieldTo?.includes(order.status)) {
-        await step.onYield?.(tx, order);
-        return { status: order.status, moved: false };
-      }
-
-      // The table first, so a finished order is refused as finished.
-      assertTransition(order.id, order.status, to);
-      if (!step.from.includes(order.status)) {
-        orderRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'WRONG_SOURCE_STATE' });
-        throw RastaError.businessRule(
-          `The order saga cannot move order ${order.id} from ${order.status} to ${to}`,
-          { orderId: order.id, from: order.status, to },
-        );
-      }
-
-      await step.apply(tx, order);
-
-      await this.repository.recordHistory(tx, {
-        orderId: order.id,
-        organizationId: order.organizationId,
-        kind: 'TRANSITION',
-        fromStatus: order.status,
-        toStatus: to,
-        reason: step.reason ?? null,
+      const result = await this.applySystemStep(tx, order, to, saga, step);
+      const detail = result.moved ? (step.movedWith ?? {}) : {};
+      await this.repository.recordSagaStep(tx, order, saga, step.activity, {
+        ...detail,
+        status: result.status,
       });
-      return { status: to, moved: true };
+      return { ...result, detail };
     });
 
     if (outcome.moved) orderTransitionsTotal.inc({ service: SERVICE_NAME, to });
-    return outcome.status;
+    return { status: outcome.status, detail: outcome.detail };
+  }
+
+  /** The decision `systemTransition` records, taken under the order's lock. */
+  private async applySystemStep(
+    tx: ExtendedPrismaClient,
+    order: LockedOrderRow,
+    to: OrderStatus,
+    saga: SagaStep,
+    step: SystemStepOptions,
+  ): Promise<{ status: OrderStatus; moved: boolean }> {
+    if (order.status === to) {
+      // Already there: a retry whose first attempt predates its record. Not an
+      // error, and nothing to do.
+      return { status: to, moved: false };
+    }
+
+    if (step.yieldTo?.includes(order.status)) {
+      await step.onYield?.(tx, order);
+      return { status: order.status, moved: false };
+    }
+
+    if (step.appliedTo?.(order)) return { status: order.status, moved: false };
+
+    // Only for an order the step would refuse: from a state it acts on, it
+    // acts. Never for a finished one: only a later saga step finishes an
+    // order, and none runs while the saga waits on this one — so a replayed
+    // command on a finished order is still refused as finished.
+    const applied =
+      !step.from.includes(order.status) &&
+      !isTerminal(order.status) &&
+      (await this.repository.hasSagaHistorySince(tx, order, {
+        kind: 'TRANSITION',
+        from: step.from,
+        to,
+        reason: step.reason ?? null,
+        since: sagaWindowStart(saga),
+      }));
+    if (applied) {
+      this.logger.log(
+        `Saga step ${step.activity} of order ${order.id} was applied before its record existed; ` +
+          `answering ${to} from the order's history`,
+      );
+      return { status: to, moved: false };
+    }
+
+    // The table first, so a finished order is refused as finished.
+    assertTransition(order.id, order.status, to);
+    if (!step.from.includes(order.status)) {
+      orderRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'WRONG_SOURCE_STATE' });
+      throw RastaError.businessRule(
+        `The order saga cannot move order ${order.id} from ${order.status} to ${to}`,
+        { orderId: order.id, from: order.status, to },
+      );
+    }
+
+    await step.apply(tx, order);
+
+    await this.repository.recordHistory(tx, {
+      orderId: order.id,
+      organizationId: order.organizationId,
+      kind: 'TRANSITION',
+      fromStatus: order.status,
+      toStatus: to,
+      reason: step.reason ?? null,
+    });
+    return { status: to, moved: true };
   }
 
   /** The parties and amount every saga audit record names (L7-14). */
@@ -1203,6 +1516,72 @@ export class OrderService {
   }
 }
 
+/**
+ * How far the clock that stamps order history may disagree with Temporal's,
+ * which stamps an activity's scheduling (D-053).
+ *
+ * A history row a step wrote is newer than the step's scheduling; with clocks
+ * that disagree it can read as slightly older, so the window opens this much
+ * early. It must stay well below the shortest gap between two writes of the
+ * same edge on one order — the settlement backoff, 30 s; reminders are days
+ * apart.
+ */
+export const SAGA_CLOCK_SKEW_MS = 5_000;
+
+/** Where a step's own history rows begin: its scheduling, less the clock allowance. */
+function sagaWindowStart(saga: SagaStep): Date {
+  return new Date(saga.scheduledAt.getTime() - SAGA_CLOCK_SKEW_MS);
+}
+
+/**
+ * The status a recorded transition step returned. Written only by
+ * `systemTransition`; anything else under its key is a broken invariant.
+ */
+function recordedStatus(orderId: string, result: Prisma.JsonValue): OrderStatus {
+  const status =
+    result !== null && typeof result === 'object' && !Array.isArray(result)
+      ? result.status
+      : undefined;
+  if (typeof status === 'string' && Object.hasOwn(ORDER_TRANSITIONS, status)) {
+    return status as OrderStatus;
+  }
+  throw new Error(`A saga step record of order ${orderId} holds no order status`);
+}
+
+/** What a recorded transition step kept beside its status: its `movedWith`. */
+function recordedDetail(result: Prisma.JsonValue): Record<string, string> {
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) return {};
+  return Object.fromEntries(
+    Object.entries(result).filter(
+      (entry): entry is [string, string] => entry[0] !== 'status' && typeof entry[1] === 'string',
+    ),
+  );
+}
+
+/** How one saga step moves the order (`systemTransition`). */
+interface SystemStepOptions {
+  activity: SagaActivity;
+  from: readonly OrderStatus[];
+  apply: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<unknown>;
+  yieldTo?: readonly OrderStatus[];
+  /** Runs inside the lock when the step yields. */
+  onYield?: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<unknown>;
+  /**
+   * Recognises this step's own effect on an order that has moved on, for
+   * a retry with no record: one whose first attempt ran before the record
+   * existed. Only a step whose effect leaves a mark on the order nothing
+   * else writes can say; every step also has its history row
+   * (`hasSagaHistorySince`).
+   */
+  appliedTo?: (order: LockedOrderRow) => boolean;
+  reason?: string;
+  /**
+   * Recorded with the status when the step moves the order, and answered to
+   * a retry: what `apply` created that the saga goes on to name.
+   */
+  movedWith?: Record<string, string>;
+}
+
 type OrderRow = {
   id: string;
   status: OrderStatus;
@@ -1224,6 +1603,7 @@ type OrderRow = {
   createdAt: Date;
   placedBy: string;
   lines: {
+    id: string;
     offerId: string;
     productId: string;
     productName: string;
@@ -1255,6 +1635,7 @@ export function toView(row: OrderRow): OrderView {
     totalAmountMinor: row.totalAmountMinor.toString(),
     currency: row.currency,
     lines: row.lines.map((line) => ({
+      id: line.id,
       offerId: line.offerId,
       productId: line.productId,
       productName: line.productName,

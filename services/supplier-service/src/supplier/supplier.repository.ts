@@ -106,6 +106,22 @@ export interface CreateQualificationInput {
   evidence: { id: string; documentId: string; label: string | null }[];
 }
 
+/**
+ * What a suspension write did. Anything but `WRITTEN` has written something the
+ * caller must roll back (the status flip), so the caller throws inside its
+ * transaction:
+ *
+ *   NOT_IN_STATE      the supplier was not in the status the command needs —
+ *                     somebody else got there first.
+ *   EPISODE_CHANGED   the status was right, but the suspension history is not
+ *                     the one the caller read: another episode is open, or a
+ *                     newer one was opened and closed since.
+ */
+export type SuspensionWrite =
+  | { readonly outcome: 'WRITTEN'; readonly suspensionId: string }
+  | { readonly outcome: 'NOT_IN_STATE' }
+  | { readonly outcome: 'EPISODE_CHANGED' };
+
 export interface DirectoryFilter {
   capability?: SupplierCapability;
   qualifiedFor?: SupplierCapability;
@@ -216,6 +232,8 @@ export class SupplierRepository {
       decidedAt: Date;
       decidedCorrelationId: string;
       decisionNote: string | null;
+      /** The supplier-visible reason; a rejection's only, null for an approval. */
+      rejectionReason: string | null;
     },
   ): Promise<number> {
     const changed = await runUnscoped(
@@ -230,6 +248,7 @@ export class SupplierRepository {
             decidedAt: input.decidedAt,
             decidedCorrelationId: input.decidedCorrelationId,
             decisionNote: input.decisionNote,
+            rejectionReason: input.rejectionReason,
           },
         }),
     );
@@ -238,17 +257,29 @@ export class SupplierRepository {
   }
 
   /**
-   * Opens a suspension episode and flips the denormalised status together.
+   * Opens a suspension episode and flips the denormalised status together —
+   * **if** the supplier's suspension history is still the one the caller read.
    *
    * The `status: 'ACTIVE'` predicate makes the pair atomic against a concurrent
    * suspension: only one caller can move the supplier out of `ACTIVE`, so only
    * one episode is ever opened. `ux_suspension_open` is the backstop underneath.
    *
-   * Unscoped for both statements, and the episode is stamped with the
+   * `expectedLatestSuspensionId` is the newest episode the caller saw (null for
+   * none), and it is compared **after** the status flip, which has locked the
+   * supplier row: every write that opens or closes an episode flips the status
+   * first, so no episode can be opened or closed between this comparison and
+   * the commit. A form read before somebody else suspended and reinstated the
+   * supplier names an older episode than the latest, and opens nothing (Codex
+   * review of PR 366, finding 2 — the suspend half of it).
+   *
+   * Unscoped for every statement, and the episode is stamped with the
    * **supplier's** organization rather than the operator's — a suspension is the
    * supplier's own record, and a guard acting for the caller would either match
    * no supplier or refuse the episode outright as an implicit cross-tenant
    * write.
+   *
+   * The caller throws on anything but `OPENED`, inside its transaction, so the
+   * status flip rolls back with it.
    */
   async openSuspension(
     tx: ExtendedPrismaClient,
@@ -261,8 +292,9 @@ export class SupplierRepository {
       /** The database's instant for this transaction (D-5). */
       suspendedAt: Date;
       suspendedCorrelationId: string;
+      expectedLatestSuspensionId: string | null;
     },
-  ): Promise<number> {
+  ): Promise<SuspensionWrite> {
     const reason =
       'a supplier is suspended by a platform operator from another organization, ' +
       'after assertCanDecideAbout has checked the caller against this supplier';
@@ -274,7 +306,19 @@ export class SupplierRepository {
       }),
     );
 
-    if (changed.count === 0) return 0;
+    if (changed.count === 0) return { outcome: 'NOT_IN_STATE' };
+
+    const latest = await runUnscoped(reason, () =>
+      tx.suspension.findFirst({
+        where: { supplierId: input.supplierId },
+        orderBy: [{ suspendedAt: 'desc' }, { id: 'desc' }],
+        select: { id: true },
+      }),
+    );
+
+    if ((latest?.id ?? null) !== input.expectedLatestSuspensionId) {
+      return { outcome: 'EPISODE_CHANGED' };
+    }
 
     await runUnscoped(reason, () =>
       tx.suspension.create({
@@ -290,16 +334,23 @@ export class SupplierRepository {
       }),
     );
 
-    return changed.count;
+    return { outcome: 'WRITTEN', suspensionId: input.id };
   }
 
   /**
-   * Closes the open episode and returns the supplier to `ACTIVE`.
+   * Closes **the named** open episode and returns the supplier to `ACTIVE`.
    *
    * The episode is **stamped, never deleted**: "no destructive cascade may erase
    * suspension history" applies to the ordinary path too, and a reinstatement
    * that removed the row would erase exactly the record somebody will later ask
    * about.
+   *
+   * `expectedSuspensionId` is the episode the caller decided to lift. It used to
+   * be "whichever episode is open now", so a form read during episode A and sent
+   * after A was lifted and B opened lifted B with A's explanation (Codex review
+   * of PR 366, finding 2). It is compared after the status flip has locked the
+   * supplier row, exactly as in {@link openSuspension}, so the open episode
+   * cannot change between the comparison and the commit.
    *
    * Unscoped for the same reason `openSuspension` is: the operator lifting the
    * suspension belongs to another organization by rule, and the episode being
@@ -309,12 +360,13 @@ export class SupplierRepository {
     tx: ExtendedPrismaClient,
     input: {
       supplierId: string;
+      expectedSuspensionId: string;
       reinstatedBy: string;
       reinstatedAt: Date;
       reinstatedCorrelationId: string;
       reinstatementNote: string;
     },
-  ): Promise<{ changed: number; suspensionId: string | null }> {
+  ): Promise<SuspensionWrite> {
     const reason =
       'a suspension is lifted by a platform operator from another organization, ' +
       'after assertCanDecideAbout has checked the caller against this supplier';
@@ -326,16 +378,18 @@ export class SupplierRepository {
       }),
     );
 
-    if (changed.count === 0) return { changed: 0, suspensionId: null };
+    if (changed.count === 0) return { outcome: 'NOT_IN_STATE' };
 
     const open = await runUnscoped(reason, () =>
       tx.suspension.findFirst({
         where: { supplierId: input.supplierId, reinstatedAt: null },
         orderBy: { suspendedAt: 'desc' },
+        select: { id: true },
       }),
     );
 
-    if (!open) return { changed: 0, suspensionId: null };
+    if (!open) return { outcome: 'NOT_IN_STATE' };
+    if (open.id !== input.expectedSuspensionId) return { outcome: 'EPISODE_CHANGED' };
 
     await runUnscoped(reason, () =>
       tx.suspension.updateMany({
@@ -349,7 +403,7 @@ export class SupplierRepository {
       }),
     );
 
-    return { changed: 1, suspensionId: open.id };
+    return { outcome: 'WRITTEN', suspensionId: open.id };
   }
 
   // -- reads ----------------------------------------------------------------
@@ -451,12 +505,14 @@ export class SupplierRepository {
 
   /**
    * One organization's standing as it is right now: the same selection as one
-   * snapshot item. `null` when the organization has no supplier profile.
+   * snapshot item (`row`, `null` when the organization has no supplier profile),
+   * plus when its GOODS_SUPPLY qualification was last approved.
    */
   async findStandingOf(organizationId: string) {
     return runUnscoped(
-      'construction-service asks for one contractors current standing at the moment a bid ' +
-        'is decided (ADR-061 § 4); identifiers and instants only, caller checked in access.ts',
+      'construction-service or procurement-service asks for one organizations current standing ' +
+        'at the moment a bid, an invitation or a quotation is decided (ADR-061 § 4, ADR-070 § 7); ' +
+        'identifiers and instants only, caller checked in access.ts',
       () =>
         // One REPEATABLE READ snapshot for both: `asOf` is the transaction's start
         // (`now()`), taken no later than the snapshot, so the standing returned is at
@@ -483,7 +539,17 @@ export class SupplierRepository {
                 },
               },
             });
-            return { asOf, row };
+            // procurement-service's capability (ADR-070 § 7), in the same snapshot.
+            const goodsSupply = await tx.qualification.findFirst({
+              where: {
+                supplier: { organizationId },
+                capability: 'GOODS_SUPPLY',
+                state: 'APPROVED',
+              },
+              select: { decidedAt: true },
+              orderBy: { decidedAt: 'desc' },
+            });
+            return { asOf, row, goodsSupplyApprovedAt: goodsSupply?.decidedAt ?? null };
           },
           { isolationLevel: 'RepeatableRead' },
         ),

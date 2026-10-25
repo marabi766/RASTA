@@ -45,6 +45,8 @@ export const ID_PREFIXES = {
   product: 'PRD',
   offer: 'OFR',
   order: 'ORD',
+  returnRequest: 'RET',
+  returnShipment: 'RSP',
   shipment: 'SHP',
   demandRequest: 'DMD',
   rfq: 'RFQ',

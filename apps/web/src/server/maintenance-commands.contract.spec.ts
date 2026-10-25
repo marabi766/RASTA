@@ -5,6 +5,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
 
+import { DISPLAY_TEXT_PATTERN, UNSUPPORTED_CHARACTERS } from '@rasta/contracts';
+import { guardAdmitsAlone } from '@/test/service-source';
+
 import {
   APPROVE_REQUEST_FIELD_MAPPING,
   ASSIGN_WORKSHOP_FIELD_MAPPING,
@@ -105,9 +108,11 @@ describe('who may use the commands', () => {
       const admitted = rolesOf(handler);
       expect(admitted.length).toBeGreaterThan(0);
       const offered = EVERY_ROLE.filter((role) => canManageMaintenance([role]));
-      expect(offered.sort()).toEqual(EVERY_ROLE.filter((role) => admitted.includes(role)).sort());
-      // …and no role the portal offers is one the service would not admit.
-      for (const role of offered) expect(admitted).toContain(role);
+      expect(offered.sort()).toEqual(
+        EVERY_ROLE.filter((role) => guardAdmitsAlone(role, admitted)).sort(),
+      );
+      // …and no role the portal offers is one the guard would not admit.
+      for (const role of offered) expect(guardAdmitsAlone(role, admitted)).toBe(true);
     },
   );
 
@@ -177,61 +182,32 @@ describe('the request bodies', () => {
 });
 
 describe("the service's displayText rule", () => {
-  const displayText = topLevelConst(dto, 'displayText');
-  const literals = collect(displayText, ts.isRegularExpressionLiteral);
-
-  it('is one regular expression literal the reader can take at its word', () => {
-    expect(literals).toHaveLength(1);
+  it('is the shared helper from @rasta/contracts, imported and not redefined', () => {
+    // The portal copies are gone: both sides use `displayText` /
+    // `DISPLAY_TEXT_PATTERN` from `@rasta/contracts`, so they cannot disagree.
+    expect(read('dto.ts')).not.toMatch(/(?:const|function)\s+displayText\b/);
+    expect(read('dto.ts')).toMatch(
+      /import\s*\{[^}]*\bdisplayText\b[^}]*\}\s*from\s*'@rasta\/contracts'/,
+    );
+    expect(MAINTENANCE_DISPLAY_TEXT).toBe(DISPLAY_TEXT_PATTERN);
   });
 
-  const text = literals[0]?.text ?? '';
-  const closing = text.lastIndexOf('/');
-  const service = new RegExp(text.slice(1, closing), text.slice(closing + 1));
+  it.each(['الف،', 'الف؛', 'چرا؟', 'a, b', 'توجه!', '50%', 'خط\nدوم'])(
+    'accepts %j, which the old copy refused',
+    (text) => {
+      expect(MAINTENANCE_DISPLAY_TEXT.test(text)).toBe(true);
+    },
+  );
 
-  it('carries the flags the portal copy carries', () => {
-    expect(service.flags).toBe(MAINTENANCE_DISPLAY_TEXT.flags);
-  });
-
-  const PROBES: readonly string[] = [
-    'لودر کوماتسو',
-    'Komatsu WA320',
-    'گریدر ۱۴۰۲',
-    'گریدر ١٤٠٢',
-    'می‌خواهم',
-    'کلید (اصلی) «برق»',
-    "O'Brien’s 4x4, 10.5 t/h: +1 - 2",
-    'á',
-    'tab\tseparated',
-    'مدل_۱',
-    'مدل#۱',
-    'a@b',
-    'a<b>',
-    'a=b',
-    'a&b',
-    'a"b',
-    '50%',
-    'a‮b',
-    'a‏b',
-    'a⁦b',
-    'خودرو 🚜',
-    '日本語',
-    'Москва',
-    '',
-  ];
-
-  it.each(PROBES)('agrees with the service on %j', (probe) => {
-    expect(MAINTENANCE_DISPLAY_TEXT.test(probe)).toBe(service.test(probe));
-  });
-
-  it('is not vacuous: the probes include strings both accept and refuse', () => {
-    const accepted = PROBES.filter((probe) => service.test(probe)).length;
-    expect(accepted).toBeGreaterThan(5);
-    expect(accepted).toBeLessThan(PROBES.length - 5);
-  });
+  it.each(['a<b>', 'a=b', 'a&b', 'خودرو 🚜', '日本語', '', 'a‮b', 'سـلام'])(
+    'refuses %j',
+    (text) => {
+      expect(MAINTENANCE_DISPLAY_TEXT.test(text)).toBe(false);
+    },
+  );
 
   it('is the message the portal translates', () => {
-    const messages = collect(displayText, ts.isStringLiteral).map((node) => node.text);
-    expect(messages).toContain('Contains unsupported characters');
+    expect(UNSUPPORTED_CHARACTERS).toBe('Contains unsupported characters');
     for (const mapping of [
       ASSIGN_WORKSHOP_FIELD_MAPPING,
       APPROVE_REQUEST_FIELD_MAPPING,
@@ -256,6 +232,8 @@ describe('the sentences the portal translates', () => {
     'dto.ts',
   ]
     .map((file) => read(file))
+    // The shared text rule's closed message lives in @rasta/contracts now.
+    .concat(readFileSync(join(ROOT, 'packages', 'contracts', 'src', 'common', 'text.ts'), 'utf8'))
     .join('\n');
 
   const normalise = (text: string) => text.replace(/'\s*\+\s*\n?\s*'/g, '').replace(/\s+/g, ' ');

@@ -4,6 +4,14 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadWebServerEnv } from './env';
+import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
+import {
+  MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS,
+  MAX_REPLAY_MARGIN_SECONDS,
+  MIN_REPLAY_MARGIN_MS,
+  projectCreateWindowFits,
+  replayMarginCoversClockBudget,
+} from './unresolved-request-policy';
 
 /**
  * What the portal refuses to start without, and why each refusal is the
@@ -134,6 +142,126 @@ describe('who is shown the Inventory link', () => {
   );
 });
 
+describe('who is shown the Contracts link', () => {
+  it("defaults to contract-service's own default: ORGANIZATION_ADMIN reads", () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_CONTRACT_READER_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+  });
+
+  it('reads comma lists, trimmed, with empty elements dropped', () => {
+    const env = loadWebServerEnv({
+      ...REQUIRED,
+      WEB_CONTRACT_READER_ROLES: ' ORGANIZATION_ADMIN , FLEET_MANAGER,, ',
+    });
+    expect(env.WEB_CONTRACT_READER_ROLES).toEqual(['ORGANIZATION_ADMIN', 'FLEET_MANAGER']);
+  });
+
+  it('refuses to start when it names AUDITOR, as the service does', () => {
+    expect(() =>
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_READER_ROLES: 'ORGANIZATION_ADMIN,AUDITOR' }),
+    ).toThrow(/WEB_CONTRACT_READER_ROLES/);
+  });
+});
+
+describe('the return replay deadline (EXP-003 returns)', () => {
+  it('defaults to marketplace-service’s floor, not its default, less ten minutes', () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS).toBe(1);
+    expect(env.WEB_RETURN_REPLAY_MARGIN_SECONDS).toBe(600);
+  });
+
+  it('mirrors the service’s bounds for the retention (1..168 hours)', () => {
+    for (const value of ['0', '169', 'soon']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS: value }),
+      ).toThrow('WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS');
+    }
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS: '24' })
+        .WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS,
+    ).toBe(24);
+  });
+
+  it('bounds the margin so the window is never shorter than half an hour', () => {
+    for (const value of ['59', '1801']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_RETURN_REPLAY_MARGIN_SECONDS: value }),
+      ).toThrow('WEB_RETURN_REPLAY_MARGIN_SECONDS');
+    }
+  });
+});
+
+describe('who is drawn the contract command forms, and with which reasons', () => {
+  it("defaults to contract-service's own defaults", () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_CONTRACT_CANCEL_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.WEB_CONTRACT_AMENDMENT_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.WEB_CONTRACT_MILESTONE_ROLES).toEqual(['ORGANIZATION_ADMIN']);
+    expect(env.WEB_CONTRACT_CANCEL_AFTER_SIGNATURE).toBe(false);
+    expect(env.WEB_CONTRACT_CANCEL_REASON_CODES).toEqual([
+      'TERMS_NOT_AGREED',
+      'CONTRACTOR_WITHDREW',
+      'AWARD_ERROR',
+      'OTHER',
+    ]);
+    expect(env.WEB_CONTRACT_AMENDMENT_REASON_CODES).toEqual([
+      'SCOPE_CHANGE',
+      'PRICE_ADJUSTMENT',
+      'SCHEDULE_CHANGE',
+      'OTHER',
+    ]);
+  });
+
+  it('an empty role list means nobody, as there; AUDITOR refuses to start', () => {
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_CANCEL_ROLES: '' }).WEB_CONTRACT_CANCEL_ROLES,
+    ).toEqual([]);
+    expect(() =>
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_MILESTONE_ROLES: 'AUDITOR' }),
+    ).toThrow(/WEB_CONTRACT_MILESTONE_ROLES/);
+  });
+
+  it('a reason list is closed codes, at least one, none twice', () => {
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_CANCEL_REASON_CODES: ' OTHER , CLIENT_CODE ' })
+        .WEB_CONTRACT_CANCEL_REASON_CODES,
+    ).toEqual(['OTHER', 'CLIENT_CODE']);
+    for (const refused of ['', 'lower_case', 'OTHER,OTHER']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_AMENDMENT_REASON_CODES: refused }),
+      ).toThrow(/WEB_CONTRACT_AMENDMENT_REASON_CODES/);
+    }
+  });
+});
+
+describe('the dispute replay deadline (PR 319 review 2, finding 2)', () => {
+  it('defaults to economic-service’s floor, not its default, less ten minutes', () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS).toBe(1);
+    expect(env.WEB_DISPUTE_REPLAY_MARGIN_SECONDS).toBe(600);
+  });
+
+  it('mirrors the service’s bounds for the retention (1..168 hours)', () => {
+    for (const value of ['0', '169', 'soon']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: value }),
+      ).toThrow('WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS');
+    }
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: '24' })
+        .WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS,
+    ).toBe(24);
+  });
+
+  it('bounds the margin so the window is never shorter than half an hour', () => {
+    for (const value of ['59', '1801']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_DISPUTE_REPLAY_MARGIN_SECONDS: value }),
+      ).toThrow('WEB_DISPUTE_REPLAY_MARGIN_SECONDS');
+    }
+  });
+});
+
 describe('refresh coordination in production (ADR-059 addendum)', () => {
   it('refuses to start in production without WEB_REDIS_URL', () => {
     // Two replicas are the documented topology; without shared coordination
@@ -188,5 +316,159 @@ describe('nothing secret reaches the browser bundle', () => {
     for (const key of Object.keys(env)) {
       expect(key).not.toMatch(/^NEXT_PUBLIC_/);
     }
+  });
+});
+
+describe('the statement replay deadline', () => {
+  it('defaults to contract-service’s floor, not its default, less ten minutes', () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS).toBe(1);
+    expect(env.WEB_CONTRACT_REPLAY_MARGIN_SECONDS).toBe(600);
+  });
+
+  it('mirrors the service’s bounds for the retention (1..168 hours)', () => {
+    for (const value of ['0', '169', 'soon']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS: value }),
+      ).toThrow('WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS');
+    }
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS: '24' })
+        .WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS,
+    ).toBe(24);
+  });
+
+  it('bounds the margin so the window is never shorter than half an hour', () => {
+    for (const value of ['59', '1801']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONTRACT_REPLAY_MARGIN_SECONDS: value }),
+      ).toThrow('WEB_CONTRACT_REPLAY_MARGIN_SECONDS');
+    }
+  });
+});
+
+describe('the bid replay deadline', () => {
+  it('defaults to construction-service’s floor, not its default, less ten minutes', () => {
+    const env = loadWebServerEnv(REQUIRED);
+    expect(env.WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS).toBe(1);
+    expect(env.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS).toBe(600);
+  });
+
+  it('bounds the retention by what can boot (1 hour: derived from the 3 300 s limit) and bounds the margin', () => {
+    expect(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS).toBe(1);
+    // No margin the schema allows lets 2 hours boot: 7 200 − 1 800 + 30 > 3 300. The schema says so itself.
+    for (const value of ['0', '2', '168', '169', 'soon']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: value }),
+      ).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    }
+    for (const value of ['59', '1801']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: value }),
+      ).toThrow('WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS');
+    }
+  });
+
+  // The window must fit what construction-service accepts (D-067): window + 30 s portal skew allowance
+  // ≤ PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS (3 300 s). With a 1 h retention the margin is ≥ 330 s.
+  it('refuses to start when the project-create window exceeds the shared maximum (boundary: = passes, +1 s refuses)', () => {
+    const at = (ttl: string, margin: string) =>
+      loadWebServerEnv({
+        ...REQUIRED,
+        WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: ttl,
+        WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: margin,
+      });
+    // 3600 − 330 = 3270; + 30 s = 3300 = K.
+    expect(at('1', '330').WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS).toBe(330);
+    expect(() => at('1', '329')).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    // Beyond the schema's derived maximum: refused by the schema, and projectCreateWindowFits agrees
+    // for every margin the schema allows.
+    expect(() => at('168', '1800')).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    expect(() => at('2', '1800')).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    for (let margin = 60; margin <= MAX_REPLAY_MARGIN_SECONDS; margin += 1) {
+      expect(projectCreateWindowFits(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS + 1, margin)).toBe(
+        false,
+      );
+    }
+    expect(projectCreateWindowFits(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS, 330)).toBe(true);
+    // The defaults fit with room: 3 000 s window + 30 s = 3 030 s, slack 270 s.
+    const defaults = loadWebServerEnv(REQUIRED);
+    const window =
+      defaults.WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS * 3600 -
+      defaults.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS;
+    expect(window).toBe(3000);
+    expect(PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS - (window + 30)).toBe(270);
+  });
+
+  it('the shared maximum is the number the service tests against (one constant, packages/contracts)', () => {
+    expect(PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS).toBe(3300);
+    expect(projectCreateWindowFits(1, 330)).toBe(true);
+    expect(projectCreateWindowFits(1, 329)).toBe(false);
+  });
+
+  // The clock budget (unresolved-request-policy.ts): margin ≥ 2 × skew + one request,
+  // i.e. 2 × 30 s + 15 s = 75 s. Below it the portal does not start (fail closed).
+  it('refuses to start when the margin does not cover two clock skews and a request', () => {
+    expect(MIN_REPLAY_MARGIN_MS).toBe(75_000);
+    for (const value of ['60', '74']) {
+      expect(() =>
+        loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: value }),
+      ).toThrow('WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS');
+    }
+    // 75 s covers the clock budget, but with the 1 h retention the window would exceed the shared
+    // maximum (margin ≥ 330 s, D-067): it is the other check that refuses it.
+    expect(replayMarginCoversClockBudget(75)).toBe(true);
+    expect(() =>
+      loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: '75' }),
+    ).toThrow('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    for (const value of ['330', '600']) {
+      expect(
+        loadWebServerEnv({ ...REQUIRED, WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: value })
+          .WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS,
+      ).toBe(Number(value));
+    }
+  });
+});
+
+describe('the tender opening roles', () => {
+  it('default to none — the owner’s own role set — and refuse what never opens a bid', () => {
+    expect(loadWebServerEnv(REQUIRED).WEB_TENDER_OPEN_ROLES).toEqual([]);
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_TENDER_OPEN_ROLES: 'FLEET_MANAGER, ORGANIZATION_ADMIN' })
+        .WEB_TENDER_OPEN_ROLES,
+    ).toEqual(['FLEET_MANAGER', 'ORGANIZATION_ADMIN']);
+    for (const value of ['SYSTEM_ADMIN', 'CONTRACTOR', 'AUDITOR']) {
+      expect(() => loadWebServerEnv({ ...REQUIRED, WEB_TENDER_OPEN_ROLES: value })).toThrow(
+        'WEB_TENDER_OPEN_ROLES',
+      );
+    }
+  });
+});
+
+describe('the evaluation and award roles, and the conflict rules', () => {
+  it('evaluating and awarding default to the owner’s own role set, and refuse what never reads a bid', () => {
+    for (const name of ['WEB_TENDER_EVALUATE_ROLES', 'WEB_TENDER_AWARD_ROLES'] as const) {
+      expect(loadWebServerEnv(REQUIRED)[name]).toEqual([]);
+      expect(loadWebServerEnv({ ...REQUIRED, [name]: 'FLEET_MANAGER' })[name]).toEqual([
+        'FLEET_MANAGER',
+      ]);
+      for (const value of ['SYSTEM_ADMIN', 'CONTRACTOR', 'AUDITOR']) {
+        expect(() => loadWebServerEnv({ ...REQUIRED, [name]: value })).toThrow(name);
+      }
+    }
+  });
+
+  it('the conflict rules default to AWARDER_NOT_EVALUATOR, switch off when empty, and stop the portal on an unknown one', () => {
+    expect(loadWebServerEnv(REQUIRED).WEB_TENDER_COI_RULES).toEqual(['AWARDER_NOT_EVALUATOR']);
+    expect(
+      loadWebServerEnv({ ...REQUIRED, WEB_TENDER_COI_RULES: '' }).WEB_TENDER_COI_RULES,
+    ).toEqual([]);
+    expect(
+      loadWebServerEnv({
+        ...REQUIRED,
+        WEB_TENDER_COI_RULES: 'AWARDER_NOT_EVALUATOR, EVALUATOR_NOT_TENDER_AUTHOR',
+      }).WEB_TENDER_COI_RULES,
+    ).toEqual(['AWARDER_NOT_EVALUATOR', 'EVALUATOR_NOT_TENDER_AUTHOR']);
+    expect(() => loadWebServerEnv({ ...REQUIRED, WEB_TENDER_COI_RULES: 'MADE_UP' })).toThrow();
   });
 });

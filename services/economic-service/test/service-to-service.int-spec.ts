@@ -189,7 +189,8 @@ describe('service-to-service access', () => {
         counterpartyOrganizationId: payee,
         grossAmountMinor: '4000',
         currency: 'IRR',
-        sourceType: 'ORDER',
+        // Not ORDER: that is recorded only as a MARKETPLACE_ORDER (recorded-sources.ts).
+        sourceType: 'SHIPMENT',
         sourceReference: key,
         holdFunds: false,
       })
@@ -272,7 +273,7 @@ describe('service-to-service access', () => {
     const response = await request(http)
       .post('/v1/commissions/rules')
       .set('x-internal-token', await forTenant(payer))
-      .send({ organizationId: payer, transactionType: 'LOGISTICS', rateBasisPoints: 100 })
+      .send({ organizationId: payer, businessLine: 'LOGISTICS', rateBasisPoints: 100 })
       .expect(403);
 
     expect(response.body.code).toBe('FORBIDDEN');

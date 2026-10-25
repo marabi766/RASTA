@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import {
   RastaError,
@@ -187,7 +188,7 @@ export class ProxyService {
     let failureRecorded = false;
 
     try {
-      const response = await fetch(target, {
+      const response = await internalFetch(target, {
         method: request.method,
         headers,
         body: this.bodyFor(request.method, request.body),

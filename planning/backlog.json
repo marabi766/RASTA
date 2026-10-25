@@ -2,7 +2,7 @@
   "$schema": "./backlog.schema.json",
   "version": 2,
   "project": "RASTA",
-  "asOf": "2026-09-22",
+  "asOf": "2026-10-23",
   "governance": {
     "baselineState": "APPROVED",
     "approvedBy": "Product Owner",
@@ -492,6 +492,11 @@
       "evidence": [
         {
           "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/31",
+          "note": "First acceptance criterion: qualification.service/.state-machine and suspension.service/.state-machine implement explicit, tenant-safe workflows. The PR's own description records a found-and-fixed tenant-safety defect (a self-judgement bypass where an operator could approve their own organization's submission via the selected X-Organization-Id), fixed by deriving the decision from the full authenticated membership set. Merge commit 36d718c, merged 2026-09-06."
+        },
+        {
+          "kind": "PR",
           "ref": "https://github.com/marabi766/RASTA/pull/48",
           "note": "ADR-052 phase 2 step 1 only: delivery promise, dispute resolution with structured attribution, structured cancellation cause. Sub-step 1-د, the quality component at 30% weight, is deliberately absent because Q-56 is open and its answer is a product decision — so the second acceptance criterion is not met and the item stays IN_PROGRESS."
         },
@@ -499,6 +504,26 @@
           "kind": "CI",
           "ref": "https://github.com/marabi766/RASTA/actions/runs/35362526476",
           "note": "First run to cover every phase-2 commit, including the real-Kafka producer tests and the asset-service contract tests"
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/120",
+          "note": "ADR-052 Phase B steps 2-4: the performance formula-version table (weights sum to 10,000bp, single ACTIVE version), an append-only performance-event table and an insert-only snapshot table. Storage only — no score computation. Merge commit 9e85472, merged 2026-09-26."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/126",
+          "note": "ADR-052 step 5: a consumer that records marketplace performance facts and computes nothing, off by default (SUPPLIER_PERFORMANCE_CONSUMER_ENABLED=false), fails closed pending the authenticated broker (D-036). Merge commit f9d0b84, merged 2026-09-27."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/142",
+          "note": "D-036 closed: the performance consumer's gate can now open because RUN-006 (#128, #131) delivered the authenticated, per-topic-ACL broker. The consumer remains off by default, recorded as a deployment decision, not a code gap. Merge commit 7db0bcb, merged 2026-09-29."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "Checked again on 2026-10-15: the second acceptance criterion is still not met. Score computation and marketplace-facing rating remain blocked on Q-56 (quality signal, 🟡), Q-77, Q-78 and Q-79 (sample-size/coverage thresholds, component denominators, \"on time\" definition, all 🟠) — all still open. Only Q-75 (who may change the formula) is closed. No score is computed or published; the item correctly stays IN_PROGRESS."
         }
       ]
     },
@@ -509,14 +534,40 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 21,
-      "status": "READY",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Stock movement and reservation are concurrency safe",
         "Shipment state is visible without sharing another service database"
       ],
       "dependencies": ["COM-005"],
       "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/246",
+          "note": "First criterion: inventory-service skeleton and a concurrency-safe stock and reservation core (ADR-056). services/inventory-service/test/concurrency.int-spec.ts and constraints.int-spec.ts exercise stock movement and reservation under real concurrent load against real PostgreSQL. Merge commit 6aef114, merged 2026-10-13."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/257",
+          "note": "Second criterion: shipment and tracking tables with POST/GET /v1/shipments endpoints, publishing SHIPMENT_CREATED, SHIPMENT_DISPATCHED and SHIPMENT_DELIVERED on rasta.inventory.v1 through the transactional outbox — shipment state is visible to other services via API and event, never by reading inventory-service's database. Tenant isolation tested in test/tenancy.int-spec.ts. Merge commit dc88cac, merged 2026-10-14. Stacked on #246; CI confirmed green on main."
+        },
+        {
+          "kind": "CI",
+          "ref": "https://github.com/marabi766/RASTA/actions/runs/38571985411",
+          "note": "Full main pipeline green on merge commit dc88cac (PR #257): lint/types/unit, integration and security tests, migration reversibility, all service image builds and scans, end-to-end, portal-in-a-browser. Verified directly via `gh pr checks 257`."
+        },
+        {
+          "kind": "TEST",
+          "ref": "pnpm --filter @rasta/inventory-service run test:coverage",
+          "note": "services/inventory-service/test/ also has idempotency.int-spec.ts (PR #264 fixed a pool-exhaustion race in this suite without changing production code, confirming the underlying concurrency behavior was already correct) and shipment-constraints.int-spec.ts."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/299",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-15, in the project-manager chat, on the criterion-by-criterion evidence recorded above. Independently verified by the Codex review of PR #299, round 1 (PR-299-r1), criterion by criterion: criterion 1 — stock-item locking in a consistent lock order, database constraints and concurrent reservation/receipt tests; criterion 2 — shipment API, tracking and transactional outbox events, with owner, consignee and third-tenant tests. No limitation disclosed."
+        }
+      ]
     },
     {
       "id": "COM-007",
@@ -525,14 +576,50 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Demand aggregation executes in the backend with configured windows and thresholds",
         "RFQ confidentiality, evaluation and purchase-order issuance are auditable"
       ],
       "dependencies": ["COM-005", "COM-006"],
       "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/300",
+          "note": "Step 0, design only: the ADR-070 procurement-service boundary and lifecycle (demand aggregation, RFQ, purchase order). No code. Merge commit d036f79, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/327",
+          "note": "ADR-070 PR 1, first criterion, partial: procurement-service skeleton (D-045 owner/runtime split, ADR-050 outbox, OpenAPI diff-tested against the planned contract), demand requests and joining an aggregation. Merge commit 852118f, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/338",
+          "note": "ADR-070 PR 2, first criterion, partial: the end of the aggregation window on time - sweeper, bounded close and cancel. Merge commit 4f4d6a7, merged 2026-10-20."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/348",
+          "note": "ADR-070 PR 3, first criterion: per-organization aggregation settings (window hours, threshold, shortfall policy) as append-only versions, snapshotted when a window opens (Q-10, Q-119). Merge commit 5342a2b, merged 2026-10-22."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/333",
+          "note": "ADR-070 PR 4: bid sealing extracted into @rasta/sealing, the shared mechanism for RFQ confidentiality (second criterion groundwork). Merge commit bff5721, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/330",
+          "note": "ADR-070 PR 5: read ports in supplier-service and identity-service for procurement-service (supplier standing, identity). Merge commit 148440a, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/349",
+          "note": "ADR-070 PR 6, second criterion, partial: issue an RFQ (criteria frozen, invited suppliers checked against supplier-service standing), close it at its deadline, cancel it. NOT yet merged: RFQ evaluation and purchase-order issuance. Merge commit 54e834d, merged 2026-10-23."
+        }
+      ]
     },
     {
       "id": "COM-008",
@@ -541,7 +628,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 13,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Domain events produce idempotent in-app notifications",
         "Email delivery respects user preferences and records delivery outcome"
@@ -621,6 +708,16 @@
           "kind": "DOCUMENT",
           "ref": "docs/24-open-questions.md",
           "note": "Q-37 remains open and all three locks hold: deliversToRealRecipients is a constant false in app.module.ts, the shipped sender is an RFC 2606 .invalid address, and env.spec.ts proves no environment variable matching REAL_RECIPIENT|PRODUCTION_MAIL|MAIL_ENABLED|SEND_REAL exists. No email has reached a real person. Whether COM-008 may be ACCEPTED while the procurement half of Q-37 — which provider, which domain, which sender identity — is unanswered is a product-owner decision and is not assumed here."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/365",
+          "note": "CI evidence gap closed (Codex acceptance audit of 2026-10-23): Mailpit runs as a pinned service container in both integration jobs and REQUIRE_MAILPIT=1 makes the email-delivery and mail-channel specs fail rather than skip when it is unreachable; the quiet-hours case now pins the worker clock. Merge commit e8286f2, merged 2026-10-23."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the evidence above, the Codex acceptance audit of 2026-10-23 and its re-check on PR #365 (both criteria met: idempotent in-app notifications from domain events; email that respects preferences and records the delivery outcome, asserted in CI against a real Mailpit). Accepted with disclosed limitations: email is development-only until Q-37 (provider, domain and sender) is answered, and deliversToRealRecipients stays false; three notification rules; SMTP delivery is at-least-once; the ADR-054 per-channel circuit breaker, outbound rate limit and template diagnostics are not built."
         }
       ]
     },
@@ -671,14 +768,45 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 13,
-      "status": "READY",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Policy registry and expiry events are operational",
         "A base claim has tenant-safe status history and documents without claiming insurer integration"
       ],
       "dependencies": ["CORE-004", "COM-004", "COM-008"],
       "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "COMMIT",
+          "ref": "24afd12e",
+          "note": "First criterion: the insurance policy registry (services/asset-service/src/insurance/insurance.service.ts) has existed since asset-service's initial end-to-end implementation, 2026-08-27 — before this item's own baseline date — but was never credited to COM-010 until this audit. INSURANCE_EXPIRING and INSURANCE_EXPIRED are published transactionally with the state change."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/108",
+          "note": "Hardens the expiry sweep to a single atomic, batched operation (L3-04) and fixes CAS status transitions on the same records. Merge commit aa4efcc, merged 2026-09-26. Tested in services/asset-service/test/insurance-policy-standing.int-spec.ts, insurance-money.int-spec.ts and insurance-drain-check.int-spec.ts."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/71",
+          "note": "Second criterion, PARTIAL: six REST routes implementing a claim state machine (SUBMITTED -> UNDER_REVIEW -> APPROVED|REJECTED -> SETTLED) with tenant-safe per-claim status history and a configurable deciding-authority role set (Q-59). The PR body explicitly states no money moves and no ledger entry or wallet or economic-service call is made, i.e. it does not claim insurer integration. Tested in services/asset-service/test/insurance-claim.int-spec.ts (lifecycle, tenant isolation, concurrency, outbox). Merge commit fa14ef4, merged 2026-09-21. NOT evidenced: claim documents. The strict submitClaimSchema (services/asset-service/src/asset/dto.ts) refuses a documentId, the InsuranceClaim model has no document reference, and ClaimService.getClaim returns the claim and its history only; document-service's generic ownerResourceType/ownerResourceId metadata stores the reference without resolving the owner, so it does not by itself show a claim-document flow or claim-document tenant isolation (Codex review of PR #299, round 1)."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/240",
+          "note": "Downstream consumer proving the registry is live and load-bearing: fleet dispatch now verifies in-force insurance at assignment time against this same registry. Merge commit 9ec2f17, merged 2026-10-14."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/304",
+          "note": "Second criterion, now MET: claim documents. Existing document-service ids are attached to a claim as references (insurance_claim_document), verified with document-service over authenticated REST signed for the asset owner (A-13), with one 404 for foreign, missing, deleted or other-asset documents (no existence oracle); only open claims (configurable statuses) and a configurable per-claim limit; idempotent re-attach without remote calls; DOCUMENT_DELETED consumed to mark a reference DOCUMENT_REMOVED without deleting history; claim reads return documents; documents stay with the attaching organization on asset transfer (Q-99 (a)). Reviewed by Codex in three rounds; merge commit 9e51a772, merged 2026-10-16, main CI 38866096623 green."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/304",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-16, in the project-manager chat, on the criterion-by-criterion evidence recorded above (criterion 1: registry and expiry events, Codex review of PR #299 round 1; criterion 2: claim documents, PR #304, Codex rounds 1-3). The Product Owner also accepted the Q-128 temporary decisions as the answer. Limitation disclosed: if a document is deleted in the milliseconds between the document-service check and the attach commit, the reference can stay ATTACHED (Q-128)."
+        }
+      ]
     },
     {
       "id": "COM-011",
@@ -687,14 +815,30 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 8,
-      "status": "READY",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Parts, insurance, maintenance, logistics, procurement, construction and marketplace service commissions use versioned configurable rules",
         "No commission rate is hard-coded"
       ],
       "dependencies": ["COM-001"],
       "sourceRefs": ["docs/adr/ADR-045-commission-business-lines.md"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/307",
+          "note": "PR 1/2 (ADR-045): commission by business line - versioned rules per line, NO_ACTIVE_RULE recorded; decided at one database instant under a per-scope lock. Merge commit 28b3797, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/308",
+          "note": "PR 2/2: GET /v1/commissions filters by businessLine and outcome (revenue per line and charges no rule priced); services/economic-service/test/commission-business-lines.int-spec.ts is the per-line evidence (journal balance, idempotency, reversal) for all seven lines. Merge commit 151b5ea, merged 2026-10-16."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the evidence above (PR #307, #308): versioned per-line rules for all seven business lines with NO_ACTIVE_RULE recorded, and no hard-coded rate. Accepted with disclosed limitations: until Q-130 is answered only maintenance sends its business line, so the other sources arrive without one and are priced by type-only rules or recorded as NO_ACTIVE_RULE; the Q-29 production fail-closed rule and the Q-08 explicit 0% pilot rule (PO decisions 2026-10-23) are follow-up work, not part of this item."
+        }
+      ]
     },
     {
       "id": "COM-012",
@@ -703,14 +847,30 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 13,
-      "status": "READY",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "ParticipationScore is explained separately from spendable RewardPoints",
         "Basic levels and badges use versioned rules and avoid coercive game mechanics"
       ],
       "dependencies": ["COM-001", "COM-009"],
       "sourceRefs": ["docs/adr/ADR-047-participation-reward-ranking.md"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/328",
+          "note": "PR 1, first criterion (ADR-047): ParticipationScore breakdown explained apart from spendable RewardPoints, from a versioned platform-wide participation rule. Merge commit e240034, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/331",
+          "note": "PR 2, second criterion (Q-140 temporary decision): levels and badges as versioned configuration with the basis explicit in each version. Merge commit 96af476, merged 2026-10-17."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the evidence above (PR #328, #331): ParticipationScore explained apart from spendable RewardPoints, and levels and badges as versioned configuration. Accepted with the disclosed limitation that the level and badge basis follows the Q-140 temporary decision; a different answer changes configuration only."
+        }
+      ]
     },
     {
       "id": "CON-001",
@@ -719,14 +879,40 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "READY",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Projects, needs and progress reports follow explicit lifecycles",
         "Approval authorities come from configuration and never create a new legal authority"
       ],
       "dependencies": ["COM-004", "COM-009"],
       "sourceRefs": ["docs/17-mvp-scope.md#رستا-عمران"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/119",
+          "note": "First criterion: construction-service skeleton with explicit database state machines (project.state-machine.ts, need.state-machine.ts), each row-locked, version-checked (409 on staleness) and compare-and-set. Integration suites project-lifecycle.int-spec.ts and need-lifecycle.int-spec.ts. Merge commit 7a5233c, merged 2026-09-26."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/122",
+          "note": "Progress-report lifecycle (ordered submissionSequence under the project lock, not wall-clock) and configurable approval authorities: approval_policy/approval_policy_step store (organization, role) pairs referencing existing organizations and roles, never a new legal entity. Writers restricted by role (UNION_ADMIN for its own or descendant orgs, verified live against organization-service), with a platform SYSTEM_ADMIN approval gate and four-eyes enforcement. Tested in policy-governance.int-spec.ts (27 cases) and organization-directory.int-spec.ts. Merge commit f271096, merged 2026-09-26. PR body: 'all 21 check runs pass.'"
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/148",
+          "note": "Closes a residual gap where an approval policy could keep governing after its authoring organization moved outside the relevant subtree (Q-83): policy now becomes APPROVAL_POLICY_SUSPENDED, fail-closed, on ORGANIZATION_MOVED. Merge commit 5091890, merged 2026-09-30."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/152",
+          "note": "Test-only fix making the need-submit-vs-cancel race deterministic by asserting on stream order instead of wall-clock createdAt — confirms the lifecycle logic itself was already correct. Merge commit ea75756, merged 2026-09-30."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/299",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-15, in the project-manager chat, on the criterion-by-criterion evidence recorded above. Independently verified by the Codex review of PR #299, round 1 (PR-299-r1), criterion by criterion: criterion 1 — explicit project, need and progress lifecycles with locking/version checks and integration tests; criterion 2 — configured approval steps, the platform approval gate, four-eyes checks and organization-move reconciliation, with no newly invented legal authority. No limitation disclosed."
+        }
+      ]
     },
     {
       "id": "CON-002",
@@ -735,14 +921,80 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "READY",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Tender deadlines survive restarts and late bids are rejected",
         "Bid confidentiality and configurable evaluation are independently testable and auditable"
       ],
       "dependencies": ["CON-001", "COM-005"],
       "sourceRefs": ["docs/17-mvp-scope.md#رستا-عمران"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/182",
+          "note": "First criterion: bid_closing_at/bid_opening_at are persisted TIMESTAMPTZ(3) columns with a DB CHECK; TenderCloseSweeper closes overdue tenders via a FOR UPDATE SKIP LOCKED claim with a lease and fencing token, so any number of sweeper instances across restarts resumes safely — tested in test/tender-close.int-spec.ts ('a crash between the claim and the close'). Merge commit 254b1b5, merged 2026-10-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/162",
+          "note": "Late-bid rejection: bid.service.ts reads the decision instant from the database's own clock_timestamp() after the row lock, not application wall time, and judges the [bid_opening_at, bid_closing_at) window; an independent DB trigger (bid_guard) re-checks any write that slips through. Merge commit a75d92d, merged 2026-09-30."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/163",
+          "note": "Second criterion, confidentiality: per-tender RSA-3072 + AES-256-GCM sealing (ADR-066), content-key wrapping bound to tender/bid/bidder/revision. Tested in sealing.spec.ts, canonical.spec.ts, key-provider.spec.ts. Merge commit d145e69, merged 2026-09-30."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/174",
+          "note": "Bid submit/replace/withdraw with own-receipt and audited reads. Merge commit 7085a15, merged 2026-10-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/184",
+          "note": "Opening requires a tamper-evident chain checked against audit-service; test/tender-open.int-spec.ts covers 'the head is audit-service's, not ours' (refuses forged/substituted/tampered chains) and 'who may open' (four-eyes, refuses bidder, oversight role, service tokens, any member of a bidding organization). Merge commit f79f100, merged 2026-10-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/165",
+          "note": "Configurable evaluation: weighted criteria stored as data (weight_bp, 1-10000), not hard-coded. Merge commit eb9045e, merged 2026-10-01."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/190",
+          "note": "Tender evaluation implementation: evaluation-matrix.ts, criteria.repository.ts, evaluation.int-spec.ts and api-evaluation.int-spec.ts. Merge commit afac1bc, merged 2026-10-03."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/199",
+          "note": "Award of an evaluated tender. Merge commit 982ef27, merged 2026-10-03."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/208",
+          "note": "Approval gates for tender publication, award and cancellation. Merge commit 299fe03, merged 2026-10-05."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/223",
+          "note": "Tender flow proved end to end through the gateway. Merge commit 12588c8, merged 2026-10-05."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/250",
+          "note": "Closes 8 construction-service audit findings (F1-F8), including F1: the pre-opening access log names no bidder before opening. Merge commit 03f2ffd, merged 2026-10-14."
+        },
+        {
+          "kind": "TEST",
+          "ref": "services/construction-service/test/tender-open.int-spec.ts and bid-opening leak checks (PR #189, #212, #272)",
+          "note": "Leak-specific test hardening confirms the confidentiality checks are precise, not evidence of an open defect: distinctive price markers (#189), value comparison rather than substring (#212), a leak marker a random id cannot contain (#272)."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/299",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-15, in the project-manager chat, on the criterion-by-criterion evidence recorded above. Independently verified by the Codex review of PR #299, round 1 (PR-299-r1), criterion by criterion: criterion 1 — persisted deadlines, database-clock checks, the late-bid trigger and crash/restart sweeper tests; criterion 2, within ADR-066's boundary — sealed bids, independently held audit receipts, configurable evaluation and access auditing. Disclosed limitation accepted with it (docs/23 D-043): confidentiality before opening is enforced by the application, not by a cryptographic time lock, so an operator holding both the KEK and database access can decrypt bids early. This remains a production limitation."
+        }
+      ]
     },
     {
       "id": "CON-003",
@@ -751,14 +1003,95 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Tender award creates a contract draft through a contract boundary",
         "Technical and financial approvals are separate and settlement remains financially consistent"
       ],
       "dependencies": ["CON-002", "COM-001"],
       "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/228",
+          "note": "First criterion met: a TENDER_AWARDED Kafka consumer creates exactly one DRAFT contract per tender, but never trusts the event's amount — it makes an authenticated GET /v1/tenders/{id}/award call to construction-service with a signed service token and only commits if the read confirms the event, else SOURCE_UNCONFIRMED or UPSTREAM_UNAVAILABLE to DLQ (ADR-061 §4 provenance check). A true REST+event boundary, not a shared database. PR body states explicitly that the second criterion (split technical/financial approval, consistent settlement) is designed here (ADR-068 §5-6) and planned for later PRs, not built yet. Merge commit 25744c6, merged 2026-10-05."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/229",
+          "note": "Fixes a projectId gap on the award read that #228 depends on. Merge commit ffe056d, merged 2026-10-05."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/231",
+          "note": "Sign and cancel a draft contract — a single signature-policy workflow, not yet the technical/financial approval split. Merge commit ad1cfaa, merged 2026-10-08."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/235",
+          "note": "Amendments and milestones. PR body explicitly scopes out statements, the two separate approval chains and settlement as later work. Merge commit 8125929, merged 2026-10-08."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/adr/ADR-068-contract-service-boundary.md",
+          "note": "Second criterion remains NOT STARTED as a feature: services/contract-service/src/ has no statement or settlement directory. ADR-068 §5-6 (StatementApprovalWorkflow, the pull-based settlement handshake with economic-service, the statement_approval table) is design only, and Q-95, Q-96 and Q-97 in docs/24-open-questions.md (contract signing/amount, statement two-chain approval and deductions, the settlement boundary with economic-service) are all still open (🟠) as of 2026-10-15. No contract-settlement integration code exists in economic-service."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/301",
+          "note": "Second criterion, step 1 (PR 4a, ADR-068 section 5): statements and deduction rules in the database. Merge commit f087986, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/302",
+          "note": "PR 4b: draft and submit statements over the API. Merge commit 3779ab4, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/312",
+          "note": "PR 5: submit a statement with both approval chains (technical and financial) snapshotted. Merge commit 1d556eb, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/315",
+          "note": "PR 6: decide a statement's approval chains - separation of duties and the cap. Merge commit a1ca661, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/320",
+          "note": "PR 6a: internal settlement read of a statement for economic-service. Merge commit 7da6e20, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/329",
+          "note": "PR 6b (economic-service): an approved contract statement becomes one settleable obligation. Merge commit 59785c2, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/340",
+          "note": "PR 6c prerequisite (economic-service): internal read of a statement's obligation for contract-service. Merge commit dbeac46, merged 2026-10-20."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/343",
+          "note": "PR 6c: statements and contracts become SETTLED on economic-service's confirmation (SETTLEMENT_COMPLETED consumer, dead-lettering to rasta.contract.v1.dlq). Merge commit 89a138e, merged 2026-10-22."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/321",
+          "note": "PR 7: the contract's statements end to end through the api-gateway (tests/e2e/specs/contract/01-contract-lifecycle.e2e-spec.ts). Merge commit f8d4b87, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/334",
+          "note": "Hardening: no caller pre-empts an obligation its owner records (source types MAINTENANCE_REQUEST, PAYMENT_INTENT, STATEMENT, ORDER are reserved). Merge commit 8d7f6ba, merged 2026-10-20."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/347",
+          "note": "Test fix after #334: the statement read's other-source case records an unreserved source type. Merge commit 58611da, merged 2026-10-22."
+        }
+      ]
     },
     {
       "id": "EXP-001",
@@ -819,7 +1152,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Core operational workflows are usable at documented permissions",
         "Desktop and supported mobile viewports pass accessibility and tenant-isolation E2E"
@@ -901,6 +1234,56 @@
           "kind": "TEST",
           "ref": "apps/web/src/server/gateway.spec.ts",
           "note": "A defect the member work found in shared code: callGateway always parsed the body as JSON, so a 204 No Content — which POST /v1/memberships/:id/revoke answers — threw after the service had already done the work, reporting a successful revocation as a failure. Fixed and covered three ways."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/155",
+          "note": "Report a maintenance request from the portal (EXP-002, 1 of 4). Merge commit f6374b1, merged 2026-09-30."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/158",
+          "note": "Register and edit a machine from the portal, with optimistic-lock expectedVersion (EXP-002, 2 of 4). /drivers and /drivers/[id] now exist under apps/web/src/app/drivers. Merge commit c5b5292, merged 2026-10-01."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/159",
+          "note": "Second criterion: apps/web/e2e/accessibility.spec.ts (axe WCAG 2.1 A+AA, no horizontal scroll, login plus 10 signed-in pages) and tenant-isolation.spec.ts (two-tenant cross-read/write refusal, non-disclosure 404s), plus a Pixel 5 (393x851, touch) Playwright project alongside desktop Chromium in apps/web/playwright.config.ts. Merge commit 2ca7ec2, merged 2026-10-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/185",
+          "note": "Refer a request to a workshop, approve its cost, cancel it (EXP-002, slice 3). Merge commit ca1a497, merged 2026-10-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/187",
+          "note": "Repair orders on the request page: start, complete, withdraw, record cost (EXP-002, slice 4). Merge commit cb0d95b, merged 2026-10-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/195",
+          "note": "Asset lifecycle on /assets/[id]: activate, change status, decommission (EXP-002, slice 5). Merge commit f400f1e, merged 2026-10-03."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/206",
+          "note": "Insurance policies and technical inspections on /assets/[id] (EXP-002, slice 6). Merge commit 74057dc, merged 2026-10-04."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/225",
+          "note": "Asset documents and fleet availability on /assets/[id] (EXP-002, slice 7). Despite the PR title's 'draft' tag, the merged diff is complete: AssetDocuments.tsx, AssetAvailability.tsx, document-actions.ts and availability-actions.ts all exist on main. e2e/asset-documents-availability.spec.ts extends live E2E to this surface. Merge commit 91009ad, merged 2026-10-06."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/16-ui-architecture.md#۱۶۶-نقشه-صفحات",
+          "note": "Checked against the documented page map on 2026-10-15: /login, /, /organizations, /assets, /assets/[id], /assets/[id]/timeline, /drivers, /usage, /maintenance and /maintenance/[id] all exist in apps/web/src/app, each with its own actions.ts/actions.spec.ts pair. Both acceptance criteria for EXP-002's domains (identity, organization, asset, fleet, maintenance) are now met; this is a candidate for the product owner's acceptance review."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/299",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-15, in the project-manager chat, on the criterion-by-criterion evidence recorded above. Independently verified by the Codex review of PR #299, round 1 (PR-299-r1), criterion by criterion: criterion 1, for the documented MVP substitution — the identity, organization, asset, fleet and maintenance screens and operational forms exist; criterion 2 — the browser axe and tenant-isolation suites run on desktop and Pixel 5, with the live-stack flag enabled in CI. Disclosed limitation accepted with it (ADR-029): WORKSHOP self-service is deferred, no workshop portal is built, and fleet managers record workshop work."
         }
       ]
     },
@@ -911,7 +1294,7 @@
       "scope": "MVP",
       "priority": "P0",
       "points": 21,
-      "status": "IN_PROGRESS",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Wallet, order, dispute and settlement states match implemented backend contracts",
         "No UI claims real banking, automatic confirmation or unimplemented supplier capabilities"
@@ -933,6 +1316,56 @@
           "kind": "TEST",
           "ref": "apps/web/src/app/orders",
           "note": "The same order rendered for its buyer and its supplier offers different commands, driven only by availableActions; each form mints its own submission id (a real idempotency key on orders); the money-releasing command requires an acknowledgement checked on the server, not only by the checkbox. Three jest-axe passes."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/85",
+          "note": "Wallet screen: /wallet with balance, escrow holds and transaction history. Renders a top-up option only after reading economic-service's own mock-provider disclosure. Merge commit 8b41d18, merged 2026-09-25."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/245",
+          "note": "Place an order from the offers page, with an explicit notice that no bank is connected and the order is not final until supplier acceptance. Merge commit a9dabad, merged 2026-10-14."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/249",
+          "note": "Read-only /settlements and /settlements/[id] (EXP-003 slice 2), with a fixed notice that settlement is simulated and not connected to any bank. Merge commit e61a253, merged 2026-10-13."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/260",
+          "note": "Hides the Settlements nav link from AUDITOR even when the account also holds an admin role. Merge commit 5038367, merged 2026-10-13."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/266",
+          "note": "Fixes realm SYSTEM_ADMIN not counting for the Settlements and Projects nav links. Merge commit 69898d4, merged 2026-10-14."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "apps/web/src/app",
+          "note": "Checked on 2026-10-15: wallet, order and settlement screens exist and match the second criterion (no real-banking or auto-confirmation claim found in any of them). The first criterion is still only PARTIAL — a repository-wide search for dispute-related screens or server modules in apps/web found none; dispute state is not yet represented in the portal. Item stays IN_PROGRESS."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/319",
+          "note": "Transaction dispute view, open and resolve. Merge commit be0f5fa, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/325",
+          "note": "Roles are read from the access token on every screen; \"session ended\" is shown only on an authoritative answer. Merge commit c6336b8, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/336",
+          "note": "Returns in the portal: ask, decide, withdraw, and the goods' progress (RUN-005 states). Merge commit fb67aa0, merged 2026-10-23."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the evidence above and the Codex acceptance audit of 2026-10-23 (both criteria met): wallet, order, dispute and settlement screens follow backend contracts (availableActions, backend balances and settlement records), and no screen claims real banking, automatic confirmation or supplier qualification. Accepted with disclosed limitations: finance is simulated (mock provider only), and the Q-14 decision of 2026-10-23 (the demo-mode label on every money screen, e.g. order detail) is follow-up work in PR #361, not part of this item."
         }
       ]
     },
@@ -943,14 +1376,80 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Procurement, supplier, logistics, construction and contract screens follow real APIs",
         "Permission, conflict, empty and degraded states are covered"
       ],
       "dependencies": ["EXP-001", "COM-007", "CON-003"],
       "sourceRefs": ["docs/16-ui-architecture.md#۱۶۶-نقشه-صفحات"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/252",
+          "note": "First criterion, partial: read-only /projects against construction-service's real API (EXP-004 slice 1). PR body states live tenant-isolation E2E is deliberately not in this slice. Merge commit ce5a534, merged 2026-10-13."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/262",
+          "note": "Read-only /tenders list and detail, both owner and bidder views (EXP-004 slice 2). Merge commit 9013dea, merged 2026-10-14."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/269",
+          "note": "Read-only /inventory warehouses and stock levels (EXP-004 slice 3). Merge commit c2f2ffc, merged 2026-10-14."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/297",
+          "note": "Splits the inventory screen's axe checks into one test per state to fix a CI timeout; confirms per-state accessibility coverage exists. Merge commit bc9203d, merged 2026-10-15."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "apps/web/src/app",
+          "note": "Checked on 2026-10-15: procurement, supplier and contract screens named in the first criterion do not exist anywhere in apps/web/src/app (only construction and logistics are built, and only read-only). Second criterion is covered at unit/component level (role-gated nav, fixed 403/404/5xx text, jest-axe per state) but has no live tenant-isolation E2E for any EXP-004 surface — apps/web/e2e/tenant-isolation.spec.ts has no project/tender/warehouse scenarios. Both criteria are PARTIAL; item moves from READY to IN_PROGRESS because real work has demonstrably started, not because either criterion is met."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/305",
+          "note": "First criterion, partial: read-only /contracts list and detail (EXP-004 slice 4). Supersedes the 2026-10-15 note that no contract screen exists. Merge commit 007bafb, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/309",
+          "note": "Read-only /suppliers directory and detail (slice 5). Merge commit ee33de5, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/332",
+          "note": "Contract statements on /contracts/[id]: read, draft, submit, decide. Merge commit 2979512, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/341",
+          "note": "Test fix: the contract statements spec gets room for its axe runs (main was red). Merge commit 2f456db, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/342",
+          "note": "Sign, cancel, amend and plan milestones on /contracts/[id]. Merge commit c505f84, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/344",
+          "note": "A contractor's own bid on /tenders/[id]: submit, replace, withdraw. Merge commit f74d23f, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/345",
+          "note": "The owner's side of a tender on /tenders/[id]: publish, close, open. Merge commit e20b240, merged 2026-10-18."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/346",
+          "note": "Evaluate and award a tender on /tenders/[id]. Merge commit a6ccde0, merged 2026-10-18."
+        }
+      ]
     },
     {
       "id": "EXP-005",
@@ -975,14 +1474,30 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Analytics projections are event-driven and tenant-safe",
         "Governance views are aggregate-only and missing baselines report INSUFFICIENT_BASELINE"
       ],
       "dependencies": ["COM-009"],
       "sourceRefs": ["docs/04-service-decomposition.md#analytics-service-p1"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/335",
+          "note": "Step 0, design only: ADR-071 analytics-service boundary and governed views. Merge commit 2a019b4, merged 2026-10-22."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/337",
+          "note": "PR 1, first criterion, partial: analytics-service skeleton and the first event-driven, tenant-safe projection (fact_maintenance from MAINTENANCE_COMPLETED). The governed-views criterion is not yet delivered. Merge commit ddf0b95, merged 2026-10-22."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/355",
+          "note": "CI: the analytics coverage gate (75% threshold) runs in integration-coverage. Merge commit e83929e, merged 2026-10-23."
+        }
+      ]
     },
     {
       "id": "RUN-002",
@@ -991,14 +1506,45 @@
       "scope": "MVP",
       "priority": "P2",
       "points": 21,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "A reproducible staging deployment uses default-deny network policy",
         "Secrets, migrations, image provenance and rollback are operationally verified"
       ],
       "dependencies": ["PLAT-004"],
       "sourceRefs": ["docs/12-deployment-architecture.md"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/176",
+          "note": "Second criterion, partial (secrets): D-045 PR A splits each service's database owner role from its runtime role, built as a shared mechanism (lib/service-privilege-split.bash) plus construction-service. Merge commit a6adac6, merged 2026-10-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/177",
+          "note": "D-045 PR B: splits identity-service and notification-service from their database owners. Merge commit ef38818, merged 2026-10-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/178",
+          "note": "D-045 PR C: splits the remaining services (economic aside) from their database owners. Merge commit 71bac91, merged 2026-10-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/180",
+          "note": "D-045 PR D: splits the economic-service runtime role from its migrator, closing the last service. scripts/check-db-runtime-privileges.mjs fails CI if any split service's runtime role owns anything or holds TRIGGER/TRUNCATE/REFERENCES/CREATE; construction-service's runtime-privileges.int-spec.ts proves DISABLE TRIGGER, ALTER, DROP and TRUNCATE all fail with 42501 under the runtime role. Merge commit ac6fa60, merged 2026-10-02."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/191",
+          "note": "D-045 follow-up: keeps database credentials out of process arguments. Merge commit 8c88d2e, merged 2026-10-03."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/23-risks-and-tradeoffs.md",
+          "note": "D-045 is recorded as priority 'بالا (RUN-002)' and status 'رفع‌شده' (fixed) as of 2026-10-01. This is real progress on migration/secrets hardening, but is not the whole second criterion: no image provenance or signing step exists in .github/workflows/ci.yml (images are pinned by digest, not signed/attested), and no deployment-level rollback mechanism exists beyond per-service database migration rollback. The first criterion (a reproducible staging deployment with default-deny network policy) is NOT STARTED: no k8s/helm manifests or values-staging.yaml exist anywhere in the repository; docs/12-deployment-architecture.md only diagrams the planned staging environment. Item moves from READY to IN_PROGRESS on the strength of the second criterion's partial progress; neither criterion is fully met."
+        }
+      ]
     },
     {
       "id": "RUN-003",
@@ -1039,14 +1585,40 @@
       "scope": "MVP",
       "priority": "P2",
       "points": 13,
-      "status": "READY",
+      "status": "IN_PROGRESS",
       "acceptanceCriteria": [
         "Return request, reverse transport, inspection and disposition use explicit states",
         "Refund remains owned by economic-service and repeated events are idempotent"
       ],
       "dependencies": ["COM-006", "COM-001"],
       "sourceRefs": ["docs/adr/ADR-048-reverse-logistics-boundary.md"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/310",
+          "note": "PR 1 (ADR-048): marketplace ReturnRequest lifecycle REQUESTED to AUTHORIZED, REJECTED or CANCELLED. Merge commit be4df61, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/311",
+          "note": "PR 2a: inventory-service return shipments, IN_TRANSIT to RECEIVED. Merge commit 0c9cb6c, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/313",
+          "note": "PR 2b: inventory-service return inspection and disposition. Merge commit ece1ae6, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/323",
+          "note": "PR 3: marketplace mirrors the return shipment onto the return request, IN_TRANSIT to RESOLVED, idempotently from rasta.inventory.v1 events. Merge commit b294b2f, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/339",
+          "note": "Fix: the return request is verified before dispatch, and no cancellation once dispatch is reserved. Merge commit a0c3162, merged 2026-10-22."
+        }
+      ]
     },
     {
       "id": "RUN-006",
@@ -1055,7 +1627,7 @@
       "scope": "MVP",
       "priority": "P1",
       "points": 8,
-      "status": "READY",
+      "status": "ACCEPTED",
       "acceptanceCriteria": [
         "Every service authenticates to Kafka with its own SASL/SCRAM-SHA-512 principal over TLS, and allow.everyone.if.no.acl.found is false",
         "WRITE on each topic is granted only to the principals ADR-061's TOPIC_PRODUCERS names for it, and READ only to declared consumer groups",
@@ -1066,7 +1638,33 @@
       ],
       "dependencies": [],
       "sourceRefs": ["docs/adr/ADR-061-event-provenance.md"],
-      "evidence": []
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/128",
+          "note": "RUN-006 PR A: TOPIC_CONSUMERS declarations and a shared SASL/TLS Kafka connection. packages/nest-common/src/kafka/connection.ts refuses to connect without SASL and TLS unless KAFKA_ALLOW_PLAINTEXT is explicitly set; packages/contracts/src/events/topic-consumers.repo.spec.ts verifies every EventConsumer matches its declared topic. Merge commit be4086c, merged 2026-09-28."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/131",
+          "note": "RUN-006 PR B: the broker runs with StandardAuthorizer and allow.everyone.if.no.acl.found=false; ACLs are generated from TOPIC_PRODUCERS/TOPIC_CONSUMERS (packages/contracts/src/events/broker-acls.ts) and checked for drift against committed broker-acls.*.json/principals.*.txt; consumer groups are prefixed per service; only ops-replay writes .retry topics and reads dead-letter topics; .github/workflows/ci.yml starts the authenticated broker via infrastructure/docker/kafka/ci-up.sh for integration and E2E; the throwaway TLS CA is generated inside the Kafka image via keytool and never committed; pnpm infra:up applies the same ACLs in development. Merge commit a4afe72, merged 2026-09-29; checks verified green via `gh pr checks 131`."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/142",
+          "note": "Proves the broker live: scripts/kafka-acl.broker.test.mjs demonstrates supplier-service, economic-service and ops-replay each refused TOPIC_AUTHORIZATION_FAILED outside their own grants. Merge commit 7db0bcb, merged 2026-09-29."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/runbooks/kafka-credential-rotation.md",
+          "note": "A substantive rotation runbook exists (210 lines), cross-referenced from docs/23-risks-and-tradeoffs.md. connection.ts documents that staging, production and a forgotten environment variable all fail closed, satisfying the sixth criterion. All six RUN-006 acceptance criteria are checked and MET as of 2026-10-15; this is a candidate for the product owner's acceptance review. One residual noted honestly in docs/23 line ~924 (an accepted CI-only credential gap, reviewed in PR #131 round 2) does not bear on the stated criteria."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "https://github.com/marabi766/RASTA/pull/299",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-15, in the project-manager chat, on the criterion-by-criterion evidence recorded above. Independently verified by the Codex review of PR #299, round 1 (PR-299-r1), criterion by criterion: all six criteria — per-service SCRAM/TLS with a default-deny broker; producer and subscription ACLs; generated ACL drift checks, group namespaces and retry/DLQ ownership; broker rejection tests with authenticated CI wiring; the authenticated development compose/bootstrap; production startup failing closed, plus the rotation runbook — each with matching implementation and test paths. No limitation disclosed."
+        }
+      ]
     },
     {
       "id": "INS-001",
@@ -1823,6 +2421,91 @@
           "note": "Both migrations reversed up to down to up against a throwaway schema, including a data-rollback probe the empty-schema reversal cannot make: an INFECTED document with no quarantine record — which the init schema permitted — is seeded, the forward migration is applied over it, and it is asserted to come through quarantined rather than aborting halfway. Twelve invariant-carrying CHECK constraints verified present, gone and back."
         }
       ]
+    },
+    {
+      "id": "RLG-001",
+      "parentItemId": "RUN-005",
+      "title": "Physical reverse logistics: request, transport, inspection and disposition",
+      "userStory": {
+        "asA": "buyer or supplier organization with a completed order",
+        "iWant": "to request a return and follow the goods through authorization, reverse transport, inspection and disposition",
+        "soThat": "every returned item has an explicit, auditable physical outcome before any money question is decided"
+      },
+      "points": 8,
+      "status": "ACCEPTED",
+      "acceptanceCriteria": [
+        {
+          "given": "a COMPLETED marketplace order",
+          "when": "a return is requested, authorized or rejected, shipped, received, inspected and given a disposition",
+          "then": "marketplace-service and inventory-service move through explicit state machines, and disposition quantities are recorded per line"
+        },
+        {
+          "given": "the same inventory return event is delivered again, concurrently or out of order",
+          "when": "marketplace-service mirrors it onto the return request",
+          "then": "the mirror change and the processed marker commit together, so the event has exactly one effect"
+        }
+      ],
+      "dependencies": ["COM-006"],
+      "sourceRefs": ["docs/adr/ADR-048-reverse-logistics-boundary.md"],
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/310",
+          "note": "PR 1 (ADR-048): marketplace ReturnRequest lifecycle REQUESTED to AUTHORIZED, REJECTED or CANCELLED. Merge commit be4df61, merged 2026-10-16."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/311",
+          "note": "PR 2a: inventory-service return shipments, IN_TRANSIT to RECEIVED. Merge commit 0c9cb6c, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/313",
+          "note": "PR 2b: inventory-service return inspection and disposition. Merge commit ece1ae6, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/323",
+          "note": "PR 3: marketplace mirrors the return shipment onto the return request, IN_TRANSIT to RESOLVED, idempotently from rasta.inventory.v1 events. Merge commit b294b2f, merged 2026-10-17."
+        },
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/339",
+          "note": "Fix: the return request is verified before dispatch, and no cancellation once dispatch is reserved. Merge commit a0c3162, merged 2026-10-22."
+        },
+        {
+          "kind": "DOCUMENT",
+          "ref": "docs/24-open-questions.md",
+          "note": "ACCEPTED by the Product Owner (the repository owner), 2026-10-23, in the project-manager chat, on the PRs above and the Codex acceptance audit of 2026-10-23 (explicit request, transport, inspection and disposition states; idempotent mirror). Accepted with disclosed limitations: RESTOCK records a disposition without increasing stock and resolution needs configured allowed dispositions (Q-133); no refund is part of this story (RLG-002)."
+        }
+      ]
+    },
+    {
+      "id": "RLG-002",
+      "parentItemId": "RUN-005",
+      "title": "Economic-owned refund or correction for a resolved return",
+      "userStory": {
+        "asA": "buyer whose return was resolved in its favour",
+        "iWant": "economic-service to refund or correct the settled order",
+        "soThat": "money follows the physical outcome under one ledger owner, without the marketplace or inventory moving money"
+      },
+      "points": 5,
+      "status": "BLOCKED",
+      "acceptanceCriteria": [
+        {
+          "given": "a return resolved with a refundable disposition on a SETTLED order",
+          "when": "economic-service receives the confirmed outcome",
+          "then": "it applies the refund or correction defined by the Q-76 decision with balanced journals, and the order learns the result"
+        },
+        {
+          "given": "the same outcome event is delivered again or concurrently",
+          "when": "economic-service processes it",
+          "then": "exactly one refund or correction is recorded"
+        }
+      ],
+      "dependencies": ["RLG-001", "COM-001"],
+      "sourceRefs": ["docs/adr/ADR-048-reverse-logistics-boundary.md", "docs/24-open-questions.md"],
+      "evidence": []
     }
   ],
   "changeLog": [
@@ -1879,6 +2562,206 @@
       "recordedBy": "Claude Opus 5.5",
       "approvalRef": "Project manager acceptance of ADR-061, 2026-09-25 (PR #96)",
       "recordIds": ["RUN-006"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "STATUS_CORRECTED",
+      "reason": "COM-006 moves from READY to IN_PROGRESS. PR #246 built the inventory-service skeleton with a concurrency-safe stock and reservation core (ADR-056), and PR #257 added shipments and tracking visible through API and event rather than a shared database; PR #257's merge run (CI 38571985411) is green on main. Both acceptance criteria now have real, tested evidence; the item still earns zero points because it has not been reviewed and accepted by the product owner.",
+      "recordedBy": "Claude Sonnet 5",
+      "approvalRef": "Project manager task 001 (chore/backlog-evidence-sync), evidence-based backlog synchronization, 2026-10-15",
+      "recordIds": ["COM-006"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "STATUS_CORRECTED",
+      "reason": "COM-010 moves from READY to IN_PROGRESS. The policy registry (asset-service, commit 24afd12e, 2026-08-27) and its expiry events were never credited to this item; PR #108 hardened the expiry sweep and PR #71 built a tenant-safe claim history that explicitly disclaims insurer integration. The first acceptance criterion has real, tested evidence; the second is only partially evidenced, because a claim cannot yet carry or return documents (no document reference on the claim, refused at submission, absent from the claim read). This is a backlog-accuracy correction for pre-existing, previously uncredited work, not new scope. The item earns zero points pending claim documents and product-owner review.",
+      "recordedBy": "Claude Sonnet 5",
+      "approvalRef": "Project manager task 001 (chore/backlog-evidence-sync), evidence-based backlog synchronization, 2026-10-15",
+      "recordIds": ["COM-010"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "STATUS_CORRECTED",
+      "reason": "CON-001 moves from READY to IN_PROGRESS. PR #119 and #122 built explicit, version-checked state machines for projects, needs and progress reports, and configuration-only approval authorities with a platform approval gate and four-eyes enforcement; PR #148 closed a residual gap on organization moves. Both acceptance criteria now have real, tested evidence; the item still earns zero points pending product-owner review.",
+      "recordedBy": "Claude Sonnet 5",
+      "approvalRef": "Project manager task 001 (chore/backlog-evidence-sync), evidence-based backlog synchronization, 2026-10-15",
+      "recordIds": ["CON-001"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "STATUS_CORRECTED",
+      "reason": "CON-002 moves from READY to IN_PROGRESS. Twelve sequential PRs (#156-#227, #250, #255, #271, #272) built database-clock-enforced deadlines with a restart-safe close sweeper, a trigger-backed late-bid refusal, RSA/AES bid sealing, a tamper-evident opening chain checked against audit-service, and data-driven evaluation, each independently tested and audited (including closure of construction-service audit finding F1 on pre-opening bidder confidentiality). Both acceptance criteria now have real, tested evidence; the item still earns zero points pending product-owner review.",
+      "recordedBy": "Claude Sonnet 5",
+      "approvalRef": "Project manager task 001 (chore/backlog-evidence-sync), evidence-based backlog synchronization, 2026-10-15",
+      "recordIds": ["CON-002"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "STATUS_CORRECTED",
+      "reason": "CON-003 moves from READY to IN_PROGRESS. PR #228 built the contract-service boundary that creates a draft contract from TENDER_AWARDED only after an authenticated re-read confirms the event (ADR-061 §4), meeting the first acceptance criterion. The second criterion (separate technical/financial approval, consistent settlement) remains design-only per PR #228's own body and ADR-068 §5-6; no statement or settlement code exists. One of two criteria is met; the item earns zero points pending the remaining work and product-owner review.",
+      "recordedBy": "Claude Sonnet 5",
+      "approvalRef": "Project manager task 001 (chore/backlog-evidence-sync), evidence-based backlog synchronization, 2026-10-15",
+      "recordIds": ["CON-003"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "STATUS_CORRECTED",
+      "reason": "EXP-004 moves from READY to IN_PROGRESS. PRs #252, #262 and #269 built read-only /projects, /tenders and /inventory screens against real construction-service and inventory-service APIs. Both acceptance criteria remain only partially met: procurement, supplier and contract screens do not exist, and no EXP-004 surface has a live tenant-isolation E2E test yet. The item earns zero points pending the remaining work and product-owner review.",
+      "recordedBy": "Claude Sonnet 5",
+      "approvalRef": "Project manager task 001 (chore/backlog-evidence-sync), evidence-based backlog synchronization, 2026-10-15",
+      "recordIds": ["EXP-004"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "STATUS_CORRECTED",
+      "reason": "RUN-002 moves from READY to IN_PROGRESS. PRs #176, #177, #178, #180 and #191 (D-045) split every service's database runtime role from its owning/migrator role, closing a high-priority risk recorded in docs/23-risks-and-tradeoffs.md as fixed on 2026-10-01. This is real progress on the second criterion's secrets/migration half, but not image provenance or deployment rollback, and the first criterion (a reproducible staging deployment with default-deny network policy) remains entirely unbuilt. Neither criterion is fully met; the item earns zero points pending the remaining work and product-owner review.",
+      "recordedBy": "Claude Sonnet 5",
+      "approvalRef": "Project manager task 001 (chore/backlog-evidence-sync), evidence-based backlog synchronization, 2026-10-15",
+      "recordIds": ["RUN-002"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "STATUS_CORRECTED",
+      "reason": "RUN-006 moves from READY to IN_PROGRESS. PR #128 and #131 deliver the authenticated, per-topic-ACL Kafka broker in both CI and the development compose, with drift checking, group-prefix enforcement, dead-letter/retry ownership restricted to ops-replay, and a documented credential-rotation runbook; PR #142 proves the broker live by demonstrating a refused unauthorized write. All six acceptance criteria now have real, tested evidence; the item still earns zero points pending product-owner review.",
+      "recordedBy": "Claude Sonnet 5",
+      "approvalRef": "Project manager task 001 (chore/backlog-evidence-sync), evidence-based backlog synchronization, 2026-10-15",
+      "recordIds": ["RUN-006"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-006 (21 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #246, PR #257, CI 38571985411) and were independently verified in the Codex review of PR #299 round 1. Its dependency COM-005 remains IN_PROGRESS; the Product Owner accepted COM-006 on its own criteria.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-15, relayed to PR #299 by the project manager at 19:55 UTC",
+      "recordIds": ["COM-006"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "ITEM_ACCEPTED",
+      "reason": "CON-001 (21 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #119, #122, #148) and were independently verified in the Codex review of PR #299 round 1.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-15, relayed to PR #299 by the project manager at 19:55 UTC",
+      "recordIds": ["CON-001"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "ITEM_ACCEPTED",
+      "reason": "CON-002 (21 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #156-#227, #250, #255, #271, #272) and were independently verified in the Codex review of PR #299 round 1. Accepted with the disclosed limitation D-043: an operator holding both the KEK and database access can decrypt bids before opening, so cryptographic exclusion remains a production limitation.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-15, relayed to PR #299 by the project manager at 19:55 UTC",
+      "recordIds": ["CON-002"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "ITEM_ACCEPTED",
+      "reason": "EXP-002 (21 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #155-#225, the desktop and Pixel 5 accessibility and tenant-isolation suites) and were independently verified in the Codex review of PR #299 round 1. Accepted with the disclosed limitation of ADR-029: WORKSHOP self-service is deferred, and fleet managers record workshop work.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-15, relayed to PR #299 by the project manager at 19:55 UTC",
+      "recordIds": ["EXP-002"]
+    },
+    {
+      "date": "2026-10-15",
+      "type": "ITEM_ACCEPTED",
+      "reason": "RUN-006 (8 SP) moves from IN_PROGRESS to ACCEPTED. All six acceptance criteria are met on the recorded evidence (PR #128, #131, #142) and were independently verified in the Codex review of PR #299 round 1.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-15, relayed to PR #299 by the project manager at 19:55 UTC",
+      "recordIds": ["RUN-006"]
+    },
+    {
+      "date": "2026-10-16",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-010 (13 SP) moves from IN_PROGRESS to ACCEPTED. Criterion 1 was verified in the Codex review of PR #299 round 1; criterion 2 (claim documents) was delivered by PR #304 (merge 9e51a772, main CI 38866096623 green) and reviewed by Codex in three rounds. Its dependency COM-008 remains IN_PROGRESS; the Product Owner accepted COM-010 on its own criteria, with the Q-128 deletion-window limitation disclosed.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-16",
+      "recordIds": ["COM-010"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "STATUS_CORRECTED",
+      "reason": "COM-007 moves from READY to IN_PROGRESS. Merged PRs #300, #327, #338, #348, #333, #330, #349 are recorded as evidence. ADR-070 plan PRs 1-6 are merged; evaluation and purchase-order issuance are not. No acceptance is claimed: the item earns zero points until the Product Owner accepts it.",
+      "recordedBy": "Claude Sonnet 5.5",
+      "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
+      "recordIds": ["COM-007"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "STATUS_CORRECTED",
+      "reason": "COM-011 moves from READY to IN_PROGRESS. Merged PRs #307, #308 are recorded as evidence. Both PRs of the ADR-045 plan are merged. No acceptance is claimed: the item earns zero points until the Product Owner accepts it.",
+      "recordedBy": "Claude Sonnet 5.5",
+      "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
+      "recordIds": ["COM-011"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "STATUS_CORRECTED",
+      "reason": "COM-012 moves from READY to IN_PROGRESS. Merged PRs #328, #331 are recorded as evidence. Both PRs of the ADR-047 plan are merged (criterion 1 and criterion 2). No acceptance is claimed: the item earns zero points until the Product Owner accepts it.",
+      "recordedBy": "Claude Sonnet 5.5",
+      "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
+      "recordIds": ["COM-012"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "STATUS_CORRECTED",
+      "reason": "RUN-001 moves from READY to IN_PROGRESS. Merged PRs #335, #337, #355 are recorded as evidence. Only PR 1 (criterion 1, first projection) of the ADR-071 plan is merged. No acceptance is claimed: the item earns zero points until the Product Owner accepts it.",
+      "recordedBy": "Claude Sonnet 5.5",
+      "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
+      "recordIds": ["RUN-001"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "STATUS_CORRECTED",
+      "reason": "RUN-005 moves from READY to IN_PROGRESS. Merged PRs #310, #311, #313, #323, #339 are recorded as evidence. PRs 1-3 are merged; the plan keeps refund in economic-service and no refund operation is part of this stack, so the second criterion's refund half is not evidenced here. No acceptance is claimed: the item earns zero points until the Product Owner accepts it.",
+      "recordedBy": "Claude Sonnet 5.5",
+      "approvalRef": "Project manager task 191 (docs/backlog-evidence-sync-2), evidence sync, owner approval 2026-10-23",
+      "recordIds": ["RUN-005"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-011 (8 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #307, #308). Accepted with disclosed limitations: per-line wiring of the source services waits on Q-130 (today only maintenance sends its line), and the Q-29 fail-closed and Q-08 0% pilot rule decisions of 2026-10-23 are follow-up work.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["COM-011"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-012 (13 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence (PR #328, #331). Accepted with the disclosed limitation that the level and badge basis follows the Q-140 temporary decision.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["COM-012"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "EXP-003 (21 SP) moves from IN_PROGRESS to ACCEPTED. Both acceptance criteria are met on the recorded evidence and the Codex acceptance audit of 2026-10-23. Accepted with disclosed limitations: simulated finance only, and the Q-14 demo-mode label on every money screen is follow-up work (PR #361).",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["EXP-003"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_DECOMPOSED",
+      "reason": "RUN-005 (13 SP, unchanged) is decomposed into RLG-001 physical reverse logistics (8 SP) and RLG-002 economic-owned refund (5 SP). The refund half of the second criterion is deliberately unbuilt until Q-76 is answered; the split keeps it visible as its own BLOCKED story instead of holding the delivered physical workflow at zero. No scope or estimate change.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) decision in the project-manager chat, 2026-10-23, on the PM recommendation after the Codex acceptance audit",
+      "recordIds": ["RUN-005", "RLG-001", "RLG-002"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "RLG-001 (8 SP) is ACCEPTED: explicit request, transport, inspection and disposition states and idempotent event mirroring are met on PR #310, #311, #313, #323, #339 and the Codex acceptance audit of 2026-10-23. Limitations: RESTOCK does not increase stock (Q-133); refund is RLG-002, blocked on Q-76.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["RLG-001"]
+    },
+    {
+      "date": "2026-10-23",
+      "type": "ITEM_ACCEPTED",
+      "reason": "COM-008 (13 SP) is ACCEPTED: idempotent in-app notifications and preference-aware email with recorded delivery outcome, proven in CI against a real Mailpit after PR #365. Limitations: development-only email until Q-37, three rules, at-least-once SMTP, no per-channel circuit breaker, rate limit or template diagnostics.",
+      "recordedBy": "Claude Opus 5.5",
+      "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
+      "recordIds": ["COM-008"]
     }
   ]
 }

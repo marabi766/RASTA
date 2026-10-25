@@ -279,6 +279,7 @@ model Order {
   history      OrderStatusHistory[]
   disputes     OrderDispute[]
   review       Review?
+  sagaSteps    SagaStep[]
 
   @@index([organizationId, status], map: "ix_order_org_status")
   @@index([supplierOrganizationId, status], map: "ix_order_supplier_status")
@@ -378,6 +379,41 @@ model OrderStatusHistory {
   @@map("order_status_history")
 }
 
+/// One row per saga activity that took effect (`docs/23` D-053).
+///
+/// Temporal retries an activity whose completion it never recorded — a worker
+/// that died or shut down after the commit, a lost response. By then a party
+/// may have moved the order on, so "is the order already where this step
+/// sends it" no longer recognises the step's own work: the retry used to be
+/// refused as a business rule, and the saga failed with the buyer's money
+/// held. The row is written in the step's own transaction and keyed by the
+/// identity Temporal keeps across retries of one scheduled activity, so a
+/// retry finds it and answers what the first attempt answered.
+model SagaStep {
+  organizationId String @map("organization_id")
+
+  orderId String @map("order_id")
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// `<workflowId>/<runId>/<activityId>`: one scheduled activity, every attempt.
+  stepKey String @map("step_key")
+
+  /// The activity that wrote it. A key answering for another activity is a
+  /// broken invariant, never a replay.
+  activity String
+
+  /// What the step returned, replayed verbatim to a retry. Null for a step
+  /// that returns nothing.
+  result Json?
+
+  /// TIMESTAMPTZ, as every new instant column (D-048).
+  appliedAt DateTime @default(now()) @map("applied_at") @db.Timestamptz(3)
+
+  @@id([organizationId, orderId, stepKey], map: "saga_step_pkey")
+  @@index([orderId], map: "ix_saga_step_order")
+  @@map("saga_step")
+}
+
 model OrderDispute {
   id String @id
 
@@ -407,6 +443,161 @@ model OrderDispute {
   @@index([orderId], map: "ix_dispute_order")
   @@index([organizationId, status], map: "ix_dispute_org_status")
   @@map("order_dispute")
+}
+
+/// The buyer's request to return goods of a completed order, and the supplier's decision about it
+/// (RUN-005, ADR-048). Marketplace's half of reverse logistics: the physical half is
+/// inventory-service's and every Hold, Refund and Reversal is economic-service's.
+///
+/// Tenant-scoped to the **buyer**, as `Order` is; the supplier reads and decides across the guard
+/// with a written reason, in `access.ts`. No Prisma relation to `Order`: the foreign key, the
+/// lifecycle trigger and the history check live in the migration SQL, and the repository reads the
+/// order itself, under its lock.
+///
+/// `status` is text with a CHECK, not an enum — the physical states widen it reversibly. The
+/// lifecycle is `REQUESTED → AUTHORIZED | REJECTED | CANCELLED`, and `AUTHORIZED → CANCELLED`.
+model ReturnRequest {
+  /// `RET_<ULID>`.
+  id String @id
+
+  /// The **buyer** — the tenant.
+  organizationId         String @map("organization_id")
+  supplierOrganizationId String @map("supplier_organization_id")
+  orderId                String @map("order_id")
+
+  status  String @default("REQUESTED")
+  /// One per status reached; the number of history rows.
+  version Int    @default(1)
+
+  /// Free text from the buyer, shown to the supplier; never on an event.
+  reason String
+
+  /// SHA-256 of route + Idempotency-Key; never the raw key (S-09).
+  commandKeyHash String @map("command_key_hash")
+
+  requestedAt            DateTime @map("requested_at") @db.Timestamptz(3)
+  requestedBy            String   @map("requested_by")
+  requestedCorrelationId String   @map("requested_correlation_id")
+
+  authorizedAt DateTime? @map("authorized_at") @db.Timestamptz(3)
+  authorizedBy String?   @map("authorized_by")
+  rejectedAt   DateTime? @map("rejected_at") @db.Timestamptz(3)
+  rejectedBy   String?   @map("rejected_by")
+  cancelledAt  DateTime? @map("cancelled_at") @db.Timestamptz(3)
+  cancelledBy  String?   @map("cancelled_by")
+  /// `REQUESTED` or `AUTHORIZED`: where a cancellation left from.
+  cancelledFrom String? @map("cancelled_from")
+
+  /// The physical half, mirrored from inventory-service's `RETURN_SHIPMENT_*` events once checked
+  /// against this request (RUN-005 PR 3). `RSP_<ULID>`: the shipment in inventory-service.
+  returnShipmentId           String?   @map("return_shipment_id")
+  /// When inventory-service says each step happened — its facts, not this service's clock.
+  inTransitAt                DateTime? @map("in_transit_at") @db.Timestamptz(3)
+  receivedAt                 DateTime? @map("received_at") @db.Timestamptz(3)
+  inspectedAt                DateTime? @map("inspected_at") @db.Timestamptz(3)
+  /// `DOC_<ULID>` in document-service, or null: the inspection report, named by id only.
+  inspectionReportDocumentId String?   @map("inspection_report_document_id")
+  resolvedAt                 DateTime? @map("resolved_at") @db.Timestamptz(3)
+
+  /// inventory-service reserved the dispatch of this AUTHORIZED request before recording its
+  /// shipment (Q-133 (5)): from then on the buyer cannot cancel it. Never changed while it stands;
+  /// cleared only beside a `ReturnDispatchRelease` (Q-133 (9)(a)). `RDR_<ULID>`, never reused.
+  dispatchReservationId         String?   @map("dispatch_reservation_id")
+  dispatchReservedAt            DateTime? @map("dispatch_reserved_at") @db.Timestamptz(3)
+  /// The service whose authenticated token reserved it.
+  dispatchReservedBy            String?   @map("dispatch_reserved_by")
+  dispatchReservedCorrelationId String?   @map("dispatch_reserved_correlation_id")
+
+  updatedAt DateTime @map("updated_at") @db.Timestamptz(3)
+
+  lines    ReturnLine[]
+  history  ReturnStatusHistory[]
+  releases ReturnDispatchRelease[]
+
+  @@unique([organizationId, commandKeyHash], map: "ux_return_request_command")
+  @@unique([organizationId, returnShipmentId], map: "ux_return_request_shipment")
+  @@index([organizationId, status, id], map: "ix_return_request_org_status")
+  @@index([organizationId, orderId, id], map: "ix_return_request_order")
+  @@index([supplierOrganizationId, id], map: "ix_return_request_supplier")
+  @@map("return_request")
+}
+
+/// One order line being returned, and how many of it. Written with the request, never changed.
+model ReturnLine {
+  /// `RTL_<ULID>`.
+  id String @id
+
+  organizationId  String @map("organization_id")
+  returnRequestId String @map("return_request_id")
+  returnRequest   ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Restrict)
+
+  orderLineId String @map("order_line_id")
+  /// Copied from the order line (the trigger checks it); what the supplier is asked to take back.
+  productId   String @map("product_id")
+  quantity    Int
+
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, returnRequestId, orderLineId], map: "ux_return_line_order_line")
+  @@index([orderLineId], map: "ix_return_line_order_line")
+  @@map("return_line")
+}
+
+/// Append-only: one row per status a request reached, in the order it reached them.
+model ReturnStatusHistory {
+  /// `RSH_<ULID>`.
+  id String @id
+
+  organizationId  String        @map("organization_id")
+  returnRequestId String        @map("return_request_id")
+  returnRequest   ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Restrict)
+
+  fromStatus String? @map("from_status")
+  toStatus   String  @map("to_status")
+  version    Int
+
+  actorId        String @map("actor_id")
+  correlationId  String @map("correlation_id")
+  commandKeyHash String @map("command_key_hash")
+
+  occurredAt DateTime @map("occurred_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, returnRequestId, version], map: "ux_return_history_version")
+  @@unique([organizationId, commandKeyHash], map: "ux_return_history_command")
+  @@map("return_status_history")
+}
+
+/// Append-only: one reconciliation with inventory-service that released one dispatch reservation
+/// (Q-133 (9)(a)). Inventory first recorded the reservation as withdrawn — so a delayed dispatch
+/// carrying it is refused there — and only then was it cleared from the request, beside this row.
+model ReturnDispatchRelease {
+  /// `RDL_<ULID>`.
+  id String @id
+
+  /// The buyer — the request's tenant.
+  organizationId  String        @map("organization_id")
+  returnRequestId String        @map("return_request_id")
+  returnRequest   ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Restrict)
+
+  /// The reservation cleared, as the request held it.
+  reservationId         String   @map("reservation_id")
+  reservedAt            DateTime @map("reserved_at") @db.Timestamptz(3)
+  reservedBy            String   @map("reserved_by")
+  reservedCorrelationId String   @map("reserved_correlation_id")
+
+  /// inventory-service's answer: when it recorded the reservation as withdrawn.
+  withdrawnAt DateTime @map("withdrawn_at") @db.Timestamptz(3)
+
+  releasedAt            DateTime @map("released_at") @db.Timestamptz(3)
+  releasedBy            String   @map("released_by")
+  releasedCorrelationId String   @map("released_correlation_id")
+  /// SHA-256 of route + request + Idempotency-Key; never the raw key (S-09).
+  commandKeyHash        String   @map("command_key_hash")
+
+  @@unique([organizationId, reservationId], map: "ux_return_dispatch_release_reservation")
+  @@unique([organizationId, commandKeyHash], map: "ux_return_dispatch_release_command")
+  @@index([organizationId, returnRequestId], map: "ix_return_dispatch_release_request")
+  @@map("return_dispatch_release")
 }
 
 model Review {

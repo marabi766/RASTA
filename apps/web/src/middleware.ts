@@ -3,6 +3,7 @@ import { webServerEnv } from '@/server/env';
 import { refuseBeforeBody } from '@/server/request-gate';
 import { renewSession, type SessionRenewal } from '@/server/session-refresh';
 import { SESSION_COOKIE, sessionCookieOptions } from '@/server/session';
+import { REFRESH_UNAVAILABLE, SESSION_STATE_HEADER } from '@/server/session-state';
 
 /**
  * Security headers on every response (docs/09 § 302-306, docs/16 § 356-368).
@@ -66,6 +67,14 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set('x-nonce', nonce);
   requestHeaders.set('Content-Security-Policy', csp);
+  // Only this file says why a session is missing (`session-state.ts`): never
+  // the browser. Every refused refresh is marked, whatever `usable` said: the
+  // token can run out between that judgement and the route's own check, and
+  // the route then finds no session — one that may still come back, not one
+  // that ended (PR 319 review 3, finding 2). Read only when a route finds no
+  // session, so a marked request that still has one is unaffected.
+  requestHeaders.delete(SESSION_STATE_HEADER);
+  if (renewal.kind === 'REFUSED') requestHeaders.set(SESSION_STATE_HEADER, REFRESH_UNAVAILABLE);
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   applyRenewal(response, renewal);
@@ -105,7 +114,9 @@ function refused(refusal: { status: number; code: string }): NextResponse {
  * A refused refresh (`REFUSED`) leaves the browser's cookie alone — another
  * replica may be sending back the rotated one right now — but a session whose
  * access token has already run out is hidden from *this* render, which then
- * treats the person as signed out. Hiding it matters beyond the page: `/login`
+ * treats the person as signed out — marked, for the routes that must tell this
+ * apart from an ended session, as "refresh unavailable" (`session-state.ts`).
+ * Hiding it matters beyond the page: `/login`
  * sends anybody with an openable session to `/`, and `/` sends an expired one
  * back to `/login`, so leaving it visible would loop.
  *

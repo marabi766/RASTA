@@ -5,7 +5,10 @@ import {
   booleanEnv,
   databaseEnvSchema,
   kafkaEnvSchema,
+  kafkaSaslConfigured,
   loadEnv,
+  outboxPurgeEnvSchema,
+  PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
 } from '@rasta/config';
 import { marketplaceOperationBudgets } from './operation-budgets';
 
@@ -17,9 +20,15 @@ import { marketplaceOperationBudgets } from './operation-budgets';
  * defaults come from `docs/08` § 8.4, which labels them ASSUMPTION in the
  * document itself (AGENTS.md § 9).
  */
+/** Half the transaction the hierarchy question is asked in (`MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS`). */
+export const ORGANIZATION_REQUEST_CEILING_MS = Math.floor(
+  PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS / 2,
+);
+
 export const marketplaceEnvSchema = baseEnvSchema
   .merge(databaseEnvSchema)
   .merge(kafkaEnvSchema)
+  .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
     CORS_ORIGINS: z.string().default(''),
@@ -32,6 +41,46 @@ export const marketplaceEnvSchema = baseEnvSchema
      * and Temporal retries it.
      */
     ECONOMIC_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(500).max(60_000).default(10_000),
+
+    /**
+     * Where a union administrator's subtree is confirmed before it decides a
+     * dispute (docs/24 Q-136): organization-service, the owner of the
+     * hierarchy (A-13), asked as economic-service asks it.
+     */
+    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+
+    /**
+     * How long that question may take, body included. It is asked under the
+     * order's row lock, inside a transaction with Prisma's default budget
+     * (`PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS`, 5 s), so the ceiling keeps it
+     * at half of that; no answer in time refuses the decision with 504 and
+     * nothing is written (fail closed).
+     */
+    MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(ORGANIZATION_REQUEST_CEILING_MS)
+      .default(2_000),
+
+    /**
+     * The owner of a return's goods (ADR-048 § 2, A-13), asked before an AUTHORIZED return is
+     * cancelled whether a shipment exists for it, and asked to withdraw a dispatch reservation
+     * when one is reconciled (Q-133 (9)(a)).
+     */
+    INVENTORY_SERVICE_URL: z.string().url().default('http://localhost:3109'),
+
+    /**
+     * How long that question may take, body included. Asked before the command's transaction,
+     * never inside it; no answer in time refuses the cancellation or reconciliation with 504 and
+     * nothing is written (fail closed).
+     */
+    MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(30_000)
+      .default(2_000),
 
     // ---- Temporal ---------------------------------------------------------
 
@@ -73,6 +122,34 @@ export const marketplaceEnvSchema = baseEnvSchema
      * confirmation would release money without the buyer's explicit consent.
      */
     MARKETPLACE_RECEIPT_WINDOW_DAYS: z.coerce.number().int().min(1).max(365).default(3),
+
+    /**
+     * Days after an order COMPLETED within which its buyer may ask to return goods (RUN-005,
+     * ADR-048, Q-132). **Unset by default, and then returns are refused**: the window is a
+     * business fact the product document does not give (Q-33), so no number is invented and a
+     * deployment opts in with the one its operations decided. Counted from the order's
+     * `completedAt`; a request is judged against it when it is made, not when it is decided.
+     */
+    MARKETPLACE_RETURN_WINDOW_DAYS: z.coerce.number().int().min(1).max(730).optional(),
+
+    /**
+     * The return mirror (RUN-005 PR 3): consumes inventory-service's `RETURN_SHIPMENT_*` events
+     * and moves the buyer's request through IN_TRANSIT … RESOLVED. **Off by default, and it fails
+     * closed**: a supplier-tenant event moves a buyer-tenant request, so it may run only where the
+     * broker authenticates who publishes on `rasta.inventory.v1` (ADR-061 § 3, RUN-006) — the
+     * same gate as supplier-service's performance consumer. Turning it on anywhere else is refused
+     * at startup (`assertReturnMirrorMayStart`).
+     */
+    MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED: booleanEnv(false),
+
+    /**
+     * Whether a return shipment may carry only part of what was authorized (Q-133 (8), RUN-005
+     * PR 3). **`false` by default**: the shipment must name every line of the request with exactly
+     * the quantity authorized — fewer arriving is said by the receipt, not by the dispatch (Q-133
+     * (4)). `true` lets it name a subset of the lines, each at most what was authorized. A line
+     * the request does not return, or more than it authorized, is refused either way.
+     */
+    MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED: booleanEnv(false),
 
     /** How often a reminder is recorded once a window has elapsed. */
     MARKETPLACE_REMINDER_INTERVAL_DAYS: z.coerce.number().int().min(1).max(90).default(3),
@@ -126,7 +203,7 @@ export const marketplaceEnvSchema = baseEnvSchema
 export type MarketplaceEnv = z.infer<typeof marketplaceEnvSchema>;
 
 export function loadMarketplaceEnv(source: NodeJS.ProcessEnv = process.env): MarketplaceEnv {
-  return loadEnv(
+  const env = loadEnv(
     marketplaceEnvSchema,
     {
       ...source,
@@ -139,6 +216,49 @@ export function loadMarketplaceEnv(source: NodeJS.ProcessEnv = process.env): Mar
     },
     { operationBudgets: marketplaceOperationBudgets },
   );
+  assertReturnMirrorMayStart(env);
+  return env;
+}
+
+/**
+ * Whether this service's Kafka client authenticates to the broker as itself — its SASL
+ * credential, over TLS, without the development PLAINTEXT opt-out — so that the broker, not the
+ * envelope, says who published what it reads (ADR-061 § 3). The rule supplier-service's
+ * performance consumer applies (`brokerConnectionIsAuthenticated` there).
+ */
+export function brokerConnectionIsAuthenticated(
+  env: Pick<
+    MarketplaceEnv,
+    | 'SERVICE_NAME'
+    | 'KAFKA_SASL_USERNAME'
+    | 'KAFKA_SASL_PASSWORD'
+    | 'KAFKA_SSL'
+    | 'KAFKA_ALLOW_PLAINTEXT'
+  >,
+): boolean {
+  return (
+    !env.KAFKA_ALLOW_PLAINTEXT &&
+    env.KAFKA_SSL &&
+    kafkaSaslConfigured(env) &&
+    env.KAFKA_SASL_USERNAME === env.SERVICE_NAME
+  );
+}
+
+/**
+ * Refuses to start with the return mirror enabled over a connection the broker does not
+ * authenticate. Without it, anyone who can reach the broker could publish on
+ * `rasta.inventory.v1` as inventory-service, in the supplier's name, and move a buyer's return
+ * request — so the flag is a gate, not a warning.
+ */
+export function assertReturnMirrorMayStart(env: MarketplaceEnv): void {
+  if (env.MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED && !brokerConnectionIsAuthenticated(env)) {
+    throw new Error(
+      'MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED=true is refused: the Kafka client does not ' +
+        'authenticate to the broker as this service (its SASL credential, KAFKA_SSL=true, and no ' +
+        'KAFKA_ALLOW_PLAINTEXT), so a return shipment event could be forged in any supplier’s ' +
+        'name (RUN-006, ADR-061 § 3).',
+    );
+  }
 }
 
 export function corsOrigins(env: MarketplaceEnv): string[] {

@@ -1,3 +1,5 @@
+import type { ProviderRefusal } from '@/lib/demo-mode';
+import type { SessionRefusal } from '@/lib/session-refusal';
 import type { UnconfirmedWriteState } from '@/lib/unconfirmed-write';
 import type { TopUpFormField, TopUpFormValues } from '@/lib/wallet-fields';
 
@@ -21,7 +23,10 @@ export type TopUpFormState =
       readonly fieldErrors: Partial<Record<TopUpFormField, string>>;
       readonly message: string | null;
     }
-  | { readonly kind: 'REFUSED'; readonly reason: 'NO_SESSION' | 'CSRF' | 'SUBMISSION' }
+  | {
+      readonly kind: 'REFUSED';
+      readonly reason: SessionRefusal | 'CSRF' | 'SUBMISSION' | ProviderRefusal;
+    }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   | { readonly kind: 'FAILED'; readonly status: number; readonly correlationId: string }
   | UnconfirmedWriteState;

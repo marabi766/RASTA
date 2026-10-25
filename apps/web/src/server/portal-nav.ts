@@ -3,23 +3,27 @@ import { canReadSettlements } from '@/app/portal-nav';
 import type { SidebarItem } from '@/ui';
 
 import { webServerEnv, type WebServerEnv } from './env';
-import { fetchCurrentUser, type CurrentUserResult } from './identity';
-import { requestRoles } from './realm-roles';
+import { tokenRoles } from './realm-roles';
+import { canReadReturns } from './returns';
 import type { WebSession } from './session';
 
 /**
  * Which navigation a signed-in person is shown.
  *
- * The entries that depend on the person are Projects and Tenders. Whether they
- * may read them is construction-service's decision and stays there: this only
- * decides whether to *draw the link*, from a setting that mirrors the
- * service's (`WEB_PROJECT_ROLES` / `WEB_PROJECT_READER_ROLES`, which must be
- * changed together with `CONSTRUCTION_PROJECT_ROLES` /
+ * The entries that depend on the person are Projects, Tenders and Contracts.
+ * Whether they may read them is the owning service's decision and stays
+ * there: this only decides whether to *draw the link*, from a setting that
+ * mirrors the service's (`WEB_PROJECT_ROLES` / `WEB_PROJECT_READER_ROLES`,
+ * which must be changed together with `CONSTRUCTION_PROJECT_ROLES` /
  * `CONSTRUCTION_PROJECT_READER_ROLES`). Tenders reuse those two settings for the
  * owner's side — the service gates tender reads by the same configured roles —
  * and add the bidder's side, whose `CONTRACTOR` role is fixed in the service.
- * A person who types `/projects` or `/tenders` anyway is given the service's
- * own answer.
+ * Contracts has its own setting for the employer's side
+ * (`WEB_CONTRACT_READER_ROLES`, mirroring contract-service's
+ * `CONTRACT_READER_ROLES`, ADR-068 § 7) and, like Tenders, adds the
+ * contractor's side on the fixed `CONTRACTOR` role. A person who types
+ * `/projects`, `/tenders` or `/contracts` anyway is given the service's own
+ * answer.
  */
 
 /** Always accepted by construction-service, so always shown the link. */
@@ -97,6 +101,45 @@ export function canReadTenders(
 }
 
 /**
+ * Which of contract-service's two doors (ADR-068 § 7) a person is worth
+ * *offering* the link for — the same shape as {@link tenderSidesFor}:
+ *
+ * - `employer` — `GET /v1/contracts` gated by `CONTRACT_READER_ROLES`, plus
+ *   `SYSTEM_ADMIN` always (it may act for an organization it selects) and
+ *   `AUDITOR` never;
+ * - `contractor` — the winning contractor's own organization, which needs the
+ *   fixed `CONTRACTOR` role and refuses `SYSTEM_ADMIN` and `AUDITOR` whenever
+ *   present, exactly like the tender bidder's side.
+ *
+ * A single `GET /v1/contracts` already returns a caller's contracts on
+ * whichever side it is a party to (the controller's own `PARTIES_NOTE`), so —
+ * unlike tenders — there is only one list and one detail route: no `?view=`
+ * is needed to choose between two different endpoints.
+ */
+export function contractSidesFor(
+  roles: readonly string[],
+  settings: Pick<WebServerEnv, 'WEB_CONTRACT_READER_ROLES'>,
+): { readonly employer: boolean; readonly contractor: boolean } {
+  return {
+    employer:
+      !roles.includes(NEVER_READS_PROJECTS) &&
+      (roles.includes(ALWAYS_READS_PROJECTS) ||
+        roles.some((role) => settings.WEB_CONTRACT_READER_ROLES.includes(role))),
+    contractor:
+      roles.includes(BIDDER_ROLE) && !BIDDER_EXCLUDED_ROLES.some((role) => roles.includes(role)),
+  };
+}
+
+/** Whether the Contracts link is worth drawing for these roles. */
+export function canReadContracts(
+  roles: readonly string[],
+  settings: Pick<WebServerEnv, 'WEB_CONTRACT_READER_ROLES'>,
+): boolean {
+  const sides = contractSidesFor(roles, settings);
+  return sides.employer || sides.contractor;
+}
+
+/**
  * Whether inventory-service would let these roles read, so the Inventory link
  * is worth drawing. Unlike projects, `SYSTEM_ADMIN` is not admitted: the
  * service refuses the platform administrator, and `AUDITOR`, whatever else the
@@ -115,27 +158,63 @@ export function canReadInventory(
 }
 
 /**
- * The navigation for a person, from the roles identity-service reports for the
- * organization they are acting in plus the global realm roles in their token
- * (`SYSTEM_ADMIN`), which is the set the backend services act on.
+ * Whether supplier-service would let these roles read `/v1/suppliers`, so the
+ * Suppliers link is worth drawing.
  *
- * An identity answer that is missing or unreadable hides the gated link: it is
- * only a convenience, and showing it on a guess is the mistake being fixed. The
- * page that called this renders its own identity outcome where it needs one.
+ * Unlike Projects and Inventory, this is not a setting: supplier-service's
+ * `DIRECTORY_ROLES` (`services/supplier-service/src/access/access.ts`) is a
+ * fixed export, not read from its own environment, so there is nothing here
+ * to make configurable either — mirroring a hard-coded list with another
+ * hard-coded list. This **mirrors that list exactly** and must change
+ * together with it: `SYSTEM_ADMIN`, `UNION_ADMIN` (`PLATFORM_ROLES`),
+ * `ORGANIZATION_ADMIN`, `SUPPLIER`, `WORKSHOP`, `CONTRACTOR`
+ * (`SUPPLIER_SIDE_ROLES`), plus `PROCUREMENT_USER` and `FLEET_MANAGER`.
+ *
+ * `AUDITOR` is refused first, whatever else the person holds: the service
+ * calls `assertNotAuditor()` before it looks at `DIRECTORY_ROLES`, so
+ * `AUDITOR` + `SUPPLIER` or `AUDITOR` + `SYSTEM_ADMIN` is a 403 there and no
+ * link here.
  */
-export async function loadPortalNav(
-  session: WebSession,
-  current?: CurrentUserResult,
-): Promise<readonly SidebarItem[]> {
-  const result = current ?? (await fetchCurrentUser(session));
-  // The realm claim is read only once identity answered: with no answer the gated
-  // links stay hidden, whatever the token says.
-  const roles =
-    result.kind === 'USER' ? requestRoles(result.user.effectiveRoles, session.accessToken) : [];
+const SUPPLIER_DIRECTORY_ROLES: readonly string[] = [
+  'SYSTEM_ADMIN',
+  'UNION_ADMIN',
+  'ORGANIZATION_ADMIN',
+  'SUPPLIER',
+  'WORKSHOP',
+  'CONTRACTOR',
+  'PROCUREMENT_USER',
+  'FLEET_MANAGER',
+];
+
+export function canReadSuppliers(roles: readonly string[]): boolean {
+  if (roles.includes('AUDITOR')) return false;
+  return roles.some((role) => SUPPLIER_DIRECTORY_ROLES.includes(role));
+}
+
+/**
+ * The navigation for a person, from the roles their access token carries for
+ * the organization it resolves to (`tokenRoles`): the set the backend services
+ * act on (`rolesForRequest`). Not `/v1/users/me`, whose membership rows run
+ * ahead of the token until it is refreshed — a role removed there still works
+ * and a role added is still refused, and a link drawn from the rows would
+ * disagree with the service's answer behind it.
+ *
+ * A token that cannot be read hides every gated link: they are only a
+ * convenience, and showing one on a guess is the mistake being fixed.
+ */
+export function portalNavForSession(
+  session: Pick<WebSession, 'accessToken'>,
+): readonly SidebarItem[] {
+  const read = tokenRoles(session.accessToken);
+  const roles = read ?? [];
+  const env = webServerEnv();
   return portalNavFor({
-    canReadProjects: canReadProjects(roles, webServerEnv()),
-    canReadTenders: canReadTenders(roles, webServerEnv()),
-    canReadSettlements: canReadSettlements(result.kind === 'USER' ? roles : null),
-    canReadInventory: canReadInventory(roles, webServerEnv()),
+    canReadProjects: canReadProjects(roles, env),
+    canReadTenders: canReadTenders(roles, env),
+    canReadContracts: canReadContracts(roles, env),
+    canReadSettlements: canReadSettlements(read),
+    canReadInventory: canReadInventory(roles, env),
+    canReadSuppliers: canReadSuppliers(roles),
+    canReadReturns: canReadReturns(read),
   });
 }

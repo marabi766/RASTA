@@ -296,6 +296,8 @@ Aggregate نیاز دارد، یا آن دو در واقع **یک** چرخه‌�
 > **دربارهٔ `aggregateVersion`:** این فیلد در Envelope **اختیاری** است و امروز فقط
 > سه محل تولیدی آن را می‌فرستند — `asset`، `identity` و `organization`. پنج سرویس
 > دیگر هرگز نمی‌فرستند، پس تکیه بر آن به‌عنوان ابزار عمومی ترتیب، امروز کار نمی‌کند.
+> در asset هم فقط `ASSET_UPDATED` آن را دارد (`asset.service.ts:463`)؛ مبنای ترتیب ترکیب ناوگان در analytics
+> `streamSeq` است (ADR-071 § ۳-الف).
 > ADR-051 نشان می‌دهد واحد درست هم `topic + partitionKey` است نه Aggregate، چون
 > `fleet`، `maintenance` و بخش تراکنشی `economic` عمداً رویدادهای چند Aggregate را
 > روی یک کلید می‌نشانند.
@@ -376,6 +378,7 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 | `INSURANCE_CLAIM_REVIEW_STARTED`      | asset (ماژول insurance) | audit · analytics                                                      |
 | `INSURANCE_CLAIM_DECIDED`             | asset (ماژول insurance) | **economic (مبلغ تأییدشده، بدون حرکت پول)** · notification · analytics |
 | `INSURANCE_CLAIM_SETTLEMENT_RECORDED` | asset (ماژول insurance) | economic · analytics — ثبت واقعیت تسویه، نه اجرای آن                   |
+| `INSURANCE_CLAIM_DOCUMENT_ATTACHED`   | asset (ماژول insurance) | audit · analytics — فقط شناسهٔ مدرک (Q-128)                            |
 
 ### Marketplace · Procurement · Supplier · Inventory
 
@@ -493,10 +496,21 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 | `REWARD_GRANTED`                         | economic | notification · analytics                            |
 | `REWARD_LEVEL_CHANGED`                   | economic | notification                                        |
 | `SETTLEMENT_COMPLETED`                   | economic | marketplace · supplier · notification               |
+| `SETTLEMENT_REFUSED`                     | economic | audit                                               |
 | `JOURNAL_POSTED`                         | economic | audit · analytics                                   |
 | `COMMISSION_RULE_CHANGED`                | economic | audit                                               |
 | `REWARD_RULE_CHANGED`                    | economic | audit                                               |
+| `PARTICIPATION_RULE_CHANGED`             | economic | audit                                               |
+| `RECOGNITION_RULE_CHANGED`               | economic | audit                                               |
 | `TRANSACTION_STATUS_CHANGED`             | economic | audit                                               |
+
+> **افزوده (2026-10-23).** `SETTLEMENT_REFUSED` رکورد Audit تسویه‌ای است که با `422 NO_ACTIVE_RULE` رد شد (docs/24
+> Q-29): هیچ چیز جابه‌جا نشده — هرچه تسویه تا آن لحظه نوشته بود تا Savepoint برمی‌گردد — و رکورد در **همان** تراکنش Commit
+> می‌شود، پیش از پاسخ `422`: ردی بی رکورد پاسخ داده نمی‌شود و نشدنِ نوشتنش `500` است که همان کلید دوباره می‌فرستد (بازبینی
+> #364 دور ۱، یافتهٔ ۲). یکی برای هر تلاشِ ردشده. `reason` فهرستی بسته است (امروز فقط `NO_ACTIVE_RULE`)؛ `transactionType` و
+> `businessLine` هم فهرست بسته‌اند و Payload `.strict()` است، بی مبلغ. audit-service آن را با نام خودش
+> (`action=SETTLEMENT_REFUSED`)، `outcome=REFUSED`، `reason` و خط و نوع در `changes` (بدون تغییر: `from` = `to`) نگه می‌دارد —
+> Projection اعتبارسنجی‌شده و فهرست‌سفید (`settlement-refusal-projection.ts`، یافتهٔ ۳).
 
 > **افزوده (2026-09-26).** `TRANSACTION_STATUS_CHANGED` رکورد Audit هر گام چرخهٔ
 > عمر تراکنش است که رویداد پولی خودش را ندارد: ثبت، ثبت تعهد از رویداد، تأیید
@@ -509,6 +523,17 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 > نمی‌کند — نرخ تازه یعنی قاعدهٔ تازه (`docs/10` § ۱۰٫۷) — پس رکورد `UPDATED` فقط
 > بستن، غیرفعال‌کردن یا برچسب را نشان می‌دهد. پیاده‌سازی و تست در همان تاریخ؛
 > زنده‌بودنِ آن روی Broker با اجرای CI سنجیده می‌شود، نه با این سند.
+
+> **افزوده (2026-10-16، COM-012).** `PARTICIPATION_RULE_CHANGED` رکورد Audit ساخت هر نسخهٔ
+> قاعدهٔ امتیاز مشارکت (ADR-047، Q-139) است: چه کسی، کِی، و شرایط نسخهٔ جایگزین‌شده (`before`)
+> و نسخهٔ تازه (`after`). نسخه هرگز ویرایش نمی‌شود، پس `change` همیشه `CREATED` است.
+> `PARTICIPATION_SCORE_UPDATED` (جدول هدف بالا) هنوز منتشر نمی‌شود: امتیاز هنگام خواندن از
+> واقعیت‌های تأییدشده و نسخهٔ جاری محاسبه می‌شود و رویداد «به‌روزرسانی» ندارد.
+
+> **افزوده (2026-10-17، COM-012 PR 2).** `RECOGNITION_RULE_CHANGED` رکورد Audit ساخت هر نسخهٔ
+> سطح و نشان (Q-140) است، به همان شکل: کنشگر، زمان، `before` (نسخهٔ جایگزین‌شده) و `after` — `basis`،
+> `levels[]` و `badges[]`. رسیدن یک شخص به سطح یا نشان **رویداد ندارد**: هنگام خواندن از مبنای نسخه محاسبه
+> می‌شود، چیزی به‌ازای شخص ذخیره نمی‌شود و هیچ اعلان یا جشنی در کار نیست (docs/10 § ۱۰٫۸).
 
 > **وضعیت (2026-08-29).** `economic` تولیدکننده واقعی است: هر یازده رویداد بالا
 > پیاده، تست قرارداد شده و روی `rasta.economic.v1` زنده مشاهده شده‌اند. مصرف

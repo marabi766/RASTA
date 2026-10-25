@@ -5,9 +5,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import {
   assertCallerIsConstructionService,
+  assertCallerMayReadStandingOf,
   assertCanBrowseDirectory,
   assertCanRegisterSupplier,
   assertSupplierReadable,
+  mayReadReviewerNote,
 } from '../access/access';
 import { transactionNow } from '../shared/clock';
 import { isUniqueViolation } from '../shared/prisma-errors';
@@ -115,7 +117,11 @@ export class SupplierService {
       throw RastaError.internal('The supplier profile disappeared immediately after creation');
     }
 
-    return toDetailView(created as unknown as SupplierRow);
+    // The registering organization is the supplier, so never a reviewer — and a
+    // new profile has no decision to carry a note anyway.
+    return toDetailView(created as unknown as SupplierRow, {
+      reviewer: mayReadReviewerNote(created),
+    });
   }
 
   /**
@@ -134,7 +140,9 @@ export class SupplierService {
 
     assertSupplierReadable(supplier);
 
-    return toDetailView(supplier as unknown as SupplierRow);
+    return toDetailView(supplier as unknown as SupplierRow, {
+      reviewer: mayReadReviewerNote(supplier),
+    });
   }
 
   /**
@@ -188,16 +196,19 @@ export class SupplierService {
   }
 
   /**
-   * One contractor's standing **now** (ADR-061 § 4): what construction-service asks
-   * at the moment it decides a bid. Authoritative where the read model it builds
+   * One organization's standing **now** (ADR-061 § 4): what construction-service asks
+   * at the moment it decides a bid, and procurement-service at an RFQ invitation or a
+   * quotation (ADR-070 § 7, with the GOODS_SUPPLY approval). Authoritative where the
+   * read model construction-service builds
    * from events and the snapshot is only advisory: a suspension committed here and
    * not yet relayed, or one whose event expired while construction-service was
    * down longer than the log keeps, is in this answer.
    */
   async standingOf(organizationId: string): Promise<StandingOf> {
-    assertCallerIsConstructionService();
+    assertCallerMayReadStandingOf();
 
-    const { asOf, row } = await this.repository.findStandingOf(organizationId);
+    const { asOf, row, goodsSupplyApprovedAt } =
+      await this.repository.findStandingOf(organizationId);
     return {
       organizationId,
       contractingApprovedAt: row?.qualifications[0]?.decidedAt?.toISOString() ?? null,
@@ -206,6 +217,7 @@ export class SupplierService {
         suspendedAt: episode.suspendedAt.toISOString(),
         reinstatedAt: episode.reinstatedAt?.toISOString() ?? null,
       })),
+      goodsSupplyApprovedAt: goodsSupplyApprovedAt?.toISOString() ?? null,
       asOf: asOf.toISOString(),
     };
   }

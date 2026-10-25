@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchDossier, type AssetSummary } from '@/server/assets';
+import { fetchDemoMode } from '@/server/demo-mode';
 import {
   canRecordAssetCompliance,
   fetchInspections,
@@ -33,7 +34,7 @@ import {
   type AssetLifecycleCommand,
 } from '@/lib/asset-lifecycle-fields';
 import type { WebSession } from '@/server/session';
-import { fetchCurrentUser } from '@/server/identity';
+import { tokenWriteRoles } from '@/server/realm-roles';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { readFlash } from '@/server/flash';
 import { mintSubmissionId } from '@/server/submission';
@@ -119,29 +120,33 @@ export default async function AssetDossierPage({
 
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/assets/${id}`)}`);
+  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  // the set the service decides on — not `/v1/users/me`, which runs ahead of the
+  // token until it is refreshed.
+  const roles = tokenWriteRoles(session.accessToken);
 
   // The server's clock, taken once: every record's "in force" on this page is
   // judged against this instant, here and not in the browser.
   const now = new Date();
 
-  const [result, currentUser, policies, inspections, availability, windows] = await Promise.all([
+  const [result, policies, inspections, availability, windows, demoMode] = await Promise.all([
     fetchDossier(session, id),
-    fetchCurrentUser(session),
     fetchInsurancePolicies(session, id),
     fetchInspections(session, id),
     fetchAvailability(session, id),
     fetchAvailabilityWindows(session, id),
+    fetchDemoMode(session),
   ]);
 
-  // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a failed identity
-  // read shows no form rather than one that might not work, and asset-service
+  // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a token whose roles
+  // cannot be read shows no form rather than one that might not work, and asset-service
   // decides again on every submit.
-  const manage = currentUser.kind === 'USER' && canManageAssets(currentUser.user.effectiveRoles);
+  const manage = roles !== null && canManageAssets(roles);
 
   const lifecycleSource =
-    currentUser.kind === 'USER' && result.kind === 'OK' && result.data.asset.version !== undefined
+    roles !== null && result.kind === 'OK' && result.data.asset.version !== undefined
       ? {
-          roles: currentUser.user.effectiveRoles,
+          roles: roles,
           asset: { ...result.data.asset, version: result.data.asset.version },
         }
       : null;
@@ -168,16 +173,16 @@ export default async function AssetDossierPage({
   // The record forms: a role asset-service admits for both POSTs, on a machine
   // that is still a live record. UX as everywhere — the service decides again.
   const recordForms =
-    currentUser.kind === 'USER' &&
-    canRecordAssetCompliance(currentUser.user.effectiveRoles) &&
+    roles !== null &&
+    canRecordAssetCompliance(roles) &&
     result.kind === 'OK' &&
     result.data.asset.status !== 'DECOMMISSIONED';
 
   // The attach form: a role asset-service admits for the POST, on a machine that
   // is still a live record. UX as everywhere — the service decides again.
   const documentForm =
-    currentUser.kind === 'USER' &&
-    canAttachAssetDocuments(currentUser.user.effectiveRoles) &&
+    roles !== null &&
+    canAttachAssetDocuments(roles) &&
     result.kind === 'OK' &&
     result.data.asset.status !== 'DECOMMISSIONED';
 
@@ -186,8 +191,8 @@ export default async function AssetDossierPage({
   // declaration for a machine its replica has not received is answered "not
   // found", which would read as the person's mistake.
   const availabilityForms =
-    currentUser.kind === 'USER' &&
-    canManageAvailability(currentUser.user.effectiveRoles) &&
+    roles !== null &&
+    canManageAvailability(roles) &&
     result.kind === 'OK' &&
     result.data.asset.status !== 'DECOMMISSIONED' &&
     availability.kind === 'OK' &&
@@ -205,11 +210,12 @@ export default async function AssetDossierPage({
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/assets" current={currentUser} />}
+      sidebar={<PortalSidebar session={session} currentHref="/assets" />}
     >
       <DossierScreen
         result={result}
         assetId={id}
+        demoMode={demoMode}
         notice={readFlash(
           session,
           typeof query[FLASH_PARAM] === 'string' ? query[FLASH_PARAM] : undefined,

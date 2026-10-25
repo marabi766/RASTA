@@ -1,13 +1,21 @@
 import { Injectable } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import type { Prisma, TransactionStatus, TransactionType } from '../generated/prisma';
+import type {
+  BusinessLine,
+  CommissionOutcome,
+  Prisma,
+  TransactionStatus,
+  TransactionType,
+} from '../generated/prisma';
 import { after, resolveCursor } from '../shared/cursor';
+import { STATEMENT_SOURCE_TYPE } from './dto';
 
 /** How a transaction list may be narrowed. */
 export interface TransactionFilter {
   status?: TransactionStatus;
   transactionType?: TransactionType;
+  sourceType?: string;
   sourceReference?: string;
   from?: Date;
   to?: Date;
@@ -102,6 +110,9 @@ export class TransactionRepository {
                  organization_id                 AS "organizationId",
                  counterparty_organization_id    AS "counterpartyOrganizationId",
                  transaction_type                AS "transactionType",
+                 business_line                   AS "businessLine",
+                 pricing_outcome                 AS "pricingOutcome",
+                 pricing_rule_id                 AS "pricingRuleId",
                  status,
                  gross_amount_minor              AS "grossAmountMinor",
                  commission_amount_minor         AS "commissionAmountMinor",
@@ -110,7 +121,8 @@ export class TransactionRepository {
                  occurred_at                     AS "occurredAt",
                  source_type                     AS "sourceType",
                  source_reference                AS "sourceReference",
-                 correlation_id                  AS "correlationId"
+                 correlation_id                  AS "correlationId",
+                 dispute_id                      AS "disputeId"
             FROM "transaction"
            WHERE id = ${id}
              FOR UPDATE
@@ -157,9 +169,10 @@ export class TransactionRepository {
    * because "the tenant guard let it through" is not an authorization decision
    * for a row that names two tenants.
    */
-  findByIdForParty(id: string) {
+  /** `client` is the caller's transaction when the read answers for what it just wrote. */
+  findByIdForParty(id: string, client: ExtendedPrismaClient = this.client) {
     return runUnscoped('a transaction is visible to both its payer and its payee', () =>
-      this.client.transaction.findUnique({
+      client.transaction.findUnique({
         where: { id },
         include: { legs: true, commission: true, settlement: true },
       }),
@@ -191,6 +204,56 @@ export class TransactionRepository {
     );
   }
 
+  /**
+   * One contract statement's obligation, as its payer holds it, with its
+   * settlement (ADR-068 § 6 (3)).
+   *
+   * Scoped, never `runUnscoped`: `organizationId` is the tenant signed into the
+   * caller's token, and the tenant guard injects the same one, so the
+   * predicate is stated where the query is read and enforced again below it.
+   * `ux_transaction_source_fact` makes this at most one row. Another payer's
+   * statement — the beneficiary asking about what it is owed included — is
+   * simply not found.
+   *
+   * ## One snapshot (review of #340 r1)
+   *
+   * The obligation and its settlement are two reads — Prisma loads an
+   * `include` with a query of its own, and this schema has no `relationJoins`
+   * — and under READ COMMITTED each would see its own moment. A settlement
+   * commits its row and the obligation's `SETTLED` together
+   * (`SettlementService`); landing between the two reads it would show a
+   * `PENDING_SETTLEMENT` obligation beside its settlement, a row that
+   * `fullySettledOf` rightly refuses as a defect — a 500 for a database that
+   * was consistent at every instant. REPEATABLE READ fixes the snapshot at the
+   * first read, so both see the same commit: before the settlement, or after
+   * it. READ ONLY because the read writes nothing, and it takes no row lock,
+   * so a settlement never waits on it. The two reads are written out rather
+   * than as an `include` so the second is a query of this service's own,
+   * scoped like the first (`settlement.organization_id` is the payer's), and
+   * `statement-obligation-read.int-spec.ts` can commit a settlement between
+   * them.
+   */
+  findStatementObligation(organizationId: string, statementId: string) {
+    return this.client.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+        const obligation = await tx.transaction.findFirst({
+          where: {
+            organizationId,
+            sourceType: STATEMENT_SOURCE_TYPE,
+            sourceReference: statementId,
+          },
+        });
+        if (!obligation) return null;
+        const settlement = await tx.settlement.findFirst({
+          where: { organizationId, transactionId: obligation.id },
+        });
+        return { ...obligation, settlement };
+      },
+      { isolationLevel: 'RepeatableRead' },
+    );
+  }
+
   async list(
     organizationId: string,
     filter: TransactionFilter,
@@ -198,6 +261,7 @@ export class TransactionRepository {
     const window: Prisma.TransactionWhereInput = {
       ...(filter.status ? { status: filter.status } : {}),
       ...(filter.transactionType ? { transactionType: filter.transactionType } : {}),
+      ...(filter.sourceType ? { sourceType: filter.sourceType } : {}),
       ...(filter.sourceReference ? { sourceReference: filter.sourceReference } : {}),
       ...(filter.from || filter.to
         ? {
@@ -264,6 +328,10 @@ export interface LockedTransaction {
   organizationId: string;
   counterpartyOrganizationId: string | null;
   transactionType: TransactionType;
+  businessLine: BusinessLine | null;
+  /** Recorded with the source fact; null on rows from before that (docs/23 D-057). */
+  pricingOutcome: CommissionOutcome | null;
+  pricingRuleId: string | null;
   status: TransactionStatus;
   grossAmountMinor: bigint;
   commissionAmountMinor: bigint;
@@ -273,6 +341,8 @@ export interface LockedTransaction {
   sourceType: string | null;
   sourceReference: string | null;
   correlationId: string;
+  /** The dispute it holds, or held last; null if never disputed. */
+  disputeId: string | null;
 }
 
 export interface TransactionRow {
@@ -280,6 +350,7 @@ export interface TransactionRow {
   organizationId: string;
   counterpartyOrganizationId: string | null;
   transactionType: string;
+  businessLine: string | null;
   status: string;
   grossAmountMinor: bigint;
   commissionAmountMinor: bigint;
@@ -289,7 +360,11 @@ export interface TransactionRow {
   sourceType: string | null;
   sourceReference: string | null;
   disputedAt: Date | null;
+  disputedBy: string | null;
   disputeReason: string | null;
+  disputeResolvedAt: Date | null;
+  disputeResolvedBy: string | null;
+  disputeResolution: string | null;
   settledAt: Date | null;
   failureReason: string | null;
   createdAt: Date;

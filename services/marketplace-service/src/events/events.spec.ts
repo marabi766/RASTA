@@ -21,9 +21,18 @@ import {
 const NAMES = Object.values(MARKETPLACE_EVENTS);
 
 describe('the catalogue', () => {
-  it('publishes the nine events docs/04 § 4.8 lists, ORDER_DISPUTE_RESOLVED (ADR-052 § 1-b) and the seven L7-14 audit records', () => {
+  it('publishes the nine events docs/04 § 4.8 lists, ORDER_DISPUTE_RESOLVED (ADR-052 § 1-b), the seven L7-14 audit records, the four return-request events (ADR-048), the four physical steps it mirrors (RUN-005 PR 3) and the release of a dispatch reservation (#339)', () => {
     expect([...NAMES].sort()).toEqual(
       [
+        'RETURN_REQUESTED',
+        'RETURN_AUTHORIZED',
+        'RETURN_REJECTED',
+        'RETURN_CANCELLED',
+        'RETURN_IN_TRANSIT',
+        'RETURN_RECEIVED',
+        'RETURN_INSPECTED',
+        'RETURN_RESOLVED',
+        'RETURN_DISPATCH_RELEASED',
         'PRODUCT_CREATED',
         'OFFER_DRAFTED',
         'OFFER_UPDATED',
@@ -358,8 +367,16 @@ describe('no payload carries personal or financial detail it should not', () => 
       Object.values(MARKETPLACE_EVENT_SCHEMAS).map((schema) => schema.description ?? ''),
     );
     // A shape assertion over the declared keys, not the descriptions.
+    // A schema refined across fields (RETURN_CANCELLED) is an effect wrapping the object.
+    const shapeOf = (schema: unknown): Record<string, unknown> => {
+      const object = schema as {
+        shape?: Record<string, unknown>;
+        _def: { schema?: unknown };
+      };
+      return object.shape ?? shapeOf(object._def.schema);
+    };
     const keys = Object.values(MARKETPLACE_EVENT_SCHEMAS).flatMap((schema) =>
-      Object.keys((schema as unknown as { shape: Record<string, unknown> }).shape),
+      Object.keys(shapeOf(schema)),
     );
 
     for (const forbidden of ['walletId', 'accountId', 'cardNumber', 'iban', 'nationalId']) {

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
+import { RETURN_DISPOSITIONS } from '@rasta/contracts';
 import {
   authEnvSchema,
   baseEnvSchema,
@@ -93,6 +94,23 @@ function roleList(name: string) {
  *                                       Default 20: a reservation of the most lines (50) then
  *                                       expires at most 1000 in one transaction, well inside
  *                                       its budget (about 15 ms each, measured locally).
+ *   INVENTORY_RETURN_DISPOSITIONS_ALLOWED
+ *                                       Q-133. Which of ADR-048's six dispositions (RESTOCK,
+ *                                       REPAIR, REPLACE, RETURN_TO_SUPPLIER, SCRAP, RECYCLE) a
+ *                                       return shipment may be resolved with. **Unset: none** —
+ *                                       a return can then be received and inspected but not
+ *                                       resolved.
+ *   INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED
+ *                                       Q-133 (4). Whether a return shipment of which nothing
+ *                                       arrived (every line received 0) may be resolved with no
+ *                                       disposition. **Unset: false** — it stays INSPECTED and
+ *                                       its resolution is refused by name. Never a way around
+ *                                       an empty INVENTORY_RETURN_DISPOSITIONS_ALLOWED.
+ *   MARKETPLACE_SERVICE_URL / INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS
+ *                                       Where the return request is read and its dispatch
+ *                                       reserved before a return shipment is recorded (A-13,
+ *                                       Q-133 (5)), and how long each exchange may take. Not a
+ *                                       business setting: nothing is recorded without an answer.
  *   INVENTORY_LOCK_TIMEOUT_MS          How long a command waits for a stock item another command
  *                                       holds before it answers 409 CONFLICT with Retry-After —
  *                                       never an unbounded wait (ADR-056 § 3).
@@ -145,7 +163,56 @@ export const inventoryEnvSchema = baseEnvSchema
     INVENTORY_RESERVATION_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
     INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
 
+    /**
+     * Q-133 (RUN-005, ADR-048 § 1): which dispositions a return shipment may be resolved with —
+     * a comma-separated subset of the six ADR-048 names. **Empty by default, and then no return
+     * shipment can be resolved**: whether a returned unit may be restocked, repaired, replaced,
+     * sent back to the supplier, scrapped or recycled "is configuration and follows the contract",
+     * and no such policy is decided. A deployment opts in with the outcomes its operations allow.
+     */
+    INVENTORY_RETURN_DISPOSITIONS_ALLOWED: commaList()
+      .pipe(
+        z.array(
+          z.enum(RETURN_DISPOSITIONS, {
+            errorMap: () => ({
+              message: `Unknown disposition in INVENTORY_RETURN_DISPOSITIONS_ALLOWED (${RETURN_DISPOSITIONS.join(', ')})`,
+            }),
+          }),
+        ),
+      )
+      .default(''),
+
+    /**
+     * Q-133 (4) (Codex r1 on #313): what a return shipment of which nothing arrived resolves to is
+     * not decided — closed with no outcome, or something ADR-048 does not name (a carrier claim, a
+     * loss). **False by default, and then such a shipment is not resolved** (`422
+     * NOTHING_RECEIVED_TO_RESOLVE`), rather than closed by a rule nobody made. True: it resolves
+     * with `dispositions: []`, and only while some disposition is allowed at all.
+     */
+    INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+
     INVENTORY_LOCK_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+
+    /**
+     * marketplace-service, which owns the return request (ADR-048 § 2). Before a return shipment
+     * is recorded, the request is read there and its dispatch reserved (A-13, ADR-061 § 4; Codex
+     * r1 on #336) — over REST with an internal token signed for the supplier, never its database.
+     */
+    MARKETPLACE_SERVICE_URL: z.string().url().default('http://localhost:3106'),
+    /**
+     * How long each of those two exchanges may take, body included. Both run before the
+     * command's transaction, never inside it; one that does not answer in time refuses the
+     * dispatch (504 UPSTREAM_TIMEOUT) and nothing is written.
+     */
+    INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(200)
+      .max(10_000)
+      .default(3000),
 
     INVENTORY_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
     INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce

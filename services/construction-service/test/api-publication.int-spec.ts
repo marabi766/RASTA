@@ -1,3 +1,4 @@
+import { ProcurementThresholdPolicy } from '../src/organization/procurement-threshold-policy';
 import request from 'supertest';
 import {
   reasonsOf,
@@ -67,6 +68,37 @@ describe('publication API', () => {
     return { id: created.body.id as string, version, token };
   }
 
+  it('returns documented 422 codes for procurement thresholds and missing estimates', async () => {
+    const a = org('threshold-422');
+    await activatePublicationPolicy(w, a);
+    const range = { minAmountMinor: '10', maxAmountMinor: '20', mode: 'REJECT' as const };
+    const source = api.app.get(ProcurementThresholdPolicy);
+    const get = jest.spyOn(source, 'get').mockResolvedValue({
+      id: 'POL-api-threshold',
+      value: { FORMAL_TENDER: range, INQUIRY: range, RFP: range, MARKETPLACE_DEAL: range },
+    });
+    try {
+      for (const [amount, code] of [
+        ['21', 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE'],
+        [undefined, 'PROCUREMENT_ESTIMATE_REQUIRED'],
+      ] as const) {
+        const tender = await tenderFor(
+          a,
+          amount === undefined ? {} : { estimatedCostMinor: amount },
+        );
+        const response = await http()
+          .post(`/v1/tenders/${tender.id}/publish`)
+          .set(as(tender.token))
+          .send({ expectedVersion: tender.version });
+        expect(response.status).toBe(422);
+        expect(response.body.code).toBe('BUSINESS_RULE_VIOLATION');
+        expect(reasonsOf(response.body)).toEqual([`publication:${code}`]);
+      }
+    } finally {
+      get.mockRestore();
+    }
+  });
+
   beforeAll(async () => {
     api = await startApi();
     w = wire();
@@ -84,6 +116,7 @@ describe('publication API', () => {
       ['post', '/v1/tenders/TND_x/publish', { expectedVersion: 1 }],
       ['post', '/v1/tenders/TND_x/invitations', { organizationId: 'ORG_X' }],
       ['get', '/v1/tenders/TND_x/invitations', {}],
+      ['get', '/v1/tenders/TND_x/procurement-threshold-preview', {}],
     ];
     for (const [method, path, body] of routes) {
       const call = (token?: string) => {
@@ -95,6 +128,71 @@ describe('publication API', () => {
       expect((await call()).status).toBe(401);
       expect((await call(auditorActor(a))).status).toBe(403);
       expect((await call(actor(a, ['DRIVER']))).status).toBe(403);
+    }
+  });
+
+  it('previews owner draft WARN/REJECT and returns the stored warning to the requester and approver', async () => {
+    const a = org('threshold-preview');
+    const { id, version, token } = await tenderFor(a, {
+      procurementNature: 'INQUIRY',
+      estimatedCostMinor: '21',
+    });
+    const range = { minAmountMinor: '10', maxAmountMinor: '20', mode: 'WARN' as const };
+    const get = jest.spyOn(api.app.get(ProcurementThresholdPolicy), 'get').mockResolvedValue({
+      id: 'POL-preview',
+      value: { FORMAL_TENDER: range, INQUIRY: range, RFP: range, MARKETPLACE_DEAL: range },
+    });
+    try {
+      const preview = await http()
+        .get(`/v1/tenders/${id}/procurement-threshold-preview`)
+        .set(as(token));
+      expect(preview.status).toBe(200);
+      expect(preview.body).toEqual({
+        tenderVersion: version,
+        decision: 'WARN',
+        procurementThresholdPolicyId: 'POL-preview',
+      });
+      get.mockResolvedValueOnce({
+        id: 'POL-preview',
+        value: {
+          FORMAL_TENDER: range,
+          INQUIRY: { ...range, mode: 'REJECT' },
+          RFP: range,
+          MARKETPLACE_DEAL: range,
+        },
+      });
+      expect(
+        (await http().get(`/v1/tenders/${id}/procurement-threshold-preview`).set(as(token))).body
+          .decision,
+      ).toBe('REJECT');
+      get.mockClear();
+      expect(
+        (
+          await http()
+            .get(`/v1/tenders/${id}/procurement-threshold-preview`)
+            .set(as(orgAdmin(org('stranger'))))
+        ).status,
+      ).toBe(404);
+      expect(get).not.toHaveBeenCalled();
+      await activatePublicationPolicy(w, a);
+      const asked = await http()
+        .post(`/v1/tenders/${id}/publish`)
+        .set(as(token))
+        .send({ expectedVersion: version });
+      expect(asked.status).toBe(202);
+      expect(asked.body).toMatchObject({
+        procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
+        procurementThresholdPolicyId: 'POL-preview',
+      });
+      const step = await http()
+        .get(`/v1/approvals/${asked.body.steps[0].approvalId as string}`)
+        .set(as(orgAdmin(a)));
+      expect(step.status).toBe(200);
+      expect(step.body.request).toMatchObject({
+        procurementThresholdWarning: 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
+      });
+    } finally {
+      get.mockRestore();
     }
   });
 
@@ -166,6 +264,65 @@ describe('publication API', () => {
     expect(published.body).toMatchObject({ status: 'PUBLISHED', version: version + 1 });
     // Used once: the same command is now a stale one.
     expect((await publish(token)).status).toBe(409);
+  });
+
+  it('keeps the first answer by Idempotency-Key, its status included: the 202 of a round rejected since, then the 200 of the publication (task 060)', async () => {
+    const a = org('publish-retry');
+    const { id, version, token } = await tenderFor(a);
+    await activatePublicationPolicy(w, a);
+    const publish = (key: string, body: object = { expectedVersion: version }) =>
+      http()
+        .post(`/v1/tenders/${id}/publish`)
+        .set(as(token))
+        .set('Idempotency-Key', key)
+        .send(body);
+
+    const asked = await publish('publish-retry-1');
+    expect(asked.status).toBe(202);
+    // The round is rejected by somebody else; the answer had been lost, and the request is sent again.
+    const stepId = asked.body.steps[0].approvalId as string;
+    const step = await http().get(`/v1/approvals/${stepId}`).set(as(token));
+    const rejected = await http()
+      .post(`/v1/approvals/${stepId}/decision`)
+      .set(as(orgAdmin(a)))
+      .send({
+        decision: 'REJECT',
+        reason: 'Not on these terms',
+        expectedVersion: step.body.version,
+      });
+    expect(rejected.status).toBe(200);
+    const again = await publish('publish-retry-1');
+    expect({ status: again.status, body: again.body }).toEqual({ status: 202, body: asked.body });
+    const listed = await http().get(`/v1/tenders/${id}/approvals`).set(as(token));
+    expect(listed.body.items).toHaveLength(1);
+    // Another body under the key, and a key that is not one: refused, nothing asked.
+    const reused = await publish('publish-retry-1', { expectedVersion: version + 1 });
+    expect({ status: reused.status, code: reused.body.code }).toEqual({
+      status: 409,
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    });
+    expect((await publish('x'.repeat(256))).status).toBe(400);
+
+    // A new request asks anew; once granted, it publishes, and its retry is its 200.
+    const fresh = await publish('publish-retry-2');
+    expect(fresh.status).toBe(202);
+    const freshStep = fresh.body.steps[0].approvalId as string;
+    const current = await http().get(`/v1/approvals/${freshStep}`).set(as(token));
+    expect(
+      (
+        await http()
+          .post(`/v1/approvals/${freshStep}/decision`)
+          .set(as(orgAdmin(a)))
+          .send({ decision: 'GRANT', expectedVersion: current.body.version })
+      ).status,
+    ).toBe(200);
+    const published = await publish('publish-retry-3');
+    expect(published.status).toBe(200);
+    const replayed = await publish('publish-retry-3');
+    expect({ status: replayed.status, body: replayed.body }).toEqual({
+      status: 200,
+      body: published.body,
+    });
   });
 
   it('answers 409 APPROVAL_STALE when the tender changed after the approval, and publishes nothing', async () => {

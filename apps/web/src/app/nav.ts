@@ -29,11 +29,20 @@ const NAV_BEFORE_PROJECTS: readonly SidebarItem[] = [
   { href: '/marketplace', label: 'بازار' },
 ];
 
+/** Shown only to a role that may read return requests (`server/returns.ts`, `canReadReturns`). */
+export const RETURNS_NAV_ITEM: SidebarItem = { href: '/returns', label: 'بازگشت کالا' };
+
 /** Shown only to a role that may read projects (`server/portal-nav.ts`). */
 const PROJECTS_ITEM: SidebarItem = { href: '/projects', label: 'پروژه‌های عمرانی' };
 
 /** Shown only to a role that may read tenders, on either side (`server/portal-nav.ts`). */
 const TENDERS_ITEM: SidebarItem = { href: '/tenders', label: 'مناقصه‌ها' };
+
+/** Shown only to a role that may read contracts, on either side (`server/portal-nav.ts`). */
+const CONTRACTS_ITEM: SidebarItem = { href: '/contracts', label: 'قراردادها' };
+
+/** Shown only to a role that may read the supplier directory (`server/portal-nav.ts`). */
+const SUPPLIERS_ITEM: SidebarItem = { href: '/suppliers', label: 'تامین‌کنندگان' };
 
 const NAV_AFTER_PROJECTS: readonly SidebarItem[] = [
   { href: '/wallet', label: 'کیف پول' },
@@ -56,14 +65,24 @@ export const INVENTORY_NAV_ITEM: SidebarItem = { href: '/inventory', label: 'ا�
 export function portalNavFor(options: {
   readonly canReadProjects: boolean;
   readonly canReadTenders?: boolean;
+  readonly canReadContracts?: boolean;
   readonly canReadSettlements?: boolean;
   readonly canReadInventory?: boolean;
+  readonly canReadSuppliers?: boolean;
+  readonly canReadReturns?: boolean;
 }): readonly SidebarItem[] {
+  const before = options.canReadReturns
+    ? NAV_BEFORE_PROJECTS.flatMap((item) =>
+        item.href === '/orders' ? [item, RETURNS_NAV_ITEM] : [item],
+      )
+    : NAV_BEFORE_PROJECTS;
   const items = [
-    ...NAV_BEFORE_PROJECTS,
+    ...before,
     ...(options.canReadProjects ? [PROJECTS_ITEM] : []),
     ...(options.canReadTenders ? [TENDERS_ITEM] : []),
+    ...(options.canReadContracts ? [CONTRACTS_ITEM] : []),
     ...(options.canReadInventory ? [INVENTORY_NAV_ITEM] : []),
+    ...(options.canReadSuppliers ? [SUPPLIERS_ITEM] : []),
     ...NAV_AFTER_PROJECTS,
   ];
   if (!options.canReadSettlements) return items;

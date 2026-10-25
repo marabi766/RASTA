@@ -24,6 +24,27 @@ describe('the provisional defaults (Q-102, Q-103)', () => {
     expect(env.INVENTORY_CONSIGNEE_READER_ROLES).toEqual(['ORGANIZATION_ADMIN']);
   });
 
+  it('allows no return disposition until the deployment names one (Q-133)', () => {
+    expect(env.INVENTORY_RETURN_DISPOSITIONS_ALLOWED).toEqual([]);
+    expect(
+      load({ INVENTORY_RETURN_DISPOSITIONS_ALLOWED: ' SCRAP , RESTOCK ' })
+        .INVENTORY_RETURN_DISPOSITIONS_ALLOWED,
+    ).toEqual(['SCRAP', 'RESTOCK']);
+    expect(() => load({ INVENTORY_RETURN_DISPOSITIONS_ALLOWED: 'REFUND' })).toThrow(
+      /Unknown disposition/,
+    );
+  });
+
+  it('resolves no return of which nothing arrived until the deployment says so (Q-133 (4))', () => {
+    expect(env.INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED).toBe(false);
+    expect(
+      load({ INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED: 'true' })
+        .INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED,
+    ).toBe(true);
+    // Only the two words: a typo is a failed start, never a silent false.
+    expect(() => load({ INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED: 'yes' })).toThrow();
+  });
+
   it('configures no shipment state, cancellation or stock link the documents leave open (Q-114, Q-115)', () => {
     expect(
       Object.keys(env).filter((name) => /SHIPMENT|FAILED|CANCEL|CHECKPOINT/.test(name)),
@@ -46,6 +67,11 @@ describe('the provisional defaults (Q-102, Q-103)', () => {
 
   it('waits at most five seconds for a stock item another command holds', () => {
     expect(env.INVENTORY_LOCK_TIMEOUT_MS).toBe(5000);
+  });
+
+  it('asks marketplace, which owns the return request, on its port, for three seconds at most', () => {
+    expect(env.MARKETPLACE_SERVICE_URL).toBe('http://localhost:3106');
+    expect(env.INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS).toBe(3000);
   });
 
   it('replays a command’s response for a day and leases an in-flight key for two minutes', () => {
@@ -121,6 +147,12 @@ describe('overrides', () => {
     ['a lock timeout over a minute', { INVENTORY_LOCK_TIMEOUT_MS: '60001' }],
     ['a zero idempotency lifetime', { INVENTORY_IDEMPOTENCY_TTL_HOURS: '0' }],
     ['a lease under ten seconds', { INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: '5' }],
+    ['a marketplace address that is not a URL', { MARKETPLACE_SERVICE_URL: 'marketplace' }],
+    ['a marketplace timeout under 200 ms', { INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS: '50' }],
+    [
+      'a marketplace timeout over ten seconds',
+      { INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS: '10001' },
+    ],
   ])('refuses %s at startup', (_label, change) => {
     expect(() => load(change)).toThrow();
   });

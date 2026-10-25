@@ -1,11 +1,22 @@
 import { NEVER_AUTO_REPLAY, isAutoReplayable } from '@rasta/contracts';
 import {
   ECONOMIC_EVENTS,
+  ECONOMIC_EVENT_DECODERS,
   ECONOMIC_EVENT_SCHEMAS,
+  ECONOMIC_EVENT_VERSIONS,
+  SETTLEMENT_REFUSAL_TRANSACTION_TYPES,
+  decodeEconomicPayload,
   validateEconomicPayload,
   type EconomicEventName,
 } from './events';
-import { CONSUMED_EVENTS, DEFERRED_CONSUMPTION, maintenanceApprovedSchema } from './consumed';
+import {
+  CONSUMED_EVENTS,
+  DEFERRED_CONSUMPTION,
+  maintenanceApprovedSchema,
+  STATEMENT_APPROVED_FIELDS,
+  statementApprovedSchema,
+} from './consumed';
+import { TRANSACTION_TYPES } from '../transaction/dto';
 
 /**
  * The event contract (docs/07 § 7.8, docs/events/README.md § Economic).
@@ -19,7 +30,7 @@ import { CONSUMED_EVENTS, DEFERRED_CONSUMPTION, maintenanceApprovedSchema } from
 const EVENT_NAMES = Object.values(ECONOMIC_EVENTS) as EconomicEventName[];
 
 describe('the catalogue', () => {
-  it('publishes exactly the twenty-one events docs/07 § 7.5 lists', () => {
+  it('publishes exactly the twenty-four events docs/07 § 7.5 lists', () => {
     expect(EVENT_NAMES.sort()).toEqual(
       [
         'COMMISSION_APPLIED',
@@ -37,10 +48,13 @@ describe('the catalogue', () => {
         'PAYMENT_RECONCILIATION_ESCALATED',
         'PAYMENT_RECONCILIATION_RESOLVED',
         'PAYMENT_RECONCILIATION_OPERATOR_ACTION',
+        'PARTICIPATION_RULE_CHANGED',
+        'RECOGNITION_RULE_CHANGED',
         'REWARD_GRANTED',
         'REWARD_LEVEL_CHANGED',
         'REWARD_RULE_CHANGED',
         'SETTLEMENT_COMPLETED',
+        'SETTLEMENT_REFUSED',
         'TRANSACTION_STATUS_CHANGED',
         'WALLET_OPENED',
       ].sort(),
@@ -229,12 +243,20 @@ describe('COMMISSION_APPLIED', () => {
     commissionId: 'CMS_1',
     transactionId: 'TXN_1',
     organizationId: 'ORG-B',
+    businessLine: 'PARTS',
     rateBasisPoints: 200,
     grossAmountMinor: '10000000',
     amountMinor: '200000',
     currency: 'IRR',
     appliedAt: new Date().toISOString(),
   };
+  const applied = { ...base, ruleId: 'CMR_1', outcome: 'RULE_APPLIED' };
+
+  it('accepts a charge under a rule, with its business line', () => {
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, applied),
+    ).not.toThrow();
+  });
 
   it('permits a null ruleId — no rule matched, so nothing was charged', () => {
     // The ADR-023 case, and a real one rather than defensive: with no active
@@ -243,16 +265,50 @@ describe('COMMISSION_APPLIED', () => {
       validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
         ...base,
         ruleId: null,
+        outcome: 'NO_ACTIVE_RULE',
+        rateBasisPoints: 0,
         amountMinor: '0',
       }),
     ).not.toThrow();
   });
 
+  it('permits a null businessLine — the source sent none (docs/24 Q-130)', () => {
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
+        ...applied,
+        businessLine: null,
+      }),
+    ).not.toThrow();
+  });
+
+  it('refuses an outcome that contradicts the rule (ADR-045 § 2)', () => {
+    // A zero under a rule and a zero under none must never be confusable.
+    for (const contradiction of [
+      { ruleId: null, outcome: 'RULE_APPLIED' },
+      { ruleId: 'CMR_1', outcome: 'NO_ACTIVE_RULE' },
+    ]) {
+      expect(() =>
+        validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
+          ...base,
+          ...contradiction,
+        }),
+      ).toThrow();
+    }
+  });
+
+  it('refuses a business line outside the contract', () => {
+    expect(() =>
+      validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
+        ...applied,
+        businessLine: 'FUEL',
+      }),
+    ).toThrow();
+  });
+
   it('refuses a rate outside 0–10 000 basis points', () => {
     expect(() =>
       validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
-        ...base,
-        ruleId: null,
+        ...applied,
         rateBasisPoints: 10_001,
       }),
     ).toThrow();
@@ -261,8 +317,7 @@ describe('COMMISSION_APPLIED', () => {
   it('refuses a fractional rate', () => {
     expect(() =>
       validateEconomicPayload(ECONOMIC_EVENTS.COMMISSION_APPLIED, {
-        ...base,
-        ruleId: null,
+        ...applied,
         rateBasisPoints: 2.5,
       }),
     ).toThrow();
@@ -345,12 +400,13 @@ describe('FUNDS_RELEASED', () => {
 });
 
 describe('consumed events', () => {
-  it('consumes only the three contracts that are real', () => {
+  it('consumes only the four contracts that are real', () => {
     // ADR-032. The rest are deferred because their contracts are sketches, and
     // writing them would mean this service defining another service's payload.
     expect(Object.values(CONSUMED_EVENTS).sort()).toEqual([
       'MAINTENANCE_APPROVED',
       'MAINTENANCE_COMPLETED',
+      'STATEMENT_APPROVED',
       'USAGE_RECORDED',
     ]);
   });
@@ -360,7 +416,9 @@ describe('consumed events', () => {
     // `processed_event` row and looks exactly like one that worked.
     expect(DEFERRED_CONSUMPTION).toContain('ORDER_CREATED');
     expect(DEFERRED_CONSUMPTION).toContain('ORDER_RECEIPT_CONFIRMED');
-    expect(DEFERRED_CONSUMPTION).toContain('STATEMENT_APPROVED');
+    // Consumed since CON-003 PR 6b, from the owner's answer (ADR-068 § 6).
+    expect(DEFERRED_CONSUMPTION).not.toContain('STATEMENT_APPROVED');
+    expect(Object.values(CONSUMED_EVENTS)).toContain('STATEMENT_APPROVED');
 
     for (const deferred of DEFERRED_CONSUMPTION) {
       expect(Object.values(CONSUMED_EVENTS)).not.toContain(deferred);
@@ -388,6 +446,31 @@ describe('consumed events', () => {
 
     expect(payload.totalCostMinor).toBe('11850000');
     expect(payload.workshopOrganizationId).toBe('ORG-WORKSHOP');
+  });
+
+  it('parses the exact STATEMENT_APPROVED contract-service publishes, which carries no amount', () => {
+    // contract-service's `statementApprovedPayload` (statementFacts + approvedAt), built by hand
+    // because importing across services is forbidden (A-02): a change there fails here.
+    const published = {
+      contractId: 'CTR_01JBQ8',
+      statementId: 'STM_01JBQ8',
+      statementNumber: 3,
+      organizationId: 'ORG-EMPLOYER',
+      contractorOrganizationId: 'ORG-CONTRACTOR',
+      approvedAt: '2026-10-16T11:00:00.000Z',
+    };
+    const payload = statementApprovedSchema.parse(published);
+
+    expect(payload.statementId).toBe('STM_01JBQ8');
+    expect(payload.contractorOrganizationId).toBe('ORG-CONTRACTOR');
+    expect(Object.keys(published).some((key) => /amount|net|minor/i.test(key))).toBe(false);
+    expect([...STATEMENT_APPROVED_FIELDS].sort()).toEqual([
+      'approvedAt',
+      'contractId',
+      'contractorOrganizationId',
+      'organizationId',
+      'statementId',
+    ]);
   });
 
   it('accepts an approval with no workshop, which is a real case', () => {
@@ -442,7 +525,8 @@ describe('consumed events', () => {
 describe('a rule change record', () => {
   const terms = {
     organizationId: null,
-    transactionType: 'LOGISTICS',
+    businessLine: 'LOGISTICS' as string | null,
+    transactionType: null as string | null,
     rateBasisPoints: 100,
     minAmountMinor: null,
     maxAmountMinor: null,
@@ -485,6 +569,23 @@ describe('a rule change record', () => {
       validateEconomicPayload('COMMISSION_RULE_CHANGED', {
         ...record('CREATED', null),
         after: { ...terms, rateBasisPoints: 2.5 },
+      }),
+    ).toThrow();
+  });
+
+  it('carries the business line, and keeps a type-only rule from before them readable', () => {
+    // docs/23 D-057: rules written before ADR-045 name a type and no line.
+    const legacy = { ...terms, businessLine: null, transactionType: 'LOGISTICS' };
+    expect(() =>
+      validateEconomicPayload('COMMISSION_RULE_CHANGED', {
+        ...record('UPDATED', legacy),
+        after: { ...legacy, status: 'INACTIVE' },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateEconomicPayload('COMMISSION_RULE_CHANGED', {
+        ...record('CREATED', null),
+        after: { ...terms, businessLine: 'FUEL' },
       }),
     ).toThrow();
   });
@@ -552,4 +653,114 @@ describe('the refund outcome events (ADR-064 § 9)', () => {
       expect(NEVER_AUTO_REPLAY.has(name)).toBe(true);
     },
   );
+});
+
+describe('event versions (docs/07 § 7.8; Codex r1 on #307, F4)', () => {
+  /** COMMISSION_APPLIED exactly as published before ADR-045. */
+  const appliedV1 = {
+    commissionId: 'CMS_1',
+    transactionId: 'TXN_1',
+    organizationId: 'ORG-B',
+    ruleId: 'CMR_1',
+    rateBasisPoints: 200,
+    grossAmountMinor: '10000000',
+    amountMinor: '200000',
+    currency: 'IRR',
+    appliedAt: '2026-09-01T00:00:00.000Z',
+  };
+  /** COMMISSION_RULE_CHANGED's terms exactly as published before ADR-045. */
+  const termsV1 = {
+    organizationId: null,
+    transactionType: 'MARKETPLACE_ORDER',
+    rateBasisPoints: 200,
+    minAmountMinor: null,
+    maxAmountMinor: null,
+    validFrom: '2026-09-01T00:00:00.000Z',
+    validTo: null,
+    status: 'ACTIVE',
+    label: null,
+  };
+  const ruleChangedV1 = {
+    ruleId: 'CMR_1',
+    change: 'UPDATED',
+    changedBy: 'USR-1',
+    changedAt: '2026-09-24T00:00:00.000Z',
+    before: termsV1,
+    after: { ...termsV1, status: 'INACTIVE' },
+  };
+
+  it('publishes the two commission events as v2 and every other event as v1', () => {
+    const versions = Object.entries(ECONOMIC_EVENT_VERSIONS);
+    expect(
+      versions
+        .filter(([, version]) => version === 2)
+        .map(([name]) => name)
+        .sort(),
+    ).toEqual(['COMMISSION_APPLIED', 'COMMISSION_RULE_CHANGED']);
+    expect(versions.every(([, version]) => version === 1 || version === 2)).toBe(true);
+    for (const name of Object.values(ECONOMIC_EVENTS)) {
+      // The published version is always one a reader can decode, by the same schema.
+      expect(ECONOMIC_EVENT_DECODERS[name][ECONOMIC_EVENT_VERSIONS[name]]).toBe(
+        ECONOMIC_EVENT_SCHEMAS[name],
+      );
+    }
+  });
+
+  it('still decodes every v1 payload already in the log', () => {
+    expect(decodeEconomicPayload('COMMISSION_APPLIED', 1, appliedV1)).toEqual(appliedV1);
+    expect(decodeEconomicPayload('COMMISSION_RULE_CHANGED', 1, ruleChangedV1)).toEqual(
+      ruleChangedV1,
+    );
+  });
+
+  it('does not read a v1 payload as v2: the fields ADR-045 added are required there', () => {
+    expect(() => decodeEconomicPayload('COMMISSION_APPLIED', 2, appliedV1)).toThrow();
+    expect(() => decodeEconomicPayload('COMMISSION_RULE_CHANGED', 2, ruleChangedV1)).toThrow();
+    expect(() => validateEconomicPayload('COMMISSION_APPLIED', appliedV1)).toThrow();
+  });
+
+  it('keeps v1 what it was: a rule without a type is not a v1 rule', () => {
+    const wholeLine = { ...ruleChangedV1, after: { ...termsV1, transactionType: null } };
+    expect(() => decodeEconomicPayload('COMMISSION_RULE_CHANGED', 1, wholeLine)).toThrow();
+  });
+
+  it('refuses a version it never published', () => {
+    expect(() => decodeEconomicPayload('COMMISSION_APPLIED', 3, appliedV1)).toThrow(
+      'COMMISSION_APPLIED has no version 3',
+    );
+    expect(() => decodeEconomicPayload('FUNDS_HELD', 2, {})).toThrow('FUNDS_HELD has no version 2');
+  });
+});
+
+describe('SETTLEMENT_REFUSED', () => {
+  const refused = (overrides: Record<string, unknown> = {}) => ({
+    transactionId: 'TXN_1',
+    organizationId: 'ORG_PAYER',
+    payerOrganizationId: 'ORG_PAYER',
+    payeeOrganizationId: 'ORG_PAYEE',
+    transactionType: 'LOGISTICS',
+    businessLine: 'LOGISTICS',
+    reason: 'NO_ACTIVE_RULE',
+    refusedBy: 'USR_1',
+    refusedAt: '2026-10-23T08:00:00.000Z',
+    ...overrides,
+  });
+
+  it('names exactly the types an obligation is recorded as', () => {
+    expect([...SETTLEMENT_REFUSAL_TRANSACTION_TYPES]).toEqual([...TRANSACTION_TYPES]);
+  });
+
+  it('accepts a refusal of a lined transaction', () => {
+    expect(() => validateEconomicPayload('SETTLEMENT_REFUSED', refused())).not.toThrow();
+  });
+
+  it.each([
+    ['a type outside the list', { transactionType: 'WALLET_TOP_UP' }],
+    ['a line outside the contract', { businessLine: 'TAXI' }],
+    ['no line — a line-less transaction is never refused', { businessLine: null }],
+    ['a reason outside the closed list', { reason: 'SOMETHING_ELSE' }],
+    ['an amount — the record carries none', { grossAmountMinor: '2000000' }],
+  ])('refuses %s', (_label, overrides) => {
+    expect(() => validateEconomicPayload('SETTLEMENT_REFUSED', refused(overrides))).toThrow();
+  });
 });

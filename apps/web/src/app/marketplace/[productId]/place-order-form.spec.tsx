@@ -69,6 +69,12 @@ describe('PlaceOrderForm', () => {
     expect(container.querySelector('[name*="amount" i]')).toBeNull();
   });
 
+  it('offers no note field: the service refuses any order note (Q-110)', () => {
+    const { container } = renderForm();
+    expect(container.querySelector('[name="note"]')).toBeNull();
+    expect(container.querySelector('textarea')).toBeNull();
+  });
+
   it('offers each offer with its supplier, price, minimum and availability', () => {
     const { getAllByRole } = renderForm();
     const options = getAllByRole('option').map((option) => option.textContent);
@@ -156,6 +162,23 @@ describe('PlaceOrderForm', () => {
     expect(
       renderForm({ kind: 'REFUSED', reason: 'CSRF' }).getByText(/این درخواست معتبر شناخته نشد/),
     ).toBeInTheDocument();
+  });
+
+  it('says the provider could not be read and nothing was sent when the action withheld it (PR 361 r4)', () => {
+    const { getByText, queryByText } = renderForm({ kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' });
+    expect(getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    expect(getByText(/فرستاده نشد و چیزی تغییر نکرد/)).toBeInTheDocument();
+    expect(queryByText(/این درخواست معتبر شناخته نشد/)).not.toBeInTheDocument();
+  });
+
+  it('a session only unavailable: says so, not "ended", with no accessibility violations', async () => {
+    const { container, getByText, queryByText } = renderForm({
+      kind: 'REFUSED',
+      reason: 'SESSION_UNAVAILABLE',
+    });
+    expect(getByText(/همین حالا در دسترس نیست/)).toBeInTheDocument();
+    expect(queryByText(/پایان یافته/)).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   it('shows the correlation id on a forbidden attempt', () => {

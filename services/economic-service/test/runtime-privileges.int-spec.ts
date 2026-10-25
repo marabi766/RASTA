@@ -23,7 +23,8 @@ import { databaseUrl } from './helpers';
  * moves forward (`reward_evaluation_cutover_forward_only`,
  * `reward_evaluation_cutover_no_truncate`), and the payment reconciliation
  * operator path's history is append-only (`trg_payment_resolution_append_only`,
- * `trg_payment_requeue_append_only`; ADR-064 § 6, D-046).
+ * `trg_payment_requeue_append_only`; ADR-064 § 6, D-046), and so is a posted
+ * commission (`trg_commission_append_only`; ADR-045 § 3).
  *
  * Until D-045 the service connected as the owner of these tables, which could
  * DISABLE, DROP or ALTER each guard away — and so could any SQL that reached
@@ -47,6 +48,14 @@ const GUARDS: readonly (readonly [table: string, trigger: string])[] = [
   // The operator path's history (ADR-064 § 6): never deleted, decided once.
   ['payment_reconciliation_resolution', 'trg_payment_resolution_append_only'],
   ['payment_reconciliation_requeue', 'trg_payment_requeue_append_only'],
+  // A posted commission is corrected by a reversal entry, never edited (ADR-045 § 3).
+  ['commission', 'trg_commission_append_only'],
+  // A participation rule version is the record of what was in force (ADR-047 § 3).
+  ['participation_rule', 'trg_participation_rule_append_only'],
+  ['participation_rule', 'trg_participation_rule_no_truncate'],
+  // So is a levels-and-badges version (COM-012 criterion 2).
+  ['recognition_rule', 'trg_recognition_rule_append_only'],
+  ['recognition_rule', 'trg_recognition_rule_no_truncate'],
 ];
 
 describe('the runtime role cannot lift an integrity guard (D-045)', () => {
@@ -72,6 +81,21 @@ describe('the runtime role cannot lift an integrity guard (D-045)', () => {
       createRole: false,
       bypassRls: false,
     });
+  });
+
+  it('can execute the commission pricing and rule-change helpers as the real runtime login', async () => {
+    // A rolled-back scope mutation proves both application call sites remain usable
+    // after a privilege split, without retaining transaction-local scope settings.
+    const rollback = new Error('rollback runtime helper probe');
+    await expect(
+      runtime.$transaction(async (tx) => {
+        const identity = await tx.$queryRaw<{ role: string }[]>`SELECT current_user::text AS role`;
+        expect(identity).toEqual([{ role: 'rasta_economic' }]);
+        await tx.$executeRaw`SELECT commission_pricing_scope_lock('runtime-acl-probe', 'PARTS', NULL)`;
+        await tx.$queryRaw`SELECT commission_rule_scope_change('runtime-acl-probe', 'PARTS', NULL)`;
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
   });
 
   it('may not DISABLE any trigger in the schema — the guards included', async () => {

@@ -7,6 +7,7 @@ import {
   asAdmin,
   cleanup,
   newOrganizationId,
+  newUserId,
   outboxFor,
   testEnv,
   wire,
@@ -343,10 +344,16 @@ describe('project lifecycle', () => {
   describe('idempotent creation (docs/06 § 6.8)', () => {
     it('returns the first response for a retry with the same key and body, creating one project', async () => {
       const a = org();
-      const first = await asAdmin(a, () => w.projects.create(PROJECT, 'key-create-1'));
-      const retry = await asAdmin(a, () => w.projects.create(PROJECT, 'key-create-1'));
+      const author = newUserId();
+      const first = await asAdmin(a, () => w.projects.create(PROJECT, 'key-create-1'), author);
+      const retry = await asAdmin(a, () => w.projects.create(PROJECT, 'key-create-1'), author);
 
       expect(retry).toEqual(first);
+      // Another person of the same organization, the same key and body: refused, never the author's
+      // project (PR-350 r1 F3).
+      await expect(
+        asAdmin(a, () => w.projects.create(PROJECT, 'key-create-1'), newUserId()),
+      ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
       expect(await asAdmin(a, async () => await w.prisma.client.project.count())).toBe(1);
       expect(await outboxFor(w.prisma, a)).toHaveLength(1);
     });

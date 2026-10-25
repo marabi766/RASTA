@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
 import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
 import {
+  INTERNAL_TOKEN_SCHEME,
   RESPONSE_BODIES,
   buildContractOpenApiDocument,
   buildDocumentationApp,
@@ -43,7 +44,7 @@ describe('the committed OpenAPI document', () => {
     expect(readFileSync(committedPath, 'utf8')).toBe(generated);
   });
 
-  it('publishes the reads and commands of CON-003, its amendments and milestones and the approval-policy routes, each closed, and no route that creates a contract', () => {
+  it('publishes the reads and commands of CON-003, its amendments, milestones and statements and the approval-policy routes, each closed, and no route that creates a contract', () => {
     const document = buildContractOpenApiDocument(app);
     const operations = Object.entries(document.paths ?? {}).flatMap(([path, item]) =>
       Object.entries(
@@ -62,6 +63,9 @@ describe('the committed OpenAPI document', () => {
       'GET /v1/contracts/{id}/amendments/{amendmentId}',
       'GET /v1/contracts/{id}/milestones',
       'GET /v1/contracts/{id}/milestones/{milestoneId}',
+      'GET /v1/contracts/{id}/statements',
+      'GET /v1/contracts/{id}/statements/{statementId}',
+      'GET /v1/internal/statements/{id}',
       'PATCH /v1/contracts/{id}/milestones/{milestoneId}',
       'POST /v1/contract-approval-policies',
       'POST /v1/contract-approval-policies/{id}/approve',
@@ -73,14 +77,26 @@ describe('the committed OpenAPI document', () => {
       'POST /v1/contracts/{id}/cancel',
       'POST /v1/contracts/{id}/milestones',
       'POST /v1/contracts/{id}/sign',
+      'POST /v1/contracts/{id}/statements',
+      'POST /v1/contracts/{id}/statements/{statementId}/decisions',
+      'POST /v1/contracts/{id}/statements/{statementId}/submit',
     ]);
     for (const { key, operation } of operations) {
-      expect(operation.security).toEqual([{ bearer: [] }]);
-      // The routes that create (a policy, an amendment, a milestone) answer 201; every other 200.
+      // A user's bearer token everywhere but the internal routes, which take a service's internal
+      // token only (asserted in the settlement read's own case below).
+      expect({ key, security: operation.security }).toEqual({
+        key,
+        security: key.startsWith('GET /v1/internal/')
+          ? [{ [INTERNAL_TOKEN_SCHEME]: [] }]
+          : [{ bearer: [] }],
+      });
+      // The routes that create (a policy, an amendment, a milestone, a statement) answer 201;
+      // every other 200.
       const created = [
         'POST /v1/contract-approval-policies',
         'POST /v1/contracts/{id}/amendments',
         'POST /v1/contracts/{id}/milestones',
+        'POST /v1/contracts/{id}/statements',
       ].includes(key);
       expect(operation.responses['200'] !== undefined).toBe(!created);
       expect(operation.responses['201'] !== undefined).toBe(created);
@@ -135,6 +151,7 @@ describe('the committed OpenAPI document', () => {
       expect(schema.properties.details.items.properties.path.const).toBe('policy');
       expect(schema.properties.details.items.properties.code.enum).toEqual([
         'AUTHORITY_NOT_GOVERNED_ORGANIZATION',
+        'AMOUNT_BOUNDS_NOT_APPLICABLE',
       ]);
     });
 
@@ -402,6 +419,110 @@ describe('the committed OpenAPI document', () => {
         true,
         false,
       ]);
+      // A statement draft's refusals are recorded; a submission also asks organization-service.
+      expect(answers('/v1/contracts/{id}/statements', 'post')).toEqual([true, false]);
+      expect(answers('/v1/contracts/{id}/statements/{statementId}/submit', 'post')).toEqual([
+        true,
+        true,
+      ]);
+    });
+
+    it('publishes the submission of a statement as a keyed command answering 200 with its chains (CON-003 PR 5)', () => {
+      const submit = operation('/v1/contracts/{id}/statements/{statementId}/submit', 'post');
+      expect(
+        submit.parameters.filter((p) => p.in === 'header').map((p) => p.name as string),
+      ).toEqual(['Idempotency-Key']);
+      expect(Object.keys(submit.responses).sort()).toEqual(
+        ['200', '400', '401', '403', '404', '409', '422', '500', '503', '504'].sort(),
+      );
+      const codes = (
+        submit.responses['422']!.content['application/json']!.schema as {
+          properties: { details: { items: { properties: { code: { enum: string[] } } } } };
+        }
+      ).properties.details.items.properties.code.enum;
+      expect(codes).toEqual(
+        expect.arrayContaining([
+          'STATEMENT_NOT_DRAFT',
+          'TECHNICAL_POLICY_REQUIRED',
+          'FINANCIAL_POLICY_REQUIRED',
+          'TECHNICAL_STEP_NOT_APPLICABLE',
+          'FINANCIAL_STEP_NOT_APPLICABLE',
+          'APPROVAL_STEP_NAMES_CONTRACTOR',
+          'POLICY_AUTHOR_NOT_GOVERNING',
+          'ACTOR_IDENTITY_UNKNOWN',
+        ]),
+      );
+      const view = (
+        submit.responses['200']!.content['application/json']!.schema as {
+          properties: Record<string, { type?: string | string[] }>;
+        }
+      ).properties;
+      expect(view.approvalChains).toBeDefined();
+      expect(view.submittedAt).toBeDefined();
+    });
+
+    it('publishes a statement’s decision as a keyed command naming its step, its refusals typed by the decision area, recorded but asking nobody (CON-003 PR 6)', () => {
+      const path = '/v1/contracts/{id}/statements/{statementId}/decisions';
+      const decide = operation(path, 'post');
+      expect(
+        decide.parameters.filter((p) => p.in === 'header').map((p) => p.name as string),
+      ).toEqual(['Idempotency-Key']);
+      expect(Object.keys(decide.responses).sort()).toEqual(
+        ['200', '400', '401', '403', '404', '409', '422', '500', '503'].sort(),
+      );
+      const body = decide.requestBody!.content['application/json']!.schema as {
+        additionalProperties?: boolean;
+        required: string[];
+        properties: Record<string, { enum?: string[] }>;
+      };
+      expect(body.additionalProperties).toBe(false);
+      expect(body.required).toEqual(['chain', 'stepOrder', 'decision']);
+      expect(body.properties.chain?.enum).toEqual(['TECHNICAL', 'FINANCIAL']);
+      expect(body.properties.decision?.enum).toEqual(['APPROVE', 'REJECT']);
+      const codesOf = (status: string) => {
+        const item = (
+          decide.responses[status]!.content['application/json']!.schema as {
+            properties: {
+              details: {
+                items: { properties: { path: { const: string }; code: { enum: string[] } } };
+              };
+            };
+          }
+        ).properties.details.items.properties;
+        return { area: item.path.const, codes: item.code.enum };
+      };
+      expect(codesOf('403')).toEqual({
+        area: 'decision',
+        codes: ['NOT_STEP_AUTHORITY', 'MEMBER_OF_CONTRACTOR'],
+      });
+      expect(codesOf('409')).toEqual({ area: 'decision', codes: ['STEP_DECIDED'] });
+      expect(codesOf('422').codes).toEqual([
+        'SUBMITTER_MAY_NOT_DECIDE',
+        'ALREADY_DECIDED_STATEMENT',
+        'ACTOR_IDENTITY_UNKNOWN',
+        'CONTRACT_NOT_SIGNED',
+        'STATEMENT_NOT_SUBMITTED',
+        'STATEMENT_DECIDED',
+        'STEP_NOT_IN_CHAIN',
+        'CHAIN_NOT_OPEN',
+        'STEP_NOT_NEXT',
+        'APPROVED_TOTAL_EXCEEDS_CAP',
+      ]);
+      // Each step of the view carries its decision.
+      const step = (
+        decide.responses['200']!.content['application/json']!.schema as {
+          properties: {
+            approvalChains: {
+              properties: {
+                technical: {
+                  properties: { steps: { items: { properties: Record<string, unknown> } } };
+                };
+              };
+            };
+          };
+        }
+      ).properties.approvalChains.properties.technical.properties.steps.items.properties;
+      expect(step.decision).toBeDefined();
     });
   });
 
@@ -417,6 +538,59 @@ describe('the committed OpenAPI document', () => {
     for (const hidden of ['awardedBy', 'matrixDigest', 'createdBy', 'signedBy']) {
       expect(schema.properties).not.toHaveProperty(hidden);
     }
+  });
+
+  it('publishes the settlement read as an internal route: the internal token alone, no body, no key, 401/403/404 for its own reasons, the net as a string and no person (CON-003 PR 6a)', () => {
+    const document = buildContractOpenApiDocument(app);
+    const op = document.paths?.['/v1/internal/statements/{id}']?.get as unknown as {
+      security: Record<string, string[]>[];
+      parameters: { name: string; in: string }[];
+      requestBody?: unknown;
+      responses: Record<
+        string,
+        { description: string; content: Record<string, { schema: Record<string, unknown> }> }
+      >;
+    };
+    // AuthGuard takes the service path only for X-Internal-Token WITHOUT a bearer token: the
+    // document names that header, not `Authorization` (a service JWT there is 401).
+    expect(op.security).toEqual([{ [INTERNAL_TOKEN_SCHEME]: [] }]);
+    expect(document.components?.securitySchemes?.[INTERNAL_TOKEN_SCHEME]).toEqual({
+      type: 'apiKey',
+      in: 'header',
+      name: 'X-Internal-Token',
+      description: expect.stringContaining('`Authorization`'),
+    });
+    expect(document.components?.securitySchemes?.bearer).toMatchObject({
+      type: 'http',
+      scheme: 'bearer',
+    });
+    expect(Object.keys(op.responses).sort()).toEqual(['200', '401', '403', '404', '500']);
+    expect(op.requestBody).toBeUndefined();
+    expect(op.parameters.filter((p) => p.in === 'header')).toEqual([]);
+    // Not the user routes' text, which says a service token is refused.
+    expect(op.responses['403']!.description).toContain('any user token');
+    expect(op.responses['403']!.description).not.toContain('CONTRACT_READER_ROLES');
+    expect(op.responses['404']!.description).toContain('the employer’s');
+    const schema = op.responses['200']!.content['application/json']!.schema as {
+      properties: Record<string, { type?: string; enum?: string[] }>;
+      required: string[];
+      additionalProperties: boolean;
+    };
+    expect(Object.keys(schema.properties).sort()).toEqual(
+      [
+        'approvedAt',
+        'beneficiaryOrganizationId',
+        'contractId',
+        'currency',
+        'netMinor',
+        'payerOrganizationId',
+        'statementId',
+        'status',
+      ].sort(),
+    );
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties.netMinor?.type).toBe('string');
+    expect(schema.properties.currency?.enum).toEqual(['IRR']);
   });
 
   it('keeps the health probes out of the contract', () => {

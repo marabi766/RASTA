@@ -1,4 +1,5 @@
 import { Counter, Gauge, Histogram, registry } from '@rasta/observability';
+import { SERVICE_NAME } from '../config/env';
 
 /**
  * Metrics owned by economic-service.
@@ -148,6 +149,12 @@ export const settlementFailuresTotal = new Counter({
   registers: [registry],
 });
 
+// Exported at zero from the first scrape after startup, rather than created at
+// one by the first refusal: `increase()` sees no increase in a series whose
+// first sample is already 1, so `RastaSettlementNoActiveRule` would miss an
+// isolated refusal after every start (docs/24 Q-29; review of #364 round 1, F4).
+settlementFailuresTotal.inc({ service: SERVICE_NAME, reason: 'no_active_rule' }, 0);
+
 export const holdsRefusedTotal = new Counter({
   name: 'rasta_economic_holds_refused_total',
   help: 'Hold attempts refused, by reason',
@@ -178,8 +185,10 @@ export const paymentIntentsTotal = new Counter({
  */
 export const commissionApplicationsTotal = new Counter({
   name: 'rasta_economic_commission_applications_total',
-  help: 'Commission calculations, by whether an active rule matched',
-  labelNames: ['service', 'type', 'matched'] as const,
+  help: 'Commission calculations, by business line and whether an active rule matched',
+  // `business_line` is one of seven values or `NONE` (ADR-045), so the series
+  // count stays bounded: `matched="false"` per line is NO_ACTIVE_RULE.
+  labelNames: ['service', 'type', 'business_line', 'matched'] as const,
   registers: [registry],
 });
 
@@ -227,11 +236,13 @@ export const rewardGrantFailuresTotal = new Counter({
 /**
  * Every question a money-making consumer put to a fact's owner (ADR-061 § 4).
  *
- * `consumer` is `settlement_authority` or `reward_trigger`. `outcome` is a
+ * `consumer` is `settlement_authority`, `statement_settlement` or
+ * `reward_trigger`. `outcome` is a
  * closed set: `confirmed`; `tenant_mismatch` (the envelope's tenant is not
  * the payload's organization, ADR-061 § 5), `not_found`, `organization_mismatch`,
  * `status_mismatch`, `amount_mismatch`, `currency_mismatch`,
- * `workshop_mismatch`, `approval_mismatch` and `asset_mismatch` (each one
+ * `workshop_mismatch`, `approval_mismatch`, `asset_mismatch`,
+ * `contract_mismatch` and `beneficiary_mismatch` (each one
  * dead-lettered as `SOURCE_UNCONFIRMED`); and `unavailable`, which is retried.
  * Any mismatch is worth an alert: either a producer has a defect or somebody
  * is publishing events they do not own.

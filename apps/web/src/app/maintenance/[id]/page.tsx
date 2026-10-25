@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
-import { fetchCurrentUser } from '@/server/identity';
+import { fetchDemoMode } from '@/server/demo-mode';
+import { tokenWriteRoles } from '@/server/realm-roles';
 import { fetchMaintenanceRequest, fetchRepairOrder } from '@/server/maintenance';
 import { canManageMaintenance, sealApprovalBaseline } from '@/server/maintenance-commands';
 import { isRepairOrderId, sealRepairOrderBaseline } from '@/server/repair-order-commands';
@@ -50,17 +51,17 @@ export default async function MaintenanceRequestPage({
 
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/maintenance/${id}`)}`);
+  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  // the set the service decides on — not `/v1/users/me`, which runs ahead of the
+  // token until it is refreshed.
+  const roles = tokenWriteRoles(session.accessToken);
 
-  const [result, currentUser] = await Promise.all([
-    fetchMaintenanceRequest(session, id),
-    fetchCurrentUser(session),
-  ]);
+  const result = await fetchMaintenanceRequest(session, id);
 
-  // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a failed identity
-  // read shows no command rather than one that might not work, and
+  // A Route Guard as UX, not as security (`docs/16 § ۱۶٫۱۱`): a token whose roles
+  // cannot be read shows no command rather than one that might not work, and
   // maintenance-service decides again on every submit.
-  const canManage =
-    currentUser.kind === 'USER' && canManageMaintenance(currentUser.user.effectiveRoles);
+  const canManage = roles !== null && canManageMaintenance(roles);
 
   // What each repair order has recorded under it. A line that cannot be read
   // costs that card its list, not the page: the commands never depend on it.
@@ -129,6 +130,8 @@ export default async function MaintenanceRequestPage({
     }
   }
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
       topBar={
@@ -141,11 +144,12 @@ export default async function MaintenanceRequestPage({
           </form>
         </TopBar>
       }
-      sidebar={<PortalSidebar session={session} currentHref="/maintenance" current={currentUser} />}
+      sidebar={<PortalSidebar session={session} currentHref="/maintenance" />}
     >
       <RequestDetailScreen
         result={result}
         requestId={id}
+        demoMode={demoMode}
         notice={readFlash(
           session,
           typeof query[FLASH_PARAM] === 'string' ? query[FLASH_PARAM] : undefined,

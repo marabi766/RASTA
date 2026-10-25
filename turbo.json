@@ -46,7 +46,15 @@
       "env": ["DATABASE_URL", "DATABASE_URL_*", "RASTA_ALLOW_DEMO_SEED"]
     },
     "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
-    "lint": { "dependsOn": ["^build"], "outputs": [] },
+    "lint": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/eslint.config.mjs",
+        "$TURBO_ROOT$/scripts/internal-token-transport-rule.mjs"
+      ],
+      "outputs": []
+    },
     // KAFKA_BROKERS is the same trap again (D-005), found by AUD-004 Phase C2:
     // identity-service's `test` runs its integration project too, and its
     // Kafka suite skips itself when the variable is absent. Undeclared, turbo
@@ -72,16 +80,44 @@
         "KAFKA_SSL*",
         "S3_*",
         "DOCUMENT_*",
+        "REQUIRE_MAILPIT",
+        "MAILPIT_API_URL",
+        "NOTIFICATION_SMTP_*",
         "OUTBOX_PURGE_*",
         "OUTBOX_CLAIM_LEASE_SECONDS",
         "ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS",
         "ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS",
         "CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "ECONOMIC_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
         "INVENTORY_LOCK_TIMEOUT_MS",
+        "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_SERVICE_URL",
+        "INVENTORY_SERVICE_URL",
+        "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
-        "GATEWAY_*"
+        "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE",
+        "INSURANCE_CLAIM_MAX_DOCUMENTS",
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS",
+        "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
+        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
+        "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
+        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
+        "CORS_ORIGINS",
+        "PROCUREMENT_*",
+        "SUPPLIER_SERVICE_URL"
       ]
     },
     "test:unit": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
@@ -123,16 +159,44 @@
         "KAFKA_SSL*",
         "S3_*",
         "DOCUMENT_*",
+        "REQUIRE_MAILPIT",
+        "MAILPIT_API_URL",
+        "NOTIFICATION_SMTP_*",
         "OUTBOX_PURGE_*",
         "OUTBOX_CLAIM_LEASE_SECONDS",
         "ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS",
         "ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS",
         "CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "ECONOMIC_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
         "INVENTORY_LOCK_TIMEOUT_MS",
+        "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_SERVICE_URL",
+        "INVENTORY_SERVICE_URL",
+        "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
-        "GATEWAY_*"
+        "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE",
+        "INSURANCE_CLAIM_MAX_DOCUMENTS",
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS",
+        "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
+        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
+        "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
+        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
+        "CORS_ORIGINS",
+        "PROCUREMENT_*",
+        "SUPPLIER_SERVICE_URL"
       ]
     },
     // identity-service's two 500-write aggregation proofs, run alone after the
@@ -212,6 +276,56 @@
     // the trap again — `CONSTRUCTION_TRANSACTION_TIMEOUT_MS=60000 pnpm dev` ran
     // on the .env value. scripts/construction-turbo-env.test.mjs holds every
     // task that starts the service to every CONSTRUCTION_* key of its schema.
+    //
+    // INSURANCE_CLAIM_MAX_DOCUMENTS and INSURANCE_CLAIM_DOCUMENT_STATUSES
+    // (Codex r2 on #304): asset-service's claim-document policy (Q-128), the
+    // trap once more — `INSURANCE_CLAIM_MAX_DOCUMENTS=1 pnpm dev` accepted a
+    // second document on the .env limit of 20, and `=0` never met the boot
+    // refusal. Declared here and in the test tasks above. From this one on,
+    // scripts/service-env-turbo.test.mjs holds every task that starts a
+    // service to every key of that service's own schema: a new setting is
+    // declared or the check fails. The settings withheld before it are listed
+    // in scripts/service-env-turbo-withheld.json, a list that may only shrink.
+    //
+    // MARKETPLACE_RETURN_WINDOW_DAYS (RUN-005, Q-132): marketplace's return
+    // window, no default — unset, every return request is refused. The first
+    // new setting under that check, declared here and in the test tasks above.
+    // INVENTORY_RETURN_DISPOSITIONS_ALLOWED (RUN-005 PR 2b, Q-133) likewise:
+    // the dispositions a return may resolve to, empty by default — unset, no
+    // return can be resolved. INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED (Q-133 (4))
+    // likewise: false by default — unset, a return of which nothing arrived is
+    // not resolved. MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED (RUN-005 PR 3)
+    // likewise: false by default, and refused without an authenticated broker.
+    // MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED (Q-133 (8)): false by default —
+    // a return shipment names exactly what was authorized.
+    //
+    // ANALYTICS_* (RUN-001, ADR-071): analytics-service's own settings — the
+    // fleet dashboard's readers and the projection switch — declared from its
+    // first commit. CORS_ORIGINS with them: every service's schema reads it, and
+    // declaring it for analytics declares it for all, so it leaves the withheld
+    // list in the three tasks above (identity's aggregation-stress task still
+    // withholds it).
+    // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
+    // economic-service's statement owner (A-13) and the line a statement's
+    // obligation is recorded under (Q-130, unset by default); the same rule.
+    // ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE (docs/24 Q-29): whether a
+    // settlement with no active rule for its line is refused; unset, on outside
+    // development and test. Declared from its first commit, the same rule.
+    // ECONOMIC_SERVICE_URL and CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS (CON-003
+    // PR 6c): where contract-service asks economic-service, before a statement
+    // is SETTLED, for its obligation (A-13), and how long that may take.
+    // CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS / _BATCH_SIZE (#343 r1 F1): the reconciliation
+    // that settles what economic settled and no event announced; technical cadence, defaulted.
+    //
+    // PROCUREMENT_* and CORS_ORIGINS (COM-007 PR 1): procurement-service is new,
+    // so none of its settings may join the withheld list — its own settings and
+    // the CORS list every service reads are declared here, which takes
+    // CORS_ORIGINS off every other service's withheld entry too.
+    //
+    // SUPPLIER_SERVICE_URL (COM-007 PR 6): procurement-service now asks
+    // supplier-service for an RFQ invitee's standing, so the URL is declared
+    // here for every task that starts it — which takes it off
+    // construction-service's withheld entry too.
     "dev": {
       "cache": false,
       "persistent": true,
@@ -224,11 +338,36 @@
         "ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS",
         "ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS",
         "CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "ECONOMIC_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS",
+        "ORGANIZATION_SERVICE_URL",
         "FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS",
         "INVENTORY_LOCK_TIMEOUT_MS",
+        "INVENTORY_MARKETPLACE_REQUEST_TIMEOUT_MS",
+        "MARKETPLACE_SERVICE_URL",
+        "INVENTORY_SERVICE_URL",
+        "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
         "CONSTRUCTION_*",
-        "GATEWAY_*"
+        "GATEWAY_*",
+        "CONTRACT_SERVICE_URL",
+        "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE",
+        "ECONOMIC_SERVICE_URL",
+        "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
+        "CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE",
+        "INSURANCE_CLAIM_MAX_DOCUMENTS",
+        "INSURANCE_CLAIM_DOCUMENT_STATUSES",
+        "MARKETPLACE_RETURN_WINDOW_DAYS",
+        "INVENTORY_RETURN_DISPOSITIONS_ALLOWED",
+        "INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED",
+        "MARKETPLACE_RETURN_MIRROR_CONSUMER_ENABLED",
+        "MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED",
+        "ANALYTICS_*",
+        "CORS_ORIGINS",
+        "PROCUREMENT_*",
+        "SUPPLIER_SERVICE_URL"
       ]
     },
     "clean": { "cache": false }

@@ -1,16 +1,28 @@
-import { randomUUID } from 'node:crypto';
-import { Kafka, type Consumer, type Producer } from 'kafkajs';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { CompressionTypes, Kafka, type Consumer, type Producer } from 'kafkajs';
 import { ulid } from 'ulid';
-import { EventConsumer, kafkaClientConfig, kafkaConnectionFor } from '@rasta/nest-common';
+import {
+  DLQ_ADDED_HEADERS_MAX_BYTES,
+  EventConsumer,
+  UnprocessableEventError,
+  deadLetterHeaders,
+  kafkaClientConfig,
+  kafkaConnectionFor,
+} from '@rasta/nest-common';
 import {
   AUDIT_EVENT_RECORDED,
   AUDIT_EVENT_RECORDED_VERSION,
   AUDIT_TRAIL_TOPIC,
   DLQ_HEADERS,
+  DLQ_HEADER_VALUE_MAX_BYTES,
+  DLQ_REASONS,
+  EVENT_HEADERS,
   OPS_REPLAY_TOPIC,
+  brokerTopics,
   REPLAY_EXECUTED,
   ERROR_CODES,
   producersOf,
+  type DlqReason,
   type EventEnvelope,
 } from '@rasta/contracts';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -130,6 +142,22 @@ function pinToOffsets(
 
 if (!brokerList) {
   console.warn('[audit] KAFKA_BROKERS is not set — skipping the projector tests');
+}
+
+/**
+ * Every `[retry-replay]` test is in a suite that skips without a broker. Where
+ * RETRY_REPLAY_REQUIRED says they must run (CI's "Retry replay, published as
+ * ops-replay" step), a missing or empty KAFKA_BROKERS fails here instead, so
+ * that step cannot pass having run none of them.
+ */
+if (!brokerList && process.env.RETRY_REPLAY_REQUIRED === 'true') {
+  describe('retry replay without a broker', () => {
+    it('[retry-replay] needs KAFKA_BROKERS, which RETRY_REPLAY_REQUIRED requires', () => {
+      throw new Error(
+        'RETRY_REPLAY_REQUIRED is true and KAFKA_BROKERS names no broker: the [retry-replay] tests would all be skipped',
+      );
+    });
+  });
 }
 
 describeWithKafka('domain projector over Kafka', () => {
@@ -524,6 +552,456 @@ describeWithKafka('domain projector over Kafka', () => {
     } finally {
       reader.stop();
       await dlqConsumer.disconnect();
+    }
+  }, 300_000);
+
+  /**
+   * PR #378 r1 F2, over the real broker: a message the broker admitted
+   * GZIP-compressed whose **decompressed** bytes exceed the size limit is
+   * refused, dead-lettered with its original bytes and key, and the next
+   * message on the same partition is consumed.
+   *
+   * The dead letter carries the decompressed bytes (that is what the consumer
+   * holds); sent uncompressed it would exceed the limit the original passed,
+   * the send would fail, and the partition would retry the same message
+   * forever. The limits are asserted first, by the broker itself: the same
+   * bytes sent uncompressed are refused `MESSAGE_TOO_LARGE` on both the source
+   * topic and the dead-letter topic, so the test cannot pass because a broker
+   * happened to allow more. (No test principal may read broker or topic
+   * configs; the refusal is the effective limit, whatever its source.)
+   */
+  it('dead-letters a refused compressed message larger than the broker limit once decompressed, and consumes the next one on its partition (PR #378 r1 F2)', async () => {
+    const sourceTopic = 'rasta.organization.v1';
+    const dlqTopic = 'rasta.audit.v1.dlq';
+    const sentinelKey = `customer-SENTINEL-${RUN_TAG}@example.test`;
+    const partitionKey = id('ORG-F2-KEY');
+
+    // A real-shaped cascade (100,001 distinct ids) that projection refuses
+    // for another reason — `newStatus` is not a string — plus a property name
+    // carrying a sentinel (F3: it must reach no header).
+    const subject = id('ORG-F2');
+    const refused = envelope({
+      eventName: 'ORGANIZATION_STATUS_CHANGED',
+      producer: ownerOf(sourceTopic),
+      aggregateType: 'Organization',
+      aggregateId: subject,
+      tenantId: subject,
+      payload: {
+        organizationId: subject,
+        newStatus: 42,
+        affectedIds: Array.from(
+          { length: 100_001 },
+          (_, index) => `${subject}-${String(index).padStart(6, '0')}`,
+        ),
+        [sentinelKey]: 'x',
+      },
+    });
+    const refusedBytes = Buffer.from(JSON.stringify(refused), 'utf8');
+
+    const isTooLarge = (error: unknown): boolean => {
+      const seen = error as { type?: string; cause?: { type?: string } } | null;
+      return seen?.type === 'MESSAGE_TOO_LARGE' || seen?.cause?.type === 'MESSAGE_TOO_LARGE';
+    };
+
+    /** Sends `value` uncompressed as `owner` and returns what the broker said. */
+    async function uncompressedVerdict(owner: string, topic: string): Promise<unknown> {
+      const client = new Kafka({
+        ...kafkaClientConfig(kafkaConnectionFor(owner, `audit-itest-limit-${owner}`)),
+        logLevel: 0,
+      });
+      const producer = client.producer({ retry: { retries: 0 } });
+      await producer.connect();
+      try {
+        await producer.send({
+          topic,
+          acks: -1,
+          messages: [{ key: partitionKey, value: refusedBytes }],
+        });
+        return 'ACCEPTED';
+      } catch (error) {
+        return error;
+      } finally {
+        await producer.disconnect();
+      }
+    }
+
+    // The effective limits: neither topic takes these bytes uncompressed.
+    expect(isTooLarge(await uncompressedVerdict(ownerOf(sourceTopic), sourceTopic))).toBe(true);
+    expect(isTooLarge(await uncompressedVerdict('audit-service', dlqTopic))).toBe(true);
+
+    const dlq = new Kafka({
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'audit-itest-dlq-f2')),
+      logLevel: 1,
+    });
+    const admin = dlq.admin();
+    await admin.connect();
+    let startAt: ReadonlyMap<number, string>;
+    try {
+      startAt = new Map(
+        (await admin.fetchTopicOffsets(dlqTopic)).map(({ partition, offset }) => [
+          partition,
+          offset,
+        ]),
+      );
+    } finally {
+      await admin.disconnect();
+    }
+
+    const dlqConsumer = dlq.consumer({
+      groupId: `itest-observer.audit-dlq-f2-${ulid().slice(-12)}`,
+    });
+    const letters: { key: Buffer | null; value: Buffer | null; headers: Record<string, string> }[] =
+      [];
+    const reader = pinToOffsets(dlqConsumer, dlqTopic, startAt);
+
+    try {
+      await dlqConsumer.connect();
+      await dlqConsumer.subscribe({ topic: dlqTopic, fromBeginning: false });
+      await dlqConsumer.run({
+        eachMessage: async ({ message }) => {
+          letters.push({
+            key: message.key,
+            value: message.value,
+            headers: Object.fromEntries(
+              Object.entries(message.headers ?? {}).map(([name, header]) => [
+                name,
+                header?.toString() ?? '',
+              ]),
+            ),
+          });
+        },
+      });
+      await reader.joined();
+
+      // Admitted compressed: the broker checks the compressed batch.
+      const producer = await producerFor(sourceTopic);
+      const [sent] = await producer.send({
+        topic: sourceTopic,
+        compression: CompressionTypes.GZIP,
+        messages: [{ key: partitionKey, value: refusedBytes }],
+      });
+
+      // The next message on the same partition: the same key, a valid event.
+      const next = envelope({
+        eventName: 'ORGANIZATION_PROBE',
+        producer: ownerOf(sourceTopic),
+        aggregateType: 'Organization',
+        aggregateId: id('ORG-F2-NEXT'),
+      });
+      const [following] = await producer.send({
+        topic: sourceTopic,
+        messages: [{ key: partitionKey, value: JSON.stringify(next) }],
+      });
+      expect(following?.partition).toBe(sent?.partition);
+      expect(BigInt(following?.baseOffset ?? '0')).toBeGreaterThan(BigInt(sent?.baseOffset ?? '0'));
+
+      const letter = await waitFor(
+        'the oversized refused message on the dlq',
+        async () => letters.find((candidate) => candidate.value?.equals(refusedBytes)),
+        DELIVERY_TIMEOUT_MS,
+      );
+      expect(refusedBytes.length).toBeGreaterThan(1_048_588);
+      expect(letter.key?.toString()).toBe(partitionKey);
+      expect(letter.headers[DLQ_HEADERS.reason]).toBe('MAX_RETRIES_EXCEEDED');
+      expect(letter.headers[DLQ_HEADERS.originalTopic]).toBe(sourceTopic);
+      expect(letter.headers[DLQ_HEADERS.originalPartition]).toBe(String(sent?.partition));
+      expect(letter.headers[DLQ_HEADERS.error]).toContain('newStatus invalid_type');
+      expect(Object.values(letter.headers).join('\n')).not.toContain('SENTINEL');
+
+      const row = await waitFor(
+        'the next message on the partition',
+        rowFor(next.eventId),
+        DELIVERY_TIMEOUT_MS,
+      );
+      expect(row.sourceTopic).toBe(sourceTopic);
+      expect(
+        await prisma.client.auditEvent.count({ where: { sourceEventId: refused.eventId } }),
+      ).toBe(0);
+    } finally {
+      reader.stop();
+      await dlqConsumer.disconnect();
+    }
+  }, 300_000);
+
+  /**
+   * PR #378 r2 F1: the dead letter of a record admitted uncompressed at the
+   * source topic's limit fits its dead-letter topic — the case the headroom is
+   * proved for. A source compressed at a higher level than the dead letter's
+   * does not (known escape (i), `scripts/dead-letter-escape.broker.test.mjs`).
+   *
+   * The record is incompressible and sent uncompressed, so its batch is
+   * exactly the source limit — one byte more is refused. Its bulk is random
+   * bytes in a platform header, which the dead letter forwards byte for byte:
+   * the value must stay an envelope for a handler to refuse it (and JSON text
+   * compresses), and a large key would be hashed by kafkajs's default
+   * partitioner on the dead-letter send, which takes minutes for a megabyte. A consumer of the shared kind refuses it with the largest headers
+   * it adds: the longest reason, a handler message at its cap in four-byte
+   * characters, a client id at its cap. Then:
+   *
+   *   1. the dead letter lands with the original key, value and header bytes,
+   *      and the next message on the partition is consumed;
+   *   2. the same dead letter is refused by a topic limited like its source —
+   *      the equal limits this replaces;
+   *   3. a dead letter whose added bytes do not compress either — more than
+   *      the source limit plus the header bound — still fits: the GZIP margin
+   *      is what admits it. The consumer's own headers are text, which GZIP
+   *      shrinks; this one is written directly, as audit-service, to hold the
+   *      provisioned limit to the bound's worst case.
+   *
+   * The limits are the ones `create-topics.sh` provisions from topics.txt,
+   * which `brokerTopics()` generates; the broker's verdicts are the assertions.
+   */
+  it('dead-letters an incompressible record at the source limit with the largest added headers, and consumes the next one on its partition (PR #378 r2 F1)', async () => {
+    type Encoded = { size(): number };
+    const encodeRecord = jest.requireActual<
+      (args: { key: Buffer; value: Buffer; headers?: Record<string, Buffer | string> }) => Encoded
+    >('kafkajs/src/protocol/recordBatch/record/v0');
+    const { RecordBatch } = jest.requireActual<{
+      RecordBatch: (args: { compression: number; records: Encoded[] }) => Promise<Encoded>;
+    }>('kafkajs/src/protocol/recordBatch/v0');
+    const batchSize = async (
+      compression: CompressionTypes,
+      message: { key: Buffer; value: Buffer; headers?: Record<string, Buffer | string> },
+    ): Promise<number> =>
+      (await RecordBatch({ compression, records: [encodeRecord(message)] })).size();
+
+    const sourceTopic = 'rasta.organization.v1';
+    const dlqTopic = 'rasta.audit.v1.dlq';
+    const limitOf = (name: string): number => {
+      const topic = brokerTopics().find((candidate) => candidate.name === name);
+      if (!topic) throw new Error(`${name} is not provisioned`);
+      return topic.maxMessageBytes;
+    };
+    const sourceLimit = limitOf(sourceTopic);
+    const dlqLimit = limitOf(dlqTopic);
+    const partition = 0;
+    const longestReason = Object.values(DLQ_REASONS).reduce((a, b) =>
+      b.length > a.length ? b : a,
+    ) as DlqReason;
+    const clientId = `audit-itest-f1-${ulid()}`.padEnd(DLQ_HEADER_VALUE_MAX_BYTES.producer, 'x');
+
+    const refused = envelope({
+      eventName: 'ORGANIZATION_PROBE',
+      producer: ownerOf(sourceTopic),
+      aggregateType: 'Organization',
+      aggregateId: id('ORG-R2F1'),
+    });
+    const value = Buffer.from(JSON.stringify(refused), 'utf8');
+
+    const key = Buffer.from(refused.aggregateId);
+    /** A platform header, so the dead letter forwards it. */
+    const bulkHeader = EVENT_HEADERS.causationId;
+
+    /** The record, its bulk random, whose uncompressed batch is exactly `size` bytes. */
+    async function recordOf(size: number): Promise<{
+      key: Buffer;
+      value: Buffer;
+      headers: Record<string, Buffer>;
+    }> {
+      let length = size - 1_000;
+      for (let tries = 0; ; tries += 1) {
+        const headers = { [bulkHeader]: Buffer.alloc(length) };
+        const at = await batchSize(CompressionTypes.None, { key, value, headers });
+        if (at === size) return { key, value, headers: { [bulkHeader]: randomBytes(length) } };
+        if (tries > 20) throw new Error(`no header length makes a ${size}-byte batch`);
+        length += size - at;
+      }
+    }
+    const source = await recordOf(sourceLimit);
+    const oneOver = await recordOf(sourceLimit + 1);
+
+    const isTooLarge = (error: unknown): boolean => {
+      const seen = error as { type?: string; cause?: { type?: string } } | null;
+      return seen?.type === 'MESSAGE_TOO_LARGE' || seen?.cause?.type === 'MESSAGE_TOO_LARGE';
+    };
+    /** Sends one message as `owner`, retrying nothing, and returns what the broker said. */
+    async function verdict(
+      owner: string,
+      topic: string,
+      message: { key: Buffer; value: Buffer; headers?: Record<string, Buffer | string> },
+      compression: CompressionTypes,
+    ): Promise<unknown> {
+      const client = new Kafka({
+        ...kafkaClientConfig(kafkaConnectionFor(owner, `audit-itest-r2f1-${owner}`)),
+        logLevel: 0,
+      });
+      const producer = client.producer({ retry: { retries: 0 } });
+      await producer.connect();
+      try {
+        const [sent] = await producer.send({
+          topic,
+          acks: -1,
+          compression,
+          messages: [{ ...message, partition }],
+        });
+        return sent;
+      } catch (error) {
+        return error;
+      } finally {
+        await producer.disconnect();
+      }
+    }
+
+    // The consumer: the shared one, as audit-service, refusing this event alone.
+    const seen: string[] = [];
+    const consumer = new EventConsumer(
+      {
+        ...kafkaConnectionFor('audit-service', clientId),
+        groupId: `audit-service.itest-r2f1-${ulid().slice(-12)}`,
+        topics: [sourceTopic],
+        fromBeginning: true,
+        deadLetterTopic: dlqTopic,
+      },
+      async (event) => {
+        if (event.eventId === refused.eventId) {
+          throw new UnprocessableEventError(longestReason, '\u{1F512}'.repeat(300));
+        }
+        seen.push(event.eventId);
+      },
+      { log: () => undefined, warn: () => undefined, error: () => undefined },
+    );
+
+    const dlq = new Kafka({
+      ...kafkaClientConfig(kafkaConnectionFor('itest-observer', 'audit-itest-dlq-r2f1')),
+      logLevel: 1,
+    });
+    const admin = dlq.admin();
+    await admin.connect();
+    let startAt: ReadonlyMap<number, string>;
+    try {
+      startAt = new Map(
+        (await admin.fetchTopicOffsets(dlqTopic)).map(({ partition: p, offset }) => [p, offset]),
+      );
+    } finally {
+      await admin.disconnect();
+    }
+    const dlqConsumer = dlq.consumer({
+      groupId: `itest-observer.audit-dlq-r2f1-${ulid().slice(-12)}`,
+    });
+    const letters: { key: Buffer | null; value: Buffer | null; headers: Record<string, Buffer> }[] =
+      [];
+    const reader = pinToOffsets(dlqConsumer, dlqTopic, startAt);
+
+    try {
+      await dlqConsumer.connect();
+      await dlqConsumer.subscribe({ topic: dlqTopic, fromBeginning: false });
+      await dlqConsumer.run({
+        eachMessage: async ({ message }) => {
+          letters.push({
+            key: message.key,
+            value: message.value,
+            headers: Object.fromEntries(
+              Object.entries(message.headers ?? {}).map(([name, header]) => [
+                name,
+                Buffer.isBuffer(header) ? header : Buffer.from(String(header ?? '')),
+              ]),
+            ),
+          });
+        },
+      });
+      await reader.joined();
+      await consumer.start();
+
+      // The source limit is exactly what topics.txt states: one byte more is refused.
+      expect(
+        isTooLarge(
+          await verdict(ownerOf(sourceTopic), sourceTopic, oneOver, CompressionTypes.None),
+        ),
+      ).toBe(true);
+      const sent = (await verdict(
+        ownerOf(sourceTopic),
+        sourceTopic,
+        source,
+        CompressionTypes.None,
+      )) as { partition?: number; baseOffset?: string };
+      expect(sent.partition).toBe(partition);
+
+      const next = envelope({
+        eventName: 'ORGANIZATION_PROBE',
+        producer: ownerOf(sourceTopic),
+        aggregateType: 'Organization',
+        aggregateId: id('ORG-R2F1-NEXT'),
+      });
+      const following = (await verdict(
+        ownerOf(sourceTopic),
+        sourceTopic,
+        { key: Buffer.from(next.aggregateId), value: Buffer.from(JSON.stringify(next)) },
+        CompressionTypes.None,
+      )) as { partition?: number; baseOffset?: string };
+      expect(following.partition).toBe(partition);
+      expect(BigInt(following.baseOffset ?? '0')).toBeGreaterThan(BigInt(sent.baseOffset ?? '0'));
+
+      // 1. In the dead-letter topic, with the original bytes, key and header; the next one consumed.
+      const letter = await waitFor(
+        'the dead letter of the record at the source limit',
+        async () =>
+          letters.find(
+            (candidate) =>
+              candidate.value?.equals(value) &&
+              candidate.key?.equals(key) &&
+              candidate.headers[bulkHeader]?.equals(source.headers[bulkHeader] ?? Buffer.alloc(0)),
+          ),
+        DELIVERY_TIMEOUT_MS,
+      );
+      await waitFor(
+        'the next message on the partition',
+        async () => (seen.includes(next.eventId) ? true : null),
+        DELIVERY_TIMEOUT_MS,
+      );
+      expect(letter.headers[DLQ_HEADERS.reason]?.toString()).toBe(longestReason);
+      expect(letter.headers[DLQ_HEADERS.originalPartition]?.toString()).toBe(String(partition));
+      expect(letter.headers['x-producer']?.toString()).toBe(clientId);
+      const letterMessage = { key, value, headers: letter.headers };
+      const letterBatch = await batchSize(CompressionTypes.GZIP, letterMessage);
+      expect(letterBatch).toBeGreaterThan(sourceLimit);
+      expect(letterBatch).toBeLessThanOrEqual(dlqLimit);
+
+      // 2. Under the equal limits this replaces, the same dead letter is refused:
+      //    a topic limited like the source, sent the same way.
+      expect(
+        isTooLarge(
+          await verdict(ownerOf(sourceTopic), sourceTopic, letterMessage, CompressionTypes.GZIP),
+        ),
+      ).toBe(true);
+
+      // 3. The bound's worst case: every added header at its cap, in bytes that
+      //    do not compress. Larger than the source limit plus the header bound,
+      //    so only the GZIP margin admits it.
+      const added = deadLetterHeaders(undefined, {
+        reason: longestReason,
+        originalTopic: 't'.repeat(DLQ_HEADER_VALUE_MAX_BYTES.originalTopic),
+        originalPartition: 2_147_483_647,
+        originalOffset: '9223372036854775807',
+        attempts: Number.MAX_SAFE_INTEGER,
+        detail: '\u{1F512}'.repeat(1000),
+        producer: 'p'.repeat(1000),
+        failedAt: new Date(8.64e15),
+      });
+      const worst = {
+        key,
+        value,
+        headers: {
+          [bulkHeader]: randomBytes(source.headers[bulkHeader]?.length ?? 0),
+          ...Object.fromEntries(
+            Object.entries(added).map(([name, text]) => [
+              name,
+              randomBytes(Buffer.byteLength(String(text))),
+            ]),
+          ),
+        },
+      };
+      const worstBatch = await batchSize(CompressionTypes.GZIP, worst);
+      expect(worstBatch).toBeGreaterThan(sourceLimit + DLQ_ADDED_HEADERS_MAX_BYTES);
+      expect(worstBatch).toBeLessThanOrEqual(dlqLimit);
+      const admitted = (await verdict('audit-service', dlqTopic, worst, CompressionTypes.GZIP)) as {
+        baseOffset?: string;
+      };
+      expect(isTooLarge(admitted)).toBe(false);
+      expect(admitted.baseOffset).toBeDefined();
+    } finally {
+      reader.stop();
+      await dlqConsumer.disconnect();
+      await consumer.stop();
     }
   }, 300_000);
 

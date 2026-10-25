@@ -3,6 +3,7 @@
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
+import { ProviderUnknownRefusal } from '@/app/DemoModeNotice';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { toPersianDigits } from '@/lib/format';
@@ -21,6 +22,7 @@ import {
   type OrderCommandField,
   type OrderCommandFormValues,
 } from '@/lib/order-fields';
+import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import { submitOrderCommand } from './actions';
 import { IDLE_ORDER_COMMAND_FORM, type OrderCommandFormState } from './form-state';
@@ -148,7 +150,16 @@ function CommandFields({
       );
 
     case 'CONFIRM_RECEIPT':
-      return <NoteField values={values} errors={errors} />;
+      // No note field (Q-110): marketplace-service refuses a non-empty receipt
+      // note and has nowhere to store one, so offering the field made the
+      // buyer's most important step fail. FULFILL keeps its note — that one is
+      // stored. A post that still carries a note (stale page, crafted request)
+      // is refused by `parseOrderCommand` and its Persian sentence shows here.
+      return errors.note ? (
+        <p role="alert" className="text-sm text-danger">
+          {errors.note}
+        </p>
+      ) : null;
 
     case 'RAISE_DISPUTE':
       return (
@@ -334,11 +345,14 @@ function CommandBanner({ state }: { state: OrderCommandFormState }) {
     return <Alert tone="warning">{state.message}</Alert>;
   }
 
+  if (state.kind === 'REFUSED' && state.reason === 'PROVIDER_UNKNOWN') {
+    return <ProviderUnknownRefusal />;
+  }
+
   if (state.kind === 'REFUSED') {
-    const text =
-      state.reason === 'NO_SESSION'
-        ? 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.'
-        : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.';
+    const text = isSessionRefusal(state.reason)
+      ? SESSION_REFUSAL_MESSAGES[state.reason]
+      : 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.';
     return <Alert tone="danger">{text}</Alert>;
   }
 

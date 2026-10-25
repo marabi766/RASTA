@@ -30,6 +30,11 @@ export const TENANT_SCOPED_MODELS = [
   'Shipment',
   'ShipmentLeg',
   'TrackingEvent',
+  'ReturnShipment',
+  'ReturnShipmentLine',
+  'ReturnTrackingEvent',
+  'ReturnDisposition',
+  'ReturnDispatchWithdrawal',
   'IdempotencyKey',
 ] as const;
 

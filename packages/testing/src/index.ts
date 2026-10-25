@@ -40,3 +40,17 @@ export {
   MIN_REASON_LENGTH,
 } from './tenant-scope';
 export type { DmmfModelLike, TenantScopeInput } from './tenant-scope';
+
+export { StubKafkaBroker, reserveFreePort } from './stub-kafka-broker';
+export type { StubKafkaBrokerOptions } from './stub-kafka-broker';
+
+export { publisherCloseProblems, runOutboxShutdownProvider } from './outbox-shutdown-wiring';
+export type { ParticipantStop, ShutdownFactoryProvider } from './outbox-shutdown-wiring';
+
+export { SAGA_DISPUTE_RECOVERY } from './saga-dispute-recovery';
+export type { SagaDisputeRecoveryRow } from './saga-dispute-recovery';
+
+export { expireClaim, makeDue } from './eligibility-clock';
+
+export { withRedirectProbe, REDIRECT_CASES } from './redirect-probe';
+export type { RedirectProbe } from './redirect-probe';
