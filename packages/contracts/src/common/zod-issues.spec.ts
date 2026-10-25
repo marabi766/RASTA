@@ -112,7 +112,7 @@ describe('legacyParse', () => {
     ]);
   });
 
-  it('±Infinity replays the number’s own checks, with their messages, as zod 3 ran them', () => {
+  it('±Infinity gets the number’s own checks, with their messages, as zod 3 ran them (patched zod)', () => {
     const schema = z.object({ q: z.number().min(1).max(5, 'at most five').int() });
     expect(brief(legacy(schema, { q: Number.POSITIVE_INFINITY }))).toEqual([
       { path: 'q', code: 'too_big', message: 'at most five' },
@@ -156,7 +156,7 @@ describe('legacyParse', () => {
     ]);
   });
 
-  it('a non-finite number after a preprocess replays the checks on the parsed number (r1 F1, ?limit=1e999)', () => {
+  it('a non-finite number after a preprocess gets the checks on the parsed number (r1 F1, ?limit=1e999)', () => {
     const limit = z.preprocess(
       (value) => (typeof value === 'string' ? Number(value) : value),
       z.number().int().min(1).max(200),
@@ -167,7 +167,7 @@ describe('legacyParse', () => {
     ]);
   });
 
-  it('after an .int() refusal, runs the later checks as zod 3 did (zod 4 stops there)', () => {
+  it('after an .int() refusal, runs the later checks as zod 3 did, each once (the patched zod goes on)', () => {
     const schema = z.object({
       q: z.number().multipleOf(5).int().min(10).max(20, 'at most twenty'),
     });
@@ -180,6 +180,40 @@ describe('legacyParse', () => {
       { path: 'q', code: 'not_multiple_of', message: 'Number must be a multiple of 5' },
       { path: 'q', code: 'invalid_type', message: 'Expected integer, received float' },
       { path: 'q', code: 'too_big', message: 'at most twenty' },
+    ]);
+  });
+
+  it('a union option stopped by an over-cap list still counts as checked when its integer failed (zod 3: dirty)', () => {
+    // Recorded under zod 3.25.76: the option's issues, not invalid_union.
+    const schema = z.union([
+      z.object({ list: z.array(z.string()).max(1), n: z.number().int() }),
+      z.string(),
+    ]);
+    expect(brief(legacy(schema, { list: ['a', 'b'], n: 0.5 }))).toEqual([
+      { path: 'list', code: 'too_big', message: 'Array must contain at most 1 element(s)' },
+      { path: 'n', code: 'invalid_type', message: 'Expected integer, received float' },
+    ]);
+  });
+
+  it('an integer past 2^53 reads as the schema’s own bound; zod 4’s safe-integer bound only where nothing else refused it', () => {
+    // zod 3.25.76: `too_big` 100 alone; `.int()` with no bound accepted 1e20 (r1 Deviation 4).
+    expect(brief(legacy(z.object({ n: z.number().int().max(100) }), { n: 1e20 }))).toEqual([
+      { path: 'n', code: 'too_big', message: 'Number must be less than or equal to 100' },
+    ]);
+    expect(brief(legacy(z.object({ n: z.number().int() }), { n: 1e20 }))).toEqual([
+      {
+        path: 'n',
+        code: 'too_big',
+        message: 'Number must be less than or equal to 9007199254740991',
+      },
+    ]);
+  });
+
+  it('a record and a tuple of the wrong type are named as zod 3 named them', () => {
+    const schema = z.object({ r: z.record(z.string(), z.number()), t: z.tuple([z.string()]) });
+    expect(brief(legacy(schema, { r: null, t: 'x' }))).toEqual([
+      { path: 'r', code: 'invalid_type', message: 'Expected object, received null' },
+      { path: 't', code: 'invalid_type', message: 'Expected array, received string' },
     ]);
   });
 
@@ -265,8 +299,18 @@ describe('legacyIssueInErrorMap', () => {
       .object({ c: currencySchema, n: z.number().max(5) })
       .safeParse({ c: 'USD', n: Number.POSITIVE_INFINITY }, { error });
     // zod 4.6.7 finishes the issues, running the maps, when the error is first read.
-    expect(result.error?.issues).toHaveLength(2);
-    expect(issues.map((issue) => issue?.code)).toEqual(['invalid_enum_value', 'too_big']);
+    // The patched zod goes on after ±Infinity, so `.max(5)` raises its own issue; the
+    // type issue before it, the one a form field shows, reads as that check too.
+    expect(result.error?.issues.map((issue) => issue.code)).toEqual([
+      'invalid_value',
+      'invalid_type',
+      'too_big',
+    ]);
+    expect(issues.map((issue) => issue?.code)).toEqual([
+      'invalid_enum_value',
+      'too_big',
+      'too_big',
+    ]);
   });
 });
 

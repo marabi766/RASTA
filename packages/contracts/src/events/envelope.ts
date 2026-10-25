@@ -92,7 +92,15 @@ export const eventEnvelopeSchema = z.object({
    * Carrying these two adds no personal data: `streamKey` is the partition key
    * already on the row, and `streamSeq` is a counter.
    */
-  streamSeq: z.number().int().positive().safe().optional(),
+  // zod 3's safe-integer bounds, spelled out: zod 4's method of that name is a second
+  // `.int()` (the integer issue twice, no bound; zod-compat-patch.spec).
+  streamSeq: z
+    .number()
+    .int()
+    .positive()
+    .min(Number.MIN_SAFE_INTEGER)
+    .max(Number.MAX_SAFE_INTEGER)
+    .optional(),
   streamKey: z.string().min(1).optional(),
 
   /**

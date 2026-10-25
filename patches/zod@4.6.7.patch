@@ -1,0 +1,144 @@
+diff --git a/v4/classic/schemas.cjs b/v4/classic/schemas.cjs
+index d624a212b95515c07054dcdc5604e1db4d531396..f91f5def2c8bf2ba12a51130596a0fcda15b43a8 100644
+--- a/v4/classic/schemas.cjs
++++ b/v4/classic/schemas.cjs
+@@ -1335,7 +1335,9 @@ exports.ZodTransform = core.$constructor("ZodTransform", (inst, def) => {
+                 if (!("input" in _issue))
+                     _issue.input = payload.value;
+                 _issue.inst ?? (_issue.inst = inst);
+-                // _issue.continue ??= true;
++                // @rasta patch (PR #444): an issue a transform adds marks the value dirty, as in
++                // zod 3 — enclosing checks and refinements still run — unless it is fatal.
++                _issue.continue ?? (_issue.continue = true);
+                 payload.issues.push(index_js_1.util.issue(_issue));
+             }
+         };
+diff --git a/v4/classic/schemas.js b/v4/classic/schemas.js
+index db63ba8bac6cbf286de1d43c9d14c31724f742dd..7b854a0e6d3e6735e75d6574db1f09fc0f94fc3f 100644
+--- a/v4/classic/schemas.js
++++ b/v4/classic/schemas.js
+@@ -1211,7 +1211,9 @@ export const ZodTransform = /*@__PURE__*/ core.$constructor("ZodTransform", (ins
+                 if (!("input" in _issue))
+                     _issue.input = payload.value;
+                 _issue.inst ?? (_issue.inst = inst);
+-                // _issue.continue ??= true;
++                // @rasta patch (PR #444): an issue a transform adds marks the value dirty, as in
++                // zod 3 — enclosing checks and refinements still run — unless it is fatal.
++                _issue.continue ?? (_issue.continue = true);
+                 payload.issues.push(util.issue(_issue));
+             }
+         };
+diff --git a/v4/core/checks.cjs b/v4/core/checks.cjs
+index b457efb619ddea6ca6136482d98d39c8657b581e..f6bdae192e8c7466b7a911600c4a6a861744835a 100644
+--- a/v4/core/checks.cjs
++++ b/v4/core/checks.cjs
+@@ -130,7 +130,11 @@ exports.$ZodCheckNumberFormat = core.$constructor("$ZodCheckNumberFormat", (inst
+                     expected: origin,
+                     format: def.format,
+                     code: "invalid_type",
+-                    continue: false,
++                    // @rasta patch (PR #444): zod 3 kept parsing after a failed .int() — the
++                    // number's later checks and every enclosing refinement still ran and were
++                    // reported. The value is still a number, so nothing downstream reads a
++                    // wrong type; the parse is refused all the same.
++                    continue: true,
+                     input,
+                     inst,
+                 });
+diff --git a/v4/core/checks.js b/v4/core/checks.js
+index 6bd3531478ce3596bad135f182f54727667dd839..e39c004e6eb20ca93d101637c533fb3a627bc1de 100644
+--- a/v4/core/checks.js
++++ b/v4/core/checks.js
+@@ -104,7 +104,11 @@ export const $ZodCheckNumberFormat = /*@__PURE__*/ core.$constructor("$ZodCheckN
+                     expected: origin,
+                     format: def.format,
+                     code: "invalid_type",
+-                    continue: false,
++                    // @rasta patch (PR #444): zod 3 kept parsing after a failed .int() — the
++                    // number's later checks and every enclosing refinement still ran and were
++                    // reported. The value is still a number, so nothing downstream reads a
++                    // wrong type; the parse is refused all the same.
++                    continue: true,
+                     input,
+                     inst,
+                 });
+diff --git a/v4/core/schemas.cjs b/v4/core/schemas.cjs
+index 0d9f7203c375d0ceb49e52f72529c8e3c285245f..26946e29bb036cf4e75f0c59f2ce780349ba3ba3 100644
+--- a/v4/core/schemas.cjs
++++ b/v4/core/schemas.cjs
+@@ -699,6 +699,10 @@ exports.$ZodNumber = core.$constructor("$ZodNumber", (inst, def) => {
+             input,
+             inst,
+             ...(received ? { received } : {}),
++            // @rasta patch (PR #444): zod 3's number took ±Infinity and ran its checks and
++            // every enclosing refinement on it. It is still refused here, but as a number:
++            // the parse goes on so those checks and refinements are reported as zod 3 did.
++            ...(typeof input === "number" && !Number.isNaN(input) ? { continue: true } : {}),
+         });
+         return payload;
+     };
+@@ -1272,7 +1276,10 @@ function handleUnionResults(results, final, inst, ctx) {
+         }
+     }
+     const nonaborted = results.filter((r) => !util.aborted(r));
+-    if (nonaborted.length === 1) {
++    // @rasta patch (PR #444): zod 3 answered with the first option that failed only on
++    // checks, and kept parsing — enclosing refinements still ran; zod 4 did that only when
++    // exactly one such option exists, and otherwise refused the whole union, fatally.
++    if (nonaborted.length >= 1) {
+         final.value = nonaborted[0].value;
+         return nonaborted[0];
+     }
+@@ -2360,6 +2367,12 @@ exports.$ZodPipe = core.$constructor("$ZodPipe", (inst, def) => {
+     };
+ });
+ function handlePipeResult(left, next, ctx) {
++    // @rasta patch (PR #444): zod 3's .transform() refused a value that had failed a check
++    // as a whole (INVALID): nothing enclosing it ran a refinement on what it would have made.
++    if (left.issues.length && next._zod.def.type === "transform") {
++        for (const iss of left.issues)
++            iss.continue = false;
++    }
+     // Any issue stops the pipe, so a failing refinement never feeds its transform. An unrecognized key is the exception: it describes the input's extra properties, not the value being piped, and an enclosing intersection may yet reconcile it.
+     if (left.issues.some((iss) => iss.code !== "unrecognized_keys")) {
+         // prevent further checks
+diff --git a/v4/core/schemas.js b/v4/core/schemas.js
+index c8c5de787d82e9c9db6df3fc21876d5924411f54..d9eab31839b1c4105509e035f64242301af06c32 100644
+--- a/v4/core/schemas.js
++++ b/v4/core/schemas.js
+@@ -655,6 +655,10 @@ export const $ZodNumber = /*@__PURE__*/ core.$constructor("$ZodNumber", (inst, d
+             input,
+             inst,
+             ...(received ? { received } : {}),
++            // @rasta patch (PR #444): zod 3's number took ±Infinity and ran its checks and
++            // every enclosing refinement on it. It is still refused here, but as a number:
++            // the parse goes on so those checks and refinements are reported as zod 3 did.
++            ...(typeof input === "number" && !Number.isNaN(input) ? { continue: true } : {}),
+         });
+         return payload;
+     };
+@@ -1228,7 +1232,10 @@ function handleUnionResults(results, final, inst, ctx) {
+         }
+     }
+     const nonaborted = results.filter((r) => !util.aborted(r));
+-    if (nonaborted.length === 1) {
++    // @rasta patch (PR #444): zod 3 answered with the first option that failed only on
++    // checks, and kept parsing — enclosing refinements still ran; zod 4 did that only when
++    // exactly one such option exists, and otherwise refused the whole union, fatally.
++    if (nonaborted.length >= 1) {
+         final.value = nonaborted[0].value;
+         return nonaborted[0];
+     }
+@@ -2316,6 +2323,12 @@ export const $ZodPipe = /*@__PURE__*/ core.$constructor("$ZodPipe", (inst, def)
+     };
+ });
+ function handlePipeResult(left, next, ctx) {
++    // @rasta patch (PR #444): zod 3's .transform() refused a value that had failed a check
++    // as a whole (INVALID): nothing enclosing it ran a refinement on what it would have made.
++    if (left.issues.length && next._zod.def.type === "transform") {
++        for (const iss of left.issues)
++            iss.continue = false;
++    }
+     // Any issue stops the pipe, so a failing refinement never feeds its transform. An unrecognized key is the exception: it describes the input's extra properties, not the value being piped, and an enclosing intersection may yet reconcile it.
+     if (left.issues.some((iss) => iss.code !== "unrecognized_keys")) {
+         // prevent further checks

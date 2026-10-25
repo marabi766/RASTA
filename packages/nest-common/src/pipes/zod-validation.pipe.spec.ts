@@ -164,6 +164,28 @@ describe('ZodValidationPipe details (S-09)', () => {
     expect(dump(error)).not.toContain('SENTINEL');
   });
 
+  it('a refinement restored after a failed .int() is masked like any other issue (PR #444 r3)', () => {
+    // zod 4 stopped at the integer, so this refinement never ran; the patched zod
+    // runs it as zod 3 did, and its client-chosen key and echoing message reach
+    // the same backstop.
+    const schema = z
+      .object({ count: z.number().int(), tags: z.record(z.string(), z.string()) })
+      .superRefine((value, ctx) => {
+        for (const [key, tag] of Object.entries(value.tags)) {
+          ctx.addIssue({ code: 'custom', path: ['tags', key], message: `tag ${tag} is refused` });
+        }
+      });
+    const input = { count: 0.5, tags: { [SENTINEL]: SENTINEL } };
+    expect(rawZodText(schema, input)).toContain(SENTINEL);
+
+    const error = refusal(schema, input);
+    expect(error.details).toEqual([
+      { path: 'count', code: 'invalid_type', message: 'Expected integer, received float' },
+      { path: `tags.${REDACTED_SEGMENT}`, code: 'custom', message: 'Invalid input' },
+    ]);
+    expect(dump(error)).not.toContain('SENTINEL');
+  });
+
   it('reaches neither the response body nor the log line through the exception filter', () => {
     const lines: unknown[] = [];
     const record = (...args: unknown[]) => {

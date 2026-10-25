@@ -40,6 +40,16 @@ import {
  * call, and returns a {@link LegacyRefusal}. Every formatter takes that refusal
  * and refuses anything else ({@link requireLegacyRefusal}). The zod 4 error,
  * which then carries the input on every issue, never leaves this file.
+ *
+ * ## Run order: zod 3's, from the patched zod
+ *
+ * zod 3 kept parsing after a failed check, so a refusal also held the
+ * number's later checks and every enclosing refinement; zod 4 stops at some
+ * failures zod 3 went on after (PR #444 r2 F1). The repository's patch of zod
+ * (`patches/zod@4.6.7.patch`) restores zod 3's run order in the one zod every
+ * workspace loads, so a refusal holds the issues zod 3's held and this file
+ * only words them. Nothing is replayed, except for the single issue a form's
+ * error map is asked about ({@link legacyIssueInErrorMap}).
  */
 
 /** The codes zod 3 used. */
@@ -270,6 +280,9 @@ const FORMAT_VALIDATION: Record<string, string> = {
   cidrv6: 'cidr',
 };
 
+/** zod 4's `expected` for a type → zod 3's: a record was an object to zod 3, a tuple an array. */
+const LEGACY_EXPECTED: Readonly<Record<string, string>> = { record: 'object', tuple: 'array' };
+
 /** zod 4's size `origin` → zod 3's `type`. */
 function sizeType(origin: unknown): LegacySizeType {
   switch (origin) {
@@ -330,7 +343,7 @@ function translate(issue: V4Issue, schema: z.ZodType, at: PropertyKey[]): Transl
       return {
         code: 'invalid_type',
         path,
-        expected: issue.expected,
+        expected: LEGACY_EXPECTED[issue.expected] ?? issue.expected,
         // Without the value, zod 3's name for what it was is unknown.
         received: known ? legacyParsedType(seen) : 'unknown',
       };
@@ -431,6 +444,46 @@ const NON_FATAL_CODES = new Set([
 ]);
 
 /**
+ * Whether zod 3 kept parsing after the issue. Besides {@link NON_FATAL_CODES},
+ * two `invalid_type`s were checks in zod 3, and keep parsing here too (the
+ * `patches/zod@4.6.7.patch` of this repository): a failed `.int()`, and ±Infinity
+ * where a number was expected, which zod 3's number took and ran its checks on.
+ */
+function keptParsing(issue: V4Issue): boolean {
+  return NON_FATAL_CODES.has(issue.code) || integerRefused(issue) || nonFiniteNumber(issue);
+}
+
+/** A failed `.int()`: zod 3's `invalid_type` "Expected integer, received float". */
+function integerRefused(issue: V4Issue): boolean {
+  return issue.code === 'invalid_type' && issue.expected === 'int';
+}
+
+/**
+ * zod 4's own refusal of an integer beyond ±(2^53 − 1) (r1 Deviation 4): a
+ * bound zod 3's `.int()` did not have, raised before the schema's own checks.
+ */
+function unsafeInteger(issue: V4Issue): boolean {
+  return (
+    (issue.code === 'too_big' || issue.code === 'too_small') &&
+    issue.origin === 'int' &&
+    (issue.code === 'too_big'
+      ? issue.maximum === Number.MAX_SAFE_INTEGER
+      : issue.minimum === Number.MIN_SAFE_INTEGER)
+  );
+}
+
+/** ±Infinity where a number was expected. */
+function nonFiniteNumber(issue: V4Issue): boolean {
+  return (
+    issue.code === 'invalid_type' &&
+    issue.expected === 'number' &&
+    typeof issue.input === 'number' &&
+    !Number.isNaN(issue.input) &&
+    !Number.isFinite(issue.input)
+  );
+}
+
+/**
  * What zod 3 reported for a union that zod 4 refused as `invalid_union`.
  *
  * zod 3 returned the issues of the **first** option that failed only on
@@ -446,7 +499,7 @@ const NON_FATAL_CODES = new Set([
 function unionAsZod3Reported(issue: V4Issue): readonly z.core.$ZodIssue[] | undefined {
   if (issue.code !== 'invalid_union' || !Array.isArray(issue.errors)) return undefined;
   const checkOnly = issue.errors.filter(
-    (option) => option.length > 0 && option.every((inner) => NON_FATAL_CODES.has(inner.code)),
+    (option) => option.length > 0 && option.every((inner) => keptParsing(inner as V4Issue)),
   );
   return checkOnly[0];
 }
@@ -461,17 +514,21 @@ function mappedMessage(map: unknown, issue: Record<string, unknown>): string | u
 }
 
 /**
- * What zod 3 reported for ±Infinity where a number was expected.
+ * What zod 3 reported for ±Infinity where a number was expected, for an error
+ * map, which sees one issue at a time.
  *
  * zod 3's `z.number()` took ±Infinity (only `.finite()` refused it) and ran
  * the number's checks on it: `.max(100)` refused it as `too_big` with the
- * schema's own message, `.int()` as a float. zod 4 refuses it as a type, so
- * the person read a generic sentence where they used to read the limit — and a
+ * schema's own message, `.int()` as a float. zod 4 refuses it as a type — and a
  * number reaches here from text (`Number('9'.repeat(400))`, `?limit=1e999`).
- * The number schema's checks are replayed on the value as zod 3 ran them, in
- * order, each with its own message; a number with none of them refused it only
- * through `.finite()` (a no-op in zod 4, leaving no trace), so that is
- * `not_finite`.
+ * The patched zod (`patches/zod@4.6.7.patch`) keeps parsing after that type
+ * issue, so the number's checks raise their own issues after it, and a whole
+ * refusal drops the type issue ({@link translateIssues}). A form's error map,
+ * though, is asked for the type issue's text on its own, and the field shows
+ * the first issue's text: that is the first failing check, replayed on the
+ * value as zod 3 ran it, with its own message; a number with none of them
+ * refused it only through `.finite()` (a no-op in zod 4, leaving no trace), so
+ * that is `not_finite`.
  *
  * The value is the one the number schema saw — after a `z.preprocess` or a
  * coercion turned `"1e999"` into `Infinity` — which only the issue itself
@@ -482,42 +539,12 @@ function infinityAsZod3Checked(
   schema: z.ZodType,
   at: PropertyKey[],
 ): LegacyIssue[] | undefined {
-  if (issue.code !== 'invalid_type' || issue.expected !== 'number') return undefined;
-  const value = issue.input;
-  if (typeof value !== 'number' || Number.isNaN(value) || Number.isFinite(value)) return undefined;
+  if (!nonFiniteNumber(issue)) return undefined;
+  const value = issue.input as number;
   const checks = numberChecksAt(schema, at);
   if (!checks) return undefined;
   const out = replayNumberChecks(checks.list, checks.nodeDef, value, at);
   return out.length > 0 ? out : undefined;
-}
-
-/**
- * What zod 3 reported after an `.int()` refusal: the number's later checks.
- *
- * zod 4's integer check refuses with `continue: false`, so the checks
- * declared after it never run; zod 3 ran every check, and `?limit=0.5` on
- * `.int().min(1)` read "Expected integer, received float" **and** "Number
- * must be greater than or equal to 1". The checks after the integer check are
- * replayed on the value, each with its own message; the ones before it ran in
- * zod 4 too and are already reported. Only checks on the one number are
- * replayed — nothing is parsed again.
- */
-function afterIntegerAsZod3Checked(
-  issue: V4Issue,
-  schema: z.ZodType,
-  at: PropertyKey[],
-): LegacyIssue[] {
-  if (issue.code !== 'invalid_type' || issue.expected !== 'int') return [];
-  const value = issue.input;
-  if (typeof value !== 'number' || !Number.isFinite(value)) return [];
-  const checks = numberChecksAt(schema, at);
-  if (!checks) return [];
-  const integer = checks.list.findIndex(
-    (check) =>
-      check._zod.def.check === 'number_format' && String(check._zod.def.format).includes('int'),
-  );
-  if (integer < 0) return [];
-  return replayNumberChecks(checks.list.slice(integer + 1), checks.nodeDef, value, at);
 }
 
 type NumberCheck = { _zod: { def: Record<string, unknown> } };
@@ -600,34 +627,56 @@ function floatSafeRemainder(value: number, step: number): number {
  * wraps, at its path, as zod 3 reported them. Module-private: the only way to
  * it is {@link legacyParse} (or {@link legacyIssueInErrorMap}), which always
  * have the schema and the issue values.
+ *
+ * A failed `.int()` and ±Infinity as a number keep the parse going (the
+ * patched zod): the number's later checks and every enclosing refinement raise
+ * their own issues, as in zod 3, so nothing is replayed here. zod 3 raised no
+ * type issue for ±Infinity: when the number's own checks refused it, they are
+ * what zod 3 reported, and the type issue is dropped; when none did, zod 3
+ * refused it only through `.finite()`, so it is `not_finite`. Likewise zod 4's
+ * safe-integer bound (r1 Deviation 4) is dropped where the schema's own bound
+ * refused the same integer, and kept where only it did.
  */
 function translateIssues(issues: readonly z.core.$ZodIssue[], schema: z.ZodType): LegacyIssue[] {
   const out: LegacyIssue[] = [];
-  const visit = (issue: V4Issue, prefix: PropertyKey[]): void => {
+  const visit = (issue: V4Issue, prefix: PropertyKey[], siblings: readonly V4Issue[]): void => {
     const at = [...prefix, ...issue.path];
     if (issue.code === 'invalid_key' || issue.code === 'invalid_element') {
-      for (const inner of issue.issues) visit(inner as V4Issue, at);
+      const inner = issue.issues as V4Issue[];
+      for (const each of inner) visit(each, at, inner);
       return;
     }
     const reported = unionAsZod3Reported(issue);
     if (reported) {
-      for (const inner of reported) visit(inner as V4Issue, at);
+      const inner = reported as V4Issue[];
+      for (const each of inner) visit(each, at, inner);
       return;
     }
-    const replayed = infinityAsZod3Checked(issue, schema, at);
-    if (replayed) {
-      out.push(...replayed);
-      return;
-    }
+    // zod 3 raised neither: when the number's own checks refused the value too,
+    // those are what it reported.
+    if ((nonFiniteNumber(issue) || unsafeInteger(issue)) && checkedAfter(issue, siblings)) return;
     const translated = translate(issue, schema, at);
     if (!translated) return;
     const zodDefault = isZodDefault(issue);
     const legacy = { ...translated, message: '', zodDefault } as LegacyIssue;
     legacy.message = zodDefault ? legacyDefaultMessage(legacy) : issue.message;
-    out.push(legacy, ...afterIntegerAsZod3Checked(issue, schema, at));
+    out.push(legacy);
   };
-  for (const issue of issues) visit(issue as V4Issue, []);
+  const top = issues as readonly V4Issue[];
+  for (const issue of top) visit(issue, [], top);
   return out;
+}
+
+/** Whether a later issue of the same parse was raised at the same path on the same number: the number's own check. */
+function checkedAfter(issue: V4Issue, siblings: readonly V4Issue[]): boolean {
+  const from = siblings.indexOf(issue);
+  return siblings
+    .slice(from + 1)
+    .some((later) => Object.is(later.input, issue.input) && samePath(later.path, issue.path));
+}
+
+function samePath(a: readonly PropertyKey[], b: readonly PropertyKey[]): boolean {
+  return a.length === b.length && a.every((segment, at) => segment === b[at]);
 }
 
 /** Marks a {@link LegacyRefusal} across copies of this package (a registry symbol, not `instanceof`). */
@@ -766,7 +815,7 @@ export function legacyIssueInErrorMap(raw: z.core.$ZodRawIssue): LegacyIssue | u
       ? (inst as z.ZodType)
       : NO_SCHEMA;
   const finished = { ...raw, path: [], message: '' } as unknown as z.core.$ZodIssue;
-  return translateIssues([finished], schema)[0];
+  return infinityAsZod3Checked(finished, schema, [])?.[0] ?? translateIssues([finished], schema)[0];
 }
 
 const NO_SCHEMA: z.ZodType = z.never();

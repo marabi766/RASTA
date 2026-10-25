@@ -176,3 +176,16 @@ trustPolicyExclude:
   - pino@9.14.0
   - semver@6.3.1
   - undici-types@6.21.0
+# zod 3's parse kept going after a check failed, and so ran every enclosing
+# refinement; zod 4 stops at some of those failures (a fractional `.int()`,
+# ±Infinity as a number, an issue added inside a transform, a union of options
+# that failed only on checks) and goes on after one zod 3 stopped at (a value
+# refused before its transform). Every refusal in this repository is still
+# worded as zod 3's (PR #444), so the patch restores zod 3's run order in the
+# one zod every workspace resolves; acceptance is zod 4's, unchanged. Each hunk
+# says which zod 3 rule it keeps. pnpm refuses to install a patch that no
+# longer applies; `packages/contracts/src/common/zod-compat-patch.spec.ts`
+# fails when the catalog moves past the patched version, and checks the copy
+# every workspace resolves.
+patchedDependencies:
+  zod@4.6.7: patches/zod@4.6.7.patch
