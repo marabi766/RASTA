@@ -47,7 +47,7 @@ export const fleetEnvSchema = baseEnvSchema
      * Required, like the two above: a fleet that cannot ask registers nobody,
      * and a missing URL is found at boot, not at the first registration.
      */
-    IDENTITY_SERVICE_URL: httpUrlSchema,
+    IDENTITY_SERVICE_URL: serviceUrlSchema,
 
     /** That one question, body included. A timeout refuses the registration. */
     FLEET_IDENTITY_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
