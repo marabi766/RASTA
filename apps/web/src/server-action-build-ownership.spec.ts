@@ -5,6 +5,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -141,8 +142,11 @@ describe('the build lock (r3 F1, r4 F1)', () => {
         const other = 'owner-' + 'c'.repeat(24);
         renameSync(join(web, ${JSON.stringify(LOCK)}, entry), join(web, ${JSON.stringify(LOCK)}, other));
         writeFileSync(join(web, ${JSON.stringify(LOCK)}, other), JSON.stringify({ pid: process.pid, nonce: 'c'.repeat(24) }));
+        // ... with an update of its own in flight: that is theirs too.
+        const theirs = 'pending-' + 'c'.repeat(24) + '-' + '0'.repeat(12);
+        writeFileSync(join(web, ${JSON.stringify(LOCK)}, theirs), '{}');
         const second = b.lock.release();
-        const keptOthers = existsSync(join(web, ${JSON.stringify(LOCK)}, other));
+        const keptOthers = readdirSync(join(web, ${JSON.stringify(LOCK)})).sort().join() === [other, theirs].sort().join();
         let lost = false;
         try { b.lock.assertHeld(); } catch { lost = true; }
         console.log(JSON.stringify({ first, gone, second, keptOthers, lost }));
@@ -190,10 +194,11 @@ describe('the build lock (r3 F1, r4 F1)', () => {
       (w: string) => writeFileSync(join(w, LOCK), '{"pid":1}'),
     ],
     ['a pending entry alone (no owner)', (w: string) => plantPendingOnly(w)],
-  ])('%s is held, not free, and never taken over', (_name, setUp) => {
+  ])('%s is held, not free, and never taken over (left exactly as found)', (_name, setUp) => {
     setUp(web);
+    const before = snapshot(join(web, LOCK));
     expect(acquire(300)).toEqual({ ok: false, busy: true });
-    expect(existsSync(join(web, LOCK))).toBe(true);
+    expect(snapshot(join(web, LOCK))).toEqual(before);
   });
 
   it('an empty lock directory is nobody`s: free, and taken', () => {
@@ -288,6 +293,14 @@ describe('the build lock (r3 F1, r4 F1)', () => {
     expect(acquire(300)).toEqual({ ok: false, busy: true });
   }, 60_000);
 });
+
+/** Every name and byte at the lock path (a directory's entries, or a file's contents). */
+function snapshot(path: string): Record<string, string> {
+  if (!lstatSync(path).isDirectory()) return { '': readFileSync(path, 'utf8') };
+  return Object.fromEntries(
+    readdirSync(path).map((name) => [name, readFileSync(join(path, name), 'utf8')]),
+  );
+}
 
 function plantTorn(web: string): void {
   mkdirSync(join(web, LOCK));
