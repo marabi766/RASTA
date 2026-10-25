@@ -1,4 +1,4 @@
-import { expireClaim } from '@rasta/testing';
+import { expireClaim, makeDue } from '@rasta/testing';
 import {
   claimPendingSql,
   OutboxRelay,
@@ -108,6 +108,14 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
 
     expect(acknowledged).toBe(1);
     expect((await readRow(a, 'EXPIRED_UNRECLAIMED')).published_at).not.toBeNull();
+  });
+
+  it.each([expireClaim, makeDue])('%p refuses a missing fixture id', async (setEligibility) => {
+    await seedRow(a, 'EXISTING_FIXTURE', { attempts: 1 });
+    await claim(storeA);
+    await expect(setEligibility(a, ['EXISTING_FIXTURE', 'WRONG_ID'])).rejects.toThrow(
+      'must update every requested fixture',
+    );
   });
 
   // -- 3 ---------------------------------------------------------------------
@@ -1189,6 +1197,16 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
         sql: `NULL, NULL, NULL, now() + interval '1 millisecond', NULL`,
         eligible: false,
       },
+      {
+        id: 'EQ14_PAIRED_LEASE_NEXT_TICK',
+        sql: `'tk', 'ow', now() + interval '1 millisecond', now(), NULL`,
+        eligible: false,
+      },
+      {
+        id: 'EQ15_PAIRED_RETRY_NEXT_TICK',
+        sql: `'tk', 'ow', now(), now() + interval '1 millisecond', NULL`,
+        eligible: false,
+      },
     ];
 
     const ids = async (tx: OutboxSqlClient, query: string): Promise<string[]> => {
@@ -1211,8 +1229,8 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
       await a.client.$transaction(async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL search_path TO "${PROTOCOL_SCHEMA}", pg_catalog`);
         const clock = await tx.$queryRawUnsafe<{ active: boolean }[]>(
-          `SELECT now() <> pg_catalog.now()
-               OR pg_catalog.now() = date_trunc('milliseconds', pg_catalog.now()) AS active`,
+          `SELECT now() = date_trunc('milliseconds', pg_catalog.now())
+               AND to_regprocedure('now()') = '"${PROTOCOL_SCHEMA}".now()'::regprocedure AS active`,
         );
         expect(clock).toEqual([{ active: true }]);
         for (const [index, testCase] of CASES.entries()) {

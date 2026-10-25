@@ -19,10 +19,12 @@ export {
 export type { IdPrefix, OrganizationId, UserId, AssetId } from './common/identifiers';
 
 export {
+  DISPLAY_TEXT_PATTERN,
   WITHOUT_BIDI_CONTROL,
   WITHOUT_CONTROL_CHARACTER,
   UNSUPPORTED_CHARACTERS,
   containsBidiControl,
+  displayText,
   plainText,
   referenceId,
   withoutBidiControlDeep,

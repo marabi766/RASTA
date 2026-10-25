@@ -33,13 +33,18 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { FINDINGS_SQL } from './check-db-runtime-privileges-lib.mjs';
+import {
+  classifyServices,
+  FINDINGS_SQL,
+  requiredRuntimeFunctions,
+} from './check-db-runtime-privileges-lib.mjs';
 import { ledgerRevoke } from './prisma-lib.mjs';
+import { libpqInvocation } from './verify-migration-reversible-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPLIT = join(ROOT, 'infrastructure/docker/postgres/lib/service-privilege-split.bash');
@@ -701,3 +706,413 @@ test('a legacy cluster — public owned by the superuser, the runtime role ownin
     assert.match(asAuditRuntime(sql).stderr, /must be owner|permission denied/, sql);
   }
 });
+
+// Every configured service, including audit's separate path, in both bootstrap
+// orders. Synthetic roles/databases keep this safe beside the real CI services.
+const extensionModes = spawnSync(
+  'bash',
+  [
+    '-c',
+    `source "${ROLE_PASSWORDS}"; for svc in "\${PRIVILEGE_SPLIT_SERVICES[@]}"; do printf '%s:%s\n' "$svc" "$(privilege_split_grants_mode "$svc")"; done`,
+  ],
+  { encoding: 'utf8' },
+);
+assert.equal(extensionModes.status, 0, extensionModes.stderr);
+const modeByService = new Map(
+  extensionModes.stdout
+    .trim()
+    .split('\n')
+    .map((line) => line.split(':')),
+);
+
+for (const [index, { service, kind }] of classifyServices().entries()) {
+  const mode = kind === 'audit' ? 'audit' : modeByService.get(service);
+  assert.ok(['audit', 'migration', 'default'].includes(mode), `${service}: unknown mode`);
+  for (const history of ['fresh', 'upgraded']) {
+    test(`${service} (${mode}), ${history}: extension writes removed on first split and rerun; application grants preserved`, () => {
+      const svc = `d820_${process.pid}_${index}_${history}`;
+      const runtime = `rasta_${svc}`;
+      const migrator = `${runtime}_migrator`;
+      const db = runtime;
+      const reader = `${runtime}_reader`;
+      const grantor = `${runtime}_grantor`;
+      PASSWORD[runtime] = `rt_${randomBytes(12).toString('hex')}`;
+      PASSWORD[migrator] = `mg_${randomBytes(12).toString('hex')}`;
+      const run = (sql, role) => ok(sql, { database: db, role });
+      const inspect = () => run(FINDINGS_SQL.replaceAll(":'runtime'", `'${runtime}'`));
+      const doSplit = () => {
+        const result = spawnSync(
+          'bash',
+          [
+            '-eu',
+            '-c',
+            `
+          source "${SPLIT}"
+          declare -gA ROLE_PASSWORDS=([${migrator}]=${PASSWORD[migrator]})
+          ${mode === 'audit' ? `split_audit_database_privileges ${db} ${svc}` : `split_service_privileges ${svc} ${db} ${mode}`}
+        `,
+          ],
+          { env: { ...process.env, POSTGRES_USER: process.env.PGUSER }, encoding: 'utf8' },
+        );
+        assert.equal(result.status, 0, result.stderr);
+      };
+      const extensions = () => run('CREATE EXTENSION IF NOT EXISTS postgis');
+      const assertExtension = () => {
+        assert.ok(
+          Number(
+            run(`SELECT count(*) FROM pg_class c JOIN pg_depend d ON d.objid = c.oid
+          WHERE d.classid = 'pg_class'::regclass AND d.deptype = 'e'
+            AND c.oid = 'public.spatial_ref_sys'::regclass`),
+          ) > 0,
+          'extension relation must exist',
+        );
+        assert.equal(
+          run(`SELECT has_table_privilege('${runtime}', 'spatial_ref_sys',
+          'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          OR has_any_column_privilege('${runtime}', 'spatial_ref_sys', 'INSERT,UPDATE,REFERENCES')`),
+          'f',
+        );
+        assert.equal(inspect(), '');
+      };
+      const spatialRead = () => {
+        // Exercise both repository shapes as runtime: asset geography distance
+        // and construction GeoJSON -> geography. Keep existing extension SELECT.
+        assert.equal(
+          run(
+            `SELECT ST_DWithin(
+          ST_SetSRID(ST_MakePoint(51.4,35.7),4326)::geography,
+          ST_SetSRID(ST_MakePoint(51.4,35.7),4326)::geography, 100)
+          AND ST_Distance(ST_SetSRID(ST_MakePoint(51.4,35.7),4326)::geography,
+                          ST_SetSRID(ST_MakePoint(51.4,35.7),4326)::geography) = 0
+          AND ST_SRID(ST_SetSRID(ST_GeomFromGeoJSON(
+            '{"type":"Polygon","coordinates":[[[51,35],[52,35],[52,36],[51,35]]]}'),4326)::geography) = 4326`,
+            runtime,
+          ),
+          't',
+        );
+        if (mode === 'default' || history === 'upgraded') {
+          assert.equal(run('SELECT count(*) > 0 FROM public.spatial_ref_sys', runtime), 't');
+        }
+      };
+      try {
+        ok(
+          `CREATE ROLE ${runtime} LOGIN PASSWORD '${PASSWORD[runtime]}';
+            CREATE ROLE ${reader}; CREATE ROLE ${grantor};`,
+          { database: 'postgres' },
+        );
+        ok(`CREATE DATABASE ${db} TEMPLATE template0 OWNER ${runtime}`, { database: 'postgres' });
+        if (history === 'fresh') {
+          doSplit(); // Real bootstrap splits BEFORE the superuser installs extensions.
+          extensions();
+        } else {
+          extensions();
+          run(`GRANT USAGE ON SCHEMA public TO ${runtime};
+               GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${runtime}`);
+          assert.equal(
+            run(`SELECT has_table_privilege('${runtime}', 'spatial_ref_sys', 'INSERT')
+              AND has_table_privilege('${runtime}', 'spatial_ref_sys', 'UPDATE')
+              AND has_table_privilege('${runtime}', 'spatial_ref_sys', 'DELETE')`),
+            't',
+          );
+          assert.match(inspect(), /INSERT on extension relation public.spatial_ref_sys/);
+          // Prove each effective pathway independently, including column-only grants.
+          run(`REVOKE INSERT, UPDATE, DELETE ON spatial_ref_sys FROM ${runtime};
+               GRANT INSERT ON spatial_ref_sys TO PUBLIC`);
+          assert.match(inspect(), /INSERT on extension relation public\.spatial_ref_sys/);
+          run(`REVOKE INSERT ON spatial_ref_sys FROM PUBLIC;
+               GRANT UPDATE ON spatial_ref_sys TO ${reader}; GRANT ${reader} TO ${runtime} WITH INHERIT FALSE, SET TRUE`);
+          assert.match(inspect(), /UPDATE on extension relation public\.spatial_ref_sys/);
+          run(`REVOKE UPDATE ON spatial_ref_sys FROM ${reader};
+               GRANT INSERT (srid), UPDATE (srtext) ON spatial_ref_sys TO ${runtime}`);
+          assert.equal(
+            run(`SELECT has_table_privilege('${runtime}', 'spatial_ref_sys', 'INSERT,UPDATE')`),
+            'f',
+          );
+          assert.match(inspect(), /INSERT on extension relation public\.spatial_ref_sys/);
+          assert.match(inspect(), /UPDATE on extension relation public\.spatial_ref_sys/);
+          // Leave all legacy sources present for the actual repair.
+          run(`GRANT SELECT, INSERT, UPDATE, DELETE ON spatial_ref_sys TO ${runtime};
+               GRANT DELETE ON spatial_ref_sys TO PUBLIC;
+               GRANT UPDATE (srtext) ON spatial_ref_sys TO ${reader};
+               GRANT INSERT (srid) ON spatial_ref_sys TO PUBLIC`);
+          spatialRead();
+          doSplit();
+        }
+        const schema = mode === 'audit' ? 'audit' : 'public';
+        run(
+          `CREATE TABLE ${schema}.app_probe (id int PRIMARY KEY, value text);
+             INSERT INTO ${schema}.app_probe VALUES (1, 'preserved');`,
+          migrator,
+        );
+        if (mode !== 'default')
+          run(`GRANT SELECT, INSERT ON ${schema}.app_probe TO ${runtime}`, migrator);
+        // Explicit invoker grants are application permissions too (economic's
+        // commission locks and procurement's digest). A rerun must keep them,
+        // while PUBLIC, ungranted invokers, definers and trigger functions stay closed.
+        run(
+          `CREATE FUNCTION ${schema}.app_invoker_probe() RETURNS int LANGUAGE sql AS 'SELECT 42';
+             CREATE FUNCTION ${schema}.app_ungranted_probe() RETURNS int LANGUAGE sql AS 'SELECT 42';
+             CREATE FUNCTION ${schema}.app_definer_probe() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 42';
+             CREATE FUNCTION ${schema}.app_trigger_probe() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+             REVOKE EXECUTE ON FUNCTION ${schema}.app_ungranted_probe() FROM PUBLIC;
+             GRANT EXECUTE ON FUNCTION ${schema}.app_invoker_probe(), ${schema}.app_definer_probe(), ${schema}.app_trigger_probe() TO ${runtime};`,
+          migrator,
+        );
+        // Audit intentionally has no USAGE in public, so its spatial API isn't a service grant.
+        if (mode === 'audit') {
+          assert.equal(run(`SELECT has_schema_privilege('${runtime}', 'public', 'USAGE')`), 'f');
+        } else {
+          spatialRead();
+        }
+        // Drift must be detected WITHOUT a split rerun, including audit trigger functions.
+        assert.match(inspect(), /reachable EXECUTE on definer\/trigger function/);
+        run(`GRANT EXECUTE ON FUNCTION ${schema}.app_ungranted_probe() TO PUBLIC`, migrator);
+        assert.match(inspect(), /PUBLIC EXECUTE on migrator function/);
+        if ((service === 'economic' || mode === 'audit') && history === 'upgraded') {
+          run(`GRANT ${reader} TO ${runtime} WITH INHERIT FALSE, SET TRUE;
+             GRANT USAGE ON SCHEMA ${schema}, public TO ${grantor};
+             GRANT EXECUTE ON FUNCTION ${schema}.app_definer_probe() TO ${grantor} WITH GRANT OPTION;
+             SET ROLE ${grantor};
+             GRANT EXECUTE ON FUNCTION ${schema}.app_definer_probe() TO ${reader}; RESET ROLE;
+             REVOKE EXECUTE ON FUNCTION ${schema}.app_definer_probe() FROM ${runtime};`);
+          assert.equal(run(`SELECT pg_has_role('${runtime}', '${reader}', 'USAGE')`), 'f');
+          assert.match(
+            inspect(),
+            /reachable EXECUTE on definer\/trigger function .*app_definer_probe/,
+          );
+          run(`CREATE SEQUENCE public.extension_seq;
+             ALTER EXTENSION postgis ADD SEQUENCE public.extension_seq;
+             GRANT UPDATE ON spatial_ref_sys TO ${grantor} WITH GRANT OPTION;
+             GRANT INSERT (srid) ON spatial_ref_sys TO ${grantor} WITH GRANT OPTION;
+             GRANT USAGE, UPDATE ON public.extension_seq TO ${grantor} WITH GRANT OPTION;
+             SET ROLE ${grantor};
+             GRANT UPDATE ON public.spatial_ref_sys TO ${reader};
+             GRANT INSERT (srid) ON public.spatial_ref_sys TO ${reader};
+             GRANT USAGE, UPDATE ON public.extension_seq TO ${reader}; RESET ROLE;`);
+          assert.match(inspect(), /UPDATE on extension relation public.spatial_ref_sys/);
+          assert.match(inspect(), /USAGE on extension sequence public.extension_seq/);
+          run(`CREATE FUNCTION ${schema}.extension_definer_probe() RETURNS int
+               LANGUAGE sql SECURITY DEFINER AS 'SELECT 42';
+               ALTER EXTENSION postgis ADD FUNCTION ${schema}.extension_definer_probe();
+               GRANT EXECUTE ON FUNCTION ${schema}.extension_definer_probe() TO ${runtime};`);
+          // All existing forbidden rules share the same closure, not just extensions/functions.
+          run(`GRANT ${reader} TO ${runtime} WITH INHERIT FALSE, SET FALSE;
+             GRANT CREATE ON SCHEMA ${schema} TO ${reader};
+             GRANT SELECT (id) ON ${schema}._prisma_migrations TO ${reader};
+             GRANT TRIGGER ON ${schema}.app_probe TO ${reader};`);
+          assert.equal(run(`SELECT pg_has_role('${runtime}', '${reader}', 'SET')`), 'f');
+          assert.match(inspect(), /CREATE on schema/);
+          assert.match(inspect(), /a right on .*_prisma_migrations/);
+          assert.match(inspect(), /TRIGGER on .*app_probe/);
+          for (const predefined of [
+            'pg_write_all_data',
+            'pg_read_all_data',
+            'pg_write_server_files',
+            'pg_read_server_files',
+            'pg_execute_server_program',
+          ]) {
+            run(`GRANT ${predefined} TO ${runtime} WITH INHERIT FALSE, SET TRUE`);
+            assert.match(inspect(), new RegExp(`member of predefined role ${predefined}`));
+            run(`REVOKE ${predefined} FROM ${runtime}`);
+          }
+          // CREATE OR REPLACE keeps the ACL; checker catches the changed definition immediately.
+          run(
+            `CREATE OR REPLACE FUNCTION ${schema}.app_invoker_probe() RETURNS int
+             LANGUAGE sql SECURITY DEFINER AS 'SELECT 42'`,
+            migrator,
+          );
+          assert.match(
+            inspect(),
+            /reachable EXECUTE on definer\/trigger function .*app_invoker_probe/,
+          );
+          doSplit();
+          assert.equal(
+            run(
+              `SELECT has_function_privilege('${runtime}', '${schema}.app_invoker_probe()', 'EXECUTE')`,
+            ),
+            'f',
+          );
+          run(
+            `CREATE OR REPLACE FUNCTION ${schema}.app_invoker_probe() RETURNS int
+             LANGUAGE sql SECURITY INVOKER AS 'SELECT 42';
+             GRANT EXECUTE ON FUNCTION ${schema}.app_invoker_probe() TO ${runtime}`,
+            migrator,
+          );
+        }
+        doSplit();
+        if ((service === 'economic' || mode === 'audit') && history === 'upgraded') {
+          assert.equal(run(`SELECT ${schema}.extension_definer_probe()`, runtime), '42');
+        }
+        assertExtension();
+        for (let rerun = 0; rerun < 2; rerun += 1) {
+          if (rerun) doSplit();
+          assertExtension();
+          assert.equal(
+            run(`SELECT value FROM ${schema}.app_probe WHERE id=1`, runtime),
+            'preserved',
+          );
+          run(`INSERT INTO ${schema}.app_probe VALUES (${rerun + 2}, 'append')`, runtime);
+          if (mode === 'default') {
+            run(
+              `UPDATE ${schema}.app_probe SET value='writable' WHERE id=${rerun + 2};
+                 DELETE FROM ${schema}.app_probe WHERE id=${rerun + 2}`,
+              runtime,
+            );
+          } else {
+            assert.equal(
+              run(
+                `SELECT has_table_privilege('${runtime}', '${schema}.app_probe', 'UPDATE,DELETE')`,
+              ),
+              'f',
+            );
+          }
+          assert.equal(run(`SELECT ${schema}.app_invoker_probe()`, runtime), '42');
+          if (rerun) {
+            for (const fn of ['app_ungranted_probe', 'app_definer_probe', 'app_trigger_probe']) {
+              assert.equal(
+                run(`SELECT has_function_privilege('${runtime}', '${schema}.${fn}()', 'EXECUTE')`),
+                'f',
+              );
+            }
+          }
+          if (mode !== 'audit') spatialRead();
+        }
+      } finally {
+        psql(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`, { database: 'postgres' });
+        for (const role of [runtime, migrator, reader, grantor]) {
+          const result = psql(`DROP ROLE IF EXISTS ${role}`, { database: 'postgres' });
+          assert.equal(result.status, 0, result.stderr);
+        }
+      }
+    });
+  }
+}
+
+// Original migrations are already applied on a damaged cluster. Exercise the
+// declared repair list with real service signatures and real runtime logins.
+for (const service of ['economic', 'procurement']) {
+  test(`${service}: old splitter damage is detected and repaired; healthy and damaged EXECUTE ACLs converge`, () => {
+    const runtime = `rasta_${service}`;
+    const migrator = `${runtime}_migrator`;
+    const db = `d825_${service}_${process.pid}`;
+    const created = [];
+    const run = (sql, role) => ok(sql, { database: db, role });
+    const inspect = () => run(FINDINGS_SQL.replaceAll(":'runtime'", `'${runtime}'`));
+    const signatures = requiredRuntimeFunctions
+      .filter(([svc]) => svc === service)
+      .map(([, sig]) => sig);
+    const acl = () =>
+      run(`SELECT p.oid::regprocedure::text, p.proacl::text FROM pg_proc p
+      WHERE p.oid IN (${signatures.map((sig) => `'${sig}'::regprocedure`).join(',')}) ORDER BY 1`);
+    const repair = (shouldSucceed = true) => {
+      const result = spawnSync(
+        'bash',
+        [
+          '-eu',
+          '-c',
+          `
+        source "${SPLIT}"
+        declare -gA ROLE_PASSWORDS=([${migrator}]=${PASSWORD[migrator]})
+        split_service_privileges ${service} ${db} default || exit 1
+      `,
+        ],
+        { env: { ...process.env, POSTGRES_USER: process.env.PGUSER }, encoding: 'utf8' },
+      );
+      if (shouldSucceed) assert.equal(result.status, 0, result.stderr);
+      else {
+        assert.notEqual(result.status, 0, 'unsafe required helper must refuse repair');
+        assert.match(result.stderr, /required runtime function has unsafe ownership or definition/);
+      }
+    };
+    try {
+      for (const role of [runtime, migrator]) {
+        const key = `DATABASE_URL_${role.replace(/^rasta_/, '').toUpperCase()}`;
+        PASSWORD[role] = process.env[key]
+          ? libpqInvocation(process.env[key]).env.PGPASSWORD
+          : `${role}_dev_password`;
+        if (
+          ok(`SELECT count(*) FROM pg_roles WHERE rolname='${role}'`, { database: 'postgres' }) ===
+          '0'
+        ) {
+          ok(`CREATE ROLE ${role} LOGIN PASSWORD '${PASSWORD[role]}'`, { database: 'postgres' });
+          created.push(role);
+        }
+      }
+      ok(`CREATE DATABASE ${db} TEMPLATE template0 OWNER ${runtime}`, { database: 'postgres' });
+      repair();
+      const migrations = join(ROOT, 'services', `${service}-service`, 'prisma', 'migrations');
+      for (const name of readdirSync(migrations)
+        .filter((name) => /^\d/.test(name))
+        .sort()) {
+        const sql = readFileSync(join(migrations, name, 'migration.sql'), 'utf8');
+        // Match Prisma's standalone concurrent-index path; all other files are atomic.
+        const concurrent = /CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY/i.test(
+          sql.replace(/--[^\n]*/g, ''),
+        );
+        run(concurrent ? sql : `BEGIN;\n${sql}\nCOMMIT;`, migrator);
+      }
+      assert.equal(inspect(), '');
+      const healthy = acl();
+      repair();
+      assert.equal(acl(), healthy, 'healthy repair must not change helper ACLs');
+      // Exact destructive function loop from the pre-407 splitter (6ef94918^).
+      run(`DO $$ DECLARE fn record; BEGIN
+        FOR fn IN SELECT p.oid::regprocedure AS signature FROM pg_proc p
+          WHERE p.proowner = '${migrator}'::regrole
+          AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid='pg_proc'::regclass
+            AND d.objid=p.oid AND d.deptype='e')
+        LOOP EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC, ${runtime}', fn.signature);
+        END LOOP; END $$;`);
+      for (const signature of signatures) {
+        assert.equal(
+          run(`SELECT has_function_privilege('${runtime}', '${signature}', 'EXECUTE')`),
+          'f',
+        );
+        assert.ok(inspect().includes(`missing required runtime EXECUTE on ${signature}`));
+      }
+      if (service === 'economic') {
+        assert.match(
+          psql(`SELECT commission_pricing_scope_lock('repair', 'PARTS', NULL)`, {
+            database: db,
+            role: runtime,
+          }).stderr,
+          /permission denied/,
+        );
+      }
+      repair();
+      assert.equal(acl(), healthy, 'damaged cluster must restore the exact healthy helper ACLs');
+      assert.equal(inspect(), '');
+      if (service === 'economic') {
+        run(
+          `BEGIN; SELECT commission_pricing_scope_lock('repair', 'PARTS', NULL);
+          SELECT commission_rule_scope_change('repair', 'PARTS', NULL); ROLLBACK;`,
+          runtime,
+        );
+      } else {
+        run(
+          `SELECT * FROM demand_aggregation_digest_range('repair', 'repair', NULL, NULL, 1)`,
+          runtime,
+        );
+      }
+      repair();
+      assert.equal(acl(), healthy, 'repair is idempotent');
+      run(`ALTER FUNCTION ${signatures[0]} SECURITY DEFINER`, migrator);
+      assert.match(inspect(), /reachable EXECUTE on definer\/trigger function/);
+      repair(false);
+      assert.equal(
+        run(`SELECT has_function_privilege('${runtime}', '${signatures[0]}', 'EXECUTE')`),
+        'f',
+      );
+      run(`ALTER FUNCTION ${signatures[0]} SECURITY INVOKER`, migrator);
+      repair();
+      assert.equal(acl(), healthy, 'safe definition restored without changing the original grants');
+      assert.equal(inspect(), '');
+    } finally {
+      psql(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`, { database: 'postgres' });
+      for (const role of created.reverse()) {
+        const result = psql(`DROP ROLE ${role}`, { database: 'postgres' });
+        assert.equal(result.status, 0, result.stderr);
+      }
+    }
+  });
+}

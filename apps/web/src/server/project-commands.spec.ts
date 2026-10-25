@@ -508,7 +508,7 @@ describe('what the service says, in fixed Persian words', () => {
     expect(result).toMatchObject({
       kind: 'INVALID',
       fieldErrors: {
-        title: INVALID_INPUT_MESSAGE,
+        title: 'این متن دست‌کم ۲ نویسه باشد',
         estimatedCost: INVALID_INPUT_MESSAGE,
         operationType: OPERATION_TYPE_NOT_ALLOWED_MESSAGE,
       },

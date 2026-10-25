@@ -9,9 +9,8 @@ import { applyMigration } from './migration-helpers';
 
 const SEQUENCE_OWNER_GRANTS = ['SELECT', 'UPDATE', 'USAGE'];
 const OWNER_GRANTS = ['DELETE', 'INSERT', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE'];
-// Supplier's extension-membership exclusion: CI copies PostGIS tables from
-// template1. They are DBA-owned extension objects, not analytics migrations.
-const NOT_AN_EXTENSION_RELATION = Prisma.sql`NOT EXISTS (
+// Application ACLs are exact; DBA-owned extensions are checked separately below.
+const APPLICATION_RELATION = Prisma.sql`NOT EXISTS (
   SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass
     AND d.objid = c.oid AND d.deptype = 'e'
 )`;
@@ -72,6 +71,24 @@ function currentGrantStep(mode: 'configured' | 'default'): string {
     { encoding: 'utf8', cwd: repositoryRoot },
   );
   if (result.status !== 0) throw new Error(`grant step failed: ${result.stderr}`);
+  return result.stdout;
+}
+
+function currentExtensionStep(): string {
+  const result = spawnSync(
+    'bash',
+    [
+      '-eu',
+      '-c',
+      `
+    source infrastructure/docker/postgres/lib/service-privilege-split.bash
+    _svc_split_psql() { printf '%s;\\n' "$2"; }
+    restrict_extension_relations ignored rasta_analytics
+  `,
+    ],
+    { encoding: 'utf8', cwd: repositoryRoot },
+  );
+  if (result.status !== 0) throw new Error(`extension step failed: ${result.stderr}`);
   return result.stdout;
 }
 
@@ -141,7 +158,7 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
     for (const migration of ['20261017140000_init_analytics', '20261024120000_baseline_metric']) {
       applyMigration(ownerUrl.toString(), 'public', join(migrations, migration, 'migration.sql'));
     }
-    // Checkpoint after ONLY 120000, before the legacy-default cleanup.
+    // Fresh is a control: only upgraded defaults distinguish B's REVOKEs.
     creationGrants = await runtime.$queryRaw`SELECT
       has_table_privilege('baseline_metric','SELECT') AS select,
       has_table_privilege('baseline_metric','INSERT') AS insert,
@@ -158,12 +175,49 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
     const before = await aclSnapshot(owner);
     let wrongRoleError: unknown;
     try {
-      applyMigration(runtimeUrl.toString(), 'public', privilegeMigration);
+      const adminUrl = process.env.TEST_ANALYTICS_ADMIN_URL;
+      if (!adminUrl) throw new Error('TEST_ANALYTICS_ADMIN_URL is required');
+      const wrongUrl = new URL(adminUrl);
+      wrongUrl.pathname = `/${name}`;
+      const wrongClient = new PrismaClient({ datasources: { db: { url: wrongUrl.toString() } } });
+      try {
+        expect(
+          await wrongClient.$queryRaw`SELECT current_setting('is_superuser') AS superuser`,
+        ).toEqual([{ superuser: 'on' }]);
+      } finally {
+        await wrongClient.$disconnect();
+      }
+      // A proven superuser can change every ACL/default if the guard is removed.
+      applyMigration(wrongUrl.toString(), 'public', privilegeMigration);
     } catch (error) {
       wrongRoleError = error;
     }
     wrongRole = { before, after: await aclSnapshot(owner), error: wrongRoleError };
     applyMigration(ownerUrl.toString(), 'public', privilegeMigration);
+    const adminUrl = process.env.TEST_ANALYTICS_ADMIN_URL;
+    if (!adminUrl) throw new Error('TEST_ANALYTICS_ADMIN_URL is required');
+    const extensionUrl = new URL(adminUrl);
+    extensionUrl.pathname = `/${name}`;
+    const extensionAdmin = new PrismaClient({
+      datasources: { db: { url: extensionUrl.toString() } },
+    });
+    try {
+      await extensionAdmin.$executeRawUnsafe('CREATE EXTENSION IF NOT EXISTS postgis');
+      await extensionAdmin.$executeRawUnsafe(
+        'GRANT UPDATE (srtext) ON spatial_ref_sys TO rasta_analytics',
+      );
+      expect(
+        await runtime.$queryRaw`SELECT has_any_column_privilege('spatial_ref_sys', 'UPDATE') AS forbidden`,
+      ).toEqual([{ forbidden: true }]);
+      // psql accepts the DO block as one statement; Prisma sends that block atomically too.
+      const cleanup = currentExtensionStep().trim().replace(/;$/, '');
+      if (cleanup) await extensionAdmin.$executeRawUnsafe(cleanup);
+      expect(
+        await runtime.$queryRaw`SELECT has_any_column_privilege('spatial_ref_sys', 'UPDATE') AS forbidden`,
+      ).toEqual([{ forbidden: false }]);
+    } finally {
+      await extensionAdmin.$disconnect();
+    }
     await owner.baselineMetric.create({ data: row });
   });
 
@@ -193,7 +247,7 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
     }
   });
 
-  it('after ONLY 120000, runtime baseline INSERT is refused with 42501 and its sequence has no rights', () => {
+  it(`after ONLY 120000 (${history === 'fresh' ? 'control: no legacy defaults' : 'legacy-default regression'}), runtime baseline INSERT is refused with 42501 and its sequence has no rights`, () => {
     expect(creationGrants).toEqual([
       {
         select: true,
@@ -224,7 +278,7 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
       await runtime.$queryRaw`
       SELECT DISTINCT pg_get_userbyid(c.relowner)::text AS owner
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f') AND ${NOT_AN_EXTENSION_RELATION}`,
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f') AND ${APPLICATION_RELATION}`,
     ).toEqual([{ owner: 'rasta_analytics_migrator' }]);
   });
 
@@ -237,7 +291,7 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
       CROSS JOIN LATERAL aclexplode(coalesce(c.relacl, acldefault(
         CASE WHEN c.relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END, c.relowner))) a
       WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')
-        AND ${NOT_AN_EXTENSION_RELATION}
+        AND ${APPLICATION_RELATION}
       GROUP BY c.relname, c.relkind, a.grantee ORDER BY c.relname, grantee`;
     const expected = expectedRelations.flatMap(({ relation, kind, privileges }) => [
       ...(privileges.length ? [{ relation, kind, grantee: 'rasta_analytics', privileges }] : []),
@@ -268,9 +322,24 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
         ) END AS privileges
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')
-        AND ${NOT_AN_EXTENSION_RELATION}
+        AND ${APPLICATION_RELATION}
       ORDER BY c.relname`;
     expect(rows).toEqual(expectedRelations);
+  });
+
+  it('extension relations exist and runtime has at most SELECT, including effective column rights', async () => {
+    const rows = await runtime.$queryRaw<{ relation: string; forbidden: boolean }[]>`
+      SELECT c.relname::text AS relation,
+        CASE WHEN c.relkind = 'S' THEN
+          has_sequence_privilege(c.oid, 'USAGE,UPDATE')
+        ELSE has_table_privilege(c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          OR has_any_column_privilege(c.oid, 'INSERT,UPDATE,REFERENCES') END AS forbidden
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind IN ('r','p','S','v','m','f')
+        AND NOT (${APPLICATION_RELATION})`;
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.map((row) => row.relation)).toContain('spatial_ref_sys');
+    expect(rows.filter((row) => row.forbidden)).toEqual([]);
   });
 
   it('has exactly the expected pg_default_acl: no inherited table or sequence grants', async () => {

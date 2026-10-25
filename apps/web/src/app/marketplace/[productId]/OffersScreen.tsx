@@ -10,6 +10,7 @@ import {
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
 import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
 import { productKindLabel } from '@/lib/labels';
+import { qualificationStateLabel } from '@/lib/supplier-fields';
 import { formatMoney, toPersianDigits } from '@/lib/format';
 import type { OffersPage, Product, ReadResult } from '@/server/marketplace';
 
@@ -29,6 +30,14 @@ import { PlaceOrderForm } from './PlaceOrderForm';
  * to check it. A checkmark here would claim a verification nobody performed
  * (`docs/16 § ۱۶٫۱۱`, ADR-041).
  */
+
+/**
+ * The marketplace's existing wording for an approved supplier, kept as it was
+ * on main: the supplier screens spell the shared label without a hamza (PR 366
+ * r5/r6), and which spelling the product uses is still an open owner question,
+ * so this screen does not follow that change.
+ */
+const APPROVED_OFFER_LABEL = 'تأییدشده';
 
 export interface OffersScreenProps {
   readonly product: ReadResult<Product>;
@@ -135,7 +144,9 @@ function OfferRows({ offers }: { offers: OffersPage }) {
             <td className="p-3 text-content-muted">
               {offer.supplierQualification === 'UNAVAILABLE'
                 ? 'هنوز فعال نیست'
-                : offer.supplierQualification}
+                : offer.supplierQualification === 'APPROVED'
+                  ? APPROVED_OFFER_LABEL
+                  : qualificationStateLabel(offer.supplierQualification)}
             </td>
           </tr>
         ))}

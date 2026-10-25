@@ -1,4 +1,8 @@
+import { createHash } from 'node:crypto';
+import { UNSUPPORTED_CHARACTERS } from '@rasta/contracts';
 import type { z } from 'zod';
+
+import { toPersianDigits } from '@/lib/format';
 import {
   callGateway,
   GatewayNeverSentError,
@@ -49,16 +53,23 @@ export type WriteResult<T, F extends string> =
    *  non-disclosure 404. */
   | { readonly kind: 'NOT_FOUND'; readonly correlationId: string }
   /**
-   * Refused before it could act: nothing was written. `neverSent` is set when
-   * the request provably never left this portal (connection refused, DNS …):
-   * unlike a 503 the platform answered, which may follow a commit, that one is
-   * known not to have reached anything — a write need not remember it as
-   * unresolved.
+   * Any other refusal or failure the gateway answered with a status. A `4xx`
+   * is a refusal before anything was written; a `5xx` is **not** proof of that
+   * (a post-commit read can fail, an upstream reset after the commit surfaces
+   * as `503`). A keyed write may resend it under the same key, which replays
+   * rather than repeats; a key-less one (`idempotency: 'NONE'`) must treat a
+   * `5xx` as unconfirmed — `supplier-runner.ts` does (Codex review of PR 366,
+   * finding 3). `neverSent` is set when the request provably never left this
+   * portal (connection refused, DNS …): unlike a 503 the platform answered,
+   * which may follow a commit, that one is known not to have reached anything —
+   * a write need not remember it as unresolved.
    */
   | {
       readonly kind: 'UNAVAILABLE';
       readonly status: number;
       readonly correlationId: string;
+      /** The platform error `code` (docs/06 § 6.7), when the response — a `4xx` — carried one. */
+      readonly code?: string;
       readonly neverSent?: true;
       /**
        * The owning service refused because the replay deadline this write carried is behind its own
@@ -99,9 +110,12 @@ export const MAX_IN_PROGRESS_WAIT_SECONDS = 30;
  * How a service's error details map onto a form.
  *
  * `paths` says which request-body path belongs to which field. `messages`
- * translates the service messages this portal knows; a message it does not
- * know is shown as it arrived — visibly foreign, never hidden — because the
- * service's sentence is the truth and a stale dictionary is not.
+ * translates the service messages this portal knows. A message it does not
+ * know is **never** shown: the service's sentence is English, may carry an
+ * internal ticket number («open question Q-110») and may echo what the person
+ * typed, so the form says {@link GENERIC_REFUSAL_MESSAGE} (or the mapping's own
+ * `fallback`) instead, and a sanitised diagnostic is logged
+ * ({@link reportUnmappedMessage}) so the gap is found without the text leaking.
  */
 export interface FieldMapping<F extends string> {
   readonly paths: Readonly<Record<string, F>>;
@@ -130,31 +144,114 @@ export interface FieldMapping<F extends string> {
    */
   readonly byDetailCode?: Readonly<Record<string, string>>;
   /**
-   * Said for anything the tables above do not cover. When set, the service's
-   * own sentence is never rendered: a form whose text could echo a stranger's
-   * characters (a bidi control in a detail) keeps the list closed.
+   * Said for anything the tables above do not cover, in place of
+   * {@link GENERIC_REFUSAL_MESSAGE}: a form that can say something more
+   * specific than the generic sentence. Either way the service's own sentence
+   * is never rendered.
    */
   readonly fallback?: string;
+}
+
+/**
+ * What a form says for a refusal it has no sentence for (and no `fallback` of
+ * its own). Persian, closed, names nothing: the reader is told the request was
+ * not accepted and what to do; the correlation id on the page finds the rest.
+ */
+export const GENERIC_REFUSAL_MESSAGE =
+  'درخواست پذیرفته نشد. اطلاعات واردشده را بررسی کنید، صفحه را تازه کنید و دوباره تلاش کنید.';
+
+/**
+ * Closed messages that more than one service emits and that mean the same
+ * thing everywhere, so no module has to remember to list them.
+ * `UNSUPPORTED_CHARACTERS` is the shared text rule's one refusal
+ * (`@rasta/contracts`).
+ */
+const COMMON_MESSAGES: Readonly<Record<string, string>> = {
+  [UNSUPPORTED_CHARACTERS]:
+    'نویسه‌ی غیرمجاز دارد؛ حروف فارسی و لاتین، رقم و نشانه‌های معمول (مانند «،» و «؛») مجازند',
+  'Name contains unsupported characters':
+    'نام نویسه‌ی غیرمجاز دارد؛ حروف فارسی و لاتین، فاصله و نیم‌فاصله مجازند',
+};
+
+/**
+ * Zod's own default sentences, which a service's validation pipe passes through
+ * when a DTO field has no message of its own («String must contain at most 200
+ * character(s)»). Closed wording with a number at most, so each has a Persian
+ * rendering that repeats nothing the person typed.
+ */
+const COMMON_PATTERNS: ReadonlyArray<readonly [RegExp, (match: RegExpMatchArray) => string]> = [
+  [
+    /^String must contain at least (\d+) character\(s\)$/,
+    (m) => `این متن دست‌کم ${toPersianDigits(m[1]!)} نویسه باشد`,
+  ],
+  [
+    /^String must contain at most (\d+) character\(s\)$/,
+    (m) => `این متن حداکثر ${toPersianDigits(m[1]!)} نویسه باشد`,
+  ],
+  [/^Required$/, () => 'این فیلد لازم است'],
+  [/^Invalid enum value\b/, () => 'مقدار انتخاب‌شده معتبر نیست'],
+  [/^Invalid$/, () => 'مقدار واردشده معتبر نیست'],
+  [/^Expected \w+, received \w+$/, () => 'مقدار واردشده معتبر نیست'],
+];
+
+/**
+ * Logs that a service sentence had no Persian rendering — and nothing of the
+ * sentence itself (AGENTS.md S-09: an unmapped message may echo input).
+ * Status, closed error code, request-body path (a field name, not a value), the
+ * sentence's length and a short SHA-256 prefix: enough to count how often the
+ * same gap occurs and to grep a mapping table for it, not enough to read it.
+ */
+export function reportUnmappedMessage(args: {
+  readonly status: number | undefined;
+  readonly code: string;
+  readonly path: string | null;
+  readonly message: string;
+}): void {
+  console.error(
+    JSON.stringify({
+      event: 'web.unmapped_service_message',
+      status: args.status ?? null,
+      code: args.code,
+      path: args.path,
+      messageLength: args.message.length,
+      messageSha256: createHash('sha256').update(args.message).digest('hex').slice(0, 16),
+    }),
+  );
+}
+
+function commonPatternText(message: string): string | undefined {
+  for (const [pattern, say] of COMMON_PATTERNS) {
+    const match = message.match(pattern);
+    if (match) return say(match);
+  }
+  return undefined;
 }
 
 export function mapProblemToFields<F extends string>(
   problem: GatewayProblem,
   mapping: FieldMapping<F>,
+  status?: number,
 ): { fieldErrors: FieldErrors<F>; message: string | null } {
   const fieldErrors: FieldErrors<F> = {};
   const unplaced: string[] = [];
-  const textOf = (message: string): string =>
-    mapping.messages?.[message] ??
-    mapping.patterns?.find(([pattern]) => pattern.test(message))?.[1] ??
-    mapping.byCode?.[problem.code] ??
-    mapping.fallback ??
-    message;
+  const textOf = (message: string, path: string | null): string => {
+    const known =
+      mapping.messages?.[message] ??
+      mapping.patterns?.find(([pattern]) => pattern.test(message))?.[1] ??
+      COMMON_MESSAGES[message] ??
+      commonPatternText(message) ??
+      mapping.byCode?.[problem.code];
+    if (known !== undefined) return known;
+    // Nothing maps this sentence: say the generic one, never the service's.
+    reportUnmappedMessage({ status, code: problem.code, path, message });
+    return mapping.fallback ?? GENERIC_REFUSAL_MESSAGE;
+  };
 
   for (const detail of problem.details ?? []) {
     const field = mapping.paths[detail.path];
     const text =
       (detail.code !== undefined ? mapping.byDetailCode?.[detail.code] : undefined) ??
-      textOf(detail.message);
+      textOf(detail.message, detail.path);
     if (field === undefined) {
       unplaced.push(text);
       continue;
@@ -168,20 +265,12 @@ export function mapProblemToFields<F extends string>(
   if (unplaced.length > 0) return { fieldErrors, message: unplaced.join(' ') };
   if (hasFieldErrors) return { fieldErrors, message: null };
   // No details at all — a business rule, a 422 with only a sentence.
-  return { fieldErrors, message: textOf(problem.message) };
+  return { fieldErrors, message: textOf(problem.message, null) };
 }
 
-export interface WriteCall<S extends z.ZodTypeAny, F extends string> {
+interface WriteCallBase<S extends z.ZodTypeAny, F extends string> {
   readonly path: string;
   readonly body: unknown;
-  /**
-   * The submission id — sent as `Idempotency-Key`; see `submission.ts`. Left out
-   * for a service that takes no key (supplier-service's six writes): sending one
-   * would suggest a retry is safe, and it is not.
-   */
-  readonly submissionId?: string;
-  /** The last instant this write may be executed under its key (needs `submissionId`); see `GatewayCall.replayDeadline`. */
-  readonly replayDeadline?: number;
   /** What the created resource must look like; everything else is dropped. */
   readonly schema: S;
   readonly mapping: FieldMapping<F>;
@@ -196,6 +285,40 @@ export interface WriteCall<S extends z.ZodTypeAny, F extends string> {
   readonly fetchImpl?: typeof fetch;
 }
 
+/**
+ * The default, and the shape every write takes unless it says otherwise: the
+ * submission id is **required** and sent as `Idempotency-Key` (see
+ * `submission.ts`), so a resend replays rather than repeats.
+ */
+interface KeyedWriteCall<S extends z.ZodTypeAny, F extends string> extends WriteCallBase<S, F> {
+  readonly idempotency?: 'KEYED';
+  /** The submission id — sent as `Idempotency-Key`; see `submission.ts`. */
+  readonly submissionId: string;
+  /** The last instant this write may be executed under its key; see `GatewayCall.replayDeadline`. */
+  readonly replayDeadline?: number;
+}
+
+/**
+ * The one exception, stated at the call: an endpoint that takes no key
+ * (supplier-service's six writes). No key is sent — sending one would suggest a
+ * resend is safe, and it is not — and the caller owns what an ambiguous answer
+ * means. `submissionId` cannot be given here, so a key cannot be half-wired.
+ */
+interface UnkeyedWriteCall<S extends z.ZodTypeAny, F extends string> extends WriteCallBase<S, F> {
+  readonly idempotency: 'NONE';
+  readonly submissionId?: never;
+  /** A deadline belongs to a key; with none sent there is nothing to bound. */
+  readonly replayDeadline?: never;
+}
+
+/**
+ * A write. Leaving out `submissionId` does not compile unless the call says
+ * `idempotency: 'NONE'` (`write.type-spec.ts` proves both directions; Codex
+ * review of PR 366, finding 5).
+ */
+export type WriteCall<S extends z.ZodTypeAny, F extends string> =
+  KeyedWriteCall<S, F> | UnkeyedWriteCall<S, F>;
+
 export async function writeThroughGateway<S extends z.ZodTypeAny, F extends string>(
   session: WebSession,
   call: WriteCall<S, F>,
@@ -207,8 +330,8 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
       method: call.method ?? 'POST',
       body: call.body,
       accessToken: session.accessToken,
-      idempotencyKey: call.submissionId,
-      replayDeadline: call.replayDeadline,
+      idempotencyKey: call.idempotency === 'NONE' ? undefined : call.submissionId,
+      replayDeadline: call.idempotency === 'NONE' ? undefined : call.replayDeadline,
       fetchImpl: call.fetchImpl,
     });
 
@@ -248,11 +371,20 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
     }
     if (status === 404) return { kind: 'NOT_FOUND', correlationId };
     if ((status === 400 || status === 422 || status === 409) && problem) {
-      return { kind: 'INVALID', correlationId, ...mapProblemToFields(problem, call.mapping) };
+      return {
+        kind: 'INVALID',
+        correlationId,
+        ...mapProblemToFields(problem, call.mapping, status),
+      };
     }
     if (error instanceof GatewayNeverSentError) {
       return { kind: 'UNAVAILABLE', status, correlationId, neverSent: true };
     }
-    return { kind: 'UNAVAILABLE', status, correlationId };
+    return {
+      kind: 'UNAVAILABLE',
+      status,
+      correlationId,
+      ...(problem ? { code: problem.code } : {}),
+    };
   }
 }

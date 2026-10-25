@@ -33,14 +33,108 @@ construction، تغییرناپذیری دفتر کل در economic، فقط‌�
 - `migration` — هیچ حقی در اسکریپت؛ هر جدول حقش را از Migration خود سرویس می‌گیرد. supplier و analytics: روی جدول‌های
   فقط‌افزودنی کمتر از DML می‌دهد.
 
-Analytics (RUN-001 PR 2) uses migration-managed grants. Apply the split script first, then
-`20261024130000_analytics_runtime_privileges`: it removes the old table/sequence default privileges
-and existing runtime grants, then grants only `SELECT, INSERT` on `fact_maintenance` and
-`processed_event`, and `SELECT` on `baseline_metric`. No baseline writer is enabled. A split rerun
-cannot restore blanket DML for analytics, even if an older caller explicitly requests `default`.
-The privilege migration's rollback revokes these grants; it never restores unsafe legacy defaults.
-The baseline rollback takes an exclusive lock and refuses if any baseline row exists. There is no
-operator bypass flag; scratch tests explicitly remove only their own synthetic measurements first.
+Analytics (RUN-001 PR 2) uses migration-managed grants. Apply the split script first.
+B (`20261024120000_baseline_metric`) grants baseline `SELECT` and revokes baseline/sequence writes
+inside its transaction. P (`20261024130000_analytics_runtime_privileges`) removes legacy table/sequence
+defaults and existing named grants, then grants only `SELECT, INSERT` on `fact_maintenance` and
+`processed_event` and restores baseline `SELECT` (P migration.sql:17 revokes it, :24 re-grants it). No baseline writer is enabled. A split
+rerun cannot restore blanket DML for analytics, even if an older caller requests `default`.
+P's down revokes only the fact/marker grants; it keeps B's baseline `SELECT` and never restores unsafe
+defaults. B's down takes an exclusive lock and refuses if any baseline row exists; there is no bypass.
+
+Before deploying P, stop analytics and capture an explicit ACL snapshot using the DBA connection
+in `PG*` (no password or URL in argv):
+
+```bash
+PGDATABASE=rasta_analytics psql -X -qAt -v ON_ERROR_STOP=1 --file scripts/db-acl-snapshot.sql > /secure/operator-path/analytics-pre-deploy-acls.txt
+```
+
+Keep that file outside the repository. If deployment fails, capture the same query again and compare
+with `diff -u` before resolving the failed migration row. This includes relation, column, function,
+schema, database and default ACLs. No pre-deploy snapshot means recovery step 1 cannot be confirmed;
+investigate rather than guessing that nothing changed.
+
+P requires **`current_user = rasta_analytics_migrator`**. A DBA/superuser connection is also refused
+with SQLSTATE `42501`. A failed Prisma ledger row blocks later deploys with **P3009**. Recovery:
+
+1. Keep the service stopped. Inspect the failed row for exactly
+   `20261024130000_analytics_runtime_privileges` (`finished_at IS NULL AND rolled_back_at IS NULL`).
+   Confirm the error is the migrator-role refusal and that the migration transaction rolled back:
+   compare relation, column and default ACLs with the pre-deploy snapshot. Do not resolve if any ACL
+   changed or the failure has another cause; investigate first. The guard precedes every ACL statement.
+2. Correct `DATABASE_URL_ANALYTICS_MIGRATOR` in the migration environment so its connected
+   `current_user` is exactly `rasta_analytics_migrator`; confirm it with `SELECT current_user`.
+   Credentials stay in the environment or `.env.migrator`, never command arguments.
+3. Mark only that rolled-back attempt through the migrator wrapper (same procedure as
+   [docs/23 recovery](../23-risks-and-tradeoffs.md)):
+
+   ```bash
+   pnpm --dir services/analytics-service exec node --env-file-if-exists=../../.env --env-file-if-exists=../../.env.migrator ../../scripts/prisma.mjs migrate resolve --rolled-back 20261024130000_analytics_runtime_privileges
+   pnpm --dir services/analytics-service db:migrate
+   ```
+
+4. Run `pnpm check:db-runtime-privileges` and verify baseline read-only plus fact/marker `SELECT, INSERT`
+   before restarting. Never mark the failed migration `--applied` to bypass its guard.
+
+**Reachability, all services including audit.** Both splitter and checker read
+`infrastructure/docker/postgres/lib/runtime-reachable.sql`: `pg_has_role(runtime, r, 'MEMBER')`
+plus PUBLIC. MEMBER is an intentionally **conservative superset**, including INHERIT FALSE and
+SET FALSE memberships; it is not a claim that every member can SET ROLE on PG16. Every forbidden
+right in the checker uses this closure: schema/database CREATE, ledger rights, dangerous table
+privileges, extension writes and function EXECUTE. Ownership and dangerous-role membership use
+MEMBER too. Predefined `pg_write_all_data`, `pg_read_all_data`, server-file and program-execution
+roles are explicitly refused; their implicit rights cannot be removed by object REVOKE. Remove
+those memberships administratively, then rerun the checker.
+
+The split revokes each actual ACL entry while temporarily acting as its recorded grantor
+(`SET LOCAL ROLE <grantor>; REVOKE ... CASCADE; RESET ROLE`). PG16 object `GRANTED BY` cannot
+name another current user. This covers table, column, sequence and function grants from third-party
+grant-option holders, across the same MEMBER/PUBLIC holder set. Extension functions remain excluded.
+
+**Extension relations, all services.** The privileged splitter removes writes after application
+grants, including column, PUBLIC and MEMBER-holder grants. Existing SELECT stays for PostGIS reads.
+No service needs runtime extension DML. Audit also runs function cleanup: its non-extension trigger
+functions need no direct runtime EXECUTE (PostgreSQL checks EXECUTE when creating triggers).
+The checker rejects PUBLIC EXECUTE on migrator functions, and reachable EXECUTE on any non-extension
+user definer/trigger/event-trigger function, even if a CREATE OR REPLACE introduced it after a split.
+
+**Repair clusters split before #407.** Stop economic/procurement. Deploy the splitter together with
+`runtime-reachable.sql` and `runtime-function-grants.txt` from the same revision, then rerun
+`pnpm db:privilege-split economic` and `pnpm db:privilege-split procurement` with the DBA credentials
+and distinct exported runtime/migrator passwords described in § 5. Already-applied migrations do not
+repair lost ACLs by themselves. The declared source of truth is `lib/runtime-function-grants.txt`:
+
+- Economic: `commission_rule_scope_key(text,"BusinessLine","TransactionType")`,
+  `commission_rule_scope_change(text,"BusinessLine","TransactionType")`,
+  `commission_pricing_scope_lock(text,"BusinessLine","TransactionType")` (20261016120000:208-210).
+- Procurement: `demand_aggregation_digest_range(text,text,text,text,integer)` (20261017120000:120).
+
+All are in `public`. The splitter idempotently restores these existing migration grants on every run,
+only after verifying migrator ownership and SECURITY INVOKER/non-trigger/non-extension definition.
+Missing signatures during pre-migration bootstrap are skipped; the post-migration checker requires
+every signature and effective runtime EXECUTE. Unsafe definitions refuse repair and require operator
+investigation. Run the checker before/after repair, then exercise commission pricing **and rule changes**
+and procurement trigger-driven digest work with the real runtime logins before restarting services.
+
+Why the allowed declared-list path instead of a new grant migration: docs/23 D-045 already uses a
+splitter for cluster ACL repairs. Repair must also converge after a later split on an upgraded database,
+whose original migrations are recorded as applied. One list serves repair and detection without
+maintaining duplicate GRANT lists. No new migration/down exists; rolling back the tooling does not
+revoke these original application grants or restore forbidden ACLs. Definitions, data and original
+migration files are unchanged. A healthy cluster and an old-splitter-damaged cluster converge to the
+same helper EXECUTE ACLs. This hardens database privileges only; it makes no app authorization or
+tenant-isolation claim.
+
+| Mode        | Services                                                                                                                                         | Expected extension rights after split                                                                                            |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `migration` | supplier, analytics                                                                                                                              | At most existing `SELECT`; application grants come from migrations.                                                              |
+| `default`   | construction, identity, notification, organization, asset, fleet, maintenance, marketplace, document, procurement, inventory, contract, economic | At most `SELECT`; ordinary application tables keep DML, sequences keep USAGE/SELECT.                                             |
+| `audit`     | audit (separate split path)                                                                                                                      | No public schema USAGE; at most existing extension `SELECT`, never extension writes. Audit append grants stay in its migrations. |
+
+Fresh bootstrap splits **before** installing extensions as superuser, so no legacy extension DML
+exists yet. Upgrades and reruns with extensions present remove legacy writes after application grants
+are set; running the split twice converges to the same privileges. The catalogue checker also rejects
+effective extension INSERT/UPDATE/DELETE, including column-only and MEMBER/PUBLIC grants.
 
 **دفتر Migration** (`_prisma_migrations`) را خود اسکریپت تقسیم، **پیش از هر Migration**، با DDL دقیق Prisma می‌سازد:
 مالکش مهاجر است و به هیچ نقشی (نه `PUBLIC`، نه نقش اجرا) حقی ندارد (بازبینی Codex روی #176). اگر Prisma آن را بسازد، از
@@ -192,3 +286,12 @@ statement_timeout = '<ms>ms'`، هرگز روی مهاجر. همان اسکری�
 - **سرویس تقسیم‌شده با یافته:** Migrationی جدولی را با نقش اجرا ساخته (URL مهاجر تنظیم نبوده) یا کسی دستی Grant داده
   است. گام‌های ۵٫۲ تا ۵٫۴ را دوباره اجرا کن؛ اسکریپت Idempotent است.
 - **«in RASTA_SERVICES but not in PRIVILEGE_SPLIT_SERVICES»:** سرویس تازه‌ای بی تقسیم اضافه شده — گام‌های § ۷.
+
+**Privileged URL names at boot.** The existing guard's scope is credential variable names, not all
+foreign runtime URLs: `DATABASE_URL_*_MIGRATOR` and `POSTGRES_PASSWORD_*_MIGRATOR` were refused.
+It now also refuses non-empty `DATABASE_URL_*_ADMIN`, `*_TEST_ADMIN`, `*_SUPERUSER` (and unprefixed
+`DATABASE_URL_ADMIN` etc.). The shared `.env.example` contains foreign service runtime URLs and no
+such privileged names, so normal `start`/`dev` stays valid. Analytics's disposable fixture uses
+`TEST_ANALYTICS_ADMIN_URL` only in its separate `test:db-privileges` integration project and coverage
+run; never in the shared all-service integration environment or runtime `.env`. See
+`services/analytics-service/test/README.md` and `.env.migrator.example`.

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { firstIssuePerField } from './form-issues';
 import {
   IRR,
   MoneyInputError,
@@ -333,20 +334,6 @@ export type ParsedProjectForm<B, F extends string> =
   | { readonly ok: true; readonly body: B }
   | { readonly ok: false; readonly fieldErrors: Partial<Record<F, string>> };
 
-function firstIssues<F extends string>(
-  error: z.ZodError,
-  fields: readonly F[],
-): Partial<Record<F, string>> {
-  const fieldErrors: Partial<Record<F, string>> = {};
-  for (const issue of error.issues) {
-    const field = issue.path[0];
-    if (typeof field === 'string' && (fields as readonly string[]).includes(field)) {
-      fieldErrors[field as F] ??= issue.message;
-    }
-  }
-  return fieldErrors;
-}
-
 /** Creating a project: every field a person types, the estimate left out when empty. */
 export function parseCreateForm(
   values: ProjectFormValues,
@@ -357,7 +344,7 @@ export function parseCreateForm(
     return {
       ok: false,
       fieldErrors: {
-        ...(parsed.success ? {} : firstIssues(parsed.error, PROJECT_FIELDS)),
+        ...(parsed.success ? {} : firstIssuePerField(parsed.error, PROJECT_FIELDS)),
         ...(estimate.ok ? {} : { estimatedCost: estimate.message }),
       },
     };
@@ -401,7 +388,7 @@ export function parseEditForm(
   const body: { -readonly [K in keyof UpdateBody]: UpdateBody[K] } = {};
 
   const parsed = projectFormSchema.safeParse(values);
-  const issues = parsed.success ? {} : firstIssues(parsed.error, PROJECT_FIELDS);
+  const issues = parsed.success ? {} : firstIssuePerField(parsed.error, PROJECT_FIELDS);
   for (const field of changed) {
     if (field === 'estimatedCost') continue;
     const issue = issues[field];
@@ -419,16 +406,17 @@ export function parseEditForm(
   return { ok: true, body };
 }
 
-const reasonSchema = text('دلیل', MIN_REASON_LENGTH, MAX_REASON_LENGTH);
+const reasonSchema = z.object({ reason: text('دلیل', MIN_REASON_LENGTH, MAX_REASON_LENGTH) });
 
 export const CANCEL_UNCONFIRMED_MESSAGE = 'برای لغو باید تایید کنید که پایانی بودن آن را می‌دانید';
 
 export function parseCancelForm(
   values: CancelFormValues,
 ): ParsedProjectForm<{ readonly reason: string }, CancelField> {
-  const reason = reasonSchema.safeParse(values.reason);
-  const fieldErrors: Partial<Record<CancelField, string>> = {};
-  if (!reason.success) fieldErrors.reason = reason.error.issues[0]?.message ?? '';
+  const reason = reasonSchema.safeParse({ reason: values.reason });
+  const fieldErrors: Partial<Record<CancelField, string>> = reason.success
+    ? {}
+    : firstIssuePerField(reason.error, ['reason']);
   if (values.confirm !== 'yes') fieldErrors.confirm = CANCEL_UNCONFIRMED_MESSAGE;
   if (Object.keys(fieldErrors).length > 0) return { ok: false, fieldErrors };
   return { ok: true, body: { reason: values.reason } };
@@ -458,7 +446,8 @@ export function parseGrantForm(
         .max(MAX_CONDITIONS_LENGTH, `شرایط حداکثر ${fa(MAX_CONDITIONS_LENGTH)} نویسه است`),
     })
     .safeParse(values);
-  if (!parsed.success) return { ok: false, fieldErrors: firstIssues(parsed.error, GRANT_FIELDS) };
+  if (!parsed.success)
+    return { ok: false, fieldErrors: firstIssuePerField(parsed.error, GRANT_FIELDS) };
   return {
     ok: true,
     body: {
@@ -471,9 +460,11 @@ export function parseGrantForm(
 export function parseRejectForm(
   values: RejectFormValues,
 ): ParsedProjectForm<{ readonly reason: string }, RejectField> {
-  const reason = text('دلیل رد', MIN_REASON_LENGTH, MAX_REASON_LENGTH).safeParse(values.reason);
+  const reason = z
+    .object({ reason: text('دلیل رد', MIN_REASON_LENGTH, MAX_REASON_LENGTH) })
+    .safeParse({ reason: values.reason });
   if (!reason.success) {
-    return { ok: false, fieldErrors: { reason: reason.error.issues[0]?.message ?? '' } };
+    return { ok: false, fieldErrors: firstIssuePerField(reason.error, ['reason']) };
   }
   return { ok: true, body: { reason: values.reason } };
 }

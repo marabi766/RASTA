@@ -59,6 +59,7 @@ const MODULES = [
   'app/contracts/[id]/contract-actions',
   'app/tenders/[id]/bid-actions',
   'app/tenders/[id]/owner-actions',
+  'app/suppliers/supplier-actions',
   'app/projects/actions',
   'app/projects/[id]/project-actions',
   'app/projects/[id]/need-actions',
@@ -107,8 +108,8 @@ it('covers every server-action module in the portal', () => {
 });
 
 it('covers every write action in those modules', () => {
-  // 52 exported actions today; a new one is added to `ACTIONS` above.
-  expect(CASES.length).toBe(52);
+  // 58 exported actions today; a new one is added to `ACTIONS` above.
+  expect(CASES.length).toBe(58);
 });
 
 describe.each(CASES)('$name', ({ action }) => {
