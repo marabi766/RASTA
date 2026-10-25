@@ -1,13 +1,15 @@
 import { z } from 'zod';
 import {
+  authEnvSchema,
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
   EnvValidationError,
+  fixedEnvMessages,
   kafkaEnvSchema,
-  authEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { AGGREGATION_WINDOW_SECONDS } from '../security-events/refusal-aggregation';
 import { roleSchema, type PlatformRole } from '../identity/dto';
@@ -17,6 +19,18 @@ import {
   DEFAULT_PROVISIONING_SCOPE_POLICY,
   type ProvisioningScopePolicy,
 } from '../identity/provisioning-scope';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+/**
+ * A role list's refusals. Fixed: they used to name the entry written (`Unknown role: ${entry}`),
+ * which is configuration text and reached the boot log (S-09, #385 r1/r2).
+ */
+const UNKNOWN_ROLE = fixed('names a role that is not a platform role');
+const UNGRANTABLE_ROLE = fixed(
+  'names a role that cannot be granted through this API and must not be configured as grantable',
+);
 
 /**
  * A comma-separated role list from the environment.
@@ -49,14 +63,11 @@ function roleListEnv(
       for (const entry of entries) {
         const parsed = roleSchema.safeParse(entry);
         if (!parsed.success) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Unknown role: ${entry}` });
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: UNKNOWN_ROLE });
           return z.NEVER;
         }
         if (!options.allowUngrantable && UNGRANTABLE_ROLES.includes(parsed.data)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: `${entry} cannot be granted through this API and must not be configured as grantable`,
-          });
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: UNGRANTABLE_ROLE });
           return z.NEVER;
         }
         if (!roles.includes(parsed.data)) roles.push(parsed.data);
@@ -79,7 +90,7 @@ export const identityEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    KEYCLOAK_URL: z.string().url(),
+    KEYCLOAK_URL: serviceUrlSchema,
     KEYCLOAK_REALM: z.string().min(1),
     KEYCLOAK_BACKEND_CLIENT_ID: z.string().min(1),
     KEYCLOAK_BACKEND_CLIENT_SECRET: z.string().min(1),
@@ -158,7 +169,7 @@ export const identityEnvSchema = baseEnvSchema
      * Required, with no default: a correction must never be validated against
      * whatever happened to be listening on a guessed address.
      */
-    AUDIT_SERVICE_URL: z.string().url(),
+    AUDIT_SERVICE_URL: serviceUrlSchema,
 
     /**
      * The whole correction-target lookup, body included. Finite, so a slow
@@ -220,6 +231,8 @@ export const identityEnvSchema = baseEnvSchema
     ),
   });
 
+export const IDENTITY_ENV_MESSAGES = seal();
+
 export type IdentityEnv = z.infer<typeof identityEnvSchema>;
 
 export function loadIdentityEnv(source: NodeJS.ProcessEnv = process.env): IdentityEnv {
@@ -237,7 +250,7 @@ export function loadIdentityEnv(source: NodeJS.ProcessEnv = process.env): Identi
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'identity-service.main',
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: identityOperationBudgets },
+    { operationBudgets: identityOperationBudgets, fixedMessages: IDENTITY_ENV_MESSAGES },
   );
   assertNarrowingEnforced(source, env);
   return env;

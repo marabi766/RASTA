@@ -73,7 +73,8 @@ export function parseVacuumOptions(argv, env = {}) {
       i += 1;
     } else {
       refuse(
-        `Unknown option "${arg}". Known: --service, --all. The connection comes from ` +
+        `Unknown option at position ${i + 1}; it is not repeated. Known: --service, --all. ` +
+          'The connection comes from ' +
           'DATABASE_URL_<SERVICE>_MIGRATOR in the environment, never from an argument.',
       );
     }

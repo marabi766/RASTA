@@ -2,8 +2,8 @@ import { z } from 'zod';
 import { queryBooleanDefault } from '@rasta/config';
 
 /**
- * Converts the Zod schemas this service validates with into JSON Schema, so
- * the OpenAPI document describes payload shapes rather than only prose.
+ * Converts the Zod schemas a service validates with into JSON Schema, so its
+ * OpenAPI document describes payload shapes rather than only prose.
  *
  * Why this exists at all: the platform validates at the boundary with Zod
  * (AGENTS.md § 3), while `@nestjs/swagger` derives schemas from decorated
@@ -15,18 +15,16 @@ import { queryBooleanDefault } from '@rasta/config';
  * (D-008), and `zod/v4`'s own `toJSONSchema` refuses a v3 schema — these are
  * built with the v3 API that the rest of the platform uses.
  *
- * Scope is deliberately the constructs this service's DTOs actually use.
+ * Scope is deliberately the constructs the services' DTOs actually use.
  * Anything else returns an open `{}` rather than a wrong shape: an
  * unconstrained schema tells a reader "not described here", while a
  * confidently wrong one sends them to write code against a contract that does
  * not hold.
  *
- * This file is byte-identical to the copies in economic-service,
- * marketplace-service and document-service. It is a pure utility with no domain
- * knowledge, so it belongs in `packages/` under AGENTS.md A-03 — extracting it
- * means editing four services' imports at once, which is its own change and not
- * this phase's. Recorded in `PROJECT_MEMORY.md` known issues; this service
- * copying it rather than diverging from it is the deliberate lesser evil.
+ * One converter for every service. Thirteen services used to carry their own
+ * copy (eight variants that had drifted apart); this is their union, and every
+ * service's generated document is byte-identical to what its copy produced.
+ * A pure utility with no domain knowledge, so it lives in `packages/` (A-03).
  */
 
 /** JSON Schema is recursive and heterogeneous; this is its shape, honestly. */

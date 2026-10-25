@@ -5,7 +5,7 @@ import { CONTRACT_STATES } from './contract.state-machine';
 /**
  * The request and response shapes of the contract API (ADR-068 § 7; sign and cancel, PR 2).
  *
- * The same Zod schemas validate input, type the code and — through `zod-schema.ts` —
+ * The same Zod schemas validate input, type the code and — through `toJsonSchema` —
  * become the OpenAPI document, so the three cannot disagree. Both commands take a strict
  * body: nothing in it decides who acts, for which side, or when.
  */
