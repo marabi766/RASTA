@@ -127,6 +127,7 @@ interface Backend {
   getRaw(key: string): Promise<string | null>;
   setRaw(key: string, raw: string): Promise<void>;
   members(setKey: string): Promise<string[]>;
+  /** Adds `member` to the index AFTER every member already in it (the order a purge walks). */
   addMember(setKey: string, member: string): Promise<void>;
   setKeys(session: WebSession): Promise<string[]>;
   reset(): Promise<void>;
@@ -258,7 +259,12 @@ function redisBackend(url: string): Backend {
     getRaw: (key) => redis.get(key),
     setRaw: async (key, raw) => void (await redis.set(key, raw, 'KEEPTTL')),
     members: (setKey) => redis.zrange(setKey, 0, -1),
-    addMember: async (setKey, member) => void (await redis.zadd(setKey, Date.now() + HOUR, member)),
+    // Scored above every member already there: ZRANGE (what a purge walks) lists it LAST, so a
+    // purge that deletes each valid member as it goes has deleted the valid ones before it refuses.
+    addMember: async (setKey, member) => {
+      const top = await redis.zrange(setKey, -1, -1, 'WITHSCORES');
+      await redis.zadd(setKey, top.length === 2 ? Number(top[1]) + 1 : Date.now() + HOUR, member);
+    },
     setKeys: async (s) =>
       redis.keys(
         `${PENDING_KEY_PREFIX}:org:${encodeURIComponent(s.organizationId ?? 'none')}:pwl:*`,
@@ -1180,15 +1186,23 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
     it('a corrupt member stops the whole purge: no record and no index entry is touched', async () => {
       const s = login();
       const { keys, setKey } = await threeScopes(s);
+      // The corrupt one is the LAST the purge walks, behind two valid members: a purge that deletes
+      // each valid member as it goes has already deleted them when it reaches this one.
+      const order = await backend.members(setKey);
+      const corrupt = order[order.length - 1]!;
+      expect(order).toHaveLength(3);
       await backend.setRaw(
-        keys[1]!,
-        JSON.stringify({ ...JSON.parse((await backend.getRaw(keys[1]!))!), state: 'BOGUS' }),
+        corrupt,
+        JSON.stringify({ ...JSON.parse((await backend.getRaw(corrupt))!), state: 'BOGUS' }),
       );
       const before = await snapshot(keys, setKey);
       expect(await purgeUnresolved(s)).toBe(false);
       expect(await snapshot(keys, setKey)).toEqual(before);
       // The valid holds of the others are still there, and still held.
-      expect(await held(s, { purpose: 'filler', target: 'A' })).toMatchObject({ key: 'k-A' });
+      for (const [i, target] of ['A', 'B', 'C'].entries()) {
+        if (keys[i] === corrupt) continue;
+        expect(await held(s, { purpose: 'filler', target })).toMatchObject({ key: `k-${target}` });
+      }
     });
 
     it('an index entry that points at another login’s (valid) record is not deleted, and stops the purge', async () => {
