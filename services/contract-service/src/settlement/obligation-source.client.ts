@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { z } from 'zod';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { readCapped } from '../award/award-source.client';
@@ -110,9 +111,10 @@ export class ObligationSourceClient implements ObligationSource {
     try {
       let response: Response;
       try {
-        response = await this.fetchImpl(
+        response = await internalFetch(
           `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/obligations/by-source/STATEMENT/${encodeURIComponent(statementId)}`,
           { method: 'GET', headers, signal: controller.signal },
+          this.fetchImpl,
         );
       } catch {
         // No cause attached: a runtime's transport error can quote the URL.

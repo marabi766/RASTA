@@ -1,3 +1,4 @@
+import { internalFetch } from '@rasta/nest-common';
 import { z } from 'zod';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
@@ -112,9 +113,10 @@ export class DocumentLookupClient implements DocumentLookup {
     let status: number;
     let text: string;
     try {
-      const response = await this.fetchImpl(
+      const response = await internalFetch(
         `${this.options.baseUrl.replace(/\/+$/, '')}/v1/documents/${encodeURIComponent(documentId)}`,
         { method: 'GET', headers, signal: controller.signal },
+        this.fetchImpl,
       );
       status = response.status;
       // The body is read inside the deadline too, and an answer that arrives

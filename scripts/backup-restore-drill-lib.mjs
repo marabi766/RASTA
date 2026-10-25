@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -55,6 +55,73 @@ export function schemaDumpEvidence(raw, version, milliseconds = 0) {
   };
   Object.defineProperty(evidence, 'content', { value: bytes });
   return evidence;
+}
+
+// Only this collection boundary can issue provenance; raw/evidence constructors cannot.
+// The collector supports synchronous PG tests and asynchronous operator subprocesses.
+const dumpProvenance = new WeakMap();
+export function dumpSchema(database, label, collect) {
+  const finish = ({ raw, version, milliseconds = 0, path }) => {
+    const evidence = schemaDumpEvidence(raw, version, milliseconds);
+    dumpProvenance.set(evidence, Object.freeze({ database, label, dumpId: randomUUID() }));
+    return { path, evidence };
+  };
+  const collected = collect(database, label);
+  return collected instanceof Promise ? collected.then(finish) : finish(collected);
+}
+
+// Own the two round trips together so callers cannot accidentally reuse REF as fixed point.
+export async function collectSchemaReference({
+  database,
+  suffix,
+  sourceDump,
+  dump,
+  create,
+  restore,
+  drop,
+  shouldDrop = () => true,
+  scratchDropFailed = () => {},
+}) {
+  if (!/^[a-f0-9]{16}$/.test(suffix)) throw new Error('Invalid reference invocation suffix');
+  const started = performance.now();
+  const scratch = [`drill_ref_${suffix}`, `drill_fixed_${suffix}`];
+  const separate = await dump(database, 'reference-input');
+  if (!sourceDump.content.equals(separate.evidence.content))
+    throw new Error('SOURCE schema changed during collection');
+  let reference, fixedPoint, originalError, result;
+  try {
+    for (const [index, name] of scratch.entries()) {
+      await create(name);
+      await restore(name, index === 0 ? separate.path : reference.path);
+      const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point');
+      if (index === 0) reference = dumped;
+      else fixedPoint = dumped;
+    }
+    const allowance = checkSourceReference(sourceDump, reference.evidence, database);
+    result = schemaReferenceEvidence(
+      sourceDump,
+      reference.evidence,
+      fixedPoint.evidence,
+      allowance,
+      Math.round(performance.now() - started),
+    );
+  } catch (error) {
+    originalError = error;
+  }
+  let dropError;
+  if (shouldDrop())
+    for (const name of scratch) {
+      try {
+        await drop(name);
+      } catch (error) {
+        scratchDropFailed(name, error);
+        dropError ??= error;
+      }
+    }
+  // Teardown still removes the owned cluster; preserve the actual collection refusal.
+  if (originalError) throw originalError;
+  if (dropError) throw dropError;
+  return result;
 }
 
 // Shared SQL-aware scanner: quoted identifiers/strings, dollar bodies and nested comments
@@ -279,14 +346,17 @@ export function checkSourceReference(source, reference, database) {
   if (a.lines.length !== b.lines.length || !isDeepStrictEqual(a.identities, b.identities))
     throw new Error('SOURCE/REF CHECK identity or line count differs');
   let checkLinesDifferent = 0;
+  const checkConstraints = [];
   for (let i = 0; i < a.lines.length; i++) {
     if (a.lines[i] === b.lines[i]) continue;
     if (!a.checks.has(i) || a.checks.get(i) !== b.checks.get(i))
       throw new Error('SOURCE/REF non-CHECK difference');
     checkLinesDifferent++;
+    const [, schema, table, name] = JSON.parse(a.checks.get(i));
+    checkConstraints.push({ schema, table, name });
   }
   // This structural allowance trusts PostgreSQL; it does NOT prove CHECK semantics.
-  const proof = { database, checkLinesDifferent };
+  const proof = { database, checkLinesDifferent, checkConstraints };
   allowances.set(proof, { source, reference });
   return proof;
 }
@@ -297,6 +367,20 @@ export function schemaReferenceEvidence(
   allowance,
   milliseconds = 0,
 ) {
+  const provenance = [source, reference, fixedPoint].map((dump) => dumpProvenance.get(dump));
+  const [sourceOrigin, refOrigin, fixedOrigin] = provenance;
+  const refSuffix = refOrigin?.database?.match(/^drill_ref_([a-f0-9]{16})$/)?.[1];
+  if (
+    !sourceOrigin ||
+    sourceOrigin.database !== allowance?.database ||
+    sourceOrigin.label !== 'source' ||
+    !refSuffix ||
+    refOrigin.label !== 'reference' ||
+    fixedOrigin?.database !== `drill_fixed_${refSuffix}` ||
+    fixedOrigin?.label !== 'fixed-point' ||
+    new Set(provenance.map((origin) => origin?.dumpId)).size !== 3
+  )
+    throw new Error('Invalid schema dump provenance');
   const allowed = allowances.get(allowance);
   if (!allowed || allowed.source !== source || allowed.reference !== reference)
     throw new Error('Missing SOURCE/REF allowance guard');

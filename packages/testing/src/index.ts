@@ -58,3 +58,6 @@ export {
   eligibilityClockWrite,
   eligibilityClockTag,
 } from './eligibility-clock';
+
+export { withRedirectProbe, REDIRECT_CASES } from './redirect-probe';
+export type { RedirectProbe } from './redirect-probe';
