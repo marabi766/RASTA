@@ -95,7 +95,15 @@ export const eventEnvelopeSchema = z.object({
   streamSeq: z.number().int().positive().safe().optional(),
   streamKey: z.string().min(1).optional(),
 
-  payload: z.unknown(),
+  /**
+   * Whatever the event carries; each consumer's own schema reads it. A message
+   * without the key is still an envelope, as it was under zod 3: zod 4.6.7
+   * refuses a missing key whose schema is not optional even when that schema
+   * takes `undefined`, which would dead-letter such a message as unreadable
+   * instead of letting a consumer skip an event it does not handle, and audit
+   * record it (PR #444 r2).
+   */
+  payload: z.unknown().optional(),
 });
 
 /**

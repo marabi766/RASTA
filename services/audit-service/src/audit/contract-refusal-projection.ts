@@ -1,5 +1,12 @@
 import { z } from 'zod';
-import { DLQ_REASONS, type EventEnvelope, isoDateTime, legacyIssues } from '@rasta/contracts';
+import {
+  DLQ_REASONS,
+  type EventEnvelope,
+  isoDateTime,
+  legacyParse,
+  requireLegacyRefusal,
+  type LegacyRefusal,
+} from '@rasta/contracts';
 import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common';
 
 /**
@@ -138,26 +145,27 @@ export function toContractRefusalProjection(
 ): ContractRefusalProjection | null {
   if (delivery.topic !== CONTRACT_TOPIC) return null;
   if (envelope.eventName === CONTRACT_REFUSAL_EVENTS.AUTHORITY) {
-    const parsed = authorityRefused.safeParse(envelope.payload);
-    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.error);
+    const parsed = legacyParse(authorityRefused, envelope.payload);
+    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.refusal);
     return { action: parsed.data.action, reason: parsed.data.reason };
   }
   if (envelope.eventName === CONTRACT_REFUSAL_EVENTS.SIGNATURE) {
-    const parsed = signatureRefused.safeParse(envelope.payload);
-    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.error);
+    const parsed = legacyParse(signatureRefused, envelope.payload);
+    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.refusal);
     return { action: 'SIGN_CONTRACT', reason: parsed.data.reason };
   }
   if (envelope.eventName === CONTRACT_REFUSAL_EVENTS.POLICY_APPROVAL) {
-    const parsed = policyApprovalRefused.safeParse(envelope.payload);
-    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.error);
+    const parsed = legacyParse(policyApprovalRefused, envelope.payload);
+    if (!parsed.success) throw unprocessable(envelope.eventName, parsed.refusal);
     return { action: POLICY_APPROVAL_ACTION, reason: parsed.data.reason };
   }
   return null;
 }
 
-function unprocessable(eventName: string, error: z.ZodError): UnprocessableEventError {
-  // zod 3's codes, which these diagnostics have always carried (GHSA-mrhx-c7xc-m3w5).
-  const issues = legacyIssues(error.issues).map(
+function unprocessable(eventName: string, refusal: LegacyRefusal): UnprocessableEventError {
+  // zod 3's codes, which these diagnostics have always carried, translated
+  // against the schema that refused (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F1).
+  const issues = requireLegacyRefusal(refusal, 'unprocessable').issues.map(
     (issue) => `${issue.path.join('.') || '(root)'}:${issue.code}`,
   );
   return new UnprocessableEventError(

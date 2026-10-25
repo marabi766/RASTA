@@ -2,7 +2,7 @@
  * @jest-environment node
  */
 import { z } from 'zod';
-import { LEGACY_PARSE } from '@rasta/contracts';
+import { LegacyContextError, legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField, GENERIC_FIELD_MESSAGE } from '@/lib/form-issues';
 
@@ -97,12 +97,12 @@ describe('every exported local form schema answers in Persian', () => {
 
     let failures = 0;
     for (const [, hostile] of HOSTILE) {
-      const result = schema.safeParse(
+      const result = legacyParse(
+        schema,
         Object.fromEntries(fields.map((field) => [field, hostile])),
-        LEGACY_PARSE,
       );
       if (result.success) continue;
-      for (const message of Object.values(firstIssuePerField(result.error, fields, schema))) {
+      for (const message of Object.values(firstIssuePerField(result.refusal, fields))) {
         failures += 1;
         expect(message).toMatch(/\p{Script=Arabic}/u);
         // A Latin word may sit inside a Persian sentence (a brand, a unit);
@@ -116,11 +116,19 @@ describe('every exported local form schema answers in Persian', () => {
   });
 
   it('answers one generic Persian sentence for an issue nobody foresaw', () => {
-    const unknown = new z.ZodError([
-      { code: 'custom', path: ['name'], message: 'Something nobody foresaw' },
-    ]);
-    expect(firstIssuePerField(unknown, ['name'], z.object({ name: z.string() }))).toEqual({
+    const unknown = legacyParse(
+      z.object({ name: z.string() }).superRefine((_value, ctx) => {
+        ctx.addIssue({ code: 'custom', path: ['name'], message: 'Something nobody foresaw' });
+      }),
+      { name: 'x' },
+    );
+    expect(unknown.refusal && firstIssuePerField(unknown.refusal, ['name'])).toEqual({
       name: GENERIC_FIELD_MESSAGE,
     });
+  });
+
+  it('refuses a bare zod error: without the parse that raised it, no sentence is guessed (r1 F1)', () => {
+    const bare = z.object({ name: z.string() }).safeParse({}).error;
+    expect(() => firstIssuePerField(bare as never, ['name'])).toThrow(LegacyContextError);
   });
 });

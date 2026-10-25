@@ -1,4 +1,4 @@
-import { DISPLAY_TEXT_PATTERN, ID_PREFIXES, LEGACY_PARSE, seedIdSchema } from '@rasta/contracts';
+import { DISPLAY_TEXT_PATTERN, ID_PREFIXES, legacyParse, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -142,12 +142,12 @@ export type ParsedReportRequestForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<ReportRequestField, string>> };
 
 export function parseReportRequestForm(values: ReportRequestFormValues): ParsedReportRequestForm {
-  const parsed = reportRequestFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(reportRequestFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, isReportRequestField, reportRequestFormSchema),
+    fieldErrors: firstIssuePerField(parsed.refusal, isReportRequestField),
   };
 }
 
@@ -311,11 +311,11 @@ export type ParsedAssignWorkshopForm =
 export function parseAssignWorkshopForm(
   values: AssignWorkshopFormValues,
 ): ParsedAssignWorkshopForm {
-  const parsed = assignWorkshopFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(assignWorkshopFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssues(parsed.error, ASSIGN_WORKSHOP_FIELDS, assignWorkshopFormSchema),
+    fieldErrors: firstIssues(parsed.refusal, ASSIGN_WORKSHOP_FIELDS),
   };
 }
 
@@ -421,11 +421,11 @@ export type ParsedApproveRequestForm =
 export function parseApproveRequestForm(
   values: ApproveRequestFormValues,
 ): ParsedApproveRequestForm {
-  const parsed = approveRequestFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(approveRequestFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssues(parsed.error, APPROVE_REQUEST_FIELDS, approveRequestFormSchema),
+    fieldErrors: firstIssues(parsed.refusal, APPROVE_REQUEST_FIELDS),
   };
 }
 
@@ -559,11 +559,11 @@ export type ParsedCancelRequestForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<CancelRequestField, string>> };
 
 export function parseCancelRequestForm(values: CancelRequestFormValues): ParsedCancelRequestForm {
-  const parsed = cancelRequestFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(cancelRequestFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssues(parsed.error, CANCEL_REQUEST_FIELDS, cancelRequestFormSchema),
+    fieldErrors: firstIssues(parsed.refusal, CANCEL_REQUEST_FIELDS),
   };
 }
 

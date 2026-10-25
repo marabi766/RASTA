@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LEGACY_PARSE } from '@rasta/contracts';
+import { legacyParse } from '@rasta/contracts';
 
 import {
   CHANGE_STATUS_TARGETS,
@@ -144,15 +144,12 @@ export function parseChangeStatusForm(
   values: ChangeStatusFormValues,
   shownStatus: string,
 ): ParsedLifecycleForm<ChangeStatusBody, ChangeStatusField> {
-  const parsed = changeStatusFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(changeStatusFormSchema, values);
   if (!parsed.success) {
     return {
       ok: false,
-      fieldErrors: firstIssuePerField(
-        parsed.error,
-        (value): value is ChangeStatusField =>
-          (CHANGE_STATUS_FIELDS as readonly string[]).includes(value),
-        changeStatusFormSchema,
+      fieldErrors: firstIssuePerField(parsed.refusal, (value): value is ChangeStatusField =>
+        (CHANGE_STATUS_FIELDS as readonly string[]).includes(value),
       ),
     };
   }
@@ -185,15 +182,12 @@ export type DecommissionBody = z.output<typeof decommissionFormSchema>;
 export function parseDecommissionForm(
   values: DecommissionFormValues,
 ): ParsedLifecycleForm<DecommissionBody, DecommissionField> {
-  const parsed = decommissionFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(decommissionFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(
-      parsed.error,
-      (value): value is DecommissionField =>
-        (DECOMMISSION_FIELDS as readonly string[]).includes(value),
-      decommissionFormSchema,
+    fieldErrors: firstIssuePerField(parsed.refusal, (value): value is DecommissionField =>
+      (DECOMMISSION_FIELDS as readonly string[]).includes(value),
     ),
   };
 }

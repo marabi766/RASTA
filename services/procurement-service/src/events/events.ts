@@ -4,6 +4,8 @@ import {
   isoDateTime,
   PROCUREMENT_RFQ_EVENT_SCHEMAS,
   PROCUREMENT_RFQ_EVENTS,
+  describeLegacyRefusal,
+  legacyParse,
 } from '@rasta/contracts';
 
 /**
@@ -228,10 +230,10 @@ export function validateProcurementPayload<N extends ProcurementEventName>(
   payload: unknown,
 ): ProcurementEventPayload<N> {
   const schema = PROCUREMENT_EVENT_SCHEMAS[eventName];
-  const parsed = schema.safeParse(payload);
+  const parsed = legacyParse(schema, payload);
   if (!parsed.success) {
     throw new Error(
-      `${eventName} payload does not match its published contract: ${parsed.error.message}`,
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
     );
   }
   return parsed.data as ProcurementEventPayload<N>;

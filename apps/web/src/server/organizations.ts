@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LEGACY_PARSE } from '@rasta/contracts';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
@@ -123,16 +123,12 @@ export type ParsedUpdateOrganizationForm =
 export function parseUpdateOrganizationForm(
   values: UpdateOrganizationFormValues,
 ): ParsedUpdateOrganizationForm {
-  const parsed = updateOrganizationFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(updateOrganizationFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(
-      parsed.error,
-      UPDATE_ORGANIZATION_FIELDS,
-      updateOrganizationFormSchema,
-    ),
+    fieldErrors: firstIssuePerField(parsed.refusal, UPDATE_ORGANIZATION_FIELDS),
   };
 }
 

@@ -1,11 +1,14 @@
-import { z, type ZodIssue } from 'zod';
+import { z } from 'zod';
+import { LegacyContextError, legacyParse, type LegacyRefusal } from '@rasta/contracts';
 import {
   DIAGNOSTIC_MAX_LENGTH,
   declaredFieldNames,
   describeErrorClass,
   describeEventType,
   describeIssues,
-  zodIssuesOf,
+  parseOrRefuse,
+  SchemaRefusedError,
+  schemaRefusalOf,
 } from './refusal-diagnostics';
 import { ORGANIZATION_PROJECTION_FIELD_NAMES } from './organization-projection';
 
@@ -13,11 +16,20 @@ import { ORGANIZATION_PROJECTION_FIELD_NAMES } from './organization-projection';
 
 const SENTINEL_KEY = 'customer-SENTINEL@example.test';
 
-const issuesOf = (schema: z.ZodTypeAny, value: unknown): ZodIssue[] => {
-  const result = schema.safeParse(value);
+const issuesOf = (schema: z.ZodTypeAny, value: unknown): LegacyRefusal => {
+  const result = legacyParse(schema, value);
   if (result.success) throw new Error('expected a refusal');
-  return result.error.issues;
+  return result.refusal;
 };
+
+/** A refusal whose issues a refinement writes as given. */
+const refusalWith = (issues: { code: string; path: (string | number)[]; message: string }[]) =>
+  issuesOf(
+    z.unknown().superRefine((_value, ctx) => {
+      for (const issue of issues) ctx.addIssue(issue as never);
+    }),
+    null,
+  );
 
 describe('describeEventType', () => {
   it('names a well-formed type and version', () => {
@@ -99,23 +111,31 @@ describe('describeIssues', () => {
     expect(text).toMatch(/, …\(5000 total\)$/);
     expect(text.length).toBeLessThanOrEqual(DIAGNOSTIC_MAX_LENGTH);
 
-    const long = Array.from({ length: 10 }, () => ({
-      code: 'custom',
-      path: Array.from({ length: 30 }, () => 'status'),
-      message: SENTINEL_KEY,
-    })) as ZodIssue[];
+    const long = refusalWith(
+      Array.from({ length: 10 }, () => ({
+        code: 'custom',
+        path: Array.from({ length: 30 }, () => 'status'),
+        message: SENTINEL_KEY,
+      })),
+    );
     const bounded = describeIssues(long, declared);
     expect(bounded.length).toBe(DIAGNOSTIC_MAX_LENGTH);
     expect(bounded.endsWith('…')).toBe(true);
   });
 
   it('replaces a code that is not shaped like a Zod code', () => {
-    const forged = [{ code: SENTINEL_KEY, path: ['status'], message: '' }] as unknown as ZodIssue[];
+    const forged = refusalWith([{ code: SENTINEL_KEY, path: ['status'], message: '' }]);
     expect(describeIssues(forged, declared)).toBe('status unknown_code');
+  });
+
+  it('refuses a bare zod error or its issues: they carry no schema to translate against (r1 F1)', () => {
+    const bare = schema.safeParse({ status: 1, open: {} }).error;
+    expect(() => describeIssues(bare as never, declared)).toThrow(LegacyContextError);
+    expect(() => describeIssues(bare?.issues as never, declared)).toThrow(LegacyContextError);
   });
 });
 
-describe('describeErrorClass and zodIssuesOf', () => {
+describe('describeErrorClass, parseOrRefuse and schemaRefusalOf', () => {
   it('names a class, never a message', () => {
     expect(describeErrorClass(new SyntaxError(SENTINEL_KEY))).toBe('SyntaxError');
     const forged = new Error('x');
@@ -124,11 +144,20 @@ describe('describeErrorClass and zodIssuesOf', () => {
     expect(describeErrorClass(SENTINEL_KEY)).toBe('Error');
   });
 
-  it('recognises a ZodError by shape, and nothing else', () => {
-    const result = z.string().safeParse(1);
-    expect(result.success).toBe(false);
-    if (!result.success) expect(zodIssuesOf(result.error)).toHaveLength(1);
-    expect(zodIssuesOf(new Error('x'))).toBeNull();
-    expect(zodIssuesOf(null)).toBeNull();
+  it('carries the refusal of the parse, and nothing else counts as one', () => {
+    expect(parseOrRefuse(z.string(), 'ok')).toBe('ok');
+    let thrown: unknown;
+    try {
+      parseOrRefuse(z.object({ status: z.string() }), { status: SENTINEL_KEY.length });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(SchemaRefusedError);
+    expect(String((thrown as Error).message)).toBe('the payload does not match its schema');
+    expect(schemaRefusalOf(thrown)?.issues.map((issue) => issue.code)).toEqual(['invalid_type']);
+    // A bare ZodError has no schema behind it: not a refusal, so it is named by its class.
+    expect(schemaRefusalOf(z.string().safeParse(1).error)).toBeNull();
+    expect(schemaRefusalOf(new Error('x'))).toBeNull();
+    expect(schemaRefusalOf(null)).toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LEGACY_PARSE } from '@rasta/contracts';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText, toPersianDigits } from '@/lib/format';
@@ -277,7 +277,7 @@ export function parseDisputeCommand(input: DisputeFormInput): ParsedDisputeComma
 
   const command = input.command;
   const field = DISPUTE_COMMAND_FIELDS[command];
-  const parsed = COMMAND_SCHEMAS[command].safeParse(input.values, LEGACY_PARSE);
+  const parsed = legacyParse(COMMAND_SCHEMAS[command], input.values);
   if (parsed.success) {
     const text = (parsed.data as Record<DisputeField, string>)[field];
     return { ok: true, request: { command, body: { [field]: text } } };
@@ -286,7 +286,7 @@ export function parseDisputeCommand(input: DisputeFormInput): ParsedDisputeComma
   return {
     ok: false,
     command,
-    fieldErrors: firstIssuePerField(parsed.error, [field], COMMAND_SCHEMAS[command]),
+    fieldErrors: firstIssuePerField(parsed.refusal, [field]),
   };
 }
 

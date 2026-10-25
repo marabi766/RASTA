@@ -1,7 +1,7 @@
 import type { ArgumentMetadata, ArgumentsHost } from '@nestjs/common';
 import type { Logger } from '@rasta/logging';
 import { z, type ZodTypeAny } from 'zod';
-import { LEGACY_PARSE, legacyIssues } from '@rasta/contracts';
+import { LegacyContextError, legacyParse } from '@rasta/contracts';
 import { AllExceptionsFilter } from '../filters/exception.filter';
 import { RastaError } from '../errors/rasta-error';
 import {
@@ -43,10 +43,9 @@ function refusal(schema: ZodTypeAny, input: unknown): RastaError {
 
 /** zod's own issue list, in the zod 3 vocabulary the pipe reads (whose enum message quotes the value). */
 function rawZodText(schema: ZodTypeAny, input: unknown): string {
-  const result = schema.safeParse(input, LEGACY_PARSE);
+  const result = legacyParse(schema, input);
   if (result.success) throw new Error('zod accepted the input');
-  const issues = legacyIssues(result.error.issues, schema);
-  return JSON.stringify(issues.map(({ path, message }) => ({ path, message })));
+  return JSON.stringify(result.refusal.issues.map(({ path, message }) => ({ path, message })));
 }
 
 /** Every echoing case: the schema, an input carrying the sentinel, the issue code, the detail expected. */
@@ -297,12 +296,16 @@ describe('safePath: which segments the schema declares', () => {
     expect(safePath(schema, path)).toEqual(shown);
   });
 
-  it('needs the schema: the exported converter takes it', () => {
+  it('needs the schema: the exported converter takes the refusal of the parse, which carries it', () => {
     const schema = z.object({ tags: z.record(z.string(), z.number()) });
-    const result = schema.safeParse({ tags: { [SENTINEL]: 'x' } });
+    const result = legacyParse(schema, { tags: { [SENTINEL]: 'x' } });
     if (result.success) throw new Error('accepted');
-    expect(toErrorDetails(result.error, schema, { tags: { [SENTINEL]: 'x' } })[0]?.path).toBe(
-      `tags.${REDACTED_SEGMENT}`,
-    );
+    expect(toErrorDetails(result.refusal)[0]?.path).toBe(`tags.${REDACTED_SEGMENT}`);
+  });
+
+  it('refuses a bare zod error: the converter cannot be reached without the schema (r1 F1)', () => {
+    const schema = z.object({ tags: z.record(z.string(), z.number()) });
+    const bare = schema.safeParse({ tags: { [SENTINEL]: 'x' } }).error;
+    expect(() => toErrorDetails(bare as never)).toThrow(LegacyContextError);
   });
 });

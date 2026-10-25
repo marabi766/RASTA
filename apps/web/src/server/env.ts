@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { parsableUrl } from '@rasta/contracts';
+import { parsableUrl, legacyParse } from '@rasta/contracts';
 
 import {
   MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS,
@@ -470,8 +470,8 @@ export function loadWebServerEnv(
   // else. `NODE_ENV` is read for one rule only: `WEB_REDIS_URL` in production.
   source: Record<string, string | undefined> = process.env,
 ): WebServerEnv {
-  const parsed = schema.safeParse(source);
-  const missing = parsed.success ? [] : parsed.error.issues.map((issue) => issue.path.join('.'));
+  const parsed = legacyParse(schema, source);
+  const missing = parsed.success ? [] : parsed.refusal.issues.map((issue) => issue.path.join('.'));
 
   // The one rule that depends on where the portal runs. Production is two
   // replicas, and two replicas without shared coordination race for every

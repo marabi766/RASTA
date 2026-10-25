@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { isoDateTime } from './iso-datetime';
 import { parsableUrl } from './parsable-url';
-import { LEGACY_PARSE, legacyIssues } from './zod-issues';
+import { legacyParse } from './zod-issues';
 
 /**
  * zod 3's `.url()` and `.datetime()` kept under zod 4 (GHSA-mrhx-c7xc-m3w5).
@@ -19,8 +19,7 @@ describe('parsableUrl', () => {
   );
 
   it('refuses what the URL parser refuses, as zod 3’s invalid_string url', () => {
-    const result = url.safeParse('not a url', LEGACY_PARSE);
-    expect(legacyIssues(result.error?.issues ?? [], url)).toEqual([
+    expect(legacyParse(url, 'not a url').refusal?.issues).toEqual([
       expect.objectContaining({
         code: 'invalid_string',
         validation: 'url',
@@ -38,8 +37,7 @@ describe('parsableUrl', () => {
 describe('isoDateTime', () => {
   it('refuses as zod 3’s invalid_string datetime, and keeps a schema message', () => {
     const instant = z.string().check(isoDateTime());
-    const result = instant.safeParse('2026-10-24 12:00', LEGACY_PARSE);
-    expect(legacyIssues(result.error?.issues ?? [], instant)).toEqual([
+    expect(legacyParse(instant, '2026-10-24 12:00').refusal?.issues).toEqual([
       expect.objectContaining({
         code: 'invalid_string',
         validation: 'datetime',

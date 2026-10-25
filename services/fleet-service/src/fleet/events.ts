@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoDateTime } from '@rasta/contracts';
+import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 
 /**
  * Events published by fleet-service, on `rasta.fleet.v1`.
@@ -174,7 +174,13 @@ export const FLEET_EVENT_SCHEMAS = {
  * consumer's dead-letter topic, by which point it is someone else's incident.
  */
 export function validateFleetPayload(eventName: FleetEventName, payload: unknown): unknown {
-  return FLEET_EVENT_SCHEMAS[eventName].parse(payload);
+  const parsed = legacyParse(FLEET_EVENT_SCHEMAS[eventName], payload);
+  if (!parsed.success) {
+    throw new Error(
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
+    );
+  }
+  return parsed.data;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoDateTime } from '@rasta/contracts';
+import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 import { WORKFLOW_KEYS } from '../policy/policy.state-machine';
 
 /**
@@ -711,10 +711,10 @@ export function validateContractPayload<N extends ContractEventName>(
   payload: unknown,
 ): ContractEventPayload<N> {
   const schema = CONTRACT_EVENT_SCHEMAS[eventName];
-  const parsed = schema.safeParse(payload);
+  const parsed = legacyParse(schema, payload);
   if (!parsed.success) {
     throw new Error(
-      `${eventName} payload does not match its published contract: ${parsed.error.message}`,
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
     );
   }
   return parsed.data as ContractEventPayload<N>;

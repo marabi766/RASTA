@@ -1,4 +1,10 @@
-import { digitsToBigInt, DLQ_REASONS, type EventEnvelope, isoDateTime } from '@rasta/contracts';
+import {
+  digitsToBigInt,
+  DLQ_REASONS,
+  type EventEnvelope,
+  isoDateTime,
+  legacyParse,
+} from '@rasta/contracts';
 import {
   UnprocessableEventError,
   invalidPayloadError,
@@ -91,9 +97,9 @@ export interface MaintenanceFact {
 export function toMaintenanceFact(envelope: EventEnvelope): MaintenanceFact | null {
   if (envelope.eventName !== MAINTENANCE_COMPLETED) return null;
 
-  const parsed = maintenanceCompletedPayload.safeParse(envelope.payload);
+  const parsed = legacyParse(maintenanceCompletedPayload, envelope.payload);
   if (!parsed.success) {
-    throw invalidPayloadError(envelope, parsed.error, MAINTENANCE_COMPLETED_FIELDS);
+    throw invalidPayloadError(envelope, parsed.refusal, MAINTENANCE_COMPLETED_FIELDS);
   }
   const payload = parsed.data;
 

@@ -1,4 +1,4 @@
-import { DLQ_REASONS, type EventEnvelope, isoDateTime } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, isoDateTime, legacyParse } from '@rasta/contracts';
 import {
   EventConsumer,
   UnprocessableEventError,
@@ -172,8 +172,8 @@ export class TenderAwardedConsumer {
     // A known event whose payload fails its schema is a producer defect no retry fixes:
     // dead-lettered at once as VALIDATION_FAILED. The message names field paths and zod
     // codes only — never zod's own text, which can quote the value received (S-09).
-    const parsed = tenderAwardedPayload.safeParse(envelope.payload);
-    if (!parsed.success) throw invalidPayloadError(envelope, parsed.error, TENDER_AWARDED_FIELDS);
+    const parsed = legacyParse(tenderAwardedPayload, envelope.payload);
+    if (!parsed.success) throw invalidPayloadError(envelope, parsed.refusal, TENDER_AWARDED_FIELDS);
     const payload = parsed.data;
 
     // Before any lookup and any token: the envelope's tenant and the payload's

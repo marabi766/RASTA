@@ -1,4 +1,4 @@
-import { DISPLAY_TEXT_PATTERN, LEGACY_PARSE } from '@rasta/contracts';
+import { DISPLAY_TEXT_PATTERN, legacyParse } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -248,11 +248,11 @@ function isRegisterAssetField(value: string): value is RegisterAssetField {
 }
 
 export function parseRegisterAssetForm(values: RegisterAssetFormValues): ParsedRegisterAssetForm {
-  const parsed = registerAssetFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(registerAssetFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, isRegisterAssetField, registerAssetFormSchema),
+    fieldErrors: firstIssuePerField(parsed.refusal, isRegisterAssetField),
   };
 }
 
@@ -352,11 +352,11 @@ export function parseUpdateAssetForm(
   }
 
   const schema = z.object(shape).strict();
-  const parsed = schema.safeParse(input, LEGACY_PARSE);
+  const parsed = legacyParse(schema, input);
   if (parsed.success) return { ok: true, request: parsed.data as UpdateAssetRequest };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, isUpdateAssetField, schema),
+    fieldErrors: firstIssuePerField(parsed.refusal, isUpdateAssetField),
   };
 }
 

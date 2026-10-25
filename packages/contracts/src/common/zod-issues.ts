@@ -17,15 +17,29 @@ import {
  * (`invalid_enum_value` → `invalid_value`, `invalid_string` → `invalid_format`,
  * …), dropped fields (`received`) and reworded every default message. Every
  * place that turns a zod error into something a person or a log reads goes
- * through {@link legacyIssues}, so nothing outside this file knows zod 4's
+ * through {@link legacyParse}, so nothing outside this file knows zod 4's
  * vocabulary.
  *
  * A message is **zod's default** when it is exactly what zod's active locale
  * writes for the issue; that is decided here by asking the locale again, which
- * needs the value the issue was raised on — so a parse whose issues are
- * translated passes `{ reportInput: true }` ({@link LEGACY_PARSE}). A default
- * message is replaced by zod 3's default for the same issue; any other message
- * — one the schema wrote — is kept as written, and `zodDefault` says which.
+ * needs the value the issue was raised on. A default message is replaced by
+ * zod 3's default for the same issue; any other message — one the schema wrote
+ * — is kept as written, and `zodDefault` says which.
+ *
+ * ## One operation: parse and translate ({@link legacyParse})
+ *
+ * The translation needs two things zod 4's issue alone does not carry: the
+ * **schema** (whether an `invalid_value` came from a literal or an enum — a
+ * one-value enum such as `currencySchema` looks exactly like a literal — and
+ * which checks a non-finite number was refused before) and the **value each
+ * issue was raised on** (a missing field from a wrong one; the number after a
+ * `z.preprocess`/coerce, which the raw input no longer shows). PR #444 r1 F1
+ * found callers that had neither, and wrote zod 4's guesses on the wire. So the
+ * translation is no longer callable on its own: {@link legacyParse} parses with
+ * the issue values reported and translates against the schema it parsed, in one
+ * call, and returns a {@link LegacyRefusal}. Every formatter takes that refusal
+ * and refuses anything else ({@link requireLegacyRefusal}). The zod 4 error,
+ * which then carries the input on every issue, never leaves this file.
  */
 
 /** The codes zod 3 used. */
@@ -116,8 +130,8 @@ export type LegacyIssue = Base &
       }
   );
 
-/** Parse options for a parse whose issues {@link legacyIssues} translates. */
-export const LEGACY_PARSE = { reportInput: true } as const;
+/** Every issue carries the value it was raised on (read by the translation only). */
+const LEGACY_PARSE = { reportInput: true } as const;
 
 /** zod 3's `getParsedType`. */
 export function legacyParsedType(data: unknown): string {
@@ -282,15 +296,6 @@ type Translated = LegacyIssue extends infer I
   : never;
 type Fields = Record<string, unknown>;
 
-function valueAt(input: unknown, path: readonly PropertyKey[]): unknown {
-  let current = input;
-  for (const segment of path) {
-    if (current === null || typeof current !== 'object') return undefined;
-    current = (current as Record<PropertyKey, unknown>)[segment];
-  }
-  return current;
-}
-
 /** Whether zod 4's active locale writes exactly this message for the issue. */
 function isZodDefault(issue: V4Issue): boolean {
   const locale = z.config().localeError;
@@ -302,20 +307,16 @@ function isZodDefault(issue: V4Issue): boolean {
 
 /**
  * The issue, in zod 3's code and fields. `schema` decides what zod 4 no longer
- * says itself — whether an `invalid_value` came from a literal or an enum —
- * and `input` stands in for `issue.input` when the parse did not report it.
+ * says itself — whether an `invalid_value` came from a literal or an enum.
+ * The value the issue was raised on is on the issue: {@link legacyParse}
+ * parses with it reported.
  */
-function translate(
-  issue: V4Issue,
-  schema: z.ZodType | undefined,
-  input: readonly [] | readonly [unknown],
-  at: PropertyKey[],
-): Translated | null {
+function translate(issue: V4Issue, schema: z.ZodType, at: PropertyKey[]): Translated | null {
   const path = at.filter((segment): segment is string | number => typeof segment !== 'symbol');
   const raw = issue as unknown as Fields;
-  // The value the issue was raised on: reported by the parse, or read from the input given.
-  const known = 'input' in issue || input.length > 0;
-  const seen = 'input' in issue ? issue.input : valueAt(input[0], at);
+  // Always reported by legacyParse's parse; an error map's raw issue carries it too.
+  const known = 'input' in issue;
+  const seen = issue.input;
   switch (issue.code) {
     case 'invalid_type': {
       if (issue.expected === 'int') {
@@ -350,12 +351,6 @@ function translate(
               received: legacyParsedType(seen),
             };
       };
-      if (!schema) {
-        // No schema to ask: a literal refuses with its one value, an enum with its options.
-        return values.length === 1
-          ? { code: 'invalid_literal', path, expected: values[0], received: seen }
-          : enumIssue(values as (string | number)[]);
-      }
       for (const node of resolveZodPath(schema, at).nodes.flatMap(unwrapZodSchema)) {
         const literal = literalValues(node);
         if (literal && sameValues(literal, values)) {
@@ -476,28 +471,81 @@ function mappedMessage(map: unknown, issue: Record<string, unknown>): string | u
  * The number schema's checks are replayed on the value as zod 3 ran them, in
  * order, each with its own message; a number with none of them refused it only
  * through `.finite()` (a no-op in zod 4, leaving no trace), so that is
- * `not_finite`, which is also the answer without a schema.
+ * `not_finite`.
+ *
+ * The value is the one the number schema saw — after a `z.preprocess` or a
+ * coercion turned `"1e999"` into `Infinity` — which only the issue itself
+ * reports; the raw input at that path is still the text.
  */
 function infinityAsZod3Checked(
   issue: V4Issue,
-  schema: z.ZodType | undefined,
-  input: readonly [] | readonly [unknown],
+  schema: z.ZodType,
   at: PropertyKey[],
 ): LegacyIssue[] | undefined {
-  if (issue.code !== 'invalid_type' || issue.expected !== 'number' || !schema) return undefined;
-  const value = 'input' in issue ? issue.input : input.length > 0 ? valueAt(input[0], at) : NaN;
+  if (issue.code !== 'invalid_type' || issue.expected !== 'number') return undefined;
+  const value = issue.input;
   if (typeof value !== 'number' || Number.isNaN(value) || Number.isFinite(value)) return undefined;
+  const checks = numberChecksAt(schema, at);
+  if (!checks) return undefined;
+  const out = replayNumberChecks(checks.list, checks.nodeDef, value, at);
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * What zod 3 reported after an `.int()` refusal: the number's later checks.
+ *
+ * zod 4's integer check refuses with `continue: false`, so the checks
+ * declared after it never run; zod 3 ran every check, and `?limit=0.5` on
+ * `.int().min(1)` read "Expected integer, received float" **and** "Number
+ * must be greater than or equal to 1". The checks after the integer check are
+ * replayed on the value, each with its own message; the ones before it ran in
+ * zod 4 too and are already reported. Only checks on the one number are
+ * replayed — nothing is parsed again.
+ */
+function afterIntegerAsZod3Checked(
+  issue: V4Issue,
+  schema: z.ZodType,
+  at: PropertyKey[],
+): LegacyIssue[] {
+  if (issue.code !== 'invalid_type' || issue.expected !== 'int') return [];
+  const value = issue.input;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return [];
+  const checks = numberChecksAt(schema, at);
+  if (!checks) return [];
+  const integer = checks.list.findIndex(
+    (check) =>
+      check._zod.def.check === 'number_format' && String(check._zod.def.format).includes('int'),
+  );
+  if (integer < 0) return [];
+  return replayNumberChecks(checks.list.slice(integer + 1), checks.nodeDef, value, at);
+}
+
+type NumberCheck = { _zod: { def: Record<string, unknown> } };
+type NumberDef = { checks?: NumberCheck[]; error?: unknown };
+
+/** The checks of the number schema at `at`, in declaration order. */
+function numberChecksAt(
+  schema: z.ZodType,
+  at: PropertyKey[],
+): { list: NumberCheck[]; nodeDef: NumberDef } | undefined {
   const node = resolveZodPath(schema, at)
     .nodes.flatMap(unwrapZodSchema)
     .find((candidate) => zodDef(candidate).type === 'number');
   if (!node) return undefined;
-  const nodeDef = zodDef(node) as unknown as {
-    checks?: { _zod: { def: Record<string, unknown> } }[];
-    error?: unknown;
-  };
+  const nodeDef = zodDef(node) as unknown as NumberDef;
+  return { list: nodeDef.checks ?? [], nodeDef };
+}
+
+/** Each of `checks` run on `value` as zod 3 ran it: every failure, in order, with its own message. */
+function replayNumberChecks(
+  checks: readonly NumberCheck[],
+  nodeDef: NumberDef,
+  value: number,
+  at: PropertyKey[],
+): LegacyIssue[] {
   const path = at.filter((segment): segment is string | number => typeof segment !== 'symbol');
   const out: LegacyIssue[] = [];
-  for (const check of nodeDef.checks ?? []) {
+  for (const check of checks) {
     const def = check._zod.def;
     const limit = def.value as number;
     let translated: Translated | undefined;
@@ -519,9 +567,13 @@ function infinityAsZod3Checked(
         inclusive: def.inclusive === true,
         exact: false,
       };
-    } else if (def.check === 'number_format' && String(def.format).includes('int')) {
+    } else if (
+      def.check === 'number_format' &&
+      String(def.format).includes('int') &&
+      !Number.isInteger(value)
+    ) {
       translated = { code: 'invalid_type', path, expected: 'integer', received: 'float' };
-    } else if (def.check === 'multiple_of') {
+    } else if (def.check === 'multiple_of' && floatSafeRemainder(value, limit) !== 0) {
       translated = { code: 'not_multiple_of', path, multipleOf: limit };
     }
     if (!translated) continue;
@@ -531,27 +583,25 @@ function infinityAsZod3Checked(
     legacy.message = custom ?? legacyDefaultMessage(legacy);
     out.push(legacy);
   }
-  return out.length > 0 ? out : undefined;
+  return out;
+}
+
+/** zod 3's `floatSafeRemainder`, which its `multipleOf` compared with 0 (`NaN` for ±Infinity). */
+function floatSafeRemainder(value: number, step: number): number {
+  const decimals = (n: number) => (n.toString().split('.')[1] ?? '').length;
+  const places = Math.max(decimals(value), decimals(step));
+  const whole = (n: number) => parseInt(n.toFixed(places).replace('.', ''), 10);
+  return (whole(value) % whole(step)) / 10 ** places;
 }
 
 /**
- * zod 4 issues, in zod 3's vocabulary. `schema` is the schema that was parsed;
- * it decides whether an `invalid_value` came from a literal or an enum. A
- * caller that only prints codes and has no schema at hand (a dead-letter
- * reason) may leave it out: a one-value refusal then reads as a literal's, a
- * longer one as an enum's — exact for every enum of two options or more.
- * `input`, the value it was parsed from, is needed only when the parse did not
- * run with {@link LEGACY_PARSE}: it stands in for each issue's value (zod 3's
- * `received`, and whether an enum refused a value or a type). Without either,
- * an enum's refusal reads as `invalid_enum_value` whatever it was given. An
- * `invalid_key`/`invalid_element` wrapper is replaced by the issues it wraps,
- * at its path, as zod 3 reported them.
+ * zod 4 issues, in zod 3's vocabulary, against the schema that raised them.
+ * An `invalid_key`/`invalid_element` wrapper is replaced by the issues it
+ * wraps, at its path, as zod 3 reported them. Module-private: the only way to
+ * it is {@link legacyParse} (or {@link legacyIssueInErrorMap}), which always
+ * have the schema and the issue values.
  */
-export function legacyIssues(
-  issues: readonly z.core.$ZodIssue[],
-  schema?: z.ZodType,
-  ...input: [] | [input: unknown]
-): LegacyIssue[] {
+function translateIssues(issues: readonly z.core.$ZodIssue[], schema: z.ZodType): LegacyIssue[] {
   const out: LegacyIssue[] = [];
   const visit = (issue: V4Issue, prefix: PropertyKey[]): void => {
     const at = [...prefix, ...issue.path];
@@ -564,18 +614,180 @@ export function legacyIssues(
       for (const inner of reported) visit(inner as V4Issue, at);
       return;
     }
-    const replayed = infinityAsZod3Checked(issue, schema, input, at);
+    const replayed = infinityAsZod3Checked(issue, schema, at);
     if (replayed) {
       out.push(...replayed);
       return;
     }
-    const translated = translate(issue, schema, input, at);
+    const translated = translate(issue, schema, at);
     if (!translated) return;
     const zodDefault = isZodDefault(issue);
     const legacy = { ...translated, message: '', zodDefault } as LegacyIssue;
     legacy.message = zodDefault ? legacyDefaultMessage(legacy) : issue.message;
-    out.push(legacy);
+    out.push(legacy, ...afterIntegerAsZod3Checked(issue, schema, at));
   };
   for (const issue of issues) visit(issue as V4Issue, []);
   return out;
+}
+
+/** Marks a {@link LegacyRefusal} across copies of this package (a registry symbol, not `instanceof`). */
+const LEGACY_REFUSAL = Symbol.for('@rasta/contracts/LegacyRefusal');
+
+/** Lets only {@link legacyParse} construct a {@link LegacyRefusal}. */
+const ISSUED = Symbol('LegacyRefusal.issued');
+
+/**
+ * A refused parse, in zod 3's vocabulary — what every formatter of a zod
+ * refusal takes (HTTP details, dead-letter reasons, audit diagnostics,
+ * environment refusals, form messages). Only {@link legacyParse} makes one, so
+ * holding one proves the issues were translated against the schema that was
+ * parsed and with the values they were raised on.
+ *
+ * `issues` is the only own enumerable field. The schema and the input are
+ * private (a formatter that needs them — the HTTP pipe's path walk and echo
+ * backstop — reads them through the accessors), and `toJSON` and
+ * `util.inspect` show paths and codes only, so a refusal that reaches a log
+ * whole repeats nothing the caller sent.
+ */
+export class LegacyRefusal {
+  readonly issues: readonly LegacyIssue[];
+  readonly #schema: z.ZodType;
+  readonly #input: unknown;
+
+  constructor(
+    token: typeof ISSUED,
+    issues: readonly LegacyIssue[],
+    schema: z.ZodType,
+    input: unknown,
+  ) {
+    if (token !== ISSUED) throw new LegacyContextError('LegacyRefusal');
+    this.issues = issues;
+    this.#schema = schema;
+    this.#input = input;
+    Object.defineProperty(this, LEGACY_REFUSAL, { value: true });
+    Object.freeze(this);
+  }
+
+  /** The schema that was parsed. */
+  get schema(): z.ZodType {
+    return this.#schema;
+  }
+
+  /** The value that was parsed, as given (before any transform). */
+  get input(): unknown {
+    return this.#input;
+  }
+
+  toJSON(): { issues: { path: (string | number)[]; code: string }[] } {
+    return { issues: this.issues.map(({ path, code }) => ({ path, code })) };
+  }
+
+  [Symbol.for('nodejs.util.inspect.custom')](): string {
+    return `LegacyRefusal ${JSON.stringify(this.toJSON())}`;
+  }
+}
+
+/**
+ * A formatter of zod refusals was handed something {@link legacyParse} did not
+ * produce — a bare `ZodError`, its `issues`, a hand-built object. Refused
+ * rather than guessed at: without the schema and the issue values the
+ * translation can only guess (PR #444 r1 F1). Fixed text: never the value.
+ */
+export class LegacyContextError extends TypeError {
+  constructor(formatter: string) {
+    super(
+      `${formatter} needs a refusal from legacyParse (the schema and the parse that raised it), ` +
+        'not a bare zod error or its issues',
+    );
+    this.name = 'LegacyContextError';
+  }
+}
+
+/** Whether `value` is a {@link LegacyRefusal}, from this copy of the package or another. */
+export function isLegacyRefusal(value: unknown): value is LegacyRefusal {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as Record<symbol, unknown>)[LEGACY_REFUSAL] === true
+  );
+}
+
+/**
+ * `value` as a {@link LegacyRefusal}, or a {@link LegacyContextError} naming
+ * `formatter`. Every formatter calls this first, so a caller that reaches it
+ * with a bare zod error (through `as never`, plain JavaScript or a stale
+ * build) fails loudly instead of printing zod 4's guesses.
+ */
+export function requireLegacyRefusal(value: unknown, formatter: string): LegacyRefusal {
+  if (!isLegacyRefusal(value)) throw new LegacyContextError(formatter);
+  return value;
+}
+
+/** What {@link legacyParse} returns. */
+export type LegacyParseResult<T> =
+  | { readonly success: true; readonly data: T; readonly refusal?: undefined }
+  | { readonly success: false; readonly data?: undefined; readonly refusal: LegacyRefusal };
+
+/**
+ * Parses `input` with `schema` and, when it is refused, translates the refusal
+ * into zod 3's vocabulary against that same schema, with every issue's value
+ * reported — one operation, so no caller can translate without the schema or
+ * the values (PR #444 r1 F1).
+ *
+ * Acceptance is exactly `schema.safeParse(input)`'s: the options only make zod
+ * keep each issue's value. Nothing is parsed a second time, so a size check
+ * that refused an array before its elements (GHSA-mrhx-c7xc-m3w5) still means
+ * no element and no refinement over the elements ran. The zod 4 error, whose
+ * issues now carry those values, is not returned: only the translated
+ * refusal is.
+ */
+export function legacyParse<S extends z.ZodType>(
+  schema: S,
+  input: unknown,
+): LegacyParseResult<z.output<S>> {
+  const result = schema.safeParse(input, LEGACY_PARSE);
+  if (result.success) return { success: true, data: result.data };
+  const issues = translateIssues(result.error.issues, schema);
+  return { success: false, refusal: new LegacyRefusal(ISSUED, issues, schema, input) };
+}
+
+/**
+ * One issue as an error map receives it, in zod 3's vocabulary — for the web
+ * forms' error map, which react-hook-form's resolver calls during its own
+ * parse. A raw issue there still carries the schema (or check) that raised it
+ * and the value it was raised on, so the context is the issue's own; a check
+ * stands in no schema, and needs none (it never raises an `invalid_value` or a
+ * non-finite number).
+ */
+export function legacyIssueInErrorMap(raw: z.core.$ZodRawIssue): LegacyIssue | undefined {
+  const inst = (raw as { inst?: unknown }).inst;
+  const schema =
+    typeof inst === 'object' && inst !== null && typeof zodDef(inst as z.ZodType).type === 'string'
+      ? (inst as z.ZodType)
+      : NO_SCHEMA;
+  const finished = { ...raw, path: [], message: '' } as unknown as z.core.$ZodIssue;
+  return translateIssues([finished], schema)[0];
+}
+
+const NO_SCHEMA: z.ZodType = z.never();
+
+/**
+ * A refusal as one line — `path code` per issue, zod 3's codes, with the
+ * schema's own message in parentheses where it wrote one (a refinement's
+ * fixed sentence: "fromStatus is null exactly when …"), at most `limit` named
+ * and the rest counted — for a service's publish-time check of its own event
+ * payloads. zod's default messages are left out: some repeat the value
+ * received. zod 3's `ZodError.message` there was its whole issue list as JSON,
+ * received values included (S-09); zod 4's is its own vocabulary.
+ */
+export function describeLegacyRefusal(refusal: LegacyRefusal, limit = 10): string {
+  const { issues } = requireLegacyRefusal(refusal, 'describeLegacyRefusal');
+  const named = issues
+    .slice(0, limit)
+    .map((issue) => {
+      const where = `${issue.path.join('.') || '(root)'} ${issue.code}`;
+      return issue.zodDefault ? where : `${where} (${issue.message})`;
+    })
+    .join(', ');
+  return issues.length > limit ? `${named}, …(${issues.length} total)` : named;
 }

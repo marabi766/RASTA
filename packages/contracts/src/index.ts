@@ -34,13 +34,19 @@ export { withMaxKeys } from './common/bounds';
 export { parsableUrl } from './common/parsable-url';
 export { isoDateTime, legacyDatetimeRegex, type IsoDateTimeOptions } from './common/iso-datetime';
 export {
-  LEGACY_PARSE,
   LEGACY_PARSED_TYPES,
+  LegacyContextError,
+  LegacyRefusal,
+  describeLegacyRefusal,
+  isLegacyRefusal,
   joinLegacyValues,
   legacyDefaultMessage,
-  legacyIssues,
+  legacyIssueInErrorMap,
+  legacyParse,
   legacyParsedType,
+  requireLegacyRefusal,
   type LegacyIssue,
+  type LegacyParseResult,
   type LegacyIssueCode,
   type LegacySizeType,
   type LegacyStringValidation,

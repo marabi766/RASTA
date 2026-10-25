@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LEGACY_PARSE } from '@rasta/contracts';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
@@ -162,16 +162,12 @@ export type ParsedUpdateMemberRolesForm =
 export function parseUpdateMemberRolesForm(
   values: UpdateMemberRolesFormValues,
 ): ParsedUpdateMemberRolesForm {
-  const parsed = updateMemberRolesFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(updateMemberRolesFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(
-      parsed.error,
-      ['membershipId', 'roles', 'reason'] as const,
-      updateMemberRolesFormSchema,
-    ),
+    fieldErrors: firstIssuePerField(parsed.refusal, ['membershipId', 'roles', 'reason'] as const),
   };
 }
 
@@ -232,16 +228,12 @@ export type ParsedRevokeMembershipForm =
 export function parseRevokeMembershipForm(
   values: RevokeMembershipFormValues,
 ): ParsedRevokeMembershipForm {
-  const parsed = revokeMembershipFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(revokeMembershipFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(
-      parsed.error,
-      ['membershipId', 'reason'] as const,
-      revokeMembershipFormSchema,
-    ),
+    fieldErrors: firstIssuePerField(parsed.refusal, ['membershipId', 'reason'] as const),
   };
 }
 

@@ -1,6 +1,6 @@
 import { Inject, Injectable, type ArgumentMetadata, type PipeTransform } from '@nestjs/common';
-import { ZodError, type ZodType } from 'zod';
-import { RastaError, toErrorDetails } from '@rasta/nest-common';
+import type { ZodType } from 'zod';
+import { validateRequestInput } from '@rasta/nest-common';
 import { ENV } from '../tokens';
 import type { AuditEnv } from '../config/env';
 import {
@@ -45,21 +45,18 @@ import {
  * The ceiling still comes from the validated environment — the same value, read
  * one step later.
  *
- * Errors are mapped exactly as the shared pipe maps them, so a client sees one
- * `VALIDATION_FAILED` shape from this service as from every other.
+ * Errors are mapped by the shared pipe's own function
+ * (`validateRequestInput`), so a client sees one `VALIDATION_FAILED` shape —
+ * zod 3's codes and messages, with the parsed value behind each one — from
+ * this service as from every other. These pipes once called the schema and the
+ * formatter themselves and dropped the parse context: `?limit=1e999` came back
+ * in zod 4's words (PR #444 r1 F1).
  */
 abstract class SchemaQueryPipe<T> implements PipeTransform {
   protected constructor(private readonly schema: ZodType<T, unknown>) {}
 
   transform(value: unknown, _metadata: ArgumentMetadata): T {
-    try {
-      return this.schema.parse(value);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        throw RastaError.validation(toErrorDetails(error, this.schema, value));
-      }
-      throw error;
-    }
+    return validateRequestInput(this.schema, value);
   }
 }
 

@@ -5,7 +5,9 @@ import {
   BUSINESS_LINES,
   DLQ_REASONS,
   type EventEnvelope,
-  legacyIssues,
+  legacyParse,
+  requireLegacyRefusal,
+  type LegacyRefusal,
 } from '@rasta/contracts';
 import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common';
 
@@ -156,8 +158,8 @@ export function toCommissionRuleChanges(
     );
   }
 
-  const parsed = schema.safeParse(envelope.payload);
-  if (!parsed.success) throw refuse(issuesOf(parsed.error));
+  const parsed = legacyParse(schema, envelope.payload);
+  if (!parsed.success) throw refuse(issuesOf(parsed.refusal));
   const change = parsed.data as {
     ruleId: string;
     before: Terms | null;
@@ -181,16 +183,17 @@ export function toCommissionRuleChanges(
 
   // The platform's own bounds on `changes` (ADR-053 § 5): a value too long or
   // of the wrong kind is refused here, never truncated into the record.
-  const bounded = auditChangesSchema.safeParse(changes);
-  if (!bounded.success) throw refuse(issuesOf(bounded.error));
+  const bounded = legacyParse(auditChangesSchema, changes);
+  if (!bounded.success) throw refuse(issuesOf(bounded.refusal));
   return bounded.data;
 }
 
 /** Schema paths and zod issue codes only — never a value (S-09). */
-function issuesOf(error: z.ZodError): string {
-  // zod 3's codes, which these diagnostics have always carried (GHSA-mrhx-c7xc-m3w5).
-  return legacyIssues(error.issues)
-    .map((issue) => `${issue.path.join('.') || '(root)'}:${issue.code}`)
+function issuesOf(refusal: LegacyRefusal): string {
+  // zod 3's codes, which these diagnostics have always carried, translated
+  // against the schema that refused (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F1).
+  return requireLegacyRefusal(refusal, 'issuesOf')
+    .issues.map((issue) => `${issue.path.join('.') || '(root)'}:${issue.code}`)
     .join(', ');
 }
 

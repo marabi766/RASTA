@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LEGACY_PARSE } from '@rasta/contracts';
+import { legacyParse } from '@rasta/contracts';
 import { DatabaseUrlConflictError, withDatabasePool } from './database-pool';
 import {
   DATABASE_URL_CONTROL_CHARACTER,
@@ -713,11 +713,11 @@ export function loadEnv<S extends z.ZodTypeAny>(
   source: NodeJS.ProcessEnv = process.env,
   options: LoadEnvOptions<z.infer<S>> = {},
 ): z.infer<S> {
-  const result = schema.safeParse(withKafkaCredentialFallback(source), LEGACY_PARSE);
+  const result = legacyParse(schema, withKafkaCredentialFallback(source));
 
   if (!result.success) {
     const fixed = new Set([...CONFIG_ENV_MESSAGES, ...(options.fixedMessages ?? [])]);
-    throw new EnvValidationError(envIssues(result.error.issues, schema, fixed));
+    throw new EnvValidationError(envIssues(result.refusal, fixed));
   }
 
   assertKafkaPlaintextOptOut(source, result.data);

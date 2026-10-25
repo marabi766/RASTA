@@ -1,4 +1,4 @@
-import { ID_PREFIXES, LEGACY_PARSE, seedIdSchema } from '@rasta/contracts';
+import { ID_PREFIXES, legacyParse, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -184,12 +184,12 @@ export function parseAssignForm(
   values: AssignDriverFormValues,
   driverIdValue: string,
 ): ParsedAssignForm {
-  const parsed = assignFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(assignFormSchema, values);
   if (parsed.success) return { ok: true, request: { ...parsed.data, driverId: driverIdValue } };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, isAssignField, assignFormSchema),
+    fieldErrors: firstIssuePerField(parsed.refusal, isAssignField),
   };
 }
 
@@ -275,12 +275,12 @@ export type ParsedEndAssignmentForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<EndAssignmentField, string>> };
 
 export function parseEndAssignmentForm(values: EndAssignmentFormValues): ParsedEndAssignmentForm {
-  const parsed = endAssignmentFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(endAssignmentFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, isEndAssignmentField, endAssignmentFormSchema),
+    fieldErrors: firstIssuePerField(parsed.refusal, isEndAssignmentField),
   };
 }
 

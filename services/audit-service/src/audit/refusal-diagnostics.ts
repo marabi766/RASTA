@@ -1,5 +1,5 @@
 import type { z, ZodTypeAny } from 'zod';
-import { legacyIssues } from '@rasta/contracts';
+import { legacyParse, requireLegacyRefusal, type LegacyRefusal } from '@rasta/contracts';
 
 /**
  * What a refusal may say about the message it refused (S-09; PR #378 r1 F3).
@@ -124,13 +124,12 @@ export function declaredFieldNames(...schemas: readonly ZodTypeAny[]): ReadonlyS
  * {@link MAX_REPORTED_ISSUES} issues and {@link DIAGNOSTIC_MAX_LENGTH}
  * characters.
  */
-export function describeIssues(
-  issues: readonly z.core.$ZodIssue[],
-  declared: ReadonlySet<string>,
-): string {
+export function describeIssues(refusal: LegacyRefusal, declared: ReadonlySet<string>): string {
+  // zod 3's codes, which these diagnostics have always carried, translated
+  // against the schema that refused (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F1).
+  const { issues } = requireLegacyRefusal(refusal, 'describeIssues');
   let withheld = 0;
-  // zod 3's codes, which these diagnostics have always carried (GHSA-mrhx-c7xc-m3w5).
-  const described = legacyIssues(issues.slice(0, MAX_REPORTED_ISSUES)).map((issue) => {
+  const described = issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => {
     const path = issue.path.map((segment) => {
       if (typeof segment === 'number') return String(segment);
       if (declared.has(segment)) return segment;
@@ -149,11 +148,31 @@ export function describeIssues(
     : `${text.slice(0, DIAGNOSTIC_MAX_LENGTH - 1)}…`;
 }
 
-/** A Zod error by shape: the schemas may come from another package's zod instance. */
-export function zodIssuesOf(error: unknown): readonly z.core.$ZodIssue[] | null {
-  if (typeof error !== 'object' || error === null) return null;
-  const issues = (error as { issues?: unknown }).issues;
-  return (error as { name?: unknown }).name === 'ZodError' && Array.isArray(issues)
-    ? (issues as z.core.$ZodIssue[])
-    : null;
+/**
+ * A payload a mapper refused, carrying the {@link LegacyRefusal} of the parse
+ * that refused it. Its own message is fixed text: the refusal is described by
+ * {@link describeIssues}, never by printing this error.
+ */
+export class SchemaRefusedError extends Error {
+  constructor(readonly refusal: LegacyRefusal) {
+    super('the payload does not match its schema');
+    this.name = 'SchemaRefusedError';
+  }
+}
+
+/**
+ * `value` parsed by `schema`, or a {@link SchemaRefusedError} — for a mapper
+ * whose caller describes the refusal ({@link schemaRefusalOf}). A bare
+ * `.parse()` would throw a `ZodError`, which has no schema to translate its
+ * codes against (PR #444 r1 F1).
+ */
+export function parseOrRefuse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
+  const parsed = legacyParse(schema, value);
+  if (!parsed.success) throw new SchemaRefusedError(parsed.refusal);
+  return parsed.data;
+}
+
+/** The refusal a {@link SchemaRefusedError} carries; `null` for anything else, a bare `ZodError` included. */
+export function schemaRefusalOf(error: unknown): LegacyRefusal | null {
+  return error instanceof SchemaRefusedError ? error.refusal : null;
 }

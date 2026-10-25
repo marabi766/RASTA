@@ -124,6 +124,7 @@ export {
   ZodValidationPipe,
   zodPipe,
   toErrorDetails,
+  validateRequestInput,
   formatPath,
 } from './pipes/zod-validation.pipe';
 

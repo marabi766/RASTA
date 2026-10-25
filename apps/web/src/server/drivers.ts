@@ -1,5 +1,5 @@
 import { TZDate } from '@date-fns/tz';
-import { ID_PREFIXES, LEGACY_PARSE, seedIdSchema } from '@rasta/contracts';
+import { ID_PREFIXES, legacyParse, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -334,12 +334,12 @@ export type ParsedCreateDriverForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<CreateDriverField, string>> };
 
 export function parseCreateDriverForm(values: CreateDriverFormValues): ParsedCreateDriverForm {
-  const parsed = createDriverFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(createDriverFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, isCreateDriverField, createDriverFormSchema),
+    fieldErrors: firstIssuePerField(parsed.refusal, isCreateDriverField),
   };
 }
 
@@ -422,12 +422,12 @@ export type ParsedUpdateDriverForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<UpdateDriverField, string>> };
 
 export function parseUpdateDriverForm(values: UpdateDriverFormValues): ParsedUpdateDriverForm {
-  const parsed = updateDriverFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(updateDriverFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, isUpdateDriverField, updateDriverFormSchema),
+    fieldErrors: firstIssuePerField(parsed.refusal, isUpdateDriverField),
   };
 }
 
@@ -504,12 +504,12 @@ export type ParsedChangeStatusForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<ChangeStatusField, string>> };
 
 export function parseChangeStatusForm(values: ChangeStatusFormValues): ParsedChangeStatusForm {
-  const parsed = changeStatusFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(changeStatusFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, isChangeStatusField, changeStatusFormSchema),
+    fieldErrors: firstIssuePerField(parsed.refusal, isChangeStatusField),
   };
 }
 

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LEGACY_PARSE } from '@rasta/contracts';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText, toLatinDigits, toPersianDigits } from '@/lib/format';
@@ -331,7 +331,7 @@ export function parseOrderCommand(values: OrderCommandFormValues): ParsedOrderCo
   }
 
   const command = values.command;
-  const parsed = COMMAND_SCHEMAS[command].safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(COMMAND_SCHEMAS[command], values);
 
   // Checked here, on the server, not only by the checkbox's `required`: a
   // browser attribute is a convenience a crafted post does not have to honour,
@@ -352,9 +352,8 @@ export function parseOrderCommand(values: OrderCommandFormValues): ParsedOrderCo
   const fieldErrors: Partial<Record<OrderCommandField, string>> = parsed.success
     ? {}
     : firstIssuePerField(
-        parsed.error,
+        parsed.refusal,
         (field): field is OrderCommandField => field !== 'command',
-        COMMAND_SCHEMAS[command],
       );
   if (!acknowledged) {
     fieldErrors.acknowledge = 'برای ادامه تأیید کنید که این اقدام بازگشت‌پذیر نیست';

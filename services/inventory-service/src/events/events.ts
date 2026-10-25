@@ -7,6 +7,8 @@ import {
   INVENTORY_SHIPMENT_EVENT_SCHEMAS,
   INVENTORY_SHIPMENT_EVENTS,
   isoDateTime,
+  describeLegacyRefusal,
+  legacyParse,
 } from '@rasta/contracts';
 
 /**
@@ -181,10 +183,10 @@ export function validateInventoryPayload<N extends InventoryEventName>(
   eventName: N,
   payload: unknown,
 ): InventoryEventPayload<N> {
-  const parsed = INVENTORY_EVENT_SCHEMAS[eventName].safeParse(payload);
+  const parsed = legacyParse(INVENTORY_EVENT_SCHEMAS[eventName], payload);
   if (!parsed.success) {
     throw new Error(
-      `${eventName} payload does not match its published contract: ${parsed.error.message}`,
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
     );
   }
   return parsed.data as InventoryEventPayload<N>;

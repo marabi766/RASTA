@@ -1,6 +1,6 @@
 import {
   ID_PREFIXES,
-  LEGACY_PARSE,
+  legacyParse,
   seedIdSchema,
   WITHOUT_CONTROL_CHARACTER,
 } from '@rasta/contracts';
@@ -218,11 +218,11 @@ export type ParsedRepairForm<B, F extends string> =
 export function parseStartRepairForm(
   values: StartRepairFormValues,
 ): ParsedRepairForm<StartRepairBody, StartRepairField> {
-  const parsed = startRepairFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(startRepairFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssues(parsed.error, START_REPAIR_FIELDS, startRepairFormSchema),
+    fieldErrors: firstIssues(parsed.refusal, START_REPAIR_FIELDS),
   };
 }
 
@@ -243,11 +243,11 @@ export type CompleteRepairBody = z.infer<typeof completeRepairFormSchema>;
 export function parseCompleteRepairForm(
   values: CompleteRepairFormValues,
 ): ParsedRepairForm<CompleteRepairBody, CompleteRepairField> {
-  const parsed = completeRepairFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(completeRepairFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssues(parsed.error, COMPLETE_REPAIR_FIELDS, completeRepairFormSchema),
+    fieldErrors: firstIssues(parsed.refusal, COMPLETE_REPAIR_FIELDS),
   };
 }
 
@@ -277,11 +277,11 @@ export type CancelRepairBody = z.infer<typeof cancelRepairFormSchema>;
 export function parseCancelRepairForm(
   values: CancelRepairFormValues,
 ): ParsedRepairForm<CancelRepairBody, CancelRepairField> {
-  const parsed = cancelRepairFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(cancelRepairFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssues(parsed.error, CANCEL_REPAIR_FIELDS, cancelRepairFormSchema),
+    fieldErrors: firstIssues(parsed.refusal, CANCEL_REPAIR_FIELDS),
   };
 }
 
@@ -311,11 +311,11 @@ export type RecordPartBody = z.infer<typeof recordPartFormSchema>;
 export function parseRecordPartForm(
   values: RecordPartFormValues,
 ): ParsedRepairForm<RecordPartBody, RecordPartField> {
-  const parsed = recordPartFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(recordPartFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssues(parsed.error, RECORD_PART_FIELDS, recordPartFormSchema),
+    fieldErrors: firstIssues(parsed.refusal, RECORD_PART_FIELDS),
   };
 }
 
@@ -345,11 +345,11 @@ export type RecordLabourBody = z.infer<typeof recordLabourFormSchema>;
 export function parseRecordLabourForm(
   values: RecordLabourFormValues,
 ): ParsedRepairForm<RecordLabourBody, RecordLabourField> {
-  const parsed = recordLabourFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(recordLabourFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssues(parsed.error, RECORD_LABOUR_FIELDS, recordLabourFormSchema),
+    fieldErrors: firstIssues(parsed.refusal, RECORD_LABOUR_FIELDS),
   };
 }
 
@@ -377,11 +377,11 @@ export type RecordCostBody = z.infer<typeof recordCostFormSchema>;
 export function parseRecordCostForm(
   values: RecordCostFormValues,
 ): ParsedRepairForm<RecordCostBody, RecordCostField> {
-  const parsed = recordCostFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(recordCostFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssues(parsed.error, RECORD_COST_FIELDS, recordCostFormSchema),
+    fieldErrors: firstIssues(parsed.refusal, RECORD_COST_FIELDS),
   };
 }
 

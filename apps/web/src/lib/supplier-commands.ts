@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LEGACY_PARSE } from '@rasta/contracts';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from './form-issues';
 import { normalizePersianText, toPersianDigits } from './format';
@@ -338,9 +338,9 @@ function parseWith<B, F extends string>(
   input: unknown,
   fields: readonly F[],
 ): ParsedSupplierForm<B, F> {
-  const parsed = schema.safeParse(input, LEGACY_PARSE);
+  const parsed = legacyParse(schema, input);
   if (parsed.success) return { ok: true, body: parsed.data };
-  const fieldErrors = firstIssuePerField(parsed.error, fields, schema);
+  const fieldErrors = firstIssuePerField(parsed.refusal, fields);
   return { ok: false, fieldErrors };
 }
 

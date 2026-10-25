@@ -10,7 +10,7 @@ import {
   referenceId,
   withoutBidiControlDeep,
 } from './text';
-import { legacyIssues } from './zod-issues';
+import { legacyParse } from './zod-issues';
 
 /** Every character Unicode classes as Bidi_Control. */
 const BIDI_CONTROLS = [
@@ -26,7 +26,7 @@ describe('plainText (server-side bidi controls)', () => {
       const result = schema.safeParse(value);
 
       expect(result.success).toBe(false);
-      expect(legacyIssues(result.error?.issues ?? [], schema)).toEqual([
+      expect(legacyParse(schema, value).refusal?.issues).toEqual([
         expect.objectContaining({ code: 'invalid_string', message: UNSUPPORTED_CHARACTERS }),
       ]);
       expect(JSON.stringify(result.error?.issues)).not.toContain('12-34');
@@ -70,7 +70,7 @@ describe('referenceId (stored references)', () => {
       const result = schema.safeParse(value);
 
       expect(result.success).toBe(false);
-      expect(legacyIssues(result.error?.issues ?? [], schema)).toEqual([
+      expect(legacyParse(schema, value).refusal?.issues).toEqual([
         expect.objectContaining({ code: 'invalid_string', message: UNSUPPORTED_CHARACTERS }),
       ]);
       expect(JSON.stringify(result.error?.issues)).not.toContain('ZK7Q');
@@ -208,7 +208,9 @@ describe('displayText (the one display-text rule: descriptions, notes, titles)',
     const result = field.safeParse(value);
     expect(result.success).toBe(false);
     if (result.success) return;
-    const messages = legacyIssues(result.error.issues, field, value).map((issue) => issue.message);
+    const messages = (legacyParse(field, value).refusal?.issues ?? []).map(
+      (issue) => issue.message,
+    );
     expect(messages.every((m) => m === UNSUPPORTED_CHARACTERS || m.startsWith('String must'))).toBe(
       true,
     );

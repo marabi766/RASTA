@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LEGACY_PARSE } from '@rasta/contracts';
+import { legacyParse } from '@rasta/contracts';
 
 import {
   AVAILABILITY_CHOICES,
@@ -311,15 +311,12 @@ export type ParsedDeclareForm =
 export function parseDeclareAvailabilityForm(
   values: DeclareAvailabilityFormValues,
 ): ParsedDeclareForm {
-  const parsed = declareAvailabilityFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(declareAvailabilityFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(
-      parsed.error,
-      (value): value is DeclareAvailabilityField =>
-        (DECLARE_AVAILABILITY_FIELDS as readonly string[]).includes(value),
-      declareAvailabilityFormSchema,
+    fieldErrors: firstIssuePerField(parsed.refusal, (value): value is DeclareAvailabilityField =>
+      (DECLARE_AVAILABILITY_FIELDS as readonly string[]).includes(value),
     ),
   };
 }

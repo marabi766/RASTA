@@ -1,12 +1,13 @@
 import { Injectable, type ArgumentMetadata, type PipeTransform } from '@nestjs/common';
-import { ZodError, type z } from 'zod';
+import type { z } from 'zod';
 import {
-  LEGACY_PARSE,
   legacyDefaultMessage,
-  legacyIssues,
+  legacyParse,
+  requireLegacyRefusal,
   resolveZodPath,
   type ErrorDetail,
   type LegacyIssue,
+  type LegacyRefusal,
 } from '@rasta/contracts';
 import { RastaError } from '../errors/rasta-error';
 
@@ -27,15 +28,22 @@ export class ZodValidationPipe<T extends z.ZodType> implements PipeTransform {
   constructor(private readonly schema: T) {}
 
   transform(value: unknown, _metadata: ArgumentMetadata): z.infer<T> {
-    try {
-      return this.schema.parse(value, LEGACY_PARSE);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        throw RastaError.validation(toErrorDetails(error, this.schema, value));
-      }
-      throw error;
-    }
+    return validateRequestInput(this.schema, value);
   }
+}
+
+/**
+ * `value` parsed by `schema`, or `400 VALIDATION_FAILED` with
+ * {@link toErrorDetails}. The one way a request input is validated — this
+ * pipe and every pipe a service builds around a schema it only knows at
+ * runtime (audit's query pipes) — so the parse and the zod 3 wording of its
+ * refusal cannot be separated (PR #444 r1 F1: audit's pipes parsed without
+ * the issue values and printed zod 4's words).
+ */
+export function validateRequestInput<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
+  const parsed = legacyParse(schema, value);
+  if (parsed.success) return parsed.data;
+  throw RastaError.validation(toErrorDetails(parsed.refusal));
 }
 
 /** Convenience for inline use: `@Body(zodPipe(createAssetSchema)) dto: CreateAssetDto`. */
@@ -72,8 +80,9 @@ export function zodPipe<T extends z.ZodType>(schema: T): ZodValidationPipe<T> {
  * (expected and received *type names*, limits, options, the validation kind),
  * so it is used as zod writes it.
  */
-export function toErrorDetails(error: ZodError, schema: z.ZodType, input: unknown): ErrorDetail[] {
-  return legacyIssues(error.issues, schema, input).map((issue) => ({
+export function toErrorDetails(refusal: LegacyRefusal): ErrorDetail[] {
+  const { issues, schema, input } = requireLegacyRefusal(refusal, 'toErrorDetails');
+  return issues.map((issue) => ({
     path: formatPath(safePath(schema, issue.path)),
     message: safeMessage(issue, input),
     code: issue.code,

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoDateTime } from '@rasta/contracts';
+import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 
 /**
  * Events published by maintenance-service, on `rasta.maintenance.v1`.
@@ -400,7 +400,13 @@ export function validateMaintenancePayload(
   eventName: MaintenanceEventName,
   payload: unknown,
 ): unknown {
-  return MAINTENANCE_EVENT_SCHEMAS[eventName].parse(payload);
+  const parsed = legacyParse(MAINTENANCE_EVENT_SCHEMAS[eventName], payload);
+  if (!parsed.success) {
+    throw new Error(
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
+    );
+  }
+  return parsed.data;
 }
 
 // ---------------------------------------------------------------------------

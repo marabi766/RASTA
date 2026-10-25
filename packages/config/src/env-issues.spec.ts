@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LEGACY_PARSE, businessLineSchema, legacyIssues, parsableUrl } from '@rasta/contracts';
+import { businessLineSchema, legacyParse, parsableUrl } from '@rasta/contracts';
 import {
   CONFIG_ENV_MESSAGES,
   EnvValidationError,
@@ -58,8 +58,8 @@ function refusedAlike<S extends z.ZodTypeAny>(
   expect(a).toEqual(b);
   for (const value of values) expect(JSON.stringify(a)).not.toContain(value);
   // Parsed as loadEnv parses, and read in zod 3's vocabulary, which the refusal is written in.
-  const parsed = schema.safeParse(source(values[0]), LEGACY_PARSE);
-  const codes = parsed.success ? [] : legacyIssues(parsed.error.issues, schema).map((i) => i.code);
+  const parsed = legacyParse(schema, source(values[0]));
+  const codes = parsed.success ? [] : parsed.refusal.issues.map((i) => i.code);
   return { ...(a as Refusal), codes };
 }
 
@@ -459,10 +459,10 @@ describe('paths: only what the schema owns', () => {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['A'], message: 'x' });
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['NOT_DECLARED'], message: 'x' });
     });
-    const parsed = schema.safeParse({ A: 'ok' });
+    const parsed = legacyParse(schema, { A: 'ok' });
     expect(parsed.success).toBe(false);
     if (parsed.success) return;
-    expect(envIssues(parsed.error.issues, schema, new Set())).toEqual([
+    expect(envIssues(parsed.refusal, new Set())).toEqual([
       { path: 'A', message: 'Invalid input' },
       { path: ENV_PATH_PLACEHOLDER, message: 'Invalid input' },
     ]);

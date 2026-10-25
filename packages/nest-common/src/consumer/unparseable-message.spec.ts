@@ -1,4 +1,4 @@
-import { DLQ_HEADERS, DLQ_REASONS } from '@rasta/contracts';
+import { DLQ_HEADERS, DLQ_REASONS, legacyParse } from '@rasta/contracts';
 import { dlqMessagesTotal } from '@rasta/observability';
 import { z } from 'zod';
 import { EventConsumer, unparseableReason, type ConsumerLogger } from './event-consumer';
@@ -181,17 +181,12 @@ describe('an unparseable message (S-09)', () => {
 
 describe('unparseableReason', () => {
   it('drops zod messages, which can repeat the value received', () => {
-    // The envelope schema has no enum or literal today; under zod 3 a schema that
-    // does made zod quote the received value in the issue message, and a zod 4
-    // parse that reports its input carries it in the error.
-    const result = z
-      .object({ kind: z.enum(['A', 'B']) })
-      .safeParse({ kind: SENTINEL }, { reportInput: true });
-    expect(result.success).toBe(false);
-    const error = (result as { error: Error }).error;
-    expect(error.message).toContain(SENTINEL); // the control: the error does carry it
+    // legacyParse's parse reports each issue's value; the refusal it returns
+    // keeps codes and paths, and the reason is built from those alone.
+    const parsed = legacyParse(z.object({ kind: z.enum(['A', 'B']) }), { kind: SENTINEL });
+    expect(parsed.refusal?.issues[0]).toMatchObject({ received: SENTINEL }); // the control
 
-    const reason = unparseableReason(error, Buffer.from('{}'));
+    const reason = unparseableReason(parsed.refusal, Buffer.from('{}'));
     expect(reason).toBe(
       'the body is not a valid event envelope (2 bytes): "kind" invalid_enum_value',
     );
@@ -202,11 +197,17 @@ describe('unparseableReason', () => {
     const schema = z.object(
       Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`f${i}`, z.string()])),
     );
-    const result = schema.safeParse({});
-    const reason = unparseableReason((result as { error: Error }).error, Buffer.from('{}'));
+    const reason = unparseableReason(legacyParse(schema, {}).refusal, Buffer.from('{}'));
     expect(reason).toContain('"f4" invalid_type');
     expect(reason).not.toContain('"f5"');
     expect(reason).toMatch(/; and 3 more$/);
+  });
+
+  it('names only the class of a bare zod error: no schema to translate against, so no zod 4 code (r1 F1)', () => {
+    const bare = z.object({ kind: z.enum(['A', 'B']) }).safeParse({ kind: SENTINEL }).error;
+    expect(unparseableReason(bare, Buffer.from('{}'))).toBe(
+      'the body could not be read (2 bytes, ZodError)',
+    );
   });
 
   it('names only the error class of anything else', () => {

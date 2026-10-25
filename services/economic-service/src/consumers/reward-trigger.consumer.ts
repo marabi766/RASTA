@@ -1,5 +1,5 @@
 import { Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   createSystemContext,
   invalidPayloadError,
@@ -608,9 +608,9 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
   private extract(envelope: EventEnvelope): Claim | null {
     switch (envelope.eventName) {
       case CONSUMED_EVENTS.USAGE_RECORDED: {
-        const parsed = usageRecordedSchema.safeParse(envelope.payload);
+        const parsed = legacyParse(usageRecordedSchema, envelope.payload);
         if (!parsed.success) {
-          throw invalidPayloadError(envelope, parsed.error, USAGE_RECORDED_FIELDS);
+          throw invalidPayloadError(envelope, parsed.refusal, USAGE_RECORDED_FIELDS);
         }
         const payload = parsed.data;
         return {
@@ -620,9 +620,9 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
         };
       }
       case CONSUMED_EVENTS.MAINTENANCE_COMPLETED: {
-        const parsed = maintenanceCompletedSchema.safeParse(envelope.payload);
+        const parsed = legacyParse(maintenanceCompletedSchema, envelope.payload);
         if (!parsed.success) {
-          throw invalidPayloadError(envelope, parsed.error, MAINTENANCE_COMPLETED_FIELDS);
+          throw invalidPayloadError(envelope, parsed.refusal, MAINTENANCE_COMPLETED_FIELDS);
         }
         const payload = parsed.data;
         return {

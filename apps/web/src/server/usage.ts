@@ -1,5 +1,5 @@
 import { TZDate } from '@date-fns/tz';
-import { ID_PREFIXES, LEGACY_PARSE, seedIdSchema } from '@rasta/contracts';
+import { ID_PREFIXES, legacyParse, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -183,7 +183,7 @@ export type ParsedUsageForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<UsageField, string>> };
 
 export function parseUsageForm(values: UsageFormValues, submissionId: string): ParsedUsageForm {
-  const parsed = usageFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(usageFormSchema, values);
   if (parsed.success) {
     return {
       ok: true,
@@ -193,7 +193,7 @@ export function parseUsageForm(values: UsageFormValues, submissionId: string): P
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, isUsageField, usageFormSchema),
+    fieldErrors: firstIssuePerField(parsed.refusal, isUsageField),
   };
 }
 

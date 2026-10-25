@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LEGACY_PARSE } from '@rasta/contracts';
+import { legacyParse } from '@rasta/contracts';
 
 import {
   POLICY_COVERAGES,
@@ -434,15 +434,12 @@ export type ParsedRecordForm<B, F extends string> =
 export function parseRecordPolicyForm(
   values: RecordPolicyFormValues,
 ): ParsedRecordForm<RecordPolicyBody, RecordPolicyField> {
-  const parsed = recordPolicyFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(recordPolicyFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(
-      parsed.error,
-      (value): value is RecordPolicyField =>
-        (RECORD_POLICY_FIELDS as readonly string[]).includes(value),
-      recordPolicyFormSchema,
+    fieldErrors: firstIssuePerField(parsed.refusal, (value): value is RecordPolicyField =>
+      (RECORD_POLICY_FIELDS as readonly string[]).includes(value),
     ),
   };
 }
@@ -450,15 +447,12 @@ export function parseRecordPolicyForm(
 export function parseRecordInspectionForm(
   values: RecordInspectionFormValues,
 ): ParsedRecordForm<RecordInspectionBody, RecordInspectionField> {
-  const parsed = recordInspectionFormSchema.safeParse(values, LEGACY_PARSE);
+  const parsed = legacyParse(recordInspectionFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(
-      parsed.error,
-      (value): value is RecordInspectionField =>
-        (RECORD_INSPECTION_FIELDS as readonly string[]).includes(value),
-      recordInspectionFormSchema,
+    fieldErrors: firstIssuePerField(parsed.refusal, (value): value is RecordInspectionField =>
+      (RECORD_INSPECTION_FIELDS as readonly string[]).includes(value),
     ),
   };
 }

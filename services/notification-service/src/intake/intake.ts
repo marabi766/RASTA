@@ -1,3 +1,4 @@
+import { legacyParse } from '@rasta/contracts';
 import type { EventEnvelope } from '@rasta/contracts';
 import { originalDelivery, type EventDelivery } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -96,10 +97,10 @@ export function decideIntake(envelope: EventEnvelope, delivery: EventDelivery): 
     );
   }
 
-  const parsed = rule.payloadSchema.safeParse(envelope.payload);
+  const parsed = legacyParse(rule.payloadSchema, envelope.payload);
   if (!parsed.success) {
     // Paths only, never values: the payload is the thing being refused.
-    const paths = parsed.error.issues.map((issue) => issue.path.join('.') || '(root)');
+    const paths = parsed.refusal.issues.map((issue) => issue.path.join('.') || '(root)');
     throw new PoisonEventError(
       POISON_REASONS.PAYLOAD_INVALID,
       `${envelope.eventName} ${envelope.eventId} payload rejected at ${paths.join(', ')}`,

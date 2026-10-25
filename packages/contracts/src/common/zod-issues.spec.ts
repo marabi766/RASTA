@@ -1,5 +1,16 @@
+import { inspect } from 'node:util';
 import { z } from 'zod';
-import { LEGACY_PARSE, legacyIssues, type LegacyIssue } from './zod-issues';
+import { currencySchema } from './money';
+import {
+  LegacyContextError,
+  LegacyRefusal,
+  describeLegacyRefusal,
+  isLegacyRefusal,
+  legacyIssueInErrorMap,
+  legacyParse,
+  requireLegacyRefusal,
+  type LegacyIssue,
+} from './zod-issues';
 
 /**
  * zod 4 issues read in zod 3's vocabulary. The goldens (recorded under zod 3)
@@ -7,15 +18,15 @@ import { LEGACY_PARSE, legacyIssues, type LegacyIssue } from './zod-issues';
  * pin each branch of the translation on its own.
  */
 function legacy(schema: z.ZodType, input: unknown): LegacyIssue[] {
-  const result = schema.safeParse(input, LEGACY_PARSE);
+  const result = legacyParse(schema, input);
   if (result.success) throw new Error('expected a refusal');
-  return legacyIssues(result.error.issues, schema);
+  return [...result.refusal.issues];
 }
 
 const brief = (issues: LegacyIssue[]) =>
   issues.map(({ path, code, message }) => ({ path: path.join('.'), code, message }));
 
-describe('legacyIssues', () => {
+describe('legacyParse', () => {
   it('renames codes and rewrites default messages as zod 3 wrote them', () => {
     const schema = z
       .object({
@@ -120,34 +131,169 @@ describe('legacyIssues', () => {
     ]);
   });
 
-  it('without a schema, a one-value refusal reads as a literal’s and a longer one as an enum’s', () => {
-    const literal = z.object({ l: z.literal('x') }).safeParse({ l: 'y' }, LEGACY_PARSE);
-    const options = z.object({ e: z.enum(['A', 'B']) }).safeParse({ e: 'C' }, LEGACY_PARSE);
-    expect(legacyIssues(literal.error?.issues ?? []).map((issue) => issue.code)).toEqual([
-      'invalid_literal',
-    ]);
-    expect(legacyIssues(options.error?.issues ?? []).map((issue) => issue.code)).toEqual([
-      'invalid_enum_value',
+  it('a one-value enum is an enum and a literal a literal: the schema decides, not the count (r1 F1)', () => {
+    // currencySchema is z.enum(['IRR']): one value, still an enum, as zod 3 reported it.
+    const schema = z.object({ currency: currencySchema, kind: z.literal('X') });
+    expect(brief(legacy(schema, { currency: 'USD', kind: 'Y' }))).toEqual([
+      {
+        path: 'currency',
+        code: 'invalid_enum_value',
+        message: "Invalid enum value. Expected 'IRR', received 'USD'",
+      },
+      { path: 'kind', code: 'invalid_literal', message: 'Invalid literal value, expected "X"' },
     ]);
   });
 
-  it('without the value, a missing field is not guessed', () => {
-    const result = z.object({ s: z.string() }).safeParse({});
-    const [issue] = legacyIssues(result.error?.issues ?? [], z.object({ s: z.string() }));
-    expect(issue).toMatchObject({ code: 'invalid_type', received: 'unknown' });
-    // The value given instead stands in for the one the parse did not report.
-    const [given] = legacyIssues(result.error?.issues ?? [], z.object({ s: z.string() }), {});
-    expect(given).toMatchObject({
-      code: 'invalid_type',
-      received: 'undefined',
-      message: 'Required',
+  it('a missing enum field is Required, and an enum given a number is a type refusal (r1 F1)', () => {
+    // CONTRACT_AUTHORITY_REFUSED with payload {} and an envelope with actor.type 7, as zod 3 read them.
+    const schema = z.object({
+      side: z.enum(['A', 'B']),
+      actor: z.object({ type: z.enum(['USER']) }),
     });
+    expect(brief(legacy(schema, { actor: { type: 7 } }))).toEqual([
+      { path: 'side', code: 'invalid_type', message: 'Required' },
+      { path: 'actor.type', code: 'invalid_type', message: "Expected 'USER', received number" },
+    ]);
+  });
+
+  it('a non-finite number after a preprocess replays the checks on the parsed number (r1 F1, ?limit=1e999)', () => {
+    const limit = z.preprocess(
+      (value) => (typeof value === 'string' ? Number(value) : value),
+      z.number().int().min(1).max(200),
+    );
+    expect(brief(legacy(z.object({ limit }), { limit: '1e999' }))).toEqual([
+      { path: 'limit', code: 'invalid_type', message: 'Expected integer, received float' },
+      { path: 'limit', code: 'too_big', message: 'Number must be less than or equal to 200' },
+    ]);
+  });
+
+  it('after an .int() refusal, runs the later checks as zod 3 did (zod 4 stops there)', () => {
+    const schema = z.object({
+      q: z.number().multipleOf(5).int().min(10).max(20, 'at most twenty'),
+    });
+    expect(brief(legacy(schema, { q: 7.5 }))).toEqual([
+      { path: 'q', code: 'not_multiple_of', message: 'Number must be a multiple of 5' },
+      { path: 'q', code: 'invalid_type', message: 'Expected integer, received float' },
+      { path: 'q', code: 'too_small', message: 'Number must be greater than or equal to 10' },
+    ]);
+    expect(brief(legacy(schema, { q: 25.5 }))).toEqual([
+      { path: 'q', code: 'not_multiple_of', message: 'Number must be a multiple of 5' },
+      { path: 'q', code: 'invalid_type', message: 'Expected integer, received float' },
+      { path: 'q', code: 'too_big', message: 'at most twenty' },
+    ]);
   });
 
   it('passes a code neither zod knows through as it is', () => {
-    const forged = [
-      { code: 'forged_code', path: ['a'], message: 'x' },
-    ] as unknown as z.core.$ZodIssue[];
-    expect(legacyIssues(forged).map((issue) => issue.code)).toEqual(['forged_code']);
+    const schema = z.object({ a: z.string() }).superRefine((_value, ctx) => {
+      ctx.addIssue({ code: 'forged_code', path: ['a'], message: 'x' } as never);
+    });
+    expect(legacy(schema, { a: 'ok' }).map((issue) => issue.code)).toEqual(['forged_code']);
+  });
+
+  it('accepts exactly what safeParse accepts, with the same output', () => {
+    const schema = z.object({ n: z.coerce.number().prefault(3), s: z.string().trim() });
+    expect(legacyParse(schema, { s: ' x ' })).toEqual({ success: true, data: { n: 3, s: 'x' } });
+    expect(legacyParse(schema, { s: 1 }).success).toBe(schema.safeParse({ s: 1 }).success);
+  });
+});
+
+describe('early rejection survives the translation (PM addendum B)', () => {
+  it('an over-cap array: one too_big, no element parsed, no refinement over the elements run', () => {
+    const element = z.string().min(3);
+    const elementRun = jest.spyOn(element._zod, 'run');
+    const refinement = jest.fn(() => true);
+    const schema = z.object({ items: z.array(element).max(2).refine(refinement, 'each once') });
+    const refused = legacyParse(schema, { items: ['a', 'b', 'c', 'd', 'e'] });
+    expect(refused.success).toBe(false);
+    expect(brief([...(refused.refusal?.issues ?? [])])).toEqual([
+      { path: 'items', code: 'too_big', message: 'Array must contain at most 2 element(s)' },
+    ]);
+    expect(elementRun).not.toHaveBeenCalled();
+    expect(refinement).not.toHaveBeenCalled();
+  });
+});
+
+describe('the refusal is the only way to a translation (r1 F1 guard)', () => {
+  const SENTINEL = 'SENTINEL-109-value';
+  const schema = z.object({ e: z.enum(['A', 'B']), s: z.string().max(3) }).strict();
+
+  it('every formatter refuses a bare zod error, its issues, or a hand-built look-alike', () => {
+    const bare = schema.safeParse({ e: SENTINEL }).error;
+    for (const notARefusal of [bare, bare?.issues, { issues: [] }, undefined, null]) {
+      expect(isLegacyRefusal(notARefusal)).toBe(false);
+      expect(() => requireLegacyRefusal(notARefusal, 'formatter')).toThrow(LegacyContextError);
+    }
+    expect(
+      () =>
+        new (LegacyRefusal as unknown as new (...args: unknown[]) => unknown)(
+          Symbol(),
+          [],
+          schema,
+          {},
+        ),
+    ).toThrow(LegacyContextError);
+    const refused = legacyParse(schema, { e: 'C' }).refusal;
+    expect(requireLegacyRefusal(refused, 'formatter')).toBe(refused);
+  });
+
+  it('the refusal shows paths and codes only: never the input or zod 4’s error (PM addendum C)', () => {
+    const input = { e: 'A', s: SENTINEL, [SENTINEL]: 1 };
+    const refusal = legacyParse(schema, input).refusal as LegacyRefusal;
+    expect(Object.keys(refusal)).toEqual(['issues']);
+    expect(refusal.input).toBe(input);
+    expect(refusal.schema).toBe(schema);
+    for (const shown of [
+      JSON.stringify(refusal),
+      inspect(refusal, { depth: 10 }),
+      String(refusal),
+    ]) {
+      expect(shown).not.toContain(SENTINEL);
+    }
+    const error = new LegacyContextError('formatter');
+    expect(`${error.message}${error.stack ?? ''}`).not.toContain(SENTINEL);
+  });
+});
+
+describe('legacyIssueInErrorMap', () => {
+  it('reads the raised-by schema and the value off the raw issue', () => {
+    const issues: (LegacyIssue | undefined)[] = [];
+    const error = (issue: z.core.$ZodRawIssue) => {
+      issues.push(legacyIssueInErrorMap(issue));
+      return undefined;
+    };
+    const result = z
+      .object({ c: currencySchema, n: z.number().max(5) })
+      .safeParse({ c: 'USD', n: Number.POSITIVE_INFINITY }, { error });
+    // zod 4.6.7 finishes the issues, running the maps, when the error is first read.
+    expect(result.error?.issues).toHaveLength(2);
+    expect(issues.map((issue) => issue?.code)).toEqual(['invalid_enum_value', 'too_big']);
+  });
+});
+
+describe('describeLegacyRefusal', () => {
+  const SENTINEL = 'SENTINEL-109-describe';
+  const schema = z
+    .object({ kind: z.enum(['A', 'B']), n: z.number().int(), list: z.array(z.string()) })
+    .superRefine((_value, ctx) => {
+      ctx.addIssue({ code: 'custom', path: ['n'], message: 'n is fixed by the event' });
+    });
+
+  it('names paths and zod 3 codes, keeps the schema’s own sentence, and never a value', () => {
+    const refused = legacyParse(schema, { kind: SENTINEL, n: 1, list: [] })
+      .refusal as LegacyRefusal;
+    const line = describeLegacyRefusal(refused);
+    expect(line).toBe('kind invalid_enum_value');
+    expect(line).not.toContain(SENTINEL);
+    const custom = legacyParse(schema, { kind: 'A', n: 1, list: [] }).refusal as LegacyRefusal;
+    expect(describeLegacyRefusal(custom)).toBe('n custom (n is fixed by the event)');
+  });
+
+  it('names at most `limit` issues and counts the rest', () => {
+    const many = z.object(
+      Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`f${i}`, z.string()])),
+    );
+    expect(describeLegacyRefusal(legacyParse(many, {}).refusal as LegacyRefusal, 2)).toBe(
+      'f0 invalid_type, f1 invalid_type, …(12 total)',
+    );
   });
 });

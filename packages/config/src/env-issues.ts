@@ -1,5 +1,10 @@
 import type { z } from 'zod';
-import { LEGACY_PARSED_TYPES, legacyIssues, type LegacyIssue } from '@rasta/contracts';
+import {
+  LEGACY_PARSED_TYPES,
+  requireLegacyRefusal,
+  type LegacyIssue,
+  type LegacyRefusal,
+} from '@rasta/contracts';
 import { enumOptions, resolveEnvPath, unwrapEnvSchema } from './env-schema';
 
 /** One refused setting, as `EnvValidationError` lists it. */
@@ -31,17 +36,14 @@ export const ENV_PATH_PLACEHOLDER = '(key not in schema)';
  *
  * Every place that formats environment issues goes through this — `loadEnv`,
  * and through it each service's loader; a service never maps `issue.message`
- * itself. The issues are read in zod 3's vocabulary ({@link legacyIssues}), so
- * the texts are the ones operators saw before the move to zod 4; `source` is
- * what was parsed, for zod 3's `received` when the parse did not report it.
+ * itself. The issues are the {@link LegacyRefusal} of `legacyParse(schema,
+ * source)` — zod 3's vocabulary, translated against the schema that was parsed
+ * — so the texts are the ones operators saw before the move to zod 4, and the
+ * schema the paths are walked in is the one that refused (PR #444 r1 F1).
  */
-export function envIssues(
-  issues: readonly z.core.$ZodIssue[],
-  schema: z.ZodType,
-  fixedMessages: ReadonlySet<string>,
-  ...source: [] | [source: unknown]
-): EnvIssue[] {
-  return legacyIssues(issues, schema, ...source).map((issue) => {
+export function envIssues(refusal: LegacyRefusal, fixedMessages: ReadonlySet<string>): EnvIssue[] {
+  const { issues, schema } = requireLegacyRefusal(refusal, 'envIssues');
+  return issues.map((issue) => {
     const { nodes, segments } = resolveEnvPath(schema, issue.path);
     const leaves = nodes.flatMap(unwrapEnvSchema);
     const path = segments.map((segment) => segment ?? ENV_PATH_PLACEHOLDER).join('.') || '(root)';
