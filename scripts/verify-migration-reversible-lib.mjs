@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { readUrl } from '../packages/config/src/url-reader.js';
 
 // -----------------------------------------------------------------------------
 // What each service's migration chain must leave behind, and the SQL that
@@ -4144,9 +4145,18 @@ function withLibpqQuery(target, params) {
   return query ? `${target.toString()}?${query}` : target.toString();
 }
 
+/**
+ * What every libpq helper below refuses a URL that does not parse with: a fixed
+ * text. `new URL`'s own error keeps the whole input on `.input`, which an
+ * uncaught throw prints — the password included, since these run before it is
+ * taken out (#385 r5).
+ */
+export const UNREADABLE_DATABASE_URL =
+  'the database URL cannot be read as a URL, so it is not handed to psql; its value is not repeated';
+
 /** `url` as libpq should see it: Prisma's own parameters removed, libpq's kept. */
 export function libpqUrl(url) {
-  const target = new URL(url);
+  const target = readUrl(url, { refusal: UNREADABLE_DATABASE_URL });
   const kept = [...target.searchParams].filter(([name]) => !PRISMA_ONLY_PARAMETERS.includes(name));
   return withLibpqQuery(target, kept);
 }
@@ -4161,7 +4171,7 @@ export function libpqUrl(url) {
  * has no password, so an inherited `PGPASSWORD` or `.pgpass` still applies.
  */
 export function libpqInvocation(url) {
-  const target = new URL(libpqUrl(url));
+  const target = readUrl(libpqUrl(url), { refusal: UNREADABLE_DATABASE_URL });
   const password = target.password
     ? decodeURIComponent(target.password)
     : target.searchParams.get('password');

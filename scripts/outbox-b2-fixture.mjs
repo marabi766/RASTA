@@ -13,6 +13,7 @@
 // -----------------------------------------------------------------------------
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { readUrl } from '../packages/config/src/url-reader.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
@@ -184,7 +185,7 @@ function assertSchemaName(schema) {
 /** A URL for the same database with its schema replaced. Never logged. */
 export function urlWithSchema(baseUrl, schema) {
   assertSchemaName(schema);
-  const url = new URL(baseUrl);
+  const url = readUrl(baseUrl, { refusal: 'the B2 fixture database URL cannot be read as a URL' });
   url.searchParams.set('schema', schema);
   return url.toString();
 }

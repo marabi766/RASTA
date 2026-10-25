@@ -1,12 +1,15 @@
 import { z } from 'zod';
 import {
+  authEnvSchema,
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  EnvValidationError,
+  fixedEnvMessages,
   kafkaEnvSchema,
-  authEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { AGGREGATION_WINDOW_SECONDS } from '../security-events/refusal-aggregation';
 import { roleSchema, type PlatformRole } from '../identity/dto';
@@ -16,6 +19,18 @@ import {
   DEFAULT_PROVISIONING_SCOPE_POLICY,
   type ProvisioningScopePolicy,
 } from '../identity/provisioning-scope';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+/**
+ * A role list's refusals. Fixed: they used to name the entry written (`Unknown role: ${entry}`),
+ * which is configuration text and reached the boot log (S-09, #385 r1/r2).
+ */
+const UNKNOWN_ROLE = fixed('names a role that is not a platform role');
+const UNGRANTABLE_ROLE = fixed(
+  'names a role that cannot be granted through this API and must not be configured as grantable',
+);
 
 /**
  * A comma-separated role list from the environment.
@@ -48,14 +63,11 @@ function roleListEnv(
       for (const entry of entries) {
         const parsed = roleSchema.safeParse(entry);
         if (!parsed.success) {
-          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Unknown role: ${entry}` });
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: UNKNOWN_ROLE });
           return z.NEVER;
         }
         if (!options.allowUngrantable && UNGRANTABLE_ROLES.includes(parsed.data)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: `${entry} cannot be granted through this API and must not be configured as grantable`,
-          });
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: UNGRANTABLE_ROLE });
           return z.NEVER;
         }
         if (!roles.includes(parsed.data)) roles.push(parsed.data);
@@ -78,7 +90,7 @@ export const identityEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    KEYCLOAK_URL: z.string().url(),
+    KEYCLOAK_URL: serviceUrlSchema,
     KEYCLOAK_REALM: z.string().min(1),
     KEYCLOAK_BACKEND_CLIENT_ID: z.string().min(1),
     KEYCLOAK_BACKEND_CLIENT_SECRET: z.string().min(1),
@@ -87,9 +99,30 @@ export const identityEnvSchema = baseEnvSchema
      * When false, account provisioning is recorded locally and the Keycloak
      * call is skipped. That is for isolated unit and API test environments
      * that have no identity provider. A deployed environment must never
-     * disable synchronisation — hence the default of true.
+     * disable synchronisation — hence the default of true, and `false` is
+     * refused at boot unless `NODE_ENV` is set explicitly to `development` or
+     * `test` (`assertNarrowingEnforced`): with it off, a demotion or a
+     * revocation commits without ever reaching a token (D-064).
      */
     KEYCLOAK_SYNC_ENABLED: booleanEnv(true),
+
+    /**
+     * ADR-060, write-ahead addendum (D-064, D-069) — how long after its
+     * deadline a Keycloak write whose answer never came (the deadline passed,
+     * the connection broke, a 5xx) may still be applied. An aborted request is
+     * not a cancelled one, so for this long an older write could land after a
+     * newer one. Every write's fence (`keycloak_write_attempt`) stays live
+     * until `deadline + this`: meanwhile a narrowing change of that user is
+     * refused (503 `KEYCLOAK_WRITE_SETTLING`); after it, the sweep re-asserts
+     * the user and clears the fence.
+     *
+     * An assumption about the deployment, stated in the ADR's D-069 residual:
+     * Keycloak applies an admin write within this long of the sender's
+     * deadline, or never. The floor is above the client's own 10 s deadline;
+     * the ceiling bounds how long one lost answer can hold demotions of that
+     * user back.
+     */
+    KEYCLOAK_WRITE_SETTLE_SECONDS: z.coerce.number().int().min(15).max(900).default(120),
 
     CORS_ORIGINS: z.string().default(''),
 
@@ -136,7 +169,7 @@ export const identityEnvSchema = baseEnvSchema
      * Required, with no default: a correction must never be validated against
      * whatever happened to be listening on a guessed address.
      */
-    AUDIT_SERVICE_URL: z.string().url(),
+    AUDIT_SERVICE_URL: serviceUrlSchema,
 
     /**
      * The whole correction-target lookup, body included. Finite, so a slow
@@ -170,6 +203,10 @@ export const identityEnvSchema = baseEnvSchema
      * else re-projects them. The interval is the latency bound on top of
      * ADR-060 § 7's 905 s, so its ceiling is kept at an hour.
      */
+    // Off is refused outside an explicit development or test environment
+    // (`assertNarrowingEnforced`): the sweep is the only path that takes a
+    // lapsed membership out of Keycloak, and it re-asserts users whose
+    // Keycloak write was left unconfirmed (D-064).
     MEMBERSHIP_EXPIRY_SCAN_ENABLED: booleanEnv(true),
     MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS: z.coerce.number().int().min(5).max(3600).default(60),
     MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(200),
@@ -194,13 +231,15 @@ export const identityEnvSchema = baseEnvSchema
     ),
   });
 
+export const IDENTITY_ENV_MESSAGES = seal();
+
 export type IdentityEnv = z.infer<typeof identityEnvSchema>;
 
 export function loadIdentityEnv(source: NodeJS.ProcessEnv = process.env): IdentityEnv {
   // Each service reads its own DATABASE_URL_* variable, so a single .env can
   // describe every service without any of them being able to open another
   // service's database by accident (ADR-005).
-  return loadEnv(
+  const env = loadEnv(
     identityEnvSchema,
     {
       ...source,
@@ -211,8 +250,44 @@ export function loadIdentityEnv(source: NodeJS.ProcessEnv = process.env): Identi
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'identity-service.main',
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: identityOperationBudgets },
+    { operationBudgets: identityOperationBudgets, fixedMessages: IDENTITY_ENV_MESSAGES },
   );
+  assertNarrowingEnforced(source, env);
+  return env;
+}
+
+/** Where a narrowing path may be switched off: named explicitly, never by an unset `NODE_ENV`. */
+export const NARROWING_OPT_OUT_ENVIRONMENTS = ['development', 'test'] as const;
+
+/**
+ * The two switches that would let a narrowing change — a role removed, a
+ * membership revoked or lapsed — commit without ever reaching Keycloak, and so
+ * a token (ADR-060, write-ahead addendum, D-064):
+ *
+ * - `KEYCLOAK_SYNC_ENABLED=false`: every Keycloak write is skipped, the
+ *   write-ahead included, and the change commits;
+ * - `MEMBERSHIP_EXPIRY_SCAN_ENABLED=false`: a lapsed membership is never taken
+ *   out of Keycloak, and a user whose write was left unconfirmed is never
+ *   re-asserted.
+ *
+ * Either is honoured only with `NODE_ENV` set explicitly to `development` or
+ * `test`, as `KAFKA_ALLOW_PLAINTEXT` is: an unset `NODE_ENV`, which the schema
+ * would default to `development`, does not count. Anywhere else the service
+ * refuses to start rather than silently skip.
+ */
+function assertNarrowingEnforced(source: NodeJS.ProcessEnv, env: IdentityEnv): void {
+  const given = source.NODE_ENV?.trim();
+  if (given && (NARROWING_OPT_OUT_ENVIRONMENTS as readonly string[]).includes(given)) return;
+  const message =
+    `may be false only with NODE_ENV set explicitly to ${NARROWING_OPT_OUT_ENVIRONMENTS.join(' or ')}: ` +
+    'with it off a demotion, a revocation or a lapse can commit without reaching Keycloak (D-064)';
+  const issues = [
+    ...(env.KEYCLOAK_SYNC_ENABLED ? [] : [{ path: 'KEYCLOAK_SYNC_ENABLED', message }]),
+    ...(env.MEMBERSHIP_EXPIRY_SCAN_ENABLED
+      ? []
+      : [{ path: 'MEMBERSHIP_EXPIRY_SCAN_ENABLED', message }]),
+  ];
+  if (issues.length > 0) throw new EnvValidationError(issues);
 }
 
 export function corsOrigins(env: IdentityEnv): string[] {

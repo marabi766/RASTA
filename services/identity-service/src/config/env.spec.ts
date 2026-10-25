@@ -1,5 +1,10 @@
-import { EnvValidationError } from '@rasta/config';
-import { loadIdentityEnv, provisioningScopePolicy, roleGrantPolicy } from './env';
+import { EnvValidationError, envEnumProbes, envRefusalOf } from '@rasta/config';
+import {
+  identityEnvSchema,
+  loadIdentityEnv,
+  provisioningScopePolicy,
+  roleGrantPolicy,
+} from './env';
 import {
   APPROVAL_TRANSACTION_TIMEOUT_MS,
   PROJECTION_TRANSACTION_TIMEOUT_MS,
@@ -32,9 +37,11 @@ const BASE: NodeJS.ProcessEnv = {
   AUDIT_SERVICE_URL: 'http://localhost:3115',
 };
 
+// NODE_ENV=test: `false` is honoured only where it is named explicitly (D-064).
 const load = (value?: string) =>
   loadIdentityEnv({
     ...BASE,
+    NODE_ENV: 'test',
     ...(value === undefined ? {} : { KEYCLOAK_SYNC_ENABLED: value }),
   });
 
@@ -61,6 +68,59 @@ describe('KEYCLOAK_SYNC_ENABLED', () => {
 
   it.each(['maybe', 'sync', '2'])('refuses %p rather than guessing', (value) => {
     expect(() => load(value)).toThrow(EnvValidationError);
+  });
+});
+
+/**
+ * D-064 — the two switches that would let a narrowing change commit without
+ * reaching Keycloak are honoured only with NODE_ENV named as development or
+ * test; an unset NODE_ENV, which the schema defaults to development, does not
+ * count.
+ */
+describe('narrowing cannot be switched off outside development and test (D-064)', () => {
+  const at = (nodeEnv: string | undefined, values: NodeJS.ProcessEnv) =>
+    loadIdentityEnv({
+      ...BASE,
+      ...(nodeEnv === undefined ? {} : { NODE_ENV: nodeEnv }),
+      ...values,
+    });
+
+  it.each([
+    ['KEYCLOAK_SYNC_ENABLED', { KEYCLOAK_SYNC_ENABLED: 'false' }],
+    ['MEMBERSHIP_EXPIRY_SCAN_ENABLED', { MEMBERSHIP_EXPIRY_SCAN_ENABLED: 'false' }],
+  ])('%s=false is refused in production, staging and with NODE_ENV unset', (name, values) => {
+    for (const nodeEnv of ['production', 'staging', undefined]) {
+      expect(() => at(nodeEnv, values)).toThrow(EnvValidationError);
+      expect(() => at(nodeEnv, values)).toThrow(new RegExp(`${name}: may be false only`));
+    }
+  });
+
+  it.each(['development', 'test'])('both may be false with NODE_ENV=%s', (nodeEnv) => {
+    expect(
+      at(nodeEnv, { KEYCLOAK_SYNC_ENABLED: 'false', MEMBERSHIP_EXPIRY_SCAN_ENABLED: 'false' }),
+    ).toMatchObject({ KEYCLOAK_SYNC_ENABLED: false, MEMBERSHIP_EXPIRY_SCAN_ENABLED: false });
+  });
+
+  it('both on is accepted everywhere', () => {
+    expect(at('production', {})).toMatchObject({
+      KEYCLOAK_SYNC_ENABLED: true,
+      MEMBERSHIP_EXPIRY_SCAN_ENABLED: true,
+    });
+  });
+
+  it('KEYCLOAK_WRITE_SETTLE_SECONDS defaults to 120, above the 10 s client deadline, and is bounded', () => {
+    expect(at('production', {}).KEYCLOAK_WRITE_SETTLE_SECONDS).toBe(120);
+    expect(
+      at('production', { KEYCLOAK_WRITE_SETTLE_SECONDS: '15' }).KEYCLOAK_WRITE_SETTLE_SECONDS,
+    ).toBe(15);
+    expect(
+      at('production', { KEYCLOAK_WRITE_SETTLE_SECONDS: '900' }).KEYCLOAK_WRITE_SETTLE_SECONDS,
+    ).toBe(900);
+    for (const value of ['14', '901', '1.5', '-1', 'soon']) {
+      expect(() => at('production', { KEYCLOAK_WRITE_SETTLE_SECONDS: value })).toThrow(
+        EnvValidationError,
+      );
+    }
   });
 });
 
@@ -272,5 +332,61 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
     expect(at('65000')).toThrow(/not above PROJECTION_TRANSACTION_TIMEOUT_MS, 65000 ms/);
     expect(at('65000')).toThrow(/not above APPROVAL_TRANSACTION_TIMEOUT_MS, 65000 ms/);
     expect(at('65001')).not.toThrow();
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    identityEnvSchema,
+    (source) => loadIdentityEnv(source),
+    BASE,
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining(['NODE_ENV', 'LOG_LEVEL', 'KAFKA_SASL_MECHANISM']),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
+  });
+});
+
+describe('a role list refuses without the entry written (#385 r1/r2, S-09)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+
+  it.each([
+    [
+      'an unknown role',
+      (value: string) => `FLEET_MANAGER,${value}`,
+      'names a role that is not a platform role',
+    ],
+    [
+      'an ungrantable role',
+      // The entry here is a real role; the message still names none.
+      (value: string) => (value === SENTINELS[0] ? 'SYSTEM_ADMIN' : 'FLEET_MANAGER,SYSTEM_ADMIN'),
+      'names a role that cannot be granted through this API and must not be configured as grantable',
+    ],
+  ])('%s', (_name, list, message) => {
+    const [a, b] = SENTINELS.map((value) =>
+      envRefusalOf(() => loadIdentityEnv({ ...BASE, ROLE_GRANTS_BY_UNION_ADMIN: list(value) })),
+    );
+    expect(a).toEqual(b);
+    expect(a?.issues).toEqual([{ path: 'ROLE_GRANTS_BY_UNION_ADMIN', message }]);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
   });
 });

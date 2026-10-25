@@ -279,6 +279,7 @@ export type {
 export {
   CONNECTED_ROLE_SQL,
   RuntimeRoleRefusedError,
+  RuntimeRoleUnverifiedError,
   assertDemoSeedRuntimeRole,
   assertRuntimeRole,
   connectedRoleProblems,
@@ -290,3 +291,7 @@ export type {
   RuntimeRolePreflightClient,
   RuntimeRoleQueryClient,
 } from './database/runtime-role';
+
+// OpenAPI --------------------------------------------------------------------
+export { toJsonSchema, codePointLength } from './openapi/zod-schema';
+export type { JsonSchema } from './openapi/zod-schema';

@@ -1,7 +1,18 @@
 import { z } from 'zod';
-import { authEnvSchema, baseEnvSchema, booleanEnv, redisEnvSchema, loadEnv } from '@rasta/config';
+import {
+  authEnvSchema,
+  baseEnvSchema,
+  booleanEnv,
+  fixedEnvMessages,
+  redisEnvSchema,
+  loadEnv,
+} from '@rasta/config';
 import { serviceUrlEnvSchema } from './routes';
-import { trustedProxiesSchema } from '../http/trust-proxy';
+import { TRUSTED_PROXY_REFUSED, trustedProxiesSchema } from '../http/trust-proxy';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+fixed(TRUSTED_PROXY_REFUSED);
 
 /**
  * `GATEWAY_TENDER_OPEN_TIMEOUT_MS` (Codex r2 on #250, G1): construction-service's own opening
@@ -83,17 +94,23 @@ export const gatewayEnvSchema = baseEnvSchema
   // A longer deadline for the tender routes only: never one shorter than every other route gets.
   .refine((env) => env.GATEWAY_TENDER_OPEN_TIMEOUT_MS >= env.GATEWAY_UPSTREAM_TIMEOUT_MS, {
     path: ['GATEWAY_TENDER_OPEN_TIMEOUT_MS'],
-    message: 'must be at least GATEWAY_UPSTREAM_TIMEOUT_MS',
+    message: fixed('must be at least GATEWAY_UPSTREAM_TIMEOUT_MS'),
   });
+
+export const GATEWAY_ENV_MESSAGES = seal();
 
 export type GatewayEnv = z.infer<typeof gatewayEnvSchema>;
 
 export function loadGatewayEnv(source: NodeJS.ProcessEnv = process.env): GatewayEnv {
-  return loadEnv(gatewayEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? 'api-gateway',
-    PORT: source.PORT ?? source.PORT_API_GATEWAY ?? '3000',
-  });
+  return loadEnv(
+    gatewayEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? 'api-gateway',
+      PORT: source.PORT ?? source.PORT_API_GATEWAY ?? '3000',
+    },
+    { fixedMessages: GATEWAY_ENV_MESSAGES },
+  );
 }
 
 export function corsOrigins(env: GatewayEnv): string[] {

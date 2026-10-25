@@ -1,14 +1,14 @@
 import { z } from 'zod';
 import { cursorPaginationSchema, plainText } from '@rasta/contracts';
 import { SHORTFALL_POLICIES } from '../config/env';
-import { codePointLength } from '../openapi/zod-schema';
+import { codePointLength } from '@rasta/nest-common';
 import { AGGREGATION_STATES, DEMAND_STATES } from './demand.state-machine';
 
 /**
  * The request and response shapes of the demand and aggregation API (ADR-070 § 2; the planned
  * contract `docs/api/procurement-service.planned.openapi.json`, operations of PR 1).
  *
- * The same Zod schemas validate input, type the code and — through `zod-schema.ts` — become the
+ * The same Zod schemas validate input, type the code and — through `toJsonSchema` — become the
  * OpenAPI document, so the three cannot disagree. Every command takes a strict body: nothing in it
  * decides who acts, for which organization, or when.
  */

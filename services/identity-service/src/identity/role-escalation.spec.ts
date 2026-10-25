@@ -29,6 +29,7 @@ import { IdentityService } from './identity.service';
 import { IdentityRepository } from './identity.repository';
 import { KeycloakAdminClient } from '../keycloak/keycloak.client';
 import { KeycloakProjector } from '../keycloak/keycloak.projector';
+import { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
 import { TEST_ORG_A } from '@rasta/testing';
 import { DEFAULT_ROLE_GRANT_POLICY, ROLE_GRANT_POLICY } from './role-grants';
 import { DEFAULT_PROVISIONING_SCOPE_POLICY, PROVISIONING_SCOPE_POLICY } from './provisioning-scope';
@@ -265,7 +266,8 @@ const repository = {
     },
   },
   transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(tx),
-  lockUserMemberships: async () => ({ activeOrganizationId: ORG_A, now: new Date() }),
+  lockUserMemberships: async () => ({ activeOrganizationId: ORG_A }),
+  databaseNow: async () => new Date(),
   // The request row lock a registration decision takes (#219 r2), on the status set per test.
   lockRegistrationRequest: async () =>
     registrationExists ? { status: registrationStatus, userId: TARGET_USER } : null,
@@ -279,6 +281,9 @@ const repository = {
   findUserWithMemberships: async () => null,
   findMembership: async () => (lookups.membership ? membershipRow('MBR_x', ['DRIVER']) : null),
   findMembershipById: async (id: string) => membershipRow(id, memberships.get(id) ?? ['DRIVER']),
+  // A revocation also reads an ended membership (sent again, it answers as it did).
+  findMembershipByIdIncludingRevoked: async (id: string) =>
+    membershipRow(id, memberships.get(id) ?? ['DRIVER']),
   listMembershipsForUser: async () => [],
   findOrganizationRefs: async () => [],
   listUsersInOrganization: async () => ({
@@ -309,6 +314,8 @@ const keycloak = {
   providers: [
     { provide: IdentityRepository, useValue: repository },
     { provide: KeycloakAdminClient, useValue: keycloak },
+    // With sync off nothing is ever fenced (D-069); a stand-in for the fence pool.
+    { provide: KeycloakWriteFences, useValue: {} },
     KeycloakProjector,
     // The shipped default, not a test-only ladder: these tests assert what a
     // deployment that configures nothing actually does.

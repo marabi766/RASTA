@@ -3,7 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { toJsonSchema } from '@rasta/nest-common';
 import { NotificationController } from '../api/notification.controller';
 import { NotificationApiService } from '../api/notification.service';
 import {

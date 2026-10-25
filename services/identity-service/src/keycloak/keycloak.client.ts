@@ -3,9 +3,11 @@ import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
 import {
   PLATFORM_ATTRIBUTE_NAMES,
+  provenanceOnly,
   readPlatformAttributes,
   type PlatformAttributes,
 } from './platform-attributes';
+import type { KeycloakWriteFence, KeycloakWriteOperation } from './keycloak-write-fence';
 
 /**
  * Thin client over the Keycloak Admin API.
@@ -19,19 +21,31 @@ import {
  * that did not land means a token that says something the database does not.
  */
 
+/**
+ * An account to create. Always created **disabled and granting nothing** —
+ * `rasta_user_id` alone (D-069 addendum D, #219 r2): a create comes before the
+ * database row that would let a user lock cover it, so whatever becomes of the
+ * caller's transaction the account must be harmless. Its grants and its
+ * enable are written afterwards, by the projector, through the fenced path
+ * every other write takes. There is deliberately no way to ask for more.
+ */
 export interface CreateKeycloakUserInput {
   username: string;
   email: string;
   firstName: string;
   lastName: string;
-  /** The whole platform attribute set, from the first write (ADR-060 § 5). */
-  attributes: PlatformAttributes;
-  /**
-   * Whether the account can sign in from the start. A registration approval
-   * creates it disabled, with no grants, and the projector enables it once the
-   * database has committed the approval (#219 r2).
-   */
-  enabled: boolean;
+  /** The platform user id, written as `rasta_user_id` (the account's provenance). */
+  userId: string;
+}
+
+/**
+ * What every write method needs besides its body (D-069): the fence it opens
+ * right before its PUT, and the caller's cancellation (a shutdown), which also
+ * bounds the reads before it.
+ */
+export interface KeycloakWriteContext {
+  fence: KeycloakWriteFence;
+  cancel?: AbortSignal;
 }
 
 /** What the admin API returns for a user — only the fields this client reads. */
@@ -96,6 +110,60 @@ export class KeycloakCreateUnconfirmedError extends RastaError {
     });
     this.name = 'KeycloakCreateUnconfirmedError';
   }
+}
+
+/**
+ * A Keycloak write whose outcome nobody can know (D-064): the request may have
+ * reached Keycloak, so it may have been applied — now, or later. Its deadline
+ * passed, the connection broke after it was sent, or something answered 5xx
+ * (Keycloak itself, or a proxy in front of it that may still be forwarding
+ * it). An aborted request is not a cancelled one: aborting stops this side
+ * waiting, and nothing more.
+ *
+ * Distinct from every other failure of a write, which is **confirmed**: the
+ * request provably never arrived (the connection was refused, the name did not
+ * resolve, the token could not be had, the read before it failed) or Keycloak
+ * answered 4xx, refusing it. A caller that needs Keycloak never to end wider
+ * than the database treats this one as "may land at any time": its fence
+ * stays (`KeycloakWriteFences`, D-069).
+ */
+export class KeycloakWriteUnconfirmedError extends RastaError {
+  constructor(operation: string, reason: 'deadline' | 'connection' | 'server_error') {
+    super(ERROR_CODES.UPSTREAM_UNAVAILABLE, 'A required service is temporarily unavailable', {
+      internalContext: { service: 'keycloak', operation, reason, unconfirmed: true },
+    });
+    this.name = 'KeycloakWriteUnconfirmedError';
+  }
+}
+
+/**
+ * Connection errors that prove the request never left: nothing was connected
+ * to, so nothing can have been applied. Anything else a write ends in — a
+ * deadline, a reset, a socket closed mid-answer — may have been sent.
+ */
+const NEVER_SENT = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+]);
+
+/**
+ * The error's name, read without `instanceof`: the deadline's `TimeoutError`
+ * is a `DOMException`, which need not share this realm's `Error`.
+ */
+function errorName(error: unknown): string {
+  const name = (error as { name?: unknown } | null)?.name;
+  return typeof name === 'string' ? name : '';
+}
+
+function neverSent(error: unknown): boolean {
+  const name = errorName(error);
+  if (name === 'TimeoutError' || name === 'AbortError') return false;
+  const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
+  return typeof cause?.code === 'string' && NEVER_SENT.has(cause.code);
 }
 
 /** A Keycloak user id as the Location header carries it: one path segment, nothing else. */
@@ -163,12 +231,18 @@ export class KeycloakAdminClient {
   // Token handling
   // -------------------------------------------------------------------------
 
-  /** A fresh deadline for one call (`requestTimeoutMs`). */
-  private deadline(): AbortSignal {
-    return AbortSignal.timeout(this.options.requestTimeoutMs ?? KEYCLOAK_REQUEST_TIMEOUT_MS);
+  /** The deadline of one call; also the deadline of every write attempt's fence (D-069). */
+  get requestTimeoutMs(): number {
+    return this.options.requestTimeoutMs ?? KEYCLOAK_REQUEST_TIMEOUT_MS;
   }
 
-  private async accessToken(): Promise<string> {
+  /** A fresh deadline for one call (`requestTimeoutMs`), cut short by `cancel`. */
+  private deadline(cancel?: AbortSignal): AbortSignal {
+    const timeout = AbortSignal.timeout(this.requestTimeoutMs);
+    return cancel ? AbortSignal.any([timeout, cancel]) : timeout;
+  }
+
+  private async accessToken(cancel?: AbortSignal): Promise<string> {
     // Refresh 30s early so a token does not expire mid-request.
     if (this.token && this.token.expiresAt > Date.now() + 30_000) {
       return this.token.value;
@@ -178,7 +252,7 @@ export class KeycloakAdminClient {
     // the connection and never answers would otherwise hold the caller — and
     // the database lock an approval or a projection holds around it —
     // without bound (#219 r4). The signal also bounds reading the body below.
-    const deadline = this.deadline();
+    const deadline = this.deadline(cancel);
     const response = await unreachableAsUpstream('client_credentials', () =>
       fetch(`${this.options.baseUrl}/realms/${this.options.realm}/protocol/openid-connect/token`, {
         method: 'POST',
@@ -211,8 +285,12 @@ export class KeycloakAdminClient {
     return this.token.value;
   }
 
-  private async admin(path: string, init: RequestInit = {}): Promise<Response> {
-    const token = await this.accessToken();
+  private async admin(
+    path: string,
+    init: RequestInit = {},
+    cancel?: AbortSignal,
+  ): Promise<Response> {
+    const token = await this.accessToken(cancel);
     return unreachableAsUpstream('admin', () =>
       fetch(`${this.options.baseUrl}/admin/realms/${this.options.realm}${path}`, {
         ...init,
@@ -221,9 +299,63 @@ export class KeycloakAdminClient {
           authorization: `Bearer ${token}`,
           'content-type': 'application/json',
         },
-        signal: this.deadline(),
+        signal: this.deadline(cancel),
       }),
     );
+  }
+
+  /**
+   * One `PUT` to a user, classified for a caller that must know whether it can
+   * have landed (`KeycloakWriteUnconfirmedError`). 2xx: applied. 404: no such
+   * account. Other 4xx, or a failure before anything was sent: refused, and
+   * provably not applied. A deadline, a broken connection or a 5xx: unknown.
+   *
+   * Fenced (D-069): the token first, then the attempt's fence — inserted and
+   * committed by `context.fence` — then, immediately before dispatch, the
+   * attempt's own deadline is checked again, and the request carries it as
+   * its abort signal. A deadline that passed before dispatch is a request that
+   * was never sent.
+   */
+  private async putUser(
+    keycloakId: string,
+    body: unknown,
+    operation: string,
+    fenced: { context: KeycloakWriteContext; as: KeycloakWriteOperation },
+    missing: 'not_found' | 'unavailable' = 'not_found',
+  ): Promise<void> {
+    // A token that cannot be had is a failure before anything was sent.
+    const token = await this.accessToken(fenced.context.cancel);
+    const attempt = await fenced.context.fence(fenced.as);
+    const payload = JSON.stringify(body);
+    let response: Response;
+    try {
+      attempt.assertDispatchable();
+      response = await fetch(
+        `${this.options.baseUrl}/admin/realms/${this.options.realm}/users/${keycloakId}`,
+        {
+          method: 'PUT',
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: payload,
+          signal: attempt.signal,
+        },
+      );
+    } catch (error) {
+      if (error instanceof RastaError) throw error;
+      if (neverSent(error)) {
+        throw RastaError.upstreamUnavailable('keycloak', { operation, reason: 'unreachable' });
+      }
+      const name = errorName(error);
+      throw new KeycloakWriteUnconfirmedError(
+        operation,
+        name === 'TimeoutError' || name === 'AbortError' ? 'deadline' : 'connection',
+      );
+    }
+    if (response.ok) return;
+    if (response.status >= 500) throw new KeycloakWriteUnconfirmedError(operation, 'server_error');
+    if (response.status === 404 && missing === 'not_found') {
+      throw RastaError.notFound('KeycloakUser', keycloakId);
+    }
+    throw RastaError.upstreamUnavailable('keycloak', { status: response.status, operation });
   }
 
   // -------------------------------------------------------------------------
@@ -251,12 +383,12 @@ export class KeycloakAdminClient {
         email: input.email,
         firstName: input.firstName,
         lastName: input.lastName,
-        enabled: input.enabled,
+        // Disabled, and granting nothing: see `CreateKeycloakUserInput`.
+        enabled: false,
         emailVerified: false,
         requiredActions: ['UPDATE_PASSWORD'],
-        // All four, including `rasta_user_id` — which was never written before,
-        // so every API-provisioned token fell back to `sub` for the user id.
-        attributes: input.attributes,
+        // All four, `rasta_user_id` set and the rest empty.
+        attributes: provenanceOnly(input.userId),
       }),
     });
 
@@ -305,33 +437,30 @@ export class KeycloakAdminClient {
    * any non-platform attribute — and the email is a sign-in and reset
    * identifier in this realm, not display data: `docs/23` D-037.
    *
-   * Throws when the write does not land. Whether that is fatal is the
+   * Throws when the write does not land — `KeycloakWriteUnconfirmedError`
+   * when it may land all the same (`putUser`). Whether that is fatal is the
    * caller's decision (`KeycloakProjector`), not this client's.
    */
   async replacePlatformAttributes(
     keycloakId: string,
     attributes: PlatformAttributes,
+    context: KeycloakWriteContext,
   ): Promise<void> {
     if (!this.options.enabled) return;
 
-    const current = await this.getUser(keycloakId, 'replacePlatformAttributes');
+    const current = await this.getUser(keycloakId, 'replacePlatformAttributes', context.cancel);
     const others = Object.fromEntries(
       Object.entries(current.attributes ?? {}).filter(
         ([name]) => !(PLATFORM_ATTRIBUTE_NAMES as readonly string[]).includes(name),
       ),
     );
 
-    const response = await this.admin(`/users/${keycloakId}`, {
-      method: 'PUT',
-      body: JSON.stringify(platformAttributesWrite(current, { ...others, ...attributes })),
-    });
-
-    if (!response.ok) {
-      throw RastaError.upstreamUnavailable('keycloak', {
-        status: response.status,
-        operation: 'replacePlatformAttributes',
-      });
-    }
+    await this.putUser(
+      keycloakId,
+      platformAttributesWrite(current, { ...others, ...attributes }),
+      'replacePlatformAttributes',
+      { context, as: 'replace_attributes' },
+    );
   }
 
   /**
@@ -360,8 +489,8 @@ export class KeycloakAdminClient {
   }
 
   /** One account by its id, as a decision needs it (`KeycloakAccount`). */
-  async getAccount(keycloakId: string): Promise<KeycloakAccount> {
-    return toAccount(await this.getUser(keycloakId, 'getAccount'));
+  async getAccount(keycloakId: string, cancel?: AbortSignal): Promise<KeycloakAccount> {
+    return toAccount(await this.getUser(keycloakId, 'getAccount', cancel));
   }
 
   /**
@@ -376,26 +505,26 @@ export class KeycloakAdminClient {
    * and the marker — plus `enabled`. Nothing else in the representation is
    * sent.
    */
-  async activateAccount(keycloakId: string, registrationId: string): Promise<void> {
+  async activateAccount(
+    keycloakId: string,
+    activationId: string,
+    context: KeycloakWriteContext,
+  ): Promise<void> {
     if (!this.options.enabled) return;
 
-    const current = await this.getUser(keycloakId, 'activateAccount');
-    const response = await this.admin(`/users/${keycloakId}`, {
-      method: 'PUT',
-      body: JSON.stringify({
+    const current = await this.getUser(keycloakId, 'activateAccount', context.cancel);
+    await this.putUser(
+      keycloakId,
+      {
         ...platformAttributesWrite(current, {
           ...(current.attributes ?? {}),
-          [ACTIVATION_ATTRIBUTE]: [registrationId],
+          [ACTIVATION_ATTRIBUTE]: [activationId],
         }),
         enabled: true,
-      }),
-    });
-    if (!response.ok) {
-      throw RastaError.upstreamUnavailable('keycloak', {
-        status: response.status,
-        operation: 'activateAccount',
-      });
-    }
+      },
+      'activateAccount',
+      { context, as: 'activate' },
+    );
   }
 
   /** The platform attributes Keycloak currently holds for one user, for reconcile. */
@@ -407,8 +536,9 @@ export class KeycloakAdminClient {
   private async getUser(
     keycloakId: string,
     operation: string,
+    cancel?: AbortSignal,
   ): Promise<KeycloakUserRepresentation> {
-    const response = await this.admin(`/users/${keycloakId}`);
+    const response = await this.admin(`/users/${keycloakId}`, {}, cancel);
     if (response.status === 404) {
       throw RastaError.notFound('KeycloakUser', keycloakId);
     }
@@ -418,17 +548,21 @@ export class KeycloakAdminClient {
     return (await response.json()) as KeycloakUserRepresentation;
   }
 
-  async setEnabled(keycloakId: string | null, enabled: boolean): Promise<void> {
-    if (!this.options.enabled || !keycloakId) return;
-
-    const response = await this.admin(`/users/${keycloakId}`, {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
-    });
-
-    if (!response.ok) {
-      throw RastaError.upstreamUnavailable('keycloak', { operation: 'setEnabled' });
-    }
+  /**
+   * Disables an account. Never enables one: the only enable is the first
+   * activation (`activateAccount`), which proves itself with its marker.
+   */
+  async disable(keycloakId: string, context: KeycloakWriteContext): Promise<void> {
+    if (!this.options.enabled) return;
+    // A 404 stays an upstream failure here, as it always was: every caller
+    // has just read the account, so its absence is Keycloak changing under it.
+    await this.putUser(
+      keycloakId,
+      { enabled: false },
+      'setEnabled',
+      { context, as: 'disable' },
+      'unavailable',
+    );
   }
 
   async isHealthy(): Promise<boolean> {

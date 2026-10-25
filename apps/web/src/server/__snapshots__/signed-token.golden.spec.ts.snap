@@ -1,0 +1,96 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`zod-3 golden: signed tokens issued before the deploy a flash verifies for its record and action only 1`] = `
+{
+  "otherAction": undefined,
+  "otherRecord": undefined,
+  "same": "SIGNED",
+}
+`;
+
+exports[`zod-3 golden: signed tokens issued before the deploy contract-command stamps verify to what they bound 1`] = `
+{
+  "cancel": {
+    "command": "CANCEL",
+    "expectedVersion": 1,
+    "side": null,
+    "token": "eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1jYW5jZWwiLCJjb21tYW5kIjoiQ0FOQ0VMIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOjEsInNpZGUiOm51bGwsImV4cCI6MTgwMDA4NTgwMH0.uQ2XufelD-c9f8V95eVeT8K31tbY3PNsxovABgIXrKE",
+    "until": 1800085800000,
+  },
+  "changeMilestone": {
+    "command": "CHANGE_MILESTONE",
+    "expectedVersion": 7,
+    "side": null,
+    "token": "eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOiJNTFMtMSIsInN1Ym1pc3Npb25JZCI6IlNVQi1jaGFuZ2VNaWxlc3RvbmUiLCJjb21tYW5kIjoiQ0hBTkdFX01JTEVTVE9ORSIsImlzc3VlZEF0IjoxODAwMDAwMDAwMDAwLCJ1bnRpbCI6MTgwMDA4NTgwMDAwMCwiZXhwZWN0ZWRWZXJzaW9uIjo3LCJzaWRlIjpudWxsLCJleHAiOjE4MDAwODU4MDB9.QNS0Pqua_PysuMY9xx3CtUBoc4lD738TCdZvQY7Ki3c",
+    "until": 1800085800000,
+  },
+  "planMilestone": {
+    "command": "PLAN_MILESTONE",
+    "expectedVersion": null,
+    "side": null,
+    "token": "eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1wbGFuTWlsZXN0b25lIiwiY29tbWFuZCI6IlBMQU5fTUlMRVNUT05FIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOm51bGwsInNpZGUiOm51bGwsImV4cCI6MTgwMDA4NTgwMH0.jAq2ZWYnsq7rh0eYC90omL2osI2jAioL7bU3JRj-m8I",
+    "until": 1800085800000,
+  },
+  "proposeAmendment": {
+    "command": "PROPOSE_AMENDMENT",
+    "expectedVersion": 4,
+    "side": null,
+    "token": "eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1wcm9wb3NlQW1lbmRtZW50IiwiY29tbWFuZCI6IlBST1BPU0VfQU1FTkRNRU5UIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOjQsInNpZGUiOm51bGwsImV4cCI6MTgwMDA4NTgwMH0.twMd9FjMqr8544mpEhrknpMnUseSk_gyhwv-cDtFOG0",
+    "until": 1800085800000,
+  },
+  "sign": {
+    "command": "SIGN",
+    "expectedVersion": 3,
+    "side": "EMPLOYER",
+    "token": "eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1zaWduIiwiY29tbWFuZCI6IlNJR04iLCJpc3N1ZWRBdCI6MTgwMDAwMDAwMDAwMCwidW50aWwiOjE4MDAwODU4MDAwMDAsImV4cGVjdGVkVmVyc2lvbiI6Mywic2lkZSI6IkVNUExPWUVSIiwiZXhwIjoxODAwMDg1ODAwfQ.ZKteYajdiO7Zn4aFrX9ANG9Ot4iU3QNE3nCYC4zr660",
+    "until": 1800085800000,
+  },
+  "signAmendment": {
+    "command": "SIGN_AMENDMENT",
+    "expectedVersion": 1,
+    "side": "CONTRACTOR",
+    "token": "eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOiJBTUQtMSIsInN1Ym1pc3Npb25JZCI6IlNVQi1zaWduQW1lbmRtZW50IiwiY29tbWFuZCI6IlNJR05fQU1FTkRNRU5UIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOjEsInNpZGUiOiJDT05UUkFDVE9SIiwiZXhwIjoxODAwMDg1ODAwfQ.dH86rxD31BuOCDweWN-Qyn4JmQ9vgOLn_va_ULVhjgg",
+    "until": 1800085800000,
+  },
+}
+`;
+
+exports[`zod-3 golden: signed tokens issued before the deploy expiry boundaries: the last millisecond that verifies and the first that does not 1`] = `
+{
+  "flashAfterExp": "refused",
+  "flashAtExp": "SIGNED",
+  "payloadAfterExp": "refused",
+  "payloadAtExp": {
+    "id": "AST-1",
+    "note": null,
+    "version": 2,
+  },
+  "stampAfterEnd": "refused",
+  "stampAtEnd": {
+    "command": "SIGN",
+    "expectedVersion": 3,
+    "side": "EMPLOYER",
+    "token": "eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1zaWduIiwiY29tbWFuZCI6IlNJR04iLCJpc3N1ZWRBdCI6MTgwMDAwMDAwMDAwMCwidW50aWwiOjE4MDAwODU4MDAwMDAsImV4cGVjdGVkVmVyc2lvbiI6Mywic2lkZSI6IkVNUExPWUVSIiwiZXhwIjoxODAwMDg1ODAwfQ.ZKteYajdiO7Zn4aFrX9ANG9Ot4iU3QNE3nCYC4zr660",
+    "until": 1800085800000,
+  },
+}
+`;
+
+exports[`zod-3 golden: signed tokens issued before the deploy the envelope and the strict parse of a hand-signed payload 1`] = `
+{
+  "exact": {
+    "id": "AST-1",
+    "note": null,
+    "version": 2,
+  },
+  "extraKey": "refused",
+  "fractionalVersion": "refused",
+  "missingNullable": "refused",
+  "persian": {
+    "id": "AST-۱",
+    "note": "یادداشت",
+    "version": 1,
+  },
+  "textVersion": "refused",
+}
+`;

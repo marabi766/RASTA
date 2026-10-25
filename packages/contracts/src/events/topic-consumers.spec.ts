@@ -164,7 +164,7 @@ describe('consumerDeclarationProblem', () => {
         ...fleet,
         groupId: 'organization-service.x',
       }),
-    ).toMatch(/organization-service is not declared/);
+    ).toMatch(/the consumer's service is not declared in TOPIC_CONSUMERS/);
     expect(isDeclaredConsumer('toString')).toBe(false);
   });
 
@@ -197,4 +197,29 @@ describe('consumerDeclarationProblem', () => {
       }),
     ).toMatch(/dead-letters to rasta\.fleet\.v1\.dlq/);
   });
+
+  // #385 r4: the group and an undeclared principal can come from the
+  // environment (KAFKA_CONSUMER_GROUP, SERVICE_NAME); the texts name neither.
+  it.each(['private-sentinel-79', 'JZ97-another-secret'])(
+    'names neither a configured group nor an undeclared principal (%s)',
+    (sentinel) => {
+      const problems = [
+        consumerDeclarationProblem(`${sentinel}-service`, {
+          ...fleet,
+          groupId: `${sentinel}-service.x`,
+        }),
+        consumerDeclarationProblem('fleet-service', { ...fleet, groupId: `${sentinel}.x` }),
+        consumerDeclarationProblem('fleet-service', {
+          ...fleet,
+          groupId: `economic-service.${sentinel}`,
+        }),
+      ];
+      expect(problems).toEqual([
+        "the consumer's service is not declared in TOPIC_CONSUMERS",
+        "the consumer group is outside fleet-service's namespace (fleet-service.…)",
+        "the consumer group is outside fleet-service's namespace (fleet-service.…)",
+      ]);
+      expect(problems.join('\n')).not.toMatch(/sentinel|jz97|another[-_]secret/i);
+    },
+  );
 });

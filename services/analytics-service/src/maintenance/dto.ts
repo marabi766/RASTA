@@ -3,7 +3,7 @@ import { z } from 'zod';
 /**
  * The request and response shapes of the fleet dashboard (ADR-071 § 4, RUN-001 PR 1).
  *
- * The same Zod schemas validate input, type the code and — through `zod-schema.ts` — become
+ * The same Zod schemas validate input, type the code and — through `toJsonSchema` — become
  * the OpenAPI document, so the three cannot disagree. No body anywhere: this service has no
  * route that writes.
  */

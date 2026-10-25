@@ -299,6 +299,18 @@ jobs:
           pnpm run ci:image-matrix
           pnpm run test:image-matrix
 
+      - name: No native URL parse of configuration (#385 r5)
+        # `new URL(value)` keeps the whole value on `.input`, which an uncaught
+        # throw prints — a database URL's password included. Configuration is
+        # parsed by @rasta/config's reader (packages/config/src/url-reader.js,
+        # fixed refusals); any other `new URL`/`URL.parse`/`URL.canParse`/
+        # `url.parse` of a non-literal in scripts/, packages/, services/, apps/
+        # and tests/ fails unless allow-listed with a reason. Also: no CLI flag
+        # takes a credential or URL, and every service base URL setting uses
+        # serviceUrlSchema (no credentials: fetch repeats them in its error).
+        # Static, the scanner's own form tests first.
+        run: pnpm run test:url-parsing-guard
+
       - name: Format check
         run: pnpm run format:check
 
@@ -330,6 +342,23 @@ jobs:
         # its environment, must exit naming the variable and never its value
         # (@rasta/config assertNoMigratorCredentials; Codex review of #176).
         run: pnpm run test:boot-guard
+
+      - name: Outbox B2 refusals, run as the CLIs (ADR-051, #385 r4)
+        # The B2 backfill's and vacuum's option and environment refusals: the
+        # production interlock refuses an unrecognised NODE_ENV with a fixed
+        # text, and an owner credential named for no service is counted, never
+        # named — the library and both CLIs as processes, before any database
+        # is opened. After Build: the CLIs load the built packages.
+        run: pnpm run test:outbox-b2
+
+      - name: Database CLIs never print a configured URL (#385 r5)
+        # The migration verifiers, the seed guard, the libpq helpers and the
+        # runtime-preflight proof, run as they run, with a database URL whose
+        # username and password are sentinels and whose port is not one: each
+        # refuses with its fixed text, and neither sentinel appears in stdout,
+        # stderr or the thrown object. After Build: the seed guard and
+        # runtime-preflight load the built packages.
+        run: pnpm run test:config-disclosure
 
       - name: Service dev scripts load TypeScript as CommonJS, telemetry first
         # `pnpm dev` ran the services through swc-node's ES-module loader,

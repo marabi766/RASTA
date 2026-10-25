@@ -68,6 +68,30 @@ describe('the rest of the configuration', () => {
     expect(() => loadWebServerEnv({ ...REQUIRED, API_GATEWAY_URL: 'gateway:3000' })).toThrow();
   });
 
+  // `fetch` refuses a URL with credentials on every call, repeating it whole
+  // into the log; refused at boot instead, by name only (#385 r5).
+  it.each(['API_GATEWAY_URL', 'OIDC_ISSUER_URL', 'WEB_PUBLIC_ORIGIN'] as const)(
+    'refuses %s with a username or password, naming neither',
+    (key) => {
+      // Built from the two sentinels, not written as one literal URL.
+      const [user, password] = ['private-sentinel-79', 'JZ97-another-secret'];
+      for (const value of [
+        `http://${user}:${password}@gateway:3000`,
+        `http://${user}@gateway:3000`,
+        `http://:${password}@gateway:3000`,
+      ]) {
+        let message = '';
+        try {
+          loadWebServerEnv({ ...REQUIRED, [key]: value });
+        } catch (error) {
+          message = (error as Error).message;
+        }
+        expect(message).toContain(key);
+        expect(message).not.toMatch(/sentinel|jz97|another-secret/i);
+      }
+    },
+  );
+
   it('bounds the session lifetime rather than trusting the number', () => {
     expect(() => loadWebServerEnv({ ...REQUIRED, WEB_SESSION_MAX_AGE_SECONDS: '10' })).toThrow();
     expect(() =>
