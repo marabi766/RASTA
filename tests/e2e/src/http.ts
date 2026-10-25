@@ -230,7 +230,7 @@ export async function send(
     throw new TransportError(request, undefined, causeCodeOf(error));
   }
   if (response === DEADLINE_PASSED) throw new TransportError(request, undefined, 'TIMEOUT');
-  if (internal && response.status >= 300 && response.status < 400) {
+  if (internal && [301, 302, 303, 307, 308].includes(response.status)) {
     void response.body?.cancel().catch(() => undefined);
     throw new TransportError(request, response.status, 'REDIRECT');
   }

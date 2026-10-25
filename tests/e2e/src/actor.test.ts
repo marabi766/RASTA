@@ -355,3 +355,19 @@ describe('internal-token redirect rejection', () => {
         });
       }
 });
+
+describe('internal-token non-redirect statuses', () => {
+  for (const status of [300, 304, 305, 399]) {
+    it(`preserves ${status} in the hand-guarded transport`, async () => {
+      const transport: Fetch = async (_url, init) => {
+        assert.equal(init?.redirect, 'manual');
+        return new Response(null, { status, headers: { etag: '"unchanged"' } });
+      };
+      const answer = await actor(transport).call('GET', '/v1/internal/x', {
+        internalToken: INTERNAL_TOKEN,
+      });
+      assert.equal(answer.status, status);
+      assert.equal(answer.headers.etag, '"unchanged"');
+    });
+  }
+});
