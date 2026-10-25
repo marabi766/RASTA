@@ -60,7 +60,10 @@ const total = (groups, key) => groups.reduce((sum, g) => sum + g[key], 0);
 
 function tally(groups, key) {
   const counts = new Map();
-  for (const g of groups) counts.set(g[key], (counts.get(g[key]) ?? 0) + g.sessions);
+  for (const g of groups) {
+    const sessions = g.sessions - g.monitor;
+    if (sessions > 0) counts.set(g[key], (counts.get(g[key]) ?? 0) + sessions);
+  }
   return counts;
 }
 

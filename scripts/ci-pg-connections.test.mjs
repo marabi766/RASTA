@@ -204,6 +204,14 @@ for (const [id, firstTest] of Object.entries(PARALLEL_JOBS)) {
       report.env.PG_CONNECTIONS_SAMPLES,
       step('Watch PostgreSQL connections').env.PG_CONNECTIONS_SAMPLES,
     );
+    // psql defaults the database to the user's name; `rasta` has none on the service PostgreSQL.
+    for (const name of [
+      'PostgreSQL connection ceiling',
+      'Watch PostgreSQL connections',
+      'PostgreSQL connection peak',
+    ]) {
+      assert.equal(step(name).env.PGDATABASE, 'postgres', name);
+    }
     // The suites themselves keep their pools: nothing here sets a pool parameter.
     assert.doesNotMatch(JSON.stringify(job), /connection_limit|DATABASE_POOL_SIZE/);
   });

@@ -1596,6 +1596,7 @@ jobs:
           PGPORT: '5432'
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
 
       - name: Watch PostgreSQL connections
@@ -1611,6 +1612,7 @@ jobs:
           PGPORT: '5432'
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
 
       - name: Integration tests
@@ -1701,6 +1703,7 @@ jobs:
           PGPORT: '5432'
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
 
       - name: Analytics database privilege integration tests
@@ -2075,6 +2078,7 @@ jobs:
           PGPORT: '5432'
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
 
       - name: Watch PostgreSQL connections
@@ -2090,6 +2094,7 @@ jobs:
           PGPORT: '5432'
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
 
       - name: Test independence (F-25)
@@ -2254,6 +2259,7 @@ jobs:
           PGPORT: '5432'
           PGUSER: rasta
           PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
 
   integration-coverage-critical:
