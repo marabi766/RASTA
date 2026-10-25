@@ -105,6 +105,15 @@ model Membership {
   /// status and the validity window against the clock, never from this.
   lapseHandledAt DateTime? @map("lapse_handled_at")
 
+  /// The expiry sweep's durable retry state for a lapse it could not act on
+  /// (D-069, #402 r1 F2): how many attempts failed, and not to be tried again
+  /// before `lapseRetryAt` (capped backoff). Kept in the row, so a restart or
+  /// another replica does not try a failing lapse sooner, and a failing prefix
+  /// never hides the lapses behind it. Written with raw SQL: neither `version`
+  /// nor `updatedAt` moves.
+  lapseFailures Int       @default(0) @map("lapse_failures")
+  lapseRetryAt  DateTime? @map("lapse_retry_at")
+
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
   createdBy String    @map("created_by")
@@ -462,4 +471,40 @@ model AuditCorrectionCommand {
 
   @@id([actorId, idempotencyKey])
   @@map("audit_correction_command")
+}
+
+/// One Keycloak write attempt of a user that may still land (D-069, ADR-060
+/// write-ahead addendum): the durable in-flight fence. Inserted and committed,
+/// on its own connection pool, **before** the PUT is sent; deleted only when
+/// its outcome is confirmed and Keycloak holds the committed state, or by a
+/// confirmed re-assertion after `takeoverAt`. A narrowing change of the user
+/// is refused while one is live (`takeoverAt` in the future).
+///
+/// No relation to `User`, on purpose: a foreign key would take a KEY SHARE
+/// lock on the user row the business transaction holds FOR UPDATE, and the
+/// fence insert would wait on the very transaction it serves.
+model KeycloakWriteAttempt {
+  attemptId   String   @id @map("attempt_id")
+  userId      String   @map("user_id")
+  /// The account the PUT addressed.
+  keycloakId  String   @map("keycloak_id")
+  /// `replace_attributes` | `activate` | `disable`.
+  operation   String
+  /// The database's clock when the fence committed.
+  startedAt   DateTime @map("started_at")
+  /// `startedAt` + the Keycloak request timeout: the sender aborts by then.
+  deadlineAt  DateTime @map("deadline_at")
+  /// `deadlineAt` + KEYCLOAK_WRITE_SETTLE_SECONDS: no longer live; the sweep may take it over.
+  takeoverAt  DateTime @map("takeover_at")
+  /// Re-assertions that failed, and not to be tried again before `nextReassertAt`.
+  reassertFailures Int      @default(0) @map("reassert_failures")
+  nextReassertAt   DateTime @map("next_reassert_at")
+  /// Terminal: Keycloak answered 404 for the account on re-assertion. Not retried; alerted on.
+  accountMissingAt DateTime? @map("account_missing_at")
+
+  // SQL-only (migration 20261024120000): the CHECKs on `operation` and on the
+  // window's order, and the partial index the re-assertion sweep walks,
+  // (user_id, next_reassert_at) WHERE account_missing_at IS NULL.
+  @@index([userId])
+  @@map("keycloak_write_attempt")
 }
