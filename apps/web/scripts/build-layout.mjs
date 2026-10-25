@@ -1,88 +1,92 @@
-// What `next build` will really do, read with Next's own config loader instead of
-// guessed from the tokens of `next.config.mjs` (an imported settings module, a spread,
-// a computed key or an environment variable can all move the build output).
+// What the web build REALLY did, as recorded by the build itself.
 //
 // The check after the build reads `.next/server/server-reference-manifest.json`. That is
-// the manifest of THIS build only while the effective configuration says the build
-// writes to `.next`, from a clean `.next`, with the default tsconfig; anything else is
-// refused rather than followed.
+// the manifest of THIS build only if the build wrote to `.next`, emptied it first, and
+// used the default tsconfig. Nothing here evaluates `next.config.mjs`: re-evaluating it
+// from another process cannot reproduce the environment the build ran in (Next's CLI sets
+// NEXT_RUNTIME, NODE_ENV and more before it loads the config), so the answer is taken from
+// the build process itself. `capture-next-config.cjs` is preloaded into `next build` and
+// records the settings of the configuration Next's own loader returned to the build
+// (`next/dist/server/config.js`, phase-production-build); `readCapture` reads that record.
 //
-// Loader and environment, both from the installed Next (15.5.28):
-//   next/dist/server/config.js: `loadConfig(phase, dir, { silent = true })` (default export)
-//     reads next.config.mjs, applies defaults and the user's function form, and returns
-//     the effective config. `silent` makes its warning logger a no-op (`curLog`).
-//   next/dist/bin/next: `process.env.NODE_ENV = process.env.NODE_ENV || defaultEnv`
-//     (`production` for every command but `dev`), set before the command runs.
-//   next/dist/build/index.js: `loadEnvConfig(dir, false, ...)` is what `next build` does for
-//     .env files; `loadConfig` calls it too (config.js, `loadEnvConfig(dir, phase === PHASE_DEVELOPMENT_SERVER)`).
-//   next/dist/build/index.js:527: `if (config.cleanDistDir ...) recursiveDelete(distDir, /^cache/)`:
-//     the build empties distDir first, which is why a receipt written by the build cannot
-//     survive a build that fails.
-//
-// Nothing here prints a config value, and an exception's message is never shown (Next
-// quotes config text in errors): a diagnostic is a fixed sentence plus the key name.
-import { createRequire } from 'node:module';
-import { join } from 'node:path';
-
-const CONSOLE_METHODS = ['log', 'info', 'warn', 'error', 'debug', 'trace'];
+// A diagnostic is a fixed sentence plus a key name; no config value is ever shown.
+import { readFileSync, realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 /**
- * @param {string} projectDir  the web project (where next.config.mjs is)
- * @param {{ nextFrom?: string, env?: Record<string, string | undefined> }} [options]
- *   `nextFrom`: where to resolve `next` from (default: the project itself).
- * @returns {Promise<{ loaded: true, distDir: unknown, tsconfigPath: unknown, cleanDistDir: unknown } | { loaded: false }>}
+ * @param {string} capturePath  file the preload appended to
+ * @returns {{ captured: false } | { captured: true, outputDir: string, distDir: unknown, tsconfigPath: unknown, cleanDistDir: unknown, consistent: boolean }}
  */
-export async function effectiveBuildLayout(projectDir, options = {}) {
-  const nextFrom = options.nextFrom ?? projectDir;
-  const saved = {};
-  for (const method of CONSOLE_METHODS) {
-    saved[method] = console[method];
-    console[method] = () => {};
-  }
-  const touched = options.env ? Object.keys(options.env) : [];
-  const before = Object.fromEntries(touched.map((key) => [key, process.env[key]]));
+export function readCapture(capturePath) {
+  let lines;
   try {
-    for (const key of touched) {
-      if (options.env[key] === undefined) delete process.env[key];
-      else process.env[key] = options.env[key];
-    }
-    // The same default `next build` runs under (bin/next).
-    process.env.NODE_ENV = process.env.NODE_ENV || 'production';
-    const require = createRequire(join(nextFrom, 'package.json'));
-    const loadConfig = require('next/dist/server/config.js').default;
-    const { PHASE_PRODUCTION_BUILD } = require('next/dist/shared/lib/constants.js');
-    const config = await loadConfig(PHASE_PRODUCTION_BUILD, projectDir, { silent: true });
-    return {
-      loaded: true,
-      distDir: config.distDir,
-      tsconfigPath: config.typescript?.tsconfigPath,
-      cleanDistDir: config.cleanDistDir,
-    };
+    lines = readFileSync(capturePath, 'utf8').split('\n').filter(Boolean);
   } catch {
-    return { loaded: false };
-  } finally {
-    for (const method of CONSOLE_METHODS) console[method] = saved[method];
-    for (const key of touched) {
-      if (before[key] === undefined) delete process.env[key];
-      else process.env[key] = before[key];
+    return { captured: false };
+  }
+  const records = [];
+  for (const line of lines) {
+    try {
+      const record = JSON.parse(line);
+      if (record === null || typeof record !== 'object') return { captured: false };
+      records.push(record);
+    } catch {
+      return { captured: false };
     }
   }
+  if (records.length === 0) return { captured: false };
+  const [first] = records;
+  const same = (a, b) =>
+    a.outputDir === b.outputDir &&
+    a.distDir === b.distDir &&
+    a.tsconfigPath === b.tsconfigPath &&
+    a.cleanDistDir === b.cleanDistDir;
+  return {
+    captured: true,
+    outputDir: first.outputDir,
+    distDir: first.distDir,
+    tsconfigPath: first.tsconfigPath,
+    cleanDistDir: first.cleanDistDir,
+    // Next's build workers load the configuration too; a disagreement means the build was
+    // not one consistent run of one configuration.
+    consistent: records.every((record) => same(record, first)),
+  };
 }
 
 /** Fixed sentences naming the offending key; empty when the layout is the supported one. */
 export function layoutProblems(layout) {
-  if (!layout.loaded) {
-    return ['next config: could not be loaded (details withheld); refusing'];
+  if (layout === null || typeof layout !== 'object' || layout.captured === false) {
+    return ['next config: the build did not report the configuration it used; refusing'];
   }
   const problems = [];
+  if (layout.consistent === false) {
+    problems.push('next config: the build processes disagree on the configuration; refusing');
+  }
   if (layout.distDir !== '.next') {
-    problems.push('distDir: effective value is not ".next"; only the default output is checked');
+    problems.push(
+      'distDir: the build did not write to ".next"; only the default output is checked',
+    );
   }
   if (layout.tsconfigPath !== undefined && layout.tsconfigPath !== 'tsconfig.json') {
-    problems.push('typescript.tsconfigPath: effective value is not the default; refusing');
+    problems.push('typescript.tsconfigPath: the build used another tsconfig; refusing');
   }
   if (layout.cleanDistDir !== true) {
-    problems.push('cleanDistDir: effective value is not true; the build would keep old artifacts');
+    problems.push('cleanDistDir: the build kept old artifacts; refusing');
   }
   return problems;
+}
+
+/** The directory Next reported writing to must be the one the checker reads. */
+export function outputDirProblems(layout, expectedDir) {
+  if (layout.captured !== true || layoutProblems(layout).length > 0) return [];
+  const real = (path) => {
+    try {
+      return realpathSync(resolve(path));
+    } catch {
+      return null;
+    }
+  };
+  return real(layout.outputDir) !== null && real(layout.outputDir) === real(expectedDir)
+    ? []
+    : ['distDir: the build did not write into this package\'s ".next"; refusing'];
 }

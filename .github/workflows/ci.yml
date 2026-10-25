@@ -691,11 +691,12 @@ jobs:
         # The compiler is the authority on which modules define server actions: the
         # build above wrote every one it compiled to
         # apps/web/.next/server/server-reference-manifest.json, and `pnpm build` wrote
-        # a receipt (build id + manifest SHA-256) after `next build` exited 0. This fails
-        # when one is not covered by the refusal cases of write-session-refusal.spec.ts,
-        # when the receipt, BUILD_ID or manifest is missing or from different builds,
-        # when Next's effective config does not build into `.next`, or on a Node that
-        # cannot run the check. apps/web's turbo build is never cached.
+        # a receipt (build id, manifest SHA-256 and the layout the build itself reported)
+        # after `next build` exited 0, having deleted every earlier receipt and `.next` first.
+        # This fails when one is not covered by the refusal cases of
+        # write-session-refusal.spec.ts, when the receipt, BUILD_ID or manifest is missing
+        # or from different builds, when the build did not report the default `.next`
+        # layout, or on a Node that cannot run the check. apps/web's turbo build is never cached.
         # Scope: refusal coverage of server actions only.
         run: pnpm --filter @rasta/web run check:server-actions
 

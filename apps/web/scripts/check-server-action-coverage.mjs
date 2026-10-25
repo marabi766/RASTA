@@ -3,9 +3,9 @@
 // The compiler is the authority: `next build` writes every server action it compiled to
 // `.next/server/server-reference-manifest.json`. This script fails (exit 1) when that
 // manifest names a (module, export) that `src/write-session-refusal.spec.ts` does not
-// cover, and when the manifest cannot be trusted: Node too old to run this, Next's
-// effective config not building into `.next`, no receipt of a successful build (or one
-// that does not match BUILD_ID and the manifest), the manifest missing, unparseable,
+// cover, and when the manifest cannot be trusted: Node too old to run this, no receipt of
+// a successful build (or one that does not match BUILD_ID and the manifest, or whose
+// recorded layout is not the default `.next` one), the manifest missing, unparseable,
 // empty, an entry of an unknown shape, an export name that is not a plain identifier, a
 // file that is gone or outside the repository.
 //
@@ -17,7 +17,6 @@
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { effectiveBuildLayout, layoutProblems } from './build-layout.mjs';
 import { receiptProblems } from './build-receipt.mjs';
 import { nodeRefusal } from './node-guard.mjs';
 
@@ -45,10 +44,8 @@ try {
     ]);
   const { MANIFEST_PATH, compiledActions, nextProjectDir, uncovered } = manifestModule;
 
-  const binding = [
-    ...layoutProblems(await effectiveBuildLayout(webDir)),
-    ...receiptProblems(webDir),
-  ];
+  // The layout is the one the build recorded in its receipt; the Next config is not evaluated here.
+  const binding = receiptProblems(webDir);
   if (binding.length > 0) fail(binding);
 
   const { actions, problems } = compiledActions(
@@ -71,7 +68,8 @@ try {
   console.log(
     `server-action coverage: ok, ${pairs.size} compiled actions in ${modules.size} modules, all covered`,
   );
-} catch (error) {
-  // An unexpected failure is a failure; only its message (never the manifest) is shown.
-  fail([`unexpected: ${error instanceof Error ? error.message : 'unknown error'}`]);
+} catch {
+  // An unexpected failure is a failure. Its message is not shown: it can quote a file's
+  // content (the manifest holds `encryptionKey`).
+  fail(['unexpected failure while checking (details withheld); nothing was verified']);
 }

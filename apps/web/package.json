@@ -5,7 +5,7 @@
   "description": "Rasta user portal — a Persian-first, right-to-left Next.js application that talks only to the API Gateway.",
   "scripts": {
     "dev": "next dev --port 3200",
-    "build": "next build && node scripts/write-build-receipt.mjs",
+    "build": "node scripts/run-web-build.mjs",
     "start": "next start --port 3200",
     "lint": "eslint src scripts",
     "check:server-actions": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-server-action-coverage.mjs",

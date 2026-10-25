@@ -1,17 +1,19 @@
 // A receipt the web build writes for ITSELF, so the check after the build reads the
 // manifest of a build that succeeded, not whatever `.next` happens to hold.
 //
-// `pnpm build` is `next build && node scripts/write-build-receipt.mjs`: the receipt exists
-// only after `next build` exited 0. The build empties `.next` first (`cleanDistDir`, see
-// build-layout.mjs), so a build that fails leaves no receipt, and a manifest or BUILD_ID
-// from an earlier build cannot be paired with a newer receipt: the receipt names the build
-// id and the SHA-256 of the manifest bytes it was written next to.
+// `pnpm build` is `node scripts/run-web-build.mjs` (build-run.mjs): it deletes the previous
+// receipt and the default output, runs `next build`, and only after `next build` exited 0
+// writes the receipt in the same invocation. The receipt names the build id, the SHA-256 of
+// the manifest bytes it was written next to, and the layout the build itself reported (see
+// build-layout.mjs), so the checker never has to evaluate the Next configuration.
 //
 // This guards against stale and mismatched artifacts. It is not a defence against someone
-// who forges the three files on purpose.
+// who forges the three files on purpose, and it does not cover a `next build` run by hand.
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+import { layoutProblems } from './build-layout.mjs';
 
 export const MANIFEST_FILE = '.next/server/server-reference-manifest.json';
 export const BUILD_ID_FILE = '.next/BUILD_ID';
@@ -25,8 +27,11 @@ function readFile(webDir, relative) {
   return readFileSync(full);
 }
 
-/** Receipt text for the build output in `webDir`, or the reasons there is none. */
-export function receiptFor(webDir) {
+/**
+ * Receipt text for the build output in `webDir`, or the reasons there is none.
+ * @param {{ distDir: unknown, tsconfigPath: unknown, cleanDistDir: unknown }} layout  what the build reported
+ */
+export function receiptFor(webDir, layout) {
   const buildId = readFile(webDir, BUILD_ID_FILE);
   const manifest = readFile(webDir, MANIFEST_FILE);
   const problems = [];
@@ -38,16 +43,21 @@ export function receiptFor(webDir) {
   return {
     problems,
     text: `${JSON.stringify({
-      version: 1,
+      version: 2,
       buildId: buildId.toString('utf8').trim(),
       manifestSha256: sha256(manifest),
+      layout: {
+        distDir: layout.distDir,
+        tsconfigPath: layout.tsconfigPath,
+        cleanDistDir: layout.cleanDistDir,
+      },
     })}\n`,
   };
 }
 
 /** Written by the build step after `next build` exits 0. */
-export function writeReceipt(webDir) {
-  const made = receiptFor(webDir);
+export function writeReceipt(webDir, layout) {
+  const made = receiptFor(webDir, layout);
   if (made.problems.length === 0) writeFileSync(join(webDir, RECEIPT_FILE), made.text);
   return made.problems;
 }
@@ -66,19 +76,22 @@ export function receiptProblems(webDir) {
   } catch {
     return [`${RECEIPT_FILE}: not valid JSON`];
   }
-  const current = receiptFor(webDir);
-  if (current.problems.length > 0) return current.problems;
   if (
     receipt === null ||
     typeof receipt !== 'object' ||
-    receipt.version !== 1 ||
+    receipt.version !== 2 ||
     typeof receipt.buildId !== 'string' ||
-    typeof receipt.manifestSha256 !== 'string'
+    typeof receipt.manifestSha256 !== 'string' ||
+    receipt.layout === null ||
+    typeof receipt.layout !== 'object'
   ) {
     return [`${RECEIPT_FILE}: unknown shape`];
   }
+  const current = receiptFor(webDir, receipt.layout);
+  if (current.problems.length > 0) return current.problems;
   const now = JSON.parse(current.text);
-  const problems = [];
+  // The layout is the one the build recorded, not one derived here.
+  const problems = layoutProblems({ captured: true, consistent: true, ...receipt.layout });
   if (receipt.buildId !== now.buildId) {
     problems.push(`${RECEIPT_FILE}: written by another build than ${BUILD_ID_FILE}`);
   }

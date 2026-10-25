@@ -1,8 +1,17 @@
 /**
  * @jest-environment node
  */
-import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,8 +19,8 @@ import { pathToFileURL } from 'node:url';
 import { MANIFEST_PATH } from './test/server-action-manifest';
 
 /**
- * The binding between the coverage check and the build it reads: Node guard, Next's
- * effective configuration, and the receipt the build writes for itself. The modules under
+ * The binding between the coverage check and the build it reads: Node guard, the layout the
+ * build itself reports, and the receipt the build writes for itself. The modules under
  * `scripts/` are plain ESM that Jest does not transform, so each case runs them in a
  * child Node and reads one JSON line back.
  */
@@ -38,10 +47,27 @@ describe('the build and check scripts', () => {
   const pkg = JSON.parse(readFileSync(join(WEB, 'package.json'), 'utf8')) as {
     scripts: Record<string, string>;
   };
-  it('writes the receipt right after `next build`, and nothing else is the build', () => {
-    // Exactly this: a flag such as --turbopack or --experimental-build-mode generate
-    // (which reuses an old BUILD_ID) or a dropped receipt step would break the binding.
-    expect(pkg.scripts.build).toBe('next build && node scripts/write-build-receipt.mjs');
+  it('builds only through the wrapper that invalidates, captures and writes the receipt', () => {
+    // Exactly this: a bare `next build`, a flag such as --turbopack or
+    // --experimental-build-mode generate (which reuses an old BUILD_ID) or a dropped
+    // receipt step would break the binding.
+    expect(pkg.scripts.build).toBe('node scripts/run-web-build.mjs');
+  });
+  it('never evaluates the Next configuration itself (r2 F1/F2: no second evaluation to disagree or print)', () => {
+    for (const file of readdirSync(SCRIPTS)) {
+      const source = readFileSync(join(SCRIPTS, file), 'utf8');
+      expect([
+        file,
+        /loadConfig|next\.config|server\/config/.test(source.replace(/\/\/.*$/gm, '')),
+      ]).toEqual(
+        // the preload is the one place that names Next's loader: it watches, it does not call it
+        [file, file === 'capture-next-config.cjs'],
+      );
+    }
+  });
+  it('shows no exception message in the checker', () => {
+    const source = readFileSync(join(SCRIPTS, 'check-server-action-coverage.mjs'), 'utf8');
+    expect(source).not.toMatch(/error\.message|\.message\b/);
   });
   it('lints the scripts directory too', () => {
     expect(pkg.scripts.lint).toBe('eslint src scripts');
@@ -125,9 +151,10 @@ describe('the receipt (r5 F2)', () => {
     );
     return { problems: out as string[], out };
   };
-  const write = (): string[] =>
+  const LAYOUT = { distDir: '.next', tsconfigPath: 'tsconfig.json', cleanDistDir: true };
+  const write = (layout: object = LAYOUT): string[] =>
     runModule(
-      `import { writeReceipt } from ${JSON.stringify(url('build-receipt.mjs'))};\nconsole.log(JSON.stringify(writeReceipt(${JSON.stringify(web)})));`,
+      `import { writeReceipt } from ${JSON.stringify(url('build-receipt.mjs'))};\nconsole.log(JSON.stringify(writeReceipt(${JSON.stringify(web)}, ${JSON.stringify(layout)})));`,
     ).out as string[];
   const finishedBuild = (id = ID, manifest = MANIFEST): void => {
     put('.next/BUILD_ID', id);
@@ -183,6 +210,12 @@ describe('the receipt (r5 F2)', () => {
     expect(receipt().problems).toEqual([expect.stringContaining('not valid JSON')]);
     put('.next/server-action-build-receipt.json', '{"version":2}');
     expect(receipt().problems).toEqual([expect.stringContaining('unknown shape')]);
+    put(
+      '.next/server-action-build-receipt.json',
+      '{"version":1,"buildId":"x","manifestSha256":"y"}',
+    );
+    expect(receipt().problems).toEqual([expect.stringContaining('unknown shape')]);
+    finishedBuild();
     rmSync(join(web, '.next/server/server-reference-manifest.json'));
     expect(receipt().problems).toEqual([
       expect.stringContaining('server-reference-manifest.json: missing'),
@@ -195,136 +228,292 @@ describe('the receipt (r5 F2)', () => {
   });
 });
 
-describe("Next's effective configuration (r5 F2)", () => {
-  let root: string;
-  beforeAll(() => {
-    root = mkdtempSync(join(tmpdir(), 'layout-'));
+describe('the layout the receipt records (r2 F1)', () => {
+  let web: string;
+  const put = (relative: string, text: string): void => {
+    mkdirSync(join(web, relative, '..'), { recursive: true });
+    writeFileSync(join(web, relative), text);
+  };
+  const recorded = (layout: object): string[] => {
+    put('.next/BUILD_ID', 'id');
+    put('.next/server/server-reference-manifest.json', '{}');
+    runModule(
+      `import { writeReceipt } from ${JSON.stringify(url('build-receipt.mjs'))};\nwriteReceipt(${JSON.stringify(web)}, ${JSON.stringify(layout)});\nconsole.log('null');`,
+    );
+    return (
+      runModule(
+        `import { receiptProblems } from ${JSON.stringify(url('build-receipt.mjs'))};\nconsole.log(JSON.stringify(receiptProblems(${JSON.stringify(web)})));`,
+      ).out as string[]
+    ).map((line) => line.split(':')[0]);
+  };
+  beforeEach(() => {
+    web = mkdtempSync(join(tmpdir(), 'recorded-'));
   });
-  afterAll(() => rmSync(root, { recursive: true, force: true }));
+  afterEach(() => rmSync(web, { recursive: true, force: true }));
 
-  interface Case {
+  it.each([
+    [
+      'the default layout',
+      { distDir: '.next', tsconfigPath: 'tsconfig.json', cleanDistDir: true },
+      [],
+    ],
+    ['no tsconfigPath set', { distDir: '.next', cleanDistDir: true }, []],
+    ['another distDir', { distDir: '.next-alt', cleanDistDir: true }, ['distDir']],
+    ['a dot-slash distDir', { distDir: './.next', cleanDistDir: true }, ['distDir']],
+    [
+      'another tsconfig',
+      { distDir: '.next', tsconfigPath: 'tsconfig.build.json', cleanDistDir: true },
+      ['typescript.tsconfigPath'],
+    ],
+    ['old output kept', { distDir: '.next', cleanDistDir: false }, ['cleanDistDir']],
+    ['no distDir recorded', { cleanDistDir: true }, ['distDir']],
+  ])('%s', (_name, layout, keys) => {
+    expect(recorded(layout)).toEqual(keys);
+  });
+});
+
+describe('reading what the build reported (r2 F1)', () => {
+  const LINE = {
+    outputDir: '/w/.next',
+    distDir: '.next',
+    tsconfigPath: 'tsconfig.json',
+    cleanDistDir: true,
+  };
+  const keysFor = (text: string | null): string[] => {
+    const dir = mkdtempSync(join(tmpdir(), 'capture-'));
+    const file = join(dir, 'c.jsonl');
+    if (text !== null) writeFileSync(file, text);
+    try {
+      const { out } = runModule(
+        `import { readCapture, layoutProblems } from ${JSON.stringify(url('build-layout.mjs'))};\nconsole.log(JSON.stringify(layoutProblems(readCapture(${JSON.stringify(file)}))));`,
+      );
+      return (out as string[]).map((line) => line.split(':')[0]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const lines = (...records: object[]): string =>
+    records.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  it.each([
+    ['one record of the default layout', lines(LINE), []],
+    ['the same record from a worker too', lines(LINE, LINE), []],
+    ['no capture file (the build did not report)', null, ['next config']],
+    ['an empty capture', '', ['next config']],
+    ['a torn line', '{"distDir"', ['next config']],
+    [
+      'a worker that saw another distDir',
+      lines(LINE, { ...LINE, distDir: '.next-alt', outputDir: '/w/.next-alt' }),
+      ['next config'],
+    ],
+    [
+      'a worker that saw another tsconfig',
+      lines(LINE, { ...LINE, tsconfigPath: 'x.json' }),
+      ['next config'],
+    ],
+    [
+      'a worker that kept old output',
+      lines(LINE, { ...LINE, cleanDistDir: false }),
+      ['next config'],
+    ],
+  ])('%s', (_name, text, keys) => {
+    expect(keysFor(text)).toEqual(keys);
+  });
+});
+
+describe('where the build wrote (r2 F1)', () => {
+  it('accepts the package`s own .next and refuses any other directory it reported', () => {
+    const web = mkdtempSync(join(tmpdir(), 'where-'));
+    try {
+      mkdirSync(join(web, '.next'));
+      mkdirSync(join(web, 'other'));
+      const ask = (outputDir: string): string[] =>
+        runModule(
+          `import { outputDirProblems } from ${JSON.stringify(url('build-layout.mjs'))};\nconsole.log(JSON.stringify(outputDirProblems({ captured: true, consistent: true, distDir: '.next', cleanDistDir: true, outputDir: ${JSON.stringify(outputDir)} }, ${JSON.stringify(join(web, '.next'))})));`,
+        ).out as string[];
+      expect(ask(join(web, '.next'))).toEqual([]);
+      expect(ask(join(web, 'other'))).toEqual([expect.stringContaining('distDir:')]);
+      expect(ask(join(web, 'missing'))).toEqual([expect.stringContaining('distDir:')]);
+    } finally {
+      rmSync(web, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: real `next build`)', () => {
+  /**
+   * Each case is a real `next build` of a one-page app, run through the wrapper that
+   * `pnpm build` is. The keyed configs are the reviewer's: Next's CLI sets
+   * NEXT_RUNTIME='nodejs' before it loads the config, a second evaluation does not.
+   */
+  const KEYED = "process.env.NEXT_RUNTIME === 'nodejs'";
+  const CHANNELS = [
+    `console.log('${SECRET}')`,
+    `console.dir({ secret: '${SECRET}' })`,
+    `console.dirxml('${SECRET}')`,
+    `console.countReset('${SECRET}')`,
+    `process.stdout.write('${SECRET}\\n')`,
+    `process.stderr.write('${SECRET}\\n')`,
+    `process.emitWarning('${SECRET}')`,
+    `setTimeout(() => console.log('${SECRET}'), 50)`,
+    `process.on('exit', () => process.stderr.write('${SECRET}\\n'))`,
+  ].join(';\n');
+  interface Fixture {
     name: string;
     config: string;
-    settings?: string;
-    env?: Record<string, string | undefined>;
-    /** Key names the refusal must name (empty: the layout is supported). */
-    refuses: string[];
+    /** Planted before the build: an earlier build's complete, self-consistent artifacts. */
+    stale: boolean;
+    page?: string;
   }
-  const CASES: Case[] = [
-    { name: 'the real web config', config: 'REAL', refuses: [] },
-    { name: 'the defaults', config: 'export default {};', refuses: [] },
+  const FIXTURES: Fixture[] = [
+    { name: 'control', config: 'export default {};', stale: true },
     {
-      name: 'a literal distDir',
-      config: "export default { distDir: '.next-alt' };",
-      refuses: ['distDir'],
+      name: 'distDir',
+      config: `const c = {};\nc['dist' + 'Dir'] = ${KEYED} ? '.next-alt' : '.next';\nexport default c;`,
+      stale: true,
     },
     {
-      name: 'a computed key (the reviewer’s sequence)',
-      config:
-        "const nextConfig = {};\nnextConfig['dist' + 'Dir'] = '.next-alt';\nexport default nextConfig;",
-      refuses: ['distDir'],
+      name: 'tsconfigPath',
+      config: `export default { typescript: { tsconfigPath: ${KEYED} ? 'tsconfig.build.json' : 'tsconfig.json' } };`,
+      stale: true,
     },
     {
-      name: 'an imported settings module',
-      config: "import settings from './settings.mjs';\nexport default { ...settings.next };",
-      settings: "export default { next: { distDir: 'out' } };",
-      refuses: ['distDir'],
+      name: 'cleanDistDir',
+      config: `export default { cleanDistDir: !(${KEYED}) };`,
+      stale: true,
     },
     {
-      name: 'a spread',
-      config:
-        "const base = { distDir: 'out' };\nexport default { reactStrictMode: true, ...base };",
-      refuses: ['distDir'],
+      name: 'channels',
+      config: `${CHANNELS};\nexport default { generateBuildId: async () => 'fixed' };`,
+      stale: true,
     },
     {
-      name: 'a function-form config',
-      config:
-        "export default (phase) => (phase === 'phase-production-build' ? { distDir: 'out' } : {});",
-      refuses: ['distDir'],
-    },
-    {
-      name: 'an environment-dependent config under the build’s NODE_ENV',
-      config:
-        "export default { distDir: process.env.NODE_ENV === 'production' ? '.next-prod' : '.next' };",
-      refuses: ['distDir'],
-    },
-    {
-      name: 'an environment variable',
-      config: "export default { distDir: process.env.ALT_DIST_DIR || '.next' };",
-      env: { ALT_DIST_DIR: 'elsewhere' },
-      refuses: ['distDir'],
-    },
-    {
-      name: 'the same variable unset',
-      config: "export default { distDir: process.env.ALT_DIST_DIR || '.next' };",
-      refuses: [],
-    },
-    {
-      name: 'a dot-slash spelling',
-      config: "export default { distDir: './.next' };",
-      refuses: ['distDir'],
-    },
-    {
-      name: 'another tsconfig',
-      config: "export default { typescript: { tsconfigPath: 'tsconfig.build.json' } };",
-      refuses: ['typescript.tsconfigPath'],
-    },
-    {
-      name: 'the default tsconfig, spelled out',
-      config: "export default { typescript: { tsconfigPath: 'tsconfig.json' } };",
-      refuses: [],
-    },
-    {
-      name: 'a build that keeps old output',
-      config: 'export default { cleanDistDir: false };',
-      refuses: ['cleanDistDir'],
-    },
-    {
-      name: 'a config that throws a message with a value',
-      config: `throw new Error('${SECRET}');`,
-      refuses: ['next config'],
-    },
-    {
-      name: 'a config that prints a value and warns about an unknown key',
-      config: `console.log('${SECRET}');\nconsole.error('${SECRET}');\nexport default { unknownKey: '${SECRET}', experimental: { unknownFlag: '${SECRET}' } };`,
-      refuses: [],
+      name: 'failing',
+      config: 'export default {};',
+      stale: true,
+      page: "import x from './does-not-exist';\nexport default function P(){return <p>{x}</p>}",
     },
   ];
+  interface Result {
+    status: number;
+    problems: string[];
+    printed: string;
+  }
+  const dirs: Record<string, string> = {};
+  const results: Record<string, Result> = {};
+  let root: string;
+  const DRIVER = (dir: string): string => `
+    import { runWebBuild } from ${JSON.stringify(url('build-run.mjs'))};
+    const result = runWebBuild(${JSON.stringify(dir)}, { nextFrom: ${JSON.stringify(WEB)}, stdio: 'ignore' });
+    process.stdout.write(JSON.stringify(result) + '\\n');
+  `;
+  const runDriver = (dir: string): Promise<Result> =>
+    new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', DRIVER(dir)], {
+        cwd: tmpdir(),
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => (stdout += chunk));
+      child.stderr.on('data', (chunk) => (stderr += chunk));
+      child.on('error', reject);
+      child.on('close', () => {
+        const parsed = JSON.parse(stdout.trim().split('\n').pop() as string) as Omit<
+          Result,
+          'printed'
+        >;
+        resolve({ ...parsed, printed: stdout + stderr });
+      });
+    });
 
-  it('is read with the loader Next’s build uses, in the build’s environment, and says only a fixed sentence and a key', () => {
-    const real = readFileSync(join(WEB, 'next.config.mjs'), 'utf8');
-    const prepared = CASES.map((c, index) => {
-      const dir = join(root, `case-${index}`);
-      mkdirSync(dir);
+  beforeAll(async () => {
+    root = mkdtempSync(join(tmpdir(), 'wrapper-'));
+    for (const fixture of FIXTURES) {
+      const dir = join(root, fixture.name);
+      dirs[fixture.name] = dir;
+      mkdirSync(join(dir, 'app'), { recursive: true });
       writeFileSync(join(dir, 'package.json'), '{"name":"fixture","version":"0.0.0"}');
-      writeFileSync(join(dir, 'next.config.mjs'), c.config === 'REAL' ? real : c.config);
-      if (c.config === 'REAL') {
-        writeFileSync(
-          join(dir, 'upload-limit.cjs'),
-          readFileSync(join(WEB, 'upload-limit.cjs'), 'utf8'),
+      symlinkSync(join(WEB, 'node_modules'), join(dir, 'node_modules'));
+      writeFileSync(
+        join(dir, 'app/layout.jsx'),
+        'export default function L({ children }) { return <html><body>{children}</body></html>; }\n',
+      );
+      writeFileSync(
+        join(dir, 'app/page.jsx'),
+        fixture.page ?? 'export default function P() { return <p>hi</p>; }\n',
+      );
+      writeFileSync(join(dir, 'next.config.mjs'), fixture.config);
+      if (fixture.stale) {
+        // A complete, self-consistent earlier build: BUILD_ID, manifest and a matching receipt.
+        mkdirSync(join(dir, '.next/server'), { recursive: true });
+        mkdirSync(join(dir, '.next/cache'), { recursive: true });
+        writeFileSync(join(dir, '.next/cache/keep'), 'x');
+        writeFileSync(join(dir, '.next/stale-marker'), 'x');
+        writeFileSync(join(dir, '.next/BUILD_ID'), 'old-build');
+        writeFileSync(join(dir, '.next/server/server-reference-manifest.json'), '{"node":{}}');
+        runModule(
+          `import { writeReceipt } from ${JSON.stringify(url('build-receipt.mjs'))};\nwriteReceipt(${JSON.stringify(dir)}, { distDir: '.next', tsconfigPath: 'tsconfig.json', cleanDistDir: true });\nconsole.log('null');`,
         );
       }
-      if (c.settings) writeFileSync(join(dir, 'settings.mjs'), c.settings);
-      return { dir, env: c.env ?? {} };
+    }
+    const done = await Promise.all(FIXTURES.map((f) => runDriver(dirs[f.name])));
+    FIXTURES.forEach((f, i) => (results[f.name] = done[i]));
+  }, 280_000);
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  const receiptProblems = (name: string): string[] =>
+    runModule(
+      `import { receiptProblems } from ${JSON.stringify(url('build-receipt.mjs'))};\nconsole.log(JSON.stringify(receiptProblems(${JSON.stringify(dirs[name])})));`,
+    ).out as string[];
+
+  it('control: a default build is receipted, from its own output only', () => {
+    expect(results.control.problems).toEqual([]);
+    expect(results.control.status).toBe(0);
+    expect(receiptProblems('control')).toEqual([]);
+    const receipt = JSON.parse(
+      readFileSync(join(dirs.control, '.next/server-action-build-receipt.json'), 'utf8'),
+    ) as { buildId: string; layout: unknown };
+    expect(receipt.buildId).toBe(readFileSync(join(dirs.control, '.next/BUILD_ID'), 'utf8').trim());
+    expect(receipt.buildId).not.toBe('old-build');
+    expect(receipt.layout).toEqual({
+      distDir: '.next',
+      tsconfigPath: 'tsconfig.json',
+      cleanDistDir: true,
     });
-    const code = `
-      import { effectiveBuildLayout, layoutProblems } from ${JSON.stringify(url('build-layout.mjs'))};
-      const results = [];
-      for (const { dir, env } of ${JSON.stringify(prepared)}) {
-        const layout = await effectiveBuildLayout(dir, { nextFrom: ${JSON.stringify(WEB)}, env: { ...env, NODE_ENV: undefined } });
-        results.push(layoutProblems(layout));
-      }
-      process.stdout.write(JSON.stringify(results) + '\\n');
-    `;
-    const { out, stdout, stderr } = runModule(code);
-    const results = out as string[][];
-    CASES.forEach((c, i) => {
-      const keys = results[i].map((line) => line.split(':')[0]);
-      expect([c.name, keys]).toEqual([c.name, c.refuses]);
-    });
-    // Nothing a config printed or threw reaches the output, and no problem line quotes a value.
-    expect(stdout.replace(/\n$/, '').split('\n').length).toBe(1);
-    expect(stdout + stderr).not.toContain(SECRET);
-    expect(JSON.stringify(results)).not.toMatch(/\.next-alt|\.next-prod|elsewhere|out"/);
+    // The earlier build's files are gone; Next's own cache is kept.
+    expect(existsSync(join(dirs.control, '.next/stale-marker'))).toBe(false);
+    expect(existsSync(join(dirs.control, '.next/cache/keep'))).toBe(true);
+  });
+
+  it.each([
+    ['distDir', 'distDir:'],
+    ['tsconfigPath', 'typescript.tsconfigPath:'],
+    ['cleanDistDir', 'cleanDistDir:'],
+  ])('%s keyed on NEXT_RUNTIME: refused, and the earlier .next is not certified', (name, key) => {
+    const { status, problems } = results[name];
+    expect(status).toBe(1);
+    expect(problems).toEqual([expect.stringContaining(key)]);
+    // The retained earlier build no longer exists to be certified.
+    expect(existsSync(join(dirs[name], '.next/stale-marker'))).toBe(false);
+    expect(existsSync(join(dirs[name], '.next/server-action-build-receipt.json'))).toBe(false);
+    expect(receiptProblems(name)).toEqual([expect.stringContaining('receipt.json: missing')]);
+  });
+
+  it('the build really went where the keyed config said (the case is not vacuous)', () => {
+    expect(existsSync(join(dirs.distDir, '.next-alt/BUILD_ID'))).toBe(true);
+    expect(existsSync(join(dirs.distDir, '.next/BUILD_ID'))).toBe(false);
+  });
+
+  it('a build that fails leaves no receipt, and the earlier one is gone', () => {
+    expect(results.failing.status).not.toBe(0);
+    expect(existsSync(join(dirs.failing, '.next/server-action-build-receipt.json'))).toBe(false);
+    expect(existsSync(join(dirs.failing, '.next/BUILD_ID'))).toBe(false);
+    expect(receiptProblems('failing')).toEqual([expect.stringContaining('receipt.json: missing')]);
+  });
+
+  it('config output on every channel (log, dir, dirxml, countReset, stdout, stderr, warning, deferred, at exit) reaches nothing the scripts print', () => {
+    expect(results.channels.status).toBe(0);
+    expect(results.channels.problems).toEqual([]);
+    expect(results.channels.printed).not.toContain(SECRET);
+    expect(JSON.stringify(results)).not.toContain(SECRET);
   });
 });

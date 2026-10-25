@@ -24,7 +24,7 @@ export const REACH_OPTIONS = [
   'resolveAlias',
   'alias',
   // Another tsconfig than the one checked here / another place for the manifest. A fast
-  // local alarm only: the EFFECTIVE value is read by Next's own loader (scripts/build-layout.mjs).
+  // local alarm only: the EFFECTIVE value is the one the build itself recorded (scripts/build-layout.mjs).
   'tsconfigPath',
   'distDir',
 ] as const;
