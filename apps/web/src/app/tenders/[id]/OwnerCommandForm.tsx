@@ -5,7 +5,8 @@ import { useActionState, useCallback, type ReactNode } from 'react';
 import { Alert, Button, Field, Identifier, IsolatedText, controlClassName } from '@/ui';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { formatScaledDecimal, toPersianDigits } from '@/lib/format';
-import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { submitThroughSlot } from '@/lib/fenced-submission';
 import {
   DISQUALIFICATION_REASON_LABELS,
   DISQUALIFY_TEXT_MAX,
@@ -56,7 +57,7 @@ import {
   type UnconfirmedOwnerCommand,
 } from './owner-form-state';
 import type { Binding } from '@/lib/unresolved-tenancy';
-import { QuarantineGate } from '@/app/UnresolvedQuarantine';
+import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
  * One command the owner's side may issue on a tender — publish, decide a
@@ -136,16 +137,30 @@ export function ownerLabel(command: OwnerCommand, execute = false): string {
 const idPart = (value: string): string => value.replace(/[^A-Za-z0-9_-]/g, '_');
 
 /**
- * The form, held behind the device's quarantine of this kind
- * (`app/UnresolvedQuarantine.tsx`): while an earlier request this person
- * cannot be shown has an unknown outcome, the form is replaced by the fixed
- * warning until they accept the duplicate risk.
+ * The form, drawn the one way every fenced form is (`UnresolvedForm`): behind
+ * the device's quarantine of this kind, and — every time it mounts — from what
+ * `sessionStorage` keeps of its own submission, if anything. The store keeps a
+ * marker only, never what was sent, so a form drawn anew over it is the
+ * view-only marker (`unconfirmedFrom`), never a blank form under its key; a
+ * mounted form keeps its own state, the sent content included.
  */
 export function OwnerCommandForm(props: OwnerCommandFormProps) {
+  const { tenderId, submissionId, account } = props;
+  const restore = () => {
+    const restored = restoreUnresolvedOwnerCommand(tenderId, account);
+    return restored?.submissionId === submissionId
+      ? { submissionId, state: unconfirmedFrom(restored) }
+      : null;
+  };
   return (
-    <QuarantineGate source={ownerCommandQuarantine} account={props.account}>
-      <OwnerCommandFormBody {...props} />
-    </QuarantineGate>
+    <UnresolvedForm
+      source={ownerCommandQuarantine}
+      account={account}
+      scope={tenderId}
+      restore={restore}
+    >
+      {(restored) => <OwnerCommandFormBody {...props} initial={restored ?? props.initial} />}
+    </UnresolvedForm>
   );
 }
 
@@ -169,51 +184,49 @@ function OwnerCommandFormBody({
   const scoring = scoreRows?.map(({ cell }) => cell) ?? null;
   const context = ownerFormContext({ scoring, award: award ?? null });
   const send = useCallback(
-    async (previous: OwnerFormState, form: FormData): Promise<OwnerFormState> => {
-      const firstSend = previous.kind !== 'UNCONFIRMED';
+    (previous: OwnerFormState, form: FormData): Promise<OwnerFormState> => {
+      const retrying = previous.kind === 'UNCONFIRMED' ? previous : null;
       const sent = form.get(SUBMISSION_FIELD);
-      const sentId = firstSend ? (typeof sent === 'string' ? sent : '') : previous.submissionId;
-      if (firstSend) {
-        const holder = restoreUnresolvedOwnerCommand(tenderId, account);
-        if (holder && holder.submissionId !== sentId) return { kind: 'HELD' };
-      } else if (previous.viewOnly || previous.restored) {
-        return previous;
-      } else if (
-        restoreUnresolvedOwnerCommand(tenderId, account)?.submissionId !== previous.submissionId
-      ) {
-        return { ...previous, viewOnly: true };
-      }
-
+      const submissionId = retrying ? retrying.submissionId : typeof sent === 'string' ? sent : '';
       // A form the action would refuse unsent is not remembered.
       const parsed = parseOwnerForm(command, ownerValuesOf(command, form, context), context);
-      const sendable = firstSend && parsed.ok;
-      const saved = sendable
-        ? saveUnresolvedOwnerCommand(
-            tenderId,
-            { command, submissionId: sentId, correlationId: null },
-            account,
-          )
-        : null;
-      if (saved === 'HELD') return { kind: 'HELD' };
-      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
-
-      let next: OwnerFormState;
-      try {
-        next = await submitOwnerCommand(tenderId, previous, form);
-      } catch (error) {
-        if (isRedirect(error)) {
-          settleUnresolvedOwnerCommand(tenderId, sentId, account);
-          throw error;
-        }
-        const ended = await sessionHasEnded();
-        if (!firstSend) return withRetryNote(previous, ended ? 'sessionEnded' : 'retryUnknown');
-        if (sendable) {
+      const sendable = !retrying && parsed.ok;
+      return submitThroughSlot<OwnerFormState>({
+        submissionId,
+        retrying,
+        stored: () => {
+          const stored = restoreUnresolvedOwnerCommand(tenderId, account);
+          return stored
+            ? { submissionId: stored.submissionId, state: unconfirmedFrom(stored) }
+            : null;
+        },
+        remember: () =>
+          sendable
+            ? saveUnresolvedOwnerCommand(
+                tenderId,
+                { command, submissionId, correlationId: null },
+                account,
+              )
+            : null,
+        // A view-only record — restored, or a command never repeated — is never
+        // sent again; nor one set aside elsewhere.
+        admitRetry: (view) => {
+          if (view.viewOnly || view.restored) return view;
+          return restoreUnresolvedOwnerCommand(tenderId, account)?.submissionId ===
+            view.submissionId
+            ? null
+            : { ...view, viewOnly: true };
+        },
+        send: () => submitOwnerCommand(tenderId, previous, form),
+        failed: (ended) => {
+          if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
+          if (!sendable) return null;
           return UNREPEATABLE_OWNER_COMMANDS.includes(command)
             ? {
                 kind: 'UNCONFIRMED',
                 command,
                 correlationId: null,
-                submissionId: sentId,
+                submissionId,
                 values: null,
                 replay: null,
                 viewOnly: true,
@@ -224,25 +237,22 @@ function OwnerCommandFormBody({
                 kind: 'UNCONFIRMED',
                 command,
                 correlationId: null,
-                submissionId: sentId,
+                submissionId,
                 values: parsed.ok ? parsed.values : null,
                 replay,
                 ...(ended ? { sessionEnded: true as const } : {}),
               };
-        }
-        throw error;
-      }
-
-      if (next.kind === 'UNCONFIRMED') {
-        answerUnresolvedOwnerCommand(
-          tenderId,
-          { command, submissionId: next.submissionId, correlationId: next.correlationId },
-          account,
-        );
-      } else if (firstSend) {
-        settleUnresolvedOwnerCommand(tenderId, sentId, account);
-      }
-      return next;
+        },
+        answer: (state) =>
+          answerUnresolvedOwnerCommand(
+            tenderId,
+            { command, submissionId: state.submissionId, correlationId: state.correlationId },
+            account,
+          ),
+        settle: () => settleUnresolvedOwnerCommand(tenderId, submissionId, account),
+        held: { kind: 'HELD' },
+        unavailable: { kind: 'STORAGE_UNAVAILABLE' },
+      });
     },
     // `context` is the props' own: a new one each render says nothing new.
     // eslint-disable-next-line react-hooks/exhaustive-deps

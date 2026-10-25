@@ -216,7 +216,8 @@ describe.each(STORES)('the $name store: no path removes an unknown outcome', (st
     expect(moved).toHaveLength(1);
     expect(window.sessionStorage.getItem(moved[0]!)).toBe('{"v":"corrupt"}');
     // The acknowledgement followed it: this person is not asked again for it.
-    expect(store.save(now, K2)).toBe('SAVED');
+    store.settle(now, K2);
+    expect(store.save(now, 'sub_THIRDKEYTHIRDKEYTHIR')).toBe('SAVED');
   });
 
   it('another person’s page: the content goes, a marker stays and holds', () => {
@@ -240,8 +241,10 @@ describe.each(STORES)('the $name store: no path removes an unknown outcome', (st
   it('a late answer of a submission already kept is stored even while something is held', () => {
     store.save(now, K1, null);
     window.sessionStorage.setItem(legacyKey(store.prefix, 'ELSEWHERE'), '{not json');
-    expect(store.save(now, K1, 'COR_LATE')).toBe('SAVED');
+    expect(store.answer(now, K1, 'COR_LATE')).toBe('SAVED');
     expect(store.restore(now)?.id).toBe(K1);
+    // A first send of it again is not a first send: nothing written (review 4, R4).
+    expect(store.save(now, K1, 'COR_AGAIN')).toBe('UNRESOLVED');
   });
 
   it('a record that verifies for this person keeps today’s behaviour: not quarantined for them', () => {

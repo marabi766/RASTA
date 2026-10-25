@@ -248,8 +248,8 @@ export function saveUnresolvedOrder(
   binding: Binding,
   now: number = Date.now(),
 ): StartOutcome {
-  return slot.start(binding, productId, order.submissionId, (earlier) =>
-    recordOf(order, earlier, binding, now),
+  return slot.start(binding, productId, order.submissionId, () =>
+    recordOf(order, null, binding, now),
   );
 }
 

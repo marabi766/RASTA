@@ -329,8 +329,8 @@ export function saveUnresolvedDispute(
   binding: Binding,
   now: number = Date.now(),
 ): StartOutcome {
-  return slot.start(binding, transactionId, dispute.submissionId, (earlier) =>
-    recordOf(dispute, earlier, binding, now),
+  return slot.start(binding, transactionId, dispute.submissionId, () =>
+    recordOf(dispute, null, binding, now),
   );
 }
 

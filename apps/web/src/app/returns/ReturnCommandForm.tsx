@@ -21,7 +21,8 @@ import {
   valuesOfBody,
   type ReturnRequestValues,
 } from '@/lib/return-request';
-import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { submitThroughSlot } from '@/lib/fenced-submission';
 import type { Binding } from '@/lib/unresolved-order';
 import {
   answerUnresolvedReturn,
@@ -42,7 +43,7 @@ import {
   type ReturnFormState,
   type UnconfirmedReturn,
 } from './return-form-state';
-import { QuarantineGate } from '@/app/UnresolvedQuarantine';
+import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
  * One return command this viewer may issue — asking to return goods of an
@@ -146,16 +147,28 @@ function pendingFrom(
 }
 
 /**
- * The form, held behind the device's quarantine of this kind
- * (`app/UnresolvedQuarantine.tsx`): while an earlier request this person
- * cannot be shown has an unknown outcome, the form is replaced by the fixed
- * warning until they accept the duplicate risk.
+ * The form, drawn the one way every fenced form is (`UnresolvedForm`): behind
+ * the device's quarantine of this kind, and — every time it mounts — from what
+ * `sessionStorage` keeps of its own submission, if anything: its uncertainty
+ * view, never a blank form under a key whose outcome is unknown.
  */
 export function ReturnCommandForm(props: ReturnCommandFormProps) {
+  const { scope, submissionId, binding, sessionMaxAgeSeconds } = props;
+  const restore = () => {
+    const restored = restoreUnresolvedReturn(scope, binding, sessionMaxAgeSeconds);
+    return restored?.entry.submissionId === submissionId
+      ? { submissionId, state: unconfirmedFrom(restored) }
+      : null;
+  };
   return (
-    <QuarantineGate source={returnQuarantine} account={props.binding}>
-      <ReturnCommandFormBody {...props} />
-    </QuarantineGate>
+    <UnresolvedForm
+      source={returnQuarantine}
+      account={binding}
+      scope={scope.kind === 'ORDER' ? `order.${scope.orderId}` : `return.${scope.returnId}`}
+      restore={restore}
+    >
+      {(restored) => <ReturnCommandFormBody {...props} initial={restored ?? props.initial} />}
+    </UnresolvedForm>
   );
 }
 
@@ -173,68 +186,64 @@ function ReturnCommandFormBody({
   heldBy = null,
 }: ReturnCommandFormProps) {
   const send = useCallback(
-    async (previous: ReturnFormState, form: FormData): Promise<ReturnFormState> => {
-      const firstSend = previous.kind !== 'UNCONFIRMED';
+    (previous: ReturnFormState, form: FormData): Promise<ReturnFormState> => {
+      const retrying = previous.kind === 'UNCONFIRMED' ? previous : null;
       const sent = form.get(SUBMISSION_FIELD);
-      const sentId = firstSend ? (typeof sent === 'string' ? sent : '') : previous.submissionId;
-      if (firstSend) {
-        // A request checked here first, with what the page knows of each line.
-        if (command === 'REQUEST') {
-          const values = returnRequestFormValues(form);
-          const parsed = parseReturnRequest(values, lines);
-          if (!parsed.ok) {
-            return {
-              kind: 'INVALID',
-              command,
-              submissionId: sentId,
-              values,
-              fieldErrors: parsed.fieldErrors,
-              message: parsed.message,
-            };
-          }
-        }
+      const submissionId = retrying ? retrying.submissionId : typeof sent === 'string' ? sent : '';
+      // Remembered BEFORE it is sent; not sent if it cannot be remembered.
+      const unsent = retrying ? null : pendingFrom(form, command, replay);
+      return submitThroughSlot<ReturnFormState>({
+        submissionId,
+        retrying,
         // Another submission's outcome is unknown here: nothing is sent, and its
         // record is not touched.
-        const holder = restoreUnresolvedReturn(scope, binding, sessionMaxAgeSeconds);
-        if (holder && holder.entry.submissionId !== sentId) return { kind: 'HELD' };
-      } else {
+        stored: () => {
+          const stored = restoreUnresolvedReturn(scope, binding, sessionMaxAgeSeconds);
+          return stored
+            ? { submissionId: stored.entry.submissionId, state: unconfirmedFrom(stored) }
+            : null;
+        },
+        // A request checked here first, with what the page knows of each line.
+        check: () => {
+          if (command !== 'REQUEST') return null;
+          const values = returnRequestFormValues(form);
+          const parsed = parseReturnRequest(values, lines);
+          return parsed.ok
+            ? null
+            : {
+                kind: 'INVALID',
+                command,
+                submissionId,
+                values,
+                fieldErrors: parsed.fieldErrors,
+                message: parsed.message,
+              };
+        },
+        remember: () => (unsent ? saveUnresolvedReturn(scope, unsent, binding) : null),
         // A replay only while the service still holds its key, and only from
         // the login it is bound to. Past that, never re-sent.
-        const stored = restoreUnresolvedReturn(scope, binding, sessionMaxAgeSeconds);
-        if (stored?.kind !== 'RETRYABLE' || stored.entry.submissionId !== previous.submissionId) {
-          return { ...previous, viewOnly: true };
-        }
-      }
-
-      // Remembered BEFORE it is sent; not sent if it cannot be remembered.
-      const unsent = firstSend ? pendingFrom(form, command, replay) : null;
-      const saved = unsent ? saveUnresolvedReturn(scope, unsent, binding) : null;
-      if (saved === 'HELD') return { kind: 'HELD' };
-      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
-
-      let next: ReturnFormState;
-      try {
-        next =
+        admitRetry: (view) => {
+          const stored = restoreUnresolvedReturn(scope, binding, sessionMaxAgeSeconds);
+          return stored?.kind === 'RETRYABLE' && stored.entry.submissionId === view.submissionId
+            ? null
+            : { ...view, viewOnly: true };
+        },
+        send: () =>
           scope.kind === 'ORDER'
-            ? await submitReturnRequest(scope.orderId, previous, form)
-            : await submitReturnCommand(scope.returnId, previous, form);
-      } catch (error) {
-        // Done: the action redirects to the request.
-        if (isRedirect(error)) {
-          settleUnresolvedReturn(scope, sentId, binding);
-          throw error;
-        }
-        const ended = await sessionHasEnded();
-        if (!firstSend) return withRetryNote(previous, ended ? 'sessionEnded' : 'retryUnknown');
-        if (unsent) return ended ? { ...unsent, sessionEnded: true } : unsent;
-        throw error;
-      }
-
-      // Still in doubt: kept. A definite answer to THIS submission's first send:
-      // its own record is dropped — never another's.
-      if (next.kind === 'UNCONFIRMED') answerUnresolvedReturn(scope, next, binding);
-      else if (firstSend) settleUnresolvedReturn(scope, sentId, binding);
-      return next;
+            ? submitReturnRequest(scope.orderId, previous, form)
+            : submitReturnCommand(scope.returnId, previous, form),
+        failed: (ended) => {
+          if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
+          if (!unsent) return null;
+          return ended ? { ...unsent, sessionEnded: true } : unsent;
+        },
+        // Still in doubt: kept. A definite answer to THIS submission's first send:
+        // its own record is dropped — never another's.
+        answer: (state) => answerUnresolvedReturn(scope, state, binding),
+        settle: () => settleUnresolvedReturn(scope, submissionId, binding),
+        held: { kind: 'HELD' },
+        unavailable: { kind: 'STORAGE_UNAVAILABLE' },
+      });
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds, lines],
   );

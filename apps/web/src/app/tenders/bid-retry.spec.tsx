@@ -3,6 +3,7 @@ import { axe } from 'jest-axe';
 
 import { PRICE_FIELD, answerField } from '@/lib/bid-fields';
 import {
+  answerUnresolvedBid,
   markBidsOpen,
   purgeAllUnresolvedBids,
   purgeForeignUnresolvedBids,
@@ -342,9 +343,17 @@ describe('one slot per tender', () => {
       savedAt: 1000,
       owner: OWNER,
     });
-    // Its own submission may update it; the first send's time stays.
+    // Its own submission's later answer may update it; the first send's time stays.
+    // A first send of it again is not one (review 4, R4): nothing written.
     expect(
       saveUnresolvedBid(
+        TENDER_ID,
+        { command: 'REVISE', submissionId: OTHER, correlationId: 'COR_2' },
+        ACCOUNT,
+      ),
+    ).toBe('UNRESOLVED');
+    expect(
+      answerUnresolvedBid(
         TENDER_ID,
         { command: 'REVISE', submissionId: OTHER, correlationId: 'COR_2' },
         ACCOUNT,

@@ -15,6 +15,7 @@ import {
   type AccountTags,
   type AnswerOutcome,
   type Binding,
+  type StartOutcome,
 } from './unresolved-tenancy';
 
 export type { AnswerOutcome };
@@ -312,12 +313,8 @@ export function purgeForeignUnresolvedStatements(tags: AccountTags): void {
   }
 }
 
-/**
- * `SAVED`: stored. `HELD`: another submission's record holds this scope — it is
- * left exactly as it was, and this one must not be sent. `UNAVAILABLE`: storage
- * refused it, or a logout has started.
- */
-export type SaveOutcome = 'SAVED' | 'HELD' | 'UNAVAILABLE';
+/** What a save before the first send says (`StartOutcome`, `lib/unresolved-tenancy.ts`). */
+export type SaveOutcome = StartOutcome;
 
 /**
  * What is stored for `entry`, or null to keep a marker as it is: a marker is
@@ -356,8 +353,8 @@ export function saveUnresolvedStatement(
   binding: Binding,
   now: number = Date.now(),
 ): SaveOutcome {
-  return slot.start(binding, scopeOf(scope), entry.submissionId, (earlier) =>
-    recordOf(entry, earlier, binding, now),
+  return slot.start(binding, scopeOf(scope), entry.submissionId, () =>
+    recordOf(entry, null, binding, now),
   );
 }
 

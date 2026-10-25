@@ -28,7 +28,8 @@ import {
   type DisputeFormValues,
 } from '@/lib/transaction-dispute-fields';
 
-import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { submitThroughSlot } from '@/lib/fenced-submission';
 import { submitDisputeCommand } from './actions';
 import {
   IDLE_DISPUTE_FORM,
@@ -36,7 +37,7 @@ import {
   type DisputeFormState,
   type UnconfirmedDispute,
 } from './form-state';
-import { QuarantineGate } from '@/app/UnresolvedQuarantine';
+import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
  * One dispute command the current viewer may issue on this transaction.
@@ -133,16 +134,28 @@ function pendingFrom(
 }
 
 /**
- * The form, held behind the device's quarantine of this kind
- * (`app/UnresolvedQuarantine.tsx`): while an earlier request this person
- * cannot be shown has an unknown outcome, the form is replaced by the fixed
- * warning until they accept the duplicate risk.
+ * The form, drawn the one way every fenced form is (`UnresolvedForm`): behind
+ * the device's quarantine of this kind, and — every time it mounts — from what
+ * `sessionStorage` keeps of its own submission, if anything: its uncertainty
+ * view, never a blank form under a key whose outcome is unknown.
  */
 export function DisputeCommandForm(props: DisputeCommandFormProps) {
+  const { transactionId, submissionId, binding, sessionMaxAgeSeconds } = props;
+  const restore = () => {
+    const restored = restoreUnresolvedDispute(transactionId, binding, sessionMaxAgeSeconds);
+    return restored?.dispute.submissionId === submissionId
+      ? { submissionId, state: unconfirmedFrom(restored) }
+      : null;
+  };
   return (
-    <QuarantineGate source={disputeQuarantine} account={props.binding}>
-      <DisputeCommandFormBody {...props} />
-    </QuarantineGate>
+    <UnresolvedForm
+      source={disputeQuarantine}
+      account={binding}
+      scope={transactionId}
+      restore={restore}
+    >
+      {(restored) => <DisputeCommandFormBody {...props} initial={restored ?? props.initial} />}
+    </UnresolvedForm>
   );
 }
 
@@ -157,56 +170,52 @@ function DisputeCommandFormBody({
   initial = IDLE_DISPUTE_FORM,
 }: DisputeCommandFormProps) {
   const send = useCallback(
-    async (previous: DisputeFormState, form: FormData): Promise<DisputeFormState> => {
-      const firstSend = previous.kind !== 'UNCONFIRMED';
-      if (!firstSend) {
-        // The same request is a replay only while the service still holds its
-        // key, and only from the login it is bound to. Past that, never re-sent.
-        const stored = restoreUnresolvedDispute(transactionId, binding, sessionMaxAgeSeconds);
-        if (stored?.kind !== 'RETRYABLE' || stored.dispute.submissionId !== previous.submissionId) {
-          return { ...previous, viewOnly: true };
-        }
-      }
-
+    (previous: DisputeFormState, form: FormData): Promise<DisputeFormState> => {
+      const retrying = previous.kind === 'UNCONFIRMED' ? previous : null;
       // Remembered BEFORE it is sent: from here until an answer, a reload or a
       // lost response must find the same key, not mint another. Not sent if it
       // cannot be remembered.
-      const unsent = firstSend ? pendingFrom(form, command, replay) : null;
-      const sentId = firstSend ? unsent?.submissionId : previous.submissionId;
-      // Nor is it sent while another command's entry holds the slot: that entry
-      // is never written over (`lib/unresolved-dispute.ts`).
-      const saved = unsent ? saveUnresolvedDispute(transactionId, unsent, binding) : null;
-      if (saved === 'HELD') return { kind: 'HELD' };
-      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
-
-      let next: DisputeFormState;
-      try {
-        next = await submitDisputeCommand(transactionId, previous, form);
-      } catch (error) {
-        // Done: the action redirects to the transaction. Nothing is unresolved now.
-        if (isRedirect(error)) {
-          if (sentId) settleUnresolvedDispute(transactionId, sentId, binding);
-          throw error;
-        }
+      const unsent = retrying ? null : pendingFrom(form, command, replay);
+      const submissionId = retrying
+        ? retrying.submissionId
+        : String(form.get(SUBMISSION_FIELD) ?? '');
+      return submitThroughSlot<DisputeFormState>({
+        submissionId,
+        retrying,
+        stored: () => {
+          const stored = restoreUnresolvedDispute(transactionId, binding, sessionMaxAgeSeconds);
+          return stored
+            ? { submissionId: stored.dispute.submissionId, state: unconfirmedFrom(stored) }
+            : null;
+        },
+        // Nor is it sent while another command's entry holds the slot: that entry
+        // is never written over (`lib/unresolved-dispute.ts`).
+        remember: () => (unsent ? saveUnresolvedDispute(transactionId, unsent, binding) : null),
+        // The same request is a replay only while the service still holds its
+        // key, and only from the login it is bound to. Past that, never re-sent.
+        admitRetry: (view) => {
+          const stored = restoreUnresolvedDispute(transactionId, binding, sessionMaxAgeSeconds);
+          return stored?.kind === 'RETRYABLE' && stored.dispute.submissionId === view.submissionId
+            ? null
+            : { ...view, viewOnly: true };
+        },
+        send: () => submitDisputeCommand(transactionId, previous, form),
         // The call itself failed. A lost response after the command may have
         // committed; only an authoritative "the session has ended" says more.
-        const ended = await sessionHasEnded();
-        if (!firstSend) {
-          return withRetryNote(previous, ended ? 'sessionEnded' : 'retryUnknown');
-        }
-        if (unsent) return ended ? { ...unsent, sessionEnded: true } : unsent;
-        throw error;
-      }
-
-      // Answered: still in doubt (kept — now with its tracking code, or, after a
-      // retry past the deadline, without its stamp for good), or a definite
-      // refusal of a first send that never left (dropped). A retry is always
-      // answered in doubt: only the redirect above ends it.
-      // Either way only THIS submission's entry: a late answer for a command set
-      // aside after another took the slot is kept aside, the other left as it is.
-      if (next.kind === 'UNCONFIRMED') answerUnresolvedDispute(transactionId, next, binding);
-      else if (firstSend && sentId) settleUnresolvedDispute(transactionId, sentId, binding);
-      return next;
+        failed: (ended) => {
+          if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
+          if (!unsent) return null;
+          return ended ? { ...unsent, sessionEnded: true } : unsent;
+        },
+        // Still in doubt: kept — now with its tracking code, or, after a retry past
+        // the deadline, without its stamp for good. Only THIS submission's entry: a
+        // late answer for a command set aside after another took the slot is kept
+        // aside, the other left as it is.
+        answer: (state) => answerUnresolvedDispute(transactionId, state, binding),
+        settle: () => settleUnresolvedDispute(transactionId, submissionId, binding),
+        held: { kind: 'HELD' },
+        unavailable: { kind: 'STORAGE_UNAVAILABLE' },
+      });
     },
     [transactionId, command, replay, binding, sessionMaxAgeSeconds],
   );

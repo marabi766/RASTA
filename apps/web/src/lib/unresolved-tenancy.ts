@@ -579,10 +579,14 @@ export interface SlotEntry {
 /**
  * `SAVED`: stored. `HELD`: another submission's entry holds this slot, or a
  * quarantined record holds this kind for this person — nothing was written and
- * this submission must not be sent. `UNAVAILABLE`: storage refused it, or a
- * logout has started.
+ * this submission must not be sent. `UNRESOLVED`: the slot already keeps this
+ * very submission, its outcome unknown — it is not a first send, whatever the
+ * form that asks believes (a form drawn again blank under its key; PR 405
+ * review 4, R4): nothing was written, nothing may be sent under that key but
+ * its kept body, and a definite answer to such a send proves nothing about
+ * the first. `UNAVAILABLE`: storage refused it, or a logout has started.
  */
-export type StartOutcome = 'SAVED' | 'HELD' | 'UNAVAILABLE';
+export type StartOutcome = 'SAVED' | 'HELD' | 'UNRESOLVED' | 'UNAVAILABLE';
 
 /**
  * `SAVED`: the slot's entry of this submission is updated. `SET_ASIDE`: the
@@ -595,18 +599,20 @@ export type AnswerOutcome = 'SAVED' | 'SET_ASIDE' | 'UNAVAILABLE';
 
 export interface FencedSlot<E extends SlotEntry> {
   /**
-   * Before the first send of `submissionId`. `compose` gets the slot's entry
-   * of this same submission, if there is one, and returns the text to store —
-   * or null to keep what is there (a marker is never made re-sendable).
+   * Before the first send of `submissionId`; `compose` returns the text to
+   * store (null: nothing storable — then nothing is sent).
    */
   start(
     binding: Binding,
     scope: string,
     submissionId: string,
-    compose: (earlier: E | null) => string | null,
-    now?: number,
+    compose: () => string | null,
   ): StartOutcome;
-  /** An answer to `submissionId` that is still in doubt (`compose` as above, given its entry). */
+  /**
+   * An answer to `submissionId` that is still in doubt: `compose` gets its entry
+   * and returns the text to store, or null to keep it as it is (a marker is
+   * never made re-sendable).
+   */
   answer(
     binding: Binding,
     scope: string,
@@ -694,9 +700,12 @@ export function fencedSlot<E extends SlotEntry>(
         ) {
           return 'HELD';
         }
-        if (held === null && !mayStartFresh(store, prefix, binding, parse)) return 'HELD';
-        const text = compose(held?.entry ?? null);
-        if (text === null) return 'SAVED';
+        // This very submission is already unresolved here: a re-send, never a first
+        // one — its entry is not rewritten, and nothing new goes out under its key.
+        if (held !== null) return 'UNRESOLVED';
+        if (!mayStartFresh(store, prefix, binding, parse)) return 'HELD';
+        const text = compose();
+        if (text === null) return 'UNAVAILABLE';
         const key = tenantKey(prefix, binding, scope);
         // Never written over: whatever else the key holds is moved aside first.
         freeOwnKey(store, prefix, key, binding, parse);

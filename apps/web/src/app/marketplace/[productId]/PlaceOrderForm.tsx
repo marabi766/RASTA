@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useActionState, useCallback, useEffect, useState } from 'react';
+import { useActionState, useCallback } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { ProviderUnknownRefusal } from '@/app/DemoModeNotice';
@@ -24,12 +24,8 @@ import {
   orderQuarantine,
 } from '@/lib/unresolved-order';
 import type { Offer } from '@/server/marketplace';
-import {
-  isRedirect,
-  isSessionRefusal,
-  sessionHasEnded,
-  SESSION_REFUSAL_MESSAGES,
-} from '@/lib/session-refusal';
+import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { submitThroughSlot } from '@/lib/fenced-submission';
 
 import { submitPlaceOrder } from './place-order-actions';
 import {
@@ -38,7 +34,7 @@ import {
   type PlaceOrderFormState,
   type UnconfirmedPlaceOrder,
 } from './place-order-form-state';
-import { QuarantineGate } from '@/app/UnresolvedQuarantine';
+import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
  * Placing an order for one offer.
@@ -74,40 +70,25 @@ export interface PlaceOrderFormProps {
 }
 
 /**
- * The form, held behind the device's quarantine of this kind
- * (`app/UnresolvedQuarantine.tsx`): while an earlier request this person
- * cannot be shown has an unknown outcome, the form is replaced by the fixed
- * warning until they accept the duplicate risk.
+ * The form, drawn the one way every fenced form is (`UnresolvedForm`): behind
+ * the device's quarantine of this kind — while an earlier request this person
+ * cannot be shown has an unknown outcome, the fixed warning comes first — and,
+ * every time it mounts, from the unresolved order `sessionStorage` keeps for
+ * this product and person (F1): its uncertainty view with its original key.
+ * The first paint is the server's (nothing), so hydration agrees.
  */
 export function PlaceOrderForm(props: PlaceOrderFormProps) {
-  return (
-    <QuarantineGate source={orderQuarantine} account={props.binding}>
-      <PlaceOrderFormBody {...props} />
-    </QuarantineGate>
-  );
-}
-
-/**
- * Remembers an unresolved order across a reload (F1): the form that mounts
- * looks for one in `sessionStorage` and, if there is one for this person, draws
- * the uncertainty view with its original key. The first paint is the server's
- * (blank), so hydration agrees; the remembered order replaces it right after
- * mount, by remounting the form with that order as its starting state.
- */
-function PlaceOrderFormBody(props: PlaceOrderFormProps) {
   const { productId, binding, sessionMaxAgeSeconds } = props;
-  const [restored, setRestored] = useState<RestoredOrder | null>(null);
-
-  useEffect(() => {
-    setRestored(restoreUnresolvedOrder(productId, binding, sessionMaxAgeSeconds));
-  }, [productId, binding, sessionMaxAgeSeconds]);
-
+  const restore = () => {
+    const restored = restoreUnresolvedOrder(productId, binding, sessionMaxAgeSeconds);
+    return restored
+      ? { submissionId: restored.order.submissionId, state: unconfirmedFrom(restored) }
+      : null;
+  };
   return (
-    <OrderForm
-      key={restored ? restored.order.submissionId : 'blank'}
-      {...props}
-      initial={restored ? unconfirmedFrom(restored) : IDLE_PLACE_ORDER_FORM}
-    />
+    <UnresolvedForm source={orderQuarantine} account={binding} scope={productId} restore={restore}>
+      {(restored) => <OrderForm {...props} initial={restored ?? IDLE_PLACE_ORDER_FORM} />}
+    </UnresolvedForm>
   );
 }
 
@@ -151,66 +132,52 @@ function OrderForm({
   initial,
 }: PlaceOrderFormProps & { initial: PlaceOrderFormState }) {
   const send = useCallback(
-    async (previous: PlaceOrderFormState, form: FormData): Promise<PlaceOrderFormState> => {
-      const firstSend = previous.kind !== 'UNCONFIRMED';
-      if (!firstSend) {
+    (previous: PlaceOrderFormState, form: FormData): Promise<PlaceOrderFormState> => {
+      const retrying = previous.kind === 'UNCONFIRMED' ? previous : null;
+      // Remembered BEFORE it is sent (F1): from here until an answer, a reload or
+      // a lost response must find the same key, not mint another.
+      const unsent = retrying ? null : pendingFrom(form);
+      const submissionId = retrying
+        ? retrying.submissionId
+        : String(form.get(SUBMISSION_FIELD) ?? '');
+      return submitThroughSlot<PlaceOrderFormState>({
+        submissionId,
+        retrying,
+        stored: () => {
+          const stored = restoreUnresolvedOrder(productId, binding, sessionMaxAgeSeconds);
+          return stored
+            ? { submissionId: stored.order.submissionId, state: unconfirmedFrom(stored) }
+            : null;
+        },
+        // If it cannot be remembered it is not sent: a lost response would leave a
+        // committed order and a reload that mints another key.
+        remember: () => (unsent ? saveUnresolvedOrder(productId, unsent, binding) : null),
         // The same request is sent again only while its own entry still holds the
         // slot, from the login it is bound to: once set aside — another order may
         // have taken the slot since — this view no longer re-sends.
-        const stored = restoreUnresolvedOrder(productId, binding, sessionMaxAgeSeconds);
-        if (stored?.kind !== 'RETRYABLE' || stored.order.submissionId !== previous.submissionId) {
-          return { ...previous, viewOnly: true };
-        }
-      }
-      // Remember it BEFORE it is sent (F1): from here until an answer, a reload or
-      // a lost response must find the same key, not mint another.
-      const unsent = firstSend ? pendingFrom(form) : null;
-      const sentId = firstSend ? unsent?.submissionId : previous.submissionId;
-      // If it cannot be remembered it is not sent: a lost response would leave a
-      // committed order and a reload that mints another key. Nor is it sent while
-      // another order's entry holds the slot — that entry is never written over.
-      const saved = unsent ? saveUnresolvedOrder(productId, unsent, binding) : null;
-      if (saved === 'HELD') return { kind: 'HELD' };
-      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
-
-      let next: PlaceOrderFormState;
-      try {
-        next = await submitPlaceOrder(previous, form);
-      } catch (error) {
-        // The order was placed: the action redirects to it. Nothing is unresolved
-        // now — for THIS submission; another one's entry is never touched.
-        if (isRedirect(error)) {
-          if (sentId) settleUnresolvedOrder(productId, sentId, binding);
-          throw error;
-        }
+        admitRetry: (view) => {
+          const stored = restoreUnresolvedOrder(productId, binding, sessionMaxAgeSeconds);
+          return stored?.kind === 'RETRYABLE' && stored.order.submissionId === view.submissionId
+            ? null
+            : { ...view, viewOnly: true };
+        },
+        send: () => submitPlaceOrder(previous, form),
         // The call itself failed — a lost response after the order may have
         // committed, or the portal's own gate answering 401 JSON to an action POST
-        // whose session has ended, which Next rejects as an "unexpected response".
-        // Either way the doubt is still there, and so is the stored entry. Only
-        // `/auth/session` answering 401 says the session ended; anything else —
-        // its 503 for a refresh unavailable for now among them — keeps the retry
-        // (same key, same body).
-        const ended = await sessionHasEnded();
-        if (!firstSend) {
-          return withRetryNote(
-            previous as UnconfirmedPlaceOrder,
-            ended ? 'sessionEnded' : 'retryUnknown',
-          );
-        }
-        if (unsent) {
+        // whose session has ended. Either way the doubt is still there; only
+        // `/auth/session` answering 401 says the session ended (same key, same body).
+        failed: (ended) => {
+          if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
+          if (!unsent) return null;
           return ended
             ? { kind: 'UNCONFIRMED', ...unsent, sessionEnded: true }
             : { kind: 'UNCONFIRMED', ...unsent };
-        }
-        throw error;
-      }
-      if (firstSend) {
-        // Answered: with the correlation id if it is still in doubt (kept aside
-        // when this order's entry no longer holds the slot), else settled.
-        if (next.kind === 'UNCONFIRMED') answerUnresolvedOrder(productId, next, binding);
-        else if (unsent) settleUnresolvedOrder(productId, unsent.submissionId, binding);
-      }
-      return next;
+        },
+        answer: (state) => answerUnresolvedOrder(productId, state, binding),
+        settle: () => settleUnresolvedOrder(productId, submissionId, binding),
+        held: { kind: 'HELD' },
+        unavailable: { kind: 'STORAGE_UNAVAILABLE' },
+      });
     },
     [productId, binding, sessionMaxAgeSeconds],
   );

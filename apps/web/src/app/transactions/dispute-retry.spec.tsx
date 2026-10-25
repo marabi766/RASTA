@@ -3,6 +3,7 @@ import { axe } from 'jest-axe';
 
 import { EMPTY_DISPUTE_FORM } from '@/lib/transaction-dispute-fields';
 import {
+  answerUnresolvedDispute,
   markDisputesOpen,
   purgeAllUnresolvedDisputes,
   purgeForeignUnresolvedDisputes,
@@ -406,7 +407,7 @@ describe('remembered across a reload (finding 2)', () => {
     const first = Date.now() - 10_000;
     const dispute = remembered({ correlationId: null });
     saveUnresolvedDispute('TXN_1', dispute, BINDING, first);
-    saveUnresolvedDispute('TXN_1', { ...dispute, correlationId: 'COR_LATER' }, BINDING);
+    answerUnresolvedDispute('TXN_1', { ...dispute, correlationId: 'COR_LATER' }, BINDING);
     expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)).toMatchObject({
       kind: 'RETRYABLE',
       dispute: { savedAt: first, correlationId: 'COR_LATER' },
@@ -478,7 +479,10 @@ describe('never silently forgotten: the outcome-unknown marker (PR 319 review 2,
     );
     expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)?.dispute.marker).toBe(true);
 
-    expect(saveUnresolvedDispute('TXN_1', remembered(), BINDING)).toBe('SAVED');
+    // Neither a first send of the same submission (it is not one: review 4, R4) nor
+    // a late answer to it makes the marker re-sendable.
+    expect(saveUnresolvedDispute('TXN_1', remembered(), BINDING)).toBe('UNRESOLVED');
+    expect(answerUnresolvedDispute('TXN_1', remembered(), BINDING)).toBe('SAVED');
     expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)).toMatchObject({
       kind: 'VIEW_ONLY',
       dispute: { marker: true, replay: null },

@@ -36,6 +36,7 @@ import {
   type AnswerOutcome,
   type Binding,
   type QuarantineSource,
+  type StartOutcome,
 } from './unresolved-tenancy';
 
 export type { AnswerOutcome };
@@ -53,13 +54,8 @@ export interface UnresolvedMarker<C extends string> {
   readonly savedAt: number;
 }
 
-/**
- * `SAVED`: stored. `HELD`: another submission's record holds this scope, or a
- * quarantined record holds this kind for this person — it is left exactly as
- * it was, and this one must not be sent. `UNAVAILABLE`: storage refused it, or
- * a logout has started.
- */
-export type SaveOutcome = 'SAVED' | 'HELD' | 'UNAVAILABLE';
+/** What a save before the first send says (`StartOutcome`, `lib/unresolved-tenancy.ts`). */
+export type SaveOutcome = StartOutcome;
 
 export interface MarkerStore<C extends string> {
   subscribe(listener: () => void): () => void;
@@ -203,8 +199,8 @@ export function markerStore<C extends string>(
     },
 
     save(scope, entry, binding, now = Date.now()) {
-      return slot.start(binding, scope, entry.submissionId, (earlier) =>
-        recordOf(entry, earlier, binding, now),
+      return slot.start(binding, scope, entry.submissionId, () =>
+        recordOf(entry, null, binding, now),
       );
     },
 
