@@ -238,7 +238,8 @@ describe('the record is a precondition of sending, and logout is final (r6)', ()
 describe('an unresolved order survives a navigation (F1)', () => {
   it('is remembered the moment the first send comes back unconfirmed, with no token or session value', async () => {
     submit.mockResolvedValueOnce(UNCONFIRMED);
-    const { container } = loadPage();
+    // The action answers for the submission it was sent (`place-order-actions.ts`).
+    const { container } = loadPage({ submissionId: KEY });
     await fillAndSend(container);
 
     expect(screen.getByText(/ممکن است سفارش ثبت شده باشد/)).toBeInTheDocument();
@@ -260,7 +261,7 @@ describe('an unresolved order survives a navigation (F1)', () => {
 
   it('a reload shows the uncertainty view again, with the original key — not the new page’s', async () => {
     submit.mockResolvedValueOnce(UNCONFIRMED);
-    const first = loadPage();
+    const first = loadPage({ submissionId: KEY });
     await fillAndSend(first.container);
     first.unmount();
 

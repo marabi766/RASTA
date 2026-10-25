@@ -14,7 +14,9 @@
  *
  * One record per scope, never replaced: saving another submission's record
  * over it is refused (`HELD`), and a record is cleared only by the submission
- * it belongs to. Records are kept per person and organization
+ * it belongs to — a late answer of a submission whose record was set aside
+ * and replaced is kept aside, never written over the replacement
+ * (`fencedSlot`, PR 405 review 3, R1). Records are kept per person and organization
  * (`lib/unresolved-tenancy.ts`): a page for another organization of the same
  * person neither shows nor clears them, a page for another person reduces
  * every entry of anyone else to a content-free marker, and a logout writes
@@ -26,17 +28,17 @@
  */
 
 import {
-  freeOwnKey,
+  fencedSlot,
   locate,
-  mayStartFresh,
   ownedHere,
   purgeForeign,
-  quarantineOf,
-  tenantKey,
   type AccountTags,
+  type AnswerOutcome,
   type Binding,
   type QuarantineSource,
 } from './unresolved-tenancy';
+
+export type { AnswerOutcome };
 
 const VERSION = 1;
 const SUBMISSION_ID = /^sub_[A-Za-z0-9_-]{8,128}$/;
@@ -70,6 +72,16 @@ export interface MarkerStore<C extends string> {
     binding: Binding,
     now?: number,
   ): SaveOutcome;
+  /** An answer still in doubt (`fencedSlot.answer`). */
+  answer(
+    scope: string,
+    entry: Omit<UnresolvedMarker<C>, 'savedAt'>,
+    binding: Binding,
+    now?: number,
+  ): AnswerOutcome;
+  /** A definite answer: this submission's record, and only that, goes. */
+  settle(scope: string, submissionId: string, binding: Binding): void;
+  /** The person sets this submission's record aside — and only that one. */
   clear(scope: string, submissionId: string, binding: Binding): void;
   restore(scope: string, binding: Binding): UnresolvedMarker<C> | null;
   /** What holds a fresh command of this kind (`lib/unresolved-tenancy.ts`). */
@@ -138,9 +150,29 @@ export function markerStore<C extends string>(
   }
 
   const parseEntry = (raw: string): Stored<C> | null => parse(raw);
+  const slot = fencedSlot(keyPrefix, parseEntry, { closing: () => accountClosing, changed });
+
+  /** The record for `entry`; the first send's command and time when the slot already keeps it. */
+  const recordOf = (
+    entry: Omit<UnresolvedMarker<C>, 'savedAt'>,
+    earlier: Stored<C> | null,
+    binding: Binding,
+    now: number,
+  ): string => {
+    const record: Stored<C> = {
+      v: VERSION,
+      command: earlier ? earlier.command : entry.command,
+      submissionId: entry.submissionId,
+      correlationId: entry.correlationId,
+      // The entry dates from the first send.
+      savedAt: earlier ? earlier.savedAt : now,
+      owner: binding.owner,
+    };
+    return JSON.stringify(record);
+  };
 
   return {
-    quarantine: quarantineOf(keyPrefix, parseEntry),
+    quarantine: slot.quarantine,
 
     subscribe(listener) {
       listeners.add(listener);
@@ -171,63 +203,27 @@ export function markerStore<C extends string>(
     },
 
     save(scope, entry, binding, now = Date.now()) {
-      if (accountClosing) return 'UNAVAILABLE';
-      try {
-        const store = storage();
-        if (!store) return 'UNAVAILABLE';
-        const found = locate(store, keyPrefix, binding, scope);
-        const parsed = found === null ? null : parse(found.raw);
-        const earlier =
-          found !== null && parsed !== null && ownedHere(binding, found.legacy, parsed.owner)
-            ? parsed
-            : null;
-        // A record from before records were kept per organization holds its
-        // scope like any other — it may be another organization's, so it is
-        // never taken over, even by the same submission.
-        if (earlier !== null && (found?.legacy || earlier.submissionId !== entry.submissionId)) {
-          return 'HELD';
-        }
-        // A fresh command waits while a quarantined record holds this kind for this person.
-        if (earlier === null && !mayStartFresh(store, keyPrefix, binding, parseEntry))
-          return 'HELD';
-        const key = tenantKey(keyPrefix, binding, scope);
-        // Never written over: whatever else the key holds is moved aside first.
-        freeOwnKey(store, keyPrefix, key, binding, parseEntry);
-        const record: Stored<C> = {
-          v: VERSION,
-          command: entry.command,
-          submissionId: entry.submissionId,
-          correlationId: entry.correlationId,
-          // The entry dates from the first send.
-          savedAt: earlier?.savedAt ?? now,
-          owner: binding.owner,
-        };
-        store.setItem(key, JSON.stringify(record));
-        changed();
-        return 'SAVED';
-      } catch {
-        return 'UNAVAILABLE';
-      }
+      return slot.start(binding, scope, entry.submissionId, (earlier) =>
+        recordOf(entry, earlier, binding, now),
+      );
+    },
+
+    answer(scope, entry, binding, now = Date.now()) {
+      return slot.answer(
+        binding,
+        scope,
+        entry.submissionId,
+        (earlier) => recordOf(entry, earlier, binding, now),
+        now,
+      );
+    },
+
+    settle(scope, submissionId, binding) {
+      slot.settle(binding, scope, submissionId);
     },
 
     clear(scope, submissionId, binding) {
-      try {
-        const store = storage();
-        const found = store ? locate(store, keyPrefix, binding, scope) : null;
-        if (!store || found === null) return;
-        const entry = parse(found.raw);
-        // Only this person's own record: anything that cannot be attributed stays (quarantined).
-        if (
-          entry?.submissionId !== submissionId ||
-          !ownedHere(binding, found.legacy, entry.owner)
-        ) {
-          return;
-        }
-        store.removeItem(found.key);
-      } catch {
-        return;
-      }
-      changed();
+      slot.release(binding, scope, submissionId);
     },
 
     restore(scope, binding) {

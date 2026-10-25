@@ -478,7 +478,7 @@ describe('never silently forgotten: the outcome-unknown marker (PR 319 review 2,
     );
     expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)?.dispute.marker).toBe(true);
 
-    expect(saveUnresolvedDispute('TXN_1', remembered(), BINDING)).toBe(true);
+    expect(saveUnresolvedDispute('TXN_1', remembered(), BINDING)).toBe('SAVED');
     expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)).toMatchObject({
       kind: 'VIEW_ONLY',
       dispute: { marker: true, replay: null },

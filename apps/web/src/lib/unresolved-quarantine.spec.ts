@@ -28,6 +28,7 @@ const { K1, K2, STORES } =
   require('@/test/unresolved-stores') as typeof import('@/test/unresolved-stores');
 const { restoreUnresolvedOrder } =
   require('./unresolved-order') as typeof import('./unresolved-order');
+const { fingerprintOf } = require('./record-fingerprint') as typeof import('./record-fingerprint');
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 type Binding = import('./unresolved-tenancy').Binding;
@@ -109,8 +110,8 @@ describe.each(STORES)('the $name store, A’s membership ended between save and 
 
   it('is held for every person on the device — this one and another — and shown to none', () => {
     const raw = legacyEntry();
-    expect(heldNow(now)).toEqual([{ key: old(), raw }]);
-    expect(heldNow(other)).toEqual([{ key: old(), raw }]);
+    expect(heldNow(now)).toEqual([{ key: old(), fingerprint: fingerprintOf(raw) }]);
+    expect(heldNow(other)).toEqual([{ key: old(), fingerprint: fingerprintOf(raw) }]);
     expect(store.restore(other)).toBeNull();
     expect(store.save(other, K2)).not.toBe('SAVED');
   });
@@ -122,7 +123,7 @@ describe.each(STORES)('the $name store, A’s membership ended between save and 
     expect(heldNow(now)).toEqual([]);
     // The record itself stays, byte for byte, and still holds another person.
     expect(window.sessionStorage.getItem(old())).toBe(raw);
-    expect(heldNow(other)).toEqual([{ key: old(), raw }]);
+    expect(heldNow(other)).toEqual([{ key: old(), fingerprint: fingerprintOf(raw) }]);
     // This person may now start a fresh one — under their own key, never over it.
     expect(store.save(now, K2)).toBe('SAVED');
     expect(window.sessionStorage.getItem(old())).toBe(raw);
@@ -135,13 +136,13 @@ describe.each(STORES)('the $name store, A’s membership ended between save and 
     // The record changes between drawing the warning and the acknowledgement.
     window.sessionStorage.setItem(old(), `${raw} `);
     quarantine().acknowledge(now.person, fence);
-    expect(heldNow(now)).toEqual([{ key: old(), raw: `${raw} ` }]);
+    expect(heldNow(now)).toEqual([{ key: old(), fingerprint: fingerprintOf(`${raw} `) }]);
     // An acknowledgement for a record that is gone covers nothing that comes later.
     window.sessionStorage.setItem(old(), raw);
     quarantine().acknowledge(now.person, heldNow(now));
     window.sessionStorage.setItem(`${store.prefix}${QUARANTINE_MARK}later`, '{"v":1}');
     expect(heldNow(now)).toEqual([
-      { key: `${store.prefix}${QUARANTINE_MARK}later`, raw: '{"v":1}' },
+      { key: `${store.prefix}${QUARANTINE_MARK}later`, fingerprint: fingerprintOf('{"v":1}') },
     ]);
   });
 
@@ -150,7 +151,7 @@ describe.each(STORES)('the $name store, A’s membership ended between save and 
     quarantine().acknowledge(now.person, heldNow(now));
     expect(heldNow(now)).toEqual([]);
     window.sessionStorage.setItem(old(), `${raw} `);
-    expect(heldNow(now)).toEqual([{ key: old(), raw: `${raw} ` }]);
+    expect(heldNow(now)).toEqual([{ key: old(), fingerprint: fingerprintOf(`${raw} `) }]);
   });
 
   it('the person’s own “set it aside” leaves it: only what is theirs is cleared', () => {
@@ -207,7 +208,9 @@ describe.each(STORES)('the $name store: no path removes an unknown outcome', (st
     // The page's own key holds something that is not this person's readable entry.
     window.sessionStorage.setItem(own(now), '{"v":"corrupt"}');
     expect(store.save(now, K2)).not.toBe('SAVED');
-    store.quarantine.acknowledge(now.person, [{ key: own(now), raw: '{"v":"corrupt"}' }]);
+    store.quarantine.acknowledge(now.person, [
+      { key: own(now), fingerprint: fingerprintOf('{"v":"corrupt"}') },
+    ]);
     expect(store.save(now, K2)).toBe('SAVED');
     const moved = all().filter((key) => key.startsWith(`${store.prefix}${QUARANTINE_MARK}`));
     expect(moved).toHaveLength(1);

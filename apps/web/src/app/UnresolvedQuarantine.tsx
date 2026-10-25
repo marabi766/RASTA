@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useId, useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 
 import { Alert, Button } from '@/ui';
 import type { AccountTags, Held, QuarantineSource } from '@/lib/unresolved-tenancy';
@@ -19,6 +19,15 @@ import type { AccountTags, Held, QuarantineSource } from '@/lib/unresolved-tenan
  * this person only, removes nothing and sends nothing. The store refuses to
  * save a fresh submission while a record is held (`mayStartFresh`), so a press
  * that beats this check still sends nothing.
+ *
+ * The gate reads again when a record of its kind is newly held — a late answer
+ * kept aside after the person set its request aside and started another (PR
+ * 405 review 3, R1) — so that outcome is shown at once, in the same fixed
+ * words. Then the warning is drawn **beside** the form, which stays mounted:
+ * what it shows (another request's own uncertainty view, typed text) is not
+ * thrown away, and the store refuses a fresh save while the hold lasts. An acknowledgement that could not be written lifts nothing, and the
+ * person is told so in fixed words, with a next step that does not rest on a
+ * list's silence (R2).
  */
 
 export const QUARANTINE_TITLE = 'درخواستی پیشین روی این دستگاه نتیجه‌ی نامعلومی دارد';
@@ -29,6 +38,9 @@ export const QUARANTINE_TEXT =
 export const QUARANTINE_CONFIRM = 'می‌دانم که درخواست تازه ممکن است همان کار را دوباره انجام دهد.';
 
 export const QUARANTINE_CONTINUE = 'ادامه با درخواست تازه';
+
+export const QUARANTINE_ACK_FAILED =
+  'پذیرش شما در این مرورگر ذخیره نشد، پس فرم تازه باز نمی‌شود و چیزی هم فرستاده نشده است؛ شاید فضای ذخیره‌سازی مرورگر پر باشد. پیش از هر کار دیگر فهرست‌های مربوط را ببینید و به یاد داشته باشید که نبودن یک درخواست در فهرست به این معنا نیست که انجام نشده است. سپس صفحه را تازه کنید و دوباره بپذیرید.';
 
 export function QuarantineGate({
   source,
@@ -43,25 +55,37 @@ export function QuarantineGate({
   const person = account.person;
   const legacy = account.legacy.join(' ');
   const [held, setHeld] = useState<readonly Held[]>([]);
+  /** Held after the form was drawn: the warning goes beside it, never in its place. */
+  const [beside, setBeside] = useState(false);
+  const blocking = useRef(false);
   const [confirmed, setConfirmed] = useState(false);
+  const [failed, setFailed] = useState(false);
   const confirmId = useId();
 
   useEffect(() => {
-    setHeld(source.held({ person, legacy: legacy === '' ? [] : legacy.split(' ') }));
+    const read = () => source.held({ person, legacy: legacy === '' ? [] : legacy.split(' ') });
+    const first = read();
+    blocking.current = first.length > 0;
+    setHeld(first);
+    setBeside(false);
+    return source.subscribe(() => {
+      setHeld(read());
+      if (!blocking.current) setBeside(true);
+    });
   }, [source, person, legacy]);
 
-  if (held.length === 0) return <>{children}</>;
-
   const acknowledge = () => {
-    source.acknowledge(person, held);
+    // Never "done" after a write that failed: the hold stays and the person is told.
+    setFailed(source.acknowledge(person, held) === 'FAILED');
     setConfirmed(false);
     setHeld(source.held({ person, legacy: legacy === '' ? [] : legacy.split(' ') }));
   };
 
-  return (
+  const warning = (
     <Alert tone="warning" title={QUARANTINE_TITLE}>
       <div className="flex flex-col gap-3">
         <p>{QUARANTINE_TEXT}</p>
+        {failed ? <Alert tone="danger">{QUARANTINE_ACK_FAILED}</Alert> : null}
         <label htmlFor={confirmId} className="flex items-start gap-2">
           <input
             id={confirmId}
@@ -79,5 +103,14 @@ export function QuarantineGate({
         </div>
       </div>
     </Alert>
+  );
+
+  if (held.length > 0 && !beside) return warning;
+  // One shape either way, so the form keeps its place and its state.
+  return (
+    <>
+      {held.length > 0 ? warning : null}
+      {children}
+    </>
   );
 }

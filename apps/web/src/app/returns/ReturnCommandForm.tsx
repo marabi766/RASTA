@@ -24,9 +24,11 @@ import {
 import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import type { Binding } from '@/lib/unresolved-order';
 import {
+  answerUnresolvedReturn,
   clearUnresolvedReturn,
   restoreUnresolvedReturn,
   saveUnresolvedReturn,
+  settleUnresolvedReturn,
   type ReplayStamp,
   type RestoredReturn,
   type ReturnScope,
@@ -219,7 +221,7 @@ function ReturnCommandFormBody({
       } catch (error) {
         // Done: the action redirects to the request.
         if (isRedirect(error)) {
-          clearUnresolvedReturn(scope, sentId, binding);
+          settleUnresolvedReturn(scope, sentId, binding);
           throw error;
         }
         const ended = await sessionHasEnded();
@@ -230,8 +232,8 @@ function ReturnCommandFormBody({
 
       // Still in doubt: kept. A definite answer to THIS submission's first send:
       // its own record is dropped — never another's.
-      if (next.kind === 'UNCONFIRMED') saveUnresolvedReturn(scope, next, binding);
-      else if (firstSend) clearUnresolvedReturn(scope, sentId, binding);
+      if (next.kind === 'UNCONFIRMED') answerUnresolvedReturn(scope, next, binding);
+      else if (firstSend) settleUnresolvedReturn(scope, sentId, binding);
       return next;
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds, lines],

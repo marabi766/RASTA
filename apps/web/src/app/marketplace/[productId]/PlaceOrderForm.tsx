@@ -13,9 +13,11 @@ import {
   type PlaceOrderFormValues,
 } from '@/lib/place-order-fields';
 import {
+  answerUnresolvedOrder,
   clearUnresolvedOrder,
   restoreUnresolvedOrder,
   saveUnresolvedOrder,
+  settleUnresolvedOrder,
   type Binding,
   type RestoredOrder,
   type UnresolvedOrder,
@@ -145,27 +147,40 @@ function OrderForm({
   newOrderHref,
   productId,
   binding,
+  sessionMaxAgeSeconds,
   initial,
 }: PlaceOrderFormProps & { initial: PlaceOrderFormState }) {
   const send = useCallback(
     async (previous: PlaceOrderFormState, form: FormData): Promise<PlaceOrderFormState> => {
       const firstSend = previous.kind !== 'UNCONFIRMED';
+      if (!firstSend) {
+        // The same request is sent again only while its own entry still holds the
+        // slot, from the login it is bound to: once set aside — another order may
+        // have taken the slot since — this view no longer re-sends.
+        const stored = restoreUnresolvedOrder(productId, binding, sessionMaxAgeSeconds);
+        if (stored?.kind !== 'RETRYABLE' || stored.order.submissionId !== previous.submissionId) {
+          return { ...previous, viewOnly: true };
+        }
+      }
       // Remember it BEFORE it is sent (F1): from here until an answer, a reload or
       // a lost response must find the same key, not mint another.
       const unsent = firstSend ? pendingFrom(form) : null;
+      const sentId = firstSend ? unsent?.submissionId : previous.submissionId;
       // If it cannot be remembered it is not sent: a lost response would leave a
-      // committed order and a reload that mints another key.
-      if (unsent && !saveUnresolvedOrder(productId, unsent, binding)) {
-        return { kind: 'STORAGE_UNAVAILABLE' };
-      }
+      // committed order and a reload that mints another key. Nor is it sent while
+      // another order's entry holds the slot — that entry is never written over.
+      const saved = unsent ? saveUnresolvedOrder(productId, unsent, binding) : null;
+      if (saved === 'HELD') return { kind: 'HELD' };
+      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
 
       let next: PlaceOrderFormState;
       try {
         next = await submitPlaceOrder(previous, form);
       } catch (error) {
-        // The order was placed: the action redirects to it. Nothing is unresolved now.
+        // The order was placed: the action redirects to it. Nothing is unresolved
+        // now — for THIS submission; another one's entry is never touched.
         if (isRedirect(error)) {
-          clearUnresolvedOrder(productId, binding);
+          if (sentId) settleUnresolvedOrder(productId, sentId, binding);
           throw error;
         }
         // The call itself failed — a lost response after the order may have
@@ -190,13 +205,14 @@ function OrderForm({
         throw error;
       }
       if (firstSend) {
-        // Answered: with the correlation id if it is still in doubt, else settled.
-        if (next.kind === 'UNCONFIRMED') saveUnresolvedOrder(productId, next, binding);
-        else if (unsent) clearUnresolvedOrder(productId, binding);
+        // Answered: with the correlation id if it is still in doubt (kept aside
+        // when this order's entry no longer holds the slot), else settled.
+        if (next.kind === 'UNCONFIRMED') answerUnresolvedOrder(productId, next, binding);
+        else if (unsent) settleUnresolvedOrder(productId, unsent.submissionId, binding);
       }
       return next;
     },
-    [productId, binding],
+    [productId, binding, sessionMaxAgeSeconds],
   );
   const [state, action, pending] = useActionState(send, initial);
 
@@ -209,7 +225,7 @@ function OrderForm({
         csrfToken={csrfToken}
         offers={offers}
         newOrderHref={newOrderHref}
-        onStartNew={() => clearUnresolvedOrder(productId, binding)}
+        onStartNew={() => clearUnresolvedOrder(productId, state.submissionId, binding)}
       />
     );
   }
@@ -280,6 +296,9 @@ function OrderForm({
   );
 }
 
+export const HELD_MESSAGE =
+  'سفارش فرستاده نشد: درخواست دیگری برای همین کالا از همین مرورگر فرستاده شده و نتیجه‌اش هنوز معلوم نیست؛ ممکن است سفارش ثبت شده باشد. پیش از هر کار دیگر فهرست سفارش‌ها را ببینید و سپس صفحه را تازه کنید.';
+
 function FormBanner({ state }: { state: PlaceOrderFormState }) {
   if (state.kind === 'INVALID' && state.message) {
     return <Alert tone="warning">{state.message}</Alert>;
@@ -298,6 +317,8 @@ function FormBanner({ state }: { state: PlaceOrderFormState }) {
       </Alert>
     );
   }
+
+  if (state.kind === 'HELD') return <Alert tone="warning">{HELD_MESSAGE}</Alert>;
 
   if (state.kind === 'STORAGE_UNAVAILABLE') {
     return (

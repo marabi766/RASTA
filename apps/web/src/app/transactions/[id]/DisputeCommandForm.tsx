@@ -6,9 +6,11 @@ import { Alert, Button, Field, controlClassName } from '@/ui';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { normalizePersianText, toPersianDigits } from '@/lib/format';
 import {
+  answerUnresolvedDispute,
   clearUnresolvedDispute,
   restoreUnresolvedDispute,
   saveUnresolvedDispute,
+  settleUnresolvedDispute,
   type ReplayStamp,
   type RestoredDispute,
   disputeQuarantine,
@@ -170,9 +172,12 @@ function DisputeCommandFormBody({
       // lost response must find the same key, not mint another. Not sent if it
       // cannot be remembered.
       const unsent = firstSend ? pendingFrom(form, command, replay) : null;
-      if (unsent && !saveUnresolvedDispute(transactionId, unsent, binding)) {
-        return { kind: 'STORAGE_UNAVAILABLE' };
-      }
+      const sentId = firstSend ? unsent?.submissionId : previous.submissionId;
+      // Nor is it sent while another command's entry holds the slot: that entry
+      // is never written over (`lib/unresolved-dispute.ts`).
+      const saved = unsent ? saveUnresolvedDispute(transactionId, unsent, binding) : null;
+      if (saved === 'HELD') return { kind: 'HELD' };
+      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
 
       let next: DisputeFormState;
       try {
@@ -180,7 +185,7 @@ function DisputeCommandFormBody({
       } catch (error) {
         // Done: the action redirects to the transaction. Nothing is unresolved now.
         if (isRedirect(error)) {
-          clearUnresolvedDispute(transactionId, binding);
+          if (sentId) settleUnresolvedDispute(transactionId, sentId, binding);
           throw error;
         }
         // The call itself failed. A lost response after the command may have
@@ -197,8 +202,10 @@ function DisputeCommandFormBody({
       // retry past the deadline, without its stamp for good), or a definite
       // refusal of a first send that never left (dropped). A retry is always
       // answered in doubt: only the redirect above ends it.
-      if (next.kind === 'UNCONFIRMED') saveUnresolvedDispute(transactionId, next, binding);
-      else if (firstSend) clearUnresolvedDispute(transactionId, binding);
+      // Either way only THIS submission's entry: a late answer for a command set
+      // aside after another took the slot is kept aside, the other left as it is.
+      if (next.kind === 'UNCONFIRMED') answerUnresolvedDispute(transactionId, next, binding);
+      else if (firstSend && sentId) settleUnresolvedDispute(transactionId, sentId, binding);
       return next;
     },
     [transactionId, command, replay, binding, sessionMaxAgeSeconds],
@@ -215,7 +222,7 @@ function DisputeCommandFormBody({
         csrfToken={csrfToken}
         headingId={headingId}
         transactionHref={`/transactions/${encodeURIComponent(transactionId)}`}
-        onForget={() => clearUnresolvedDispute(transactionId, binding)}
+        onForget={() => clearUnresolvedDispute(transactionId, state.submissionId, binding)}
       />
     );
   }
@@ -282,6 +289,9 @@ const REFUSAL_MESSAGES: Record<Extract<DisputeFormState, { kind: 'REFUSED' }>['r
   COMMAND: 'این درخواست معتبر شناخته نشد. صفحه را تازه کنید و دوباره تلاش کنید.',
 };
 
+export const HELD_MESSAGE =
+  'درخواست ارسال نشد: اقدام دیگری روی همین تراکنش از همین مرورگر فرستاده شده و نتیجه‌اش هنوز معلوم نیست؛ ممکن است انجام شده باشد. تا روشن‌شدن نتیجه‌ی آن، این فرم فرستاده نمی‌شود. وضعیت را با تازه‌کردن صفحه ببینید.';
+
 function CommandBanner({ state }: { state: DisputeFormState }) {
   if (state.kind === 'INVALID' && state.message) {
     return <Alert tone="warning">{state.message}</Alert>;
@@ -302,6 +312,8 @@ function CommandBanner({ state }: { state: DisputeFormState }) {
   if (state.kind === 'NOT_FOUND') {
     return <Alert tone="warning">این تراکنش دیگر در دسترس نیست. صفحه را تازه کنید.</Alert>;
   }
+
+  if (state.kind === 'HELD') return <Alert tone="warning">{HELD_MESSAGE}</Alert>;
 
   if (state.kind === 'STORAGE_UNAVAILABLE') {
     return (

@@ -35,9 +35,23 @@ export function pageContext(session: WebSession): string {
   return contextTagFor(webServerEnv().WEB_SESSION_SECRET, actingOrganizationId(session));
 }
 
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Whether `received` is the tag `expected`. Anything that is not a canonical
+ * base64url text of the tag's length in BYTES is no tag — a malformed one
+ * resets the page like an unknown one (PR 405 review 3, R3: `é` sixteen times
+ * has the tag's length in characters and twice it in bytes, and
+ * `timingSafeEqual` throws on buffers of different lengths). Only two buffers
+ * of the same length are compared, in constant time.
+ */
 function sameTag(received: unknown, expected: string): boolean {
-  if (typeof received !== 'string' || received.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(received), Buffer.from(expected));
+  if (typeof received !== 'string' || !BASE64URL.test(received)) return false;
+  const bytes = Buffer.from(received, 'base64url');
+  const want = Buffer.from(expected, 'base64url');
+  // Spare bits let several texts decode to the same bytes; only the canonical one was drawn.
+  if (bytes.toString('base64url') !== received) return false;
+  return bytes.length === want.length && timingSafeEqual(bytes, want);
 }
 
 /**

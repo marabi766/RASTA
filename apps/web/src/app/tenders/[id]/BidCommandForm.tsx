@@ -21,9 +21,11 @@ import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { toPersianDigits } from '@/lib/format';
 import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import {
+  answerUnresolvedBid,
   clearUnresolvedBid,
   restoreUnresolvedBid,
   saveUnresolvedBid,
+  settleUnresolvedBid,
   type ReplayStamp,
   type UnresolvedBid,
   bidQuarantine,
@@ -178,7 +180,7 @@ function BidCommandFormBody({
       } catch (error) {
         // Done: the action redirects to the tender.
         if (isRedirect(error)) {
-          clearUnresolvedBid(tenderId, sentId, account);
+          settleUnresolvedBid(tenderId, sentId, account);
           throw error;
         }
         const ended = await sessionHasEnded();
@@ -213,13 +215,13 @@ function BidCommandFormBody({
       // Still in doubt: kept. A definite answer to THIS submission's first send:
       // its own record is dropped — never another's.
       if (next.kind === 'UNCONFIRMED') {
-        saveUnresolvedBid(
+        answerUnresolvedBid(
           tenderId,
           { command, submissionId: next.submissionId, correlationId: next.correlationId },
           account,
         );
       } else if (firstSend) {
-        clearUnresolvedBid(tenderId, sentId, account);
+        settleUnresolvedBid(tenderId, sentId, account);
       }
       return next;
     },

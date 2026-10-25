@@ -125,7 +125,7 @@ describe.each(STORES)('the $name store', (store) => {
     for (const key of keys()) {
       expect(key.startsWith(`${store.prefix}${QUARANTINE_MARK}`)).toBe(true);
       const raw = window.sessionStorage.getItem(key)!;
-      expect(Object.keys(JSON.parse(raw)).sort()).toEqual(['at', 'quarantined', 'v']);
+      expect(Object.keys(JSON.parse(raw)).sort()).toEqual(['at', 'g', 'quarantined', 'v']);
       for (const kept of [K1, K2, inA.owner, inB.owner, inA.person, store.scope]) {
         expect(`${key} ${raw}`).not.toContain(kept);
       }

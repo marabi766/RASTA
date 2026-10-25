@@ -55,14 +55,44 @@
  *   submission of that store's kind is saved — so none is sent — and the form
  *   is replaced by a fixed warning (`app/UnresolvedQuarantine.tsx`).
  * - **Release.** Only by the person's explicit acknowledgement of the duplicate
- *   risk, fenced to the exact records the warning was drawn for (key and bytes,
- *   `acknowledge`): it lifts the hold **for that person**, resends nothing, and
- *   removes nothing — another person on the device is still warned. A record
- *   that changed after the warning was drawn is not covered. The one other
- *   release is the owner service's answer to THAT request, which only an entry
- *   that verifies for its person can receive (its own form, under its own key
- *   and stamp): a retry's refusal, or a list that does not show it, is neither.
+ *   risk, fenced to the exact records the warning was drawn for (key and a
+ *   fingerprint of the bytes, `acknowledge`): it lifts the hold **for that
+ *   person**, resends nothing, and removes nothing — another person on the
+ *   device is still warned. A record that changed after the warning was drawn
+ *   is not covered. The acknowledgement keeps a bounded fingerprint, never a
+ *   copy (PR 405 review 3, R2), and its outcome is returned: a write that
+ *   failed lifts nothing and says so (`AckOutcome`). The one other release is
+ *   the owner service's answer to THAT request, which only an entry that
+ *   verifies for its person can receive (its own form, under its own key and
+ *   stamp): a retry's refusal, or a list that does not show it, is neither.
+ *
+ * ## One slot, fenced to its submission (PR 405 review 3, R1)
+ *
+ * Every store keeps at most one entry per scope, and every write to it goes
+ * through `fencedSlot`, so the seven cannot drift apart again. The fence is
+ * the whole ownership tuple: the person and the organization (the key and the
+ * entry's owner tag), the scope (the key, and the entry where it names one),
+ * the submission id, and — for an answer — the login it was sent under.
+ *
+ * - `start`, before a first send: refused (`HELD`) while the slot holds another
+ *   submission's entry, or while a quarantined record holds this kind for the
+ *   person. Nothing is written over anything.
+ * - `answer`, a later answer still in doubt: updates the slot only while it
+ *   holds THAT submission's entry, keeping its first body, its first time and
+ *   a withdrawn replay withdrawn. Otherwise — the person set it aside and
+ *   another submission took the slot, or it was reduced — the slot is left
+ *   exactly as it is and the late answer is **kept aside** as a content-free
+ *   quarantined record (`SET_ASIDE`), which holds this kind and draws the
+ *   fixed warning. If even that cannot be written (a full quota, a logout in
+ *   between), it is kept for this document in memory and holds the same way
+ *   until this tab navigates away — never dropped silently.
+ * - `settle`, a definite answer, and `release`, the person's own "set it
+ *   aside": remove the slot's entry only when it is that submission's — and
+ *   only that one key; another organization's entry, an old-format entry of
+ *   another submission and every quarantined record stay.
  */
+
+import { fingerprintOf } from './record-fingerprint';
 
 /** The tags the page computed for this person, organization and login (`server/submission.ts`). */
 export interface Binding {
@@ -83,10 +113,14 @@ export const QUARANTINE_MARK = '!q.';
 /** Under a store's prefix: what one person acknowledged (`acknowledge`). */
 const ACK_MARK = '!ack.';
 
-/** A quarantined record, exactly: where it is and what it holds. */
+/**
+ * A quarantined record, as the warning was drawn for it: where it is and a
+ * bounded fingerprint of what it holds (`lib/record-fingerprint.ts`) — never
+ * its content, which nothing shows.
+ */
 export interface Held {
   readonly key: string;
-  readonly raw: string;
+  readonly fingerprint: string;
 }
 
 /** How a store reads one of its entries; null when it does not read. */
@@ -179,6 +213,16 @@ function freshQuarantineKey(store: Storage, prefix: string, now: number): string
 }
 
 /**
+ * The content-free record of an unknown outcome: the time and a generation of
+ * its own, so no two such records are ever the same bytes — an acknowledgement
+ * of one never covers a later one.
+ */
+function quarantineMarker(now: number): string {
+  const generation = `${sequence.toString(36)}.${Math.floor(Math.random() * 2 ** 32).toString(36)}`;
+  return JSON.stringify({ v: 1, quarantined: true, at: now, g: generation });
+}
+
+/**
  * Drops the content of the entry under `key` and keeps the fact that an
  * outcome is unknown: a marker with nothing in it but the time, under a key
  * that names nobody and no scope. For an entry whose content may not outlive
@@ -191,16 +235,15 @@ export function reduceToQuarantine(
   key: string,
   now: number = Date.now(),
 ): void {
-  store.setItem(
-    freshQuarantineKey(store, prefix, now),
-    JSON.stringify({ v: 1, quarantined: true, at: now }),
-  );
+  store.setItem(freshQuarantineKey(store, prefix, now), quarantineMarker(now));
   store.removeItem(key);
 }
 
 /**
  * Moves the record under `key` aside, byte for byte, so the key can take a new
- * entry without writing over it; acknowledgements of it follow it.
+ * entry without writing over it; acknowledgements of it follow it. If a write
+ * fails part way the record stays where it was (and may be held twice) — a
+ * hold is never lifted by a failure.
  */
 export function relocate(
   store: Storage,
@@ -210,16 +253,16 @@ export function relocate(
 ): void {
   const raw = store.getItem(key);
   if (raw === null) return;
+  const fingerprint = fingerprintOf(raw);
   const moved = freshQuarantineKey(store, prefix, now);
   store.setItem(moved, raw);
   for (const ackKey of keysUnder(store, `${prefix}${ACK_MARK}`)) {
     const acks = acknowledgements(store, ackKey);
-    if (acks.some((ack) => ack.key === key && ack.raw === raw)) {
+    const covers = (ack: Held) => ack.key === key && ack.fingerprint === fingerprint;
+    if (acks.some(covers)) {
       store.setItem(
         ackKey,
-        JSON.stringify(
-          acks.map((ack) => (ack.key === key && ack.raw === raw ? { key: moved, raw } : ack)),
-        ),
+        JSON.stringify(acks.map((ack) => (covers(ack) ? { key: moved, fingerprint } : ack))),
       );
     }
   }
@@ -260,10 +303,14 @@ export function quarantinedFor<E extends { readonly owner: string }>(
   for (const key of keysUnder(store, prefix)) {
     if (key.startsWith(`${prefix}${ACK_MARK}`)) continue;
     const raw = store.getItem(key);
-    if (raw !== null && !ownEntry(prefix, key, raw, tags, parse)) held.push({ key, raw });
+    if (raw !== null && !ownEntry(prefix, key, raw, tags, parse)) {
+      held.push({ key, fingerprint: fingerprintOf(raw) });
+    }
   }
   return held;
 }
+
+const FINGERPRINT = /^[0-9a-z]{1,8}\.[0-9a-f]{64}$/;
 
 function acknowledgements(store: Storage, ackKey: string): Held[] {
   try {
@@ -274,14 +321,56 @@ function acknowledgements(store: Storage, ackKey: string): Held[] {
         typeof item === 'object' &&
         item !== null &&
         typeof (item as Held).key === 'string' &&
-        typeof (item as Held).raw === 'string',
+        typeof (item as Held).fingerprint === 'string' &&
+        FINGERPRINT.test((item as Held).fingerprint),
     );
   } catch {
     return [];
   }
 }
 
-/** The quarantined records this person has not acknowledged: what holds their next submission of this kind. */
+// ---------------------------------------------------------------------------
+// What could not be written: held in memory for this document
+
+/**
+ * A late answer that could not be kept aside in storage (quota, a logout in
+ * between, storage gone): its kind is held for this document — every person
+ * on it — with the same fixed warning, until each acknowledges it. Nothing of
+ * it is kept but the fact; it does not outlive the document, which is the
+ * most that can be promised when storage refuses.
+ */
+const MEMORY_MARK = 'memory:';
+const unrecorded = new Map<string, string[]>();
+const memoryAcks = new Map<string, Set<string>>();
+const watchers = new Map<string, Set<() => void>>();
+let memorySequence = 0;
+
+function notify(prefix: string): void {
+  for (const listener of [...(watchers.get(prefix) ?? [])]) listener();
+}
+
+function keepInMemory(prefix: string): void {
+  memorySequence += 1;
+  unrecorded.set(prefix, [...(unrecorded.get(prefix) ?? []), `${MEMORY_MARK}${memorySequence}`]);
+}
+
+function memoryHeldFor(prefix: string, person: string): Held[] {
+  const acked = memoryAcks.get(`${prefix} ${person}`) ?? new Set<string>();
+  return (unrecorded.get(prefix) ?? [])
+    .filter((key) => !acked.has(key))
+    .map((key) => ({ key, fingerprint: key }));
+}
+
+/** A new document's memory, for specs: nothing unrecorded, nothing acknowledged. */
+export function resetUnrecordedOutcomes(): void {
+  unrecorded.clear();
+  memoryAcks.clear();
+}
+
+/**
+ * The quarantined records this person has not acknowledged — in storage and
+ * in this document's memory: what holds their next submission of this kind.
+ */
 export function heldFor<E extends { readonly owner: string }>(
   store: Storage,
   prefix: string,
@@ -289,34 +378,83 @@ export function heldFor<E extends { readonly owner: string }>(
   parse: EntryParser<E>,
 ): Held[] {
   const acks = acknowledgements(store, `${prefix}${ACK_MARK}${tags.person}`);
-  return quarantinedFor(store, prefix, tags, parse).filter(
-    (record) => !acks.some((ack) => ack.key === record.key && ack.raw === record.raw),
+  const stored = quarantinedFor(store, prefix, tags, parse).filter(
+    (record) =>
+      !acks.some((ack) => ack.key === record.key && ack.fingerprint === record.fingerprint),
   );
+  return [...stored, ...memoryHeldFor(prefix, tags.person)];
 }
 
 /**
+ * `ACKNOWLEDGED`: every record of the fence is covered. `CHANGED`: some of
+ * them changed or went after the warning was drawn and are not covered (the
+ * rest are). `FAILED`: the acknowledgement could not be written — nothing new
+ * is covered and the hold stays; the person is told so.
+ */
+export type AckOutcome = 'ACKNOWLEDGED' | 'CHANGED' | 'FAILED';
+
+/**
  * This person accepts the duplicate risk for exactly `fence` — the records the
- * warning was drawn for. Only those still there with the same bytes are
- * covered; nothing is removed or sent, and nobody else's hold is lifted.
+ * warning was drawn for. Only those still there with the same bytes (the same
+ * fingerprint, checked in this same turn) are covered; nothing is removed or
+ * sent, and nobody else's hold is lifted. What is written is bounded — a key
+ * and a fingerprint per record — and read back before success is reported.
  */
 export function acknowledge(
   store: Storage,
   prefix: string,
   person: string,
   fence: readonly Held[],
-): void {
-  if (!TAG.test(person)) return;
+): AckOutcome {
+  if (!TAG.test(person)) return 'FAILED';
   const ackKey = `${prefix}${ACK_MARK}${person}`;
-  const still = (record: Held) => store.getItem(record.key) === record.raw;
+  const still = (record: Held) => {
+    const raw = store.getItem(record.key);
+    return raw !== null && fingerprintOf(raw) === record.fingerprint;
+  };
+  const inStore = fence.filter((record) => !record.key.startsWith(MEMORY_MARK));
   const kept = acknowledgements(store, ackKey).filter(still);
-  const added = fence.filter(
+  const covered = inStore.filter(
     (record) =>
       record.key.startsWith(prefix) &&
       !record.key.startsWith(`${prefix}${ACK_MARK}`) &&
-      still(record) &&
-      !kept.some((ack) => ack.key === record.key && ack.raw === record.raw),
+      still(record),
   );
-  store.setItem(ackKey, JSON.stringify([...kept, ...added.map(({ key, raw }) => ({ key, raw }))]));
+  const added = covered.filter(
+    (record) =>
+      !kept.some((ack) => ack.key === record.key && ack.fingerprint === record.fingerprint),
+  );
+  const text = JSON.stringify([
+    ...kept,
+    ...added.map(({ key, fingerprint }) => ({ key, fingerprint })),
+  ]);
+  // Nothing new and nothing pruned: no write, so a full storage cannot fail it.
+  if (store.getItem(ackKey) !== text && (added.length > 0 || store.getItem(ackKey) !== null)) {
+    try {
+      store.setItem(ackKey, text);
+    } catch {
+      return 'FAILED';
+    }
+    if (store.getItem(ackKey) !== text) return 'FAILED';
+  }
+  return acknowledgeInMemory(prefix, person, fence) && covered.length === inStore.length
+    ? 'ACKNOWLEDGED'
+    : 'CHANGED';
+}
+
+/** The memory part of a fence: covered when still unrecorded here. False when one of them is not. */
+function acknowledgeInMemory(prefix: string, person: string, fence: readonly Held[]): boolean {
+  const pending = unrecorded.get(prefix) ?? [];
+  const id = `${prefix} ${person}`;
+  const acked = memoryAcks.get(id) ?? new Set<string>();
+  let all = true;
+  for (const record of fence) {
+    if (!record.key.startsWith(MEMORY_MARK)) continue;
+    if (pending.includes(record.key) && record.fingerprint === record.key) acked.add(record.key);
+    else all = false;
+  }
+  memoryAcks.set(id, acked);
+  return all;
 }
 
 /**
@@ -337,7 +475,9 @@ export function freeOwnKey<E extends { readonly owner: string }>(
 /** What a form of one kind needs to know and do about quarantined records (`app/UnresolvedQuarantine.tsx`). */
 export interface QuarantineSource {
   held(tags: AccountTags): readonly Held[];
-  acknowledge(person: string, fence: readonly Held[]): void;
+  acknowledge(person: string, fence: readonly Held[]): AckOutcome;
+  /** Told when a record of this kind is newly held (a late answer kept aside); returns the unsubscribe. */
+  subscribe(listener: () => void): () => void;
 }
 
 function sessionStore(): Storage | null {
@@ -348,7 +488,7 @@ function sessionStore(): Storage | null {
   }
 }
 
-/** The quarantine of the store under `prefix`, read from this tab's `sessionStorage`. */
+/** The quarantine of the store under `prefix`, read from this tab's `sessionStorage` and this document's memory. */
 export function quarantineOf<E extends { readonly owner: string }>(
   prefix: string,
   parse: EntryParser<E>,
@@ -357,18 +497,32 @@ export function quarantineOf<E extends { readonly owner: string }>(
     held(tags) {
       try {
         const store = sessionStore();
-        return store ? heldFor(store, prefix, tags, parse) : [];
+        return store ? heldFor(store, prefix, tags, parse) : memoryHeldFor(prefix, tags.person);
       } catch {
-        return [];
+        return memoryHeldFor(prefix, tags.person);
       }
     },
     acknowledge(person, fence) {
       try {
         const store = sessionStore();
-        if (store) acknowledge(store, prefix, person, fence);
+        if (store) return acknowledge(store, prefix, person, fence);
+        // No storage at all: only what this document holds in memory can be covered.
+        const onlyMemory = fence.every((record) => record.key.startsWith(MEMORY_MARK));
+        return onlyMemory && TAG.test(person) && acknowledgeInMemory(prefix, person, fence)
+          ? 'ACKNOWLEDGED'
+          : 'FAILED';
       } catch {
-        // Unavailable storage: nothing acknowledged, the hold stays.
+        // Unavailable storage: nothing acknowledged, the hold stays — and the person is told.
+        return 'FAILED';
       }
+    },
+    subscribe(listener) {
+      const set = watchers.get(prefix) ?? new Set<() => void>();
+      set.add(listener);
+      watchers.set(prefix, set);
+      return () => {
+        set.delete(listener);
+      };
     },
   };
 }
@@ -409,4 +563,196 @@ export function mayStartFresh<E extends { readonly owner: string }>(
 /** Whether a located entry naming `entryOwner` is this page's to show. */
 export function ownedHere(binding: Binding, legacy: boolean, entryOwner: string): boolean {
   return legacy ? binding.legacy.includes(entryOwner) : entryOwner === binding.owner;
+}
+
+// ---------------------------------------------------------------------------
+// The fenced slot: every store's save, answer, settle and release (R1)
+
+/** What the slot reads of a store's entry: whose, which submission, which login. */
+export interface SlotEntry {
+  readonly owner: string;
+  readonly submissionId: string;
+  /** The login it was sent under; absent in a content-free marker. */
+  readonly session?: string;
+}
+
+/**
+ * `SAVED`: stored. `HELD`: another submission's entry holds this slot, or a
+ * quarantined record holds this kind for this person — nothing was written and
+ * this submission must not be sent. `UNAVAILABLE`: storage refused it, or a
+ * logout has started.
+ */
+export type StartOutcome = 'SAVED' | 'HELD' | 'UNAVAILABLE';
+
+/**
+ * `SAVED`: the slot's entry of this submission is updated. `SET_ASIDE`: the
+ * slot no longer holds it — it was left exactly as it is, and the answer is
+ * kept aside as a content-free quarantined record. `UNAVAILABLE`: neither
+ * could be written; this submission's earlier entry, if the slot still holds
+ * it, stays as it was, and otherwise the outcome is held in memory.
+ */
+export type AnswerOutcome = 'SAVED' | 'SET_ASIDE' | 'UNAVAILABLE';
+
+export interface FencedSlot<E extends SlotEntry> {
+  /**
+   * Before the first send of `submissionId`. `compose` gets the slot's entry
+   * of this same submission, if there is one, and returns the text to store —
+   * or null to keep what is there (a marker is never made re-sendable).
+   */
+  start(
+    binding: Binding,
+    scope: string,
+    submissionId: string,
+    compose: (earlier: E | null) => string | null,
+    now?: number,
+  ): StartOutcome;
+  /** An answer to `submissionId` that is still in doubt (`compose` as above, given its entry). */
+  answer(
+    binding: Binding,
+    scope: string,
+    submissionId: string,
+    compose: (earlier: E) => string | null,
+    now?: number,
+  ): AnswerOutcome;
+  /** A definite answer to `submissionId`, from the login it was sent under: its entry, and only that, goes. */
+  settle(binding: Binding, scope: string, submissionId: string): void;
+  /** The person sets aside the entry they were shown — `submissionId`'s, and only that. */
+  release(binding: Binding, scope: string, submissionId: string): void;
+  readonly quarantine: QuarantineSource;
+}
+
+/** Whether `entry` was sent under this page's login; a marker keeps no login and is anyone's of its person. */
+function sameLogin(entry: SlotEntry, binding: Binding): boolean {
+  return entry.session === undefined || entry.session === binding.session;
+}
+
+/**
+ * The one slot primitive every store writes through (`lib/unresolved-*.ts`).
+ * `closing` says a logout has started (nothing is written from then on);
+ * `changed` is told after every write.
+ */
+export function fencedSlot<E extends SlotEntry>(
+  prefix: string,
+  parse: EntryParser<E>,
+  hooks: { readonly closing: () => boolean; readonly changed?: () => void },
+): FencedSlot<E> {
+  const changed = () => hooks.changed?.();
+
+  /** The slot's entry, when it is this person's and organization's own (or their old-format one). */
+  function occupant(store: Storage, binding: Binding, scope: string) {
+    const found = locate(store, prefix, binding, scope);
+    const located = found === null ? null : storedKeyOf(prefix, found.key);
+    const entry = found === null || located === null ? null : parse(found.raw, located);
+    if (found === null || entry === null || !ownedHere(binding, found.legacy, entry.owner)) {
+      return null;
+    }
+    return { key: found.key, legacy: found.legacy, entry };
+  }
+
+  /** The slot's entry of `submissionId` from this login — the one an answer may touch. */
+  function answerable(store: Storage, binding: Binding, scope: string, submissionId: string) {
+    const held = occupant(store, binding, scope);
+    return held !== null &&
+      !held.legacy &&
+      held.entry.submissionId === submissionId &&
+      sameLogin(held.entry, binding)
+      ? held
+      : null;
+  }
+
+  /** A late answer for a slot that is no longer its own: kept aside, never over anything. */
+  function setAside(store: Storage | null, now: number): AnswerOutcome {
+    try {
+      if (store === null || hooks.closing()) throw new Error('not written');
+      store.setItem(freshQuarantineKey(store, prefix, now), quarantineMarker(now));
+      return 'SET_ASIDE';
+    } catch {
+      keepInMemory(prefix);
+      return 'UNAVAILABLE';
+    } finally {
+      changed();
+      notify(prefix);
+    }
+  }
+
+  return {
+    quarantine: quarantineOf(prefix, parse),
+
+    start(binding, scope, submissionId, compose) {
+      if (hooks.closing()) return 'UNAVAILABLE';
+      try {
+        const store = sessionStore();
+        if (!store) return 'UNAVAILABLE';
+        const held = occupant(store, binding, scope);
+        // Another submission's entry — even a marker — is never replaced; nor is an
+        // old-format entry, which is only ever shown (it may be another organization's).
+        if (
+          held !== null &&
+          (held.legacy ||
+            held.entry.submissionId !== submissionId ||
+            !sameLogin(held.entry, binding))
+        ) {
+          return 'HELD';
+        }
+        if (held === null && !mayStartFresh(store, prefix, binding, parse)) return 'HELD';
+        const text = compose(held?.entry ?? null);
+        if (text === null) return 'SAVED';
+        const key = tenantKey(prefix, binding, scope);
+        // Never written over: whatever else the key holds is moved aside first.
+        freeOwnKey(store, prefix, key, binding, parse);
+        store.setItem(key, text);
+        changed();
+        return 'SAVED';
+      } catch {
+        return 'UNAVAILABLE';
+      }
+    },
+
+    answer(binding, scope, submissionId, compose, now = Date.now()) {
+      const store = sessionStore();
+      if (store !== null && !hooks.closing()) {
+        let own = false;
+        try {
+          const held = answerable(store, binding, scope, submissionId);
+          own = held !== null;
+          if (held !== null) {
+            const text = compose(held.entry);
+            if (text !== null) store.setItem(held.key, text);
+            changed();
+            return 'SAVED';
+          }
+        } catch {
+          // Its own entry is still there as it was: still shown, still holding its slot.
+          if (own) return 'UNAVAILABLE';
+        }
+      }
+      // Not its slot any more — set aside and replaced, reduced, or unreadable — or
+      // nothing can be read: the slot is not touched and the answer is kept aside.
+      return setAside(store, now);
+    },
+
+    settle(binding, scope, submissionId) {
+      try {
+        const store = sessionStore();
+        const held = store ? answerable(store, binding, scope, submissionId) : null;
+        if (!store || held === null) return;
+        store.removeItem(held.key);
+      } catch {
+        return;
+      }
+      changed();
+    },
+
+    release(binding, scope, submissionId) {
+      try {
+        const store = sessionStore();
+        const held = store ? occupant(store, binding, scope) : null;
+        if (!store || held === null || held.entry.submissionId !== submissionId) return;
+        store.removeItem(held.key);
+      } catch {
+        return;
+      }
+      changed();
+    },
+  };
 }

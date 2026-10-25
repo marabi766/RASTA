@@ -19,9 +19,11 @@ import {
   type StatementLineValues,
 } from '@/lib/statement-fields';
 import {
+  answerUnresolvedStatement,
   clearUnresolvedStatement,
   restoreUnresolvedStatement,
   saveUnresolvedStatement,
+  settleUnresolvedStatement,
   type ReplayStamp,
   type RestoredStatement,
   type StatementScope,
@@ -207,7 +209,7 @@ function StatementCommandFormBody({
       } catch (error) {
         // Done: the action redirects to the statement.
         if (isRedirect(error)) {
-          clearUnresolvedStatement(scope, sentId, binding);
+          settleUnresolvedStatement(scope, sentId, binding);
           throw error;
         }
         const ended = await sessionHasEnded();
@@ -218,8 +220,8 @@ function StatementCommandFormBody({
 
       // Still in doubt: kept. A definite answer to THIS submission's first send:
       // its own record is dropped — never another's.
-      if (next.kind === 'UNCONFIRMED') saveUnresolvedStatement(scope, next, binding);
-      else if (firstSend) clearUnresolvedStatement(scope, sentId, binding);
+      if (next.kind === 'UNCONFIRMED') answerUnresolvedStatement(scope, next, binding);
+      else if (firstSend) settleUnresolvedStatement(scope, sentId, binding);
       return next;
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds],

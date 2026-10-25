@@ -67,6 +67,17 @@ describe('the boundary', () => {
     ['drawn for another organization', () => pageContext(inA)],
     ['with no tag', () => undefined],
     ['with a tag that is not one', () => 'x'.repeat(16)],
+    // R3: the tag's length in characters, not in bytes — never a page error.
+    ['with a non-ASCII tag of the same length', () => 'é'.repeat(16)],
+    ['with a tag of astral characters', () => '😀'.repeat(8)],
+    ['with a tag one character short', () => pageContext(inB).slice(1)],
+    ['with a tag one character long', () => `${pageContext(inB)}A`],
+    [
+      'with the tag in plain base64',
+      () => pageContext(inB).replace(/-/g, '+').replace(/_/g, '/') + '==',
+    ],
+    ['with a tag that is empty', () => ''],
+    ['with a tag holding a NUL', () => `${pageContext(inB).slice(0, 15)}\0`],
     ['with the tag twice', () => [pageContext(inB), pageContext(inB)]],
   ])(
     'hands it nothing for a URL %s: every cursor, filter and confirmation reset before any read',

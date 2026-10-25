@@ -8,19 +8,19 @@ import {
 } from './return-fields';
 import type { ReturnRequestBody } from './return-request';
 import {
-  freeOwnKey,
+  fencedSlot,
   keysUnder,
   locate,
-  mayStartFresh,
   ownedHere,
   purgeForeign,
-  quarantineOf,
   storedKeyOf,
-  tenantKey,
   type AccountTags,
+  type AnswerOutcome,
   type Binding,
   type StoredKey,
 } from './unresolved-tenancy';
+
+export type { AnswerOutcome };
 
 /**
  * A return command whose outcome is unknown, kept in `sessionStorage` so that
@@ -293,7 +293,10 @@ function stored(store: Storage, key: string): Stored | null {
 const parseEntry = (raw: string, key: StoredKey): Stored | null => parse(raw, key.scope);
 
 /** The quarantine of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
-export const returnQuarantine = quarantineOf(KEY_PREFIX, parseEntry);
+/** The one slot per scope, fenced to its submission (`lib/unresolved-tenancy.ts`). */
+const slot = fencedSlot(KEY_PREFIX, parseEntry, { closing: () => accountClosing, changed });
+
+export const returnQuarantine = slot.quarantine;
 
 /**
  * Logout: every entry reduced to a marker; a record that does not read, and one
@@ -339,88 +342,92 @@ export function purgeForeignUnresolvedReturns(tags: AccountTags): void {
  */
 export type SaveOutcome = 'SAVED' | 'HELD' | 'UNAVAILABLE';
 
+/**
+ * What is stored for `entry`, or null to keep a marker as it is: a marker is
+ * never turned back into something that can be re-sent. When the slot already
+ * keeps this submission, its first command, body and time stay, and a withdrawn
+ * replay stays withdrawn.
+ */
+function recordOf(
+  scope: ReturnScope,
+  entry: Omit<UnresolvedReturn, 'savedAt' | 'marker'>,
+  earlier: Stored | null,
+  binding: Binding,
+  now: number,
+): string | null {
+  if (earlier?.marker) return null;
+  return JSON.stringify({
+    v: VERSION,
+    marker: false,
+    scope: scopeOf(scope),
+    command: earlier ? earlier.command : entry.command,
+    submissionId: entry.submissionId,
+    // The body is the first send's, whatever a later answer carries.
+    body: earlier ? earlier.body : entry.body,
+    correlationId: entry.correlationId,
+    // The entry dates from the first send.
+    savedAt: earlier ? earlier.savedAt : now,
+    // Once withdrawn — the server said the deadline passed — never restored.
+    replay: earlier && earlier.replay === null ? null : entry.replay,
+    owner: binding.owner,
+    session: binding.session,
+  });
+}
+
+/** Before the first send (`StartOutcome`, `lib/unresolved-tenancy.ts`). */
 export function saveUnresolvedReturn(
   scope: ReturnScope,
   entry: Omit<UnresolvedReturn, 'savedAt' | 'marker'>,
   binding: Binding,
   now: number = Date.now(),
 ): SaveOutcome {
-  if (accountClosing) return 'UNAVAILABLE';
-  try {
-    const store = storage();
-    if (!store) return 'UNAVAILABLE';
-    if (!belongs(scopeOf(scope), entry.command)) return 'UNAVAILABLE';
-    const found = locate(store, KEY_PREFIX, binding, scopeOf(scope));
-    const parsed = found === null ? null : parse(found.raw, scopeOf(scope));
-    // Someone else's is not this person's to keep (`purgeForeignUnresolvedReturns`).
-    const earlier =
-      found !== null && parsed !== null && ownedHere(binding, found.legacy, parsed.owner)
-        ? parsed
-        : null;
-    // Another submission's record — even a marker — is never replaced; nor is
-    // a record from before records were kept per organization, which is only
-    // ever shown (it may have been another organization's).
-    if (earlier !== null && (found?.legacy || earlier.submissionId !== entry.submissionId)) {
-      return 'HELD';
-    }
-    // A marker is never turned back into something that can be re-sent.
-    if (earlier?.marker) return 'SAVED';
-    const same = earlier !== null;
-    // A fresh submission waits while a quarantined record holds this kind for this person.
-    if (!same && !mayStartFresh(store, KEY_PREFIX, binding, parseEntry)) return 'HELD';
-    const key = tenantKey(KEY_PREFIX, binding, scopeOf(scope));
-    // Never written over: whatever else the key holds is moved aside first.
-    freeOwnKey(store, KEY_PREFIX, key, binding, parseEntry);
-    store.setItem(
-      key,
-      JSON.stringify({
-        v: VERSION,
-        marker: false,
-        scope: scopeOf(scope),
-        command: entry.command,
-        submissionId: entry.submissionId,
-        // The body is the first send's, whatever a later answer carries.
-        body: same ? earlier.body : entry.body,
-        correlationId: entry.correlationId,
-        // The entry dates from the first send.
-        savedAt: same ? earlier.savedAt : now,
-        // Once withdrawn — the server said the deadline passed — never restored.
-        replay: same && earlier.replay === null ? null : entry.replay,
-        owner: binding.owner,
-        session: binding.session,
-      }),
-    );
-    changed();
-    return 'SAVED';
-  } catch {
-    return 'UNAVAILABLE';
-  }
+  if (!belongs(scopeOf(scope), entry.command)) return 'UNAVAILABLE';
+  return slot.start(binding, scopeOf(scope), entry.submissionId, (earlier) =>
+    recordOf(scope, entry, earlier, binding, now),
+  );
 }
 
 /**
- * Forgets the record of `submissionId` — and only that one: a record another
- * submission holds stays, and so does every other organization's. A
- * record that cannot be attributed is never removed (quarantined).
+ * An answer to `entry.submissionId` still in doubt: its record is updated
+ * while the slot holds it; otherwise the slot is left as it is and the answer
+ * is kept aside (`SET_ASIDE`; `lib/unresolved-tenancy.ts`).
+ */
+export function answerUnresolvedReturn(
+  scope: ReturnScope,
+  entry: Omit<UnresolvedReturn, 'savedAt' | 'marker'>,
+  binding: Binding,
+  now: number = Date.now(),
+): AnswerOutcome {
+  return slot.answer(
+    binding,
+    scopeOf(scope),
+    entry.submissionId,
+    (earlier) => recordOf(scope, entry, earlier, binding, now),
+    now,
+  );
+}
+
+/** A definite answer to `submissionId`, from the login it was sent under: its record, and only that, goes. */
+export function settleUnresolvedReturn(
+  scope: ReturnScope,
+  submissionId: string,
+  binding: Binding,
+): void {
+  slot.settle(binding, scopeOf(scope), submissionId);
+}
+
+/**
+ * The person sets aside the record of `submissionId` — and only that one: a
+ * record another submission holds stays, and so does every other
+ * organization's. A record that cannot be attributed is never removed
+ * (quarantined).
  */
 export function clearUnresolvedReturn(
   scope: ReturnScope,
   submissionId: string,
   binding: Binding,
 ): void {
-  try {
-    const store = storage();
-    const found = store ? locate(store, KEY_PREFIX, binding, scopeOf(scope)) : null;
-    if (!store || found === null) return;
-    const entry = parse(found.raw, scopeOf(scope));
-    // Only this person's own record: anything that cannot be attributed stays (quarantined).
-    if (entry?.submissionId !== submissionId || !ownedHere(binding, found.legacy, entry.owner))
-      return;
-    store.removeItem(found.key);
-  } catch {
-    // See above.
-    return;
-  }
-  changed();
+  slot.release(binding, scopeOf(scope), submissionId);
 }
 
 /**

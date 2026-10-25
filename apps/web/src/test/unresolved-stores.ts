@@ -28,8 +28,14 @@ export interface StoreUnderTest {
   readonly holds: boolean;
   /** Whether a restored entry may be sent again at all (a marker store never). */
   readonly retries: boolean;
+  /** Before the first send (`start`). */
   save(binding: Binding, id: string, correlationId?: string | null): string;
+  /** A later answer still in doubt (`answer`): `SAVED`, `SET_ASIDE` or `UNAVAILABLE`. */
+  answer(binding: Binding, id: string, correlationId?: string | null): string;
+  /** A definite answer (`settle`). */
+  settle(binding: Binding, id: string): void;
   restore(binding: Binding): { kind: Kind; id: string } | null;
+  /** The person's own "set it aside" (`release`). */
   clear(binding: Binding, id: string): void;
   purgeForeign(tags: AccountTags): void;
   purgeAll(): void;
@@ -38,8 +44,14 @@ export interface StoreUnderTest {
   readonly quarantine: QuarantineSource;
 }
 
-const outcome = (saved: boolean | string): string =>
-  saved === true ? 'SAVED' : saved === false ? 'UNAVAILABLE' : saved;
+const disputeEntry = (id: string, correlationId: string | null) =>
+  ({
+    command: 'DISPUTE',
+    submissionId: id,
+    values: { ...EMPTY_DISPUTE_FORM, reason: 'کالا نرسید' },
+    correlationId,
+    replay: STAMP,
+  }) as const;
 
 const STATEMENT_SCOPE = { contractId: 'CTR_1', statementId: 'STM_1' };
 const CONTRACT_SCOPE = { contractId: 'CTR_1', slot: 'CONTRACT' as const, subjectId: null };
@@ -50,21 +62,26 @@ export const STORES: StoreUnderTest[] = [
     name: 'order',
     prefix: 'rasta.unresolved-order.',
     scope: 'PRD_1',
-    holds: false,
+    holds: true,
     retries: true,
     save: (b, id, correlationId = 'COR') =>
-      outcome(
-        order.saveUnresolvedOrder(
-          'PRD_1',
-          { submissionId: id, values: { offerId: 'OFR_1', quantity: '3' }, correlationId },
-          b,
-        ),
+      order.saveUnresolvedOrder(
+        'PRD_1',
+        { submissionId: id, values: { offerId: 'OFR_1', quantity: '3' }, correlationId },
+        b,
       ),
+    answer: (b, id, correlationId = 'COR_LATE') =>
+      order.answerUnresolvedOrder(
+        'PRD_1',
+        { submissionId: id, values: { offerId: 'OFR_1', quantity: '3' }, correlationId },
+        b,
+      ),
+    settle: (b, id) => order.settleUnresolvedOrder('PRD_1', id, b),
     restore: (b) => {
       const found = order.restoreUnresolvedOrder('PRD_1', b, MAX_AGE);
       return found && { kind: found.kind, id: found.order.submissionId };
     },
-    clear: (b) => order.clearUnresolvedOrder('PRD_1', b),
+    clear: (b, id) => order.clearUnresolvedOrder('PRD_1', id, b),
     purgeForeign: order.purgeForeignUnresolvedOrders,
     purgeAll: order.purgeAllUnresolvedOrders,
     open: order.markAccountOpen,
@@ -77,24 +94,15 @@ export const STORES: StoreUnderTest[] = [
     holds: true,
     retries: true,
     save: (b, id, correlationId = 'COR') =>
-      outcome(
-        dispute.saveUnresolvedDispute(
-          'TXN_1',
-          {
-            command: 'DISPUTE',
-            submissionId: id,
-            values: { ...EMPTY_DISPUTE_FORM, reason: 'کالا نرسید' },
-            correlationId,
-            replay: STAMP,
-          },
-          b,
-        ),
-      ),
+      dispute.saveUnresolvedDispute('TXN_1', disputeEntry(id, correlationId), b),
+    answer: (b, id, correlationId = 'COR_LATE') =>
+      dispute.answerUnresolvedDispute('TXN_1', disputeEntry(id, correlationId), b),
+    settle: (b, id) => dispute.settleUnresolvedDispute('TXN_1', id, b),
     restore: (b) => {
       const found = dispute.restoreUnresolvedDispute('TXN_1', b, MAX_AGE);
       return found && { kind: found.kind, id: found.dispute.submissionId };
     },
-    clear: (b) => dispute.clearUnresolvedDispute('TXN_1', b),
+    clear: (b, id) => dispute.clearUnresolvedDispute('TXN_1', id, b),
     purgeForeign: dispute.purgeForeignUnresolvedDisputes,
     purgeAll: dispute.purgeAllUnresolvedDisputes,
     open: dispute.markDisputesOpen,
@@ -112,6 +120,13 @@ export const STORES: StoreUnderTest[] = [
         { command: 'AUTHORIZE', submissionId: id, body: null, correlationId, replay: STAMP },
         b,
       ),
+    answer: (b, id, correlationId = 'COR_LATE') =>
+      ret.answerUnresolvedReturn(
+        RETURN_SCOPE,
+        { command: 'AUTHORIZE', submissionId: id, body: null, correlationId, replay: STAMP },
+        b,
+      ),
+    settle: (b, id) => ret.settleUnresolvedReturn(RETURN_SCOPE, id, b),
     restore: (b) => {
       const found = ret.restoreUnresolvedReturn(RETURN_SCOPE, b, MAX_AGE);
       return found && { kind: found.kind, id: found.entry.submissionId };
@@ -134,6 +149,13 @@ export const STORES: StoreUnderTest[] = [
         { command: 'APPROVE', submissionId: id, lines: [], correlationId, replay: STAMP },
         b,
       ),
+    answer: (b, id, correlationId = 'COR_LATE') =>
+      statement.answerUnresolvedStatement(
+        STATEMENT_SCOPE,
+        { command: 'APPROVE', submissionId: id, lines: [], correlationId, replay: STAMP },
+        b,
+      ),
+    settle: (b, id) => statement.settleUnresolvedStatement(STATEMENT_SCOPE, id, b),
     restore: (b) => {
       const found = statement.restoreUnresolvedStatement(STATEMENT_SCOPE, b, MAX_AGE);
       return found && { kind: found.kind, id: found.entry.submissionId };
@@ -156,6 +178,13 @@ export const STORES: StoreUnderTest[] = [
         { command: 'SIGN', submissionId: id, input: null, correlationId, replay: STAMP },
         b,
       ),
+    answer: (b, id, correlationId = 'COR_LATE') =>
+      contract.answerUnresolvedContractCommand(
+        CONTRACT_SCOPE,
+        { command: 'SIGN', submissionId: id, input: null, correlationId, replay: STAMP },
+        b,
+      ),
+    settle: (b, id) => contract.settleUnresolvedContractCommand(CONTRACT_SCOPE, id, b),
     restore: (b) => {
       const found = contract.restoreUnresolvedContractCommand(CONTRACT_SCOPE, b, MAX_AGE);
       return found && { kind: found.kind, id: found.entry.submissionId };
@@ -174,6 +203,9 @@ export const STORES: StoreUnderTest[] = [
     retries: false,
     save: (b, id, correlationId = 'COR') =>
       bid.saveUnresolvedBid('TND_1', { command: 'SUBMIT', submissionId: id, correlationId }, b),
+    answer: (b, id, correlationId = 'COR_LATE') =>
+      bid.answerUnresolvedBid('TND_1', { command: 'SUBMIT', submissionId: id, correlationId }, b),
+    settle: (b, id) => bid.settleUnresolvedBid('TND_1', id, b),
     restore: (b) => {
       const found = bid.restoreUnresolvedBid('TND_1', b);
       return found && { kind: 'VIEW_ONLY', id: found.submissionId };
@@ -196,6 +228,13 @@ export const STORES: StoreUnderTest[] = [
         { command: 'PUBLISH', submissionId: id, correlationId },
         b,
       ),
+    answer: (b, id, correlationId = 'COR_LATE') =>
+      owner.answerUnresolvedOwnerCommand(
+        'TND_1',
+        { command: 'PUBLISH', submissionId: id, correlationId },
+        b,
+      ),
+    settle: (b, id) => owner.settleUnresolvedOwnerCommand('TND_1', id, b),
     restore: (b) => {
       const found = owner.restoreUnresolvedOwnerCommand('TND_1', b);
       return found && { kind: 'VIEW_ONLY', id: found.submissionId };

@@ -26,9 +26,11 @@ import {
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import {
+  answerUnresolvedContractCommand,
   clearUnresolvedContractCommand,
   restoreUnresolvedContractCommand,
   saveUnresolvedContractCommand,
+  settleUnresolvedContractCommand,
   type ContractScope,
   type ReplayStamp,
   type RestoredContractCommand,
@@ -217,7 +219,7 @@ function ContractCommandFormBody({
       } catch (error) {
         // Done: the action redirects to the contract.
         if (isRedirect(error)) {
-          clearUnresolvedContractCommand(scope, sentId, binding);
+          settleUnresolvedContractCommand(scope, sentId, binding);
           throw error;
         }
         const ended = await sessionHasEnded();
@@ -228,8 +230,8 @@ function ContractCommandFormBody({
 
       // Still in doubt: kept. A definite answer to THIS submission's first send:
       // its own record is dropped — never another's.
-      if (next.kind === 'UNCONFIRMED') saveUnresolvedContractCommand(scope, next, binding);
-      else if (firstSend) clearUnresolvedContractCommand(scope, sentId, binding);
+      if (next.kind === 'UNCONFIRMED') answerUnresolvedContractCommand(scope, next, binding);
+      else if (firstSend) settleUnresolvedContractCommand(scope, sentId, binding);
       return next;
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds],

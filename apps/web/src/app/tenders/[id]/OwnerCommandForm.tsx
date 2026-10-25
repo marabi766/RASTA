@@ -38,9 +38,11 @@ import {
   type ScoringCell,
 } from '@/lib/tender-owner-input';
 import {
+  answerUnresolvedOwnerCommand,
   clearUnresolvedOwnerCommand,
   restoreUnresolvedOwnerCommand,
   saveUnresolvedOwnerCommand,
+  settleUnresolvedOwnerCommand,
   type ReplayStamp,
   type UnresolvedOwnerCommand,
   ownerCommandQuarantine,
@@ -200,7 +202,7 @@ function OwnerCommandFormBody({
         next = await submitOwnerCommand(tenderId, previous, form);
       } catch (error) {
         if (isRedirect(error)) {
-          clearUnresolvedOwnerCommand(tenderId, sentId, account);
+          settleUnresolvedOwnerCommand(tenderId, sentId, account);
           throw error;
         }
         const ended = await sessionHasEnded();
@@ -232,13 +234,13 @@ function OwnerCommandFormBody({
       }
 
       if (next.kind === 'UNCONFIRMED') {
-        saveUnresolvedOwnerCommand(
+        answerUnresolvedOwnerCommand(
           tenderId,
           { command, submissionId: next.submissionId, correlationId: next.correlationId },
           account,
         );
       } else if (firstSend) {
-        clearUnresolvedOwnerCommand(tenderId, sentId, account);
+        settleUnresolvedOwnerCommand(tenderId, sentId, account);
       }
       return next;
     },

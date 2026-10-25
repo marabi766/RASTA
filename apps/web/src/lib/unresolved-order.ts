@@ -1,21 +1,19 @@
 import { canonicalQuantity, type PlaceOrderFormValues } from './place-order-fields';
 import {
-  freeOwnKey,
+  fencedSlot,
   keysUnder,
-  legacyKey,
   locate,
-  mayStartFresh,
   ownedHere,
   purgeForeign,
-  quarantineOf,
   reduceToQuarantine,
   storedKeyOf,
-  tenantKey,
   type AccountTags,
+  type AnswerOutcome,
   type Binding,
+  type StartOutcome,
 } from './unresolved-tenancy';
 
-export type { AccountTags, Binding };
+export type { AccountTags, AnswerOutcome, Binding, StartOutcome };
 
 /**
  * An order whose outcome is unknown, kept in `sessionStorage` so that a reload,
@@ -36,7 +34,11 @@ export type { AccountTags, Binding };
  * Only an *unresolved* submission is kept. It is dropped by the explicit "start
  * a new order" action and by a successful order response; a definite refusal
  * does not drop it, because a refusal of a retry says nothing about the first
- * request (`place-order-actions.ts`).
+ * request (`place-order-actions.ts`). Each of those names the submission it
+ * is about, and touches nothing else (`fencedSlot`, PR 405 review 3, R1): an
+ * answer that arrives after the person set its order aside and started
+ * another never writes over or removes the other — it is kept aside, a
+ * content-free record that holds the next fresh order and draws the warning.
  *
  * Nothing else removes one (PR 405 review 2, F1; `lib/unresolved-tenancy.ts`):
  * a logout, another person's page and an expiry drop its content but leave a
@@ -160,14 +162,11 @@ function parse(raw: string): Stored | null {
 /** `parse` for `lib/unresolved-tenancy.ts`, which hands the key too. */
 const parseEntry = (raw: string): Stored | null => parse(raw);
 
-/** The entry under this page's own key, when it reads and is this page's. */
-function parseOwned(raw: string, binding: Binding): Stored | null {
-  const entry = parse(raw);
-  return entry !== null && entry.owner === binding.owner ? entry : null;
-}
+/** The one slot per product, fenced to its submission (`lib/unresolved-tenancy.ts`). */
+const slot = fencedSlot(KEY_PREFIX, parseEntry, { closing: () => accountClosing });
 
 /** The quarantine of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
-export const orderQuarantine = quarantineOf(KEY_PREFIX, parseEntry);
+export const orderQuarantine = slot.quarantine;
 
 /**
  * Account boundary, logout: nothing of an unresolved order's content outlives
@@ -213,66 +212,88 @@ export function purgeForeignUnresolvedOrders(tags: AccountTags): void {
   }
 }
 
+/** What is stored for `order`: the first send's values and time when the slot already keeps it. */
+function recordOf(
+  order: Omit<UnresolvedOrder, 'savedAt'>,
+  earlier: Stored | null,
+  binding: Binding,
+  now: number,
+): string {
+  const stored: Stored = {
+    v: VERSION,
+    submissionId: order.submissionId,
+    // The body is the first send's, whatever a later answer carries: the retry is the same request.
+    values: earlier
+      ? earlier.values
+      : { offerId: order.values.offerId, quantity: order.values.quantity },
+    correlationId: order.correlationId,
+    // Written before the send, when there is no correlation id yet.
+    ...(order.correlationId === null ? { pending: true as const } : {}),
+    savedAt: earlier ? earlier.savedAt : now,
+    owner: binding.owner,
+    session: binding.session,
+  };
+  return JSON.stringify(stored);
+}
+
 /**
- * True when the entry is stored. False: storage refused it, a logout has
- * started, or — for a fresh order — a quarantined record holds this kind for
- * this person (`orderQuarantine`): then nothing may be sent.
+ * Before the first send. `SAVED`: stored. `HELD`: another order's entry holds
+ * this product's slot, or a quarantined record holds this kind for this
+ * person (`orderQuarantine`) — nothing was written, and nothing may be sent.
+ * `UNAVAILABLE`: storage refused it, or a logout has started.
  */
 export function saveUnresolvedOrder(
   productId: string,
   order: Omit<UnresolvedOrder, 'savedAt'>,
   binding: Binding,
   now: number = Date.now(),
-): boolean {
-  if (accountClosing) return false;
-  try {
-    const store = storage();
-    if (!store) return false;
-    const key = tenantKey(KEY_PREFIX, binding, productId);
-    const kept = store.getItem(key);
-    const same = kept !== null && parseOwned(kept, binding)?.submissionId === order.submissionId;
-    if (!same && !mayStartFresh(store, KEY_PREFIX, binding, parseEntry)) return false;
-    // Never written over: whatever else the key holds is moved aside first.
-    freeOwnKey(store, KEY_PREFIX, key, binding, parseEntry);
-    const stored: Stored = {
-      v: VERSION,
-      submissionId: order.submissionId,
-      values: { offerId: order.values.offerId, quantity: order.values.quantity },
-      correlationId: order.correlationId,
-      // Written before the send, when there is no correlation id yet.
-      ...(order.correlationId === null ? { pending: true as const } : {}),
-      savedAt: now,
-      owner: binding.owner,
-      session: binding.session,
-    };
-    store.setItem(key, JSON.stringify(stored));
-    return true;
-  } catch {
-    // Unavailable or full: the caller decides what that means.
-    return false;
-  }
+): StartOutcome {
+  return slot.start(binding, productId, order.submissionId, (earlier) =>
+    recordOf(order, earlier, binding, now),
+  );
 }
 
 /**
- * Drops this page's entry for the product: this organization's, and an entry
- * from before entries were kept per organization that the page showed in its
- * place — only when it is this person's. Another organization's stays, and so
- * does anything that cannot be attributed (quarantined).
+ * An answer to `order.submissionId` that is still in doubt: its entry is
+ * updated while the slot holds it; otherwise the slot is left as it is and the
+ * answer is kept aside (`SET_ASIDE`; `lib/unresolved-tenancy.ts`).
  */
-export function clearUnresolvedOrder(productId: string, binding: Binding): void {
-  try {
-    const store = storage();
-    if (!store) return;
-    const own = tenantKey(KEY_PREFIX, binding, productId);
-    const ownRaw = store.getItem(own);
-    if (ownRaw !== null && parseOwned(ownRaw, binding) !== null) store.removeItem(own);
-    const old = legacyKey(KEY_PREFIX, productId);
-    const oldRaw = store.getItem(old);
-    const oldEntry = oldRaw === null ? null : parse(oldRaw);
-    if (oldEntry !== null && ownedHere(binding, true, oldEntry.owner)) store.removeItem(old);
-  } catch {
-    // See above.
-  }
+export function answerUnresolvedOrder(
+  productId: string,
+  order: Omit<UnresolvedOrder, 'savedAt'>,
+  binding: Binding,
+  now: number = Date.now(),
+): AnswerOutcome {
+  return slot.answer(
+    binding,
+    productId,
+    order.submissionId,
+    (earlier) => recordOf(order, earlier, binding, now),
+    now,
+  );
+}
+
+/** The order `submissionId` was placed or definitely refused: its entry, and only that one, is dropped. */
+export function settleUnresolvedOrder(
+  productId: string,
+  submissionId: string,
+  binding: Binding,
+): void {
+  slot.settle(binding, productId, submissionId);
+}
+
+/**
+ * The person's "start a new order": drops the entry the page showed —
+ * `submissionId`'s, this organization's or an old-format one of theirs — and
+ * nothing else. Another order's entry, another organization's, and anything
+ * that cannot be attributed (quarantined) stay.
+ */
+export function clearUnresolvedOrder(
+  productId: string,
+  submissionId: string,
+  binding: Binding,
+): void {
+  slot.release(binding, productId, submissionId);
 }
 
 /**
