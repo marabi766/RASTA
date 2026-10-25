@@ -50,13 +50,23 @@ export const DATABASE_SERVICES = Object.freeze([
   'SUPPLIER',
 ] as const);
 
-/** The owner-credential variables a refusal may name: the two of each database service. */
-export const REGISTERED_MIGRATOR_CREDENTIALS: ReadonlySet<string> = new Set(
-  DATABASE_SERVICES.flatMap((service) => [
+/**
+ * The owner-credential variables a refusal may name: the two migrator
+ * settings of each database service, and the privileged URL names #421 refuses
+ * as well (`DATABASE_URL_ADMIN`, `DATABASE_URL_<SERVICE>_ADMIN`, `_TEST_ADMIN`,
+ * `_SUPERUSER`). A closed list built from constants (#385 r6): any other name
+ * the detection pattern matches is counted, never named.
+ */
+export const REGISTERED_MIGRATOR_CREDENTIALS: ReadonlySet<string> = new Set([
+  'DATABASE_URL_ADMIN',
+  ...DATABASE_SERVICES.flatMap((service) => [
     `DATABASE_URL_${service}_MIGRATOR`,
     `POSTGRES_PASSWORD_${service}_MIGRATOR`,
+    `DATABASE_URL_${service}_ADMIN`,
+    `DATABASE_URL_${service}_TEST_ADMIN`,
+    `DATABASE_URL_${service}_SUPERUSER`,
   ]),
-);
+]);
 
 /** The owner-credential variables set (non-empty) in `env`, by name, sorted. */
 export function migratorCredentialsIn(env: NodeJS.ProcessEnv): string[] {

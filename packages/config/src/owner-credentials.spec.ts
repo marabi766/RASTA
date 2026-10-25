@@ -89,7 +89,7 @@ describe('a service never holds its database owner credential (D-045)', () => {
       .map((name) => name.slice(0, -'-service'.length).replaceAll('-', '_').toUpperCase())
       .sort();
     expect([...DATABASE_SERVICES]).toEqual(owning);
-    expect(REGISTERED_MIGRATOR_CREDENTIALS.size).toBe(owning.length * 2);
+    expect(REGISTERED_MIGRATOR_CREDENTIALS.size).toBe(owning.length * 5 + 1);
   });
 
   // #385 r4: detected by the pattern, named only from the registered list. An
@@ -117,5 +117,26 @@ describe('a service never holds its database owner credential (D-045)', () => {
       );
       expect(everythingOf(both)).not.toMatch(FRAGMENTS);
     }
+  });
+
+  // #385 r6: #421 refuses privileged URL names too. Those of a database
+  // service (and DATABASE_URL_ADMIN) are registered, so a refusal names them;
+  // any other name the pattern may match is still counted, never named.
+  it('names a privileged URL of a database service, counts any other', () => {
+    const error = new MigratorCredentialInServiceError([
+      'DATABASE_URL_ADMIN',
+      'DATABASE_URL_ANALYTICS_TEST_ADMIN',
+      'DATABASE_URL_ASSET_SUPERUSER',
+      'DATABASE_URL_ECONOMIC_ADMIN',
+      `DATABASE_URL_${SENTINELS[0].replaceAll('-', '_').toUpperCase()}_ADMIN`,
+    ]);
+    expect(error.variables).toEqual([
+      'DATABASE_URL_ADMIN',
+      'DATABASE_URL_ANALYTICS_TEST_ADMIN',
+      'DATABASE_URL_ASSET_SUPERUSER',
+      'DATABASE_URL_ECONOMIC_ADMIN',
+    ]);
+    expect(error.unregistered).toBe(1);
+    expect(everythingOf(error)).not.toMatch(FRAGMENTS);
   });
 });
