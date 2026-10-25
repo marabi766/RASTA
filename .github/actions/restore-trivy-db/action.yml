@@ -1,0 +1,46 @@
+name: Restore the shared Trivy DB
+description: >-
+  Restores the vulnerability DB the `trivy-db` job of this run published, and
+  fails unless it is present, intact, from this run and at most 24 h old. Used
+  by every Trivy scan; none of them downloads a DB of its own. See
+  scripts/ci-trivy-db-lib.mjs and the `trivy-db` job in ci.yml.
+inputs:
+  key:
+    description: needs.trivy-db.outputs.key. Empty means the producer failed.
+    required: false
+    default: ''
+outputs:
+  dir:
+    description: Trivy cache directory holding the restored DB (pass as cache-dir).
+    value: ${{ github.workspace }}/.cache/trivy
+runs:
+  using: composite
+  steps:
+    - name: Require the key of the shared Trivy DB
+      # A consumer whose producer failed or was skipped still runs (see the
+      # `if:` on the callers) and ends here, red, instead of being skipped,
+      # which a required check would count as a passing scan.
+      shell: bash
+      env:
+        KEY: ${{ inputs.key }}
+      run: |
+        if [ -z "$KEY" ]; then
+          echo "::error::The trivy-db job published no database for this run; refusing to scan without one."
+          exit 1
+        fi
+
+    - name: Restore the shared Trivy DB
+      # Exact key only. No restore-keys: a prefix match could hand this scan
+      # another run's (older) copy, which is what the action's own daily cache
+      # does. A miss fails the step.
+      uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: ${{ github.workspace }}/.cache/trivy
+        key: ${{ inputs.key }}
+        fail-on-cache-miss: true
+
+    - name: Check the restored Trivy DB
+      shell: bash
+      env:
+        TRIVY_DB_DIR: ${{ github.workspace }}/.cache/trivy
+      run: node scripts/ci-trivy-db.mjs check "$TRIVY_DB_DIR"

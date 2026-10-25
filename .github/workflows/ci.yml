@@ -26,6 +26,10 @@ env:
   # here `mc` is the entrypoint and needs none. Bump the two together.
   MINIO_IMAGE: 'cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1'
   MC_IMAGE: 'cgr.dev/chainguard/minio-client@sha256:b8b144ab34694ecea25aa352c4be9de4c26ee2a02701521dce02ee5593c57338'
+  # The Trivy CLI every scan and the one-per-run DB download use. This is
+  # trivy-action v0.36.0's own default, stated here so the DB schema the
+  # producer downloads and the CLI that reads it cannot drift apart.
+  TRIVY_VERSION: 'v0.70.0'
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -272,6 +276,14 @@ jobs:
         # sha256 digest is refused. Also fails if a step runs a digest-pinned
         # image that no earlier step of its job pre-pulls.
         run: pnpm run test:ci-pull-image
+
+      - name: Trivy DB download, freshness and scan wiring
+        # The shared Trivy DB (`trivy-db` job): both repositories tried with
+        # bounded retries, a stale, damaged, foreign or missing copy refused,
+        # and every Trivy scan wired to restore it, skip Trivy's own update,
+        # and fail (not skip) when the download did not happen, with the gate's
+        # severity, exit code and ignore files pinned.
+        run: pnpm run test:ci-trivy-db
 
       - name: Grafana dashboard contract
         # The provisioned local `Rasta Audit Evidence` dashboard: stable
@@ -4081,6 +4093,80 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # The vulnerability DB for every Trivy scan of this run, downloaded once.
+  #
+  # Evidence (main run 40163416703 at 61a13bbc, #380): 10 of 17 image scans
+  # failed, and the rerun failed again on api-gateway, with
+  #   FATAL ... failed to download artifact from mirror.gcr.io/aquasec/trivy-db:2:
+  #   oci download error: failed to fetch the layer: GET
+  #   https://mirror.gcr.io/artifacts-downloads/...: unexpected status code 404
+  # Trivy falls back to ghcr.io only for errors it recognises as transient or
+  # BLOB_UNKNOWN; a 404 on the layer is neither, so ghcr.io was never tried.
+  # trivy-action's daily cache did not prevent it: every job restored
+  # `cache-trivy-<date>` and still logged "Need to update DB" and downloaded
+  # 129 MB itself, seventeen times plus the ClamAV scan's.
+  #
+  # Here the download is `trivy image --download-db-only` against
+  # mirror.gcr.io and then ghcr.io, retrying on ANY failure (3 attempts per
+  # repository, 5 s and 15 s apart), and the copy is published under a key of
+  # this run. The scans restore exactly that key (`.github/actions/
+  # restore-trivy-db`), set TRIVY_SKIP_DB_UPDATE, and fail, rather than scan
+  # or skip, if the copy is missing, damaged, from another run or older than
+  # 24 h (skip mode checks the schema only, never the age, so
+  # scripts/ci-trivy-db-lib.mjs does). The scan gate is unchanged: same
+  # images, severity CRITICAL,HIGH, exit-code 1, ignore-unfixed and ignore
+  # files.
+  #
+  # No `needs`: it starts with the fastest jobs, so the scans that wait for
+  # it (the ClamAV scan now; the image scans only after quality, integration
+  # and e2e) never wait on it for long.
+  #
+  # Reruns: the key carries the run attempt, because cache entries are
+  # immutable. "Re-run failed jobs" keeps this job's earlier output and so its
+  # earlier key, and the scans restore that copy; once it is older than 24 h
+  # they fail and the run must be re-run in full.
+  #
+  # The Java DB is not fetched: no scan log of main run 40163416703 contains
+  # a Java DB line (no .jar in any image), Trivy would fetch it on demand
+  # exactly as before, and TRIVY_SKIP_JAVA_DB_UPDATE is deliberately not set,
+  # so analyzer coverage is identical.
+  # ---------------------------------------------------------------------------
+  trivy-db:
+    name: Trivy vulnerability DB (downloaded once)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      key: ${{ steps.publish.outputs.key }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: |
+            scripts/ci-trivy-db.mjs
+            scripts/ci-trivy-db-lib.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Download the DB (mirror.gcr.io, then ghcr.io)
+        env:
+          TRIVY_DB_DIR: ${{ github.workspace }}/.cache/trivy
+        run: node scripts/ci-trivy-db.mjs fetch "$TRIVY_DB_DIR"
+
+      - name: Publish the DB for this run
+        id: publish
+        run: echo "key=trivy-db-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Save the DB under this run's key
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ github.workspace }}/.cache/trivy
+          key: ${{ steps.publish.outputs.key }}
+
+  # ---------------------------------------------------------------------------
   # The malware scanner's own supply chain (ADR-049).
   #
   # Separate from `integration` on purpose, and the separation is the point.
@@ -4101,8 +4187,20 @@ jobs:
     name: ClamAV image scan and signature freshness
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Waits for the one DB download, and only for that. `!cancelled()` rather
+    # than the default success(): if the download failed this job still runs
+    # and fails at its restore step, red, never skipped (a required check
+    # counts "skipped" as passing).
+    needs: [trivy-db]
+    if: ${{ !cancelled() }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Restore the shared Trivy DB
+        id: trivy-db
+        uses: ./.github/actions/restore-trivy-db
+        with:
+          key: ${{ needs.trivy-db.outputs.key }}
 
       - name: Pull the pinned image
         # By digest, so this job scans exactly what the integration job, the
@@ -4117,14 +4215,33 @@ jobs:
           docker tag clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6 \
             rasta/clamav-pinned:ci
 
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Check the Trivy DB is still fresh
+        # Skip mode below validates the DB's schema and never its age.
+        run: node scripts/ci-trivy-db.mjs check "${{ steps.trivy-db.outputs.dir }}"
+
       - name: Scan the image
         # The same severity and the same `exit-code: 1` as every Rasta image
         # below — the threshold is not relaxed because the image is somebody
         # else's. When it fires, the fix is to bump the pinned digest, which is
         # a reviewable edit rather than a silent drift. Like that gate, it
         # rejects fixable HIGH/CRITICAL only (`ignore-unfixed`).
+        #
+        # Only the DB's origin changed (the `trivy-db` job, see there): the
+        # action neither installs Trivy nor restores its own daily DB cache,
+        # and Trivy is told not to download one.
+        env:
+          TRIVY_SKIP_DB_UPDATE: 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: 'true'
+          cache: 'false'
+          cache-dir: ${{ steps.trivy-db.outputs.dir }}
           image-ref: rasta/clamav-pinned:ci
           severity: CRITICAL,HIGH
           exit-code: '1'
@@ -4228,8 +4345,21 @@ jobs:
     # commit whose critical financial path was never exercised is not something
     # to publish (AGENTS.md § 6, § 7). The same gates hold on a pull request,
     # which now builds and scans the images it touches before merge (L7-35).
-    needs: [container-scope, quality, security, integration, migration-reversibility, e2e]
-    if: needs.container-scope.outputs.services != '[]'
+    # `trivy-db` is needed for its output, not as a gate: a failed download
+    # must fail the scans, not skip them (a required check counts "skipped"
+    # as passing), so the condition names every other job's result and leaves
+    # the download's to the restore step. Before this, the default success()
+    # skipped the job when any of the others failed; that still holds.
+    needs: [container-scope, quality, security, integration, migration-reversibility, e2e, trivy-db]
+    if: >-
+      ${{ !cancelled()
+      && needs.container-scope.outputs.services != '[]'
+      && needs.container-scope.result == 'success'
+      && needs.quality.result == 'success'
+      && needs.security.result == 'success'
+      && needs.integration.result == 'success'
+      && needs.migration-reversibility.result == 'success'
+      && needs.e2e.result == 'success' }}
 
     strategy:
       fail-fast: false
@@ -4243,6 +4373,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Restore the shared Trivy DB
+        # First, so a missing or stale DB fails the job in seconds rather than
+        # after the build.
+        id: trivy-db
+        uses: ./.github/actions/restore-trivy-db
+        with:
+          key: ${{ needs.trivy-db.outputs.key }}
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -4259,6 +4397,17 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Check the Trivy DB is still fresh
+        # Skip mode below validates the DB's schema and never its age, and the
+        # build above took minutes.
+        run: node scripts/ci-trivy-db.mjs check "${{ steps.trivy-db.outputs.dir }}"
+
       - name: Scan image
         # Tags on this action carry a `v` prefix; the unprefixed `0.28.0` this
         # once pinned does not resolve, so the job died at "Set up job" before
@@ -4274,8 +4423,20 @@ jobs:
         # .trivyignore entry per CVE with an owner and an expiry date, and the
         # gate run without ignore-unfixed) is the recorded follow-up (L7-35
         # review).
+        #
+        # Only the DB's origin changed (main run 40163416703: 10 of 17 scans
+        # died on a mirror.gcr.io 404 while downloading their own copy): the
+        # `trivy-db` job downloads it once, the action neither installs Trivy
+        # nor restores its own daily DB cache, and Trivy is told not to
+        # download one. Severity, exit code, ignore-unfixed, ignore file and
+        # image are as before.
+        env:
+          TRIVY_SKIP_DB_UPDATE: 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: 'true'
+          cache: 'false'
+          cache-dir: ${{ steps.trivy-db.outputs.dir }}
           image-ref: rasta/${{ matrix.service }}:${{ github.sha }}
           severity: CRITICAL,HIGH
           exit-code: '1'
