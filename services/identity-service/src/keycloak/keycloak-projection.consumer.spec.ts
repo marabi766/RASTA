@@ -1,6 +1,8 @@
 import type { EventEnvelope } from '@rasta/contracts';
 import { KeycloakProjectionConsumer, REPROJECTED_EVENTS } from './keycloak-projection.consumer';
 import type { KeycloakProjector } from './keycloak.projector';
+import type { EventConsumer, EventHandler } from '@rasta/nest-common';
+import { throwIfCancelled } from '../prisma/cancellation';
 
 /**
  * The durable path of the Keycloak projection: each membership or role event
@@ -32,7 +34,7 @@ describe('KeycloakProjectionConsumer', () => {
 
   it.each(REPROJECTED_EVENTS)('re-projects the user a %s names', async (eventName) => {
     await consumer.handle(envelope(eventName, { userId: 'USR_1', organizationId: 'ORG-A' }));
-    expect(project).toHaveBeenCalledWith('USR_1', 'event');
+    expect(project).toHaveBeenCalledWith('USR_1', 'event', { signal: expect.any(AbortSignal) });
   });
 
   it.each(['USER_UPDATED', 'ACTIVE_ORGANIZATION_SWITCHED'])(
@@ -66,7 +68,7 @@ describe('KeycloakProjectionConsumer', () => {
     // second delivery writes the same truth (idempotent by construction).
     await consumer.handle(envelope('ROLE_REVOKED', { membershipId: 'MBR_1', userId: 'USR_1' }));
     expect(project).toHaveBeenCalledTimes(1);
-    expect(project).toHaveBeenCalledWith('USR_1', 'event');
+    expect(project).toHaveBeenCalledWith('USR_1', 'event', { signal: expect.any(AbortSignal) });
   });
 
   it('lets a failed projection throw, so the consumer retries and then dead-letters it', async () => {
@@ -78,5 +80,79 @@ describe('KeycloakProjectionConsumer', () => {
 
   it('starts nothing when Keycloak sync is off', async () => {
     await expect(consumer.onModuleInit()).resolves.toBeUndefined();
+  });
+
+  describe('the bounded stop cancels the projection it abandons (#402 r2 F2)', () => {
+    /** A consumer whose stop gives up on the handler in flight, as the real one does at its deadline. */
+    function abandoningConsumer() {
+      let handler!: EventHandler;
+      const factory = (): EventConsumer =>
+        ({
+          start: jest.fn(async () => undefined),
+          stop: jest.fn(async () => undefined),
+        }) as unknown as EventConsumer;
+      let resume!: () => void;
+      const resumed = new Promise<void>((resolve) => (resume = resolve));
+      /** The signal the projection got, and the operations of it that passed the boundary once resumed. */
+      const seen: { signal?: AbortSignal; started: string[] } = { started: [] };
+      const projector = {
+        project: jest.fn(
+          async (_userId: string, _trigger: string, options: { signal?: AbortSignal }) => {
+            seen.signal = options.signal;
+            await resumed;
+            // What the projection's next database operation runs first.
+            for (const query of ['databaseNow', 'findUserById', 'fences.ofUser']) {
+              try {
+                throwIfCancelled();
+                seen.started.push(query);
+              } catch {
+                // refused at the boundary: never started
+              }
+            }
+            return 'projected' as const;
+          },
+        ),
+      };
+      const consumer = new KeycloakProjectionConsumer(
+        (h) => {
+          handler = h;
+          return factory();
+        },
+        projector as unknown as KeycloakProjector,
+      );
+      return {
+        consumer,
+        projector,
+        seen,
+        resume,
+        handle: (e: EventEnvelope) => handler(e, {} as never),
+      };
+    }
+
+    it('a projection that resumes after the stop returned starts no database operation, and its Keycloak call is cancelled', async () => {
+      const c = abandoningConsumer();
+      await c.consumer.onModuleInit();
+      const inFlight = c.handle(envelope('ROLE_REVOKED', { userId: 'USR_1' }));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(c.seen.signal?.aborted).toBe(false);
+
+      await c.consumer.stop({ deadlineAt: Date.now() });
+      expect(c.seen.signal?.aborted).toBe(true);
+
+      c.resume();
+      await inFlight;
+      expect(c.seen.started).toEqual([]);
+    });
+
+    it('control: without a stop, the same projection passes the boundary', async () => {
+      const c = abandoningConsumer();
+      await c.consumer.onModuleInit();
+      const inFlight = c.handle(envelope('ROLE_REVOKED', { userId: 'USR_1' }));
+      await new Promise((resolve) => setImmediate(resolve));
+      c.resume();
+      await inFlight;
+      expect(c.seen.signal?.aborted).toBe(false);
+      expect(c.seen.started).toEqual(['databaseNow', 'findUserById', 'fences.ofUser']);
+    });
   });
 });

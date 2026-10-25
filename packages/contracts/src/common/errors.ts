@@ -89,6 +89,26 @@ export const ERROR_CODES = {
   // 5xx
   INTERNAL_ERROR: 'INTERNAL_ERROR',
   UPSTREAM_UNAVAILABLE: 'UPSTREAM_UNAVAILABLE',
+  /**
+   * A change that takes access away — a role removed, a membership revoked
+   * or lapsed — was refused because the identity provider could not be
+   * written first (ADR-060, write-ahead addendum, D-064). Nothing was
+   * committed: the roles or the membership are exactly as they were, and no
+   * event was emitted. The same request may be sent again; once it succeeds
+   * it is idempotent. Never says what the provider answered.
+   */
+  KEYCLOAK_UNAVAILABLE: 'KEYCLOAK_UNAVAILABLE',
+  /**
+   * A change that takes access away from one user was refused, before
+   * anything was sent, because an earlier identity-provider write of that
+   * same user may still land and could overtake it (D-069). The provider may
+   * be healthy: this concerns one user, for at most the `Retry-After` it
+   * carries. Nothing was committed and no event was emitted; the same request
+   * may be sent again after that. Only ever answered to a caller already
+   * authorized for the change. Not a service outage: the gateway does not
+   * count it towards identity's circuit (ADR-060, D-069).
+   */
+  KEYCLOAK_WRITE_SETTLING: 'KEYCLOAK_WRITE_SETTLING',
   UPSTREAM_TIMEOUT: 'UPSTREAM_TIMEOUT',
   NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
 } as const;
@@ -153,6 +173,8 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   RATE_LIMIT_EXCEEDED: 429,
   INTERNAL_ERROR: 500,
   UPSTREAM_UNAVAILABLE: 503,
+  KEYCLOAK_UNAVAILABLE: 503,
+  KEYCLOAK_WRITE_SETTLING: 503,
   UPSTREAM_TIMEOUT: 504,
   NOT_IMPLEMENTED: 501,
 };

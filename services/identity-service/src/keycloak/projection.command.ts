@@ -1,6 +1,7 @@
 import type { IdentityRepository } from '../identity/identity.repository';
 import type { KeycloakAdminClient } from './keycloak.client';
 import type { KeycloakProjector } from './keycloak.projector';
+import type { KeycloakWriteFences } from './keycloak-write-fence';
 import { grantsAnything, type PlatformAttributeName } from './platform-attributes';
 
 /**
@@ -34,6 +35,19 @@ import { grantsAnything, type PlatformAttributeName } from './platform-attribute
  * reports an account enabled for a user who is not ACTIVE, or disabled for an
  * ACTIVE one (a disable made in the Keycloak console, not the platform), as
  * unclean. Backfill disables the first; the second is left to an operator.
+ *
+ * And for **write fences** (D-069, #402 r2 F3): backfill ends with a drain of
+ * every row of `keycloak_write_attempt` — every user that owns one, paged
+ * past any page size, linked to an account or not, whether the fence is due,
+ * waiting out a retry or terminal — by projecting that user, which takes over
+ * every fence that is no longer live (`KeycloakProjector.write`). An unlinked
+ * user's projection makes the account its fences addressed harmless and
+ * clears them; a repaired orphan's earlier attempts go the same way. Then it
+ * counts **every** row (`COUNT(*)`): the report says how many are left, and is
+ * clean only at zero — the one state in which the migration's `down.sql`
+ * accepts a rollback. A live fence (a writer still running, or not yet past
+ * takeover) or a terminal one whose account is still missing keeps it unclean.
+ * Reconcile counts them too, without draining.
  *
  * Separated from the CLI entry point so the sweep itself is tested without a
  * database or a Keycloak.
@@ -70,6 +84,20 @@ export interface ProjectionCommandReport {
    * nothing here enables an account but its one activation.
    */
   enabledDivergent: { userId: string; keycloakEnabled: boolean; platformStatus: string }[];
+  /**
+   * Either mode: Keycloak write fences (D-069). `drained`: backfill projected
+   * this many fence owners in its drain. `outstanding` is `COUNT(*)` over
+   * `keycloak_write_attempt` after it — every row, whatever its state — and
+   * the report is clean, and a rollback of the fence migration ready, only at
+   * zero. `live`, `due` and `accountMissing` say why any are left.
+   */
+  fences: {
+    drained: number;
+    outstanding: number;
+    live: number;
+    due: number;
+    accountMissing: number;
+  };
 }
 
 const PAGE = 200;
@@ -80,6 +108,7 @@ export async function runProjectionCommand(
     repository: Pick<IdentityRepository, 'listUserIdsWithAccount' | 'listUsersWithoutAccount'>;
     projector: Pick<KeycloakProjector, 'project' | 'reconcile' | 'repairOrphan'>;
     keycloak: Pick<KeycloakAdminClient, 'findAccountByUsername'>;
+    fences: Pick<KeycloakWriteFences, 'owners' | 'counts'>;
   },
 ): Promise<ProjectionCommandReport> {
   const report: ProjectionCommandReport = {
@@ -91,6 +120,7 @@ export async function runProjectionCommand(
     orphans: [],
     activationPending: [],
     enabledDivergent: [],
+    fences: { drained: 0, outstanding: 0, live: 0, due: 0, accountMissing: 0 },
   };
 
   let after: string | null = null;
@@ -126,7 +156,44 @@ export async function runProjectionCommand(
   }
 
   await sweepOrphans(report, deps);
+  if (mode === 'backfill') await drainFences(report, deps);
+  // Every row, whatever its state: an empty page of anything is not proof.
+  const counts = await deps.fences.counts();
+  report.fences.outstanding = counts.total;
+  report.fences.live = counts.live;
+  report.fences.due = counts.due;
+  report.fences.accountMissing = counts.accountMissing;
   return report;
+}
+
+/**
+ * Projects every user that still owns a write fence after the passes above
+ * — one walk by user id, paged, over every row's owner, so none is skipped
+ * for having no account, a retry deadline or a terminal fence. Each
+ * projection takes over the user's fences that are no longer live.
+ */
+async function drainFences(
+  report: ProjectionCommandReport,
+  deps: {
+    projector: Pick<KeycloakProjector, 'project'>;
+    fences: Pick<KeycloakWriteFences, 'owners'>;
+  },
+): Promise<void> {
+  let after: string | null = null;
+  for (;;) {
+    const page = await deps.fences.owners(after, PAGE);
+    if (page.length === 0) break;
+    for (const userId of page) {
+      report.fences.drained += 1;
+      try {
+        await deps.projector.project(userId, 'command');
+      } catch {
+        if (!report.failed.includes(userId)) report.failed.push(userId);
+      }
+    }
+    after = page.at(-1) ?? null;
+    if (after === null) break;
+  }
 }
 
 async function sweepOrphans(
@@ -172,13 +239,18 @@ async function sweepOrphans(
   }
 }
 
-/** Whether the report describes a clean, fully converged realm. */
+/**
+ * Whether the report describes a clean, fully converged realm — with no
+ * Keycloak write fence left at all (`fences.outstanding`, an explicit
+ * `COUNT(*)`), which is also what a rollback of the fence migration needs.
+ */
 export function isClean(report: ProjectionCommandReport): boolean {
   return (
     report.divergent.length === 0 &&
     report.failed.length === 0 &&
     report.activationPending.length === 0 &&
     report.enabledDivergent.length === 0 &&
-    report.orphans.every((orphan) => orphan.repaired || (!orphan.enabled && !orphan.grants))
+    report.orphans.every((orphan) => orphan.repaired || (!orphan.enabled && !orphan.grants)) &&
+    report.fences.outstanding === 0
   );
 }
