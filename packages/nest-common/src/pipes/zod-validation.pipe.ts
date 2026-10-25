@@ -1,6 +1,13 @@
 import { Injectable, type ArgumentMetadata, type PipeTransform } from '@nestjs/common';
-import { ZodError, defaultErrorMap, type ZodIssue, type ZodTypeAny, type z } from 'zod';
-import type { ErrorDetail } from '@rasta/contracts';
+import { ZodError, type z } from 'zod';
+import {
+  LEGACY_PARSE,
+  legacyDefaultMessage,
+  legacyIssues,
+  resolveZodPath,
+  type ErrorDetail,
+  type LegacyIssue,
+} from '@rasta/contracts';
 import { RastaError } from '../errors/rasta-error';
 
 /**
@@ -16,12 +23,12 @@ import { RastaError } from '../errors/rasta-error';
  * client's own input (S-09).
  */
 @Injectable()
-export class ZodValidationPipe<T extends ZodTypeAny> implements PipeTransform {
+export class ZodValidationPipe<T extends z.ZodType> implements PipeTransform {
   constructor(private readonly schema: T) {}
 
   transform(value: unknown, _metadata: ArgumentMetadata): z.infer<T> {
     try {
-      return this.schema.parse(value);
+      return this.schema.parse(value, LEGACY_PARSE);
     } catch (error) {
       if (error instanceof ZodError) {
         throw RastaError.validation(toErrorDetails(error, this.schema, value));
@@ -32,7 +39,7 @@ export class ZodValidationPipe<T extends ZodTypeAny> implements PipeTransform {
 }
 
 /** Convenience for inline use: `@Body(zodPipe(createAssetSchema)) dto: CreateAssetDto`. */
-export function zodPipe<T extends ZodTypeAny>(schema: T): ZodValidationPipe<T> {
+export function zodPipe<T extends z.ZodType>(schema: T): ZodValidationPipe<T> {
   return new ZodValidationPipe(schema);
 }
 
@@ -54,7 +61,7 @@ export function zodPipe<T extends ZodTypeAny>(schema: T): ZodValidationPipe<T> {
  *    walking `schema`; a segment the walk cannot place is treated the same
  *    way. Array indexes and declared field names stay.
  *  - **A message the schema supplied** (a `.refine` message, a custom
- *    `errorMap`, a regex message) can interpolate anything, the input
+ *    `error`, a regex message) can interpolate anything, the input
  *    included. It is kept when it does not contain the offending value —
  *    the value at the issue's path, or any string or number under it of three
  *    characters or more, or an unrecognized key — and otherwise replaced by
@@ -65,8 +72,8 @@ export function zodPipe<T extends ZodTypeAny>(schema: T): ZodValidationPipe<T> {
  * (expected and received *type names*, limits, options, the validation kind),
  * so it is used as zod writes it.
  */
-export function toErrorDetails(error: ZodError, schema: ZodTypeAny, input: unknown): ErrorDetail[] {
-  return error.issues.map((issue) => ({
+export function toErrorDetails(error: ZodError, schema: z.ZodType, input: unknown): ErrorDetail[] {
+  return legacyIssues(error.issues, schema, input).map((issue) => ({
     path: formatPath(safePath(schema, issue.path)),
     message: safeMessage(issue, input),
     code: issue.code,
@@ -96,22 +103,20 @@ const ECHO_MIN_LENGTH = 3;
 /** How much of the input the message backstop reads before giving up and assuming an echo. */
 const ECHO_MAX_LEAVES = 200;
 
-function safeMessage(issue: ZodIssue, input: unknown): string {
-  const fixed = fixedMessage(issue);
-  const zodDefault = defaultErrorMap(issue, { defaultError: '', data: undefined }).message;
-  if (issue.message === zodDefault) return fixed;
-  return echoesInput(issue, input) ? fixed : issue.message;
+function safeMessage(issue: LegacyIssue, input: unknown): string {
+  if (issue.zodDefault) return fixedMessage(issue);
+  return echoesInput(issue, input) ? fixedMessage(issue) : issue.message;
 }
 
 /** The message for an issue from schema-side facts alone. */
-function fixedMessage(issue: ZodIssue): string {
+function fixedMessage(issue: LegacyIssue): string {
   switch (issue.code) {
     case 'invalid_enum_value':
       return `Invalid enum value. Expected ${issue.options.map(renderOption).join(' | ')}`;
     case 'unrecognized_keys':
       return `Unrecognized key(s) in object (${issue.keys.length})`;
     default:
-      return defaultErrorMap(issue, { defaultError: 'Invalid input', data: undefined }).message;
+      return legacyDefaultMessage(issue);
   }
 }
 
@@ -119,7 +124,7 @@ function renderOption(option: string | number): string {
   return typeof option === 'string' ? `'${option}'` : String(option);
 }
 
-function echoesInput(issue: ZodIssue, input: unknown): boolean {
+function echoesInput(issue: LegacyIssue, input: unknown): boolean {
   const texts = issue.code === 'unrecognized_keys' ? [...issue.keys] : [];
   const leaves = collectLeaves(valueAt(input, issue.path), texts);
   if (!leaves) return true; // too much to check: assume the worst
@@ -157,115 +162,18 @@ function collectLeaves(value: unknown, into: string[]): string[] | null {
 // Path: which segments the schema declares
 // ---------------------------------------------------------------------------
 
-/** The zod v3 internals the walk reads. */
-interface ZodDefLike {
-  typeName?: string;
-  innerType?: ZodTypeAny;
-  schema?: ZodTypeAny;
-  type?: ZodTypeAny;
-  in?: ZodTypeAny;
-  getter?: () => ZodTypeAny;
-  shape?: () => Record<string, ZodTypeAny>;
-  catchall?: ZodTypeAny;
-  valueType?: ZodTypeAny;
-  items?: ZodTypeAny[];
-  rest?: ZodTypeAny | null;
-  options?: ZodTypeAny[] | Map<unknown, ZodTypeAny>;
-  left?: ZodTypeAny;
-  right?: ZodTypeAny;
-}
-
-const defOf = (schema: ZodTypeAny): ZodDefLike => schema._def as ZodDefLike;
-
-/** The path with every segment the schema does not declare replaced by `*`. */
+/**
+ * The path with every segment the schema does not declare replaced by `*`.
+ * The walk is the shared one ({@link resolveZodPath}): a key is declared when
+ * an object names it; a record's key, or a key an object takes through
+ * `.catchall()`, is the client's. An array position is shown wherever it falls.
+ */
 export function safePath(
-  schema: ZodTypeAny,
+  schema: z.ZodType,
   path: readonly (string | number)[],
 ): (string | number)[] {
-  const shown: (string | number)[] = [];
-  let current: ZodTypeAny | undefined = schema;
-  for (const segment of path) {
-    const step: Step = current ? child(current, segment) : { declared: false };
-    shown.push(typeof segment === 'number' || step.declared ? segment : REDACTED_SEGMENT);
-    current = step.schema;
-  }
-  return shown;
-}
-
-interface Step {
-  /** The segment is a name the schema itself wrote (or an array position). */
-  declared: boolean;
-  schema?: ZodTypeAny;
-}
-
-/** Wrappers that change nothing about the path beneath them. */
-function unwrap(schema: ZodTypeAny, depth = 0): ZodTypeAny {
-  if (depth > 32) return schema;
-  const def = defOf(schema);
-  switch (def.typeName) {
-    case 'ZodOptional':
-    case 'ZodNullable':
-    case 'ZodDefault':
-    case 'ZodCatch':
-    case 'ZodReadonly':
-      return def.innerType ? unwrap(def.innerType, depth + 1) : schema;
-    case 'ZodEffects':
-      return def.schema ? unwrap(def.schema, depth + 1) : schema;
-    case 'ZodBranded':
-    case 'ZodPromise':
-      return def.type ? unwrap(def.type, depth + 1) : schema;
-    case 'ZodPipeline':
-      return def.in ? unwrap(def.in, depth + 1) : schema;
-    case 'ZodLazy':
-      return def.getter ? unwrap(def.getter(), depth + 1) : schema;
-    default:
-      return schema;
-  }
-}
-
-function child(schema: ZodTypeAny, segment: string | number): Step {
-  const target = unwrap(schema);
-  const def = defOf(target);
-  switch (def.typeName) {
-    case 'ZodObject': {
-      const shape = def.shape?.() ?? {};
-      if (typeof segment === 'string' && Object.prototype.hasOwnProperty.call(shape, segment)) {
-        return { declared: true, schema: shape[segment] };
-      }
-      // A key the schema did not name: the client's, whatever `catchall` says.
-      const catchall = def.catchall && defOf(def.catchall).typeName !== 'ZodNever';
-      return { declared: false, schema: catchall ? def.catchall : undefined };
-    }
-    case 'ZodRecord':
-      return { declared: false, schema: def.valueType };
-    case 'ZodArray':
-      return { declared: typeof segment === 'number', schema: def.type };
-    case 'ZodTuple':
-      return typeof segment === 'number'
-        ? { declared: true, schema: def.items?.[segment] ?? def.rest ?? undefined }
-        : { declared: false };
-    case 'ZodUnion':
-    case 'ZodDiscriminatedUnion': {
-      const options = Array.isArray(def.options)
-        ? def.options
-        : def.options
-          ? [...def.options.values()]
-          : [];
-      for (const option of options) {
-        const step = child(option, segment);
-        if (step.declared) return step;
-      }
-      return { declared: false };
-    }
-    case 'ZodIntersection': {
-      for (const side of [def.left, def.right]) {
-        if (!side) continue;
-        const step = child(side, segment);
-        if (step.declared) return step;
-      }
-      return { declared: false };
-    }
-    default:
-      return { declared: false };
-  }
+  const { segments } = resolveZodPath(schema, path);
+  return path.map((segment, at) =>
+    typeof segment === 'number' || segments[at] !== undefined ? segment : REDACTED_SEGMENT,
+  );
 }

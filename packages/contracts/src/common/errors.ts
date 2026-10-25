@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from './iso-datetime';
 
 /**
  * Platform-wide error model.
@@ -116,7 +117,7 @@ export const apiErrorSchema = z.object({
   correlationId: z.string(),
   /** W3C trace id, for jumping straight to the trace. */
   traceId: z.string().optional(),
-  timestamp: z.string().datetime(),
+  timestamp: z.string().check(isoDateTime()),
   path: z.string().optional(),
 });
 

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, isoDateTime, legacyIssues } from '@rasta/contracts';
 import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common';
 
 /**
@@ -80,7 +80,7 @@ export const CONTRACT_REFUSAL_REASONS = [
 export const CONTRACT_REFUSAL_SIDES = ['EMPLOYER', 'CONTRACTOR', 'APPROVER'] as const;
 
 const id = z.string().min(1).max(128);
-const instant = z.string().datetime({ offset: true });
+const instant = z.string().check(isoDateTime({ offset: true }));
 
 const authorityRefused = z
   .object({
@@ -156,7 +156,10 @@ export function toContractRefusalProjection(
 }
 
 function unprocessable(eventName: string, error: z.ZodError): UnprocessableEventError {
-  const issues = error.issues.map((issue) => `${issue.path.join('.') || '(root)'}:${issue.code}`);
+  // zod 3's codes, which these diagnostics have always carried (GHSA-mrhx-c7xc-m3w5).
+  const issues = legacyIssues(error.issues).map(
+    (issue) => `${issue.path.join('.') || '(root)'}:${issue.code}`,
+  );
   return new UnprocessableEventError(
     DLQ_REASONS.VALIDATION_FAILED,
     `${eventName} does not match the contract refusal projection (${issues.join(', ')})`,

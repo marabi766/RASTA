@@ -1,4 +1,4 @@
-import { DISPLAY_TEXT_PATTERN } from '@rasta/contracts';
+import { DISPLAY_TEXT_PATTERN, LEGACY_PARSE } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -213,7 +213,7 @@ export function registerAssetFormValues(form: FormData): RegisterAssetFormValues
 export const registerAssetFormSchema = z
   .object({
     name: requiredDisplayText('نام', 2, 200),
-    type: z.enum(ASSET_TYPES, { errorMap: () => ({ message: 'نوع ماشین را انتخاب کنید' }) }),
+    type: z.enum(ASSET_TYPES, { error: 'نوع ماشین را انتخاب کنید' }),
     assetTag: identifierText('شمارهٔ دارایی', 64).transform(blankTo(undefined)),
     manufacturer: optionalDisplayText('سازنده', 120).transform(blankTo(undefined)),
     model: modelText.transform(blankTo(undefined)),
@@ -248,9 +248,12 @@ function isRegisterAssetField(value: string): value is RegisterAssetField {
 }
 
 export function parseRegisterAssetForm(values: RegisterAssetFormValues): ParsedRegisterAssetForm {
-  const parsed = registerAssetFormSchema.safeParse(values);
+  const parsed = registerAssetFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, request: parsed.data };
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isRegisterAssetField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.error, isRegisterAssetField, registerAssetFormSchema),
+  };
 }
 
 export const REGISTER_ASSET_FIELD_MAPPING: FieldMapping<RegisterAssetField> = {
@@ -348,9 +351,13 @@ export function parseUpdateAssetForm(
     input[field] = values[field];
   }
 
-  const parsed = z.object(shape).strict().safeParse(input);
+  const schema = z.object(shape).strict();
+  const parsed = schema.safeParse(input, LEGACY_PARSE);
   if (parsed.success) return { ok: true, request: parsed.data as UpdateAssetRequest };
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isUpdateAssetField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.error, isUpdateAssetField, schema),
+  };
 }
 
 /**

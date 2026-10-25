@@ -4,6 +4,14 @@ packages:
   - 'packages/*'
   - 'tests/*'
 
+# One version for every package that resolves zod. nest-common's pipe uses
+# `instanceof ZodError` and apps/web composes @rasta/contracts schemas into its
+# own, so two copies (or two majors) side by side would turn validation errors
+# into 500s. zod 4.6.6+ closes GHSA-mrhx-c7xc-m3w5 (leading array length checks
+# reject before any element is parsed); 4.6.7 was published 2026-10-12.
+catalog:
+  zod: 4.6.7
+
 # pnpm blocks dependency lifecycle scripts by default. These compile native
 # binaries or generate clients at install time and genuinely need to run.
 allowBuilds:

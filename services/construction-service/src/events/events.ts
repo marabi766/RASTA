@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { PROJECT_STATES } from '../project/project.state-machine';
 import { TENDER_WORKFLOW_KEYS, WORKFLOW_KEYS } from '../approval/approval.state-machine';
 import { CANCELLATION_CODES, TENDER_STATES } from '../tender/tender.state-machine';
@@ -127,7 +128,7 @@ export const CONSTRUCTION_EVENTS = {
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
 
 const identifier = z.string().min(1).max(64);
-const isoTimestamp = z.string().datetime();
+const isoTimestamp = z.string().check(isoDateTime());
 const amountMinor = z.string().regex(/^\d{1,19}$/);
 const projectState = z.enum(PROJECT_STATES);
 

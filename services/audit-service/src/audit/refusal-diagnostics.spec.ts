@@ -43,7 +43,7 @@ describe('declaredFieldNames', () => {
     .object({
       outer: z.object({ inner: z.string() }).optional(),
       list: z.array(z.object({ item: z.number() })),
-      open: z.record(z.object({ value: z.string() })),
+      open: z.record(z.string(), z.object({ value: z.string() })),
     })
     .superRefine(() => undefined);
 
@@ -63,7 +63,7 @@ describe('declaredFieldNames', () => {
 describe('describeIssues', () => {
   const schema = z.object({
     status: z.string(),
-    open: z.record(z.object({ value: z.string() })),
+    open: z.record(z.string(), z.object({ value: z.string() })),
   });
   const declared = declaredFieldNames(schema);
 

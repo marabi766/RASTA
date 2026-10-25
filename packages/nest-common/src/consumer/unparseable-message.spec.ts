@@ -181,12 +181,15 @@ describe('an unparseable message (S-09)', () => {
 
 describe('unparseableReason', () => {
   it('drops zod messages, which can repeat the value received', () => {
-    // The envelope schema has no enum or literal today; a schema that does
-    // makes zod quote the received value in the issue message.
-    const result = z.object({ kind: z.enum(['A', 'B']) }).safeParse({ kind: SENTINEL });
+    // The envelope schema has no enum or literal today; under zod 3 a schema that
+    // does made zod quote the received value in the issue message, and a zod 4
+    // parse that reports its input carries it in the error.
+    const result = z
+      .object({ kind: z.enum(['A', 'B']) })
+      .safeParse({ kind: SENTINEL }, { reportInput: true });
     expect(result.success).toBe(false);
     const error = (result as { error: Error }).error;
-    expect(error.message).toContain(SENTINEL); // the control: zod does echo it
+    expect(error.message).toContain(SENTINEL); // the control: the error does carry it
 
     const reason = unparseableReason(error, Buffer.from('{}'));
     expect(reason).toBe(

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LEGACY_PARSE } from '@rasta/contracts';
 
 import {
   CHANGE_STATUS_TARGETS,
@@ -115,7 +116,7 @@ export const activateFormValues = (): ActivateAssetFormValues => ({});
 export const changeStatusFormSchema = z
   .object({
     status: z.enum(CHANGE_STATUS_TARGETS, {
-      errorMap: () => ({ message: 'وضعیت تازه را از فهرست انتخاب کنید' }),
+      error: 'وضعیت تازه را از فهرست انتخاب کنید',
     }),
     reason: reasonText(
       'دلیل تغییر',
@@ -143,12 +144,15 @@ export function parseChangeStatusForm(
   values: ChangeStatusFormValues,
   shownStatus: string,
 ): ParsedLifecycleForm<ChangeStatusBody, ChangeStatusField> {
-  const parsed = changeStatusFormSchema.safeParse(values);
+  const parsed = changeStatusFormSchema.safeParse(values, LEGACY_PARSE);
   if (!parsed.success) {
     return {
       ok: false,
-      fieldErrors: firstIssuePerField(parsed.error, (value): value is ChangeStatusField =>
-        (CHANGE_STATUS_FIELDS as readonly string[]).includes(value),
+      fieldErrors: firstIssuePerField(
+        parsed.error,
+        (value): value is ChangeStatusField =>
+          (CHANGE_STATUS_FIELDS as readonly string[]).includes(value),
+        changeStatusFormSchema,
       ),
     };
   }
@@ -168,7 +172,7 @@ export const decommissionFormSchema = z
       DECOMMISSION_REASON_BOUNDS.min,
       DECOMMISSION_REASON_BOUNDS.max,
     ),
-    confirm: z.literal('yes', { errorMap: () => ({ message: DECOMMISSION_UNCONFIRMED_MESSAGE }) }),
+    confirm: z.literal('yes', { error: DECOMMISSION_UNCONFIRMED_MESSAGE }),
   })
   .strict()
   // The tick is the person's confirmation and is not sent: the service's body
@@ -181,12 +185,15 @@ export type DecommissionBody = z.output<typeof decommissionFormSchema>;
 export function parseDecommissionForm(
   values: DecommissionFormValues,
 ): ParsedLifecycleForm<DecommissionBody, DecommissionField> {
-  const parsed = decommissionFormSchema.safeParse(values);
+  const parsed = decommissionFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, (value): value is DecommissionField =>
-      (DECOMMISSION_FIELDS as readonly string[]).includes(value),
+    fieldErrors: firstIssuePerField(
+      parsed.error,
+      (value): value is DecommissionField =>
+        (DECOMMISSION_FIELDS as readonly string[]).includes(value),
+      decommissionFormSchema,
     ),
   };
 }

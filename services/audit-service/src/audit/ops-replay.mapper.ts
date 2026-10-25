@@ -1,13 +1,14 @@
-import type { ZodIssue } from 'zod';
+import type { z } from 'zod';
 import {
+  type AuditChange,
+  type EventEnvelope,
   eventEnvelopeSchema,
+  legacyIssues,
   OPS_REPLAY_PRODUCER,
   OPS_REPLAY_TOPIC,
   REPLAY_EXECUTED,
   REPLAY_EXECUTED_VERSION,
   replayExecutedPayloadSchemaV1,
-  type AuditChange,
-  type EventEnvelope,
 } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { toEnvelopeProvenance, type AuditEventRecord } from './audit.mapper';
@@ -74,8 +75,9 @@ export class OpsReplayRejectedError extends Error {
   }
 }
 
-function describeIssues(issues: readonly ZodIssue[]): string {
-  const named = issues.map(
+function describeIssues(issues: readonly z.core.$ZodIssue[]): string {
+  // zod 3's codes, which these diagnostics have always carried (GHSA-mrhx-c7xc-m3w5).
+  const named = legacyIssues(issues).map(
     (issue) => `${issue.path.length === 0 ? '(root)' : issue.path.join('.')} ${issue.code}`,
   );
   const shown = named.slice(0, MAX_REPORTED_ISSUES).join(', ');

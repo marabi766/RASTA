@@ -1,5 +1,5 @@
 import { TZDate } from '@date-fns/tz';
-import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
+import { ID_PREFIXES, LEGACY_PARSE, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -73,10 +73,10 @@ export function canManageDrivers(roles: readonly string[]): boolean {
 const driverSummarySchema = z.object({
   id: z.string(),
   userId: z.string(),
-  employeeNo: z.string().nullable().default(null),
-  licenceNumber: z.string().nullable().default(null),
-  licenceClass: z.string().nullable().default(null),
-  licenceValidTo: renderableDate.nullable().default(null),
+  employeeNo: z.string().nullable().prefault(null),
+  licenceNumber: z.string().nullable().prefault(null),
+  licenceClass: z.string().nullable().prefault(null),
+  licenceValidTo: renderableDate.nullable().prefault(null),
   status: z.string(),
 });
 
@@ -84,15 +84,15 @@ export type DriverSummary = z.infer<typeof driverSummarySchema>;
 
 const driverPageSchema = z.object({
   items: z.array(driverSummarySchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type DriverPage = z.infer<typeof driverPageSchema>;
 
 const driverDetailSchema = driverSummarySchema.extend({
-  statusReason: z.string().nullable().default(null),
-  notes: z.string().nullable().default(null),
+  statusReason: z.string().nullable().prefault(null),
+  notes: z.string().nullable().prefault(null),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -334,10 +334,13 @@ export type ParsedCreateDriverForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<CreateDriverField, string>> };
 
 export function parseCreateDriverForm(values: CreateDriverFormValues): ParsedCreateDriverForm {
-  const parsed = createDriverFormSchema.safeParse(values);
+  const parsed = createDriverFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isCreateDriverField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.error, isCreateDriverField, createDriverFormSchema),
+  };
 }
 
 function isCreateDriverField(value: string): value is CreateDriverField {
@@ -419,10 +422,13 @@ export type ParsedUpdateDriverForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<UpdateDriverField, string>> };
 
 export function parseUpdateDriverForm(values: UpdateDriverFormValues): ParsedUpdateDriverForm {
-  const parsed = updateDriverFormSchema.safeParse(values);
+  const parsed = updateDriverFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isUpdateDriverField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.error, isUpdateDriverField, updateDriverFormSchema),
+  };
 }
 
 function isUpdateDriverField(value: string): value is UpdateDriverField {
@@ -480,7 +486,7 @@ export function changeStatusFormValues(form: FormData): ChangeStatusFormValues {
 
 export const changeStatusFormSchema = z
   .object({
-    status: z.enum(DRIVER_STATUSES, { errorMap: () => ({ message: 'وضعیت را انتخاب کنید' }) }),
+    status: z.enum(DRIVER_STATUSES, { error: 'وضعیت را انتخاب کنید' }),
     // Required, not optional. A driver barred from work without a recorded
     // reason is a decision nobody can review later (AGENTS.md S-06).
     reason: z
@@ -498,10 +504,13 @@ export type ParsedChangeStatusForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<ChangeStatusField, string>> };
 
 export function parseChangeStatusForm(values: ChangeStatusFormValues): ParsedChangeStatusForm {
-  const parsed = changeStatusFormSchema.safeParse(values);
+  const parsed = changeStatusFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isChangeStatusField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.error, isChangeStatusField, changeStatusFormSchema),
+  };
 }
 
 function isChangeStatusField(value: string): value is ChangeStatusField {

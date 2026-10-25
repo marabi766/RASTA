@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 
 /**
  * Events published by identity-service.
@@ -84,7 +85,7 @@ export const membershipExpiredPayload = z.object({
   membershipId: z.string(),
   userId: z.string(),
   organizationId: z.string(),
-  validUntil: z.string().datetime(),
+  validUntil: z.string().check(isoDateTime()),
 });
 
 /**

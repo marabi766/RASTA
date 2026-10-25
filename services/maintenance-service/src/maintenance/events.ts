@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 
 /**
  * Events published by maintenance-service, on `rasta.maintenance.v1`.
@@ -480,7 +481,7 @@ export const assetTransferredSchema = z
     assetId: z.string().min(1),
     fromOrganizationId: z.string().min(1),
     toOrganizationId: z.string().min(1),
-    transferredAt: z.string().datetime({ offset: true }),
+    transferredAt: z.string().check(isoDateTime({ offset: true })),
   })
   .passthrough()
   .refine((payload) => payload.fromOrganizationId !== payload.toOrganizationId, {
@@ -516,7 +517,7 @@ export interface ConsumedPayloadContract {
   readonly fields: readonly string[];
 }
 
-const contract = (object: z.AnyZodObject) => ({
+const contract = (object: z.ZodObject) => ({
   schema: object,
   fields: Object.keys(object.shape),
 });

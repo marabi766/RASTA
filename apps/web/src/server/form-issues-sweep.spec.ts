@@ -2,6 +2,7 @@
  * @jest-environment node
  */
 import { z } from 'zod';
+import { LEGACY_PARSE } from '@rasta/contracts';
 
 import { firstIssuePerField, GENERIC_FIELD_MESSAGE } from '@/lib/form-issues';
 
@@ -55,7 +56,9 @@ function shapeOf(schema: z.ZodTypeAny): Record<string, z.ZodTypeAny> | null {
   let current: z.ZodTypeAny = schema;
   for (let depth = 0; depth < 8; depth += 1) {
     if (current instanceof z.ZodObject) return current.shape as Record<string, z.ZodTypeAny>;
-    if (current instanceof z.ZodEffects) current = current._def.schema as z.ZodTypeAny;
+    // A refinement is a check on the object itself; a transform or preprocess is a pipe.
+    if (current instanceof z.ZodPipe)
+      current = (current.in instanceof z.ZodTransform ? current.out : current.in) as z.ZodType;
     else return null;
   }
   return null;
@@ -94,9 +97,12 @@ describe('every exported local form schema answers in Persian', () => {
 
     let failures = 0;
     for (const [, hostile] of HOSTILE) {
-      const result = schema.safeParse(Object.fromEntries(fields.map((field) => [field, hostile])));
+      const result = schema.safeParse(
+        Object.fromEntries(fields.map((field) => [field, hostile])),
+        LEGACY_PARSE,
+      );
       if (result.success) continue;
-      for (const message of Object.values(firstIssuePerField(result.error, fields))) {
+      for (const message of Object.values(firstIssuePerField(result.error, fields, schema))) {
         failures += 1;
         expect(message).toMatch(/\p{Script=Arabic}/u);
         // A Latin word may sit inside a Persian sentence (a brand, a unit);
@@ -113,6 +119,8 @@ describe('every exported local form schema answers in Persian', () => {
     const unknown = new z.ZodError([
       { code: 'custom', path: ['name'], message: 'Something nobody foresaw' },
     ]);
-    expect(firstIssuePerField(unknown, ['name'])).toEqual({ name: GENERIC_FIELD_MESSAGE });
+    expect(firstIssuePerField(unknown, ['name'], z.object({ name: z.string() }))).toEqual({
+      name: GENERIC_FIELD_MESSAGE,
+    });
   });
 });

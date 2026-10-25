@@ -6,6 +6,7 @@ import {
   type Producer,
   type IHeaders,
 } from 'kafkajs';
+import type { z } from 'zod';
 import {
   DLQ_ADDED_HEADERS_MAX_BYTES,
   DLQ_HEADER_VALUE_MAX_BYTES,
@@ -18,6 +19,7 @@ import {
   isAllowedProducer,
   isDeclaredConsumer,
   isDeclaredTopic,
+  legacyIssues,
   RETRY_TOPIC_SUFFIX,
   type DlqReason,
   type EventEnvelope,
@@ -1089,7 +1091,8 @@ export function unparseableReason(error: unknown, value: Buffer | null): string 
   if (!value) return 'the message has no body';
   const size = `${value.length} bytes`;
   if (isZodError(error)) {
-    const issues = error.issues
+    // zod 3's codes, which dead-letter reasons have always carried (GHSA-mrhx-c7xc-m3w5).
+    const issues = legacyIssues(error.issues as unknown as z.core.$ZodIssue[], eventEnvelopeSchema)
       .slice(0, 5)
       .map((issue) => `${logField(issue.path.join('.') || '(root)', 48)} ${issue.code}`)
       .join('; ');
@@ -1105,9 +1108,7 @@ export function unparseableReason(error: unknown, value: Buffer | null): string 
  * envelope schema lives in `@rasta/contracts`, whose zod need not be the same
  * module instance as this package's.
  */
-function isZodError(
-  error: unknown,
-): error is { issues: { path: (string | number)[]; code: string }[] } {
+function isZodError(error: unknown): error is { issues: { path: PropertyKey[]; code: string }[] } {
   return (
     error instanceof Error &&
     error.name === 'ZodError' &&

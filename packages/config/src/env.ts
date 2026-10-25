@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LEGACY_PARSE } from '@rasta/contracts';
 import { DatabaseUrlConflictError, withDatabasePool } from './database-pool';
 import {
   DATABASE_URL_CONTROL_CHARACTER,
@@ -142,7 +143,7 @@ const BOOLEAN_EXPECTED = 'Expected a boolean such as "true" or "false"';
 function booleanish(defaultValue: boolean) {
   return z
     .union([z.boolean(), z.string()])
-    .default(defaultValue)
+    .prefault(defaultValue)
     .transform((value, ctx) => {
       if (typeof value === 'boolean') return value;
 
@@ -223,18 +224,18 @@ export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 25_000;
 
 /** Every Rasta service has these, without exception. */
 export const baseEnvSchema = z.object({
-  NODE_ENV: z.enum(NODE_ENVS).default('development'),
-  LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
+  NODE_ENV: z.enum(NODE_ENVS).prefault('development'),
+  LOG_LEVEL: z.enum(LOG_LEVELS).prefault('info'),
 
   SERVICE_NAME: z.string().min(1),
-  SERVICE_VERSION: z.string().default('0.0.0'),
+  SERVICE_VERSION: z.string().prefault('0.0.0'),
   PORT: z.coerce.number().int().min(1).max(65535),
 
   // Observability — tracing is opt-out rather than opt-in so that a service
   // deployed without OTel config is still visible, just without a collector.
   OTEL_EXPORTER_OTLP_ENDPOINT: httpUrlSchema.optional(),
   OTEL_TRACES_ENABLED: booleanEnv(true),
-  OTEL_SERVICE_NAMESPACE: z.string().default('rasta'),
+  OTEL_SERVICE_NAMESPACE: z.string().prefault('rasta'),
 
   // Bounded, and bounded *below* the orchestrator's own grace period: see
   // `installGracefulShutdown` in @rasta/nest-common.
@@ -243,7 +244,7 @@ export const baseEnvSchema = z.object({
     .int()
     .min(1000)
     .max(120_000)
-    .default(DEFAULT_SHUTDOWN_TIMEOUT_MS),
+    .prefault(DEFAULT_SHUTDOWN_TIMEOUT_MS),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
@@ -353,7 +354,7 @@ export const kafkaEnvSchema = z.object({
    */
   KAFKA_SASL_USERNAME: z.string().min(1).max(64).optional(),
   KAFKA_SASL_PASSWORD: z.string().min(1).optional(),
-  KAFKA_SASL_MECHANISM: z.enum(KAFKA_SASL_MECHANISMS).default('scram-sha-512'),
+  KAFKA_SASL_MECHANISM: z.enum(KAFKA_SASL_MECHANISMS).prefault('scram-sha-512'),
 
   /** TLS to the broker. Required together with SASL unless PLAINTEXT is allowed below. */
   KAFKA_SSL: booleanEnv(false),
@@ -369,8 +370,8 @@ export const kafkaEnvSchema = z.object({
   /** PEM file of the CA that signed the broker's certificate; absent = the system trust store. */
   KAFKA_SSL_CA_FILE: z.string().min(1).optional(),
 
-  OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).default(500),
-  OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
+  OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).prefault(500),
+  OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(100),
 
   /**
    * How long a claim owns its rows before another relay may take them back
@@ -388,13 +389,13 @@ export const kafkaEnvSchema = z.object({
    * a single `sendBatch`), it only has to hold three renewal intervals and stay
    * shorter than an acceptable recovery delay.
    */
-  OUTBOX_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(20).max(3600).default(60),
+  OUTBOX_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(20).max(3600).prefault(60),
 
   /** Base of the capped exponential retry backoff: `min(2^min(n,10) × base, max)`. */
-  OUTBOX_CLAIM_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).default(5),
+  OUTBOX_CLAIM_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).prefault(5),
 
   /** Ceiling of that backoff, so a poisoned row is retried eventually. */
-  OUTBOX_CLAIM_BACKOFF_MAX_SECONDS: z.coerce.number().int().min(1).max(86_400).default(3600),
+  OUTBOX_CLAIM_BACKOFF_MAX_SECONDS: z.coerce.number().int().min(1).max(86_400).prefault(3600),
 
   /**
    * How long shutdown keeps renewing a lease whose publish is still in flight.
@@ -414,7 +415,7 @@ export const kafkaEnvSchema = z.object({
    * exit. The default, 20 s, fits the default 23 s budget; it was 30 s, which
    * did not even fit the 25 s timeout.
    */
-  OUTBOX_SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().min(0).max(300).default(20),
+  OUTBOX_SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().min(0).max(300).prefault(20),
 });
 
 export type KafkaEnv = z.infer<typeof kafkaEnvSchema>;
@@ -448,28 +449,28 @@ export const outboxPurgeEnvSchema = z.object({
    * of one hour refuses a typo that would empty that record as fast as it
    * fills; the ceiling of a year refuses one that would make the purge a no-op.
    */
-  OUTBOX_PURGE_RETENTION_HOURS: z.coerce.number().int().min(1).max(8760).default(168),
+  OUTBOX_PURGE_RETENTION_HOURS: z.coerce.number().int().min(1).max(8760).prefault(168),
 
   /**
    * Pause between the end of one run and the start of the next. A row outlives
    * its retention by at most one interval plus one run — five minutes against a
    * 168-hour window — while an idle run costs a single indexed probe.
    */
-  OUTBOX_PURGE_INTERVAL_SECONDS: z.coerce.number().int().min(10).max(86_400).default(300),
+  OUTBOX_PURGE_INTERVAL_SECONDS: z.coerce.number().int().min(10).max(86_400).prefault(300),
 
   /**
    * Rows deleted per statement. 1000 is the ceiling `OUTBOX_BATCH_SIZE`
    * already allows the relay to lock in one claim, so a purge batch locks no
    * more outbox rows at once than the platform's own relay may.
    */
-  OUTBOX_PURGE_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(1000),
+  OUTBOX_PURGE_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).prefault(1000),
 
   /**
    * Batches per run, so one run is bounded in time too. A run that hits the
    * cap reports `truncated` and the next continues; together with the defaults
    * above that is 10 000 rows per run, 120 000 an hour.
    */
-  OUTBOX_PURGE_MAX_BATCHES_PER_RUN: z.coerce.number().int().min(1).max(1000).default(10),
+  OUTBOX_PURGE_MAX_BATCHES_PER_RUN: z.coerce.number().int().min(1).max(1000).prefault(10),
 
   /**
    * `statement_timeout` for each batch. Bounds how long one batch can hold its
@@ -477,7 +478,7 @@ export const outboxPurgeEnvSchema = z.object({
    * batch bound that `loadEnv` holds under `SHUTDOWN_TIMEOUT_MS`
    * ({@link outboxPurgeBatchBoundMs}).
    */
-  OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+  OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).prefault(5000),
 
   /**
    * How long a batch may wait for a pooled connection before its transaction
@@ -487,7 +488,7 @@ export const outboxPurgeEnvSchema = z.object({
    * `failed`, rather than queue behind the service's own work. Part of the
    * batch bound ({@link outboxPurgeBatchBoundMs}).
    */
-  OUTBOX_PURGE_MAX_WAIT_MS: z.coerce.number().int().min(100).max(60_000).default(2000),
+  OUTBOX_PURGE_MAX_WAIT_MS: z.coerce.number().int().min(100).max(60_000).prefault(2000),
 });
 
 export type OutboxPurgeEnv = z.infer<typeof outboxPurgeEnvSchema>;
@@ -543,7 +544,7 @@ export function outboxShutdownBudgetMs(env: { SHUTDOWN_TIMEOUT_MS: number }): nu
 /** Services that use cache, distributed locks or rate limiting. */
 export const redisEnvSchema = z.object({
   REDIS_URL: redisUrlSchema,
-  REDIS_KEY_PREFIX: z.string().default('rasta'),
+  REDIS_KEY_PREFIX: z.string().prefault('rasta'),
 });
 
 /** Services that verify caller identity — which is all of them. */
@@ -559,8 +560,8 @@ export const authEnvSchema = z.object({
    * minimum for HS256 to be meaningfully secure.
    */
   INTERNAL_TOKEN_SECRET: z.string().min(32),
-  INTERNAL_TOKEN_ISSUER: z.string().default('rasta-internal'),
-  INTERNAL_TOKEN_TTL_SECONDS: z.coerce.number().int().min(30).max(900).default(300),
+  INTERNAL_TOKEN_ISSUER: z.string().prefault('rasta-internal'),
+  INTERNAL_TOKEN_TTL_SECONDS: z.coerce.number().int().min(30).max(900).prefault(300),
 });
 
 /**
@@ -712,7 +713,7 @@ export function loadEnv<S extends z.ZodTypeAny>(
   source: NodeJS.ProcessEnv = process.env,
   options: LoadEnvOptions<z.infer<S>> = {},
 ): z.infer<S> {
-  const result = schema.safeParse(withKafkaCredentialFallback(source));
+  const result = schema.safeParse(withKafkaCredentialFallback(source), LEGACY_PARSE);
 
   if (!result.success) {
     const fixed = new Set([...CONFIG_ENV_MESSAGES, ...(options.fixedMessages ?? [])]);

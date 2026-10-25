@@ -1,4 +1,5 @@
-import { z } from 'zod';
+import type { z } from 'zod';
+import { LEGACY_PARSED_TYPES, legacyIssues, type LegacyIssue } from '@rasta/contracts';
 import { enumOptions, resolveEnvPath, unwrapEnvSchema } from './env-schema';
 
 /** One refused setting, as `EnvValidationError` lists it. */
@@ -30,14 +31,17 @@ export const ENV_PATH_PLACEHOLDER = '(key not in schema)';
  *
  * Every place that formats environment issues goes through this — `loadEnv`,
  * and through it each service's loader; a service never maps `issue.message`
- * itself.
+ * itself. The issues are read in zod 3's vocabulary ({@link legacyIssues}), so
+ * the texts are the ones operators saw before the move to zod 4; `source` is
+ * what was parsed, for zod 3's `received` when the parse did not report it.
  */
 export function envIssues(
-  issues: readonly z.ZodIssue[],
-  schema: z.ZodTypeAny,
+  issues: readonly z.core.$ZodIssue[],
+  schema: z.ZodType,
   fixedMessages: ReadonlySet<string>,
+  ...source: [] | [source: unknown]
 ): EnvIssue[] {
-  return issues.map((issue) => {
+  return legacyIssues(issues, schema, ...source).map((issue) => {
     const { nodes, segments } = resolveEnvPath(schema, issue.path);
     const leaves = nodes.flatMap(unwrapEnvSchema);
     const path = segments.map((segment) => segment ?? ENV_PATH_PLACEHOLDER).join('.') || '(root)';
@@ -53,18 +57,18 @@ function bound(value: unknown): string | undefined {
   return undefined;
 }
 
-const PARSED_TYPES = new Set<string>(Object.values(z.ZodParsedType));
-
 /**
  * The fixed text for an issue's code, in Zod's own wording where Zod's says
  * nothing about the input, and without the part that does where it does.
  */
-function byCode(issue: z.ZodIssue, leaves: readonly z.ZodTypeAny[]): string {
+function byCode(issue: LegacyIssue, leaves: readonly z.ZodType[]): string {
   switch (issue.code) {
-    case z.ZodIssueCode.invalid_type:
-      if (issue.received === z.ZodParsedType.undefined) return 'Required';
-      return PARSED_TYPES.has(issue.expected) ? `Expected ${issue.expected}` : 'Invalid type';
-    case z.ZodIssueCode.invalid_enum_value: {
+    case 'invalid_type':
+      if (issue.received === 'undefined') return 'Required';
+      return LEGACY_PARSED_TYPES.has(issue.expected)
+        ? `Expected ${issue.expected}`
+        : 'Invalid type';
+    case 'invalid_enum_value': {
       // The options of the enum the schema has at this path, not the ones the issue carries.
       const declared = leaves
         .map(enumOptions)
@@ -78,46 +82,44 @@ function byCode(issue: z.ZodIssue, leaves: readonly z.ZodTypeAny[]): string {
         ? `Invalid enum value. Expected ${declared.map((option) => `'${option}'`).join(' | ')}`
         : 'Invalid enum value';
     }
-    case z.ZodIssueCode.too_small:
-    case z.ZodIssueCode.too_big:
+    case 'too_small':
+    case 'too_big':
       return sizeMessage(issue);
-    case z.ZodIssueCode.invalid_string:
+    case 'invalid_string':
       if (typeof issue.validation === 'object') return 'Invalid input: not in the expected form';
       return issue.validation === 'regex' ? 'Invalid' : `Invalid ${issue.validation}`;
-    case z.ZodIssueCode.not_multiple_of: {
+    case 'not_multiple_of': {
       const step = bound(issue.multipleOf);
       return step === undefined ? 'Invalid number' : `Number must be a multiple of ${step}`;
     }
-    case z.ZodIssueCode.not_finite:
+    case 'not_finite':
       return 'Number must be finite';
-    case z.ZodIssueCode.invalid_literal:
+    case 'invalid_literal':
       return 'Invalid literal value';
-    case z.ZodIssueCode.unrecognized_keys:
+    case 'unrecognized_keys':
       return `Unrecognized key(s) in object: ${issue.keys.length}`;
-    case z.ZodIssueCode.invalid_union:
+    case 'invalid_union':
       return 'Invalid input';
-    case z.ZodIssueCode.invalid_union_discriminator:
+    case 'invalid_union_discriminator':
       return 'Invalid discriminator value';
-    case z.ZodIssueCode.invalid_date:
+    case 'invalid_date':
       return 'Invalid date';
-    case z.ZodIssueCode.invalid_intersection_types:
+    case 'invalid_intersection_types':
       return 'Intersection results could not be merged';
-    case z.ZodIssueCode.invalid_arguments:
+    case 'invalid_arguments':
       return 'Invalid function arguments';
-    case z.ZodIssueCode.invalid_return_type:
+    case 'invalid_return_type':
       return 'Invalid function return type';
-    case z.ZodIssueCode.custom:
+    case 'custom':
     default:
       return 'Invalid input';
   }
 }
 
 /** Zod's size wording, from the bound the schema declared. */
-function sizeMessage(issue: z.ZodTooSmallIssue | z.ZodTooBigIssue): string {
-  const small = issue.code === z.ZodIssueCode.too_small;
-  const limit = bound(
-    small ? (issue as z.ZodTooSmallIssue).minimum : (issue as z.ZodTooBigIssue).maximum,
-  );
+function sizeMessage(issue: Extract<LegacyIssue, { code: 'too_small' | 'too_big' }>): string {
+  const small = issue.code === 'too_small';
+  const limit = bound(small ? issue.minimum : issue.maximum);
   if (limit === undefined) return 'Invalid input';
   const relation = (exact: string, inclusive: string, strict: string) =>
     issue.exact ? exact : issue.inclusive ? inclusive : strict;

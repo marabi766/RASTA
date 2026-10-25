@@ -1,4 +1,5 @@
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import type { z } from 'zod';
+import { DLQ_REASONS, legacyIssues, type EventEnvelope } from '@rasta/contracts';
 import { UnprocessableEventError } from './event-consumer';
 
 /** The shape of a zod error this reads, so no particular zod instance is assumed. */
@@ -23,7 +24,7 @@ const MAX_NAMED_ISSUES = 5;
  *
  * The message reaches the log and `x-dlq-error`, so it carries identifiers and
  * closed codes only (S-09): the event name and id, and per issue the field
- * path and zod's issue code. A path segment is shown only when it is one of
+ * path and zod's issue code (zod 3's name for it). A path segment is shown only when it is one of
  * `fields` — the names the consumer's schema declares — or an array index;
  * any other segment is a key the payload supplied and is shown as `*`. Zod's
  * issue messages are left out because some repeat the value received.
@@ -36,7 +37,8 @@ export function invalidPayloadError(
   const declared = new Set(fields);
   const segment = (key: PropertyKey): string =>
     typeof key === 'number' || (typeof key === 'string' && declared.has(key)) ? String(key) : '*';
-  const named = error.issues
+  // zod 3's codes, which dead-letter reasons have always carried (GHSA-mrhx-c7xc-m3w5).
+  const named = legacyIssues(error.issues as unknown as z.core.$ZodIssue[])
     .slice(0, MAX_NAMED_ISSUES)
     .map((issue) => `${issue.path.map(segment).join('.') || '(root)'} ${issue.code}`);
   const more =

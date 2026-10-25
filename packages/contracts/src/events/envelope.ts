@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '../common/iso-datetime';
 
 /**
  * The envelope every Kafka message on the platform carries.
@@ -38,16 +39,16 @@ export const eventEnvelopeSchema = z.object({
   eventId: z.string().min(1),
   eventName: z.string().regex(/^[A-Z][A-Z0-9_]*$/, 'Event names are SCREAMING_SNAKE_CASE'),
   /** Payload schema version. Distinct from the topic's envelope version. */
-  eventVersion: z.number().int().positive().default(1),
+  eventVersion: z.number().int().positive().prefault(1),
 
   /** When it happened in the domain — not when it was published. */
-  occurredAt: z.string().datetime(),
+  occurredAt: z.string().check(isoDateTime()),
 
   /** The publishing service's `SERVICE_NAME` — see `PRODUCER_NAME_PATTERN`. */
   producer: z
     .string()
     .regex(PRODUCER_NAME_PATTERN, 'producer must be a service name (lower-case, digits, hyphens)'),
-  producerVersion: z.string().default('0.0.0'),
+  producerVersion: z.string().prefault('0.0.0'),
 
   aggregateType: z.string().min(1),
   aggregateId: z.string().min(1),

@@ -293,5 +293,10 @@ export type {
 } from './database/runtime-role';
 
 // OpenAPI --------------------------------------------------------------------
-export { toJsonSchema, codePointLength } from './openapi/zod-schema';
+export {
+  toJsonSchema,
+  codePointLength,
+  isOptionalField,
+  objectShapeOf,
+} from './openapi/zod-schema';
 export type { JsonSchema } from './openapi/zod-schema';

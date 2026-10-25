@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { PROCUREMENT_RFQ_EVENTS, PROCUREMENT_RFQ_EVENT_SCHEMAS } from '@rasta/contracts';
+import {
+  isoDateTime,
+  PROCUREMENT_RFQ_EVENT_SCHEMAS,
+  PROCUREMENT_RFQ_EVENTS,
+} from '@rasta/contracts';
 
 /**
  * Events published by procurement-service, on `rasta.procurement.v1` (ADR-070 § 9).
@@ -54,7 +58,7 @@ const demandCount = z.number().int().min(0).max(2_147_483_647);
 /** `demandIdsDigest` of the same demands: lowercase hex SHA-256. */
 const demandIdsSha256 = z.string().regex(/^[0-9a-f]{64}$/);
 /** ISO 8601 in UTC, the form every event of the platform carries a time in. */
-const instant = z.string().datetime({ offset: false });
+const instant = z.string().check(isoDateTime({ offset: false }));
 
 const windowFacts = {
   aggregationId: id,

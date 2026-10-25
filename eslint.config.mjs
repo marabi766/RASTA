@@ -5,6 +5,21 @@ import globals from 'globals';
 import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
 
 /** Restated in `apps/web/eslint.config.mjs`, which does not extend this file. */
+/**
+ * zod 4's `.default(value)` returns `value` as the output without parsing it;
+ * zod 3's parsed it through the chain (a pipe, a transform, a trim, an
+ * object's own defaults). `.prefault(value)` is zod 3's `.default()` exactly,
+ * so every schema says that (GHSA-mrhx-c7xc-m3w5). No call named `default`
+ * exists here outside zod chains. Restated in `apps/web/eslint.config.mjs`.
+ */
+const NO_ZOD_DEFAULT = [
+  {
+    selector: "CallExpression[callee.type='MemberExpression'][callee.property.name='default']",
+    message:
+      "zod 4's .default() skips parsing the value; use .prefault() (zod 3's .default()).",
+  },
+];
+
 const NO_ZOD_COERCE = [
   {
     selector: "MemberExpression[object.name='z'][property.name='coerce']",
@@ -58,7 +73,7 @@ const base = tseslint.config(
       // `Number({"toString":null})` throws, and a 400 becomes a 500. A request
       // schema takes `numberInput` from @rasta/contracts instead; `env.ts`,
       // whose input is `process.env` (only strings), is exempt below.
-      'no-restricted-syntax': ['error', ...NO_ZOD_COERCE],
+      'no-restricted-syntax': ['error', ...NO_ZOD_COERCE, ...NO_ZOD_DEFAULT],
       'no-restricted-imports': [
         'error',
         {
@@ -117,7 +132,7 @@ const base = tseslint.config(
     // `env-issues.spec.ts` builds environment schemas as `env.ts` does, from
     // the same string-only `process.env` input, to test their refusal texts.
     files: ['**/env.ts', '**/env-issues.spec.ts'],
-    rules: { 'no-restricted-syntax': 'off' },
+    rules: { 'no-restricted-syntax': ['error', ...NO_ZOD_DEFAULT] },
   },
   {
     files: ['**/*.spec.ts', '**/*.e2e-spec.ts', '**/*.int-spec.ts', '**/test/**/*.ts'],

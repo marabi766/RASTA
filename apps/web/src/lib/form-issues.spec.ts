@@ -5,6 +5,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { z } from 'zod';
+import { LEGACY_PARSE } from '@rasta/contracts';
 
 import {
   firstIssuePerField,
@@ -25,8 +26,9 @@ const ARABIC_LETTER = /\p{Script=Arabic}/u;
 /** Hamza letters and U+0654: the project's text policy for added copy. */
 const FORBIDDEN_SPELLING = /[\u0654\u0623\u0625\u0624\u0626]/u;
 
+// Parsed as every form parser parses (LEGACY_PARSE), so an issue carries the value it was raised on.
 const issueOf = (schema: z.ZodTypeAny, value: unknown): z.ZodIssue => {
-  const result = schema.safeParse(value);
+  const result = schema.safeParse(value, LEGACY_PARSE);
   if (result.success) throw new Error('expected a failed parse');
   return result.error.issues[0]!;
 };
@@ -94,18 +96,21 @@ describe('formIssueMessage', () => {
     expect(formIssueMessage(unknown)).toBe(GENERIC_FIELD_MESSAGE);
     expect(GENERIC_FIELD_MESSAGE).toMatch(ARABIC_LETTER);
     expect(GENERIC_FIELD_MESSAGE).not.toMatch(LATIN_LETTER);
+    // zod 4 has no function schemas (zod 3's invalid_arguments); an issue no
+    // sentence covers is one a key schema raises.
     const odd = {
-      code: 'invalid_arguments',
+      code: 'invalid_key',
+      origin: 'record',
+      issues: [],
       path: [],
-      message: 'Invalid arguments',
-      argumentsError: new z.ZodError([]),
-    } as unknown as z.ZodIssue;
+      message: 'Invalid key in record',
+    } as unknown as z.core.$ZodIssue;
     expect(formIssueMessage(odd)).toBe(GENERIC_FIELD_MESSAGE);
   });
 
   it('serves a resolver the same sentences through the error map', () => {
     const schema = z.object({ name: z.string().max(5), n: z.number().int() });
-    const result = schema.safeParse({ name: 'abcdefg', n: 1.5 }, { errorMap: persianErrorMap });
+    const result = schema.safeParse({ name: 'abcdefg', n: 1.5 }, { error: persianErrorMap });
     expect(result.success).toBe(false);
     const messages = result.success ? [] : result.error.issues.map((issue) => issue.message);
     expect(messages).toEqual(['حداکثر ۵ نویسه مجاز است', 'یک عدد صحیح و معتبر وارد کنید']);
@@ -120,19 +125,21 @@ describe('firstIssuePerField', () => {
   });
 
   it('keeps the first issue per field, for the fields the form has, in Persian', () => {
-    const result = schema.safeParse({ name: 'abcd', roles: [''], extra: 'zz' });
+    const result = schema.safeParse({ name: 'abcd', roles: [''], extra: 'zz' }, LEGACY_PARSE);
     if (result.success) throw new Error('expected a failure');
-    expect(firstIssuePerField(result.error, ['name', 'roles'])).toEqual({
+    expect(firstIssuePerField(result.error, ['name', 'roles'], schema)).toEqual({
       name: 'حداکثر ۳ نویسه مجاز است',
       roles: 'این مقدار را وارد کنید',
     });
   });
 
   it('accepts a type guard as well as a list, and drops what is not a field', () => {
-    const result = schema.safeParse({ name: 'abcd', roles: [''], extra: 'zz' });
+    const result = schema.safeParse({ name: 'abcd', roles: [''], extra: 'zz' }, LEGACY_PARSE);
     if (result.success) throw new Error('expected a failure');
     const only = (value: string): value is 'extra' => value === 'extra';
-    expect(firstIssuePerField(result.error, only)).toEqual({ extra: 'حداکثر ۱ نویسه مجاز است' });
+    expect(firstIssuePerField(result.error, only, schema)).toEqual({
+      extra: 'حداکثر ۱ نویسه مجاز است',
+    });
   });
 });
 
@@ -171,6 +178,32 @@ describe('no parser reads Zod’s own message', () => {
       expect(lines.length).toBeGreaterThan(0);
       for (const line of lines) expect(line).not.toMatch(/\.message\b/);
     }
+  });
+
+  it('parses with LEGACY_PARSE wherever an error reaches firstIssuePerField', () => {
+    // zod 4 keeps the value an issue was raised on only when the parse asks for
+    // it, and that value is what tells a missing field from a wrong one.
+    const offenders = sources(SRC).flatMap((file) => {
+      const text = readFileSync(file, 'utf8');
+      return [...text.matchAll(/firstIssu\w*\((\w+)\.error/g)].flatMap((call) => {
+        const name = call[1] ?? '';
+        // The parse that produced it: the nearest one before the call.
+        const parses = [
+          ...text
+            .slice(0, call.index)
+            .matchAll(
+              new RegExp(
+                `(?:const|let) ${name}\\b[^=;]*=[^;]*?\\.safeParse\\(([^;]*?)\\)\\s*;`,
+                'g',
+              ),
+            ),
+        ];
+        return parses.at(-1)?.[1]?.includes('LEGACY_PARSE')
+          ? []
+          : [`${relative(SRC, file)} ${name}`];
+      });
+    });
+    expect(offenders).toEqual([]);
   });
 
   it('gives every resolver the Persian error map', () => {

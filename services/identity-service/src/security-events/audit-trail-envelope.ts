@@ -1,14 +1,15 @@
-import type { ZodIssue } from 'zod';
+import type { z } from 'zod';
 import {
   AUDIT_EVENT_RECORDED,
   AUDIT_EVENT_RECORDED_VERSION,
   AUDIT_TRAIL_TOPIC,
-  EVENT_HEADERS,
   auditTrailPayloadSchemaV1,
-  eventEnvelopeSchema,
   type AuditTrailPayloadV1,
   type ErrorCode,
+  EVENT_HEADERS,
   type EventEnvelope,
+  eventEnvelopeSchema,
+  legacyIssues,
 } from '@rasta/contracts';
 import type { OutboxRow } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
@@ -177,8 +178,9 @@ export class AuditTrailContractError extends Error {
 
 const MAX_REPORTED_ISSUES = 10;
 
-function describeIssues(issues: readonly ZodIssue[]): string {
-  const described = issues.map(
+function describeIssues(issues: readonly z.core.$ZodIssue[]): string {
+  // zod 3's codes, which these diagnostics have always carried (GHSA-mrhx-c7xc-m3w5).
+  const described = legacyIssues(issues).map(
     (issue) => `${issue.path.length === 0 ? '(root)' : issue.path.join('.')} ${issue.code}`,
   );
   const shown = described.slice(0, MAX_REPORTED_ISSUES).join(', ');

@@ -10,6 +10,7 @@ import {
   referenceId,
   withoutBidiControlDeep,
 } from './text';
+import { legacyIssues } from './zod-issues';
 
 /** Every character Unicode classes as Bidi_Control. */
 const BIDI_CONTROLS = [
@@ -21,10 +22,11 @@ describe('plainText (server-side bidi controls)', () => {
     'refuses %s anywhere in the text, with a message that repeats nothing',
     (_label, cp) => {
       const value = `گواهی${String.fromCodePoint(cp)}12-34`;
-      const result = plainText().max(64).safeParse(value);
+      const schema = plainText().max(64);
+      const result = schema.safeParse(value);
 
       expect(result.success).toBe(false);
-      expect(result.error?.issues).toEqual([
+      expect(legacyIssues(result.error?.issues ?? [], schema)).toEqual([
         expect.objectContaining({ code: 'invalid_string', message: UNSUPPORTED_CHARACTERS }),
       ]);
       expect(JSON.stringify(result.error?.issues)).not.toContain('12-34');
@@ -64,10 +66,11 @@ describe('referenceId (stored references)', () => {
     'refuses %s inside an id, with the closed message',
     (_label, cp) => {
       const value = `DOC_01J9${String.fromCodePoint(cp)}ZK7Q`;
-      const result = referenceId().min(1).max(64).safeParse(value);
+      const schema = referenceId().min(1).max(64);
+      const result = schema.safeParse(value);
 
       expect(result.success).toBe(false);
-      expect(result.error?.issues).toEqual([
+      expect(legacyIssues(result.error?.issues ?? [], schema)).toEqual([
         expect.objectContaining({ code: 'invalid_string', message: UNSUPPORTED_CHARACTERS }),
       ]);
       expect(JSON.stringify(result.error?.issues)).not.toContain('ZK7Q');
@@ -90,7 +93,7 @@ describe('referenceId (stored references)', () => {
 describe('containsBidiControl / withoutBidiControlDeep (free-form JSON)', () => {
   const RLO = String.fromCodePoint(0x202e);
   const ALM = String.fromCodePoint(0x061c);
-  const schema = withoutBidiControlDeep(z.record(z.unknown()));
+  const schema = withoutBidiControlDeep(z.record(z.string(), z.unknown()));
 
   it.each([
     ['a top-level string value', { a: `x${RLO}` }],
@@ -205,7 +208,7 @@ describe('displayText (the one display-text rule: descriptions, notes, titles)',
     const result = field.safeParse(value);
     expect(result.success).toBe(false);
     if (result.success) return;
-    const messages = result.error.issues.map((issue) => issue.message);
+    const messages = legacyIssues(result.error.issues, field, value).map((issue) => issue.message);
     expect(messages.every((m) => m === UNSUPPORTED_CHARACTERS || m.startsWith('String must'))).toBe(
       true,
     );

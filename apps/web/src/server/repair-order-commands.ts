@@ -1,4 +1,9 @@
-import { ID_PREFIXES, WITHOUT_CONTROL_CHARACTER, seedIdSchema } from '@rasta/contracts';
+import {
+  ID_PREFIXES,
+  LEGACY_PARSE,
+  seedIdSchema,
+  WITHOUT_CONTROL_CHARACTER,
+} from '@rasta/contracts';
 import { z } from 'zod';
 
 import {
@@ -213,9 +218,12 @@ export type ParsedRepairForm<B, F extends string> =
 export function parseStartRepairForm(
   values: StartRepairFormValues,
 ): ParsedRepairForm<StartRepairBody, StartRepairField> {
-  const parsed = startRepairFormSchema.safeParse(values);
+  const parsed = startRepairFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, START_REPAIR_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.error, START_REPAIR_FIELDS, startRepairFormSchema),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -235,9 +243,12 @@ export type CompleteRepairBody = z.infer<typeof completeRepairFormSchema>;
 export function parseCompleteRepairForm(
   values: CompleteRepairFormValues,
 ): ParsedRepairForm<CompleteRepairBody, CompleteRepairField> {
-  const parsed = completeRepairFormSchema.safeParse(values);
+  const parsed = completeRepairFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, COMPLETE_REPAIR_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.error, COMPLETE_REPAIR_FIELDS, completeRepairFormSchema),
+  };
 }
 
 /**
@@ -266,9 +277,12 @@ export type CancelRepairBody = z.infer<typeof cancelRepairFormSchema>;
 export function parseCancelRepairForm(
   values: CancelRepairFormValues,
 ): ParsedRepairForm<CancelRepairBody, CancelRepairField> {
-  const parsed = cancelRepairFormSchema.safeParse(values);
+  const parsed = cancelRepairFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, CANCEL_REPAIR_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.error, CANCEL_REPAIR_FIELDS, cancelRepairFormSchema),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +300,7 @@ export const recordPartFormSchema = z
     quantity: positiveQuantity('تعداد', 3, 9),
     unit: requiredText('واحد', 1, 32),
     unitCostMinor: rialAmount('بهای واحد', { allowZero: true }),
-    source: z.enum(PART_SOURCES, { errorMap: () => ({ message: 'منبع قطعه را انتخاب کنید' }) }),
+    source: z.enum(PART_SOURCES, { error: 'منبع قطعه را انتخاب کنید' }),
     sourceReference: optionalReference('ارجاع منبع'),
   })
   .strict();
@@ -297,9 +311,12 @@ export type RecordPartBody = z.infer<typeof recordPartFormSchema>;
 export function parseRecordPartForm(
   values: RecordPartFormValues,
 ): ParsedRepairForm<RecordPartBody, RecordPartField> {
-  const parsed = recordPartFormSchema.safeParse(values);
+  const parsed = recordPartFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, RECORD_PART_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.error, RECORD_PART_FIELDS, recordPartFormSchema),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -328,9 +345,12 @@ export type RecordLabourBody = z.infer<typeof recordLabourFormSchema>;
 export function parseRecordLabourForm(
   values: RecordLabourFormValues,
 ): ParsedRepairForm<RecordLabourBody, RecordLabourField> {
-  const parsed = recordLabourFormSchema.safeParse(values);
+  const parsed = recordLabourFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, RECORD_LABOUR_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.error, RECORD_LABOUR_FIELDS, recordLabourFormSchema),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -344,7 +364,7 @@ export function recordCostFormValues(form: FormData): RecordCostFormValues {
 export const recordCostFormSchema = z
   .object({
     category: z.enum(DIRECT_COST_CATEGORIES, {
-      errorMap: () => ({ message: 'نوع هزینه را از فهرست انتخاب کنید' }),
+      error: 'نوع هزینه را از فهرست انتخاب کنید',
     }),
     amountMinor: rialAmount('مبلغ', { allowZero: false }),
     description: requiredText('شرح هزینه', 2, 500),
@@ -357,9 +377,12 @@ export type RecordCostBody = z.infer<typeof recordCostFormSchema>;
 export function parseRecordCostForm(
   values: RecordCostFormValues,
 ): ParsedRepairForm<RecordCostBody, RecordCostField> {
-  const parsed = recordCostFormSchema.safeParse(values);
+  const parsed = recordCostFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, RECORD_COST_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.error, RECORD_COST_FIELDS, recordCostFormSchema),
+  };
 }
 
 // ---------------------------------------------------------------------------

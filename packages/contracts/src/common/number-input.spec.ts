@@ -68,8 +68,9 @@ describe('numberInput', () => {
     expect(result.error?.issues).toEqual([expect.objectContaining({ code: 'invalid_type' })]);
   });
 
-  it('is the throw z.coerce.number() made, for the record', () => {
-    expect(() => before.safeParse({ toString: null })).toThrow(TypeError);
+  it('is what z.coerce.number() made of a boolean and an array, for the record', () => {
+    // zod 3 also threw a TypeError on { toString: null }; zod 4 refuses it instead.
+    expect(() => before.safeParse({ toString: null })).not.toThrow();
     expect(before.safeParse(true)).toMatchObject({ success: true, data: 1 });
     expect(before.safeParse([7])).toMatchObject({ success: true, data: 7 });
   });
@@ -77,7 +78,7 @@ describe('numberInput', () => {
   it('leaves optional, nullable and default to the wrappers outside it', () => {
     expect(after.optional().parse(undefined)).toBeUndefined();
     expect(after.nullable().parse(null)).toBeNull();
-    expect(after.default(25).parse(undefined)).toBe(25);
+    expect(after.prefault(25).parse(undefined)).toBe(25);
     expect(after.optional().isOptional()).toBe(true);
     expect(after.isOptional()).toBe(false);
   });

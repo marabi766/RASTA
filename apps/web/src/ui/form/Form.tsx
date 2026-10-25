@@ -27,7 +27,7 @@ import { cn } from '../cn';
  * when a field is left is the one that matches how people actually fill a
  * form.
  */
-export function useSchemaForm<TSchema extends z.ZodType<FieldValues>>(
+export function useSchemaForm<TSchema extends z.ZodType<FieldValues, FieldValues>>(
   schema: TSchema,
   options?: Omit<UseFormProps<z.input<TSchema>>, 'resolver'>,
 ): UseFormReturn<z.input<TSchema>> {
@@ -39,7 +39,7 @@ export function useSchemaForm<TSchema extends z.ZodType<FieldValues>>(
     // is confined to this one line rather than leaking into every call site.
     // Zod's default sentences are English: the Persian error map is the same
     // boundary the server-side form parsers use (`lib/form-issues.ts`).
-    resolver: zodResolver(schema, { errorMap: persianErrorMap } as z.ParseParams) as never,
+    resolver: zodResolver(schema, { error: persianErrorMap }) as never,
   });
 }
 

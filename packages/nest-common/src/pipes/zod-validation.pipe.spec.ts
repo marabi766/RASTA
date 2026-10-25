@@ -1,6 +1,7 @@
 import type { ArgumentMetadata, ArgumentsHost } from '@nestjs/common';
 import type { Logger } from '@rasta/logging';
 import { z, type ZodTypeAny } from 'zod';
+import { LEGACY_PARSE, legacyIssues } from '@rasta/contracts';
 import { AllExceptionsFilter } from '../filters/exception.filter';
 import { RastaError } from '../errors/rasta-error';
 import {
@@ -40,10 +41,12 @@ function refusal(schema: ZodTypeAny, input: unknown): RastaError {
   throw new Error('the pipe accepted the input');
 }
 
+/** zod's own issue list, in the zod 3 vocabulary the pipe reads (whose enum message quotes the value). */
 function rawZodText(schema: ZodTypeAny, input: unknown): string {
-  const result = schema.safeParse(input);
+  const result = schema.safeParse(input, LEGACY_PARSE);
   if (result.success) throw new Error('zod accepted the input');
-  return JSON.stringify(result.error.issues.map(({ path, message }) => ({ path, message })));
+  const issues = legacyIssues(result.error.issues, schema);
+  return JSON.stringify(issues.map(({ path, message }) => ({ path, message })));
 }
 
 /** Every echoing case: the schema, an input carrying the sentinel, the issue code, the detail expected. */
@@ -106,10 +109,9 @@ const CASES: {
   {
     name: 'custom: a refine message that interpolates the value',
     schema: z.object({
-      reference: z.string().refine(
-        (v) => v.startsWith('REF-'),
-        (v) => ({ message: `${v} is not a reference` }),
-      ),
+      reference: z.string().refine((v) => v.startsWith('REF-'), {
+        error: (issue) => `${String(issue.input)} is not a reference`,
+      }),
     }),
     input: { reference: SENTINEL },
     expected: { path: 'reference', code: 'custom', message: 'Invalid input' },
@@ -131,20 +133,20 @@ const CASES: {
     expected: { path: 'window', code: 'custom', message: 'Invalid input' },
   },
   {
-    name: 'invalid_type: a custom errorMap that interpolates the data',
+    name: 'invalid_type: a custom error map that interpolates the data',
     schema: z.object({
       amount: z.number({
-        errorMap: (_issue, ctx) => ({ message: `bad amount ${String(ctx.data)}` }),
+        error: (issue) => `bad amount ${String(issue.input)}`,
       }),
     }),
     input: { amount: SENTINEL },
     expected: { path: 'amount', code: 'invalid_type', message: 'Expected number, received string' },
   },
   {
-    name: 'invalid_string: a regex errorMap that interpolates the data',
+    name: 'invalid_string: a regex error map that interpolates the data',
     schema: z.object({
       code: z
-        .string({ errorMap: (_issue, ctx) => ({ message: `"${String(ctx.data)}" is malformed` }) })
+        .string({ error: (issue) => `"${String(issue.input)}" is malformed` })
         .regex(/^[A-Z]{3}$/),
     }),
     input: { code: SENTINEL },
@@ -218,7 +220,7 @@ describe('what the details keep', () => {
 
   it('a static message that merely contains a short input — below the backstop length', () => {
     const schema = z.object({
-      size: z.enum(['S', 'M'], { errorMap: () => ({ message: 'Pick S or M' }) }),
+      size: z.enum(['S', 'M'], { error: 'Pick S or M' }),
     });
     const error = refusal(schema, { size: 'M!' });
     expect(error.details).toEqual([
@@ -239,7 +241,7 @@ describe('safePath: which segments the schema declares', () => {
         .object({ inner: z.string() })
         .optional()
         .nullable()
-        .default({ inner: 'x' })
+        .prefault({ inner: 'x' })
         .transform((v) => v),
       list: z.array(z.record(z.string(), z.object({ leaf: z.string() }))),
       either: z.union([z.object({ a: z.string() }), z.object({ b: z.string() })]),

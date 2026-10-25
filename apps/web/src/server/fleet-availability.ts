@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LEGACY_PARSE } from '@rasta/contracts';
 
 import {
   AVAILABILITY_CHOICES,
@@ -154,7 +155,7 @@ const availabilitySchema = z.object({
       currentAssignment: z
         .object({ id: z.string(), driverId: z.string(), startedAt: z.string() })
         .nullable()
-        .default(null),
+        .prefault(null),
     }),
   ),
 });
@@ -167,17 +168,17 @@ const windowSchema = z.object({
   assetId: z.string(),
   available: z.boolean(),
   fromAt: renderableDate,
-  toAt: renderableDate.nullable().default(null),
+  toAt: renderableDate.nullable().prefault(null),
   reason: z.string(),
   createdAt: z.string(),
-  revokedAt: renderableDate.nullable().default(null),
+  revokedAt: renderableDate.nullable().prefault(null),
 });
 
 export type AvailabilityWindow = z.infer<typeof windowSchema>;
 
 const windowsSchema = z.object({
   items: z.array(windowSchema),
-  hasMore: z.boolean().default(false),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type AvailabilityWindows = z.infer<typeof windowsSchema>;
@@ -265,7 +266,7 @@ export function declareAvailabilityFormValues(form: FormData): DeclareAvailabili
 export const declareAvailabilityFormSchema = z
   .object({
     available: z.enum(AVAILABILITY_CHOICES, {
-      errorMap: () => ({ message: 'وضعیت را از فهرست انتخاب کنید' }),
+      error: 'وضعیت را از فهرست انتخاب کنید',
     }),
     reason: displayText(
       'دلیل',
@@ -310,12 +311,15 @@ export type ParsedDeclareForm =
 export function parseDeclareAvailabilityForm(
   values: DeclareAvailabilityFormValues,
 ): ParsedDeclareForm {
-  const parsed = declareAvailabilityFormSchema.safeParse(values);
+  const parsed = declareAvailabilityFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, (value): value is DeclareAvailabilityField =>
-      (DECLARE_AVAILABILITY_FIELDS as readonly string[]).includes(value),
+    fieldErrors: firstIssuePerField(
+      parsed.error,
+      (value): value is DeclareAvailabilityField =>
+        (DECLARE_AVAILABILITY_FIELDS as readonly string[]).includes(value),
+      declareAvailabilityFormSchema,
     ),
   };
 }

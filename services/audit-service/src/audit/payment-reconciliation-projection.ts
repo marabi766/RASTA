@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, type LegacyIssue, legacyIssues } from '@rasta/contracts';
 import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common';
 import {
   ECONOMIC_RECONCILIATION_CONTRACT,
@@ -279,7 +279,7 @@ const REPORTABLE_FIELDS: ReadonlySet<string> = new Set([
 ]);
 
 /** The top-level schema field an issue is about, or `(payload)`. Never a payload-supplied name. */
-function fieldOf(issue: z.ZodIssue): string {
+function fieldOf(issue: LegacyIssue): string {
   const [first] = issue.path;
   if (first === undefined) return '(payload)';
   return typeof first === 'string' && REPORTABLE_FIELDS.has(first) ? first : '(payload)';
@@ -291,7 +291,8 @@ function fieldOf(issue: z.ZodIssue): string {
  * segment the payload supplied.
  */
 export function describeIssues(error: z.ZodError): string {
-  const issues = error.issues
+  // zod 3's codes, which these diagnostics have always carried (GHSA-mrhx-c7xc-m3w5).
+  const issues = legacyIssues(error.issues)
     .slice(0, 8)
     .map((issue) => `${fieldOf(issue)} ${issue.code}`)
     .join('; ');

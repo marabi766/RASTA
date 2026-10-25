@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 
 /**
  * Events published by fleet-service, on `rasta.fleet.v1`.
@@ -254,7 +255,7 @@ export const assetStatusChangedSchema = assetSourceSchema.extend({
 });
 
 /** An instant as asset-service writes it (`toISOString()`); an offset is accepted too. */
-const isoInstant = z.string().datetime({ offset: true });
+const isoInstant = z.string().check(isoDateTime({ offset: true }));
 
 /**
  * `INSURANCE_RECORDED`, held to the four fields its projection acts on and to
@@ -314,7 +315,7 @@ export const assetTransferredSchema = z
     assetId: z.string().min(1),
     fromOrganizationId: z.string().min(1),
     toOrganizationId: z.string().min(1),
-    transferredAt: z.string().datetime({ offset: true }),
+    transferredAt: z.string().check(isoDateTime({ offset: true })),
     // Additive (#240 round 2). The asset's new ownership generation and the
     // coverages that follow the vehicle, computed by asset-service at transfer
     // time. Absent on an older event: the projection then keeps no window.
@@ -335,7 +336,7 @@ export interface ConsumedPayloadContract {
   readonly fields: readonly string[];
 }
 
-const contract = (object: z.AnyZodObject, schema: z.ZodTypeAny = object) => ({
+const contract = (object: z.ZodObject, schema: z.ZodTypeAny = object) => ({
   schema,
   fields: Object.keys(object.shape),
 });

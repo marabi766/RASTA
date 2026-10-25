@@ -3,6 +3,12 @@ import jsxA11y from 'eslint-plugin-jsx-a11y';
 import reactHooks from 'eslint-plugin-react-hooks';
 import tseslint from 'typescript-eslint';
 
+/** The services' rule, restated: zod 4's `.default()` skips parsing; `.prefault()` is zod 3's. */
+const NO_ZOD_DEFAULT = {
+  selector: "CallExpression[callee.type='MemberExpression'][callee.property.name='default']",
+  message: "zod 4's .default() skips parsing the value; use .prefault() (zod 3's .default()).",
+};
+
 /**
  * The portal's lint rules.
  *
@@ -55,11 +61,12 @@ export default tseslint.config(
           message:
             'z.coerce converts unchecked input (a TypeError is a 500). Use numberInput from @rasta/contracts.',
         },
+        NO_ZOD_DEFAULT,
       ],
     },
   },
   {
     files: ['**/env.ts'],
-    rules: { 'no-restricted-syntax': 'off' },
+    rules: { 'no-restricted-syntax': ['error', NO_ZOD_DEFAULT] },
   },
 );

@@ -1,4 +1,4 @@
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, isoDateTime } from '@rasta/contracts';
 import {
   EventConsumer,
   UnprocessableEventError,
@@ -56,7 +56,7 @@ const tenderAwardedPayload = z.object({
   winnerOrganizationId: identifier,
   matrixDigest: z.string().min(1).max(128),
   awardedBy: identifier,
-  awardedAt: z.string().datetime({ offset: true }),
+  awardedAt: z.string().check(isoDateTime({ offset: true })),
 });
 
 /** The names the schema declares — what a dead-letter message may name of a failing payload (S-09). */

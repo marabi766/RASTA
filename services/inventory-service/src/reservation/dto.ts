@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cursorPaginationSchema } from '@rasta/contracts';
+import { cursorPaginationSchema, isoDateTime } from '@rasta/contracts';
 import { expectedVersionSchema, quantitySchema, stockItemIdSchema } from '../shared/dto';
 
 /**
@@ -30,7 +30,7 @@ export const reserveStockSchema = z
       .describe('Optional opaque `ORD_`/`PO_` reference of the order the stock is held for.'),
     expiresAt: z
       .string()
-      .datetime({ offset: true })
+      .check(isoDateTime({ offset: true }))
       .optional()
       .describe(
         'Optional. When the reservation is released by itself if not issued or released first. ' +

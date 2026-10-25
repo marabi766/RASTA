@@ -1,4 +1,5 @@
-import type { ZodIssue, ZodTypeAny } from 'zod';
+import type { z, ZodTypeAny } from 'zod';
+import { legacyIssues } from '@rasta/contracts';
 
 /**
  * What a refusal may say about the message it refused (S-09; PR #378 r1 F3).
@@ -73,47 +74,45 @@ export function declaredFieldNames(...schemas: readonly ZodTypeAny[]): ReadonlyS
   const pending: unknown[] = [...schemas];
 
   while (pending.length > 0) {
-    const schema = pending.pop() as { _def?: Record<string, unknown> } | undefined;
-    if (!schema?._def || seen.has(schema)) continue;
+    const schema = pending.pop() as { _zod?: { def: Record<string, unknown> } } | undefined;
+    if (!schema?._zod || seen.has(schema)) continue;
     seen.add(schema);
-    const def = schema._def;
+    const def = schema._zod.def;
 
-    switch (def.typeName) {
-      case 'ZodObject': {
-        const shape = (def.shape as () => Record<string, unknown>)();
-        for (const [key, field] of Object.entries(shape)) {
+    switch (def.type) {
+      case 'object': {
+        for (const [key, field] of Object.entries(def.shape as Record<string, unknown>)) {
           names.add(key);
           pending.push(field);
         }
         pending.push(def.catchall);
         break;
       }
-      case 'ZodArray':
-        pending.push(def.type);
+      case 'array':
+        pending.push(def.element);
         break;
-      case 'ZodRecord':
-      case 'ZodMap':
+      case 'record':
+      case 'map':
         pending.push(def.valueType);
         break;
-      case 'ZodEffects':
-        pending.push(def.schema);
-        break;
-      case 'ZodUnion':
-      case 'ZodDiscriminatedUnion':
+      case 'union':
         pending.push(...(def.options as unknown[]));
         break;
-      case 'ZodIntersection':
+      case 'intersection':
         pending.push(def.left, def.right);
         break;
-      case 'ZodTuple':
+      case 'tuple':
         pending.push(...(def.items as unknown[]), def.rest);
         break;
-      case 'ZodPipeline':
+      case 'pipe':
+        // A transform or preprocess: the schema on either side of the function.
         pending.push(def.in, def.out);
         break;
+      case 'lazy':
+        break;
       default:
-        // ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodReadonly, ZodBranded
-        pending.push(def.innerType, def.type);
+        // optional, nullable, default, prefault, catch, readonly, non-optional
+        pending.push(def.innerType);
     }
   }
   return names;
@@ -125,9 +124,13 @@ export function declaredFieldNames(...schemas: readonly ZodTypeAny[]): ReadonlyS
  * {@link MAX_REPORTED_ISSUES} issues and {@link DIAGNOSTIC_MAX_LENGTH}
  * characters.
  */
-export function describeIssues(issues: readonly ZodIssue[], declared: ReadonlySet<string>): string {
+export function describeIssues(
+  issues: readonly z.core.$ZodIssue[],
+  declared: ReadonlySet<string>,
+): string {
   let withheld = 0;
-  const described = issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => {
+  // zod 3's codes, which these diagnostics have always carried (GHSA-mrhx-c7xc-m3w5).
+  const described = legacyIssues(issues.slice(0, MAX_REPORTED_ISSUES)).map((issue) => {
     const path = issue.path.map((segment) => {
       if (typeof segment === 'number') return String(segment);
       if (declared.has(segment)) return segment;
@@ -147,10 +150,10 @@ export function describeIssues(issues: readonly ZodIssue[], declared: ReadonlySe
 }
 
 /** A Zod error by shape: the schemas may come from another package's zod instance. */
-export function zodIssuesOf(error: unknown): readonly ZodIssue[] | null {
+export function zodIssuesOf(error: unknown): readonly z.core.$ZodIssue[] | null {
   if (typeof error !== 'object' || error === null) return null;
   const issues = (error as { issues?: unknown }).issues;
   return (error as { name?: unknown }).name === 'ZodError' && Array.isArray(issues)
-    ? (issues as ZodIssue[])
+    ? (issues as z.core.$ZodIssue[])
     : null;
 }

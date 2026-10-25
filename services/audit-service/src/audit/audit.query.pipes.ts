@@ -1,5 +1,5 @@
 import { Inject, Injectable, type ArgumentMetadata, type PipeTransform } from '@nestjs/common';
-import { ZodError, type ZodType, type ZodTypeDef } from 'zod';
+import { ZodError, type ZodType } from 'zod';
 import { RastaError, toErrorDetails } from '@rasta/nest-common';
 import { ENV } from '../tokens';
 import type { AuditEnv } from '../config/env';
@@ -49,7 +49,7 @@ import {
  * `VALIDATION_FAILED` shape from this service as from every other.
  */
 abstract class SchemaQueryPipe<T> implements PipeTransform {
-  protected constructor(private readonly schema: ZodType<T, ZodTypeDef, unknown>) {}
+  protected constructor(private readonly schema: ZodType<T, unknown>) {}
 
   transform(value: unknown, _metadata: ArgumentMetadata): T {
     try {

@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import {
+  type AuditChange,
+  auditChangesSchema,
   BUSINESS_LINES,
   DLQ_REASONS,
-  auditChangesSchema,
-  type AuditChange,
   type EventEnvelope,
+  legacyIssues,
 } from '@rasta/contracts';
 import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common';
 import { ECONOMIC_TOPIC } from './commission-rule-change-projection';
@@ -133,7 +134,8 @@ export function toSettlementRefusalProjection(
 
 /** Schema paths and zod issue codes only — never a value (S-09). */
 function issuesOf(error: z.ZodError): string {
-  return error.issues
+  // zod 3's codes, which these diagnostics have always carried (GHSA-mrhx-c7xc-m3w5).
+  return legacyIssues(error.issues)
     .map((issue) => `${issue.path.join('.') || '(root)'}:${issue.code}`)
     .join(', ');
 }

@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { legacyIssues, type LegacyIssue } from '@rasta/contracts';
 
 import { toPersianDigits } from './format/digits';
 
@@ -34,7 +35,7 @@ const ARABIC_SCRIPT_LETTER = /[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\uf
 
 const digits = (value: number | bigint): string => toPersianDigits(String(value));
 
-function boundMessage(issue: z.ZodIssue): string | null {
+function boundMessage(issue: LegacyIssue): string | null {
   switch (issue.code) {
     case 'too_small': {
       if (issue.type === 'string') {
@@ -86,29 +87,44 @@ function boundMessage(issue: z.ZodIssue): string | null {
   }
 }
 
-/** The text a person may read for one issue; never Zod's own English. */
-export function formIssueMessage(issue: z.ZodIssue): string {
-  if (ARABIC_SCRIPT_LETTER.test(issue.message)) return issue.message;
-  return boundMessage(issue) ?? GENERIC_FIELD_MESSAGE;
+/**
+ * The text a person may read for one issue; never Zod's own English. The
+ * issue is read in zod 3's vocabulary ({@link legacyIssues}) — the codes and
+ * bounds these sentences were written against; a missing field is told from a
+ * wrong one by the value the issue was raised on, which a parse reports when
+ * it runs with `LEGACY_PARSE` (every form parser here does).
+ */
+export function formIssueMessage(issue: z.core.$ZodIssue, schema?: z.ZodType): string {
+  const [legacy] = legacyIssues([issue], schema);
+  const message = legacy?.message ?? issue.message;
+  if (ARABIC_SCRIPT_LETTER.test(message)) return message;
+  return (legacy && boundMessage(legacy)) ?? GENERIC_FIELD_MESSAGE;
 }
 
 /**
  * The error map for resolvers that read Zod's messages themselves
- * (react-hook-form's Zod resolver, via its `errorMap` option). A message the schema wrote wins over
- * any map, so this only ever replaces Zod's defaults.
+ * (react-hook-form's Zod resolver, via its `error` option). A message the schema wrote wins over
+ * any map, so this only ever replaces Zod's defaults. The issue reaches a map
+ * before it is finished: it still carries the schema that raised it, which
+ * tells a literal from an enum, and the value it was raised on.
  */
-export const persianErrorMap: z.ZodErrorMap = (issue, ctx) => ({
-  message: formIssueMessage({ ...issue, message: ctx.defaultError } as z.ZodIssue),
-});
+export const persianErrorMap: z.core.$ZodErrorMap = (issue) => {
+  const raw = issue as z.core.$ZodRawIssue & { inst?: z.ZodType };
+  const finished = { ...raw, path: [], message: '' } as unknown as z.core.$ZodIssue;
+  return formIssueMessage(finished, raw.inst);
+};
 
 /**
  * The first issue per field of a failed parse, as Persian text. `accepts` is
  * the form's field list or a type guard; an issue whose first path segment is
  * not a field of the form (a numeric array index, an unknown key) is dropped.
+ * `schema` is the schema parsed (with `LEGACY_PARSE`): it tells a literal from
+ * an enum and holds the bounds zod 3 checked a non-finite number against.
  */
 export function firstIssuePerField<F extends string>(
   error: z.ZodError,
   accepts: readonly F[] | ((value: string) => value is F),
+  schema: z.ZodType,
 ): Partial<Record<F, string>> {
   const isField =
     typeof accepts === 'function'
@@ -118,7 +134,7 @@ export function firstIssuePerField<F extends string>(
   for (const issue of error.issues) {
     const field = issue.path[0];
     if (typeof field === 'string' && isField(field) && fieldErrors[field] === undefined) {
-      fieldErrors[field] = formIssueMessage(issue);
+      fieldErrors[field] = formIssueMessage(issue, schema);
     }
   }
   return fieldErrors;

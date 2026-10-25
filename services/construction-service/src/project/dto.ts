@@ -80,6 +80,26 @@ export const MAX_RINGS = 20;
 export const MAX_AREA_POSITIONS = 5000;
 
 const position = z.array(z.number().finite()).length(2);
+
+/**
+ * When the polygon's own rules run: as under zod 3, also after a position
+ * failed in a way that still leaves a value to read — a bound (`too_small`/
+ * `too_big`, which zod 4 lets the rules see) or a non-finite coordinate, which
+ * zod 3 refused with `not_finite` and kept reading but zod 4 refuses as a type
+ * (GHSA-mrhx-c7xc-m3w5: the golden fixture pins both). Never after an issue
+ * that stops the parse, such as an over-cap array refused before its elements.
+ */
+const POLYGON_RULES_RUN = {
+  when: (payload: z.core.ParsePayload): boolean =>
+    payload.issues.every(
+      (issue) =>
+        (issue as { continue?: boolean }).continue === true ||
+        (issue.code === 'invalid_type' &&
+          issue.expected === 'number' &&
+          typeof issue.input === 'number' &&
+          !Number.isNaN(issue.input)),
+    ),
+};
 const ring = z.array(position).min(4).max(MAX_RING_POSITIONS);
 
 /**
@@ -132,7 +152,7 @@ export const polygonInput = z
         message: `An operating area may have at most ${MAX_AREA_POSITIONS} positions`,
       });
     }
-  });
+  }, POLYGON_RULES_RUN);
 
 export type PolygonInput = z.infer<typeof polygonInput>;
 

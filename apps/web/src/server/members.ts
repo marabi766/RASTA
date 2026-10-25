@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LEGACY_PARSE } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
@@ -38,20 +39,20 @@ import { writeThroughGateway, type FieldMapping, type WriteResult } from './writ
 const memberSchema = z.object({
   id: z.string(),
   /** Null only for a row whose membership vanished between two queries. */
-  membershipId: z.string().nullable().default(null),
+  membershipId: z.string().nullable().prefault(null),
   username: z.string(),
-  firstName: z.string().default(''),
-  lastName: z.string().default(''),
+  firstName: z.string().prefault(''),
+  lastName: z.string().prefault(''),
   status: z.string(),
-  roles: z.array(z.string()).default([]),
+  roles: z.array(z.string()).prefault([]),
 });
 
 export type Member = z.infer<typeof memberSchema>;
 
 const memberPageSchema = z.object({
   items: z.array(memberSchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type MemberPage = z.infer<typeof memberPageSchema>;
@@ -161,12 +162,16 @@ export type ParsedUpdateMemberRolesForm =
 export function parseUpdateMemberRolesForm(
   values: UpdateMemberRolesFormValues,
 ): ParsedUpdateMemberRolesForm {
-  const parsed = updateMemberRolesFormSchema.safeParse(values);
+  const parsed = updateMemberRolesFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, ['membershipId', 'roles', 'reason'] as const),
+    fieldErrors: firstIssuePerField(
+      parsed.error,
+      ['membershipId', 'roles', 'reason'] as const,
+      updateMemberRolesFormSchema,
+    ),
   };
 }
 
@@ -227,12 +232,16 @@ export type ParsedRevokeMembershipForm =
 export function parseRevokeMembershipForm(
   values: RevokeMembershipFormValues,
 ): ParsedRevokeMembershipForm {
-  const parsed = revokeMembershipFormSchema.safeParse(values);
+  const parsed = revokeMembershipFormSchema.safeParse(values, LEGACY_PARSE);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, ['membershipId', 'reason'] as const),
+    fieldErrors: firstIssuePerField(
+      parsed.error,
+      ['membershipId', 'reason'] as const,
+      revokeMembershipFormSchema,
+    ),
   };
 }
 

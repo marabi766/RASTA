@@ -51,7 +51,7 @@ function roleListEnv(
 ) {
   return z
     .string()
-    .default(fallback.join(','))
+    .prefault(fallback.join(','))
     .transform((value, ctx): readonly PlatformRole[] => {
       const entries = value
         .split(',')
@@ -102,7 +102,7 @@ export const identityEnvSchema = baseEnvSchema
      */
     KEYCLOAK_SYNC_ENABLED: booleanEnv(true),
 
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * ADR-053 § 4 — how long a refusal may wait for its `security_event_outbox`
@@ -114,13 +114,13 @@ export const identityEnvSchema = baseEnvSchema
      * best-effort, and the refusal itself never waits on audit for long. The
      * ceiling keeps a misconfiguration from turning every `403` into a stall.
      */
-    SECURITY_EVENT_CAPTURE_TIMEOUT_MS: z.coerce.number().int().min(10).max(5000).default(250),
+    SECURITY_EVENT_CAPTURE_TIMEOUT_MS: z.coerce.number().int().min(10).max(5000).prefault(250),
 
     /** How often the refusal relay polls `security_event_outbox`. */
-    SECURITY_EVENT_FLUSH_INTERVAL_MS: z.coerce.number().int().min(50).max(60_000).default(1000),
+    SECURITY_EVENT_FLUSH_INTERVAL_MS: z.coerce.number().int().min(50).max(60_000).prefault(1000),
 
     /** Rows one refusal-relay claim may take. */
-    SECURITY_EVENT_FLUSH_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
+    SECURITY_EVENT_FLUSH_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(100),
 
     /**
      * ADR-053 § 4 — the UTC window matching refusals are counted over (AUD-004
@@ -139,7 +139,7 @@ export const identityEnvSchema = baseEnvSchema
       .int()
       .min(AGGREGATION_WINDOW_SECONDS.MIN)
       .max(AGGREGATION_WINDOW_SECONDS.MAX)
-      .default(AGGREGATION_WINDOW_SECONDS.DEFAULT),
+      .prefault(AGGREGATION_WINDOW_SECONDS.DEFAULT),
 
     /**
      * audit-service's base URL, for the one question the audit correction
@@ -153,7 +153,7 @@ export const identityEnvSchema = baseEnvSchema
      * The whole correction-target lookup, body included. Finite, so a slow
      * audit-service turns into a bounded `504`, never a hung command.
      */
-    AUDIT_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+    AUDIT_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).prefault(3000),
 
     /**
      * The grant ladder — which roles each acting role may hand out
@@ -182,8 +182,8 @@ export const identityEnvSchema = baseEnvSchema
      * ADR-060 § 7's 905 s, so its ceiling is kept at an hour.
      */
     MEMBERSHIP_EXPIRY_SCAN_ENABLED: booleanEnv(true),
-    MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS: z.coerce.number().int().min(5).max(3600).default(60),
-    MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(200),
+    MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS: z.coerce.number().int().min(5).max(3600).prefault(60),
+    MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(200),
 
     /**
      * Which roles may provision a user into an organization other than the one
