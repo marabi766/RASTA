@@ -1,3 +1,4 @@
+import { setEligibilityFixture } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { IdentityRepository } from '../src/identity/identity.repository';
 import { IdentityService } from '../src/identity/identity.service';
@@ -35,13 +36,14 @@ describe('membership validUntil (ADR-060 § 5)', () => {
   const inA = id('MBR-EXP-A');
   const inB = id('MBR-EXP-B');
 
-  // A validUntil a few seconds ahead of the *real* clock. The sweep and the
-  // projection read the faked `Date`, but the switch judges a membership on the
-  // database's clock (Codex #114 R1-1: inside its lock), which no fake reaches —
-  // so the refusal after validUntil waits for real time to pass it.
-  const validUntil = new Date(Date.now() + 10_000);
-  const before = new Date(validUntil.getTime() - 60_000);
-  const after = new Date(validUntil.getTime() + 60_000);
+  // A validUntil ten seconds ahead of the *database* clock, written by it and
+  // read back. The sweep and the projection read the faked `Date`, set a minute
+  // either side of it, but the switch judges a membership on the database's
+  // clock (Codex #114 R1-1: inside its lock), which no fake reaches — so the
+  // refusal after validUntil waits for real time to pass it.
+  let validUntil: Date;
+  let before: Date;
+  let after: Date;
 
   const setClock = (now: Date) => jest.setSystemTime(now);
 
@@ -64,7 +66,6 @@ describe('membership validUntil (ADR-060 § 5)', () => {
         'clearTimeout',
       ],
     });
-    setClock(before);
 
     prisma = newPrisma();
     await prisma.onModuleInit();
@@ -109,7 +110,6 @@ describe('membership validUntil (ADR-060 § 5)', () => {
             userId,
             organizationId: org.a,
             roles: ['OPERATOR'],
-            validFrom: new Date(before.getTime() - 3600_000),
             createdBy: 'ITEST',
             updatedBy: 'ITEST',
           },
@@ -118,14 +118,20 @@ describe('membership validUntil (ADR-060 § 5)', () => {
             userId,
             organizationId: org.b,
             roles: ['DRIVER'],
-            validFrom: new Date(before.getTime() - 3600_000),
-            validUntil,
             createdBy: 'ITEST',
             updatedBy: 'ITEST',
           },
         ],
       });
+      // Both began an hour ago; B ends ten seconds from now, by the database clock.
+      await setEligibilityFixture(prisma, 'membershipStartedHourAgo', [inA, inB]);
+      await setEligibilityFixture(prisma, 'membershipEndsInTenSeconds', [inB]);
+      const ending = await prisma.client.membership.findUniqueOrThrow({ where: { id: inB } });
+      validUntil = ending.validUntil!;
     });
+    before = new Date(validUntil.getTime() - 60_000);
+    after = new Date(validUntil.getTime() + 60_000);
+    setClock(before);
   });
 
   afterAll(async () => {

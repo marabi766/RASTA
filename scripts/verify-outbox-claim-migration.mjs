@@ -220,16 +220,20 @@ const CLAIMABLE_INDEXDEF =
   'CREATE INDEX ix_outbox_claimable ON public.outbox_message ' +
   'USING btree (created_at, id) WHERE (published_at IS NULL)';
 
-/** A minimal, valid unpublished row. Every NOT NULL column the table has. */
-const insertRow = (id, extra = '') => eligibilityClockSql`
+/**
+ * A minimal, valid unpublished row. Every NOT NULL column the table has, and
+ * none of the claim or retry columns: those are compared with the database
+ * clock, so a probe that needs one names it in its own static statement.
+ */
+const insertRow = (id) => eligibilityClockSql`
 INSERT INTO "outbox_message" (
   "id", "aggregate_type", "aggregate_id", "event_name", "event_version",
   "topic", "partition_key", "payload", "headers", "correlation_id",
-  "created_at", "attempts"${extra ? ', ' + extra.split('=')[0].trim() : ''}
+  "created_at", "attempts"
 ) VALUES (
   '${id}', 'Probe', '${id}', 'PROBE', 1,
   't.probe', '${id}', '{}'::jsonb, '{}'::jsonb, 'COR-${id}',
-  now(), 0${extra ? ', ' + extra.split('=').slice(1).join('=').trim() : ''}
+  now(), 0
 );`;
 
 /** Probe rows this script writes, removed before and after the constraint checks. */

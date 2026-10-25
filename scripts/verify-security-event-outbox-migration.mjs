@@ -337,7 +337,13 @@ const insertLegacy = insertInto(C1_VALUES);
 /** A row as Phase C2 writes it. */
 const insertProbe = insertInto(C2_VALUES);
 const clearProbes = `DELETE FROM "${TABLE}" WHERE id LIKE 'SEOCHK%';`;
-const update = (set, id = PROBE) => `UPDATE "${TABLE}" SET ${set} WHERE id = '${id}';`;
+/**
+ * One probe UPDATE. A reviewed template: its SET list may name a clock-gated
+ * column only through a reviewed `eligibilityClockSql` fragment, which the
+ * guard checks at every call.
+ */
+const update = (set, id = PROBE) =>
+  eligibilityClockSql`UPDATE "${TABLE}" SET ${set} WHERE id = '${id}';`;
 const fresh = (statement) => `${clearProbes} ${statement}`;
 
 const startedAt = Date.now();

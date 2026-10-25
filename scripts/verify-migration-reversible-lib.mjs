@@ -1261,11 +1261,21 @@ const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
 
 const PARTICIPATION_RULE = '20261016190000_participation_rule';
 
-/** A reward evaluation row; `subject` adds the two columns this migration brings. */
-const EVALUATION_MIGCHECK = (sourceReference, outcome, subject) => `
+/**
+ * A reward evaluation row; `subject` adds the two columns this migration
+ * brings. `occurred_at` is compared with the database clock (the participation
+ * window), so the row with it is its own static, reviewed probe.
+ */
+const EVALUATION_MIGCHECK = (sourceReference, outcome, subject) =>
+  subject
+    ? eligibilityClockSql`
 INSERT INTO "reward_source_evaluation"
-  ("organization_id", "trigger_event", "source_reference", "origin", "event_id", "outcome"${subject ? ', "subject_user_id", "occurred_at"' : ''})
-VALUES ('ORG-MIGCHECK', 'USAGE_RECORDED', '${sourceReference}', 'EVENT', 'EVT-${sourceReference}', '${outcome}'${subject ? `, '${subject}', now()` : ''});`;
+  ("organization_id", "trigger_event", "source_reference", "origin", "event_id", "outcome", "subject_user_id", "occurred_at")
+VALUES ('ORG-MIGCHECK', 'USAGE_RECORDED', '${sourceReference}', 'EVENT', 'EVT-${sourceReference}', '${outcome}', '${subject}', now());`
+    : `
+INSERT INTO "reward_source_evaluation"
+  ("organization_id", "trigger_event", "source_reference", "origin", "event_id", "outcome")
+VALUES ('ORG-MIGCHECK', 'USAGE_RECORDED', '${sourceReference}', 'EVENT', 'EVT-${sourceReference}', '${outcome}');`;
 
 const PARTICIPATION_RULE_MIGCHECK = (id, version) => `
 INSERT INTO "participation_rule" ("id", "version", "window_days", "contributions", "created_by")
@@ -1301,7 +1311,7 @@ const PARTICIPATION_RULE_STEPS = [
   },
   {
     label: 'participation: a subject without an instant is refused',
-    sql: `UPDATE "reward_source_evaluation" SET occurred_at = NULL WHERE source_reference = 'USG_MIGCHECK_NEW';`,
+    sql: eligibilityClockSql`UPDATE "reward_source_evaluation" SET occurred_at = NULL WHERE source_reference = 'USG_MIGCHECK_NEW';`,
     mustFail: 'ck_reward_source_evaluation_subject',
   },
   {

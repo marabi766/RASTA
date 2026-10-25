@@ -133,9 +133,12 @@ describe('the payment reconciler (real database)', () => {
     paymentIntentId: string,
     pendingOnly = false,
   ): Promise<string[]> => {
-    const tasks = await tasksOf(paymentIntentId);
-    expect(tasks.length).toBeGreaterThan(0);
-    return tasks.filter((task) => !pendingOnly || task.status === 'PENDING').map((task) => task.id);
+    const ids = (await tasksOf(paymentIntentId))
+      .filter((task) => !pendingOnly || task.status === 'PENDING')
+      .map((task) => task.id);
+    // After the filter: a fixture that matches nothing must not pass silently.
+    expect(ids.length).toBeGreaterThan(0);
+    return ids;
   };
 
   /** Makes the intent's pending task due now: the grace is what a test skips. */

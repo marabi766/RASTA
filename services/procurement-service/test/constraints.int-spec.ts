@@ -545,9 +545,22 @@ describe('the database keeps the demand and aggregation invariants', () => {
         for (const status of ['READY', 'REFERRED', 'LAPSED', 'RFQ_ISSUED', 'CANCELLED']) {
           await refusedWith(born(status, {}), /ck_demand_aggregation_born_open/);
         }
-        // Born OPEN, it carries no sweep and no cancellation either.
+        // Born OPEN, it carries no sweep and no cancellation either. The swept birth is
+        // its own static probe: sweep_lease_until is compared with the database clock, so
+        // the generic `born` never names it (eligibility-clock guard, F4).
         await refusedWith(
-          born('OPEN', { sweep_lease_until: T0, sweep_fence: 'FENCE' }),
+          db.$executeRawUnsafe(
+            eligibilityClockSql`INSERT INTO demand_aggregation
+               (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
+                min_quantity, shortfall_policy, total_quantity, demand_count, extension_count,
+                closed_at, created_at, updated_at, sweep_lease_until, sweep_fence)
+             VALUES ($1, $2, $3, 'OPEN', $4, $5, 10, 0, 'EXTEND', 0, 0, 0, NULL, $4, $4, $4, 'FENCE')`,
+            `AGG_${ulid()}`,
+            a,
+            productId,
+            T0,
+            new Date(T0.getTime() + 10 * HOUR),
+          ),
           /ck_demand_aggregation_born_open/,
         );
         await refusedWith(born('OPEN', { sweep_attempts: 1 }), /ck_demand_aggregation_born_open/);

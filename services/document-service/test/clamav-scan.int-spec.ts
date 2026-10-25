@@ -854,9 +854,10 @@ describe('malware scanning with a real ClamAV', () => {
         const claimed = await leases.claim('that-died', 200, 300);
         expect(claimed.map((d) => d.id)).toContain(document.id);
 
-        // Both lease columns, because `ck_document_scan_lease_complete` refuses a
-        // half-written lease — an expiry with no owner never expires from
-        // anybody's point of view.
+        // Only the expiry moves, a second into the past by the database clock; the
+        // owner the claim wrote stays (asserted first), because
+        // `ck_document_scan_lease_complete` refuses a half-written lease — an
+        // expiry with no owner never expires from anybody's point of view.
         //
         // Bounded to the one row this test registered. Expiring leases by owner
         // or by state would expire whatever else the claim above swallowed.

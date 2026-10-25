@@ -54,6 +54,8 @@ export {
   expireClaim,
   makeDue,
   setEligibilityFixture,
+  setTenantEligibilityFixture,
+  insertTransferFixture,
   eligibilityClockSql,
   eligibilityClockWrite,
   eligibilityClockTag,

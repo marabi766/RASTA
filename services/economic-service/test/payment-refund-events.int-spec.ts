@@ -140,12 +140,10 @@ describe('the refund outcome events (real database)', () => {
         where: { paymentIntentId },
         select: { id: true, status: true },
       });
-      expect(tasks.length).toBeGreaterThan(0);
-      await setEligibilityFixture(
-        prisma,
-        'paymentPendingDue',
-        tasks.filter((task) => task.status === 'PENDING').map((task) => task.id),
-      );
+      const pending = tasks.filter((task) => task.status === 'PENDING').map((task) => task.id);
+      // After the filter: a fixture that matches nothing must not pass silently.
+      expect(pending.length).toBeGreaterThan(0);
+      await setEligibilityFixture(prisma, 'paymentPendingDue', pending);
     });
 
   /**
