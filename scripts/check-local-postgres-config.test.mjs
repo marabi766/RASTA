@@ -11,6 +11,8 @@ import {
   parseEnvAssignments,
   validateLocalPostgresConfig,
 } from './check-local-postgres-config-lib.mjs';
+import { UNREGISTERED_DATABASE_URL } from './database-services.mjs';
+import { KEY_SENTINELS, SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const EXAMPLE = resolve(here, '..', '.env.example');
@@ -175,7 +177,11 @@ test('fails closed on a malformed relevant line, and ignores a malformed unrelat
   );
   expectErrors(
     fixture({}, [`DATABASE_URL_EXTRA ${pg('rasta_extra')}`]),
-    /^DATABASE_URL_EXTRA \(line \d+\): malformed assignment$/,
+    /^a DATABASE_URL_\* named for no service \(line \d+\): malformed assignment$/,
+  );
+  expectErrors(
+    fixture({}, [`DATABASE_URL_IDENTITY_MIGRATOR ${pg('rasta_identity_migrator')}`]),
+    /^DATABASE_URL_IDENTITY_MIGRATOR \(line \d+\): malformed assignment$/,
   );
   assert.deepEqual(validateLocalPostgresConfig(fixture({}, ['SOME RANDOM LINE'])).errors, []);
 });
@@ -280,4 +286,95 @@ test('the CLI passes on .env.example and fails a temporary copy without printing
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// #385 r4: a `DATABASE_URL_*` no service owns came from the text checked. It is
+// still checked — detection is by prefix — but every diagnostic shows it as a
+// placeholder, through the library and through the real CLI.
+const SENTINEL_KEYS = KEY_SENTINELS.map((key) => `DATABASE_URL_${key}`);
+
+function sentinelCases(key) {
+  return [
+    [fixture({}, [`${key} ${pg('rasta_x')}`]), 'malformed assignment'],
+    [fixture({ [key]: pg('rasta_x') }, [`${key}=${pg('rasta_x')}`]), 'duplicate assignment'],
+    [fixture({ [key]: 'not-a-url' }), 'malformed URL (no scheme)'],
+    [
+      fixture({ [key]: pg('rasta_x', 'localhost:5433') }),
+      'host must be 127.0.0.1 (found localhost)',
+    ],
+    [
+      fixture({ [key]: pg('rasta_x', '127.0.0.1:5432') }),
+      'port 5432 does not equal POSTGRES_PORT 5433',
+    ],
+    [
+      fixture({ [key]: 'postgresql+x://u@127.0.0.1:5433/x' }),
+      'malformed PostgreSQL URL (unsupported scheme)',
+    ],
+  ];
+}
+
+test('a DATABASE_URL_* named for no service is checked, and shown only as a placeholder', () => {
+  for (const key of SENTINEL_KEYS) {
+    for (const [text, problem] of sentinelCases(key)) {
+      const { errors } = validateLocalPostgresConfig(text);
+      const mine = errors.filter((error) => error.includes(problem));
+      assert.equal(mine.length, 1, `${key} ${problem}: ${errors.join('\n')}`);
+      assert.match(
+        mine[0],
+        new RegExp(`^${UNREGISTERED_DATABASE_URL.replace(/\*/g, '\\*')} \\(line \\d+\\): `),
+      );
+      assertNoSentinel(errors.join('\n'), `${key} ${problem}`);
+    }
+  }
+  // The value of a registered one is no more repeated than before.
+  for (const sentinel of SENTINELS) {
+    const { errors } = validateLocalPostgresConfig(fixture({ DATABASE_URL_IDENTITY: sentinel }));
+    assert.deepEqual(errors, [`DATABASE_URL_IDENTITY (line 6): malformed URL (no scheme)`]);
+  }
+});
+
+test('the CLI: every line it prints for a DATABASE_URL_* named for no service is free of the name', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rasta-local-pg-'));
+  try {
+    for (const key of SENTINEL_KEYS) {
+      for (const [text, problem] of sentinelCases(key)) {
+        const copy = join(dir, 'env.example');
+        writeFileSync(copy, text);
+        const run = spawnSync(process.execPath, [CLI, '--file', copy], { encoding: 'utf8' });
+        assert.equal(run.status, 1, `${problem}: ${run.stderr}`);
+        assert.ok(run.stderr.includes(`${UNREGISTERED_DATABASE_URL} (line`), run.stderr);
+        assertNoSentinel(run.stdout + run.stderr, `${key} ${problem}`);
+      }
+    }
+    // Positive control: the same file with only registered names passes.
+    const copy = join(dir, 'env.example');
+    writeFileSync(copy, fixture());
+    const ok = spawnSync(process.execPath, [CLI, '--file', copy], { encoding: 'utf8' });
+    assert.equal(ok.status, 0, ok.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #385 r4, the rule for numbers: a port is printed only once read as one —
+// POSTGRES_PORT after its digits check, a URL's port after the URL parser's.
+// Written as text, neither is repeated.
+test('a port written as text is refused without being repeated', () => {
+  for (const sentinel of SENTINELS) {
+    assert.deepEqual(validateLocalPostgresConfig(fixture({ POSTGRES_PORT: sentinel })).errors, [
+      'POSTGRES_PORT (line 5): must be a port number 1-65535',
+    ]);
+    const { errors } = validateLocalPostgresConfig(
+      fixture({ DATABASE_URL_IDENTITY: pg('rasta_identity', `127.0.0.1:${sentinel}`) }),
+    );
+    assert.deepEqual(errors, ['DATABASE_URL_IDENTITY (line 6): malformed PostgreSQL URL']);
+    assertNoSentinel(errors.join('\n'), sentinel);
+  }
+  // A number is printed: it cannot carry text.
+  assert.deepEqual(
+    validateLocalPostgresConfig(
+      fixture({ DATABASE_URL_IDENTITY: pg('rasta_identity', '127.0.0.1:1234') }),
+    ).errors,
+    ['DATABASE_URL_IDENTITY (line 6): port 1234 does not equal POSTGRES_PORT 5433'],
+  );
 });

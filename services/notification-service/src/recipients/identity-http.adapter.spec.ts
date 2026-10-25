@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import { InternalTokenService } from '@rasta/nest-common';
 import { IdentityHttpRecipientAdapter } from './identity-http.adapter';
 import { RecipientResolutionError } from './recipient.port';
@@ -291,5 +292,31 @@ describe('IdentityHttpRecipientAdapter', () => {
       (async () => jsonResponse({ users: [] })) as typeof fetch,
     );
     await expect(wrongShape.resolve(query)).rejects.toMatchObject({ reason: 'MALFORMED_RESPONSE' });
+  });
+
+  it('refuses an unreadable base URL with a fixed text, never the URL (#385 r5)', async () => {
+    // `new URL(path, base)` keeps the base on `.base`; an uncaught throw prints it.
+    const { fetch, calls } = fakeFetch(() => jsonResponse({ items: [], hasMore: false }));
+    // Built from the two sentinels, not written as one literal URL.
+    const [user, password] = ['private-sentinel-79', 'JZ97-another-secret'];
+    const adapter = new IdentityHttpRecipientAdapter(
+      { baseUrl: `http://${user}:${password}@identity:bad`, timeoutMs: 1000 },
+      tokens,
+      fetch,
+    );
+    const error = await adapter.resolve(query).then(
+      () => undefined,
+      (thrown: unknown) => thrown as Error,
+    );
+    expect(error?.message).toBe(
+      'IDENTITY_SERVICE_URL cannot be read as a URL; its value is not repeated',
+    );
+    const printed = [
+      error?.stack,
+      JSON.stringify(error, Object.getOwnPropertyNames(error)),
+      inspect(error, { showHidden: true, depth: 10 }),
+    ].join('\n');
+    expect(printed).not.toMatch(/sentinel|jz97|another-secret/i);
+    expect(calls).toHaveLength(0);
   });
 });

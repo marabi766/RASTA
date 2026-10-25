@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 import {
   BASELINE_FILE,
   listedAt,
@@ -159,4 +160,33 @@ test('the command prints the base, and exits 2 when there is none', (t) => {
   assert.equal(zero.status, 2);
   assert.equal(zero.stdout, '');
   assert.match(zero.stderr, /names no previous main/);
+});
+
+// #385 r4: an event name or a "before" that is not a commit id is any text; the
+// command refuses it with a fixed line, from its real entry point.
+test('the command repeats neither an unknown event nor a before that is not a commit', (t) => {
+  const repo = multiCommitPush();
+  t.after(() => rmSync(repo.dir, { recursive: true, force: true }));
+  const run = (env) =>
+    spawnSync(process.execPath, [SCRIPT], {
+      cwd: repo.ci,
+      encoding: 'utf8',
+      env: { ...GIT_ENV, ...env },
+    });
+  for (const sentinel of SENTINELS) {
+    const event = run({ GITHUB_EVENT_NAME: sentinel, SERVICE_ENV_WITHHELD_PUSH_BEFORE: repo.a });
+    assert.equal(event.status, 2);
+    assert.equal(
+      event.stderr,
+      'service-env-withheld-base: no withheld-list base for this event: GITHUB_EVENT_NAME is ' +
+        'pull_request or push only\n',
+    );
+    const before = run({ GITHUB_EVENT_NAME: 'push', SERVICE_ENV_WITHHELD_PUSH_BEFORE: sentinel });
+    assert.equal(before.status, 2);
+    assert.equal(
+      before.stderr,
+      'service-env-withheld-base: github.event.before is not a commit id\n',
+    );
+    for (const output of [event, before]) assertNoSentinel(output.stdout + output.stderr, sentinel);
+  }
 });

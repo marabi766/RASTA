@@ -35,7 +35,11 @@ export {
   outboxPurgeOperationBudget,
   idempotencyClaimOperationBudget,
   urlWithProtocol,
+  urlWithProtocolMessages,
+  CONFIG_ENV_MESSAGES,
   httpUrlSchema,
+  serviceUrlSchema,
+  URL_CREDENTIALS_REFUSED,
   postgresUrlSchema,
   redisUrlSchema,
 } from './env';
@@ -51,7 +55,19 @@ export type {
   OperationBudget,
 } from './env';
 
-export { UTC_SESSION_OPTION, withStatementTimeout, withUtcSession } from './database-session';
+export { ENV_PATH_PLACEHOLDER, envIssues, fixedEnvMessages } from './env-issues';
+export { envEnumFields } from './env-schema';
+export type { EnvEnumField } from './env-schema';
+export { envEnumProbes, envRefusalOf } from './env-probe';
+export type { EnvEnumProbe, EnvRefusal } from './env-probe';
+
+export {
+  DATABASE_URL_CONTROL_CHARACTER,
+  DATABASE_URL_REPEATED_OPTIONS,
+  UTC_SESSION_OPTION,
+  withStatementTimeout,
+  withUtcSession,
+} from './database-session';
 
 export {
   DATABASE_POOL_PARAMETERS,
@@ -73,8 +89,12 @@ export {
 export type { DemoSeedDatabaseProbe } from './seed-guard';
 
 export {
+  DATABASE_SERVICES,
   MIGRATOR_CREDENTIAL_PATTERN,
   MigratorCredentialInServiceError,
+  REGISTERED_MIGRATOR_CREDENTIALS,
   assertNoMigratorCredentials,
   migratorCredentialsIn,
 } from './owner-credentials';
+
+export { UNREADABLE_URL, UnreadableUrlError, readUrl, tryReadUrl } from './url-reader';

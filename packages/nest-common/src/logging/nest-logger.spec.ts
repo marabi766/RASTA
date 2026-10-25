@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { Injectable, Logger, Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { EnvValidationError, baseEnvSchema, loadEnv } from '@rasta/config';
 import { createLogger, REDACTED } from '@rasta/logging';
 import { EXCEPTION_FILTER_LOGGER } from '../filters/exception.filter';
 import { bootstrapLogger, installNestLogger, logFatal } from './nest-logger';
@@ -291,5 +292,36 @@ describe('logFatal', () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatchObject({ level: 'fatal', msg: '[svc-a] failed to start' });
     expect(JSON.stringify(lines[0])).not.toContain(PASSWORD);
+  });
+
+  it('prints an environment refusal without the value written (#385 r2 F2)', async () => {
+    // The startup path of every service: loadEnv throws, main's catch hands the error to
+    // logFatal, which prints its message and stack. Two sentinels, one line each, alike.
+    const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+    const lines: Line[] = [];
+    for (const value of SENTINELS) {
+      const source = { SERVICE_NAME: 'svc-a', PORT: '3000', LOG_LEVEL: value };
+      let thrown: unknown;
+      try {
+        loadEnv(baseEnvSchema, source);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(EnvValidationError);
+      lines.push(
+        ...(await captureLines(() =>
+          logFatal({ serviceName: 'svc-a' }, '[svc-a] failed to start', thrown),
+        )),
+      );
+    }
+
+    expect(lines).toHaveLength(2);
+    const [a, b] = lines.map(({ err }) => err as Record<string, unknown>);
+    expect(a?.message).toMatch(/LOG_LEVEL: Invalid enum value\. Expected 'fatal' \| /);
+    // The stack's frames are where it was thrown from, not what was written; its text is the message.
+    const header = (stack: unknown) => String(stack).split('\n    at ')[0];
+    expect(header(a?.stack)).toBe(`EnvValidationError: ${String(a?.message)}`);
+    expect({ ...a, stack: header(a?.stack) }).toEqual({ ...b, stack: header(b?.stack) });
+    for (const sentinel of SENTINELS) expect(JSON.stringify(lines)).not.toContain(sentinel);
   });
 });

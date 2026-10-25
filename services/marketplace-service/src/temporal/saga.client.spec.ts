@@ -1,4 +1,6 @@
+import { Logger } from '@nestjs/common';
 import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
+import { foreignFailure } from './foreign-failure';
 import { OrderSagaClient } from './saga.client';
 import { installTemporalRuntimeLogger } from './runtime-logger';
 import type { MarketplaceEnv } from '../config/env';
@@ -272,5 +274,95 @@ describe('the connection', () => {
     await client.start('ORD_20');
     await client.onModuleDestroy();
     expect(temporal.close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('what is logged about Temporal (#385 r6)', () => {
+  // The two sentinels of scripts/refusal-probes.mjs, as an address's userinfo
+  // and in a failure's text, cause and details.
+  const USER = 'private-sentinel-79';
+  const PASSWORD = 'JZ97-another-secret';
+  const SENTINEL = /sentinel|jz97|another[-_]secret/i;
+  const ADDRESS = [USER, ':', PASSWORD, '@temporal.invalid:7233'].join('');
+  const leaky = (): Error =>
+    Object.assign(new Error(`failed to dial ${ADDRESS}`, { cause: new Error(ADDRESS) }), {
+      details: ADDRESS,
+    });
+  const logged = (spy: jest.SpyInstance): string => JSON.stringify(spy.mock.calls);
+
+  it('a replayed start (REJECT_DUPLICATE) still branches on the SDK type: no error is logged', async () => {
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+    stubTemporal({
+      start: () =>
+        Promise.reject(
+          new WorkflowExecutionAlreadyStartedError('already started', 'order-ORD_20', 'orderSaga'),
+        ),
+    });
+
+    await expect(new OrderSagaClient(env()).start('ORD_20')).resolves.toBeUndefined();
+    expect(error).not.toHaveBeenCalled();
+    expect(debug).toHaveBeenCalledWith({ orderId: 'ORD_20' }, 'The order saga was already started');
+  });
+
+  it('a missing saga on signal still branches on the SDK type: a warning, no error', async () => {
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    stubTemporal({
+      signal: () => Promise.reject(new WorkflowNotFoundError('gone', 'order-ORD_21', 'rasta')),
+    });
+
+    await new OrderSagaClient(env()).signal('ORD_21', 'confirmed');
+    expect(error).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed start is logged by class only, nothing of its text, cause or details', async () => {
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    stubTemporal({ start: () => Promise.reject(leaky()) });
+
+    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS })).start('ORD_22');
+    expect(error).toHaveBeenCalledWith(
+      { orderId: 'ORD_22', failure: { type: 'Error' } },
+      'Could not start the order saga',
+    );
+    expect(logged(error)).not.toMatch(SENTINEL);
+  });
+
+  it('a failed connection and a failed signal are logged alike', async () => {
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    connect.mockRejectedValue(Object.assign(leaky(), { code: 14 }));
+    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS })).start('ORD_23');
+    stubTemporal({ signal: () => Promise.reject(leaky()) });
+    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS })).signal('ORD_24', 'confirmed');
+
+    expect(error).toHaveBeenCalledTimes(2);
+    expect(error.mock.calls[0][0]).toEqual({
+      orderId: 'ORD_23',
+      failure: { type: 'Error', code: 14 },
+    });
+    expect(logged(error)).not.toMatch(SENTINEL);
+  });
+
+  it('a connection is announced by the setting, never the address it dialled', async () => {
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    stubTemporal();
+    await new OrderSagaClient(env({ TEMPORAL_ADDRESS: ADDRESS })).start('ORD_25');
+
+    expect(log).toHaveBeenCalledWith('Temporal client connected (TEMPORAL_ADDRESS)');
+    expect(logged(log)).not.toMatch(SENTINEL);
+  });
+
+  it('foreignFailure keeps a class and a well-formed code, nothing else', () => {
+    expect(foreignFailure(Object.assign(new Error(ADDRESS), { code: 'UNAVAILABLE' }))).toEqual({
+      type: 'Error',
+      code: 'UNAVAILABLE',
+    });
+    expect(foreignFailure(Object.assign(new Error('x'), { code: ADDRESS }))).toEqual({
+      type: 'Error',
+    });
+    const renamed = Object.assign(new Error('x'), { name: ADDRESS });
+    expect(foreignFailure(renamed)).toEqual({ type: 'unknown' });
+    expect(foreignFailure(ADDRESS)).toEqual({ type: 'unknown' });
   });
 });

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { serviceUrlSchema } from '@rasta/config';
 
 /**
  * The routing table.
@@ -276,22 +277,22 @@ export function resolveRoute(path: string): RouteRule | undefined {
 }
 
 export const serviceUrlEnvSchema = z.object({
-  IDENTITY_SERVICE_URL: z.string().url(),
-  ORGANIZATION_SERVICE_URL: z.string().url(),
-  ASSET_SERVICE_URL: z.string().url(),
-  FLEET_SERVICE_URL: z.string().url(),
-  MAINTENANCE_SERVICE_URL: z.string().url(),
-  MARKETPLACE_SERVICE_URL: z.string().url(),
-  PROCUREMENT_SERVICE_URL: z.string().url(),
-  SUPPLIER_SERVICE_URL: z.string().url(),
-  INVENTORY_SERVICE_URL: z.string().url(),
-  CONSTRUCTION_SERVICE_URL: z.string().url(),
-  CONTRACT_SERVICE_URL: z.string().url(),
-  ECONOMIC_SERVICE_URL: z.string().url(),
-  NOTIFICATION_SERVICE_URL: z.string().url(),
-  DOCUMENT_SERVICE_URL: z.string().url(),
-  AUDIT_SERVICE_URL: z.string().url(),
-  ANALYTICS_SERVICE_URL: z.string().url(),
+  IDENTITY_SERVICE_URL: serviceUrlSchema,
+  ORGANIZATION_SERVICE_URL: serviceUrlSchema,
+  ASSET_SERVICE_URL: serviceUrlSchema,
+  FLEET_SERVICE_URL: serviceUrlSchema,
+  MAINTENANCE_SERVICE_URL: serviceUrlSchema,
+  MARKETPLACE_SERVICE_URL: serviceUrlSchema,
+  PROCUREMENT_SERVICE_URL: serviceUrlSchema,
+  SUPPLIER_SERVICE_URL: serviceUrlSchema,
+  INVENTORY_SERVICE_URL: serviceUrlSchema,
+  CONSTRUCTION_SERVICE_URL: serviceUrlSchema,
+  CONTRACT_SERVICE_URL: serviceUrlSchema,
+  ECONOMIC_SERVICE_URL: serviceUrlSchema,
+  NOTIFICATION_SERVICE_URL: serviceUrlSchema,
+  DOCUMENT_SERVICE_URL: serviceUrlSchema,
+  AUDIT_SERVICE_URL: serviceUrlSchema,
+  ANALYTICS_SERVICE_URL: serviceUrlSchema,
 });
 
 export type ServiceUrls = z.infer<typeof serviceUrlEnvSchema>;
