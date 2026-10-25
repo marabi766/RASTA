@@ -1,5 +1,5 @@
 import { eligibilityClockWrite } from '@rasta/testing';
-import { withUtcSession } from '@rasta/config';
+import { readUrl, withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
 import { PrismaClient } from '../src/generated/prisma';
 
@@ -36,7 +36,7 @@ export function databaseUrl(): string {
 export const TEST_POOL_CONNECTIONS = 16;
 
 function withTestPool(url: string): string {
-  const parsed = new URL(url);
+  const parsed = readUrl(url);
   parsed.searchParams.set('connection_limit', String(TEST_POOL_CONNECTIONS));
   return parsed.toString();
 }

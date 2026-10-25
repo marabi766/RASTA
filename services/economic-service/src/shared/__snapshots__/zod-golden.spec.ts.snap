@@ -1,0 +1,913 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`zod-3 golden: idempotent request bodies and their hashes POST /v1/transactions 1`] = `
+{
+  "amountAsNumber": {
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected string, received number",
+        "path": "grossAmountMinor",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "amountNegative": {
+    "details": [
+      {
+        "code": "invalid_string",
+        "message": "Amount must be a non-negative integer string in minor units",
+        "path": "grossAmountMinor",
+      },
+      {
+        "code": "custom",
+        "message": "Amount exceeds the largest storable amount (2^63 - 1 minor units)",
+        "path": "grossAmountMinor",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "amountPastBigint": {
+    "details": [
+      {
+        "code": "custom",
+        "message": "Amount exceeds the largest storable amount (2^63 - 1 minor units)",
+        "path": "grossAmountMinor",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "badOrganization": {
+    "details": [
+      {
+        "code": "custom",
+        "message": "Expected an identifier of the form ORG_<ULID>",
+        "path": "counterpartyOrganizationId",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "dateWithoutTime": {
+    "details": [
+      {
+        "code": "invalid_string",
+        "message": "Invalid datetime",
+        "path": "occurredAt",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "explicitDefaults": {
+    "hash": "81bf62565ac5688752ccd746e11955fe1aa970567902b5142f9586e05b3d6455",
+    "parsed": {
+      "currency": "IRR",
+      "grossAmountMinor": "1000",
+      "holdFunds": false,
+      "transactionType": "MAINTENANCE_SERVICE",
+    },
+  },
+  "full": {
+    "hash": "e6dea548b47c057533c6b6e87b0eea608e180ec095e09c4541b546678d7cc7c1",
+    "parsed": {
+      "businessLine": "PARTS",
+      "counterpartyOrganizationId": "ORG-DEH-0001",
+      "currency": "IRR",
+      "grossAmountMinor": "9223372036854775807",
+      "holdFunds": true,
+      "idempotencyKey": "key-00000001",
+      "occurredAt": "2026-10-01T10:00:00Z",
+      "sourceReference": "ref-1",
+      "sourceType": "PURCHASE",
+      "transactionType": "MARKETPLACE_ORDER",
+    },
+  },
+  "holdFundsAsText": {
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected boolean, received string",
+        "path": "holdFunds",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "minimal": {
+    "hash": "81bf62565ac5688752ccd746e11955fe1aa970567902b5142f9586e05b3d6455",
+    "parsed": {
+      "currency": "IRR",
+      "grossAmountMinor": "1000",
+      "holdFunds": false,
+      "transactionType": "MAINTENANCE_SERVICE",
+    },
+  },
+  "missingEverything": {
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Required",
+        "path": "transactionType",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Required",
+        "path": "grossAmountMinor",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "notAnObject": {
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected object, received string",
+        "path": "(root)",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "offsetInstant": {
+    "details": [
+      {
+        "code": "invalid_string",
+        "message": "Invalid datetime",
+        "path": "occurredAt",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "reservedSource": {
+    "details": [
+      {
+        "code": "custom",
+        "message": "This source type is recorded only from its owning service",
+        "path": "sourceType",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "unknownKey": {
+    "details": [
+      {
+        "code": "unrecognized_keys",
+        "message": "Unrecognized key(s) in object (1)",
+        "path": "(root)",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "unknownType": {
+    "details": [
+      {
+        "code": "invalid_enum_value",
+        "message": "Invalid enum value. Expected 'MARKETPLACE_ORDER' | 'MAINTENANCE_SERVICE' | 'LOGISTICS' | 'CONSTRUCTION_STATEMENT' | 'PROCUREMENT_ORDER'",
+        "path": "transactionType",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+}
+`;
+
+exports[`zod-3 golden: idempotent request bodies and their hashes dispute, resolve, cancel, refund and settle 1`] = `
+{
+  "cancel": {
+    "blank": {
+      "details": [
+        {
+          "code": "too_small",
+          "message": "String must contain at least 3 character(s)",
+          "path": "reason",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "trimmed": {
+      "hash": "b4cb2c3c9883588aa324f8e04463c23c8375f1d9478cf98f9d92929f482245e9",
+      "parsed": {
+        "reason": "dup",
+      },
+    },
+  },
+  "dispute": {
+    "missing": {
+      "details": [
+        {
+          "code": "invalid_type",
+          "message": "Required",
+          "path": "reason",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "tooShort": {
+      "details": [
+        {
+          "code": "too_small",
+          "message": "String must contain at least 10 character(s)",
+          "path": "reason",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "trimmed": {
+      "hash": "03f15b3c024924775b8df6ddd770dd642ee686053a3c1b4759991a27725dc563",
+      "parsed": {
+        "reason": "the delivered parts were not the ones ordered",
+      },
+    },
+  },
+  "refund": {
+    "ok": {
+      "hash": "20b7722e198e2b17d14892529970300a3a7c48029cb8132642f5471a13457fc5",
+      "parsed": {
+        "reason": "returned",
+      },
+    },
+  },
+  "resolve": {
+    "emptyDispute": {
+      "details": [
+        {
+          "code": "too_small",
+          "message": "String must contain at least 1 character(s)",
+          "path": "disputeId",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "withDispute": {
+      "hash": "6a7b6098cea24998a5ebb7435f3e72e4d878546b87df053ae27d0edc149b6d76",
+      "parsed": {
+        "disputeId": "DSP-1",
+        "resolution": "the delivered parts were not the ones ordered",
+      },
+    },
+    "withoutDispute": {
+      "hash": "f57cb4dc78ba569843cd6ab469f1d8ebf831e99e9de7cf2707ba409464f66f05",
+      "parsed": {
+        "resolution": "the delivered parts were not the ones ordered",
+      },
+    },
+  },
+  "settle": {
+    "ok": {
+      "hash": "5bf70ffced2e97dffc4e6914300064ec5b452787506f11e8f22990bafb9fb19f",
+      "parsed": {
+        "transactionId": "TXN-1",
+      },
+    },
+    "tooLong": {
+      "details": [
+        {
+          "code": "too_big",
+          "message": "String must contain at most 64 character(s)",
+          "path": "transactionId",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+  },
+}
+`;
+
+exports[`zod-3 golden: idempotent request bodies and their hashes participation and recognition rule versions 1`] = `
+{
+  "participation": {
+    "duplicateEvent": {
+      "details": [
+        {
+          "code": "custom",
+          "message": "Invalid input",
+          "path": "contributions",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "empty": {
+      "details": [
+        {
+          "code": "too_small",
+          "message": "Array must contain at least 1 element(s)",
+          "path": "contributions",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "fractionalWeight": {
+      "details": [
+        {
+          "code": "invalid_type",
+          "message": "Expected integer, received float",
+          "path": "contributions[0].weight",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "ok": {
+      "hash": "506236a4bbcac0c39a529bdbb2d22607aa39cbca6c3e4302c3fb6ad08df534e1",
+      "parsed": {
+        "contributions": [
+          {
+            "triggerEvent": "USAGE_RECORDED",
+            "weight": 2,
+          },
+          {
+            "maxPerWindow": 3,
+            "triggerEvent": "MAINTENANCE_COMPLETED",
+            "weight": 5,
+          },
+        ],
+        "expectedCurrentVersion": 0,
+        "label": "نمونه — نیازمند تصویب",
+        "windowDays": 30,
+      },
+    },
+    "overCap": {
+      "details": [
+        {
+          "code": "too_big",
+          "message": "Array must contain at most 2 element(s)",
+          "path": "contributions",
+        },
+        {
+          "code": "custom",
+          "message": "Invalid input",
+          "path": "contributions",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+  },
+  "recognition": {
+    "badBadge": {
+      "details": [
+        {
+          "code": "invalid_string",
+          "message": "Invalid",
+          "path": "badges[0].code",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "notALadder": {
+      "details": [
+        {
+          "code": "custom",
+          "message": "Invalid input",
+          "path": "levels",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "nothing": {
+      "details": [
+        {
+          "code": "custom",
+          "message": "a version names at least one level or badge",
+          "path": "(root)",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "ok": {
+      "hash": "0749c46b8877bc4dc8ca6ac87976f40da721131ad54efcf7d89525aeaf0563c0",
+      "parsed": {
+        "badges": [
+          {
+            "code": "FIRST_USE",
+            "name": "نخستین کارکرد",
+            "threshold": 1,
+          },
+        ],
+        "basis": "PARTICIPATION_SCORE",
+        "expectedCurrentVersion": 2,
+        "levels": [
+          {
+            "name": "برنز",
+            "threshold": 0,
+          },
+          {
+            "name": "نقره",
+            "threshold": 10,
+          },
+        ],
+      },
+    },
+  },
+}
+`;
+
+exports[`zod-3 golden: idempotent request bodies and their hashes wallet top-up and payment refunds and reconciliation 1`] = `
+{
+  "decision": {
+    "extra": {
+      "details": [
+        {
+          "code": "unrecognized_keys",
+          "message": "Unrecognized key(s) in object (1)",
+          "path": "(root)",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "ok": {
+      "hash": "b6e8db4dc113f8fc600d6a031372d2c0e3461ebf86579bd11b8d7bcf989497a6",
+      "parsed": {
+        "reason": "checked",
+      },
+    },
+  },
+  "paymentRefund": {
+    "ok": {
+      "hash": "7d1e9112035e547addf1b5191c92a92ef466de176346d7db983a85268d5d22b2",
+      "parsed": {
+        "reason": "customer asked",
+      },
+    },
+  },
+  "propose": {
+    "badEvidence": {
+      "details": [
+        {
+          "code": "invalid_string",
+          "message": "An evidence reference is 3–128 letters, digits and . _ : / -",
+          "path": "evidenceReference",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "badOutcome": {
+      "details": [
+        {
+          "code": "invalid_enum_value",
+          "message": "Invalid enum value. Expected 'REFUNDED' | 'DECLINED' | 'NOT_REACHED'",
+          "path": "providerOutcome",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "ok": {
+      "hash": "1e82032aa0236cec2e6224f44c4a4a47435ac1a0d76deb19a6cb05912be89c18",
+      "parsed": {
+        "evidenceReference": "TICKET-42/a",
+        "providerOutcome": "REFUNDED",
+        "reason": "statement",
+      },
+    },
+  },
+  "topUp": {
+    "ok": {
+      "hash": "9b1b3919a9293eb38ab82136053ac6814f184b4f8cab60e514cf0839c7af9fb6",
+      "parsed": {
+        "amountMinor": "500",
+        "instrument": "fail:INSUFFICIENT_FUNDS",
+      },
+    },
+    "zero": {
+      "details": [
+        {
+          "code": "custom",
+          "message": "A top-up must be positive",
+          "path": "amountMinor",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+  },
+  "topUpWithKey": {
+    "ok": {
+      "hash": "e18a2030ae3cef12d23351ca784eec8de04250644bce0e767cc1e3eceab6500b",
+      "parsed": {
+        "amountMinor": "500",
+        "idempotencyKey": "key-00000001",
+      },
+    },
+  },
+}
+`;
+
+exports[`zod-3 golden: list queries as they arrive in a query string GET /v1/payment-intents and GET /v1/settlements 1`] = `
+{
+  "payments": {
+    "empty": {
+      "hash": "d837ac99c8a7517b99d9b2a3bb8bb57640707eae5d3b3f8458cac9bbe13dd8dc",
+      "parsed": {
+        "limit": 25,
+      },
+    },
+    "extra": {
+      "details": [
+        {
+          "code": "unrecognized_keys",
+          "message": "Unrecognized key(s) in object (1)",
+          "path": "(root)",
+        },
+      ],
+      "refused": "VALIDATION_FAILED",
+    },
+    "limit": {
+      "hash": "d8261df1943813bf2678ae070f11f8cad37ad5c8784fc6309bb88e0430d6f06d",
+      "parsed": {
+        "limit": 100,
+      },
+    },
+  },
+  "settlements": {
+    "empty": {
+      "hash": "3afeb385ef0ef17d194a9cd61afc7b745b4df1a070ed97a866a7a92544caba8b",
+      "parsed": {
+        "incoming": false,
+        "limit": 25,
+      },
+    },
+    "limit": {
+      "hash": "01d8892d1b86bfb2fc5e50f6e4b9ae63fa3f994498731e30939689c7eab87b04",
+      "parsed": {
+        "incoming": false,
+        "limit": 7,
+      },
+    },
+  },
+}
+`;
+
+exports[`zod-3 golden: list queries as they arrive in a query string GET /v1/transactions: defaults, explicit false, booleans, limits, cursors 1`] = `
+{
+  "badStatus": {
+    "details": [
+      {
+        "code": "invalid_enum_value",
+        "message": "Invalid enum value. Expected 'CREATED' | 'HELD' | 'PENDING_SETTLEMENT' | 'DISPUTED' | 'SETTLED' | 'REFUNDED' | 'CANCELLED' | 'FAILED'",
+        "path": "status",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "blank": {
+    "hash": "414df24a640c887cc5c67fcd84f9c7923ef1496c5f75c5814092d3e388b9ca59",
+    "parsed": {
+      "includeIncoming": false,
+      "limit": 25,
+    },
+  },
+  "cursor": {
+    "hash": "9fd1bffda2fd0e3a8f4f3b4233c6746ac2f2acd2ce72d8fbd528a558c13286cf",
+    "parsed": {
+      "cursor": "TXN_01J9ZS3X5Y0000000000000000",
+      "includeIncoming": false,
+      "limit": 25,
+    },
+  },
+  "empty": {
+    "hash": "414df24a640c887cc5c67fcd84f9c7923ef1496c5f75c5814092d3e388b9ca59",
+    "parsed": {
+      "includeIncoming": false,
+      "limit": 25,
+    },
+  },
+  "emptyCursor": {
+    "hash": "718244b49862c49961b38dd697d2668b79cc9899a380418621c06d9d9a5a87b6",
+    "parsed": {
+      "cursor": "",
+      "includeIncoming": false,
+      "limit": 25,
+    },
+  },
+  "explicitFalse": {
+    "hash": "414df24a640c887cc5c67fcd84f9c7923ef1496c5f75c5814092d3e388b9ca59",
+    "parsed": {
+      "includeIncoming": false,
+      "limit": 25,
+    },
+  },
+  "explicitTrue": {
+    "hash": "d559a85fd80723fa3c90cfe0e926e9c1356feaeae367b4fb91aa11c5e80000c9",
+    "parsed": {
+      "includeIncoming": true,
+      "limit": 25,
+    },
+  },
+  "limit": {
+    "hash": "a8b3ff2b32fe57ca240383643ad3fbca7b33a1f67a8d5cfbb959348bed64391a",
+    "parsed": {
+      "includeIncoming": false,
+      "limit": 5,
+    },
+  },
+  "limitFraction": {
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected integer, received float",
+        "path": "limit",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "limitText": {
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected number, received nan",
+        "path": "limit",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "limitTooBig": {
+    "details": [
+      {
+        "code": "too_big",
+        "message": "Number must be less than or equal to 100",
+        "path": "limit",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "limitZero": {
+    "details": [
+      {
+        "code": "too_small",
+        "message": "Number must be greater than or equal to 1",
+        "path": "limit",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "no": {
+    "hash": "414df24a640c887cc5c67fcd84f9c7923ef1496c5f75c5814092d3e388b9ca59",
+    "parsed": {
+      "includeIncoming": false,
+      "limit": 25,
+    },
+  },
+  "notABoolean": {
+    "details": [
+      {
+        "code": "custom",
+        "message": "Expected a boolean such as "true" or "false"",
+        "path": "includeIncoming",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "notABooleanOneCharacter": {
+    "details": [
+      {
+        "code": "custom",
+        "message": "Expected a boolean such as "true" or "false"",
+        "path": "includeIncoming",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "notABooleanTwoCharacters": {
+    "details": [
+      {
+        "code": "custom",
+        "message": "Expected a boolean such as "true" or "false"",
+        "path": "includeIncoming",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "off": {
+    "hash": "414df24a640c887cc5c67fcd84f9c7923ef1496c5f75c5814092d3e388b9ca59",
+    "parsed": {
+      "includeIncoming": false,
+      "limit": 25,
+    },
+  },
+  "on": {
+    "hash": "d559a85fd80723fa3c90cfe0e926e9c1356feaeae367b4fb91aa11c5e80000c9",
+    "parsed": {
+      "includeIncoming": true,
+      "limit": 25,
+    },
+  },
+  "one": {
+    "hash": "d559a85fd80723fa3c90cfe0e926e9c1356feaeae367b4fb91aa11c5e80000c9",
+    "parsed": {
+      "includeIncoming": true,
+      "limit": 25,
+    },
+  },
+  "range": {
+    "hash": "e077d0379ce2f1947c27c26ceb36043180eba3c09c40307c955e16d543078b61",
+    "parsed": {
+      "from": "2026-01-01T00:00:00Z",
+      "includeIncoming": false,
+      "limit": 25,
+      "to": "2026-01-31T23:59:59.999Z",
+    },
+  },
+  "trimmedSource": {
+    "hash": "e7780af574c48ef7d90326337f68aa2e95d837cb42bd6d466ec95ef314ee1567",
+    "parsed": {
+      "includeIncoming": false,
+      "limit": 25,
+      "sourceReference": "o-1",
+      "sourceType": "ORDER",
+    },
+  },
+  "unknownParameter": {
+    "details": [
+      {
+        "code": "unrecognized_keys",
+        "message": "Unrecognized key(s) in object (1)",
+        "path": "(root)",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "upperYes": {
+    "hash": "d559a85fd80723fa3c90cfe0e926e9c1356feaeae367b4fb91aa11c5e80000c9",
+    "parsed": {
+      "includeIncoming": true,
+      "limit": 25,
+    },
+  },
+  "yes": {
+    "hash": "d559a85fd80723fa3c90cfe0e926e9c1356feaeae367b4fb91aa11c5e80000c9",
+    "parsed": {
+      "includeIncoming": true,
+      "limit": 25,
+    },
+  },
+  "zero": {
+    "hash": "414df24a640c887cc5c67fcd84f9c7923ef1496c5f75c5814092d3e388b9ca59",
+    "parsed": {
+      "includeIncoming": false,
+      "limit": 25,
+    },
+  },
+}
+`;
+
+exports[`zod-3 golden: reward rule conditions (recursive) POST /v1/reward-rules: leaves, all/any nesting and their bounds 1`] = `
+{
+  "anyOfLeaves": {
+    "hash": "effb024fd65409423d6f7b54197dd45a6d25be8f7be52ab4bb08b3b6e1b7b742",
+    "parsed": {
+      "condition": {
+        "any": [
+          {
+            "field": "hours",
+            "op": "gte",
+            "value": 4,
+          },
+          {
+            "field": "kind",
+            "op": "eq",
+            "value": "TRIP",
+          },
+        ],
+      },
+      "points": 10,
+      "rewardType": "POINTS",
+      "status": "ACTIVE",
+      "triggerEvent": "USAGE_RECORDED",
+    },
+  },
+  "badNestedLeaf": {
+    "details": [
+      {
+        "code": "too_small",
+        "message": "String must contain at least 1 character(s)",
+        "path": "condition.all[1].any[0].field",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "bothAllAndAny": {
+    "details": [
+      {
+        "code": "unrecognized_keys",
+        "message": "Unrecognized key(s) in object (1)",
+        "path": "condition",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "deep": {
+    "hash": "820c7a905889314d09e0bdbf75df0a8b059ff17380e519ebc404781374ed7098",
+    "parsed": {
+      "condition": {
+        "all": [
+          {
+            "all": [
+              {
+                "all": [
+                  {
+                    "all": [
+                      {
+                        "field": "hours",
+                        "op": "gte",
+                        "value": 4,
+                      },
+                      {
+                        "field": "kind",
+                        "op": "present",
+                      },
+                    ],
+                  },
+                  {
+                    "field": "kind",
+                    "op": "present",
+                  },
+                ],
+              },
+              {
+                "field": "kind",
+                "op": "present",
+              },
+            ],
+          },
+          {
+            "field": "kind",
+            "op": "present",
+          },
+        ],
+      },
+      "points": 10,
+      "rewardType": "POINTS",
+      "status": "ACTIVE",
+      "triggerEvent": "USAGE_RECORDED",
+    },
+  },
+  "elevenAny": {
+    "details": [
+      {
+        "code": "too_big",
+        "message": "Array must contain at most 10 element(s)",
+        "path": "condition.any",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "emptyAll": {
+    "details": [
+      {
+        "code": "too_small",
+        "message": "Array must contain at least 1 element(s)",
+        "path": "condition.all",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "leaf": {
+    "hash": "b084d84327a679cb3c27c851ea936b181886b20ec42a304483d073fb47a9c0d4",
+    "parsed": {
+      "condition": {
+        "field": "hours",
+        "op": "gte",
+        "value": 4,
+      },
+      "points": 10,
+      "rewardType": "POINTS",
+      "status": "ACTIVE",
+      "triggerEvent": "USAGE_RECORDED",
+    },
+  },
+  "leafExtraKey": {
+    "details": [
+      {
+        "code": "unrecognized_keys",
+        "message": "Unrecognized key(s) in object (1)",
+        "path": "condition",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "noCondition": {
+    "hash": "28336c5c51a9fa70cfc1543ee82a5a733a4d9b1236ed21b9035347c10e35404e",
+    "parsed": {
+      "condition": undefined,
+      "points": 10,
+      "rewardType": "POINTS",
+      "status": "ACTIVE",
+      "triggerEvent": "USAGE_RECORDED",
+    },
+  },
+  "objectValue": {
+    "details": [
+      {
+        "code": "invalid_union",
+        "message": "Invalid input",
+        "path": "condition",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+  "unknownOp": {
+    "details": [
+      {
+        "code": "invalid_union",
+        "message": "Invalid input",
+        "path": "condition",
+      },
+    ],
+    "refused": "VALIDATION_FAILED",
+  },
+}
+`;

@@ -4,10 +4,10 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
-  httpUrlSchema,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { maintenanceOperationBudgets } from './operation-budgets';
 
@@ -27,7 +27,7 @@ export const maintenanceEnvSchema = baseEnvSchema
      * meets an expired transfer fence (ADR-062 § 3b). Required, with no
      * default: a missing one is found at boot, not at the first expired fence.
      */
-    ASSET_SERVICE_URL: httpUrlSchema,
+    ASSET_SERVICE_URL: serviceUrlSchema,
 
     /** One such question, body included. A timeout refuses the work. */
     ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: z.coerce

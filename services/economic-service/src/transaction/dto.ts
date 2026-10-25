@@ -20,7 +20,7 @@ import { isEconomicRecordedSource, RECORDED_SOURCE_REFUSAL } from './recorded-so
  *
  * Schemas are Zod rather than class-validator because validation happens at
  * the boundary through `zodPipe`, and because the same schema is what
- * generates the OpenAPI body (`openapi/zod-schema.ts`) — one definition,
+ * generates the OpenAPI body (`toJsonSchema`, @rasta/nest-common) — one definition,
  * rather than a decorated class and a hand-written document that drift.
  */
 
