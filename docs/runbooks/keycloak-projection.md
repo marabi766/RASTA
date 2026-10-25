@@ -111,9 +111,28 @@ FROM keycloak_write_attempt WHERE takeover_at < now() AND account_missing_at IS 
    (`account_missing_at`) و دیگر کوشیده نمی‌شود. توکنی برای حساب ناموجود ساخته نمی‌شود، پس دسترسی در خطر نیست، و تنزل او رد
    نمی‌شود. حساب را بازگردان و `keycloak:backfill` بزن، یا `keycloak_id` کاربر را درست کن؛ Projection بعدی که بنشیند حصار را
    پاک می‌کند.
-6. **بازگرداندن Migration** (`20261024120000_keycloak_write_attempt/down.sql`) تا وقتی حصاری در جدول است رد می‌شود. سرویس را
-   متوقف کن (حصار تازه‌ای باز نمی‌شود)، صبر کن تا همه‌ی حصارها از `takeover_at` بگذرند، `keycloak:backfill` را اجرا کن تا
-   Projection آن‌ها را بگیرد و پاک کند، حصارهای نهایی باقیمانده را با بند ۵ حل کن، سپس دوباره اجرا کن.
+6. **بازگرداندن Migration** (`20261024120000_keycloak_write_attempt/down.sql`) تا وقتی **هر** ردیفی در جدول است رد می‌شود
+   — زنده، سررسیده، در انتظار Backoff یا نهایی:
+   1. **همه‌ی Replicaهای identity-service را متوقف کن** — نه یکی: هر Replica زنده حصار تازه باز می‌کند، و گذرش همان ردیف‌ها را
+      می‌نویسد.
+   2. صبر کن تا آخرین `takeover_at` بگذرد: `SELECT max(takeover_at) FROM keycloak_write_attempt`.
+   3. `keycloak:backfill` را اجرا کن. پس از کاربران دارای حساب و یتیم‌ها، **همه‌ی صاحبان حصار** را — صفحه‌به‌صفحه، با حساب
+      پیوندخورده یا بی آن (حساب یتیم بی‌خطر می‌شود و حصارش پاک)، سررسیده یا در انتظار Backoff — Project می‌کند، و در پایان
+      `COUNT(*)` همه‌ی ردیف‌ها را در `fences.outstanding` گزارش می‌کند (`live`، `due`، `accountMissing` می‌گویند چرا مانده‌اند).
+      کد خروج ۰ فقط وقتی است که `fences.outstanding` **صفر** باشد.
+   4. اگر چیزی مانده: حصار نهایی را با بند ۵ حل کن، `live` یعنی نویسنده‌ای هنوز در کار است یا صبر کافی نبود (گام ۱ و ۲)؛
+      سپس گام ۳ را تکرار کن.
+   5. فقط با `fences.outstanding: 0` و در حالی که همه‌ی Replicaها هنوز متوقف‌اند، `down.sql` را اجرا کن؛ خودش جدول را قفل و
+      دوباره بررسی می‌کند.
+7. `RastaIdentityKeycloakWriteOverdue` (هشدار، D-070): نوشتنی به Keycloak از مهلتش به‌اضافه‌ی **نیمی** از
+   `KEYCLOAK_WRITE_SETTLE_SECONDS` گذشته و نتیجه‌اش هنوز معلوم نیست (Timeout، قطع اتصال، 5xx، یا فرستنده‌ای که متوقف مانده).
+   هنوز چیزی ناامن نیست — تنزل آن کاربر تا `takeover_at` رد می‌شود — اما ضمانت تکیه بر فرض استقرار D-070 دارد: هیچ درخواستی
+   دیرتر از پنجره نمی‌رسد یا اعمال نمی‌شود. همین حالا تاخیر Admin API در Keycloak، Proxy و شبکه‌ی جلوی آن، و مکث‌های Event
+   Loop در identity-service را ببین؛ اگر به پنجره نزدیک‌اند، `KEYCLOAK_WRITE_SETTLE_SECONDS` را بالا ببر. فهرست:
+   `SELECT user_id, operation, deadline_at, takeover_at FROM keycloak_write_attempt WHERE takeover_at > now() AND
+account_missing_at IS NULL ORDER BY deadline_at`. این سیگنال در هر گذر نمونه گرفته می‌شود، پس
+   `MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS` باید حداکثر نیمی از `KEYCLOAK_WRITE_SETTLE_SECONDS` باشد. مسیریابی هشدار در
+   Production هنوز وجود ندارد.
 
 <a id="registration-approval-orphan"></a>
 
