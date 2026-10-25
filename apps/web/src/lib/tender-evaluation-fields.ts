@@ -1,3 +1,4 @@
+import { ownValue } from '@/lib/own-key';
 /**
  * The vocabulary of a tender's evaluation and award on `/tenders/[id]`
  * (EXP-004; construction-service CON-002 PRs 9–11, ADR-067, Q-84, Q-88..Q-93)
@@ -31,7 +32,7 @@ export const DISQUALIFICATION_REASON_LABELS: Readonly<Record<string, string>> = 
 export const DISQUALIFICATION_REASONS = Object.keys(DISQUALIFICATION_REASON_LABELS);
 
 export const disqualificationLabel = (code: string): string =>
-  DISQUALIFICATION_REASON_LABELS[code] ?? code;
+  ownValue(DISQUALIFICATION_REASON_LABELS, code) ?? code;
 
 /** `RECUSAL_REASONS` (provisional, Q-92) — shown, never sent: standing down is not in this slice. */
 const RECUSAL_REASON_LABELS: Readonly<Record<string, string>> = {
@@ -39,7 +40,7 @@ const RECUSAL_REASON_LABELS: Readonly<Record<string, string>> = {
   OTHER: 'دلیل دیگر',
 };
 
-export const recusalLabel = (code: string): string => RECUSAL_REASON_LABELS[code] ?? code;
+export const recusalLabel = (code: string): string => ownValue(RECUSAL_REASON_LABELS, code) ?? code;
 
 /** `matrixViewSchema.readinessBlockedBy`: why the counted evaluators keep it from completing. */
 export const READINESS_BLOCKED_TEXT: Readonly<Record<string, string>> = {
@@ -115,7 +116,7 @@ const AWARD_REQUEST_STATUS_LABELS: Readonly<Record<string, string>> = {
 };
 
 export const awardRequestStatusLabel = (status: string): string =>
-  AWARD_REQUEST_STATUS_LABELS[status] ?? status;
+  ownValue(AWARD_REQUEST_STATUS_LABELS, status) ?? status;
 
 /** `TENDER_STATES` past the opening, as the evaluation section says them. */
 export const EVALUATION_STAGE_TEXT: Readonly<Record<string, string>> = {

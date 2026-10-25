@@ -18,6 +18,7 @@ import {
   type InspectionSummary,
   type InsurancePolicySummary,
 } from '@/server/asset-records';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The machine's insurance policies and technical inspections on `/assets/[id]`
@@ -193,7 +194,7 @@ function InspectionList({
           >
             <div className="flex flex-wrap items-center gap-2">
               <StatusBadge
-                status={RESULT_BADGE[inspection.result] ?? inspection.result}
+                status={ownValue(RESULT_BADGE, inspection.result) ?? inspection.result}
                 label={inspectionResultLabel(inspection.result)}
               />
               <StatusBadge status={wear.status} label={wear.label} />

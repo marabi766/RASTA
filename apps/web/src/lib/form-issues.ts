@@ -1,4 +1,10 @@
+import { defaultErrorMap } from 'zod';
 import type { z } from 'zod';
+
+import { UNSUPPORTED_CHARACTERS } from '@rasta/contracts';
+
+import { toNestErrors } from '@hookform/resolvers';
+import type { FieldError } from 'react-hook-form';
 
 import { toPersianDigits } from './format/digits';
 
@@ -13,14 +19,20 @@ import { toPersianDigits } from './format/digits';
  * `form-issue-boundary.spec.ts` fails on any other reader of an issue's
  * message, so a new parser cannot reopen the class.
  *
- * Rules, in order:
- *  1. A message the schema's author wrote in Persian (it holds an Arabic-script
- *     letter) is shown as written — those are the specific, field-aware
- *     sentences («نام سازمان را وارد کنید»). Zod's defaults and a message
- *     written in English hold none and never pass.
- *  2. Otherwise a specific sentence from the issue's code and its bounds
- *     («حداکثر ۲۰۰ نویسه مجاز است»), which names the limit and never the input.
- *  3. Otherwise one generic sentence.
+ * The decision is by PROVENANCE, never by what the sentence says. Where a
+ * message came from, in order:
+ *  1. A shared contract message (the closed set in {@link CONTRACT_MESSAGES},
+ *     exact text) is shown as its Persian translation.
+ *  2. Zod's own default for that very issue — recomputed with Zod's default
+ *     error map, so a default that echoes the input (Persian or not) is
+ *     recognised as a default — is replaced by a sentence chosen from the
+ *     issue's code and bounds, which names the limit and never the input.
+ *     The text of a default is never inspected.
+ *  3. A message the portal's own schema author wrote is static text. It is
+ *     shown as written only if it is a Persian sentence ({@link isPersianSentence}:
+ *     it holds an Arabic-script letter; digits, punctuation and a byte-order
+ *     mark alone do not count). English text from anywhere else falls through.
+ *  4. Otherwise a specific sentence from the issue's code, else one generic one.
  *
  * No hamza letters and no U+0654 in any sentence here (docs/16 text policy).
  */
@@ -28,9 +40,43 @@ import { toPersianDigits } from './format/digits';
 /** The fallback for an issue nothing above can describe. */
 export const GENERIC_FIELD_MESSAGE = 'مقدار واردشده معتبر نیست';
 
-// Detection only (is this sentence Persian?), not an allow-list of what may be typed:
-// the Arabic blocks, so `display-text-sites.spec.ts` keeps its one-definition rule.
-const ARABIC_SCRIPT_LETTER = /[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]/;
+/**
+ * Rule 3 only, for text the portal's own authors wrote: an Arabic-script LETTER
+ * (`\p{L}`), not a digit, a punctuation mark, a mark or the byte-order mark,
+ * all of which sit in the Arabic blocks too.
+ */
+const ARABIC_SCRIPT_LETTER = /(?=\p{Script=Arabic})\p{L}/u;
+
+export function isPersianSentence(text: string): boolean {
+  return ARABIC_SCRIPT_LETTER.test(text);
+}
+
+/** The shared contract messages (`@rasta/contracts`), by exact text. */
+const CONTRACT_MESSAGES: ReadonlyMap<string, string> = new Map([
+  [UNSUPPORTED_CHARACTERS, 'نویسه‌های واردشده مجاز نیست'],
+  [
+    'Amount must be a non-negative integer string in minor units',
+    'مبلغ را به ریال و با ارقام درست بنویسید، بدون اعشار',
+  ],
+  [
+    'Amount must be an integer string in minor units',
+    'مبلغ را به ریال و با ارقام درست بنویسید، بدون اعشار',
+  ],
+]);
+
+// A sentence no message can equal: Zod's map answers it for an issue code it has
+// no default sentence for (`custom`), which is how a default is told from authored text.
+const NO_DEFAULT = '\u0000no-default';
+
+function isZodDefault(issue: z.ZodIssue): boolean {
+  return (
+    issue.message ===
+    defaultErrorMap(issue as z.ZodIssueOptionalMessage, {
+      defaultError: NO_DEFAULT,
+      data: undefined,
+    }).message
+  );
+}
 
 const digits = (value: number | bigint): string => toPersianDigits(String(value));
 
@@ -88,14 +134,17 @@ function boundMessage(issue: z.ZodIssue): string | null {
 
 /** The text a person may read for one issue; never Zod's own English. */
 export function formIssueMessage(issue: z.ZodIssue): string {
-  if (ARABIC_SCRIPT_LETTER.test(issue.message)) return issue.message;
+  const shared = CONTRACT_MESSAGES.get(issue.message);
+  if (shared !== undefined) return shared;
+  if (!isZodDefault(issue) && isPersianSentence(issue.message)) return issue.message;
   return boundMessage(issue) ?? GENERIC_FIELD_MESSAGE;
 }
 
 /**
  * The error map for resolvers that read Zod's messages themselves
  * (react-hook-form's Zod resolver, via its `errorMap` option). A message the schema wrote wins over
- * any map, so this only ever replaces Zod's defaults.
+ * any map, so this only ever replaces Zod's defaults; {@link persianResolver}
+ * normalises the rest.
  */
 export const persianErrorMap: z.ZodErrorMap = (issue, ctx) => ({
   message: formIssueMessage({ ...issue, message: ctx.defaultError } as z.ZodIssue),
@@ -122,4 +171,29 @@ export function firstIssuePerField<F extends string>(
     }
   }
   return fieldErrors;
+}
+
+/**
+ * react-hook-form's resolver for a Zod schema, with every error message passed
+ * through {@link formIssueMessage}: the schema's own messages (a contract's
+ * English «Contains unsupported characters» included) are normalised too, which
+ * an error map cannot do because a message the schema wrote bypasses the map.
+ */
+export function persianResolver<TOutput>(schema: z.ZodType<TOutput, z.ZodTypeDef, unknown>) {
+  return async (
+    values: unknown,
+    _context: unknown,
+    options: Parameters<typeof toNestErrors>[1],
+  ) => {
+    const result = await schema.safeParseAsync(values);
+    if (result.success) return { values: result.data, errors: {} };
+    const flat: Record<string, FieldError> = Object.create(null) as Record<string, FieldError>;
+    for (const issue of result.error.issues) {
+      const key = issue.path.join('.');
+      if (flat[key] === undefined) {
+        flat[key] = { type: issue.code, message: formIssueMessage(issue) };
+      }
+    }
+    return { values: {}, errors: toNestErrors(flat, options) };
+  };
 }

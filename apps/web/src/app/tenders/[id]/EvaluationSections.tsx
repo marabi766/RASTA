@@ -36,6 +36,7 @@ import type {
 import type { ApprovalRequest, TenderAward } from '@/server/tender-owner';
 
 import { RequestView, type RequestWording } from './OwnerSections';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The evaluation and the award on `/tenders/[id]` (EXP-004): the matrix as
@@ -132,7 +133,7 @@ function MatrixView({
   const labels = new Map(view.criteria.map((criterion) => [criterion.code, criterion.label]));
   return (
     <div className="flex flex-col gap-4">
-      <p>{EVALUATION_STAGE_TEXT[view.status] ?? view.status}</p>
+      <p>{ownValue(EVALUATION_STAGE_TEXT, view.status) ?? view.status}</p>
       <dl className="grid gap-3 sm:grid-cols-3">
         <div>
           <dt className="text-sm text-content-muted">بیشترین امتیاز وزنی یک ارزیاب</dt>
@@ -159,7 +160,7 @@ function MatrixView({
       </ul>
       {view.readinessBlockedBy !== null ? (
         <Alert tone="warning">
-          {READINESS_BLOCKED_TEXT[view.readinessBlockedBy] ??
+          {ownValue(READINESS_BLOCKED_TEXT, view.readinessBlockedBy) ??
             'ارزیاب‌های شمرده‌شده افراد جداگانه‌ای شناخته نمی‌شوند و ارزیابی کامل نمی‌شود.'}
         </Alert>
       ) : null}

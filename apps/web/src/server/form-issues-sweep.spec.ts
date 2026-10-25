@@ -5,25 +5,13 @@ import { z } from 'zod';
 
 import { firstIssuePerField, GENERIC_FIELD_MESSAGE } from '@/lib/form-issues';
 
-import * as assetCommands from './asset-commands';
-import * as assetDocuments from './asset-documents';
-import * as assetLifecycle from './asset-lifecycle-commands';
-import * as assetRecords from './asset-records';
-import * as assignments from './assignments';
-import * as drivers from './drivers';
-import * as fleetAvailability from './fleet-availability';
-import * as maintenanceCommands from './maintenance-commands';
-import * as members from './members';
-import * as organizations from './organizations';
-import * as repairOrderCommands from './repair-order-commands';
-import * as usage from './usage';
-import * as supplierCommands from '@/lib/supplier-commands';
+import { discoverModules } from '@/test/module-discovery';
 
 /**
  * Every local form schema the portal exports, with hostile input in every
  * field: whatever a person would be shown for a failed field is Persian. The
- * sweep finds the schemas by the `…FormSchema` naming convention, so a new
- * parser is covered the day it is exported; a floor on the count fails the
+ * sweep finds the modules by their exported `…FormSchema` declarations (no list
+ * to forget), so a new parser is covered the day it is exported; a floor on the count fails the
  * test if the convention is ever abandoned.
  */
 
@@ -35,21 +23,13 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-const MODULES: Record<string, Record<string, unknown>> = {
-  'asset-commands': assetCommands,
-  'asset-documents': assetDocuments,
-  'asset-lifecycle-commands': assetLifecycle,
-  'asset-records': assetRecords,
-  assignments,
-  drivers,
-  'fleet-availability': fleetAvailability,
-  'maintenance-commands': maintenanceCommands,
-  members,
-  organizations,
-  'repair-order-commands': repairOrderCommands,
-  'supplier-commands': supplierCommands,
-  usage,
-};
+// Every module under lib/ and server/ that exports a `…FormSchema` — found, not listed.
+const MODULES = Object.fromEntries(
+  discoverModules({
+    dirs: ['lib', 'server'],
+    marker: /export const \w+FormSchema\b/,
+  }).map(({ name, exports }) => [name, exports] as const),
+);
 
 function shapeOf(schema: z.ZodTypeAny): Record<string, z.ZodTypeAny> | null {
   let current: z.ZodTypeAny = schema;

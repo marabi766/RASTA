@@ -12,6 +12,7 @@ import {
 } from '@/ui';
 import { formatJalaliDateLong } from '@/lib/format';
 import {
+  disputeTextLabel,
   transactionReasonLabel,
   transactionSourceLabel,
   transactionStatusLabel,
@@ -249,7 +250,11 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
             <Row term="زمان ثبت اعتراض">{formatJalaliDateLong(t.disputedAt)}</Row>
           ) : null}
           <Row term="دلیل اعتراض">
-            {t.disputeReason === null ? 'ثبت نشده' : <IsolatedText>{t.disputeReason}</IsolatedText>}
+            {t.disputeReason === null ? (
+              'ثبت نشده'
+            ) : (
+              <IsolatedText>{disputeTextLabel(t.disputeReason)}</IsolatedText>
+            )}
           </Row>
         </dl>
       </div>
@@ -270,7 +275,7 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
         <dl className="text-sm">
           {t.disputeReason !== null ? (
             <Row term={legacy ? 'آخرین متن ثبت‌شده برای اعتراض' : 'دلیل اعتراض'}>
-              <IsolatedText>{t.disputeReason}</IsolatedText>
+              <IsolatedText>{disputeTextLabel(t.disputeReason)}</IsolatedText>
             </Row>
           ) : null}
           {resolution.kind !== 'NONE' ? (
@@ -280,7 +285,7 @@ function DisputeState({ transaction: t }: { transaction: Transaction }) {
           ) : null}
           {resolution.kind !== 'NONE' && t.disputeResolution !== null ? (
             <Row term={own ? 'شرح تصمیم' : 'شرح آخرین تصمیم'}>
-              <IsolatedText>{t.disputeResolution}</IsolatedText>
+              <IsolatedText>{disputeTextLabel(t.disputeResolution)}</IsolatedText>
             </Row>
           ) : null}
         </dl>

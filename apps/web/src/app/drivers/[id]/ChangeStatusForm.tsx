@@ -7,6 +7,7 @@ import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { driverStatusOptions } from '@/lib/labels';
 import { EMPTY_CHANGE_STATUS_FORM } from '@/lib/driver-fields';
+import { ownValue } from '@/lib/own-key';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
 import { submitChangeStatus } from './actions';
@@ -53,7 +54,7 @@ export function ChangeStatusForm({
   const errors = state.kind === 'INVALID' ? state.fieldErrors : {};
   const currentSubmissionId = state.kind === 'INVALID' ? state.submissionId : submissionId;
 
-  const legal = LEGAL_NEXT_STATUSES[currentStatus] ?? [];
+  const legal = ownValue(LEGAL_NEXT_STATUSES, currentStatus) ?? [];
   const options = driverStatusOptions.filter((option) => legal.includes(option.value));
   // A driver already DEACTIVATED has no legal next status at all — the
   // lifecycle is terminal — so the form has nothing to offer and says so

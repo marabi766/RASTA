@@ -10,6 +10,7 @@ import {
 } from './format';
 import type { ProjectStatus } from './project-fields';
 import { SESSION_REFUSAL_MESSAGES } from './session-refusal';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The commands of the project write screens (EXP-004; construction-service
@@ -665,11 +666,11 @@ export const APPROVAL_STATUS_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function approvalStatusLabel(status: string): string {
-  return APPROVAL_STATUS_LABELS[status] ?? status;
+  return ownValue(APPROVAL_STATUS_LABELS, status) ?? status;
 }
 
 export function workflowLabel(key: string): string {
-  return WORKFLOW_LABELS[key] ?? key;
+  return ownValue(WORKFLOW_LABELS, key) ?? key;
 }
 
 /** Project workflows only: a tender step is decided on its tender's screen. */

@@ -1,24 +1,12 @@
 /**
  * @jest-environment node
  */
-import * as assetCommands from './asset-commands';
-import * as assetDocuments from './asset-documents';
-import * as assetLifecycle from './asset-lifecycle-commands';
-import * as assetRecords from './asset-records';
-import * as assignments from './assignments';
-import * as contractCommands from './contract-commands';
 import * as drivers from './drivers';
-import * as fleetAvailability from './fleet-availability';
 import * as maintenanceCommands from './maintenance-commands';
-import * as members from './members';
 import * as orders from './orders';
-import * as organizations from './organizations';
-import * as placeOrder from './place-order';
-import * as repairOrders from './repair-order-commands';
-import * as returns from './returns';
-import * as transactions from './transactions';
 import * as usage from './usage';
-import * as wallet from './wallet';
+import { discoverModules } from '@/test/module-discovery';
+
 import { GENERIC_REFUSAL_MESSAGE, mapProblemToFields, type FieldMapping } from './write';
 
 /**
@@ -30,26 +18,11 @@ import { GENERIC_REFUSAL_MESSAGE, mapProblemToFields, type FieldMapping } from '
  * server.
  */
 
-const MODULES = [
-  assetCommands,
-  assetDocuments,
-  assetLifecycle,
-  assetRecords,
-  assignments,
-  contractCommands,
-  drivers,
-  fleetAvailability,
-  maintenanceCommands,
-  members,
-  orders,
-  organizations,
-  placeOrder,
-  repairOrders,
-  returns,
-  transactions,
-  usage,
-  wallet,
-];
+// Every server module that declares a field mapping — found, not listed.
+const MODULES = discoverModules({
+  dirs: ['server'],
+  marker: /export const \w+MAPPING\b/,
+}).map(({ exports }) => exports);
 
 const MAPPINGS: ReadonlyArray<readonly [string, FieldMapping<string>]> = MODULES.flatMap((module) =>
   Object.entries(module)

@@ -12,6 +12,7 @@ import {
 } from './gateway';
 import { webServerEnv } from './env';
 import type { WebSession } from './session';
+import { ownValue, ownText } from '@/lib/own-key';
 
 /**
  * Writing through the gateway, and turning every way it can end into
@@ -236,11 +237,11 @@ export function mapProblemToFields<F extends string>(
   const unplaced: string[] = [];
   const textOf = (message: string, path: string | null): string => {
     const known =
-      mapping.messages?.[message] ??
+      ownText(mapping.messages, message) ??
       mapping.patterns?.find(([pattern]) => pattern.test(message))?.[1] ??
-      COMMON_MESSAGES[message] ??
+      ownText(COMMON_MESSAGES, message) ??
       commonPatternText(message) ??
-      mapping.byCode?.[problem.code];
+      ownText(mapping.byCode, problem.code);
     if (known !== undefined) return known;
     // Nothing maps this sentence: say the generic one, never the service's.
     reportUnmappedMessage({ status, code: problem.code, path, message });
@@ -248,10 +249,8 @@ export function mapProblemToFields<F extends string>(
   };
 
   for (const detail of problem.details ?? []) {
-    const field = mapping.paths[detail.path];
-    const text =
-      (detail.code !== undefined ? mapping.byDetailCode?.[detail.code] : undefined) ??
-      textOf(detail.message, detail.path);
+    const field = ownValue(mapping.paths, detail.path);
+    const text = ownText(mapping.byDetailCode, detail.code) ?? textOf(detail.message, detail.path);
     if (field === undefined) {
       unplaced.push(text);
       continue;
