@@ -228,11 +228,8 @@ export function producerKey(run) {
  */
 export function expectedProducer(key, run) {
   const m = KEY.exec(typeof key === 'string' ? key : '');
-  if (!m)
-    return {
-      ok: false,
-      reason: `producer key ${JSON.stringify(key)} is not trivy-db-<run>-<attempt>`,
-    };
+  // Refused by name: an unmatched key is never repeated (scripts/cli-contract.mjs).
+  if (!m) return { ok: false, reason: 'the producer key is not trivy-db-<run>-<attempt>' };
   if (!POSITIVE.test(String(run?.id ?? '')) || !POSITIVE.test(String(run?.attempt ?? ''))) {
     return { ok: false, reason: 'this job does not know its own run id and attempt' };
   }
@@ -303,7 +300,8 @@ function readMeta(page, expectedId) {
  * Opens a bbolt file the way bbolt does, but strictly (a freshly published,
  * closed DB has two valid meta pages), and lists the top-level buckets with
  * their entry counts. Reads only the pages it needs, so a 1.6 GB DB takes
- * milliseconds. Problems are returned, never thrown.
+ * milliseconds. Problems are returned, never thrown, and never name the
+ * path (a refusal does not repeat what the operator passed).
  * @returns {{ok: true, buckets: Map<string, number>} | {ok: false, reason: string}}
  */
 export function inspectBolt(path) {
@@ -311,9 +309,9 @@ export function inspectBolt(path) {
   try {
     fd = openSync(path, 'r');
   } catch (e) {
-    return { ok: false, reason: `cannot open ${path}: ${e.code ?? e.message}` };
+    return { ok: false, reason: `cannot open it (${e.code ?? 'error'})` };
   }
-  const fail = (reason) => ({ ok: false, reason: `${path}: ${reason}` });
+  const fail = (reason) => ({ ok: false, reason });
   try {
     const size = BigInt(fstatSync(fd).size);
     const read = (offset, length) => {
@@ -482,12 +480,12 @@ function checkContent(cacheDir, now, nowNs) {
   const dbDir = join(cacheDir, 'db');
   const metaPath = join(dbDir, 'metadata.json');
   const dbPath = join(dbDir, 'trivy.db');
-  if (!existsSync(metaPath)) return fail(`missing ${metaPath}`);
+  if (!existsSync(metaPath)) return fail(`missing db/metadata.json`);
   let meta;
   try {
     meta = JSON.parse(readFileSync(metaPath, 'utf8'));
   } catch {
-    return fail(`${metaPath} is not valid JSON`);
+    return fail(`db/metadata.json is not valid JSON`);
   }
   const m = checkMetadata(meta, nowNs);
   if (m.problem) return fail(`metadata ${m.problem} (runner clock ${now.toISOString()})`);
@@ -499,16 +497,16 @@ function checkContent(cacheDir, now, nowNs) {
     );
   }
 
-  if (!existsSync(dbPath)) return fail(`missing ${dbPath}`);
+  if (!existsSync(dbPath)) return fail(`missing db/trivy.db`);
   const bolt = inspectBolt(dbPath);
-  if (!bolt.ok) return fail(`${bolt.reason} (not a usable bbolt database)`);
+  if (!bolt.ok) return fail(`db/trivy.db: ${bolt.reason} (not a usable bbolt database)`);
   for (const name of REQUIRED_BUCKETS) {
-    if (!bolt.buckets.has(name)) return fail(`${dbPath} has no bucket "${name}"`);
-    if (bolt.buckets.get(name) === 0) return fail(`${dbPath} has an empty bucket "${name}"`);
+    if (!bolt.buckets.has(name)) return fail(`db/trivy.db has no bucket "${name}"`);
+    if (bolt.buckets.get(name) === 0) return fail(`db/trivy.db has an empty bucket "${name}"`);
   }
   for (const family of REQUIRED_BUCKET_FAMILIES) {
     if (![...bolt.buckets].some(([name, count]) => family.pattern.test(name) && count > 0)) {
-      return fail(`${dbPath} has no non-empty "${family.label}" bucket`);
+      return fail(`db/trivy.db has no non-empty "${family.label}" bucket`);
     }
   }
   return { ok: true, updatedAt: meta.UpdatedAt, ageHours, buckets: bolt.buckets.size };
@@ -537,16 +535,16 @@ export function checkDb(cacheDir, { now, key, run } = {}) {
 
   const sourcePath = join(cacheDir, SOURCE_FILE);
   if (!existsSync(sourcePath)) {
-    return fail(`missing ${sourcePath}: this DB was not produced by the shared download`);
+    return fail(`missing ${SOURCE_FILE}: this DB was not produced by the shared download`);
   }
   let source;
   try {
     source = JSON.parse(readFileSync(sourcePath, 'utf8'));
   } catch {
-    return fail(`${sourcePath} is not valid JSON`);
+    return fail(`${SOURCE_FILE} is not valid JSON`);
   }
   if (source === null || typeof source !== 'object' || Array.isArray(source)) {
-    return fail(`${sourcePath} is not a JSON object`);
+    return fail(`${SOURCE_FILE} is not a JSON object`);
   }
   if (
     source.key !== producer.key ||
@@ -565,7 +563,7 @@ export function checkDb(cacheDir, { now, key, run } = {}) {
   for (const file of DIGESTED) {
     const want = source.sha256?.[file];
     if (typeof want !== 'string' || !/^[0-9a-f]{64}$/.test(want)) {
-      return fail(`${sourcePath} carries no sha256 for ${file}`);
+      return fail(`${SOURCE_FILE} carries no sha256 for ${file}`);
     }
     if (sha256File(join(cacheDir, 'db', file)) !== want) {
       return fail(`db/${file} is not the copy the producer validated (sha256 differs)`);

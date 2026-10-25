@@ -242,6 +242,25 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/ci-image-matrix.mjs': { other: ['--all'] },
   'scripts/ci-integration-split-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
   'scripts/ci-migration-reversibility-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
+  // Trivy's own options, passed to the pinned trivy binary (download and canary scan).
+  'scripts/ci-trivy-db-lib.mjs': {
+    other: [
+      '--cache-backend',
+      '--cache-dir',
+      '--db-repository',
+      '--download-db-only',
+      '--format',
+      '--no-progress',
+      '--offline-scan',
+      '--quiet',
+      '--scanners',
+      '--skip-db-update',
+      '--skip-java-db-update',
+      '--timeout',
+    ],
+  },
+  // fetch|check, the Trivy cache directory, the producer key (trivy-db-<run>-<attempt>).
+  'scripts/ci-trivy-db.mjs': { positionals: ['enum', 'path', 'identifier'] },
   'scripts/container-scope-proof.mjs': {
     other: ['--test', '--test-name-pattern', '--test-reporter'],
   },

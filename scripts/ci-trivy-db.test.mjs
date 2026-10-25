@@ -948,6 +948,20 @@ for (const [name, env, pattern] of [
   });
 }
 
+test('CLI refusals never repeat the cache path or an unmatched key (scripts/cli-contract.mjs)', () => {
+  const sentinel = 'SENTINEL-c0ffee';
+  const dir = join(tmp(), sentinel);
+  for (const r of [
+    cli(['check', dir, KEY]), // nothing there
+    cli(['check', writeDb(dir, { db: r1Counterexample(), base: new Date() }), KEY]),
+    cli(['check', dir, `trivy-db-77-1${sentinel}`]),
+    cli(['check', dir, sentinel]),
+  ]) {
+    assert.equal(r.status, 1);
+    assert.doesNotMatch(r.stdout + r.stderr, new RegExp(sentinel));
+  }
+});
+
 test('CLI check: restore miss (empty directory) -> exit 1', () => {
   const r = cli(['check', tmp(), KEY]);
   assert.equal(r.status, 1);
