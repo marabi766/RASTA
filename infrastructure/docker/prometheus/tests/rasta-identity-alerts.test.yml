@@ -1,0 +1,169 @@
+# Behaviour tests for rules/rasta-identity-alerts.yml.
+#
+#   docker run --rm -v "$PWD/infrastructure/docker/prometheus:/etc/prometheus:ro" \
+#     --entrypoint promtool prom/prometheus:v3.1.0 \
+#     test rules /etc/prometheus/tests/rasta-identity-alerts.test.yml
+#
+# Inputs carry the scrape's job/instance/environment labels so the expected alert also
+# proves which labels the rule keeps (none) and which it drops.
+
+rule_files:
+  - ../rules/rasta-identity-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------------
+  # RastaIdentityMembershipLapseBacklog
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Two lapses wait from minute 1; one is acted on at 15, the other at 30.
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 2x13 1x15 0x5'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts: []
+      # Waiting, but not yet for 20 minutes: a lapse the sweep is still backing off.
+      - eval_time: 20m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '1 lapsed memberships have not been taken out of Keycloak'
+              description: "The membership expiry sweep has lapses past validUntil that it has not acted on for 20 minutes. identity-service already refuses them, but each stays in the user's Keycloak attributes, and so in new tokens, until its write lands; the gateway's cutoff covers those tokens only once the lapse is acted on and its MEMBERSHIP_EXPIRED is out. The identity-service log names each membership and why it failed (Keycloak refused, unreachable, or a write of the user still settling). This alert deliberately carries none of them."
+              runbook: docs/runbooks/keycloak-projection.md
+      # Every lapse acted on.
+      - eval_time: 31m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityKeycloakAccountMissing (D-069)
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Live and due fences come and go; one becomes terminal at minute 5 and an
+      # operator resolves it at minute 12.
+      - series: 'rasta_identity_keycloak_write_fences{state="live",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '3x20'
+      - series: 'rasta_identity_keycloak_write_fences{state="due",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '1x20'
+      - series: 'rasta_identity_keycloak_write_fences{state="account_missing",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 0 0 0 0 1x6 0x8'
+    alert_rule_test:
+      # Live and due fences alone never fire it.
+      - eval_time: 4m
+        alertname: RastaIdentityKeycloakAccountMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaIdentityKeycloakAccountMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '1 Keycloak write fences name an account Keycloak no longer has'
+              description: "On re-assertion, Keycloak answered 404 for the account a write of these users addressed. Their fences are terminal (keycloak_write_attempt.account_missing_at): not retried, kept for an operator. No token can be minted for a missing account. Find the users in keycloak_write_attempt WHERE account_missing_at IS NOT NULL, and either restore the account and run keycloak:backfill, or correct the user's keycloak_id; the fence is cleared by the next projection that lands. The log names each user; this alert deliberately does not."
+              runbook: docs/runbooks/keycloak-projection.md
+      # Resolved: the next pass publishes zero.
+      - eval_time: 12m
+        alertname: RastaIdentityKeycloakAccountMissing
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityKeycloakWriteOverdue (D-070)
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Live fences come and go without firing it; one write stays unresolved past
+      # half its settle window at minute 3, and is taken over by minute 5.
+      - series: 'rasta_identity_keycloak_write_fences{state="live",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '2x10'
+      - series: 'rasta_identity_keycloak_write_fences{state="overdue",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 0 0 1 1 0x6'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RastaIdentityKeycloakWriteOverdue
+        exp_alerts: []
+      # At once: no `for`, the window is what it warns about.
+      - eval_time: 3m
+        alertname: RastaIdentityKeycloakWriteOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '1 Keycloak writes are unresolved past half their settle window'
+              description: "Keycloak writes whose answer was lost (timeout, broken connection, 5xx) or whose sender stalled are still live past their deadline plus half of KEYCLOAK_WRITE_SETTLE_SECONDS (keycloak_write_attempt, D-069). Narrowing changes of these users are refused until takeover; nothing is unsafe yet. But the guarantee that such a write cannot land after a later narrowing rests on the deployment assumption D-070: no request is delivered or applied, and no sender resumes, later than the settle window. Look now at Keycloak's admin API latency, the proxies and network in front of it, and identity-service's event-loop pauses; if any approach the window, raise KEYCLOAK_WRITE_SETTLE_SECONDS. The log names the users; this alert deliberately does not."
+              runbook: docs/runbooks/keycloak-projection.md
+      - eval_time: 6m
+        alertname: RastaIdentityKeycloakWriteOverdue
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityKeycloakReassertBacklog (D-069)
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # One due fence from minute 1, re-asserted at minute 25.
+      - series: 'rasta_identity_keycloak_write_fences{state="due",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 1x23 0x6'
+      # Terminal fences are not a backlog: they are never retried.
+      - series: 'rasta_identity_keycloak_write_fences{state="account_missing",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0x30'
+    alert_rule_test:
+      # Due, but within the sweep's backoff: not yet.
+      - eval_time: 20m
+        alertname: RastaIdentityKeycloakReassertBacklog
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: RastaIdentityKeycloakReassertBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '1 Keycloak write fences are past takeover and not re-asserted'
+              description: "Keycloak writes whose outcome was never confirmed can no longer land, but for 20 minutes the sweep has not managed to write the users' committed state over them (keycloak_write_attempt, takeover_at passed). Until it does, Keycloak may hold what an old write carried — at most what the rows granted when it was sent — and that user's tokens may say so; a narrowing change of the user is not held back by these. Restore Keycloak; the sweep retries on its own, and keycloak:backfill re-asserts everyone. The log names the users; this alert deliberately does not."
+              runbook: docs/runbooks/keycloak-projection.md
+      - eval_time: 26m
+        alertname: RastaIdentityKeycloakReassertBacklog
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityNarrowingRefused
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Writes land throughout; refusals from minute 2 to 16, then Keycloak is back.
+      - series: 'rasta_identity_keycloak_write_ahead_total{outcome="written",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0+2x30'
+      - series: 'rasta_identity_keycloak_write_ahead_total{outcome="refused",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 0 1+1x14 15x15'
+      # A single refusal of another kind, long before: an administrator retrying.
+      - series: 'rasta_identity_keycloak_write_ahead_total{outcome="settling",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaIdentityNarrowingRefused
+        exp_alerts: []
+      # Refusing, but not yet for ten minutes.
+      - eval_time: 11m
+        alertname: RastaIdentityNarrowingRefused
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: RastaIdentityNarrowingRefused
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Demotions and revocations are being refused: Keycloak cannot be written'
+              description: 'For ten minutes, role removals, revocations or lapses have been refused (503 KEYCLOAK_UNAVAILABLE, or KEYCLOAK_WRITE_SETTLING for one user) because their write to Keycloak was refused, went unanswered, or an earlier write of the same user could still land. Nothing was committed: the old roles still stand in the database and in Keycloak. Restore Keycloak; the requests can be repeated as they are, and the expiry sweep retries on its own.'
+              runbook: docs/runbooks/keycloak-projection.md
+      # Keycloak back at 16: no new refusals within the 5-minute window after 21.
+      - eval_time: 23m
+        alertname: RastaIdentityNarrowingRefused
+        exp_alerts: []

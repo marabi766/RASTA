@@ -67,6 +67,11 @@ const ALLOWED = Object.freeze([
     reason: 'test helper: a redirect the portal drew, against a literal base; no configuration',
   },
   {
+    file: 'services/identity-service/test/keycloak-http-stub.ts',
+    call: "new URL(request.url ?? '', this.url)",
+    reason: "the stub server's incoming request path against its own loopback base; no configuration",
+  },
+  {
     file: 'apps/web/src/app/AccountBoundary.tsx',
     call: 'new URL(form.action, window.location.href)',
     reason: 'browser: a form action against the page location; no configuration',

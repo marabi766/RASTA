@@ -9,6 +9,13 @@ import { DisputeCommandForm } from './[id]/DisputeCommandForm';
 import type { DisputeFormState } from './[id]/form-state';
 import { bindingOf } from '@/test/unresolved-binding';
 
+// Each test renders the transaction screen or a dispute form and runs jest-axe over it (40 scans;
+// the file took 56 s on main 61a13bbc). On a loaded CI runner the first test passed jest's 5 s
+// default (train run 40171771172, PR #402 run 40173125770), and the axe run it left behind failed
+// every later test. The contracts and tenders screens have the same allowance; task 239 looks for
+// why this file is slow.
+jest.setTimeout(20_000);
+
 /**
  * What `/transactions/[id]` renders: every outcome the read can hand back, the
  * dispute state exactly as the record says it, money as a Persian-digit decimal

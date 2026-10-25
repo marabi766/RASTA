@@ -14,7 +14,9 @@ import {
   type TransactionOptions,
 } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
+import { BACKOFF_EXPONENT_CAP, BACKOFF_FAILURES_CAP } from '../keycloak/keycloak-write-fence';
 import type { ListUsersQuery } from './dto';
+import type { Prisma } from '../generated/prisma';
 import { liveMembershipWhere } from './membership-window';
 
 /**
@@ -45,48 +47,62 @@ export class IdentityRepository {
   }
 
   /**
-   * Serialises every Keycloak projection of one user, inside the caller's
-   * transaction (ADR-060 § 5).
-   *
-   * A transaction-scoped advisory lock keyed on the user id, held until the
-   * projection's transaction ends. Taken *before* the projection reads the
-   * user's rows, so whichever projection writes last also read last — under
-   * READ COMMITTED it sees every change committed before it took the lock.
-   * The key is a bound parameter hashed by PostgreSQL; nothing is interpolated.
-   */
-  async lockUserProjection(tx: ExtendedPrismaClient, userId: string): Promise<void> {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`keycloak-projection:${userId}`}, 0))`;
-  }
-
-  /**
    * The per-user serialisation point for membership changes and the
    * active-organization switch (global audit L7-14, Codex #114 R1-1).
    *
    * Locks the user row for the rest of the caller's transaction and returns
-   * its active organization together with the database's own clock. Every
-   * transaction that can end a membership (revocation, the expiry sweep),
-   * change one (roles) or move the active organization takes it **first**,
-   * before reading or writing any membership. So a switch that validated a
-   * membership cannot commit around a revocation of that same membership: one
-   * of them waits for the other, then reads what it committed. `null` when no
-   * such user exists.
+   * its active organization. Every transaction that can end a membership
+   * (revocation, the expiry sweep), change one (roles) or move the active
+   * organization takes it **first**, before reading or writing any
+   * membership. So a switch that validated a membership cannot commit around
+   * a revocation of that same membership: one of them waits for the other,
+   * then reads what it committed. `null` when no such user exists.
+   *
+   * It returns no clock, on purpose (#402 r1 F3): a value read in this
+   * statement may predate the wait for the lock — `now()` is the
+   * transaction's start, and even `clock_timestamp()` in the select list is
+   * evaluated before the row is locked. A decision on validity reads
+   * {@link databaseNow} in a later statement.
    *
    * It is also the serialisation point for a user's **status** (#219 r4): the
-   * first activation of a registration approval's account
+   * first activation of a provisioned account
    * (`KeycloakProjector.activateOnce`) holds it from its read of the status to
    * its write to Keycloak. Any path that changes a user's status — a suspend
    * or deactivate, none of which exists yet (D-049) — must take it first, so a
    * disable that commits first is seen and wins, and one that commits after is
    * carried to Keycloak by the projection it triggers.
+   *
+   * And it is the **one lock of every Keycloak writer of the user** (ADR-060,
+   * write-ahead addendum, D-064, D-069): a narrowing change's write-ahead,
+   * every projection — after a request, from the outbox event, the backfill,
+   * the re-assertion sweep, an activation — an approval's adoption and the
+   * orphan repair all take it before they read what they write, and a write
+   * fence is only ever opened under it (`KeycloakWriteFences.open`). The
+   * protocol is stated once, in `KeycloakProjector`'s header.
    */
   async lockUserMemberships(
     tx: ExtendedPrismaClient,
     userId: string,
-  ): Promise<{ activeOrganizationId: string | null; now: Date } | null> {
-    const rows = await tx.$queryRaw<Array<{ active_organization_id: string | null; now: Date }>>`
-      SELECT active_organization_id, now() AS now FROM "user" WHERE id = ${userId} FOR UPDATE`;
+  ): Promise<{ activeOrganizationId: string | null } | null> {
+    const rows = await tx.$queryRaw<Array<{ active_organization_id: string | null }>>`
+      SELECT active_organization_id FROM "user" WHERE id = ${userId} FOR UPDATE`;
     const row = rows[0];
-    return row ? { activeOrganizationId: row.active_organization_id, now: row.now } : null;
+    return row ? { activeOrganizationId: row.active_organization_id } : null;
+  }
+
+  /**
+   * The database's wall clock, now — its own statement, so after any lock the
+   * caller took before it (#402 r1 F3). The clock every validity decision
+   * under the user lock is made on: the one that stamps `validFrom`, and that
+   * a write fence's `takeover_at` is measured against (D-069). In UTC, like
+   * every timestamp column here.
+   */
+  async databaseNow(db: ExtendedPrismaClient): Promise<Date> {
+    const rows = await db.$queryRaw<Array<{ now: Date }>>`
+      SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
+    const row = rows[0];
+    if (!row) throw new Error('the database did not answer its own clock');
+    return row.now;
   }
 
   /**
@@ -110,23 +126,25 @@ export class IdentityRepository {
   }
 
   /**
-   * The approved registration request of one user, or null (#219 r3).
+   * What a first activation marks the account with, or null when nothing has
+   * decided to provision it yet (#219 r3, D-069 addendum D).
    *
-   * What a first activation needs: the projector enables a registration
-   * approval's account only while its request is APPROVED, and marks the
-   * account with this id (`KeycloakAdminClient.activateAccount`). A user's id
-   * is minted with their request (`submitRegistration`), so there is at most
-   * one.
+   * The approved registration request's id, for a self-registered user: the
+   * projector enables their account only while it is APPROVED. For a user an
+   * operator created (`IdentityService.createUser`), who has no registration
+   * request at all — `submitRegistration` mints every self-registered user
+   * with theirs — their own user id: that operator's decision committed with
+   * the row. A request that is still pending or was rejected gives null.
    */
-  async findApprovedRegistrationId(
-    tx: ExtendedPrismaClient,
-    userId: string,
-  ): Promise<string | null> {
-    const rows = await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT id FROM registration_request
-       WHERE user_id = ${userId} AND status = 'APPROVED'
-       ORDER BY id LIMIT 1`;
-    return rows[0]?.id ?? null;
+  async findActivationSource(tx: ExtendedPrismaClient, userId: string): Promise<string | null> {
+    const rows = await tx.$queryRaw<Array<{ approved: string | null; requests: bigint }>>`
+      SELECT (SELECT id FROM registration_request
+                WHERE user_id = ${userId} AND status = 'APPROVED'
+                ORDER BY id LIMIT 1) AS approved,
+             (SELECT COUNT(*) FROM registration_request WHERE user_id = ${userId}) AS requests`;
+    const row = rows[0];
+    if (row?.approved) return row.approved;
+    return row && Number(row.requests) === 0 ? userId : null;
   }
 
   /** The same lock, on every registration request of one user; their statuses. */
@@ -294,6 +312,17 @@ export class IdentityRepository {
   }
 
   /**
+   * A membership whatever became of it, revoked included — so a revocation
+   * sent again finds the one it already ended and answers as it did, rather
+   * than 404 (D-064: the caller may not have seen the first answer). Scoped
+   * to the tenant like every membership read.
+   */
+  async findMembershipByIdIncludingRevoked(id: string, tx?: ExtendedPrismaClient) {
+    const db = tx ?? this.client;
+    return db.membership.findFirst({ where: { id } });
+  }
+
+  /**
    * The organizations a user holds a live membership in **now**, with the roles held in
    * each, and the instant that was. "Now" is the **database's** clock, read once for the
    * whole statement: a membership's `validFrom` defaults to the database's `now()`, so
@@ -411,16 +440,82 @@ export class IdentityRepository {
   }
 
   /**
-   * Memberships whose `validUntil` has passed and that the expiry sweep has
-   * not yet acted on (ADR-060 § 5), oldest lapse first. Platform-wide: a
-   * membership expires whichever tenant it belongs to.
+   * Memberships whose `validUntil` has passed, that the expiry sweep has not
+   * yet acted on, and that are not waiting out a retry (`lapse_retry_at`,
+   * #402 r1 F2) — oldest lapse first, a page at a time: strictly after
+   * `after` (the last one before) and, when given, no later than `until`, so
+   * the sweep's cursor walks on from where it stopped across passes and wraps
+   * round once. Ids compare in the database's order, never this process's.
+   * Platform-wide: a membership expires whichever tenant it belongs to.
    */
-  async findLapsedMemberships(now: Date, take: number) {
+  async findLapsedMemberships(
+    now: Date,
+    take: number,
+    after: { validUntil: Date | null; id: string } | null = null,
+    until: { validUntil: Date | null; id: string } | null = null,
+  ) {
+    const bounds: Prisma.MembershipWhereInput[] = [];
+    if (after?.validUntil) {
+      bounds.push({
+        OR: [
+          { validUntil: { gt: after.validUntil } },
+          { validUntil: after.validUntil, id: { gt: after.id } },
+        ],
+      });
+    }
+    if (until?.validUntil) {
+      bounds.push({
+        OR: [
+          { validUntil: { lt: until.validUntil } },
+          { validUntil: until.validUntil, id: { lte: until.id } },
+        ],
+      });
+    }
     return runUnscoped('the membership expiry sweep covers every organization', () =>
       this.client.membership.findMany({
-        where: { deletedAt: null, lapseHandledAt: null, validUntil: { lte: now } },
+        where: {
+          deletedAt: null,
+          lapseHandledAt: null,
+          validUntil: { lte: now },
+          OR: [{ lapseRetryAt: null }, { lapseRetryAt: { lte: now } }],
+          ...(bounds.length > 0 ? { AND: bounds } : {}),
+        },
         orderBy: [{ validUntil: 'asc' }, { id: 'asc' }],
         take,
+      }),
+    );
+  }
+
+  /**
+   * One more failed attempt at a lapse: not to be tried again for twice as
+   * many scan intervals as last time, up to `maxIntervals` (#402 r1 F2). In
+   * the row, so a restart or another replica waits too, and the sweep reaches
+   * the lapses behind it. Raw SQL, so neither `version` nor `updated_at`
+   * moves: this is the sweep's bookkeeping, not a change to the membership.
+   * Its own statement, after the failed transaction ended. The exponent and
+   * the counter are bounded before the arithmetic (#402 r2 F4,
+   * `BACKOFF_EXPONENT_CAP`), so no failure count can overflow it.
+   */
+  async deferLapse(membershipId: string, intervalSeconds: number, maxIntervals: number) {
+    await runUnscoped(
+      'the membership expiry sweep covers every organization',
+      () =>
+        this.client.$executeRaw`
+        UPDATE membership
+           SET lapse_failures = LEAST(lapse_failures, ${BACKOFF_FAILURES_CAP - 1}) + 1,
+               lapse_retry_at = (clock_timestamp() AT TIME ZONE 'UTC')
+                 + make_interval(secs => ${intervalSeconds}
+                     * LEAST(POWER(2, LEAST(lapse_failures, ${BACKOFF_EXPONENT_CAP}) + 1),
+                             ${maxIntervals}))
+         WHERE id = ${membershipId} AND lapse_handled_at IS NULL`,
+    );
+  }
+
+  /** How many lapses are past `validUntil` and not yet acted on: the sweep's backlog. */
+  async countLapsedMemberships(now: Date): Promise<number> {
+    return runUnscoped('the membership expiry backlog covers every organization', () =>
+      this.client.membership.count({
+        where: { deletedAt: null, lapseHandledAt: null, validUntil: { lte: now } },
       }),
     );
   }

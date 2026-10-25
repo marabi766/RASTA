@@ -73,7 +73,14 @@ const {
   reserveUnresolved,
   useUnresolvedStore,
 } = require('@/server/unresolved-request') as typeof import('@/server/unresolved-request');
-const { MAX_PENDING_PER_LOGIN, memoryUnresolvedStore, redisUnresolvedStore, recordKeyPrefix } =
+const {
+  MAX_PENDING_PER_LOGIN,
+  PENDING_KEY_PREFIX,
+  memoryUnresolvedStore,
+  redisUnresolvedStore,
+  recordKeyPrefix,
+  storedRecordSchema,
+} =
   require('@/server/unresolved-request-store') as typeof import('@/server/unresolved-request-store');
 const { policyOf, purposePolicies } =
   require('@/server/unresolved-request-policy') as typeof import('@/server/unresolved-request-policy');
@@ -119,6 +126,14 @@ const rawOf = {
   async set(key: string, value: string, mem: ReturnType<typeof memoryUnresolvedStore> | null) {
     if (mem) mem.records.set(key, value);
     else await redis!.set(key, value, 'KEEPTTL');
+  },
+  /** The login's index, in the order a purge walks it (Redis: by score; in-process: insertion). */
+  async index(org: string, mem: ReturnType<typeof memoryUnresolvedStore> | null) {
+    const setKeys = mem
+      ? [...mem.sets.keys()].filter((k) => k.startsWith(`${PENDING_KEY_PREFIX}:org:${org}:pwl:`))
+      : await redis!.keys(`${PENDING_KEY_PREFIX}:org:${org}:pwl:*`);
+    expect(setKeys).toHaveLength(1);
+    return mem ? [...mem.sets.get(setKeys[0]!)!.keys()] : redis!.zrange(setKeys[0]!, 0, -1);
   },
 };
 
@@ -306,35 +321,59 @@ describe.each(BACKENDS)('supplier-write holds on %s', (_name, real) => {
       expect((await rawOf.keys(session.organizationId!, mem)).sort()).toEqual([...before].sort());
     });
 
-    it('a failed purge (a member that is not valid) frees no slot and deletes nothing', async () => {
+    /**
+     * Three otherwise-valid holds (this login's supplier slot and two more); returns the index in the
+     * order a purge walks it. The member a test spoils is the LAST of them, behind two valid ones, so a
+     * purge that deletes each valid member as it goes has deleted them before it reaches the spoiled
+     * one; and the snapshot covers the records AND the index membership.
+     */
+    const threeHolds = async () => {
       suspendSupplier.mockResolvedValue(lost);
       await suspend();
-      const key = await only();
-      const good = (await rawOf.get(key, mem))!;
       expect((await hold('SUP_SECOND', 'sub_second')).kind).toBe('RESERVED');
-      const bad = edit((r) => (r.purpose = 'future-purpose'))(good);
-      await rawOf.set(key, bad, mem);
-      const keysBefore = (await rawOf.keys(session.organizationId!, mem)).sort();
+      expect((await hold('SUP_THIRD', 'sub_third')).kind).toBe('RESERVED');
+      const order = await rawOf.index(session.organizationId!, mem);
+      expect(order).toHaveLength(3);
+      expect([...order].sort()).toEqual((await rawOf.keys(session.organizationId!, mem)).sort());
+      return order;
+    };
+    const snapshot = async (order: readonly string[]) => {
+      const records: Record<string, string | null> = {};
+      for (const key of order) records[key] = await rawOf.get(key, mem);
+      return { records, index: await rawOf.index(session.organizationId!, mem) };
+    };
+
+    it('a failed purge (a member that is not valid) frees no slot and deletes nothing', async () => {
+      const order = await threeHolds();
+      const last = order[2]!;
+      const bad = edit((r) => (r.purpose = 'future-purpose'))((await rawOf.get(last, mem))!);
+      await rawOf.set(last, bad, mem);
+      const before = await snapshot(order);
+      expect(before.records[order[0]!]).not.toBeNull();
+      expect(before.records[last]).toBe(bad);
 
       expect(await purgeUnresolved(session)).toBe(false);
 
-      expect((await rawOf.keys(session.organizationId!, mem)).sort()).toEqual(keysBefore);
-      expect(await rawOf.get(key, mem)).toBe(bad);
+      expect(await snapshot(order)).toEqual(before);
     });
 
     it('a legacy-shaped record under the supplier slot is not read as this login’s and stays', async () => {
-      suspendSupplier.mockResolvedValue(lost);
-      await suspend();
-      const key = await only();
-      const record = JSON.parse((await rawOf.get(key, mem))!);
+      const order = await threeHolds();
+      const last = order[2]!;
+      // A genuine v1 record in every respect but its owner: a numeric deadline, no v2 fields. Only the
+      // ownership proof (a bind the session derives) can keep it; its bind is a supplier slot's.
+      const record = JSON.parse((await rawOf.get(last, mem))!);
       record.v = 1;
-      for (const f of ['purpose', 'target', 'org', 'login', 'deadline']) delete record[f];
+      record.deadline = Date.now() + 3_600_000;
+      for (const f of ['purpose', 'target', 'org', 'login']) delete record[f];
       const legacy = JSON.stringify(record);
-      await rawOf.set(key, legacy, mem);
+      expect(storedRecordSchema.safeParse(JSON.parse(legacy)).success).toBe(true);
+      await rawOf.set(last, legacy, mem);
+      const before = await snapshot(order);
 
       expect(await purgeUnresolved(session)).toBe(false);
-      expect(await readUnresolved(session, scope())).toEqual({ kind: 'UNAVAILABLE' });
-      expect(await rawOf.get(key, mem)).toBe(legacy);
+
+      expect(await snapshot(order)).toEqual(before);
     });
   });
 });
