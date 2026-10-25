@@ -514,7 +514,9 @@ test('allow-list proof stays valid for every Docker build context and scan input
   const scan = workflow.jobs.containers.steps.find((step) =>
     step.uses?.startsWith('aquasecurity/trivy-action@'),
   );
-  assert.equal(scan.with.trivyignores, '.trivyignore.services');
+  // No exception file: every service image is scanned with none (the zod
+  // advisory's time-boxed .trivyignore.services went with the zod 4 migration).
+  assert.equal(scan.with.trivyignores, undefined);
   assert.equal(scan.with['image-ref'], 'rasta/${{ matrix.service }}:${{ github.sha }}');
 });
 
