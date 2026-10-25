@@ -84,6 +84,45 @@ export type ProjectPage = z.infer<typeof projectPageSchema>;
 export const PROJECTS_PER_PAGE = 20;
 
 // ---------------------------------------------------------------------------
+// Needs
+// ---------------------------------------------------------------------------
+
+/**
+ * One need of a project (`needViewSchema`), as much as a screen renders and a
+ * command needs. The actor ids are dropped, as above. `version` is required: a
+ * need without one is `MALFORMED` and draws no command, because nothing could be
+ * sent that the service would accept.
+ */
+export const projectNeedSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  title: z.string(),
+  description: z.string(),
+  quantity: z.string().nullable().default(null),
+  unit: z.string().nullable().default(null),
+  estimatedCostMinor: minorUnits.nullable().default(null),
+  status: z.string(),
+  createdAt: utcInstant,
+  submittedAt: utcInstant.nullable().default(null),
+  withdrawnAt: utcInstant.nullable().default(null),
+  withdrawalReason: z.string().nullable().default(null),
+  version: z.number().int().min(1),
+});
+
+export type ProjectNeed = z.infer<typeof projectNeedSchema>;
+
+const needPageSchema = z.object({
+  items: z.array(projectNeedSchema),
+  nextCursor: z.string().nullable().default(null),
+  hasMore: z.boolean().default(false),
+});
+
+export type ProjectNeedPage = z.infer<typeof needPageSchema>;
+
+/** How many needs one render of the project page reads; the rest is `?needs=<cursor>` away. */
+export const NEEDS_PER_PAGE = 20;
+
+// ---------------------------------------------------------------------------
 // Approvals
 // ---------------------------------------------------------------------------
 
@@ -218,6 +257,24 @@ export function fetchProject(
   projectId: string,
 ): Promise<ReadResult<ProjectDetail>> {
   return read(session, `/v1/projects/${encodeURIComponent(projectId)}`, projectDetailSchema);
+}
+
+/**
+ * A page of the project's needs, oldest first, every status (the service's list
+ * is filtered only when asked). `cursor` is the previous page's `nextCursor`.
+ */
+export function fetchProjectNeeds(
+  session: WebSession,
+  projectId: string,
+  cursor?: string,
+): Promise<ReadResult<ProjectNeedPage>> {
+  const search = new URLSearchParams({ limit: String(NEEDS_PER_PAGE) });
+  if (cursor) search.set('cursor', cursor);
+  return read(
+    session,
+    `/v1/projects/${encodeURIComponent(projectId)}/needs?${search.toString()}`,
+    needPageSchema,
+  );
 }
 
 export function fetchProjectApprovals(
