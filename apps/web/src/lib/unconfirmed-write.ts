@@ -19,5 +19,5 @@ export interface UnconfirmedWriteState {
 
 /** What the person is told. No claim either way: we do not know. */
 export const UNCONFIRMED_WRITE_MESSAGE =
-  'نتوانستیم تأیید کنیم که این درخواست ثبت شد یا نه؛ ممکن است ذخیره شده باشد. ' +
+  'نتوانستیم بدانیم که این درخواست ثبت شد یا نه؛ ممکن است ذخیره شده باشد. ' +
   'پیش از فرستادن دوباره، صفحه را تازه کنید و بررسی کنید که تغییر اعمال شده است یا نه.';

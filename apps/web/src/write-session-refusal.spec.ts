@@ -80,6 +80,22 @@ const CASES = EXPORTS.filter(
   ({ exported, value }) => exported.startsWith('submit') && typeof value === 'function',
 ).map(({ key, label, value }) => ({ key, label, action: value as Action }));
 
+/**
+ * An exported action that is not a `submit*` form-state action has no `REFUSED` result to
+ * return; it must be listed here (by `actionKey`) with where it sends a request that has no
+ * session. A new non-`submit*` export that is not listed fails the coverage case below.
+ */
+const NO_SESSION_REDIRECTS = new Map<string, string>([
+  [
+    actionKey('apps/web/src/app/projects/actions.ts', 'releaseUnresolvedCreate'),
+    '/login?returnTo=/projects',
+  ],
+]);
+
+const REDIRECT_CASES = EXPORTS.filter(
+  ({ exported, value }) => !exported.startsWith('submit') && typeof value === 'function',
+).map(({ key, label, value }) => ({ key, label, action: value as Action }));
+
 /** The action's own leading arguments (ids), then the previous state, then the form. */
 function call(action: Action): Promise<unknown> {
   const ids = Array.from({ length: Math.max(0, action.length - 2) }, (_, i) => `ID_${i + 1}`);
@@ -118,7 +134,9 @@ it('has no inline server action: a function-scoped directive is outside the case
 
 it('has a refusal case for exactly the (module, export) pairs discovery finds', () => {
   // Both sides are `actionKey` identities (tuples), never display text.
-  expect([...coveredActions(DISCOVERED)].sort()).toEqual(CASES.map(({ key }) => key).sort());
+  expect([...coveredActions(DISCOVERED)].sort()).toEqual(
+    [...CASES, ...REDIRECT_CASES].map(({ key }) => key).sort(),
+  );
 });
 
 it('reads the same export names from syntax as the module has at runtime', () => {
@@ -312,12 +330,29 @@ describe('discovery (negative control)', () => {
   });
 });
 
-it('covers every exported action of every module: each is a `submit*` function', () => {
+it('covers every exported action of every module: a `submit*` function or a listed redirect', () => {
   // A `'use server'` export that is not exercised below would be an
   // unguarded write, so the exports and the cases must be the same set.
-  const covered = new Set(CASES.map(({ key }) => key));
+  const covered = new Set([...CASES, ...REDIRECT_CASES].map(({ key }) => key));
   const uncovered = EXPORTS.filter(({ key }) => !covered.has(key)).map(({ label }) => label);
   expect(uncovered).toEqual([]);
+  // A listed redirect that no longer exists is a stale entry, not a silent pass.
+  expect(REDIRECT_CASES.map(({ key }) => key).sort()).toEqual(
+    [...NO_SESSION_REDIRECTS.keys()].sort(),
+  );
+});
+
+describe.each(REDIRECT_CASES)('$label', ({ key, action }) => {
+  it('a request with no session is sent to sign in', async () => {
+    const thrown = await (action as (...args: unknown[]) => Promise<unknown>)(new FormData()).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    // Exact message: `toThrow(string)` would also accept a longer URL.
+    expect((thrown as Error | undefined)?.message).toBe(
+      `NEXT_REDIRECT:${NO_SESSION_REDIRECTS.get(key)}`,
+    );
+  });
 });
 
 describe.each(CASES)('$label', ({ action }) => {

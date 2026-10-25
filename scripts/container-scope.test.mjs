@@ -333,8 +333,6 @@ for (const path of [
   'planning/plan.txt',
   'unknown-input',
   'README.md',
-  'docs/README.md',
-  'tests/README.md',
   'CHANGELOG.md',
   'services/unknown/src/a.ts',
   ' docs/only.md',
@@ -345,7 +343,16 @@ for (const path of [
   });
 }
 
-for (const path of ['docs/a.md', 'docs/nested/file.txt', 'tests/e2e/a.ts', 'tests/a.md']) {
+for (const path of [
+  'docs/a.md',
+  'docs/nested/file.txt',
+  'tests/e2e/a.ts',
+  'tests/a.md',
+  'docs/README.md',
+  'tests/README.md',
+  'docs/events/README.md',
+  'tests/e2e/README.md',
+]) {
   test(`explicit build-context exclusion: ${path} selects none`, () => {
     assert.deepEqual(servicesToBuild(ALL, [path]), []);
   });
@@ -478,7 +485,7 @@ test('CI delegates paths to CLI and proves narrowing after its filtered install'
   );
   assert.ok(proof > install);
   assert.equal(steps[proof].if, "github.event_name == 'pull_request'");
-  assert.match(steps[proof].run, /--test-name-pattern='filtered parser narrows'/);
+  assert.equal(steps[proof].run, 'node scripts/container-scope-proof.mjs');
   assert.doesNotMatch(steps.find((step) => step.id === 'scope').run, /git diff|\| node/);
 });
 
@@ -487,7 +494,7 @@ test('allow-list proof stays valid for every Docker build context and scan input
   assert.ok(ignore.includes('docs'));
   assert.ok(ignore.includes('tests'));
   // Any new negation requires reviewing the exemptions rather than silently
-  // re-including a path they skip. README.md is already handled as ALL.
+  // re-including a path they skip. Only the root README.md is re-included.
   assert.deepEqual(
     ignore.filter((line) => line.startsWith('!')),
     ['!.env.example', '!README.md'],
@@ -510,3 +517,102 @@ test('allow-list proof stays valid for every Docker build context and scan input
   assert.equal(scan.with.trivyignores, '.trivyignore.services');
   assert.equal(scan.with['image-ref'], 'rasta/${{ matrix.service }}:${{ github.sha }}');
 });
+
+// Exercise BuildKit's matcher against the actual pinned ignore rules. FROM
+// scratch needs no registry or network; export only to this disposable context.
+test('BuildKit: !README.md re-includes only the context root', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'container-scope-dockerignore-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const context = join(dir, 'context');
+  mkdirSync(context);
+  copyFileSync(join(root, '.dockerignore'), join(context, '.dockerignore'));
+  for (const path of [
+    'README.md',
+    'included.txt',
+    'docs/README.md',
+    'docs/events/README.md',
+    'tests/README.md',
+    'tests/e2e/README.md',
+  ]) {
+    mkdirSync(dirname(join(context, path)), { recursive: true });
+    writeFileSync(join(context, path), 'matcher fixture\n');
+  }
+  writeFileSync(join(context, 'Dockerfile'), 'FROM scratch\nCOPY . /\n');
+  const output = join(dir, 'output');
+  const result = spawnSync(
+    'docker',
+    ['buildx', 'build', '--network=none', '--output', `type=local,dest=${output}`, context],
+    { encoding: 'utf8', timeout: 60_000 },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(output, 'README.md'), 'utf8'), 'matcher fixture\n');
+  assert.equal(existsSync(join(output, 'included.txt')), true);
+  assert.equal(existsSync(join(output, 'docs')), false);
+  assert.equal(existsSync(join(output, 'tests')), false);
+});
+
+for (const workflowChanged of [false, true]) {
+  test(`CLI: selection exception after diff names its stage (workflow changed: ${workflowChanged})`, (t) => {
+    const f = fixture(t);
+    if (!workflowChanged) {
+      writeFileSync(f.workflow, WORKFLOW);
+      f.commit();
+    }
+    const lib = join(f.dir, 'scripts/container-scope-lib.mjs');
+    writeFileSync(
+      lib,
+      readFileSync(lib, 'utf8').replace(
+        "  if (changed === 'all')",
+        "  throw new Error('private source contents\\n::error::must not leak');\n  if (changed === 'all')",
+      ),
+    );
+    const result = f.raw();
+    assert.deepEqual(JSON.parse(result.stdout), ALL);
+    assert.equal(
+      result.stderr,
+      '::warning::Container scope: service selection failed; building and scanning every image.\n',
+    );
+  });
+}
+
+for (const mode of ['unchanged', 'renamed', 'duplicated', 'failing']) {
+  test(`CI proof guard: ${mode} narrowing test`, (t) => {
+    const f = fixture(t);
+    for (const name of ['container-scope.test.mjs', 'container-scope-proof.mjs']) {
+      copyFileSync(join(root, 'scripts', name), join(f.dir, 'scripts', name));
+    }
+    const tests = join(f.dir, 'scripts/container-scope.test.mjs');
+    const source = readFileSync(tests, 'utf8');
+    if (mode === 'renamed') {
+      // Change only the registered test title: the old raw Node command exits 0.
+      writeFileSync(
+        tests,
+        source.replace("test('filtered parser narrows:", "test('renamed proof:"),
+      );
+    } else if (mode === 'duplicated') {
+      writeFileSync(tests, `${source}\ntest('filtered parser narrows: duplicate', () => {});\n`);
+    } else if (mode === 'failing') {
+      writeFileSync(
+        tests,
+        source.replace(
+          "assert.deepEqual(result, ['fleet-service']);",
+          "assert.fail('proof failed');",
+        ),
+      );
+    }
+    // Launch as CI's shell does, outside this parent Node test runner.
+    const { NODE_TEST_CONTEXT: _testContext, ...env } = process.env;
+    const result = spawnSync(process.execPath, [join(f.dir, 'scripts/container-scope-proof.mjs')], {
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(result.status, mode === 'unchanged' ? 0 : 1, result.stdout + result.stderr);
+    if (mode !== 'unchanged') {
+      assert.match(result.stderr, /requires exactly one passing narrowing test/);
+    }
+    if (mode === 'renamed') {
+      assert.doesNotMatch(result.stdout, /^ok \d+ - filtered parser narrows:/m);
+      assert.match(result.stdout, /^1\.\.0$/m);
+    }
+  });
+}

@@ -28,7 +28,7 @@ function hasDirective(statements: readonly ts.Statement[]): ts.StringLiteral | u
  * This is the ONE place a directive is recognised; no text filter runs before it.
  *
  * Scope: a fast local early warning. The authority on which modules define server
- * actions is the compiler's own manifest (`scripts/check-server-action-coverage.mjs`).
+ * actions is the compiler's own manifest; holding the cases to it follows in a stacked change.
  */
 export function scanServerActions(source: string, fileName: string): ServerActionScan {
   const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, false);
