@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { runWebBuild } from './build-run.mjs';
 
 const webDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const { status, problems } = runWebBuild(webDir);
+const { status, problems } = await runWebBuild(webDir);
 if (problems.length > 0) {
   console.error('build receipt: NOT written');
   for (const problem of problems) console.error(`  ${problem}`);

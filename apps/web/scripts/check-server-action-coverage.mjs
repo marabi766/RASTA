@@ -14,10 +14,10 @@
 //
 // Needs Node >= 22.18 (runs the shared TypeScript modules by type stripping). The Node
 // guard below runs BEFORE any `.ts` is imported: the imports after it are dynamic.
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { receiptProblems } from './build-receipt.mjs';
+import { checkedSnapshot } from './build-receipt.mjs';
 import { nodeRefusal } from './node-guard.mjs';
 
 const webDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -36,20 +36,20 @@ if (refusal) {
 }
 
 try {
-  const [{ actionKey, coveredActions, discoverServerActions }, manifestModule, fs] =
-    await Promise.all([
-      import('../src/test/server-action-discovery.ts'),
-      import('../src/test/server-action-manifest.ts'),
-      import('node:fs'),
-    ]);
-  const { MANIFEST_PATH, compiledActions, nextProjectDir, uncovered } = manifestModule;
+  const [{ actionKey, coveredActions, discoverServerActions }, manifestModule] = await Promise.all([
+    import('../src/test/server-action-discovery.ts'),
+    import('../src/test/server-action-manifest.ts'),
+  ]);
+  const { compiledActions, nextProjectDir, uncovered } = manifestModule;
 
-  // The layout is the one the build recorded in its receipt; the Next config is not evaluated here.
-  const binding = receiptProblems(webDir);
-  if (binding.length > 0) fail(binding);
+  // ONE snapshot: the manifest bytes are read once, hashed against the receipt, and these
+  // same bytes are what is parsed below. The layout is the one the build recorded in its
+  // receipt; the Next config is not evaluated here.
+  const snapshot = checkedSnapshot(webDir);
+  if (snapshot.problems.length > 0) fail(snapshot.problems);
 
   const { actions, problems } = compiledActions(
-    fs.readFileSync(join(webDir, MANIFEST_PATH), 'utf8'),
+    snapshot.manifestText,
     nextProjectDir(webDir),
     repoRoot,
   );

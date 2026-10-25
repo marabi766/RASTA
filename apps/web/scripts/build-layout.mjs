@@ -14,10 +14,23 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
+ * What the preload reported for ONE invocation, and whether that report is complete.
+ *
+ * Complete means: the `next build` process itself reported (`rootPid`), and every child
+ * process or worker thread that any reporting process saw start AND that is a Node process
+ * reported too. A started Node process runs the preload (it is forced into the child's
+ * environment at spawn, see capture-next-config.cjs), and the preload writes the config record
+ * from inside the function that hands the configuration to the process, so a process that
+ * reported its start cannot have used a configuration without reporting it. A partial set of
+ * records cannot pass: any Node child that was started but never reported leaves a `spawn`
+ * record with no matching `start`. Processes that are not Node (a shell, git) load no Next
+ * config; a Node process below them is still counted when it reports.
+ *
  * @param {string} capturePath  file the preload appended to
- * @returns {{ captured: false } | { captured: true, outputDir: string, distDir: unknown, tsconfigPath: unknown, cleanDistDir: unknown, consistent: boolean }}
+ * @param {{ nonce: string, rootPid: number }} invocation
+ * @returns {{ captured: false } | { captured: true, outputDir: string, distDir: unknown, tsconfigPath: unknown, cleanDistDir: unknown, consistent: boolean, missing: number }}
  */
-export function readCapture(capturePath) {
+export function readCapture(capturePath, invocation) {
   let lines;
   try {
     lines = readFileSync(capturePath, 'utf8').split('\n').filter(Boolean);
@@ -29,13 +42,23 @@ export function readCapture(capturePath) {
     try {
       const record = JSON.parse(line);
       if (record === null || typeof record !== 'object') return { captured: false };
-      records.push(record);
+      // Another invocation's record (or a forged one without the nonce) is not evidence.
+      if (record.nonce === invocation.nonce) records.push(record);
     } catch {
       return { captured: false };
     }
   }
-  if (records.length === 0) return { captured: false };
-  const [first] = records;
+  const starts = new Set(
+    records.filter((r) => r.kind === 'start').map((r) => `${r.pid}:${r.tid ?? 0}`),
+  );
+  if (!starts.has(`${invocation.rootPid}:0`)) return { captured: false };
+  const configs = records.filter((r) => r.kind === 'config');
+  if (configs.length === 0) return { captured: false };
+  const expected = records
+    .filter((r) => r.kind === 'spawn' && r.node === true)
+    .map((r) => (r.thread !== undefined ? `${r.pid}:${r.thread}` : `${r.child}:0`));
+  const missing = new Set(expected.filter((key) => !starts.has(key))).size;
+  const [first] = configs;
   const same = (a, b) =>
     a.outputDir === b.outputDir &&
     a.distDir === b.distDir &&
@@ -49,7 +72,8 @@ export function readCapture(capturePath) {
     cleanDistDir: first.cleanDistDir,
     // Next's build workers load the configuration too; a disagreement means the build was
     // not one consistent run of one configuration.
-    consistent: records.every((record) => same(record, first)),
+    consistent: configs.every((record) => same(record, first)),
+    missing,
   };
 }
 
@@ -59,6 +83,9 @@ export function layoutProblems(layout) {
     return ['next config: the build did not report the configuration it used; refusing'];
   }
   const problems = [];
+  if (layout.missing !== 0) {
+    problems.push('next config: a process the build started never reported; refusing');
+  }
   if (layout.consistent === false) {
     problems.push('next config: the build processes disagree on the configuration; refusing');
   }
