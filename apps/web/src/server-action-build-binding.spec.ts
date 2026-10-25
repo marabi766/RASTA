@@ -1,47 +1,41 @@
 /**
  * @jest-environment node
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
-  readdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 
+import {
+  alive,
+  LOCK,
+  plantApp as plant,
+  plantFakeNext,
+  runDriver,
+  runModule,
+  startDriver,
+  SCRIPTS,
+  url,
+  WEB,
+  type Result,
+} from './test/build-scripts';
 import { MANIFEST_PATH } from './test/server-action-manifest';
 
 /**
  * The binding between the coverage check and the build it reads: Node guard, the layout the
- * build itself reports, and the receipt the build writes for itself. The modules under
- * `scripts/` are plain ESM that Jest does not transform, so each case runs them in a
- * child Node and reads one JSON line back.
+ * build itself reports, and the receipt the build writes for itself. The build lock, and what
+ * happens when a process of the build crashes, is killed or cannot write its report, is in
+ * server-action-build-ownership.spec.ts.
  */
-const WEB = join(__dirname, '..');
-const SCRIPTS = join(WEB, 'scripts');
-const url = (file: string): string => pathToFileURL(join(SCRIPTS, file)).href;
 const SECRET = 'SECRET-CONFIG-VALUE-MUST-NOT-LEAK';
-
-function runModule(code: string): { out: unknown; stdout: string; stderr: string } {
-  const run = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
-    encoding: 'utf8',
-    cwd: tmpdir(),
-    timeout: 120_000,
-  });
-  const stdout = run.stdout ?? '';
-  return {
-    out: stdout.trim() === '' ? undefined : JSON.parse(stdout.trim().split('\n').pop() as string),
-    stdout,
-    stderr: run.stderr ?? '',
-  };
-}
 
 describe('the build and check scripts', () => {
   const pkg = JSON.parse(readFileSync(join(WEB, 'package.json'), 'utf8')) as {
@@ -315,134 +309,6 @@ describe('one immutable snapshot for the checker (r3 F1)', () => {
   });
 });
 
-describe('the build lock (r3 F1)', () => {
-  let web: string;
-  const LOCK = '.next.build-lock';
-  const IMPORT = `import { acquireBuildLock, buildInProgress } from ${JSON.stringify(url('build-lock.mjs'))};`;
-  const run = (body: string): unknown =>
-    runModule(`${IMPORT}\nconst web = ${JSON.stringify(web)};\n${body}`).out;
-  const deadPid = (): number => {
-    const child = spawnSync(process.execPath, ['-e', '1']);
-    return child.pid;
-  };
-  beforeEach(() => {
-    web = mkdtempSync(join(tmpdir(), 'lock-'));
-  });
-  afterEach(() => rmSync(web, { recursive: true, force: true }));
-
-  it('a second invocation refuses after a bounded wait and leaves the owner`s lock alone', () => {
-    expect(
-      run(`
-        const a = await acquireBuildLock(web, { waitMs: 100 });
-        const t0 = Date.now();
-        const b = await acquireBuildLock(web, { waitMs: 400 });
-        const stillA = (() => { try { a.lock.assertHeld(); return true; } catch { return false; } })();
-        console.log(JSON.stringify({ a: a.ok, b: b.ok, problem: b.problem, waited: Date.now() - t0 >= 350, stillA }));
-      `),
-    ).toEqual({
-      a: true,
-      b: false,
-      problem: expect.stringContaining('build lock: another build of this package holds'),
-      waited: true,
-      stillA: true,
-    });
-  });
-
-  it('a waiting invocation proceeds once the owner released', () => {
-    expect(
-      run(`
-        const a = await acquireBuildLock(web, { waitMs: 100 });
-        setTimeout(() => a.lock.release(), 500);
-        const b = await acquireBuildLock(web, { waitMs: 10000 });
-        console.log(JSON.stringify({ b: b.ok }));
-      `),
-    ).toEqual({ b: true });
-  });
-
-  it('a released lock is gone, and releasing a lock that is no longer ours removes nothing', () => {
-    expect(
-      run(`
-        import { existsSync, writeFileSync } from 'node:fs';
-        import { join } from 'node:path';
-        const a = await acquireBuildLock(web, { waitMs: 100 });
-        writeFileSync(join(web, ${JSON.stringify(LOCK)}), JSON.stringify({ pid: process.pid, nonce: 'someone-else' }));
-        a.lock.release();
-        const keptOthers = existsSync(join(web, ${JSON.stringify(LOCK)}));
-        let lost = false;
-        try { a.lock.assertHeld(); } catch { lost = true; }
-        console.log(JSON.stringify({ keptOthers, lost }));
-      `),
-    ).toEqual({ keptOthers: true, lost: true });
-  });
-
-  it('a lock whose wrapper and build are both dead is taken over; a live owner is never taken from', () => {
-    const dead = deadPid();
-    writeFileSync(join(web, LOCK), JSON.stringify({ pid: dead, nonce: 'gone' }));
-    expect(
-      run(
-        `const a = await acquireBuildLock(web, { waitMs: 2000 }); console.log(JSON.stringify(a.ok));`,
-      ),
-    ).toBe(true);
-    rmSync(join(web, LOCK), { force: true });
-    // the jest worker is alive
-    writeFileSync(join(web, LOCK), JSON.stringify({ pid: process.pid, nonce: 'alive' }));
-    expect(
-      run(
-        `const a = await acquireBuildLock(web, { waitMs: 300 }); console.log(JSON.stringify(a.ok));`,
-      ),
-    ).toBe(false);
-  });
-
-  it('a dead wrapper whose `next build` still runs keeps the package locked', () => {
-    writeFileSync(
-      join(web, LOCK),
-      JSON.stringify({ pid: deadPid(), childPid: process.pid, nonce: 'orphan' }),
-    );
-    expect(
-      run(
-        `const a = await acquireBuildLock(web, { waitMs: 300 }); console.log(JSON.stringify({ ok: a.ok, busy: buildInProgress(web) }));`,
-      ),
-    ).toEqual({ ok: false, busy: true });
-  });
-
-  it('an unreadable lock is held, not free', () => {
-    writeFileSync(join(web, LOCK), '{"pid"');
-    expect(
-      run(
-        `const a = await acquireBuildLock(web, { waitMs: 300 }); console.log(JSON.stringify({ ok: a.ok, busy: buildInProgress(web) }));`,
-      ),
-    ).toEqual({ ok: false, busy: true });
-  });
-
-  it('is mutual exclusion: six processes never overlap in the critical section', async () => {
-    const worker = `
-      import { readFileSync, writeFileSync } from 'node:fs';
-      import { join } from 'node:path';
-      ${IMPORT}
-      const web = process.argv[1];
-      const a = await acquireBuildLock(web, { waitMs: 60000 });
-      if (!a.ok) { console.log('refused'); process.exit(1); }
-      const file = join(web, 'counter');
-      const seen = Number(readFileSync(file, 'utf8'));
-      await new Promise((r) => setTimeout(r, 60));
-      writeFileSync(file, String(seen + 1));
-      a.lock.release();
-      console.log('done');
-    `;
-    writeFileSync(join(web, 'counter'), '0');
-    const runs = Array.from(
-      { length: 6 },
-      () =>
-        new Promise<number | null>((resolve) => {
-          const child = spawn(process.execPath, ['--input-type=module', '-e', worker, '--', web]);
-          child.on('close', resolve);
-        }),
-    );
-    expect(await Promise.all(runs)).toEqual([0, 0, 0, 0, 0, 0]);
-    expect(readFileSync(join(web, 'counter'), 'utf8')).toBe('6');
-  }, 60_000);
-});
-
 describe('the layout the receipt records (r2 F1)', () => {
   let web: string;
   const put = (relative: string, text: string): void => {
@@ -487,7 +353,7 @@ describe('the layout the receipt records (r2 F1)', () => {
   });
 });
 
-describe('reading what the build reported (r2 F1, r3 F3)', () => {
+describe('reading what the build reported (r2 F1, r3 F3, r4 F3)', () => {
   const NONCE = 'n-this';
   const ROOT = 100;
   const CONFIG = {
@@ -503,8 +369,13 @@ describe('reading what the build reported (r2 F1, r3 F3)', () => {
     tid,
     ...extra,
   });
+  /** One completed loader call: its begin record and its result. */
+  const loaded = (pid: number, call = 1, tid = 0, layout: object = CONFIG): object[] => [
+    rec(pid, { kind: 'config-begin', call }, tid),
+    rec(pid, { ...layout, call }, tid),
+  ];
   const ROOT_START = rec(ROOT, { kind: 'start', ppid: 1 });
-  const ROOT_CONFIG = rec(ROOT, CONFIG);
+  const ROOT_CONFIG = loaded(ROOT);
   const keysFor = (text: string | null): string[] => {
     const dir = mkdtempSync(join(tmpdir(), 'capture-'));
     const file = join(dir, 'c.jsonl');
@@ -518,15 +389,20 @@ describe('reading what the build reported (r2 F1, r3 F3)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   };
-  const lines = (...records: object[]): string =>
-    records.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  const lines = (...records: Array<object | object[]>): string =>
+    records
+      .flat()
+      .map((r) => JSON.stringify(r))
+      .join('\n') + '\n';
   const CHILD = { kind: 'spawn', child: 200, node: true };
   const CHILD_START = rec(200, { kind: 'start', ppid: ROOT });
+  const THREAD = { kind: 'spawn', thread: 3, node: true };
+  const THREAD_START = rec(ROOT, { kind: 'start', ppid: 1 }, 3);
   it.each([
     ['the build process alone, default layout', lines(ROOT_START, ROOT_CONFIG), []],
     [
       'a worker that started and reported the same layout',
-      lines(ROOT_START, ROOT_CONFIG, rec(ROOT, CHILD), CHILD_START, rec(200, CONFIG)),
+      lines(ROOT_START, ROOT_CONFIG, rec(ROOT, CHILD), CHILD_START, loaded(200)),
       [],
     ],
     [
@@ -537,6 +413,19 @@ describe('reading what the build reported (r2 F1, r3 F3)', () => {
     [
       'a child that is not a Node process (a shell, git) and left no record',
       lines(ROOT_START, ROOT_CONFIG, rec(ROOT, { kind: 'spawn', child: 300, node: false })),
+      [],
+    ],
+    [
+      'repeated loads, in the build process and a worker thread, each completed',
+      lines(
+        ROOT_START,
+        ROOT_CONFIG,
+        loaded(ROOT, 2),
+        rec(ROOT, THREAD),
+        THREAD_START,
+        loaded(ROOT, 1, 3),
+        loaded(ROOT, 2, 3),
+      ),
       [],
     ],
     ['no capture file (the build did not report)', null, ['next config']],
@@ -556,7 +445,7 @@ describe('reading what the build reported (r2 F1, r3 F3)', () => {
     ],
     [
       'a worker thread the build started that never reported',
-      lines(ROOT_START, ROOT_CONFIG, rec(ROOT, { kind: 'spawn', thread: 3, node: true })),
+      lines(ROOT_START, ROOT_CONFIG, rec(ROOT, THREAD)),
       ['next config'],
     ],
     [
@@ -571,35 +460,113 @@ describe('reading what the build reported (r2 F1, r3 F3)', () => {
     ],
     [
       'a worker thread that reported its start',
+      lines(ROOT_START, ROOT_CONFIG, rec(ROOT, THREAD), THREAD_START),
+      [],
+    ],
+    [
+      // r4 F3, the reviewer's trigger: the worker's start is there, its config record was lost.
+      'a worker that began loading the config and never reported what it got',
       lines(
         ROOT_START,
         ROOT_CONFIG,
-        rec(ROOT, { kind: 'spawn', thread: 3, node: true }),
-        rec(ROOT, { kind: 'start', ppid: 1 }, 3),
+        rec(ROOT, CHILD),
+        CHILD_START,
+        rec(200, { kind: 'config-begin', call: 1 }),
       ),
-      [],
+      ['next config'],
+    ],
+    [
+      'the build process: a second load that began and never reported',
+      lines(ROOT_START, ROOT_CONFIG, rec(ROOT, { kind: 'config-begin', call: 2 })),
+      ['next config'],
+    ],
+    [
+      'a worker thread: one of two loads unreported',
+      lines(
+        ROOT_START,
+        ROOT_CONFIG,
+        rec(ROOT, THREAD),
+        THREAD_START,
+        loaded(ROOT, 1, 3),
+        rec(ROOT, { kind: 'config-begin', call: 2 }, 3),
+      ),
+      ['next config'],
+    ],
+    [
+      'a config result with no begin (a report out of order or forged)',
+      lines(ROOT_START, ROOT_CONFIG, rec(ROOT, { ...CONFIG, call: 2 })),
+      ['next config'],
+    ],
+    [
+      'a loader call reported twice',
+      lines(ROOT_START, ROOT_CONFIG, rec(ROOT, { ...CONFIG, call: 1 })),
+      ['next config'],
+    ],
+    [
+      'a record from a process that never reported its start',
+      lines(ROOT_START, ROOT_CONFIG, loaded(200)),
+      ['next config'],
+    ],
+    [
+      'the build process loaded nothing, only a worker did',
+      lines(ROOT_START, rec(ROOT, CHILD), CHILD_START, loaded(200)),
+      ['next config'],
+    ],
+    [
+      'a record of a kind the preload does not write',
+      lines(ROOT_START, ROOT_CONFIG, rec(ROOT, { kind: 'end' })),
+      ['next config'],
     ],
     [
       'a worker that saw another distDir',
       lines(
         ROOT_START,
         ROOT_CONFIG,
-        rec(200, { ...CONFIG, distDir: '.next-alt', outputDir: '/w/.next-alt' }),
+        rec(ROOT, CHILD),
+        CHILD_START,
+        loaded(200, 1, 0, { ...CONFIG, distDir: '.next-alt', outputDir: '/w/.next-alt' }),
       ),
       ['next config'],
     ],
     [
       'a worker that saw another tsconfig',
-      lines(ROOT_START, ROOT_CONFIG, rec(200, { ...CONFIG, tsconfigPath: 'x.json' })),
+      lines(
+        ROOT_START,
+        ROOT_CONFIG,
+        rec(ROOT, CHILD),
+        CHILD_START,
+        loaded(200, 1, 0, { ...CONFIG, tsconfigPath: 'x.json' }),
+      ),
       ['next config'],
     ],
     [
       'a worker that kept old output',
-      lines(ROOT_START, ROOT_CONFIG, rec(200, { ...CONFIG, cleanDistDir: false })),
+      lines(
+        ROOT_START,
+        ROOT_CONFIG,
+        rec(ROOT, CHILD),
+        CHILD_START,
+        loaded(200, 1, 0, { ...CONFIG, cleanDistDir: false }),
+      ),
       ['next config'],
     ],
   ])('%s', (_name, text, keys) => {
     expect(keysFor(text)).toEqual(keys);
+  });
+
+  it('names an unreported load in its own fixed sentence', () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'capture-')), 'c.jsonl');
+    writeFileSync(
+      file,
+      lines(ROOT_START, ROOT_CONFIG, rec(ROOT, { kind: 'config-begin', call: 2 })),
+    );
+    const { out } = runModule(
+      `import { readCapture, layoutProblems } from ${JSON.stringify(url('build-layout.mjs'))};\nconsole.log(JSON.stringify(layoutProblems(readCapture(${JSON.stringify(file)}, { nonce: ${JSON.stringify(NONCE)}, rootPid: ${ROOT} }))));`,
+    );
+    rmSync(join(file, '..'), { recursive: true, force: true });
+    expect(out).toEqual([
+      'next config: a build process loaded the configuration and never reported what it got; refusing',
+    ]);
   });
 });
 
@@ -687,7 +654,7 @@ describe('where the build wrote (r2 F1)', () => {
       mkdirSync(join(web, 'other'));
       const ask = (outputDir: string): string[] =>
         runModule(
-          `import { outputDirProblems } from ${JSON.stringify(url('build-layout.mjs'))};\nconsole.log(JSON.stringify(outputDirProblems({ captured: true, consistent: true, missing: 0, distDir: '.next', cleanDistDir: true, outputDir: ${JSON.stringify(outputDir)} }, ${JSON.stringify(join(web, '.next'))})));`,
+          `import { outputDirProblems } from ${JSON.stringify(url('build-layout.mjs'))};\nconsole.log(JSON.stringify(outputDirProblems({ captured: true, consistent: true, missing: 0, incomplete: 0, distDir: '.next', cleanDistDir: true, outputDir: ${JSON.stringify(outputDir)} }, ${JSON.stringify(join(web, '.next'))})));`,
         ).out as string[];
       expect(ask(join(web, '.next'))).toEqual([]);
       expect(ask(join(web, 'other'))).toEqual([expect.stringContaining('distDir:')]);
@@ -697,86 +664,6 @@ describe('where the build wrote (r2 F1)', () => {
     }
   });
 });
-
-interface Result {
-  status: number;
-  problems: string[];
-  printed: string;
-}
-
-interface DriverOptions {
-  inherit?: boolean;
-  lockWaitMs?: number;
-  env?: Record<string, string>;
-  /** Pause after a good build, before the receipt: writes `paused`, waits for `go`. */
-  pauseDir?: string;
-}
-const DRIVER = `
-  import { existsSync, writeFileSync } from 'node:fs';
-  import { join } from 'node:path';
-  import { setTimeout as sleep } from 'node:timers/promises';
-  import { runWebBuild } from ${JSON.stringify(url('build-run.mjs'))};
-  const options = JSON.parse(process.env.DRIVER_OPTIONS ?? '{}');
-  const beforeReceipt = options.pauseDir
-    ? async () => {
-        writeFileSync(join(options.pauseDir, 'paused'), '');
-        for (let i = 0; i < 2400 && !existsSync(join(options.pauseDir, 'go')); i += 1) await sleep(100);
-      }
-    : undefined;
-  const result = await runWebBuild(process.argv[1], {
-    nextFrom: ${JSON.stringify(WEB)},
-    stdio: options.inherit ? 'inherit' : 'ignore',
-    lockWaitMs: options.lockWaitMs,
-    env: { ...process.env, ...options.env },
-    beforeReceipt,
-  });
-  process.stdout.write(JSON.stringify(result) + '\\n');
-`;
-const runDriver = (dir: string, options: DriverOptions = {}): Promise<Result> =>
-  new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--input-type=module', '-e', DRIVER, '--', dir], {
-      cwd: tmpdir(),
-      env: { ...process.env, DRIVER_OPTIONS: JSON.stringify(options) },
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => (stdout += chunk));
-    child.stderr.on('data', (chunk) => (stderr += chunk));
-    child.on('error', reject);
-    child.on('close', () => {
-      const parsed = JSON.parse(stdout.trim().split('\n').pop() as string) as Omit<
-        Result,
-        'printed'
-      >;
-      resolve({ ...parsed, printed: stdout + stderr });
-    });
-  });
-const plant = (dir: string, config: string, page?: string, stale = false): void => {
-  mkdirSync(join(dir, 'app'), { recursive: true });
-  writeFileSync(join(dir, 'package.json'), '{"name":"fixture","version":"0.0.0"}');
-  symlinkSync(join(WEB, 'node_modules'), join(dir, 'node_modules'));
-  writeFileSync(
-    join(dir, 'app/layout.jsx'),
-    'export default function L({ children }) { return <html><body>{children}</body></html>; }\n',
-  );
-  writeFileSync(
-    join(dir, 'app/page.jsx'),
-    page ?? 'export default function P() { return <p>hi</p>; }\n',
-  );
-  writeFileSync(join(dir, 'next.config.mjs'), config);
-  if (stale) {
-    // A complete, self-consistent earlier build: BUILD_ID, manifest and a matching receipt.
-    mkdirSync(join(dir, '.next/server'), { recursive: true });
-    mkdirSync(join(dir, '.next/cache'), { recursive: true });
-    writeFileSync(join(dir, '.next/cache/keep'), 'x');
-    writeFileSync(join(dir, '.next/stale-marker'), 'x');
-    writeFileSync(join(dir, '.next/BUILD_ID'), 'old-build');
-    writeFileSync(join(dir, '.next/server/server-reference-manifest.json'), '{"node":{}}');
-    runModule(
-      `import { writeReceipt } from ${JSON.stringify(url('build-receipt.mjs'))};\nwriteReceipt(${JSON.stringify(dir)}, { distDir: '.next', tsconfigPath: 'tsconfig.json', cleanDistDir: true });\nconsole.log('null');`,
-    );
-  }
-};
 
 describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: real `next build`)', () => {
   /**
@@ -804,7 +691,15 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
     page?: string;
     /** The production default: the build's output goes to the driver's own stdout/stderr. */
     inherit?: boolean;
+    /** Added to the build's environment (`FAULT` names the record the fault preload fails). */
+    env?: Record<string, string>;
   }
+  // r4 F1: a process the config starts in the build process (not in its workers) that keeps
+  // writing into `.next` and records its pid; it never exits by itself.
+  const WRITER = `import { spawn } from 'node:child_process';\nif (!process.env.IS_NEXT_WORKER && !globalThis.__writer) {\n  globalThis.__writer = true;\n  spawn(process.execPath, ['-e', ${JSON.stringify(
+    "const fs = require('fs'); fs.writeFileSync('writer.pid', String(process.pid)); setInterval(() => { fs.mkdirSync('.next', { recursive: true }); fs.writeFileSync('.next/from-writer', String(Date.now())); }, 100);",
+  )}], { stdio: 'ignore' }).unref();\n}\n`;
+  let fault: string;
   const FIXTURES: Fixture[] = [
     { name: 'control', config: 'export default {};', stale: true },
     {
@@ -859,18 +754,45 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
       stale: true,
       page: "import x from './does-not-exist';\nexport default function P(){return <p>{x}</p>}",
     },
+    {
+      // r4 F3, the reviewer's trigger: workers pick another tsconfig, and their config
+      // records cannot be written (EIO on the capture file only).
+      name: 'workerConfigLost',
+      config: `export default { typescript: { tsconfigPath: process.env.IS_NEXT_WORKER ? 'tsconfig.build.json' : 'tsconfig.json' } };`,
+      stale: true,
+      env: { FAULT: 'config:child:EIO' },
+    },
+    {
+      // r4 addendum B: `next build` exits 0 while a process it started still writes.
+      name: 'writerAfterSuccess',
+      config: `${WRITER}export default {};`,
+      stale: true,
+    },
+    {
+      // r4 F1 (c): the build fails while a process it started still writes.
+      name: 'writerAfterFailure',
+      config: `${WRITER}export default {};`,
+      stale: true,
+      page: "import x from './does-not-exist';\nexport default function P(){return <p>{x}</p>}",
+    },
   ];
   const dirs: Record<string, string> = {};
   const results: Record<string, Result> = {};
   let root: string;
   beforeAll(async () => {
     root = mkdtempSync(join(tmpdir(), 'wrapper-'));
+    ({ fault } = plantFakeNext(join(root, 'fake')));
     for (const fixture of FIXTURES) {
       dirs[fixture.name] = join(root, fixture.name);
       plant(dirs[fixture.name], fixture.config, fixture.page, fixture.stale);
     }
     const done = await Promise.all(
-      FIXTURES.map((f) => runDriver(dirs[f.name], { inherit: f.inherit })),
+      FIXTURES.map((f) =>
+        runDriver(dirs[f.name], {
+          inherit: f.inherit,
+          env: f.env && { ...f.env, NODE_OPTIONS: `--require=${JSON.stringify(fault)}` },
+        }),
+      ),
     );
     FIXTURES.forEach((f, i) => (results[f.name] = done[i]));
   }, 280_000);
@@ -952,6 +874,37 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
       false,
     );
   });
+
+  it('a worker whose config record cannot be written (EIO): the build is stopped and refused, no receipt (r4 F3)', () => {
+    const { status, problems } = results.workerConfigLost;
+    expect(status).toBe(1);
+    expect(problems).toEqual(['next config: a build process could not write its report; refusing']);
+    expect(existsSync(join(dirs.workerConfigLost, '.next/server-action-build-receipt.json'))).toBe(
+      false,
+    );
+    expect(existsSync(join(dirs.workerConfigLost, LOCK))).toBe(false);
+  });
+
+  it.each([
+    ['writerAfterSuccess', 'exited 0'],
+    ['writerAfterFailure', 'failed'],
+  ])(
+    '%s: `next build` %s while a process it started still writes: refused, and that process is gone before the lock is (r4 F1 c, B)',
+    (name) => {
+      const { status, problems } = results[name];
+      expect(status).toBe(1);
+      expect(problems).toEqual([
+        'next build: a process it started was still running after it exited; refusing',
+      ]);
+      const writer = Number(readFileSync(join(dirs[name], 'writer.pid'), 'utf8'));
+      // The case is not vacuous: the writer did write into `.next` during the build ...
+      expect(existsSync(join(dirs[name], '.next/from-writer'))).toBe(true);
+      // ... and it was stopped and awaited before the wrapper returned and released the lock.
+      expect(alive(writer)).toBe(false);
+      expect(existsSync(join(dirs[name], LOCK))).toBe(false);
+      expect(existsSync(join(dirs[name], '.next/server-action-build-receipt.json'))).toBe(false);
+    },
+  );
 
   it('production default stdio (inherit): layout values reach the refusal and nothing prints them', () => {
     const { status, problems, printed } = results.secretDistDir;
@@ -1037,5 +990,37 @@ describe('two invocations in one package (r3 F1: real `next build`)', () => {
     expect(buildId(dir)).not.toBe(idA);
     expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
     expect(checkReceipt(dir)).toEqual([expect.stringContaining('receipt.json: missing')]);
+  }, 280_000);
+
+  it('the wrapper killed between starting `next build` and publishing it (r4 F1 b): the lock is free at once, and that build never writes', async () => {
+    const { dir } = paths('killed');
+    plant(dir, 'export default {};');
+    const record = join(root, 'killed-child.json');
+    const a = await startDriver(dir, {
+      afterSpawn: 'kill',
+      recordChild: record,
+      handshakeMs: 20_000,
+    }).done;
+    expect(a.signal).toBe('SIGKILL');
+    const { pid, capturePath } = JSON.parse(readFileSync(record, 'utf8')) as {
+      pid: number;
+      capturePath: string;
+    };
+    // The orphan is alive, waiting for a handshake that cannot come; the lock names a dead
+    // wrapper and no group, so nothing is in progress and B takes the package over at once.
+    expect(alive(pid)).toBe(true);
+    expect(
+      runModule(
+        `import { buildInProgress } from ${JSON.stringify(url('build-lock.mjs'))};\nconsole.log(JSON.stringify(buildInProgress(${JSON.stringify(dir)})));`,
+      ).out,
+    ).toBe(false);
+    const b = await runDriver(dir, { lockWaitMs: 5_000 });
+    expect(b).toMatchObject({ status: 0, problems: [] });
+    // A's `next build` never got past the preload: it wrote no record, no output.
+    for (let i = 0; i < 300 && alive(pid); i += 1) await new Promise((r) => setTimeout(r, 100));
+    expect(alive(pid)).toBe(false);
+    expect(existsSync(capturePath)).toBe(false);
+    rmSync(join(capturePath, '..'), { recursive: true, force: true });
+    expect(checkReceipt(dir)).toEqual([]);
   }, 280_000);
 });

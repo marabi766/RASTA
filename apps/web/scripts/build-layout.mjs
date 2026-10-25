@@ -13,22 +13,31 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+const KINDS = new Set(['start', 'spawn', 'config-begin', 'config']);
+
 /**
  * What the preload reported for ONE invocation, and whether that report is complete.
  *
- * Complete means: the `next build` process itself reported (`rootPid`), and every child
- * process or worker thread that any reporting process saw start AND that is a Node process
- * reported too. A started Node process runs the preload (it is forced into the child's
- * environment at spawn, see capture-next-config.cjs), and the preload writes the config record
- * from inside the function that hands the configuration to the process, so a process that
- * reported its start cannot have used a configuration without reporting it. A partial set of
- * records cannot pass: any Node child that was started but never reported leaves a `spawn`
- * record with no matching `start`. Processes that are not Node (a shell, git) load no Next
- * config; a Node process below them is still counted when it reports.
+ * Complete means:
+ *  - the `next build` process itself reported its start (`rootPid`) and completed at least one
+ *    load of the configuration;
+ *  - every record comes from a process or worker thread that reported its start;
+ *  - every load of the configuration that began (`config-begin`, one per loader call: pid,
+ *    thread id, call number) also reported what it returned (`config`). A start record says
+ *    nothing about the configuration: a participant that loaded it and could not report the
+ *    result is refused, while one that never loads it (nothing to disagree with) is accepted;
+ *  - every child process or worker thread that any reporting process saw start AND that is a
+ *    Node process reported its start too. A started Node process runs the preload (it is
+ *    forced into the child's environment at spawn, see capture-next-config.cjs), so any Node
+ *    child that never reported leaves a `spawn` record with no matching `start`. Processes
+ *    that are not Node (a shell, git) load no Next config; a Node process below them is still
+ *    counted when it reports.
+ * A record the preload could not write ends the build (capture-next-config.cjs, point 3), so
+ * a missing record is never the only trace of a failure.
  *
  * @param {string} capturePath  file the preload appended to
  * @param {{ nonce: string, rootPid: number }} invocation
- * @returns {{ captured: false } | { captured: true, outputDir: string, distDir: unknown, tsconfigPath: unknown, cleanDistDir: unknown, consistent: boolean, missing: number }}
+ * @returns {{ captured: false } | { captured: true, outputDir: string, distDir: unknown, tsconfigPath: unknown, cleanDistDir: unknown, consistent: boolean, missing: number, incomplete: number }}
  */
 export function readCapture(capturePath, invocation) {
   let lines;
@@ -48,12 +57,23 @@ export function readCapture(capturePath, invocation) {
       return { captured: false };
     }
   }
-  const starts = new Set(
-    records.filter((r) => r.kind === 'start').map((r) => `${r.pid}:${r.tid ?? 0}`),
-  );
-  if (!starts.has(`${invocation.rootPid}:0`)) return { captured: false };
+  if (records.some((r) => !KINDS.has(r.kind))) return { captured: false };
+  const who = (r) => `${r.pid}:${r.tid ?? 0}`;
+  const starts = new Set(records.filter((r) => r.kind === 'start').map(who));
+  const root = `${invocation.rootPid}:0`;
+  if (!starts.has(root) || records.some((r) => !starts.has(who(r)))) return { captured: false };
+  const call = (r) => `${who(r)}:${r.call}`;
+  const begun = records.filter((r) => r.kind === 'config-begin').map(call);
   const configs = records.filter((r) => r.kind === 'config');
-  if (configs.length === 0) return { captured: false };
+  const done = configs.map(call);
+  const unique = (keys) => new Set(keys).size === keys.length;
+  const begunSet = new Set(begun);
+  if (!unique(begun) || !unique(done) || done.some((key) => !begunSet.has(key))) {
+    return { captured: false };
+  }
+  if (!configs.some((r) => who(r) === root)) return { captured: false };
+  const doneSet = new Set(done);
+  const incomplete = begun.filter((key) => !doneSet.has(key)).length;
   const expected = records
     .filter((r) => r.kind === 'spawn' && r.node === true)
     .map((r) => (r.thread !== undefined ? `${r.pid}:${r.thread}` : `${r.child}:0`));
@@ -74,6 +94,7 @@ export function readCapture(capturePath, invocation) {
     // not one consistent run of one configuration.
     consistent: configs.every((record) => same(record, first)),
     missing,
+    incomplete,
   };
 }
 
@@ -85,6 +106,11 @@ export function layoutProblems(layout) {
   const problems = [];
   if (layout.missing !== 0) {
     problems.push('next config: a process the build started never reported; refusing');
+  }
+  if (layout.incomplete !== 0) {
+    problems.push(
+      'next config: a build process loaded the configuration and never reported what it got; refusing',
+    );
   }
   if (layout.consistent === false) {
     problems.push('next config: the build processes disagree on the configuration; refusing');

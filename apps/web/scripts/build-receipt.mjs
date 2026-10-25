@@ -115,6 +115,7 @@ export function snapshotProblems(snapshot) {
     captured: true,
     consistent: true,
     missing: 0,
+    incomplete: 0,
     ...receipt.layout,
   });
   if (receipt.buildId !== now.buildId) {
