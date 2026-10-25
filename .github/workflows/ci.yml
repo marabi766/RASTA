@@ -4144,29 +4144,37 @@ jobs:
   # or skip, unless the copy is the one this producer validated. Skip mode
   # checks the schema only, never the age or the content, so
   # scripts/ci-trivy-db-lib.mjs does, at one boundary used by this job before
-  # it publishes and by every scan before it scans (PR #435 round 2):
+  # it publishes and by every scan before it scans (PR #435 rounds 2 and 3):
   #  - metadata: Version 2, strict RFC 3339 UpdatedAt / NextUpdate /
   #    DownloadedAt, UpdatedAt at most 24 h old and not in the future;
-  #  - trivy.db: a real bbolt file (both meta pages: magic, version, page
-  #    size, checksum; every page it walks in range) holding non-empty
-  #    `vulnerability`, `data-source`, npm-advisory and Alpine buckets (a
-  #    hollow DB makes Trivy exit 0 with no findings);
-  #  - here only, Trivy itself must find CVE-2021-23337 in lodash 4.17.20
-  #    with this DB, rated HIGH or CRITICAL;
+  #  - trivy.db: a real bbolt file, walked completely (both meta pages, then
+  #    every reachable branch, leaf, nested and inline bucket, every page
+  #    owned exactly once, within fixed limits and a deadline), holding
+  #    non-empty `vulnerability`, `data-source` and the advisory buckets of
+  #    each ecosystem the images contain: `alpine 3.24` (every image's base),
+  #    npm and cargo, with no empty package bucket and one known advisory per
+  #    ecosystem rated HIGH or CRITICAL (a hollow DB makes Trivy exit 0 with
+  #    no findings);
+  #  - here only, Trivy itself scans a canary root like an image (apk
+  #    zlib 1.2.12-r0, node_modules lodash 4.17.20, Cargo.lock tokio 1.8.0
+  #    on Alpine 3.24) and must report CVE-2022-37434, CVE-2021-23337 and
+  #    CVE-2021-45710, each HIGH or CRITICAL;
   #  - provenance: this key, run and attempt, an allowed repository, and the
   #    sha256 of both files, so a scan accepts exactly the validated bytes.
-  # A copy that fails any of this is a failed attempt: the next attempt or
-  # repository gets its turn. The scan gate is unchanged: same images,
-  # severity CRITICAL,HIGH, exit-code 1, ignore-unfixed and ignore files.
+  # A copy that fails any of this, or whose inspection errs or overruns its
+  # deadline, is a failed attempt: the next attempt or repository gets its
+  # turn. The scan gate is unchanged: same images, severity CRITICAL,HIGH,
+  # exit-code 1, ignore-unfixed and ignore files.
   #
-  # Time: each repository owns a 180 s window the other cannot spend, and
-  # every Trivy child is killed at its deadline (SIGTERM, SIGKILL 5 s later;
-  # Trivy also gets a matching --timeout), so a stalled mirror cannot keep
-  # ghcr.io from its turn. fetch <= 2 x 180 s + 2 x 20 s of validation = 400 s
-  # <= the step's 7 min; with checkout 2 + setup-trivy 3 + pack 2 + upload
-  # 3 min that is this job's 17 min, and each step has its own limit
-  # (measured on run 40189036039: 1.5 s, 2 s, 9 s, then the cache save
-  # 3.6 s that the upload replaces).
+  # Time: each repository owns a 180 s window the other cannot spend, every
+  # child is killed at its deadline (SIGTERM to its process group, SIGKILL
+  # 5 s later even if the leader already exited; Trivy also gets a matching
+  # --timeout), and one copy's in-process checks stop at 90 s, so a stalled
+  # mirror cannot keep ghcr.io from its turn. fetch <= 2 x (180 s + 90 s) =
+  # 540 s <= the step's 10 min; with checkout 2 + setup-trivy 3 + pack 2 +
+  # upload 3 min that is this job's 20 min, and each step has its own limit
+  # (measured on the real 1.64 GB DB: one copy's validation 22.4 s, a
+  # consumer's check 10 s, pack 3 s, unpack 5 s; see BUDGET in the script).
   #
   # Transport: an artifact, not actions/cache. Run 40191748744 saved the DB
   # to the cache at 12:07, the ClamAV scan restored it at 12:08, and by 12:40,
@@ -4176,7 +4184,10 @@ jobs:
   # mode=max`) at 12:18-12:20, and eviction takes the least recently used
   # entry. Artifacts are stored apart from that limit and are immutable;
   # the download is by exact name, and the provenance check still binds the
-  # copy to this key. tar + zstd keeps it at ~100 MB instead of 1.6 GB.
+  # copy to this key. The archive (ustar + zstd, ~100 MB instead of 1.6 GB)
+  # is written by `ci-trivy-db.mjs pack` and admitted by `unpack`, the one
+  # admission every scan shares (round 2's shell checks failed open when
+  # `grep -q` closed its pipe early, PR #435 r2 R2-1).
   #
   # The DB lives in runner.temp, outside the checkout: in the workspace it
   # would be part of every image's build context (`COPY . .`), as it was in
@@ -4203,7 +4214,7 @@ jobs:
   trivy-db:
     name: Trivy vulnerability DB (downloaded once)
     runs-on: ubuntu-latest
-    timeout-minutes: 17
+    timeout-minutes: 20
     outputs:
       key: ${{ steps.fetch.outputs.key }}
     steps:
@@ -4228,18 +4239,20 @@ jobs:
         # Writes `key=trivy-db-<run id>-<run attempt>` to GITHUB_OUTPUT only
         # after the copy passed every check.
         id: fetch
-        timeout-minutes: 7
+        timeout-minutes: 10
         env:
           TRIVY_DB_DIR: ${{ runner.temp }}/trivy-db
         run: node scripts/ci-trivy-db.mjs fetch "$TRIVY_DB_DIR"
 
       - name: Pack the DB
-        # The validated directory exactly as it is, provenance included; the
-        # scans unpack it and run the same check.
+        # The validated directory exactly as it is, provenance included, as
+        # the archive the scans' `unpack` admits; the scans then run the same
+        # check.
         timeout-minutes: 2
         env:
-          TRIVY_DB_PARENT: ${{ runner.temp }}
-        run: tar -C "$TRIVY_DB_PARENT" -cf - trivy-db | zstd -q -T0 -3 -o "$TRIVY_DB_PARENT/trivy-db.tar.zst"
+          TRIVY_DB_DIR: ${{ runner.temp }}/trivy-db
+          TRIVY_DB_ARCHIVE: ${{ runner.temp }}/trivy-db.tar.zst
+        run: node scripts/ci-trivy-db.mjs pack "$TRIVY_DB_DIR" "$TRIVY_DB_ARCHIVE"
 
       - name: Publish the DB as this run's artifact
         timeout-minutes: 3

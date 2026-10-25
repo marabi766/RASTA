@@ -45,31 +45,20 @@ runs:
         path: ${{ steps.where.outputs.archive }}
 
     - name: Unpack exactly the producer's archive
-      # One file, trivy-db.tar.zst, holding only regular files and
-      # directories under trivy-db/ (no links, no `..`); whatever was in the
-      # target before is removed first.
+      # The one admission (unpackDb, scripts/ci-trivy-db-lib.mjs): the
+      # artifact is exactly trivy-db.tar.zst, and the archive exactly the
+      # producer's five members (ustar, compared byte for byte, in order,
+      # each within its size limit; no link, no tar extension, nothing
+      # else). It is decompressed once, bounded, and the parse that admits a
+      # member is the one that writes it, into a fresh directory that only
+      # replaces the target once the whole archive passed. Whatever was in
+      # the target before is removed first; a refusal or any error leaves
+      # none.
       shell: bash
       env:
         ARCHIVE_DIR: ${{ steps.where.outputs.archive }}
         TRIVY_DB_DIR: ${{ steps.where.outputs.dir }}
-      run: |
-        set -euo pipefail
-        shopt -s nullglob dotglob
-        files=("$ARCHIVE_DIR"/*)
-        if [ "${#files[@]}" -ne 1 ] || [ "${files[0]}" != "$ARCHIVE_DIR/trivy-db.tar.zst" ]; then
-          echo "::error::The downloaded artifact is not exactly trivy-db.tar.zst; refusing to scan with it."
-          exit 1
-        fi
-        listing="$(zstd -dc "${files[0]}" | tar -tvf -)"
-        names="$(zstd -dc "${files[0]}" | tar -tf -)"
-        if printf '%s\n' "$listing" | cut -c1 | grep -q -v -E '^[-d]$' ||
-          printf '%s\n' "$names" | grep -q -v -E '^trivy-db(/[A-Za-z0-9._-]+)*/?$' ||
-          printf '%s\n' "$names" | grep -q -E '(^|/)\.\.(/|$)'; then
-          echo "::error::The Trivy DB archive holds something other than files under trivy-db/; refusing to scan with it."
-          exit 1
-        fi
-        rm -rf "$TRIVY_DB_DIR"
-        zstd -dc "${files[0]}" | tar -C "$(dirname "$TRIVY_DB_DIR")" --no-same-owner -xf -
+      run: node scripts/ci-trivy-db.mjs unpack "$ARCHIVE_DIR" "$TRIVY_DB_DIR"
 
     - name: Check the restored Trivy DB
       shell: bash

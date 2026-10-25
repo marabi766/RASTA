@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -8,7 +8,10 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  rmSync,
+  symlinkSync,
   truncateSync,
   writeFileSync,
 } from 'node:fs';
@@ -17,17 +20,25 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import {
+  ALPINE_RELEASES,
+  ARCHIVE,
+  BOLT_LIMITS,
   BUDGET,
   checkDb,
+  ECOSYSTEMS,
   expectedProducer,
   fetchDb,
   inspectBolt,
   MAX_AGE_NS,
   MAX_FUTURE_SKEW_NS,
+  packDb,
   parseInstant,
   REPOSITORIES,
   REQUIRED_BUCKETS,
   runBounded,
+  SCANNED_BASES,
+  startBounded,
+  unpackDb,
 } from './ci-trivy-db-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -44,8 +55,18 @@ const CTX = Object.freeze({ now: NOW, key: KEY, run: RUN });
 const [GCR, GHCR] = REPOSITORIES;
 const E404 =
   'FATAL failed to download artifact from mirror.gcr.io/aquasec/trivy-db:2: oci download error: failed to fetch the layer: GET https://mirror.gcr.io/artifacts-downloads/x: unexpected status code 404 Not Found';
+const [ALPINE] = ECOSYSTEMS.map((e) => e.bucket);
 
-const tmp = () => mkdtempSync(join(tmpdir(), 'ci-trivy-db-'));
+const made = [];
+const tmp = () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-trivy-db-'));
+  made.push(dir);
+  return dir;
+};
+// Some tests write a 20,000-entry tree or a 1.6 GB-class archive's worth of files.
+after(() => {
+  for (const dir of made) rmSync(dir, { recursive: true, force: true });
+});
 const sha256 = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
 
 /** The review's counterexample (r1 F1): 2 MiB, bbolt magic at offset 16, version 0, page size 0. */
@@ -111,50 +132,113 @@ function reseal(dir) {
   writeFileSync(path, JSON.stringify(source));
 }
 
-/** Offset of the root bucket's page in a bbolt file (current meta = higher txid). */
-function rootPageOffset(buf) {
+/**
+ * A test-side view of a bbolt file in a Buffer, independent of the reader
+ * under test: the current meta page and the elements of any page, found by
+ * path ([top-level bucket, nested bucket..., key]). Offsets are into `buf`,
+ * so a test can damage exactly one field.
+ */
+function bolt(buf) {
   const ps = buf.readUInt32LE(24);
   const metas = [0, ps].map((at) => ({
-    root: buf.readBigUInt64LE(at + 32),
+    at,
+    root: Number(buf.readBigUInt64LE(at + 32)),
+    freelist: Number(buf.readBigUInt64LE(at + 48)),
+    pgid: Number(buf.readBigUInt64LE(at + 56)),
     txid: buf.readBigUInt64LE(at + 64),
   }));
   const meta = metas[1].txid > metas[0].txid ? metas[1] : metas[0];
-  return { ps, at: Number(meta.root) * ps };
+  const header = (off) => ({
+    off,
+    flags: buf.readUInt16LE(off + 8),
+    count: buf.readUInt16LE(off + 10),
+  });
+  const elements = (off) => {
+    const { flags, count } = header(off);
+    return Array.from({ length: count }, (_, i) => {
+      const el = off + 16 + i * 16;
+      if (flags === 0x01) {
+        const keyAt = el + buf.readUInt32LE(el);
+        const ksize = buf.readUInt32LE(el + 4);
+        const key = buf.toString('latin1', keyAt, keyAt + ksize);
+        return {
+          el,
+          keyAt,
+          ksize,
+          key,
+          childAt: el + 8,
+          child: Number(buf.readBigUInt64LE(el + 8)),
+        };
+      }
+      const keyAt = el + buf.readUInt32LE(el + 4);
+      const ksize = buf.readUInt32LE(el + 8);
+      const vsize = buf.readUInt32LE(el + 12);
+      const key = buf.toString('latin1', keyAt, keyAt + ksize);
+      return { el, flags: buf.readUInt32LE(el), keyAt, ksize, key, valueAt: keyAt + ksize, vsize };
+    });
+  };
+  /** The page holding a bucket element's contents: its inline page, or its root page. */
+  const bucketPage = (el) => {
+    const root = Number(buf.readBigUInt64LE(el.valueAt));
+    return root === 0 ? el.valueAt + 16 : root * ps;
+  };
+  const lookup = (off, key) => {
+    const els = elements(off);
+    if (header(off).flags !== 0x01) return els.find((e) => e.key === key);
+    let pick = els[0];
+    for (const e of els) if (e.key <= key) pick = e;
+    return lookup(pick.child * ps, key);
+  };
+  const at = (...path) => {
+    let off = meta.root * ps;
+    let el;
+    for (const key of path) {
+      if (el) off = bucketPage(el);
+      el = lookup(off, key);
+      assert.ok(el, `${path.join(' / ')} is in the fixture`);
+    }
+    return el;
+  };
+  const freelist = () => {
+    const off = meta.freelist * ps;
+    const count = buf.readUInt16LE(off + 10);
+    return {
+      off,
+      count,
+      ids: Array.from({ length: count }, (_, i) => Number(buf.readBigUInt64LE(off + 16 + i * 8))),
+    };
+  };
+  return { ps, meta, header, elements, bucketPage, at, freelist, rootPage: meta.root * ps };
 }
 
-/** Writes the real fixture with `edit(buffer)` applied, provenance re-sealed. */
-function damaged(edit) {
-  const dir = writeDb(tmp());
+/** Writes the real fixture (or `db`) with `edit(buffer, view)` applied, provenance re-sealed. */
+function damaged(edit, db = 'real') {
+  const dir = writeDb(tmp(), { db });
   const path = join(dir, 'db/trivy.db');
   const buf = readFileSync(path);
-  edit(buf);
+  edit(buf, bolt(buf));
   writeFileSync(path, buf);
   reseal(dir);
   return dir;
 }
 
-/** Renames a top-level bucket in place (same length), keeping the file structurally valid. */
-function renameTopLevel(from, to) {
-  assert.equal(from.length, to.length);
-  return damaged((buf) => {
-    const { at } = rootPageOffset(buf);
-    assert.equal(buf.readUInt16LE(at + 8), 0x02, 'the fixture root is one leaf page');
-    for (let i = 0; i < buf.readUInt16LE(at + 10); i++) {
-      const el = at + 16 + i * 16;
-      const keyAt = el + buf.readUInt32LE(el + 4);
-      if (buf.toString('utf8', keyAt, keyAt + buf.readUInt32LE(el + 8)) === from) {
-        buf.write(to, keyAt);
-        return;
-      }
-    }
-    assert.fail(`${from} is not a top-level key`);
+/** Renames a key in place (same length), keeping it in order unless the test means otherwise. */
+const rename = (path, to) =>
+  damaged((buf, b) => {
+    const el = b.at(...path);
+    assert.equal(el.ksize, to.length);
+    buf.write(to, el.keyAt, 'latin1');
   });
-}
+const renameTopLevel = (from, to) => rename([from], to);
 
-const refused = (dir, pattern, ctx = CTX) => {
+/** checkDb refuses, with `pattern`, and repeats none of `unechoed` (values the test injected). */
+const refused = (dir, pattern, ctx = CTX, unechoed = []) => {
   const r = checkDb(dir, ctx);
   assert.equal(r.ok, false, `expected a refusal matching ${pattern}`);
   assert.match(r.reason, pattern);
+  for (const value of unechoed)
+    assert.ok(!r.reason.includes(value), `${r.reason} repeats ${value}`);
+  return r;
 };
 
 // --- F1: the copy must be a real, usable Trivy DB ------------------------------
@@ -162,36 +246,50 @@ const refused = (dir, pattern, ctx = CTX) => {
 test('the fixtures are what the README says (go.etcd.io/bbolt output, not the reader under test)', () => {
   const real = inspectBolt(join(FIXTURES, 'real.db'));
   assert.equal(real.ok, true, real.reason);
-  assert.deepEqual([...real.buckets.keys()].sort(), [
-    'alpine 3.24',
-    'data-source',
-    'npm::GitHub Security Advisory npm',
-    'vulnerability',
-  ]);
-  for (const [name, count] of real.buckets) assert.ok(count > 0, name);
+  assert.deepEqual([...real.buckets.keys()].sort(), [...REQUIRED_BUCKETS].sort());
+  for (const [name, b] of real.buckets) {
+    assert.ok(b.values > 0, name);
+    assert.equal(b.emptyBuckets, 0, name);
+  }
+  // What the round-2 mutations need: a branch page, inline buckets, an overflow page.
+  const view = bolt(readFileSync(join(FIXTURES, 'real.db')));
+  assert.equal(view.header(view.bucketPage(view.at('vulnerability'))).flags, 0x01);
+  const alpine = view.elements(view.bucketPage(view.at(ALPINE)));
+  assert.equal(alpine.length, 4);
+  for (const pkg of alpine) assert.equal(view.bucketPage(pkg), pkg.valueAt + 16, pkg.key);
+  assert.ok(real.stats.maxPageSpanBytes > view.ps);
+  assert.ok(view.freelist().count > 0);
+  assert.equal(inspectBolt(join(FIXTURES, 'sparse.db')).buckets.get(ALPINE).emptyBuckets, 1);
   assert.deepEqual([...inspectBolt(join(FIXTURES, 'empty.db')).buckets], []);
   const hollow = inspectBolt(join(FIXTURES, 'hollow.db'));
-  assert.equal(hollow.buckets.size, 4);
-  for (const count of hollow.buckets.values()) assert.equal(count, 0);
+  assert.equal(hollow.buckets.size, REQUIRED_BUCKETS.length);
+  for (const b of hollow.buckets.values()) assert.equal(b.values, 0);
 });
 
 test('checkDb: the real fixture, fresh and sealed by this producer, is accepted', () => {
   const r = checkDb(writeDb(tmp()), CTX);
   assert.equal(r.ok, true, r.reason);
   assert.equal(r.ageHours, 1);
-  assert.equal(r.buckets, 4);
+  assert.equal(r.buckets, 5);
   assert.equal(r.source.key, KEY);
 });
 
 test("checkDb: the review's counterexample (magic only, bbolt version 0, page size 0) is REFUSED", () => {
-  refused(writeDb(tmp(), { db: r1Counterexample() }), /meta page 0 has version 0, expected 2/);
+  refused(writeDb(tmp(), { db: r1Counterexample() }), /meta page 0 is not format version 2/);
 });
 
-for (const [name, edit, pattern] of [
+// Each damages one field of the genuine fixture; the provenance is re-sealed,
+// so the sha256 is not what refuses it. The values injected are never repeated.
+for (const [name, edit, pattern, unechoed = []] of [
   ['no bbolt magic', (b) => b.writeUInt32LE(0, 16), /meta page 0 has no bbolt magic/],
-  ['meta 0 version 1', (b) => b.writeUInt32LE(1, 20), /meta page 0 has version 1/],
-  ['meta 0 page size 0', (b) => b.writeUInt32LE(0, 24), /meta page 0 has page size 0/],
-  ['meta 0 page size not a power of two', (b) => b.writeUInt32LE(4095, 24), /page size 4095/],
+  ['meta 0 version 1', (b) => b.writeUInt32LE(1, 20), /meta page 0 is not format version 2/],
+  ['meta 0 page size 0', (b) => b.writeUInt32LE(0, 24), /meta page 0 has an invalid page size/],
+  [
+    'meta 0 page size not a power of two',
+    (b) => b.writeUInt32LE(4095, 24),
+    /meta page 0 has an invalid page size/,
+    ['4095'],
+  ],
   [
     'meta 0 checksum (txid changed under it)',
     (b) => b.writeBigUInt64LE(b.readBigUInt64LE(64) + 1n, 64),
@@ -209,27 +307,224 @@ for (const [name, edit, pattern] of [
   ],
   [
     'root page carries another id',
-    (b) => {
-      const { at } = rootPageOffset(b);
-      b.writeBigUInt64LE(9999n, at);
-    },
-    /carries id 9999/,
+    (b, v) => b.writeBigUInt64LE(9999n, v.rootPage),
+    /a page carries another id/,
+    ['9999'],
   ],
   [
     'root page is neither branch nor leaf',
-    (b) => {
-      const { at } = rootPageOffset(b);
-      b.writeUInt16LE(0x10, at + 8);
-    },
-    /has flags 16, not a branch or leaf/,
+    (b, v) => b.writeUInt16LE(0x10, v.rootPage + 8),
+    /a page is neither a branch nor a leaf/,
+    ['16'],
   ],
   [
     'root page claims more elements than fit',
-    (b) => {
-      const { at } = rootPageOffset(b);
-      b.writeUInt16LE(60000, at + 10);
+    (b, v) => b.writeUInt16LE(60000, v.rootPage + 10),
+    /a page has more elements than fit/,
+    ['60000'],
+  ],
+  // --- round 2's three mutations (F1): nested and inline structure ---
+  [
+    "r2 (a): every Alpine package's inline page flags zeroed",
+    (b, v) => {
+      for (const pkg of v.elements(v.bucketPage(v.at(ALPINE))))
+        b.writeUInt16LE(0, pkg.valueAt + 16 + 8);
     },
-    /more elements than fit/,
+    /an inline bucket is not an inline leaf page/,
+  ],
+  [
+    "r2 (b): every Alpine package's inline advisory count zeroed",
+    (b, v) => {
+      for (const pkg of v.elements(v.bucketPage(v.at(ALPINE))))
+        b.writeUInt16LE(0, pkg.valueAt + 16 + 10);
+    },
+    /an inline bucket is not exactly as long as its elements/,
+  ],
+  [
+    'r2 (c): a vulnerability branch child page id out of range',
+    (b, v) => b.writeBigUInt64LE(9999n, v.elements(v.bucketPage(v.at('vulnerability')))[3].childAt),
+    /a page id is out of range/,
+    ['9999'],
+  ],
+  [
+    "r2 (c): a vulnerability branch child pointing at its sibling's page",
+    (b, v) => {
+      const [first, second] = v.elements(v.bucketPage(v.at('vulnerability')));
+      b.writeBigUInt64LE(BigInt(second.child), first.childAt);
+    },
+    /a page is referenced twice/,
+  ],
+  [
+    'r2 (c): a vulnerability branch child pointing at a free page',
+    (b, v) =>
+      b.writeBigUInt64LE(
+        BigInt(v.freelist().ids[0]),
+        v.elements(v.bucketPage(v.at('vulnerability')))[5].childAt,
+      ),
+    /a page is (referenced twice|neither a branch nor a leaf)/,
+  ],
+  [
+    'r2 (c): a vulnerability branch child pointing at a meta page',
+    (b, v) => b.writeBigUInt64LE(1n, v.elements(v.bucketPage(v.at('vulnerability')))[0].childAt),
+    /a page id is out of range/,
+  ],
+  [
+    'a vulnerability branch emptied',
+    (b, v) => b.writeUInt16LE(0, v.bucketPage(v.at('vulnerability')) + 10),
+    /a non-root page is empty/,
+  ],
+  [
+    'a vulnerability leaf emptied',
+    (b, v) =>
+      b.writeUInt16LE(0, v.elements(v.bucketPage(v.at('vulnerability')))[2].child * v.ps + 10),
+    /a non-root page is empty/,
+  ],
+  [
+    'branch keys out of order',
+    (b, v) => b.write('0', v.elements(v.bucketPage(v.at('vulnerability')))[4].keyAt, 'latin1'),
+    /page keys are not in order/,
+  ],
+  [
+    'leaf keys out of order (inline data-source)',
+    (b, v) => b.write('z', v.at('data-source', ALPINE).keyAt, 'latin1'),
+    /bucket keys are not in order/,
+  ],
+  [
+    'a leaf element with unknown flags',
+    (b, v) => b.writeUInt32LE(2, v.at('vulnerability', 'CVE-2021-23337').el),
+    /a leaf element has unknown flags/,
+  ],
+  [
+    'a leaf element with an empty key',
+    (b, v) => b.writeUInt32LE(0, v.at('vulnerability', 'CVE-2021-23337').el + 8),
+    /a leaf element overruns its page/,
+  ],
+  [
+    'a leaf element whose value overruns its page',
+    (b, v) => b.writeUInt32LE(1 << 20, v.at('vulnerability', 'CVE-2021-23337').el + 12),
+    /a leaf element overruns its page/,
+  ],
+  [
+    'a leaf element moved one byte (gap between elements)',
+    (b, v) => {
+      const el = v.at('vulnerability', 'CVE-2021-23337').el;
+      b.writeUInt32LE(b.readUInt32LE(el + 4) + 1, el + 4);
+    },
+    /a page does not lay its elements out back to back/,
+  ],
+  [
+    'a branch element moved one byte',
+    (b, v) => {
+      const el = v.elements(v.bucketPage(v.at('vulnerability')))[1].el;
+      b.writeUInt32LE(b.readUInt32LE(el) + 1, el);
+    },
+    /a page does not lay its elements out back to back/,
+  ],
+  [
+    'a branch element with an empty key',
+    (b, v) => b.writeUInt32LE(0, v.elements(v.bucketPage(v.at('vulnerability'))).at(-1).el + 4),
+    /a branch element overruns its page/,
+  ],
+  [
+    'an inline page with an id',
+    (b, v) => b.writeBigUInt64LE(7n, v.at(ALPINE, 'zlib').valueAt + 16),
+    /an inline bucket is not an inline leaf page/,
+  ],
+  [
+    'an inline page claiming overflow pages',
+    (b, v) => b.writeUInt32LE(1, v.at(ALPINE, 'zlib').valueAt + 16 + 12),
+    /an inline bucket claims overflow pages/,
+  ],
+  [
+    'an inline bucket holding a bucket',
+    (b, v) => b.writeUInt32LE(1, v.at(ALPINE, 'zlib', 'CVE-2022-37434').el),
+    /an inline bucket holds a bucket/,
+  ],
+  [
+    'a bucket header with trailing bytes',
+    (b, v) => b.writeUInt32LE(17, v.at('vulnerability').el + 12),
+    /a bucket header has trailing bytes/,
+  ],
+  [
+    'a bucket header cut short',
+    (b, v) => b.writeUInt32LE(15, v.at('vulnerability').el + 12),
+    /a bucket header is truncated/,
+  ],
+  [
+    'a value at the top level, where only buckets live',
+    (b, v) => b.writeUInt32LE(0, v.at('vulnerability').el),
+    /the root holds a value, not a bucket/,
+  ],
+  [
+    'a page whose overflow runs past the file',
+    (b, v) =>
+      b.writeUInt32LE(9999, v.elements(v.bucketPage(v.at('vulnerability')))[2].child * v.ps + 12),
+    /a page overflows the file/,
+    ['9999'],
+  ],
+  [
+    'the freelist page is not a freelist',
+    (b, v) => b.writeUInt16LE(0x02, v.freelist().off + 8),
+    /the freelist page is not a freelist/,
+  ],
+  [
+    'the freelist lists a page out of range',
+    (b, v) => b.writeBigUInt64LE(9999n, v.freelist().off + 16),
+    /a page id is out of range/,
+    ['9999'],
+  ],
+  [
+    'the freelist lists a reachable page',
+    (b, v) => b.writeBigUInt64LE(BigInt(v.meta.root), v.freelist().off + 16),
+    /a page is referenced twice/,
+  ],
+  [
+    'a page neither reachable nor free (dropped from the freelist)',
+    (b, v) => b.writeUInt16LE(v.freelist().count - 1, v.freelist().off + 10),
+    /a page is neither reachable nor free/,
+  ],
+  [
+    'the freelist claims more pages than fit',
+    (b, v) => b.writeUInt16LE(5000, v.freelist().off + 10),
+    /the freelist lists more pages than fit/,
+    ['5000'],
+  ],
+]) {
+  test(`checkDb: structure: ${name} -> refused`, () => {
+    refused(damaged(edit), pattern, CTX, unechoed);
+  });
+}
+
+/** bbolt's meta checksum (FNV-1a 64 over the 56 bytes before it), to forge a consistent meta page. */
+function fnv1a64(bytes) {
+  let h = 0xcbf29ce484222325n;
+  for (const b of bytes) h = BigInt.asUintN(64, (h ^ BigInt(b)) * 0x100000001b3n);
+  return h;
+}
+const resum = (b, at) => b.writeBigUInt64LE(fnv1a64(b.subarray(at + 16, at + 72)), at + 72);
+
+for (const [name, edit, pattern] of [
+  [
+    'the meta pages disagree on the page size (both checksums valid)',
+    (b, v) => {
+      b.writeUInt32LE(8192, v.ps + 24);
+      resum(b, v.ps);
+    },
+    /meta pages disagree on the page size/,
+  ],
+  [
+    'the freelist in its long form, claiming more pages than exist',
+    (b, v) => {
+      const { off } = v.freelist();
+      b.writeUInt16LE(0xffff, off + 10);
+      b.writeBigUInt64LE(1n << 40n, off + 16);
+    },
+    /the freelist lists more pages than exist/,
+  ],
+  [
+    'an inline bucket shorter than a page header',
+    (b, v) => b.writeUInt32LE(20, v.at(ALPINE, 'zlib').el + 12),
+    /an inline bucket is truncated/,
   ],
 ]) {
   test(`checkDb: structure: ${name} -> refused`, () => {
@@ -241,26 +536,95 @@ test('checkDb: structure: a file shorter than its meta page says -> refused', ()
   const dir = writeDb(tmp());
   truncateSync(join(dir, 'db/trivy.db'), 3 * 4096);
   reseal(dir);
-  refused(dir, /is truncated/);
+  refused(dir, /is truncated: shorter than its meta page says/);
 });
 
 test('checkDb: structure: one byte short of the pages its meta page counts -> refused', () => {
   const dir = writeDb(tmp());
   const path = join(dir, 'db/trivy.db');
-  const buf = readFileSync(path);
-  const ps = buf.readUInt32LE(24);
-  const pgid = [0, ps]
-    .map((at) => ({ pgid: buf.readBigUInt64LE(at + 56), txid: buf.readBigUInt64LE(at + 64) }))
-    .sort((a, b) => (a.txid > b.txid ? -1 : 1))[0].pgid;
-  truncateSync(path, Number(pgid) * ps - 1);
+  const { meta, ps } = bolt(readFileSync(path));
+  truncateSync(path, meta.pgid * ps - 1);
   reseal(dir);
-  refused(dir, /is truncated: \d+ bytes, its meta page needs \d+ pages of 4096/);
+  refused(dir, /is truncated: shorter than its meta page says/);
 });
 
 test('checkDb: structure: an empty or tiny file -> refused', () => {
   refused(writeDb(tmp(), { db: Buffer.alloc(0) }), /meta page 0 is truncated/);
   refused(writeDb(tmp(), { db: Buffer.alloc(100) }), /meta page 0/);
 });
+
+test('inspectBolt: every bound refuses just below what the genuine fixture needs (BOLT_LIMITS, tightened)', () => {
+  const path = join(FIXTURES, 'real.db');
+  const { stats } = inspectBolt(path);
+  const size = readFileSync(path).length;
+  const find = [[ALPINE, 'zlib', 'CVE-2022-37434']];
+  for (const [limits, pattern] of [
+    [{ fileBytes: size - 1 }, /is larger than allowed/],
+    [{ pageSpanBytes: stats.maxPageSpanBytes - 1 }, /a page is larger than allowed/],
+    [{ treeDepth: stats.maxTreeDepth - 1 }, /a bucket tree is too deep/],
+    [{ bucketNesting: stats.maxNesting - 1 }, /buckets are nested too deep/],
+    [{ elements: stats.elements - 1 }, /has more elements than allowed/],
+    [{ foundValueBytes: 10 }, /a canary value is larger than allowed/],
+  ]) {
+    const r = inspectBolt(path, { limits, find });
+    assert.equal(r.ok, false, JSON.stringify(limits));
+    assert.match(r.reason, pattern);
+  }
+  for (const limits of [
+    { fileBytes: size },
+    { pageSpanBytes: stats.maxPageSpanBytes },
+    { treeDepth: stats.maxTreeDepth },
+    { bucketNesting: stats.maxNesting },
+    { elements: stats.elements },
+  ]) {
+    assert.equal(inspectBolt(path, { limits, find }).ok, true, JSON.stringify(limits));
+  }
+  // ... and `limits` can only tighten: a sparse file past the production bound stays refused.
+  const big = join(tmp(), 'big.db');
+  copyFileSync(path, big);
+  truncateSync(big, BOLT_LIMITS.fileBytes + 1);
+  const loosened = inspectBolt(big, { limits: { fileBytes: 1e12 } });
+  assert.equal(loosened.ok, false);
+  assert.match(loosened.reason, /is larger than allowed/);
+  assert.equal(BOLT_LIMITS.treeDepth, 12);
+});
+
+test('inspectBolt: the production bounds admit the real DB with margin (measured, PR #435 round 3)', () => {
+  // The real DB of 2026-10-25 (1.63 GB): 397 943 pages, 7 358 317 elements,
+  // tree depth 3, nesting 2, largest page span 479 232 bytes; walked in 3.3 s.
+  const real = {
+    fileBytes: 1_631_318_016,
+    elements: 7_358_317,
+    treeDepth: 3,
+    bucketNesting: 2,
+    pageSpanBytes: 479_232,
+  };
+  for (const [k, v] of Object.entries(real)) assert.ok(BOLT_LIMITS[k] >= 2 * v, k);
+  assert.ok(
+    BUDGET.checkMs >= 3 * (3_300 + 6_700),
+    'walk + sha256 of the real DB, three times over',
+  );
+});
+
+test('checkDb: a sha256 that runs past the deadline -> refused (sparse 3 GiB trivy.db: fast walk, slow hash)', () => {
+  const dir = writeDb(tmp());
+  truncateSync(join(dir, 'db/trivy.db'), 3 * 1024 ** 3); // pages past the high-water mark are not walked
+  const started = performance.now();
+  refused(dir, /the copy took longer than its time limit/, {
+    ...CTX,
+    deadline: performance.now() + 300,
+  });
+  assert.ok(performance.now() - started < 3_000);
+});
+
+test('checkDb: an inspection that runs past its deadline -> refused', () => {
+  refused(writeDb(tmp()), /took longer than its time limit/, {
+    ...CTX,
+    deadline: performance.now() - 1,
+  });
+});
+
+// --- content: what a scan reads must be there (F1, addendum B) ---------------
 
 test('checkDb: content: a valid bbolt file with no buckets -> refused', () => {
   refused(writeDb(tmp(), { db: 'empty' }), /has no bucket "vulnerability"/);
@@ -276,12 +640,53 @@ for (const name of REQUIRED_BUCKETS) {
   });
 }
 
-test('checkDb: content: no Alpine release bucket -> refused', () => {
-  refused(
-    renameTopLevel('alpine 3.24', 'alpine x.24'),
-    /no non-empty "alpine <major>\.<minor>" bucket/,
-  );
+test('checkDb: content: another Alpine release populated, not the one the images use -> refused', () => {
+  assert.deepEqual(ALPINE_RELEASES, ['3.24']);
+  refused(renameTopLevel(ALPINE, 'alpine 3.23'), /has no bucket "alpine 3\.24"/);
 });
+
+test('checkDb: content: an empty package bucket in a scanned ecosystem (genuine sparse.db) -> refused', () => {
+  refused(writeDb(tmp(), { db: 'sparse' }), /has an empty package bucket in "alpine 3\.24"/);
+});
+
+for (const { bucket, canary } of ECOSYSTEMS) {
+  test(`checkDb: content: ${bucket}: canary advisory ${canary.id} missing -> refused`, () => {
+    const to = `${canary.id.slice(0, -1)}${canary.id.endsWith('7') ? '6' : '7'}`;
+    refused(
+      rename([bucket, canary.pkg, canary.id], to),
+      new RegExp(`no canary advisory ${canary.id}`),
+    );
+  });
+  test(`checkDb: content: ${bucket}: canary advisory not a JSON object -> refused`, () => {
+    const dir = damaged((buf, v) =>
+      buf.write('[', v.at(bucket, canary.pkg, canary.id).valueAt, 'latin1'),
+    );
+    refused(dir, new RegExp(`no canary advisory ${canary.id}`));
+  });
+  test(`checkDb: content: ${bucket}: ${canary.id} missing from vulnerability -> refused`, () => {
+    const to = `${canary.id.slice(0, -1)}${canary.id.endsWith('7') ? '6' : '7'}`;
+    refused(
+      rename(['vulnerability', canary.id], to),
+      new RegExp(`does not rate ${canary.id} HIGH or CRITICAL`),
+    );
+  });
+  test(`checkDb: content: ${bucket}: ${canary.id} rated below the gate -> refused`, () => {
+    const dir = damaged((buf, v) => {
+      const el = v.at('vulnerability', canary.id);
+      const text = buf.toString('latin1', el.valueAt, el.valueAt + el.vsize);
+      const m = /"Severity":"(HIGH|CRITICAL)"/.exec(text);
+      assert.ok(m, 'the fixture rates it');
+      buf.write(`"Severity":"${'LOW'.padEnd(m[1].length, 'W')}"`, el.valueAt + m.index, 'latin1');
+    });
+    refused(dir, new RegExp(`does not rate ${canary.id} HIGH or CRITICAL`));
+  });
+  test(`checkDb: content: ${bucket}: no data-source row -> refused`, () => {
+    refused(
+      rename(['data-source', bucket], `${bucket.slice(0, -1)}#`),
+      /records no data source for/,
+    );
+  });
+}
 
 test('checkDb: a byte changed in a data page (structure intact) -> refused by the sha256', () => {
   const dir = writeDb(tmp());
@@ -298,6 +703,35 @@ test('checkDb: metadata.json rewritten after sealing -> refused by the sha256', 
   const path = join(dir, 'db/metadata.json');
   writeFileSync(path, `${readFileSync(path, 'utf8')}\n`);
   refused(dir, /db\/metadata\.json is not the copy/);
+});
+
+// --- addendum C: an inspection error is a refusal, never a crash --------------
+
+test('checkDb: unreadable or misshapen files are refusals (error: true when the inspection itself failed)', () => {
+  const asDir = writeDb(tmp(), { db: false });
+  mkdirSync(join(asDir, 'db/trivy.db'));
+  refused(asDir, /db\/trivy\.db is not a regular file/);
+
+  const metaDir = writeDb(tmp());
+  const metaPath = join(metaDir, 'db/metadata.json');
+  rmSync(metaPath);
+  mkdirSync(metaPath);
+  refused(metaDir, /db\/metadata\.json is not a regular file/);
+
+  refused(
+    writeDb(tmp(), { meta: `{"Version":2,"x":"${'a'.repeat(70_000)}"}` }),
+    /metadata\.json is larger than allowed/,
+  );
+
+  const locked = writeDb(tmp());
+  chmodSync(join(locked, 'db/trivy.db'), 0);
+  const r = refused(locked, /db\/trivy\.db cannot be opened \(EACCES\)/);
+  assert.equal(r.error, true);
+
+  const lockedSource = writeDb(tmp());
+  chmodSync(join(lockedSource, 'ci-trivy-db-source.json'), 0);
+  const s = refused(lockedSource, /the copy could not be inspected \(EACCES\)/);
+  assert.equal(s.error, true);
 });
 
 // --- metadata and instants (F2, addendum D) -------------------------------------
@@ -390,7 +824,9 @@ test('parseInstant: strict RFC 3339 with a calendar round-trip', () => {
 test('checkDb: a calendar-invalid UpdatedAt (2026-02-30) is refused, not normalised', () => {
   refused(
     writeDb(tmp(), { meta: { UpdatedAt: '2026-02-30T05:00:00Z' } }),
-    /UpdatedAt is missing or not a valid RFC 3339 instant: "2026-02-30T05:00:00Z"/,
+    /UpdatedAt is missing or not a valid RFC 3339 instant \(runner clock/,
+    CTX,
+    ['2026-02-30'],
   );
 });
 
@@ -406,13 +842,13 @@ for (const [name, now] of [
 }
 
 for (const [name, meta, pattern] of [
-  ['empty cache directory', null, /missing .*metadata\.json/],
+  ['empty cache directory', null, /db\/metadata\.json is missing/],
   ['metadata empty file', '', /not valid JSON/],
   ['metadata is not JSON', '{nope', /not valid JSON/],
-  ['metadata is an array', '[]', /metadata is not a JSON object/],
-  ['metadata is null', 'null', /metadata is not a JSON object/],
-  ['wrong schema version', { Version: 1 }, /Version is 1, expected 2/],
-  ['schema version as a string', { Version: '2' }, /Version is "2", expected 2/],
+  ['metadata is an array', '[]', /db\/metadata\.json is not a JSON object/],
+  ['metadata is null', 'null', /db\/metadata\.json is not a JSON object/],
+  ['wrong schema version', { Version: 1 }, /Version is not 2/],
+  ['schema version as a string', { Version: '2' }, /Version is not 2/],
   ['UpdatedAt missing', { UpdatedAt: undefined }, /UpdatedAt is missing/],
   ['UpdatedAt malformed', { UpdatedAt: 'yesterday' }, /UpdatedAt is missing or not a valid/],
   ['UpdatedAt a number', { UpdatedAt: 1761372000 }, /UpdatedAt is missing or not a valid/],
@@ -460,23 +896,25 @@ for (const [name, source, pattern] of [
   [
     'a prefix-matched entry (trivy-db-77-10 restored for trivy-db-77-1)',
     { key: 'trivy-db-77-10', runAttempt: '10' },
-    /published as "trivy-db-77-10" by run 77 attempt 10, expected trivy-db-77-1/,
+    /not published by the producer that key names \(expected trivy-db-77-1\)$/,
   ],
-  ['the right key but another attempt', { runAttempt: '2' }, /attempt 2, expected trivy-db-77-1/],
-  ['the right key but another run', { runId: '78' }, /by run 78 .* expected trivy-db-77-1/],
-  ['attempt as a number', { runAttempt: 1 }, /expected trivy-db-77-1/],
-  ['no key', { key: undefined }, /published as undefined/],
+  ['the right key but another attempt', { runAttempt: '2' }, /not published by the producer/],
+  ['the right key but another run', { runId: '78' }, /not published by the producer/],
+  ['attempt as a number', { runAttempt: 1 }, /not published by the producer/],
+  ['no key', { key: undefined }, /not published by the producer/],
   [
     'a repository outside the allowlist',
     { repository: 'evil.example/trivy-db:2' },
-    /names repository "evil\.example\/trivy-db:2", not one of mirror\.gcr\.io/,
+    /names a repository that is not one of mirror\.gcr\.io/,
   ],
-  ['no repository', { repository: undefined }, /names repository undefined/],
+  ['no repository', { repository: undefined }, /names a repository that is not one of/],
   [
     'an allowed repository with another tag',
     { repository: 'ghcr.io/aquasecurity/trivy-db:1' },
-    /names repository/,
+    /names a repository that is not one of/,
   ],
+  ['no fetchedAt', { fetchedAt: undefined }, /carries no valid fetchedAt instant/],
+  ['a fetchedAt that is not an instant', { fetchedAt: 'yesterday' }, /carries no valid fetchedAt/],
   ['no sha256', { sha256: undefined }, /carries no sha256 for trivy\.db/],
   [
     'a malformed sha256',
@@ -488,6 +926,22 @@ for (const [name, source, pattern] of [
     refused(writeDb(tmp(), { source }), pattern);
   });
 }
+
+test('checkDb: refusals never repeat what the provenance or the metadata says (scripts/cli-contract.mjs)', () => {
+  const sentinel = 'SENTINEL-c0ffee';
+  for (const [source, meta] of [
+    [{ key: `trivy-db-77-1${sentinel}` }, undefined],
+    [{ runId: sentinel }, undefined],
+    [{ repository: sentinel }, undefined],
+    [{ fetchedAt: sentinel }, undefined],
+    [{}, { Version: sentinel }],
+    [{}, { UpdatedAt: sentinel }],
+    [{}, { NextUpdate: sentinel }],
+    [{}, { DownloadedAt: sentinel }],
+  ]) {
+    refused(writeDb(tmp(), { source, meta }), /./, CTX, [sentinel]);
+  }
+});
 
 test('checkDb: provenance file not JSON / not an object -> refused', () => {
   const dir = writeDb(tmp());
@@ -544,9 +998,13 @@ test('expectedProducer: compares attempts as numbers, not strings', () => {
 /**
  * A stub `trivy` (a real executable) that behaves per repository as `plan`
  * says, the last step repeating, and records every call. Download steps:
- *   ok | stale | r1 | hollow | empty | blind | lowsev | nothing | fail | hang | canary-hang
- * `blind` / `lowsev` / `canary-hang` download a good DB but break the canary.
- * `hang` ignores SIGTERM and never exits.
+ *   ok | stale | r1 | hollow | empty | sparse | dir | unreadable | meta-unreadable
+ *   | sparse-huge (the real fixture, sparse-extended to 3 GiB)
+ *   | nothing | fail | hang
+ * Canary steps (a good DB, then the `rootfs` canary scan goes wrong):
+ *   blind | blind-alpine | blind-cargo | lowsev | wrong-os | huge | garbage | canary-hang
+ * `hang` ignores SIGTERM and never exits. The canary records what the canary
+ * root holds, so a test can compare it with what Trivy really detected.
  */
 function stubTrivy(plan) {
   const dir = tmp();
@@ -567,13 +1025,28 @@ const hang = () => {
   setTimeout(() => process.exit(9), 30000); // a bound for when the code under test forgets to kill
 };
 const cache = arg('--cache-dir');
-if (args[0] === 'fs') {
+if (args[0] === 'rootfs') {
   const step = fs.readFileSync(path.join(dir, 'last-step'), 'utf8');
-  record({ canary: true, step });
+  const root = args.at(-1);
+  const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+  record({ canary: true, step, root: {
+    release: read('etc/alpine-release'),
+    apk: read('lib/apk/db/installed'),
+    npm: JSON.parse(read('app/node_modules/lodash/package.json')),
+    cargo: read('app/Cargo.lock'),
+  } });
   if (!fs.existsSync(path.join(cache, 'db/trivy.db'))) { console.error('no DB'); process.exit(1); }
   if (step === 'canary-hang') return hang();
-  const vulns = step === 'blind' ? [] : [{ VulnerabilityID: 'CVE-2021-23337', PkgName: 'lodash', Severity: step === 'lowsev' ? 'LOW' : 'HIGH' }];
-  process.stdout.write(JSON.stringify({ Results: [{ Target: 'package-lock.json', Vulnerabilities: vulns }] }));
+  if (step === 'huge') return process.stdout.write('x'.repeat(5 * 1024 * 1024), () => process.exit(0));
+  if (step === 'garbage') return process.stdout.write('not a report', () => process.exit(0));
+  const v = (PkgName, VulnerabilityID, Severity) => ({ PkgName, VulnerabilityID, Severity });
+  const results = [
+    { Target: 'x (alpine 3.24.0)', Type: 'alpine', Vulnerabilities: step === 'blind-alpine' ? [] : [v('zlib', 'CVE-2022-37434', 'CRITICAL')] },
+    { Target: 'Node.js', Type: 'node-pkg', Vulnerabilities: [v('lodash', 'CVE-2021-23337', step === 'lowsev' ? 'LOW' : 'HIGH')] },
+    { Target: 'app/Cargo.lock', Type: 'cargo', Vulnerabilities: step === 'blind-cargo' ? [] : [v('tokio', 'CVE-2021-45710', 'HIGH')] },
+  ];
+  const os = { Family: 'alpine', Name: step === 'wrong-os' ? '3.23.0' : '3.24.0' };
+  process.stdout.write(JSON.stringify({ Metadata: { OS: os }, Results: step === 'blind' ? [] : results }));
   process.exit(0);
 }
 const repo = arg('--db-repository');
@@ -594,7 +1067,11 @@ const updated = step === 'stale' ? -30 : -1;
 fs.writeFileSync(path.join(cache, 'db/metadata.json'), JSON.stringify({ Version: 2, NextUpdate: at(updated + 24), UpdatedAt: at(updated), DownloadedAt: at(0) }));
 const db = path.join(cache, 'db/trivy.db');
 if (step === 'r1') { const b = Buffer.alloc(2 * 1024 * 1024); b.writeUInt32LE(0xed0cdaed, 16); fs.writeFileSync(db, b); }
-else fs.copyFileSync(path.join(fixtures, (step === 'hollow' || step === 'empty' ? step : 'real') + '.db'), db);
+else if (step === 'dir') fs.mkdirSync(db);
+else fs.copyFileSync(path.join(fixtures, (['hollow', 'empty', 'sparse'].includes(step) ? step : 'real') + '.db'), db);
+if (step === 'unreadable') fs.chmodSync(db, 0);
+if (step === 'meta-unreadable') fs.chmodSync(path.join(cache, 'db/metadata.json'), 0);
+if (step === 'sparse-huge') fs.truncateSync(db, 3 * 1024 ** 3);
 `,
   );
   chmodSync(stub, 0o755);
@@ -627,7 +1104,10 @@ const FAST = Object.freeze({
   canaryMs: 10_000,
   killGraceMs: 200,
   minAttemptMs: 100,
-  validationSlopMs: 0,
+  validationMs: 10_000,
+  checkMs: 10_000,
+  packMs: 10_000,
+  unpackMs: 10_000,
 });
 const fetchWith = (trivy, extra = {}) => {
   const cacheDir = join(tmp(), 'trivy-db');
@@ -643,19 +1123,35 @@ const fetchWith = (trivy, extra = {}) => {
 };
 const realClockCtx = () => ({ now: new Date(), key: KEY, run: RUN });
 
-test('fetch: the first repository works -> one download, one canary, sealed and accepted', async () => {
+test('fetch: the first repository works -> one download, one canary scan, sealed and accepted', async () => {
   const t = stubTrivy({ [GCR]: ['ok'], [GHCR]: ['ok'] });
-  const { result, cacheDir } = await fetchWith(t);
+  const { result, cacheDir, lines } = await fetchWith(t);
   assert.equal(result.ok, true, result.reason);
   assert.equal(result.key, KEY);
   assert.deepEqual(t.repos(), [GCR]);
-  const [download, canary] = t.calls();
+  const [download, canary, ...more] = t.calls();
+  assert.deepEqual(more, []); // one Alpine release, one canary scan
   assert.deepEqual(download.args.slice(0, 3), ['image', '--download-db-only', '--no-progress']);
   assert.equal(download.args[download.args.indexOf('--timeout') + 1], '9s');
   assert.equal(canary.canary, true);
-  for (const flag of ['--skip-db-update', '--offline-scan', '--cache-backend']) {
+  assert.equal(canary.args[0], 'rootfs');
+  for (const flag of [
+    '--skip-db-update',
+    '--offline-scan',
+    '--cache-backend',
+    '--skip-java-db-update',
+  ]) {
     assert.ok(canary.args.includes(flag), flag);
   }
+  // Exactly the root real trivy 0.70.0 reported all three canaries for (PR #435 round 3).
+  assert.deepEqual(canary.root, {
+    release: '3.24.0\n',
+    apk: 'P:zlib\nV:1.2.12-r0\n\n',
+    npm: { name: 'lodash', version: '4.17.20' },
+    cargo:
+      'version = 3\n\n[[package]]\nname = "tokio"\nversion = "1.8.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n',
+  });
+  assert.match(lines.join('\n'), /canaries CVE-2022-37434, CVE-2021-23337, CVE-2021-45710 found/);
   const source = JSON.parse(readFileSync(join(cacheDir, 'ci-trivy-db-source.json'), 'utf8'));
   assert.equal(source.key, KEY);
   assert.equal(source.sha256['trivy.db'], sha256(join(FIXTURES, 'real.db')));
@@ -681,24 +1177,53 @@ test('fetch: a transient failure on the first attempt is retried on the same rep
 });
 
 for (const [name, step, pattern] of [
-  ["the review's counterexample (magic only, version 0)", 'r1', /meta page 0 has version 0/],
+  [
+    "the review's counterexample (magic only, version 0)",
+    'r1',
+    /meta page 0 is not format version 2/,
+  ],
   ['a valid bbolt file with no buckets', 'empty', /has no bucket "vulnerability"/],
   ['a hollow DB (buckets present, empty)', 'hollow', /has an empty bucket/],
+  ['a DB with an empty package bucket', 'sparse', /has an empty package bucket in "alpine 3\.24"/],
   ['a stale copy', 'stale', /vulnerability DB is stale/],
   [
     'a DB in which Trivy finds no canary',
     'blind',
-    /Trivy found no CVE-2021-23337 in lodash 4\.17\.20/,
+    /Trivy found no CVE-2022-37434 in zlib 1\.2\.12-r0 \(alpine\)/,
   ],
-  ['a DB that rates the canary LOW', 'lowsev', /rates CVE-2021-23337 "LOW"/],
-  ['trivy exits 0 and writes nothing', 'nothing', /missing .*metadata\.json/],
+  ['a DB in which Trivy finds no Alpine advisory', 'blind-alpine', /Trivy found no CVE-2022-37434/],
+  [
+    'a DB in which Trivy finds no Rust advisory',
+    'blind-cargo',
+    /Trivy found no CVE-2021-45710 in tokio 1\.8\.0 \(cargo\)/,
+  ],
+  [
+    'a DB that rates the npm canary LOW',
+    'lowsev',
+    /Trivy does not rate CVE-2021-23337 HIGH or CRITICAL/,
+  ],
+  ['a canary scan that sees another Alpine release', 'wrong-os', /did not detect Alpine 3\.24/],
+  [
+    'a canary scan that prints without bound',
+    'huge',
+    /the canary scan printed more than allowed and was stopped/,
+  ],
+  ['a canary scan that prints no report', 'garbage', /the canary scan printed no JSON report/],
+  ['trivy exits 0 and writes nothing', 'nothing', /db\/metadata\.json is missing/],
+  ['trivy.db that is a directory', 'dir', /db\/trivy\.db is not a regular file/],
+  ['trivy.db that cannot be read', 'unreadable', /db\/trivy\.db cannot be opened \(EACCES\)/],
+  [
+    'metadata.json that cannot be read (the inspection throws)',
+    'meta-unreadable',
+    /could not be inspected \(EACCES\)/,
+  ],
 ]) {
   test(`fetch: ${name} from the mirror is a failed attempt; ghcr.io is tried and used`, async () => {
     const t = stubTrivy({ [GCR]: [step], [GHCR]: ['ok'] });
     const { result, lines } = await fetchWith(t);
     assert.equal(result.ok, true, result.reason);
     assert.deepEqual(t.repos(), [GCR, GCR, GCR, GHCR]);
-    assert.match(lines.join('\n'), new RegExp(`downloaded copy rejected: .*${pattern.source}`));
+    assert.match(lines.join('\n'), new RegExp(`downloaded copy (rejected: )?.*${pattern.source}`));
   });
 }
 
@@ -739,10 +1264,31 @@ test("fetch: a failed attempt never inherits the previous attempt's files", asyn
   assert.equal(existsSync(cacheDir), false);
 });
 
-test('fetch: the trivy binary missing -> bounded attempts, refused', async () => {
+test('fetch: the trivy binary missing -> bounded attempts, refused, the path not repeated', async () => {
   const { result } = await fetchWith({ stub: join(tmp(), 'no-such-trivy') });
   assert.equal(result.ok, false);
-  assert.match(result.reason, /could not run .*no-such-trivy/);
+  assert.match(result.reason, /could not run trivy \(ENOENT\)/);
+  assert.doesNotMatch(result.reason, /no-such-trivy/);
+});
+
+test('fetch: a copy whose sealing sha256 overruns BUDGET.validationMs is a failed attempt', async () => {
+  const t = stubTrivy({ [GCR]: ['sparse-huge'], [GHCR]: ['ok'] });
+  const { result, lines } = await fetchWith(t, { budget: { ...FAST, validationMs: 1_500 } });
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.repository, GHCR);
+  assert.match(
+    lines.join('\n'),
+    /attempt 1\/3: downloaded copy rejected: the copy took longer than its time limit/,
+  );
+});
+
+test('fetch: a copy whose in-process checks overrun BUDGET.validationMs is a failed attempt', async () => {
+  const t = stubTrivy({ [GCR]: ['ok'], [GHCR]: ['ok'] });
+  const { result } = await fetchWith(t, { budget: { ...FAST, validationMs: 0 } });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /took longer than its time limit/);
+  assert.deepEqual(t.repos(), [GCR, GCR, GCR, GHCR, GHCR, GHCR]);
+  assert.equal(t.calls().filter((c) => c.canary).length, 0); // stopped before the canary
 });
 
 test('fetch: a producer that does not know its run refuses before downloading', async () => {
@@ -815,6 +1361,129 @@ test('runBounded: a child that exits in time is not signalled', async () => {
   });
   assert.deepEqual([r.status, r.timedOut], [3, false]);
 });
+
+/** A leader (node) that starts a descendant ignoring SIGTERM, with closed stdio; both pids written to `pids`. */
+const leaderWithStubbornChild = (dir, leaderOnTerm) => `
+    const fs = require('node:fs');
+    const { spawn } = require('node:child_process');
+    const g = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setTimeout(() => {}, 30000)"], { stdio: 'ignore' });
+    fs.writeFileSync(${JSON.stringify(join(dir, 'pids'))}, process.pid + ' ' + g.pid);
+    ${leaderOnTerm}
+    setTimeout(() => process.exit(9), 30000);`;
+const waitFor = async (file) => {
+  for (let i = 0; i < 100 && !existsSync(file); i++) await new Promise((r) => setTimeout(r, 20));
+};
+
+test(
+  'runBounded (r2 R2-2): a leader that exits on SIGTERM does not cancel the SIGKILL its descendant needs',
+  { timeout: 20_000 },
+  async () => {
+    const dir = tmp();
+    const script = leaderWithStubbornChild(dir, "process.on('SIGTERM', () => process.exit(0));");
+    const started = performance.now();
+    const r = await runBounded(process.execPath, ['-e', script], {
+      limitMs: 1500,
+      graceMs: 500,
+      env: process.env,
+    });
+    const elapsed = performance.now() - started;
+    assert.equal(r.timedOut, true);
+    assert.equal(r.status, 0); // the leader went on SIGTERM ...
+    assert.ok(elapsed >= 1400, `${elapsed} ms: settled only after the SIGKILL`);
+    await new Promise((r2) => setTimeout(r2, 100));
+    const [leader, child] = readFileSync(join(dir, 'pids'), 'utf8').split(' ');
+    assert.equal(alive(leader), false);
+    assert.equal(alive(child), false, 'the SIGTERM-ignoring descendant was killed with the group');
+  },
+);
+
+test(
+  "runBounded (r2 R2-2, the review's Bash reproduction): leader exits on SIGTERM, its sleep ignores it",
+  { timeout: 20_000 },
+  async () => {
+    const pidFile = join(tmp(), 'pid');
+    const script = `(trap '' TERM; exec sleep 30) </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; trap 'exit 0' TERM; while :; do sleep 0.1; done`;
+    const r = await runBounded('bash', ['-c', script], {
+      limitMs: 1500,
+      graceMs: 500,
+      env: process.env,
+    });
+    assert.equal(r.timedOut, true);
+    await new Promise((r2) => setTimeout(r2, 100));
+    assert.equal(alive(readFileSync(pidFile, 'utf8').trim()), false, 'the descendant was killed');
+  },
+);
+
+test(
+  'runBounded: a leader that exits on its own leaves nothing of its group behind',
+  { timeout: 20_000 },
+  async () => {
+    const dir = tmp();
+    const script = leaderWithStubbornChild(dir, 'setTimeout(() => process.exit(0), 200);');
+    const r = await runBounded(process.execPath, ['-e', script], {
+      limitMs: 10_000,
+      graceMs: 500,
+      env: process.env,
+    });
+    assert.deepEqual([r.status, r.timedOut], [0, false]);
+    await new Promise((r2) => setTimeout(r2, 100));
+    const [, child] = readFileSync(join(dir, 'pids'), 'utf8').split(' ');
+    assert.equal(alive(child), false);
+  },
+);
+
+test(
+  'runBounded: captured output is bounded; one byte over stops the child (addendum D)',
+  { timeout: 20_000 },
+  async () => {
+    const r = await runBounded(
+      process.execPath,
+      ['-e', "process.stdout.write('x'.repeat(4096)); setTimeout(() => {}, 30000)"],
+      { limitMs: 10_000, graceMs: 500, env: process.env, stdout: 'pipe', captureLimit: 4095 },
+    );
+    assert.equal(r.overflow, true);
+    assert.equal(r.stopped, true);
+    assert.ok(r.stdout.length <= 4095);
+    const ok = await runBounded(
+      process.execPath,
+      ['-e', "process.stdout.write('x'.repeat(4096))"],
+      {
+        limitMs: 10_000,
+        graceMs: 500,
+        env: process.env,
+        stdout: 'pipe',
+        captureLimit: 4096,
+      },
+    );
+    assert.deepEqual([ok.status, ok.overflow, ok.stdout.length], [0, false, 4096]);
+  },
+);
+
+test(
+  'startBounded: stop() kills the whole group at once (a refusal)',
+  { timeout: 20_000 },
+  async () => {
+    const dir = tmp();
+    const run = startBounded(
+      process.execPath,
+      ['-e', leaderWithStubbornChild(dir, "process.on('SIGTERM', () => {});")],
+      {
+        limitMs: 10_000,
+        graceMs: 2_000,
+        env: process.env,
+      },
+    );
+    await waitFor(join(dir, 'pids'));
+    const started = performance.now();
+    run.stop();
+    const r = await run.result;
+    assert.ok(performance.now() - started < 1_000);
+    assert.deepEqual([r.stopped, r.timedOut, r.signal], [true, false, 'SIGKILL']);
+    await new Promise((r2) => setTimeout(r2, 100));
+    for (const pid of readFileSync(join(dir, 'pids'), 'utf8').split(' '))
+      assert.equal(alive(pid), false, pid);
+  },
+);
 
 test(
   'fetch: a mirror that never answers (ignores SIGTERM) cannot keep ghcr.io from its window',
@@ -916,7 +1585,7 @@ test('CLI check: a fresh sealed copy passes and prints the evidence line', () =>
   assert.equal(r.status, 0, r.stderr);
   assert.match(
     r.stdout,
-    /^trivy-db: shared copy ok - trivy-db-77-1 from repository mirror\.gcr\.io\/aquasec\/trivy-db:2, fetched by run 77 attempt 1 .*\(1\.0 h old, limit 24 h\), 4 buckets, sha256 verified\n$/,
+    /^trivy-db: shared copy ok - trivy-db-77-1 from repository mirror\.gcr\.io\/aquasec\/trivy-db:2, fetched by run 77 attempt 1 .*\(1\.0 h old, limit 24 h\), 5 buckets, sha256 verified\n$/,
   );
 });
 
@@ -948,16 +1617,24 @@ for (const [name, env, pattern] of [
   });
 }
 
-test('CLI refusals never repeat the cache path or an unmatched key (scripts/cli-contract.mjs)', () => {
+test('CLI refusals never repeat a path, an unmatched key or an archive member (scripts/cli-contract.mjs)', () => {
   const sentinel = 'SENTINEL-c0ffee';
   const dir = join(tmp(), sentinel);
+  const named = hostileTar([ustar(`trivy-db/${sentinel}`, '0', 'x')]);
+  const existing = join(tmp(), sentinel);
+  mkdirSync(existing);
   for (const r of [
     cli(['check', dir, KEY]), // nothing there
     cli(['check', writeDb(dir, { db: r1Counterexample(), base: new Date() }), KEY]),
     cli(['check', dir, `trivy-db-77-1${sentinel}`]),
     cli(['check', dir, sentinel]),
+    cli(['pack', join(tmp(), sentinel), join(tmp(), sentinel, 'a.tar.zst')]),
+    cli(['pack', writeDb(join(tmp(), sentinel), { base: new Date() }), existing]), // EEXIST
+    cli(['unpack', join(tmp(), sentinel), join(tmp(), sentinel)]),
+    cli(['unpack', named, join(tmp(), sentinel)]),
   ]) {
-    assert.equal(r.status, 1);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /^::error::trivy-db: /);
     assert.doesNotMatch(r.stdout + r.stderr, new RegExp(sentinel));
   }
 });
@@ -965,7 +1642,7 @@ test('CLI refusals never repeat the cache path or an unmatched key (scripts/cli-
 test('CLI check: restore miss (empty directory) -> exit 1', () => {
   const r = cli(['check', tmp(), KEY]);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /missing .*metadata\.json/);
+  assert.match(r.stderr, /db\/metadata\.json is missing/);
 });
 
 test('CLI fetch: fixed repositories and binary (`trivy` on PATH), knobs ignored, key published', () => {
@@ -1004,6 +1681,11 @@ test('CLI: usage errors exit 2', () => {
     ['fetch'],
     ['fetch', '/x', KEY],
     ['check', '/x', KEY, 'more'],
+    ['pack', '/x'],
+    ['pack', '/x', '/y', '/z'],
+    ['unpack', '/x'],
+    ['unpack', '/x', ''],
+    ['toString', '/x'],
   ]) {
     assert.equal(spawnSync(process.execPath, [CLI, ...args]).status, 2, args.join(' '));
   }
@@ -1019,11 +1701,10 @@ test('no test knob anywhere: the CLI reads only the run identity, the library re
   ]);
   assert.doesNotMatch(cliSource, /process\.env\[|CI_TRIVY/);
   const lib = readFileSync(LIB, 'utf8');
-  // The only mention passes the job's environment through to the Trivy child.
-  assert.deepEqual(
-    [...lib.matchAll(/process\.env\S*/g)].map((m) => m[0]),
-    ['process.env,'],
-  );
+  // The only mentions pass the job's environment through to children (trivy, zstd), as defaults.
+  const mentions = [...lib.matchAll(/process\.env/g)].length;
+  assert.equal(mentions, 3);
+  assert.equal([...lib.matchAll(/\benv = process\.env\b(?![.[])/g)].length, mentions);
   assert.doesNotMatch(lib, /CI_TRIVY/);
 });
 
@@ -1032,12 +1713,24 @@ test('the production policy is frozen', () => {
     [...REPOSITORIES],
     ['mirror.gcr.io/aquasec/trivy-db:2', 'ghcr.io/aquasecurity/trivy-db:2'],
   );
-  assert.ok(Object.isFrozen(REPOSITORIES) && Object.isFrozen(BUDGET));
+  for (const frozen of [
+    REPOSITORIES,
+    BUDGET,
+    BOLT_LIMITS,
+    ECOSYSTEMS,
+    ARCHIVE,
+    ARCHIVE.members,
+    SCANNED_BASES,
+  ]) {
+    assert.ok(Object.isFrozen(frozen));
+  }
+  for (const e of ECOSYSTEMS) assert.ok(Object.isFrozen(e) && Object.isFrozen(e.canary));
 });
 
 // --- the workflow and the composite ------------------------------------------------
 
-const workflow = parseYaml(readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8'));
+const workflowText = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
+const workflow = parseYaml(workflowText);
 const composite = parseYaml(
   readFileSync(join(ROOT, '.github/actions/restore-trivy-db/action.yml'), 'utf8'),
 );
@@ -1048,6 +1741,8 @@ const SCANS = [
 const stepIndex = (job, pred) => workflow.jobs[job].steps.findIndex(pred);
 const compositeStep = (name) => composite.runs.steps.find((s) => s.name === name);
 const PRE_SCAN_CHECK = 'node scripts/ci-trivy-db.mjs check "$TRIVY_DB_DIR" "$TRIVY_DB_KEY"';
+const UNPACK_RUN = 'node scripts/ci-trivy-db.mjs unpack "$ARCHIVE_DIR" "$TRIVY_DB_DIR"';
+const PACK_RUN = 'node scripts/ci-trivy-db.mjs pack "$TRIVY_DB_DIR" "$TRIVY_DB_ARCHIVE"';
 
 for (const [job, image, ignores] of SCANS) {
   const steps = workflow.jobs[job].steps;
@@ -1125,6 +1820,38 @@ test('containers: every job it already waited for is still required to have succ
   assert.ok(cond.includes("needs.container-scope.outputs.services != '[]'"));
 });
 
+test('the Alpine releases the DB must cover are those of every scanned image (addendum B)', () => {
+  // Every service image's runtime stage (its last FROM), and the ClamAV pin.
+  const bases = new Set();
+  const services = readdirSync(join(ROOT, 'services'), { withFileTypes: true }).filter((d) =>
+    existsSync(join(ROOT, 'services', d.name, 'Dockerfile')),
+  );
+  assert.equal(services.length, 17);
+  for (const d of services) {
+    const froms = [
+      ...readFileSync(join(ROOT, 'services', d.name, 'Dockerfile'), 'utf8').matchAll(
+        /^FROM\s+(\S+)/gm,
+      ),
+    ];
+    bases.add(froms.at(-1)[1]);
+  }
+  const clamav = /clamav\/clamav:[\w.]+@sha256:[0-9a-f]{64}/.exec(
+    workflow.jobs['clamav-signatures'].steps.map((s) => s.run ?? '').join('\n'),
+  );
+  assert.ok(clamav, 'the ClamAV pin');
+  bases.add(clamav[0]);
+  assert.deepEqual([...bases].sort(), Object.keys(SCANNED_BASES).sort());
+  assert.deepEqual(ALPINE_RELEASES, [...new Set(Object.values(SCANNED_BASES))].sort());
+  assert.deepEqual(
+    ECOSYSTEMS.filter((e) => e.type === 'alpine').map((e) => e.bucket),
+    ALPINE_RELEASES.map((r) => `alpine ${r}`),
+  );
+  assert.deepEqual(
+    ECOSYSTEMS.map((e) => e.type),
+    [...ALPINE_RELEASES.map(() => 'alpine'), 'node-pkg', 'cargo'],
+  );
+});
+
 const producerStep = (pred) => workflow.jobs['trivy-db'].steps.find(pred);
 const PACK = () => producerStep((s) => s.name === 'Pack the DB');
 const UPLOAD = () => producerStep((s) => s.uses?.startsWith('actions/upload-artifact@'));
@@ -1140,14 +1867,12 @@ test('trivy-db job: no needs, pinned Trivy, the key comes from the validated fet
   assert.equal(job.steps.filter((s) => /GITHUB_OUTPUT/.test(s.run ?? '')).length, 0);
   const names = job.steps.map((s) => s.name ?? s.uses);
   assert.ok(names.indexOf(PACK().name) > names.indexOf(fetch.name));
+  assert.equal(PACK().run, PACK_RUN);
   const upload = UPLOAD();
   assert.match(upload.uses, /^actions\/upload-artifact@[0-9a-f]{40}$/);
-  assert.match(
-    readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8'),
-    new RegExp(`uses: ${upload.uses} # v4\\n`),
-  );
+  assert.match(workflowText, new RegExp(`uses: ${upload.uses} # v4\\n`));
   assert.equal(upload.with.name, '${{ steps.fetch.outputs.key }}');
-  assert.equal(upload.with.path, '${{ runner.temp }}/trivy-db.tar.zst');
+  assert.equal(upload.with.path, PACK().env.TRIVY_DB_ARCHIVE);
   assert.equal(upload.with['if-no-files-found'], 'error');
   assert.equal(upload.with.overwrite, undefined);
   for (const s of [PACK(), upload]) assert.equal(s.if, undefined); // only after a successful fetch
@@ -1160,7 +1885,7 @@ test('trivy-db job: no needs, pinned Trivy, the key comes from the validated fet
   assert.equal(workflow.env.TRIVY_VERSION, 'v0.70.0');
 });
 
-test('trivy-db job: the time budget fits the step and job limits (F3 arithmetic)', () => {
+test('trivy-db job: the time budget fits the step and job limits (F3 arithmetic, addendum A)', () => {
   const job = workflow.jobs['trivy-db'];
   const limits = job.steps.map((s) => s['timeout-minutes']);
   assert.ok(
@@ -1169,8 +1894,9 @@ test('trivy-db job: the time budget fits the step and job limits (F3 arithmetic)
   );
   assert.ok(limits.reduce((a, b) => a + b, 0) <= job['timeout-minutes']);
   const fetch = producerStep((s) => s.id === 'fetch');
-  const fetchWorstMs = REPOSITORIES.length * (BUDGET.repositoryWindowMs + BUDGET.validationSlopMs);
+  const fetchWorstMs = REPOSITORIES.length * (BUDGET.repositoryWindowMs + BUDGET.validationMs);
   assert.ok(fetchWorstMs <= fetch['timeout-minutes'] * 60_000, `${fetchWorstMs} ms`);
+  assert.ok(BUDGET.packMs + 2 * BUDGET.killGraceMs <= PACK()['timeout-minutes'] * 60_000);
   assert.ok(
     BUDGET.attemptMs + BUDGET.minAttemptMs <= BUDGET.repositoryWindowMs,
     'a retry fits a window',
@@ -1179,6 +1905,7 @@ test('trivy-db job: the time budget fits the step and job limits (F3 arithmetic)
     BUDGET.attemptMs - 2 * BUDGET.killGraceMs >= 60_000,
     "Trivy's own timeout stays generous",
   );
+  assert.ok(BUDGET.canaryMs * ALPINE_RELEASES.length <= BUDGET.validationMs);
 });
 
 test('trivy-db job: the sparse checkout holds every file the fetch imports (addendum B)', () => {
@@ -1210,7 +1937,10 @@ test('the DB lives outside the checkout, at one path for producer and consumers 
     producerStep((s) => s.id === 'fetch').env.TRIVY_DB_DIR,
     '${{ runner.temp }}/trivy-db',
   );
-  assert.equal(PACK().env.TRIVY_DB_PARENT, '${{ runner.temp }}');
+  assert.deepEqual(PACK().env, {
+    TRIVY_DB_DIR: '${{ runner.temp }}/trivy-db',
+    TRIVY_DB_ARCHIVE: '${{ runner.temp }}/trivy-db.tar.zst',
+  });
   const where = compositeStep('Require the key of the shared Trivy DB');
   assert.match(where.run, /echo "dir=\$RUNNER_TEMP\/trivy-db" >> "\$GITHUB_OUTPUT"/);
   assert.match(where.run, /echo "archive=\$RUNNER_TEMP\/trivy-db-artifact" >> "\$GITHUB_OUTPUT"/);
@@ -1225,6 +1955,7 @@ function runStep(step, env) {
   const out = join(tmp(), 'github-output');
   writeFileSync(out, '');
   const r = spawnSync('bash', ['-e', '-c', step.run], {
+    cwd: ROOT,
     encoding: 'utf8',
     env: { PATH: process.env.PATH, GITHUB_OUTPUT: out, RUNNER_TEMP: '/runner/_temp', ...env },
   });
@@ -1232,26 +1963,20 @@ function runStep(step, env) {
 }
 const UNPACK = () => compositeStep("Unpack exactly the producer's archive");
 const sh = (script, cwd) => {
-  const r = spawnSync('bash', ['-euo', 'pipefail', '-c', script], { cwd, encoding: 'utf8' });
+  const r = spawnSync('bash', ['-euo', 'pipefail', '-c', script], {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 1 << 26,
+  });
   assert.equal(r.status, 0, r.stderr);
+  return r.stdout;
 };
 
 /** Packs `dir` (a cache directory) with the producer's real pack step; returns the artifact directory. */
 function packed(dir) {
-  const parent = tmp();
-  sh(`cp -r "${dir}" "${parent}/trivy-db"`);
-  const r = runStep(PACK(), { TRIVY_DB_PARENT: parent });
+  const artifact = tmp();
+  const r = runStep(PACK(), { TRIVY_DB_DIR: dir, TRIVY_DB_ARCHIVE: join(artifact, ARCHIVE.file) });
   assert.equal(r.status, 0, r.stderr);
-  const artifact = tmp();
-  sh(`mv "${parent}/trivy-db.tar.zst" "${artifact}/"`);
-  return artifact;
-}
-/** A hand-made archive: `build` runs in an empty directory, then everything in it is tarred (`tarArgs`). */
-function hostile(build, tarArgs = '.') {
-  const work = tmp();
-  sh(build, work);
-  const artifact = tmp();
-  sh(`tar -cf - ${tarArgs} | zstd -q -o "${artifact}/trivy-db.tar.zst"`, work);
   return artifact;
 }
 const unpack = (artifact, target = join(tmp(), 'trivy-db')) => ({
@@ -1259,7 +1984,59 @@ const unpack = (artifact, target = join(tmp(), 'trivy-db')) => ({
   ...runStep(UNPACK(), { ARCHIVE_DIR: artifact, TRIVY_DB_DIR: target }),
 });
 
-test('restore action: key first, then the exact artifact of this run, unpacked strictly, then the check', () => {
+/** One hand-made ustar header + data (512-byte padded); `edit(header)` may damage the header. */
+function ustar(name, type, data = '', { edit, size } = {}) {
+  const body = Buffer.from(data);
+  const h = Buffer.alloc(512);
+  h.write(name, 0, 'latin1');
+  h.write(type === '5' ? '0000755\0' : '0000644\0', 100);
+  h.write('0000000\0', 108);
+  h.write('0000000\0', 116);
+  h.write(`${(size ?? body.length).toString(8).padStart(11, '0')}\0`, 124);
+  h.write('00000000000\0', 136);
+  h[156] = type.charCodeAt(0);
+  h.write('ustar\u000000', 257, 'latin1');
+  edit?.(h);
+  h.write('        ', 148);
+  let sum = 0;
+  for (const b of h) sum += b;
+  h.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148);
+  return Buffer.concat([h, body, Buffer.alloc((512 - (body.length % 512)) % 512)]);
+}
+const END = Buffer.alloc(1024);
+/** zstd-compresses `parts` (Buffers) into a fresh artifact directory. */
+function hostileTar(parts, name = ARCHIVE.file) {
+  const artifact = tmp();
+  const r = spawnSync('zstd', ['-q', '-c'], { input: Buffer.concat(parts), maxBuffer: 1 << 26 });
+  assert.equal(r.status, 0);
+  writeFileSync(join(artifact, name), r.stdout);
+  return artifact;
+}
+/** The producer's five members of a sealed fixture copy, as ustar parts (as packDb writes them). */
+function goodMembers() {
+  const dir = writeDb(tmp(), { base: new Date() });
+  return [
+    ustar('trivy-db/', '5'),
+    ustar(
+      'trivy-db/ci-trivy-db-source.json',
+      '0',
+      readFileSync(join(dir, 'ci-trivy-db-source.json')),
+    ),
+    ustar('trivy-db/db/', '5'),
+    ustar('trivy-db/db/metadata.json', '0', readFileSync(join(dir, 'db/metadata.json'))),
+    ustar('trivy-db/db/trivy.db', '0', readFileSync(join(dir, 'db/trivy.db'))),
+  ];
+}
+/** GNU tar run in a fresh directory after `build`, compressed into an artifact. */
+function gnuTar(build, tarArgs) {
+  const work = tmp();
+  sh(build, work);
+  const artifact = tmp();
+  sh(`tar -cf - ${tarArgs} | zstd -q -o "${artifact}/${ARCHIVE.file}"`, work);
+  return { artifact, work };
+}
+
+test('restore action: key first, then the exact artifact of this run, unpacked by the one admission, then the check', () => {
   const [where, download, unpackStep, check] = composite.runs.steps;
   assert.equal(where.name, 'Require the key of the shared Trivy DB');
   assert.match(download.uses, /^actions\/download-artifact@[0-9a-f]{40}$/);
@@ -1274,6 +2051,7 @@ test('restore action: key first, then the exact artifact of this run, unpacked s
   });
   assert.equal(download['continue-on-error'], undefined);
   assert.equal(unpackStep, UNPACK());
+  assert.equal(unpackStep.run, UNPACK_RUN);
   assert.deepEqual(unpackStep.env, {
     ARCHIVE_DIR: '${{ steps.where.outputs.archive }}',
     TRIVY_DB_DIR: '${{ steps.where.outputs.dir }}',
@@ -1285,6 +2063,8 @@ test('restore action: key first, then the exact artifact of this run, unpacked s
   });
   for (const s of composite.runs.steps) assert.equal(s.if, undefined, s.name);
   assert.equal(composite.runs.steps.filter((s) => s.uses?.startsWith('actions/cache')).length, 0);
+  // No shell pipeline decides admission any more (r2 R2-1: `grep -q` + pipefail failed open).
+  for (const s of composite.runs.steps) assert.doesNotMatch(s.run ?? '', /\||tar |zstd /, s.name);
 
   const empty = runStep(where, { KEY: '' });
   assert.equal(empty.status, 1);
@@ -1301,7 +2081,9 @@ test('pack -> unpack -> check, the real step scripts end to end: the sealed copy
   writeFileSync(join(target, 'stale-leftover'), 'x');
   const r = unpack(packed(writeDb(tmp(), { base: new Date() })), target);
   assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^trivy-db: archive admitted, \d+ bytes unpacked\n$/);
   assert.equal(existsSync(join(target, 'stale-leftover')), false); // replaced, not merged
+  assert.deepEqual(readdirSync(dirname(target)), ['trivy-db']); // no quarantine left behind
   const check = runStep(compositeStep('Check the restored Trivy DB'), {
     TRIVY_DB_DIR: target,
     TRIVY_DB_KEY: KEY,
@@ -1310,6 +2092,125 @@ test('pack -> unpack -> check, the real step scripts end to end: the sealed copy
   });
   assert.equal(check.status, 0, check.stderr);
   assert.match(check.stdout, /shared copy ok - trivy-db-77-1 .* sha256 verified/);
+});
+
+test('packDb writes genuine ustar: GNU tar lists exactly the five members, in order, and nothing else', () => {
+  const artifact = packed(writeDb(tmp(), { base: new Date() }));
+  const listing = sh(`zstd -dc "${join(artifact, ARCHIVE.file)}" | tar -tvf -`)
+    .trim()
+    .split('\n');
+  assert.deepEqual(
+    listing.map((l) => l.split(/\s+/).at(-1)),
+    ARCHIVE.members.map((m) => m.name),
+  );
+  for (const [i, l] of listing.entries()) assert.equal(l[0], ARCHIVE.members[i].dir ? 'd' : '-', l);
+  // Our own parse of GNU tar's identical layout (`--format=ustar`, same order) is admitted too.
+  const dir = writeDb(tmp(), { base: new Date() });
+  const parent = tmp();
+  sh(`cp -r "${dir}" "${parent}/trivy-db"`);
+  const art = tmp();
+  sh(
+    `tar --format=ustar --owner=0 --group=0 -C "${parent}" -cf - --no-recursion trivy-db/ trivy-db/ci-trivy-db-source.json trivy-db/db/ trivy-db/db/metadata.json trivy-db/db/trivy.db | zstd -q -o "${art}/${ARCHIVE.file}"`,
+  );
+  assert.equal(unpack(art).status, 0);
+});
+
+for (const [name, setup, pattern] of [
+  [
+    'a directory that holds something else',
+    (d) => writeFileSync(join(d, 'extra'), 'x'),
+    /holds something other than the DB/,
+  ],
+  [
+    'a trivy.db that is a symlink',
+    (d) => {
+      rmSync(join(d, 'db/trivy.db'));
+      symlinkSync(join(FIXTURES, 'real.db'), join(d, 'db/trivy.db'));
+    },
+    /could not be written \(ELOOP\)/,
+  ],
+  [
+    'a metadata.json that is a directory',
+    (d) => {
+      rmSync(join(d, 'db/metadata.json'));
+      mkdirSync(join(d, 'db/metadata.json'));
+    },
+    /not a regular file within its limit/,
+  ],
+]) {
+  test(`packDb: ${name} -> refused, no archive`, async () => {
+    const dir = writeDb(tmp(), { base: new Date() });
+    setup(dir);
+    const out = join(tmp(), ARCHIVE.file);
+    const r = await packDb(dir, out);
+    assert.equal(r.ok, false);
+    assert.match(r.reason, pattern);
+    assert.equal(existsSync(out), false);
+  });
+}
+
+test('packDb: a file over its member limit -> refused, no archive', async () => {
+  const dir = writeDb(tmp(), {
+    base: new Date(),
+    meta: `{"Version":2,"x":"${'a'.repeat(70_000)}"}`,
+  });
+  const out = join(tmp(), ARCHIVE.file);
+  const r = await packDb(dir, out);
+  assert.match(r.reason, /not a regular file within its limit/);
+  assert.equal(existsSync(out), false);
+});
+
+/** A stand-in `zstd`: `script` is its node body. */
+function stubZstd(script) {
+  const dir = tmp();
+  const stub = join(dir, 'zstd');
+  writeFileSync(
+    stub,
+    `#!${process.execPath}\nconst fs = require('node:fs');\nconst dir = ${JSON.stringify(dir)};\n${script}\n`,
+  );
+  chmodSync(stub, 0o755);
+  return { dir, stub };
+}
+
+for (const [name, script, pattern] of [
+  [
+    'a compressor that exits early',
+    'process.exit(0);',
+    /the compressor stopped|could not be written/,
+  ],
+  [
+    'a compressor that fails',
+    "process.stdin.resume(); process.stdin.on('end', () => process.exit(1));",
+    /could not be written: the compressor exited 1/,
+  ],
+  [
+    'a compressor that hangs (ignores SIGTERM)',
+    "fs.writeFileSync(dir + '/pid', String(process.pid)); process.on('SIGTERM', () => {}); process.stdin.resume(); setTimeout(() => {}, 30000);",
+    /could not be written: the compressor did not finish within its deadline/,
+  ],
+]) {
+  test(`packDb: ${name} -> refused, no archive`, { timeout: 20_000 }, async () => {
+    const z = stubZstd(script);
+    const out = join(tmp(), ARCHIVE.file);
+    const r = await packDb(writeDb(tmp(), { base: new Date() }), out, {
+      zstd: z.stub,
+      budget: { ...FAST, packMs: 800, killGraceMs: 200 },
+    });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, pattern);
+    assert.equal(existsSync(out), false);
+    if (existsSync(join(z.dir, 'pid')))
+      assert.equal(alive(readFileSync(join(z.dir, 'pid'), 'utf8')), false);
+  });
+}
+
+test('packDb: never overwrites an existing archive', async () => {
+  const out = join(tmp(), ARCHIVE.file);
+  writeFileSync(out, 'earlier');
+  const r = await packDb(writeDb(tmp(), { base: new Date() }), out);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /could not be written \(EEXIST\)/);
+  assert.equal(readFileSync(out, 'utf8'), 'earlier');
 });
 
 for (const [name, artifact] of [
@@ -1330,11 +2231,21 @@ for (const [name, artifact] of [
       return a;
     },
   ],
+  ['the archive under another name', () => hostileTar(goodMembers().concat(END), 'db.tar.zst')],
   [
-    'the archive under another name',
+    'the archive as a symlink',
     () => {
       const a = packed(writeDb(tmp(), { base: new Date() }));
-      sh(`mv "${a}/trivy-db.tar.zst" "${a}/db.tar.zst"`);
+      const b = tmp();
+      symlinkSync(join(a, ARCHIVE.file), join(b, ARCHIVE.file));
+      return b;
+    },
+  ],
+  [
+    'the archive as a directory',
+    () => {
+      const a = tmp();
+      mkdirSync(join(a, ARCHIVE.file));
       return a;
     },
   ],
@@ -1342,32 +2253,347 @@ for (const [name, artifact] of [
   test(`restore action: ${name} -> refused before unpacking`, () => {
     const r = unpack(artifact());
     assert.equal(r.status, 1);
-    assert.match(r.stdout, /::error::The downloaded artifact is not exactly trivy-db\.tar\.zst/);
-    assert.equal(existsSync(r.target), false);
-  });
-}
-
-for (const [name, build, tarArgs] of [
-  ['a symlink out of the tree', 'mkdir trivy-db && ln -s /etc trivy-db/db', 'trivy-db'],
-  [
-    'a path climbing out (..)',
-    'mkdir -p trivy-db && echo x > evil',
-    "--transform='s|^evil$|trivy-db/../evil|' trivy-db evil",
-  ],
-  ['another top-level directory', 'mkdir trivy-db other && echo x > other/f', 'trivy-db other'],
-  ['a hard link', 'mkdir trivy-db && echo x > trivy-db/a && ln trivy-db/a trivy-db/b', 'trivy-db'],
-  ['an empty archive', 'true', '--files-from /dev/null'],
-]) {
-  test(`restore action: an archive with ${name} -> refused, nothing unpacked`, () => {
-    const r = unpack(hostile(build, tarArgs));
-    assert.equal(r.status, 1, r.stdout + r.stderr);
     assert.match(
-      r.stdout,
-      /::error::The Trivy DB archive holds something other than files under trivy-db\//,
+      r.stderr,
+      /::error::trivy-db: the downloaded artifact is not exactly trivy-db\.tar\.zst/,
     );
     assert.equal(existsSync(r.target), false);
   });
 }
+
+/** Unpacks `artifact` with the real step; asserts a refusal matching `pattern` and that nothing escaped. */
+function refusedArchive(artifact, pattern, unechoed = []) {
+  const parent = tmp();
+  const target = join(parent, 'trivy-db');
+  mkdirSync(target);
+  writeFileSync(join(target, 'earlier-copy'), 'x');
+  const started = performance.now();
+  const r = unpack(artifact, target);
+  const elapsed = performance.now() - started;
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, pattern);
+  for (const value of unechoed) assert.doesNotMatch(r.stderr + r.stdout, new RegExp(value));
+  assert.deepEqual(
+    readdirSync(parent),
+    [],
+    'nothing unpacked, nothing beside it, no quarantine, no earlier copy',
+  );
+  return { r, elapsed };
+}
+
+// R2-1 (round 2): a forbidden entry first, then 20,000 regular entries, with
+// real GNU tar listings. The round-2 shell admission accepted all five
+// (`grep -q` exited early, printf got SIGPIPE, pipefail returned 141).
+const MANY = 'mkdir -p trivy-db && for i in $(seq -w 1 20000); do : > trivy-db/f$i; done';
+for (const [name, build, first] of [
+  ['a symlink', `${MANY} && ln -s /etc trivy-db/aaa`, 'trivy-db/aaa'],
+  ['a FIFO', `${MANY} && mkfifo trivy-db/aaa`, 'trivy-db/aaa'],
+  [
+    'a path climbing out (..)',
+    `${MANY} && echo x > evil`,
+    "--transform='s|^evil$|trivy-db/../evil|' evil",
+  ],
+  ['an absolute path', `${MANY} && echo x > evil`, '--absolute-names "$PWD/evil"'],
+  ['another top-level path', `${MANY} && mkdir other && echo x > other/f`, 'other/f'],
+]) {
+  test(
+    `unpack (r2 R2-1): ${name} first, then 20,000 regular entries -> refused, nothing unpacked`,
+    { timeout: 60_000 },
+    () => {
+      const { artifact } = gnuTar(build, `--no-recursion ${first} trivy-db trivy-db/f*`);
+      const listing = sh(`zstd -dc "${join(artifact, ARCHIVE.file)}" | tar -tf - | wc -l`);
+      assert.ok(Number(listing) > 20_000);
+      refusedArchive(artifact, /holds a member that is not the next one the producer writes/);
+    },
+  );
+}
+
+for (const [name, parts, pattern] of [
+  [
+    'the right members, then a duplicate of trivy.db',
+    () => [...goodMembers(), goodMembers()[4], END],
+    /holds more members than the producer writes/,
+  ],
+  ['trivy-db/ twice', () => [goodMembers()[0], ...goodMembers(), END], /not the next one/],
+  [
+    'an alias: ./trivy-db/',
+    () => [ustar('./trivy-db/', '5'), ...goodMembers().slice(1), END],
+    /not the next one/,
+  ],
+  [
+    'an alias: trivy-db//db/',
+    () => [
+      ...goodMembers().slice(0, 2),
+      ustar('trivy-db//db/', '5'),
+      ...goodMembers().slice(3),
+      END,
+    ],
+    /not the next one/,
+  ],
+  [
+    'a directory without its slash',
+    () => [ustar('trivy-db', '5'), ...goodMembers().slice(1), END],
+    /not the next one/,
+  ],
+  [
+    'a file with a trailing slash',
+    () => [...goodMembers().slice(0, 4), ustar('trivy-db/db/trivy.db/', '0', 'x'), END],
+    /not the next one/,
+  ],
+  [
+    'trivy.db as a directory (file/directory collision)',
+    () => [...goodMembers().slice(0, 4), ustar('trivy-db/db/trivy.db', '5'), END],
+    /not the next one/,
+  ],
+  [
+    'a hard link where a file belongs',
+    () => [
+      ...goodMembers().slice(0, 4),
+      ustar('trivy-db/db/trivy.db', '1', '', { edit: (h) => h.write('/etc/passwd', 157) }),
+      END,
+    ],
+    /not the next one/,
+  ],
+  [
+    'a regular file carrying a link name',
+    () => [
+      ...goodMembers().slice(0, 4),
+      ustar('trivy-db/db/trivy.db', '0', '', { edit: (h) => h.write('/etc', 157) }),
+      END,
+    ],
+    /not the next one/,
+  ],
+  [
+    'a symlink where a file belongs',
+    () => [
+      ...goodMembers().slice(0, 4),
+      ustar('trivy-db/db/trivy.db', '2', '', { edit: (h) => h.write('/etc', 157) }),
+      END,
+    ],
+    /not the next one/,
+  ],
+  [
+    'a pax header renaming the next member',
+    () => [ustar('PaxHeader', 'x', '19 path=../../evil\n'), ...goodMembers(), END],
+    /not the next one/,
+  ],
+  [
+    'a global pax header',
+    () => [ustar('pax_global_header', 'g', '19 path=../../evil\n'), ...goodMembers(), END],
+    /not the next one/,
+  ],
+  [
+    'a GNU long name',
+    () => [ustar('././@LongLink', 'L', `trivy-db/${'a'.repeat(200)}\0`), ...goodMembers(), END],
+    /not the next one/,
+  ],
+  [
+    'the right name with a prefix field',
+    () => [
+      ustar('trivy-db/', '5', '', { edit: (h) => h.write('evil', 345) }),
+      ...goodMembers().slice(1),
+      END,
+    ],
+    /not the next one/,
+  ],
+  [
+    'GNU magic instead of ustar',
+    () => [
+      ustar('trivy-db/', '5', '', { edit: (h) => h.write('ustar  \0', 257, 'latin1') }),
+      ...goodMembers().slice(1),
+      END,
+    ],
+    /not the next one/,
+  ],
+  [
+    'a damaged header checksum',
+    () => {
+      const first = goodMembers()[0];
+      first[140] = 0x31; // the mtime, which only the checksum covers
+      return [first, ...goodMembers().slice(1), END];
+    },
+    /not the next one/,
+  ],
+  [
+    'a base-256 size',
+    () => [
+      ...goodMembers().slice(0, 3),
+      ustar('trivy-db/db/metadata.json', '0', '{}', {
+        edit: (h) => {
+          h.fill(0, 124, 136);
+          h[124] = 0x80;
+          h[135] = 2;
+        },
+      }),
+      ...goodMembers().slice(4),
+      END,
+    ],
+    /holds a member whose size is not plain octal/,
+  ],
+  [
+    'a directory with a size',
+    () => [ustar('trivy-db/', '5', 'x'), ...goodMembers().slice(1), END],
+    /holds a member larger than allowed/,
+  ],
+  [
+    'metadata.json over its limit',
+    () => [
+      ...goodMembers().slice(0, 3),
+      ustar('trivy-db/db/metadata.json', '0', 'x'.repeat(70_000)),
+      ...goodMembers().slice(4),
+      END,
+    ],
+    /holds a member larger than allowed/,
+  ],
+  [
+    'data in the padding',
+    () => {
+      const m = goodMembers();
+      const meta = m[3];
+      meta[meta.length - 1] = 0x41;
+      return [...m.slice(0, 3), meta, m[4], END];
+    },
+    /carries data in its padding/,
+  ],
+  ['no end blocks', () => goodMembers(), /has no proper end/],
+  [
+    'the end too early',
+    () => [...goodMembers().slice(0, 3), END],
+    /ends before the last member the producer writes/,
+  ],
+  [
+    'a member cut short',
+    () => {
+      const m = goodMembers();
+      return [...m.slice(0, 4), m[4].subarray(0, 512 + 4096)];
+    },
+    /ends before the last member/,
+  ],
+  [
+    '20,000 more members after the right five',
+    () => [
+      ...goodMembers(),
+      ...Array.from({ length: 20_000 }, (_, i) => ustar(`trivy-db/f${i}`, '0')),
+      END,
+    ],
+    /holds more members than the producer writes/,
+  ],
+  [
+    'data after the end',
+    () => [...goodMembers(), END, Buffer.alloc(512, 1)],
+    /holds more members than the producer writes/,
+  ],
+]) {
+  test(`unpack: an archive with ${name} -> refused, nothing unpacked`, { timeout: 60_000 }, () => {
+    refusedArchive(hostileTar(parts()), pattern);
+  });
+}
+
+test('unpack: a size bomb (trivy.db declared at 8 GiB) is refused at its header, before any data', () => {
+  const bomb = [
+    ...goodMembers().slice(0, 4),
+    ustar('trivy-db/db/trivy.db', '0', '', { size: 8 * 1024 ** 3 - 1 }),
+  ];
+  const { elapsed } = refusedArchive(hostileTar(bomb), /holds a member larger than allowed/);
+  assert.ok(elapsed < 5_000, `${elapsed} ms`);
+});
+
+test(
+  'unpack: a decompression bomb (1 GiB of zeroes after the end) is cut off, not decompressed',
+  { timeout: 60_000 },
+  () => {
+    const artifact = tmp();
+    const head = spawnSync('zstd', ['-q', '-c'], {
+      input: Buffer.concat([...goodMembers(), END]),
+    }).stdout;
+    const zeros = sh('head -c 1073741824 /dev/zero | zstd -q -c --no-progress | base64 -w0');
+    writeFileSync(
+      join(artifact, ARCHIVE.file),
+      Buffer.concat([head, Buffer.from(zeros, 'base64')]),
+    );
+    const started = performance.now();
+    refusedArchive(artifact, /carries data after its end/);
+    assert.ok(performance.now() - started < 4_000, 'stopped long before 1 GiB was inflated');
+  },
+);
+
+test('unpack: an artifact larger than ARCHIVE.maxArchiveBytes -> refused before decompressing', () => {
+  const artifact = tmp();
+  writeFileSync(join(artifact, ARCHIVE.file), '');
+  truncateSync(join(artifact, ARCHIVE.file), ARCHIVE.maxArchiveBytes + 1); // sparse
+  refusedArchive(artifact, /the downloaded archive is larger than allowed/);
+});
+
+test('unpack: a truncated or damaged archive -> refused (the decompressor fails)', () => {
+  const good = packed(writeDb(tmp(), { base: new Date() }));
+  const path = join(good, ARCHIVE.file);
+  truncateSync(path, Math.floor(readFileSync(path).length / 2));
+  refusedArchive(good, /the archive is damaged or truncated: the decompressor exited 1/);
+  const garbage = tmp();
+  writeFileSync(join(garbage, ARCHIVE.file), 'not zstd at all');
+  refusedArchive(garbage, /damaged or truncated/);
+});
+
+test('unpackDb: an inspection error is a refusal marked error, distinct from a clean refusal', async () => {
+  const good = packed(writeDb(tmp(), { base: new Date() }));
+  const missing = await unpackDb(good, join(tmp(), 'trivy-db'), { zstd: join(tmp(), 'no-zstd') });
+  assert.deepEqual([missing.ok, missing.error], [false, true]);
+  assert.match(missing.reason, /could not be unpacked: could not run the decompressor \(ENOENT\)/);
+  const locked = tmp();
+  chmodSync(locked, 0);
+  const denied = await unpackDb(locked, join(tmp(), 'trivy-db'));
+  chmodSync(locked, 0o700);
+  assert.deepEqual([denied.ok, denied.error], [false, true]);
+  assert.match(denied.reason, /could not be unpacked \(EACCES\)/);
+  const clean = await unpackDb(tmp(), join(tmp(), 'trivy-db'));
+  assert.deepEqual([clean.ok, clean.error], [false, undefined]);
+});
+
+test(
+  'unpackDb: a refusal kills the decompressor at once, long before its deadline',
+  { timeout: 20_000 },
+  async () => {
+    // Emits a header that is not the producer's, then writes forever and ignores SIGTERM.
+    const z = stubZstd(
+      "fs.writeFileSync(dir + '/pid', String(process.pid)); process.on('SIGTERM', () => {}); process.stdout.write(Buffer.alloc(512, 0x41)); setInterval(() => process.stdout.write(Buffer.alloc(65536)), 1);",
+    );
+    const good = packed(writeDb(tmp(), { base: new Date() }));
+    const started = performance.now();
+    const r = await unpackDb(good, join(tmp(), 'trivy-db'), {
+      zstd: z.stub,
+      budget: { ...FAST, unpackMs: 10_000, killGraceMs: 2_000 },
+    });
+    assert.ok(performance.now() - started < 1_500, `${performance.now() - started} ms`);
+    assert.match(r.reason, /holds a member that is not the next one/);
+    assert.equal(alive(readFileSync(join(z.dir, 'pid'), 'utf8')), false);
+  },
+);
+
+test(
+  'unpackDb: a decompressor that hangs is killed at the deadline (with its group) and refused',
+  { timeout: 20_000 },
+  async () => {
+    const dir = tmp();
+    const stub = join(dir, 'zstd');
+    writeFileSync(
+      stub,
+      `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(join(dir, 'pid'))}, String(process.pid));\nprocess.on('SIGTERM', () => {});\nsetTimeout(() => {}, 30000);\n`,
+    );
+    chmodSync(stub, 0o755);
+    const good = packed(writeDb(tmp(), { base: new Date() }));
+    const target = join(tmp(), 'trivy-db');
+    const started = performance.now();
+    const r = await unpackDb(good, target, {
+      zstd: stub,
+      budget: { ...FAST, unpackMs: 800, killGraceMs: 200 },
+    });
+    assert.ok(performance.now() - started < 3_000);
+    assert.deepEqual([r.ok, r.error], [false, true]);
+    assert.match(r.reason, /the decompressor did not finish within its deadline and was killed/);
+    assert.equal(alive(readFileSync(join(dir, 'pid'), 'utf8')), false);
+    assert.equal(existsSync(target), false);
+  },
+);
 
 test('restore action, scripted end to end: a copy sealed for another producer is refused by the check', () => {
   // The artifact name is exact, so this needs a wrong upload; the provenance still catches it.
@@ -1384,7 +2610,10 @@ test('restore action, scripted end to end: a copy sealed for another producer is
     GITHUB_RUN_ATTEMPT: '10',
   });
   assert.equal(check.status, 1);
-  assert.match(check.stderr, /published as "trivy-db-77-10" .* expected trivy-db-77-1/);
+  assert.match(
+    check.stderr,
+    /not published by the producer that key names \(expected trivy-db-77-1\)/,
+  );
 });
 
 test('no Trivy scan anywhere in the workflow lets trivy-action download or cache its own DB', () => {
@@ -1397,15 +2626,21 @@ test('no Trivy scan anywhere in the workflow lets trivy-action download or cache
   }
 });
 
-test('every use of the CLI in the workflow and composite passes the producer key to check', () => {
+test('every use of the CLI in the workflow and composite is one of its fixed forms', () => {
   const runs = [
     ...Object.values(workflow.jobs).flatMap((j) => (j.steps ?? []).map((s) => s.run ?? '')),
     ...composite.runs.steps.map((s) => s.run ?? ''),
   ].filter((r) => r.includes('ci-trivy-db.mjs'));
-  assert.equal(runs.length, 4); // fetch, the composite's check, two pre-scan checks
+  // fetch, pack, the composite's unpack and check, two pre-scan checks
+  assert.equal(runs.length, 6);
   for (const r of runs) {
     assert.ok(
-      r === PRE_SCAN_CHECK || r === 'node scripts/ci-trivy-db.mjs fetch "$TRIVY_DB_DIR"',
+      [
+        PRE_SCAN_CHECK,
+        UNPACK_RUN,
+        PACK_RUN,
+        'node scripts/ci-trivy-db.mjs fetch "$TRIVY_DB_DIR"',
+      ].includes(r),
       r,
     );
   }
