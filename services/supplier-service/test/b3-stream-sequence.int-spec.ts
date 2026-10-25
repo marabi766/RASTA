@@ -134,7 +134,10 @@ describe('supplier stream sequencing', () => {
     );
     await asOperator(() => w.qualifications.approve(supplier.id, submitted.id, {}));
     await asOperator(() =>
-      w.suspensions.suspend(supplier.id, { reason: 'یک دلیل ثبت‌شده برای تعلیق' }),
+      w.suspensions.suspend(supplier.id, {
+        reason: 'یک دلیل ثبت‌شده برای تعلیق',
+        latestSuspensionId: null,
+      }),
     );
 
     const rows = await outboxFor(w.prisma, org);
@@ -171,7 +174,10 @@ describe('supplier stream sequencing', () => {
       w.suppliers.register({ displayName: 'تأمین‌کننده الف', capabilities: ['GOODS_SUPPLY'] }),
     );
     await asOperator(() =>
-      w.suspensions.suspend(supplierA.id, { reason: 'یک دلیل ثبت‌شده برای تعلیق' }),
+      w.suspensions.suspend(supplierA.id, {
+        reason: 'یک دلیل ثبت‌شده برای تعلیق',
+        latestSuspensionId: null,
+      }),
     );
     expect((await outboxFor(w.prisma, first)).map((row) => Number(row.streamSeq))).toEqual([1, 2]);
 
@@ -250,7 +256,10 @@ describe('supplier stream sequencing', () => {
 
     // The next real event takes the number the rolled-back one had held.
     await asOperator(() =>
-      w.suspensions.suspend(supplier.id, { reason: 'یک دلیل ثبت‌شده برای تعلیق' }),
+      w.suspensions.suspend(supplier.id, {
+        reason: 'یک دلیل ثبت‌شده برای تعلیق',
+        latestSuspensionId: null,
+      }),
     );
     const rows = await outboxFor(w.prisma, org);
     expect(rows.map((row) => Number(row.streamSeq))).toEqual([1, 2]);
