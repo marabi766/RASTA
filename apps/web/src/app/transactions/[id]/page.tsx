@@ -14,6 +14,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { TransactionDetailScreen } from './TransactionDetailScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageParams } from '@/server/page-context';
 
 /**
  * The `/transactions/[id]` route — one transaction and its dispute (EXP-003).
@@ -43,7 +44,7 @@ export default async function TransactionPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/transactions/${id}`)}`);
 
-  const query = await searchParams;
+  const query = await pageParams(session, searchParams);
   const flash = query[FLASH_PARAM];
   const notice = readFlash(
     session,

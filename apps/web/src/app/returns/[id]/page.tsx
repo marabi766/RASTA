@@ -22,6 +22,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 import type { OfferedReturnCommand } from '../ReturnCommands';
 import { ReturnDetailScreen } from './ReturnDetailScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageParams } from '@/server/page-context';
 
 /**
  * The `/returns/[id]` route — one return request (EXP-003, RUN-005).
@@ -55,7 +56,7 @@ export default async function ReturnPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(href)}`);
 
-  const flash = (await searchParams)[FLASH_PARAM];
+  const flash = (await pageParams(session, searchParams))[FLASH_PARAM];
   const notice = readFlash(
     session,
     typeof flash === 'string' ? flash : undefined,

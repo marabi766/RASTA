@@ -6,6 +6,7 @@ import type { Offer, OffersPage, Product, ReadResult } from '@/server/marketplac
 
 import { OffersScreen } from './OffersScreen';
 import { bindingOf } from '@/test/unresolved-binding';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * The order section of the offers screen: who it is shown to, which offers it
@@ -53,6 +54,7 @@ function screen(
 ) {
   return render(
     <OffersScreen
+      context={TEST_CONTEXT}
       demoMode={demoMode}
       product={product}
       offers={offers}

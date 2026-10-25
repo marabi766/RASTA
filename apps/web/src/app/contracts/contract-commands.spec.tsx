@@ -28,6 +28,7 @@ import { ContractDetailScreen } from './[id]/ContractDetailScreen';
 import type { ContractCommandOffers, SigningNote } from './[id]/contract-offers';
 import type { ContractFormState } from './[id]/contract-form-state';
 import { bindingOf } from '@/test/unresolved-binding';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 // Each test renders a whole contract screen and runs jest-axe over it; give each room on a
 // loaded runner, as `statements.spec.tsx` does (main 59785c26).
@@ -103,6 +104,7 @@ function contractPage(
 ) {
   return render(
     <ContractDetailScreen
+      context={TEST_CONTEXT}
       result={{ kind: 'OK', data: contract }}
       amendments={{
         kind: 'OK',

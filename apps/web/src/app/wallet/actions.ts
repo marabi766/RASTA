@@ -61,7 +61,9 @@ export async function submitTopUp(
   const result = await topUpWallet(session, walletId, parsed.request, submissionId);
 
   if (result.kind === 'CREATED') {
-    redirect('/wallet?toppedUp=1');
+    // Nothing on the page reads a confirmation flag, so none is carried (PR 405 review 2, F2):
+    // the balance it reads again is the confirmation.
+    redirect('/wallet');
   }
 
   switch (result.kind) {

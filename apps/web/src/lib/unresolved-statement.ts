@@ -6,10 +6,14 @@ import {
 } from './statement-fields';
 import type { StatementLineRequest } from './statement-draft';
 import {
+  freeOwnKey,
   keysUnder,
   locate,
+  mayStartFresh,
   ownedHere,
   purgeForeign,
+  quarantineOf,
+  storedKeyOf,
   tenantKey,
   type AccountTags,
   type Binding,
@@ -261,17 +265,28 @@ function markerOf(entry: Stored): string {
   });
 }
 
-/** Logout: every entry reduced to a marker; unreadable ones removed. */
+/** `parse` for `lib/unresolved-tenancy.ts`, which hands the key too. */
+const parseEntry = (raw: string): Stored | null => parse(raw);
+
+/** The quarantine of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
+export const statementQuarantine = quarantineOf(KEY_PREFIX, parseEntry);
+
+/**
+ * Logout: every entry reduced to a marker; a record that does not read, and one
+ * from before entries were kept per organization, are left as they are.
+ */
 export function purgeAllUnresolvedStatements(): void {
   markStatementsClosing();
   try {
     const store = storage();
     if (!store) return;
     for (const key of keysUnder(store, KEY_PREFIX)) {
+      // An entry from before entries were kept per organization stays as it is: whose it
+      // is cannot be told here, and it is never written over (PR 405 review 2, F1).
+      if (storedKeyOf(KEY_PREFIX, key)?.kind !== 'TENANT') continue;
       const raw = store.getItem(key);
       const entry = raw === null ? null : parse(raw);
       if (entry) store.setItem(key, markerOf(entry));
-      else store.removeItem(key);
     }
   } catch {
     // Unavailable storage holds nothing to purge.
@@ -280,14 +295,15 @@ export function purgeAllUnresolvedStatements(): void {
 }
 
 /**
- * A page for this person: entries of anyone else, and unreadable ones, are
- * removed; theirs stay, for every organization (`lib/unresolved-tenancy.ts`).
+ * A page for this person: entries of anyone else are reduced to content-free
+ * markers; theirs stay, for every organization, and nothing that cannot be
+ * attributed is touched (`lib/unresolved-tenancy.ts`).
  */
 export function purgeForeignUnresolvedStatements(tags: AccountTags): void {
   try {
     const store = storage();
     if (!store) return;
-    purgeForeign(store, KEY_PREFIX, tags, parse);
+    purgeForeign(store, KEY_PREFIX, tags, parseEntry);
   } catch {
     // See above.
   }
@@ -326,8 +342,13 @@ export function saveUnresolvedStatement(
     // A marker is never turned back into something that can be re-sent.
     if (earlier?.marker) return 'SAVED';
     const same = earlier !== null;
+    // A fresh submission waits while a quarantined record holds this kind for this person.
+    if (!same && !mayStartFresh(store, KEY_PREFIX, binding, parseEntry)) return 'HELD';
+    const key = tenantKey(KEY_PREFIX, binding, scopeOf(scope));
+    // Never written over: whatever else the key holds is moved aside first.
+    freeOwnKey(store, KEY_PREFIX, key, binding, parseEntry);
     store.setItem(
-      tenantKey(KEY_PREFIX, binding, scopeOf(scope)),
+      key,
       JSON.stringify({
         v: VERSION,
         marker: false,
@@ -353,8 +374,8 @@ export function saveUnresolvedStatement(
 /**
  * Forgets the record of `submissionId` — and only that one: a record another
  * submission holds stays (PR 332 review 1), and so does every other
- * organization's. An unreadable record is left to
- * `restoreUnresolvedStatement`, which removes it.
+ * organization's. A record that cannot
+ * be attributed is never removed (quarantined).
  */
 export function clearUnresolvedStatement(
   scope: StatementScope,
@@ -365,7 +386,10 @@ export function clearUnresolvedStatement(
     const store = storage();
     const found = store ? locate(store, KEY_PREFIX, binding, scopeOf(scope)) : null;
     if (!store || found === null) return;
-    if (parse(found.raw)?.submissionId !== submissionId) return;
+    const entry = parse(found.raw);
+    // Only this person's own record: anything that cannot be attributed stays (quarantined).
+    if (entry?.submissionId !== submissionId || !ownedHere(binding, found.legacy, entry.owner))
+      return;
     store.removeItem(found.key);
   } catch {
     // See above.
@@ -376,7 +400,8 @@ export function clearUnresolvedStatement(
 
 /**
  * The unresolved statement command in this scope, if this person has one.
- * Unreadable, or someone else's: removed, read as none. Older than the
+ * Unreadable, or not this person's: read as none and left as
+ * it is (quarantined). Older than the
  * session's lifetime: reduced to the marker, and read as that — never as none.
  */
 export function restoreUnresolvedStatement(
@@ -391,10 +416,8 @@ export function restoreUnresolvedStatement(
     if (!store || found === null) return null;
 
     const entry = parse(found.raw);
-    if (!entry || !ownedHere(binding, found.legacy, entry.owner)) {
-      store.removeItem(found.key);
-      return null;
-    }
+    // Not this person's, or does not read: none here, and left as it is (quarantined).
+    if (!entry || !ownedHere(binding, found.legacy, entry.owner)) return null;
     const { command, submissionId, correlationId, savedAt } = entry;
     if (entry.marker || now - savedAt > maxAgeSeconds * 1000) {
       if (!entry.marker) store.setItem(found.key, markerOf(entry));

@@ -10,6 +10,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriversScreen } from './DriversScreen';
 import { NewDriverForm } from './NewDriverForm';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/drivers` route — راننده و تخصیص (docs/16 § ۱۶٫۶, role `FLEET_MANAGER`).
@@ -47,7 +48,7 @@ export default async function DriversPage({
   // token until it is refreshed.
   const roles = tokenWriteRoles(session.accessToken);
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const query: DriverListQuery = {
     status: one(params.status),
     q: one(params.q),
@@ -110,7 +111,11 @@ export default async function DriversPage({
       ) : null}
 
       <div className="mt-4 flex flex-col gap-4">
-        <DriversScreen result={result} query={query} names={roster?.names ?? null} />
+        <DriversScreen
+          result={result}
+          query={{ ...query, context: pageContext(session) }}
+          names={roster?.names ?? null}
+        />
       </div>
     </AppShell>
   );

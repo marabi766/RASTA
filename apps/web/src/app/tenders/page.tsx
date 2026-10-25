@@ -11,6 +11,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { TendersScreen, type TendersQuery, type TendersView } from './TendersScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/tenders` route — مناقصه‌ها (docs/16 § ۱۶٫۶). Read-only.
@@ -38,7 +39,7 @@ export default async function TendersPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/tenders');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const status = one(params.status);
   // A status the service would not accept is dropped, not forwarded to earn a
   // 400 the person cannot act on.
@@ -79,7 +80,7 @@ export default async function TendersPage({
         description="مناقصه‌هایی که این سازمان برگزار کرده و مناقصه‌هایی که می‌تواند برایشان پیشنهاد بدهد."
       />
       <div className="mt-4">
-        <TendersScreen view={view} query={query} />
+        <TendersScreen view={view} query={{ ...query, context: pageContext(session) }} />
       </div>
     </AppShell>
   );

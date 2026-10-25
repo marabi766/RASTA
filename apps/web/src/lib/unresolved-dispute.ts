@@ -7,11 +7,15 @@ import {
   type DisputeFormValues,
 } from './transaction-dispute-fields';
 import {
+  freeOwnKey,
   keysUnder,
   legacyKey,
   locate,
+  mayStartFresh,
   ownedHere,
   purgeForeign,
+  quarantineOf,
+  storedKeyOf,
   tenantKey,
   type AccountTags,
   type Binding,
@@ -62,8 +66,13 @@ import {
  * A confirmed answer (the action redirects) drops it. Otherwise only the
  * person drops it, with the labelled action the uncertainty view offers once
  * the same request has been tried again or can no longer be — never by a
- * reload, a refusal, an expiry or a logout alone. Another person's page drops
- * every entry of anyone else (`purgeForeignUnresolvedDisputes`).
+ * reload, a refusal, an expiry or a logout alone. Another person's page
+ * reduces every entry of anyone else to a content-free marker
+ * (`purgeForeignUnresolvedDisputes`), and nothing that cannot be attributed —
+ * an entry from an organization this person's token no longer lists, one that
+ * does not read — is removed at all: each holds every fresh dispute command on
+ * this device until the person acknowledges the duplicate risk
+ * (`disputeQuarantine`, `lib/unresolved-tenancy.ts`; PR 405 review 2, F1).
  */
 
 const KEY_PREFIX = 'rasta.unresolved-dispute.';
@@ -226,11 +235,17 @@ function markerOf(entry: Stored): string {
   });
 }
 
+/** `parse` for `lib/unresolved-tenancy.ts`, which hands the key too. */
+const parseEntry = (raw: string): Stored | null => parse(raw);
+
+/** The quarantine of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
+export const disputeQuarantine = quarantineOf(KEY_PREFIX, parseEntry);
+
 /**
  * Logout: the text of an unresolved dispute does not outlive the login that
  * wrote it, but the fact that its outcome is unknown does — reduced to a
  * marker, so the same person signing in again in this tab is not offered a
- * fresh form over it. Unreadable entries are removed.
+ * fresh form over it. A record that does not read is left as it is.
  */
 export function purgeAllUnresolvedDisputes(): void {
   markDisputesClosing();
@@ -238,10 +253,12 @@ export function purgeAllUnresolvedDisputes(): void {
     const store = storage();
     if (!store) return;
     for (const key of keysUnder(store, KEY_PREFIX)) {
+      // An entry from before entries were kept per organization stays as it is: whose it
+      // is cannot be told here, and it is never written over (PR 405 review 2, F1).
+      if (storedKeyOf(KEY_PREFIX, key)?.kind !== 'TENANT') continue;
       const raw = store.getItem(key);
       const entry = raw === null ? null : parse(raw);
       if (entry) store.setItem(key, markerOf(entry));
-      else store.removeItem(key);
     }
   } catch {
     // Unavailable storage holds nothing to purge.
@@ -249,20 +266,25 @@ export function purgeAllUnresolvedDisputes(): void {
 }
 
 /**
- * A page for this person: entries of anyone else, and unreadable ones, are
- * removed; theirs stay, for every organization (`lib/unresolved-tenancy.ts`).
+ * A page for this person: entries of anyone else are reduced to content-free
+ * markers; theirs stay, for every organization, and nothing that cannot be
+ * attributed is touched (`lib/unresolved-tenancy.ts`).
  */
 export function purgeForeignUnresolvedDisputes(tags: AccountTags): void {
   try {
     const store = storage();
     if (!store) return;
-    purgeForeign(store, KEY_PREFIX, tags, parse);
+    purgeForeign(store, KEY_PREFIX, tags, parseEntry);
   } catch {
     // See above.
   }
 }
 
-/** True when the entry is stored. False: storage refused it, or a logout has started. */
+/**
+ * True when the entry is stored. False: storage refused it, a logout has
+ * started, or — for a fresh command — a quarantined record holds this kind for
+ * this person (`disputeQuarantine`): then nothing may be sent.
+ */
 export function saveUnresolvedDispute(
   transactionId: string,
   dispute: Omit<UnresolvedDispute, 'savedAt' | 'marker'>,
@@ -286,9 +308,13 @@ export function saveUnresolvedDispute(
     if (earlier?.marker) return earlier.submissionId === dispute.submissionId;
     // The original save time stays: the entry dates from the first send.
     const same = earlier !== null && earlier.submissionId === dispute.submissionId;
+    if (!same && !mayStartFresh(store, KEY_PREFIX, binding, parseEntry)) return false;
+    const key = tenantKey(KEY_PREFIX, binding, transactionId);
+    // Never written over: whatever else the key holds is moved aside first.
+    freeOwnKey(store, KEY_PREFIX, key, binding, parseEntry);
     const field = DISPUTE_COMMAND_FIELDS[dispute.command];
     store.setItem(
-      tenantKey(KEY_PREFIX, binding, transactionId),
+      key,
       JSON.stringify({
         v: VERSION,
         marker: false,
@@ -312,13 +338,21 @@ export function saveUnresolvedDispute(
 /**
  * Drops this page's entry for the transaction: this organization's, and an
  * entry from before entries were kept per organization that the page showed in
- * its place. Another organization's stays.
+ * its place — only when it is this person's. Another organization's stays, and
+ * so does anything that cannot be attributed (quarantined).
  */
 export function clearUnresolvedDispute(transactionId: string, binding: Binding): void {
   try {
     const store = storage();
-    store?.removeItem(tenantKey(KEY_PREFIX, binding, transactionId));
-    store?.removeItem(legacyKey(KEY_PREFIX, transactionId));
+    if (!store) return;
+    for (const [key, legacy] of [
+      [tenantKey(KEY_PREFIX, binding, transactionId), false],
+      [legacyKey(KEY_PREFIX, transactionId), true],
+    ] as const) {
+      const raw = store.getItem(key);
+      const entry = raw === null ? null : parse(raw);
+      if (entry !== null && ownedHere(binding, legacy, entry.owner)) store.removeItem(key);
+    }
   } catch {
     // See above.
   }
@@ -327,9 +361,9 @@ export function clearUnresolvedDispute(transactionId: string, binding: Binding):
 /**
  * The unresolved dispute command for this transaction, if this person has one.
  *
- * Unreadable, or someone else's: removed, and read as none. Older than the
- * session's lifetime: reduced to the outcome-unknown marker, and read as that
- * — never as none.
+ * Unreadable, or not this person's: read as none and left as it is
+ * (quarantined, `disputeQuarantine`). Older than the session's lifetime:
+ * reduced to the outcome-unknown marker, and read as that — never as none.
  */
 export function restoreUnresolvedDispute(
   transactionId: string,
@@ -343,10 +377,7 @@ export function restoreUnresolvedDispute(
     if (!store || found === null) return null;
 
     const entry = parse(found.raw);
-    if (!entry || !ownedHere(binding, found.legacy, entry.owner)) {
-      store.removeItem(found.key);
-      return null;
-    }
+    if (!entry || !ownedHere(binding, found.legacy, entry.owner)) return null;
 
     const { command, submissionId, correlationId, savedAt } = entry;
     if (entry.marker || now - savedAt > maxAgeSeconds * 1000) {

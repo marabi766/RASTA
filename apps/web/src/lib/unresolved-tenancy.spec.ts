@@ -9,11 +9,12 @@
  * - nothing of A's is removed by B's account boundary, and back on A it is all
  *   there, exactly as it could act before (retryable only where it was);
  * - an answer of A's that lands after the switch is A's, never B's;
- * - another person's page removes everything, and a logout empties or reduces
- *   everything, as before;
+ * - another person's page reduces everything to content-free markers, and a
+ *   logout leaves nothing that can be sent again (task 102: nothing is removed
+ *   outright — `unresolved-quarantine.spec.ts`);
  * - an entry from before entries were kept per organization is never retagged
- *   and never re-sent: shown view-only and holding its scope, kept for its
- *   person only.
+ *   and never re-sent: shown view-only and holding its scope for its person,
+ *   quarantined — never removed — for anyone else.
  */
 
 Object.assign(process.env, {
@@ -29,32 +30,19 @@ const { submissionBinding } =
   require('@/server/submission') as typeof import('@/server/submission');
 const { actingAccessToken } =
   require('@/test/session-token') as typeof import('@/test/session-token');
-const order = require('./unresolved-order') as typeof import('./unresolved-order');
-const dispute = require('./unresolved-dispute') as typeof import('./unresolved-dispute');
-const ret = require('./unresolved-return') as typeof import('./unresolved-return');
-const statement = require('./unresolved-statement') as typeof import('./unresolved-statement');
-const contract =
-  require('./unresolved-contract-command') as typeof import('./unresolved-contract-command');
-const bid = require('./unresolved-bid') as typeof import('./unresolved-bid');
-const owner =
-  require('./unresolved-tender-command') as typeof import('./unresolved-tender-command');
-const { EMPTY_DISPUTE_FORM } =
-  require('./transaction-dispute-fields') as typeof import('./transaction-dispute-fields');
-const { legacyKey, tenantKey } =
+const { legacyKey, QUARANTINE_MARK, tenantKey } =
   require('./unresolved-tenancy') as typeof import('./unresolved-tenancy');
+const { K1, K2, STORES } =
+  require('@/test/unresolved-stores') as typeof import('@/test/unresolved-stores');
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 type Binding = import('./unresolved-tenancy').Binding;
 type AccountTags = import('./unresolved-tenancy').AccountTags;
 type WebSession = import('@/server/session').WebSession;
+type Kind = import('@/test/unresolved-stores').Kind;
 
 const A = 'ORG-DEH-0001';
 const B = 'ORG-DEH-0002';
-const MAX_AGE = 12 * 60 * 60;
-const STAMP = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
-const K1 = 'sub_FIRSTKEYFIRSTKEYFIRS';
-const K2 = 'sub_SECONDKEYSECONDKEYSE';
-
 function sessionFor(org: string, subject = 'USR_1'): WebSession {
   return {
     subject,
@@ -76,186 +64,6 @@ const tagsOf = (binding: Binding): AccountTags => ({
   person: binding.person,
   legacy: binding.legacy,
 });
-
-type Kind = 'RETRYABLE' | 'VIEW_ONLY';
-interface StoreUnderTest {
-  readonly name: string;
-  readonly prefix: string;
-  readonly scope: string;
-  /** Whether an unresolved entry holds its scope against another submission. */
-  readonly holds: boolean;
-  /** Whether a restored entry may be sent again at all (a marker store never). */
-  readonly retries: boolean;
-  save(binding: Binding, id: string, correlationId?: string | null): string;
-  restore(binding: Binding): { kind: Kind; id: string } | null;
-  clear(binding: Binding, id: string): void;
-  purgeForeign(tags: AccountTags): void;
-  purgeAll(): void;
-  open(): void;
-}
-
-const outcome = (saved: boolean | string): string =>
-  saved === true ? 'SAVED' : saved === false ? 'UNAVAILABLE' : saved;
-
-const STATEMENT_SCOPE = { contractId: 'CTR_1', statementId: 'STM_1' };
-const CONTRACT_SCOPE = { contractId: 'CTR_1', slot: 'CONTRACT' as const, subjectId: null };
-const RETURN_SCOPE = { kind: 'RETURN' as const, returnId: 'RET_1' };
-
-const STORES: StoreUnderTest[] = [
-  {
-    name: 'order',
-    prefix: 'rasta.unresolved-order.',
-    scope: 'PRD_1',
-    holds: false,
-    retries: true,
-    save: (b, id, correlationId = 'COR') =>
-      outcome(
-        order.saveUnresolvedOrder(
-          'PRD_1',
-          { submissionId: id, values: { offerId: 'OFR_1', quantity: '3' }, correlationId },
-          b,
-        ),
-      ),
-    restore: (b) => {
-      const found = order.restoreUnresolvedOrder('PRD_1', b, MAX_AGE);
-      return found && { kind: found.kind, id: found.order.submissionId };
-    },
-    clear: (b) => order.clearUnresolvedOrder('PRD_1', b),
-    purgeForeign: order.purgeForeignUnresolvedOrders,
-    purgeAll: order.purgeAllUnresolvedOrders,
-    open: order.markAccountOpen,
-  },
-  {
-    name: 'dispute',
-    prefix: 'rasta.unresolved-dispute.',
-    scope: 'TXN_1',
-    holds: true,
-    retries: true,
-    save: (b, id, correlationId = 'COR') =>
-      outcome(
-        dispute.saveUnresolvedDispute(
-          'TXN_1',
-          {
-            command: 'DISPUTE',
-            submissionId: id,
-            values: { ...EMPTY_DISPUTE_FORM, reason: 'کالا نرسید' },
-            correlationId,
-            replay: STAMP,
-          },
-          b,
-        ),
-      ),
-    restore: (b) => {
-      const found = dispute.restoreUnresolvedDispute('TXN_1', b, MAX_AGE);
-      return found && { kind: found.kind, id: found.dispute.submissionId };
-    },
-    clear: (b) => dispute.clearUnresolvedDispute('TXN_1', b),
-    purgeForeign: dispute.purgeForeignUnresolvedDisputes,
-    purgeAll: dispute.purgeAllUnresolvedDisputes,
-    open: dispute.markDisputesOpen,
-  },
-  {
-    name: 'return',
-    prefix: 'rasta.unresolved-return.',
-    scope: 'return.RET_1',
-    holds: true,
-    retries: true,
-    save: (b, id, correlationId = 'COR') =>
-      ret.saveUnresolvedReturn(
-        RETURN_SCOPE,
-        { command: 'AUTHORIZE', submissionId: id, body: null, correlationId, replay: STAMP },
-        b,
-      ),
-    restore: (b) => {
-      const found = ret.restoreUnresolvedReturn(RETURN_SCOPE, b, MAX_AGE);
-      return found && { kind: found.kind, id: found.entry.submissionId };
-    },
-    clear: (b, id) => ret.clearUnresolvedReturn(RETURN_SCOPE, id, b),
-    purgeForeign: ret.purgeForeignUnresolvedReturns,
-    purgeAll: ret.purgeAllUnresolvedReturns,
-    open: ret.markReturnsOpen,
-  },
-  {
-    name: 'statement',
-    prefix: 'rasta.unresolved-statement.',
-    scope: 'CTR_1.STM_1',
-    holds: true,
-    retries: true,
-    save: (b, id, correlationId = 'COR') =>
-      statement.saveUnresolvedStatement(
-        STATEMENT_SCOPE,
-        { command: 'APPROVE', submissionId: id, lines: [], correlationId, replay: STAMP },
-        b,
-      ),
-    restore: (b) => {
-      const found = statement.restoreUnresolvedStatement(STATEMENT_SCOPE, b, MAX_AGE);
-      return found && { kind: found.kind, id: found.entry.submissionId };
-    },
-    clear: (b, id) => statement.clearUnresolvedStatement(STATEMENT_SCOPE, id, b),
-    purgeForeign: statement.purgeForeignUnresolvedStatements,
-    purgeAll: statement.purgeAllUnresolvedStatements,
-    open: statement.markStatementsOpen,
-  },
-  {
-    name: 'contract command',
-    prefix: 'rasta.unresolved-contract.',
-    scope: 'CTR_1.CONTRACT.-',
-    holds: true,
-    retries: true,
-    save: (b, id, correlationId = 'COR') =>
-      contract.saveUnresolvedContractCommand(
-        CONTRACT_SCOPE,
-        { command: 'SIGN', submissionId: id, input: null, correlationId, replay: STAMP },
-        b,
-      ),
-    restore: (b) => {
-      const found = contract.restoreUnresolvedContractCommand(CONTRACT_SCOPE, b, MAX_AGE);
-      return found && { kind: found.kind, id: found.entry.submissionId };
-    },
-    clear: (b, id) => contract.clearUnresolvedContractCommand(CONTRACT_SCOPE, id, b),
-    purgeForeign: contract.purgeForeignUnresolvedContractCommands,
-    purgeAll: contract.purgeAllUnresolvedContractCommands,
-    open: contract.markContractCommandsOpen,
-  },
-  {
-    name: 'bid',
-    prefix: 'rasta.unresolved-bid.',
-    scope: 'TND_1',
-    holds: true,
-    retries: false,
-    save: (b, id, correlationId = 'COR') =>
-      bid.saveUnresolvedBid('TND_1', { command: 'SUBMIT', submissionId: id, correlationId }, b),
-    restore: (b) => {
-      const found = bid.restoreUnresolvedBid('TND_1', b);
-      return found && { kind: 'VIEW_ONLY', id: found.submissionId };
-    },
-    clear: (b, id) => bid.clearUnresolvedBid('TND_1', id, b),
-    purgeForeign: bid.purgeForeignUnresolvedBids,
-    purgeAll: bid.purgeAllUnresolvedBids,
-    open: bid.markBidsOpen,
-  },
-  {
-    name: 'tender owner command',
-    prefix: 'rasta.unresolved-tender-command.',
-    scope: 'TND_1',
-    holds: true,
-    retries: false,
-    save: (b, id, correlationId = 'COR') =>
-      owner.saveUnresolvedOwnerCommand(
-        'TND_1',
-        { command: 'PUBLISH', submissionId: id, correlationId },
-        b,
-      ),
-    restore: (b) => {
-      const found = owner.restoreUnresolvedOwnerCommand('TND_1', b);
-      return found && { kind: 'VIEW_ONLY', id: found.submissionId };
-    },
-    clear: (b, id) => owner.clearUnresolvedOwnerCommand('TND_1', id, b),
-    purgeForeign: owner.purgeForeignUnresolvedOwnerCommands,
-    purgeAll: owner.purgeAllUnresolvedOwnerCommands,
-    open: owner.markOwnerCommandsOpen,
-  },
-];
 
 const keys = () => Object.keys(window.sessionStorage).sort();
 
@@ -308,11 +116,22 @@ describe.each(STORES)('the $name store', (store) => {
     expect(store.restore(inA)?.id).toBe(K1);
   });
 
-  it('another person’s page removes every entry of this person, every organization’s', () => {
+  it('another person’s page reduces every entry of this person to a content-free marker', () => {
     store.save(inA, K1);
     store.save(inB, K2);
     store.purgeForeign(tagsOf(someoneElse));
-    expect(keys()).toEqual([]);
+    // Nothing of either entry stays readable — not the content, not the scope, not the tags.
+    expect(keys()).toHaveLength(2);
+    for (const key of keys()) {
+      expect(key.startsWith(`${store.prefix}${QUARANTINE_MARK}`)).toBe(true);
+      const raw = window.sessionStorage.getItem(key)!;
+      expect(Object.keys(JSON.parse(raw)).sort()).toEqual(['at', 'quarantined', 'v']);
+      for (const kept of [K1, K2, inA.owner, inB.owner, inA.person, store.scope]) {
+        expect(`${key} ${raw}`).not.toContain(kept);
+      }
+    }
+    // The fact that two outcomes are unknown stays: the next person is held by both.
+    expect(store.save(someoneElse, K2)).not.toBe('SAVED');
   });
 
   it('a logout leaves nothing that can be sent again, in either organization', () => {
@@ -352,18 +171,21 @@ describe.each(STORES)('the $name store', (store) => {
       });
     }
 
-    it('is kept by this person’s pages, removed by another person’s', () => {
-      legacyEntry(inA, K1);
+    it('is kept by this person’s pages and by another person’s, byte for byte', () => {
+      const raw = legacyEntry(inA, K1);
       store.purgeForeign(tagsOf(inB));
       expect(keys()).toEqual([legacyKey(store.prefix, store.scope)]);
+      // Another person cannot tell whose it is: quarantined, never removed.
       store.purgeForeign(tagsOf(someoneElse));
-      expect(keys()).toEqual([]);
+      expect(keys()).toEqual([legacyKey(store.prefix, store.scope)]);
+      expect(window.sessionStorage.getItem(legacyKey(store.prefix, store.scope))).toBe(raw);
     });
 
-    it('another person’s is not shown and is removed', () => {
-      legacyEntry(someoneElse, K1);
+    it('another person’s is not shown, and is kept byte for byte', () => {
+      const raw = legacyEntry(someoneElse, K1);
       expect(store.restore(inA)).toBeNull();
-      expect(keys()).toEqual([]);
+      expect(keys()).toEqual([legacyKey(store.prefix, store.scope)]);
+      expect(window.sessionStorage.getItem(legacyKey(store.prefix, store.scope))).toBe(raw);
     });
   });
 });

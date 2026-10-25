@@ -7,6 +7,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 import { TIMELINE_CATEGORIES, oneOf } from '@/lib/asset-fields';
 import { TimelineScreen } from './TimelineScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/assets/[id]/timeline` route — تاریخچهٔ دارایی (docs/16 § ۱۶٫۶, role
@@ -41,7 +42,7 @@ export default async function AssetTimelinePage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/assets/${id}/timeline`)}`);
 
-  const search = await searchParams;
+  const search = await pageParams(session, searchParams);
   const query: AssetTimelineQuery = {
     // A strict enum on asset-service's side; see `/assets/page.tsx`.
     category: oneOf(TIMELINE_CATEGORIES, one(search.category)),
@@ -68,7 +69,12 @@ export default async function AssetTimelinePage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/assets" />}
     >
-      <TimelineScreen result={result} assetId={id} query={query} demoMode={demoMode} />
+      <TimelineScreen
+        result={result}
+        assetId={id}
+        query={{ ...query, context: pageContext(session) }}
+        demoMode={demoMode}
+      />
     </AppShell>
   );
 }

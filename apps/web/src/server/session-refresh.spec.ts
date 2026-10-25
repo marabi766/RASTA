@@ -405,6 +405,46 @@ describe('the organization goes with the token (PR 405 review 1, F1)', () => {
     });
   });
 
+  it('keeps the copy it replaces beside the session — to recognise what was remembered under it (PR 405 r2 F1)', async () => {
+    const stale = sealed({ organizationId: 'ORG_A', accessToken: actingAccessToken('ORG_B') });
+    const { refresh } = rotatingProvider();
+    const resealed = await renewSession(stale, { env: ENV, refresh, now: at(T0 + 60) });
+    if (resealed.kind !== 'RENEWED') throw new Error(resealed.kind);
+    expect(openSession(resealed.sealed, SECRET)!).toMatchObject({
+      organizationId: 'ORG_B',
+      formerOrganizationId: 'ORG_A',
+    });
+    // A stale cookie that needs a refresh keeps it too.
+    const refreshed = await renewSession(stale, {
+      env: ENV,
+      refresh: providerActingFor('ORG_C'),
+      now: at(T0 + 880),
+    });
+    if (refreshed.kind !== 'RENEWED') throw new Error(refreshed.kind);
+    expect(openSession(refreshed.sealed, SECRET)!).toMatchObject({
+      organizationId: 'ORG_C',
+      formerOrganizationId: 'ORG_A',
+    });
+    // And every refresh after carries it, unchanged: it is the old build's copy, once.
+    const later = await renewSession(refreshed.sealed, {
+      env: ENV,
+      refresh: providerActingFor('ORG_D'),
+      now: at(T0 + 880 + 890),
+    });
+    if (later.kind !== 'RENEWED') throw new Error(later.kind);
+    expect(openSession(later.sealed, SECRET)!.formerOrganizationId).toBe('ORG_A');
+  });
+
+  it('a cookie in step gets no former copy, not even across a switch', async () => {
+    const renewal = await renewSession(sealed(), {
+      env: ENV,
+      refresh: providerActingFor('ORG_B'),
+      now: at(T0 + 880),
+    });
+    if (renewal.kind !== 'RENEWED') throw new Error(renewal.kind);
+    expect(openSession(renewal.sealed, SECRET)!.formerOrganizationId).toBeUndefined();
+  });
+
   it('a refused refresh leaves such a cookie alone, and this render does not use it — it cannot be resealed', async () => {
     const stale = sealed({ organizationId: 'ORG_A', accessToken: actingAccessToken('ORG_B') });
     const refusing = async (): Promise<TokenResponse> => {

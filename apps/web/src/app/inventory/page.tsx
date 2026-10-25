@@ -9,6 +9,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { InventoryScreen, type InventoryQuery, type InventorySelection } from './InventoryScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/inventory` route — انبار (docs/16 § ۱۶٫۶). Read-only.
@@ -34,7 +35,7 @@ export default async function InventoryPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/inventory');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const chosen = one(params.warehouse);
   // A warehouse id the service could not have issued is dropped, not forwarded
   // to earn a refusal the person cannot act on.
@@ -69,7 +70,11 @@ export default async function InventoryPage({
         description="انبارهای این سازمان و موجودی هر کالا: موجود، رزروشده و قابل‌استفاده."
       />
       <div className="mt-4">
-        <InventoryScreen warehouses={warehouses} selection={selection} query={query} />
+        <InventoryScreen
+          warehouses={warehouses}
+          selection={selection}
+          query={{ ...query, context: pageContext(session) }}
+        />
       </div>
     </AppShell>
   );

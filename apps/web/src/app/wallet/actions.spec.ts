@@ -161,11 +161,11 @@ describe('topping up — the full order of checks', () => {
     );
   });
 
-  it('redirects to /wallet with ?toppedUp=1 after a successful top-up', async () => {
+  it('redirects to /wallet — with no flag the page never read — after a successful top-up', async () => {
     await expect(
       submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000000' })),
     ).rejects.toThrow(/NEXT_REDIRECT/);
-    expect(redirect).toHaveBeenCalledWith('/wallet?toppedUp=1');
+    expect(redirect).toHaveBeenCalledWith('/wallet');
   });
 
   it('sends one submission twice under one reference — the double-submit case', async () => {

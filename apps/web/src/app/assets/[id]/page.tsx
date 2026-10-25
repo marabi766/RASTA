@@ -49,6 +49,7 @@ import { AttachDocumentForm } from './AssetDocumentForm';
 import { AssetAvailability } from './AssetAvailability';
 import { DeclareAvailabilityForm, RevokeAvailabilityForm } from './AvailabilityForms';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/assets/[id]` route.
@@ -117,10 +118,10 @@ export default async function AssetDossierPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const query = await searchParams;
 
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/assets/${id}`)}`);
+  const query = await pageParams(session, searchParams);
   // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
@@ -215,6 +216,7 @@ export default async function AssetDossierPage({
       sidebar={<PortalSidebar session={session} currentHref="/assets" />}
     >
       <DossierScreen
+        context={pageContext(session)}
         result={result}
         assetId={id}
         demoMode={demoMode}

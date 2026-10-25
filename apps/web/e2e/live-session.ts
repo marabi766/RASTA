@@ -7,6 +7,7 @@ import { z } from 'zod';
 
 import { SESSION_COOKIE, newCsrfToken, sealSession } from '../src/server/session';
 import { storedOrganizationFor } from '../src/server/session-organization';
+import { contextTagFor } from '../src/server/context-tag';
 
 /**
  * A real portal session for the live-stack browser scenario.
@@ -85,6 +86,14 @@ interface RealmExport {
 export interface LiveSession {
   readonly accessToken: string;
   readonly organizationId: string;
+  /**
+   * The tag a URL drawn for this session's organization carries
+   * (`src/server/page-context.ts`): a scenario that goes straight to a URL
+   * with a query binds it with `withContext(session.context, url)`, as every
+   * link and form of the portal does — without it the page reads none of the
+   * query (PR 405 review 2, F2).
+   */
+  readonly context: string;
 }
 
 function requiredEnv(name: string): string {
@@ -301,5 +310,12 @@ async function installSession(context: BrowserContext, fixture: Fixture): Promis
     },
   ]);
 
-  return { accessToken: tokens.access_token, organizationId: claims.org_id };
+  return {
+    accessToken: tokens.access_token,
+    organizationId: claims.org_id,
+    context: contextTagFor(
+      requiredEnv('WEB_SESSION_SECRET'),
+      storedOrganizationFor(tokens.access_token),
+    ),
+  };
 }

@@ -8,6 +8,7 @@ import { webServerEnv } from './env';
 import { utcInstant } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
+import { actingOrganizationId } from './session-organization';
 
 export type { ReadResult };
 
@@ -282,7 +283,8 @@ export async function fetchApprovalInbox(session: WebSession): Promise<ReadResul
 export async function fetchExecutionPolicy(
   session: WebSession,
 ): Promise<ReadResult<ExecutionPolicy>> {
-  const organizationId = session.organizationId;
+  // The organization the token acts for — the one the policy read is for (PR 405).
+  const organizationId = actingOrganizationId(session);
   if (!organizationId) return { kind: 'NOT_FOUND' };
 
   const result = await read(

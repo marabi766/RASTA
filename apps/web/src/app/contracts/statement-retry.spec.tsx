@@ -289,7 +289,7 @@ describe('never silently gone', () => {
     expect(restoreUnresolvedStatement(STATEMENT_SCOPE, BINDING, SESSION_MAX_AGE)).toBeNull();
   });
 
-  it('refuses an entry whose lines are not what a draft sends', () => {
+  it('refuses an entry whose lines are not what a draft sends — never shown, kept as it is (quarantined)', () => {
     window.sessionStorage.setItem(
       STORE_KEY,
       JSON.stringify({
@@ -305,8 +305,9 @@ describe('never silently gone', () => {
         session: BINDING.session,
       }),
     );
+    const raw = window.sessionStorage.getItem(STORE_KEY);
     expect(restoreUnresolvedStatement(DRAFT_SCOPE, BINDING, SESSION_MAX_AGE)).toBeNull();
-    expect(stored()).toBeNull();
+    expect(window.sessionStorage.getItem(STORE_KEY)).toBe(raw);
   });
 });
 

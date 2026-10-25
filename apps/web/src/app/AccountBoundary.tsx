@@ -53,19 +53,26 @@ import type { AccountTags } from '@/lib/unresolved-tenancy';
  * hold what was sent — so a logout only stops them being written again.
  *
  * - **Logout.** Any form posting to `/auth/logout` — every portal page has its
- *   own — empties every remembered order before the navigation leaves. A capture
- *   listener on the document, so no page has to remember to wire it. A
- *   remembered dispute command is reduced instead, to a marker with no text,
- *   no login tag and no stamp that still says its outcome is unknown: a dispute
+ *   own, and so has the recovery page — reduces every remembered order before
+ *   the navigation leaves, to a marker with nothing in it but the time. A
+ *   capture listener on the document, so no page has to remember to wire it. A
+ *   remembered dispute command is reduced too, to a marker with no text, no
+ *   login tag and no stamp that still says its outcome is unknown: a dispute
  *   command repeated under a fresh key can act on a newer dispute, so the same
  *   person signing in again must not be offered a fresh form over it (PR 319
- *   review 2, finding 1). The next point removes it for anyone else.
- * - **A page for another person.** A page drawn for a person removes the
- *   entries of anyone else (and any it cannot read) on its first load, so a tab
+ *   review 2, finding 1).
+ * - **A page for another person.** A page drawn for a person reduces the
+ *   entries of anyone else on its first load to content-free markers, so a tab
  *   handed from one person to the next never shows the first one's offer,
  *   quantity or tracking code, even when the first one never pressed "log out"
  *   (a session that expired, a closed laptop). The same person after a re-login
  *   keeps theirs.
+ * - **Nothing is removed outright** (PR 405 review 2, F1). What a logout or
+ *   another person's page reduces, and every record that cannot be attributed
+ *   to the page's person — one from an organization their token no longer
+ *   lists, one that does not read — stays, and holds every fresh submission of
+ *   its kind on this device until the person acknowledges the duplicate risk
+ *   (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`).
  * - **Another organization is not another person.** Entries are kept per
  *   person and organization (`lib/unresolved-tenancy.ts`): after a switch from
  *   A to B nothing of A's is removed here, and none of it is shown or resolved
@@ -74,9 +81,9 @@ import type { AccountTags } from '@/lib/unresolved-tenancy';
  *
  * - **Nothing is written after a logout starts.** The purge also sets an in-memory
  *   flag that `saveUnresolvedOrder` honours, so the answer to a send still in
- *   flight cannot store the order again. The sign-in page does not purge on load
- *   instead: that would also drop the order of a person whose session merely
- *   expired and who may still be in doubt (view-only after the re-login).
+ *   flight cannot store the order again. The sign-in page does not reduce on
+ *   load instead: that would also take the order of a person whose session
+ *   merely expired and who may still be in doubt (view-only after the re-login).
  *
  * `account` is the person's one-way tags `submissionBinding` computes — null on
  * a page with no login (the sign-in page, a session `readSession()` refuses),

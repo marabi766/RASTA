@@ -9,6 +9,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ContractsScreen } from './ContractsScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/contracts` route — قراردادها (docs/16 § ۱۶٫۶, ADR-068).
@@ -35,7 +36,7 @@ export default async function ContractsPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/contracts');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const status = one(params.status);
   // A status the service would not accept is dropped, not forwarded to earn a
   // 400 the person cannot act on.
@@ -68,7 +69,11 @@ export default async function ContractsPage({
         description="قراردادهایی که این سازمان طرف آن‌هاست — به‌عنوان کارفرما یا پیمانکار."
       />
       <div className="mt-4">
-        <ContractsScreen result={result} query={query} demoMode={demoMode} />
+        <ContractsScreen
+          result={result}
+          query={{ ...query, context: pageContext(session) }}
+          demoMode={demoMode}
+        />
       </div>
     </AppShell>
   );

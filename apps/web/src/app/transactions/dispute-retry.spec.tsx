@@ -16,6 +16,7 @@ import { DisputeCommandForm } from './[id]/DisputeCommandForm';
 import { DisputeCommands } from './[id]/DisputeCommands';
 import type { DisputeFormState } from './[id]/form-state';
 import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
+import { QUARANTINE_TITLE } from '@/app/UnresolvedQuarantine';
 
 /**
  * The unconfirmed path with the real `useActionState`: only the action's own
@@ -358,14 +359,20 @@ describe('remembered across a reload (finding 2)', () => {
     expect(screen.queryByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' })).toBeNull();
   });
 
-  it('someone else’s entry is never shown, and the account boundary removes it', async () => {
+  it('someone else’s entry is never shown — they are warned instead — and the account boundary reduces it to a content-free marker', async () => {
     saveUnresolvedDispute('TXN_1', remembered(), BINDING);
     const { container } = renderCommands(['DISPUTE'], bindingOf('owner-tag-B', 'x', OTHER_PERSON));
-    await waitFor(() => expect(container.querySelector('textarea')).not.toBeNull());
-    expect(container.querySelector('[name="submission"]')).toHaveValue(FRESH);
+    // The device quarantine (PR 405 review 2, F1): no fresh form over an unknown outcome.
+    await waitFor(() => expect(container.textContent).toContain(QUARANTINE_TITLE));
+    expect(container.querySelector('textarea')).toBeNull();
     expect(container.textContent).not.toContain(REASON);
     purgeForeignUnresolvedDisputes({ person: OTHER_PERSON, legacy: [] });
     expect(window.sessionStorage.getItem(STORE_KEY)).toBeNull();
+    const markers = Object.keys(window.sessionStorage).filter((key) =>
+      key.startsWith('rasta.unresolved-dispute.!q.'),
+    );
+    expect(markers).toHaveLength(1);
+    expect(window.sessionStorage.getItem(markers[0]!)).not.toContain(REASON);
   });
 
   it('the same person acting for another organization: not shown there, kept for this one (task 100)', async () => {

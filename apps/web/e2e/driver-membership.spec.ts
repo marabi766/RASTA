@@ -9,9 +9,11 @@ import {
   installProvisionedSession,
   liveAccessToken,
   type LivePersona,
+  type LiveSession,
   type ProvisionedPerson,
 } from './live-session';
 import { provisionPerson } from './provisioned-people';
+import { withContext } from '../src/lib/page-context';
 
 /**
  * Registering a driver through the real stack (task 095): the portal, the real
@@ -63,12 +65,14 @@ async function driverRowsOf(userId: string): Promise<{ id: string; userId: strin
 async function as(
   browser: Browser,
   who: LivePersona | ProvisionedPerson,
-): Promise<{ page: Page; close: () => Promise<void> }> {
+): Promise<{ page: Page; session: LiveSession; close: () => Promise<void> }> {
   const context = await browser.newContext({ locale: 'fa-IR', timezoneId: 'Asia/Tehran' });
-  if (typeof who === 'string') await installLiveSession(context, who);
-  else await installProvisionedSession(context, who);
+  const session =
+    typeof who === 'string'
+      ? await installLiveSession(context, who)
+      : await installProvisionedSession(context, who);
   const page = await context.newPage();
-  return { page, close: () => context.close() };
+  return { page, session, close: () => context.close() };
 }
 
 const person = async (label: string, organizationId: string, roles: string[]) =>
@@ -89,7 +93,7 @@ test.describe('registering a driver needs a member of the organization (task 095
     const elsewhere = await person('elsewhere', OTHER, ['OPERATOR']);
     const employeeNo = `OP-E2E-${randomUUID().slice(0, 6)}`;
 
-    const { page, close } = await as(browser, 'orgAdmin');
+    const { page, session, close } = await as(browser, 'orgAdmin');
     try {
       await page.goto('/drivers');
       const form = page.locator('form', { has: page.getByRole('button', { name: 'ثبت راننده' }) });
@@ -111,7 +115,8 @@ test.describe('registering a driver needs a member of the organization (task 095
       await picker.selectOption({ label: option });
       await form.locator('[name="employeeNo"]').fill(employeeNo);
       await form.getByRole('button', { name: 'ثبت راننده' }).click();
-      await page.waitForURL(/\/drivers\/DRV_[0-9A-Z]+\?created=1$/);
+      // The driver's own page — no flag it never read (PR 405 review 2, F2).
+      await page.waitForURL(/\/drivers\/DRV_[0-9A-Z]+$/);
 
       // fleet-service holds exactly one row for the member, in this organization.
       const rows = await driverRowsOf(member.userId);
@@ -119,7 +124,7 @@ test.describe('registering a driver needs a member of the organization (task 095
       expect(page.url()).toContain(`/drivers/${rows[0]!.id}`);
 
       // A registered member leaves the picker, and the list names them.
-      await page.goto(`/drivers?q=${encodeURIComponent(employeeNo)}`);
+      await page.goto(withContext(session.context, `/drivers?q=${encodeURIComponent(employeeNo)}`));
       const after = await page
         .getByRole('combobox', { name: /عضو سازمان/ })
         .locator('option')

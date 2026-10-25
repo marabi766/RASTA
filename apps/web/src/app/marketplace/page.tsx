@@ -6,6 +6,7 @@ import { OFFER_SORTS, searchProducts, type ProductSearchQuery } from '@/server/m
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { MarketplaceScreen } from './MarketplaceScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/marketplace` route — جست‌وجوی کالا و خدمت (docs/16 § ۱۶٫۶, role
@@ -40,7 +41,7 @@ export default async function MarketplacePage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/marketplace');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const query: ProductSearchQuery = {
     q: one(params.q),
     category: one(params.category),
@@ -66,7 +67,11 @@ export default async function MarketplacePage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/marketplace" />}
     >
-      <MarketplaceScreen result={result} query={query} demoMode={demoMode} />
+      <MarketplaceScreen
+        result={result}
+        query={{ ...query, context: pageContext(session) }}
+        demoMode={demoMode}
+      />
     </AppShell>
   );
 }

@@ -33,6 +33,8 @@ import {
 import type { WriteResult } from '@/server/write';
 
 import type { SupplierFormState } from './supplier-form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The one path every supplier command takes.
@@ -87,8 +89,11 @@ export interface SupplierCommandSpec<V, B, F extends string> {
   ) => Promise<WriteResult<WrittenSupplier, F>>;
 }
 
-const supplierPath = (supplierId: string, flash: string): string =>
-  `/suppliers/${encodeURIComponent(supplierId)}?${FLASH_PARAM}=${flash}`;
+const supplierPath = (session: WebSession, supplierId: string, flash: string): string =>
+  withContext(
+    pageContext(session),
+    `/suppliers/${encodeURIComponent(supplierId)}?${FLASH_PARAM}=${flash}`,
+  );
 
 type Gated =
   | { readonly ok: true; readonly session: WebSession; readonly submissionId: string }
@@ -280,7 +285,13 @@ export async function runRegister(
   if (!sent.sent) return sent.state;
   const { result } = sent;
   if (result.kind === 'CREATED') {
-    redirect(supplierPath(result.data.id, mintFlash(gated.session, result.data.id, 'registered')));
+    redirect(
+      supplierPath(
+        gated.session,
+        result.data.id,
+        mintFlash(gated.session, result.data.id, 'registered'),
+      ),
+    );
   }
   return failure(result, gated.submissionId, values);
 }
@@ -354,14 +365,20 @@ export async function runOnSupplier<V, B, F extends string>(
     // Redirect, not state: a refreshed page must not resubmit, and the page the
     // person lands on reads the supplier again, so it shows what the command did.
     redirect(
-      supplierPath(baseline.supplierId, mintFlash(session, baseline.supplierId, command.notice)),
+      supplierPath(
+        session,
+        baseline.supplierId,
+        mintFlash(session, baseline.supplierId, command.notice),
+      ),
     );
   }
 
   if (result.kind === 'INVALID' && result.message === STALE_MESSAGE) {
     // The same stale page would be refused again, so the typed values are not
     // offered back for another try: the person sees the record as it is.
-    redirect(supplierPath(baseline.supplierId, mintFlash(session, baseline.supplierId, 'stale')));
+    redirect(
+      supplierPath(session, baseline.supplierId, mintFlash(session, baseline.supplierId, 'stale')),
+    );
   }
   return failure(result, submissionId, values);
 }

@@ -16,18 +16,26 @@
  * over it is refused (`HELD`), and a record is cleared only by the submission
  * it belongs to. Records are kept per person and organization
  * (`lib/unresolved-tenancy.ts`): a page for another organization of the same
- * person neither shows nor clears them, a page for another person drops every
- * entry of anyone else, and a logout writes nothing more and leaves the markers.
+ * person neither shows nor clears them, a page for another person reduces
+ * every entry of anyone else to a content-free marker, and a logout writes
+ * nothing more and leaves the markers. Nothing that cannot be attributed — a
+ * record from an organization this person's token no longer lists, one that
+ * does not read — is removed: it holds every fresh command of its kind on this
+ * device until the person acknowledges the duplicate risk (`quarantine`; PR
+ * 405 review 2, F1).
  */
 
 import {
-  keysUnder,
+  freeOwnKey,
   locate,
+  mayStartFresh,
   ownedHere,
   purgeForeign,
+  quarantineOf,
   tenantKey,
   type AccountTags,
   type Binding,
+  type QuarantineSource,
 } from './unresolved-tenancy';
 
 const VERSION = 1;
@@ -44,9 +52,10 @@ export interface UnresolvedMarker<C extends string> {
 }
 
 /**
- * `SAVED`: stored. `HELD`: another submission's record holds this scope — it
- * is left exactly as it was, and this one must not be sent. `UNAVAILABLE`:
- * storage refused it, or a logout has started.
+ * `SAVED`: stored. `HELD`: another submission's record holds this scope, or a
+ * quarantined record holds this kind for this person — it is left exactly as
+ * it was, and this one must not be sent. `UNAVAILABLE`: storage refused it, or
+ * a logout has started.
  */
 export type SaveOutcome = 'SAVED' | 'HELD' | 'UNAVAILABLE';
 
@@ -63,6 +72,8 @@ export interface MarkerStore<C extends string> {
   ): SaveOutcome;
   clear(scope: string, submissionId: string, binding: Binding): void;
   restore(scope: string, binding: Binding): UnresolvedMarker<C> | null;
+  /** What holds a fresh command of this kind (`lib/unresolved-tenancy.ts`). */
+  readonly quarantine: QuarantineSource;
 }
 
 type Stored<C extends string> = UnresolvedMarker<C> & {
@@ -126,7 +137,11 @@ export function markerStore<C extends string>(
     };
   }
 
+  const parseEntry = (raw: string): Stored<C> | null => parse(raw);
+
   return {
+    quarantine: quarantineOf(keyPrefix, parseEntry),
+
     subscribe(listener) {
       listeners.add(listener);
       return () => {
@@ -138,18 +153,10 @@ export function markerStore<C extends string>(
       accountClosing = false;
     },
 
+    // Markers hold nothing of what was sent: a logout only stops more being
+    // written, and leaves every record — readable or not — where it is.
     purgeAll() {
       accountClosing = true;
-      try {
-        const store = storage();
-        if (!store) return;
-        for (const key of keysUnder(store, keyPrefix)) {
-          const raw = store.getItem(key);
-          if (raw === null || parse(raw) === null) store.removeItem(key);
-        }
-      } catch {
-        // Unavailable storage holds nothing to purge.
-      }
       changed();
     },
 
@@ -157,7 +164,7 @@ export function markerStore<C extends string>(
       try {
         const store = storage();
         if (!store) return;
-        purgeForeign(store, keyPrefix, tags, parse);
+        purgeForeign(store, keyPrefix, tags, parseEntry);
       } catch {
         // See above.
       }
@@ -180,6 +187,12 @@ export function markerStore<C extends string>(
         if (earlier !== null && (found?.legacy || earlier.submissionId !== entry.submissionId)) {
           return 'HELD';
         }
+        // A fresh command waits while a quarantined record holds this kind for this person.
+        if (earlier === null && !mayStartFresh(store, keyPrefix, binding, parseEntry))
+          return 'HELD';
+        const key = tenantKey(keyPrefix, binding, scope);
+        // Never written over: whatever else the key holds is moved aside first.
+        freeOwnKey(store, keyPrefix, key, binding, parseEntry);
         const record: Stored<C> = {
           v: VERSION,
           command: entry.command,
@@ -189,7 +202,7 @@ export function markerStore<C extends string>(
           savedAt: earlier?.savedAt ?? now,
           owner: binding.owner,
         };
-        store.setItem(tenantKey(keyPrefix, binding, scope), JSON.stringify(record));
+        store.setItem(key, JSON.stringify(record));
         changed();
         return 'SAVED';
       } catch {
@@ -202,7 +215,14 @@ export function markerStore<C extends string>(
         const store = storage();
         const found = store ? locate(store, keyPrefix, binding, scope) : null;
         if (!store || found === null) return;
-        if (parse(found.raw)?.submissionId !== submissionId) return;
+        const entry = parse(found.raw);
+        // Only this person's own record: anything that cannot be attributed stays (quarantined).
+        if (
+          entry?.submissionId !== submissionId ||
+          !ownedHere(binding, found.legacy, entry.owner)
+        ) {
+          return;
+        }
         store.removeItem(found.key);
       } catch {
         return;
@@ -216,10 +236,8 @@ export function markerStore<C extends string>(
         const found = store ? locate(store, keyPrefix, binding, scope) : null;
         if (!store || found === null) return null;
         const entry = parse(found.raw);
-        if (!entry || !ownedHere(binding, found.legacy, entry.owner)) {
-          store.removeItem(found.key);
-          return null;
-        }
+        // Not this person's, or does not read: none here, and left as it is (quarantined).
+        if (!entry || !ownedHere(binding, found.legacy, entry.owner)) return null;
         const { command, submissionId, correlationId, savedAt } = entry;
         return { command, submissionId, correlationId, savedAt };
       } catch {

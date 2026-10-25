@@ -292,7 +292,7 @@ describe('never silently gone', () => {
     expect(restoreUnresolvedReturn(RETURN_SCOPE, BINDING, SESSION_MAX_AGE)).toBeNull();
   });
 
-  it('refuses an entry that is not what its slot holds', () => {
+  it('refuses an entry that is not what its slot holds — never shown, kept as it is (quarantined)', () => {
     // A decision kept in an order's slot, a request without its body.
     for (const value of [
       { command: 'AUTHORIZE', body: null },
@@ -317,8 +317,9 @@ describe('never silently gone', () => {
           ...value,
         }),
       );
+      const raw = window.sessionStorage.getItem(ORDER_SLOT);
       expect(restoreUnresolvedReturn(ORDER_SCOPE, BINDING, SESSION_MAX_AGE)).toBeNull();
-      expect(stored()).toBeNull();
+      expect(window.sessionStorage.getItem(ORDER_SLOT)).toBe(raw);
     }
   });
 });

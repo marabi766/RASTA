@@ -85,6 +85,19 @@ export function actingOrganizationId(session: WebSession): string | null {
   return organizationId;
 }
 
+/**
+ * The organization a cookie sealed before task 100 kept as its copy, when it
+ * differs from the acting one: the one that build tagged and keyed this
+ * login's unresolved submissions under (`session.ts`, `formerOrganizationId`).
+ * For **recognising** those records as this person's, never for acting,
+ * labelling or sending. `undefined`: none, or the same as the acting one.
+ */
+export function formerOrganizationCopy(session: WebSession): string | null | undefined {
+  const former = session.formerOrganizationId;
+  if (former === undefined) return undefined;
+  return former === actingOrganizationId(session) ? undefined : former;
+}
+
 /** The top bar's label for it. */
 export function actingOrganizationLabel(session: WebSession): string {
   return actingOrganizationId(session) ?? 'بدون سازمان فعال';

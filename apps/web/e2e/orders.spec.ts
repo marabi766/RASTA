@@ -148,7 +148,10 @@ test.describe('placing an order through the live stack', () => {
     await form.locator('input[name="quantity"]').fill('۱۰');
     await form.getByRole('button', { name: 'ثبت سفارش' }).click();
 
-    await expect(page).toHaveURL(/\/orders\/[^/?]+\?placed=1$/);
+    // The order's page, with the flash its own write earned, bound to this organization (PR 405 r2 F2).
+    await expect(page).toHaveURL(
+      new RegExp(`/orders/[^/?]+\\?flash=[^&]+&ctx=${session.context}$`),
+    );
     placedId = decodeURIComponent(new URL(page.url()).pathname.split('/').pop() ?? '');
     expect(placedId).not.toBe('');
 

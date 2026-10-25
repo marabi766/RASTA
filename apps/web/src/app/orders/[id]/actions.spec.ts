@@ -9,6 +9,7 @@ import { RECEIPT_NOTE_REFUSAL } from '@/server/orders';
 
 import { IDLE_ORDER_COMMAND_FORM } from './form-state';
 import { actingAccessToken } from '@/test/session-token';
+import { landing } from '@/test/landing';
 
 /**
  * The one server action behind every order command.
@@ -168,7 +169,14 @@ describe('what reaches the service', () => {
       { command: 'CONFIRM_RECEIPT', body: {} },
       expect.any(String),
     );
-    expect(redirect).toHaveBeenCalledWith('/orders/ORD_1?done=CONFIRM_RECEIPT');
+    expect(
+      landing(redirect.mock.calls[0]![0] as string, SESSION, 'ORD_1', ['CONFIRM_RECEIPT']),
+    ).toEqual({
+      path: '/orders/ORD_1',
+      query: {},
+      bound: true,
+      confirmed: 'CONFIRM_RECEIPT',
+    });
   });
 
   it('ignores an order id smuggled into the form — the bound one wins', async () => {

@@ -1,10 +1,15 @@
 import { canonicalQuantity, type PlaceOrderFormValues } from './place-order-fields';
 import {
+  freeOwnKey,
   keysUnder,
   legacyKey,
   locate,
+  mayStartFresh,
   ownedHere,
   purgeForeign,
+  quarantineOf,
+  reduceToQuarantine,
+  storedKeyOf,
   tenantKey,
   type AccountTags,
   type Binding,
@@ -32,6 +37,14 @@ export type { AccountTags, Binding };
  * a new order" action and by a successful order response; a definite refusal
  * does not drop it, because a refusal of a retry says nothing about the first
  * request (`place-order-actions.ts`).
+ *
+ * Nothing else removes one (PR 405 review 2, F1; `lib/unresolved-tenancy.ts`):
+ * a logout, another person's page and an expiry drop its content but leave a
+ * content-free marker in its place, and an entry this person cannot be shown
+ * — one from an organization their token no longer lists, another person's,
+ * one that does not read — stays as it is. Each of these holds every fresh
+ * order on this device until the person acknowledges the risk of a duplicate
+ * (`orderQuarantine`).
  *
  * Storage can be absent (private mode, a blocked cookie policy, a full quota).
  * Reads and removals swallow that. Saving does not: it reports whether the entry
@@ -144,25 +157,49 @@ function parse(raw: string): Stored | null {
   };
 }
 
+/** `parse` for `lib/unresolved-tenancy.ts`, which hands the key too. */
+const parseEntry = (raw: string): Stored | null => parse(raw);
+
+/** The entry under this page's own key, when it reads and is this page's. */
+function parseOwned(raw: string, binding: Binding): Stored | null {
+  const entry = parse(raw);
+  return entry !== null && entry.owner === binding.owner ? entry : null;
+}
+
+/** The quarantine of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
+export const orderQuarantine = quarantineOf(KEY_PREFIX, parseEntry);
+
 /**
- * Account boundary, logout: nothing of an unresolved order outlives the person
- * who signed out, whatever product it was for. (A session that merely *expires*
- * is not a logout: the same person's next login keeps theirs, below.)
+ * Account boundary, logout: nothing of an unresolved order's content outlives
+ * the person who signed out, whatever product it was for — but the fact that
+ * an order's outcome is unknown does: each readable entry is reduced to a
+ * content-free marker, which holds the next fresh order on this device until
+ * acknowledged. A record that does not read is left as it is. (A session that
+ * merely *expires* is not a logout: the same person's next login keeps theirs,
+ * below.)
  */
-export function purgeAllUnresolvedOrders(): void {
+export function purgeAllUnresolvedOrders(now: number = Date.now()): void {
   markAccountClosing();
   try {
     const store = storage();
     if (!store) return;
-    for (const key of keysUnder(store, KEY_PREFIX)) store.removeItem(key);
+    for (const key of keysUnder(store, KEY_PREFIX)) {
+      // An entry from before entries were kept per organization stays as it is: whose it
+      // is cannot be told here, and it is never written over (PR 405 review 2, F1).
+      if (storedKeyOf(KEY_PREFIX, key)?.kind !== 'TENANT') continue;
+      const raw = store.getItem(key);
+      if (raw !== null && parse(raw) !== null) {
+        reduceToQuarantine(store, KEY_PREFIX, key, now);
+      }
+    }
   } catch {
     // See above.
   }
 }
 
 /**
- * Account boundary, a page for this person: entries of anyone else — and
- * entries that cannot be read as anyone's — are removed. The same person keeps
+ * Account boundary, a page for this person: another person's entries are
+ * reduced to content-free markers; nothing is removed. The same person keeps
  * theirs, for every organization (`lib/unresolved-tenancy.ts`), and after a
  * re-login (view-only, `restoreUnresolvedOrder`).
  */
@@ -170,13 +207,17 @@ export function purgeForeignUnresolvedOrders(tags: AccountTags): void {
   try {
     const store = storage();
     if (!store) return;
-    purgeForeign(store, KEY_PREFIX, tags, parse);
+    purgeForeign(store, KEY_PREFIX, tags, parseEntry);
   } catch {
     // See above.
   }
 }
 
-/** True when the entry is stored. False: storage refused it, or a logout has started. */
+/**
+ * True when the entry is stored. False: storage refused it, a logout has
+ * started, or — for a fresh order — a quarantined record holds this kind for
+ * this person (`orderQuarantine`): then nothing may be sent.
+ */
 export function saveUnresolvedOrder(
   productId: string,
   order: Omit<UnresolvedOrder, 'savedAt'>,
@@ -185,6 +226,14 @@ export function saveUnresolvedOrder(
 ): boolean {
   if (accountClosing) return false;
   try {
+    const store = storage();
+    if (!store) return false;
+    const key = tenantKey(KEY_PREFIX, binding, productId);
+    const kept = store.getItem(key);
+    const same = kept !== null && parseOwned(kept, binding)?.submissionId === order.submissionId;
+    if (!same && !mayStartFresh(store, KEY_PREFIX, binding, parseEntry)) return false;
+    // Never written over: whatever else the key holds is moved aside first.
+    freeOwnKey(store, KEY_PREFIX, key, binding, parseEntry);
     const stored: Stored = {
       v: VERSION,
       submissionId: order.submissionId,
@@ -196,9 +245,7 @@ export function saveUnresolvedOrder(
       owner: binding.owner,
       session: binding.session,
     };
-    const store = storage();
-    if (!store) return false;
-    store.setItem(tenantKey(KEY_PREFIX, binding, productId), JSON.stringify(stored));
+    store.setItem(key, JSON.stringify(stored));
     return true;
   } catch {
     // Unavailable or full: the caller decides what that means.
@@ -209,13 +256,20 @@ export function saveUnresolvedOrder(
 /**
  * Drops this page's entry for the product: this organization's, and an entry
  * from before entries were kept per organization that the page showed in its
- * place. Another organization's stays.
+ * place — only when it is this person's. Another organization's stays, and so
+ * does anything that cannot be attributed (quarantined).
  */
 export function clearUnresolvedOrder(productId: string, binding: Binding): void {
   try {
     const store = storage();
-    store?.removeItem(tenantKey(KEY_PREFIX, binding, productId));
-    store?.removeItem(legacyKey(KEY_PREFIX, productId));
+    if (!store) return;
+    const own = tenantKey(KEY_PREFIX, binding, productId);
+    const ownRaw = store.getItem(own);
+    if (ownRaw !== null && parseOwned(ownRaw, binding) !== null) store.removeItem(own);
+    const old = legacyKey(KEY_PREFIX, productId);
+    const oldRaw = store.getItem(old);
+    const oldEntry = oldRaw === null ? null : parse(oldRaw);
+    if (oldEntry !== null && ownedHere(binding, true, oldEntry.owner)) store.removeItem(old);
   } catch {
     // See above.
   }
@@ -223,8 +277,10 @@ export function clearUnresolvedOrder(productId: string, binding: Binding): void 
 
 /**
  * The unresolved order for this product, if there is one this person may see
- * here, for this organization. An unreadable, aged-out or someone else's entry
- * is removed and reads as none; another organization's is not read at all.
+ * here, for this organization. Another organization's is not read at all. An
+ * entry that does not read, or is not this person's, reads as none and stays
+ * as it is (quarantined); an expired one of theirs reads as none and is
+ * reduced to a content-free marker — never removed outright.
  */
 export function restoreUnresolvedOrder(
   productId: string,
@@ -238,9 +294,9 @@ export function restoreUnresolvedOrder(
     if (!store || found === null) return null;
 
     const entry = parse(found.raw);
-    const aged = entry !== null && now - entry.savedAt > maxAgeSeconds * 1000;
-    if (!entry || aged || !ownedHere(binding, found.legacy, entry.owner)) {
-      store.removeItem(found.key);
+    if (!entry || !ownedHere(binding, found.legacy, entry.owner)) return null;
+    if (now - entry.savedAt > maxAgeSeconds * 1000) {
+      reduceToQuarantine(store, KEY_PREFIX, found.key, now);
       return null;
     }
 

@@ -30,6 +30,7 @@ import {
   type ReplayStamp,
   type RestoredReturn,
   type ReturnScope,
+  returnQuarantine,
 } from '@/lib/unresolved-return';
 
 import { submitReturnCommand, submitReturnRequest } from './return-actions';
@@ -39,6 +40,7 @@ import {
   type ReturnFormState,
   type UnconfirmedReturn,
 } from './return-form-state';
+import { QuarantineGate } from '@/app/UnresolvedQuarantine';
 
 /**
  * One return command this viewer may issue — asking to return goods of an
@@ -141,7 +143,21 @@ function pendingFrom(
   };
 }
 
-export function ReturnCommandForm({
+/**
+ * The form, held behind the device's quarantine of this kind
+ * (`app/UnresolvedQuarantine.tsx`): while an earlier request this person
+ * cannot be shown has an unknown outcome, the form is replaced by the fixed
+ * warning until they accept the duplicate risk.
+ */
+export function ReturnCommandForm(props: ReturnCommandFormProps) {
+  return (
+    <QuarantineGate source={returnQuarantine} account={props.binding}>
+      <ReturnCommandFormBody {...props} />
+    </QuarantineGate>
+  );
+}
+
+function ReturnCommandFormBody({
   scope,
   command,
   csrfToken,

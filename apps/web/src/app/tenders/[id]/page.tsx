@@ -81,6 +81,8 @@ import {
 } from './OwnerSections';
 import { OpenTenderDetailScreen, OwnBidSection, OwnTenderDetailScreen } from './TenderDetailScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The `/tenders/[id]` route — جزئیات مناقصه (docs/16 § ۱۶٫۶). Read-only.
@@ -116,14 +118,15 @@ export default async function TenderPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const query = await searchParams;
-  const requested = query.view;
   const session = await currentSession();
   if (!session) {
+    // No session to bind the query to: the way back is the tender's default view.
     redirect(
-      `/login?returnTo=${encodeURIComponent(safeReturnTo(tenderDetailPath(id, requested)))}`,
+      `/login?returnTo=${encodeURIComponent(safeReturnTo(tenderDetailPath(id, undefined)))}`,
     );
   }
+  const query = await pageParams(session, searchParams);
+  const requested = query.view;
 
   // Asked alongside the tender's own reads, and drawn above whichever body they make (Q-14): the
   // opened bids' prices, the winner's amount and the bid form's price are money on this page.
@@ -149,7 +152,7 @@ export default async function TenderPage({
       BID_COMMANDS,
     );
     const { offered, note } = bidCommandOffers(session, caller, id, result, own);
-    const pageHref = tenderDetailPath(id, 'open');
+    const pageHref = withContext(pageContext(session), tenderDetailPath(id, 'open'));
     // A tender behind the bidder's door, or a bid of this organization on one
     // that no longer is: otherwise the absence says all there is.
     const ownBid =
@@ -272,11 +275,14 @@ async function loadAuthority(
       decisions: [...forms.publication, ...forms.award],
     };
   });
-  const pageHref = tenderDetailPath(id, 'own');
+  const pageHref = withContext(pageContext(session), tenderDetailPath(id, 'own'));
   const at = (cursor: string | null) =>
     cursor === null
       ? pageHref
-      : `${pageHref}&${new URLSearchParams({ [INBOX_CURSOR_PARAM]: cursor })}`;
+      : withContext(
+          pageContext(session),
+          `${pageHref}&${new URLSearchParams({ [INBOX_CURSOR_PARAM]: cursor })}`,
+        );
   const { truncated, resumeFrom, failure } = steps.data;
   return {
     views,
@@ -314,7 +320,7 @@ function authorityStepViews(
         offered={decisions}
         csrfToken={session.csrfToken}
         account={account}
-        pageHref={tenderDetailPath(id, 'own')}
+        pageHref={withContext(pageContext(session), tenderDetailPath(id, 'own'))}
         showsRestored={firstShowsRestored && index === 0}
         pageSubmissionIds={pageSubmissionIds}
       />
@@ -404,7 +410,7 @@ function sessionRecovery(session: WebSession, tenderId: string): ReactNode {
         offered={[]}
         csrfToken={session.csrfToken}
         account={submissionBinding(session)}
-        pageHref={tenderDetailPath(tenderId, 'own')}
+        pageHref={withContext(pageContext(session), tenderDetailPath(tenderId, 'own'))}
         showsRestored
         pageSubmissionIds={[]}
       />
@@ -467,7 +473,7 @@ async function bidSideOnlyBody(
       offered={offered}
       csrfToken={session.csrfToken}
       account={submissionBinding(session)}
-      pageHref={tenderDetailPath(id, 'own')}
+      pageHref={withContext(pageContext(session), tenderDetailPath(id, 'own'))}
       showsRestored={showsRestored}
       pageSubmissionIds={pageSubmissionIds}
     />
@@ -573,7 +579,7 @@ async function ownerSections(
   const flash = query[FLASH_PARAM];
   const done = readFlash(session, typeof flash === 'string' ? flash : undefined, id, OWNER_DONE);
 
-  const pageHref = tenderDetailPath(id, 'own');
+  const pageHref = withContext(pageContext(session), tenderDetailPath(id, 'own'));
   const account = submissionBinding(session);
   const pageSubmissionIds = submissionIdsOf(forms);
   const group = (offered: typeof forms.publication, showsRestored: boolean) => (

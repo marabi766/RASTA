@@ -21,6 +21,14 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 import { MembersScreen } from './MembersScreen';
 import { OrganizationProfileForm } from './OrganizationProfileForm';
 import { actingOrganizationId, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
+import { FLASH_PARAM } from '@/lib/form-fields';
+import { readFlash } from '@/server/flash';
+import {
+  ORGANIZATION_FLASH_SUBJECT,
+  ORGANIZATION_NOTICES,
+  type OrganizationNotice,
+} from './notices';
 
 /**
  * The `/organizations` route — سازمان و اعضا (docs/16 § ۱۶٫۶, role
@@ -49,17 +57,15 @@ function one(value: string | string[] | undefined): string | undefined {
 }
 
 /**
- * What a successful write left behind.
- *
- * The action redirects and the form instance is gone, so the confirmation
- * lives in the query — which also means a person can link somebody to this
- * page without carrying a stale "saved" banner along, because they would have
- * to copy the flag deliberately.
+ * What a successful write left behind: the flash the action's redirect carries,
+ * signed for this session and organization (`server/flash.ts`) — a link
+ * somebody sends, or a URL drawn while the person acted for another
+ * organization, shows no banner.
  */
-function Confirmation({ saved, revoked }: { saved?: string; revoked?: string }) {
-  if (revoked) return <Alert tone="success">عضویت باطل شد.</Alert>;
-  if (saved === 'roles') return <Alert tone="success">نقش‌های عضو ذخیره شد.</Alert>;
-  if (saved === 'profile') return <Alert tone="success">مشخصات سازمان ذخیره شد.</Alert>;
+function Confirmation({ notice }: { notice: OrganizationNotice | undefined }) {
+  if (notice === 'revoked') return <Alert tone="success">عضویت باطل شد.</Alert>;
+  if (notice === 'roles') return <Alert tone="success">نقش‌های عضو ذخیره شد.</Alert>;
+  if (notice === 'profile') return <Alert tone="success">مشخصات سازمان ذخیره شد.</Alert>;
   return null;
 }
 
@@ -122,7 +128,7 @@ export default async function OrganizationsPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/organizations');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const query: MemberListQuery = {
     q: one(params.q),
     role: one(params.role),
@@ -162,7 +168,14 @@ export default async function OrganizationsPage({
         description="مشخصات این سازمان، اعضای آن، و نقشی که هر عضو در آن دارد."
       />
 
-      <Confirmation saved={one(params.saved)} revoked={one(params.revoked)} />
+      <Confirmation
+        notice={readFlash(
+          session,
+          one(params[FLASH_PARAM]),
+          ORGANIZATION_FLASH_SUBJECT,
+          ORGANIZATION_NOTICES,
+        )}
+      />
 
       {organizationId === null ? (
         <Alert tone="warning">
@@ -182,7 +195,7 @@ export default async function OrganizationsPage({
       <div className="mt-4">
         <MembersScreen
           result={members}
-          query={query}
+          query={{ ...query, context: pageContext(session) }}
           grantableRoles={grantableRoles}
           csrfToken={session.csrfToken}
           mintSubmissionId={() => mintSubmissionId(session)}

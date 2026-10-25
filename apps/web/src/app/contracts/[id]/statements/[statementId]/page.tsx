@@ -21,6 +21,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 import type { OfferedStatementCommand } from '../../StatementCommands';
 import { StatementDetailScreen } from './StatementDetailScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageParams } from '@/server/page-context';
 
 /**
  * The `/contracts/[id]/statements/[statementId]` route — one statement, its
@@ -56,7 +57,7 @@ export default async function StatementPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(href)}`);
 
-  const flash = (await searchParams)[FLASH_PARAM];
+  const flash = (await pageParams(session, searchParams))[FLASH_PARAM];
   const notice = readFlash(
     session,
     typeof flash === 'string' ? flash : undefined,

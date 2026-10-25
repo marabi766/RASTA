@@ -11,6 +11,8 @@ import {
   IDLE_UPDATE_ORGANIZATION_FORM,
 } from './form-state';
 import { actingAccessToken } from '@/test/session-token';
+import { landing } from '@/test/landing';
+import { ORGANIZATION_FLASH_SUBJECT, ORGANIZATION_NOTICES } from './notices';
 
 /**
  * The three `/organizations` write paths, from a posted form to a call.
@@ -222,7 +224,19 @@ describe('editing the organization profile', () => {
       { name: 'نام تازه', shortName: null, externalCode: null },
       expect.any(String),
     );
-    expect(redirect).toHaveBeenCalledWith('/organizations?saved=profile');
+    expect(
+      landing(
+        redirect.mock.calls[0]![0] as string,
+        SESSION,
+        ORGANIZATION_FLASH_SUBJECT,
+        ORGANIZATION_NOTICES,
+      ),
+    ).toEqual({
+      path: '/organizations',
+      query: {},
+      bound: true,
+      confirmed: 'profile',
+    });
   });
 
   it('does not call the service for a form it can already see is invalid', async () => {
@@ -336,7 +350,19 @@ describe('revoking a membership', () => {
       { membershipId: 'MBR_2', reason: 'پایان همکاری' },
       expect.any(String),
     );
-    expect(redirect).toHaveBeenCalledWith('/organizations?revoked=1');
+    expect(
+      landing(
+        redirect.mock.calls[0]![0] as string,
+        SESSION,
+        ORGANIZATION_FLASH_SUBJECT,
+        ORGANIZATION_NOTICES,
+      ),
+    ).toEqual({
+      path: '/organizations',
+      query: {},
+      bound: true,
+      confirmed: 'revoked',
+    });
   });
 
   it('will not revoke without a stated reason', async () => {

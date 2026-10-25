@@ -5,7 +5,11 @@ import { SUBMISSION_FIELD } from '@/lib/form-fields';
 import { webServerEnv } from './env';
 import { tokenPerson } from './realm-roles';
 import type { WebSession } from './session';
-import { actingOrganizationId, sessionOrganization } from './session-organization';
+import {
+  actingOrganizationId,
+  formerOrganizationCopy,
+  sessionOrganization,
+} from './session-organization';
 
 /**
  * A per-render reference for one form: minted when the form is rendered and
@@ -160,10 +164,14 @@ const BINDING_PURPOSE = 'rasta-web/unresolved-submission-binding/v1';
  *   never re-sent.
  * - `legacy`: the `owner` tags an entry written before entries were keyed per
  *   organization may carry for this person — one per organization the token
- *   lists them as a member of, and none. Such an entry cannot say which
+ *   lists them as a member of, none, and the copy an older cookie of this
+ *   login kept (`formerOrganizationCopy`). Such an entry cannot say which
  *   organization it was sent for (the tag was the login's organization, not
  *   necessarily the token's), so it is never retagged and never guessed: it is
- *   kept for this person and shown view-only, never re-sent.
+ *   kept for this person and shown view-only, never re-sent. One whose tag is
+ *   none of these — a membership that has ended since, another person — cannot
+ *   be told to be anyone's: quarantined on the device, never removed
+ *   (`lib/unresolved-tenancy.ts`; PR 405 review 2, F1).
  *
  * Keyed MACs of the session's own values: no tag reveals, nor can be used to
  * derive, the subject, an organization, the CSRF token or any token.
@@ -190,7 +198,16 @@ export function submissionBinding(session: WebSession): SubmissionBinding {
   const organizationId = actingOrganizationId(session);
   const owner = `${session.subject}\n${organizationId ?? ''}`;
   const memberships = tokenPerson(session.accessToken)?.memberships ?? [];
-  const legacy = [...new Set([null, organizationId, ...memberships].map(ownerOf))].sort();
+  // The copy an older cookie kept: the organization that build tagged this login's entries
+  // with, even after the membership has ended (PR 405 review 2, F1).
+  const former = formerOrganizationCopy(session);
+  const legacy = [
+    ...new Set(
+      [null, organizationId, ...memberships, ...(former === undefined ? [] : [former])].map(
+        ownerOf,
+      ),
+    ),
+  ].sort();
   return {
     person: tag(`person\n${session.subject}`),
     owner: ownerOf(organizationId),

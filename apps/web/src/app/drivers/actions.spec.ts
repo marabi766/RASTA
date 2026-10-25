@@ -148,7 +148,8 @@ describe('what reaches the service', () => {
     await expect(submitCreateDriver(IDLE_CREATE_DRIVER_FORM, formData(VALID))).rejects.toThrow(
       /NEXT_REDIRECT/,
     );
-    expect(redirect).toHaveBeenCalledWith('/drivers/DRV_1?created=1');
+    // No flag the page never read (PR 405 review 2, F2): the driver's own page.
+    expect(redirect).toHaveBeenCalledWith('/drivers/DRV_1');
   });
 
   it('sends one submission twice under one reference — the double-submit case', async () => {

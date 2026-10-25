@@ -17,6 +17,7 @@ import { BidCommands } from './[id]/BidCommands';
 import type { BidFormState } from './[id]/bid-form-state';
 import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
 import type { Binding } from '@/lib/unresolved-tenancy';
+import { QUARANTINE_TITLE } from '@/app/UnresolvedQuarantine';
 
 // Each test renders a form and may run jest-axe over it (#341): room to finish.
 jest.setTimeout(20_000);
@@ -262,7 +263,7 @@ describe('after a reload', () => {
     expect(stored()).toBeNull();
   });
 
-  it('another person’s page never shows it, and the account boundary removes it', () => {
+  it('another person’s page never shows it — it is warned instead — and the account boundary reduces it to a content-free marker', () => {
     saveUnresolvedBid(
       TENDER_ID,
       { command: 'SUBMIT', submissionId: KEY, correlationId: null },
@@ -271,19 +272,22 @@ describe('after a reload', () => {
     const { container, unmount } = renderCommands(
       bindingOf('owner-tag-B', 'session-tag-B', OTHER_PERSON),
     );
-    expect(container.querySelector(`input[value="${FRESH}"]`)).not.toBeNull();
+    // The device quarantine (PR 405 review 2, F1): no fresh form over an unknown outcome, nothing of it shown.
+    expect(container.querySelector(`input[value="${FRESH}"]`)).toBeNull();
+    expect(container.textContent).toContain(QUARANTINE_TITLE);
+    expect(container.textContent).not.toContain(KEY);
     unmount();
 
-    saveUnresolvedBid(
-      TENDER_ID,
-      { command: 'SUBMIT', submissionId: KEY, correlationId: null },
-      ACCOUNT,
-    );
     purgeForeignUnresolvedBids({ person: OTHER_PERSON, legacy: [] });
     expect(stored()).toBeNull();
+    const markers = Object.keys(window.sessionStorage).filter((key) =>
+      key.startsWith('rasta.unresolved-bid.!q.'),
+    );
+    expect(markers).toHaveLength(1);
+    expect(window.sessionStorage.getItem(markers[0]!)).not.toContain(KEY);
   });
 
-  it('an entry that is not one of ours — content in it included — is removed, never shown', () => {
+  it('an entry that is not one of ours — content in it included — is never shown, and kept as it is (quarantined)', () => {
     window.sessionStorage.setItem(
       STORE_KEY,
       JSON.stringify({
@@ -296,8 +300,9 @@ describe('after a reload', () => {
         priceMinor: '1',
       }),
     );
+    const raw = window.sessionStorage.getItem(STORE_KEY);
     expect(restoreUnresolvedBid(TENDER_ID, ACCOUNT)).toBeNull();
-    expect(stored()).toBeNull();
+    expect(window.sessionStorage.getItem(STORE_KEY)).toBe(raw);
   });
 });
 

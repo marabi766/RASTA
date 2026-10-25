@@ -8,6 +8,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { SettlementsScreen } from './SettlementsScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/settlements` route — تسویه‌ها (docs/16 § ۱۶٫۶), read-only.
@@ -32,7 +33,7 @@ export default async function SettlementsPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/settlements');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const view = one(params.view);
   const query: SettlementListQuery = {
     view: isSettlementView(view) ? view : 'PAID',
@@ -61,7 +62,7 @@ export default async function SettlementsPage({
         description="تسویه‌هایی که این سازمان پرداخت کرده یا دریافت کرده است؛ فقط خواندنی."
       />
       <div className="mt-4">
-        <SettlementsScreen result={result} query={query} />
+        <SettlementsScreen result={result} query={{ ...query, context: pageContext(session) }} />
       </div>
     </AppShell>
   );

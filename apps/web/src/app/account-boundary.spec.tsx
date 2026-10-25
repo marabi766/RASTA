@@ -3,8 +3,10 @@ import { fireEvent, render } from '@testing-library/react';
 import { AccountBoundary } from './AccountBoundary';
 
 /**
- * F3: an unresolved order (`lib/unresolved-order.ts`) does not outlive the person
- * who held it. Real storage, real DOM events; only the owner tag is handed in.
+ * F3: an unresolved order's content (`lib/unresolved-order.ts`) does not outlive
+ * the person who held it — and the fact that its outcome is unknown is never
+ * removed (PR 405 review 2, F1). Real storage, real DOM events; only the owner
+ * tag is handed in.
  */
 
 const PERSON_1 = 'owner-tag-1';
@@ -34,8 +36,29 @@ function entry(owner: string, productId: string, session = 'login-1') {
   );
 }
 
+/** An entry in today's format: keyed by its person and owner (`lib/unresolved-tenancy.ts`). */
+function tenantEntry(person: string, owner: string, productId: string) {
+  window.sessionStorage.setItem(
+    `rasta.unresolved-order.@${person}.${owner}.${productId}`,
+    JSON.stringify({
+      v: 1,
+      submissionId: 'sub_KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKE',
+      values: { offerId: 'OFR_SECRET', quantity: '3' },
+      correlationId: 'COR_ORIGINAL',
+      savedAt: Date.now(),
+      owner,
+      session: 'login-1',
+    }),
+  );
+}
+
 function keys(): string[] {
   return Object.keys(window.sessionStorage).sort();
+}
+
+/** The content-free markers an entry was reduced to (PR 405 review 2, F1). */
+function markers(): string[] {
+  return keys().filter((key) => key.startsWith('rasta.unresolved-order.!q.'));
 }
 
 beforeEach(() => window.sessionStorage.clear());
@@ -65,15 +88,25 @@ describe('logout purges every remembered order', () => {
     );
   }
 
-  it('removes the entries of all products, and nothing else in storage', () => {
-    entry(PERSON_1, 'PRD_1');
-    entry(PERSON_1, 'PRD_2');
+  it('reduces the entries of all products to content-free markers, and touches nothing else', () => {
+    tenantEntry('person-1', 'owner-1', 'PRD_1');
+    tenantEntry('person-1', 'owner-1', 'PRD_2');
+    entry(PERSON_1, 'PRD_3');
+    const old = window.sessionStorage.getItem('rasta.unresolved-order.PRD_3');
     window.sessionStorage.setItem('unrelated', 'kept');
     const { getByTestId } = logoutPage();
 
     fireEvent.submit(getByTestId('logout'));
 
-    expect(keys()).toEqual(['unrelated']);
+    // Nothing of what was ordered stays readable; that two outcomes are unknown does.
+    expect(markers()).toHaveLength(2);
+    for (const key of markers()) {
+      expect(window.sessionStorage.getItem(key)).not.toMatch(/OFR_SECRET|PRD_|owner-1|person-1/);
+    }
+    // An entry from before entries were kept per organization is never written over.
+    expect(window.sessionStorage.getItem('rasta.unresolved-order.PRD_3')).toBe(old);
+    expect(window.sessionStorage.getItem('unrelated')).toBe('kept');
+    expect(keys()).toHaveLength(4);
   });
 
   it('is not triggered by another form on the page', () => {
@@ -101,20 +134,30 @@ describe('logout purges every remembered order', () => {
 });
 
 describe('a page for another person purges what is not theirs', () => {
-  it('removes the previous person’s entries on the first load, keeps the same person’s', () => {
-    entry(PERSON_1, 'PRD_1');
+  it('reduces the previous person’s entries to content-free markers on the first load, keeps the same person’s', () => {
+    tenantEntry('person-1', 'owner-1', 'PRD_1');
+    tenantEntry('person-2', 'owner-2', 'PRD_4');
     entry(PERSON_2, 'PRD_2');
     entry(PERSON_2, 'PRD_3', 'login-0');
 
     render(<AccountBoundary account={ACCOUNT_2} />);
 
-    expect(keys()).toEqual(['rasta.unresolved-order.PRD_2', 'rasta.unresolved-order.PRD_3']);
+    expect(markers()).toHaveLength(1);
+    expect(keys().filter((key) => !markers().includes(key))).toEqual([
+      'rasta.unresolved-order.@person-2.owner-2.PRD_4',
+      'rasta.unresolved-order.PRD_2',
+      'rasta.unresolved-order.PRD_3',
+    ]);
+    expect(window.sessionStorage.getItem(markers()[0]!)).not.toMatch(/OFR_SECRET|PRD_1|person-1/);
   });
 
-  it('removes entries that cannot be read as anyone’s', () => {
+  it('keeps — never removes — what it cannot tell to be anyone’s: another person’s old entry, one that does not read', () => {
+    entry(PERSON_1, 'PRD_1');
+    const old = window.sessionStorage.getItem('rasta.unresolved-order.PRD_1');
     window.sessionStorage.setItem('rasta.unresolved-order.PRD_9', 'not json');
-    render(<AccountBoundary account={ACCOUNT_1} />);
-    expect(keys()).toEqual([]);
+    render(<AccountBoundary account={ACCOUNT_2} />);
+    expect(window.sessionStorage.getItem('rasta.unresolved-order.PRD_1')).toBe(old);
+    expect(window.sessionStorage.getItem('rasta.unresolved-order.PRD_9')).toBe('not json');
   });
 
   it('a page with no login (the sign-in page) removes nothing: the same person may sign back in', () => {

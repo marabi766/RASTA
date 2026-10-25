@@ -33,6 +33,7 @@ import { ReturnCommandForm } from './ReturnCommandForm';
 import { ReturnsScreen } from './ReturnsScreen';
 import type { ReturnFormState } from './return-form-state';
 import { bindingOf } from '@/test/unresolved-binding';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * The return screens in every state they can be in, each checked with axe:
@@ -85,7 +86,7 @@ describe('the list', () => {
     const { container } = render(
       <ReturnsScreen
         result={result as ReadResult<ReturnPage>}
-        query={{ side }}
+        query={{ context: TEST_CONTEXT, side }}
         actionable={new Set([REQUESTED.id])}
       />,
     );
@@ -97,7 +98,7 @@ describe('the list', () => {
     render(
       <ReturnsScreen
         result={page([REQUESTED])}
-        query={{ side: 'SUPPLIER' }}
+        query={{ context: TEST_CONTEXT, side: 'SUPPLIER' }}
         actionable={new Set([RETURN_ID])}
       />,
     );

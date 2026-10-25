@@ -18,6 +18,7 @@ import {
   type UnresolvedStore,
 } from './unresolved-request-store';
 import { MAX_CLOCK_SKEW_MS } from './unresolved-request-policy';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The retention of an unresolved write request: what it keeps, for whom, and what
@@ -98,11 +99,13 @@ let counter = 0;
 const uniq = `${process.pid}-${Date.now()}`;
 function login(overrides: Partial<WebSession> = {}): WebSession {
   counter += 1;
+  const organizationId =
+    overrides.organizationId !== undefined ? overrides.organizationId : `ORG_${uniq}_${counter}`;
   return {
     subject: `USR_${uniq}_${counter}`,
     username: 'owner',
-    organizationId: `ORG_${uniq}_${counter}`,
-    accessToken: 'access-token-value',
+    organizationId,
+    accessToken: actingAccessToken(organizationId),
     accessTokenExpiresAt: 2_000_000_000,
     refreshToken: 'refresh-token-value',
     csrfToken: `csrf-${counter}`,
@@ -1008,8 +1011,18 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
     it.each([
       ['another person', (s: WebSession) => ({ ...s, subject: `${s.subject}-2` })],
       ['a later login', (s: WebSession) => ({ ...s, csrfToken: 'a-later-login' })],
-      ['another organization', (s: WebSession) => ({ ...s, organizationId: 'ORG_OTHER' })],
-      ['no organization', (s: WebSession) => ({ ...s, organizationId: null })],
+      [
+        'another organization',
+        (s: WebSession) => ({
+          ...s,
+          organizationId: 'ORG_OTHER',
+          accessToken: actingAccessToken('ORG_OTHER'),
+        }),
+      ],
+      [
+        'no organization',
+        (s: WebSession) => ({ ...s, organizationId: null, accessToken: actingAccessToken(null) }),
+      ],
     ])('%s reads nothing, reserves its own, and cannot release it', async (_name, other) => {
       const s = login();
       const mine = await reserved(s);
@@ -1020,6 +1033,63 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
       const request = (await held(s)) as never;
       expect(await releaseUnresolved(o, SCOPE, releaseToken(s, SCOPE, request))).toBe('STALE');
       expect(await held(s)).toMatchObject({ key: 'sub_1' });
+    });
+
+    it('memberships change between save and read: A’s request is not B’s, and is still A’s', async () => {
+      const a = login();
+      const mine = await reserved(a);
+      await settleUnresolved(mine.attempt, 'UNRESOLVED');
+      // The same login, its token now acting for B only (A's membership ended).
+      const b = {
+        ...a,
+        organizationId: 'ORG_B_ONLY',
+        accessToken: actingAccessToken('ORG_B_ONLY'),
+      };
+      expect(await readUnresolved(b, SCOPE)).toEqual({ kind: 'NONE' });
+      // Nothing of A's was removed by it.
+      expect(await held(a)).toMatchObject({ key: 'sub_1' });
+    });
+
+    it('a record an older cookie keyed under its stale copy holds the scope, is never re-sent, and goes only by release (PR 405 r2 F1)', async () => {
+      // The build before task 100 kept the login's organization A as the copy while the
+      // token acted for B, and keyed this login's records under A.
+      const before = login();
+      const written = await reserved(before);
+      await settleUnresolved(written.attempt, 'UNRESOLVED');
+      // Brought into step: acting for B, the stale copy kept beside it; A no longer listed.
+      const after: WebSession = {
+        ...before,
+        organizationId: 'ORG_B_NOW',
+        accessToken: actingAccessToken('ORG_B_NOW'),
+        formerOrganizationId: before.organizationId,
+      };
+      const read = await readUnresolved(after, SCOPE);
+      expect(read).toMatchObject({ kind: 'PENDING', request: { key: 'sub_1', former: true } });
+      if (read.kind !== 'PENDING') throw new Error('held');
+      expect(mayResend(read.request, read.now)).toBe(false);
+      // Nothing is sent over it — not even the same key and body.
+      expect(await reserve(after, 'sub_1')).toMatchObject({
+        kind: 'HELD',
+        reason: 'RECONCILE_ONLY',
+      });
+      expect(await reserve(after, 'sub_2')).toMatchObject({
+        kind: 'HELD',
+        reason: 'RECONCILE_ONLY',
+      });
+      // The explicit release, fenced to that record, lets go of it — and only then.
+      expect(await releaseUnresolved(after, SCOPE, releaseToken(after, SCOPE, read.request))).toBe(
+        'RELEASED',
+      );
+      expect(await readUnresolved(after, SCOPE)).toEqual({ kind: 'NONE' });
+      expect(await reserve(after, 'sub_2')).toMatchObject({ kind: 'RESERVED' });
+    });
+
+    it('a session whose organization cannot be told reads and reserves nothing: it throws', async () => {
+      const s = login();
+      const untold = { ...s, accessToken: actingAccessToken(s.organizationId, []) };
+      await expect(readUnresolved(untold, SCOPE)).rejects.toThrow();
+      await expect(reserve(untold, 'sub_1')).rejects.toThrow();
+      expect(await purgeUnresolved(untold)).toBe(false);
     });
 
     it('is keyed by purpose and by target', async () => {

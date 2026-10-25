@@ -167,10 +167,12 @@ export async function renewSession(
   if (!isExpiring(session, now)) {
     if (inStep(session)) return { kind: 'VALID' };
     // Same tokens, the token's organization: no refresh is spent, so nothing
-    // can race this write.
+    // can race this write. The copy it replaces is kept, to recognise what was
+    // remembered under it (`formerOrganizationId`).
     const resealed: WebSession = {
       ...session,
       organizationId: storedOrganizationFor(session.accessToken),
+      formerOrganizationId: formerCopyOf(session),
     };
     return {
       kind: 'RENEWED',
@@ -213,6 +215,8 @@ export async function renewSession(
     // The new token's organization, never the login's: the person may have
     // switched organization since, and the token is what every service reads.
     organizationId: storedOrganizationFor(tokens.access_token),
+    // A copy that was out of step is kept, to recognise what was remembered under it.
+    ...(inStep(session) ? {} : { formerOrganizationId: formerCopyOf(session) }),
     // `issuedAt` is carried over untouched by the spread: a refresh extends
     // the access token, never the session.
   };
@@ -228,6 +232,17 @@ export async function renewSession(
 /** True when the session's stored organization is the one its token acts for. */
 function inStep(session: WebSession): boolean {
   return session.organizationId === storedOrganizationFor(session.accessToken);
+}
+
+/**
+ * The copy an out-of-step cookie is brought into step from: the first one
+ * only — a cookie is out of step only once, as sealed by the build before
+ * task 100, whose copy was the login's organization for its whole life.
+ */
+function formerCopyOf(session: WebSession): string | null {
+  return session.formerOrganizationId !== undefined
+    ? session.formerOrganizationId
+    : session.organizationId;
 }
 
 // ---------------------------------------------------------------------------

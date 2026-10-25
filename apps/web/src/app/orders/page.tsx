@@ -9,6 +9,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { OrdersScreen } from './OrdersScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/orders` route — سفارش‌ها (docs/16 § ۱۶٫۶, `PROCUREMENT_USER`,
@@ -46,7 +47,7 @@ export default async function OrdersPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/orders');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const query: OrderListQuery = {
     role: side(one(params.role)),
     status: one(params.status),
@@ -77,7 +78,11 @@ export default async function OrdersPage({
         description="سفارش‌هایی که این سازمان ثبت کرده یا به آن داده شده، و مرحله‌ای که هر کدام در آن است."
       />
       <div className="mt-4">
-        <OrdersScreen result={result} query={query} demoMode={demoMode} />
+        <OrdersScreen
+          result={result}
+          query={{ ...query, context: pageContext(session) }}
+          demoMode={demoMode}
+        />
       </div>
     </AppShell>
   );

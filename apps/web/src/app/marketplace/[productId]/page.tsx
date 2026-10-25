@@ -14,6 +14,7 @@ import {
   actingOrganizationLabel,
   actingScope,
 } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/marketplace/[productId]` route — مقایسه پیشنهادها (docs/16 §
@@ -46,7 +47,7 @@ export default async function ProductOffersPage({
     redirect(`/login?returnTo=${encodeURIComponent(`/marketplace/${productId}`)}`);
   }
 
-  const search = await searchParams;
+  const search = await pageParams(session, searchParams);
   const sort = sortOf(search.sort);
 
   const [product, offers] = await Promise.all([
@@ -79,6 +80,7 @@ export default async function ProductOffersPage({
       sidebar={<PortalSidebar session={session} currentHref="/marketplace" />}
     >
       <OffersScreen
+        context={pageContext(session)}
         product={product}
         offers={offers}
         productId={productId}

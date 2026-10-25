@@ -27,6 +27,7 @@ import {
   StartRepairForm,
 } from './RepairOrderForms';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageParams } from '@/server/page-context';
 
 /**
  * The `/maintenance/[id]` route (docs/16 § 16.6).
@@ -48,10 +49,10 @@ export default async function MaintenanceRequestPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const query = await searchParams;
 
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/maintenance/${id}`)}`);
+  const query = await pageParams(session, searchParams);
   // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.

@@ -14,6 +14,7 @@ import { RegisterSupplierForm } from './SupplierForms';
 import { SuppliersScreen } from './SuppliersScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 import { SupplierPendingNotices } from './UnresolvedSupplierNotice';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/suppliers` route — تامین‌کنندگان (docs/16 § ۱۶٫۶): the directory, and
@@ -42,7 +43,7 @@ export default async function SuppliersPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/suppliers');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const status = one(params.status);
   const capability = one(params.capability);
   // A value the service would not accept is dropped, not forwarded to earn a
@@ -82,7 +83,7 @@ export default async function SuppliersPage({
       <div className="mt-4">
         <SuppliersScreen
           result={result}
-          query={query}
+          query={{ ...query, context: pageContext(session) }}
           ownOrganizationId={actor?.organizationId ?? null}
           register={
             actor && canRegisterSupplier(actor) ? (

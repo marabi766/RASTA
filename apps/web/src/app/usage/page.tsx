@@ -10,6 +10,10 @@ import { mintSubmissionId } from '@/server/submission';
 
 import { UsageForm } from './UsageForm';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageParams } from '@/server/page-context';
+import { FLASH_PARAM } from '@/lib/form-fields';
+import { readFlash } from '@/server/flash';
+import { USAGE_CREATED } from '@/lib/usage-fields';
 
 /**
  * The `/usage` route — recording machine usage (docs/16 § ۱۶٫۶).
@@ -40,8 +44,14 @@ export default async function UsagePage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/usage');
 
-  const params = await searchParams;
-  const created = typeof params.created === 'string' ? params.created : null;
+  const params = await pageParams(session, searchParams);
+  // Shown only with the flash this session's own write earned for that record.
+  const named = typeof params.created === 'string' ? params.created : null;
+  const created =
+    named !== null &&
+    readFlash(session, params[FLASH_PARAM], named, [USAGE_CREATED]) === USAGE_CREATED
+      ? named
+      : null;
   const demoMode = await fetchDemoMode(session);
 
   return (

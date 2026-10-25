@@ -24,12 +24,16 @@ export const dynamic = 'force-dynamic';
 
 export function GET(request: Request): NextResponse {
   const env = webServerEnv();
+  const query = new URL(request.url).searchParams;
   const attempt = {
     state: newOpaqueValue(),
     nonce: newOpaqueValue(),
     ...newPkcePair(),
-    returnTo: safeReturnTo(new URL(request.url).searchParams.get('returnTo')),
+    returnTo: safeReturnTo(query.get('returnTo')),
   };
+  // Another account (the recovery page): the provider asks for credentials even
+  // over a live single sign-on session. Exactly `login`, or nothing is asked.
+  const prompt = query.get('prompt') === 'login' ? 'login' : undefined;
 
   const redirect = NextResponse.redirect(
     authorizationUrl({
@@ -39,6 +43,7 @@ export function GET(request: Request): NextResponse {
       state: attempt.state,
       nonce: attempt.nonce,
       challenge: attempt.challenge,
+      prompt,
     }),
   );
 

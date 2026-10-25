@@ -14,6 +14,7 @@ import {
 import { PlaceOrderForm, type PlaceOrderFormProps } from './PlaceOrderForm';
 import type { PlaceOrderFormState } from './place-order-form-state';
 import { OTHER_PERSON as OTHER_PERSON_TAG, bindingOf, keyFor } from '@/test/unresolved-binding';
+import { QUARANTINE_TITLE } from '@/app/UnresolvedQuarantine';
 
 /**
  * What survives a reload, the sort form's GET navigation, a call the gate
@@ -226,8 +227,11 @@ describe('the record is a precondition of sending, and logout is final (r6)', ()
 
     await act(async () => answer(UNCONFIRMED));
 
+    // Nothing of the order is stored again; only the content-free marker of its unknown outcome stays.
     expect(stored()).toBeNull();
-    expect(window.sessionStorage.length).toBe(0);
+    expect(Object.keys(window.sessionStorage)).toEqual([
+      expect.stringMatching(/^rasta\.unresolved-order\.!q\./),
+    ]);
   });
 });
 
@@ -362,37 +366,43 @@ describe('an unresolved order survives a navigation (F1)', () => {
     expect(submit).not.toHaveBeenCalled();
   });
 
-  it('another person’s entry is not shown, and the account boundary removes it', async () => {
+  it('another person’s entry is not shown — this person is warned instead — and the account boundary reduces it to a content-free marker', async () => {
     plant({}, OTHER_PERSON);
     const theirs = keyFor('rasta.unresolved-order.', OTHER_PERSON, 'PRD_1');
     const { container } = loadPage();
 
-    await waitFor(() =>
-      expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY),
-    );
+    // The device quarantine (PR 405 review 2, F1): no fresh order over an unknown outcome.
+    await waitFor(() => expect(screen.queryByText(QUARANTINE_TITLE)).not.toBeNull());
+    expect(container.querySelector('[name="submission"]')).toBeNull();
     expect(screen.queryByText(/ممکن است سفارش ثبت شده باشد/)).toBeNull();
     // `AccountBoundary` on this person's first page.
     purgeForeignUnresolvedOrders({ person: LOGIN_1.person, legacy: [] });
     expect(window.sessionStorage.getItem(theirs)).toBeNull();
+    expect(Object.keys(window.sessionStorage)).toEqual([
+      expect.stringMatching(/^rasta\.unresolved-order\.!q\./),
+    ]);
   });
 
-  it('an entry older than the session lifetime is discarded', async () => {
+  it('an entry older than the session lifetime is reduced to a marker that holds, never removed outright', async () => {
     plant({ savedAt: Date.now() - (SESSION_MAX_AGE + 5) * 1000 });
-    const { container } = loadPage();
+    loadPage();
 
     await waitFor(() => expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull());
-    expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY);
+    expect(Object.keys(window.sessionStorage)).toEqual([
+      expect.stringMatching(/^rasta\.unresolved-order\.!q\./),
+    ]);
   });
 
   it.each([
     ['not JSON', 'not json'],
     ['the wrong shape', JSON.stringify({ v: 1, submissionId: 'x' })],
     ['a submission id that is not one', JSON.stringify({ v: 1, submissionId: '<img src=x>' })],
-  ])('treats an entry that is %s as none', async (_name, raw) => {
+  ])('an entry that is %s is never shown, kept as it is, and holds', async (_name, raw) => {
     window.sessionStorage.setItem(STORAGE_KEY, raw);
     const { container } = loadPage();
-    await waitFor(() => expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull());
-    expect(container.querySelector('[name="submission"]')).toHaveValue(PAGE_KEY);
+    await waitFor(() => expect(screen.queryByText(QUARANTINE_TITLE)).not.toBeNull());
+    expect(window.sessionStorage.getItem(STORAGE_KEY)).toBe(raw);
+    expect(container.innerHTML).not.toContain('<img src=x>');
   });
 
   it('is kept per product', async () => {
@@ -754,10 +764,12 @@ describe('what is remembered is what was sent (F2)', () => {
     expect(stored()).not.toBeNull();
   });
 
-  it('a quantity the action could never have accepted is still dropped on restore', async () => {
+  it('a quantity the action could never have accepted is never restored — kept as it is, and holds', async () => {
     plant({ values: { offerId: 'OFR_1', quantity: '0' } });
+    const raw = window.sessionStorage.getItem(STORAGE_KEY);
     loadPage();
-    await waitFor(() => expect(stored()).toBeNull());
+    await waitFor(() => expect(screen.queryByText(QUARANTINE_TITLE)).not.toBeNull());
+    expect(window.sessionStorage.getItem(STORAGE_KEY)).toBe(raw);
   });
 });
 

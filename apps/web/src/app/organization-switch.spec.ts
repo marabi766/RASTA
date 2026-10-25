@@ -71,7 +71,7 @@ const B = 'ORG-DEH-0002';
 const ROLES = ['ORGANIZATION_ADMIN'];
 
 /** Every request a page made: path and bearer. */
-let asked: { path: string; authorization: string | null }[] = [];
+let asked: { path: string; authorization: string | null; search?: string }[] = [];
 let answer: (path: string) => { status: number; body?: unknown } = () => ({ status: 404 });
 const originalFetch = globalThis.fetch;
 
@@ -84,6 +84,7 @@ beforeEach(() => {
     asked.push({
       path: url.pathname,
       authorization: new Headers(init?.headers).get('authorization'),
+      ...(url.search ? { search: url.search } : {}),
     });
     const { status, body } = answer(url.pathname);
     return new Response(body === undefined ? '' : JSON.stringify(body), {
@@ -150,8 +151,11 @@ const propsOf = (tree: ReactElement, type: unknown): Record<string, unknown> => 
   return found[0]!.props as Record<string, unknown>;
 };
 
-const run = (path: string, params: Record<string, string> = {}) =>
-  page(path)({ params: Promise.resolve(params), searchParams: Promise.resolve({}) });
+const run = (
+  path: string,
+  params: Record<string, string> = {},
+  searchParams: Record<string, string> = {},
+) => page(path)({ params: Promise.resolve(params), searchParams: Promise.resolve(searchParams) });
 
 const offer = (id: string, supplier: string) => ({
   id,
@@ -233,8 +237,9 @@ it('the organizations page reads B’s profile and B’s members, both with B’
   answer = () => ({ status: 503 });
   await run('./organizations/page');
   const bearer = `Bearer ${inB.accessToken}`;
-  expect(asked).toContainEqual({ path: `/v1/organizations/${B}`, authorization: bearer });
-  expect(asked).toContainEqual({ path: '/v1/users', authorization: bearer });
+  const made = asked.map(({ path, authorization }) => ({ path, authorization }));
+  expect(made).toContainEqual({ path: `/v1/organizations/${B}`, authorization: bearer });
+  expect(made).toContainEqual({ path: '/v1/users', authorization: bearer });
   expect(asked.map(({ path }) => path)).not.toContain(`/v1/organizations/${A}`);
   expect(asked.every(({ authorization }) => authorization === bearer)).toBe(true);
 });
@@ -252,4 +257,127 @@ it('remembered submissions are tagged per organization: the same person, another
   expect(b.person).toBe(a.person);
   expect(b.owner).not.toBe(a.owner);
   expect(b.session).not.toBe(a.session);
+});
+
+/**
+ * PR 405 review 2, F2: what a URL drawn for A carries — a cursor, a filter, a
+ * confirmation — is A's. Reloaded after the refresh into B it must be reset
+ * before any read, never applied to B's.
+ */
+describe('a URL drawn for A, reloaded in B', () => {
+  /* eslint-disable @typescript-eslint/no-require-imports */
+  const { mintFlash, readFlash } = require('@/server/flash') as typeof import('@/server/flash');
+  const { signPayload, verifyPayload } =
+    require('@/server/signed-payload') as typeof import('@/server/signed-payload');
+  /* eslint-enable @typescript-eslint/no-require-imports */
+  const { z } = jest.requireActual('zod') as typeof import('zod');
+
+  it('A’s drivers cursor does not filter B’s list', async () => {
+    answer = (path) =>
+      path === '/v1/drivers'
+        ? { status: 200, body: { items: [], nextCursor: null } }
+        : { status: 503 };
+    await run('./drivers/page', {}, { cursor: 'DRV_ZZZZ_OF_A' });
+    const read = asked.filter(({ path }) => path === '/v1/drivers');
+    expect(read.length).toBeGreaterThan(0);
+    for (const { search } of read) expect(search ?? '').not.toContain('DRV_ZZZZ_OF_A');
+  });
+
+  it('A’s chosen warehouse is not read for B', async () => {
+    answer = () => ({ status: 503 });
+    await run('./inventory/page', {}, { warehouse: 'WHS_01J0000000000000000000000A' });
+    expect(JSON.stringify(asked)).not.toContain('WHS_01J0000000000000000000000A');
+  });
+
+  it('A’s confirmation is not B’s: a flash minted for A does not read in B', () => {
+    const token = mintFlash(inA, 'TND_1', 'SUBMIT');
+    expect(readFlash(inA, token, 'TND_1', ['SUBMIT'])).toBe('SUBMIT');
+    expect(readFlash(inB, token, 'TND_1', ['SUBMIT'])).toBeUndefined();
+  });
+
+  it('no signed payload of A’s verifies in B, whatever its purpose', () => {
+    const schema = z.object({ id: z.string() });
+    const token = signPayload(inA, 'baseline', { id: 'X' }, 600);
+    expect(verifyPayload(inA, 'baseline', token, schema)).toEqual({ id: 'X' });
+    expect(verifyPayload(inB, 'baseline', token, schema)).toBeNull();
+  });
+
+  it('an order’s confirmation is only the flash this session earned for it — never a typed flag, never A’s', async () => {
+    /* eslint-disable @typescript-eslint/no-require-imports */
+    const { OrderDetailScreen } =
+      require('./orders/[id]/OrderDetailScreen') as typeof import('./orders/[id]/OrderDetailScreen');
+    const { boundQuery } = require('@/test/page-context') as typeof import('@/test/page-context');
+    /* eslint-enable @typescript-eslint/no-require-imports */
+    answer = () => ({ status: 503 });
+    const shown = async (query: Record<string, string>) => {
+      const props = propsOf(
+        await run(
+          './orders/[id]/page',
+          { id: 'ORD_1' },
+          boundQuery(inB, query) as Record<string, string>,
+        ),
+        OrderDetailScreen,
+      );
+      return { placed: props.placed, done: props.done };
+    };
+    // Typed, with B's own valid tag: nothing.
+    expect(await shown({ placed: '1', done: 'CONFIRM_RECEIPT' })).toEqual({
+      placed: false,
+      done: undefined,
+    });
+    // A's flash for this very order: nothing in B.
+    expect(await shown({ flash: mintFlash(inA, 'ORD_1', 'PLACED') })).toEqual({
+      placed: false,
+      done: undefined,
+    });
+    // B's own: shown.
+    expect(await shown({ flash: mintFlash(inB, 'ORD_1', 'PLACED') })).toEqual({
+      placed: true,
+      done: undefined,
+    });
+    expect(await shown({ flash: mintFlash(inB, 'ORD_1', 'CONFIRM_RECEIPT') })).toEqual({
+      placed: false,
+      done: 'CONFIRM_RECEIPT',
+    });
+  });
+
+  it('a recorded usage is confirmed only with the flash its write earned', async () => {
+    /* eslint-disable-next-line @typescript-eslint/no-require-imports */
+    const { boundQuery } = require('@/test/page-context') as typeof import('@/test/page-context');
+    answer = () => ({ status: 503 });
+    const { renderToStaticMarkup } = jest.requireActual(
+      'react-dom/server',
+    ) as typeof import('react-dom/server');
+    const html = async (query: Record<string, string>) =>
+      renderToStaticMarkup(
+        await run('./usage/page', {}, boundQuery(inB, query) as Record<string, string>),
+      );
+    expect(await html({ created: 'USG_1' })).not.toContain('USG_1');
+    expect(
+      await html({ created: 'USG_1', flash: mintFlash(inA, 'USG_1', 'created') }),
+    ).not.toContain('USG_1');
+    expect(await html({ created: 'USG_1', flash: mintFlash(inB, 'USG_1', 'created') })).toContain(
+      'USG_1',
+    );
+  });
+
+  it('an unsigned confirmation typed into B’s organizations page is not shown', async () => {
+    answer = () => ({ status: 503 });
+    const { renderToStaticMarkup } = jest.requireActual(
+      'react-dom/server',
+    ) as typeof import('react-dom/server');
+    /* eslint-disable-next-line @typescript-eslint/no-require-imports */
+    const { boundQuery } = require('@/test/page-context') as typeof import('@/test/page-context');
+    // Even bound to B's own organization, a typed flag is no confirmation.
+    for (const query of [
+      { saved: 'profile' },
+      boundQuery(inB, { saved: 'profile', revoked: '1' }),
+    ]) {
+      const html = renderToStaticMarkup(
+        await run('./organizations/page', {}, query as Record<string, string>),
+      );
+      expect(html).not.toContain('مشخصات سازمان ذخیره شد');
+      expect(html).not.toContain('عضویت باطل شد');
+    }
+  });
 });

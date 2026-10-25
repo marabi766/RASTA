@@ -38,9 +38,11 @@ export type { ReplayStamp, SaveOutcome };
  * A tender's submit, replace and withdraw forms share one slot: a new
  * submission never replaces another's record (saving it is refused, `HELD`,
  * and the form is not sent), and a record is cleared only by the submission it
- * belongs to. Another person's page drops every entry of anyone else
- * (`purgeForeignUnresolvedBids`); a logout writes nothing more and leaves the
- * markers, which hold nothing of the bid.
+ * belongs to. Another person's page reduces every entry of anyone else to a
+ * content-free marker (`purgeForeignUnresolvedBids`); a logout writes nothing
+ * more and leaves the markers, which hold nothing of the bid. A record that
+ * cannot be attributed holds every fresh bid command on this device until
+ * acknowledged (`bidQuarantine`, `lib/unresolved-tenancy.ts`).
  */
 
 /** A fresh submission id for one bid form, with its signed replay deadline. */
@@ -60,10 +62,10 @@ export const subscribeUnresolvedBids = (listener: () => void): (() => void) =>
 
 export const markBidsOpen = (): void => store.markOpen();
 
-/** Logout: nothing is saved from here on; unreadable entries are removed, markers stay. */
+/** Logout: nothing is saved from here on; every record stays. */
 export const purgeAllUnresolvedBids = (): void => store.purgeAll();
 
-/** A page for this person: entries of anyone else, and unreadable ones, are removed; theirs stay, for every organization. */
+/** A page for this person: entries of anyone else are reduced to content-free markers; nothing is removed. */
 export const purgeForeignUnresolvedBids = (tags: AccountTags): void => store.purgeForeign(tags);
 
 export const saveUnresolvedBid = (
@@ -83,3 +85,6 @@ export const clearUnresolvedBid = (
 /** The unresolved bid command on this tender, if this person has one; anything else is removed. */
 export const restoreUnresolvedBid = (tenderId: string, binding: Binding): UnresolvedBid | null =>
   store.restore(tenderId, binding);
+
+/** What holds a fresh command of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
+export const bidQuarantine = store.quarantine;

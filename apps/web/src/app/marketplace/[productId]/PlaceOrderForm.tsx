@@ -19,6 +19,7 @@ import {
   type Binding,
   type RestoredOrder,
   type UnresolvedOrder,
+  orderQuarantine,
 } from '@/lib/unresolved-order';
 import type { Offer } from '@/server/marketplace';
 import {
@@ -35,6 +36,7 @@ import {
   type PlaceOrderFormState,
   type UnconfirmedPlaceOrder,
 } from './place-order-form-state';
+import { QuarantineGate } from '@/app/UnresolvedQuarantine';
 
 /**
  * Placing an order for one offer.
@@ -70,13 +72,27 @@ export interface PlaceOrderFormProps {
 }
 
 /**
+ * The form, held behind the device's quarantine of this kind
+ * (`app/UnresolvedQuarantine.tsx`): while an earlier request this person
+ * cannot be shown has an unknown outcome, the form is replaced by the fixed
+ * warning until they accept the duplicate risk.
+ */
+export function PlaceOrderForm(props: PlaceOrderFormProps) {
+  return (
+    <QuarantineGate source={orderQuarantine} account={props.binding}>
+      <PlaceOrderFormBody {...props} />
+    </QuarantineGate>
+  );
+}
+
+/**
  * Remembers an unresolved order across a reload (F1): the form that mounts
  * looks for one in `sessionStorage` and, if there is one for this person, draws
  * the uncertainty view with its original key. The first paint is the server's
  * (blank), so hydration agrees; the remembered order replaces it right after
  * mount, by remounting the form with that order as its starting state.
  */
-export function PlaceOrderForm(props: PlaceOrderFormProps) {
+function PlaceOrderFormBody(props: PlaceOrderFormProps) {
   const { productId, binding, sessionMaxAgeSeconds } = props;
   const [restored, setRestored] = useState<RestoredOrder | null>(null);
 

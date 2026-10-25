@@ -41,6 +41,7 @@ import {
 } from './ProjectCommands';
 import { ProjectDetailScreen } from './ProjectDetailScreen';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageParams } from '@/server/page-context';
 
 /**
  * The `/projects/[id]` route — جزئیات پروژه (docs/16 § ۱۶٫۶).
@@ -129,9 +130,9 @@ export default async function ProjectPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const query = await searchParams;
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/projects/${id}`)}`);
+  const query = await pageParams(session, searchParams);
 
   const [result, approvals, demoMode] = await Promise.all([
     fetchProject(session, id),

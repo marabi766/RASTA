@@ -32,6 +32,7 @@ import {
   type ContractScope,
   type ReplayStamp,
   type RestoredContractCommand,
+  contractCommandQuarantine,
 } from '@/lib/unresolved-contract-command';
 import type { Binding } from '@/lib/unresolved-order';
 
@@ -42,6 +43,7 @@ import {
   type ContractFormState,
   type UnconfirmedContractCommand,
 } from './contract-form-state';
+import { QuarantineGate } from '@/app/UnresolvedQuarantine';
 
 /**
  * One contract command this viewer may issue — signing or cancelling the
@@ -154,7 +156,21 @@ function titleOf(
   return parts.join(' — ');
 }
 
-export function ContractCommandForm({
+/**
+ * The form, held behind the device's quarantine of this kind
+ * (`app/UnresolvedQuarantine.tsx`): while an earlier request this person
+ * cannot be shown has an unknown outcome, the form is replaced by the fixed
+ * warning until they accept the duplicate risk.
+ */
+export function ContractCommandForm(props: ContractCommandFormProps) {
+  return (
+    <QuarantineGate source={contractCommandQuarantine} account={props.binding}>
+      <ContractCommandFormBody {...props} />
+    </QuarantineGate>
+  );
+}
+
+function ContractCommandFormBody({
   scope,
   command,
   side = null,

@@ -13,6 +13,8 @@ import { driverStatusLabel, driverStatusOptions } from '@/lib/labels';
 import { formatJalaliDateLong, withoutBidiControls } from '@/lib/format';
 import type { DriverListQuery, DriverPage, ReadResult } from '@/server/drivers';
 import type { RosterPerson } from '@/server/driver-roster';
+import { withContext, type InContext } from '@/lib/page-context';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * The driver list (docs/16 § 16.6, `/drivers`).
@@ -28,7 +30,7 @@ import type { RosterPerson } from '@/server/driver-roster';
 
 export interface DriversScreenProps {
   readonly result: ReadResult<DriverPage>;
-  readonly query: DriverListQuery;
+  readonly query: InContext<DriverListQuery>;
   /**
    * Every member of this organization by user id, when this person may list
    * the members and the whole list was read (`server/driver-roster.ts`);
@@ -40,14 +42,14 @@ export interface DriversScreenProps {
 }
 
 /** Rebuilds this screen's URL with one value changed. */
-function hrefWith(query: DriverListQuery, changes: Partial<DriverListQuery>): string {
+function hrefWith(query: InContext<DriverListQuery>, changes: Partial<DriverListQuery>): string {
   const params = new URLSearchParams();
   const merged = { ...query, ...changes };
   if (merged.status) params.set('status', merged.status);
   if (merged.q) params.set('q', merged.q);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const search = params.toString();
-  return search ? `/drivers?${search}` : '/drivers';
+  return withContext(query.context, search ? `/drivers?${search}` : '/drivers');
 }
 
 const CONTROL =
@@ -55,7 +57,7 @@ const CONTROL =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ' +
   'focus-visible:outline-focus';
 
-function Filters({ query }: { query: DriverListQuery }) {
+function Filters({ query }: { query: InContext<DriverListQuery> }) {
   return (
     <form
       method="get"
@@ -63,6 +65,7 @@ function Filters({ query }: { query: DriverListQuery }) {
       className="flex flex-wrap items-end gap-4"
       aria-label="پالایش فهرست"
     >
+      <ContextField context={query.context} />
       <label htmlFor="filter-status" className="flex flex-col gap-1 text-sm text-content-muted">
         وضعیت
         <select
@@ -121,7 +124,7 @@ function DriverRows({
   names,
 }: {
   page: DriverPage;
-  query: DriverListQuery;
+  query: InContext<DriverListQuery>;
   names: ReadonlyMap<string, RosterPerson> | null;
 }) {
   return (

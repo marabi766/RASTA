@@ -1,6 +1,7 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
 
 import { installLiveSession } from './live-session';
+import { withContext } from '../src/lib/page-context';
 
 /**
  * `/maintenance` in a real browser.
@@ -201,10 +202,13 @@ test.describe('reporting maintenance through the live stack', () => {
   test.describe.configure({ mode: 'serial' });
 
   let accessToken = '';
+  /** The tag this session's URLs carry (`src/server/page-context.ts`). */
+  let pageTag = '';
 
   test.beforeEach(async ({ context, request }) => {
     const session = await installLiveSession(context, 'orgAdmin');
     accessToken = session.accessToken;
+    pageTag = session.context;
     await assertMachineIsOurs(request, accessToken);
   });
 
@@ -219,7 +223,7 @@ test.describe('reporting maintenance through the live stack', () => {
   }) => {
     test.setTimeout(60_000);
 
-    await page.goto(`/maintenance?assetId=${MACHINE}#report-request`);
+    await page.goto(withContext(pageTag, `/maintenance?assetId=${MACHINE}#report-request`));
     const form = page.locator('form').filter({
       has: page.getByRole('button', { name: 'ثبت درخواست' }),
     });
@@ -258,7 +262,7 @@ test.describe('reporting maintenance through the live stack', () => {
     // The service's own rule, not the portal's: a second open breakdown on the
     // same machine. The refusal comes back through the gateway and lands in the
     // form in Persian, and nothing new is created.
-    await page.goto(`/maintenance?assetId=${MACHINE}#report-request`);
+    await page.goto(withContext(pageTag, `/maintenance?assetId=${MACHINE}#report-request`));
     const again = page.locator('form').filter({
       has: page.getByRole('button', { name: 'ثبت درخواست' }),
     });
@@ -614,7 +618,7 @@ test.describe('reporting maintenance through the live stack', () => {
     page,
     request,
   }) => {
-    await page.goto(`/maintenance?assetId=${MACHINE}#report-request`);
+    await page.goto(withContext(pageTag, `/maintenance?assetId=${MACHINE}#report-request`));
     const form = page.locator('form').filter({
       has: page.getByRole('button', { name: 'ثبت درخواست' }),
     });

@@ -26,6 +26,7 @@ import {
   saveUnresolvedBid,
   type ReplayStamp,
   type UnresolvedBid,
+  bidQuarantine,
 } from '@/lib/unresolved-bid';
 
 import { submitBidCommand } from './bid-actions';
@@ -36,6 +37,7 @@ import {
   type UnconfirmedBid,
 } from './bid-form-state';
 import type { Binding } from '@/lib/unresolved-tenancy';
+import { QuarantineGate } from '@/app/UnresolvedQuarantine';
 
 /**
  * One bid command this contractor may issue on a tender — submitting the
@@ -115,7 +117,21 @@ function sendable(form: FormData, command: BidCommand): BidFormValues | 'WITHDRA
   return parseBid(values).ok ? values : null;
 }
 
-export function BidCommandForm({
+/**
+ * The form, held behind the device's quarantine of this kind
+ * (`app/UnresolvedQuarantine.tsx`): while an earlier request this person
+ * cannot be shown has an unknown outcome, the form is replaced by the fixed
+ * warning until they accept the duplicate risk.
+ */
+export function BidCommandForm(props: BidCommandFormProps) {
+  return (
+    <QuarantineGate source={bidQuarantine} account={props.account}>
+      <BidCommandFormBody {...props} />
+    </QuarantineGate>
+  );
+}
+
+function BidCommandFormBody({
   tenderId,
   command,
   criteria,

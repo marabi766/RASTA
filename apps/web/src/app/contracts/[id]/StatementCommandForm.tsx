@@ -25,6 +25,7 @@ import {
   type ReplayStamp,
   type RestoredStatement,
   type StatementScope,
+  statementQuarantine,
 } from '@/lib/unresolved-statement';
 import type { Binding } from '@/lib/unresolved-order';
 
@@ -35,6 +36,7 @@ import {
   type StatementFormState,
   type UnconfirmedStatement,
 } from './statement-form-state';
+import { QuarantineGate } from '@/app/UnresolvedQuarantine';
 
 /**
  * One statement command this viewer may issue — drafting a statement of the
@@ -144,7 +146,21 @@ function rowCount(rows: readonly StatementLineValues[]): number {
   return Math.min(FORM_LINE_ROWS, Math.max(FIRST_ROWS, last + 1));
 }
 
-export function StatementCommandForm({
+/**
+ * The form, held behind the device's quarantine of this kind
+ * (`app/UnresolvedQuarantine.tsx`): while an earlier request this person
+ * cannot be shown has an unknown outcome, the form is replaced by the fixed
+ * warning until they accept the duplicate risk.
+ */
+export function StatementCommandForm(props: StatementCommandFormProps) {
+  return (
+    <QuarantineGate source={statementQuarantine} account={props.binding}>
+      <StatementCommandFormBody {...props} />
+    </QuarantineGate>
+  );
+}
+
+function StatementCommandFormBody({
   scope,
   command,
   csrfToken,

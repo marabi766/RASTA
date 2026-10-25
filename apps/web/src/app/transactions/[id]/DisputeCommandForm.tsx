@@ -11,6 +11,7 @@ import {
   saveUnresolvedDispute,
   type ReplayStamp,
   type RestoredDispute,
+  disputeQuarantine,
 } from '@/lib/unresolved-dispute';
 import type { Binding } from '@/lib/unresolved-order';
 import {
@@ -33,6 +34,7 @@ import {
   type DisputeFormState,
   type UnconfirmedDispute,
 } from './form-state';
+import { QuarantineGate } from '@/app/UnresolvedQuarantine';
 
 /**
  * One dispute command the current viewer may issue on this transaction.
@@ -128,7 +130,21 @@ function pendingFrom(
   };
 }
 
-export function DisputeCommandForm({
+/**
+ * The form, held behind the device's quarantine of this kind
+ * (`app/UnresolvedQuarantine.tsx`): while an earlier request this person
+ * cannot be shown has an unknown outcome, the form is replaced by the fixed
+ * warning until they accept the duplicate risk.
+ */
+export function DisputeCommandForm(props: DisputeCommandFormProps) {
+  return (
+    <QuarantineGate source={disputeQuarantine} account={props.binding}>
+      <DisputeCommandFormBody {...props} />
+    </QuarantineGate>
+  );
+}
+
+function DisputeCommandFormBody({
   transactionId,
   command,
   csrfToken,

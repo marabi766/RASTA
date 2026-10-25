@@ -61,3 +61,6 @@ export const restoreUnresolvedOwnerCommand = (
   tenderId: string,
   binding: Binding,
 ): UnresolvedOwnerCommand | null => store.restore(tenderId, binding);
+
+/** What holds a fresh command of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
+export const ownerCommandQuarantine = store.quarantine;

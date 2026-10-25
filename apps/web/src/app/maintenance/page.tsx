@@ -9,6 +9,7 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 import { MaintenanceScreen } from './MaintenanceScreen';
 import { ReportRequestForm } from './ReportRequestForm';
 import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/maintenance` route (docs/16 § 16.6).
@@ -38,7 +39,7 @@ export default async function MaintenancePage({
   // token until it is refreshed.
   const roles = tokenWriteRoles(session.accessToken);
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const query: MaintenanceRequestListQuery = {
     status: one(params.status),
     type: one(params.type),
@@ -70,7 +71,7 @@ export default async function MaintenancePage({
     >
       <MaintenanceScreen
         result={result}
-        query={query}
+        query={{ ...query, context: pageContext(session) }}
         reportForm={
           canReport ? (
             <ReportRequestForm

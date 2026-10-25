@@ -43,6 +43,7 @@ import {
   saveUnresolvedOwnerCommand,
   type ReplayStamp,
   type UnresolvedOwnerCommand,
+  ownerCommandQuarantine,
 } from '@/lib/unresolved-tender-command';
 
 import { submitOwnerCommand } from './owner-actions';
@@ -53,6 +54,7 @@ import {
   type UnconfirmedOwnerCommand,
 } from './owner-form-state';
 import type { Binding } from '@/lib/unresolved-tenancy';
+import { QuarantineGate } from '@/app/UnresolvedQuarantine';
 
 /**
  * One command the owner's side may issue on a tender — publish, decide a
@@ -131,7 +133,21 @@ export function ownerLabel(command: OwnerCommand, execute = false): string {
 
 const idPart = (value: string): string => value.replace(/[^A-Za-z0-9_-]/g, '_');
 
-export function OwnerCommandForm({
+/**
+ * The form, held behind the device's quarantine of this kind
+ * (`app/UnresolvedQuarantine.tsx`): while an earlier request this person
+ * cannot be shown has an unknown outcome, the form is replaced by the fixed
+ * warning until they accept the duplicate risk.
+ */
+export function OwnerCommandForm(props: OwnerCommandFormProps) {
+  return (
+    <QuarantineGate source={ownerCommandQuarantine} account={props.account}>
+      <OwnerCommandFormBody {...props} />
+    </QuarantineGate>
+  );
+}
+
+function OwnerCommandFormBody({
   tenderId,
   command,
   execute = false,

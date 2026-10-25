@@ -24,6 +24,8 @@ import {
 } from './SupplierForms';
 import { SuppliersScreen } from './SuppliersScreen';
 import type { SupplierFormState } from './supplier-form-state';
+import { storedOrganizationFor } from '@/server/session-organization';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * The supplier write screens with the real `useActionState`: only the server
@@ -369,7 +371,8 @@ function tokenFor(organizationId: string | null, roles: string[], memberships?: 
 const sessionFor = (token: string): WebSession => ({
   subject: 'user-1',
   username: 'u',
-  organizationId: 'ORG-X',
+  // The copy every stored session carries: the token's own organization.
+  organizationId: storedOrganizationFor(token),
   accessToken: token,
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
@@ -738,7 +741,13 @@ describe('the directory page', () => {
   };
 
   it('marks the row of the organization the session acts for — the API has no “my supplier”', () => {
-    render(<SuppliersScreen result={PAGE} query={{}} ownOrganizationId={SUPPLIER_ORG} />);
+    render(
+      <SuppliersScreen
+        result={PAGE}
+        query={{ context: TEST_CONTEXT }}
+        ownOrganizationId={SUPPLIER_ORG}
+      />,
+    );
     expect(screen.getAllByText('سازمان شما')).toHaveLength(1);
     expect(screen.getByText('سازمان شما').closest('li')).toHaveTextContent('تعمیرگاه ما');
   });
@@ -747,7 +756,7 @@ describe('the directory page', () => {
     const { container } = render(
       <SuppliersScreen
         result={PAGE}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
         register={<RegisterSupplierForm csrfToken={CSRF} submissionId={SUBMISSION} />}
       />,
     );
@@ -758,7 +767,7 @@ describe('the directory page', () => {
   });
 
   it('draws no registration and no mark by default', () => {
-    render(<SuppliersScreen result={PAGE} query={{}} />);
+    render(<SuppliersScreen result={PAGE} query={{ context: TEST_CONTEXT }} />);
     expect(screen.queryByText('سازمان شما')).toBeNull();
     expect(screen.queryByRole('heading', { name: /ثبت پرونده/ })).toBeNull();
   });

@@ -8,6 +8,8 @@ import type { DriverPicker } from '@/lib/driver-fields';
 import { NOT_A_MEMBER_TEXT, type DriverPage, type ReadResult } from '@/server/drivers';
 import type { RosterPerson } from '@/server/driver-roster';
 import type { CreateDriverFormState } from './form-state';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The `/drivers` list, in every state the server can put it in, and the
@@ -32,19 +34,26 @@ const page = (overrides: Partial<DriverPage> = {}): ReadResult<DriverPage> => ({
 
 describe('the driver list', () => {
   it('shows a row per driver, linking to its detail', () => {
-    const { getByRole } = render(<DriversScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <DriversScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(getByRole('link', { name: 'EMP-1' })).toHaveAttribute('href', '/drivers/DRV_1');
   });
 
   it('falls back to the user id when no employee number is on file', () => {
     const { getByRole } = render(
-      <DriversScreen result={page({ items: [{ ...DRIVER, employeeNo: null }] })} query={{}} />,
+      <DriversScreen
+        result={page({ items: [{ ...DRIVER, employeeNo: null }] })}
+        query={{ context: TEST_CONTEXT }}
+      />,
     );
     expect(getByRole('link', { name: 'USR_9' })).toBeInTheDocument();
   });
 
   it('translates status without translating the data', () => {
-    const { getByRole } = render(<DriversScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <DriversScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     const row = getByRole('row', { name: /EMP-1/ });
     expect(row).toHaveTextContent('فعال');
     expect(getByRole('option', { name: 'فعال' })).toHaveValue('ACTIVE');
@@ -52,60 +61,73 @@ describe('the driver list', () => {
 
   it('shows an unknown status as it arrived, rather than hiding it', () => {
     const { getByText } = render(
-      <DriversScreen result={page({ items: [{ ...DRIVER, status: 'ON_LEAVE' }] })} query={{}} />,
+      <DriversScreen
+        result={page({ items: [{ ...DRIVER, status: 'ON_LEAVE' }] })}
+        query={{ context: TEST_CONTEXT }}
+      />,
     );
     expect(getByText('ON_LEAVE')).toBeInTheDocument();
   });
 
   it('offers the next page only when there is one', () => {
-    const { queryByRole } = render(<DriversScreen result={page()} query={{}} />);
+    const { queryByRole } = render(
+      <DriversScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(queryByRole('link', { name: 'صفحهٔ بعد' })).toBeNull();
 
     const { getByRole } = render(
       <DriversScreen
         result={page({ hasMore: true, nextCursor: 'CUR_2' })}
-        query={{ status: 'ACTIVE' }}
+        query={{ context: TEST_CONTEXT, status: 'ACTIVE' }}
       />,
     );
     expect(getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      '/drivers?status=ACTIVE&cursor=CUR_2',
+      withContext(TEST_CONTEXT, '/drivers?status=ACTIVE&cursor=CUR_2'),
     );
   });
 
   it('says something different when a filter matched nothing', () => {
     const empty = page({ items: [] });
 
-    const unfiltered = render(<DriversScreen result={empty} query={{}} />);
+    const unfiltered = render(<DriversScreen result={empty} query={{ context: TEST_CONTEXT }} />);
     expect(unfiltered.getByText('هنوز راننده‌ای ثبت نشده')).toBeInTheDocument();
 
-    const filtered = render(<DriversScreen result={empty} query={{ q: 'چیزی' }} />);
+    const filtered = render(
+      <DriversScreen result={empty} query={{ context: TEST_CONTEXT, q: 'چیزی' }} />,
+    );
     expect(filtered.getByText('چیزی با این پالایش پیدا نشد')).toBeInTheDocument();
     expect(filtered.getByRole('link', { name: 'نمایش همه' })).toHaveAttribute('href', '/drivers');
   });
 
   it('renders a refusal as a refusal and an outage as an outage', () => {
-    const forbidden = render(<DriversScreen result={{ kind: 'FORBIDDEN' }} query={{}} />);
+    const forbidden = render(
+      <DriversScreen result={{ kind: 'FORBIDDEN' }} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(forbidden.getByText('دسترسی ندارید')).toBeInTheDocument();
 
     const down = render(
       <DriversScreen
         result={{ kind: 'UNAVAILABLE', status: 503, correlationId: 'COR_9' }}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
       />,
     );
     expect(down.getByText(/COR_9/)).toBeInTheDocument();
   });
 
   it('filters through the URL, with no javascript', () => {
-    const { getByRole } = render(<DriversScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <DriversScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     const form = getByRole('form', { name: 'پالایش فهرست' });
     expect(form).toHaveAttribute('method', 'get');
     expect(form).toHaveAttribute('action', '/drivers');
   });
 
   it('has no accessibility violations', async () => {
-    const { container } = render(<DriversScreen result={page()} query={{}} />);
+    const { container } = render(
+      <DriversScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 
@@ -117,7 +139,11 @@ describe('the driver list', () => {
 
     it('shows each driver’s name and username, and says so for one not in the member list', () => {
       const { getByRole } = render(
-        <DriversScreen result={page({ items: [DRIVER, formerMember] })} query={{}} names={names} />,
+        <DriversScreen
+          result={page({ items: [DRIVER, formerMember] })}
+          query={{ context: TEST_CONTEXT }}
+          names={names}
+        />,
       );
       expect(getByRole('columnheader', { name: 'نام' })).toBeInTheDocument();
       const row = getByRole('row', { name: /EMP-1/ });
@@ -129,7 +155,9 @@ describe('the driver list', () => {
     });
 
     it('has no name column without the member list (a fleet manager’s view)', () => {
-      const { queryByRole } = render(<DriversScreen result={page()} query={{}} names={null} />);
+      const { queryByRole } = render(
+        <DriversScreen result={page()} query={{ context: TEST_CONTEXT }} names={null} />,
+      );
       expect(queryByRole('columnheader', { name: 'نام' })).toBeNull();
     });
 
@@ -137,7 +165,9 @@ describe('the driver list', () => {
       const spoofed = new Map<string, RosterPerson>([
         ['USR_9', { userId: 'USR_9', name: 'علی\u202eرضا', username: 'ali\u2066x' }],
       ]);
-      const { getByRole } = render(<DriversScreen result={page()} query={{}} names={spoofed} />);
+      const { getByRole } = render(
+        <DriversScreen result={page()} query={{ context: TEST_CONTEXT }} names={spoofed} />,
+      );
       const row = getByRole('row', { name: /EMP-1/ });
       expect(row.textContent).not.toMatch(/\p{Bidi_Control}/u);
       expect(row).toHaveTextContent('علیرضا');
@@ -145,7 +175,11 @@ describe('the driver list', () => {
 
     it('has no accessibility violations with the name column', async () => {
       const { container } = render(
-        <DriversScreen result={page({ items: [DRIVER, formerMember] })} query={{}} names={names} />,
+        <DriversScreen
+          result={page({ items: [DRIVER, formerMember] })}
+          query={{ context: TEST_CONTEXT }}
+          names={names}
+        />,
       );
       expect(await axe(container)).toHaveNoViolations();
     });

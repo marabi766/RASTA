@@ -49,6 +49,16 @@ export const sessionSchema = z.object({
    * copy that disagrees with its token.
    */
   organizationId: z.string().min(1).nullable(),
+  /**
+   * The copy a cookie sealed before the copy was kept in step carried when it
+   * was first brought into step (`session-refresh.ts`): that build's login
+   * organization, under which it tagged and keyed every unresolved submission
+   * of this login — even one sent for another organization (PR 405 review 2,
+   * F1). Absent otherwise. Read only to **recognise** those records as this
+   * person's (`formerOrganizationCopy`), never to act for, label or send
+   * anything.
+   */
+  formerOrganizationId: z.string().min(1).nullable().optional(),
   accessToken: z.string().min(1),
   /** Seconds since the epoch. Compared against the server clock, never the browser's. */
   accessTokenExpiresAt: z.number().int().positive(),

@@ -25,6 +25,8 @@ import type {
   UpdateOrganizationFormState,
 } from './form-state';
 import { actingOrganizationId } from '@/server/session-organization';
+import { flashHref } from '@/server/flash';
+import { ORGANIZATION_FLASH_SUBJECT } from './notices';
 
 /**
  * The `/organizations` server actions.
@@ -98,7 +100,7 @@ export async function submitUpdateOrganization(
 
   switch (result.kind) {
     case 'CREATED':
-      redirect('/organizations?saved=profile');
+      redirect(flashHref(gated.session, '/organizations', ORGANIZATION_FLASH_SUBJECT, 'profile'));
       break;
     case 'INVALID':
       return {
@@ -146,7 +148,7 @@ export async function submitUpdateMemberRoles(
 
   switch (result.kind) {
     case 'CREATED':
-      redirect('/organizations?saved=roles');
+      redirect(flashHref(gated.session, '/organizations', ORGANIZATION_FLASH_SUBJECT, 'roles'));
       break;
     case 'INVALID':
       return {
@@ -196,7 +198,7 @@ export async function submitRevokeMembership(
 
   switch (result.kind) {
     case 'CREATED':
-      redirect('/organizations?revoked=1');
+      redirect(flashHref(gated.session, '/organizations', ORGANIZATION_FLASH_SUBJECT, 'revoked'));
       break;
     case 'INVALID':
       return {

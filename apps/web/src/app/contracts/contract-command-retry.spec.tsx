@@ -401,7 +401,7 @@ describe('never silently gone', () => {
     expect(saveUnresolvedContractCommand(CONTRACT_SLOT, entry, BINDING)).toBe('UNAVAILABLE');
   });
 
-  it('from another login it is shown, never re-sent; another person’s page removes it', () => {
+  it('from another login it is shown, never re-sent; another person’s page reduces it to a content-free marker', () => {
     saveUnresolvedContractCommand(CONTRACT_SLOT, entry, BINDING);
     expect(
       restoreUnresolvedContractCommand(
@@ -414,7 +414,7 @@ describe('never silently gone', () => {
     expect(restoreUnresolvedContractCommand(CONTRACT_SLOT, BINDING, SESSION_MAX_AGE)).toBeNull();
   });
 
-  it('refuses an entry whose input is not what its command sends', () => {
+  it('refuses an entry whose input is not what its command sends — never shown, kept as it is (quarantined)', () => {
     window.sessionStorage.setItem(
       storeKey(NEW_AMENDMENT),
       JSON.stringify({
@@ -430,7 +430,8 @@ describe('never silently gone', () => {
         session: BINDING.session,
       }),
     );
+    const raw = window.sessionStorage.getItem(storeKey(NEW_AMENDMENT));
     expect(restoreUnresolvedContractCommand(NEW_AMENDMENT, BINDING, SESSION_MAX_AGE)).toBeNull();
-    expect(stored(NEW_AMENDMENT)).toBeNull();
+    expect(window.sessionStorage.getItem(storeKey(NEW_AMENDMENT))).toBe(raw);
   });
 });
