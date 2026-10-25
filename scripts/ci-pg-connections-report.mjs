@@ -1,32 +1,56 @@
 #!/usr/bin/env node
 /**
- * Prints the connection peak the watcher recorded (PG_CONNECTIONS_SAMPLES)
- * against max_connections, and a `::warning::` annotation when less than a
- * fifth of the usable slots was left. Never fails: the verdict of the job is
- * its tests', and a monitor that could not sample says so instead.
+ * Stops the watcher (stopWatcher: TERM, a bounded wait for its process group
+ * to empty, KILL for what is left), then prints the connection peaks it
+ * recorded (PG_CONNECTIONS_SAMPLES) against max_connections, the postgres
+ * container's memory (PG_CONTAINER_ID, cgroup v2), and a `::warning::`
+ * annotation when less than a fifth of the usable slots was left or the
+ * telemetry has gaps. Never fails: the verdict of the job is its tests', and
+ * a monitor that could not measure says so instead.
  * Reads nothing from its command line. See ci-pg-connections-lib.mjs.
  */
 import { readFileSync } from 'node:fs';
-import { availableParallelism } from 'node:os';
-import { summarize } from './ci-pg-connections-lib.mjs';
+import { availableParallelism, totalmem } from 'node:os';
+import {
+  containerMemory,
+  readSeries,
+  stopWatcher,
+  summarize,
+  TIMING,
+} from './ci-pg-connections-lib.mjs';
 
-let limits = null;
-const samples = [];
 try {
-  for (const line of readFileSync(process.env.PG_CONNECTIONS_SAMPLES ?? '', 'utf8').split('\n')) {
-    if (!line.trim()) continue;
-    const row = JSON.parse(line);
-    if ('limits' in row) limits = row.limits;
-    else samples.push(row);
-  }
-} catch {
-  // Missing or unreadable: summarize() reports that there was nothing to report.
-}
-const { lines, warning } = summarize(samples, limits, availableParallelism());
-for (const line of lines) console.log(line);
-if (warning) {
+  const file = process.env.PG_CONNECTIONS_SAMPLES ?? '';
+  const read = () => {
+    try {
+      return readFileSync(file, 'utf8');
+    } catch {
+      return '';
+    }
+  };
+  const stopped = await stopWatcher(readSeries(read()), {
+    waitMs: TIMING.stopWaitMs,
+    killWaitMs: TIMING.killWaitMs,
+  });
+  console.log(`[pg-connections] watcher: ${stopped}`);
+  const memory = containerMemory(
+    process.env.PG_CONTAINER_ID,
+    (path) => readFileSync(path, 'utf8').trim(),
+    totalmem(),
+  );
+  const { lines, warnings } = summarize(readSeries(read()), {
+    cpus: availableParallelism(),
+    now: Date.now(),
+    memory,
+  });
+  for (const line of lines) console.log(line);
+  for (const text of warnings) console.log(`::warning title=PostgreSQL connection margin::${text}`);
+} catch (error) {
   console.log(
-    '::warning title=PostgreSQL connection margin::less than 20% of the usable connection slots ' +
-      'was left at the peak (or the monitor could not measure it); see the [pg-connections] lines',
+    `[pg-connections] the report itself failed (${error?.name ?? 'error'}): margin unknown`,
+  );
+  console.log(
+    '::warning title=PostgreSQL connection margin::the connection report failed: margin unknown',
   );
 }
+process.exit(0);

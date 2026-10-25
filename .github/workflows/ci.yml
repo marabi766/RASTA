@@ -1277,8 +1277,10 @@ jobs:
         # client with a pool of its own and many specs opening several, so
         # that ceiling was one new pool away from "remaining connection slots
         # are reserved for roles with the SUPERUSER attribute" in whichever
-        # package asked next (run 40183450262). 300 leaves the measured peak
-        # (see the [pg-connections] lines every run prints) about three times over.
+        # package asked next (run 40183450262). Sampled locally at 1 Hz (a
+        # lower bound): peaks of 70-73 suite sessions, per-database peaks
+        # summing to 217-225 — a sizing heuristic, not a bound; 300 covers
+        # that sum. Every run prints its own peaks ([pg-connections] lines).
         # The pools themselves are NOT changed: tests that depend on a pool's
         # size (the outbox-purge "gives up on a busy pool" proofs) keep it.
         command: postgres -c max_connections=300
@@ -1602,11 +1604,12 @@ jobs:
       - name: Watch PostgreSQL connections
         # Samples pg_stat_activity once a second in the background until the
         # report step below stops it (scripts/ci-pg-connections-lib.mjs).
+        # `setsid`: the watcher leads its own process group, so the report
+        # step can end it and any psql it started, whatever state it is in.
         timeout-minutes: 2
         run: |
-          nohup node scripts/ci-pg-connections-watch.mjs \
+          setsid nohup node scripts/ci-pg-connections-watch.mjs \
             > "${RUNNER_TEMP}/pg-connections-watch.log" 2>&1 &
-          echo "$!" > "${RUNNER_TEMP}/pg-connections.pid"
         env:
           PGHOST: localhost
           PGPORT: '5432'
@@ -1692,19 +1695,16 @@ jobs:
 
       - name: PostgreSQL connection peak
         # Always, so a run that failed on the ceiling still shows how far over
-        # it went. Never fails: the job's verdict is its tests'.
+        # it went. Stops the watcher first (TERM, at most ~12 s until its
+        # process group is gone, KILL for what is left). Never fails: the
+        # job's verdict is its tests'. Reads the postgres container's memory
+        # from its cgroup.
         if: always()
         timeout-minutes: 2
-        run: |
-          kill "$(cat "${RUNNER_TEMP}/pg-connections.pid" 2>/dev/null)" 2>/dev/null || true
-          node scripts/ci-pg-connections-report.mjs
+        run: node scripts/ci-pg-connections-report.mjs
         env:
-          PGHOST: localhost
-          PGPORT: '5432'
-          PGUSER: rasta
-          PGPASSWORD: rasta_ci_password
-          PGDATABASE: postgres
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONTAINER_ID: ${{ job.services.postgres.id }}
 
       - name: Analytics database privilege integration tests
         timeout-minutes: 5
@@ -1844,8 +1844,10 @@ jobs:
         # client with a pool of its own and many specs opening several, so
         # that ceiling was one new pool away from "remaining connection slots
         # are reserved for roles with the SUPERUSER attribute" in whichever
-        # package asked next (run 40183450262). 300 leaves the measured peak
-        # (see the [pg-connections] lines every run prints) about three times over.
+        # package asked next (run 40183450262). Sampled locally at 1 Hz (a
+        # lower bound): peaks of 70-73 suite sessions, per-database peaks
+        # summing to 217-225 — a sizing heuristic, not a bound; 300 covers
+        # that sum. Every run prints its own peaks ([pg-connections] lines).
         # The pools themselves are NOT changed: tests that depend on a pool's
         # size (the outbox-purge "gives up on a busy pool" proofs) keep it.
         command: postgres -c max_connections=300
@@ -2084,11 +2086,12 @@ jobs:
       - name: Watch PostgreSQL connections
         # Samples pg_stat_activity once a second in the background until the
         # report step below stops it (scripts/ci-pg-connections-lib.mjs).
+        # `setsid`: the watcher leads its own process group, so the report
+        # step can end it and any psql it started, whatever state it is in.
         timeout-minutes: 2
         run: |
-          nohup node scripts/ci-pg-connections-watch.mjs \
+          setsid nohup node scripts/ci-pg-connections-watch.mjs \
             > "${RUNNER_TEMP}/pg-connections-watch.log" 2>&1 &
-          echo "$!" > "${RUNNER_TEMP}/pg-connections.pid"
         env:
           PGHOST: localhost
           PGPORT: '5432'
@@ -2248,19 +2251,16 @@ jobs:
 
       - name: PostgreSQL connection peak
         # Always, so a run that failed on the ceiling still shows how far over
-        # it went. Never fails: the job's verdict is its tests'.
+        # it went. Stops the watcher first (TERM, at most ~12 s until its
+        # process group is gone, KILL for what is left). Never fails: the
+        # job's verdict is its tests'. Reads the postgres container's memory
+        # from its cgroup.
         if: always()
         timeout-minutes: 2
-        run: |
-          kill "$(cat "${RUNNER_TEMP}/pg-connections.pid" 2>/dev/null)" 2>/dev/null || true
-          node scripts/ci-pg-connections-report.mjs
+        run: node scripts/ci-pg-connections-report.mjs
         env:
-          PGHOST: localhost
-          PGPORT: '5432'
-          PGUSER: rasta
-          PGPASSWORD: rasta_ci_password
-          PGDATABASE: postgres
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONTAINER_ID: ${{ job.services.postgres.id }}
 
   integration-coverage-critical:
     name: Coverage gates (construction, contract, inventory)
