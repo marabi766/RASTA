@@ -94,8 +94,16 @@ const base = tseslint.config(
     },
   },
   {
-    files: ['services/*/src/**/*.ts', 'packages/*/src/**/*.ts', 'scripts/**/*.{js,mjs,cjs}'],
-    ignores: ['**/*.spec.ts', '**/*.test.mjs', '**/test/**'],
+    // Workspaces re-export this config, so paths must match from their cwd too.
+    files: ['**/src/**/*.ts', '**/dev/**/*.ts', '**/prisma/**/*.ts', 'scripts/**/*.{js,mjs,cjs}'],
+    ignores: [
+      '**/*.spec.ts',
+      '**/*.test.ts',
+      '**/*.test.mjs',
+      '**/*.int-spec.ts',
+      '**/*.e2e-spec.ts',
+      '**/test/**',
+    ],
     plugins: { internal: { rules: { transport: internalTokenTransport } } },
     rules: { 'internal/transport': 'error' },
   },
