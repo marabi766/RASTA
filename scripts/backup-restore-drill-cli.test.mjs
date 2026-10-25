@@ -334,8 +334,13 @@ async function referenceCliFixture(directory, mode) {
     'backup-restore-drill-lib.mjs',
     'infra-preflight-lib.mjs',
     'check-kafka-credential-scope-lib.mjs',
+    'database-services.mjs',
   ])
     cpSync(join(repo, 'scripts', name), join(copied, name));
+  // The drill reads example URLs through the shared reader, imported relative to scripts/.
+  const reader = 'packages/config/src/url-reader.js';
+  mkdirSync(join(directory, reader, '..'), { recursive: true });
+  cpSync(join(repo, reader), join(directory, reader));
   symlinkSync(join(repo, 'node_modules'), join(copied, 'node_modules'), 'dir');
   const path = join(copied, 'backup-restore-drill.mjs');
   const target = mode === 'bypass-ref' ? path : join(copied, 'backup-restore-drill-lib.mjs');

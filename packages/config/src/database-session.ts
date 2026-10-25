@@ -103,6 +103,20 @@ function endsWithUtc(options: string): boolean {
 }
 
 /**
+ * The two refusals of a URL whose options the driver would read otherwise, as
+ * fixed texts: they are raised while `DATABASE_URL` is parsed, so they reach
+ * the boot error through `loadEnv`'s list of fixed messages. Neither says how
+ * many parameters there were or where the character stood (#385 r2 F2).
+ */
+export const DATABASE_URL_CONTROL_CHARACTER =
+  'DATABASE_URL contains a raw control character (U+0000–U+001F or U+007F), which a URL ' +
+  'parser would drop or read differently from this; remove it, or percent-encode it';
+
+export const DATABASE_URL_REPEATED_OPTIONS =
+  'DATABASE_URL has more than one options parameter, and the driver keeps only the last ' +
+  'one; write every startup option in a single options parameter';
+
+/**
  * The `options` the URL carries, and a function giving the URL with them
  * replaced. Everything but the `options` parameter is kept byte for byte — the
  * credentials, the host and every other parameter — and the new value is
@@ -124,12 +138,7 @@ function startupOptions(url: string): {
   withOptions: (options: string) => string;
 } {
   if ([...url].some((char) => char <= '\u001f' || char === '\u007f')) {
-    throw new DatabaseUrlConflictError(
-      'DATABASE_URL',
-      'options',
-      'DATABASE_URL contains a raw control character (U+0000–U+001F or U+007F), which a URL ' +
-        'parser would drop or read differently from this; remove it, or percent-encode it',
-    );
+    throw new DatabaseUrlConflictError('DATABASE_URL', 'options', DATABASE_URL_CONTROL_CHARACTER);
   }
   const hashAt = url.indexOf('#');
   const beforeHash = hashAt === -1 ? url : url.slice(0, hashAt);
@@ -148,12 +157,7 @@ function startupOptions(url: string): {
     decodeComponent(pair.split('=')[0] ?? '') === 'options';
   const written = pairs.filter(isOptions);
   if (written.length > 1) {
-    throw new DatabaseUrlConflictError(
-      'DATABASE_URL',
-      'options',
-      `DATABASE_URL has ${written.length} options parameters, and the driver keeps only the ` +
-        'last one; write every startup option in a single options parameter',
-    );
+    throw new DatabaseUrlConflictError('DATABASE_URL', 'options', DATABASE_URL_REPEATED_OPTIONS);
   }
   const [pair] = written;
   const existing =

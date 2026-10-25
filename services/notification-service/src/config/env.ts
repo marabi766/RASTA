@@ -3,12 +3,20 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
-  httpUrlSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { notificationOperationBudgets } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const SMTP_CREDENTIALS_PAIRED = fixed(
+  'NOTIFICATION_SMTP_USER and NOTIFICATION_SMTP_PASSWORD must be set together or not at all',
+);
 
 export const SERVICE_NAME = 'notification-service';
 
@@ -81,13 +89,13 @@ export const notificationEnvSchema = baseEnvSchema
       .string()
       .regex(
         /^notification-service\.[a-z0-9][a-z0-9.-]{0,120}$/,
-        'must be a group in the notification-service. namespace',
+        fixed('must be a group in the notification-service. namespace'),
       ),
 
     CORS_ORIGINS: z.string().default(''),
 
     /** Where recipient resolution goes. Never the gateway (D-007). */
-    IDENTITY_SERVICE_URL: httpUrlSchema,
+    IDENTITY_SERVICE_URL: serviceUrlSchema,
 
     /** Per-call ceiling on the identity request. */
     NOTIFICATION_IDENTITY_REQUEST_TIMEOUT_MS: z.coerce
@@ -204,11 +212,12 @@ export const notificationEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['NOTIFICATION_SMTP_USER'],
-        message:
-          'NOTIFICATION_SMTP_USER and NOTIFICATION_SMTP_PASSWORD must be set together or not at all',
+        message: SMTP_CREDENTIALS_PAIRED,
       });
     }
   });
+
+export const NOTIFICATION_ENV_MESSAGES = seal();
 
 export type NotificationEnv = z.infer<typeof notificationEnvSchema>;
 
@@ -236,7 +245,7 @@ export function loadNotificationEnv(source: NodeJS.ProcessEnv = process.env): No
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? DISPATCHER_CONSUMER_GROUP,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: notificationOperationBudgets },
+    { operationBudgets: notificationOperationBudgets, fixedMessages: NOTIFICATION_ENV_MESSAGES },
   );
 }
 

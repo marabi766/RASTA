@@ -36,6 +36,8 @@
  * Refusals name the setting, never its value (S-09).
  */
 
+import { tryReadUrl } from '@rasta/config';
+
 /** The suite's own opt-in. Its only accepted value is `true`. */
 export const LIVE_WRITE_OPT_IN = 'KEYCLOAK_LIVE_ALLOW_WRITES';
 
@@ -71,13 +73,11 @@ export function environmentRefusals(env: LiveTargetEnvironment): string[] {
     reasons.push(`${LIVE_WRITE_OPT_IN} is not exactly "true"`);
   }
   if (env.NODE_ENV !== 'test') reasons.push('NODE_ENV is not exactly "test"');
-  let host: string | undefined;
-  try {
-    const url = new URL(env.KEYCLOAK_URL);
-    host = url.protocol === 'http:' || url.protocol === 'https:' ? url.hostname : undefined;
-  } catch {
-    host = undefined;
-  }
+  const url = tryReadUrl(env.KEYCLOAK_URL);
+  const host =
+    url !== null && (url.protocol === 'http:' || url.protocol === 'https:')
+      ? url.hostname
+      : undefined;
   if (host === undefined) reasons.push('KEYCLOAK_URL is not an http(s) URL');
   else if (!isLoopbackHost(host)) reasons.push('KEYCLOAK_URL is not a loopback address');
   return reasons;

@@ -1,16 +1,32 @@
 import { z } from 'zod';
 import { businessLineSchema } from '@rasta/contracts';
 import {
-  EnvValidationError,
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  EnvValidationError,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { economicOperationBudgets } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const GRACE_TOO_SHORT = fixed('must be more than twice ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS');
+const LEASE_TOO_SHORT = fixed(
+  'must exceed ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS by at least 5 seconds',
+);
+const MOCK_LATENCY_OVER_TIMEOUT = fixed(
+  'must exceed ECONOMIC_MOCK_PAYMENT_LATENCY_MS while the mock provider is bound',
+);
+const BACKOFF_MAX_BELOW_BASE = fixed(
+  'must not be below ECONOMIC_PAYMENT_RECONCILER_BACKOFF_SECONDS',
+);
 
 /**
  * economic-service configuration.
@@ -221,10 +237,10 @@ export const economicEnvSchema = baseEnvSchema
      * confirm an approval, so it could never record an obligation. That is
      * better found at boot than as a DLQ full of good events.
      */
-    MAINTENANCE_SERVICE_URL: z.string().url(),
-    FLEET_SERVICE_URL: z.string().url(),
+    MAINTENANCE_SERVICE_URL: serviceUrlSchema,
+    FLEET_SERVICE_URL: serviceUrlSchema,
     /** The owner of an approved contract statement (ADR-068 § 6 (2)); required for the same reason. */
-    CONTRACT_SERVICE_URL: z.string().url(),
+    CONTRACT_SERVICE_URL: serviceUrlSchema,
 
     /**
      * The business line a contract statement's obligation is recorded under
@@ -252,7 +268,7 @@ export const economicEnvSchema = baseEnvSchema
      * organization-service, the owner of the hierarchy (A-13), asked as
      * construction-service and contract-service ask it.
      */
-    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    ORGANIZATION_SERVICE_URL: serviceUrlSchema.default('http://localhost:3102'),
 
     /**
      * How long that question may take, body included. It is asked under the
@@ -304,7 +320,7 @@ export const economicEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS'],
-        message: 'must be more than twice ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS',
+        message: GRACE_TOO_SHORT,
       });
     }
     // A claim must outlive the provider question and the write that follows,
@@ -317,7 +333,7 @@ export const economicEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS'],
-        message: 'must exceed ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS by at least 5 seconds',
+        message: LEASE_TOO_SHORT,
       });
     }
     // The mock's fixed latency must fit inside the deadline, or every mock
@@ -331,7 +347,7 @@ export const economicEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS'],
-        message: 'must exceed ECONOMIC_MOCK_PAYMENT_LATENCY_MS while the mock provider is bound',
+        message: MOCK_LATENCY_OVER_TIMEOUT,
       });
     }
     if (
@@ -341,10 +357,12 @@ export const economicEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS'],
-        message: 'must not be below ECONOMIC_PAYMENT_RECONCILER_BACKOFF_SECONDS',
+        message: BACKOFF_MAX_BELOW_BASE,
       });
     }
   });
+
+export const ECONOMIC_ENV_MESSAGES = seal();
 
 /** The settings as the schema parses them, before `loadEconomicEnv` resolves the defaults it alone can. */
 export type EconomicEnvInput = z.infer<typeof economicEnvSchema>;
@@ -366,7 +384,7 @@ export function loadEconomicEnv(source: NodeJS.ProcessEnv = process.env): Econom
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'economic-service.main',
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: economicOperationBudgets },
+    { operationBudgets: economicOperationBudgets, fixedMessages: ECONOMIC_ENV_MESSAGES },
   );
   assertFourEyesOptOut(source, env);
   return {

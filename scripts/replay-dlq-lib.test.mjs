@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
   MAX_CEILING,
   UsageError,
+  foreignFailureText,
   OPERATOR_PATTERN,
   assess,
   executeReplays,
@@ -765,4 +766,70 @@ test('ABORTED only after the last stable offset passed the position AND the tran
   assert.equal(verdict({ nowMs: at + REPLAY_TRANSACTION_TIMEOUT_MS - 1 }), 'STILL_UNKNOWN');
   // Retention removed the position: never "absent", never "aborted".
   assert.equal(verdict({ lowOffset: 42n }), 'STILL_UNKNOWN');
+});
+
+// #385 r4: the real tool refuses an unreadable CA file before it connects,
+// with a fixed text — never the configured path.
+test('replay-dlq.mjs: an unreadable CA file is refused before connecting, path unprinted', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { SENTINELS, assertNoSentinel } = await import('./refusal-probes.mjs');
+  const { UNREADABLE_CA_FILE } = await import('./kafka-acl-lib.mjs');
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const run = (env) =>
+    spawnSync(
+      process.execPath,
+      [
+        resolve(root, 'scripts/replay-dlq.mjs'),
+        '--dlq',
+        'rasta.fleet.v1.dlq',
+        '--event-id',
+        '00000000-0000-4000-8000-000000000001',
+      ],
+      { encoding: 'utf8', env: { PATH: process.env.PATH, ...env } },
+    );
+  for (const sentinel of SENTINELS) {
+    const result = run({
+      KAFKA_SSL_CA_FILE: `/nonexistent/${sentinel}/${sentinel.replaceAll('-', '_')}/ca.pem`,
+      KAFKA_SASL_PASSWORD_OPS_REPLAY: 'x',
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stderr, `replay-dlq: ${UNREADABLE_CA_FILE}\n`);
+    assertNoSentinel(result.stdout + result.stderr, sentinel);
+  }
+  // Positive control: a readable CA passes; the next check (no password) refuses.
+  const dir = mkdtempSync(resolve(tmpdir(), 'replay-ca-'));
+  try {
+    writeFileSync(resolve(dir, 'ca.pem'), 'PEM');
+    const result = run({ KAFKA_SSL_CA_FILE: resolve(dir, 'ca.pem') });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /KAFKA_SASL_PASSWORD_OPS_REPLAY and the broker CA are required/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failure the tool did not write is printed by category, class and code only (#385 r6)', () => {
+  const broker = 'private-sentinel-79.invalid:1';
+  const error = Object.assign(new Error(`Connection error: getaddrinfo ENOTFOUND ${broker}`), {
+    name: 'KafkaJSConnectionError',
+    broker,
+    cause: Object.assign(new Error(`getaddrinfo ENOTFOUND ${broker}`), { code: 'ENOTFOUND' }),
+  });
+  assert.equal(
+    foreignFailureText('the Kafka operation failed', error),
+    'the Kafka operation failed (KafkaJSConnectionError, code ENOTFOUND); its own text is withheld',
+  );
+  // A code or name that is not shaped like one is not printed either.
+  const odd = Object.assign(new Error('x'), {
+    name: broker,
+    code: broker,
+    type: 'JZ97-another-secret',
+  });
+  assert.doesNotMatch(foreignFailureText('c', odd), /sentinel|jz97|another/i);
+  assert.equal(
+    foreignFailureText('c', undefined),
+    'c (unknown, code unknown); its own text is withheld',
+  );
 });

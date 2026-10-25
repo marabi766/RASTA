@@ -4,13 +4,18 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   kafkaSaslConfigured,
   loadEnv,
   outboxPurgeEnvSchema,
   PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { marketplaceOperationBudgets } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
 
 /**
  * marketplace-service configuration.
@@ -34,7 +39,7 @@ export const marketplaceEnvSchema = baseEnvSchema
     CORS_ORIGINS: z.string().default(''),
 
     /** Where the order saga sends its financial commands (ADR-040). */
-    ECONOMIC_SERVICE_URL: z.string().url().default('http://localhost:3112'),
+    ECONOMIC_SERVICE_URL: serviceUrlSchema.default('http://localhost:3112'),
 
     /**
      * How long a call to economic-service may take before the activity fails
@@ -47,7 +52,7 @@ export const marketplaceEnvSchema = baseEnvSchema
      * dispute (docs/24 Q-136): organization-service, the owner of the
      * hierarchy (A-13), asked as economic-service asks it.
      */
-    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    ORGANIZATION_SERVICE_URL: serviceUrlSchema.default('http://localhost:3102'),
 
     /**
      * How long that question may take, body included. It is asked under the
@@ -68,7 +73,7 @@ export const marketplaceEnvSchema = baseEnvSchema
      * cancelled whether a shipment exists for it, and asked to withdraw a dispatch reservation
      * when one is reconciled (Q-133 (9)(a)).
      */
-    INVENTORY_SERVICE_URL: z.string().url().default('http://localhost:3109'),
+    INVENTORY_SERVICE_URL: serviceUrlSchema.default('http://localhost:3109'),
 
     /**
      * How long that question may take, body included. Asked before the command's transaction,
@@ -195,10 +200,13 @@ export const marketplaceEnvSchema = baseEnvSchema
       env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS * 60 * 60,
     {
       path: ['MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS'],
-      message:
+      message: fixed(
         'MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS must be shorter than MARKETPLACE_IDEMPOTENCY_TTL_HOURS',
+      ),
     },
   );
+
+export const MARKETPLACE_ENV_MESSAGES = seal();
 
 export type MarketplaceEnv = z.infer<typeof marketplaceEnvSchema>;
 
@@ -214,7 +222,7 @@ export function loadMarketplaceEnv(source: NodeJS.ProcessEnv = process.env): Mar
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'marketplace-service.main',
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: marketplaceOperationBudgets },
+    { operationBudgets: marketplaceOperationBudgets, fixedMessages: MARKETPLACE_ENV_MESSAGES },
   );
   assertReturnMirrorMayStart(env);
   return env;

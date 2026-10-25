@@ -110,10 +110,19 @@ const result = spawnSync('prisma', process.argv.slice(2), {
 // Whatever the run's outcome: a failed migration must not leave the ledger
 // writable either.
 {
-  const revoke = ledgerRevoke({
-    migratorUrl: process.env[migratorKey],
-    runtimeUrl: process.env[key],
-  });
+  // A refusal is one of prisma-lib's fixed texts; printed as its message alone,
+  // never as the thrown object, whose stack and properties an uncaught throw
+  // would print too (#385 r4).
+  let revoke;
+  try {
+    revoke = ledgerRevoke({
+      migratorUrl: process.env[migratorKey],
+      runtimeUrl: process.env[key],
+    });
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
   if (revoke) {
     // D-045: the migration ledger is the migrator's alone. A runtime role that
     // could write it could mark a guard-creating migration as already applied.

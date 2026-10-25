@@ -49,6 +49,9 @@ function setting(name) {
   return value;
 }
 
+/** A spawn failure's errno name (`ENOENT`, `EACCES`, …), or a fixed word for anything else. */
+const spawnCode = (error) => (/^E[A-Z0-9]+$/.test(error?.code ?? '') ? error.code : 'spawn error');
+
 function temporal(cli, args) {
   const result = spawnSync(cli, args, {
     encoding: 'utf8',
@@ -56,7 +59,13 @@ function temporal(cli, args) {
     maxBuffer: 256 * 1024 * 1024,
   });
   const command = `temporal ${args.slice(0, 2).join(' ')}`;
-  if (result.error) throw new Unverifiable(`${command}: ${result.error.message}`);
+  // The error's code only: its message names the executable, which is
+  // TEMPORAL_CLI's value (#385 r4).
+  if (result.error) {
+    throw new Unverifiable(
+      `${command}: TEMPORAL_CLI could not be run (${spawnCode(result.error)})`,
+    );
+  }
   if (result.status !== 0) {
     const detail = result.stderr.trim().split('\n').at(-1) ?? '';
     throw new Unverifiable(`${command} exited ${result.status ?? result.signal}: ${detail}`);
