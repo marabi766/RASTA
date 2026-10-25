@@ -76,6 +76,35 @@ tests:
         exp_alerts: []
 
   # ---------------------------------------------------------------------------
+  # RastaIdentityKeycloakWriteOverdue (D-070)
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # Live fences come and go without firing it; one write stays unresolved past
+      # half its settle window at minute 3, and is taken over by minute 5.
+      - series: 'rasta_identity_keycloak_write_fences{state="live",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '2x10'
+      - series: 'rasta_identity_keycloak_write_fences{state="overdue",service="identity-service",job="identity-service",instance="host.docker.internal:3101",environment="local"}'
+        values: '0 0 0 1 1 0x6'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RastaIdentityKeycloakWriteOverdue
+        exp_alerts: []
+      # At once: no `for`, the window is what it warns about.
+      - eval_time: 3m
+        alertname: RastaIdentityKeycloakWriteOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '1 Keycloak writes are unresolved past half their settle window'
+              description: "Keycloak writes whose answer was lost (timeout, broken connection, 5xx) or whose sender stalled are still live past their deadline plus half of KEYCLOAK_WRITE_SETTLE_SECONDS (keycloak_write_attempt, D-069). Narrowing changes of these users are refused until takeover; nothing is unsafe yet. But the guarantee that such a write cannot land after a later narrowing rests on the deployment assumption D-070: no request is delivered or applied, and no sender resumes, later than the settle window. Look now at Keycloak's admin API latency, the proxies and network in front of it, and identity-service's event-loop pauses; if any approach the window, raise KEYCLOAK_WRITE_SETTLE_SECONDS. The log names the users; this alert deliberately does not."
+              runbook: docs/runbooks/keycloak-projection.md
+      - eval_time: 6m
+        alertname: RastaIdentityKeycloakWriteOverdue
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
   # RastaIdentityKeycloakReassertBacklog (D-069)
   # ---------------------------------------------------------------------------
   - interval: 1m

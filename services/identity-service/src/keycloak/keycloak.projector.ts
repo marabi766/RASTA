@@ -33,7 +33,10 @@ import {
   type KeycloakProjectionTrigger,
   type KeycloakWriteAheadOutcome,
 } from '../observability/keycloak-projection.metrics';
-import { PROJECTION_TRANSACTION_TIMEOUT_MS } from '../config/operation-budgets';
+import {
+  APPROVAL_TRANSACTION_TIMEOUT_MS,
+  PROJECTION_TRANSACTION_TIMEOUT_MS,
+} from '../config/operation-budgets';
 
 /**
  * A second projection or repair of the same user waits on the first one's
@@ -195,7 +198,12 @@ class FencedWrites {
     private readonly fences: KeycloakWriteFences,
     private readonly tx: ExtendedPrismaClient,
     private readonly userId: string,
-    private readonly timing: { timeoutMs: number; settleSeconds: number },
+    private readonly timing: {
+      timeoutMs: number;
+      settleSeconds: number;
+      /** The budget `tx` was opened with: bounds each fence insert, and is re-checked after it. */
+      transactionTimeoutMs: number;
+    },
     readonly cancel: AbortSignal | undefined,
   ) {}
 
@@ -441,7 +449,14 @@ export class KeycloakProjector {
           throw keycloakWriteSettling(Math.max(...live.map((fence) => fence.settlesInSeconds)));
         }
         phase = 'writing';
-        const fenced = this.fencedWrites(tx, userId, options.signal);
+        // Every narrowing change runs in a transaction opened with
+        // USER_LOCK_TRANSACTION_OPTIONS (identity.service.ts).
+        const fenced = this.fencedWrites(
+          tx,
+          userId,
+          USER_LOCK_TRANSACTION_OPTIONS.timeout,
+          options.signal,
+        );
         writes = fenced;
         try {
           await fenced.write(keycloakId, (context) =>
@@ -552,7 +567,7 @@ export class KeycloakProjector {
       if (!account || provenance.length !== 1 || provenance[0] !== userId) return 'not_ours';
       if (!account.enabled && !grantsAnything(account.attributes)) return 'harmless';
 
-      const writes = this.fencedWrites(tx, userId);
+      const writes = this.fencedWrites(tx, userId, PROJECTION_TRANSACTION_OPTIONS.timeout);
       await this.makeHarmless(writes, userId, account);
       // Harmless is what an account no user row names should be: the writes
       // carried the committed state, and their fences go with this commit.
@@ -580,7 +595,8 @@ export class KeycloakProjector {
     account: KeycloakAccount,
   ): Promise<boolean> {
     if (!account.enabled && !grantsAnything(account.attributes)) return false;
-    const writes = this.fencedWrites(tx, userId);
+    // The approval's transaction (APPROVAL_TRANSACTION_OPTIONS, identity.service.ts).
+    const writes = this.fencedWrites(tx, userId, APPROVAL_TRANSACTION_TIMEOUT_MS);
     try {
       await this.makeHarmless(writes, userId, account);
     } finally {
@@ -603,7 +619,17 @@ export class KeycloakProjector {
     );
   }
 
-  private fencedWrites(tx: ExtendedPrismaClient, userId: string, cancel?: AbortSignal) {
+  /**
+   * `transactionTimeoutMs` is the budget `tx` was opened with — every fence
+   * insert is bounded by what is left of it, and `tx` is checked again after
+   * the insert commits (`KeycloakWriteFences.open`, #402 r2 F1).
+   */
+  private fencedWrites(
+    tx: ExtendedPrismaClient,
+    userId: string,
+    transactionTimeoutMs: number,
+    cancel?: AbortSignal,
+  ) {
     return new FencedWrites(
       this.fences,
       tx,
@@ -611,6 +637,7 @@ export class KeycloakProjector {
       {
         timeoutMs: this.keycloak.requestTimeoutMs,
         settleSeconds: this.options.writeSettleSeconds,
+        transactionTimeoutMs,
       },
       cancel,
     );
@@ -671,7 +698,12 @@ export class KeycloakProjector {
         const due = fences.filter((fence) => !fence.live);
         // Live: may still land.
         const uncertain = fences.filter((fence) => fence.live);
-        const fenced = this.fencedWrites(tx, userId, signal);
+        const fenced = this.fencedWrites(
+          tx,
+          userId,
+          PROJECTION_TRANSACTION_OPTIONS.timeout,
+          signal,
+        );
         writes = fenced;
         const linked = user.keycloakId;
 

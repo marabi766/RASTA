@@ -5,11 +5,12 @@
 -- operator. Dropping them would silently let a narrowing change run ahead of a
 -- write that can overtake it. Lock before checking, so no writer can insert
 -- one between the check and the drop; the file runner applies this atomically.
--- To roll back: stop identity-service (no new fences), wait until every
--- fence is past takeover (the last deadline + KEYCLOAK_WRITE_SETTLE_SECONDS),
--- run keycloak:backfill (its projections take every due fence over, a
--- terminal one once its account exists again), resolve any terminal fence
--- left (runbook keycloak-projection.md), and run this again.
+-- To roll back: stop EVERY identity-service replica (no new fences), wait
+-- until every fence is past takeover (the last deadline +
+-- KEYCLOAK_WRITE_SETTLE_SECONDS), run keycloak:backfill — it projects every
+-- fence owner, linked to an account or not, and reports COUNT(*) of this
+-- table as fences.outstanding — resolve any terminal fence left (runbook
+-- keycloak-projection.md), and run this only once it reports 0.
 SET LOCAL lock_timeout = '5s';
 LOCK TABLE "keycloak_write_attempt" IN ACCESS EXCLUSIVE MODE;
 DO $$

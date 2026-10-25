@@ -86,11 +86,14 @@ export const keycloakWriteFenceEventsTotal = new Counter({
  * that may still land; `due` — past takeover, not re-asserted yet;
  * `account_missing` — terminal, Keycloak has no account for them. A `due`
  * count that stays up is users whose re-assertion keeps failing; any
- * `account_missing` is an account an operator must look at.
+ * `account_missing` is an account an operator must look at. `overdue` (a
+ * subset of `live`): writes still unresolved past their deadline plus half
+ * the settle window — the D-070 deployment assumption's signal, alerted on at
+ * once (`RastaIdentityKeycloakWriteOverdue`).
  */
 export const keycloakWriteFences = new Gauge({
   name: 'rasta_identity_keycloak_write_fences',
-  help: 'Keycloak write fences by state (live, due, account_missing), as of the last sweep',
+  help: 'Keycloak write fences by state (live, due, account_missing, overdue), as of the last sweep',
   labelNames: ['state'] as const,
   registers: [registry],
 });

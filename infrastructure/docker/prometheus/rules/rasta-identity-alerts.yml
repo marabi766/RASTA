@@ -71,6 +71,25 @@ groups:
           description: "Keycloak writes whose outcome was never confirmed can no longer land, but for 20 minutes the sweep has not managed to write the users' committed state over them (keycloak_write_attempt, takeover_at passed). Until it does, Keycloak may hold what an old write carried — at most what the rows granted when it was sent — and that user's tokens may say so; a narrowing change of the user is not held back by these. Restore Keycloak; the sweep retries on its own, and keycloak:backfill re-asserts everyone. The log names the users; this alert deliberately does not."
           runbook: docs/runbooks/keycloak-projection.md
 
+      # D-070: the settle window is a deployment assumption — no Keycloak write is
+      # delivered, and no sender resumes, later than deadline + KEYCLOAK_WRITE_SETTLE_SECONDS
+      # (ADR-060 D-069 addendum § 6). This is its signal: a write whose outcome is still
+      # unresolved past its deadline plus half the settle window (timed out, broken off,
+      # answered 5xx, or its sender paused). Each one is a write that is relying on the
+      # window right now; a delivery that late would land after takeover. Fires at once, well
+      # before the window ends, so an operator can look at Keycloak's and the network's latency
+      # while it still matters. Sampled once per sweep pass: reliable while
+      # MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS <= KEYCLOAK_WRITE_SETTLE_SECONDS / 2 (60 <= 60
+      # at the defaults).
+      - alert: RastaIdentityKeycloakWriteOverdue
+        expr: max(rasta_identity_keycloak_write_fences{state="overdue"}) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $value }} Keycloak writes are unresolved past half their settle window'
+          description: "Keycloak writes whose answer was lost (timeout, broken connection, 5xx) or whose sender stalled are still live past their deadline plus half of KEYCLOAK_WRITE_SETTLE_SECONDS (keycloak_write_attempt, D-069). Narrowing changes of these users are refused until takeover; nothing is unsafe yet. But the guarantee that such a write cannot land after a later narrowing rests on the deployment assumption D-070: no request is delivered or applied, and no sender resumes, later than the settle window. Look now at Keycloak's admin API latency, the proxies and network in front of it, and identity-service's event-loop pauses; if any approach the window, raise KEYCLOAK_WRITE_SETTLE_SECONDS. The log names the users; this alert deliberately does not."
+          runbook: docs/runbooks/keycloak-projection.md
+
       # Narrowing changes refused because Keycloak could not be written first, for ten
       # minutes running. One refusal is an administrator retrying; a run of them is a
       # Keycloak that cannot take demotions.

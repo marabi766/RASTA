@@ -14,6 +14,7 @@ import {
   type TransactionOptions,
 } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
+import { BACKOFF_EXPONENT_CAP, BACKOFF_FAILURES_CAP } from '../keycloak/keycloak-write-fence';
 import type { ListUsersQuery } from './dto';
 import type { Prisma } from '../generated/prisma';
 
@@ -467,7 +468,9 @@ export class IdentityRepository {
    * the row, so a restart or another replica waits too, and the sweep reaches
    * the lapses behind it. Raw SQL, so neither `version` nor `updated_at`
    * moves: this is the sweep's bookkeeping, not a change to the membership.
-   * Its own statement, after the failed transaction ended.
+   * Its own statement, after the failed transaction ended. The exponent and
+   * the counter are bounded before the arithmetic (#402 r2 F4,
+   * `BACKOFF_EXPONENT_CAP`), so no failure count can overflow it.
    */
   async deferLapse(membershipId: string, intervalSeconds: number, maxIntervals: number) {
     await runUnscoped(
@@ -475,10 +478,11 @@ export class IdentityRepository {
       () =>
         this.client.$executeRaw`
         UPDATE membership
-           SET lapse_failures = lapse_failures + 1,
+           SET lapse_failures = LEAST(lapse_failures, ${BACKOFF_FAILURES_CAP - 1}) + 1,
                lapse_retry_at = (clock_timestamp() AT TIME ZONE 'UTC')
                  + make_interval(secs => ${intervalSeconds}
-                     * LEAST(POWER(2, lapse_failures + 1), ${maxIntervals}))
+                     * LEAST(POWER(2, LEAST(lapse_failures, ${BACKOFF_EXPONENT_CAP}) + 1),
+                             ${maxIntervals}))
          WHERE id = ${membershipId} AND lapse_handled_at IS NULL`,
     );
   }

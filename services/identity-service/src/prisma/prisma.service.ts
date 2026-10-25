@@ -5,6 +5,7 @@ import {
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
+import { throwIfCancelled } from './cancellation';
 
 /**
  * Models in this service that carry an `organizationId` and must therefore be
@@ -77,16 +78,28 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   }
 
   private buildClient() {
-    return this.base.$extends(
-      createTenantGuardExtension({
-        scopedModels: TENANT_SCOPED_MODELS,
-        onUnscopedQuery: ({ model, operation, reason }) => {
-          // Every deliberate boundary crossing is recorded, so an auditor can
-          // enumerate them without reading the whole codebase.
-          this.logger.warn(`Unscoped query on ${model}.${operation} — reason: ${reason}`);
+    // First, so it runs before anything else: a cancelled worker starts no
+    // database operation at all (`cancellation.ts`, #402 r2 F2).
+    return this.base
+      .$extends({
+        name: 'cancellation-boundary',
+        query: {
+          $allOperations({ args, query }) {
+            throwIfCancelled();
+            return query(args);
+          },
         },
-      }),
-    );
+      })
+      .$extends(
+        createTenantGuardExtension({
+          scopedModels: TENANT_SCOPED_MODELS,
+          onUnscopedQuery: ({ model, operation, reason }) => {
+            // Every deliberate boundary crossing is recorded, so an auditor can
+            // enumerate them without reading the whole codebase.
+            this.logger.warn(`Unscoped query on ${model}.${operation} — reason: ${reason}`);
+          },
+        }),
+      );
   }
 
   async onModuleInit(): Promise<void> {
@@ -149,6 +162,9 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     fn: (tx: ExtendedPrismaClient) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<T> {
+    // Transaction setup is a database operation too: none begins once the
+    // worker this runs in was stopped (`cancellation.ts`).
+    throwIfCancelled();
     if (options?.statementTimeoutMs === undefined) {
       return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), options);
     }

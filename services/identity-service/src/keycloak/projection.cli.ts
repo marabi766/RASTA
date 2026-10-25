@@ -58,22 +58,26 @@ async function main(): Promise<number> {
       clientSecret: env.KEYCLOAK_BACKEND_CLIENT_SECRET,
       enabled: true,
     });
-    const projector = new KeycloakProjector(
-      repository,
-      keycloak,
-      new KeycloakWriteFences(fencePool),
-      {
-        writeSettleSeconds: env.KEYCLOAK_WRITE_SETTLE_SECONDS,
-      },
-    );
+    const fences = new KeycloakWriteFences(fencePool);
+    const projector = new KeycloakProjector(repository, keycloak, fences, {
+      writeSettleSeconds: env.KEYCLOAK_WRITE_SETTLE_SECONDS,
+    });
 
     const report = await runProjectionCommand(mode as ProjectionCommandMode, {
       repository,
       projector,
       keycloak,
+      fences,
     });
     // User ids only — never names, emails or roles in an operations log (S-09).
-    logger.info({ report }, `Keycloak ${mode}: ${report.accounts} accounts`);
+    logger.info(
+      { report },
+      `Keycloak ${mode}: ${report.accounts} accounts, ` +
+        `${report.fences.outstanding} write fences outstanding` +
+        (report.fences.outstanding === 0
+          ? ' (the fence migration may be rolled back while every identity-service replica stays stopped)'
+          : ''),
+    );
     return isClean(report) ? 0 : 1;
   } finally {
     await fencePool.onModuleDestroy();

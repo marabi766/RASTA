@@ -7,6 +7,7 @@ import {
   membershipLapseBacklog,
   membershipLapseFailuresTotal,
 } from '../observability/keycloak-projection.metrics';
+import { withCancellation } from '../prisma/cancellation';
 import { IdentityRepository } from './identity.repository';
 import { IdentityService } from './identity.service';
 
@@ -88,8 +89,13 @@ export interface MembershipExpiryScanOptions {
  * purge, by their shared deadline (D-052). A stop cancels the pass in flight
  * (#402 r1 F4): the Keycloak call it is waiting on is aborted — its fence
  * stays, so stopping mid-write is safe (D-069) — and every later step of the
- * pass, down to the last gauge, checks the stop before it starts. Nothing it
- * would have done next reaches the database once the stop has returned.
+ * pass, down to the last gauge, checks the stop before it starts. Below the
+ * stages, the pass runs inside the database's cancellation boundary
+ * (`prisma/cancellation.ts`, #402 r2 F2): every database operation it starts
+ * anywhere — a read in the projector, a fence release, a transaction's setup
+ * — checks the stop first. Nothing it would have done next reaches the
+ * database once the stop has returned, but the rollback of the transaction it
+ * was in.
  */
 /** The longest a failing lapse or re-assertion waits between attempts, in scan intervals. */
 export const MAX_BACKOFF_INTERVALS = 16;
@@ -190,7 +196,9 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
    */
   scan(now: Date = new Date()): Promise<number> {
     if (this.inFlight || this.stopped) return Promise.resolve(0);
-    const pass = this.pass(now).finally(() => {
+    // Every database operation of the pass — wherever in the projector, the
+    // service or the fences it starts — checks the stop first (#402 r2 F2).
+    const pass = withCancellation(this.cancel.signal, () => this.pass(now)).finally(() => {
       this.inFlight = undefined;
     });
     this.inFlight = pass;
@@ -210,6 +218,7 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
       keycloakWriteFences.set({ state: 'live' }, fences.live);
       keycloakWriteFences.set({ state: 'due' }, fences.due);
       keycloakWriteFences.set({ state: 'account_missing' }, fences.accountMissing);
+      keycloakWriteFences.set({ state: 'overdue' }, fences.overdue);
       return handled;
     } catch (error) {
       // Never takes the service down: access is already decided from the clock.
