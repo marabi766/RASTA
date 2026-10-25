@@ -146,7 +146,9 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Runs `fn` inside a transaction.
+   * Runs `fn` inside a transaction — the only way this service opens an
+   * interactive one (`transaction-boundary.spec.ts` holds `src/` to it), so the
+   * cancellation checks below are on every transaction of every worker.
    *
    * Exposed deliberately: the outbox pattern requires the state change and the
    * outbox insert to share one transaction, and that is the whole reason the
@@ -165,15 +167,25 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     // Transaction setup is a database operation too: none begins once the
     // worker this runs in was stopped (`cancellation.ts`).
     throwIfCancelled();
+    // And so is its COMMIT, which Prisma issues when the callback resolves,
+    // without passing through the client extension (#402 r3 R3-1): a callback
+    // that resumes after the stop returned — its last statement's reply held
+    // past it — throws here instead, and Prisma rolls the transaction back.
+    // Both branches below run `fn` only through this.
+    const committable = async (tx: ExtendedPrismaClient): Promise<T> => {
+      const result = await fn(tx);
+      throwIfCancelled();
+      return result;
+    };
     if (options?.statementTimeoutMs === undefined) {
-      return this.client.$transaction((tx) => fn(tx as ExtendedPrismaClient), options);
+      return this.client.$transaction((tx) => committable(tx as ExtendedPrismaClient), options);
     }
     const bound = localStatementTimeoutOf(options.statementTimeoutMs);
     const { maxWait, timeout } = options;
     return this.client.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${bound}`);
-        return fn(tx as ExtendedPrismaClient);
+        return committable(tx as ExtendedPrismaClient);
       },
       { maxWait, timeout },
     );

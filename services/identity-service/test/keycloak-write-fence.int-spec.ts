@@ -1,9 +1,11 @@
 import { writeFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { withDatabasePool } from '@rasta/config';
-import { runUnscoped } from '@rasta/nest-common';
+import type { EventEnvelope } from '@rasta/contracts';
+import { runUnscoped, type EventConsumer, type EventHandler } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { IdentityRepository } from '../src/identity/identity.repository';
+import { IDENTITY_EVENTS } from '../src/identity/events';
 import { IdentityService } from '../src/identity/identity.service';
 import { MembershipExpiryScanner } from '../src/identity/membership-expiry.scanner';
 import {
@@ -12,6 +14,7 @@ import {
   type KeycloakWriteAttempt,
 } from '../src/keycloak/keycloak-write-fence';
 import type { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
+import { KeycloakProjectionConsumer } from '../src/keycloak/keycloak-projection.consumer';
 import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import { runProjectionCommand } from '../src/keycloak/projection.command';
 import { keycloakWriteFenceEventsTotal } from '../src/observability/keycloak-projection.metrics';
@@ -22,6 +25,7 @@ import {
   readPlatformAttributes,
   type PlatformAttributes,
 } from '../src/keycloak/platform-attributes';
+import { withCancellation } from '../src/prisma/cancellation';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, databaseUrl, id, newFences, newPrisma, tenants, waitFor } from './helpers';
 import { KeycloakHttpStub, type StubRequest } from './keycloak-http-stub';
@@ -1400,6 +1404,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const ownService = new IdentityService(ownRepository, keycloak, ownProjector);
       return {
         log,
+        pools: { business, fence: pool },
         repository: ownRepository,
         fences: ownFences,
         projector: ownProjector,
@@ -1549,6 +1554,278 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       try {
         await stack.scanner(new Set([s.userId])).scan();
         expect(stack.log.length).toBeGreaterThan(5);
+        expect(await fencesOf(s.userId)).toEqual([]);
+      } finally {
+        await stack.close();
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // #402 r3 R3-1: … and the COMMIT. Prisma sends it when the callback
+    // resolves, past the client extension, so the recorder above cannot see
+    // it; the database can. Each case holds the reply of a transaction's LAST
+    // statement until the stop returned, then lets the work resume, and asks
+    // PostgreSQL how that transaction ended (`txid_status`).
+    // -----------------------------------------------------------------------
+
+    /** How the transaction `xid` ended, by PostgreSQL's own record of it. */
+    const ended = async (xid: string) =>
+      (
+        await prisma.client.$queryRaw<Array<{ status: string }>>`
+          SELECT txid_status(${xid}::bigint) AS status`
+      )[0]?.status;
+
+    const xidOf = async (tx: unknown) =>
+      (
+        await (tx as PrismaService['client']).$queryRaw<Array<{ xid: string }>>`
+          SELECT txid_current()::text AS xid`
+      )[0]!.xid;
+
+    /**
+     * Pauses the next call of `method`, whose first argument is the business
+     * transaction, after its statement completed — the reply held — and
+     * records that transaction's id first.
+     */
+    function holdLastStatement<T extends object>(target: T, method: keyof T & string) {
+      const held = { xid: '' };
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let reached!: () => void;
+      const paused = new Promise<void>((resolve) => (reached = resolve));
+      const real = (target[method] as (...args: unknown[]) => Promise<unknown>).bind(target);
+      jest.spyOn(target, method as never).mockImplementationOnce((async (...args: unknown[]) => {
+        held.xid = await xidOf(args[0]);
+        const result = await real(...args);
+        reached();
+        await released;
+        return result;
+      }) as never);
+      return { held, paused, release };
+    }
+
+    /** The same, for the next transaction `service` opens: its callback's last statement held. */
+    function holdTransaction(service: PrismaService) {
+      const held = { xid: '' };
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      let reached!: () => void;
+      const paused = new Promise<void>((resolve) => (reached = resolve));
+      const real = service.transaction.bind(service);
+      jest.spyOn(service, 'transaction').mockImplementationOnce(((
+        fn: (tx: PrismaService['client']) => Promise<unknown>,
+        options?: Parameters<PrismaService['transaction']>[1],
+      ) =>
+        real(async (tx) => {
+          held.xid = await xidOf(tx);
+          const result = await fn(tx);
+          reached();
+          await released;
+          return result;
+        }, options)) as never);
+      return { held, paused, release };
+    }
+
+    /** A fresh pass after every fence of `userId` is past takeover: the sweep re-asserts. */
+    async function reassertedLater(
+      stack: Awaited<ReturnType<typeof recordedStack>>,
+      userId: string,
+    ) {
+      await sleep(TAKEOVER_MS);
+      await stack.scanner(new Set([userId])).scan();
+      await waitFor('the sweep to re-assert and clear every fence', async () =>
+        (await fencesOf(userId)).length === 0 ? true : null,
+      );
+    }
+
+    it('a re-assertion held at its last statement (the fence DELETE) until the stop returned: ROLLBACK — nothing commits, the PUT that landed keeps its live fence, and the sweep re-asserts after takeover', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      await dueFence(s.userId, s.keycloakId);
+      const stack = await recordedStack();
+      try {
+        const putsBefore = stub.puts(s.keycloakId).length;
+        const hold = holdLastStatement(stack.fences, 'settle');
+        const after = await stopWhilePaused(stack, new Set([s.userId]), hold);
+
+        expect(await ended(hold.held.xid)).toBe('aborted');
+        expect(after).toEqual([]);
+        // The PUT was applied before the stop, and carried the rows read under the lock.
+        const puts = stub.puts(s.keycloakId).slice(putsBefore);
+        expect(puts).toHaveLength(1);
+        expect(carried(puts[0]!)).toEqual(await rowsGrant(s.userId));
+        // Its fence (committed on the fence pool before the PUT) and the due
+        // one it would have taken over both stay: the DELETE rolled back.
+        expect(await fencesOf(s.userId)).toEqual([
+          expect.objectContaining({ live: false }),
+          expect.objectContaining({ live: true }),
+        ]);
+
+        await reassertedLater(stack, s.userId);
+        for (const put of stub.puts(s.keycloakId).slice(putsBefore)) {
+          expect(carried(put)).toEqual(await rowsGrant(s.userId));
+        }
+      } finally {
+        await stack.close();
+      }
+    });
+
+    it('a lapse held at its last statement (the outbox insert) until the stop returned: ROLLBACK — no claim, no event; the narrowing that landed keeps its live fence; the next pass after takeover lapses it once', async () => {
+      const s = await seed({
+        memberships: [
+          { in: 'a', roles: ['OPERATOR'] },
+          { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() - 1000) },
+        ],
+      });
+      const lapsed = s.memberships[1]!;
+      const stack = await recordedStack();
+      try {
+        const putsBefore = stub.puts(s.keycloakId).length;
+        const hold = holdLastStatement(stack.repository, 'enqueueEvent');
+        const after = await stopWhilePaused(stack, new Set([s.userId]), hold);
+
+        expect(await ended(hold.held.xid)).toBe('aborted');
+        expect(after).toEqual([]);
+        expect(await events(lapsed)).toEqual([]);
+        const row = await runUnscoped('the suite reads its own fixture', () =>
+          prisma.client.membership.findUniqueOrThrow({ where: { id: lapsed } }),
+        );
+        expect(row.lapseHandledAt).toBeNull();
+        // The write-ahead landed: Keycloak already holds the narrower set — the
+        // safe direction — and its fence stays live, holding the rest back.
+        const puts = stub.puts(s.keycloakId).slice(putsBefore);
+        expect(puts).toHaveLength(1);
+        const narrowed = await rowsGrant(s.userId);
+        expect(carried(puts[0]!)).toEqual(narrowed);
+        expect(await fencesOf(s.userId)).toEqual([expect.objectContaining({ live: true })]);
+
+        await reassertedLater(stack, s.userId);
+        expect(await events(lapsed)).toHaveLength(1);
+        // No write ever put the lapsed grant back.
+        for (const put of stub.puts(s.keycloakId).slice(putsBefore)) {
+          expect(carried(put)).toEqual(narrowed);
+        }
+      } finally {
+        await stack.close();
+      }
+    });
+
+    it('a fence-pool INSERT transaction held at its INSERT until the stop returned: ROLLBACK — no fence row, no PUT, and the business transaction rolls back too', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      await dueFence(s.userId, s.keycloakId);
+      const stack = await recordedStack();
+      try {
+        const putsBefore = stub.puts(s.keycloakId).length;
+        // Records the business transaction's id at its fence read; holds nothing.
+        const business = holdLastStatement(stack.fences, 'ofUser');
+        business.release();
+        const hold = holdTransaction(stack.pools.fence);
+        const after = await stopWhilePaused(stack, new Set([s.userId]), hold);
+
+        expect(await ended(hold.held.xid)).toBe('aborted');
+        expect(await ended(business.held.xid)).toBe('aborted');
+        expect(after).toEqual([]);
+        expect(stub.puts(s.keycloakId)).toHaveLength(putsBefore);
+        // Only the due fence it found: the new attempt's row never committed.
+        expect(await fencesOf(s.userId)).toEqual([expect.objectContaining({ live: false })]);
+      } finally {
+        await stack.close();
+      }
+    });
+
+    it('a consumer projection held at its last statement until the consumer’s stop returned: ROLLBACK — its fence stays live', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      const stack = await recordedStack();
+      try {
+        let handler!: EventHandler;
+        const consumer = new KeycloakProjectionConsumer((h) => {
+          handler = h;
+          return {
+            start: async () => undefined,
+            stop: async () => undefined,
+          } as unknown as EventConsumer;
+        }, stack.projector);
+        await consumer.onModuleInit();
+        const putsBefore = stub.puts(s.keycloakId).length;
+        const hold = holdLastStatement(stack.fences, 'settle');
+        const handled = handler(
+          {
+            eventId: `EVT_${ulid()}`,
+            eventName: IDENTITY_EVENTS.ROLE_ASSIGNED,
+            payload: { userId: s.userId },
+          } as unknown as EventEnvelope,
+          {} as never,
+        ).then(
+          () => 'committed',
+          () => 'refused',
+        );
+        await hold.paused;
+        await consumer.stop({ deadlineAt: Date.now() + 100 });
+        const stoppedAt = performance.now();
+        hold.release();
+
+        expect(await handled).toBe('refused');
+        expect(await ended(hold.held.xid)).toBe('aborted');
+        expect(stack.log.filter((entry) => entry.at >= stoppedAt)).toEqual([]);
+        expect(stub.puts(s.keycloakId)).toHaveLength(putsBefore + 1);
+        expect(await fencesOf(s.userId)).toEqual([expect.objectContaining({ live: true })]);
+      } finally {
+        await stack.close();
+      }
+    });
+
+    it.each([
+      ['the business pool', 'without', undefined],
+      ['the business pool', 'with', 5_000],
+      ['the fence pool', 'without', undefined],
+      ['the fence pool', 'with', 5_000],
+    ] as const)(
+      'PrismaService.transaction on %s, %s statementTimeoutMs: a callback that resolves after the abort rolls back; one that resolves before it commits',
+      async (pool, _branch, statementTimeoutMs) => {
+        const stack = await recordedStack();
+        try {
+          const service = pool === 'the fence pool' ? stack.pools.fence : stack.pools.business;
+          const run = (abortBeforeReturn: boolean) => {
+            const cancel = new AbortController();
+            const held = { xid: '' };
+            const outcome = withCancellation(cancel.signal, () =>
+              service.transaction(
+                async (tx) => {
+                  held.xid = await xidOf(tx);
+                  if (abortBeforeReturn) cancel.abort(new Error('stopped'));
+                  return 'returned';
+                },
+                { maxWait: 5_000, timeout: 5_000, statementTimeoutMs },
+              ),
+            ).then(
+              (value) => value,
+              (error: Error) => error.message,
+            );
+            return { held, outcome };
+          };
+
+          const late = run(true);
+          expect(await late.outcome).toBe('stopped');
+          expect(await ended(late.held.xid)).toBe('aborted');
+
+          const inTime = run(false);
+          expect(await inTime.outcome).toBe('returned');
+          expect(await ended(inTime.held.xid)).toBe('committed');
+        } finally {
+          await stack.close();
+        }
+      },
+    );
+
+    it('control: the same hold at the last statement, no stop — COMMIT, and the fences go with it', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      await dueFence(s.userId, s.keycloakId);
+      const stack = await recordedStack();
+      try {
+        const hold = holdLastStatement(stack.fences, 'settle');
+        const pass = stack.scanner(new Set([s.userId])).scan();
+        await hold.paused;
+        hold.release();
+        await pass;
+        expect(await ended(hold.held.xid)).toBe('committed');
         expect(await fencesOf(s.userId)).toEqual([]);
       } finally {
         await stack.close();

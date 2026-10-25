@@ -234,6 +234,12 @@ export class SecurityEventOutboxStore implements OutboxStore {
    * interactive captures past a five-second `statement_timeout`
    * (`test/security-event-aggregation.int-spec.ts`).
    *
+   * The one transaction not opened through `PrismaService.transaction`
+   * (`transaction-boundary.spec.ts`), and needing no post-callback check: a
+   * batch has no callback, so no code of this service runs between its last
+   * statement and its COMMIT, which the engine sends in the same request.
+   * Each statement still passes the cancellation boundary before it is sent.
+   *
    * `statement_timeout` bounds the database work, including any lock it waits
    * on — a concurrent claim of the same row, for instance. The recorder's hard
    * deadline bounds the HTTP response whatever the driver does, including a
@@ -398,8 +404,7 @@ export class SecurityEventOutboxStore implements OutboxStore {
   async release(ids: readonly string[], token: string, bound: OutboxReleaseBound): Promise<number> {
     if (ids.length === 0) return 0;
     return boundedReleaseSql(
-      (fn, timeoutMs) =>
-        this.prisma.client.$transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
+      (fn, timeoutMs) => this.prisma.transaction(fn, { timeout: timeoutMs, maxWait: timeoutMs }),
       bound,
       (tx) =>
         tx.$executeRawUnsafe(
@@ -424,9 +429,8 @@ export class SecurityEventOutboxStore implements OutboxStore {
   ): Promise<string[]> {
     if (ids.length === 0) return [];
     const bound = statementTimeoutOf(deadlineMs);
-    return this.prisma.client.$transaction(
+    return this.prisma.transaction(
       async (tx) => {
-        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${bound}`);
         const rows = await tx.$queryRawUnsafe<{ id: string }[]>(
           `UPDATE security_event_outbox
               SET claim_expires_at = now() + make_interval(secs => $3::double precision)
@@ -440,7 +444,8 @@ export class SecurityEventOutboxStore implements OutboxStore {
         );
         return rows.map((row) => row.id);
       },
-      { maxWait: bound, timeout: bound + TRANSACTION_MARGIN_MS },
+      // `SET LOCAL statement_timeout` first, as the transaction's own statement.
+      { maxWait: bound, timeout: bound + TRANSACTION_MARGIN_MS, statementTimeoutMs: bound },
     );
   }
 

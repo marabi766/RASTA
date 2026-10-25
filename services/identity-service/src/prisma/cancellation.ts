@@ -15,8 +15,21 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  * continuation — starts nothing more on the database: not a check each call
  * site has to remember, but one boundary every call goes through.
  *
- * What it does not stop: a statement already sent, and the **rollback** of a
- * transaction such a refusal ends — Prisma's engine rolls back without
+ * A transaction's **COMMIT** is refused too (#402 r3 R3-1). Prisma's engine
+ * issues it when the callback resolves, without passing through the client
+ * extension, so `PrismaService.transaction` checks the signal again at that
+ * point: a callback that resumes after the stop — its last statement's reply
+ * held past it — throws instead of returning, and the transaction rolls back.
+ * Nothing it did commits, on either pool. If it had already sent a Keycloak
+ * PUT, that PUT carried the state read under the user lock; its fence row,
+ * committed on the fence pool before the PUT, survives the rollback (the
+ * rollback undoes only the business transaction's delete of it), stays live
+ * until `takeover_at`, holds every narrowing back meanwhile, and is then
+ * re-asserted by the sweep from the rows as they are: no stale write.
+ *
+ * What it does not stop: a statement already sent — a COMMIT included, when
+ * the stop aborts after the callback resolved — and the **rollback** of a
+ * transaction such a refusal ends: Prisma's engine rolls back without
  * passing through the client extension, so cleanup is never refused. A fence
  * whose release or confirmation is refused this way simply stays (live until
  * `takeover_at`, then the sweep re-asserts it): slower, never unsafe (D-069).

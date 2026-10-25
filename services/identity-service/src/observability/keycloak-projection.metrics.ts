@@ -89,7 +89,9 @@ export const keycloakWriteFenceEventsTotal = new Counter({
  * `account_missing` is an account an operator must look at. `overdue` (a
  * subset of `live`): writes still unresolved past their deadline plus half
  * the settle window — the D-070 deployment assumption's signal, alerted on at
- * once (`RastaIdentityKeycloakWriteOverdue`).
+ * once (`RastaIdentityKeycloakWriteOverdue`). Sampled only at the end of a
+ * sweep pass, so a whole overdue window can pass unseen (#402 r3 R3-2; an
+ * independent sampler is the follow-up).
  */
 export const keycloakWriteFences = new Gauge({
   name: 'rasta_identity_keycloak_write_fences',
