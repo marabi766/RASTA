@@ -37,6 +37,13 @@
         "$TURBO_ROOT$/services/construction-service/src/approval/approval.state-machine.ts",
         "$TURBO_ROOT$/services/construction-service/src/approval/dto.ts",
         "$TURBO_ROOT$/services/construction-service/src/config/env.ts",
+        "$TURBO_ROOT$/services/construction-service/src/openapi/document.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/dto.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/execution.service.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/lifecycle.controller.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/project.controller.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/project.service.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/project.state-machine.ts",
         "$TURBO_ROOT$/services/construction-service/src/tender/award.controller.ts",
         "$TURBO_ROOT$/services/construction-service/src/tender/award.dto.ts",
         "$TURBO_ROOT$/services/construction-service/src/tender/award.repository.ts",
@@ -132,7 +139,17 @@
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.controller.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.service.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/state-machine.ts",
-        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts"
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/access/access.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/openapi/document.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/capabilities.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/dto.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/qualification.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/qualification.state-machine.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/supplier.controller.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/supplier.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/suspension.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/suspension.state-machine.ts"
       ]
     },
     "test:unit": {
@@ -161,6 +178,13 @@
         "$TURBO_ROOT$/services/construction-service/src/approval/approval.state-machine.ts",
         "$TURBO_ROOT$/services/construction-service/src/approval/dto.ts",
         "$TURBO_ROOT$/services/construction-service/src/config/env.ts",
+        "$TURBO_ROOT$/services/construction-service/src/openapi/document.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/dto.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/execution.service.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/lifecycle.controller.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/project.controller.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/project.service.ts",
+        "$TURBO_ROOT$/services/construction-service/src/project/project.state-machine.ts",
         "$TURBO_ROOT$/services/construction-service/src/tender/award.controller.ts",
         "$TURBO_ROOT$/services/construction-service/src/tender/award.dto.ts",
         "$TURBO_ROOT$/services/construction-service/src/tender/award.repository.ts",
@@ -256,7 +280,17 @@
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.controller.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/return.service.ts",
         "$TURBO_ROOT$/services/marketplace-service/src/returns/state-machine.ts",
-        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts"
+        "$TURBO_ROOT$/services/marketplace-service/src/returns/views.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/access/access.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/openapi/document.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/capabilities.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/dto.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/qualification.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/qualification.state-machine.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/supplier.controller.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/supplier.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/suspension.service.ts",
+        "$TURBO_ROOT$/services/supplier-service/src/supplier/suspension.state-machine.ts"
       ]
     }
   }

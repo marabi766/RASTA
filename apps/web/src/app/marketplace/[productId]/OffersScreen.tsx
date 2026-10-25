@@ -32,6 +32,14 @@ import type { Binding } from '@/lib/unresolved-tenancy';
  * (`docs/16 § ۱۶٫۱۱`, ADR-041).
  */
 
+/**
+ * The marketplace's existing wording for an approved supplier, kept as it was
+ * on main: the supplier screens spell the shared label without a hamza (PR 366
+ * r5/r6), and which spelling the product uses is still an open owner question,
+ * so this screen does not follow that change.
+ */
+const APPROVED_OFFER_LABEL = 'تأییدشده';
+
 export interface OffersScreenProps {
   readonly product: ReadResult<Product>;
   readonly offers: ReadResult<OffersPage>;
@@ -137,7 +145,9 @@ function OfferRows({ offers }: { offers: OffersPage }) {
             <td className="p-3 text-content-muted">
               {offer.supplierQualification === 'UNAVAILABLE'
                 ? 'هنوز فعال نیست'
-                : qualificationStateLabel(offer.supplierQualification)}
+                : offer.supplierQualification === 'APPROVED'
+                  ? APPROVED_OFFER_LABEL
+                  : qualificationStateLabel(offer.supplierQualification)}
             </td>
           </tr>
         ))}

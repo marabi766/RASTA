@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { RastaError, getContext } from '@rasta/nest-common';
+import { ERROR_CODES } from '@rasta/contracts';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
-import { assertCanDecideAbout } from '../access/access';
+import { assertCanDecideAbout, mayReadReviewerNote } from '../access/access';
 import { transactionNow } from '../shared/clock';
-import { SupplierRepository } from './supplier.repository';
+import { SupplierRepository, type SuspensionWrite } from './supplier.repository';
 import { requireActor } from './supplier.service';
 import { toDetailView, type SupplierRow } from './views';
 import {
@@ -15,6 +16,38 @@ import {
 import type { ReinstateSupplierDto, SupplierDetailView, SuspendSupplierDto } from './dto';
 import { suspensionTransitionsTotal } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
+
+/**
+ * The closed `details[].code` of a suspension command refused because the
+ * supplier's suspension history is no longer the one the operator read.
+ */
+export const SUSPENSION_EPISODE_CHANGED = 'SUSPENSION_EPISODE_CHANGED';
+
+/**
+ * `409`: the operator decided about an episode history that has moved on.
+ * `OPTIMISTIC_LOCK_FAILED` is the platform's code for "modified by another
+ * request; reload", and the detail names which expectation failed, with a code a
+ * client can rely on rather than a sentence.
+ */
+function episodeChanged(supplierId: string, field: 'latestSuspensionId' | 'suspensionId') {
+  return new RastaError(
+    ERROR_CODES.OPTIMISTIC_LOCK_FAILED,
+    'The supplier’s suspension history changed since it was read; nothing was written',
+    {
+      details: [
+        {
+          path: field,
+          message:
+            field === 'suspensionId'
+              ? 'This suspension is not the supplier’s open one any more'
+              : 'A newer suspension was recorded for this supplier',
+          code: SUSPENSION_EPISODE_CHANGED,
+        },
+      ],
+      internalContext: { supplierId },
+    },
+  );
+}
 
 /**
  * SuspendSupplier and ReinstateSupplier.
@@ -69,7 +102,7 @@ export class SuspensionService {
       // D-5: one instant from the database for the episode and its event.
       const suspendedAt = await transactionNow(tx);
 
-      const changed = await this.repository.openSuspension(tx, {
+      const written = await this.repository.openSuspension(tx, {
         id: suspensionId,
         supplierId,
         organizationId: supplier.organizationId,
@@ -77,18 +110,12 @@ export class SuspensionService {
         suspendedBy: actor,
         suspendedAt,
         suspendedCorrelationId: context.correlationId,
+        expectedLatestSuspensionId: dto.latestSuspensionId,
       });
 
-      if (changed === 0) {
-        // Another operator suspended it between the read and this write.
-        // Thrown inside the transaction so the event rolls back with it.
-        throw RastaError.businessRule(
-          `Supplier ${supplierId} was suspended by somebody else first`,
-          {
-            supplierId,
-          },
-        );
-      }
+      // Thrown inside the transaction so the status flip and the event roll
+      // back with it.
+      refuseUnlessWritten(written, supplierId, 'latestSuspensionId');
 
       await this.events.enqueue(tx, {
         eventName: 'SUPPLIER_SUSPENDED',
@@ -143,28 +170,24 @@ export class SuspensionService {
       const reinstatedAt = await transactionNow(tx);
       const result = await this.repository.closeSuspension(tx, {
         supplierId,
+        expectedSuspensionId: dto.suspensionId,
         reinstatedBy: actor,
         reinstatedAt,
         reinstatedCorrelationId: context.correlationId,
         reinstatementNote: dto.reason,
       });
 
-      if (result.changed === 0 || !result.suspensionId) {
-        // Thrown inside the transaction so nothing — status or event — commits.
-        throw RastaError.businessRule(
-          `Supplier ${supplierId} was reinstated by somebody else first`,
-          { supplierId },
-        );
-      }
+      // Thrown inside the transaction so nothing — status or event — commits.
+      const suspensionId = refuseUnlessWritten(result, supplierId, 'suspensionId');
 
       await this.events.enqueue(tx, {
         eventName: 'SUPPLIER_REINSTATED',
-        aggregateId: result.suspensionId,
+        aggregateId: suspensionId,
         organizationId: supplier.organizationId,
         payload: {
           supplierId,
           organizationId: supplier.organizationId,
-          suspensionId: result.suspensionId,
+          suspensionId,
           reason: dto.reason,
           reinstatedBy: actor,
           reinstatedAt: reinstatedAt.toISOString(),
@@ -183,6 +206,36 @@ export class SuspensionService {
     if (!supplier) {
       throw RastaError.internal('The supplier disappeared immediately after being written');
     }
-    return toDetailView(supplier as unknown as SupplierRow);
+    return toDetailView(supplier as unknown as SupplierRow, {
+      reviewer: mayReadReviewerNote(supplier),
+    });
+  }
+}
+
+/**
+ * The suspension write's outcome as the command's answer: the episode id when
+ * it was written, otherwise the refusal — the same business-rule sentence as
+ * before for a status somebody else changed first, and `409`
+ * `SUSPENSION_EPISODE_CHANGED` for an episode history that moved on.
+ */
+function refuseUnlessWritten(
+  written: SuspensionWrite,
+  supplierId: string,
+  field: 'latestSuspensionId' | 'suspensionId',
+): string {
+  switch (written.outcome) {
+    case 'WRITTEN':
+      return written.suspensionId;
+    case 'EPISODE_CHANGED':
+      throw episodeChanged(supplierId, field);
+    case 'NOT_IN_STATE':
+      // Two literal sentences, not one template: the portal matches each whole
+      // and pins it against this file (`supplier-commands.contract.spec.ts`).
+      throw RastaError.businessRule(
+        field === 'suspensionId'
+          ? `Supplier ${supplierId} was reinstated by somebody else first`
+          : `Supplier ${supplierId} was suspended by somebody else first`,
+        { supplierId },
+      );
   }
 }

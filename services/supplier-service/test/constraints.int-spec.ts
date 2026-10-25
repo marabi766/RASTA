@@ -185,7 +185,13 @@ describe('database invariants', () => {
         raw(() =>
           prisma.client.qualification.update({
             where: { id },
-            data: { state: 'REJECTED', decidedBy: `USR_${ulid()}`, decidedCorrelationId: ulid() },
+            data: {
+              state: 'REJECTED',
+              decidedBy: `USR_${ulid()}`,
+              decidedCorrelationId: ulid(),
+              // Present, so the refusal is the missing timestamp's alone.
+              rejectionReason: 'A stated reason',
+            },
           }),
         ),
       ).rejects.toThrow(/ck_qualification_decision_complete|check constraint/i);
@@ -297,6 +303,8 @@ describe('database invariants', () => {
         decidedBy: `USR_${ulid()}`,
         decidedAt: new Date(),
         decidedCorrelationId: ulid(),
+        // Every rejection recorded since 20261023120000 carries its reason.
+        rejectionReason: 'A stated reason for the supplier',
       };
 
       await raw(() => prisma.client.qualification.update({ where: { id }, data: rejected }));

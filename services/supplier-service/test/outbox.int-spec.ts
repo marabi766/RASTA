@@ -145,7 +145,9 @@ describe('the transactional outbox', () => {
         w.qualifications.submit(supplier.id, { capability: 'WORKSHOP_SERVICE', evidence: [] }),
       );
       await asOperator(() => w.qualifications.approve(supplier.id, submitted.id, {}));
-      await asOperator(() => w.suspensions.suspend(supplier.id, { reason: 'A stated reason' }));
+      await asOperator(() =>
+        w.suspensions.suspend(supplier.id, { reason: 'A stated reason', latestSuspensionId: null }),
+      );
 
       const keys = new Set((await outboxFor(w.prisma, org)).map((row) => row.partitionKey));
 
