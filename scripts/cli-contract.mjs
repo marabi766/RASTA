@@ -92,6 +92,8 @@ export const CLI_CONTRACT = Object.freeze({
       '--fallback-manifest': 'path',
     },
   },
+  // psql's own options, for the connection sampler; it reads none from its command line.
+  'scripts/ci-pg-connections-watch.mjs': { other: ['-A', '-F', '-X', '-c', '-t'] },
   // The campaign workflow's own command line, checked as text in a workflow file.
   'scripts/aggregation-campaign-workflow-lib.mjs': { other: ['--pairs', '--slot'] },
   'scripts/aggregation-campaign-workflow.mjs': { positionals: ['path'] },

@@ -68,6 +68,7 @@
     "check:test-phases": "node scripts/check-test-phases.mjs",
     "test:ci-integration-split": "node --test scripts/ci-integration-split.test.mjs",
     "test:ci-pull-image": "node --test scripts/ci-pull-image.test.mjs",
+    "test:ci-pg-connections": "node --test scripts/ci-pg-connections.test.mjs",
     "test:aggregation-evidence-lib": "node --test scripts/aggregation-evidence.test.mjs scripts/aggregation-evidence-cli.test.mjs",
     "calibrate:aggregation-stress": "node scripts/aggregation-evidence.mjs --calibrate",
     "account:aggregation-campaign": "node scripts/aggregation-campaign-accounting.mjs",
