@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { expectNotDisclosed, thisRun } from '@rasta/testing';
 import { IdempotencyStore, hashRequestBody } from '../src/shared/idempotency';
 import {
   reasonsOf,
@@ -15,6 +16,7 @@ import {
   cleanup,
   publishedForBids,
   qualify,
+  recordedIdentities,
   wire,
   type Wiring,
 } from './helpers';
@@ -91,7 +93,7 @@ describe('bids API', () => {
   });
 
   it('submits (201), reads its own receipt (200), replaces (200) and withdraws (200), never returning content', async () => {
-    const { bidder, tenderId } = await setup('flow');
+    const { owner, bidder, tenderId } = await setup('flow');
 
     const submitted = await http()
       .post(`/v1/tenders/${tenderId}/bids`)
@@ -126,8 +128,14 @@ describe('bids API', () => {
     expect(withdrawn.status).toBe(200);
     expect(withdrawn.body.status).toBe('WITHDRAWN');
 
+    // Neither price, nor the note, nor an answer — with the receipts, ids and instants the bid
+    // store recorded set aside first, so a digest holding 900000000 cannot fail it (#452).
+    const recorded = await recordedIdentities([owner]);
     for (const body of [submitted.body, mine.body, replaced.body, withdrawn.body]) {
-      expect(JSON.stringify(body)).not.toMatch(/1250000000|900000000|Mobilisation|Licence 1234/);
+      expectNotDisclosed(body, [/1250000000|900000000|Mobilisation|Licence 1234/], {
+        known: recorded,
+        instantsBetween: thisRun(),
+      });
     }
   });
 
@@ -276,7 +284,7 @@ describe('bids API', () => {
     });
 
     it('answers a retry with the stored receipt, one bid, one receipt, one BID_SUBMITTED', async () => {
-      const { bidder, tenderId } = await setup('key-replay');
+      const { owner, bidder, tenderId } = await setup('key-replay');
       const user = userOf(bidder);
       const key = bidKey();
       const body = { content: bidContent('1250000000') };
@@ -316,7 +324,12 @@ describe('bids API', () => {
       );
       expect(stored?.request_hash).toMatch(KEYED_SALTED);
       expect(stored?.request_hash).not.toContain(hashRequestBody({ id: tenderId, body }));
-      expect(JSON.stringify(stored?.response_body)).not.toContain('1250000000');
+      // The stored answer is the receipt, ids and instants the store recorded — not the price.
+      expectNotDisclosed(stored?.response_body, ['1250000000'], {
+        known: await recordedIdentities([owner, bidder]),
+        instantsBetween: thisRun(),
+        input: body,
+      });
     });
 
     it('stores digests no two claims share: identical bids of two organizations, or of two users of one, never compare (Codex r1 on #250, R1)', async () => {

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ERROR_CODES, eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
+import { expectNotDisclosed, mintedKey, thisRun } from '@rasta/testing';
 import { Logger } from '@nestjs/common';
 import { awardStandingChecksTotal } from '../src/observability/metrics';
 import { matrixDigest } from '../src/tender/evaluation-matrix';
@@ -18,6 +19,8 @@ import {
   loadStanding,
   newUserId,
   outboxFor,
+  outboxKeys,
+  recordedIdentities,
   ownerClient,
   ownerSql,
   TEST_ISSUER,
@@ -355,13 +358,20 @@ describe('awarding an evaluated tender', () => {
       expect(view.amountMinor).toBe(price);
       expect((await awardRows(tenderId))[0]!.amountMinor).toBe(9007199254740993n);
       expect((await as(owner, () => w.award.getAward(tenderId))).amountMinor).toBe(price);
-      // Nowhere in the owner's event stream or log, whole or as a number.
-      const everything = JSON.stringify(
+      // Nowhere in the owner's event stream or log, whole or as a number — the rounded double is
+      // what a path through `Number` would write, never sent. Every generated value is set aside
+      // first, as one of the owner's records or a key minted for its own row (#452).
+      expectNotDisclosed(
         [await outboxFor(w.prisma, owner), await logOf(tenderId)],
-        (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value),
+        [price, '9007199254740992'],
+        {
+          metadata: { ...outboxKeys('0.'), '1.*.id': mintedKey('BAL') },
+          known: await recordedIdentities([owner]),
+          instantsBetween: thisRun(),
+          input: { prices: [price, '9007199254740995'] },
+          derived: ['9007199254740992'],
+        },
       );
-      expect(everything).not.toContain(price);
-      expect(everything).not.toContain('9007199254740992');
     });
 
     it('records the awarder’s issuer and subject beside the user id when the token carries both', async () => {

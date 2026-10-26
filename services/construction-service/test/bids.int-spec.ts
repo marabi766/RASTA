@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { InternalTokenService, RastaError, runUnscoped } from '@rasta/nest-common';
+import { expectNotDisclosed, mintedKey, thisRun } from '@rasta/testing';
 import {
   TenderEvidenceClient,
   trustedReceiptsOf,
@@ -30,6 +31,7 @@ import {
   SUPPLIER,
   publishedForBids,
   qualify,
+  recordedIdentities,
   testEnv,
   untilASessionWaitsOnALock,
   wire,
@@ -133,19 +135,26 @@ describe('bids', () => {
         receipt: expect.stringMatching(/^[0-9a-f]{64}$/),
         contentCommitment: expect.stringMatching(/^[0-9a-f]{64}$/),
       });
-      expect(JSON.stringify(view)).not.toMatch(/1250000000|Mobilisation|Licence 1234/);
+      // The receipt, ids and instants the store recorded are set aside first: a digest can hold a
+      // run of the price's digits (#452).
+      const recorded = { known: await recordedIdentities([owner]), instantsBetween: thisRun() };
+      expectNotDisclosed(view, [/1250000000|Mobilisation|Licence 1234/], recorded);
 
       // Nothing readable is stored: the price, the note and the answers exist only sealed.
       const row = await runUnscoped('the suite reads the row it wrote', () =>
         w.prisma.client.bid.findFirstOrThrow({ where: { id: view.bidId } }),
       );
       expect(row).toMatchObject({ organizationId: owner, bidderOrganizationId: bidder });
-      const stored = JSON.stringify({
-        ...row,
-        nonce: Buffer.from(row.nonce).toString('latin1'),
-        ciphertext: Buffer.from(row.ciphertext).toString('latin1'),
-      });
-      expect(stored).not.toMatch(/1250000000|Mobilisation|Licence 1234/);
+      // The sealed bytes stay in what is searched, as text (C): they are what must not hold it.
+      expectNotDisclosed(
+        {
+          ...row,
+          nonce: Buffer.from(row.nonce).toString('latin1'),
+          ciphertext: Buffer.from(row.ciphertext).toString('latin1'),
+        },
+        [/1250000000|Mobilisation|Licence 1234/],
+        recorded,
+      );
 
       // The event carries digests and the new head, no content.
       const [event] = await eventsOf(w, owner, 'BID_SUBMITTED');
@@ -163,7 +172,10 @@ describe('bids', () => {
         receipt: view.receipt,
         submittedBy: expect.any(String),
       });
-      expect(JSON.stringify(event!.payload)).not.toMatch(/1250000000|Mobilisation|Licence 1234/);
+      expectNotDisclosed(event!.payload, [/1250000000|Mobilisation|Licence 1234/], {
+        ...recorded,
+        metadata: { eventId: event!.id, correlationId: event!.correlationId },
+      });
     });
 
     it('stamps the row, the receipt and the event with one instant', async () => {
@@ -1125,9 +1137,16 @@ describe('bids', () => {
         refusalCode: null,
         accessedAt: rows[0]!.accessedAt.toISOString(),
       });
-      expect(JSON.stringify(rows) + JSON.stringify(event!.payload)).not.toMatch(
-        /1250000000|Mobilisation|Licence 1234/,
-      );
+      // The log row's own key, and the event's, are set aside with the store's records (#452).
+      expectNotDisclosed([rows, event!.payload], [/1250000000|Mobilisation|Licence 1234/], {
+        metadata: {
+          '0.*.id': mintedKey('BAL'),
+          '1.eventId': event!.id,
+          '1.correlationId': event!.correlationId,
+        },
+        known: await recordedIdentities([owner]),
+        instantsBetween: thisRun(),
+      });
     });
 
     it('logs a refused read, commits the row, and then answers 404', async () => {

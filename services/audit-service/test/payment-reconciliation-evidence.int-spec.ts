@@ -1,6 +1,7 @@
 import type { EventEnvelope } from '@rasta/contracts';
 import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
+import { expectNotDisclosed, thisRun } from '@rasta/testing';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { AuditRepository } from '../src/audit/audit.repository';
 import { DomainProjectorConsumer } from '../src/consumers/domain-projector.consumer';
@@ -307,14 +308,23 @@ describe('payment-reconciliation evidence (real PostgreSQL)', () => {
 
     const [row] = await evidenceOf(event.eventId);
     expect(Object.keys(row ?? {}).sort()).toEqual(COLUMNS);
-    const text = JSON.stringify(row);
-    for (const marker of ['SMUGGLED', '250000', 'IRR', 'mock', 'wal_1']) {
-      expect(text).not.toContain(marker);
-    }
-    // And the audit row stays as path A has always written it: no payload.
     const audit = await prisma.client.auditEvent.findFirstOrThrow({
       where: { sourceEventId: event.eventId },
     });
+    // Every marker is in the event; none in the row — looked for once the row's ids and instants
+    // are verified and set aside (#452: helpers.ts ids end in a ULID that can hold 250000).
+    expectNotDisclosed(row, ['SMUGGLED', '250000', 'IRR', 'mock', 'wal_1'], {
+      metadata: {
+        organization_id: at.org,
+        payment_intent_id: at.intent,
+        source_event_id: event.eventId,
+        audit_event_id: audit.id,
+      },
+      instantsBetween: thisRun(),
+      known: [event.occurredAt],
+      input: event,
+    });
+    // And the audit row stays as path A has always written it: no payload.
     expect(audit.changes).toBeNull();
     expect(audit.reason).toBeNull();
     expect(

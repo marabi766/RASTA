@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext } from '@rasta/nest-common';
+import { expectNotDisclosed, mintedKey, thisRun } from '@rasta/testing';
 import type { PrismaClient } from '../src/generated/prisma';
 import {
   bidOpeningConflictChecksTotal,
@@ -30,6 +31,8 @@ import {
   newOrganizationId,
   newUserId,
   outboxFor,
+  outboxKeys,
+  recordedIdentities,
   ownerClient,
   publishedForBids,
   qualify,
@@ -330,13 +333,31 @@ describe('opening the bids of a tender', () => {
           ),
         ),
       );
-      // The content never reaches an event or the log, and the key never does either.
-      const everything = JSON.stringify(
-        [await outboxFor(w.prisma, owner), rows],
-        (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value),
+      // The content never reaches an event or the log, and the key never does either. Every value
+      // the run generated is set aside first — as one of the owner's records, as a key the outbox
+      // or the log minted for its own row, or as an instant of this run — so a price cannot be
+      // found inside a ULID or a digest (#452). The opening's digest of the ids is computed above.
+      const outbox = await outboxFor(w.prisma, owner);
+      expectNotDisclosed(
+        [outbox, rows],
+        [...MARKERS, ...PRICES, /PRIVATE KEY|wrappedPrivateKey/i],
+        {
+          metadata: {
+            ...outboxKeys('0.'),
+            '0.*.payload.payload.bidIdsDigest': createHash('sha256')
+              .update(
+                bids
+                  .map((bid) => bid.id)
+                  .sort()
+                  .join('\n'),
+              )
+              .digest('hex'),
+            '1.*.id': mintedKey('BAL'),
+          },
+          known: await recordedIdentities([owner]),
+          instantsBetween: thisRun(),
+        },
       );
-      for (const marker of [...MARKERS, ...PRICES]) expect(everything).not.toContain(marker);
-      expect(everything).not.toMatch(/PRIVATE KEY|wrappedPrivateKey/i);
     });
 
     it('unwraps the tender key only for the opening and zeroises what it unwrapped', async () => {
@@ -970,9 +991,12 @@ describe('opening the bids of a tender', () => {
 
       expect(view).toMatchObject({ tenderId, opened: false, bidCount: 2, bids: [] });
       expect(view.receivedAt).toHaveLength(2);
-      const text = JSON.stringify(view);
-      for (const bidder of bidders) expect(text).not.toContain(bidder);
-      for (const marker of [...MARKERS, ...PRICES]) expect(text).not.toContain(marker);
+      // Not who (a bidder's id, looked for in the view as it is), not what — with the tender's
+      // and the receipts' generated values set aside first (#452).
+      expectNotDisclosed(view, [...bidders, ...MARKERS, ...PRICES], {
+        known: await recordedIdentities([owner]),
+        instantsBetween: thisRun(),
+      });
       expect(unwrap).not.toHaveBeenCalled();
       expect(w.evidence.asked).toHaveLength(0);
       expect(await logOf(tenderId)).toEqual([

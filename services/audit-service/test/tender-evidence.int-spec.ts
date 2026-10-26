@@ -3,6 +3,7 @@ import request from 'supertest';
 import { ulid } from 'ulid';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
+import { expectNotDisclosed, instant, thisRun } from '@rasta/testing';
 import { TenderEvidenceUnmappableError, genesisReceipt } from '../src/audit/tender-evidence';
 import { TenderEvidenceRepository } from '../src/audit/tender-evidence.repository';
 import { TenderGapMonitor } from '../src/audit/tender-gap-monitor';
@@ -507,7 +508,25 @@ describe('the tender-evidence projection', () => {
         `SELECT * FROM tender_receipt_link WHERE tender_id = $1`,
         tenderId,
       );
-      expect(JSON.stringify(rows)).not.toMatch(/1250000000|secret|ciphertext-must-not-leak/);
+      // The price, the note and the ciphertext are in the event, not in the row. Every column the
+      // run generated is verified against the event first and set aside (#452).
+      const sent = first.event.payload as Record<string, string>;
+      expectNotDisclosed(rows, [/1250000000|secret|ciphertext-must-not-leak/], {
+        metadata: {
+          '0.bid_id': sent.bidId!,
+          '0.tender_id': tenderId,
+          '0.organization_id': OWNER,
+          '0.bidder_organization_id': BIDDER,
+          '0.source_event_id': first.event.eventId,
+          '0.receipt': first.receipt,
+          '0.previous_receipt': sent.previousReceipt!,
+          '0.content_commitment': sent.contentCommitment!,
+          '0.ciphertext_sha256': sent.ciphertextSha256!,
+          '0.received_at': sent.receivedAt!,
+          '0.recorded_at': instant(thisRun()),
+        },
+        input: first.event,
+      });
       expect(Object.keys(rows[0]!).sort()).toEqual(
         [
           'bid_id',

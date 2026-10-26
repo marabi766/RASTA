@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { expectNotDisclosed, thisRun } from '@rasta/testing';
 import { ulid } from 'ulid';
 import {
   actor,
@@ -121,10 +122,12 @@ describe('amendments of a signed contract', () => {
         proposedBy: expect.any(String),
         proposedAt: res.body.proposedAt,
       });
-      // Neither the amount nor the text is on the shared topic.
-      const text = JSON.stringify(events);
-      expect(text).not.toContain('250000000');
-      expect(text).not.toContain('pile work');
+      // Neither the amount nor the text is on the shared topic — looked for once the ids and
+      // instants the run minted are set aside (#452: a ULID can hold 250000000).
+      expectNotDisclosed(events, ['250000000', 'pile work'], {
+        known: [c.id, c.employer, c.contractor, res.body.id],
+        instantsBetween: thisRun(),
+      });
 
       const second = await propose(
         api,
@@ -421,8 +424,14 @@ describe('amendments of a signed contract', () => {
         effectiveAt: second.body.contractorSignedAt,
       });
       // No amount, no text, on any event of the amendment.
-      expect(JSON.stringify(events)).not.toContain('250000000');
-      expect(JSON.stringify(events)).not.toContain('pile work');
+      // The employer's signature names the policy it rested on; its id is the stored signature's.
+      const policies = (await amendmentSignatures(w, proposed.id)).flatMap((signature) =>
+        signature.policyId ? [signature.policyId] : [],
+      );
+      expectNotDisclosed(events, ['250000000', 'pile work'], {
+        known: [c.id, c.employer, c.contractor, proposed.id, ...policies],
+        instantsBetween: thisRun(),
+      });
     });
 
     it('the contractor first, the employer second: the same amendment, whichever signs first', async () => {

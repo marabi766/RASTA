@@ -1,7 +1,9 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
 import { runUnscoped } from '@rasta/nest-common';
+import { expectNotDisclosed, oneOf, thisRun } from '@rasta/testing';
 import { mockReferenceWithDirective } from '../src/payment/mock.provider';
+import { hashRequestBody } from '../src/shared/idempotency';
 import { admin, apiTenant, bearer, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
 
@@ -163,27 +165,47 @@ describe('refusals and defaults', () => {
     const pan = '4111111111111111';
 
     for (const instrument of [`fail-capture:${pan}`, `fail:${pan}`, `fail-refund:${pan}`]) {
+      const sent = { amountMinor: '5000', instrument };
+      const key = id('ref-unsupported-directive');
       const response = await request(http)
         .post(`/v1/wallets/${wallet.body.id}/top-up`)
         .set('authorization', asOrg())
-        .set('idempotency-key', id('ref-unsupported-directive'))
-        .send({ amountMinor: '5000', instrument })
+        .set('idempotency-key', key)
+        .send(sent)
         .expect(201);
 
       expect(response.body.status).toBe('FAILED');
       expect(response.body.failureReason).toBe('UNSUPPORTED_DIRECTIVE');
-      expect(JSON.stringify(response.body)).not.toContain(pan);
+      // The card number is looked for once the ids and instants the run minted are set aside:
+      // a ULID can hold sixteen digits (#452). The same for the stored row and the events.
+      const minted = {
+        known: [wallet.body.id as string, response.body.paymentIntentId as string],
+        instantsBetween: thisRun(),
+        input: sent,
+      };
+      expectNotDisclosed(response.body, [pan], minted);
 
       const intent = await runUnscoped('the suite reads what was stored for the intent', () =>
         harness.prisma.client.paymentIntent.findUniqueOrThrow({
           where: { id: response.body.paymentIntentId as string },
         }),
       );
-      expect(
-        JSON.stringify(intent, (_key, value: unknown) =>
-          typeof value === 'bigint' ? value.toString() : value,
-        ),
-      ).not.toContain(pan);
+      // A bigint column is searched as its digits, as JSON.stringify with a replacer wrote it. The
+      // row's request hash is the hash of this very request (payment.service.ts), the key the one
+      // sent, the correlation id the response's.
+      expectNotDisclosed(intent, [pan], {
+        ...minted,
+        metadata: {
+          idempotencyKey: key,
+          correlationId: response.headers['x-correlation-id'] as string,
+          requestHash: hashRequestBody({
+            walletId: wallet.body.id,
+            amountMinor: '5000',
+            currency: wallet.body.currency,
+            instrument,
+          }),
+        },
+      });
 
       const published = await runUnscoped('the suite reads what was published for it', () =>
         harness.prisma.client.outboxMessage.findMany({
@@ -191,7 +213,18 @@ describe('refusals and defaults', () => {
         }),
       );
       expect(published.length).toBeGreaterThan(0);
-      expect(JSON.stringify(published.map((row) => row.payload))).not.toContain(pan);
+      // Each envelope's eventId is its outbox row's id; its correlation id the request's.
+      expectNotDisclosed(
+        published.map((row) => row.payload),
+        [pan],
+        {
+          ...minted,
+          metadata: {
+            '*.eventId': oneOf(published.map((row) => row.id)),
+            '*.correlationId': response.headers['x-correlation-id'] as string,
+          },
+        },
+      );
     }
   });
 

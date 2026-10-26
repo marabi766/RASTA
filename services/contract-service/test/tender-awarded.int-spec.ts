@@ -1,4 +1,5 @@
 import { DLQ_REASONS } from '@rasta/contracts';
+import { expectNotDisclosed, thisRun } from '@rasta/testing';
 import { RastaError, UnprocessableEventError, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import {
@@ -133,11 +134,28 @@ describe('TENDER_AWARDED drafts a contract', () => {
       winningBidId: award.winningBidId,
       draftedAt: row?.createdAt.toISOString(),
     });
-    expect(
-      JSON.stringify(message, (_key, value: unknown) =>
-        typeof value === 'bigint' ? value.toString() : value,
-      ),
-    ).not.toContain(award.amountMinor);
+    // The whole outbox row, a bigint column as its digits, as the replacer wrote it. The
+    // envelope and its headers carry the row's own id; the causation is the award event, the
+    // correlation the award's chain.
+    expectNotDisclosed(message, [award.amountMinor], {
+      metadata: {
+        'payload.eventId': message!.id,
+        'headers.x-event-id': message!.id,
+        'payload.causationId': event.eventId,
+        'headers.x-causation-id': event.eventId,
+      },
+      known: [
+        message!.id,
+        event.correlationId!,
+        o,
+        row!.id,
+        award.tenderId,
+        award.projectId,
+        award.winnerOrganizationId,
+        award.winningBidId,
+      ],
+      instantsBetween: thisRun(),
+    });
   });
 
   describe('is idempotent on the tender', () => {

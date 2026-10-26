@@ -1,5 +1,6 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { runUnscoped } from '@rasta/nest-common';
+import { expectNotDisclosed, thisRun } from '@rasta/testing';
 import { ulid } from 'ulid';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { TenderCloseRepository } from '../src/tender/tender-close.repository';
@@ -12,6 +13,7 @@ import {
   newOrganizationId,
   outboxFor,
   ownerClient,
+  recordedIdentities,
   publishedForBids,
   qualify,
   untilASessionWaitsOnALock,
@@ -199,7 +201,13 @@ describe('tender close sweeper', () => {
       const [event] = await closedEvents(owner);
       const payload = eventEnvelopeSchema.parse(event!.payload).payload;
       expect(payload).toMatchObject({ bidCount: 1 });
-      expect(JSON.stringify(event!.payload)).not.toMatch(/1250000000|Mobilisation|bidder/i);
+      // The envelope's own keys are the row's; the tender's and the bids' values are the store's
+      // records; set aside before the price, the note or a bidder is looked for (#452).
+      expectNotDisclosed(event!.payload, [/1250000000|Mobilisation|bidder/i], {
+        metadata: { eventId: event!.id, correlationId: event!.correlationId },
+        known: await recordedIdentities([owner]),
+        instantsBetween: thisRun(),
+      });
     });
 
     it('leaves a tender whose deadline has not passed alone', async () => {

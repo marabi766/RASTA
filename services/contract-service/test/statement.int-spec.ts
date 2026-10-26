@@ -1,4 +1,5 @@
 import { runUnscoped } from '@rasta/nest-common';
+import { expectNotDisclosed, thisRun } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { EventPublisher } from '../src/events/publisher';
 import {
@@ -152,10 +153,14 @@ describe('statements of a signed contract', () => {
         draftedBy: expect.any(String),
         draftedAt: res.body.createdAt,
       });
-      const text = JSON.stringify(events);
-      for (const secret of ['1500000001', '1200000000', '300000001', 'Excavation', 'Formwork']) {
-        expect(text).not.toContain(secret);
-      }
+      expectNotDisclosed(
+        events,
+        ['1500000001', '1200000000', '300000001', 'Excavation', 'Formwork'],
+        {
+          known: [c.id, c.employer, c.contractor, res.body.id],
+          instantsBetween: thisRun(),
+        },
+      );
     });
 
     it('keeps amounts exact past 2^53 and Persian text intact', async () => {

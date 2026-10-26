@@ -1,4 +1,5 @@
 import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import { OrganizationService } from './organization.service';
 import { toLabel, type OrganizationRepository } from './organization.repository';
 import { ORGANIZATION_EVENTS } from './events';
@@ -1036,10 +1037,14 @@ describe('contacts', () => {
 
     await runWithContext(context(), () => h.service.addContact(DEH1, contact));
 
-    const serialized = JSON.stringify(h.enqueued[0]?.payload);
-    expect(serialized).not.toContain(contact.phone);
-    expect(serialized).not.toContain(contact.email);
-    expect(serialized).not.toContain(contact.displayName);
+    // The id the service minted for the contact is the one it wrote; it is set aside before the
+    // phone (whose digits a ULID can hold, #452), email and name are looked for.
+    const written = h.tx.organizationContact.create.mock.calls[0]?.[0] as { data: { id: string } };
+    expectNotDisclosed(
+      h.enqueued[0]?.payload,
+      [contact.phone, contact.email, contact.displayName],
+      { metadata: { contactId: written.data.id }, input: contact },
+    );
     expect(h.enqueued[0]?.payload).toMatchObject({
       organizationId: DEH1,
       change: 'ADDED',

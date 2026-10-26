@@ -1,4 +1,5 @@
 import { RastaError } from '@rasta/nest-common';
+import { expectNotDisclosed, thisRun } from '@rasta/testing';
 import { ulid } from 'ulid';
 import {
   HIERARCHY_LOCK_KEY,
@@ -616,10 +617,18 @@ describe('organization hierarchy integrity', () => {
         hasPhone: false,
       });
 
-      const serialized = JSON.stringify(rows.map((outbox) => outbox.payload));
-      expect(serialized).not.toContain('09120000009');
-      expect(serialized).not.toContain('finance@example.test');
-      expect(serialized).not.toContain('امور مالی');
+      // The phone, email and name sent above are in neither event, looked for once the ids and
+      // instants the run minted are accounted for (#452: a ULID can hold the phone's digits).
+      expectNotDisclosed(
+        rows.map((outbox) => outbox.payload),
+        ['09120000009', 'finance@example.test', 'امور مالی'],
+        {
+          // Each envelope's eventId is its outbox row's id.
+          metadata: { '0.eventId': rows[0]!.id, '1.eventId': rows[1]!.id },
+          known: [organization.id, first.id, second.id],
+          instantsBetween: thisRun(),
+        },
+      );
     });
   });
 
