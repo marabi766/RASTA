@@ -17,7 +17,15 @@ import { zodPipe } from './zod-validation.pipe';
  * shows a cap behind a refinement does not — which is why every cap in the
  * platform is written first in its chain (`.min()`/`.max()` before anything
  * else).
+ *
+ * The pipe parses a refused input twice (`legacyParse`, D-078): stock zod
+ * decides, then a pass in zod 3's order words the refusal. Each pass refuses
+ * an oversized array the same way, so the spy is still never called; a count
+ * of elements that are parsed is {@link PASSES} times one pass's.
  */
+
+/** Parses of a refused input: stock zod's, then the zod 3-ordered one for its wording. */
+const PASSES = 2;
 
 function refusal(schema: z.ZodType, input: unknown): RastaError {
   try {
@@ -65,7 +73,7 @@ describe('an array over its cap is refused before any element is parsed', () => 
       list: many(3),
     });
 
-    expect(parses).toHaveBeenCalledTimes(3);
+    expect(parses).toHaveBeenCalledTimes(PASSES * 3);
     expect(error.details).toHaveLength(3);
   });
 
@@ -86,8 +94,8 @@ describe('an array over its cap is refused before any element is parsed', () => 
     expect(oversizedPosition.details).toEqual([
       expect.objectContaining({ path: 'rings[0][0]', code: 'too_big' }),
     ]);
-    // The three valid positions' coordinates, and not one of the 100,000.
-    expect(coordinates).toHaveBeenCalledTimes(6);
+    // The three valid positions' coordinates, and not one of the 100,000, in each pass.
+    expect(coordinates).toHaveBeenCalledTimes(PASSES * 6);
 
     coordinates.mockClear();
     positions.mockClear();
@@ -134,6 +142,6 @@ describe('an array over its cap is refused before any element is parsed', () => 
 
     refusal(z.object({ list: late }).strict(), { list: many(1_000) });
 
-    expect(parses).toHaveBeenCalledTimes(1_000);
+    expect(parses).toHaveBeenCalledTimes(PASSES * 1_000);
   });
 });

@@ -41,7 +41,6 @@ export {
   isLegacyRefusal,
   joinLegacyValues,
   legacyDefaultMessage,
-  legacyIssueInErrorMap,
   legacyParse,
   legacyParsedType,
   requireLegacyRefusal,

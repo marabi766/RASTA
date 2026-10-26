@@ -10,7 +10,15 @@ import { polygonInput } from './dto';
  * array over its bound is refused before any of its elements is parsed. A spy
  * on each element schema's own parse proves it: an oversized array of invalid
  * elements answers its one length issue, and none of its elements is parsed.
+ *
+ * The pipe parses a refused input twice (`legacyParse`, D-078: stock zod
+ * decides, then zod 3's order words the refusal), and each pass refuses an
+ * oversized array the same way: a count of elements that are parsed is
+ * {@link PASSES} times one pass's.
  */
+
+/** Parses of a refused input: stock zod's, then the zod 3-ordered one for its wording. */
+const PASSES = 2;
 
 /** The element schema of the array at `path` in the area. */
 function elementAt(...path: (string | number)[]): z.ZodType {
@@ -54,8 +62,8 @@ describe('the operating area refuses an oversized array before parsing its eleme
         message: 'Array must contain exactly 2 element(s)',
       },
     ]);
-    // The three valid positions' coordinates, and not one of the 100,000.
-    expect(coordinates).toHaveBeenCalledTimes(6);
+    // The three valid positions' coordinates, and not one of the 100,000, in each pass.
+    expect(coordinates).toHaveBeenCalledTimes(PASSES * 6);
   });
 
   it('a ring of 100,000 invalid positions: one issue, no position parsed', () => {

@@ -6,7 +6,6 @@ import {
   LegacyRefusal,
   describeLegacyRefusal,
   isLegacyRefusal,
-  legacyIssueInErrorMap,
   legacyParse,
   requireLegacyRefusal,
   type LegacyIssue,
@@ -285,32 +284,6 @@ describe('the refusal is the only way to a translation (r1 F1 guard)', () => {
     }
     const error = new LegacyContextError('formatter');
     expect(`${error.message}${error.stack ?? ''}`).not.toContain(SENTINEL);
-  });
-});
-
-describe('legacyIssueInErrorMap', () => {
-  it('reads the raised-by schema and the value off the raw issue', () => {
-    const issues: (LegacyIssue | undefined)[] = [];
-    const error = (issue: z.core.$ZodRawIssue) => {
-      issues.push(legacyIssueInErrorMap(issue));
-      return undefined;
-    };
-    const result = z
-      .object({ c: currencySchema, n: z.number().max(5) })
-      .safeParse({ c: 'USD', n: Number.POSITIVE_INFINITY }, { error });
-    // zod 4.6.7 finishes the issues, running the maps, when the error is first read.
-    // The patched zod goes on after ±Infinity, so `.max(5)` raises its own issue; the
-    // type issue before it, the one a form field shows, reads as that check too.
-    expect(result.error?.issues.map((issue) => issue.code)).toEqual([
-      'invalid_value',
-      'invalid_type',
-      'too_big',
-    ]);
-    expect(issues.map((issue) => issue?.code)).toEqual([
-      'invalid_enum_value',
-      'too_big',
-      'too_big',
-    ]);
   });
 });
 

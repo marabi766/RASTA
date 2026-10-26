@@ -41,6 +41,18 @@ describe('an over-cap RFQ list is refused before its elements and refinements', 
     expect(run).not.toHaveBeenCalled();
   });
 
+  it('criteria, parsed by stock zod alone (no switch, as any other parse): no criterion parsed', () => {
+    // The pipe above runs legacyParse's two passes (D-078): stock zod's, then
+    // zod 3's order for the wording. Each refuses the list before its elements.
+    run.mockClear();
+    const duplicate = { code: 'PRICE', label: 'Price', weightBp: 1, scoring: 'MANUAL_SCORE' };
+    const result = issueRfqSchema.safeParse({
+      criteria: Array.from({ length: MAX_CRITERIA + 1 }, () => duplicate),
+    });
+    expect(result.success).toBe(false);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('invitees: one too_big, and the once-each refinement does not run', () => {
     const same = 'ORG_01JB9V5Q6K8M2N4P7R3S5T7V9X';
     const shown = details({
