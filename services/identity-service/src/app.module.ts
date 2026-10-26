@@ -47,6 +47,10 @@ import { IdentityRepository } from './identity/identity.repository';
 import { IdentityService } from './identity/identity.service';
 import { MembershipExpiryScanner } from './identity/membership-expiry.scanner';
 import {
+  KeycloakFenceSampler,
+  pooledFenceSampleSource,
+} from './keycloak/keycloak-fence-sampler';
+import {
   MembershipController,
   RegistrationController,
   UserController,
@@ -208,6 +212,22 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
           projector,
           fences,
         ),
+    },
+
+    // The fence and lapse gauges, sampled on their own timers and their own
+    // connection — never by the sweep's serial pass (#402 r3 R3-2). A pool of
+    // one: it can starve neither the business pool nor the fence pool's two
+    // connections every Keycloak write needs, and neither can starve it. It
+    // closes that pool itself, in its own bounded stop.
+    {
+      provide: KeycloakFenceSampler,
+      inject: [ENV, IdentityRepository],
+      useFactory: (env: IdentityEnv, repository: IdentityRepository) => {
+        const own = new PrismaService(env.DATABASE_URL, { connections: 1, waitSeconds: 1 });
+        return new KeycloakFenceSampler(pooledFenceSampleSource(own, repository), {
+          ownPool: own,
+        });
+      },
     },
 
     // The durable half of the Keycloak projection (ADR-060 § 5): re-projects
