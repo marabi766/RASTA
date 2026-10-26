@@ -2,10 +2,13 @@ import { z } from 'zod';
 
 import type { FuzzReport } from './__tests__/zod-differential';
 import { releaseStockZod, runInBuild, type Build } from './__tests__/zod-stock-oracle';
+import { inspect } from 'node:util';
+
 import {
   describeLegacyRefusal,
   genericLegacyIssue,
   legacyParse,
+  legacyParseAsync,
   refusalIssues,
   type LegacyIssue,
 } from './zod-issues';
@@ -152,6 +155,162 @@ describe.each(BUILDS)('stock zod decides, in the %s build (D-078)', (build) => {
     expect(report.stock.accepted).toBeGreaterThan(20_000);
     expect(report.stock.refused).toBeGreaterThan(20_000);
     expect(report.switchedAcceptedStockRefused).toBeGreaterThan(0);
+    // Where stock zod throws, legacyParse refuses with the generic issue (addendum C).
+    expect(report.stock.threw).toBeGreaterThan(0);
+  });
+
+  it('agrees with stock safeParseAsync on 75,000 compositions with every callback async (r4 F4)', () => {
+    const report = runInBuild<FuzzReport & { unhandledRejections: number }>(build, 'fuzzAsync', {
+      seed: 444,
+      schemas: 3000,
+      inputs: 25,
+      phase: 'awaited',
+    });
+    expect(report.mismatches).toEqual([]);
+    expect(report.mismatchCount).toBe(0);
+    expect(report.cases).toBe(75_000);
+    expect(report.asyncCases).toBe(75_000);
+    expect(report.stock.accepted).toBeGreaterThan(20_000);
+    expect(report.stock.refused).toBeGreaterThan(20_000);
+    // A rejected stock parse is the generic refusal; the F3 class is refused.
+    expect(report.stock.threw).toBeGreaterThan(0);
+    expect(report.switchedAcceptedStockRefused).toBeGreaterThan(0);
+    // Awaited, nothing is left behind to reject later.
+    expect(report.unhandledRejections).toBe(0);
+  });
+
+  it('refuses those schemas in the synchronous legacyParse as stock safeParse does, 25,000 cases', () => {
+    const report = runInBuild<FuzzReport>(build, 'fuzzAsync', {
+      seed: 444,
+      schemas: 1000,
+      inputs: 25,
+      phase: 'sync',
+    });
+    expect(report.mismatches).toEqual([]);
+    expect(report.mismatchCount).toBe(0);
+    expect(report.cases).toBe(25_000);
+    // zod's async error, rethrown, in most of them.
+    expect(report.stock.threw).toBeGreaterThan(5_000);
+  });
+
+  it('resolves each async callback kind as stock safeParseAsync, and refuses it synchronously as stock zod (r4 F4)', () => {
+    type Side = { kind: string; data?: string; issues?: unknown; message?: string };
+    const cases = runInBuild<
+      {
+        name: string;
+        valid: { stock: Side; legacy: Side; stockSync: Side; legacySync: Side };
+        invalid: {
+          stock: Side;
+          legacy: Side;
+          stockTranslated: Side;
+          stockSync: Side;
+          legacySync: Side;
+        };
+        inputUnchanged: boolean;
+      }[]
+    >(build, 'asyncKinds');
+    expect(cases.map(({ name }) => name)).toEqual([
+      'refine',
+      'superRefine',
+      'check',
+      'transform',
+      'preprocess',
+    ]);
+    const asyncError = {
+      kind: 'threw',
+      message: 'Encountered Promise during synchronous parse. Use .parseAsync() instead.',
+    };
+    const stockSyncThrows = new Set<string>();
+    for (const each of cases) {
+      expect([each.name, each.valid.stock.kind]).toEqual([each.name, 'accepted']);
+      expect([each.name, each.valid.legacy]).toEqual([each.name, each.valid.stock]);
+      expect([each.name, each.invalid.stock.kind]).toEqual([each.name, 'refused']);
+      expect([each.name, each.invalid.legacy]).toEqual([each.name, each.invalid.stockTranslated]);
+      expect([each.name, each.invalid.legacy.kind]).toEqual([each.name, 'refused']);
+      for (const side of [each.valid, each.invalid]) {
+        // Synchronously, stock zod throws: its async error, which legacyParse
+        // rethrows, or — where its compiled object parser reads the Promise
+        // of an async transform or preprocess — a TypeError, which
+        // legacyParse turns into the generic refusal (addendum C).
+        expect(side.stockSync.kind).toBe('threw');
+        expect([each.name, side.legacySync]).toEqual([
+          each.name,
+          side.stockSync.message === asyncError.message
+            ? asyncError
+            : { kind: 'refused', issues: [{ path: '', code: 'custom', message: 'Invalid input' }] },
+        ]);
+        stockSyncThrows.add(`${each.name}: ${side.stockSync.message}`);
+      }
+      expect(each.inputUnchanged).toBe(true);
+    }
+    expect([...stockSyncThrows]).toEqual([
+      `refine: ${asyncError.message}`,
+      `superRefine: ${asyncError.message}`,
+      `check: ${asyncError.message}`,
+      "transform: Cannot read properties of undefined (reading 'length')",
+      "preprocess: Cannot read properties of undefined (reading 'length')",
+    ]);
+  });
+
+  it('refuses Codex PR-444 r3 F3 with an async refinement through legacyParseAsync, as stock zod does', () => {
+    const cases = runInBuild<
+      {
+        name: string;
+        stock: Outcome;
+        stockRefinementCalls: number;
+        plain: Outcome;
+        plainRefinementCalls: number;
+        switched: string;
+        legacy: { kind: string };
+        stockTranslated: { kind: string };
+        syncLegacy: { kind: string };
+        inputUnchanged: boolean;
+      }[]
+    >(build, 'f3Async');
+    expect(cases).toHaveLength(5);
+    for (const each of cases) {
+      expect([each.name, each.stock.kind]).toEqual([each.name, 'refused']);
+      expect([each.name, each.plain, each.plainRefinementCalls]).toEqual([
+        each.name,
+        each.stock,
+        each.stockRefinementCalls,
+      ]);
+      expect([each.name, each.switched]).toEqual([each.name, 'accepted']);
+      expect([each.name, each.legacy]).toEqual([each.name, each.stockTranslated]);
+      expect(each.legacy.kind).toBe('refused');
+      expect(each.syncLegacy.kind).toBe('threw');
+      expect(each.inputUnchanged).toBe(true);
+    }
+  });
+
+  it('keeps async parses apart: reentrant, 40 interleaved, no input mutated (addendum D)', () => {
+    const result = runInBuild<{
+      reentrant: { kind: string; issues: { code: string }[] };
+      nested: { kind: string; issues: { code: string }[] }[];
+      sameAsAlone: number;
+      kinds: number;
+      refinementCalls: number;
+      mutated: number;
+    }>(build, 'asyncIsolation');
+    // A legacyParseAsync inside a callback of another, in both of its passes:
+    // each nested one is its own, complete, zod 3-ordered refusal.
+    expect(result.reentrant.kind).toBe('refused');
+    expect(result.nested).toHaveLength(2);
+    for (const nested of result.nested) {
+      expect(nested.issues.map((issue) => issue.code)).toEqual([
+        'invalid_type',
+        'too_small',
+        'custom',
+      ]);
+    }
+    // 40 at once, refused and accepted interleaved: each as when run alone.
+    expect(result.sameAsAlone).toBe(40);
+    expect(result.kinds).toBeGreaterThan(1);
+    // The refinement: once per accepted input (10), twice per input it
+    // refused (10, both passes), once per input refused before it (20, the
+    // switched pass only).
+    expect(result.refinementCalls).toBe(50);
+    expect(result.mutated).toBe(0);
   });
 });
 
@@ -272,6 +431,239 @@ describe('legacyParse fails closed (D-078, addendum B)', () => {
     });
     legacyParse(nested, value);
     expect(value).toEqual(before);
+  });
+});
+
+describe('legacyParseAsync fails closed the same way (r4 F4, addenda B and C)', () => {
+  const brief = (issues: readonly LegacyIssue[]) =>
+    issues.map(({ path, code, message }) => [path.join('.'), code, message]);
+  const refusalOf = async (schema: z.ZodType, input: unknown) => {
+    const result = await legacyParseAsync(schema, input);
+    if (result.success) throw new Error('expected a refusal');
+    return result.refusal;
+  };
+
+  it('returns stock zod’s success unchanged, values included', async () => {
+    const schema = z.object({
+      n: z.string().transform(async (value) => Number(value)),
+      d: z.string().prefault('x'),
+    });
+    const result = await legacyParseAsync(schema, { n: '5' });
+    expect(result).toEqual({ success: true, data: await schema.parseAsync({ n: '5' }) });
+  });
+
+  it('words a refusal in zod 3’s order when the awaited second pass refuses too', async () => {
+    const schema = z
+      .object({ n: z.number().int().min(1), s: z.string() })
+      .refine(async () => false, { message: 'enclosing' });
+    expect(brief((await refusalOf(schema, { n: 0.5, s: 's' })).issues)).toEqual([
+      ['n', 'invalid_type', 'Expected integer, received float'],
+      ['n', 'too_small', 'Number must be greater than or equal to 1'],
+      ['', 'custom', 'enclosing'],
+    ]);
+  });
+
+  it('keeps stock zod’s refusal when the awaited second pass rejects', async () => {
+    let calls = 0;
+    const rejecting = z.object({ n: z.number().int() }).refine(async () => {
+      calls += 1;
+      if (calls > 1) throw new Error('second pass');
+      return false;
+    }, 'first pass');
+    expect(brief((await refusalOf(rejecting, { n: 1 })).issues)).toEqual([
+      ['', 'custom', 'first pass'],
+    ]);
+    expect(calls).toBe(2);
+  });
+
+  it('keeps stock zod’s refusal when the awaited second pass accepts (F3)', async () => {
+    const left = z
+      .object({ a: z.string() })
+      .strict()
+      .transform(async (value) => value)
+      .refine(async () => false, 'never allowed');
+    const f3 = z.intersection(left, z.object({ b: z.string() }));
+    const value = { a: 'a', b: 'b' };
+    expect(
+      (await f3.safeParseAsync(value, { [Symbol.for('@rasta/zod.legacyRunOrder')]: true } as never))
+        .success,
+    ).toBe(true);
+    expect(brief((await refusalOf(f3, value)).issues)).toEqual([['', 'custom', 'never allowed']]);
+    expect(value).toEqual({ a: 'a', b: 'b' });
+  });
+
+  it('says the generic issue when neither refusal can be worded', async () => {
+    const VALUE = 'SENTINEL-042-value';
+    const refusal = await refusalOf(
+      z.object({
+        a: z.string().refine(async () => false, {
+          error: () => {
+            throw new Error(VALUE);
+          },
+        }),
+      }),
+      { a: VALUE },
+    );
+    expect(refusal.issues).toEqual([genericLegacyIssue()]);
+    expect(inspect(refusal) + JSON.stringify(refusal)).not.toContain(VALUE);
+  });
+
+  it('never mutates the input, in either awaited pass', async () => {
+    const value = { n: 0.5, s: 's', nested: { list: [1, 2] } };
+    const before = structuredClone(value);
+    const nested = z.object({
+      n: z.number().int(),
+      s: z.string().transform(async (text) => text.toUpperCase()),
+      nested: z.object({ list: z.array(z.number()).transform(async (list) => list.reverse()) }),
+    });
+    await legacyParseAsync(nested, value);
+    expect(value).toEqual(before);
+  });
+});
+
+describe('a first pass that throws is the generic refusal, sync and async (addendum C)', () => {
+  const VALUE = 'SENTINEL-042-thrown';
+  const throwing = () =>
+    z.object({
+      a: z.string().transform(() => {
+        throw new Error(VALUE);
+      }),
+    });
+
+  it('legacyParse: never an acceptance, never the error’s text', () => {
+    const schema = throwing();
+    expect(() => schema.safeParse({ a: 'x' })).toThrow(VALUE);
+    const result = legacyParse(schema, { a: 'x' });
+    expect(result.success).toBe(false);
+    expect(result.refusal?.issues).toEqual([genericLegacyIssue()]);
+    expect(inspect(result) + JSON.stringify(result)).not.toContain(VALUE);
+  });
+
+  it('legacyParseAsync: a rejected first pass the same way', async () => {
+    const schema = z.object({
+      a: z.string().refine(async () => {
+        throw new Error(VALUE);
+      }),
+    });
+    await expect(schema.safeParseAsync({ a: 'x' })).rejects.toThrow(VALUE);
+    const result = await legacyParseAsync(schema, { a: 'x' });
+    expect(result.success).toBe(false);
+    expect(result.refusal?.issues).toEqual([genericLegacyIssue()]);
+    expect(inspect(result) + JSON.stringify(result)).not.toContain(VALUE);
+    // The synchronous one throws as legacyParse did not: it is not zod's async error.
+    expect(legacyParse(throwing(), { a: 'x' }).refusal?.issues).toEqual([genericLegacyIssue()]);
+  });
+
+  it('legacyParse rethrows zod’s own async error: an async schema refused as stock safeParse refuses it', () => {
+    const schema = z.object({ a: z.string().refine(async () => true) });
+    expect(() => schema.safeParse({ a: 'x' })).toThrow(z.core.$ZodAsyncError);
+    expect(() => legacyParse(schema, { a: 'x' })).toThrow(z.core.$ZodAsyncError);
+  });
+
+  it('refuses the async schema stock zod’s compiled parser trips over, rather than throw its TypeError', async () => {
+    // Stock zod 4.6.7, synchronously: an async preprocess inside an object
+    // makes its compiled object parser read a Promise, a TypeError instead of
+    // $ZodAsyncError (session repro). Not zod's async error, so the generic
+    // refusal; awaited, the schema parses.
+    const schema = z.object({
+      a: z.preprocess(async (value) => value, z.object({ b: z.string() })),
+    });
+    expect(() => schema.safeParse({ a: { b: 'x' } })).toThrow(TypeError);
+    expect(legacyParse(schema, { a: { b: 'x' } }).refusal?.issues).toEqual([genericLegacyIssue()]);
+    expect(await legacyParseAsync(schema, { a: { b: 'x' } })).toEqual({
+      success: true,
+      data: { a: { b: 'x' } },
+    });
+  });
+});
+
+describe('a refused union keeps its options, beside its issue (r4 F5)', () => {
+  const objects = z.union([z.object({ a: z.string() }), z.object({ b: z.enum(['X1', 'Y1']) })]);
+  const refusalOf = (schema: z.ZodType, input: unknown) => {
+    const result = legacyParse(schema, input);
+    if (result.success) throw new Error('expected a refusal');
+    return result.refusal;
+  };
+  const word = (issue: LegacyIssue) => `${issue.code}@${issue.path.join('.')}`;
+
+  it('translates each option at the union’s full path, nested unions the same way', () => {
+    const schema = z.object({
+      items: z.array(
+        z.union([z.object({ kind: z.literal('x'), inner: objects }), z.object({ e: z.number() })]),
+      ),
+    });
+    const refusal = refusalOf(schema, { items: [{ kind: 'x', inner: { a: 1, b: 'Z' }, e: 'z' }] });
+    expect(refusal.issues.map(({ path, code }) => [path.join('.'), code])).toEqual([
+      ['items.0', 'invalid_union'],
+    ]);
+    expect(refusal.unionBranches(refusal.issues[0]!, word)).toEqual([
+      [
+        {
+          path: ['items', 0, 'inner'],
+          code: 'invalid_union',
+          message: 'invalid_union@items.0.inner',
+          branches: [
+            [
+              {
+                path: ['items', 0, 'inner', 'a'],
+                code: 'invalid_type',
+                message: 'invalid_type@items.0.inner.a',
+              },
+            ],
+            [
+              {
+                path: ['items', 0, 'inner', 'b'],
+                code: 'invalid_enum_value',
+                message: 'invalid_enum_value@items.0.inner.b',
+              },
+            ],
+          ],
+        },
+      ],
+      [{ path: ['items', 0, 'e'], code: 'invalid_type', message: 'invalid_type@items.0.e' }],
+    ]);
+  });
+
+  it('hands the consumer’s wording the translated issue, and keeps nothing else', () => {
+    const refusal = refusalOf(objects, { a: 1, b: 'SENTINEL-042-enum' });
+    const seen: LegacyIssue[] = [];
+    const tree = refusal.unionBranches(refusal.issues[0]!, (issue) => {
+      seen.push(issue);
+      return 'worded';
+    });
+    // The wording sees what a top-level issue carries (zod 3's fields)…
+    expect(seen.map((issue) => issue.code)).toEqual(['invalid_type', 'invalid_enum_value']);
+    expect(seen[1]).toMatchObject({ options: ['X1', 'Y1'], received: 'SENTINEL-042-enum' });
+    // …and the tree keeps only path, code and its answer.
+    const text = JSON.stringify(tree) + inspect(tree, { depth: null, showHidden: true });
+    expect(text).not.toMatch(/SENTINEL-042-enum|X1|Y1|received|options/);
+    expect(Object.isFrozen(tree![0]![0])).toBe(true);
+  });
+
+  it('answers only for a union issue of that refusal', () => {
+    const refusal = refusalOf(objects, { a: 1 });
+    const other = refusalOf(objects, { a: 1 });
+    expect(refusal.unionBranches(other.issues[0]!, word)).toBeUndefined();
+    expect(refusal.unionBranches({ ...refusal.issues[0]! }, word)).toBeUndefined();
+    const plain = refusalOf(z.object({ a: z.string() }), { a: 1 });
+    expect(plain.unionBranches(plain.issues[0]!, word)).toBeUndefined();
+    // A union zod 3 reported through its first check-only option has no tree:
+    // that option's issues are the refusal's own.
+    const checks = refusalOf(z.union([z.string().min(5), z.number()]), 'ab');
+    expect(checks.issues.map((issue) => issue.code)).toEqual(['too_small']);
+    expect(checks.unionBranches(checks.issues[0]!, word)).toBeUndefined();
+  });
+
+  it('leaves the refusal’s issues, JSON and inspection exactly as without it', () => {
+    const refusal = refusalOf(z.object({ payload: objects }), { payload: { a: 1, b: 'Z' } });
+    expect(refusal.issues).toEqual([
+      { code: 'invalid_union', path: ['payload'], message: 'Invalid input', zodDefault: true },
+    ]);
+    expect(Object.keys(refusal.issues[0]!)).toEqual(['code', 'path', 'message', 'zodDefault']);
+    expect(JSON.stringify(refusal)).toBe(
+      '{"issues":[{"path":["payload"],"code":"invalid_union"}]}',
+    );
+    expect(inspect(refusal)).toBe(`LegacyRefusal ${JSON.stringify(refusal)}`);
   });
 });
 

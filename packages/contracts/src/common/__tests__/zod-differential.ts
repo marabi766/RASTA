@@ -106,17 +106,55 @@ function legacy(ctx: Context, schema: Schema, input: unknown): LegacyOutcome {
   }
 }
 
+function brief(result: ZodIssues.LegacyParseResult<unknown>): LegacyOutcome {
+  if (result.success) return { kind: 'accepted', data: canon(result.data) };
+  return {
+    kind: 'refused',
+    issues: result.refusal.issues.map(({ path, code, message }) => ({
+      path: path.join('.'),
+      code,
+      message,
+    })),
+  };
+}
+
+/** {@link legacy}, awaited: `legacyParseAsync` (PR #444 r4 F4). */
+async function legacyAsync(ctx: Context, schema: Schema, input: unknown): Promise<LegacyOutcome> {
+  try {
+    return brief(await ctx.issues.legacyParseAsync(schema, input));
+  } catch (error) {
+    return { kind: 'threw', message: (error as Error).message };
+  }
+}
+
+/** What legacyParse says when the first pass threw (addendum C): fixed text, no value. */
+const GENERIC_REFUSAL = canon({
+  kind: 'refused',
+  issues: [{ path: '', code: 'custom', message: 'Invalid input' }],
+});
+
+/** zod's own refusal of an async schema in a synchronous parse. */
+const ZOD_ASYNC = 'Encountered Promise during synchronous parse. Use .parseAsync() instead.';
+
 /** Codex PR-444 r3 F3 and its wrappers: a refusal another combinator reconciles away. */
-function f3Schemas(z: Z, calls: { n: number }): [string, Schema, unknown][] {
+function f3Schemas(z: Z, calls: { n: number }, async = false): [string, Schema, unknown][] {
   const left = () =>
     z
       .object({ a: z.string() })
       .strict()
       .transform((value) => value)
-      .refine(() => {
-        calls.n += 1;
-        return false;
-      }, 'never allowed');
+      .refine(
+        async
+          ? async () => {
+              calls.n += 1;
+              return false;
+            }
+          : () => {
+              calls.n += 1;
+              return false;
+            },
+        'never allowed',
+      );
   const core = () => z.intersection(left(), z.object({ b: z.string() }));
   return [
     ['direct', core(), { a: 'a', b: 'b' }],
@@ -159,6 +197,191 @@ export function f3(ctx: Context): unknown[] {
       inputUnchanged: canon(input) === before,
     };
   });
+}
+
+/** {@link f3} with the refinement async, through `legacyParseAsync` (PR #444 r4 F4). */
+export async function f3Async(ctx: Context): Promise<unknown[]> {
+  const stockCalls = { n: 0 };
+  const patchedCalls = { n: 0 };
+  const stock = f3Schemas(ctx.stock, stockCalls, true);
+  const patched = f3Schemas(ctx.patched, patchedCalls, true);
+  const out: unknown[] = [];
+  for (const [at, [name, stockSchema, input]] of stock.entries()) {
+    const schema = patched[at][1];
+    const before = canon(input);
+    stockCalls.n = 0;
+    const stockOutcome = await outcomeAsync(() => stockSchema.safeParseAsync(input));
+    const stockRefinementCalls = stockCalls.n;
+    patchedCalls.n = 0;
+    const plain = await outcomeAsync(() => schema.safeParseAsync(input));
+    const plainRefinementCalls = patchedCalls.n;
+    const switched = await outcomeAsync(() => schema.safeParseAsync(input, SWITCHED as never));
+    const viaLegacy = await legacyAsync(ctx, schema, input);
+    const stockIssues =
+      stockOutcome.kind === 'refused' ? await legacyAsync(ctx, stockSchema, input) : stockOutcome;
+    out.push({
+      name,
+      stock: stockOutcome,
+      stockRefinementCalls,
+      plain,
+      plainRefinementCalls,
+      switched: switched.kind,
+      legacy: viaLegacy,
+      stockTranslated: stockIssues,
+      syncLegacy: legacy(ctx, schema, input),
+      inputUnchanged: canon(input) === before,
+    });
+  }
+  return out;
+}
+
+/**
+ * Each kind of async callback (PR #444 r4 F4) — refine, superRefine, check,
+ * transform, preprocess — through `legacyParseAsync` against stock
+ * `safeParseAsync`, valid and invalid input; and through the synchronous
+ * `legacyParse`, which refuses the schema exactly as stock `safeParse` does.
+ */
+export async function asyncKinds(ctx: Context): Promise<unknown[]> {
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 1));
+  const kinds = (z: Z): [string, Schema, unknown, unknown][] => [
+    [
+      'refine',
+      z.object({
+        n: z.string().refine(async (value) => {
+          await tick();
+          return value === 'ok';
+        }, 'not ok'),
+      }),
+      { n: 'ok' },
+      { n: 'no' },
+    ],
+    [
+      'superRefine',
+      z.object({
+        n: z.string().superRefine(async (value, inner) => {
+          await tick();
+          if (value !== 'ok') inner.addIssue({ code: 'custom', message: 'not ok' });
+        }),
+      }),
+      { n: 'ok' },
+      { n: 'no' },
+    ],
+    [
+      'check',
+      z.object({
+        n: z.string().check(async (inner) => {
+          await tick();
+          if (inner.value !== 'ok') {
+            inner.issues.push({ code: 'custom', message: 'not ok', input: inner.value });
+          }
+        }),
+      }),
+      { n: 'ok' },
+      { n: 'no' },
+    ],
+    [
+      'transform',
+      z.object({
+        n: z.string().transform(async (value, inner) => {
+          await tick();
+          if (value !== 'ok') inner.addIssue({ code: 'custom', message: 'not ok' });
+          return value.length;
+        }),
+      }),
+      { n: 'ok' },
+      { n: 'no' },
+    ],
+    [
+      'preprocess',
+      z.object({
+        n: z.preprocess(async (value) => {
+          await tick();
+          return typeof value === 'string' ? value.trim() : value;
+        }, z.string().min(2)),
+      }),
+      { n: ' ok ' },
+      { n: ' x ' },
+    ],
+  ];
+  const stock = kinds(ctx.stock);
+  const out: unknown[] = [];
+  for (const [at, [name, schema, valid, invalid]] of kinds(ctx.patched).entries()) {
+    const stockSchema = stock[at][1];
+    const before = [canon(valid), canon(invalid)];
+    out.push({
+      name,
+      valid: {
+        stock: await outcomeAsync(() => stockSchema.safeParseAsync(valid)),
+        legacy: await legacyAsync(ctx, schema, valid),
+        stockSync: settle(() => stockSchema.safeParse(valid)),
+        legacySync: legacy(ctx, schema, valid),
+      },
+      invalid: {
+        stock: await outcomeAsync(() => stockSchema.safeParseAsync(invalid)),
+        legacy: await legacyAsync(ctx, schema, invalid),
+        stockTranslated: await legacyAsync(ctx, stockSchema, invalid),
+        stockSync: settle(() => stockSchema.safeParse(invalid)),
+        legacySync: legacy(ctx, schema, invalid),
+      },
+      inputUnchanged: canon(valid) === before[0] && canon(invalid) === before[1],
+    });
+  }
+  return out;
+}
+
+/**
+ * Addendum D, awaited: an async callback runs twice on refused input, so it
+ * must not share state between parses. A `legacyParseAsync` started inside a
+ * callback of another (reentrancy), 40 interleaved `legacyParseAsync` calls on
+ * one schema — refused ones, which run the switched pass, and accepted ones —
+ * each equal to the same call alone, and no input mutated.
+ */
+export async function asyncIsolation(ctx: Context): Promise<unknown> {
+  const z = ctx.patched;
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 1));
+  const inner = z.object({ n: z.number().int().min(1) }).refine(async () => {
+    await tick();
+    return false;
+  }, 'inner');
+  const nested: unknown[] = [];
+  const outer = z.object({ s: z.string().min(5) }).superRefine(async () => {
+    await tick();
+    nested.push(await legacyAsync(ctx, inner, { n: 0.5 }));
+  });
+  const reentrant = await legacyAsync(ctx, outer, { s: 'x' });
+
+  let calls = 0;
+  const schema = z
+    .object({
+      n: z.number().int().min(1),
+      list: z.array(z.number()).transform(async (list) => {
+        await tick();
+        return [...list].reverse();
+      }),
+    })
+    .refine(async (value) => {
+      await tick();
+      calls += 1;
+      return value.n !== 2;
+    }, 'enclosing');
+  const inputs = Array.from({ length: 40 }, (_, i) =>
+    i % 2 === 0 ? { n: 0.5, list: [1, 2] } : { n: i % 4 === 1 ? 3 : 2, list: [i, 1] },
+  );
+  const before = inputs.map((input) => canon(input));
+  const alone: string[] = [];
+  for (const input of inputs) alone.push(canon(await legacyAsync(ctx, schema, input)));
+  calls = 0;
+  const together = (await Promise.all(inputs.map((input) => legacyAsync(ctx, schema, input)))).map(
+    (outcome) => canon(outcome),
+  );
+  return {
+    reentrant,
+    nested,
+    sameAsAlone: together.filter((outcome, at) => outcome === alone[at]).length,
+    kinds: [...new Set(together.map((outcome) => outcome.slice(0, 40)))].length,
+    refinementCalls: calls,
+    mutated: inputs.filter((input, at) => canon(input) !== before[at]).length,
+  };
 }
 
 /** One case per hunk of the patch: what zod 3 reported, in its order, only with the switch on. */
@@ -578,7 +801,8 @@ function holds(p: Predicate, value: unknown): boolean {
   }
 }
 
-function realize(z: Z, n: Node): Schema {
+function realize(z: Z, n: Node, async = false): Schema {
+  const realizeIn = (child: Node) => realize(z, child, async);
   switch (n.k) {
     case 'string': {
       let s = z.string();
@@ -606,7 +830,7 @@ function realize(z: Z, n: Node): Schema {
     case 'unknown':
       return z.unknown();
     case 'object': {
-      const shape = Object.fromEntries(n.shape.map(([key, child]) => [key, realize(z, child)]));
+      const shape = Object.fromEntries(n.shape.map(([key, child]) => [key, realizeIn(child)]));
       return n.mode === 'strict'
         ? z.strictObject(shape)
         : n.mode === 'loose'
@@ -614,35 +838,57 @@ function realize(z: Z, n: Node): Schema {
           : z.object(shape);
     }
     case 'array': {
-      let s = z.array(realize(z, n.el));
+      let s = z.array(realizeIn(n.el));
       if (n.min !== undefined) s = s.min(n.min);
       if (n.max !== undefined) s = s.max(n.max);
       return s;
     }
     case 'intersection':
-      return z.intersection(realize(z, n.l), realize(z, n.r));
+      return z.intersection(realizeIn(n.l), realizeIn(n.r));
     case 'union': {
-      const [first, second, ...rest] = n.options.map((option) => realize(z, option));
+      const [first, second, ...rest] = n.options.map((option) => realizeIn(option));
       return z.union([first, second, ...rest]);
     }
     case 'pipe':
-      return realize(z, n.from).pipe(realize(z, n.to) as never);
+      return realizeIn(n.from).pipe(realizeIn(n.to) as never);
     case 'transform': {
-      const inner = realize(z, n.inner);
+      const inner = realizeIn(n.inner);
       switch (n.f) {
         case 'id':
-          return inner.transform((value) => value);
+          return inner.transform(async ? async (value) => value : (value) => value);
         case 'wrap':
-          return inner.transform((value) => ({ w: value }));
+          return inner.transform(
+            async ? async (value) => ({ w: value }) : (value) => ({ w: value }),
+          );
         case 'length':
-          return inner.transform((value) => canon(value).length);
-        case 'issue':
-          return inner.transform((value, inner) => {
+          return inner.transform(
+            async ? async (value) => canon(value).length : (value) => canon(value).length,
+          );
+        case 'issue': {
+          const issue = (value: unknown, inner: zodNamespace.core.$RefinementCtx) => {
             if (!holds('even', value))
               inner.addIssue({ code: 'custom', message: 'transform issue' });
             return value;
-          });
+          };
+          return inner.transform(
+            async ? async (value, inner) => issue(await Promise.resolve(value), inner) : issue,
+          );
+        }
         default:
+          if (async) {
+            return inner.transform(async (value, inner) => {
+              await Promise.resolve();
+              if (!holds('even', value)) {
+                inner.addIssue({
+                  code: 'custom',
+                  message: 'fatal transform issue',
+                  fatal: true,
+                } as never);
+                return z.NEVER;
+              }
+              return value;
+            });
+          }
           return inner.transform((value, inner) => {
             if (!holds('even', value)) {
               inner.addIssue({
@@ -657,39 +903,70 @@ function realize(z: Z, n: Node): Schema {
       }
     }
     case 'refine':
-      return realize(z, n.inner).refine((value) => holds(n.p, value), {
-        message: `refine ${n.p}`,
-        ...(n.abort ? { abort: true } : {}),
-      });
+      return realizeIn(n.inner).refine(
+        async
+          ? async (value) => holds(n.p, await Promise.resolve(value))
+          : (value) => holds(n.p, value),
+        {
+          message: `refine ${n.p}`,
+          ...(n.abort ? { abort: true } : {}),
+        },
+      );
     case 'superRefine':
-      return realize(z, n.inner).superRefine((value, inner) => {
-        if (!holds(n.p, value)) inner.addIssue({ code: 'custom', message: `superRefine ${n.p}` });
-      });
+      if (async && n.p === 'even') {
+        // The async variant's `.check()`: the same predicate, raised by hand.
+        return realizeIn(n.inner).check(async (inner) => {
+          await Promise.resolve();
+          if (!holds(n.p, inner.value)) {
+            inner.issues.push({
+              code: 'custom',
+              message: `superRefine ${n.p}`,
+              input: inner.value,
+            });
+          }
+        });
+      }
+      return realizeIn(n.inner).superRefine(
+        async
+          ? async (value, inner) => {
+              await Promise.resolve();
+              if (!holds(n.p, value))
+                inner.addIssue({ code: 'custom', message: `superRefine ${n.p}` });
+            }
+          : (value, inner) => {
+              if (!holds(n.p, value))
+                inner.addIssue({ code: 'custom', message: `superRefine ${n.p}` });
+            },
+      );
     case 'lazy': {
-      const inner = realize(z, n.inner);
+      const inner = realizeIn(n.inner);
       return z.lazy(() => inner);
     }
-    case 'preprocess':
-      return z.preprocess(
+    case 'preprocess': {
+      const pre =
         n.f === 'id'
-          ? (value) => value
+          ? (value: unknown) => value
           : n.f === 'trim'
-            ? (value) => (typeof value === 'string' ? value.trim() : value)
-            : (value) => (typeof value === 'string' && value !== '' ? Number(value) : value),
-        realize(z, n.inner),
+            ? (value: unknown) => (typeof value === 'string' ? value.trim() : value)
+            : (value: unknown) =>
+                typeof value === 'string' && value !== '' ? Number(value) : value;
+      return z.preprocess(
+        async ? async (value: unknown) => pre(await Promise.resolve(value)) : pre,
+        realizeIn(n.inner),
       );
+    }
     case 'default':
       // zod's own .default(), covered as D-078 item 3c asks; production never reaches it.
       // eslint-disable-next-line zod/no-default
-      return realize(z, n.inner).default(structuredClone(n.value) as never);
+      return realizeIn(n.inner).default(structuredClone(n.value) as never);
     case 'prefault':
-      return realize(z, n.inner).prefault(structuredClone(n.value) as never);
+      return realizeIn(n.inner).prefault(structuredClone(n.value) as never);
     case 'catch':
-      return realize(z, n.inner).catch(structuredClone(n.value) as never);
+      return realizeIn(n.inner).catch(structuredClone(n.value) as never);
     case 'optional':
-      return realize(z, n.inner).optional();
+      return realizeIn(n.inner).optional();
     default:
-      return realize(z, n.inner).nullable();
+      return realizeIn(n.inner).nullable();
   }
 }
 
@@ -835,7 +1112,8 @@ export async function fuzz(
         }
         if (switched.kind === 'accepted') report.switchedAcceptedStockRefused += 1;
         if (switched.kind === 'threw') report.switchedThrew += 1;
-      } else if (viaLegacy.kind !== 'threw' || viaLegacy.message !== stock.message) {
+      } else if (canon(viaLegacy) !== GENERIC_REFUSAL) {
+        // Addendum C: a first pass that throws is the fixed generic refusal.
         miss(i, input, `legacyParse ${canon(viaLegacy)} where stock threw ${stock.message}`);
       }
       if (j % 4 === 0) {
@@ -845,10 +1123,128 @@ export async function fuzz(
         if (canon(plainAsync) !== canon(stockAsync)) {
           miss(i, input, `plain async ${canon(plainAsync)} != stock async ${canon(stockAsync)}`);
         }
+        // One rule, sync and awaited (PR #444 r4 F4): the same answer, word for word.
+        const viaLegacyAsync = await legacyAsync(ctx, schema, input);
+        if (canon(viaLegacyAsync) !== canon(viaLegacy)) {
+          miss(
+            i,
+            input,
+            `legacyParseAsync ${canon(viaLegacyAsync)} != legacyParse ${canon(viaLegacy)}`,
+          );
+        }
       }
       if (canon(input) !== before) miss(i, input, 'the input was mutated');
     }
   }
   report.mismatchCount = mismatches;
   return report;
+}
+
+/**
+ * The composition fuzz with every callback async (PR #444 r4 F4): refine,
+ * superRefine (half of them as `.check()`), transform and preprocess return
+ * promises. `legacyParseAsync` must decide as stock `safeParseAsync` — the
+ * same values on acceptance, a refusal on refusal, the generic refusal where
+ * it rejects — and the synchronous `legacyParse` must throw where stock
+ * `safeParse` throws zod's async error, and otherwise decide as it does.
+ */
+export async function fuzzAsync(
+  ctx: Context,
+  args: { seed: number; schemas: number; inputs: number; phase: 'awaited' | 'sync' },
+): Promise<FuzzReport & { unhandledRejections: number }> {
+  // A synchronous parse of an async schema leaves zod's own promise chain
+  // behind, which may reject later (stock zod as much as patched): counted
+  // here, so the awaited phase can show it leaves none.
+  let unhandledRejections = 0;
+  const count = () => {
+    unhandledRejections += 1;
+  };
+  process.on('unhandledRejection', count);
+  const report: FuzzReport = {
+    schemas: 0,
+    cases: 0,
+    asyncCases: 0,
+    stock: { accepted: 0, refused: 0, threw: 0 },
+    switchedAcceptedStockRefused: 0,
+    switchedThrew: 0,
+    mismatches: [],
+    mismatchCount: 0,
+  };
+  const r = rng(args.seed);
+  let mismatches = 0;
+  const miss = (schema: number, input: unknown, what: string) => {
+    mismatches += 1;
+    if (report.mismatches.length < 50)
+      report.mismatches.push({ schema, input: canon(input), what });
+  };
+  // The synchronous parse of the same schema: zod's async error where stock
+  // zod throws it; otherwise stock zod's decision, and the generic refusal
+  // where stock zod throws anything else (addendum C).
+  const checkSync = (stockSchema: Schema, schema: Schema, input: unknown, i: number) => {
+    const stockSync = settle(() => stockSchema.safeParse(input));
+    const viaLegacySync = legacy(ctx, schema, input);
+    report.stock[stockSync.kind] += 1;
+    if (stockSync.kind === 'threw' && stockSync.message === ZOD_ASYNC) {
+      if (viaLegacySync.kind !== 'threw' || viaLegacySync.message !== ZOD_ASYNC) {
+        miss(i, input, `legacyParse ${canon(viaLegacySync)} where stock threw zod's async error`);
+      }
+    } else if (stockSync.kind === 'accepted') {
+      if (viaLegacySync.kind !== 'accepted' || viaLegacySync.data !== stockSync.data) {
+        miss(i, input, `legacyParse ${canon(viaLegacySync)} != stock acceptance`);
+      }
+    } else if (stockSync.kind === 'refused') {
+      if (viaLegacySync.kind !== 'refused' || viaLegacySync.issues.length === 0) {
+        miss(i, input, `legacyParse ${canon(viaLegacySync)} where stock refused`);
+      }
+    } else if (canon(viaLegacySync) !== GENERIC_REFUSAL) {
+      miss(i, input, `legacyParse ${canon(viaLegacySync)} where stock threw ${stockSync.message}`);
+    }
+  };
+  for (let i = 0; i < args.schemas; i += 1) {
+    const description = node(r, 0);
+    const stockSchema = realize(ctx.stock, description, true);
+    const schema = realize(ctx.patched, description, true);
+    report.schemas += 1;
+    for (let j = 0; j < args.inputs; j += 1) {
+      const input = sample(description, r, 0);
+      const before = canon(input);
+      report.cases += 1;
+      if (args.phase === 'sync') {
+        checkSync(stockSchema, schema, input, i);
+        if (canon(input) !== before) miss(i, input, 'the input was mutated');
+        continue;
+      }
+      const stock = await outcomeAsync(() => stockSchema.safeParseAsync(input));
+      const plain = await outcomeAsync(() => schema.safeParseAsync(input));
+      const viaLegacy = await legacyAsync(ctx, schema, input);
+      const switched = await outcomeAsync(() => schema.safeParseAsync(input, SWITCHED as never));
+      report.asyncCases += 1;
+      report.stock[stock.kind] += 1;
+      if (canon(plain) !== canon(stock))
+        miss(i, input, `plain ${canon(plain)} != stock ${canon(stock)}`);
+      if (stock.kind === 'accepted') {
+        if (viaLegacy.kind !== 'accepted' || viaLegacy.data !== stock.data) {
+          miss(i, input, `legacyParseAsync ${canon(viaLegacy)} != stock acceptance ${stock.data}`);
+        }
+      } else if (stock.kind === 'refused') {
+        if (viaLegacy.kind !== 'refused' || viaLegacy.issues.length === 0) {
+          miss(i, input, `legacyParseAsync ${canon(viaLegacy)} where stock refused`);
+        }
+        if (switched.kind === 'accepted') report.switchedAcceptedStockRefused += 1;
+        if (switched.kind === 'threw') report.switchedThrew += 1;
+      } else if (canon(viaLegacy) !== GENERIC_REFUSAL) {
+        miss(
+          i,
+          input,
+          `legacyParseAsync ${canon(viaLegacy)} where stock rejected ${stock.message}`,
+        );
+      }
+      if (canon(input) !== before) miss(i, input, 'the input was mutated');
+    }
+  }
+  // Let a rejection left behind settle before counting.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  process.off('unhandledRejection', count);
+  report.mismatchCount = mismatches;
+  return { ...report, unhandledRejections };
 }
