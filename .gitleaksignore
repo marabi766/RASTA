@@ -13,3 +13,8 @@ be0f5fa7e000d30e7fad8df39b530d743355ab01:apps/web/src/app/transactions/dispute-r
 73dc0a437c429f7487cd048e8615a248c001f030:services/asset-service/src/asset/persian-punctuation-http.spec.ts:generic-api-key:80
 # #452 r2: a ULID fixture held in a variable named `key` in a test (packages/testing disclosure.spec.ts), not a secret; renamed in the next commit, so the final tree no longer flags.
 e5bee5664515afcfab0ec5304b576c45ba0f32cd:packages/testing/src/disclosure.spec.ts:generic-api-key:147
+# #444 r4: a test sentinel for a payload's record key (SENTINEL-041-key), not a secret; renamed in the next commit. Verified by the PM 2026-10-26.
+ef44711c70b6cfea9b2541968e1d370952ead264:packages/contracts/src/common/zod-acceptance.spec.ts:generic-api-key:280
+ef44711c70b6cfea9b2541968e1d370952ead264:packages/nest-common/src/legacy-fallback.spec.ts:generic-api-key:19
+ef44711c70b6cfea9b2541968e1d370952ead264:services/audit-service/src/audit/legacy-fallback.spec.ts:generic-api-key:18
+ef44711c70b6cfea9b2541968e1d370952ead264:services/identity-service/src/security-events/legacy-fallback.spec.ts:generic-api-key:13

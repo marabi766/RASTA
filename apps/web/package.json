@@ -31,7 +31,7 @@
     "react-dom": "^19.2.8",
     "react-hook-form": "^7.88.0",
     "tailwind-merge": "^3.7.0",
-    "zod": "^3.25.76"
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",

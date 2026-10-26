@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { CANONICAL_VERSION } from './audit.canonical';
 
 /**
@@ -110,7 +111,7 @@ export const DIVERGENCE_REASON_VALUES = Object.values(DIVERGENCE_REASONS) as [
   ...DivergenceReason[],
 ];
 
-const isoInstant = z.string().datetime({ offset: true });
+const isoInstant = z.string().check(isoDateTime({ offset: true }));
 
 const monthResultSchema = z
   .object({

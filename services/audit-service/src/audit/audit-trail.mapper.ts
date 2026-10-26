@@ -4,6 +4,7 @@ import {
   AUDIT_TRAIL_TOPIC,
   auditTrailPayloadSchemaV1,
   eventEnvelopeSchema,
+  legacyParse,
   type AuditChange,
   type AuditChangeValue,
   type AuditTrailPayloadV1,
@@ -222,11 +223,11 @@ export function toAuditTrailRecord(
   // Re-parsed even though `EventConsumer` parsed it first: this function is
   // the boundary, and a boundary that trusts its caller to have validated is
   // one refactor away from not being one.
-  const parsedEnvelope = eventEnvelopeSchema.safeParse(envelope);
+  const parsedEnvelope = legacyParse(eventEnvelopeSchema, envelope);
   if (!parsedEnvelope.success) {
     throw rejected(
       INGESTION_FAILURE_REASONS.TRAIL_INVALID_ENVELOPE,
-      describeIssues(parsedEnvelope.error.issues, TRAIL_FIELD_NAMES),
+      describeIssues(parsedEnvelope.refusal, TRAIL_FIELD_NAMES),
     );
   }
   const checked: EventEnvelope = { ...parsedEnvelope.data, payload: parsedEnvelope.data.payload };
@@ -245,11 +246,11 @@ export function toAuditTrailRecord(
     throw rejected(unsupported, `not delivered on ${AUDIT_TRAIL_TOPIC}`);
   }
 
-  const parsedPayload = auditTrailPayloadSchemaV1.safeParse(checked.payload);
+  const parsedPayload = legacyParse(auditTrailPayloadSchemaV1, checked.payload);
   if (!parsedPayload.success) {
     throw rejected(
       INGESTION_FAILURE_REASONS.TRAIL_INVALID_PAYLOAD,
-      describeIssues(parsedPayload.error.issues, TRAIL_FIELD_NAMES),
+      describeIssues(parsedPayload.refusal, TRAIL_FIELD_NAMES),
     );
   }
   const payload = parsedPayload.data;

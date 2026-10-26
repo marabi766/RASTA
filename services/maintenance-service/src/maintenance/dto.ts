@@ -1,14 +1,15 @@
 import { z } from 'zod';
 import {
   amountMinorSchema,
-  cursorPaginationSchema,
   currencySchema,
-  displayText,
+  cursorPaginationSchema,
   digitsToBigInt,
-  seedIdSchema,
+  displayText,
   ID_PREFIXES,
-  referenceId,
+  isoDateTime,
   numberInput,
+  referenceId,
+  seedIdSchema,
 } from '@rasta/contracts';
 
 /**
@@ -149,7 +150,7 @@ const scheduleIntervals = {
  * that starts before the previous service is finished means the schedule is
  * permanently "due soon", which is the same as having no warning at all.
  */
-function refineIntervals<T extends z.ZodTypeAny>(schema: T) {
+function refineIntervals<T extends z.ZodType<Record<string, unknown>>>(schema: T) {
   return schema
     .refine(
       (dto: Record<string, unknown>) =>
@@ -178,8 +179,8 @@ export const createScheduleSchema = refineIntervals(
       assetId,
       /** What this service is, in the organization's own words. */
       title: displayText(2, 200),
-      maintenanceType: maintenanceTypeSchema.default('PREVENTIVE'),
-      recurrence: scheduleRecurrenceSchema.default('RECURRING'),
+      maintenanceType: maintenanceTypeSchema.prefault('PREVENTIVE'),
+      recurrence: scheduleRecurrenceSchema.prefault('RECURRING'),
       ...scheduleIntervals,
 
       /**
@@ -190,7 +191,7 @@ export const createScheduleSchema = refineIntervals(
        * current readings — so adding a schedule to a grader with 4 310 hours
        * on it does not report it overdue on day one.
        */
-      lastServicedAt: z.string().datetime().optional(),
+      lastServicedAt: z.string().check(isoDateTime()).optional(),
       lastServicedHourMeter: quantity(10).optional(),
       lastServicedOdometer: quantity(10).optional(),
 
@@ -215,7 +216,7 @@ export const updateScheduleSchema = z
      * the meter read model never moves backwards, so the schedule is moved
      * instead of the history being rewritten.
      */
-    lastServicedAt: z.string().datetime().nullable().optional(),
+    lastServicedAt: z.string().check(isoDateTime()).nullable().optional(),
     lastServicedHourMeter: quantity(10).nullable().optional(),
     lastServicedOdometer: quantity(10).nullable().optional(),
     notes: displayText(1, 1000).nullable().optional(),
@@ -260,7 +261,7 @@ export const dueSchedulesQuerySchema = cursorPaginationSchema
       .transform((value) => value === 'true')
       .optional(),
     /** Evaluate as at a point in time rather than now. */
-    at: z.string().datetime().optional(),
+    at: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -291,12 +292,12 @@ export const createRequestSchema = z
      * not for the afternoon the repair took. Left out for planned work, where
      * downtime begins when the machine goes in.
      */
-    outOfServiceAt: z.string().datetime().optional(),
+    outOfServiceAt: z.string().check(isoDateTime()).optional(),
 
     /** When it should be done by. Taken from the schedule when one is named. */
-    dueDate: z.string().datetime().optional(),
+    dueDate: z.string().check(isoDateTime()).optional(),
 
-    reportedAt: z.string().datetime().optional(),
+    reportedAt: z.string().check(isoDateTime()).optional(),
   })
   .strict()
   .refine((dto) => dto.type !== 'CORRECTIVE' || dto.severity !== undefined, {
@@ -324,7 +325,7 @@ export const assignWorkshopSchema = z
     workshopOrganizationId: organizationId,
     workshopName: displayText(2, 200).optional(),
     workSummary: displayText(2, 1000).optional(),
-    assignedAt: z.string().datetime().optional(),
+    assignedAt: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -371,8 +372,8 @@ export const listRequestsQuerySchema = cursorPaginationSchema
       .transform((value) => value === 'true')
       .optional(),
     /** A window over `reportedAt`. */
-    from: z.string().datetime().optional(),
-    to: z.string().datetime().optional(),
+    from: z.string().check(isoDateTime()).optional(),
+    to: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -384,7 +385,7 @@ export type ListRequestsQuery = z.infer<typeof listRequestsQuerySchema>;
 
 export const startRepairSchema = z
   .object({
-    startedAt: z.string().datetime().optional(),
+    startedAt: z.string().check(isoDateTime()).optional(),
     workSummary: displayText(2, 1000).optional(),
   })
   .strict();
@@ -395,7 +396,7 @@ export const completeRepairSchema = z
   .object({
     /** What was actually done, as opposed to what was asked for. */
     workPerformed: displayText(2, 2000),
-    completedAt: z.string().datetime().optional(),
+    completedAt: z.string().check(isoDateTime()).optional(),
     /**
      * When the machine went back into service.
      *
@@ -403,7 +404,7 @@ export const completeRepairSchema = z
      * be repaired on Thursday and collected on Monday, and the fleet was
      * without it for the whole of that.
      */
-    returnedToServiceAt: z.string().datetime().optional(),
+    returnedToServiceAt: z.string().check(isoDateTime()).optional(),
     /**
      * The repair order's total the caller was looking at, echoed back.
      *
@@ -448,7 +449,7 @@ export const recordPartSchema = z
     /** The workshop's own unit — عدد, لیتر, متر. */
     unit: displayText(1, 32),
     unitCostMinor: boundedAmountMinorSchema,
-    source: partSourceSchema.default('WORKSHOP_SUPPLIED'),
+    source: partSourceSchema.prefault('WORKSHOP_SUPPLIED'),
     /**
      * The order or stock movement this came from, when it came from another
      * service. A reference only: inventory-service owns stock and
@@ -457,7 +458,7 @@ export const recordPartSchema = z
      * `partReference`.
      */
     sourceReference: referenceId().min(1).max(128).optional(),
-    recordedAt: z.string().datetime().optional(),
+    recordedAt: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -470,8 +471,8 @@ export const recordLabourSchema = z
     technician: displayText(2, 120).optional(),
     hours: quantity(6),
     hourlyRateMinor: boundedAmountMinorSchema,
-    performedAt: z.string().datetime().optional(),
-    recordedAt: z.string().datetime().optional(),
+    performedAt: z.string().check(isoDateTime()).optional(),
+    recordedAt: z.string().check(isoDateTime()).optional(),
   })
   .strict()
   .refine((dto) => Number.parseFloat(dto.hours) > 0, {
@@ -485,9 +486,9 @@ export const recordCostSchema = z
   .object({
     category: directCostCategorySchema,
     amountMinor: boundedAmountMinorSchema,
-    currency: currencySchema.default('IRR'),
+    currency: currencySchema.prefault('IRR'),
     description: displayText(2, 500),
-    recordedAt: z.string().datetime().optional(),
+    recordedAt: z.string().check(isoDateTime()).optional(),
   })
   .strict()
   .refine((dto) => dto.amountMinor !== '0', {

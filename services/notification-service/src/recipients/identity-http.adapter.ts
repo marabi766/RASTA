@@ -58,7 +58,7 @@ const userPageSchema = z.object({
     z.object({
       id: z.string().min(1),
       status: z.string(),
-      roles: z.array(z.string()).default([]),
+      roles: z.array(z.string()).prefault([]),
       // Optional rather than required: an identity deployment that stops
       // returning addresses has to degrade to "nobody is emailable", not to a
       // malformed-response failure that stops the in-app half working too.
@@ -66,7 +66,7 @@ const userPageSchema = z.object({
     }),
   ),
   nextCursor: z.string().nullable().optional(),
-  hasMore: z.boolean().default(false),
+  hasMore: z.boolean().prefault(false),
 });
 
 /** identity caps a page at `MAX_PAGE_SIZE` (200); asking for more is a 400. */

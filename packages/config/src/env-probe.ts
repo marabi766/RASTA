@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 import { EnvValidationError, type EnvIssue } from './env';
 import { envEnumFields } from './env-schema';
 
@@ -38,17 +39,18 @@ export function envRefusalOf(load: () => unknown): EnvRefusal {
  * is probed without being listed anywhere.
  */
 export function envEnumProbes(
-  schema: z.ZodTypeAny,
+  schema: z.ZodType,
   load: (source: NodeJS.ProcessEnv) => unknown,
   base: NodeJS.ProcessEnv,
   values: readonly [string, string],
 ): EnvEnumProbe[] {
   return envEnumFields(schema).map(({ name }) => {
     const source = (value: string): NodeJS.ProcessEnv => ({ ...base, [name]: value });
-    const parsed = schema.safeParse(source(values[0]));
+    // Parsed as `loadEnv` parses: the codes are zod 3's, against this schema (PR #444 r1 F1).
+    const parsed = legacyParse(schema, source(values[0]));
     const codes = parsed.success
       ? []
-      : parsed.error.issues.filter((issue) => issue.path[0] === name).map((issue) => issue.code);
+      : parsed.refusal.issues.filter((issue) => issue.path[0] === name).map((issue) => issue.code);
     // One call site for both, so the two stacks can be compared whole.
     const [first, second] = values.map((value) => envRefusalOf(() => load(source(value))));
     return { name, codes, refusals: [first as EnvRefusal, second as EnvRefusal] };

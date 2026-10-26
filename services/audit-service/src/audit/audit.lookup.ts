@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { RastaError, getContext } from '@rasta/nest-common';
 import { AuditRepository } from './audit.repository';
 
@@ -50,7 +51,7 @@ export const auditTargetLookupQuerySchema = z
     /** The target's own `occurredAt`, exactly as the read API published it. */
     occurredAt: z
       .string()
-      .datetime({ offset: true })
+      .check(isoDateTime({ offset: true }))
       .transform((value) => new Date(value)),
   })
   .strict();
@@ -62,7 +63,7 @@ export const auditTargetViewSchema = z
     id: z.string(),
     /** Null only for a genuinely platform-scoped record. */
     organizationId: z.string().nullable(),
-    occurredAt: z.string().datetime({ offset: true }),
+    occurredAt: z.string().check(isoDateTime({ offset: true })),
   })
   .strict();
 
