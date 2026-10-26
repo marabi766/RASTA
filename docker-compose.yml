@@ -349,7 +349,7 @@ services:
   # correct; there is no arm64 manifest to point at.
   clamav:
     <<: *restart
-    image: clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+    image: clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
     container_name: rasta-clamav
     # `clamd` directly rather than the image's `/init`, which needs root at
     # start to create /run/clamav and link /var/lock. Bypassing it lets the
@@ -409,7 +409,7 @@ services:
   # from there — rather than downloading the whole set before anything works.
   clamav-freshclam:
     <<: *restart
-    image: clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+    image: clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
     container_name: rasta-clamav-freshclam
     user: '100:101'
     entrypoint: ['freshclam', '--daemon', '--foreground']
