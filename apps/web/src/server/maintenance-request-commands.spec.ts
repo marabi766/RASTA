@@ -56,6 +56,13 @@ beforeEach(() => {
 const REQUEST = 'MNT_01J00000000000000000000000';
 const WORKSHOP = 'ORG_01J00000000000000000000001';
 
+// zod 4 infers a field whose transform may return undefined as present-but-undefined (zod 3: optional).
+const ASSIGN = {
+  workshopOrganizationId: WORKSHOP,
+  workshopName: undefined,
+  workSummary: undefined,
+};
+const APPROVE = { expectedTotalCostMinor: '5', notes: undefined };
 describe('who is offered the commands', () => {
   it.each(['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN'])(
     'offers them to %s, the roles assign, approve and cancel admit',
@@ -320,15 +327,13 @@ describe('writing', () => {
       'assigns',
       'assign',
       201,
-      (impl: typeof fetch) =>
-        assignWorkshop(SESSION, REQUEST, { workshopOrganizationId: WORKSHOP }, 'sub_abc', impl),
+      (impl: typeof fetch) => assignWorkshop(SESSION, REQUEST, { ...ASSIGN }, 'sub_abc', impl),
     ],
     [
       'approves',
       'approve',
       200,
-      (impl: typeof fetch) =>
-        approveRequest(SESSION, REQUEST, { expectedTotalCostMinor: '5' }, 'sub_abc', impl),
+      (impl: typeof fetch) => approveRequest(SESSION, REQUEST, { ...APPROVE }, 'sub_abc', impl),
     ],
     [
       'cancels',
@@ -386,13 +391,7 @@ describe('writing', () => {
       message: 'The cost has changed since it was shown to you; review it again before approving.',
     });
 
-    const result = await approveRequest(
-      SESSION,
-      REQUEST,
-      { expectedTotalCostMinor: '5' },
-      'sub_abc',
-      impl,
-    );
+    const result = await approveRequest(SESSION, REQUEST, { ...APPROVE }, 'sub_abc', impl);
 
     expect(result).toMatchObject({ kind: 'INVALID', message: APPROVAL_TOTAL_CHANGED_MESSAGE });
   });
@@ -430,8 +429,7 @@ describe('writing', () => {
     it.each([
       [
         'approve',
-        (impl: typeof fetch) =>
-          approveRequest(SESSION, REQUEST, { expectedTotalCostMinor: '5' }, 's', impl),
+        (impl: typeof fetch) => approveRequest(SESSION, REQUEST, { ...APPROVE }, 's', impl),
       ],
       [
         'cancel',
@@ -456,11 +454,9 @@ describe('writing', () => {
     ])('is said in Persian from its code, for %s', async (_n, status, code, persian) => {
       const sentence = 'A maintenance request cannot move from OPEN to APPROVED';
       for (const call of [
-        (impl: typeof fetch) =>
-          approveRequest(SESSION, REQUEST, { expectedTotalCostMinor: '5' }, 's', impl),
+        (impl: typeof fetch) => approveRequest(SESSION, REQUEST, { ...APPROVE }, 's', impl),
         (impl: typeof fetch) => cancelRequest(SESSION, REQUEST, { reason: 'فروخته شد' }, 's', impl),
-        (impl: typeof fetch) =>
-          assignWorkshop(SESSION, REQUEST, { workshopOrganizationId: WORKSHOP }, 's', impl),
+        (impl: typeof fetch) => assignWorkshop(SESSION, REQUEST, { ...ASSIGN }, 's', impl),
       ]) {
         const result = await call(recording(status, { code, message: sentence }).impl);
         expect(result).toMatchObject({ kind: 'INVALID', message: persian });
@@ -474,13 +470,7 @@ describe('writing', () => {
         message:
           'This request is already with a workshop. Cancel that referral before making another.',
       });
-      const result = await assignWorkshop(
-        SESSION,
-        REQUEST,
-        { workshopOrganizationId: WORKSHOP },
-        's',
-        impl,
-      );
+      const result = await assignWorkshop(SESSION, REQUEST, { ...ASSIGN }, 's', impl);
       expect(result).toMatchObject({
         kind: 'INVALID',
         message: expect.stringContaining('نزد یک تعمیرگاه'),
@@ -492,13 +482,7 @@ describe('writing', () => {
         code: 'SOME_NEW_CODE',
         message: 'A completed request cannot be referred to a workshop',
       });
-      const result = await assignWorkshop(
-        SESSION,
-        REQUEST,
-        { workshopOrganizationId: WORKSHOP },
-        's',
-        impl,
-      );
+      const result = await assignWorkshop(SESSION, REQUEST, { ...ASSIGN }, 's', impl);
       expect(result).toMatchObject({
         kind: 'INVALID',
         message: GENERIC_REFUSAL_MESSAGE,
@@ -529,9 +513,9 @@ describe('writing', () => {
   it('never claims nothing happened when the gateway timed out after forwarding', async () => {
     const { impl } = recording(504, { code: 'UPSTREAM_TIMEOUT', message: 'slow' });
 
-    expect(
-      await approveRequest(SESSION, REQUEST, { expectedTotalCostMinor: '5' }, 'sub_abc', impl),
-    ).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
+    expect(await approveRequest(SESSION, REQUEST, { ...APPROVE }, 'sub_abc', impl)).toMatchObject({
+      kind: 'UNKNOWN_OUTCOME',
+    });
   });
 });
 

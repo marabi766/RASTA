@@ -1,4 +1,4 @@
-import { DISPLAY_TEXT_PATTERN, ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
+import { DISPLAY_TEXT_PATTERN, ID_PREFIXES, legacyParse, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -105,7 +105,7 @@ export const reportRequestFormSchema = z
       .trim()
       .min(1, 'شناسهٔ ماشین را وارد کنید')
       .refine((value) => assetId.safeParse(value).success, 'شناسهٔ ماشین معتبر نیست'),
-    type: z.enum(MAINTENANCE_TYPES, { errorMap: () => ({ message: 'نوع کار را انتخاب کنید' }) }),
+    type: z.enum(MAINTENANCE_TYPES, { error: 'نوع کار را انتخاب کنید' }),
     title: z
       .string()
       .transform((raw) => normalizePersianText(raw))
@@ -119,11 +119,7 @@ export const reportRequestFormSchema = z
       .string()
       .trim()
       .transform((value) => (value === '' ? undefined : value))
-      .pipe(
-        z
-          .enum(SEVERITIES, { errorMap: () => ({ message: 'شدت را از فهرست انتخاب کنید' }) })
-          .optional(),
-      ),
+      .pipe(z.enum(SEVERITIES, { error: 'شدت را از فهرست انتخاب کنید' }).optional()),
     outOfServiceAt: optionalLocalDate,
     dueDate: optionalLocalDate,
   })
@@ -146,10 +142,13 @@ export type ParsedReportRequestForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<ReportRequestField, string>> };
 
 export function parseReportRequestForm(values: ReportRequestFormValues): ParsedReportRequestForm {
-  const parsed = reportRequestFormSchema.safeParse(values);
+  const parsed = legacyParse(reportRequestFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isReportRequestField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, isReportRequestField),
+  };
 }
 
 function isReportRequestField(value: string): value is ReportRequestField {
@@ -312,9 +311,12 @@ export type ParsedAssignWorkshopForm =
 export function parseAssignWorkshopForm(
   values: AssignWorkshopFormValues,
 ): ParsedAssignWorkshopForm {
-  const parsed = assignWorkshopFormSchema.safeParse(values);
+  const parsed = legacyParse(assignWorkshopFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, ASSIGN_WORKSHOP_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.refusal, ASSIGN_WORKSHOP_FIELDS),
+  };
 }
 
 /**
@@ -419,9 +421,12 @@ export type ParsedApproveRequestForm =
 export function parseApproveRequestForm(
   values: ApproveRequestFormValues,
 ): ParsedApproveRequestForm {
-  const parsed = approveRequestFormSchema.safeParse(values);
+  const parsed = legacyParse(approveRequestFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, APPROVE_REQUEST_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.refusal, APPROVE_REQUEST_FIELDS),
+  };
 }
 
 /**
@@ -554,9 +559,12 @@ export type ParsedCancelRequestForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<CancelRequestField, string>> };
 
 export function parseCancelRequestForm(values: CancelRequestFormValues): ParsedCancelRequestForm {
-  const parsed = cancelRequestFormSchema.safeParse(values);
+  const parsed = legacyParse(cancelRequestFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, CANCEL_REQUEST_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.refusal, CANCEL_REQUEST_FIELDS),
+  };
 }
 
 export const CANCEL_REQUEST_FIELD_MAPPING: FieldMapping<CancelRequestField> = {

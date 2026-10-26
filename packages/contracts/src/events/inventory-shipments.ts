@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '../common/iso-datetime';
 import { ID_PREFIXES, organizationIdSchema } from '../common/identifiers';
 
 /**
@@ -53,7 +54,7 @@ const trackingEventId = prefixed('TRK');
 /** A platform identifier of a person or an organization, as every other event carries one. */
 const id = z.string().min(1).max(128);
 /** ISO 8601 in UTC, the form every event of the platform carries a time in. */
-const instant = z.string().datetime({ offset: false });
+const instant = z.string().check(isoDateTime({ offset: false }));
 const orderReference = z
   .string()
   .regex(/^(ORD|PO)_[0-9A-HJKMNP-TV-Z]{26}$/)

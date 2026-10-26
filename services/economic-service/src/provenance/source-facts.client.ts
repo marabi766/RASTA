@@ -1,6 +1,6 @@
 import { internalFetch } from '@rasta/nest-common';
 import { z } from 'zod';
-import { MAX_AMOUNT_MINOR, digitsToBigInt } from '@rasta/contracts';
+import { digitsToBigInt, isoDateTime, MAX_AMOUNT_MINOR } from '@rasta/contracts';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
@@ -58,7 +58,7 @@ const TRACE_ID = /^[0-9a-f]{32}$/;
 const SPAN_ID = /^[0-9a-f]{16}$/;
 
 const minorAmount = z.string().regex(/^\d+$/);
-const instant = z.string().datetime({ offset: true });
+const instant = z.string().check(isoDateTime({ offset: true }));
 
 const maintenanceRequestFactSchema = z.object({
   id: z.string().min(1),

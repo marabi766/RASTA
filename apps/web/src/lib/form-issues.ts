@@ -1,4 +1,9 @@
-import type { z } from 'zod';
+import {
+  isSchemaAuthored,
+  requireLegacyRefusal,
+  type LegacyIssue,
+  type LegacyRefusal,
+} from '@rasta/contracts';
 
 import { toPersianDigits } from './format/digits';
 
@@ -9,15 +14,19 @@ import { toPersianDigits } from './format/digits';
  * puts a message in front of the person. Zod's own sentences are English and
  * can repeat the input («Invalid enum value … received 'x'»), so no parser may
  * copy `issue.message` into a form error: every one goes through
- * {@link formIssueMessage}, `firstIssuePerField` or {@link persianErrorMap}.
+ * {@link formIssueMessage}, `firstIssuePerField` or `legacyFormResolver`.
  * `form-issue-boundary.spec.ts` fails on any other reader of an issue's
  * message, so a new parser cannot reopen the class.
  *
  * Rules, in order:
- *  1. A message the schema's author wrote in Persian (it holds an Arabic-script
- *     letter) is shown as written — those are the specific, field-aware
- *     sentences («نام سازمان را وارد کنید»). Zod's defaults and a message
- *     written in English hold none and never pass.
+ *  1. A message the schema's author wrote, in Persian, is shown as written —
+ *     those are the specific, field-aware sentences («نام سازمان را وارد
+ *     کنید»). Who wrote it is decided by where zod took the message from
+ *     (`isSchemaAuthored`), never by what it says: a default of zod's that
+ *     repeats a Persian value, option or key is zod's all the same (PR #444
+ *     r5 F6), and an issue nobody can vouch for is not the author's. Of the
+ *     author's, only one holding an Arabic-script letter passes; one written
+ *     in English does not.
  *  2. Otherwise a specific sentence from the issue's code and its bounds
  *     («حداکثر ۲۰۰ نویسه مجاز است»), which names the limit and never the input.
  *  3. Otherwise one generic sentence.
@@ -34,7 +43,7 @@ const ARABIC_SCRIPT_LETTER = /[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\uf
 
 const digits = (value: number | bigint): string => toPersianDigits(String(value));
 
-function boundMessage(issue: z.ZodIssue): string | null {
+function boundMessage(issue: LegacyIssue): string | null {
   switch (issue.code) {
     case 'too_small': {
       if (issue.type === 'string') {
@@ -86,36 +95,40 @@ function boundMessage(issue: z.ZodIssue): string | null {
   }
 }
 
-/** The text a person may read for one issue; never Zod's own English. */
-export function formIssueMessage(issue: z.ZodIssue): string {
-  if (ARABIC_SCRIPT_LETTER.test(issue.message)) return issue.message;
-  return boundMessage(issue) ?? GENERIC_FIELD_MESSAGE;
+/**
+ * The text a person may read for one issue; never Zod's own English. The
+ * issue is in zod 3's vocabulary — the codes and bounds these sentences were
+ * written against — as `legacyParse` translated it (for a form resolver too:
+ * `legacyFormResolver`), with the schema that refused and the
+ * value each issue was raised on, which is what tells a missing field from a
+ * wrong one (PR #444 r1 F1).
+ */
+export function formIssueMessage(issue: LegacyIssue | undefined): string {
+  if (issue && isSchemaAuthored(issue) && ARABIC_SCRIPT_LETTER.test(issue.message)) {
+    return issue.message;
+  }
+  return (issue && boundMessage(issue)) ?? GENERIC_FIELD_MESSAGE;
 }
 
 /**
- * The error map for resolvers that read Zod's messages themselves
- * (react-hook-form's Zod resolver, via its `errorMap` option). A message the schema wrote wins over
- * any map, so this only ever replaces Zod's defaults.
- */
-export const persianErrorMap: z.ZodErrorMap = (issue, ctx) => ({
-  message: formIssueMessage({ ...issue, message: ctx.defaultError } as z.ZodIssue),
-});
-
-/**
- * The first issue per field of a failed parse, as Persian text. `accepts` is
+ * The first issue per field of a failed parse, as Persian text. `refusal` is
+ * what `legacyParse(schema, values)` returned: it carries the schema that
+ * refused (which tells a literal from an enum and holds the bounds zod 3
+ * checked a non-finite number against) and each issue's value. `accepts` is
  * the form's field list or a type guard; an issue whose first path segment is
  * not a field of the form (a numeric array index, an unknown key) is dropped.
  */
 export function firstIssuePerField<F extends string>(
-  error: z.ZodError,
+  refusal: LegacyRefusal,
   accepts: readonly F[] | ((value: string) => value is F),
 ): Partial<Record<F, string>> {
+  const { issues } = requireLegacyRefusal(refusal, 'firstIssuePerField');
   const isField =
     typeof accepts === 'function'
       ? accepts
       : (value: string): value is F => (accepts as readonly string[]).includes(value);
   const fieldErrors: Partial<Record<F, string>> = {};
-  for (const issue of error.issues) {
+  for (const issue of issues) {
     const field = issue.path[0];
     if (typeof field === 'string' && isField(field) && fieldErrors[field] === undefined) {
       fieldErrors[field] = formIssueMessage(issue);

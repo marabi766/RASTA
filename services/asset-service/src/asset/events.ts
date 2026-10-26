@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 
 /**
  * Events published by asset-service.
@@ -309,11 +310,23 @@ export const INSURANCE_EVENT_SCHEMAS = {
  *  enters the log where it would end up in a dead-letter topic for someone to
  *  triage by hand. */
 export function validateAssetPayload(eventName: AssetEventName, payload: unknown): unknown {
-  return ASSET_EVENT_SCHEMAS[eventName].parse(payload);
+  const parsed = legacyParse(ASSET_EVENT_SCHEMAS[eventName], payload);
+  if (!parsed.success) {
+    throw new Error(
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
+    );
+  }
+  return parsed.data;
 }
 
 export function validateInsurancePayload(eventName: InsuranceEventName, payload: unknown): unknown {
-  return INSURANCE_EVENT_SCHEMAS[eventName].parse(payload);
+  const parsed = legacyParse(INSURANCE_EVENT_SCHEMAS[eventName], payload);
+  if (!parsed.success) {
+    throw new Error(
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
+    );
+  }
+  return parsed.data;
 }
 
 // ---------------------------------------------------------------------------

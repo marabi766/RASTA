@@ -20,7 +20,7 @@ export const maintenanceEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * asset-service, asked whether a transfer was recorded when a work-start
@@ -35,7 +35,7 @@ export const maintenanceEnvSchema = baseEnvSchema
       .int()
       .min(100)
       .max(30_000)
-      .default(3000),
+      .prefault(3000),
 
     /**
      * How far ahead of its due point a schedule announces itself, when the
@@ -49,7 +49,7 @@ export const maintenanceEnvSchema = baseEnvSchema
      * constant buried in the evaluator (AGENTS.md § 9), and any schedule may
      * override it.
      */
-    MAINTENANCE_DEFAULT_LEAD_DAYS: z.coerce.number().int().min(0).max(365).default(7),
+    MAINTENANCE_DEFAULT_LEAD_DAYS: z.coerce.number().int().min(0).max(365).prefault(7),
 
     /**
      * Whether this instance evaluates time-based schedules on a timer.
@@ -68,17 +68,22 @@ export const maintenanceEnvSchema = baseEnvSchema
     MAINTENANCE_DUE_SCAN_ENABLED: booleanEnv(true),
 
     /** How often the time-based scan runs, in seconds. */
-    MAINTENANCE_DUE_SCAN_INTERVAL_SECONDS: z.coerce.number().int().min(30).max(86_400).default(900),
+    MAINTENANCE_DUE_SCAN_INTERVAL_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(30)
+      .max(86_400)
+      .prefault(900),
 
     /** How many schedules one scan pass evaluates. Bounds the query. */
-    MAINTENANCE_DUE_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(200),
+    MAINTENANCE_DUE_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(200),
 
     /**
      * How long an `Idempotency-Key` on `POST /v1/maintenance-requests` is
      * honoured, in hours (#157, docs/06 § 6.8: 24 by default, configurable).
      * Within it a retry replays the original 201; after it the key is free.
      */
-    MAINTENANCE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    MAINTENANCE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
 
     /**
      * How long a claim on an `Idempotency-Key` stays **in flight**, in seconds:
@@ -102,7 +107,7 @@ export const maintenanceEnvSchema = baseEnvSchema
       .int()
       .min(30)
       .max(3_600)
-      .default(120),
+      .prefault(120),
   });
 
 export type MaintenanceEnv = z.infer<typeof maintenanceEnvSchema>;
