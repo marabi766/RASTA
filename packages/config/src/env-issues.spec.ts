@@ -483,3 +483,51 @@ describe('fixedEnvMessages', () => {
     expect(sealed).toEqual(['one', 'two']);
   });
 });
+
+describe('a refusal legacyParse took from stock zod (D-078, addendum H)', () => {
+  const VALUE = 'SENTINEL-041-env-value';
+  const neverAllowed = { message: 'never allowed' };
+
+  it('is reported exactly as the same refusal reached the ordinary way, no value in it', () => {
+    // Codex PR-444 r3 F3's shape: run in zod 3's order the intersection
+    // reconciles the key issue away and nothing refuses; legacyParse keeps
+    // stock zod's refusal.
+    const fallback = z.intersection(
+      z
+        .object({ A: z.string() })
+        .strict()
+        .transform((value) => value)
+        .refine(() => false, neverAllowed),
+      z.object({ B: z.string() }),
+    );
+    const ordinary = z.object({ A: z.string(), B: z.string() }).refine(() => false, neverAllowed);
+    const source = { A: VALUE, B: VALUE };
+    expect(
+      fallback.safeParse(source, { [Symbol.for('@rasta/zod.legacyRunOrder')]: true } as never)
+        .success,
+    ).toBe(true);
+    const options = { fixedMessages: ['never allowed'] };
+    const a = refusalOf(() => loadEnv(fallback, source, options));
+    const b = refusalOf(() => loadEnv(ordinary, source, options));
+    expect(a.issues).toEqual(b.issues);
+    expect(a.issues).toEqual([{ path: '(root)', message: 'never allowed' }]);
+    expect(JSON.stringify(a)).not.toContain(VALUE);
+  });
+
+  it('a refusal neither pass can word is one fixed issue, no value and no raw error in it', () => {
+    const schema = z.object({
+      A: z.string().refine(() => false, {
+        error: () => {
+          throw new Error(VALUE);
+        },
+      }),
+    });
+    const refused = legacyParse(schema, { A: VALUE });
+    if (refused.success) throw new Error('expected a refusal');
+    expect(envIssues(refused.refusal, new Set())).toEqual([
+      { path: '(root)', message: expect.any(String) },
+    ]);
+    const thrown = refusalOf(() => loadEnv(schema, { A: VALUE }));
+    expect(JSON.stringify(thrown)).not.toContain(VALUE);
+  });
+});

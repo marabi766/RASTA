@@ -188,8 +188,8 @@ export function toCommissionRuleChanges(
   return bounded.data;
 }
 
-/** Schema paths and zod issue codes only — never a value (S-09). */
-function issuesOf(refusal: LegacyRefusal): string {
+/** Schema paths and zod issue codes only — never a value (S-09). Exported for its tests. */
+export function issuesOf(refusal: LegacyRefusal): string {
   // zod 3's codes, which these diagnostics have always carried, translated
   // against the schema that refused (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F1).
   return requireLegacyRefusal(refusal, 'issuesOf')

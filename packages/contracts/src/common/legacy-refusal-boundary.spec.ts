@@ -26,7 +26,7 @@ function sourcesUnder(dir: string): string[] {
   return entries.flatMap((entry) => {
     const path = join(dir, entry);
     if (statSync(path).isDirectory()) {
-      return ['node_modules', 'dist', '.next', 'test', '__fixtures__'].includes(entry)
+      return ['node_modules', 'dist', '.next', 'test', '__tests__', '__fixtures__'].includes(entry)
         ? []
         : sourcesUnder(path);
     }
