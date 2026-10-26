@@ -575,9 +575,9 @@ maintenance شروع می‌شود، نه با supplier.
 | موضوع            | تصمیم                                                                                   |
 | ---------------- | --------------------------------------------------------------------------------------- |
 | موتور            | ClamAV 1.5.4، Sidecar، غیر-root، Rootfs فقط-خواندنی                                     |
-| Image            | `clamav/clamav@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6` |
+| Image            | `clamav/clamav@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d` |
 | مبدأ Image       | Docker Hub، `clamav/clamav` (Cisco-Talos، رسمی)، نسخهٔ همراهِ پایگاه امضا               |
-| امضاها در Image  | `main.cvd` v63 · `daily.cvd` v28150 · `bytecode.cvd` v339                               |
+| امضاها در Image  | `main.cvd` v63 · `daily.cvd` v28164 · `bytecode.cvd` v339                               |
 | مرز Production   | Unix Domain Socket روی Volume مشترک درون یک Pod (مُد 0660)                              |
 | مرز Local/CI     | TCP فقط روی `127.0.0.1`، و **در Production رد می‌شود** (S-08)                           |
 | چرخهٔ عمر        | ناهمزمان: `PENDING` → Worker → `CLEAN` / `INFECTED` / `FAILED`                          |
