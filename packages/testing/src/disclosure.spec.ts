@@ -144,18 +144,18 @@ describe('expectNotDisclosed', () => {
   });
 
   it('mintedKey takes a bare ULID only: never a prefixed id, never content', () => {
-    const key = '01JABCDE403FGHJKMNPQRSTVWX';
+    const minted = '01JABCDE403FGHJKMNPQRSTVWX';
     expect(() =>
-      expectNotDisclosed({ id: key }, ['403'], { metadata: { id: mintedKey() } }),
+      expectNotDisclosed({ id: minted }, ['403'], { metadata: { id: mintedKey() } }),
     ).not.toThrow();
-    for (const value of [OWN_ORG, `${key} 1250000000`, '1250000000', 42]) {
+    for (const value of [OWN_ORG, `${minted} 1250000000`, '1250000000', 42]) {
       expect(() =>
         expectNotDisclosed({ id: value }, ['zzz'], { metadata: { id: mintedKey() } }),
       ).toThrow(/expected a bare ULID/);
     }
     // With the row type's prefix: that prefix and a ULID, no other.
     expect(() =>
-      expectNotDisclosed({ id: `BAL_${key}` }, ['403'], { metadata: { id: mintedKey('BAL') } }),
+      expectNotDisclosed({ id: `BAL_${minted}` }, ['403'], { metadata: { id: mintedKey('BAL') } }),
     ).not.toThrow();
     expect(() =>
       expectNotDisclosed({ id: OWN_ORG }, ['zzz'], { metadata: { id: mintedKey('BAL') } }),
