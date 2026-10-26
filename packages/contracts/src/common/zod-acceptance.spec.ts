@@ -277,7 +277,7 @@ describe('legacyParse fails closed (D-078, addendum B)', () => {
 
 describe('describeLegacyRefusal on a stock-zod fallback (addendum H)', () => {
   const VALUE = 'SENTINEL-041-value';
-  const KEY = 'SENTINEL-041-key';
+  const RECORD_NAME = 'SENTINEL-041-record';
 
   it('describes it exactly as the same refusal reached the ordinary way, and the generic one without a value', () => {
     const left = z
@@ -294,7 +294,7 @@ describe('describeLegacyRefusal on a stock-zod fallback (addendum H)', () => {
         z.object({ a: z.string(), b: z.string() }).refine(() => false, 'never allowed'),
       ),
     });
-    const input = { tags: { [KEY]: { a: VALUE, b: VALUE } } };
+    const input = { tags: { [RECORD_NAME]: { a: VALUE, b: VALUE } } };
     // Run in zod 3's order the refusal is reconciled away (r3 F3): legacyParse keeps stock zod's.
     expect(
       fallbackSchema.safeParse(input, { [Symbol.for('@rasta/zod.legacyRunOrder')]: true } as never)

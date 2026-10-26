@@ -15,7 +15,7 @@ import { issuesOf as settlementIssues } from './settlement-refusal-projection';
  */
 
 const VALUE = 'SENTINEL-041-value';
-const KEY = 'SENTINEL-041-key';
+const RECORD_NAME = 'SENTINEL-041-record';
 
 function refused(schema: z.ZodType, input: unknown): LegacyRefusal {
   const result = legacyParse(schema, input);
@@ -44,7 +44,7 @@ function refusals(): { fallback: LegacyRefusal; ordinary: LegacyRefusal; generic
       z.object({ a: z.string(), b: z.string() }).refine(() => false, 'never allowed'),
     ),
   });
-  const input = { tags: { [KEY]: { a: VALUE, b: VALUE } } };
+  const input = { tags: { [RECORD_NAME]: { a: VALUE, b: VALUE } } };
   expect(
     fallback.safeParse(input, { [Symbol.for('@rasta/zod.legacyRunOrder')]: true } as never).success,
   ).toBe(true);
@@ -86,7 +86,7 @@ describe('audit formatters of a stock-zod fallback refusal (D-078, addendum H)',
   );
 
   it('withholds the payload’s own key as today', () => {
-    expect(diagnosticIssues(fallback, new Set(['tags']))).not.toContain(KEY);
-    expect(reconciliationIssues(fallback)).not.toContain(KEY);
+    expect(diagnosticIssues(fallback, new Set(['tags']))).not.toContain(RECORD_NAME);
+    expect(reconciliationIssues(fallback)).not.toContain(RECORD_NAME);
   });
 });
