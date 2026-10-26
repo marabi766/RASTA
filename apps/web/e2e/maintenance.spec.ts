@@ -1,4 +1,5 @@
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { test, type APIRequestContext } from '@playwright/test';
+import { expect } from './expect';
 
 import { installLiveSession } from './live-session';
 

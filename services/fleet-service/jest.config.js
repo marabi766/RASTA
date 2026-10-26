@@ -1,4 +1,5 @@
 const swcOptions = require('../../jest.swc.cjs');
+const disclosureGuard = require('../../jest.disclosure-guard.cjs');
 const swcTransform = { '^.+\\.(t|j)s$': ['@swc/jest', swcOptions] };
 
 /** @type {import('jest').Config} */
@@ -22,6 +23,7 @@ module.exports = {
   projects: [
     {
       displayName: 'unit',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: 'src',
       testEnvironment: 'node',
       testRegex: '.*\\.spec\\.ts$',
@@ -30,6 +32,7 @@ module.exports = {
     },
     {
       displayName: 'integration',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: 'test',
       testEnvironment: 'node',
       testRegex: '.*\\.int-spec\\.ts$',

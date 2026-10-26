@@ -129,7 +129,7 @@ export const test = base.extend<RastaFixtures>({
   },
 });
 
-export { expect } from '@playwright/test';
+export { expect } from './expect';
 
 /** A key that cannot collide with another run's. */
 export function idempotencyKey(label: string): string {

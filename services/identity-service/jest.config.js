@@ -1,4 +1,5 @@
 const swcOptions = require('../../jest.swc.cjs');
+const disclosureGuard = require('../../jest.disclosure-guard.cjs');
 // `.mjs` too, as in asset-service: test/outbox-purge.int-spec.ts starts psql
 // through `libpqInvocation` from scripts/verify-migration-reversible-lib.mjs.
 const swcTransform = { '^.+\\.(t|j|mj)s$': ['@swc/jest', swcOptions] };
@@ -20,6 +21,7 @@ module.exports = {
   projects: [
     {
       displayName: 'unit',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: 'src',
       // The keycloak-live suite's write gate is checked here, on every run,
       // not only in the job that has a Keycloak. Its `*.live-spec.ts` itself
@@ -32,6 +34,7 @@ module.exports = {
     },
     {
       displayName: 'integration',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: 'test',
       testEnvironment: 'node',
       testRegex: '.*\\.int-spec\\.ts$',
@@ -45,6 +48,7 @@ module.exports = {
       // (ADR-060 § 5). Only `test:keycloak-live` selects it, and the `e2e`
       // CI job runs it, because that job is the one with a Keycloak.
       displayName: 'keycloak-live',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: 'test',
       testEnvironment: 'node',
       testRegex: '.*\\.live-spec\\.ts$',
@@ -53,6 +57,7 @@ module.exports = {
     },
     {
       displayName: 'aggregation-stress',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: 'test',
       testEnvironment: 'node',
       testRegex: AGGREGATION_STRESS_SPEC,

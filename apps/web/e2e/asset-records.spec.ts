@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect } from './expect';
 
 import { installLiveSession } from './live-session';
 

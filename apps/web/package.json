@@ -36,6 +36,7 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.62.1",
+    "@rasta/testing": "workspace:*",
     "@swc/core": "^1.10.7",
     "@swc/jest": "^0.2.37",
     "@tailwindcss/postcss": "^4.3.3",

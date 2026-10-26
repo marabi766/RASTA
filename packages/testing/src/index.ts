@@ -54,3 +54,28 @@ export { expireClaim, makeDue } from './eligibility-clock';
 
 export { withRedirectProbe, REDIRECT_CASES } from './redirect-probe';
 export type { RedirectProbe } from './redirect-probe';
+
+export {
+  GENERATED_VALUE_SHAPES,
+  absenceHazard,
+  correlationId,
+  errorEnvelope,
+  expectNotDisclosed,
+  generatedValuesIn,
+  instant,
+  mintedKey,
+  oneOf,
+  sameAs,
+  searched,
+  thisRun,
+  wholeNumber,
+} from './disclosure';
+export { absenceRefusal, guardedAbsenceMatchers } from './absence-guard';
+export type { AbsenceMatcherResult } from './absence-guard';
+export type {
+  DisclosureOptions,
+  GeneratedShape,
+  GeneratedValue,
+  MetadataExpectation,
+  MetadataMatcher,
+} from './disclosure';

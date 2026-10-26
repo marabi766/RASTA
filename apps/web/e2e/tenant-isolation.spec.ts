@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect } from './expect';
 
 import { installLiveSession, type LiveSession } from './live-session';
 
@@ -367,7 +368,9 @@ test.describe('tenant isolation through the live stack', () => {
       await page.goto('/assets');
       const text = await mainText(page);
       expect(text).not.toContain(OWN_ASSET_TAG);
-      expect(text).not.toContain('D1-');
+      // No ORG-DEH-0001 tag at all: a tag starts `D1-`. Anchored at the tag's start, so a
+      // UUID on the page (`…-5bd1-…`) cannot hold it (#452).
+      expect(text).not.toMatch(/(?<![\w-])D1-/);
     });
 
     test('ORG-DEH-0001’s machine is answered as a missing one, from this side too', async ({

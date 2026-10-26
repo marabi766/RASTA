@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import { expect, test, type APIRequestContext } from '@playwright/test';
+import { test, type APIRequestContext } from '@playwright/test';
+import { expect } from './expect';
 
 import { formatMoney } from '../src/lib/format';
 import { ORDER_STATUS_LABELS } from '../src/lib/order-fields';
