@@ -42,6 +42,7 @@ export {
   joinLegacyValues,
   legacyDefaultMessage,
   legacyParse,
+  legacyParseAsync,
   legacyParsedType,
   requireLegacyRefusal,
   type LegacyIssue,
@@ -49,6 +50,7 @@ export {
   type LegacyIssueCode,
   type LegacySizeType,
   type LegacyStringValidation,
+  type LegacyUnionBranchIssue,
 } from './common/zod-issues';
 export {
   enumOptions,

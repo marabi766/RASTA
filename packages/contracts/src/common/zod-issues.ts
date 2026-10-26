@@ -529,9 +529,17 @@ function unionAsZod3Reported(issue: V4Issue): readonly z.core.$ZodIssue[] | unde
  * safe-integer bound (r1 Deviation 4) is dropped where the schema's own bound
  * refused the same integer, and kept where only it did.
  */
-function translateIssues(issues: readonly z.core.$ZodIssue[], schema: z.ZodType): LegacyIssue[] {
+function translateIssues(
+  issues: readonly z.core.$ZodIssue[],
+  schema: z.ZodType,
+  prefix: readonly PropertyKey[] = [],
+): LegacyIssue[] {
   const out: LegacyIssue[] = [];
-  const visit = (issue: V4Issue, prefix: PropertyKey[], siblings: readonly V4Issue[]): void => {
+  const visit = (
+    issue: V4Issue,
+    prefix: readonly PropertyKey[],
+    siblings: readonly V4Issue[],
+  ): void => {
     const at = [...prefix, ...issue.path];
     if (issue.code === 'invalid_key' || issue.code === 'invalid_element') {
       const inner = issue.issues as V4Issue[];
@@ -552,11 +560,68 @@ function translateIssues(issues: readonly z.core.$ZodIssue[], schema: z.ZodType)
     const zodDefault = isZodDefault(issue);
     const legacy = { ...translated, message: '', zodDefault } as LegacyIssue;
     legacy.message = zodDefault ? legacyDefaultMessage(legacy) : issue.message;
+    if (legacy.code === 'invalid_union') keepBranches(legacy, issue, schema, at);
     out.push(legacy);
   };
   const top = issues as readonly V4Issue[];
-  for (const issue of top) visit(issue, [], top);
+  for (const issue of top) visit(issue, prefix, top);
   return out;
+}
+
+/**
+ * The options of each union refusal a translation produced, translated the
+ * same way at the union's path (PR #444 r4 F5) — what zod 3 carried as
+ * `unionErrors` and a form resolver routes to the option's own fields. Kept
+ * beside the issue, never on it: every other formatter reads `issues` and
+ * sees exactly what it saw before. Read only through
+ * {@link LegacyRefusal.unionBranches}.
+ */
+const UNION_BRANCHES = new WeakMap<LegacyIssue, readonly (readonly LegacyIssue[])[]>();
+
+function keepBranches(legacy: LegacyIssue, issue: V4Issue, schema: z.ZodType, at: PropertyKey[]) {
+  if (issue.code !== 'invalid_union' || !Array.isArray(issue.errors) || issue.errors.length === 0) {
+    return;
+  }
+  try {
+    UNION_BRANCHES.set(
+      legacy,
+      issue.errors.map((option) => translateIssues(option, schema, at)),
+    );
+  } catch {
+    // An option that cannot be worded leaves the union's own issue, as before.
+  }
+}
+
+/**
+ * One issue of a refused union option, as a consumer may show it: where, which
+ * code, and the consumer's own wording of it — nothing else (no option list,
+ * no value received, no key the input chose beyond its place in the path).
+ */
+export interface LegacyUnionBranchIssue {
+  readonly path: readonly (string | number)[];
+  readonly code: string;
+  readonly message: string;
+  /** The options of a union refused inside this option, the same way. */
+  readonly branches?: readonly (readonly LegacyUnionBranchIssue[])[];
+}
+
+function branchTree(
+  issue: LegacyIssue,
+  word: (issue: LegacyIssue) => string,
+): readonly (readonly LegacyUnionBranchIssue[])[] | undefined {
+  return UNION_BRANCHES.get(issue)?.map((option) =>
+    Object.freeze(
+      option.map((branch) => {
+        const branches = branchTree(branch, word);
+        return Object.freeze({
+          path: Object.freeze([...branch.path]) as readonly (string | number)[],
+          code: branch.code,
+          message: word(branch),
+          ...(branches ? { branches } : {}),
+        });
+      }),
+    ),
+  );
 }
 
 /** Whether a later issue of the same parse was raised at the same path on the same number: the number's own check. */
@@ -626,6 +691,22 @@ export class LegacyRefusal {
   [Symbol.for('nodejs.util.inspect.custom')](): string {
     return `LegacyRefusal ${JSON.stringify(this.toJSON())}`;
   }
+
+  /**
+   * The options of the union refused at `issue` (one of {@link issues}), each
+   * option's issues at their full paths, with nested unions the same way
+   * (PR #444 r4 F5) — or `undefined` when `issue` is not such a union of this
+   * refusal. `word` is the consumer's own wording, the one it gives the
+   * refusal's issues (the form's `formIssueMessage`), so an option's issue is
+   * masked exactly as a top-level one; the tree carries path, code and that
+   * wording only.
+   */
+  unionBranches(
+    issue: LegacyIssue,
+    word: (issue: LegacyIssue) => string,
+  ): readonly (readonly LegacyUnionBranchIssue[])[] | undefined {
+    return this.issues.includes(issue) ? branchTree(issue, word) : undefined;
+  }
 }
 
 /**
@@ -683,19 +764,109 @@ export type LegacyParseResult<T> =
  * array before its elements (GHSA-mrhx-c7xc-m3w5) refuses it the same way in
  * both passes, so no element is parsed in either. The zod 4 errors are not
  * returned: only the translated refusal is.
+ *
+ * A first pass that throws is a refusal with {@link genericLegacyIssue}, never
+ * an acceptance or the error's text (addendum C) — except zod's own
+ * `$ZodAsyncError`: like stock `safeParse`, this synchronous parse refuses a
+ * schema with an async step by throwing it. {@link legacyParseAsync} is the
+ * same rule, awaited.
  */
 export function legacyParse<S extends z.ZodType>(
   schema: S,
   input: unknown,
 ): LegacyParseResult<z.output<S>> {
-  const stock = schema.safeParse(input, STOCK_PARSE);
-  if (stock.success) return { success: true, data: stock.data };
+  const rule = legacyParseRule(schema, input);
+  let step = rule.next();
+  while (!step.done) {
+    let outcome: PassOutcome;
+    try {
+      outcome = { threw: false, result: schema.safeParse(input, PASSES[step.value]) };
+    } catch (error) {
+      if (step.value === 'stock' && isZodAsyncError(error)) throw error;
+      outcome = { threw: true, error };
+    }
+    step = rule.next(outcome);
+  }
+  return step.value;
+}
+
+/**
+ * {@link legacyParse}, awaited (PR #444 r4 F4): the same rule, so a schema with
+ * an async refinement, check, transform or preprocess is decided by stock
+ * `safeParseAsync`, and its success is returned unchanged; only after a
+ * refusal is the zod 3-ordered pass awaited, for the wording. A first pass
+ * that rejects is a refusal with {@link genericLegacyIssue}.
+ */
+export async function legacyParseAsync<S extends z.ZodType>(
+  schema: S,
+  input: unknown,
+): Promise<LegacyParseResult<z.output<S>>> {
+  const rule = legacyParseRule(schema, input);
+  let step = rule.next();
+  while (!step.done) {
+    let outcome: PassOutcome;
+    try {
+      outcome = { threw: false, result: await schema.safeParseAsync(input, PASSES[step.value]) };
+    } catch (error) {
+      outcome = { threw: true, error };
+    }
+    step = rule.next(outcome);
+  }
+  return step.value;
+}
+
+/** legacyParse's two passes, and what each parses with. */
+const PASSES = { stock: STOCK_PARSE, ordered: LEGACY_ORDER_PARSE } as const;
+type Pass = keyof typeof PASSES;
+
+/** What a pass gave: its result, or what it threw. */
+type PassOutcome =
+  | { readonly threw: false; readonly result: z.ZodSafeParseResult<unknown> }
+  | { readonly threw: true; readonly error: unknown };
+
+/**
+ * D-078, once for both {@link legacyParse} and {@link legacyParseAsync}: it
+ * asks for a pass (yields which) and is handed what the pass gave, so the
+ * synchronous and the awaited parse cannot decide differently.
+ */
+function* legacyParseRule<S extends z.ZodType>(
+  schema: S,
+  input: unknown,
+): Generator<Pass, LegacyParseResult<z.output<S>>, PassOutcome> {
+  const stock = yield 'stock';
+  if (stock.threw) {
+    return refused([genericLegacyIssue()], schema, input);
+  }
+  const first = stock.result;
+  if (first.success) return { success: true, data: first.data as z.output<S> };
+  const ordered = yield 'ordered';
   const issues = refusalIssues(
-    () => schema.safeParse(input, LEGACY_ORDER_PARSE),
-    () => stock.error.issues,
+    () => {
+      if (ordered.threw) throw ordered.error;
+      return ordered.result;
+    },
+    () => first.error.issues,
     schema,
   );
+  return refused(issues, schema, input);
+}
+
+function refused<T>(
+  issues: readonly LegacyIssue[],
+  schema: z.ZodType,
+  input: unknown,
+): LegacyParseResult<T> {
   return { success: false, refusal: new LegacyRefusal(ISSUED, issues, schema, input) };
+}
+
+/** zod's "Encountered Promise during synchronous parse", from either build of zod. */
+const ZOD_ASYNC_MESSAGE = new z.core.$ZodAsyncError().message;
+
+function isZodAsyncError(error: unknown): boolean {
+  return (
+    error instanceof z.core.$ZodAsyncError ||
+    (error instanceof Error && error.message === ZOD_ASYNC_MESSAGE)
+  );
 }
 
 /** What a refusal says when neither pass's issues could be translated: fixed text, no value. */
