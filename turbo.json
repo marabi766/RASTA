@@ -1,7 +1,17 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "ui": "stream",
-  "globalDependencies": ["tsconfig.base.json", ".env"],
+  // Every Jest configuration loads the disclosure guard by path, not as a
+  // dependency (#452), so a change to it must re-run every package's tests
+  // rather than replay a cached green.
+  "globalDependencies": [
+    "tsconfig.base.json",
+    ".env",
+    "jest.disclosure-guard.cjs",
+    "packages/testing/src/disclosure-guard.ts",
+    "packages/testing/src/absence-guard.ts",
+    "packages/testing/src/disclosure.ts"
+  ],
   "globalEnv": ["NODE_ENV", "CI"],
   "tasks": {
     "build": {
