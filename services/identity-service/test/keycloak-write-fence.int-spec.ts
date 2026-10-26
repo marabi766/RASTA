@@ -15,7 +15,7 @@ import {
 } from '../src/keycloak/keycloak-write-fence';
 import type { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
 import { KeycloakProjectionConsumer } from '../src/keycloak/keycloak-projection.consumer';
-import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
+import { KeycloakProjector, settleRecoveryProjections } from '../src/keycloak/keycloak.projector';
 import { runProjectionCommand } from '../src/keycloak/projection.command';
 import { keycloakWriteFenceEventsTotal } from '../src/observability/keycloak-projection.metrics';
 import {
@@ -95,7 +95,10 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
     service = new IdentityService(repository, keycloak, projector);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // A late write's recovery projection runs in the background (D-070 D):
+    // done before the next test, so it never takes that test's stub modes.
+    await settleRecoveryProjections(30_000);
     stub.onPut = null;
     jest.restoreAllMocks();
   });
@@ -402,7 +405,11 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       expect(await first).toMatchObject({ status: 503, code: 'KEYCLOAK_UNAVAILABLE' });
       expect(await second).toMatchObject({ status: 503, code: 'KEYCLOAK_WRITE_SETTLING' });
       expect(await events(s.memberships[0]!)).toEqual([]);
-      expect(await fencesOf(s.userId)).toEqual([expect.objectContaining({ live: true })]);
+      // Its own, and — its timeout learned past its deadline — a fresh one (D-070 D).
+      expect(await fencesOf(s.userId)).toEqual([
+        expect.objectContaining({ live: true }),
+        expect.objectContaining({ live: true }),
+      ]);
       stub.releaseHeld();
     });
 
@@ -440,14 +447,18 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const scanner = ownScanner(50, undefined, new Set([s.userId]));
       stub.nextPut('hang');
       await expect(projector.project(s.userId, 'event')).rejects.toBeDefined();
-      const [old] = await fencesOf(s.userId);
+      // Its timeout was learned past its deadline: a fresh fence beside it,
+      // and a recovery projection of the rows (D-070 D).
+      await settleRecoveryProjections(10_000);
+      const [old, fresh] = await fencesOf(s.userId);
 
-      // Before takeover: the sweep leaves it, and sends nothing.
+      // Before takeover: the sweep leaves them, and sends nothing.
       const puts = stub.puts(s.keycloakId).length;
       await scanner.scan();
       expect(stub.puts(s.keycloakId)).toHaveLength(puts);
       expect(await fencesOf(s.userId)).toEqual([
         expect.objectContaining({ attemptId: old!.attemptId, live: true }),
+        expect.objectContaining({ attemptId: fresh!.attemptId, live: true }),
       ]);
 
       // After it: re-asserted, and cleared.
@@ -455,18 +466,21 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       await scanner.scan();
       expect(await fencesOf(s.userId)).toEqual([]);
 
-      // A newer attempt, in flight.
+      // A newer attempt, in flight — and its own late sender's fresh fence.
       stub.nextPut('hang');
       await expect(projector.project(s.userId, 'event')).rejects.toBeDefined();
-      const [newer] = await fencesOf(s.userId);
+      await settleRecoveryProjections(10_000);
+      const [newer, newerFresh] = await fencesOf(s.userId);
       expect(newer!.attemptId).not.toBe(old!.attemptId);
 
       // The old attempt's owner wakes up late and "releases" or "confirms" it:
-      // compare-and-delete by attempt id touches only its own row.
+      // compare-and-delete by attempt id touches only its own row — never the
+      // newer attempts, and never a replacement fence.
       await fencing.fences.release(old!.attemptId);
-      await fencing.fences.confirmLanded([old!.attemptId]);
+      await fencing.fences.confirmLanded([old!.attemptId, fresh!.attemptId]);
       expect(await fencesOf(s.userId)).toEqual([
         expect.objectContaining({ attemptId: newer!.attemptId, live: true }),
+        expect.objectContaining({ attemptId: newerFresh!.attemptId, live: true }),
       ]);
       expect(await failure(demote(s, ['OPERATOR']))).toMatchObject({
         code: 'KEYCLOAK_WRITE_SETTLING',
@@ -829,7 +843,11 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       await expect(
         reviewer(() => service.approveRegistration(registrationId, {})),
       ).rejects.toBeDefined();
+      // Its own fence, and — its timeout learned past its deadline — a fresh
+      // one for the same account and operation (D-070 D).
+      await settleRecoveryProjections(10_000);
       expect(await fencesOf(userId)).toEqual([
+        expect.objectContaining({ live: true, operation: 'disable' }),
         expect.objectContaining({ live: true, operation: 'disable' }),
       ]);
 
@@ -1919,8 +1937,10 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
           live: 0,
           due: 0,
           overdue: 0,
+          expired: 0,
           accountMissing: Number(row!.terminal),
           total: Number(row!.total),
+          at: new Date(),
         };
       };
 

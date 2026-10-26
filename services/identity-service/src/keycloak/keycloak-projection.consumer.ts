@@ -7,6 +7,7 @@ import {
   type EventHandler,
   type HandlerOutcome,
   type OutboxStopOptions,
+  withinDeadline,
 } from '@rasta/nest-common';
 import { IDENTITY_EVENTS } from '../identity/events';
 import { withCancellation } from '../prisma/cancellation';
@@ -83,7 +84,22 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
     const stopping = this.consumer?.stop(options) ?? Promise.resolve();
     // Once the stop returns, the handler it may have abandoned starts nothing
     // more — before the caller resumes.
-    return stopping.finally(() => this.cancel.abort());
+    return stopping
+      .finally(() => this.cancel.abort())
+      .then(() => this.recoverOwed(options?.deadlineAt));
+  }
+
+  /**
+   * Before the stop returns, outside the scope it cancelled: the fresh fences
+   * of late writes still owed — one the cancelled handler heard back for
+   * after its deadline, or one still unanswered past it (D-070 D). Bounded by
+   * what is left of the deadline; never throws.
+   */
+  private async recoverOwed(deadlineAt: number | undefined): Promise<void> {
+    if (!this.consumerFactory) return;
+    const flush = this.projector.recoverOwed();
+    if (deadlineAt === undefined) await flush;
+    else await withinDeadline(flush, Math.max(0, deadlineAt - Date.now()));
   }
 
   /** Joins the stop `OutboxShutdown` began; returns at once. */

@@ -2,11 +2,7 @@ import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } fro
 import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import type { KeycloakProjector } from '../keycloak/keycloak.projector';
 import type { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
-import {
-  keycloakWriteFences,
-  membershipLapseBacklog,
-  membershipLapseFailuresTotal,
-} from '../observability/keycloak-projection.metrics';
+import { membershipLapseFailuresTotal } from '../observability/keycloak-projection.metrics';
 import { withCancellation } from '../prisma/cancellation';
 import { IdentityRepository } from './identity.repository';
 import { IdentityService } from './identity.service';
@@ -67,8 +63,9 @@ export interface MembershipExpiryScanOptions {
  *   attempts and {@link MAX_PAGES_PER_PASS} pages a pass.
  *
  * Nothing is ever given up: a lapse is tried until it is acted on. The backlog
- * — lapses past `validUntil` and not acted on — is published after every pass
- * (`rasta_identity_membership_lapse_backlog`), and alerted on when it stays up.
+ * — lapses past `validUntil` and not acted on — is sampled on its own timer,
+ * not by a pass (`KeycloakFenceSampler`, `rasta_identity_membership_lapse_backlog`),
+ * and alerted on when it stays up.
  *
  * ## Re-assertion (D-069)
  *
@@ -83,13 +80,20 @@ export interface MembershipExpiryScanOptions {
  * counted (`rasta_identity_keycloak_write_fences{state="account_missing"}`,
  * alerted on).
  *
+ * ## Late senders (D-070 option D)
+ *
+ * A pass begins by writing the fresh fences of late writes this process could
+ * not write when they were late (`KeycloakWriteFences.recoverOwed`) — a due
+ * one is then re-asserted by that same pass — and a stop ends with the same
+ * flush, before it returns.
+ *
  * ## Shutdown
  *
  * `OutboxShutdown` stops it in Nest's destroy phase, beside both relays and the
  * purge, by their shared deadline (D-052). A stop cancels the pass in flight
  * (#402 r1 F4): the Keycloak call it is waiting on is aborted — its fence
  * stays, so stopping mid-write is safe (D-069) — and every later step of the
- * pass, down to the last gauge, checks the stop before it starts. Below the
+ * pass checks the stop before it starts. Below the
  * stages, the pass runs inside the database's cancellation boundary
  * (`prisma/cancellation.ts`, #402 r2 F2): every database operation it starts
  * anywhere — a read in the projector, a fence release, a transaction's setup
@@ -130,8 +134,8 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
     private readonly options: MembershipExpiryScanOptions,
     /** Re-projects users with a write fence past takeover (D-069). */
     private readonly projector: Pick<KeycloakProjector, 'project'>,
-    /** The write fences: who is due, their deferral, the gauges (D-069). */
-    private readonly fences: Pick<KeycloakWriteFences, 'dueUsers' | 'deferReassert' | 'counts'>,
+    /** The write fences: who is due, their deferral, and late senders' owed fences (D-069, D-070 D). */
+    private readonly fences: Pick<KeycloakWriteFences, 'dueUsers' | 'deferReassert' | 'recoverOwed'>,
   ) {}
 
   onModuleInit(): void {
@@ -176,15 +180,32 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
     this.timer = undefined;
 
     const current = this.inFlight;
-    if (!current) return;
-    if (deadlineAt === undefined) {
-      await current;
-      return;
+    if (current) {
+      if (deadlineAt === undefined) {
+        await current;
+      } else if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
+        this.logger.warn(
+          'Membership expiry pass still unwinding at the shutdown deadline; abandoned. It starts ' +
+            'no further step; the lapse in flight rolls back and the next pass finds it again',
+        );
+      }
     }
-    if ((await withinDeadline(current, deadlineAt - Date.now())) === 'abandoned') {
-      this.logger.warn(
-        'Membership expiry pass still unwinding at the shutdown deadline; abandoned. It starts ' +
-          'no further step; the lapse in flight rolls back and the next pass finds it again',
+    // Before returning, outside the scope the stop cancelled: the fresh fences
+    // of late writes this process still owes — a late sender the stop refused,
+    // and any write still unanswered past its deadline (D-070 D). Bounded by
+    // what is left of the deadline; a fence not written by then is not, and
+    // the residual is stated in ADR-060.
+    const flush = this.fences.recoverOwed();
+    const owed =
+      deadlineAt === undefined
+        ? await flush
+        : (await withinDeadline(flush, Math.max(0, deadlineAt - Date.now()))) === 'finished'
+          ? await flush
+          : -1;
+    if (owed !== 0) {
+      this.logger.error(
+        `Stopping with ${owed < 0 ? 'unknown' : owed} late Keycloak write fences unwritten ` +
+          '(D-070 D); the old fences, if not yet taken over, still stand',
       );
     }
   }
@@ -207,18 +228,17 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
 
   private async pass(now: Date): Promise<number> {
     try {
+      // First, the retry of late senders' fresh fences this process could
+      // not write (D-070 D): a due one is then re-asserted by this very pass.
+      await this.fences.recoverOwed();
+      if (this.stopped) return 0;
       const handled = await this.expireLapses(now);
       // Every stage checks the stop before it starts (#402 r1 F4).
       if (this.stopped) return handled;
       await this.reassertDue();
-      if (this.stopped) return handled;
-      membershipLapseBacklog.set(await this.repository.countLapsedMemberships(now));
-      if (this.stopped) return handled;
-      const fences = await this.fences.counts();
-      keycloakWriteFences.set({ state: 'live' }, fences.live);
-      keycloakWriteFences.set({ state: 'due' }, fences.due);
-      keycloakWriteFences.set({ state: 'account_missing' }, fences.accountMissing);
-      keycloakWriteFences.set({ state: 'overdue' }, fences.overdue);
+      // No gauge is sampled here any more: a pass is serial and may be long,
+      // skipped or failed, so the fence and lapse gauges have a sampler of
+      // their own (`KeycloakFenceSampler`, #402 r3 R3-2).
       return handled;
     } catch (error) {
       // Never takes the service down: access is already decided from the clock.

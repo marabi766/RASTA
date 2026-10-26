@@ -4,7 +4,7 @@ import { IdentityService } from '../src/identity/identity.service';
 import { MembershipExpiryScanner } from '../src/identity/membership-expiry.scanner';
 import { KeycloakProjectionConsumer } from '../src/keycloak/keycloak-projection.consumer';
 import { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
-import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
+import { KeycloakProjector, settleRecoveryProjections } from '../src/keycloak/keycloak.projector';
 import {
   isWithin,
   platformAttributesFor,
@@ -85,6 +85,9 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
   });
 
   afterEach(async () => {
+    // A late write's recovery projection runs in the background (D-070 D):
+    // done before the next test, so it never takes that test's stub modes.
+    await settleRecoveryProjections(30_000);
     stub.onPut = null;
     jest.restoreAllMocks();
   });
@@ -342,8 +345,15 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
         'OPERATOR',
       ]);
       expect(await events(s.memberships[0]!)).toEqual([]);
-      // Its fence stays: the write may still land.
-      expect(await fencesOf(s.userId)).toEqual([expect.objectContaining({ live: true })]);
+      // Its fence stays: the write may still land. Its timeout was learned
+      // past its deadline, so a fresh live fence stands beside it (D-070 D),
+      // and the recovery projection wrote the rows as committed — unchanged.
+      expect(await settleRecoveryProjections(10_000)).toBe('finished');
+      expect(await fencesOf(s.userId)).toEqual([
+        expect.objectContaining({ live: true }),
+        expect.objectContaining({ live: true }),
+      ]);
+      expect(carried(stub.puts(s.keycloakId).at(-1)!)).toEqual(await rowsGrant(s.userId));
 
       // The retry, while that write may still land: refused before writing.
       const putsBefore = stub.puts(s.keycloakId).length;
@@ -807,7 +817,12 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
         code: 'UPSTREAM_UNAVAILABLE',
       });
       expect(stub.heldCount).toBe(1);
+      // Its own fence, and — its timeout learned past its deadline — a fresh
+      // one beside it, and a recovery projection of the rows (D-070 D).
+      expect(await settleRecoveryProjections(10_000)).toBe('finished');
+      expect(carried(stub.puts(s.keycloakId).at(-1)!)).toEqual(wide);
       expect(await fencesOf(s.userId)).toEqual([
+        expect.objectContaining({ live: true, operation: 'replace_attributes' }),
         expect.objectContaining({ live: true, operation: 'replace_attributes' }),
       ]);
 

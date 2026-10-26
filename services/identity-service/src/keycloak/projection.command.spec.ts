@@ -8,7 +8,7 @@ import { isClean, runProjectionCommand } from './projection.command';
 /** No write fence anywhere: what every test below but the drain's assumes. */
 const noFences = () => ({
   owners: jest.fn(async () => [] as string[]),
-  counts: jest.fn(async () => ({ live: 0, due: 0, accountMissing: 0, overdue: 0, total: 0 })),
+  counts: jest.fn(async () => ({ live: 0, due: 0, accountMissing: 0, overdue: 0, expired: 0, total: 0, at: new Date() })),
 });
 
 describe('runProjectionCommand', () => {
@@ -329,7 +329,9 @@ describe('runProjectionCommand', () => {
             due: owners.size - (owners.has('USR_TERMINAL') ? 1 : 0),
             accountMissing: owners.has('USR_TERMINAL') ? 1 : 0,
             overdue: 0,
+            expired: 0,
             total: [...owners.values()].reduce((sum, n) => sum + n, 0),
+            at: new Date(),
           })),
         },
       };
@@ -390,7 +392,7 @@ describe('runProjectionCommand', () => {
       };
       const fences = {
         owners: jest.fn(async () => [] as string[]),
-        counts: jest.fn(async () => ({ live: 1, due: 0, accountMissing: 0, overdue: 0, total: 1 })),
+        counts: jest.fn(async () => ({ live: 1, due: 0, accountMissing: 0, overdue: 0, expired: 0, total: 1, at: new Date() })),
       };
       const report = await runProjectionCommand('backfill', {
         repository: noAccounts,

@@ -82,9 +82,10 @@ describe('AppModule shutdown wiring (D-052)', () => {
 
   it('the projection consumer passes the deadline to its EventConsumer; a later stop joins it', async () => {
     const consumerStop = jest.fn(async (_options?: OutboxStopOptions) => undefined);
+    const recoverOwed = jest.fn(async () => 0);
     const projection = new KeycloakProjectionConsumer(
       () => ({ start: async () => undefined, stop: consumerStop }) as unknown as EventConsumer,
-      {} as never,
+      { recoverOwed } as never,
     );
     await projection.onModuleInit();
 
@@ -92,6 +93,8 @@ describe('AppModule shutdown wiring (D-052)', () => {
     await projection.onApplicationShutdown();
 
     expect(consumerStop.mock.calls).toEqual([[{ deadlineAt: 1234 }], [undefined]]);
+    // Each stop writes the late senders' owed fences before it returns (D-070 D).
+    expect(recoverOwed).toHaveBeenCalledTimes(2);
   });
 
   it('Keycloak sync off, the projection consumer has nothing to stop', async () => {

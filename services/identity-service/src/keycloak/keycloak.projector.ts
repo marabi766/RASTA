@@ -371,8 +371,6 @@ export type OrphanRepairOutcome =
 @Injectable()
 export class KeycloakProjector {
   private readonly logger = new Logger(KeycloakProjector.name);
-  /** The recovery projections started and not finished yet (D-070 D). */
-  private readonly recoveries = new Set<Promise<void>>();
 
   constructor(
     private readonly repository: IdentityRepository,
@@ -708,17 +706,8 @@ export class KeycloakProjector {
         );
       },
     );
-    this.recoveries.add(run);
-    void run.finally(() => this.recoveries.delete(run));
-  }
-
-  /**
-   * Waits for the recovery projections started so far, at most `timeoutMs`:
-   * for the backfill command before it disconnects, and for tests. Their
-   * fresh fences are already durable either way.
-   */
-  async settleRecoveries(timeoutMs: number): Promise<'finished' | 'abandoned'> {
-    return withinDeadline(Promise.all([...this.recoveries]), timeoutMs);
+    recoveries.add(run);
+    void run.finally(() => recoveries.delete(run));
   }
 
   /**
@@ -993,6 +982,18 @@ export class KeycloakProjector {
       'Account disabled: the platform user is not ACTIVE, and its status is the authority',
     );
   }
+}
+
+/** The recovery projections started in this process and not finished yet (D-070 D). */
+const recoveries = new Set<Promise<void>>();
+
+/**
+ * Waits for every recovery projection started so far in this process, at most
+ * `timeoutMs`: for the backfill command before it disconnects, and for tests.
+ * Their fresh fences are durable either way.
+ */
+export function settleRecoveryProjections(timeoutMs: number): Promise<'finished' | 'abandoned'> {
+  return withinDeadline(Promise.all([...recoveries]), timeoutMs);
 }
 
 function describe(error: unknown): string {

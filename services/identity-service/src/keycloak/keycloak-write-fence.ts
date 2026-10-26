@@ -251,6 +251,82 @@ export function writeNotSent(
   );
 }
 
+/** Every fence row, counted by state as of one database instant ({@link fenceCounts}). */
+export interface FenceCounts {
+  live: number;
+  due: number;
+  accountMissing: number;
+  overdue: number;
+  expired: number;
+  total: number;
+  /** The database instant every row was judged as of. */
+  at: Date;
+}
+
+/**
+ * How many fences are live, due and terminal, and two subsets that matter
+ * for the D-070 deployment assumption:
+ *
+ * - `overdue` (live): unresolved past the deadline plus half the settle
+ *   window (`deadline_at + (takeover_at - deadline_at) / 2`), not yet past
+ *   takeover. Such a write timed out, broke off, was answered 5xx, or its
+ *   sender is paused; the settle window is all that keeps a late delivery of
+ *   it from landing after takeover (ADR-060 D-069 § 6). The definition is
+ *   #402's, unchanged.
+ * - `expired` (due, not terminal): past takeover with its outcome never
+ *   learned — a window that still has width (`deadline_at < takeover_at`;
+ *   an owner that confirmed its write collapsed it, `confirmLanded`) — and
+ *   not re-asserted yet. What an `overdue` fence becomes at takeover, until
+ *   the sweep repairs it: so a window that closed still leaves a trace.
+ *
+ * `total` is every row, whatever its state: the rollback's readiness check
+ * (`COUNT(*) = 0`). One full aggregate — never a page. As of the database's
+ * clock now; `at` judges every row as of that one instant instead.
+ */
+export async function fenceCounts(
+  client: Pick<ExtendedPrismaClient, '$queryRaw'>,
+  at?: Date,
+): Promise<FenceCounts> {
+  const instant =
+    at === undefined ? Prisma.sql`clock_timestamp() AT TIME ZONE 'UTC'` : Prisma.sql`${at}`;
+  const rows = await client.$queryRaw<
+    Array<{
+      live: bigint;
+      due: bigint;
+      account_missing: bigint;
+      overdue: bigint;
+      expired: bigint;
+      total: bigint;
+      now: Date;
+    }>
+  >`
+    SELECT COUNT(*) FILTER (WHERE takeover_at > t.now) AS live,
+           COUNT(*) FILTER (WHERE takeover_at <= t.now AND account_missing_at IS NULL) AS due,
+           COUNT(*) FILTER (WHERE account_missing_at IS NOT NULL) AS account_missing,
+           COUNT(*) FILTER (
+             WHERE takeover_at > t.now
+               AND t.now >= deadline_at + (takeover_at - deadline_at) / 2) AS overdue,
+           COUNT(*) FILTER (
+             WHERE takeover_at <= t.now
+               AND deadline_at < takeover_at
+               AND account_missing_at IS NULL) AS expired,
+           COUNT(*) AS total,
+           t.now AS now
+      FROM (SELECT ${instant} AS now) t
+      LEFT JOIN keycloak_write_attempt ON true
+     GROUP BY t.now`;
+  const row = rows[0];
+  return {
+    live: Number(row?.live ?? 0),
+    due: Number(row?.due ?? 0),
+    accountMissing: Number(row?.account_missing ?? 0),
+    overdue: Number(row?.overdue ?? 0),
+    expired: Number(row?.expired ?? 0),
+    total: Number(row?.total ?? 0),
+    at: row?.now ?? new Date(Number.NaN),
+  };
+}
+
 export class KeycloakWriteFences {
   private readonly monotonicNow: () => number;
   /** Attempts dispatched whose outcome is not known yet, by attempt id (this process). */
@@ -534,13 +610,19 @@ export class KeycloakWriteFences {
    * next projection of the user takes them over. On the fence pool; an update
    * that fails leaves them live until `takeover_at` — slower, never unsafe.
    * Only ever shortens a fence, and only an attempt's own owner calls it.
+   *
+   * Its window collapses: `deadline_at = takeover_at` (the earlier of the old
+   * takeover and now). A zero window is how a row says its outcome was
+   * **resolved** — every unresolved row keeps `takeover_at = deadline_at +`
+   * the settle window, at least 15 s — so a due row whose outcome was never
+   * learned (`expired`, {@link fenceCounts}) is told apart without a column.
    */
   async confirmLanded(attemptIds: readonly string[]): Promise<boolean> {
     if (attemptIds.length === 0) return true;
     try {
       await this.pool.client.$executeRaw`
         UPDATE keycloak_write_attempt
-           SET deadline_at = LEAST(deadline_at, t.c),
+           SET deadline_at = LEAST(takeover_at, t.c),
                takeover_at = LEAST(takeover_at, t.c),
                next_reassert_at = LEAST(next_reassert_at, t.c)
           FROM (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS c) t
@@ -661,46 +743,11 @@ export class KeycloakWriteFences {
   }
 
   /**
-   * How many fences are live, due and terminal — the sweep's gauges — and
-   * `overdue`: live fences whose write is still unresolved past its deadline
-   * plus half its settle window (`deadline_at + (takeover_at - deadline_at) / 2`).
-   * Such a write timed out, broke off or was answered 5xx, or its sender is
-   * paused; the settle window is all that keeps a late delivery of it from
-   * landing after takeover (ADR-060 D-069 § 6, D-070). Alerted on at once
-   * (`RastaIdentityKeycloakWriteOverdue`). `total` is every row, whatever its
-   * state: the rollback's readiness check (`COUNT(*) = 0`).
-   *
-   * As of the database's clock now; `at` (a database instant) judges every
-   * row as of that one instant instead — for a reader comparing two counts.
+   * Every row counted by state, on the fence pool ({@link fenceCounts}): the
+   * backfill's report, and its rollback readiness (`total`).
    */
-  async counts(at?: Date): Promise<{
-    live: number;
-    due: number;
-    accountMissing: number;
-    overdue: number;
-    total: number;
-  }> {
-    const instant =
-      at === undefined ? Prisma.sql`clock_timestamp() AT TIME ZONE 'UTC'` : Prisma.sql`${at}`;
-    const rows = await this.pool.client.$queryRaw<
-      Array<{ live: bigint; due: bigint; account_missing: bigint; overdue: bigint; total: bigint }>
-    >`
-      SELECT COUNT(*) FILTER (WHERE takeover_at > t.now) AS live,
-             COUNT(*) FILTER (WHERE takeover_at <= t.now AND account_missing_at IS NULL) AS due,
-             COUNT(*) FILTER (WHERE account_missing_at IS NOT NULL) AS account_missing,
-             COUNT(*) FILTER (
-               WHERE takeover_at > t.now
-                 AND t.now >= deadline_at + (takeover_at - deadline_at) / 2) AS overdue,
-             COUNT(*) AS total
-        FROM keycloak_write_attempt, (SELECT ${instant} AS now) t`;
-    const row = rows[0];
-    return {
-      live: Number(row?.live ?? 0),
-      due: Number(row?.due ?? 0),
-      accountMissing: Number(row?.account_missing ?? 0),
-      overdue: Number(row?.overdue ?? 0),
-      total: Number(row?.total ?? 0),
-    };
+  counts(at?: Date): Promise<FenceCounts> {
+    return fenceCounts(this.pool.client, at);
   }
 
   /**
