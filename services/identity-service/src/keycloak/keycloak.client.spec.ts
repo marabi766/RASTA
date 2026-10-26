@@ -15,16 +15,25 @@ import { provenanceOnly } from './platform-attributes';
  * the client opens before a PUT (D-069), with the attempt's deadline as the
  * request's signal. `expired` makes the deadline pass before dispatch.
  */
-function testFence(timeoutMs = 10_000, options: { expired?: boolean } = {}) {
+function testFence(
+  timeoutMs = 10_000,
+  options: { expired?: boolean; onObserve?: (dispatched: boolean) => void } = {},
+) {
   const opened: string[] = [];
   const fence: KeycloakWriteFence = async (operation) => {
     opened.push(operation);
     const signal = AbortSignal.timeout(timeoutMs);
+    let dispatched = false;
     return {
       id: `KWA_TEST_${opened.length}`,
       signal,
       assertDispatchable() {
         if (options.expired) throw writeNotSent(operation, 'deadline');
+        dispatched = true;
+      },
+      observeReply() {
+        options.onObserve?.(dispatched);
+        return false;
       },
     };
   };
@@ -694,6 +703,39 @@ describe('KeycloakAdminClient: whether a write may have landed (D-064)', () => {
     cancel.abort();
     expect(await pending).toBeInstanceOf(KeycloakWriteUnconfirmedError);
     expect(puts).toHaveLength(1);
+  });
+
+  // D-070 option D: whether a sender is late is read on its clock after the
+  // reply — so the client must hand the attempt that instant, in every outcome
+  // after dispatch, and only after the request reached Keycloak.
+  it.each([
+    ['an answer 204', 204 as const],
+    ['a refusal 403', 403 as const],
+    ['a 500', 500 as const],
+    ['a 404', 404 as const],
+    ['its deadline', 'hang' as const],
+    ['a broken connection', 'reset' as const],
+  ])('reads the clock after the reply, on %s (D-070 D)', async (_label, mode) => {
+    onPut = mode;
+    const observed: Array<{ dispatched: boolean; puts: number }> = [];
+    const recorded = testFence(300, {
+      onObserve: (dispatched) => observed.push({ dispatched, puts: puts.length }),
+    });
+    await client()
+      .replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence: recorded.fence })
+      .catch(() => undefined);
+    expect(observed[0]).toEqual({ dispatched: true, puts: 1 });
+  });
+
+  it('a request never dispatched is never a late reply (D-070 D)', async () => {
+    const observed: boolean[] = [];
+    await client()
+      .replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), {
+        fence: testFence(300, { expired: true, onObserve: (d) => observed.push(d) }).fence,
+      })
+      .catch(() => undefined);
+    expect(observed.every((dispatched) => !dispatched)).toBe(true);
+    expect(puts).toHaveLength(0);
   });
 
   it('the secret never reaches an unconfirmed error', async () => {

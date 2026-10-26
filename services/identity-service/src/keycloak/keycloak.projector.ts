@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ERROR_CODES } from '@rasta/contracts';
-import { RastaError, runUnscoped } from '@rasta/nest-common';
+import { RastaError, runUnscoped, withinDeadline } from '@rasta/nest-common';
 import { IdentityRepository } from '../identity/identity.repository';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import {
@@ -25,6 +25,7 @@ import {
 } from './platform-attributes';
 import {
   KEYCLOAK_PROJECTION_OUTCOMES,
+  KEYCLOAK_PROJECTION_TRIGGERS,
   KEYCLOAK_WRITE_AHEAD_OUTCOMES,
   keycloakProjectionsTotal,
   keycloakWriteAheadTotal,
@@ -84,6 +85,12 @@ export interface ProjectOptions {
    * sweep's shutdown (#402 r1 F4). A write cut off mid-flight keeps its fence.
    */
   signal?: AbortSignal;
+  /**
+   * This projection is a late sender's recovery (D-070 D): a write of its own
+   * that is late fences again, but asks for no further projection, so one
+   * late write never starts a chain of them.
+   */
+  recovery?: boolean;
 }
 
 /**
@@ -205,6 +212,13 @@ class FencedWrites {
       transactionTimeoutMs: number;
     },
     readonly cancel: AbortSignal | undefined,
+    /**
+     * Asks for an immediate projection of the user once a write here is late
+     * (D-070 D) — started, never awaited: this transaction holds the user
+     * lock that projection takes. Null for a recovery projection's own writes,
+     * so a late recovery fences again but asks for nothing more.
+     */
+    private readonly requestProjection: (() => void) | null,
   ) {}
 
   async write(
@@ -228,17 +242,39 @@ class FencedWrites {
       await call({ fence, cancel: this.cancel });
     } catch (error) {
       const opened = attempt as KeycloakWriteAttempt | null;
-      // Provably not applied — never sent, refused, 404, its deadline passed
-      // before dispatch: nothing can land, so its fence goes now. Unknown: it
-      // stays, and holds narrowing back until the sweep takes it over.
-      if (opened && !(error instanceof KeycloakWriteUnconfirmedError)) {
-        const released = await this.fences.release(opened.id);
-        keycloakWriteFenceEventsTotal.inc({ event: released ? 'released' : 'release_failed' });
+      if (opened) {
+        const unknown = error instanceof KeycloakWriteUnconfirmedError;
+        // Provably not applied — never sent, refused, 404, its deadline passed
+        // before dispatch: nothing can land, so its fence goes now. Unknown: it
+        // stays, and holds narrowing back until the sweep takes it over.
+        if (!unknown) {
+          const released = await this.fences.release(opened.id);
+          keycloakWriteFenceEventsTotal.inc({ event: released ? 'released' : 'release_failed' });
+        }
+        // Whatever the answer, heard after the deadline (D-070 D).
+        await this.afterLateReply(opened, !unknown);
       }
       throw error;
     }
     const opened = attempt as KeycloakWriteAttempt | null;
-    if (opened) this.landed.push(opened.id);
+    if (opened) {
+      this.landed.push(opened.id);
+      await this.afterLateReply(opened, true);
+    }
+  }
+
+  /**
+   * D-070 option D: an attempt whose outcome was learned only after its
+   * deadline — judged on the monotonic clock read after the reply — gets a
+   * fresh fence for the user, then an immediate projection is asked for.
+   * `known`: the attempt landed or provably was not applied. The old
+   * attempt's own row is left to its usual owner, by its own id: nothing here
+   * deletes or shortens a fence.
+   */
+  private async afterLateReply(attempt: KeycloakWriteAttempt, known: boolean): Promise<void> {
+    if (!attempt.observeReply()) return;
+    await this.fences.recoverLate(attempt, known);
+    this.requestProjection?.();
   }
 }
 
@@ -335,6 +371,8 @@ export type OrphanRepairOutcome =
 @Injectable()
 export class KeycloakProjector {
   private readonly logger = new Logger(KeycloakProjector.name);
+  /** The recovery projections started and not finished yet (D-070 D). */
+  private readonly recoveries = new Set<Promise<void>>();
 
   constructor(
     private readonly repository: IdentityRepository,
@@ -629,6 +667,7 @@ export class KeycloakProjector {
     userId: string,
     transactionTimeoutMs: number,
     cancel?: AbortSignal,
+    recovery = false,
   ) {
     return new FencedWrites(
       this.fences,
@@ -640,7 +679,55 @@ export class KeycloakProjector {
         transactionTimeoutMs,
       },
       cancel,
+      recovery ? null : () => this.requestRecovery(userId, cancel),
     );
+  }
+
+  /**
+   * D-070 option D: a write of this user was late — its sender learned the
+   * outcome only after its deadline — and a fresh fence for the user is
+   * committed (or owed). Starts a projection of the user now: the rows as
+   * committed, written under the user lock, the last word after the late
+   * PUT. **Never awaited** by the sender, which may hold that very lock: it
+   * waits for the lock like any projection, after the sender's transaction
+   * ends. In the sender's scope, so a stopped worker's recovery starts
+   * nothing; it is best-effort, and the fresh fence is what is durable — the
+   * sweep re-asserts from it if this one never lands. Its own late writes
+   * fence again but ask for nothing more (`recovery`).
+   */
+  private requestRecovery(userId: string, signal: AbortSignal | undefined): void {
+    const run = this.project(userId, KEYCLOAK_PROJECTION_TRIGGERS.RECOVERY, {
+      signal,
+      recovery: true,
+    }).then(
+      () => undefined,
+      (error: unknown) => {
+        this.logger.error(
+          `Keycloak recovery projection failed for user ${userId} after a late write; ` +
+            `its fresh fence keeps it for the sweep. ${describe(error)}`,
+        );
+      },
+    );
+    this.recoveries.add(run);
+    void run.finally(() => this.recoveries.delete(run));
+  }
+
+  /**
+   * Waits for the recovery projections started so far, at most `timeoutMs`:
+   * for the backfill command before it disconnects, and for tests. Their
+   * fresh fences are already durable either way.
+   */
+  async settleRecoveries(timeoutMs: number): Promise<'finished' | 'abandoned'> {
+    return withinDeadline(Promise.all([...this.recoveries]), timeoutMs);
+  }
+
+  /**
+   * Writes the fresh fences of late writes this process still owes (D-070 D,
+   * `KeycloakWriteFences.recoverOwed`): for a worker's stop, before it
+   * returns, outside the scope it cancelled. Never throws.
+   */
+  recoverOwed(): Promise<number> {
+    return this.fences.recoverOwed();
   }
 
   /**
@@ -703,6 +790,7 @@ export class KeycloakProjector {
           userId,
           PROJECTION_TRANSACTION_OPTIONS.timeout,
           signal,
+          options.recovery === true,
         );
         writes = fenced;
         const linked = user.keycloakId;

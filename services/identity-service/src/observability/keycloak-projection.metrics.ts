@@ -30,6 +30,8 @@ export const KEYCLOAK_PROJECTION_TRIGGERS = {
   COMMAND: 'command',
   /** The sweep re-projecting a user with a Keycloak write fence past takeover (D-069). */
   REASSERT: 'reassert',
+  /** A late sender's immediate re-projection of the user (D-070 option D). */
+  RECOVERY: 'recovery',
 } as const;
 export type KeycloakProjectionTrigger =
   (typeof KEYCLOAK_PROJECTION_TRIGGERS)[keyof typeof KEYCLOAK_PROJECTION_TRIGGERS];

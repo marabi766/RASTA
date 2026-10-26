@@ -580,6 +580,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
             attempt.assertDispatchable();
             checkedAt.push(performance.timeOrigin + performance.now());
           },
+          observeReply: () => attempt.observeReply(),
         };
         return wrapped;
       });

@@ -86,6 +86,49 @@ import { keycloakWriteFenceEventsTotal } from '../observability/keycloak-project
  * the business transaction, after the insert committed, proved that
  * transaction still alive and holding the lock. Every writer that takes the
  * lock after that point reads the fence; one that took it before cannot exist.
+ *
+ * ## The late sender (D-070 option D)
+ *
+ * A sender can be paused — the process stopped, a long GC, an event-loop
+ * stall — after its last deadline check and before or while its request goes
+ * out, for longer than the settle window. Its PUT may then reach Keycloak after
+ * its fence was taken over and a later narrowing committed: the old fence no
+ * longer holds anything back. So whatever answer it then gets, a sender that
+ * learns the outcome **after its own deadline** — judged on the monotonic
+ * clock read after the reply ({@link KeycloakWriteAttempt.observeReply}), not
+ * on any time it scheduled — does two things:
+ *
+ * 1. it commits a **fresh fence** for the user ({@link KeycloakWriteFences.recoverLate}):
+ *    a new attempt, with its own deadline and takeover from now, under the
+ *    same rules as every other row. Its outcome unknown (a timeout, a broken
+ *    connection, a 5xx), the fresh row is live: the PUT may still land, and
+ *    every narrowing of the user waits until a re-assertion after takeover.
+ *    Its outcome known — landed, or provably not applied — its owner confirms
+ *    it in the same statement (a zero window, so due at once, D-069 rule 4):
+ *    nothing of it can land any more, and the next projection takes it over;
+ * 2. it asks for an immediate projection of the user (the projector's
+ *    recovery), which writes the committed rows under the user lock. Never
+ *    awaited by the sender: the sender may still hold that lock.
+ *
+ * The fresh row is what makes the recovery durable: if the projection fails,
+ * or the process dies, the sweep of any replica re-asserts the user from it
+ * (at once when due, after takeover when live). A fresh row that cannot be
+ * written — the database failed, or the sender's worker was **stopped**, so
+ * its scope refuses every database operation (`prisma/cancellation.ts`) — is
+ * owed: kept in this process and written by {@link KeycloakWriteFences.recoverOwed},
+ * which every sweep pass calls first and every worker's stop calls before it
+ * returns (outside the stopped scope, so nothing commits after a stop has
+ * returned). That flush also writes a fresh row for every attempt sent and
+ * still unanswered past its deadline, so a stop that abandons a paused sender
+ * leaves a durable record of it.
+ *
+ * **What this does not cover.** A request delayed in the network, a proxy or
+ * Keycloak itself after the sender's last check — the sender heard back in
+ * time, or its request was in flight before the deadline and lands later than
+ * the settle window — leaves no trace on the sender's clock. That remains the
+ * deployment assumption F (D-070) until option A (a projection version in the
+ * token, after #381 PR 2). Nor does a sender that pauses again for longer
+ * than the settle window between its stop's flush and the process exit.
  */
 
 /** Connections of the fence pool: inserts and releases are single short statements. */
@@ -93,6 +136,13 @@ export const FENCE_POOL_CONNECTIONS = 2;
 
 /** Below this much left of the business transaction, no fence is opened: nothing is sent. */
 const MIN_INSERT_BUDGET_MS = 1;
+
+/**
+ * The bound of a late sender's fresh fence (D-070 D): the wait for a fence
+ * connection, the statement and its transaction. It holds no user lock, so it
+ * is bounded on its own; one that fails is owed and written again later.
+ */
+export const LATE_FENCE_BUDGET_MS = 5_000;
 
 /** How long the current transaction has run, in milliseconds, on the database clock. */
 const AGE_OF_TRANSACTION_MS = Prisma.sql`(EXTRACT(EPOCH FROM clock_timestamp() - transaction_timestamp()) * 1000)::float8`;
@@ -124,6 +174,42 @@ export interface KeycloakWriteAttempt {
    * caller was cancelled. Called immediately before the request is dispatched.
    */
   assertDispatchable(): void;
+  /**
+   * Called as soon as the request's outcome is known — an answer, or a
+   * failure after dispatch. Reads the monotonic clock **now** (the first call
+   * only; later calls return the same verdict) and returns whether the
+   * attempt's deadline had passed by then: a late sender (D-070 option D).
+   * False for an attempt never dispatched.
+   */
+  observeReply(): boolean;
+}
+
+/** What a late sender's fresh fence needs to know of the attempt it stands in for. */
+interface SentWrite {
+  attemptId: string;
+  userId: string;
+  keycloakId: string;
+  operation: KeycloakWriteOperation;
+  timeoutMs: number;
+  settleSeconds: number;
+  /** On the monotonic clock. */
+  deadline: number;
+  /** A flush already wrote a fresh fence for it while it was unanswered. */
+  flushed?: boolean;
+}
+
+/** A fresh fence not yet written: whether the late attempt's outcome is known. */
+interface OwedFence extends SentWrite {
+  known: boolean;
+}
+
+export interface KeycloakWriteFencesOptions {
+  /**
+   * The monotonic clock every attempt's deadline is kept on, in milliseconds:
+   * `performance.now`, which keeps running across a process stop or a GC
+   * pause. A test pauses a sender by moving its own.
+   */
+  monotonicNow?: () => number;
 }
 
 /**
@@ -166,11 +252,33 @@ export function writeNotSent(
 }
 
 export class KeycloakWriteFences {
+  private readonly monotonicNow: () => number;
+  /** Attempts dispatched whose outcome is not known yet, by attempt id (this process). */
+  private readonly sent = new Map<string, SentWrite>();
+  /** Late attempts whose fresh fence is not written yet, by the late attempt's id. */
+  private readonly owed = new Map<string, OwedFence>();
+  /**
+   * The flushes, one after another, so two never write the same fresh fence
+   * twice; each runs in its own caller's scope, so a stop's flush is never
+   * the cancelled one of the pass it stopped.
+   */
+  private flushes: Promise<unknown> = Promise.resolve();
+
   /**
    * @param pool the fence pool — a `PrismaService` of its own, never the one
    *   business transactions run on (see the header).
    */
-  constructor(private readonly pool: PrismaService) {}
+  constructor(
+    private readonly pool: PrismaService,
+    options: KeycloakWriteFencesOptions = {},
+  ) {
+    this.monotonicNow = options.monotonicNow ?? (() => performance.now());
+  }
+
+  /** Fresh fences of late senders still to be written in this process (D-070 D). */
+  get owedCount(): number {
+    return this.owed.size;
+  }
 
   /**
    * Inserts and commits one attempt's fence, then returns it. `tx` must hold
@@ -226,7 +334,7 @@ export class KeycloakWriteFences {
     if (budget < MIN_INSERT_BUDGET_MS) throw writeNotSent(operation, 'transaction_ended');
 
     const attemptId = `KWA_${ulid()}`;
-    const startedAt = performance.now();
+    const startedAt = this.monotonicNow();
     const timeout = input.timeoutMs / 1000;
     // A failure here throws, and nothing is sent. The insert's own transaction
     // rolled back; should its COMMIT have landed all the same (an answer lost
@@ -268,19 +376,140 @@ export class KeycloakWriteFences {
     }
 
     const deadline = startedAt + input.timeoutMs;
+    const clock = this.monotonicNow;
     // Whole milliseconds, rounded down: never later than the deadline.
-    const remaining = Math.max(0, Math.floor(deadline - performance.now()));
+    const remaining = Math.max(0, Math.floor(deadline - clock()));
     const timer = AbortSignal.timeout(remaining);
     const signal = input.cancel ? AbortSignal.any([timer, input.cancel]) : timer;
+    const write: SentWrite = {
+      attemptId,
+      userId: input.userId,
+      keycloakId: input.keycloakId,
+      operation,
+      timeoutMs: input.timeoutMs,
+      settleSeconds: input.settleSeconds,
+      deadline,
+    };
+    const { sent, owed } = this;
+    let dispatched = false;
+    /** The monotonic instant the outcome became known; null until then. */
+    let repliedAt: number | null = null;
     return {
       id: attemptId,
       signal,
       assertDispatchable(): void {
         if (input.cancel?.aborted) throw writeNotSent(operation, 'cancelled');
-        if (performance.now() >= deadline || timer.aborted)
-          throw writeNotSent(operation, 'deadline');
+        if (clock() >= deadline || timer.aborted) throw writeNotSent(operation, 'deadline');
+        dispatched = true;
+        sent.set(attemptId, write);
+      },
+      observeReply(): boolean {
+        if (!dispatched) return false;
+        if (repliedAt === null) {
+          // After the reply, never before: a sender paused anywhere between
+          // its last check and this point is late, however punctual the
+          // request it scheduled was (D-070 D).
+          repliedAt = clock();
+          sent.delete(attemptId);
+          // Owed from this instant, as unknown — the conservative reading —
+          // until its sender says what it heard (`recoverLate`); a flush that
+          // runs first writes it live.
+          if (repliedAt >= deadline) owed.set(attemptId, { ...write, known: false });
+        }
+        return repliedAt >= deadline;
       },
     };
+  }
+
+  /**
+   * A late sender's fresh fence (D-070 option D, see the header): a new
+   * attempt for the same user and account, its deadline and takeover counted
+   * from now on the database's clock. `known` — the late attempt landed, or
+   * provably was not applied — confirms it in the same statement: a zero
+   * window (`deadline_at = takeover_at`), due at once, so the next projection
+   * takes it over. Unknown, it is live until its own takeover.
+   *
+   * On the fence pool, in a short transaction of its own, under no user lock
+   * — the sender may still hold that lock, or may have lost it long ago — and
+   * bounded by {@link LATE_FENCE_BUDGET_MS}. Never throws: a fence that cannot
+   * be written (the database failed, or the sender's worker was stopped and
+   * its scope refuses it) is owed, and {@link recoverOwed} writes it.
+   *
+   * Never deletes or shortens any other row: the late attempt's own row, and
+   * any fence of a newer attempt, are left exactly as they are.
+   */
+  async recoverLate(attempt: KeycloakWriteAttempt, known: boolean): Promise<boolean> {
+    const pending = this.owed.get(attempt.id);
+    // Not owed: not late, or a flush already wrote it (live: the safe reading).
+    if (!pending) return true;
+    keycloakWriteFenceEventsTotal.inc({ event: 'late_reply' });
+    pending.known = known;
+    if (await this.writeFresh(pending)) {
+      this.owed.delete(attempt.id);
+      return true;
+    }
+    keycloakWriteFenceEventsTotal.inc({ event: 'late_owed' });
+    return false;
+  }
+
+  /**
+   * Writes every fresh fence this process owes (D-070 D): those a late sender
+   * could not write, and one for each attempt sent and still unanswered past
+   * its deadline — a sender paused right now, whose stop must not leave it
+   * without a record. Called first by every sweep pass (the retry), and by
+   * every worker's stop after its work unwound or was abandoned, before the
+   * stop returns. Returns how many are still owed; never throws.
+   */
+  recoverOwed(): Promise<number> {
+    const flush = this.flushes.then(() => this.flush());
+    this.flushes = flush.catch(() => undefined);
+    return flush;
+  }
+
+  private async flush(): Promise<number> {
+    const now = this.monotonicNow();
+    for (const write of [...this.sent.values()]) {
+      if (now < write.deadline || write.flushed || this.owed.has(write.attemptId)) continue;
+      // Still unanswered past its deadline: its outcome is unknown. Once: if
+      // its sender later hears back late, it writes a fresh fence of its own.
+      write.flushed = true;
+      this.owed.set(write.attemptId, { ...write, known: false });
+    }
+    for (const owed of [...this.owed.values()]) {
+      if (await this.writeFresh(owed)) this.owed.delete(owed.attemptId);
+    }
+    return this.owed.size;
+  }
+
+  private async writeFresh(owed: OwedFence): Promise<boolean> {
+    const attemptId = `KWA_${ulid()}`;
+    const timeout = owed.timeoutMs / 1000;
+    try {
+      await this.pool.transaction(
+        (fence) => fence.$executeRaw`
+          INSERT INTO keycloak_write_attempt
+                 (attempt_id, user_id, keycloak_id, operation,
+                  started_at, deadline_at, takeover_at, next_reassert_at)
+          SELECT ${attemptId}, ${owed.userId}, ${owed.keycloakId}, ${owed.operation},
+                 t.c, w.deadline, w.takeover, w.takeover
+            FROM (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS c) t,
+                 LATERAL (SELECT
+                   CASE WHEN ${owed.known} THEN t.c
+                        ELSE t.c + make_interval(secs => ${timeout}) END AS deadline,
+                   CASE WHEN ${owed.known} THEN t.c
+                        ELSE t.c + make_interval(secs => ${timeout + owed.settleSeconds}) END
+                     AS takeover) w`,
+        {
+          maxWait: LATE_FENCE_BUDGET_MS,
+          timeout: LATE_FENCE_BUDGET_MS,
+          statementTimeoutMs: LATE_FENCE_BUDGET_MS,
+        },
+      );
+      keycloakWriteFenceEventsTotal.inc({ event: 'late_fenced' });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
