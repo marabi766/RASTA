@@ -30,14 +30,14 @@ import type { WebSession } from './session';
  */
 const assetSchema = z.object({
   id: z.string(),
-  assetTag: z.string().nullable().default(null),
+  assetTag: z.string().nullable().prefault(null),
   name: z.string(),
   type: z.string(),
   status: z.string(),
-  manufacturer: z.string().nullable().default(null),
-  model: z.string().nullable().default(null),
-  manufactureYear: z.number().int().nullable().default(null),
-  commissionedAt: renderableDate.nullable().default(null),
+  manufacturer: z.string().nullable().prefault(null),
+  model: z.string().nullable().prefault(null),
+  manufactureYear: z.number().int().nullable().prefault(null),
+  commissionedAt: renderableDate.nullable().prefault(null),
   /**
    * What an edit is made against (`expectedVersion`). Absent from a service
    * that predates it, and then the edit form is not offered: an edit with no
@@ -50,8 +50,8 @@ export type AssetSummary = z.infer<typeof assetSchema>;
 
 const assetPageSchema = z.object({
   items: z.array(assetSchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type AssetPage = z.infer<typeof assetPageSchema>;
@@ -59,7 +59,7 @@ export type AssetPage = z.infer<typeof assetPageSchema>;
 const complianceSchema = z.object({
   operable: z.boolean(),
   /** Every reason this asset cannot be dispatched, not only the first. */
-  blockers: z.array(z.string()).default([]),
+  blockers: z.array(z.string()).prefault([]),
   activeInsurance: z
     .object({
       policyNumber: z.string(),
@@ -68,26 +68,26 @@ const complianceSchema = z.object({
       daysUntilExpiry: z.number().int(),
     })
     .nullable()
-    .default(null),
+    .prefault(null),
   latestInspection: z
     .object({
-      certificateNo: z.string().nullable().default(null),
-      centerName: z.string().nullable().default(null),
+      certificateNo: z.string().nullable().prefault(null),
+      centerName: z.string().nullable().prefault(null),
       validTo: renderableDate,
       result: z.string(),
       daysUntilExpiry: z.number().int(),
     })
     .nullable()
-    .default(null),
+    .prefault(null),
 });
 
 const timelineEntrySchema = z.object({
   id: z.string(),
   category: z.string(),
   title: z.string(),
-  description: z.string().nullable().default(null),
+  description: z.string().nullable().prefault(null),
   /** Minor units as a string — a rial total does not survive a JSON number. */
-  amountMinor: z.string().nullable().default(null),
+  amountMinor: z.string().nullable().prefault(null),
   occurredAt: renderableDate,
 });
 
@@ -102,15 +102,15 @@ export const assetDocumentSchema = z.object({
   documentId: z.string(),
   kind: z.string(),
   title: z.string(),
-  issuedAt: renderableDate.nullable().default(null),
-  expiresAt: renderableDate.nullable().default(null),
+  issuedAt: renderableDate.nullable().prefault(null),
+  expiresAt: renderableDate.nullable().prefault(null),
 });
 
 export type AssetDocumentSummary = z.infer<typeof assetDocumentSchema>;
 
 const dossierSchema = z.object({
   asset: assetSchema,
-  organizationName: z.string().nullable().default(null),
+  organizationName: z.string().nullable().prefault(null),
   compliance: complianceSchema,
   costs: z.object({
     totalMinor: z.string(),
@@ -118,9 +118,9 @@ const dossierSchema = z.object({
     partsAndOrdersMinor: z.string(),
     entryCount: z.number().int(),
   }),
-  recentActivity: z.array(timelineEntrySchema).default([]),
-  documents: z.array(assetDocumentSchema).default([]),
-  transferCount: z.number().int().default(0),
+  recentActivity: z.array(timelineEntrySchema).prefault([]),
+  documents: z.array(assetDocumentSchema).prefault([]),
+  transferCount: z.number().int().prefault(0),
 });
 
 export type AssetDossier = z.infer<typeof dossierSchema>;
@@ -144,7 +144,7 @@ async function read<S extends z.ZodTypeAny>(
   session: WebSession,
   path: string,
   // The schema itself rather than its output type: several fields here carry
-  // a `.default()`, so the parsed value is narrower than what Zod accepts, and
+  // a `.prefault()`, so the parsed value is narrower than what Zod accepts, and
   // a `ZodType<T>` parameter would make the two disagree at every call site.
   schema: S,
 ): Promise<ReadResult<z.infer<S>>> {
@@ -211,8 +211,8 @@ export function fetchDossier(
 
 const timelinePageSchema = z.object({
   items: z.array(timelineEntrySchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type AssetTimelinePage = z.infer<typeof timelinePageSchema>;

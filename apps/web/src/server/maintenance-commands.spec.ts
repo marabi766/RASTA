@@ -272,11 +272,15 @@ describe('writing a report', () => {
     return { impl, calls };
   }
 
+  // zod 4 infers a field whose transform may return undefined as present-but-undefined (zod 3: optional).
   const REQUEST = {
     assetId: ASSET,
     type: 'CORRECTIVE' as const,
     title: 'نشتی روغن',
     severity: 'HIGH' as const,
+    description: undefined,
+    outOfServiceAt: undefined,
+    dueDate: undefined,
   };
 
   it('posts the body to the gateway with the submission id in the Idempotency-Key header', async () => {

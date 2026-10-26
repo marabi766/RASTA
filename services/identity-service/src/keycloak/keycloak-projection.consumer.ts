@@ -1,3 +1,4 @@
+import { legacyParse } from '@rasta/contracts';
 import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { z } from 'zod';
 import type { EventEnvelope } from '@rasta/contracts';
@@ -101,13 +102,13 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
   async handle(envelope: EventEnvelope): Promise<HandlerOutcome> {
     if (!REPROJECTED_EVENTS.includes(envelope.eventName)) return 'SKIPPED';
 
-    const parsed = namesUser.safeParse(envelope.payload);
+    const parsed = legacyParse(namesUser, envelope.payload);
     if (!parsed.success) {
       // The producer is this service, and publish-time validation requires the
       // field; a payload without it is a defect a retry cannot fix. Dead-lettered
       // at once rather than acknowledged, so the missed projection has a record
       // an operator sees (audit L7-26, docs/07 § 7.6).
-      throw invalidPayloadError(envelope, parsed.error, Object.keys(namesUser.shape));
+      throw invalidPayloadError(envelope, parsed.refusal, Object.keys(namesUser.shape));
     }
 
     const { signal } = this.cancel;

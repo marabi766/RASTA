@@ -135,8 +135,8 @@ describe('the declaration body', () => {
   });
 
   it('takes the days as ISO datetimes, and refuses an end that is not after the start', () => {
-    expect(squash(properties.get('fromAt'))).toBe('z.string().datetime().optional()');
-    expect(squash(properties.get('toAt'))).toBe('z.string().datetime().optional()');
+    expect(squash(properties.get('fromAt'))).toBe('z.string().check(isoDateTime()).optional()');
+    expect(squash(properties.get('toAt'))).toBe('z.string().check(isoDateTime()).optional()');
     expect(squash(topLevelConst(dto, 'declareAvailabilitySchema').getText())).toContain(
       '!dto.toAt||!dto.fromAt||newDate(dto.toAt)>newDate(dto.fromAt)',
     );

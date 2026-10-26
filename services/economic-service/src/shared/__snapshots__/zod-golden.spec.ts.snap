@@ -329,11 +329,6 @@ exports[`zod-3 golden: idempotent request bodies and their hashes participation 
           "message": "Array must contain at most 2 element(s)",
           "path": "contributions",
         },
-        {
-          "code": "custom",
-          "message": "Invalid input",
-          "path": "contributions",
-        },
       ],
       "refused": "VALIDATION_FAILED",
     },

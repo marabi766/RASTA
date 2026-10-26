@@ -4306,7 +4306,3 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
-          # One time-boxed exception, expiring 2026-10-30: the zod advisory
-          # the dependency audit already ignores until the zod 4 migration
-          # (see the file and pnpm-workspace.yaml auditConfig).
-          trivyignores: .trivyignore.services
