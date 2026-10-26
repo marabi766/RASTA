@@ -199,11 +199,12 @@ describe('notification read API (real application)', () => {
       userId: me,
       readAt: new Date(),
     });
+    const now = new Date();
     const dismissed = await seedNotification(api.prisma, {
       organizationId: org,
       userId: me,
-      readAt: new Date(),
-      dismissedAt: new Date(),
+      readAt: now,
+      dismissedAt: now,
     });
     const expired = await seedNotification(api.prisma, {
       organizationId: org,
