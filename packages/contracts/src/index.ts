@@ -39,6 +39,7 @@ export {
   LegacyRefusal,
   describeLegacyRefusal,
   isLegacyRefusal,
+  isSchemaAuthored,
   joinLegacyValues,
   legacyDefaultMessage,
   legacyParse,

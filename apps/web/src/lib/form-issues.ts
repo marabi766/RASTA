@@ -1,4 +1,9 @@
-import { requireLegacyRefusal, type LegacyIssue, type LegacyRefusal } from '@rasta/contracts';
+import {
+  isSchemaAuthored,
+  requireLegacyRefusal,
+  type LegacyIssue,
+  type LegacyRefusal,
+} from '@rasta/contracts';
 
 import { toPersianDigits } from './format/digits';
 
@@ -14,10 +19,14 @@ import { toPersianDigits } from './format/digits';
  * message, so a new parser cannot reopen the class.
  *
  * Rules, in order:
- *  1. A message the schema's author wrote in Persian (it holds an Arabic-script
- *     letter) is shown as written — those are the specific, field-aware
- *     sentences («نام سازمان را وارد کنید»). Zod's defaults and a message
- *     written in English hold none and never pass.
+ *  1. A message the schema's author wrote, in Persian, is shown as written —
+ *     those are the specific, field-aware sentences («نام سازمان را وارد
+ *     کنید»). Who wrote it is decided by where zod took the message from
+ *     (`isSchemaAuthored`), never by what it says: a default of zod's that
+ *     repeats a Persian value, option or key is zod's all the same (PR #444
+ *     r5 F6), and an issue nobody can vouch for is not the author's. Of the
+ *     author's, only one holding an Arabic-script letter passes; one written
+ *     in English does not.
  *  2. Otherwise a specific sentence from the issue's code and its bounds
  *     («حداکثر ۲۰۰ نویسه مجاز است»), which names the limit and never the input.
  *  3. Otherwise one generic sentence.
@@ -95,7 +104,9 @@ function boundMessage(issue: LegacyIssue): string | null {
  * wrong one (PR #444 r1 F1).
  */
 export function formIssueMessage(issue: LegacyIssue | undefined): string {
-  if (issue && ARABIC_SCRIPT_LETTER.test(issue.message)) return issue.message;
+  if (issue && isSchemaAuthored(issue) && ARABIC_SCRIPT_LETTER.test(issue.message)) {
+    return issue.message;
+  }
   return (issue && boundMessage(issue)) ?? GENERIC_FIELD_MESSAGE;
 }
 

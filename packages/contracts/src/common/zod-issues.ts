@@ -18,7 +18,10 @@ import { enumOptions, literalValues, resolveZodPath, unwrapZodSchema } from './z
  * writes for the issue; that is decided here by asking the locale again, which
  * needs the value the issue was raised on. A default message is replaced by
  * zod 3's default for the same issue; any other message — one the schema wrote
- * — is kept as written, and `zodDefault` says which.
+ * — is kept as written, and `zodDefault` says which. That is a comparison of
+ * texts, for the wording; whether a consumer may show a message as the
+ * schema's own is decided by where zod took it from ({@link isSchemaAuthored},
+ * PR #444 r5 F6).
  *
  * ## One operation: parse and translate ({@link legacyParse})
  *
@@ -149,8 +152,32 @@ const LEGACY_RUN_ORDER = Symbol.for('@rasta/zod.legacyRunOrder');
 /** Stock zod 4: every issue carries the value it was raised on (read by the translation only). */
 const STOCK_PARSE = { reportInput: true } as const;
 
-/** The same, in zod 3's run order: diagnostics only, after {@link STOCK_PARSE} refused. */
-const LEGACY_ORDER_PARSE = { reportInput: true, [LEGACY_RUN_ORDER]: true } as const;
+/**
+ * zod's per-parse error map, called only where zod is about to word an issue
+ * itself: after the issue brought no message of its own and neither the check
+ * nor the schema that raised it supplied one (`finalizeIssue`). It writes no
+ * message (it returns nothing, so zod's own wording follows exactly as without
+ * it); it marks the issue, and zod copies the mark onto the issue it reports
+ * (PR #444 r5 F6). Every `finalizeIssue` call of either build of zod passes
+ * the parse's context (`zod-authorship.spec`).
+ */
+const ZOD_WORDED_KEY = '~legacyZodWorded';
+const ZOD_WORDED: object = Object.freeze({});
+function markZodWorded(issue: unknown): undefined {
+  (issue as Record<string, unknown>)[ZOD_WORDED_KEY] = ZOD_WORDED;
+  return undefined;
+}
+
+/**
+ * The same, in zod 3's run order: diagnostics only, after {@link STOCK_PARSE}
+ * refused. It also marks every issue zod words itself, which is how the
+ * translation tells a message the schema wrote ({@link isSchemaAuthored}).
+ */
+const LEGACY_ORDER_PARSE = {
+  reportInput: true,
+  [LEGACY_RUN_ORDER]: true,
+  error: markZodWorded,
+} as const;
 
 /** zod 3's `getParsedType`. */
 export function legacyParsedType(data: unknown): string {
@@ -317,6 +344,31 @@ type Translated = LegacyIssue extends infer I
     : never
   : never;
 type Fields = Record<string, unknown>;
+
+/**
+ * Messages the schema itself supplied (PR #444 r5 F6): a check's or schema's
+ * own `error`/`message`, or the message a refinement added the issue with —
+ * known by where zod took it from, never by what it says. Only an issue of
+ * the zod 3-ordered pass can be in here: that pass marks every issue zod
+ * words itself ({@link markZodWorded}), and an issue it did not mark, whose
+ * message is not the active locale's text either, got its message from the
+ * schema. An issue of stock zod's pass (the fallback), the generic issue, an
+ * author's function that returned nothing or zod's own text, a copy of an
+ * issue: not in here, so not authored. Read only through
+ * {@link isSchemaAuthored}.
+ */
+const SCHEMA_AUTHORED = new WeakSet<LegacyIssue>();
+
+/**
+ * Whether `issue` (one of a refusal's issues, or of its union options) holds
+ * a message the schema supplied, rather than zod's wording — which repeats
+ * the value received, the options and the keys. `false` for anything this
+ * package cannot vouch for. A consumer that may show an author's message
+ * (the portal's `formIssueMessage`) asks this first.
+ */
+export function isSchemaAuthored(issue: LegacyIssue): boolean {
+  return SCHEMA_AUTHORED.has(issue);
+}
 
 /** Whether zod 4's active locale writes exactly this message for the issue. */
 function isZodDefault(issue: V4Issue): boolean {
@@ -528,11 +580,16 @@ function unionAsZod3Reported(issue: V4Issue): readonly z.core.$ZodIssue[] | unde
  * refused it only through `.finite()`, so it is `not_finite`. Likewise zod 4's
  * safe-integer bound (r1 Deviation 4) is dropped where the schema's own bound
  * refused the same integer, and kept where only it did.
+ *
+ * `marked`: the issues come from the zod 3-ordered pass, which marks what zod
+ * words itself, so an unmarked message may be the schema's
+ * ({@link SCHEMA_AUTHORED}); otherwise none is.
  */
 function translateIssues(
   issues: readonly z.core.$ZodIssue[],
   schema: z.ZodType,
   prefix: readonly PropertyKey[] = [],
+  marked = false,
 ): LegacyIssue[] {
   const out: LegacyIssue[] = [];
   const visit = (
@@ -560,7 +617,16 @@ function translateIssues(
     const zodDefault = isZodDefault(issue);
     const legacy = { ...translated, message: '', zodDefault } as LegacyIssue;
     legacy.message = zodDefault ? legacyDefaultMessage(legacy) : issue.message;
-    if (legacy.code === 'invalid_union') keepBranches(legacy, issue, schema, at);
+    if (
+      marked &&
+      !zodDefault &&
+      (issue as unknown as Fields)[ZOD_WORDED_KEY] !== ZOD_WORDED &&
+      typeof issue.message === 'string' &&
+      issue.message !== ''
+    ) {
+      SCHEMA_AUTHORED.add(legacy);
+    }
+    if (legacy.code === 'invalid_union') keepBranches(legacy, issue, schema, at, marked);
     out.push(legacy);
   };
   const top = issues as readonly V4Issue[];
@@ -578,14 +644,20 @@ function translateIssues(
  */
 const UNION_BRANCHES = new WeakMap<LegacyIssue, readonly (readonly LegacyIssue[])[]>();
 
-function keepBranches(legacy: LegacyIssue, issue: V4Issue, schema: z.ZodType, at: PropertyKey[]) {
+function keepBranches(
+  legacy: LegacyIssue,
+  issue: V4Issue,
+  schema: z.ZodType,
+  at: PropertyKey[],
+  marked: boolean,
+) {
   if (issue.code !== 'invalid_union' || !Array.isArray(issue.errors) || issue.errors.length === 0) {
     return;
   }
   try {
     UNION_BRANCHES.set(
       legacy,
-      issue.errors.map((option) => translateIssues(option, schema, at)),
+      issue.errors.map((option) => translateIssues(option, schema, at, marked)),
     );
   } catch {
     // An option that cannot be worded leaves the union's own issue, as before.
@@ -895,13 +967,15 @@ export function refusalIssues(
   try {
     const second = ordered();
     if (!second.success) {
-      const issues = translator(second.error.issues, schema);
+      // The ordered pass marks what zod words itself (LEGACY_ORDER_PARSE).
+      const issues = translator(second.error.issues, schema, [], true);
       if (issues.length > 0) return issues;
     }
   } catch {
     // The diagnostic pass is not the answer; stock zod's refusal is.
   }
   try {
+    // Unmarked: no message of stock zod's pass counts as the schema's.
     const issues = translator(stockIssues(), schema);
     if (issues.length > 0) return issues;
   } catch {
