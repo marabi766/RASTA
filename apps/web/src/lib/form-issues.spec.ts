@@ -7,12 +7,8 @@ import { join, relative } from 'node:path';
 import { z } from 'zod';
 import { legacyParse, type LegacyIssue } from '@rasta/contracts';
 
-import {
-  firstIssuePerField,
-  formIssueMessage,
-  GENERIC_FIELD_MESSAGE,
-  persianErrorMap,
-} from './form-issues';
+import { firstIssuePerField, formIssueMessage, GENERIC_FIELD_MESSAGE } from './form-issues';
+import { legacyFormResolver } from './form-resolver';
 
 /**
  * The portal's one Persian boundary for local validation (`form-issues.ts`).
@@ -101,12 +97,38 @@ describe('formIssueMessage', () => {
     expect(formIssueMessage(undefined)).toBe(GENERIC_FIELD_MESSAGE);
   });
 
-  it('serves a resolver the same sentences through the error map', () => {
+  it('serves a form resolver the same sentences, through legacyParse', async () => {
     const schema = z.object({ name: z.string().max(5), n: z.number().int() });
-    const result = schema.safeParse({ name: 'abcdefg', n: 1.5 }, { error: persianErrorMap });
-    expect(result.success).toBe(false);
-    const messages = result.success ? [] : result.error.issues.map((issue) => issue.message);
-    expect(messages).toEqual(['حداکثر ۵ نویسه مجاز است', 'یک عدد صحیح و معتبر وارد کنید']);
+    const resolved = await legacyFormResolver(schema)({ name: 'abcdefg', n: 1.5 }, undefined, {
+      fields: {},
+      shouldUseNativeValidation: false,
+    });
+    expect(resolved.errors).toEqual({
+      name: { type: 'too_big', message: 'حداکثر ۵ نویسه مجاز است', ref: undefined },
+      n: { type: 'invalid_type', message: 'یک عدد صحیح و معتبر وارد کنید', ref: undefined },
+    });
+  });
+
+  it('lets stock zod decide a form resolver’s answer (D-078)', async () => {
+    const options = { fields: {}, shouldUseNativeValidation: false } as const;
+    // Codex PR-444 r3 F3: a refusal another combinator would reconcile away
+    // in zod 3's order. Stock zod refuses it, and so does the form.
+    const left = z
+      .object({ a: z.string() })
+      .strict()
+      .transform((value) => value)
+      .refine(() => false, 'never allowed');
+    const refused = await legacyFormResolver(z.intersection(left, z.object({ b: z.string() })))(
+      { a: 'a', b: 'b' },
+      undefined,
+      options,
+    );
+    expect(refused.values).toEqual({});
+    expect(Object.keys(refused.errors)).toEqual(['']);
+    // Accepted: the values are stock zod's output.
+    const schema = z.object({ n: z.string().transform(Number), d: z.string().prefault('x') });
+    const accepted = await legacyFormResolver(schema)({ n: '5' }, undefined, options);
+    expect(accepted).toEqual({ values: schema.parse({ n: '5' }), errors: {} });
   });
 });
 
@@ -148,8 +170,15 @@ function sources(dir: string): string[] {
 
 describe('no parser reads Zod’s own message', () => {
   // Reading `.path` of an issue (to name a missing environment variable) never
-  // shows a sentence; these two do exactly that and nothing else.
-  const PATH_ONLY = new Set(['lib/form-issues.ts', 'server/env.ts', 'server/oidc.ts']);
+  // shows a sentence; these two do exactly that and nothing else. The boundary
+  // itself (form-issues.ts, and the form resolver, which reads a legacyParse
+  // refusal's issues and words each through formIssueMessage) is the third.
+  const PATH_ONLY = new Set([
+    'lib/form-issues.ts',
+    'lib/form-resolver.ts',
+    'server/env.ts',
+    'server/oidc.ts',
+  ]);
 
   it('uses ZodError.issues only inside the boundary (or to read paths)', () => {
     const offenders = sources(SRC)
@@ -186,12 +215,67 @@ describe('no parser reads Zod’s own message', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('gives every resolver the Persian error map', () => {
+  it('parses every form through legacyFormResolver (D-078, addendum E)', () => {
+    // Stock zod decides and a refusal is worded once, by legacyParse: no
+    // resolver of the library's own (zodResolver parsed with zod directly), no
+    // hand-written one, no error map standing in for the translation.
     const offenders = sources(SRC)
       .map((file) => relative(SRC, file))
-      .filter((file) =>
-        /zodResolver\((?![^)]*persianErrorMap)/.test(readFileSync(join(SRC, file), 'utf8')),
-      );
+      .filter((file) => file !== 'lib/form-resolver.ts')
+      .filter((file) => {
+        const text = readFileSync(join(SRC, file), 'utf8');
+        return (
+          /@hookform\/resolvers/.test(text) ||
+          /\bresolver\s*:(?!\s*legacyFormResolver\()/.test(text) ||
+          /persianErrorMap|legacyIssueInErrorMap/.test(text)
+        );
+      });
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('a refusal legacyParse took from stock zod (D-078, addendum H)', () => {
+  const VALUE = 'SENTINEL-041-value';
+  const options = { fields: {}, shouldUseNativeValidation: false } as const;
+  const left = z
+    .object({ a: z.string() })
+    .strict()
+    .transform((value) => value)
+    .refine(() => false, 'never allowed');
+  // Codex PR-444 r3 F3's shape: in zod 3's order the key issue is reconciled away.
+  const fallback = z.intersection(left, z.object({ b: z.string() }));
+  const ordinary = z.object({ a: z.string(), b: z.string() }).refine(() => false, 'never allowed');
+  const generic = z.object({
+    a: z.string().refine(() => false, {
+      error: () => {
+        throw new Error(VALUE);
+      },
+    }),
+  });
+  const input = { a: VALUE, b: VALUE };
+
+  it('shows it in a form as the same refusal reached the ordinary way, no value in it', async () => {
+    expect(
+      fallback.safeParse(input, { [Symbol.for('@rasta/zod.legacyRunOrder')]: true } as never)
+        .success,
+    ).toBe(true);
+    const a = await legacyFormResolver(fallback)(input, undefined, options);
+    const b = await legacyFormResolver(ordinary)(input, undefined, options);
+    expect(a).toEqual(b);
+    expect(JSON.stringify(a)).not.toContain(VALUE);
+    const refused = legacyParse(fallback, input);
+    const same = legacyParse(ordinary, input);
+    if (refused.success || same.success) throw new Error('expected refusals');
+    expect(firstIssuePerField(refused.refusal, ['a', 'b'])).toEqual(
+      firstIssuePerField(same.refusal, ['a', 'b']),
+    );
+  });
+
+  it('shows the generic refusal as one generic Persian sentence', async () => {
+    const resolved = await legacyFormResolver(generic)({ a: VALUE }, undefined, options);
+    expect(resolved.errors).toEqual({
+      '': { type: 'custom', message: GENERIC_FIELD_MESSAGE, ref: undefined },
+    });
+    expect(JSON.stringify(resolved)).not.toContain(VALUE);
   });
 });

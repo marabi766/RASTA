@@ -1,10 +1,4 @@
-import type { z } from 'zod';
-import {
-  legacyIssueInErrorMap,
-  requireLegacyRefusal,
-  type LegacyIssue,
-  type LegacyRefusal,
-} from '@rasta/contracts';
+import { requireLegacyRefusal, type LegacyIssue, type LegacyRefusal } from '@rasta/contracts';
 
 import { toPersianDigits } from './format/digits';
 
@@ -15,7 +9,7 @@ import { toPersianDigits } from './format/digits';
  * puts a message in front of the person. Zod's own sentences are English and
  * can repeat the input («Invalid enum value … received 'x'»), so no parser may
  * copy `issue.message` into a form error: every one goes through
- * {@link formIssueMessage}, `firstIssuePerField` or {@link persianErrorMap}.
+ * {@link formIssueMessage}, `firstIssuePerField` or `legacyFormResolver`.
  * `form-issue-boundary.spec.ts` fails on any other reader of an issue's
  * message, so a new parser cannot reopen the class.
  *
@@ -95,8 +89,8 @@ function boundMessage(issue: LegacyIssue): string | null {
 /**
  * The text a person may read for one issue; never Zod's own English. The
  * issue is in zod 3's vocabulary — the codes and bounds these sentences were
- * written against — as `legacyParse` (or, inside a resolver's parse,
- * `legacyIssueInErrorMap`) translated it, with the schema that refused and the
+ * written against — as `legacyParse` translated it (for a form resolver too:
+ * `legacyFormResolver`), with the schema that refused and the
  * value each issue was raised on, which is what tells a missing field from a
  * wrong one (PR #444 r1 F1).
  */
@@ -104,16 +98,6 @@ export function formIssueMessage(issue: LegacyIssue | undefined): string {
   if (issue && ARABIC_SCRIPT_LETTER.test(issue.message)) return issue.message;
   return (issue && boundMessage(issue)) ?? GENERIC_FIELD_MESSAGE;
 }
-
-/**
- * The error map for resolvers that read Zod's messages themselves
- * (react-hook-form's Zod resolver, via its `error` option). A message the schema wrote wins over
- * any map, so this only ever replaces Zod's defaults. The issue reaches a map
- * before it is finished: it still carries the schema that raised it, which
- * tells a literal from an enum, and the value it was raised on.
- */
-export const persianErrorMap: z.core.$ZodErrorMap = (issue) =>
-  formIssueMessage(legacyIssueInErrorMap(issue as z.core.$ZodRawIssue));
 
 /**
  * The first issue per field of a failed parse, as Persian text. `refusal` is
