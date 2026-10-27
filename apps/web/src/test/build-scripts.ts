@@ -1,8 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+import { signalChild, supervisorEndpoint, trackFixture, watchdogFixture } from './build-lifetime';
 
 /**
  * What the build-binding specs share: the modules under `scripts/` are plain ESM that Jest
@@ -90,16 +92,36 @@ const DRIVER = `
   import { chmodSync, existsSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
   import { dirname, join } from 'node:path';
   import { setTimeout as sleep } from 'node:timers/promises';
-  import { runWebBuild } from ${JSON.stringify(url('build-run.mjs'))};
+  import cp from 'node:child_process';
+  import { syncBuiltinESMExports } from 'node:module';
   const options = JSON.parse(process.env.DRIVER_OPTIONS ?? '{}');
   const dir = process.argv[1];
   const lockDir = join(dir, ${JSON.stringify(LOCK)});
   let scratch;
-  let supervisor;
+  let supervisorChild;
+  const originalSpawn = cp.spawn;
+  cp.spawn = (file, args, given) => {
+    if (args?.[0] === ${JSON.stringify(join(SCRIPTS, 'build-supervisor.mjs'))}) {
+      const bootstrap = 'import { supervise } from ' + JSON.stringify(${JSON.stringify(pathToFileURL(join(__dirname, 'build-controller.mjs')).href)})
+        + '; await supervise(' + JSON.stringify(options.controlPath) + ', '
+        + JSON.stringify(${JSON.stringify(url('build-supervisor.mjs'))}) + ');';
+      supervisorChild = originalSpawn(file, ['--input-type=module', '-e', bootstrap], given);
+      return supervisorChild;
+    }
+    return originalSpawn(file, args, given);
+  };
+  syncBuiltinESMExports();
+  const { runWebBuild } = await import(${JSON.stringify(url('build-run.mjs'))});
+  const signalSupervisor = () => {
+    // Direct parent-held child; synchronous exit gate, never a recorded PID.
+    if (supervisorChild?.exitCode === null && supervisorChild.signalCode === null) supervisorChild.kill('SIGKILL');
+  };
+  process.on('message', (message) => {
+    if (message.kind === 'supervisor-death') signalSupervisor();
+  });
   let uncertain = false;
   const afterSpawn = async ({ pid, group, capturePath }) => {
     scratch = dirname(capturePath);
-    supervisor = group;
     writeFileSync(join(dir, 'driver-child-' + process.pid + '.json'), JSON.stringify({ pid, group, capturePath }));
     if (options.recordChild) writeFileSync(options.recordChild, JSON.stringify({ pid, group, capturePath }));
     if (options.afterSpawn === 'kill') process.kill(process.pid, 'SIGKILL');
@@ -167,7 +189,7 @@ const DRIVER = `
       process.kill(process.pid, 'SIGTERM');
     }
     if (options.afterReceipt === 'uncertain' || options.afterReceipt === 'readonly-uncertain') uncertain = true;
-    if (options.afterReceipt === 'supervisor-death') { process.kill(supervisor, 'SIGKILL'); await sleep(20); }
+    if (options.afterReceipt === 'supervisor-death') { signalSupervisor(); await sleep(20); }
   };
   const groupEvents = [];
   let shutdownStarted;
@@ -214,39 +236,55 @@ const DRIVER = `
   process.stdout.write(JSON.stringify({ ...result, shutdownElapsedMs }) + '\\n', () => process.exit(result.status));
 `;
 
-/** Runs the wrapper in a driver process of its own; `pid` is the wrapper's. */
+/** Wrapper signals use the unreaped child; member/group signals use live controllers. */
 export function startDriver(
   dir: string,
   options: DriverOptions = {},
-): { pid: number; done: Promise<Result> } {
+): {
+  done: Promise<Result>;
+  signal(signal: NodeJS.Signals): boolean;
+  root(signal: NodeJS.Signals): Promise<boolean>;
+  killSupervisor(): boolean;
+  watchdog(): Promise<never>;
+  expireWatchdog(): void;
+} {
+  const endpoint = supervisorEndpoint();
   const child = spawn(process.execPath, ['--input-type=module', '-e', DRIVER, '--', dir], {
     cwd: tmpdir(),
-    env: { ...process.env, DRIVER_OPTIONS: JSON.stringify(options) },
+    env: {
+      ...process.env,
+      DRIVER_OPTIONS: JSON.stringify({ ...options, controlPath: endpoint.path }),
+    },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
-  // A failed mutation must not strand the wrapper or the exact group this driver
-  // started. Fake builds have a 20s watchdog; real Next builds use their spec's budget.
-  const watchdog = options.nextFrom
-    ? setTimeout(() => {
-        const file = join(dir, 'driver-child-' + child.pid + '.json');
-        if (existsSync(file)) {
-          const { group } = JSON.parse(readFileSync(file, 'utf8')) as { group: number };
-          try {
-            process.kill(-group, 'SIGKILL');
-          } catch {
-            /* already gone */
-          }
-        }
-        child.kill('SIGKILL');
-      }, 20_000)
-    : undefined;
+  const fixture = {
+    group: () => endpoint.request('group'),
+    wrapper: (signal: NodeJS.Signals) => signalChild(child, signal),
+    close: () => endpoint.close(),
+  };
+  trackFixture(fixture);
+  let watchdogError: Error | undefined;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  const armWatchdog = (ms: number): void => {
+    clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
+      void watchdogFixture(fixture).catch((error: Error) => {
+        watchdogError = error;
+      });
+    }, ms);
+  };
+  if (options.nextFrom) armWatchdog(20_000);
   let stdout = '';
   let stderr = '';
-  child.stdout.on('data', (chunk) => (stdout += chunk));
-  child.stderr.on('data', (chunk) => (stderr += chunk));
+  child.stdout?.on('data', (chunk) => (stdout += chunk));
+  child.stderr?.on('data', (chunk) => (stderr += chunk));
   const done = new Promise<Result>((resolve, reject) => {
+    void endpoint.ready.catch(reject);
     child.on('error', reject);
     child.on('close', (code, signal) => {
+      endpoint.wrapperEnded();
       if (watchdog) clearTimeout(watchdog);
+      if (watchdogError) return reject(watchdogError);
       const last = stdout.trim().split('\n').pop() ?? '';
       const parsed = (last.startsWith('{') ? JSON.parse(last) : { problems: [] }) as {
         status?: number;
@@ -255,7 +293,18 @@ export function startDriver(
       resolve({ ...parsed, printed: stdout + stderr, code, signal });
     });
   });
-  return { pid: child.pid as number, done };
+  return {
+    done,
+    signal: fixture.wrapper,
+    watchdog: () => watchdogFixture(fixture),
+    expireWatchdog: () => armWatchdog(0),
+    root: (signal) => endpoint.request('root', signal),
+    killSupervisor: () => {
+      if (!child.connected) return false;
+      child.send({ kind: 'supervisor-death' }, () => {});
+      return true;
+    },
+  };
 }
 
 export const runDriver = (dir: string, options: DriverOptions = {}): Promise<Result> =>

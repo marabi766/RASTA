@@ -27,6 +27,7 @@ import {
   WEB,
   type Result,
 } from './test/build-scripts';
+import { cleanupFixtures } from './test/build-lifetime';
 import { MANIFEST_PATH } from './test/server-action-manifest';
 
 /**
@@ -36,6 +37,8 @@ import { MANIFEST_PATH } from './test/server-action-manifest';
  * server-action-build-ownership.spec.ts.
  */
 const SECRET = 'SECRET-CONFIG-VALUE-MUST-NOT-LEAK';
+
+afterEach(cleanupFixtures);
 
 describe('the build and check scripts', () => {
   const pkg = JSON.parse(readFileSync(join(WEB, 'package.json'), 'utf8')) as {

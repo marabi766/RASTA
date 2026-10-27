@@ -16,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { cleanupFixtures, signalChild } from './test/build-lifetime';
 import {
   alive,
   LOCK,
@@ -52,29 +53,23 @@ const waitFor = async (test: () => boolean, ms = 30_000): Promise<void> => {
 };
 
 /** A live process group of our own (a detached sleeper leads it); stopped in `afterEach`. */
-const groups: number[] = [];
+const groups = new Map<number, ChildProcess>();
 function liveGroup(): number {
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
     detached: true,
     stdio: 'ignore',
   });
   child.unref();
-  groups.push(child.pid as number);
+  groups.set(child.pid as number, child);
   return child.pid as number;
 }
 /** Lock processes a case started; a failed expectation must not leave one holding forever. */
 const lockProcesses: ChildProcess[] = [];
-afterEach(() => {
-  for (const child of lockProcesses.splice(0)) {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-  }
-  for (const group of groups.splice(0)) {
-    try {
-      process.kill(-group, 'SIGKILL');
-    } catch {
-      // gone
-    }
-  }
+afterEach(async () => {
+  for (const child of lockProcesses.splice(0)) signalChild(child, 'SIGKILL');
+  for (const child of groups.values()) signalChild(child, 'SIGKILL');
+  groups.clear();
+  await cleanupFixtures();
 });
 
 function plantLock(web: string, owner: object, id = nonce('a'), extra: string[] = []): void {
@@ -207,7 +202,7 @@ describe('the build lock (r3 F1, r4 F1)', () => {
     const group = liveGroup();
     plantLock(web, { pid: deadPid(), group });
     expect(acquire(300)).toEqual({ ok: false, busy: true });
-    process.kill(-group, 'SIGKILL');
+    signalChild(groups.get(group) as ChildProcess, 'SIGKILL');
     // Asynchronously: Jest's process must get to reap the killed sleeper (a zombie is still a
     // member of its group, and so still counts as alive).
     await waitFor(() => !alive(-group));
@@ -456,22 +451,11 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     ({ nextFrom } = plantFakeNext(join(root, 'fake')));
   });
   afterEach(async () => {
-    // Mutation failures must leave no writer/supervisor behind on the shared host.
-    // These are exclusively the groups recorded at startup by THIS test's drivers.
     for (const dir of caseApps) {
       chmodSync(dir, 0o700);
       if (existsSync(join(dir, '.next'))) chmodSync(join(dir, '.next'), 0o700);
-      for (const file of readdirSync(dir).filter((name) => name.startsWith('driver-child-'))) {
-        const { group } = JSON.parse(readFileSync(join(dir, file), 'utf8')) as { group: number };
-        if (!alive(-group)) continue;
-        try {
-          process.kill(-group, 'SIGKILL');
-        } catch {
-          /* already gone */
-        }
-        await waitFor(() => !alive(-group), 5_000);
-      }
     }
+    await cleanupFixtures();
     caseApps.clear();
   });
   afterAll(() => {
@@ -480,6 +464,56 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       if (existsSync(lock)) chmodSync(lock, 0o700);
     }
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it.each(['afterEach', 'watchdog'] as const)(
+    'R5-1: %s sees a completed fixture PGID reused by an unrelated live group and sends no signal',
+    async (path) => {
+      const dir = app({});
+      const driver = startDriver(dir, { nextFrom, recordChild: join(dir, 'child.json') });
+      expect(await driver.done).toMatchObject({ status: 0 });
+      const { group } = record(dir);
+      // The original lifetime has ended. Resume the ACTUAL cleanup/watchdog body
+      // after a pause, with a model in which every old numeric ID is now live again.
+      // No real ID reuse or unrelated process is needed on this shared host.
+      const signals: Array<[number, unknown]> = [];
+      const kill = jest.spyOn(process, 'kill').mockImplementation((target, signal) => {
+        if (signal !== 0) signals.push([target, signal]);
+        return true;
+      });
+      try {
+        expect(alive(-group)).toBe(true);
+        if (path === 'afterEach') await cleanupFixtures();
+        else await expect(driver.watchdog()).rejects.toThrow('supervisor lifetime unavailable');
+        expect(signals).toEqual([]);
+        expect(driver.signal('SIGTERM')).toBe(false);
+        expect(driver.killSupervisor()).toBe(false);
+        expect(await driver.root('SIGTERM')).toBe(false);
+      } finally {
+        // Mutant cleanup also runs under this model: never let an intentionally
+        // restored numeric teardown reach the real shared host from an afterEach.
+        try {
+          await cleanupFixtures();
+        } finally {
+          kill.mockRestore();
+        }
+      }
+    },
+  );
+
+  it('R5-1: the actual watchdog fails loudly and joins owned group cleanup', async () => {
+    const dir = app({ holdMs: 60_000 });
+    const driver = startDriver(dir, {
+      nextFrom,
+      recordChild: join(dir, 'child.json'),
+    });
+    await waitFor(() => ran(dir).length === 1);
+    driver.expireWatchdog();
+    await expect(driver.done).rejects.toThrow('fixture watchdog expired');
+    await cleanupFixtures();
+    // EOF confirms the supervisor lifetime ended; group members may still be
+    // disappearing. This observation only asserts termination, never signals.
+    await waitFor(() => !alive(-record(dir).group), 5_000);
   });
 
   it('control: a build of the fake `next` is receipted, and leaves no lock', async () => {
@@ -604,7 +638,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       const dir = app({ holdMs: 60_000, linger: { ms: 60_000 } });
       const driver = startDriver(dir, { nextFrom, recordChild: join(dir, 'child.json') });
       await waitFor(() => ran(dir).length === 1 && existsSync(join(dir, 'linger.pid')));
-      process.kill(driver.pid, signal);
+      driver.signal(signal);
       const result = await driver.done;
       // The wrapper itself was not killed by its build's group signal: it reported.
       expect(result).toMatchObject({
@@ -632,7 +666,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
         });
         await waitFor(() => existsSync(join(dir, 'unresponsive.ready')));
         const started = performance.now();
-        process.kill(driver.pid, signal);
+        driver.signal(signal);
         const result = await driver.done;
         expect(performance.now() - started).toBeLessThan(3_150);
         expect(result).toMatchObject({
@@ -661,9 +695,9 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     });
     await waitFor(() => existsSync(join(dir, 'unresponsive.ready')));
     const started = performance.now();
-    process.kill(driver.pid, 'SIGTERM');
+    driver.signal('SIGTERM');
     await sleep(25);
-    process.kill(driver.pid, 'SIGINT');
+    driver.signal('SIGINT');
     expect(await driver.done).toMatchObject({ status: 143 });
     expect(performance.now() - started).toBeLessThan(3_200);
     const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
@@ -743,7 +777,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
   );
 
   it('R4-2: unexpected supervisor death retires signalling and keeps the lock while writers live', async () => {
-    const dir = app({ holdMs: 60_000 });
+    const dir = app({ holdMs: 2_000 });
     const driver = startDriver(dir, {
       nextFrom,
       recordChild: join(dir, 'child.json'),
@@ -753,8 +787,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     });
     await waitFor(() => ran(dir).length === 1);
     const { pid, group } = record(dir);
-    groups.push(group);
-    process.kill(group, 'SIGKILL');
+    expect(driver.killSupervisor()).toBe(true);
     expect(await driver.done).toMatchObject({
       status: 1,
       problems: [
@@ -766,7 +799,8 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect(existsSync(join(dir, LOCK))).toBe(true);
     const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
     expect(events.filter((e) => e === 'send-term' || e === 'send-kill')).toEqual([]);
-    process.kill(pid, 'SIGTERM');
+    // Its parent died: no endpoint can authorize a root signal.
+    // Observe this bounded fixture's natural exit instead of using its saved PID.
     await waitFor(() => !alive(-group));
     expect(inProgress(dir)).toBe(false);
   });
@@ -926,17 +960,16 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     const dir = app({ holdMs: 60_000 });
     const driver = startDriver(dir, { nextFrom, recordChild: join(dir, 'child.json') });
     await waitFor(() => ran(dir).length === 1);
-    process.kill(driver.pid, 'SIGKILL');
+    driver.signal('SIGKILL');
     await driver.done;
     const { pid, group } = record(dir);
-    groups.push(group);
     expect(inProgress(dir)).toBe(true);
     const b = await runDriver(dir, { nextFrom, lockWaitMs: 1_000 });
     expect(b.status).toBe(1);
     expect(b.problems).toEqual([expect.stringContaining('build lock: another build')]);
     expect(ran(dir)).toEqual([pid]);
     expect(alive(group)).toBe(true); // orphan leader still reserves the PGID while writers live
-    process.kill(pid, 'SIGTERM');
+    expect(await driver.root('SIGTERM')).toBe(true);
     await waitFor(() => !alive(-group));
     expect(inProgress(dir)).toBe(false);
     // The next invocation builds normally (no hold this time).
