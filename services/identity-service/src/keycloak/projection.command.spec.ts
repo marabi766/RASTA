@@ -9,6 +9,7 @@ import { isClean, runProjectionCommand } from './projection.command';
 const noFences = () => ({
   owners: jest.fn(async () => [] as string[]),
   counts: jest.fn(async () => ({ live: 0, due: 0, accountMissing: 0, overdue: 0, expired: 0, total: 0, at: new Date() })),
+  recoverOwed: jest.fn(async () => 0),
 });
 
 describe('runProjectionCommand', () => {
@@ -301,6 +302,30 @@ describe('runProjectionCommand', () => {
     expect(isClean(report)).toBe(false);
   });
 
+  it('writes the late writes’ owed fresh fences (D-070 D) before it counts, and is unclean while any is still owed', async () => {
+    const order: string[] = [];
+    const fences = {
+      owners: jest.fn(async () => [] as string[]),
+      recoverOwed: jest.fn(async () => {
+        order.push('recoverOwed');
+        return 1;
+      }),
+      counts: jest.fn(async () => {
+        order.push('counts');
+        return { live: 0, due: 0, accountMissing: 0, overdue: 0, expired: 0, total: 0, at: new Date() };
+      }),
+    };
+    const report = await runProjectionCommand('backfill', {
+      repository,
+      projector: { project: jest.fn(async () => 'projected' as const), reconcile: jest.fn(), repairOrphan: jest.fn() },
+      keycloak,
+      fences,
+    });
+    expect(order).toEqual(['recoverOwed', 'counts']);
+    expect(report.fences).toMatchObject({ owed: 1, outstanding: 0 });
+    expect(isClean(report)).toBe(false);
+  });
+
   describe('the fence drain (D-069, #402 r2 F3)', () => {
     /**
      * Fence owners on more than one page (the page is 200): two unlinked
@@ -333,6 +358,7 @@ describe('runProjectionCommand', () => {
             total: [...owners.values()].reduce((sum, n) => sum + n, 0),
             at: new Date(),
           })),
+          recoverOwed: jest.fn(async () => 0),
         },
       };
     }
@@ -362,6 +388,7 @@ describe('runProjectionCommand', () => {
       expect(project).toHaveBeenCalledWith('USR_RETRY', 'command');
       expect(report.fences).toEqual({
         drained: 207,
+        owed: 0,
         outstanding: 1,
         live: 0,
         due: 0,
@@ -393,6 +420,7 @@ describe('runProjectionCommand', () => {
       const fences = {
         owners: jest.fn(async () => [] as string[]),
         counts: jest.fn(async () => ({ live: 1, due: 0, accountMissing: 0, overdue: 0, expired: 0, total: 1, at: new Date() })),
+        recoverOwed: jest.fn(async () => 0),
       };
       const report = await runProjectionCommand('backfill', {
         repository: noAccounts,
