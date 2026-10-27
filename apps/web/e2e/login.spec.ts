@@ -1,4 +1,5 @@
-import { expect, test } from '@playwright/test';
+import { test } from './expect';
+import { expect } from './expect';
 
 /**
  * The first browser test in this repository.

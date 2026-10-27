@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Page } from '@playwright/test';
+import { test, type Page } from './expect';
+import { expect } from './expect';
 
 import { installLiveSession } from './live-session';
 

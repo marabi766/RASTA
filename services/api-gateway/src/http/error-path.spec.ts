@@ -34,7 +34,9 @@ import { GATEWAY_ENV } from '../tokens';
  * logger, and `ProxyService` forwarding with `fetch` to a stub upstream.
  */
 
-const SECRET = 'abc';
+// No generated value can hold it: lowercase letters past `f` are in no ULID, instant or hex
+// digest, and the log carries a hex trace id where `abc` sat by chance (#452).
+const SECRET = 'query-value-wxyz';
 const QUERY = `?secret=${SECRET}`;
 
 let upstreamRespond: (res: ServerResponse) => void;
