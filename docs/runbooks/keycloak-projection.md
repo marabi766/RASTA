@@ -119,7 +119,8 @@ FROM keycloak_write_attempt WHERE takeover_at < now() AND account_missing_at IS 
    3. `keycloak:backfill` را اجرا کن. پس از کاربران دارای حساب و یتیم‌ها، **همه‌ی صاحبان حصار** را — صفحه‌به‌صفحه، با حساب
       پیوندخورده یا بی آن (حساب یتیم بی‌خطر می‌شود و حصارش پاک)، سررسیده یا در انتظار Backoff — Project می‌کند، و در پایان
       `COUNT(*)` همه‌ی ردیف‌ها را در `fences.outstanding` گزارش می‌کند (`live`، `due`، `accountMissing` می‌گویند چرا مانده‌اند).
-      کد خروج ۰ فقط وقتی است که `fences.outstanding` **صفر** باشد.
+      پیش از شمردن، منتظر Projectionهای بازیابی نوشتن‌های دیرکرده می‌ماند و حصارهای تازه‌ی بدهکار را می‌نویسد (`fences.owed`، بند ۱۱).
+      کد خروج ۰ فقط وقتی است که `fences.outstanding` و `fences.owed` هر دو **صفر** باشند.
    4. اگر چیزی مانده: حصار نهایی را با بند ۵ حل کن، `live` یعنی نویسنده‌ای هنوز در کار است یا صبر کافی نبود (گام ۱ و ۲)؛
       سپس گام ۳ را تکرار کن.
    5. فقط با `fences.outstanding: 0` و در حالی که همه‌ی Replicaها هنوز متوقف‌اند، `down.sql` را اجرا کن؛ خودش جدول را قفل و
@@ -130,13 +131,34 @@ FROM keycloak_write_attempt WHERE takeover_at < now() AND account_missing_at IS 
    دیرتر از پنجره نمی‌رسد یا اعمال نمی‌شود. همین حالا تاخیر Admin API در Keycloak، Proxy و شبکه‌ی جلوی آن، و مکث‌های Event
    Loop در identity-service را ببین؛ اگر به پنجره نزدیک‌اند، `KEYCLOAK_WRITE_SETTLE_SECONDS` را بالا ببر. فهرست:
    `SELECT user_id, operation, deadline_at, takeover_at FROM keycloak_write_attempt WHERE takeover_at > now() AND
-account_missing_at IS NULL ORDER BY deadline_at`. **این هشدار هنوز قابل اتکا نیست (#402 r3 R3-2):** Gauge فقط در پایان
-   گذر جاروکننده نمونه گرفته می‌شود، پس از انقضاها و بازنویسی‌های پشت‌سرهمِ همان گذر؛ گذری که زودتر شکست بخورد یا نوبتی که
-   محافظ هم‌پوشانی رد کند اصلا نمونه نمی‌گیرد؛ و حصاری که از `takeover_at` بگذرد سررسیده است، نه دیرکرده، پس پنجره‌ای که میان
-   دو نمونه گذشته باشد هیچ ردی نمی‌گذارد. هیچ مقداری از `MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS` آن را قابل اتکا نمی‌کند: حتی
-   با پیش‌فرض‌ها همه‌ی پنجره‌ی دیرکرد یک حصار می‌تواند بی‌نمونه بگذرد. نبود هشدار پس دلیل نبود نوشتن دیرکرده نیست؛ پرس‌وجوی بالا
-   را مستقیم اجرا کن. پیگیری: نمونه‌گیر مستقل و کران‌دار (با کهنگی نمونه‌ی خودش). مسیریابی هشدار در Production هنوز وجود
-   ندارد.
+account_missing_at IS NULL ORDER BY deadline_at`. **چه اندازه قابل اتکاست (#402 r3 R3-2، ADR-060 افزوده‌ی D-069 § ۸):**
+   Gauge را `KeycloakFenceSampler` با زمان‌سنج و Pool یک‌اتصالی خودش هر ۲ ثانیه می‌گیرد — نه گذر جاروکننده — و هر نمونه
+   حداکثر ۱ ثانیه است؛ بیشینه‌ی `overdue` در ۳۰ ثانیه‌ی آخر نگه داشته می‌شود. ثابت شده: هر پنجره‌ی دیرکرد (نیمی از
+   `KEYCLOAK_WRITE_SETTLE_SECONDS`، دست‌کم ۷٫۵ ثانیه) یا نمونه‌ای موفق در خود دارد، یا فاصله‌ی دو نمونه‌ی موفق از ۶ ثانیه گذشته
+   و بند ۹ روشن است. هشدار حداکثر ۳۷ ثانیه پس از باز شدن پنجره روشن می‌شود (۷ + Scrape ۱۵ + ارزیابی ۱۵) — با پیش‌فرض ۱۲۰
+   ثانیه (پنجره‌ی ۶۰ ثانیه) پیش از Takeover، و با پنجره‌ی کوتاه‌تر از ۷۵ ثانیه شاید پس از آن؛ آنگاه بند ۸ آن را می‌گیرد.
+   مسیریابی هشدار در Production هنوز وجود ندارد: فقط Prometheus محلی.
+8. `RastaIdentityKeycloakWriteExpired` (هشدار، D-070): نوشتنی که نتیجه‌اش هرگز معلوم نشد **تمام** پنجره را گذراند و هنوز
+   بازنویسی نشده (`expired`، زیرمجموعه‌ی `due`). گذر آن را در یک دوره بازنویسی می‌کند؛ تا آن زمان Keycloak ممکن است آنچه نوشتن
+   کهنه برد نگه دارد. اگر آن نوشتن باز هم دیرتر برسد، پس از Takeover می‌نشیند: فرض D-070 برایش شکست. همان بررسی بند ۷، و اگر
+   ماند بند ۴. فهرست: `SELECT user_id, operation, deadline_at, takeover_at FROM keycloak_write_attempt WHERE takeover_at <=
+now() AND deadline_at < takeover_at AND account_missing_at IS NULL`.
+9. `RastaIdentityKeycloakFenceSamplerStale` (هشدار، R3-2): هیچ Replicaیی بیش از ۶ ثانیه نمونه‌ی موفقی از حصارها نگرفته؛ بندهای ۷
+   و ۸ تا بازگشت آن قابل اتکا نیستند — پرس‌وجوهای آن دو بند را مستقیم اجرا کن. سن در لحظه‌ی Scrape حساب می‌شود، پس هنگام گیر
+   کردن نمونه‌گیری بالا می‌رود و فاصله‌ای که میان دو Scrape بسته شد هم ۳۰ ثانیه دیده می‌شود. ببین:
+   `rasta_identity_keycloak_fence_samples_total{outcome="failed"}` و `rasta_identity_keycloak_fence_sample_duration_seconds`؛
+   قفلی روی `keycloak_write_attempt` (Migration)، پایگاه داده‌ی کند یا در دسترس نبودن آن، یا Event Loop متوقف. پیش از نخستین نمونه‌ی
+   موفق هیچ سری حصاری صادر نمی‌شود و سن از آغاز نمونه‌گیر شمرده می‌شود: سکوت صفر نیست.
+10. `RastaIdentityKeycloakFenceSamplerMissing` (هشدار، R3-2): identity-service Scrape می‌شود ولی
+    `rasta_identity_keycloak_fence_sample_age_seconds` ندارد: نمونه‌گیر اجرا نمی‌شود (سیم‌کشی `app.module.ts` یا نام Metric)، و
+    بندهای ۷ تا ۹ همه خاموش‌اند.
+11. **فرستنده‌ی دیرکرده (D-070 گزینه‌ی D).** فرستنده‌ای که نتیجه‌ی نوشتنش را پس از مهلت خودش بفهمد (مکث فرایند، GC، Timeout)
+    — هر نتیجه‌ای — یک حصار **تازه** برای کاربر Commit می‌کند و Projection فوری او را می‌خواهد:
+    `rasta_identity_keycloak_write_fence_events_total{event="late_reply"}` (پاسخ دیرکرده)، `late_fenced` (حصار تازه نوشته شد)،
+    `late_owed` (نوشته نشد — پایگاه داده یا توقف Worker — و در حافظه ماند تا گذر بعدی یا توقف همان فرایند بنویسدش)، و
+    `rasta_identity_keycloak_projections_total{trigger="recovery"}`. افزایش `late_reply` یعنی مکث یا تاخیرهایی هم‌اندازه‌ی مهلت:
+    همان بررسی بند ۷. هشدار جدا ندارد؛ حصار تازه در بندهای ۷ تا ۹ دیده می‌شود. لاگ «Stopping with N late Keycloak write fences
+    unwritten» هنگام توقف یعنی N حصار تازه پیش از خروج نوشته نشد: حصار قدیمی، اگر هنوز Takeover نشده، می‌ماند؛ بندهای ۷ و ۸.
 
 <a id="registration-approval-orphan"></a>
 

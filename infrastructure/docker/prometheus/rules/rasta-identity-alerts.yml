@@ -81,7 +81,7 @@ groups:
       # Sampled by KeycloakFenceSampler on its own timer and its own one-connection pool,
       # never by the sweep (#402 r3 R3-2): every 2 s, each sample bounded at 1 s, and the
       # gauge keeps the largest `overdue` of the last 30 s. What is proven (ADR-060 D-069
-      # addendum § 7): every overdue window (settle/2, at least 7.5 s) contains a
+      # addendum § 8): every overdue window (settle/2, at least 7.5 s) contains a
       # successful sample's database instant, or a gap between two successful samples
       # exceeded 6 s and RastaIdentityKeycloakFenceSamplerStale fires instead. Once
       # sampled, it reaches a scrape (15 s) within the 30 s it is kept, and this rule

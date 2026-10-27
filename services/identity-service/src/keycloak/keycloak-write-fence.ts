@@ -128,7 +128,8 @@ import { keycloakWriteFenceEventsTotal } from '../observability/keycloak-project
  * the settle window — leaves no trace on the sender's clock. That remains the
  * deployment assumption F (D-070) until option A (a projection version in the
  * token, after #381 PR 2). Nor does a sender that pauses again for longer
- * than the settle window between its stop's flush and the process exit.
+ * than the settle window between its stop's flush and the process exit
+ * (ADR-060 D-069 addendum § 7).
  */
 
 /** Connections of the fence pool: inserts and releases are single short statements. */

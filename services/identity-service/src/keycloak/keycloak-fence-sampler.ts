@@ -15,7 +15,7 @@ import { fenceCounts, type FenceCounts } from './keycloak-write-fence';
 
 /**
  * The independent sampler of the Keycloak write fences (#402 r3 R3-2,
- * ADR-060 D-069 addendum § 6).
+ * ADR-060 D-069 addendum § 8).
  *
  * The fence gauges — above all `overdue`, the D-070 deployment assumption's
  * signal — used to be sampled at the end of a sweep pass, after its serial
@@ -84,7 +84,7 @@ export const FENCE_SAMPLE_RETENTION_MS = 30_000;
  * a gap it does not report, plus one sample's budget, is shorter than the
  * shortest overdue window any accepted configuration has
  * (`KEYCLOAK_WRITE_SETTLE_SECONDS` ≥ 15, so half of it ≥ 7.5 s):
- * 6 + 1 = 7 s < 7.5 s. ADR-060 D-069 addendum § 6 has the proof.
+ * 6 + 1 = 7 s < 7.5 s. ADR-060 D-069 addendum § 8 has the proof.
  */
 export const FENCE_SAMPLE_STALE_SECONDS = 6;
 

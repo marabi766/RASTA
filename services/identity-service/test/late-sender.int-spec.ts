@@ -687,14 +687,23 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
   // -------------------------------------------------------------------------
 
   describe('regressions (brief G)', () => {
-    it('the recovery rebuilds from committed rows only: a membership in another tenant is projected as the rows say, and an uncommitted change is not', async () => {
+    it('the recovery rebuilds from committed rows only — a membership in another tenant is projected as the rows say — and enqueues no event', async () => {
       const s = await seed([
         { in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] },
         { in: 'b', roles: ['DRIVER'] },
       ]);
+      const outbox = () =>
+        runUnscoped('test reads the outbox', () =>
+          prisma.client.outboxMessage.count({
+            where: { aggregateId: { in: [s.userId, ...s.memberships] } },
+          }),
+        );
+      const eventsBefore = await outbox();
       pauseNextSender();
       await asAdmin(s.org.a, () => projector.project(s.userId, 'event'));
       await settleRecoveryProjections(10_000);
+      // A replayed event's late write and its recovery add no business effect.
+      expect(await outbox()).toBe(eventsBefore);
       // Both tenants' grants, exactly as committed: the actor's scope (org a)
       // neither hides org b's membership nor adds anything.
       expect(stub.platform(s.keycloakId)).toEqual(await rowsGrant(s.userId));

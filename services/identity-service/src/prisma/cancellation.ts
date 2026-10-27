@@ -34,6 +34,25 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  * whose release or confirmation is refused this way simply stays (live until
  * `takeover_at`, then the sweep re-asserts it): slower, never unsafe (D-069).
  *
+ * **A late sender in a stopped scope (D-070 option D).** A sender that hears
+ * back only after its deadline owes a fresh fence for its user
+ * (`KeycloakWriteFences.recoverLate`). Resumed after its worker's stop, it
+ * cannot write one here — this boundary refuses it like anything else, and
+ * is not weakened for it. The fence is kept as owed in the process and
+ * written by the stop itself, before it returns and **outside** this scope
+ * (`recoverOwed`, called by the sweep's and the consumer's stop; the flush
+ * also fences every write still unanswered past its deadline). The stop's
+ * flush is a short transaction of its own on the fence pool, under no user
+ * lock: nothing of the stopped work commits. What that does not cover: a
+ * sender that hears back after the stop's flush and before the process
+ * exits, or a process that dies without a stop, with a fence owed — that
+ * fresh fence is lost, and the old one stands only if not yet taken over;
+ * and, beyond any sender, a request delayed in the network, a proxy or
+ * Keycloak after the sender's last check, which leaves no trace on its clock
+ * — that stays the deployment assumption F (D-070) until option A (a
+ * projection version in the token, after #381 PR 2). ADR-060 D-069 addendum
+ * § 7.
+ *
  * The scope is the async context (`AsyncLocalStorage`), so it follows the
  * work through every `await`, and nothing outside it — a request — is
  * affected. Nested scopes combine: either signal refuses.
