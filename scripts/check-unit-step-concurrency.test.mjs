@@ -1,452 +1,390 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse, stringify } from 'yaml';
 import {
-  MAX_CONCURRENCY,
   parsedProblems,
   UNBOUNDED_EXCEPTIONS,
   unitStepProblems,
 } from './check-unit-step-concurrency-lib.mjs';
 
-const read = (path) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8');
-const realWorkflow = read('../.github/workflows/ci.yml');
-const realScripts = JSON.parse(read('../package.json')).scripts;
-const [exception] = UNBOUNDED_EXCEPTIONS;
-
-// Every negative control edits (a copy of) the real workflow, so a check is
-// exercised against the steps it protects, not a toy.
+const root = fileURLToPath(new URL('../', import.meta.url));
+const realWorkflow = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
+const realScripts = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).scripts;
 const realDoc = parse(realWorkflow);
-const problemsAfter = (edit, { scripts = realScripts, extraFiles = {} } = {}) => {
-  const doc = structuredClone(realDoc);
-  edit(doc);
-  const extra = Object.fromEntries(Object.entries(extraFiles).map(([f, t]) => [f, parse(t)]));
-  return parsedProblems({ 'ci.yml': doc, ...extra }, scripts);
-};
+const [exception] = UNBOUNDED_EXCEPTIONS;
 const unitStep = (doc) => doc.jobs.quality.steps.find((step) => step.name === 'Unit tests');
 const securityStep = (doc) =>
   doc.jobs[exception.job].steps.find((step) => step.name === exception.step);
-const addStep = (doc, job, step) => doc.jobs[job].steps.push(step);
-
-/** At least one problem, and one of them is the one `pattern` names. */
-const assertRefused = (problems, pattern) => {
+const problemsAfter = (edit, scripts = realScripts) => {
+  const doc = structuredClone(realDoc);
+  edit(doc);
+  return parsedProblems({ 'ci.yml': doc }, scripts);
+};
+const refused = (problems, pattern) =>
   assert.ok(
     problems.some((problem) => pattern.test(problem)),
-    `expected a problem matching ${pattern}, got ${JSON.stringify(problems, null, 2)}`,
+    JSON.stringify(problems),
   );
-};
+const extraRun = (run, job = 'quality') =>
+  problemsAfter((doc) => doc.jobs[job].steps.push({ name: 'Another command', run }));
 
-test('the real workflow and package.json hold, parsed here or from text', () => {
+test('real workflow passes as YAML and as parsed text', () => {
   assert.deepEqual(unitStepProblems({ 'ci.yml': realWorkflow }, realScripts), []);
-  assert.deepEqual(
-    unitStepProblems({ 'ci.yml': stringify(realDoc, { lineWidth: 0 }) }, realScripts),
-    [],
-  );
   assert.deepEqual(
     problemsAfter(() => {}),
     [],
   );
+  assert.equal(realScripts['test:unit'], 'turbo run test:unit');
 });
 
-test('a bounded step passes at every allowed value, and `bash` is an allowed shell', () => {
-  for (let n = 1; n <= MAX_CONCURRENCY; n += 1) {
+for (const value of ['1', '3', '12']) {
+  test(`root bound accepts positive integer ${value} without duplicating the configured number`, () => {
     assert.deepEqual(
-      problemsAfter((doc) => {
-        unitStep(doc).run = `pnpm run test:unit --concurrency=${n}`;
+      problemsAfter(() => {}, {
+        ...realScripts,
+        'test:unit:ci': `turbo run test:unit --concurrency=${value}`,
       }),
       [],
     );
-  }
-  assert.deepEqual(
-    problemsAfter((doc) => {
-      unitStep(doc).shell = 'bash';
-      securityStep(doc).shell = 'bash';
-    }),
-    [],
-  );
-});
-
-test('turbo default, an over-limit value, a zero, a percentage and a jest-bound flag are refused', () => {
-  for (const run of [
-    'pnpm run test:unit',
-    `pnpm run test:unit --concurrency=${MAX_CONCURRENCY + 1}`,
-    'pnpm run test:unit --concurrency=10',
-    'pnpm run test:unit --concurrency=0',
-    'pnpm run test:unit --concurrency=50%',
-    'pnpm run test:unit -- --concurrency=3',
-  ]) {
-    const problems = problemsAfter((doc) => {
-      unitStep(doc).run = run;
-    });
-    assert.ok(problems.length > 0, run);
-  }
-  assertRefused(
-    problemsAfter((doc) => {
-      unitStep(doc).run = 'pnpm run test:unit --concurrency=4';
-    }),
-    /concurrency 4 is outside 1\.\.3/,
-  );
-  assertRefused(
-    problemsAfter((doc) => {
-      unitStep(doc).run = 'pnpm run test:unit';
-    }),
-    /runs unit suites with "pnpm run test:unit"/,
-  );
-});
-
-test('a renamed, removed or duplicated bounded step is refused rather than skipped', () => {
-  assertRefused(
-    problemsAfter((doc) => {
-      unitStep(doc).name = 'Tests';
-    }),
-    /exactly one "Unit tests" step .* found 0/,
-  );
-  assertRefused(
-    problemsAfter((doc) => {
+  });
+}
+for (const script of [
+  undefined,
+  'turbo run test:unit',
+  'turbo run test:unit --concurrency=0',
+  'turbo run test:unit --concurrency=50%',
+  'turbo run test:unit -- --concurrency=3',
+  'turbo run test:unit --concurrency=3 --concurrency=4',
+  'pnpm exec jest --concurrency=3',
+  'turbo run test:unit --concurrency=3; true',
+]) {
+  test(`invalid root bound: ${script}`, () => {
+    refused(
+      problemsAfter(() => {}, { ...realScripts, 'test:unit:ci': script }),
+      /package.json test:unit:ci/,
+    );
+  });
+}
+for (const [name, edit, pattern] of [
+  [
+    'missing',
+    (doc) => {
       doc.jobs.quality.steps = doc.jobs.quality.steps.filter((step) => step.name !== 'Unit tests');
-    }),
+    },
     /found 0/,
-  );
-  assertRefused(
-    problemsAfter((doc) => {
-      addStep(doc, 'quality', { ...unitStep(doc) });
-    }),
+  ],
+  [
+    'renamed',
+    (doc) => {
+      unitStep(doc).name = 'Tests';
+    },
+    /found 0/,
+  ],
+  [
+    'moved job',
+    (doc) => {
+      doc.jobs.security.steps.push(unitStep(doc));
+      doc.jobs.quality.steps = doc.jobs.quality.steps.filter((step) => step.name !== 'Unit tests');
+    },
+    /found 0/,
+  ],
+  [
+    'duplicate',
+    (doc) => {
+      doc.jobs.quality.steps.push({ ...unitStep(doc) });
+    },
     /found 2/,
-  );
-  // The bounded command must be the whole step, not one line of it.
-  assertRefused(
-    problemsAfter((doc) => {
-      unitStep(doc).run = 'echo start\npnpm run test:unit --concurrency=3\n';
-    }),
-    /found 0/,
-  );
-});
-
-test('the step must run: `if:` on it, on its job or on a job it needs is refused', () => {
-  for (const condition of [false, '${{ false }}', 'always()', "github.event_name == 'push'"]) {
-    assertRefused(
-      problemsAfter((doc) => {
-        unitStep(doc).if = condition;
-      }),
-      /"Unit tests"\): has `if: /,
-    );
-  }
-  assertRefused(
-    problemsAfter((doc) => {
-      doc.jobs.quality.if = false;
-    }),
-    /quality.*job "quality" has `if: false`/,
-  );
-  // integration-security needs quality: a skipped quality skips the exception's job too.
-  assertRefused(
-    problemsAfter((doc) => {
-      doc.jobs.quality.if = false;
-    }),
-    /integration-security.*job "quality" has `if: false`/,
-  );
-  assertRefused(
-    problemsAfter((doc) => {
-      securityStep(doc).if = false;
-    }),
-    /Tenant isolation and authorization tests"\): has `if: false`/,
-  );
-});
-
-test('failure must propagate: step- or job-level continue-on-error is refused', () => {
-  for (const value of [true, '${{ true }}']) {
-    assertRefused(
-      problemsAfter((doc) => {
-        unitStep(doc)['continue-on-error'] = value;
-      }),
-      /has step-level `continue-on-error`/,
-    );
-    assertRefused(
-      problemsAfter((doc) => {
-        doc.jobs.quality['continue-on-error'] = value;
-      }),
-      /job "quality" has `continue-on-error`/,
-    );
-    assertRefused(
-      problemsAfter((doc) => {
-        doc.jobs[exception.job]['continue-on-error'] = value;
-      }),
-      /job "integration-security" has `continue-on-error`/,
-    );
-  }
-  assert.deepEqual(
-    problemsAfter((doc) => {
-      unitStep(doc)['continue-on-error'] = false;
-    }),
-    [],
-  );
-});
-
-test('the script must execute: a non-bash shell at step, job or workflow level is refused', () => {
-  for (const shell of ['echo {0}', 'sh', 'pwsh', 'bash +e {0}']) {
-    assertRefused(
-      problemsAfter((doc) => {
-        unitStep(doc).shell = shell;
-      }),
-      /runs under `shell: /,
-    );
-  }
-  assertRefused(
-    problemsAfter((doc) => {
-      doc.jobs.quality.defaults = { run: { shell: 'echo {0}' } };
-    }),
-    /"Unit tests"\): runs under `shell: echo \{0\}`/,
-  );
-  assertRefused(
-    problemsAfter((doc) => {
-      doc.defaults = { run: { shell: 'echo {0}' } };
-    }),
-    /Tenant isolation.*runs under `shell: echo \{0\}`/,
-  );
-});
-
-test('the script must run at the workspace root, without a shell start-up variable', () => {
-  assertRefused(
-    problemsAfter((doc) => {
-      unitStep(doc)['working-directory'] = 'apps/web';
-    }),
-    /runs in `working-directory: apps\/web`/,
-  );
-  assertRefused(
-    problemsAfter((doc) => {
-      doc.jobs.quality.defaults = { run: { 'working-directory': 'apps/web' } };
-    }),
-    /runs in `working-directory: apps\/web`/,
-  );
-  assertRefused(
-    problemsAfter((doc) => {
-      unitStep(doc).env.BASH_ENV = './no-errexit.sh';
-    }),
-    /sets BASH_ENV/,
-  );
-  assertRefused(
-    problemsAfter((doc) => {
-      doc.env.SHELLOPTS = 'braceexpand';
-    }),
-    /sets SHELLOPTS/,
-  );
-});
-
-test('a construct that skips or absorbs an invocation line is refused', () => {
-  const cases = [
-    ['pnpm run test:integration -- --x || true', /`\|\|`/],
-    ['set +e', /`set \+…`/],
-    ['exit 0', /`exit`\/`return`\/`trap`/],
-    ["trap 'exit 0' ERR", /`exit`\/`return`\/`trap`/],
-    ['! true', /a leading `!` or `exec`/],
-    ['exec true', /a leading `!` or `exec`/],
-    ['sleep 1 &', /a `&` background job/],
-    ['if false; then', /shell control flow/],
-    ['skip() {', /shell control flow/],
-    ["cat <<'EOF'", /a here-document/],
-    ['echo \\', /a `\\` continuation/],
-    ['source ./no-errexit.sh', /`source`\/`\.`\/`eval`/],
-    ['. ./no-errexit.sh', /`source`\/`\.`\/`eval`/],
-    ['eval "set +o errexit"', /`source`\/`\.`\/`eval`/],
-    ['echo "', /an open quote/],
-  ];
-  for (const [line, pattern] of cases) {
-    assertRefused(
-      problemsAfter((doc) => {
-        const step = securityStep(doc);
-        step.run = `${line}\n${step.run}`;
-      }),
-      pattern,
-    );
-  }
-  // On the bounded step a suffix makes the command non-canonical.
-  for (const run of [
-    'pnpm run test:unit --concurrency=3 || true',
-    'pnpm run test:unit --concurrency=3; exit 0',
-    'set +e; pnpm run test:unit --concurrency=3',
-  ]) {
-    assertRefused(
-      problemsAfter((doc) => {
-        unitStep(doc).run = run;
-      }),
-      /found 0/,
-    );
-  }
-  // The exception's trusted lines are exempt only verbatim.
-  assertRefused(
-    problemsAfter((doc) => {
-      const step = securityStep(doc);
-      step.run = step.run.replace('eval "${kafka_credentials}"', 'eval  "${kafka_credentials}"');
-    }),
-    /`source`\/`\.`\/`eval`/,
-  );
-});
-
-test('another unit invocation anywhere, under any name or form, is refused', () => {
-  const forms = [
-    'pnpm run test:unit',
-    'pnpm test:unit',
-    'pnpm -w test:unit',
-    'turbo run test:unit',
-    'turbo test:unit',
-    'pnpm exec turbo run test:unit --concurrency=3',
-    'npx turbo run test --concurrency=1',
-    'pnpm exec turbo run @rasta/web#test:unit',
-    'pnpm test',
-    'pnpm run test -- --testNamePattern=x',
-    'node scripts/run-test-phases.mjs test',
-    'pnpm run verify',
-    'npm test',
-    'bash -c "pnpm run test:unit"',
-    // A second bounded copy is still a second invocation outside the step.
-    'pnpm run test:unit --concurrency=3',
-  ];
-  for (const run of forms) {
-    for (const job of ['quality', 'security', exception.job]) {
-      assertRefused(
-        problemsAfter((doc) => {
-          addStep(doc, job, { name: 'Checks', run });
-        }),
-        new RegExp(`jobs\\.${job}\\.steps\\[\\d+\\] \\("Checks"\\): runs unit suites`),
-      );
+  ],
+  [
+    'duplicate with different run',
+    (doc) => {
+      doc.jobs.quality.steps.push({ name: 'Unit tests', run: 'echo test' });
+    },
+    /found 2/,
+  ],
+  [
+    'wrong run',
+    (doc) => {
+      unitStep(doc).run = 'pnpm run test:unit';
+    },
+    /run must be exactly/,
+  ],
+  [
+    'extra line',
+    (doc) => {
+      unitStep(doc).run += '\necho done';
+    },
+    /run must be exactly/,
+  ],
+  [
+    'missing run',
+    (doc) => {
+      delete unitStep(doc).run;
+    },
+    /run must be exactly/,
+  ],
+]) {
+  test(`bounded step ${name} is refused`, () => refused(problemsAfter(edit), pattern));
+}
+for (const level of ['step', 'job']) {
+  for (const key of ['if', 'continue-on-error']) {
+    for (const value of [false, true, '${{ false }}', 'always()']) {
+      test(`${level} ${key}: ${value} is refused`, () => {
+        refused(
+          problemsAfter((doc) => {
+            (level === 'step' ? unitStep(doc) : doc.jobs.quality)[key] = value;
+          }),
+          new RegExp(`${level} must not set ${key}`),
+        );
+      });
     }
   }
-  // Inside a multi-line script of an existing step.
-  assertRefused(
-    problemsAfter((doc) => {
-      const step = doc.jobs.quality.steps.find(
-        (s) => s.name === 'Unit-step concurrency is bounded',
-      );
-      step.run = `${step.run}\npnpm test:unit`;
-    }),
-    /"Unit-step concurrency is bounded"\): runs unit suites with "pnpm test:unit"/,
-  );
-});
-
-test('a root script that reaches the unit task counts as a unit invocation', () => {
-  const scripts = {
-    ...realScripts,
-    'ci:unit': 'turbo run test:unit',
-    'ci:all': 'pnpm run ci:unit',
-  };
-  for (const name of ['ci:unit', 'ci:all']) {
-    assertRefused(
-      problemsAfter(
-        (doc) => {
-          addStep(doc, 'security', { name: 'Checks', run: `pnpm run ${name}` });
-        },
-        { scripts },
-      ),
-      new RegExp(`runs unit suites with "pnpm run ${name}"`),
-    );
-  }
-  assertRefused(
-    problemsAfter(() => {}, { scripts: { ...realScripts, 'test:unit': 'node x.mjs' } }),
-    /package.json "test:unit" must be `turbo run test:unit`/,
-  );
-});
-
-test('test:unit spelled outside an accepted invocation is refused', () => {
-  assertRefused(
-    problemsAfter((doc) => {
-      unitStep(doc).env.TASK = 'test:unit';
-      addStep(doc, 'security', { name: 'Checks', run: 'pnpm run "$TASK"' });
-    }),
-    /jobs.quality.steps.\d+.env.TASK: mentions test:unit/,
-  );
-  assertRefused(
-    problemsAfter((doc) => {
-      addStep(doc, 'security', { name: 'Checks', run: 'echo test:unit' });
-    }),
-    /mentions test:unit outside an accepted invocation/,
-  );
-});
-
-test('no false positives: other programs and other test tasks are not unit invocations', () => {
-  for (const run of [
-    'pnpm --filter @rasta/web exec playwright test',
-    'pnpm run test:unit-step-concurrency',
-    'pnpm run test:integration -- --testNamePattern=x',
-    'pnpm --filter @rasta/web run test:coverage',
-    'pnpm exec turbo run build --filter=./packages/*',
-  ]) {
-    assert.deepEqual(
-      problemsAfter((doc) => {
-        addStep(doc, 'security', { name: 'Checks', run });
-      }),
-      [],
-      run,
-    );
-  }
-});
-
-test('the exception is named and exact: changed or moved, it is refused and reported stale', () => {
-  const changed = problemsAfter((doc) => {
-    const step = securityStep(doc);
-    step.run = step.run.replace('subtree visibility)', 'subtree visibility|.)');
-  });
-  assertRefused(changed, /runs unit suites with "pnpm run test -- --testNamePattern=/);
-  assertRefused(changed, /UNBOUNDED_EXCEPTIONS .* matched 0: update or remove/);
-  assertRefused(
-    problemsAfter((doc) => {
-      addStep(doc, 'quality', { name: 'Checks', run: exception.command });
-    }),
-    /jobs\.quality\.steps\[\d+\] \("Checks"\): runs unit suites/,
-  );
-  assertRefused(
-    problemsAfter((doc) => {
-      const step = securityStep(doc);
-      step.run = `${step.run}\n${exception.command}\n`;
-    }),
-    /matched 2/,
-  );
-  // Moved whole, same step name and command, into another job: still refused.
-  assertRefused(
-    problemsAfter((doc) => {
-      const step = securityStep(doc);
-      doc.jobs[exception.job].steps = doc.jobs[exception.job].steps.filter((s) => s !== step);
-      addStep(doc, 'security', step);
-    }),
-    /jobs\.security\.steps\[\d+\] \("Tenant isolation and authorization tests"\): runs unit suites/,
-  );
-});
-
-test('a local composite action or another workflow cannot carry a unit invocation', () => {
-  const action = stringify({
-    runs: { using: 'composite', steps: [{ run: 'pnpm run test:unit', shell: 'bash' }] },
-  });
-  assertRefused(
-    problemsAfter(() => {}, { extraFiles: { 'actions/unit/action.yml': action } }),
-    /actions\/unit\/action.yml runs.steps\[0\] \(null\): runs unit suites/,
-  );
-  const other = stringify({
-    on: 'push',
-    jobs: {
-      quality: { steps: [{ name: 'Unit tests', run: 'pnpm run test:unit --concurrency=3' }] },
+}
+for (const command of [
+  'pnpm run test:unit',
+  'pnpm test:unit',
+  'pnpm -w test:unit',
+  'pnpm --filter @rasta/web run test:unit',
+  'pnpm run test',
+  'pnpm test',
+  'pnpm -r test',
+  'turbo run test:unit',
+  'turbo test:unit',
+  'turbo run test',
+  'pnpm exec turbo run test:unit',
+  'npx turbo run test:unit',
+  'node scripts/run-test-phases.mjs test',
+  './scripts/run-test-phases.mjs test',
+  'echo start && pnpm run test:unit',
+  'true; pnpm test',
+  'turbo run test:unit --concurrency=0',
+  'turbo run test:unit --concurrency=50%',
+  'turbo run test:unit -- --concurrency=3',
+  'turbo run test:unit --concurrency=3 --concurrency=4',
+]) {
+  test(`literal unbounded invocation refused: ${command}`, () =>
+    refused(extraRun(command), /literal unbounded unit invocation/));
+}
+for (const job of ['quality', 'security', 'integration-security']) {
+  test(`all jobs scanned: ${job}`, () =>
+    refused(extraRun('echo start\npnpm test', job), /literal unbounded/));
+}
+for (const command of [
+  'pnpm run format:check --ignore-path test',
+  'pnpm --filter @rasta/web exec playwright test',
+  'pnpm run test:unit-step-concurrency',
+  'pnpm run test:integration',
+  'pnpm run test:coverage',
+  'turbo run build',
+  'turbo run build --filter test:unit',
+  'pnpm --filter test run format:check',
+  'turbo run test:unit --concurrency=3',
+  'turbo run test:unit --concurrency 2',
+  'pnpm exec turbo run test:unit --concurrency=3',
+  'echo "pnpm run test:unit"',
+]) {
+  test(`command-position control accepted: ${command}`, () =>
+    assert.deepEqual(extraRun(command), []));
+}
+for (const [name, edit] of [
+  [
+    'removed',
+    (doc) => {
+      securityStep(doc).run = 'echo nothing';
     },
+  ],
+  [
+    'duplicate line',
+    (doc) => {
+      securityStep(doc).run += `\n${exception.command}`;
+    },
+  ],
+  [
+    'duplicate step',
+    (doc) => {
+      doc.jobs[exception.job].steps.push({ ...securityStep(doc) });
+    },
+  ],
+  [
+    'changed command',
+    (doc) => {
+      securityStep(doc).run = securityStep(doc).run.replace('subtree visibility', 'other');
+    },
+  ],
+  [
+    'changed name',
+    (doc) => {
+      securityStep(doc).name = 'Different';
+    },
+  ],
+  [
+    'changed job',
+    (doc) => {
+      doc.jobs.quality.steps.push(securityStep(doc));
+      doc.jobs[exception.job].steps = doc.jobs[exception.job].steps.filter(
+        (step) => step.name !== exception.step,
+      );
+    },
+  ],
+]) {
+  test(`exception ${name} is refused`, () =>
+    refused(problemsAfter(edit), /must match exactly once/));
+}
+test('exception workflow identity is exact', () => {
+  const doc = structuredClone(realDoc);
+  const step = securityStep(doc);
+  step.run = 'echo removed';
+  refused(
+    parsedProblems(
+      {
+        'ci.yml': doc,
+        'other.yml': {
+          jobs: { [exception.job]: { steps: [{ name: exception.step, run: exception.command }] } },
+        },
+      },
+      realScripts,
+    ),
+    /literal unbounded/,
+  );
+});
+test('other workflows and composite metadata are scanned', () => {
+  for (const [file, doc] of [
+    ['other.yaml', { jobs: { other: { steps: [{ run: 'pnpm test' }] } } }],
+    ['local/ci/unit/action.yaml', { runs: { using: 'composite', steps: [{ run: 'pnpm test' }] } }],
+  ])
+    refused(parsedProblems({ 'ci.yml': realDoc, [file]: doc }, realScripts), /literal unbounded/);
+});
+test('malformed YAML, duplicate keys, unreadable documents and scalar documents fail closed', () => {
+  for (const text of ['jobs: [', 'jobs: {}\njobs: {}', new Error('unreadable'), 'null', 'hello']) {
+    refused(
+      unitStepProblems({ 'ci.yml': realWorkflow, 'other.yml': text }, realScripts),
+      /not readable YAML/,
+    );
+  }
+});
+test('YAML merge keys cannot hide a skipped unit step', () => {
+  const doc = structuredClone(realDoc);
+  unitStep(doc)['<<'] = { if: false };
+  refused(unitStepProblems({ 'ci.yml': stringify(doc) }, realScripts), /step must not set if/);
+});
+
+/** Exercise actual CLI discovery in a disposable repository-shaped filesystem. */
+function cliFixture(t) {
+  const fixture = mkdtempSync(join(tmpdir(), 'unit-tripwire-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const write = (path, text) => {
+    mkdirSync(dirname(join(fixture, path)), { recursive: true });
+    writeFileSync(join(fixture, path), text);
+  };
+  mkdirSync(join(fixture, 'scripts'));
+  for (const name of ['check-unit-step-concurrency.mjs', 'check-unit-step-concurrency-lib.mjs'])
+    cpSync(join(root, 'scripts', name), join(fixture, 'scripts', name));
+  symlinkSync(join(root, 'node_modules'), join(fixture, 'node_modules'), 'dir');
+  write('package.json', JSON.stringify({ type: 'module', scripts: realScripts }));
+  const doc = structuredClone(realDoc);
+  // The real main may gain composites unrelated to this fixture.
+  for (const job of Object.values(doc.jobs))
+    job.steps = job.steps?.filter((step) => !step.uses?.startsWith('./'));
+  const workflow = () => write('.github/workflows/ci.yml', stringify(doc));
+  workflow();
+  return {
+    write,
+    doc,
+    workflow,
+    run: () =>
+      spawnSync(process.execPath, [join(fixture, 'scripts/check-unit-step-concurrency.mjs')], {
+        encoding: 'utf8',
+        timeout: 10000,
+      }),
+  };
+}
+test('CLI follows arbitrary local uses recursively, both metadata extensions, and handles cycles', (t) => {
+  const fixture = cliFixture(t);
+  fixture.doc.jobs.quality.steps.push({ uses: './ci/outer' });
+  fixture.workflow();
+  fixture.write(
+    'ci/outer/action.yml',
+    stringify({ runs: { using: 'composite', steps: [{ uses: './tools/inner' }] } }),
+  );
+  fixture.write(
+    'tools/inner/action.yaml',
+    stringify({
+      runs: { using: 'composite', steps: [{ uses: './ci/outer' }, { run: 'echo safe' }] },
+    }),
+  );
+  assert.equal(fixture.run().status, 0);
+  fixture.write(
+    'tools/inner/action.yaml',
+    stringify({
+      runs: { using: 'composite', steps: [{ uses: './ci/outer' }, { run: 'pnpm test' }] },
+    }),
+  );
+  const result = fixture.run();
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /local\/tools\/inner\/action.yaml.*literal unbounded/);
+});
+for (const metadata of ['missing', 'malformed', 'unreadable']) {
+  test(`CLI refuses ${metadata} referenced action metadata`, (t) => {
+    const fixture = cliFixture(t);
+    fixture.doc.jobs.quality.steps.push({ uses: './ci/broken' });
+    fixture.workflow();
+    if (metadata === 'malformed') fixture.write('ci/broken/action.yml', 'runs: [');
+    // A directory at the metadata path is unreadable as a file even as root.
+    if (metadata === 'unreadable') fixture.write('ci/broken/action.yml/child', '');
+    const result = fixture.run();
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /local\/ci\/broken\/action.yml: not readable YAML/);
   });
-  assertRefused(
-    problemsAfter(() => {}, { extraFiles: { 'other.yml': other } }),
-    /other.yml jobs.quality.steps\[0\] \("Unit tests"\): runs unit suites/,
+}
+
+test('workflow line endings are normalized before parsing (CRLF and CR)', () => {
+  for (const newline of ['\r\n', '\r']) {
+    assert.deepEqual(
+      unitStepProblems({ 'ci.yml': realWorkflow.replaceAll('\n', newline) }, realScripts),
+      [],
+    );
+  }
+});
+test('CLI scans conventional action metadata even before a workflow references it', (t) => {
+  const fixture = cliFixture(t);
+  fixture.write(
+    '.github/actions/future/action.yaml',
+    stringify({ runs: { using: 'composite', steps: [{ run: 'pnpm test' }] } }),
   );
+  const result = fixture.run();
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /local\/\.github\/actions\/future\/action.yaml.*literal unbounded/);
 });
 
-test('a YAML merge key cannot hide a key from the guard', () => {
-  const text = realWorkflow.replace(
-    /^( +)- name: Unit tests\n/m,
-    '$1- name: Unit tests\n$1  <<: { continue-on-error: true }\n',
+test('CLI normalizes CR-only workflow and composite metadata before discovery', (t) => {
+  const fixture = cliFixture(t);
+  fixture.doc.jobs.quality.steps.push({ uses: './ci/outer' });
+  fixture.write('.github/workflows/ci.yml', stringify(fixture.doc).replaceAll('\n', '\r'));
+  fixture.write(
+    'ci/outer/action.yml',
+    stringify({ runs: { using: 'composite', steps: [{ uses: './ci/inner' }] } }).replaceAll(
+      '\n',
+      '\r',
+    ),
   );
-  assert.notEqual(text, realWorkflow);
-  assertRefused(
-    unitStepProblems({ 'ci.yml': text }, realScripts),
-    /step-level `continue-on-error`/,
+  fixture.write(
+    'ci/inner/action.yml',
+    stringify({ runs: { using: 'composite', steps: [{ run: 'pnpm test' }] } }),
   );
-});
-
-test('unreadable YAML fails closed', () => {
-  assertRefused(
-    unitStepProblems({ 'ci.yml': 'jobs: [' }, realScripts),
-    /ci.yml: not readable YAML/,
-  );
-  assertRefused(unitStepProblems({ 'ci.yml': 'jobs: {}\n' }, realScripts), /found 0/);
+  const result = fixture.run();
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /local\/ci\/inner\/action.yml.*literal unbounded/);
 });

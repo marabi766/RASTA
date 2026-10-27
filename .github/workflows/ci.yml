@@ -355,21 +355,15 @@ jobs:
           key: temporal-test-server-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Unit-step concurrency is bounded
-        # `turbo run test:unit` starts 10 package tasks at once by default, and
-        # every jest in them opens its own worker pool: on this 4-vCPU runner
-        # apps/web's axe specs ran ~8x slower than alone and failed on jest's
-        # 5 s default (TASK 239/240). The checker finds every unit invocation in
-        # every workflow by what it runs, not by step name: only the one below
-        # may run, bounded, plus its named exceptions; each must run without
-        # `if:`/`continue-on-error`, in bash, with nothing absorbing a failure
-        # (PR #450 r1). Static; the checker's own tests first.
+        # Static tripwire for accidental changes to the root bound or a second
+        # literal unbounded unit run. Workflow code review covers dynamic commands
+        # and shell behavior; this does not prove execution or failure propagation.
         run: pnpm run test:unit-step-concurrency
 
       - name: Unit tests
-        # 3 packages at a time (turbo's default is 10): same tests, same
-        # failure propagation. The flag goes to turbo, not to the packages'
-        # jest/node:test runners; `check-unit-step-concurrency` keeps it here.
-        run: pnpm run test:unit --concurrency=3
+        # The root CI script limits Turbo package concurrency. Package-time sums
+        # decreased in the measured runs; step wall time was unchanged (~270 s).
+        run: pnpm run test:unit:ci
         env:
           TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
 
