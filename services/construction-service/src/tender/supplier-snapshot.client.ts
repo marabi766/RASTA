@@ -2,6 +2,7 @@ import { internalFetch } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { readCapped } from '../organization/organization-directory';
@@ -21,7 +22,7 @@ export const SNAPSHOT_PAGE_SIZE = 200;
  * the contract — a reason, a name, a note — makes the page unusable instead of
  * being quietly kept.
  */
-const instant = z.string().datetime();
+const instant = z.string().check(isoDateTime());
 
 export const standingSnapshotPageSchema = z
   .object({

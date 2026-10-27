@@ -1454,7 +1454,7 @@
     {
       "id": "EXP-005",
       "epicId": "EP-EXPERIENCE",
-      "title": "PWA and offline usage queue",
+      "title": "PWA shell and offline usage screens",
       "scope": "MVP",
       "priority": "P1",
       "points": 13,
@@ -1463,9 +1463,56 @@
         "Usage can be queued offline and synchronized idempotently",
         "Conflict, retry and user-visible failure behavior are tested"
       ],
-      "dependencies": ["EXP-002"],
-      "sourceRefs": ["docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰"],
+      "dependencies": ["EXP-002", "EXP-006", "EXP-007"],
+      "sourceRefs": [
+        "docs/17-mvp-scope.md#۱۷۲-p1--mvp-کامل-روز-۲۰",
+        "docs/adr/ADR-073-implementation-plan.md"
+      ],
       "evidence": []
+    },
+    {
+      "id": "EXP-006",
+      "epicId": "EP-EXPERIENCE",
+      "title": "Offline usage queue core and usage reference fence",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 13,
+      "status": "READY",
+      "acceptanceCriteria": [
+        "One shared implementation issues and verifies offline usage references, with a key ring, for the portal and fleet",
+        "The browser queue survives reload and retires entries; fleet refuses a retired reference with 409 USAGE_REFERENCE_RETIRED"
+      ],
+      "dependencies": ["EXP-007"],
+      "sourceRefs": [
+        "docs/adr/ADR-073-pwa-and-offline-usage-queue.md",
+        "docs/adr/ADR-073-implementation-plan.md"
+      ],
+      "evidence": []
+    },
+    {
+      "id": "EXP-007",
+      "epicId": "EP-EXPERIENCE",
+      "title": "Online usage safety repairs required before offline usage",
+      "scope": "MVP",
+      "priority": "P1",
+      "points": 13,
+      "status": "IN_PROGRESS",
+      "acceptanceCriteria": [
+        "Usage replay is bound to the user, the body and the read rule, and driver and assignment attribution use the reported interval",
+        "The maintenance meter is independent of arrival order, existing meters are reconciled, and fleet exposes the reference reads it needs"
+      ],
+      "dependencies": [],
+      "sourceRefs": [
+        "docs/adr/ADR-073-pwa-and-offline-usage-queue.md",
+        "docs/adr/ADR-073-implementation-plan.md"
+      ],
+      "evidence": [
+        {
+          "kind": "PR",
+          "ref": "https://github.com/marabi766/RASTA/pull/372",
+          "note": "First criterion, partial: usage replay bound to user, body and read rule, re-checked under lock (ADR-073 plan PR 1). Merge commit ade49b7, merged 2026-10-24."
+        }
+      ]
     },
     {
       "id": "RUN-001",
@@ -2762,6 +2809,14 @@
       "recordedBy": "Claude Opus 5.5",
       "approvalRef": "Product Owner (repository owner) acceptance in the project-manager chat, 2026-10-23",
       "recordIds": ["COM-008"]
+    },
+    {
+      "date": "2026-10-26",
+      "type": "SCOPE_ADDED",
+      "reason": "D-073 (owner, 2026-10-25) re-estimated EXP-005 from 13 to 39 points. 39 is not on the point scale and docs/25 § 25.3 rule 5 splits a feature above 21, so the unconditional slices of the ADR-073 implementation plan are split into three 13-point items along the plan's own dependency line: EXP-007 = online safety repairs that are needed even without offline use (plan PR 1, 2a, 9, 7; PR 1 already merged as #372); EXP-006 = offline queue core and reference fence (PR 12, 5, 11); EXP-005 keeps its two acceptance criteria and becomes the PWA shell and offline screens that demonstrate them (PR 0, 3, 4, 6, 10; criterion 1 shown by PR 6 on PR 5, criterion 2 by PR 6's E2E suite). Optional slices PR 2b (+1, after Q-150) and PR 8 (+2, after Q-153) are not added until those questions are answered.",
+      "recordedBy": "Claude Opus 5.5 (project manager)",
+      "approvalRef": "D-073: owner approval of the 39-point budget on #368, 2026-10-25 (docs/23)",
+      "recordIds": ["EXP-006", "EXP-007"]
     }
   ]
 }

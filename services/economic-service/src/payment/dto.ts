@@ -81,7 +81,7 @@ export type OperatorDecisionDto = z.infer<typeof operatorDecisionSchema>;
 export const listPaymentsQuerySchema = z
   .object({
     cursor: cursorQueryParameter,
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 

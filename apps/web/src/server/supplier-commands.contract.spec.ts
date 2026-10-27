@@ -265,7 +265,7 @@ describe('the request bodies', () => {
       `plainText().min(1).max(${MAX_STATEMENT_LENGTH}).optional()`,
     );
     expect(prop('submitQualificationSchema', 'evidence')).toBe(
-      `z.array(qualificationEvidenceInputSchema).max(${MAX_EVIDENCE_ITEMS}).default([])`,
+      `z.array(qualificationEvidenceInputSchema).max(${MAX_EVIDENCE_ITEMS}).prefault([])`,
     );
     expect(prop('qualificationEvidenceInputSchema', 'documentId')).toBe('identifier');
     expect(prop('qualificationEvidenceInputSchema', 'label')).toBe(

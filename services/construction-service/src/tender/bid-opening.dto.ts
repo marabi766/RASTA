@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cursorPaginationSchema } from '@rasta/contracts';
+import { cursorPaginationSchema, isoDateTime } from '@rasta/contracts';
 import { BID_ACCESS_PURPOSES } from '../events/events';
 import { bidContentSchema } from './bid.dto';
 
@@ -38,9 +38,11 @@ export const withdrawProposalSchema = z
   .object({
     proposedAt: z
       .string()
-      .datetime({
-        message: 'A time is ISO 8601 in UTC with a trailing Z, e.g. 2026-10-31T12:00:00.000Z',
-      })
+      .check(
+        isoDateTime({
+          message: 'A time is ISO 8601 in UTC with a trailing Z, e.g. 2026-10-31T12:00:00.000Z',
+        }),
+      )
       .describe(
         'The `proposedAt` of the proposal to withdraw, as answered by proposing or by GET ' +
           '/tenders/{id}/bids. Another proposal standing is 409 `PROPOSAL_SUPERSEDED`: nothing is withdrawn.',

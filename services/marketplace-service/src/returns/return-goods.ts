@@ -2,6 +2,7 @@ import { internalFetch } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -61,7 +62,7 @@ const withdrawalAnswerSchema = z.discriminatedUnion('outcome', [
     outcome: z.literal('WITHDRAWN'),
     returnRequestId: z.string().min(1),
     reservationId: z.string().min(1),
-    withdrawnAt: z.string().datetime({ offset: true }),
+    withdrawnAt: z.string().check(isoDateTime({ offset: true })),
     returnShipment: z.null(),
   }),
   z.object({

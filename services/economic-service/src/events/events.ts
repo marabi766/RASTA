@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { BUSINESS_LINES } from '@rasta/contracts';
+import { BUSINESS_LINES, describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 import { COMMISSION_OUTCOMES } from '../commission/rule-engine';
 
 /**
@@ -986,7 +986,11 @@ export function validateEconomicPayload<N extends EconomicEventName>(
 ): z.infer<(typeof ECONOMIC_EVENT_SCHEMAS)[N]> {
   // The schema is selected by the same key as the return type; TypeScript
   // cannot correlate the two through a generic parameter, hence the assertion.
-  return ECONOMIC_EVENT_SCHEMAS[eventName].parse(payload) as z.infer<
-    (typeof ECONOMIC_EVENT_SCHEMAS)[N]
-  >;
+  const parsed = legacyParse(ECONOMIC_EVENT_SCHEMAS[eventName], payload);
+  if (!parsed.success) {
+    throw new Error(
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
+    );
+  }
+  return parsed.data as z.infer<(typeof ECONOMIC_EVENT_SCHEMAS)[N]>;
 }

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime, parsableUrl } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
 import { codePointLength, toJsonSchema } from './zod-schema';
 
@@ -22,8 +23,8 @@ describe('toJsonSchema', () => {
           .max(10)
           .regex(/^[a-z]+$/i),
         email: z.string().email(),
-        url: z.string().url(),
-        instant: z.string().datetime({ offset: true }),
+        url: z.string().check(parsableUrl()),
+        instant: z.string().check(isoDateTime({ offset: true })),
         count: z.number().int().min(0).max(5),
         ratio: z.number().min(0.5),
         flag: z.boolean(),
@@ -31,11 +32,11 @@ describe('toJsonSchema', () => {
         version: z.literal(1),
         lines: z.array(z.string()).min(1).max(50),
         tags: z.array(z.string()),
-        metadata: z.record(z.number()),
+        metadata: z.record(z.string(), z.number()),
         either: z.union([z.string(), z.number()]),
         maybe: z.string().optional(),
         nothing: z.string().nullable(),
-        defaulted: z.number().int().default(25),
+        defaulted: z.number().int().prefault(25),
         refined: z.string().refine((value) => value !== 'x'),
         transformed: z.string().transform((value) => value.trim()),
         described: z.string().describe('What it is'),
@@ -53,6 +54,21 @@ describe('toJsonSchema', () => {
       type: 'object',
       properties: { a: { type: 'string' } },
       additionalProperties: undefined,
+    });
+  });
+
+  it('leaves a discriminated union and a pipe between two schemas undescribed, as before', () => {
+    // zod 3 had a type of its own for each, which the converter did not know; in
+    // zod 4 a discriminated union is a union and `.pipe()` a pipe, and still `{}`.
+    const tagged = z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('A') }),
+      z.object({ kind: z.literal('B') }),
+    ]);
+    expect(toJsonSchema(tagged)).toEqual({});
+    expect(toJsonSchema(z.string().pipe(z.enum(['X'])))).toEqual({});
+    // A plain union is still described.
+    expect(toJsonSchema(z.union([z.string(), z.number()]))).toEqual({
+      anyOf: [{ type: 'string' }, { type: 'number' }],
     });
   });
 

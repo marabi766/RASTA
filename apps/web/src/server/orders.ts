@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText, toLatinDigits, toPersianDigits } from '@/lib/format';
@@ -55,7 +56,7 @@ const orderLineSchema = z.object({
    * The order line a return request names (RUN-005). A service that does not
    * send it leaves the line out of every return form rather than guessed.
    */
-  id: z.string().min(1).nullable().default(null),
+  id: z.string().min(1).nullable().prefault(null),
   offerId: z.string(),
   productId: z.string(),
   productName: z.string(),
@@ -72,14 +73,14 @@ const orderSchema = z.object({
   supplierOrganizationId: z.string(),
   totalAmountMinor: minorUnits,
   currency: z.string(),
-  lines: z.array(orderLineSchema).default([]),
-  confirmedAt: z.string().nullable().default(null),
-  fulfilledAt: z.string().nullable().default(null),
-  receiptConfirmedAt: z.string().nullable().default(null),
-  completedAt: z.string().nullable().default(null),
-  cancelledAt: z.string().nullable().default(null),
-  cancellationReason: z.string().nullable().default(null),
-  failureReason: z.string().nullable().default(null),
+  lines: z.array(orderLineSchema).prefault([]),
+  confirmedAt: z.string().nullable().prefault(null),
+  fulfilledAt: z.string().nullable().prefault(null),
+  receiptConfirmedAt: z.string().nullable().prefault(null),
+  completedAt: z.string().nullable().prefault(null),
+  cancelledAt: z.string().nullable().prefault(null),
+  cancellationReason: z.string().nullable().prefault(null),
+  failureReason: z.string().nullable().prefault(null),
   createdAt: renderableDate,
   /**
    * The commands *this viewer* may issue now, computed by marketplace-service
@@ -90,7 +91,7 @@ const orderSchema = z.object({
    */
   availableActions: z
     .array(z.string())
-    .default([])
+    .prefault([])
     .transform((actions) => actions.filter(isOrderCommand)),
 });
 
@@ -104,7 +105,7 @@ export type OrderLine = z.infer<typeof orderLineSchema>;
 
 const orderPageSchema = z.object({
   items: z.array(orderSchema),
-  nextCursor: z.string().nullable().default(null),
+  nextCursor: z.string().nullable().prefault(null),
 });
 
 export type OrderPage = z.infer<typeof orderPageSchema>;
@@ -252,7 +253,7 @@ const COMMAND_SCHEMAS = {
   }),
 
   RESOLVE_DISPUTE: z.object({
-    outcome: z.enum(DISPUTE_OUTCOMES, { errorMap: () => ({ message: 'نتیجه را انتخاب کنید' }) }),
+    outcome: z.enum(DISPUTE_OUTCOMES, { error: 'نتیجه را انتخاب کنید' }),
     resolution: z
       .string()
       .trim()
@@ -264,7 +265,7 @@ const COMMAND_SCHEMAS = {
     // Required, never defaulted: ADR-052 rule 14 forbids reading
     // responsibility out of the outcome or out of free text.
     responsibility: z.enum(RESPONSIBILITIES, {
-      errorMap: () => ({ message: 'مسئول را صریحاً مشخص کنید' }),
+      error: 'مسئول را صریحاً مشخص کنید',
     }),
   }),
 
@@ -330,7 +331,7 @@ export function parseOrderCommand(values: OrderCommandFormValues): ParsedOrderCo
   }
 
   const command = values.command;
-  const parsed = COMMAND_SCHEMAS[command].safeParse(values);
+  const parsed = legacyParse(COMMAND_SCHEMAS[command], values);
 
   // Checked here, on the server, not only by the checkbox's `required`: a
   // browser attribute is a convenience a crafted post does not have to honour,
@@ -350,7 +351,10 @@ export function parseOrderCommand(values: OrderCommandFormValues): ParsedOrderCo
 
   const fieldErrors: Partial<Record<OrderCommandField, string>> = parsed.success
     ? {}
-    : firstIssuePerField(parsed.error, (field): field is OrderCommandField => field !== 'command');
+    : firstIssuePerField(
+        parsed.refusal,
+        (field): field is OrderCommandField => field !== 'command',
+      );
   if (!acknowledged) {
     fieldErrors.acknowledge = 'برای ادامه تأیید کنید که این اقدام بازگشت‌پذیر نیست';
   }

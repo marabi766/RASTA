@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   AUDIT_CHANGES_MAX_ENTRIES,
-  auditChangeSchema,
   type AuditChange,
+  auditChangeSchema,
+  isoDateTime,
   plainText,
 } from '@rasta/contracts';
 
@@ -89,7 +90,7 @@ export const auditCorrectionCommandSchema = z
      */
     occurredAt: z
       .string()
-      .datetime({ offset: true })
+      .check(isoDateTime({ offset: true }))
       .transform((value) => new Date(value).toISOString()),
     reason: plainText().min(1).max(CORRECTION_REASON_MAX_LENGTH),
     changes: z.array(correctionChangeSchema).min(1).max(AUDIT_CHANGES_MAX_ENTRIES),

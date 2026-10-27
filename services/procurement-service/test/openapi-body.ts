@@ -31,7 +31,7 @@ const KNOWN = new Set([
   'description',
 ]);
 
-/** ISO 8601 instant as `Date#toISOString` writes it and `z.string().datetime()` accepts it. */
+/** ISO 8601 instant as `Date#toISOString` writes it and `isoDateTime()` (@rasta/contracts) accepts it. */
 const DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
 export function responseSchemaOf(
