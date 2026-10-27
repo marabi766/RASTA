@@ -196,11 +196,24 @@ export const SPLIT_STEPS = Object.freeze(Object.keys(STEP_INVENTORY));
 
 /**
  * `if:` conditions allowed on a split job's step, as `{ job, step, if, reason }`.
- * Empty: no split job, and no step of one, has a condition on main, so every
- * step runs on every pull request and push. A failure()-only diagnostic step
- * would be a legitimate entry, with its reason.
+ * No test or guard step has one on main, so each runs on every pull request and
+ * push. The only entries are the connection report that must follow a failed
+ * run too: it measures, it is not in STEP_INVENTORY and never fails the job.
  */
-export const ALLOWED_CONDITIONS = Object.freeze([]);
+export const ALLOWED_CONDITIONS = Object.freeze([
+  {
+    job: 'integration-suites',
+    step: 'PostgreSQL connection peak',
+    if: 'always()',
+    reason: 'prints the connection peak against max_connections after a failed run too',
+  },
+  {
+    job: 'integration-security',
+    step: 'PostgreSQL connection peak',
+    if: 'always()',
+    reason: 'prints the connection peak against max_connections after a failed run too',
+  },
+]);
 
 /** The keys a test step may have: nothing that skips it, forgives it or changes its shell. */
 const STEP_KEYS = new Set(['name', 'run', 'env', 'timeout-minutes']);
