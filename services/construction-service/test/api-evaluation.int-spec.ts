@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import {
   reasonsOf,
   actor,
@@ -423,8 +424,8 @@ describe('evaluation API', () => {
       content: { priceMinor: '1250000000' },
       evaluation: { decision: null, completed: false, totalScaled: null },
     });
-    expect(JSON.stringify(res.body)).not.toContain(second.bidId);
-    expect(JSON.stringify(res.body)).not.toContain('1300000000');
+    // No independently verified path exemption: generated values stay searched (#452).
+    expectNotDisclosed(res.body, [second.bidId, '1300000000']);
 
     const other = await http()
       .get(path)

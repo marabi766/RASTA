@@ -28,6 +28,7 @@
     "test:migration-lib": "node --test scripts/verify-migration-reversible-lib.test.mjs",
     "test:audit-correction-lib": "node --test scripts/verify-audit-correction-command-lib.test.mjs",
     "test:outbox-test-clock": "node --test scripts/outbox-test-clock.test.mjs",
+    "test:disclosure-guard-wiring": "node --test scripts/disclosure-guard-wiring.test.mjs",
     "test:outbox-b1": "node --test scripts/verify-outbox-b1-lib.test.mjs",
     "test:outbox-b2": "node --test scripts/outbox-b2-lib.test.mjs",
     "test:url-parsing-guard": "node --test scripts/url-parsing-guard.test.mjs",

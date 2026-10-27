@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { expectNotDisclosed } from '@rasta/testing';
 import { EventPublisher } from '../src/events/publisher';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -145,7 +146,7 @@ describe('POST /v1/contracts/{id}/sign', () => {
         signedAt: second.body.contractorSignedAt,
       });
       // No amount on any event, however it is written.
-      expect(JSON.stringify(events)).not.toContain(award.amountMinor);
+      expectNotDisclosed(events, [award.amountMinor]);
     });
 
     it('the contractor then the employer: the same contract, whichever signs first', async () => {
