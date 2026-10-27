@@ -8,13 +8,14 @@
  * so it still gets in when the ceiling is reached.
  *
  * Every psql it starts — the limits query and each sample — runs bounded
- * (runBounded: TERM at its deadline, KILL after a grace). On SIGTERM or SIGINT
+ * (3 s connect timeout + 3 s server statement timeout, independently of this leader).
+ * runBounded also enforces a local deadline. On SIGTERM, SIGINT or SIGHUP
  * it stops the psql in flight the same way, waits for it to be gone, records
  * the stop and exits 0, within termGraceMs + killWaitMs. The workflow starts
  * it in a detached process group, so the report step can also end its whole process group.
  * Reads nothing from its command line. See ci-pg-connections-lib.mjs.
  */
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import {
   errorCode,
   processIdentity,
@@ -42,6 +43,7 @@ async function stop() {
 // Installed before the first child exists: no psql can start unwatched.
 process.on('SIGTERM', stop);
 process.on('SIGINT', stop);
+process.on('SIGHUP', stop);
 
 const file = process.env.PG_CONNECTIONS_SAMPLES;
 if (!file) {
@@ -50,6 +52,18 @@ if (!file) {
 }
 
 const ownerFile = process.env.PG_CONNECTIONS_OWNER;
+// The launcher supplies an absolute deadline, so a delayed handshake cannot reset the budget.
+const suppliedDeadline = Number(process.env.PG_CONNECTIONS_DEADLINE);
+const expires = Math.min(
+  Number.isFinite(suppliedDeadline) ? suppliedDeadline : Infinity,
+  Date.now() + TIMING.watcherLifetimeMs,
+);
+const requested = () => existsSync(`${ownerFile}.stop`) || Date.now() >= expires;
+if (requested()) process.exit(0);
+setTimeout(stop, Math.max(0, expires - Date.now()));
+setInterval(() => {
+  if (requested()) void stop();
+}, TIMING.stopPollMs);
 const owner = { pid: process.pid, ...processIdentity(), run: process.env.PG_CONNECTIONS_RUN };
 // A query is forbidden until independent ownership has been committed atomically.
 try {
@@ -78,8 +92,17 @@ function record(phase, entry) {
 }
 
 async function psql(sql) {
+  if (stopping || requested()) {
+    void stop();
+    return { ok: false, reason: 'stopped' };
+  }
   active = runBounded('psql', ['-X', '-A', '-t', '-F', '|', '-c', sql], {
-    env: { ...process.env, PGCONNECT_TIMEOUT: '5', PGAPPNAME: 'ci-pg-connections' },
+    env: {
+      ...process.env,
+      PGCONNECT_TIMEOUT: String(TIMING.connectTimeoutS),
+      PGOPTIONS: `-c statement_timeout=${TIMING.statementTimeoutMs}`,
+      PGAPPNAME: 'ci-pg-connections',
+    },
     deadlineMs: TIMING.queryDeadlineMs,
     termGraceMs: TIMING.termGraceMs,
     killWaitMs: TIMING.killWaitMs,

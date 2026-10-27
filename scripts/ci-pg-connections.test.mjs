@@ -10,6 +10,8 @@ import { parse as parseYaml } from 'yaml';
 import { fileURLToPath } from 'node:url';
 import {
   alive,
+  captureProcess,
+  checkedSignal,
   containerMemory,
   processIdentity,
   readOwner,
@@ -350,7 +352,7 @@ function stubPsql(dir, { stallOn = null, ignoreTerm = false } = {}) {
   const stall = [
     `echo $$ > '${join(dir, 'stalled.pid')}'`,
     ...(ignoreTerm ? ["trap '' TERM"] : []),
-    'exec sleep 600',
+    'exec sleep 6',
   ].join('; ');
   writeFileSync(
     bin,
@@ -385,41 +387,37 @@ function watcherEnv(dir, extra = {}) {
 /** Starts the watcher leading its own process group, as `setsid` does in the workflow. */
 function startWatcher(t, env) {
   const child = spawn(process.execPath, [WATCH], { env, stdio: 'ignore', detached: true });
-  ownChild(t, child, true);
+  const owner = ownChild(t, child, true);
   const exited = once(child, 'exit');
-  return { child, exited };
+  return { child, exited, owner };
 }
 
 function ownBounded(t, run) {
   t.after(async () => {
     // Direct child shares the runner group: stop only the child, never -pgid.
     await Promise.race([run.stop(), delay(2500)]);
-    if (run.pid && alive(run.pid)) process.kill(run.pid, 'SIGKILL');
+    if (run.pid && alive(run.pid)) checkedSignal(run.owner, 'SIGKILL');
     if (run.pid) await waitFor(() => !alive(run.pid), 1000, 'bounded child exit', false);
   });
   if (process.env.CI_PG_FAULT_PID && run.pid)
-    writeFileSync(process.env.CI_PG_FAULT_PID, String(run.pid));
+    writeFileSync(process.env.CI_PG_FAULT_PID, JSON.stringify(run.owner));
 }
 
-async function cleanGroup(pgid) {
-  assert.notEqual(pgid, processIdentity().pgid, 'never signal the test runner group');
-  if (alive(pgid, true)) {
-    try {
-      process.kill(-pgid, 'SIGKILL');
-    } catch {
-      /* exited */
-    }
-  }
-  await waitFor(() => !alive(pgid, true), 2500, 'fixture process group to exit', false);
+async function cleanGroup(owner) {
+  if (alive(owner.pid, true)) checkedSignal(owner, 'SIGKILL', { group: true });
+  await waitFor(() => !alive(owner.pid, true), 6500, 'fixture process group to exit', false);
 }
 
 function ownChild(t, child, group) {
+  const owner = captureProcess(child.pid);
   t.after(async () => {
-    if (group) await cleanGroup(child.pid);
-    else child.kill('SIGKILL');
+    if (group) await cleanGroup(owner);
+    else checkedSignal(owner, 'SIGKILL');
   });
   child.unref();
-  if (process.env.CI_PG_FAULT_PID) writeFileSync(process.env.CI_PG_FAULT_PID, String(child.pid));
+  if (process.env.CI_PG_FAULT_PID)
+    writeFileSync(process.env.CI_PG_FAULT_PID, JSON.stringify(owner));
+  return owner;
 }
 
 const stepOwner = (dir) => readOwner(join(dir, 'pg-connections-fixture-1.owner.json'), 'fixture-1');
@@ -446,11 +444,11 @@ const STEP_FILE = 'pg-connections.jsonl';
 /** TERM to the watcher; it must exit 0 within `boundMs` and leave no process of its group. */
 async function termAndCheck(watcher, boundMs) {
   const sent = Date.now();
-  process.kill(watcher.child.pid, 'SIGTERM');
+  checkedSignal(watcher.owner, 'SIGTERM');
   const timer = delay(boundMs).then(() => 'late');
   const outcome = await Promise.race([watcher.exited, timer]);
   if (outcome === 'late') {
-    process.kill(-watcher.child.pid, 'SIGKILL');
+    checkedSignal(watcher.owner, 'SIGKILL', { group: true });
     assert.fail(`watcher still running ${boundMs} ms after TERM`);
   }
   assert.deepEqual(outcome, [0, null]);
@@ -562,7 +560,7 @@ test('a query past its deadline is TERMed, then KILLed, and recorded as a failed
   await waitFor(() => existsSync(join(dir, 'stalled.pid')), 5000, 'the stalled child');
   const stalled = Number(readFileSync(join(dir, 'stalled.pid'), 'utf8'));
   const result = await Promise.race([run.done, delay(5000).then(() => 'still running')]);
-  if (result === 'still running') process.kill(stalled, 'SIGKILL'); // our own stub: never left behind
+  if (result === 'still running') checkedSignal(run.owner, 'SIGKILL'); // our own stub: never left behind
   assert.deepEqual(result, { ok: false, stdout: '', reason: 'timeout' });
   assert.ok(Date.now() - started >= 600 && Date.now() - started < 3000);
   assert.equal(alive(stalled), false);
@@ -598,7 +596,7 @@ test('stopping a watcher that ignores TERM kills its whole process group, bounde
     `
     import { spawn } from 'node:child_process';
     process.on('SIGTERM', () => {});
-    spawn('bash', ['-c', "trap '' TERM; echo $$ > '${dir}/child.pid'; exec sleep 600"], { stdio: 'ignore' });
+    spawn('bash', ['-c', "trap '' TERM; echo $$ > '${dir}/child.pid'; exec sleep 6"], { stdio: 'ignore' });
     setInterval(() => {}, 1000);
   `,
   );
@@ -640,7 +638,7 @@ function runStep(t, job, name, dir, extraEnv = {}, script = stepOf(job, name).ru
   if (name === 'Watch PostgreSQL connections')
     t.after(async () => {
       const owner = stepOwner(dir);
-      if (owner) await cleanGroup(owner.pgid);
+      if (owner) await cleanGroup(owner);
     });
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, RUNNER_TEMP: dir, ...extraEnv };
   for (const [key, value] of Object.entries(stepOf(job, name)?.env ?? {})) {
@@ -657,7 +655,7 @@ function runStep(t, job, name, dir, extraEnv = {}, script = stepOf(job, name).ru
     timeout: 20_000,
   });
   if (name === 'Watch PostgreSQL connections' && process.env.CI_PG_FAULT_PID && stepOwner(dir)) {
-    writeFileSync(process.env.CI_PG_FAULT_PID, String(stepOwner(dir).pid));
+    writeFileSync(process.env.CI_PG_FAULT_PID, JSON.stringify(stepOwner(dir)));
   }
   return result;
 }
@@ -847,10 +845,11 @@ for (const fixture of [
       // Ownership is registered before the synchronous subprocess can create children.
       t.after(async () => {
         if (existsSync(pidfile)) {
-          const pid = Number(readFileSync(pidfile, 'utf8'));
+          const owner = JSON.parse(readFileSync(pidfile, 'utf8'));
+          const pid = owner.pid;
           if (fixture === 'a query past its deadline') {
-            if (alive(pid)) process.kill(pid, 'SIGKILL');
-          } else await cleanGroup(pid);
+            if (alive(pid)) checkedSignal(owner, 'SIGKILL');
+          } else await cleanGroup(owner);
         }
       });
       const result = spawnSync(
@@ -878,7 +877,7 @@ for (const fixture of [
         fault === 'setup' ? /timed out waiting/ : /injected assertion failure/,
       );
       assert.ok(existsSync(pidfile), 'fault reached a spawned fixture');
-      const pid = Number(readFileSync(pidfile, 'utf8'));
+      const { pid } = JSON.parse(readFileSync(pidfile, 'utf8'));
       assert.equal(
         alive(pid, fixture !== 'a query past its deadline'),
         false,
@@ -924,7 +923,7 @@ for (const phase of ['owner', 'start', 'limits', 'sample', 'stop']) {
     if (phase === 'stop') {
       await waitFor(() => records(dir).samples.length >= 1, 5000, 'first sample');
       beforeStop = readFileSync(join(dir, 'queries'), 'utf8').trim().split('\n').length;
-      watcher.child.kill('SIGTERM');
+      checkedSignal(watcher.owner, 'SIGTERM');
     }
     const result = await Promise.race([watcher.exited, delay(5000).then(() => 'late')]);
     assert.notEqual(result, 'late', 'watcher did not stop after filesystem failure');
@@ -962,7 +961,7 @@ for (const phase of ['owner', 'start', 'limits', 'sample', 'stop']) {
 test('ownership is run-specific, validated, independent of samples, and cannot signal unrelated groups', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'ci-pg-owner-'));
   const file = join(dir, 'owner.json');
-  const child = spawn('sleep', ['600'], { detached: true, stdio: 'ignore' });
+  const child = spawn('sleep', ['6'], { detached: true, stdio: 'ignore' });
   ownChild(t, child, true);
   const owner = { pid: child.pid, ...processIdentity(child.pid), run: 'current' };
   writeOwner(file, owner);
@@ -979,7 +978,7 @@ test('ownership is run-specific, validated, independent of samples, and cannot s
   }
   assert.equal(
     await stopWatcher(owner, { waitMs: 10, killWaitMs: 10 }),
-    'ownership unverified: not stopped',
+    'ownership unverified: not stopped; query self-expires within 6 s; watcher within 30 min + 4 s',
   );
   assert.ok(alive(child.pid), 'unrelated command was not signalled');
 });
@@ -993,7 +992,7 @@ test('report stops the owned group even when all measurement data is lost', asyn
   const owner = readOwner(env.PG_CONNECTIONS_OWNER, env.PG_CONNECTIONS_RUN);
   assert.equal(
     await stopWatcher({ ...owner, ticks: '0' }, { waitMs: 10, killWaitMs: 10 }),
-    'ownership unverified: not stopped',
+    'ownership unverified: not stopped; query self-expires within 6 s; watcher within 30 min + 4 s',
   );
   assert.ok(alive(watcher.child.pid), 'recycled identity was refused');
   writeFileSync(env.PG_CONNECTIONS_SAMPLES, 'lost measurement data\n');
@@ -1021,13 +1020,14 @@ for (const job of Object.keys(PARALLEL_JOBS)) {
     writeFileSync(
       preload,
       `import { writeFileSync } from 'node:fs';
+      import { captureProcess } from '${join(ROOT, 'scripts/ci-pg-connections-lib.mjs')}';
       if (process.argv[1].endsWith('ci-pg-connections-watch.mjs')) {
-        writeFileSync(${JSON.stringify(pidfile)}, String(process.pid));
-        await new Promise(() => { setInterval(() => {}, 1000); });
+        writeFileSync(${JSON.stringify(pidfile)}, JSON.stringify(captureProcess(process.pid)));
+        await new Promise(resolve => setTimeout(resolve, 6000));
       }`,
     );
     t.after(async () => {
-      if (existsSync(pidfile)) await cleanGroup(Number(readFileSync(pidfile, 'utf8')));
+      if (existsSync(pidfile)) await cleanGroup(JSON.parse(readFileSync(pidfile, 'utf8')));
     });
     // It carries a plausible but stale run; it must be rotated before launch.
     writeOwner(join(dir, 'pg-connections-fixture-1.owner.json'), {
@@ -1044,7 +1044,7 @@ for (const job of Object.keys(PARALLEL_JOBS)) {
     assert.ok(Date.now() - started < 9000);
     assert.match(launch.stdout, /::warning.*watcher did not start/);
     assert.equal(stepOwner(dir), null);
-    assert.equal(alive(Number(readFileSync(pidfile, 'utf8')), true), false);
+    assert.equal(alive(JSON.parse(readFileSync(pidfile, 'utf8')).pid, true), false);
     const output = runStep(t, job, 'PostgreSQL connection peak', dir);
     assert.equal(output.status, 0);
     assert.match(output.stdout, /watcher did not start/);
@@ -1090,3 +1090,270 @@ for (const job of Object.keys(PARALLEL_JOBS)) {
     }
   });
 }
+
+// Delayed signals must re-read identity; this models reuse without kernel PID recycling.
+test('identity replaced during the stop wait never receives a signal', () => {
+  const probe = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const realRead = fs.readFileSync;
+    const realKill = process.kill;
+    let ticks = '101';
+    let state = 'S';
+    let pgid = '424242';
+    let ownGroup = false;
+    const signals = [];
+    let identities = 0;
+    fs.readFileSync = (file, ...args) => {
+      if (file === '/proc/424242/stat') {
+        identities++;
+        const fields = Array(20).fill('0');
+        fields[0] = state; fields[2] = pgid; fields[19] = ticks;
+        return '424242 (fixture) ' + fields.join(' ');
+      }
+      if (file === '/proc/424242/cmdline') return 'node\\0ci-pg-connections-watch.mjs\\0';
+      if (ownGroup && file === '/proc/' + process.pid + '/stat') {
+        const stat = realRead(file, ...args);
+        const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+        fields[2] = '424242';
+        return stat.slice(0, stat.lastIndexOf(')') + 2) + fields.join(' ');
+      }
+      return realRead(file, ...args);
+    };
+    process.kill = (pid, signal) => {
+      if (Math.abs(pid) !== 424242) return realKill(pid, signal);
+      if (signal === 0) return true;
+      signals.push([pid, signal, ticks]);
+      ticks = '202';
+    };
+    syncBuiltinESMExports();
+    const { stopWatcher, checkedSignal } = await import(${JSON.stringify(join(ROOT, 'scripts/ci-pg-connections-lib.mjs'))});
+    const result = await stopWatcher({ pid:424242, pgid:424242, ticks:'101' }, { waitMs:50, killWaitMs:50 });
+    ticks = '101'; state = 'Z';
+    const zombie = checkedSignal({ pid:424242, ticks:'101' }, 'SIGKILL', { group:true });
+    state = 'S'; pgid = '77';
+    const nonLeader = checkedSignal({ pid:424242, ticks:'101' }, 'SIGKILL', { group:true });
+    pgid = '424242'; ownGroup = true;
+    const runnerGroup = checkedSignal({ pid:424242, ticks:'101' }, 'SIGKILL', { group:true });
+    console.log(JSON.stringify({ signals, identities, result, zombie, nonLeader, runnerGroup }));
+  `,
+    ],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  assert.equal(probe.status, 0, probe.stderr);
+  const result = JSON.parse(probe.stdout);
+  assert.deepEqual(result.signals, [[424242, 'SIGTERM', '101']]);
+  assert.ok(result.identities >= 2, 'identity checked again after waiting');
+  assert.equal(result.zombie, false);
+  assert.equal(result.nonLeader, false);
+  assert.equal(result.runnerGroup, false);
+  assert.match(result.result, /ownership unverified.*self-expires/);
+  assert.match(probe.stderr, /signal refused/);
+});
+
+test('checked signals refuse stale, dead, unrelated commands and the runner group', async (t) => {
+  const child = spawn('sleep', ['10'], { stdio: 'ignore' });
+  const owner = ownChild(t, child, false);
+  for (const patch of [{ ticks: '0' }, { command: 'unrelated.mjs' }, { pid: process.pid }]) {
+    assert.equal(checkedSignal({ ...owner, ...patch }, 'SIGTERM'), false);
+    assert.ok(alive(child.pid));
+  }
+  assert.equal(checkedSignal(owner, 'SIGKILL', { group: true }), false);
+  assert.ok(alive(child.pid));
+  assert.equal(checkedSignal({ pid: 2147483647, ticks: '1' }, 'SIGKILL'), false);
+});
+
+test('every signal site and fixture finalizer delegates to the checked helper', () => {
+  for (const suffix of ['.test', '-lib', '-start', '-watch', '-report']) {
+    const text = readFileSync(join(ROOT, `scripts/ci-pg-connections${suffix}.mjs`), 'utf8');
+    // Two primitive sites only: the checked helper and the harmless liveness probe.
+    const primitives = text.match(/\b(?:process|child|leader|watcher\.child)\.kill\s*\(/g) ?? [];
+    assert.equal(primitives.length, suffix === '-lib' ? 2 : 0, suffix);
+  }
+  const self = readFileSync(fileURLToPath(import.meta.url), 'utf8').split('// Delayed signals')[0];
+  for (const code of [
+    'if (group) await cleanGroup(owner);',
+    'if (owner) await cleanGroup(owner);',
+    'else await cleanGroup(owner);',
+    "if (existsSync(pidfile)) await cleanGroup(JSON.parse(readFileSync(pidfile, 'utf8')));",
+  ])
+    assert.ok(self.includes(code), code);
+});
+
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGKILL']) {
+  test(`interrupted handshake ${signal}: stop survives refused signals and no query starts after report`, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-pg-interrupt-'));
+    stubPsql(dir);
+    const preload = join(dir, 'delay.mjs');
+    const pidfile = join(dir, 'watcher.json');
+    writeFileSync(
+      preload,
+      `
+      import fs from 'node:fs';
+      import { captureProcess } from '${join(ROOT, 'scripts/ci-pg-connections-lib.mjs')}';
+      if (process.argv[1].endsWith('ci-pg-connections-watch.mjs')) {
+        // Refuse TERM so the persistent stop file is required even if launch cleanup cannot signal.
+        process.on('SIGTERM', () => {});
+        fs.writeFileSync(${JSON.stringify(pidfile)}, JSON.stringify(captureProcess(process.pid)));
+        await new Promise(resolve => setTimeout(resolve, 3200));
+      }
+      // Model ownership becoming unreadable at signal-time in the launcher only.
+      if (process.argv[1].endsWith('ci-pg-connections-start.mjs')) {
+        const read = fs.readFileSync;
+        fs.readFileSync = (path, ...rest) => {
+          if (/^\\/proc\\/\\d+\\/stat$/.test(path) && fs.existsSync(${JSON.stringify(pidfile)})) throw new Error();
+          return read(path, ...rest);
+        };
+        const { syncBuiltinESMExports } = await import('node:module');
+        syncBuiltinESMExports();
+      }
+    `,
+    );
+    const env = watcherEnv(dir, { NODE_OPTIONS: `--import=${preload}` });
+    const launcher = spawn(process.execPath, [join(ROOT, 'scripts/ci-pg-connections-start.mjs')], {
+      env,
+      stdio: 'ignore',
+    });
+    const launcherOwner = ownChild(t, launcher, false);
+    const exited = once(launcher, 'exit');
+    t.after(async () => {
+      if (existsSync(pidfile)) await cleanGroup(JSON.parse(readFileSync(pidfile, 'utf8')));
+    });
+    await waitFor(() => existsSync(pidfile), 5000, 'delayed handshake');
+    assert.equal(checkedSignal(launcherOwner, signal), true);
+    const outcome = await Promise.race([exited, delay(4000).then(() => 'late')]);
+    assert.deepEqual(outcome, signal === 'SIGKILL' ? [null, 'SIGKILL'] : [0, null]);
+    const output = spawnSync(process.execPath, [REPORT], {
+      env: { ...env, NODE_OPTIONS: '' },
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+    assert.equal(output.status, 0, output.stderr);
+    assert.match(output.stdout, /watcher did not start/);
+    const watcher = JSON.parse(readFileSync(pidfile, 'utf8'));
+    await waitFor(() => !alive(watcher.pid, true), 5000, 'delayed watcher self-exit');
+    assert.equal(existsSync(join(dir, 'queries')), false, 'no query starts after report');
+  });
+}
+
+test('dead leader with a live real query: report refuses signals, query self-expires within 6 seconds', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-orphan-'));
+  const silent = await silentServer();
+  t.after(() => silent.close());
+  const watcher = startWatcher(t, realPsqlEnv(dir, silent.port));
+  await waitFor(() => silent.sockets.size > 0, 5000, 'real query connected');
+  const childPids = readFileSync(
+    `/proc/${watcher.child.pid}/task/${watcher.child.pid}/children`,
+    'utf8',
+  )
+    .trim()
+    .split(/\s+/)
+    .map(Number);
+  assert.equal(childPids.length, 1);
+  const query = captureProcess(childPids[0]);
+  assert.ok(alive(query.pid));
+  const started = Date.now();
+  assert.equal(checkedSignal(watcher.owner, 'SIGKILL'), true);
+  await watcher.exited;
+  assert.ok(alive(query.pid), 'query outlives its leader');
+  const output = spawnSync(process.execPath, [REPORT], {
+    env: realPsqlEnv(dir, silent.port),
+    encoding: 'utf8',
+    timeout: 5000,
+  });
+  assert.equal(output.status, 0, output.stderr);
+  assert.match(output.stdout, /ownership unverified.*self-expires within 6 s/);
+  assert.match(output.stdout, /shutdown unconfirmed/);
+  assert.doesNotMatch(output.stdout, /telemetry complete/);
+  await waitFor(
+    () => !alive(query.pid) && silent.sockets.size === 0,
+    6500,
+    'orphan query self-expiry',
+  );
+  assert.ok(Date.now() - started < 6500);
+});
+
+test('watcher absolute lifetime and stop file expire without any external signal', async (t) => {
+  for (const method of ['deadline', 'stop-file', 'already-stopped', 'expired-before-start']) {
+    const dir = mkdtempSync(join(tmpdir(), 'ci-pg-expiry-'));
+    stubPsql(dir);
+    const env = watcherEnv(dir, {
+      PG_CONNECTIONS_DEADLINE: String(
+        Date.now() +
+          (method === 'expired-before-start' ? -1 : method === 'stop-file' ? 10_000 : 350),
+      ),
+    });
+    if (method === 'already-stopped') writeFileSync(`${env.PG_CONNECTIONS_OWNER}.stop`, 'stop');
+    const watcher = startWatcher(t, env);
+    if (method === 'stop-file') {
+      await waitFor(() => records(dir).samples.length >= 1, 3000, 'sample before stop');
+      writeFileSync(`${env.PG_CONNECTIONS_OWNER}.stop`, 'stop');
+    }
+    assert.deepEqual(await Promise.race([watcher.exited, delay(2000).then(() => 'late')]), [
+      0,
+      null,
+    ]);
+    assert.equal(alive(watcher.child.pid, true), false);
+    if (['already-stopped', 'expired-before-start'].includes(method))
+      assert.equal(existsSync(join(dir, 'queries')), false);
+  }
+});
+
+test('every limits and sample query carries independent expiry despite inherited disabling options', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-budgets-'));
+  stubPsql(dir);
+  const bin = join(dir, 'psql');
+  writeFileSync(
+    bin,
+    readFileSync(bin, 'utf8').replace(
+      'case "$*" in',
+      `printf '%s|%s\\n' "$PGCONNECT_TIMEOUT" "$PGOPTIONS" >> '${dir}/budgets'\ncase "$*" in`,
+    ),
+  );
+  const env = watcherEnv(dir, { PGCONNECT_TIMEOUT: '0', PGOPTIONS: '-c statement_timeout=0' });
+  const watcher = startWatcher(t, env);
+  await waitFor(() => records(dir).samples.length >= 2, 4000, 'limits and two samples');
+  await termAndCheck(watcher, 5000);
+  const budgets = readFileSync(join(dir, 'budgets'), 'utf8').trim().split('\n');
+  assert.ok(budgets.length >= 3);
+  assert.ok(
+    budgets.every((row) => row === '3|-c statement_timeout=3000'),
+    budgets.join('\n'),
+  );
+});
+
+test('default watcher lifetime caps an inherited future deadline at 30 minutes', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ci-pg-cap-'));
+  stubPsql(dir);
+  const preload = join(dir, 'timer.mjs');
+  writeFileSync(
+    preload,
+    `
+    import { writeFileSync } from 'node:fs';
+    const timer = globalThis.setTimeout;
+    globalThis.setTimeout = (callback, ms, ...args) => {
+      if (ms > 60_000) {
+        writeFileSync('${dir}/lifetime', String(ms));
+        return timer(callback, 350, ...args);
+      }
+      return timer(callback, ms, ...args);
+    };
+  `,
+  );
+  const watcher = startWatcher(
+    t,
+    watcherEnv(dir, {
+      PG_CONNECTIONS_DEADLINE: String(Number.MAX_SAFE_INTEGER),
+      NODE_OPTIONS: `--import=${preload}`,
+    }),
+  );
+  assert.deepEqual(await Promise.race([watcher.exited, delay(2000).then(() => 'late')]), [0, null]);
+  const lifetime = Number(readFileSync(join(dir, 'lifetime'), 'utf8'));
+  assert.ok(lifetime > 1_799_000 && lifetime <= 1_800_000, String(lifetime));
+  assert.equal(alive(watcher.child.pid, true), false);
+});

@@ -70,6 +70,10 @@ export const WARN_MARGIN = 0.2;
 export const TIMING = Object.freeze({
   /** One sample is started every period. */
   periodMs: 1000,
+  connectTimeoutS: 3,
+  statementTimeoutMs: 3000,
+  watcherLifetimeMs: 30 * 60 * 1000,
+  stopPollMs: 100,
   /** A sample vouches for this long after it; time no sample vouches for is unknown. */
   coverMs: 1500,
   /** A psql that has not finished by then is stopped (TERM, then KILL). */
@@ -102,7 +106,52 @@ export const errorCode = (error) =>
 export function processIdentity(pid = process.pid) {
   const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
   const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-  return { pgid: Number(fields[2]), ticks: fields[19] };
+  return { pgid: Number(fields[2]), ticks: fields[19], state: fields[0] };
+}
+
+/** Capture once at spawn; only checkedSignal may authorize a later signal. */
+export function captureProcess(pid, command) {
+  try {
+    return { pid, ...processIdentity(pid), ...(command ? { command } : {}) };
+  } catch {
+    return { pid };
+  }
+}
+
+/** No await/cache between identity verification and signal. A dead leader grants no authority. */
+export function checkedSignal(owner, signal, { group = false } = {}) {
+  try {
+    const { pid, ticks, command } = owner ?? {};
+    if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid || !/^\d+$/.test(ticks))
+      throw new Error();
+    if (command) {
+      const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+      if (!(argv[1] === command || argv[1]?.endsWith(`/${command}`))) throw new Error();
+    }
+    const runnerGroup = processIdentity().pgid;
+    const identity = processIdentity(pid);
+    if (
+      ['Z', 'X'].includes(identity.state) ||
+      identity.ticks !== ticks ||
+      (group && (identity.pgid !== pid || pid === runnerGroup))
+    )
+      throw new Error();
+    process.kill(group ? -pid : pid, signal);
+    return true;
+  } catch {
+    console.error('[pg-connections] signal refused: ownership unverified; relying on self-expiry');
+    return false;
+  }
+}
+
+/** A stop request survives launcher interruption, even before the ownership handshake. */
+export function requestStop(ownerFile) {
+  if (!ownerFile) return;
+  try {
+    writeFileSync(`${ownerFile}.stop`, 'stop\n', { mode: 0o600 });
+  } catch {
+    console.error('[pg-connections] stop file unavailable; relying on self-expiry');
+  }
 }
 
 /** Ownership/status never shares the append-only measurement file. */
@@ -472,6 +521,7 @@ async function until(predicate, ms) {
  */
 export function runBounded(command, args, { env, deadlineMs, termGraceMs, killWaitMs }) {
   const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'ignore'] });
+  const owner = captureProcess(child.pid);
   let stdout = '';
   let exited = false;
   let stopping = null;
@@ -494,10 +544,10 @@ export function runBounded(command, args, { env, deadlineMs, termGraceMs, killWa
     why ??= reason;
     stopping ??= (async () => {
       if (!exited) {
-        child.kill('SIGTERM');
+        checkedSignal(owner, 'SIGTERM');
         const graceOver = delay(termGraceMs).then(() => false);
         if (!(await Promise.race([exit.then(() => true), graceOver]))) {
-          child.kill('SIGKILL');
+          checkedSignal(owner, 'SIGKILL');
           await Promise.race([exit, delay(killWaitMs)]);
         }
       }
@@ -521,7 +571,7 @@ export function runBounded(command, args, { env, deadlineMs, termGraceMs, killWa
     ]);
     return { ok: true, stdout, reason: null };
   });
-  return { pid: child.pid, done, stop: () => stop('stopped') };
+  return { pid: child.pid, owner, done, stop: () => stop('stopped') };
 }
 
 /**
@@ -554,33 +604,13 @@ export async function stopWatcher(recorded, { waitMs, killWaitMs }) {
   const { pid, group } = targets;
   const gone = () => !alive(pid) && (!group || !alive(pid, true));
   if (gone()) return 'already exited';
-  try {
-    const identity = processIdentity(pid);
-    const command = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
-    if (
-      identity.pgid !== pid ||
-      identity.ticks !== recorded.ticks ||
-      !(command[1] === WATCHER_COMMAND || command[1]?.endsWith(`/${WATCHER_COMMAND}`))
-    ) {
-      return 'ownership unverified: not stopped';
-    }
-  } catch {
-    return 'ownership unverified: not stopped';
-  }
-  try {
-    process.kill(pid, 'SIGTERM');
-  } catch {
-    // Exited in between: the wait below sees it.
-  }
+  const owner = { ...recorded, command: WATCHER_COMMAND };
+  const unconfirmed =
+    'ownership unverified: not stopped; query self-expires within 6 s; watcher within 30 min + 4 s';
+  if (!checkedSignal(owner, 'SIGTERM')) return unconfirmed;
   if (await until(gone, waitMs)) return 'stopped';
-  for (const target of group ? [-pid, pid] : [pid]) {
-    try {
-      process.kill(target, 'SIGKILL');
-    } catch {
-      // Already gone.
-    }
-  }
+  if (!checkedSignal(owner, 'SIGKILL', { group })) return unconfirmed;
   return (await until(gone, killWaitMs))
     ? `killed after ${waitMs} ms`
-    : `still present ${killWaitMs} ms after KILL`;
+    : `still present ${killWaitMs} ms after KILL; relying on self-expiry`;
 }

@@ -1,15 +1,49 @@
 #!/usr/bin/env node
-/** Bounded ownership handshake; a timed-out launch cannot query after the report. */
+/** Bounded ownership handshake with the same teardown on errors and interruption. */
 import { spawn } from 'node:child_process';
 import { closeSync, openSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { errorCode, readOwner, TIMING } from './ci-pg-connections-lib.mjs';
+import {
+  captureProcess,
+  checkedSignal,
+  errorCode,
+  readOwner,
+  requestStop,
+  TIMING,
+  WATCHER_COMMAND,
+} from './ci-pg-connections-lib.mjs';
 
 const file = process.env.PG_CONNECTIONS_OWNER;
 let child;
+let owner;
 let log;
+let exited = false;
+let interrupted = false;
+let teardown;
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function stop() {
+  teardown ??= (async () => {
+    requestStop(file);
+    if (child?.pid && !exited) {
+      checkedSignal(owner, 'SIGTERM');
+      await delay(500);
+      if (!exited) checkedSignal(owner, 'SIGKILL', { group: true });
+      const deadline = Date.now() + TIMING.killWaitMs;
+      while (!exited && Date.now() < deadline) await delay(25);
+      child.unref();
+    }
+  })();
+  return teardown;
+}
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  process.on(signal, () => {
+    interrupted = true;
+    void stop();
+  });
+}
 try {
   rmSync(file, { force: true });
+  rmSync(`${file}.stop`, { force: true });
   log = openSync(`${file}.log`, 'w', 0o600);
   child = spawn(
     process.execPath,
@@ -17,10 +51,13 @@ try {
     {
       detached: true,
       stdio: ['ignore', log, log],
-      env: process.env,
+      env: {
+        ...process.env,
+        PG_CONNECTIONS_DEADLINE: String(Date.now() + TIMING.watcherLifetimeMs),
+      },
     },
   );
-  let exited = false;
+  owner = captureProcess(child.pid, WATCHER_COMMAND);
   child.on('exit', () => {
     exited = true;
   });
@@ -28,35 +65,18 @@ try {
     exited = true;
   });
   const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    const owner = readOwner(file, process.env.PG_CONNECTIONS_RUN);
-    if (owner?.pid === child.pid) {
+  while (Date.now() < deadline && !interrupted) {
+    const recorded = readOwner(file, process.env.PG_CONNECTIONS_RUN);
+    if (recorded?.pid === child.pid && recorded.ticks === owner.ticks) {
       child.unref();
       process.exit(0);
     }
     if (exited) break;
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await delay(25);
   }
-  throw { code: 'ETIMEDOUT' };
+  throw { code: interrupted ? 'EINTR' : 'ETIMEDOUT' };
 } catch (error) {
-  if (child?.pid) {
-    // This PID/group is owned by this spawn, independent of the failed handshake.
-    try {
-      process.kill(-child.pid, 'SIGKILL');
-    } catch {
-      /* already exited */
-    }
-    try {
-      child.kill('SIGKILL');
-    } catch {
-      /* already exited */
-    }
-    await Promise.race([
-      new Promise((resolve) => child.once('exit', resolve)),
-      new Promise((resolve) => setTimeout(resolve, TIMING.killWaitMs)),
-    ]);
-    child.unref();
-  }
+  await stop();
   try {
     rmSync(file, { force: true });
   } catch {

@@ -17,6 +17,7 @@ import {
   readSeries,
   readOwner,
   stopWatcher,
+  requestStop,
   summarize,
   TIMING,
 } from './ci-pg-connections-lib.mjs';
@@ -31,6 +32,7 @@ try {
     }
   };
   const ownerFile = process.env.PG_CONNECTIONS_OWNER;
+  requestStop(ownerFile);
   const owner = readOwner(ownerFile, process.env.PG_CONNECTIONS_RUN);
   const stopped = await stopWatcher(owner ?? {}, {
     waitMs: TIMING.stopWaitMs,
