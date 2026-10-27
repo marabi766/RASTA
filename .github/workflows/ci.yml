@@ -1604,12 +1604,11 @@ jobs:
       - name: Watch PostgreSQL connections
         # Samples pg_stat_activity once a second in the background until the
         # report step below stops it (scripts/ci-pg-connections-lib.mjs).
-        # `setsid`: the watcher leads its own process group, so the report
-        # step can end it and any psql it started, whatever state it is in.
+        # The launcher waits for independent ownership (at most 5 s). Its
+        # detached watcher leads a group the always() report can stop.
         timeout-minutes: 2
         run: |
-          setsid nohup node scripts/ci-pg-connections-watch.mjs \
-            > "${RUNNER_TEMP}/pg-connections-watch.log" 2>&1 &
+          node scripts/ci-pg-connections-start.mjs
         env:
           PGHOST: localhost
           PGPORT: '5432'
@@ -1617,6 +1616,8 @@ jobs:
           PGPASSWORD: rasta_ci_password
           PGDATABASE: postgres
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Integration tests
         # Two phases (`scripts/run-test-phases.mjs`): every package's
@@ -1704,6 +1705,8 @@ jobs:
         run: node scripts/ci-pg-connections-report.mjs
         env:
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
           PG_CONTAINER_ID: ${{ job.services.postgres.id }}
 
       - name: Analytics database privilege integration tests
@@ -2086,12 +2089,11 @@ jobs:
       - name: Watch PostgreSQL connections
         # Samples pg_stat_activity once a second in the background until the
         # report step below stops it (scripts/ci-pg-connections-lib.mjs).
-        # `setsid`: the watcher leads its own process group, so the report
-        # step can end it and any psql it started, whatever state it is in.
+        # The launcher waits for independent ownership (at most 5 s). Its
+        # detached watcher leads a group the always() report can stop.
         timeout-minutes: 2
         run: |
-          setsid nohup node scripts/ci-pg-connections-watch.mjs \
-            > "${RUNNER_TEMP}/pg-connections-watch.log" 2>&1 &
+          node scripts/ci-pg-connections-start.mjs
         env:
           PGHOST: localhost
           PGPORT: '5432'
@@ -2099,6 +2101,8 @@ jobs:
           PGPASSWORD: rasta_ci_password
           PGDATABASE: postgres
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Test independence (F-25)
         # Runs every test in maintenance's event-flow suite on its own and
@@ -2260,6 +2264,8 @@ jobs:
         run: node scripts/ci-pg-connections-report.mjs
         env:
           PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
           PG_CONTAINER_ID: ${{ job.services.postgres.id }}
 
   integration-coverage-critical:

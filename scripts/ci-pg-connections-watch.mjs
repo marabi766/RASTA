@@ -2,7 +2,7 @@
 /**
  * Samples PostgreSQL's client sessions once a second until it is stopped,
  * into the file named by PG_CONNECTIONS_SAMPLES (JSON lines: a start record
- * with its pid and process group, the limits, one record per sample or
+ * with its start time, the limits, one record per sample or
  * failed sample, and a stop record). Connects with the standard PG* variables
  * as the cluster's administrator, which may use the reserved superuser slots,
  * so it still gets in when the ceiling is reached.
@@ -11,11 +11,14 @@
  * (runBounded: TERM at its deadline, KILL after a grace). On SIGTERM or SIGINT
  * it stops the psql in flight the same way, waits for it to be gone, records
  * the stop and exits 0, within termGraceMs + killWaitMs. The workflow starts
- * it under `setsid`, so the report step can also end its whole process group.
+ * it in a detached process group, so the report step can also end its whole process group.
  * Reads nothing from its command line. See ci-pg-connections-lib.mjs.
  */
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import {
+  errorCode,
+  processIdentity,
+  writeOwner,
   LIMITS_SQL,
   parseLimits,
   parseSample,
@@ -33,7 +36,7 @@ async function stop() {
   stopping = true;
   wake();
   if (active) await active.stop();
-  record({ stopped: Date.now() });
+  record('stop', { stopped: Date.now() });
   process.exit(0);
 }
 // Installed before the first child exists: no psql can start unwatched.
@@ -46,21 +49,31 @@ if (!file) {
   process.exit(2);
 }
 
-function record(entry) {
-  try {
-    appendFileSync(file, `${JSON.stringify(entry)}\n`);
-  } catch {
-    // A lost line is a stretch without a sample, which the report counts.
-  }
+const ownerFile = process.env.PG_CONNECTIONS_OWNER;
+const owner = { pid: process.pid, ...processIdentity(), run: process.env.PG_CONNECTIONS_RUN };
+// A query is forbidden until independent ownership has been committed atomically.
+try {
+  if (!ownerFile || !owner.run || owner.pgid !== process.pid) throw { code: 'EINVAL' };
+  writeOwner(ownerFile, owner);
+} catch (error) {
+  console.error(`[pg-connections] watcher did not start (${errorCode(error)})`);
+  process.exit(2);
 }
 
-/** This process's group id, from /proc (Linux); null when unreadable. */
-function ownProcessGroup() {
+function record(phase, entry) {
   try {
-    const stat = readFileSync('/proc/self/stat', 'utf8');
-    return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[2]);
-  } catch {
-    return null;
+    appendFileSync(file, `${JSON.stringify(entry)}\n`);
+    return true;
+  } catch (error) {
+    owner.failure ??= { phase, code: errorCode(error) };
+    try {
+      writeOwner(ownerFile, owner);
+    } catch {
+      // The status device may also be full. Missing stop still means incomplete.
+    }
+    console.error(`[pg-connections] append failed (${owner.failure.phase}:${owner.failure.code})`);
+    // Never issue another query after losing the ability to retain its answer.
+    process.exit(0);
   }
 }
 
@@ -76,12 +89,25 @@ async function psql(sql) {
   return result;
 }
 
-writeFileSync(file, '');
-record({ started: Date.now(), pid: process.pid, pgid: ownProcessGroup() });
+try {
+  writeFileSync(file, '');
+} catch (error) {
+  owner.failure = { phase: 'start', code: errorCode(error) };
+  try {
+    writeOwner(ownerFile, owner);
+  } catch {
+    /* report sees missing records */
+  }
+  process.exit(0);
+}
+record('start', { started: Date.now() });
 const limits = await psql(LIMITS_SQL);
 if (!stopping) {
   const parsed = limits.ok ? parseLimits(limits.stdout) : null;
-  record({ limits: parsed, ...(parsed ? {} : { reason: limits.reason ?? 'unreadable' }) });
+  record('limits', {
+    limits: parsed,
+    ...(parsed ? {} : { reason: limits.reason ?? 'unreadable' }),
+  });
 }
 
 while (!stopping) {
@@ -89,7 +115,7 @@ while (!stopping) {
   const result = await psql(SAMPLE_SQL);
   if (stopping) break;
   const parsed = result.ok ? parseSample(result.stdout) : { reason: result.reason };
-  record(parsed.sample ?? { failed: started, reason: parsed.reason });
+  record('sample', parsed.sample ?? { failed: started, reason: parsed.reason });
   await new Promise((resolve) => {
     wake = resolve;
     setTimeout(resolve, Math.max(0, TIMING.periodMs - (Date.now() - started)));

@@ -30,8 +30,15 @@
 // sample, an unreadable line, a stretch with no sample, a watcher that did not
 // record its stop — each is counted and printed, and the run's margin is then
 // "unknown for N s", with a warning. Nothing here fails the job.
+//
+// Ownership is not measurement: before its first query the watcher writes an
+// ownership file (PG_CONNECTIONS_OWNER, temp + rename) naming the run, its
+// pid, process group and start time. It is the only place the report learns
+// what to stop, and where the watcher leaves the reason when a record could
+// not be written (it then stops: no query runs whose answer cannot be kept).
 // -----------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
+import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 
 /**
  * One row per backend group: epoch ms | database | role | state | sessions |
@@ -76,6 +83,52 @@ export const TIMING = Object.freeze({
 });
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** What the watcher's own command line contains; the report signals nothing else. */
+export const WATCHER_COMMAND = 'ci-pg-connections-watch.mjs';
+
+/** The records the watcher appends, in the order it appends them. */
+const PHASES = ['start', 'limits', 'sample', 'stop'];
+
+/**
+ * An error's code when it is a plain errno name (ENOSPC, EACCES …), else
+ * EUNKNOWN: what the logs and the ownership file carry, never a path, a
+ * message or a payload.
+ */
+export const errorCode = (error) =>
+  /^E[A-Z0-9]{1,15}$/.test(String(error?.code ?? '')) ? error.code : 'EUNKNOWN';
+
+/** Linux process identity, including start ticks to reject recycled PIDs. */
+export function processIdentity(pid = process.pid) {
+  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  return { pgid: Number(fields[2]), ticks: fields[19] };
+}
+
+/** Ownership/status never shares the append-only measurement file. */
+export function writeOwner(file, owner) {
+  const temporary = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify(owner), { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
+export function readOwner(file, run) {
+  try {
+    const owner = JSON.parse(readFileSync(file, 'utf8'));
+    if (!run || owner.run !== run || !watcherTargets(owner) || !/^\d+$/.test(owner.ticks)) {
+      return null;
+    }
+    // Never render arbitrary contents of a status file in annotations.
+    if (
+      owner.failure &&
+      (!PHASES.includes(owner.failure.phase) || errorCode(owner.failure) !== owner.failure.code)
+    )
+      return null;
+    return owner;
+  } catch {
+    return null;
+  }
+}
 
 /** `max|superuser reserved|reserved|shared memory` (a psql -At row) into values, or null. */
 export function parseLimits(row) {
@@ -142,13 +195,12 @@ const isLimits = (l) =>
 /**
  * The watcher's file (JSON lines) into a series. Every line that is not one
  * of the watcher's records — a truncated last line, a malformed record — is
- * counted in `unreadable`, and reading goes on.
+ * counted in `unreadable`, and reading goes on. Measurement only: nothing in
+ * it decides what the report signals (that is readOwner's).
  */
 export function readSeries(text) {
   const series = {
     started: null,
-    pid: null,
-    pgid: null,
     limits: null,
     limitsRecorded: false,
     samples: [],
@@ -166,11 +218,8 @@ export function readSeries(text) {
       continue;
     }
     if (row === null || typeof row !== 'object') series.unreadable++;
-    else if (isCount(row.started) && series.started === null) {
-      series.started = row.started;
-      series.pid = isCount(row.pid) ? row.pid : null;
-      series.pgid = isCount(row.pgid) ? row.pgid : null;
-    } else if (
+    else if (isCount(row.started) && series.started === null) series.started = row.started;
+    else if (
       'limits' in row &&
       !series.limitsRecorded &&
       (row.limits === null || isLimits(row.limits))
@@ -237,7 +286,7 @@ const mib = (bytes) => `${Math.round(bytes / 1048576)} MiB`;
  * when the watcher recorded no stop. `memory` is containerMemory()'s result.
  * `warnings` holds one text per `::warning::` the report should print.
  */
-export function summarize(series, { cpus, now, memory = null }) {
+export function summarize(series, { cpus, now, memory = null, ownershipProblem = null }) {
   const lines = [];
   const warnings = [];
   const { limits, samples } = series;
@@ -262,6 +311,8 @@ export function summarize(series, { cpus, now, memory = null }) {
     ) / 1000,
   );
   const problems = [];
+  if (ownershipProblem) problems.push(ownershipProblem);
+  if (samples.length === 0) problems.push('no samples');
   if (series.started === null) problems.push('no start record');
   if (!series.limitsRecorded) problems.push('no limits record');
   else if (limits === null) problems.push('max_connections unreadable');
@@ -470,31 +521,52 @@ export function runBounded(command, args, { env, deadlineMs, termGraceMs, killWa
     ]);
     return { ok: true, stdout, reason: null };
   });
-  return { done, stop: () => stop('stopped') };
+  return { pid: child.pid, done, stop: () => stop('stopped') };
 }
 
 /**
- * What the report may signal for the watcher a series names: its pid, and its
- * process group when it leads one; null unless the pid is an integer above 1
- * (0 and -1 would address this process's group or every process of the user).
+ * What the report may signal: only a positive group leader outside its own
+ * process group. Command and start ticks are checked again before signalling.
  */
-export function watcherTargets({ pid, pgid }) {
-  if (!Number.isSafeInteger(pid) || pid <= 1) return null;
-  return { pid, group: pgid === pid };
+export function watcherTargets({ pid, pgid } = {}) {
+  if (
+    !Number.isSafeInteger(pid) ||
+    pid <= 1 ||
+    pid === process.pid ||
+    !Number.isSafeInteger(pgid) ||
+    pgid <= 1 ||
+    pgid !== pid ||
+    pgid === processIdentity().pgid
+  )
+    return null;
+  return { pid, group: true };
 }
 
 /**
- * Stops the watcher a series names: TERM to its pid, then wait (at most
+ * Stops the watcher its independent ownership record names: TERM to its pid, then wait (at most
  * `waitMs`) until the pid and — when it leads its own process group — the
  * group are gone; whatever is left gets KILL, the group included. Signals
  * only watcherTargets(). Returns what it did.
  */
 export async function stopWatcher(recorded, { waitMs, killWaitMs }) {
   const targets = watcherTargets(recorded);
-  if (!targets) return 'no watcher pid recorded: not stopped';
+  if (!targets) return 'watcher did not start';
   const { pid, group } = targets;
   const gone = () => !alive(pid) && (!group || !alive(pid, true));
   if (gone()) return 'already exited';
+  try {
+    const identity = processIdentity(pid);
+    const command = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+    if (
+      identity.pgid !== pid ||
+      identity.ticks !== recorded.ticks ||
+      !(command[1] === WATCHER_COMMAND || command[1]?.endsWith(`/${WATCHER_COMMAND}`))
+    ) {
+      return 'ownership unverified: not stopped';
+    }
+  } catch {
+    return 'ownership unverified: not stopped';
+  }
   try {
     process.kill(pid, 'SIGTERM');
   } catch {

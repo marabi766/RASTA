@@ -13,7 +13,9 @@ import { readFileSync } from 'node:fs';
 import { availableParallelism, totalmem } from 'node:os';
 import {
   containerMemory,
+  errorCode,
   readSeries,
+  readOwner,
   stopWatcher,
   summarize,
   TIMING,
@@ -28,11 +30,37 @@ try {
       return '';
     }
   };
-  const stopped = await stopWatcher(readSeries(read()), {
+  const ownerFile = process.env.PG_CONNECTIONS_OWNER;
+  const owner = readOwner(ownerFile, process.env.PG_CONNECTIONS_RUN);
+  const stopped = await stopWatcher(owner ?? {}, {
     waitMs: TIMING.stopWaitMs,
     killWaitMs: TIMING.killWaitMs,
   });
   console.log(`[pg-connections] watcher: ${stopped}`);
+  const finalOwner = readOwner(ownerFile, process.env.PG_CONNECTIONS_RUN);
+  // If the status rename also failed (e.g. a full device), use only the
+  // watcher's sanitized code from its captured stderr, never raw log text.
+  let appendFailure = finalOwner?.failure;
+  if (owner && !appendFailure) {
+    try {
+      const match =
+        /^\[pg-connections\] append failed \((start|limits|sample|stop):(E[A-Z0-9]{1,15})\)$/m.exec(
+          readFileSync(`${ownerFile}.log`, 'utf8'),
+        );
+      if (match) appendFailure = { phase: match[1], code: match[2] };
+    } catch {
+      /* unavailable log: missing records still mean incomplete */
+    }
+  }
+  const ownershipProblem = !owner
+    ? 'watcher did not start'
+    : appendFailure
+      ? `append failed (${appendFailure.phase}:${appendFailure.code})`
+      : /not stopped|still present/.test(stopped)
+        ? 'watcher shutdown unconfirmed'
+        : null;
+  if (ownershipProblem)
+    console.log(`::warning title=PostgreSQL connection margin::${ownershipProblem}`);
   const memory = containerMemory(
     process.env.PG_CONTAINER_ID,
     (path) => readFileSync(path, 'utf8').trim(),
@@ -42,13 +70,12 @@ try {
     cpus: availableParallelism(),
     now: Date.now(),
     memory,
+    ownershipProblem,
   });
   for (const line of lines) console.log(line);
   for (const text of warnings) console.log(`::warning title=PostgreSQL connection margin::${text}`);
 } catch (error) {
-  console.log(
-    `[pg-connections] the report itself failed (${error?.name ?? 'error'}): margin unknown`,
-  );
+  console.log(`[pg-connections] the report itself failed (${errorCode(error)}): margin unknown`);
   console.log(
     '::warning title=PostgreSQL connection margin::the connection report failed: margin unknown',
   );
