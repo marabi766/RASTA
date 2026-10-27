@@ -26,7 +26,18 @@ function sourcesUnder(dir: string): string[] {
   return entries.flatMap((entry) => {
     const path = join(dir, entry);
     if (statSync(path).isDirectory()) {
-      return ['node_modules', 'dist', '.next', 'test', '__tests__', '__fixtures__'].includes(entry)
+      // `generated` is git-ignored codegen (Prisma clients, .gitignore): not
+      // authored here, and another job's `prisma generate` may rewrite it
+      // while this walk reads it (ENOENT, PR #466 run 40490748601).
+      return [
+        'node_modules',
+        'dist',
+        '.next',
+        'generated',
+        'test',
+        '__tests__',
+        '__fixtures__',
+      ].includes(entry)
         ? []
         : sourcesUnder(path);
     }
