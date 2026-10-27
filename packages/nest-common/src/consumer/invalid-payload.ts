@@ -1,10 +1,10 @@
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import {
+  DLQ_REASONS,
+  requireLegacyRefusal,
+  type EventEnvelope,
+  type LegacyRefusal,
+} from '@rasta/contracts';
 import { UnprocessableEventError } from './event-consumer';
-
-/** The shape of a zod error this reads, so no particular zod instance is assumed. */
-interface SchemaIssues {
-  readonly issues: readonly { readonly path: readonly PropertyKey[]; readonly code: string }[];
-}
 
 /** How many issues the message names; the rest are counted. */
 const MAX_NAMED_ISSUES = 5;
@@ -23,26 +23,30 @@ const MAX_NAMED_ISSUES = 5;
  *
  * The message reaches the log and `x-dlq-error`, so it carries identifiers and
  * closed codes only (S-09): the event name and id, and per issue the field
- * path and zod's issue code. A path segment is shown only when it is one of
+ * path and zod's issue code (zod 3's name for it). A path segment is shown only when it is one of
  * `fields` — the names the consumer's schema declares — or an array index;
  * any other segment is a key the payload supplied and is shown as `*`. Zod's
  * issue messages are left out because some repeat the value received.
+ *
+ * `refusal` comes from `legacyParse(schema, envelope.payload)`: the codes are
+ * zod 3's, which dead-letter reasons have always carried, and only the parse
+ * that raised them can say which (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F1). The
+ * count is of those issues, as zod 3 counted them.
  */
 export function invalidPayloadError(
   envelope: Pick<EventEnvelope, 'eventName' | 'eventId'>,
-  error: SchemaIssues,
+  refusal: LegacyRefusal,
   fields: readonly string[],
 ): UnprocessableEventError {
+  const { issues } = requireLegacyRefusal(refusal, 'invalidPayloadError');
   const declared = new Set(fields);
   const segment = (key: PropertyKey): string =>
     typeof key === 'number' || (typeof key === 'string' && declared.has(key)) ? String(key) : '*';
-  const named = error.issues
+  const named = issues
     .slice(0, MAX_NAMED_ISSUES)
     .map((issue) => `${issue.path.map(segment).join('.') || '(root)'} ${issue.code}`);
   const more =
-    error.issues.length > MAX_NAMED_ISSUES
-      ? `; and ${error.issues.length - MAX_NAMED_ISSUES} more`
-      : '';
+    issues.length > MAX_NAMED_ISSUES ? `; and ${issues.length - MAX_NAMED_ISSUES} more` : '';
   return new UnprocessableEventError(
     DLQ_REASONS.VALIDATION_FAILED,
     `${envelope.eventName} ${envelope.eventId} payload fails its schema: ${named.join('; ')}${more}`,

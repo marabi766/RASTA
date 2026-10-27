@@ -18,6 +18,8 @@ import {
   isAllowedProducer,
   isDeclaredConsumer,
   isDeclaredTopic,
+  isLegacyRefusal,
+  legacyParse,
   RETRY_TOPIC_SUFFIX,
   type DlqReason,
   type EventEnvelope,
@@ -502,16 +504,8 @@ export class EventConsumer {
     run: ConsumerRun = this.run,
   ): Promise<void> {
     const beat = heartbeat === undefined ? undefined : () => this.beat(heartbeat);
-    let envelope: EventEnvelope;
-
-    try {
-      if (!value) throw new Error('Message has no body');
-      const parsed = eventEnvelopeSchema.parse(JSON.parse(value.toString('utf8')));
-      // `payload` is `unknown` in the schema, which zod infers as optional.
-      // Restating it makes it a present key again — the handler is entitled to
-      // find the property there even when its value is undefined.
-      envelope = { ...parsed, payload: parsed.payload };
-    } catch (error) {
+    const read = readEnvelope(value);
+    if (!read.ok) {
       // Unprocessable by construction — no number of retries changes the bytes.
       //
       // Never the parser's own message (S-09): Node's JSON.parse quotes a
@@ -519,7 +513,7 @@ export class EventConsumer {
       // received value. The log line and the dead-letter header carry fixed
       // text and metadata only; the dead-lettered message keeps the original
       // bytes, which is what it is for.
-      const reason = unparseableReason(error, value);
+      const reason = unparseableReason(read.failure, value);
       const where = `${topic}[${partition}]${offset === undefined ? '' : `@${offset}`}`;
       this.logger.error(`Unparseable message on ${where}: ${reason}`);
       await this.deadLetter(
@@ -533,6 +527,7 @@ export class EventConsumer {
       );
       return;
     }
+    const { envelope } = read;
 
     // ADR-061 § 2, before any handler and before any retry: the producer the
     // envelope names must be allowed on the topic the *broker* delivered it on
@@ -1079,40 +1074,51 @@ export function handlerMessage(error: unknown): string {
 }
 
 /**
- * Why a message could not be read as an event envelope, in words that contain
- * nothing from the message itself: fixed text, the body's size, and — for an
- * envelope that parsed as JSON but failed the schema — each issue's path and
- * zod code. Paths name schema fields (escaped and bounded all the same);
- * messages are left out because some repeat the value received.
+ * The message's bytes as an event envelope, or why not: the `JSON.parse`
+ * error, or the envelope schema's `LegacyRefusal` (from `legacyParse`,
+ * so {@link unparseableReason} names zod 3's codes against the schema that
+ * refused — PR #444 r1 F1).
  */
-export function unparseableReason(error: unknown, value: Buffer | null): string {
-  if (!value) return 'the message has no body';
-  const size = `${value.length} bytes`;
-  if (isZodError(error)) {
-    const issues = error.issues
-      .slice(0, 5)
-      .map((issue) => `${logField(issue.path.join('.') || '(root)', 48)} ${issue.code}`)
-      .join('; ');
-    const more = error.issues.length > 5 ? `; and ${error.issues.length - 5} more` : '';
-    return `the body is not a valid event envelope (${size}): ${issues}${more}`;
+function readEnvelope(
+  value: Buffer | null,
+): { ok: true; envelope: EventEnvelope } | { ok: false; failure: unknown } {
+  try {
+    if (!value) throw new Error('Message has no body');
+    const parsed = legacyParse(eventEnvelopeSchema, JSON.parse(value.toString('utf8')));
+    if (!parsed.success) return { ok: false, failure: parsed.refusal };
+    // `payload` is `unknown` in the schema, which zod infers as optional.
+    // Restating it makes it a present key again — the handler is entitled to
+    // find the property there even when its value is undefined.
+    return { ok: true, envelope: { ...parsed.data, payload: parsed.data.payload } };
+  } catch (error) {
+    return { ok: false, failure: error };
   }
-  if (error instanceof SyntaxError) return `the body is not valid JSON (${size})`;
-  return `the body could not be read (${size}, ${error instanceof Error ? error.name : 'unknown error'})`;
 }
 
 /**
- * A zod validation error, recognised by shape rather than `instanceof`: the
- * envelope schema lives in `@rasta/contracts`, whose zod need not be the same
- * module instance as this package's.
+ * Why a message could not be read as an event envelope, in words that contain
+ * nothing from the message itself: fixed text, the body's size, and — for an
+ * envelope that parsed as JSON but failed the schema — each issue's path and
+ * zod 3 code, from the envelope schema's `LegacyRefusal`. Paths name
+ * schema fields (escaped and bounded all the same); messages are left out
+ * because some repeat the value received. Anything else — a bare zod error
+ * included, which carries no schema to translate against — is described by its
+ * class only.
  */
-function isZodError(
-  error: unknown,
-): error is { issues: { path: (string | number)[]; code: string }[] } {
-  return (
-    error instanceof Error &&
-    error.name === 'ZodError' &&
-    Array.isArray((error as { issues?: unknown }).issues)
-  );
+export function unparseableReason(failure: unknown, value: Buffer | null): string {
+  if (!value) return 'the message has no body';
+  const size = `${value.length} bytes`;
+  if (isLegacyRefusal(failure)) {
+    const { issues } = failure;
+    const named = issues
+      .slice(0, 5)
+      .map((issue) => `${logField(issue.path.join('.') || '(root)', 48)} ${issue.code}`)
+      .join('; ');
+    const more = issues.length > 5 ? `; and ${issues.length - 5} more` : '';
+    return `the body is not a valid event envelope (${size}): ${named}${more}`;
+  }
+  if (failure instanceof SyntaxError) return `the body is not valid JSON (${size})`;
+  return `the body could not be read (${size}, ${failure instanceof Error ? failure.name : 'unknown error'})`;
 }
 
 function describe(error: unknown): string {

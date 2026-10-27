@@ -36,7 +36,6 @@ export const SHARED_INPUTS = [
   /(^|\/)\.dockerignore$/,
   /(^|\/)\.npmrc$/,
   /(^|\/)Dockerfile(?:\.[^/]*)?$/,
-  /(^|\/)\.trivyignore\.services$/,
   /^turbo\.json$/,
   /^scripts\/copy-prisma-client\.mjs$/,
   /^\.github\/workflows\/ci\.yml$/,

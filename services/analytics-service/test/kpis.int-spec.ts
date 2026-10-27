@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { errorEnvelope, expectNotDisclosed } from '@rasta/testing';
 import { PLATFORM_ROLES, createSystemContext, runWithContext } from '@rasta/nest-common';
 import { kpisViewSchema } from '../src/kpis/dto';
 import {
@@ -137,7 +138,10 @@ describe('tenant isolation — B baseline never affects A', () => {
     expect(forB.kpis[0].value).toBe('1');
     expect(forB.kpis[1]).toMatchObject({ status: 'AVAILABLE', value: '777777' });
     const refused = await kpis(actor(a, ['FLEET_MANAGER']), KPI_WINDOW, b).expect(403);
-    expect(JSON.stringify(refused.body)).not.toContain('777777');
+    // B's baseline value is not in the refusal; the envelope's generated values set aside first (#452).
+    expectNotDisclosed(refused.body, ['777777'], {
+      metadata: errorEnvelope({ headers: refused.headers }),
+    });
   });
 
   it('the guarded Prisma model scopes baseline reads as well as the raw API query', async () => {

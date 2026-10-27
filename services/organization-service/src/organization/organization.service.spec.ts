@@ -1,4 +1,5 @@
 import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import { OrganizationService } from './organization.service';
 import { toLabel, type OrganizationRepository } from './organization.repository';
 import { ORGANIZATION_EVENTS } from './events';
@@ -1036,10 +1037,12 @@ describe('contacts', () => {
 
     await runWithContext(context(), () => h.service.addContact(DEH1, contact));
 
-    const serialized = JSON.stringify(h.enqueued[0]?.payload);
-    expect(serialized).not.toContain(contact.phone);
-    expect(serialized).not.toContain(contact.email);
-    expect(serialized).not.toContain(contact.displayName);
+    // The generated contact id has no independent source: keep it searched with the payload.
+    expectNotDisclosed(
+      h.enqueued[0]?.payload,
+      [contact.phone, contact.email, contact.displayName],
+      { input: contact },
+    );
     expect(h.enqueued[0]?.payload).toMatchObject({
       organizationId: DEH1,
       change: 'ADDED',

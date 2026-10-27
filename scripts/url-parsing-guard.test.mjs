@@ -52,6 +52,12 @@ const ALLOWED = Object.freeze([
     reason: 'the reader itself: the native error is discarded, a fixed text is thrown',
   },
   {
+    file: 'packages/contracts/src/common/parsable-url.ts',
+    call: 'new URL(payload.value)',
+    reason:
+      "zod 3's .url() as a schema check: only whether the value parses; the native error is discarded and the issue carries no text of it",
+  },
+  {
     file: 'scripts/verify-migration-reversible-lib.mjs',
     call: 'new URL( `../services/identity-service/prisma/migrations/${MEMBERSHIP_GUARD}/migration.sql`, import.meta.url, )',
     reason: 'a repository file: a constant migration name against import.meta.url',
@@ -445,6 +451,8 @@ test('the command-line contract holds for the repository', () => {
 });
 
 test('every service base URL is read with serviceUrlSchema, and no bare zod .url()', () => {
+  // `.check(parsableUrl())` is zod 3's `.url()` kept under zod 4 (@rasta/contracts).
+
   const configFiles = sourceFiles(ROOT).filter(
     (file) => /^services\/[^/]+\/src\/config\/[^/]+\.ts$/.test(file) && !isTestFile(file),
   );
@@ -454,7 +462,7 @@ test('every service base URL is read with serviceUrlSchema, and no bare zod .url
   for (const file of configFiles) {
     const text = readFileSync(join(ROOT, file), 'utf8');
     for (const match of text.matchAll(
-      /\b([A-Z][A-Z0-9_]*)\s*:\s*z\s*\.\s*string\(\)\s*\.\s*url\(/g,
+      /\b([A-Z][A-Z0-9_]*)\s*:\s*z\s*\.\s*string\(\)\s*\.\s*(?:url\(|check\(\s*parsableUrl\()/g,
     )) {
       zodUrlSettings.add(match[1]);
       if (!(match[1] in ALLOWED_ZOD_URL_SETTINGS)) {
