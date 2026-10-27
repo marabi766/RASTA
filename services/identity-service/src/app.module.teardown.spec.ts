@@ -65,7 +65,10 @@ const stub = () => ({ stop: async () => undefined });
 
 type Worker = 'scanner' | 'consumer' | 'recovery';
 
-async function boot(worker: Worker) {
+async function boot(
+  worker: Worker,
+  options: { kafkaStop?: () => Promise<void>; sibling?: { stop(): Promise<void> } } = {},
+) {
   const log: string[] = [];
   const business = modelledPool('business', log);
   const fence = modelledPool('fence', log);
@@ -90,7 +93,11 @@ async function boot(worker: Worker) {
   const consumer =
     worker === 'consumer'
       ? new KeycloakProjectionConsumer(
-          () => ({ start: async () => undefined, stop: async () => undefined }) as never,
+          () =>
+            ({
+              start: async () => undefined,
+              stop: options.kafkaStop ?? (async () => undefined),
+            }) as never,
           projector,
         )
       : stub();
@@ -109,7 +116,7 @@ async function boot(worker: Worker) {
       { provide: OutboxPurgeScheduler, useValue: stub() },
       { provide: SECURITY_EVENT_RELAY, useValue: stub() },
       { provide: KeycloakFenceSampler, useValue: stub() },
-      { provide: OutboxGauges, useValue: stub() },
+      { provide: OutboxGauges, useValue: options.sibling ?? stub() },
       { provide: KafkaEventPublisher, useValue: stub() },
       // The production coordinator, as AppModule declares it.
       appProvider(OutboxShutdown),
@@ -188,6 +195,43 @@ describe('#458 r2 F2: Nest closes every pool only after every worker that uses i
     },
   );
 
+  it('#458 r3 F7, the reviewer’s trace: Kafka’s disconnect rejects while a sibling worker still drains — DISCONNECT only after WORKER FINISHED, and the consumer still flushed what it owed', async () => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    let log: string[] = [];
+    const booted = await boot('consumer', {
+      kafkaStop: async () => {
+        log.push('STOP REJECTED');
+        throw new Error('Kafka disconnect failed');
+      },
+      sibling: {
+        stop: () =>
+          new Promise<void>((resolve) =>
+            setTimeout(() => {
+              log.push('WORKER FINISHED');
+              resolve();
+            }, 150),
+          ),
+      },
+    });
+    log = booted.log;
+
+    await expect(booted.moduleRef.close()).rejects.toThrow('Kafka disconnect failed');
+
+    const firstDisconnect = log.findIndex((step) => step.startsWith('DISCONNECT'));
+    expect(log.indexOf('STOP REJECTED')).toBeGreaterThan(-1);
+    expect(log.indexOf('WORKER FINISHED')).toBeGreaterThan(log.indexOf('STOP REJECTED'));
+    expect(firstDisconnect).toBeGreaterThan(log.indexOf('WORKER FINISHED'));
+    // The consumer's recovery ran despite the rejection: both owed fences
+    // were written, before any pool closed.
+    expect(log.filter((step) => step.startsWith('COMMIT'))).toHaveLength(2);
+    expect(firstDisconnect).toBeGreaterThan(log.findLastIndex((step) => DATABASE_STEP.test(step)));
+    expect(log.filter((step) => step.startsWith('DISCONNECT')).sort()).toEqual([
+      'DISCONNECT business',
+      'DISCONNECT fence',
+      'DISCONNECT sampler',
+    ]);
+  });
+
   it('the production pool class has no destroy hook of its own for Nest to run beside the coordinator', () => {
     expect('onModuleDestroy' in PrismaService.prototype).toBe(false);
   });
@@ -236,7 +280,7 @@ describe('#458 r2 F2: the projection command’s teardown', () => {
       Date.now() + 1_000,
     );
 
-    expect(left).toEqual({ recoveriesUnwinding: 0, transactionsUnsettled: 0 });
+    expect(left).toEqual({ recoveriesUnwinding: 0, transactionsUnsettled: 0, poolsAbandoned: 0 });
     expect(t.log.slice(0, 3)).toEqual(['BEGIN 1', 'SET', 'COMMIT 1']);
     expect(t.log.slice(3).sort()).toEqual(['DISCONNECT business', 'DISCONNECT fence']);
   });
@@ -257,5 +301,60 @@ describe('#458 r2 F2: the projection command’s teardown', () => {
 
     expect(left.recoveriesUnwinding).toBe(1);
     expect(left.transactionsUnsettled).toBe(1);
+    // The projector waited the whole deadline out: no time was left for
+    // either pool's disconnect, so neither reports drained.
+    expect(left.poolsAbandoned).toBe(2);
+  });
+
+  it('#458 r3 F7: one pool whose close fails never ends the wait for its sibling — the failure comes only after the other pool’s COMMIT and DISCONNECT', async () => {
+    const t = command();
+    const answer = gate();
+    t.business.steps.push({ commit: answer.opened });
+    // A transaction admitted on the business pool, its COMMIT with the
+    // engine, answered in 100 ms.
+    const writing = t.business.pool.transaction((tx) => tx.$executeRawUnsafe('SET LOCAL x = 1'));
+    await new Promise((resolve) => setImmediate(resolve));
+    setTimeout(answer.open, 100);
+    const failing = {
+      stop: async () => {
+        t.log.push('FENCE POOL CLOSE REJECTED');
+        throw new Error('disconnect failed');
+      },
+    };
+
+    const outcome = await tearDownProjectionCommand(
+      { projector: t.projector, pools: [failing, t.business.pool] },
+      Date.now() + 1_000,
+    ).then(
+      () => 'resolved',
+      (error: unknown) => {
+        t.log.push('TEARDOWN REJECTED');
+        return (error as Error).message;
+      },
+    );
+    await writing;
+
+    expect(outcome).toBe('disconnect failed');
+    expect(t.log).toEqual([
+      'BEGIN 1',
+      'SET',
+      'FENCE POOL CLOSE REJECTED',
+      'COMMIT 1',
+      'DISCONNECT business',
+      'TEARDOWN REJECTED',
+    ]);
+  });
+
+  it('#458 r3 F7: a projector whose stop fails still has both pools closed after it, then the failure', async () => {
+    const t = command();
+    jest.spyOn(t.projector, 'stop').mockRejectedValue(new Error('projector stop failed'));
+
+    await expect(
+      tearDownProjectionCommand(
+        { projector: t.projector, pools: [t.fence.pool, t.business.pool] },
+        Date.now() + 1_000,
+      ),
+    ).rejects.toThrow('projector stop failed');
+    expect(t.log.sort()).toEqual(['DISCONNECT business', 'DISCONNECT fence']);
   });
 });

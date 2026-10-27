@@ -96,11 +96,14 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
     try {
       await (this.consumer?.stop({ deadlineAt }) ?? Promise.resolve());
     } finally {
-      // Once the stop returns, the handler it may have abandoned starts
-      // nothing more — before the caller resumes.
+      // Once the stop returns — or fails: a Kafka disconnect that rejects
+      // (#458 r3 F7) — the handler it may have abandoned starts nothing more,
+      // before the caller resumes; and the owed fences and the handlers'
+      // pending transactions are still flushed and waited for, by the
+      // deadline. The failure is rethrown after that, never instead of it.
       this.cancel.abort();
+      await this.recoverOwed(deadlineAt);
     }
-    await this.recoverOwed(deadlineAt);
   }
 
   /**
@@ -108,11 +111,17 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
    * of late writes still owed — one the cancelled handler heard back for
    * after its deadline, or one still unanswered past it (D-070 D). In a scope
    * that carries the deadline (#458 r1 F2): bounded by what is left of it,
-   * refused past it, and cancelled before this returns. Never throws.
+   * refused past it, and cancelled before this returns. Never throws: in the
+   * stop's `finally`, it must not replace the stop's own failure.
    */
   private async recoverOwed(deadlineAt: number | undefined): Promise<void> {
     if (!this.consumerFactory) return;
-    const flushed = await untilDeadline(() => this.projector.recoverOwed(), deadlineAt);
+    const flushed = await untilDeadline(() => this.projector.recoverOwed(), deadlineAt).catch(
+      (error: unknown) => {
+        this.logger.error(`Flushing owed Keycloak write fences failed: ${String(error)}`);
+        return { outcome: 'abandoned' as const, unsettled: 0 };
+      },
+    );
     const owed = flushed.outcome === 'finished' ? flushed.value : -1;
     if (owed !== 0) {
       this.logger.error(

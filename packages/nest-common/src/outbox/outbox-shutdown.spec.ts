@@ -378,6 +378,86 @@ describe('OutboxShutdown', () => {
     });
   });
 
+  describe('a failure never ends a phase early (Codex r3 on #458, F7)', () => {
+    it('a worker that fails while its sibling still drains: the publishers and the databases begin only after the sibling returned, then the failure is rethrown', async () => {
+      const log: string[] = [];
+      let finish!: () => void;
+      const errors: string[] = [];
+      const shutdown = new OutboxShutdown({
+        relay: { stop: async () => undefined },
+        workers: [
+          { stop: async () => Promise.reject(new Error('Kafka disconnect failed')) },
+          {
+            stop: () =>
+              new Promise<void>((resolve) => {
+                finish = () => {
+                  log.push('WORKER FINISHED');
+                  resolve();
+                };
+              }),
+          },
+        ],
+        publishers: [{ stop: async () => void log.push('PUBLISHER CLOSED') }],
+        databases: [{ stop: async () => void log.push('DISCONNECT') }],
+        budgetMs: 5_000,
+        logger: { error: (message: unknown) => void errors.push(String(message)) },
+      });
+
+      const stopping = shutdown.stop();
+      const outcome = stopping.then(
+        () => 'resolved',
+        (error: unknown) => (error as Error).message,
+      );
+      for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+      // The rejected sibling ended nothing: the drain still waits.
+      expect(log).toEqual([]);
+      finish();
+      expect(await outcome).toBe('Kafka disconnect failed');
+      expect(log).toEqual(['WORKER FINISHED', 'PUBLISHER CLOSED', 'DISCONNECT']);
+      expect(errors).toEqual([expect.stringMatching(/phase drain.*Kafka disconnect failed/)]);
+    });
+
+    it('a failure in every phase: each phase still ran to the end, every cause is logged and all are rethrown together', async () => {
+      const closed: string[] = [];
+      const errors: string[] = [];
+      const shutdown = new OutboxShutdown({
+        relay: { stop: async () => Promise.reject(new Error('relay stop failed')) },
+        workers: [{ stop: async () => void closed.push('worker') }],
+        publishers: [
+          { stop: async () => Promise.reject(new Error('producer close failed')) },
+          { stop: async () => void closed.push('publisher') },
+        ],
+        databases: [
+          {
+            stop: () => {
+              throw new Error('pool close threw');
+            },
+          },
+          { stop: async () => void closed.push('pool') },
+        ],
+        budgetMs: 1000,
+        logger: { error: (message: unknown) => void errors.push(String(message)) },
+      });
+
+      const failure = await shutdown.stop().then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect((failure as AggregateError).errors.map((error: Error) => error.message)).toEqual([
+        'relay stop failed',
+        'producer close failed',
+        'pool close threw',
+      ]);
+      expect(closed).toEqual(['worker', 'publisher', 'pool']);
+      expect(errors).toEqual([
+        expect.stringMatching(/phase drain.*relay stop failed/),
+        expect.stringMatching(/phase publishers.*producer close failed/),
+        expect.stringMatching(/phase databases.*pool close threw/),
+      ]);
+    });
+  });
+
   it('refuses a budget that is not a positive integer', () => {
     const relay = { stop: async () => undefined };
     for (const budgetMs of [0, -1, 1.5, Number.NaN]) {

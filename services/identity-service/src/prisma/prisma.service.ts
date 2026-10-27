@@ -4,6 +4,7 @@ import { SERVICE_NAME } from '../config/env';
 import {
   createTenantGuardExtension,
   assertRuntimeRole as assertConnectedRuntimeRole,
+  withinDeadline,
   type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
@@ -51,12 +52,48 @@ export function separatePoolUrl(databaseUrl: string, connections: number, waitSe
   return url.toString();
 }
 
-/** This pool was closed (`PrismaService.stop`): nothing more runs on it. */
+/** This pool is closing or closed (`PrismaService.stop`): it admits no new work. */
 export class PoolClosedError extends Error {
   constructor() {
     super('refused: this database pool is closed');
     this.name = 'PoolClosedError';
   }
+}
+
+/**
+ * What a pool's close reports (#458 r3 F2): `drained` only when every
+ * operation it admitted settled **and** its disconnect returned, both by the
+ * deadline; otherwise `unsettled` says how many admitted operations had not
+ * settled when it stopped waiting — those may still commit.
+ */
+export interface PoolCloseReport {
+  drained: boolean;
+  unsettled: number;
+}
+
+/**
+ * The transaction Prisma runs one operation in, as its query extensions see
+ * it (`__internalParams.transaction`): `batch` for a statement of a batch
+ * `$transaction` (an array of statements) — every statement of one batch
+ * shares its `lock` — and `itx` for a statement of an interactive
+ * transaction. Absent: an autocommit statement.
+ */
+interface OperationTransaction {
+  kind?: string;
+  lock?: object;
+}
+
+/** One batch `$transaction` (an array of statements), admitted or refused as a whole. */
+interface BatchAdmission {
+  refusal?: unknown;
+  /** Settles its tracked entry: the first of its statements to settle. */
+  settle?: () => void;
+}
+
+function transactionOf(params: unknown): OperationTransaction | undefined {
+  const internal = (params as { __internalParams?: { transaction?: OperationTransaction } })
+    .__internalParams;
+  return internal?.transaction;
 }
 
 /**
@@ -66,16 +103,35 @@ export class PoolClosedError extends Error {
  * flushing through it. `OutboxShutdown` closes it (`databases`), once every
  * worker and timer that uses it has returned; the projection command, once
  * its projector stopped. See {@link stop}.
+ *
+ * **One admission point** (#458 r3 F2): every database operation on this
+ * pool — an autocommit statement (an outbox claim or acknowledgement, a fence
+ * release, confirmation, deferral or terminal marking, a repository or gauge
+ * read), every statement of a batch `$transaction` (the security-event
+ * outbox's, an array of statements), an interactive transaction ({@link transaction}) and its
+ * statements, the readiness probe and the role check — is admitted here, in
+ * the client extension or the two methods that use the bare client, and
+ * tracked in {@link admitted} until it settles. Once closing starts, nothing
+ * new is admitted; what was admitted is waited for, by the deadline.
  */
 @Injectable()
 export class PrismaService implements OnModuleInit {
   private readonly logger = new Logger(PrismaService.name);
   private readonly base: PrismaClient;
-  /** Every interactive transaction begun on this pool and not settled yet. */
-  private readonly transactions = new Set<Promise<unknown>>();
-  /** From the start of {@link stop}: no transaction begins any more. */
-  private closing?: Promise<number>;
-  /** Once {@link stop} closed it: no operation at all (no lazy reconnect). */
+  /**
+   * Every operation admitted on this pool and not settled yet: autocommit
+   * statements, batches (one entry each), interactive transactions — their
+   * COMMIT included — and the statements in them.
+   */
+  private readonly admitted = new Set<Promise<unknown>>();
+  /** Each batch's one decision, by the `lock` its statements share. */
+  private readonly batches = new WeakMap<object, BatchAdmission>();
+  /** From the start of {@link stop}: no new work is admitted. */
+  private closing?: Promise<PoolCloseReport>;
+  /**
+   * Once {@link stop} stopped waiting: not even a statement of a transaction
+   * admitted before runs any more (no lazy reconnect).
+   */
   private closed = false;
 
   /** The client every repository uses. Tenant scoping is already applied. */
@@ -102,18 +158,20 @@ export class PrismaService implements OnModuleInit {
   }
 
   private buildClient() {
-    const isClosed = () => this.closed;
-    // First, so it runs before anything else: a cancelled worker starts no
-    // database operation at all (`cancellation.ts`, #402 r2 F2), and nothing
-    // runs on a closed pool — Prisma would otherwise reconnect it.
+    const admit = <T>(transaction: OperationTransaction | undefined, run: () => Promise<T>) =>
+      this.admit(transaction, run);
+    // First, so it runs before anything else — every other extension runs
+    // inside it: a cancelled worker starts no database operation at all
+    // (`cancellation.ts`, #402 r2 F2), nothing new starts on a closing pool,
+    // nothing at all on a closed one — Prisma would otherwise reconnect it —
+    // and everything it lets through is tracked until it settles (#458 r3 F2).
     return this.base
       .$extends({
-        name: 'cancellation-boundary',
+        name: 'admission-boundary',
         query: {
-          $allOperations({ args, query }) {
-            if (isClosed()) throw new PoolClosedError();
-            throwIfCancelled();
-            return query(args);
+          $allOperations(params) {
+            const { args, query } = params;
+            return admit(transactionOf(params), () => query(args));
           },
         },
       })
@@ -127,6 +185,66 @@ export class PrismaService implements OnModuleInit {
           },
         }),
       );
+  }
+
+  /**
+   * The admission point of every operation (#458 r3 F2). A statement of an
+   * interactive transaction belongs to one admitted before the close began,
+   * which is drained, not cut off: it is refused only once the pool is
+   * closed. Anything else — an autocommit statement, a batch — is new work:
+   * refused from the start of the close. A batch is decided once, by its
+   * first statement, for all of them — Prisma sends it only once every one
+   * reached the engine, so a split decision would leave the rest waiting
+   * forever — and tracked as one entry, until the first of its statements
+   * settles: then the engine has answered it, or will never be sent it.
+   */
+  private admit<T>(transaction: OperationTransaction | undefined, run: () => Promise<T>) {
+    if (transaction?.kind === 'batch' && transaction.lock) {
+      return this.admitBatched(transaction.lock, run);
+    }
+    if (transaction?.kind === 'itx' ? this.closed : this.closing) throw new PoolClosedError();
+    throwIfCancelled();
+    return this.track(run());
+  }
+
+  private admitBatched<T>(lock: object, run: () => Promise<T>): Promise<T> {
+    let batch = this.batches.get(lock);
+    if (!batch) {
+      const decided: BatchAdmission = {};
+      try {
+        if (this.closing) throw new PoolClosedError();
+        throwIfCancelled();
+        this.track(new Promise<void>((resolve) => (decided.settle = resolve)));
+      } catch (refusal) {
+        decided.refusal = refusal;
+      }
+      this.batches.set(lock, decided);
+      batch = decided;
+    }
+    if (batch.refusal !== undefined) throw batch.refusal;
+    let result: Promise<T>;
+    try {
+      result = run();
+    } catch (error) {
+      batch.settle?.();
+      throw error;
+    }
+    result.then(batch.settle, batch.settle);
+    return result;
+  }
+
+  /** Tracked in {@link admitted} until it settles. */
+  private track<T>(operation: Promise<T>): Promise<T> {
+    this.admitted.add(operation);
+    const settle = () => void this.admitted.delete(operation);
+    operation.then(settle, settle);
+    return operation;
+  }
+
+  /** On the bare client, so admitted here rather than by the extension. */
+  private admitDirect<T>(run: () => Promise<T>): Promise<T> {
+    if (this.closing) throw new PoolClosedError();
+    return this.track(run());
   }
 
   async onModuleInit(): Promise<void> {
@@ -145,42 +263,66 @@ export class PrismaService implements OnModuleInit {
    * integration suites open owner connections through this class on purpose.
    */
   async assertRuntimeRole(): Promise<void> {
-    const facts = await assertConnectedRuntimeRole(this.base, {
-      service: SERVICE_NAME,
-      runtimeVariable: 'DATABASE_URL_IDENTITY',
-    });
+    const facts = await this.admitDirect(() =>
+      assertConnectedRuntimeRole(this.base, {
+        service: SERVICE_NAME,
+        runtimeVariable: 'DATABASE_URL_IDENTITY',
+      }),
+    );
     this.logger.log(
       `Connected as ${facts.role}: not a superuser or a migrator, owns nothing, no CREATE`,
     );
   }
 
   /**
-   * Closes this pool, by the shutdown's deadline (#458 r2 F2): from now on no
-   * transaction begins on it; every one already begun — a COMMIT in flight
-   * included — is waited for until `deadlineAt`; then nothing runs on it any
-   * more, not even a request still being served (each operation refuses,
-   * {@link PoolClosedError}), and it disconnects. Resolves to how many
-   * transactions had not settled by the deadline — those may still commit —
-   * and logs them as an error: never closed as drained while one is pending.
-   * One close per pool; later calls join it. Named `stop` because that is
-   * what `OutboxShutdown` calls.
+   * Closes this pool, by the shutdown's deadline (#458 r2/r3 F2): from now on
+   * no new work is admitted — no autocommit statement, no batch, no
+   * transaction ({@link PoolClosedError}); every operation already admitted —
+   * a COMMIT in flight included — is waited for until `deadlineAt`; then
+   * nothing runs on it any more, not even a statement of a transaction still
+   * open, and it disconnects, **by what is left of the same deadline**:
+   * Prisma's disconnect itself waits for the query its engine is executing.
+   * Resolves to `drained` only when everything settled and the disconnect
+   * returned in time; otherwise it logs, as an error, how many operations
+   * were still unsettled — those may still commit — and reports not drained:
+   * a close that returns at its deadline never says clean. One close per
+   * pool; later calls join it. Named `stop` because that is what
+   * `OutboxShutdown` calls.
    */
-  stop(options: OutboxStopOptions = {}): Promise<number> {
+  stop(options: OutboxStopOptions = {}): Promise<PoolCloseReport> {
     this.closing ??= this.close(options.deadlineAt);
     return this.closing;
   }
 
-  private async close(deadlineAt: number | undefined): Promise<number> {
-    const unsettled = await settleWithin(this.transactions, deadlineAt);
+  private async close(deadlineAt: number | undefined): Promise<PoolCloseReport> {
+    const unsettled = await settleWithin(this.admitted, deadlineAt);
     this.closed = true;
     if (unsettled > 0) {
       this.logger.error(
-        `Closing a database pool with ${unsettled} transactions unsettled at the shutdown ` +
+        `Closing a database pool with ${unsettled} operations unsettled at the shutdown ` +
           'deadline: they may still commit after this process stopped waiting for them',
       );
     }
-    await this.base.$disconnect();
-    return unsettled;
+    // A disconnect that failed is over, but not a clean close.
+    const disconnected = this.base.$disconnect().then(
+      () => true,
+      (error: unknown) => {
+        this.logger.error(`Database pool disconnect failed: ${String(error)}`);
+        return false;
+      },
+    );
+    const finished =
+      deadlineAt === undefined ||
+      (await withinDeadline(disconnected, deadlineAt - Date.now())) === 'finished';
+    const left = this.admitted.size;
+    if (!finished) {
+      this.logger.error(
+        'Database pool close ABANDONED: its disconnect had not returned by the shutdown ' +
+          `deadline, with ${left} operations still unsettled — they may still commit`,
+      );
+      return { drained: false, unsettled: left };
+    }
+    return { drained: (await disconnected) && unsettled === 0 && left === 0, unsettled: left };
   }
 
   /**
@@ -191,7 +333,7 @@ export class PrismaService implements OnModuleInit {
   async isHealthy(): Promise<boolean> {
     if (this.closing) return false;
     try {
-      await this.base.$queryRaw`SELECT 1`;
+      await this.admitDirect(() => this.base.$queryRaw`SELECT 1`);
       return true;
     } catch {
       return false;
@@ -262,10 +404,7 @@ export class PrismaService implements OnModuleInit {
           );
     // Until it settles, its worker's stop and this pool's close wait for it:
     // a COMMIT handed to the engine is never left pending behind either.
-    this.transactions.add(run);
-    const settle = () => void this.transactions.delete(run);
-    run.then(settle, settle);
-    return trackInScope(run);
+    return trackInScope(this.track(run));
   }
 }
 

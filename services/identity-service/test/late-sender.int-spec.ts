@@ -21,8 +21,14 @@ import {
   keycloakWriteFenceEventsTotal,
 } from '../src/observability/keycloak-projection.metrics';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, databaseUrl, id, newPrisma, tenants } from './helpers';
-import { KeycloakHttpStub, type StubRequest } from './keycloak-http-stub';
+import { asActor, databaseUrl, id, newPrisma, tenants, untilEveryFenceTakenOver } from './helpers';
+import {
+  DEADLINE_FIXTURE_MS,
+  KeycloakHttpStub,
+  SLOW_ROUND_TRIP_MS,
+  SUCCESS_REQUEST_BUDGET_MS,
+  type StubRequest,
+} from './keycloak-http-stub';
 
 /**
  * D-070 option D, against a real PostgreSQL and the real `KeycloakAdminClient`
@@ -52,9 +58,16 @@ import { KeycloakHttpStub, type StubRequest } from './keycloak-http-stub';
  */
 
 const SETTLE_SECONDS = 2;
-const REQUEST_TIMEOUT_MS = 400;
-/** Longer than a request's deadline: what a paused sender's clock moves on by. */
-const PAUSE_MS = REQUEST_TIMEOUT_MS + 1_000;
+/**
+ * The shared client's request budget — every ordinary success path's — and
+ * so its fences' `deadline_at - started_at` (#458 r3 F8): generous, so a slow
+ * runner never turns a success into a timeout. Lateness here is a pause, never
+ * the real clock; only a test about a timeout uses the short fixture
+ * (`short`, {@link DEADLINE_FIXTURE_MS}).
+ */
+const REQUEST_BUDGET_MS = SUCCESS_REQUEST_BUDGET_MS;
+/** Longer than any request's deadline here: what a paused sender's clock moves on by. */
+const PAUSE_MS = REQUEST_BUDGET_MS + 1_000;
 
 describe('D-070 option D: a late sender fences afresh and asks for a projection', () => {
   let prisma: PrismaService;
@@ -65,6 +78,11 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
   let fences: KeycloakWriteFences;
   let projector: KeycloakProjector;
   let service: IdentityService;
+  /**
+   * The explicit short-budget fixture (#458 r3 F8): only for a test about a
+   * timeout — the request that must time out goes through it.
+   */
+  let short: KeycloakProjector;
   /** How far the senders' monotonic clock is ahead of `performance.now`: the pauses so far. */
   let paused = 0;
   const mine = new Set<string>();
@@ -77,12 +95,15 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
     repository = new IdentityRepository(prisma);
     stub = new KeycloakHttpStub();
     await stub.start();
-    keycloak = stub.client(REQUEST_TIMEOUT_MS);
+    keycloak = stub.client(REQUEST_BUDGET_MS);
     fences = new KeycloakWriteFences(fencePool, { monotonicNow: () => performance.now() + paused });
     projector = new KeycloakProjector(repository, keycloak, fences, {
       writeSettleSeconds: SETTLE_SECONDS,
     });
     service = new IdentityService(repository, keycloak, projector);
+    short = new KeycloakProjector(repository, stub.client(DEADLINE_FIXTURE_MS), fences, {
+      writeSettleSeconds: SETTLE_SECONDS,
+    });
   });
 
   afterEach(async () => {
@@ -405,7 +426,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
         expect.objectContaining({
           live: true,
           window: SETTLE_SECONDS,
-          timeout: REQUEST_TIMEOUT_MS / 1000,
+          timeout: REQUEST_BUDGET_MS / 1000,
         }),
       ]);
       expect(fresh[0]!.takeoverAt.getTime()).toBeGreaterThanOrEqual(own!.takeoverAt.getTime());
@@ -421,8 +442,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
         ),
       ).rejects.toMatchObject({ code: 'KEYCLOAK_WRITE_SETTLING' });
 
-      const takeover = Math.max(...record!.rows.map((row) => row.takeoverAt.getTime()));
-      await new Promise((resolve) => setTimeout(resolve, Math.max(0, takeover - Date.now()) + 300));
+      await untilEveryFenceTakenOver(prisma, s.userId);
       await ownScanner().scan();
       expect(await fencesOf(s.userId)).toEqual([]);
       expect(stub.platform(s.keycloakId)).toEqual(await rowsGrant(s.userId));
@@ -434,7 +454,8 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       stub.nextPut('hang');
       pauseNextSender();
 
-      await expect(projector.project(s.userId, 'event')).rejects.toBeDefined();
+      // A request that must time out: the short fixture.
+      await expect(short.project(s.userId, 'event')).rejects.toBeDefined();
 
       expect(late).toEqual([expect.objectContaining({ known: false, written: true })]);
       const fresh = late[0]!.rows.filter((row) => row.attemptId !== late[0]!.late);
@@ -446,7 +467,8 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       const late = recordLateFences();
       stub.nextPut('hang');
 
-      await expect(projector.project(s.userId, 'event')).rejects.toBeDefined();
+      // A request that must time out: the short fixture.
+      await expect(short.project(s.userId, 'event')).rejects.toBeDefined();
       await settleRecoveryProjections(10_000);
 
       // The timer may fire a fraction before the deadline (not late: nothing
@@ -459,13 +481,15 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       expect(rows.every((row) => row.live)).toBe(true);
     });
 
-    it('on time: no fresh fence and no recovery — the deadline is judged on the clock after the reply, not before', async () => {
+    it('on time: no fresh fence and no recovery — the deadline is judged on the clock after the reply, not before — on a slow runner too', async () => {
       const s = await seed([{ in: 'a', roles: ['OPERATOR'] }]);
       const late = recordLateFences();
       const triggers = recordProjections();
       let seenAtKeycloak = 0;
       stub.onPut = async () => {
         seenAtKeycloak = (await fencesOf(s.userId)).length;
+        // A slow round trip (#458 r3 F8): still on time within the budget.
+        await new Promise((resolve) => setTimeout(resolve, SLOW_ROUND_TRIP_MS));
       };
 
       await expect(projector.project(s.userId, 'event')).resolves.toBe('projected');
@@ -727,7 +751,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
             userId: s.userId,
             keycloakId: s.keycloakId,
             operation: 'replace_attributes',
-            timeoutMs: REQUEST_TIMEOUT_MS,
+            timeoutMs: REQUEST_BUDGET_MS,
             settleSeconds: SETTLE_SECONDS,
             transactionTimeoutMs: 5_000,
           }),

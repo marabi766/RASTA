@@ -1,8 +1,8 @@
 import type { IdentityRepository } from '../identity/identity.repository';
-import type { PrismaService } from '../prisma/prisma.service';
+import { PrismaService } from '../prisma/prisma.service';
 import type { KeycloakAdminClient } from './keycloak.client';
 import { settleRecoveryProjections, type KeycloakProjector } from './keycloak.projector';
-import type { KeycloakWriteFences } from './keycloak-write-fence';
+import { FENCE_POOL_CONNECTIONS, type KeycloakWriteFences } from './keycloak-write-fence';
 import { grantsAnything, type PlatformAttributeName } from './platform-attributes';
 
 /**
@@ -127,12 +127,33 @@ export const RECOVERY_SETTLE_MS = 30_000;
 export const RECOVERY_STOP_MS = 5_000;
 
 /**
- * The command's teardown, whatever ended it (#458 r1/r2 F2): its projector
- * stops first — no recovery starts any more, those running are cancelled
- * and waited for, a COMMIT of theirs included — and the pools close last,
- * by the same deadline: each waits for a transaction still in flight, then
- * refuses everything and disconnects. What was still unwinding or unsettled
- * at the deadline is returned, for the command to report unclean.
+ * The command's two pools, as the CLI opens them: the business pool and the
+ * write fences' own (D-069) — so a test holds exactly these to the pool's
+ * close (#458 r3 F2).
+ */
+export function projectionCommandPools(databaseUrl: string): {
+  prisma: PrismaService;
+  fencePool: PrismaService;
+} {
+  return {
+    prisma: new PrismaService(databaseUrl),
+    // The write fences' own pool, as in the service (D-069): the backfill's
+    // projections and orphan repairs are fenced like every other writer.
+    fencePool: new PrismaService(databaseUrl, { connections: FENCE_POOL_CONNECTIONS }),
+  };
+}
+
+/**
+ * The command's teardown, whatever ended it (#458 r1/r2/r3 F2, r3 F7): its
+ * projector stops first — no recovery starts any more, those running are
+ * cancelled and waited for, a COMMIT of theirs included — and the pools close
+ * last, by the same deadline: each refuses new work, waits for what it
+ * admitted, then disconnects within what is left. Each step waits for
+ * **every** participant to settle, a failed one included, before the next
+ * begins — a pool whose close fails never ends the wait for its sibling — and
+ * every failure is rethrown only then (`settleAll`). What was still
+ * unwinding, unsettled or abandoned at the deadline is returned, for the
+ * command to report unclean.
  */
 export async function tearDownProjectionCommand(
   deps: {
@@ -140,13 +161,40 @@ export async function tearDownProjectionCommand(
     pools: ReadonlyArray<Pick<PrismaService, 'stop'>>;
   },
   deadlineAt: number,
-): Promise<{ recoveriesUnwinding: number; transactionsUnsettled: number }> {
-  const recoveriesUnwinding = (await deps.projector?.stop({ deadlineAt })) ?? 0;
-  const unsettled = await Promise.all(deps.pools.map((pool) => pool.stop({ deadlineAt })));
+): Promise<{ recoveriesUnwinding: number; transactionsUnsettled: number; poolsAbandoned: number }> {
+  const failures: unknown[] = [];
+  const projector = deps.projector;
+  const [stopped] = await settleAll(
+    projector ? [() => projector.stop({ deadlineAt })] : [],
+    failures,
+  );
+  const closed = await settleAll(
+    deps.pools.map((pool) => () => pool.stop({ deadlineAt })),
+    failures,
+  );
+  if (failures.length > 0) {
+    throw failures.length === 1
+      ? failures[0]
+      : new AggregateError(failures, 'the projection command teardown failed');
+  }
   return {
-    recoveriesUnwinding,
-    transactionsUnsettled: unsettled.reduce((sum, count) => sum + count, 0),
+    recoveriesUnwinding: stopped ?? 0,
+    transactionsUnsettled: closed.reduce((sum, close) => sum + (close?.unsettled ?? 0), 0),
+    poolsAbandoned: closed.filter((close) => !close?.drained).length,
   };
+}
+
+/** Starts every one, waits for all of them to settle; a failure is collected, its value undefined. */
+async function settleAll<T>(
+  starts: ReadonlyArray<() => Promise<T>>,
+  failures: unknown[],
+): Promise<Array<T | undefined>> {
+  const settled = await Promise.allSettled(starts.map((start) => start()));
+  return settled.map((outcome) => {
+    if (outcome.status === 'fulfilled') return outcome.value;
+    failures.push(outcome.reason);
+    return undefined;
+  });
 }
 
 export async function runProjectionCommand(

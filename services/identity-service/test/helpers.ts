@@ -150,6 +150,25 @@ export async function databaseNowMs(prisma: PrismaService): Promise<number> {
 }
 
 /**
+ * Waits until every Keycloak write fence of `userId` is past its takeover, on
+ * the database clock the fences were written with (#458 r3 F8) — not a fixed
+ * sleep computed from when the test began: a late sender's fresh fence starts
+ * when its outcome was heard, which a slow runner moves later.
+ */
+export async function untilEveryFenceTakenOver(
+  prisma: PrismaService,
+  userId: string,
+  marginMs = 300,
+): Promise<void> {
+  const rows = await prisma.client.$queryRaw<Array<{ ms: number | null }>>`
+    SELECT (EXTRACT(EPOCH FROM max(takeover_at) - (clock_timestamp() AT TIME ZONE 'UTC'))
+              * 1000)::float8 AS ms
+      FROM keycloak_write_attempt WHERE user_id = ${userId}`;
+  const leftMs = Math.max(0, rows[0]?.ms ?? 0);
+  await new Promise((resolve) => setTimeout(resolve, leftMs + marginMs));
+}
+
+/**
  * Waits, on the database clock, until at least `neededMs` remain in the current
  * aggregation window, so a burst of refusals a test sends next starts with that
  * margin rather than straddling a boundary by chance.

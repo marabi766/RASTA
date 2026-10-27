@@ -16,6 +16,13 @@ import { PrismaService } from '../src/prisma/prisma.service';
  * is logged as DISCONNECT (with the pool's name, if it has one). Every step is
  * logged, so a test can say exactly what reached the "database" and when;
  * pools given one `shared` log write to it in order.
+ *
+ * What it **cannot** prove (#458 r3 F2): anything about the disconnect
+ * itself, or about operations that bypass `PrismaService.transaction`. Its
+ * DISCONNECT returns at once, where Prisma's waits for the query its engine
+ * is executing, and its client has no extension, so autocommit statements
+ * and batches never reach the pool's admission point here. Both are held to
+ * the real Prisma client and engine wrapper in `prisma.service.spec.ts`.
  */
 export interface Step {
   /** Resolves when the connection is free; at most `maxWait` is waited. */
@@ -102,7 +109,8 @@ export function modelledPool(name?: string, shared?: string[]) {
     client,
     base,
     logger: new Logger(PrismaService.name),
-    transactions: new Set(),
+    admitted: new Set(),
+    batches: new WeakMap(),
     closed: false,
   });
   return { pool, log, steps, bounds };

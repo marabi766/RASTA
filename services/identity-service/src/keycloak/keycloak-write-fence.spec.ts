@@ -380,7 +380,7 @@ describe('#458 r2 F2: one budget, and a COMMIT handed to the engine is waited fo
     // Closing: no transaction begins any more.
     expect(() => t.pool.transaction(async () => undefined)).toThrow(/pool is closed/);
     setTimeout(answer.open, 50);
-    expect(await closing).toBe(0);
+    expect(await closing).toEqual({ drained: true, unsettled: 0 });
     await writing;
     expect(t.log).toEqual(['BEGIN 1', 'SET', 'COMMIT 1', 'DISCONNECT']);
   });
@@ -392,9 +392,14 @@ describe('#458 r2 F2: one budget, and a COMMIT handed to the engine is waited fo
     t.steps.push({ commit: answer.opened });
     const writing = t.pool.transaction((tx) => tx.$executeRawUnsafe('SET LOCAL x = 1'));
 
-    expect(await t.pool.stop({ deadlineAt: Date.now() + 50 })).toBe(1);
+    expect(await t.pool.stop({ deadlineAt: Date.now() + 50 })).toEqual({
+      drained: false,
+      unsettled: 1,
+    });
     expect(errors.mock.calls.map(([message]) => String(message))).toEqual([
-      expect.stringMatching(/with 1 transactions unsettled/),
+      expect.stringMatching(/with 1 operations unsettled/),
+      // No time was left for the disconnect: the close is abandoned, loudly.
+      expect.stringMatching(/close ABANDONED.*1 operations still unsettled/),
     ]);
     answer.open();
     await writing;
