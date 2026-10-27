@@ -169,7 +169,7 @@ interface Gateway {
 
 async function startGateway(
   upstream: Upstream,
-  options: Pick<ProxyOptions, 'timeoutMs' | 'failureThreshold' | 'resetAfterMs'>,
+  options: Pick<ProxyOptions, 'timeoutMs' | 'failureThreshold' | 'resetAfterMs' | 'now'>,
 ): Promise<Gateway> {
   const urls = Object.fromEntries(
     SERVICE_NAMES.map((name) => [`${name.toUpperCase()}_SERVICE_URL`, upstream.url]),
@@ -553,41 +553,159 @@ describe('a success counts only once its body is complete', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Client cancellation
+// Client cancellation (#460 r1 F1)
 // ---------------------------------------------------------------------------
 
-describe('a client that goes away frees the probe slot and changes nothing', () => {
-  it.each([
-    ['waiting for the response headers', hold],
-    ['reading the response body', stallBody],
-  ])('while the probe is %s', async (_label, probeBehaviour) => {
-    gateway = await startGateway(upstream, {
-      timeoutMs: 4000,
+describe('a caller that leaves after the probe was sent cannot buy another probe', () => {
+  const DEADLINE_MS = 4000;
+
+  /** A gateway whose breaker clock only moves when the test moves it. */
+  async function frozenGateway() {
+    let clock = 10_000;
+    const started = await startGateway(upstream, {
+      timeoutMs: DEADLINE_MS,
       failureThreshold: 1,
       resetAfterMs: COOLDOWN_MS,
+      now: () => clock,
     });
-    await openThenCool(upstream, gateway);
-    upstream.behaviour = probeBehaviour;
+    upstream.behaviour = crash;
+    expect((await started.send(USERS).answer).status).toBe(503);
+    expect(started.proxy.circuitStates().identity?.state).toBe('OPEN');
+    clock += COOLDOWN_MS;
+    return { gateway: started, advance: (ms: number) => (clock += ms) };
+  }
 
-    const probe = gateway.send(USERS);
-    void probe.answer.catch(() => undefined);
-    await until(() => upstream.exchanges.length === 2, 'the probe');
-    await sleep(50); // the stalled body's headers have reached the gateway
-    probe.abort();
+  /** Sends, waits until the upstream has the request, then hangs up the client. */
+  async function sendAndLeave(gw: Gateway, exchangesBefore: number, wait = 0): Promise<void> {
+    const sent = gw.send(USERS);
+    void sent.answer.catch(() => undefined);
+    await until(() => upstream.exchanges.length === exchangesBefore + 1, 'the probe');
+    if (wait > 0) await sleep(wait);
+    sent.abort();
+    await until(
+      () => upstream.exchanges[exchangesBefore]!.abandoned,
+      'the probe upstream call to be aborted',
+    );
+  }
 
-    // The upstream call is cancelled with the client…
-    await until(() => upstream.exchanges[1]!.abandoned, 'the probe upstream call to be aborted');
-    // …and neither a success nor a failure was recorded.
+  it('20 sequential callers that leave after sending, clock frozen: ONE request reaches the service; the work goes on upstream', async () => {
+    const frozen = await frozenGateway();
+    gateway = frozen.gateway;
+    // The service keeps working after the gateway hangs up — as a payment
+    // transaction would — and records when it is done, and whether the
+    // gateway had already hung up by then.
+    const completed: boolean[] = [];
+    upstream.behaviour = (exchange) =>
+      void setTimeout(() => completed.push(exchange.abandoned), 100);
+
+    await sendAndLeave(gateway, 1);
+    const answers: Answer[] = [];
+    for (let i = 1; i < 20; i += 1) {
+      const sent = gateway.send(USERS);
+      answers.push(await sent.answer);
+      sent.abort(); // the same caller pattern; refused before it could leave
+    }
+    await sleep(QUIET_MS);
+
+    expect(upstream.exchanges).toHaveLength(2); // the opening crash + ONE probe
+    for (const refused of answers) {
+      // Retry-After is the time left to the abandoned probe's deadline.
+      expect(refused).toMatchObject({ status: 503, code: 'UPSTREAM_UNAVAILABLE', retryAfter: '4' });
+    }
+    await until(() => completed.length === 1, 'the upstream work to complete');
+    // The transport was closed first, and the service finished the work anyway.
+    expect(completed).toEqual([true]);
     expect(gateway.proxy.circuitStates().identity).toEqual({
       failures: 1,
       open: false,
       state: 'HALF_OPEN',
     });
+  });
 
+  it.each([
+    ['waiting for the response headers', hold],
+    ['reading the response body', stallBody],
+  ])(
+    'a probe abandoned while %s holds the slot until its deadline, then frees it as neither success nor failure',
+    async (_label, probeBehaviour) => {
+      const frozen = await frozenGateway();
+      gateway = frozen.gateway;
+      upstream.behaviour = probeBehaviour;
+
+      await sendAndLeave(gateway, 1, 50); // 50 ms: a stalled body's headers have arrived
+      expect(gateway.proxy.circuitStates().identity).toEqual({
+        failures: 1,
+        open: false,
+        state: 'HALF_OPEN',
+      });
+
+      upstream.behaviour = ok;
+      frozen.advance(DEADLINE_MS - 1);
+      expect(await gateway.send(USERS).answer).toMatchObject({ status: 503, retryAfter: '1' });
+      expect(upstream.exchanges).toHaveLength(2);
+
+      frozen.advance(1); // the abandoned probe's deadline has passed
+      upstream.behaviour = hold;
+      const next = gateway.send(USERS);
+      await until(() => upstream.exchanges.length === 3, 'one new probe');
+      // Still exactly one in flight: the next caller is refused.
+      expect(await gateway.send(USERS).answer).toMatchObject({ status: 503, retryAfter: '1' });
+      expect(upstream.exchanges).toHaveLength(3);
+
+      answer(upstream.exchanges[2]!.res, 200, { ok: true });
+      expect((await next.answer).status).toBe(200);
+      expect(gateway.proxy.circuitStates().identity?.state).toBe('CLOSED');
+    },
+  );
+
+  /** A 5xx status line and part of its body, then nothing. */
+  const stall5xxBody: Behaviour = ({ res }) => {
+    res.writeHead(503, { 'content-type': 'application/json', 'content-length': '256' });
+    res.write('{"code":"UPSTREAM_UNAVAILABLE",');
+  };
+
+  it('a 5xx status already received when the caller leaves is a failure: the probe re-opens the circuit', async () => {
+    const frozen = await frozenGateway();
+    gateway = frozen.gateway;
+    upstream.behaviour = stall5xxBody;
+
+    await sendAndLeave(gateway, 1, 50);
+    expect(gateway.proxy.circuitStates().identity).toEqual({
+      failures: 2,
+      open: true,
+      state: 'OPEN',
+    });
     upstream.behaviour = ok;
-    expect((await gateway.send(USERS).answer).status).toBe(200); // the next probe
-    expect(upstream.exchanges).toHaveLength(3);
-    expect(gateway.proxy.circuitStates().identity?.state).toBe('CLOSED');
+    expect(await gateway.send(USERS).answer).toMatchObject({ status: 503, retryAfter: '1' });
+    expect(upstream.exchanges).toHaveLength(2); // a fresh cooldown, not a free probe
+  });
+
+  it('a 5xx status already received when the caller leaves counts as a failure while CLOSED', async () => {
+    gateway = await startGateway(upstream, {
+      timeoutMs: DEADLINE_MS,
+      failureThreshold: 5,
+      resetAfterMs: 60_000,
+    });
+    upstream.behaviour = stall5xxBody;
+    await sendAndLeave(gateway, 0, 50);
+    expect(gateway.proxy.circuitStates().identity).toEqual({
+      failures: 1,
+      open: false,
+      state: 'CLOSED',
+    });
+  });
+
+  it('a caller that leaves after sending, while CLOSED, records nothing (residual)', async () => {
+    gateway = await startGateway(upstream, {
+      timeoutMs: DEADLINE_MS,
+      failureThreshold: 1,
+      resetAfterMs: 60_000,
+    });
+    upstream.behaviour = hold;
+    await sendAndLeave(gateway, 0);
+    expect(gateway.proxy.circuitStates().identity).toBeUndefined();
+    upstream.behaviour = ok;
+    expect((await gateway.send(USERS).answer).status).toBe(200);
   });
 });
 

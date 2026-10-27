@@ -17,7 +17,12 @@ import {
   type ServiceUrls,
   type UpstreamDeadlineRoute,
 } from '../config/routes';
-import { CircuitBreakers, type CircuitOutcome, type CircuitStateView } from './circuit-breaker';
+import {
+  CircuitBreakers,
+  type CircuitOutcome,
+  type CircuitPermit,
+  type CircuitStateView,
+} from './circuit-breaker';
 
 export { circuitRetryAfterSeconds } from './circuit-breaker';
 
@@ -52,8 +57,11 @@ export interface ProxyRequest {
   /**
    * Aborted when the caller has gone away. Cancels the upstream call wherever
    * it is — before it is sent, waiting for headers, reading the body — and the
-   * request then proves nothing about the service (#381 r4 F2). Without one,
-   * the call runs to its deadline, as before.
+   * request then proves nothing about the service (#381 r4 F2), except that a
+   * 5xx status already received is a failure. Once sent, the service may still
+   * be acting on it: a probe abandoned then keeps the probe slot until its
+   * deadline (#460 r1 F1). Without a signal, the call runs to its deadline, as
+   * before.
    */
   signal?: AbortSignal;
 }
@@ -158,15 +166,19 @@ export class ProxyService {
     const permit = this.circuits.admit(request.service);
     // What this request proved about the service, decided exactly once. Until
     // an answer is complete it proved nothing: a gateway-local fault (token
-    // issuance) or a caller gone away is a `release`.
+    // issuance) or a caller gone away before anything was sent is a `release`.
     let outcome: CircuitOutcome = 'release';
     try {
-      const exchanged = await this.exchange(request);
+      const exchanged = await this.exchange(request, permit);
       outcome = exchanged.outcome;
       return exchanged.response;
     } catch (error) {
       if (error instanceof UpstreamFailure) {
         outcome = 'failure';
+        throw error.reported;
+      }
+      if (error instanceof CallerGoneAfterSending) {
+        outcome = error.outcome;
         throw error.reported;
       }
       throw error;
@@ -182,6 +194,7 @@ export class ProxyService {
    */
   private async exchange(
     request: ProxyRequest,
+    permit: CircuitPermit,
   ): Promise<{ response: ProxyResponse; outcome: CircuitOutcome }> {
     const cancelled = request.signal;
     if (cancelled?.aborted) throw new ClientCancelledError(request.service);
@@ -247,8 +260,13 @@ export class ProxyService {
       controller.abort();
     };
     cancelled?.addEventListener('abort', onCancelled, { once: true });
+    // The status line, once it has arrived: a 5xx is evidence even if its body never is.
+    let status: number | undefined;
 
     try {
+      // From here the service may receive it: a caller leaving is no longer a
+      // `release` (nothing reached the service) but `abandoned`.
+      this.circuits.dispatched(permit, timeoutMs);
       const response = await internalFetch(target, {
         method: request.method,
         headers,
@@ -256,13 +274,15 @@ export class ProxyService {
         signal: controller.signal,
       });
 
+      status = response.status;
       // Nothing is decided on the status line: a 200 whose body then stalls or
       // is cut off is a failure, and a 5xx is judged once its body is in.
       const text = await response.text();
 
       if (response.status >= 500) {
         // A 5xx counts toward the circuit, once. (#381's expected identity
-        // refusals would be the one exception: `release`, never `success`.)
+        // refusals would be the one exception: `release`, never `success` —
+        // and only with the body complete; see the caller-gone branch below.)
         //
         // Parsed once, and only the parsed, allow-listed fields travel. The
         // schema accepting a body says nothing about what else the body held:
@@ -320,10 +340,18 @@ export class ProxyService {
     } catch (error) {
       if (error instanceof UpstreamFailure) throw error;
 
-      // The caller left: the upstream call was cancelled with it, and says
-      // nothing about the service. The service may still have acted on it —
-      // nothing here resends it or tells anyone it did not happen.
-      if (abortedBy === 'caller') throw new ClientCancelledError(request.service);
+      // The caller left: the upstream call was cancelled with it. Cancelling
+      // the transport does not stop the service — it may still be acting on
+      // it, so this is `abandoned`, never `release`, and nothing here resends
+      // it or tells anyone it did not happen. A 5xx status line already
+      // received is a `failure`: without its complete body no exemption
+      // (#381) can be proven, so none is applied — fail closed.
+      if (abortedBy === 'caller') {
+        throw new CallerGoneAfterSending(
+          status !== undefined && status >= 500 ? 'failure' : 'abandoned',
+          new ClientCancelledError(request.service),
+        );
+      }
 
       if (abortedBy === 'deadline') {
         throw new UpstreamFailure(
@@ -473,6 +501,16 @@ export class ProxyService {
 /** Raised inside `exchange` for a failure of the service, carrying what the caller is told. */
 class UpstreamFailure extends Error {
   constructor(readonly reported: RastaError) {
+    super(reported.message);
+  }
+}
+
+/** Raised inside `exchange` when the caller left after the request was sent. */
+class CallerGoneAfterSending extends Error {
+  constructor(
+    readonly outcome: 'abandoned' | 'failure',
+    readonly reported: ClientCancelledError,
+  ) {
     super(reported.message);
   }
 }

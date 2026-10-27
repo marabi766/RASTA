@@ -136,6 +136,52 @@ describe('CircuitBreakers: transitions', () => {
     expect(b.circuits.admit('identity').probe).toBe(true);
   });
 
+  it('an abandoned probe keeps the slot until its own deadline, with Retry-After the time left', () => {
+    const b = breakers();
+    openedAndCooled(b);
+    const probe = b.circuits.admit('identity');
+    b.circuits.dispatched(probe, 4000);
+    b.advance(500);
+    b.circuits.settle(probe, 'abandoned');
+    expect(b.state()).toEqual({ failures: THRESHOLD, open: false, state: 'HALF_OPEN' });
+    expect(refused(() => b.circuits.admit('identity')).retryAfterSeconds).toBe(4); // 3.5 s, up
+    b.advance(2000);
+    expect(refused(() => b.circuits.admit('identity')).retryAfterSeconds).toBe(2); // 1.5 s, up
+    b.advance(1499);
+    expect(refused(() => b.circuits.admit('identity')).retryAfterSeconds).toBe(1); // 1 ms, min 1
+    b.advance(1);
+    const next = b.circuits.admit('identity'); // the deadline has passed
+    expect(next.probe).toBe(true);
+    expect(b.state()).toEqual({ failures: THRESHOLD, open: false, state: 'HALF_OPEN' });
+    expect(refused(() => b.circuits.admit('identity')).retryAfterSeconds).toBe(
+      HALF_OPEN_RETRY_AFTER_SECONDS,
+    );
+    b.circuits.settle(probe, 'success'); // the abandoned one settled once already
+    expect(b.state()?.state).toBe('HALF_OPEN');
+    b.circuits.settle(next, 'success');
+    expect(b.state()?.state).toBe('CLOSED');
+  });
+
+  it('an abandoned probe never marked as sent holds the slot for a full cooldown, not none', () => {
+    const b = breakers();
+    openedAndCooled(b);
+    b.circuits.settle(b.circuits.admit('identity'), 'abandoned');
+    b.advance(RESET_MS - 1);
+    expect(() => b.circuits.admit('identity')).toThrow(RastaError);
+    b.advance(1);
+    expect(b.circuits.admit('identity').probe).toBe(true);
+  });
+
+  it('an abandoned request while CLOSED changes nothing', () => {
+    const b = breakers();
+    b.circuits.settle(b.circuits.admit('identity'), 'failure');
+    const permit = b.circuits.admit('identity');
+    b.circuits.dispatched(permit, 4000);
+    b.circuits.settle(permit, 'abandoned');
+    expect(b.state()).toEqual({ failures: 1, open: false, state: 'CLOSED' });
+    expect(b.circuits.admit('identity').probe).toBe(false);
+  });
+
   it('a release while CLOSED changes nothing', () => {
     const b = breakers();
     b.circuits.settle(b.circuits.admit('identity'), 'failure');
@@ -152,8 +198,8 @@ describe('CircuitBreakers: transitions', () => {
 });
 
 describe('CircuitBreakers: an outcome counts only for the generation and the permit that earned it', () => {
-  it.each(['success', 'failure', 'release'] as const)(
-    'a %s admitted while CLOSED, settled after the circuit opened, changes nothing',
+  it.each(['success', 'failure', 'release', 'abandoned'] as const)(
+    '%s from a request admitted while CLOSED, settled after the circuit opened, changes nothing',
     (outcome) => {
       const b = breakers();
       const stale = b.circuits.admit('identity');
@@ -164,8 +210,8 @@ describe('CircuitBreakers: an outcome counts only for the generation and the per
     },
   );
 
-  it.each(['success', 'failure', 'release'] as const)(
-    'a %s admitted before the probe neither decides nor releases the probe',
+  it.each(['success', 'failure', 'release', 'abandoned'] as const)(
+    '%s from a request admitted before the probe neither decides nor releases the probe',
     (outcome) => {
       const b = breakers();
       const stale = b.circuits.admit('identity');
@@ -179,8 +225,8 @@ describe('CircuitBreakers: an outcome counts only for the generation and the per
     },
   );
 
-  it.each(['success', 'failure', 'release'] as const)(
-    'an earlier probe, already released, cannot %s its successor',
+  it.each(['success', 'failure', 'release', 'abandoned'] as const)(
+    'an earlier probe, already released, cannot settle its successor as %s',
     (outcome) => {
       const b = breakers();
       openedAndCooled(b);
@@ -294,7 +340,11 @@ describe('forward settles its permit on every exit path', () => {
     startedAt: 0,
   };
 
-  /** A proxy whose identity circuit is HALF_OPEN-ready: opened once, cooldown over. */
+  /**
+   * A proxy whose identity circuit is HALF_OPEN-ready: opened once, cooldown
+   * over. Its clock never moves again, so a slot freed here is freed at once —
+   * a `release` before sending, never an `abandoned` waiting out a deadline.
+   */
   async function halfOpenProxy(tokens: Pick<InternalTokenService, 'issue'>) {
     let clock = 0;
     const proxy = new ProxyService(urls, tokens as InternalTokenService, {

@@ -17,8 +17,13 @@ import { circuitStateGauge } from './circuit.metrics';
  *              request is refused fast, `Retry-After` = 1 s. The probe's
  *              success closes the circuit; its failure or timeout opens it
  *              again for a fresh cooldown; a probe that proves nothing
- *              (`release`) frees the slot for the next request and leaves the
- *              circuit exactly as it was.
+ *              before it was sent (`release`) frees the slot for the next
+ *              request and leaves the circuit exactly as it was. A probe whose
+ *              caller left after it was sent (`abandoned`) keeps the slot until
+ *              its own upstream deadline has passed on this breaker's clock —
+ *              the service may still be working on it — and only then frees
+ *              it, again as neither success nor failure (#460 r1 F1). So at
+ *              most ONE sent probe per deadline window, whatever callers do.
  *
  * Three rules keep a response from deciding more than it saw:
  *
@@ -42,15 +47,22 @@ import { circuitStateGauge } from './circuit.metrics';
  * response body is complete: 2xx–4xx `success` (a 4xx is the service
  * answering, not the service failing), 5xx / malformed / truncated / upstream
  * timeout / network error `failure`, client cancellation and gateway-local
- * faults (token issuance) `release`. An expected per-request refusal exempted
- * from counting (#381's identity refusals) is a `release` too: it frees the
- * probe slot without changing the failure state.
+ * faults before the request was sent (token issuance) `release`, client
+ * cancellation after it was sent `abandoned` — unless a 5xx status line had
+ * already arrived, which is a `failure` (fail closed). An expected per-request
+ * refusal exempted from counting (#381's identity refusals) is a `release` too,
+ * once its body is complete: it frees the probe slot without changing the
+ * failure state.
  */
 
 export type CircuitStateName = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 
-/** What one forwarded request proved about its service, decided once. */
-export type CircuitOutcome = 'success' | 'failure' | 'release';
+/**
+ * What one forwarded request proved about its service, decided once.
+ * `release` — nothing outstanding upstream (never sent, or answered in full);
+ * `abandoned` — sent, then the caller left: the upstream work may still run.
+ */
+export type CircuitOutcome = 'success' | 'failure' | 'release' | 'abandoned';
 
 /** One admitted request's right to report on its service's circuit. */
 export interface CircuitPermit {
@@ -86,6 +98,8 @@ export function circuitRetryAfterSeconds(remainingMs: number): number {
 /**
  * `Retry-After` while a probe is in flight. Fixed, not computed: the probe ends
  * within its own deadline, and a refusal costs nothing, so a short wait is right.
+ * While an abandoned probe holds the slot the wait is known — the time left to
+ * its deadline — and that is sent instead.
  */
 export const HALF_OPEN_RETRY_AFTER_SECONDS = 1;
 
@@ -105,6 +119,10 @@ interface Permit extends CircuitPermit {
   /** `failureSeq` when it was admitted. */
   readonly failuresSeen: number;
   settled: boolean;
+  /** Its upstream deadline on this breaker's clock; set when it is sent. */
+  deadlineAt?: number;
+  /** An abandoned probe: the slot stays its own until this time. */
+  heldUntil?: number;
 }
 
 const STATE_VALUE: Record<CircuitStateName, number> = { CLOSED: 0, HALF_OPEN: 1, OPEN: 2 };
@@ -137,12 +155,39 @@ export class CircuitBreakers {
     }
 
     if (circuit.probe) {
-      throw refusal(service, 'circuit-half-open', HALF_OPEN_RETRY_AFTER_SECONDS);
+      const heldUntil = circuit.probe.heldUntil;
+      if (heldUntil === undefined) {
+        throw refusal(service, 'circuit-half-open', HALF_OPEN_RETRY_AFTER_SECONDS);
+      }
+      const remainingMs = heldUntil - this.options.now();
+      if (remainingMs > 0) {
+        throw refusal(
+          service,
+          'circuit-half-open',
+          circuitRetryAfterSeconds(remainingMs),
+          remainingMs,
+        );
+      }
+      // The abandoned probe's deadline has passed: the gateway would have given
+      // up on it by now. Freed as neither success nor failure. Fenced like
+      // every outcome: a transition clears `circuit.probe`, so only the
+      // generation that admitted it can reach here.
+      circuit.probe = null;
+      this.logger.warn(`Circuit for ${service}: the abandoned probe's deadline passed; slot freed`);
     }
     const probe = this.permit(service, circuit, true);
     circuit.probe = probe;
     this.logger.log(`Circuit for ${service} is half-open; probing`);
     return probe;
+  }
+
+  /**
+   * Records that `permit`'s request is being sent, with `deadlineMs` to be
+   * answered. Called immediately before the upstream call: from here on the
+   * caller leaving is `abandoned`, not `release`.
+   */
+  dispatched(permit: CircuitPermit, deadlineMs: number): void {
+    (permit as Permit).deadlineAt = this.options.now() + deadlineMs;
   }
 
   /** Applies what one request proved. Stale, repeated or foreign permits change nothing. */
@@ -158,6 +203,14 @@ export class CircuitBreakers {
       // Only the permit holding the slot decides it (a released probe's
       // successor is in the same generation).
       if (!circuit || circuit.state !== 'HALF_OPEN' || circuit.probe !== own) return;
+      if (outcome === 'abandoned') {
+        // Sent, and the caller left: the service may still be working on it,
+        // so no second probe is sent until this one's deadline has passed.
+        // Never sent through `dispatched`, it has no deadline of its own: a
+        // full cooldown, rather than none.
+        own.heldUntil = own.deadlineAt ?? this.options.now() + this.options.resetAfterMs;
+        return;
+      }
       circuit.probe = null;
       if (outcome === 'success') {
         circuit.failures = 0;
@@ -170,7 +223,8 @@ export class CircuitBreakers {
     }
 
     // A non-probe permit is current only while its circuit is CLOSED: every
-    // other state began with a transition, a new generation.
+    // other state began with a transition, a new generation. `release` and
+    // `abandoned` record nothing here.
     if (outcome === 'success') {
       if (circuit && circuit.failures > 0 && circuit.failureSeq === own.failuresSeen) {
         circuit.failures = 0;
