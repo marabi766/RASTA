@@ -288,6 +288,13 @@ jobs:
         # severity, exit code and ignore files pinned.
         run: pnpm run test:ci-trivy-db
 
+      - name: PostgreSQL connection monitor
+        # The sampler and report that every parallel-suite job prints its
+        # connection peak with (scripts/ci-pg-connections-lib.mjs), and the
+        # wiring: a raised max_connections proven by SHOW, the watcher started
+        # before the first suite, the report always() after it.
+        run: pnpm run test:ci-pg-connections
+
       - name: Grafana dashboard contract
         # The provisioned local `Rasta Audit Evidence` dashboard: stable
         # datasource UID on every query, every alert in the rules file, the
@@ -1278,6 +1285,20 @@ jobs:
     services:
       postgres:
         image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+        # `command` replaces the image's default CMD (GitHub documents
+        # `services.<id>.command`; actionlint 1.7.12 does not know the key yet).
+        # PostgreSQL's default `max_connections` is 100, 3 of them reserved for
+        # superusers. Up to ten packages' suites run at once here, each Prisma
+        # client with a pool of its own and many specs opening several, so
+        # that ceiling was one new pool away from "remaining connection slots
+        # are reserved for roles with the SUPERUSER attribute" in whichever
+        # package asked next (run 40183450262). Sampled locally at 1 Hz (a
+        # lower bound): peaks of 70-73 suite sessions, per-database peaks
+        # summing to 217-225 — a sizing heuristic, not a bound; 300 covers
+        # that sum. Every run prints its own peaks ([pg-connections] lines).
+        # The pools themselves are NOT changed: tests that depend on a pool's
+        # size (the outbox-purge "gives up on a busy pool" proofs) keep it.
+        command: postgres -c max_connections=300
         env:
           POSTGRES_USER: rasta
           POSTGRES_PASSWORD: rasta_ci_password
@@ -1578,6 +1599,41 @@ jobs:
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
+      - name: PostgreSQL connection ceiling
+        # Proves the service's `command` took effect: a default 100 here would
+        # mean the override was ignored, and the suites below would run on the
+        # ceiling this job was changed to leave.
+        timeout-minutes: 2
+        run: |
+          ceiling="$(psql -X -At -c 'SHOW max_connections')"
+          echo "[pg-connections] SHOW max_connections = ${ceiling}"
+          test "${ceiling}" = 300
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+
+      - name: Watch PostgreSQL connections
+        # Samples pg_stat_activity once a second in the background until the
+        # report step below stops it (scripts/ci-pg-connections-lib.mjs).
+        # The launcher waits for independent ownership (at most 5 s). Its
+        # detached watcher leads a group the always() report can stop.
+        timeout-minutes: 2
+        run: |
+          node scripts/ci-pg-connections-start.mjs
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Integration tests
         # Two phases (`scripts/run-test-phases.mjs`): every package's
         # integration suites in parallel, then identity-service's aggregation
@@ -1652,6 +1708,21 @@ jobs:
           # proven by the `clamav-signatures` job.
           DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: '8760'
           REDIS_URL: redis://localhost:6379
+
+      - name: PostgreSQL connection peak
+        # Always, so a run that failed on the ceiling still shows how far over
+        # it went. Stops the watcher first (TERM, at most ~12 s until its
+        # process group is gone, KILL for what is left). Never fails: the
+        # job's verdict is its tests'. Reads the postgres container's memory
+        # from its cgroup.
+        if: always()
+        timeout-minutes: 2
+        run: node scripts/ci-pg-connections-report.mjs
+        env:
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          PG_CONTAINER_ID: ${{ job.services.postgres.id }}
 
       - name: Analytics database privilege integration tests
         timeout-minutes: 5
@@ -1784,6 +1855,20 @@ jobs:
     services:
       postgres:
         image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+        # `command` replaces the image's default CMD (GitHub documents
+        # `services.<id>.command`; actionlint 1.7.12 does not know the key yet).
+        # PostgreSQL's default `max_connections` is 100, 3 of them reserved for
+        # superusers. Up to ten packages' suites run at once here, each Prisma
+        # client with a pool of its own and many specs opening several, so
+        # that ceiling was one new pool away from "remaining connection slots
+        # are reserved for roles with the SUPERUSER attribute" in whichever
+        # package asked next (run 40183450262). Sampled locally at 1 Hz (a
+        # lower bound): peaks of 70-73 suite sessions, per-database peaks
+        # summing to 217-225 — a sizing heuristic, not a bound; 300 covers
+        # that sum. Every run prints its own peaks ([pg-connections] lines).
+        # The pools themselves are NOT changed: tests that depend on a pool's
+        # size (the outbox-purge "gives up on a busy pool" proofs) keep it.
+        command: postgres -c max_connections=300
         env:
           POSTGRES_USER: rasta
           POSTGRES_PASSWORD: rasta_ci_password
@@ -1999,6 +2084,41 @@ jobs:
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
+      - name: PostgreSQL connection ceiling
+        # Proves the service's `command` took effect: a default 100 here would
+        # mean the override was ignored, and the suites below would run on the
+        # ceiling this job was changed to leave.
+        timeout-minutes: 2
+        run: |
+          ceiling="$(psql -X -At -c 'SHOW max_connections')"
+          echo "[pg-connections] SHOW max_connections = ${ceiling}"
+          test "${ceiling}" = 300
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+
+      - name: Watch PostgreSQL connections
+        # Samples pg_stat_activity once a second in the background until the
+        # report step below stops it (scripts/ci-pg-connections-lib.mjs).
+        # The launcher waits for independent ownership (at most 5 s). Its
+        # detached watcher leads a group the always() report can stop.
+        timeout-minutes: 2
+        run: |
+          node scripts/ci-pg-connections-start.mjs
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Test independence (F-25)
         # Runs every test in maintenance's event-flow suite on its own and
         # requires it to pass alone.
@@ -2147,6 +2267,21 @@ jobs:
           RETRY_REPLAY_REQUIRED: 'true'
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
+
+      - name: PostgreSQL connection peak
+        # Always, so a run that failed on the ceiling still shows how far over
+        # it went. Stops the watcher first (TERM, at most ~12 s until its
+        # process group is gone, KILL for what is left). Never fails: the
+        # job's verdict is its tests'. Reads the postgres container's memory
+        # from its cgroup.
+        if: always()
+        timeout-minutes: 2
+        run: node scripts/ci-pg-connections-report.mjs
+        env:
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          PG_CONTAINER_ID: ${{ job.services.postgres.id }}
 
   integration-coverage-critical:
     name: Coverage gates (construction, contract, inventory)
