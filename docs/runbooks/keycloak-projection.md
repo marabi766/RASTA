@@ -151,7 +151,8 @@ now() AND deadline_at < takeover_at AND account_missing_at IS NULL`.
    موفق هیچ سری حصاری صادر نمی‌شود و سن از آغاز نمونه‌گیر شمرده می‌شود: سکوت صفر نیست.
 10. `RastaIdentityKeycloakFenceSamplerMissing` (هشدار، R3-2): identity-service Scrape می‌شود ولی
     `rasta_identity_keycloak_fence_sample_age_seconds` ندارد: نمونه‌گیر اجرا نمی‌شود (سیم‌کشی `app.module.ts` یا نام Metric)، و
-    بندهای ۷ تا ۹ همه خاموش‌اند.
+    بندهای ۷ تا ۹ همه خاموش‌اند. Replicaیی که نمونه‌گیر ندارد (سیم‌کشی‌نشده، آغازنشده یا متوقف) هیچ سنی صادر نمی‌کند، نه صفر
+    (#458 r1 F3): اگر Replicaهای دیگر نمونه بگیرند، این هشدار روشن نمی‌شود و بند ۹ روی همان‌ها سنجیده می‌شود.
 11. **فرستنده‌ی دیرکرده (D-070 گزینه‌ی D).** فرستنده‌ای که نتیجه‌ی نوشتنش را پس از مهلت خودش بفهمد (مکث فرایند، GC، Timeout)
     — هر نتیجه‌ای — یک حصار **تازه** برای کاربر Commit می‌کند و Projection فوری او را می‌خواهد:
     `rasta_identity_keycloak_write_fence_events_total{event="late_reply"}` (پاسخ دیرکرده)، `late_fenced` (حصار تازه نوشته شد)،
@@ -159,6 +160,15 @@ now() AND deadline_at < takeover_at AND account_missing_at IS NULL`.
     `rasta_identity_keycloak_projections_total{trigger="recovery"}`. افزایش `late_reply` یعنی مکث یا تأخیرهایی هم‌اندازه‌ی مهلت:
     همان بررسی بند ۷. هشدار جدا ندارد؛ حصار تازه در بندهای ۷ تا ۹ دیده می‌شود. لاگ «Stopping with N late Keycloak write fences
     unwritten» هنگام توقف یعنی N حصار تازه پیش از خروج نوشته نشد: حصار قدیمی، اگر هنوز Takeover نشده، می‌ماند؛ بندهای ۷ و ۸.
+    «unknown» به جای N یعنی Flush توقف تا مهلت تمام نشد و لغو شد: پس از برگشتن توقف هیچ تراکنشی از آن آغاز یا Commit نمی‌شود
+    (#458 r1 F2). لاگ «N Keycloak recovery projections still unwinding after cancellation» یعنی Projection بازیابی لغو شد و تا مهلت
+    باز نشد؛ کاری به پایگاه داده نمی‌فرستد، و حصار تازه‌اش برای گذر می‌ماند. در گزارش Backfill/Reconcile همین
+    `fences.recoveriesAbandoned` است و گزارش را ناپاک می‌کند: فرمان را دوباره اجرا کن.
+12. `RastaIdentityMembershipLapseBacklogUnknown` (هشدار، #458 r1 F3): identity-service Scrape می‌شود ولی هیچ Replicaیی
+    `rasta_identity_membership_lapse_backlog` تازه ندارد — نمونه‌گیر اجرا نمی‌شود، یا شمارش انقضا (هر ۳۰ ثانیه روی Pool کسب‌وکار)
+    سه دوره پیاپی شکست خورده — پس `RastaIdentityMembershipLapseBacklog` نمی‌تواند روشن شود. لاگ identity-service علت شکست شمارش را
+    می‌گوید (پایگاه داده‌ی کند یا در دسترس نبودن آن، Pool پر). تا بازگشت آن، فهرست انقضاهای عمل‌نشده را مستقیم بخوان:
+    `SELECT id, valid_until FROM membership WHERE valid_until <= now() AND lapse_handled_at IS NULL`.
 
 <a id="registration-approval-orphan"></a>
 

@@ -27,7 +27,17 @@ import {
 } from '../src/keycloak/platform-attributes';
 import { withCancellation } from '../src/prisma/cancellation';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, databaseUrl, id, newFences, newPrisma, tenants, waitFor } from './helpers';
+import {
+  asActor,
+  databaseUrl,
+  id,
+  newFences,
+  newPrisma,
+  pauseSenderAtNextPut,
+  SenderClock,
+  tenants,
+  waitFor,
+} from './helpers';
 import { KeycloakHttpStub, type StubRequest } from './keycloak-http-stub';
 
 /**
@@ -60,6 +70,8 @@ import { KeycloakHttpStub, type StubRequest } from './keycloak-http-stub';
 const SETTLE_SECONDS = 2;
 /** The stub client's request deadline: the fence's `deadline_at - started_at`. */
 const REQUEST_TIMEOUT_MS = 400;
+/** Longer than a request's deadline: how far a paused sender's clock moves on. */
+const PAUSE_MS = REQUEST_TIMEOUT_MS + 1_000;
 /** From a fence's opening until it is no longer live, and a margin. */
 const TAKEOVER_MS = REQUEST_TIMEOUT_MS + SETTLE_SECONDS * 1000 + 300;
 
@@ -77,6 +89,8 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
   let service: IdentityService;
   /** Users this suite made, so its sweeps touch nobody else's fences or lapses. */
   const mine = new Set<string>();
+  /** The senders' monotonic clock: a late timeout is a paused sender, said so (#458 r1 F5). */
+  const senders = new SenderClock();
 
   beforeAll(async () => {
     prisma = newPrisma();
@@ -88,7 +102,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
     stub = new KeycloakHttpStub();
     await stub.start();
     keycloak = stub.client(REQUEST_TIMEOUT_MS);
-    fencing = await newFences();
+    fencing = await newFences(senders);
     projector = new KeycloakProjector(repository, keycloak, fencing.fences, {
       writeSettleSeconds: SETTLE_SECONDS,
     });
@@ -397,6 +411,8 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       );
 
       stub.nextPut('hold');
+      // Paused while its PUT is at Keycloak: its timeout is heard late (D-070 D).
+      pauseSenderAtNextPut(stub, senders, 1500 + PAUSE_MS);
       const first = failure(demoteWith(slowService, s, ['FLEET_MANAGER', 'OPERATOR']));
       await waitFor('the held PUT', async () => (stub.heldCount === 1 ? true : null));
       const second = failure(demote(s, ['OPERATOR']));
@@ -405,7 +421,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       expect(await first).toMatchObject({ status: 503, code: 'KEYCLOAK_UNAVAILABLE' });
       expect(await second).toMatchObject({ status: 503, code: 'KEYCLOAK_WRITE_SETTLING' });
       expect(await events(s.memberships[0]!)).toEqual([]);
-      // Its own, and — its timeout learned past its deadline — a fresh one (D-070 D).
+      // Its own, and — its timeout heard past its deadline — a fresh one (D-070 D).
       expect(await fencesOf(s.userId)).toEqual([
         expect.objectContaining({ live: true }),
         expect.objectContaining({ live: true }),
@@ -446,9 +462,11 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       });
       const scanner = ownScanner(50, undefined, new Set([s.userId]));
       stub.nextPut('hang');
+      pauseSenderAtNextPut(stub, senders, PAUSE_MS);
       await expect(projector.project(s.userId, 'event')).rejects.toBeDefined();
-      // Its timeout was learned past its deadline: a fresh fence beside it,
-      // and a recovery projection of the rows (D-070 D).
+      // Its sender paused at Keycloak, its timeout was heard past its
+      // deadline: a fresh fence beside it, and a recovery projection of the
+      // rows (D-070 D).
       await settleRecoveryProjections(10_000);
       const [old, fresh] = await fencesOf(s.userId);
 
@@ -468,6 +486,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
 
       // A newer attempt, in flight — and its own late sender's fresh fence.
       stub.nextPut('hang');
+      pauseSenderAtNextPut(stub, senders, PAUSE_MS);
       await expect(projector.project(s.userId, 'event')).rejects.toBeDefined();
       await settleRecoveryProjections(10_000);
       const [newer, newerFresh] = await fencesOf(s.userId);
@@ -840,11 +859,13 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
 
       // 1. The first approval's adoption: its disable reaches Keycloak and is held.
       stub.nextPut('hold');
+      pauseSenderAtNextPut(stub, senders, PAUSE_MS);
       await expect(
         reviewer(() => service.approveRegistration(registrationId, {})),
       ).rejects.toBeDefined();
-      // Its own fence, and — its timeout learned past its deadline — a fresh
-      // one for the same account and operation (D-070 D).
+      // Its own fence, and — its sender paused at Keycloak, its timeout heard
+      // past its deadline — a fresh one for the same account and operation
+      // (D-070 D).
       await settleRecoveryProjections(10_000);
       expect(await fencesOf(userId)).toEqual([
         expect.objectContaining({ live: true, operation: 'disable' }),

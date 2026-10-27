@@ -379,15 +379,18 @@ export class KeycloakProjector {
   private readonly logger = new Logger(KeycloakProjector.name);
   /**
    * The application-shutdown owner of every recovery projection this
-   * projector starts (#458 r1 F2): aborted by {@link stop}. A recovery a
-   * request asked for has no signal of its own; this one cancels its
-   * Keycloak calls and refuses every database operation it would start next.
+   * projector starts (#458 r1 F2): aborted by {@link stop}, for good. A
+   * recovery a request asked for has no signal of its own; this one cancels
+   * its Keycloak calls and refuses every database operation it would start
+   * next.
    */
   private readonly recoveryStop = new AbortController();
+  /** The recoveries running now: aborted by {@link cancelRecoveries}, then replaced. */
+  private batch = new AbortController();
   /** The recovery projections this projector started and that have not finished. */
   private readonly running = new Set<Promise<void>>();
   /** The one stop; later calls join it. */
-  private stopping?: Promise<number>;
+  private stopping?: Promise<void>;
 
   constructor(
     private readonly repository: IdentityRepository,
@@ -717,8 +720,8 @@ export class KeycloakProjector {
    * None starts once stopped: the fresh fence stands for it.
    */
   private requestRecovery(userId: string, signal: AbortSignal | undefined): void {
-    const owner = this.recoveryStop.signal;
-    if (owner.aborted) return;
+    if (this.recoveryStop.signal.aborted) return;
+    const owner = AbortSignal.any([this.recoveryStop.signal, this.batch.signal]);
     const cancel = signal ? AbortSignal.any([owner, signal]) : owner;
     const run = withCancellation(owner, () =>
       this.project(userId, KEYCLOAK_PROJECTION_TRIGGERS.RECOVERY, {
@@ -744,42 +747,46 @@ export class KeycloakProjector {
   }
 
   /**
-   * Stops every recovery projection this projector started (#458 r1 F2): an
-   * `OutboxShutdown` worker, by the shutdown's deadline, and the command's
-   * last step before it disconnects. Cancels them at once — their Keycloak
-   * calls aborted, every database operation they would start next refused,
-   * a COMMIT included (`prisma/cancellation.ts`) — and waits for them to
-   * unwind, at most until `deadlineAt`. Resolves to how many are still
-   * unwinding then: cancelled, but with a statement already sent. A recovery
-   * is best-effort — its fresh fence is what is durable, and the sweep
-   * re-asserts from it — so cancelling one loses nothing. One stop per
-   * projector: later calls join it.
+   * Cancels every recovery projection running now (#458 r1 F2) — their
+   * Keycloak calls aborted, every database operation they would start next
+   * refused, a COMMIT included (`prisma/cancellation.ts`) — and waits for
+   * them to unwind, at most until `deadlineAt`. Resolves to how many are
+   * still unwinding then: cancelled, but with a statement already sent. A
+   * recovery is best-effort — its fresh fence is what is durable, and the
+   * sweep re-asserts from it — so cancelling one loses nothing. The
+   * command's step before it counts; a recovery asked for later still runs.
    */
-  stopRecoveries(options: OutboxStopOptions = {}): Promise<number> {
-    this.stopping ??= this.haltRecoveries(options.deadlineAt);
-    return this.stopping;
-  }
-
-  /** {@link stopRecoveries}, as an `OutboxShutdown` worker. */
-  async stop(options: OutboxStopOptions = {}): Promise<void> {
-    await this.stopRecoveries(options);
-  }
-
-  private async haltRecoveries(deadlineAt: number | undefined): Promise<number> {
-    this.recoveryStop.abort();
+  async cancelRecoveries(options: OutboxStopOptions = {}): Promise<number> {
+    const batch = this.batch;
+    this.batch = new AbortController();
+    batch.abort();
     const pending = [...this.running];
     if (pending.length === 0) return 0;
     const all = Promise.all(pending);
-    if (deadlineAt === undefined) await all;
-    else await withinDeadline(all, Math.max(0, deadlineAt - Date.now()));
-    const left = this.running.size;
+    if (options.deadlineAt === undefined) await all;
+    else await withinDeadline(all, Math.max(0, options.deadlineAt - Date.now()));
+    const left = pending.filter((run) => this.running.has(run)).length;
     if (left > 0) {
       this.logger.error(
-        `Stopping with ${left} Keycloak recovery projections still unwinding (D-070 D); ` +
+        `${left} Keycloak recovery projections still unwinding after cancellation (D-070 D); ` +
           'they start nothing more, and their fresh fences keep them for the sweep',
       );
     }
     return left;
+  }
+
+  /**
+   * An `OutboxShutdown` worker, by the shutdown's deadline, and the command's
+   * teardown before it disconnects: no recovery starts any more, and those
+   * running are cancelled ({@link cancelRecoveries}). One stop per
+   * projector: later calls join it.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<void> {
+    this.stopping ??= (async () => {
+      this.recoveryStop.abort();
+      await this.cancelRecoveries(options);
+    })();
+    return this.stopping;
   }
 
   /**

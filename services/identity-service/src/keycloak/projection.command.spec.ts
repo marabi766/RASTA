@@ -40,7 +40,7 @@ describe('runProjectionCommand', () => {
       project,
       reconcile: jest.fn(),
       repairOrphan: jest.fn(),
-      stopRecoveries: noRecoveries(),
+      cancelRecoveries: noRecoveries(),
     };
     const report = await runProjectionCommand('backfill', {
       repository,
@@ -62,7 +62,7 @@ describe('runProjectionCommand', () => {
         activationPending: false,
       })),
       repairOrphan: jest.fn(),
-      stopRecoveries: noRecoveries(),
+      cancelRecoveries: noRecoveries(),
     };
     const report = await runProjectionCommand('reconcile', {
       repository,
@@ -83,7 +83,7 @@ describe('runProjectionCommand', () => {
       }),
       reconcile: jest.fn(),
       repairOrphan: jest.fn(),
-      stopRecoveries: noRecoveries(),
+      cancelRecoveries: noRecoveries(),
     };
     const report = await runProjectionCommand('backfill', {
       repository,
@@ -112,7 +112,7 @@ describe('runProjectionCommand', () => {
       project: jest.fn(),
       reconcile: jest.fn(),
       repairOrphan: jest.fn(async () => 'repaired' as const),
-      stopRecoveries: noRecoveries(),
+      cancelRecoveries: noRecoveries(),
     };
     beforeEach(() => projector.repairOrphan.mockClear());
     const grants = (organizations: string[]) => ({
@@ -282,7 +282,7 @@ describe('runProjectionCommand', () => {
         enabledDivergent: null,
       })),
       repairOrphan: jest.fn(),
-      stopRecoveries: noRecoveries(),
+      cancelRecoveries: noRecoveries(),
     };
     const keycloak = { findAccountByUsername: jest.fn(async () => null) };
     const report = await runProjectionCommand('reconcile', {
@@ -307,7 +307,7 @@ describe('runProjectionCommand', () => {
           userId === 'USR_2' ? { keycloakEnabled: false, platformStatus: 'ACTIVE' } : null,
       })),
       repairOrphan: jest.fn(),
-      stopRecoveries: noRecoveries(),
+      cancelRecoveries: noRecoveries(),
     };
     const keycloak = { findAccountByUsername: jest.fn(async () => null) };
     const report = await runProjectionCommand('reconcile', {
@@ -350,7 +350,7 @@ describe('runProjectionCommand', () => {
         project: jest.fn(async () => 'projected' as const),
         reconcile: jest.fn(),
         repairOrphan: jest.fn(),
-        stopRecoveries: noRecoveries(),
+        cancelRecoveries: noRecoveries(),
       },
       keycloak,
       fences,
@@ -369,8 +369,8 @@ describe('runProjectionCommand', () => {
         return 0;
       }),
     };
-    const stopRecoveries = jest.fn(async (options: { deadlineAt?: number }) => {
-      order.push('stopRecoveries');
+    const cancelRecoveries = jest.fn(async (options: { deadlineAt?: number }) => {
+      order.push('cancelRecoveries');
       expect(options.deadlineAt).toEqual(expect.any(Number));
       return 1;
     });
@@ -380,13 +380,13 @@ describe('runProjectionCommand', () => {
         project: jest.fn(async () => 'projected' as const),
         reconcile: jest.fn(),
         repairOrphan: jest.fn(),
-        stopRecoveries,
+        cancelRecoveries,
       },
       keycloak,
       fences,
     });
     // Stopped first: a cancelled recovery's own late write is owed, and flushed after.
-    expect(order).toEqual(['stopRecoveries', 'recoverOwed']);
+    expect(order).toEqual(['cancelRecoveries', 'recoverOwed']);
     expect(report.fences).toMatchObject({ recoveriesAbandoned: 1, owed: 0, outstanding: 0 });
     expect(isClean(report)).toBe(false);
     expect(isClean({ ...report, fences: { ...report.fences, recoveriesAbandoned: 0 } })).toBe(true);
@@ -446,7 +446,7 @@ describe('runProjectionCommand', () => {
         project,
         reconcile: jest.fn(),
         repairOrphan: jest.fn(),
-        stopRecoveries: noRecoveries(),
+        cancelRecoveries: noRecoveries(),
       };
       const report = await runProjectionCommand('backfill', {
         repository: noAccounts,
@@ -488,7 +488,7 @@ describe('runProjectionCommand', () => {
         project: jest.fn(async () => 'projected' as const),
         reconcile: jest.fn(),
         repairOrphan: jest.fn(),
-        stopRecoveries: noRecoveries(),
+        cancelRecoveries: noRecoveries(),
       };
       const fences = {
         owners: jest.fn(async () => [] as string[]),
@@ -526,7 +526,7 @@ describe('runProjectionCommand', () => {
           project,
           reconcile: jest.fn(),
           repairOrphan: jest.fn(),
-          stopRecoveries: noRecoveries(),
+          cancelRecoveries: noRecoveries(),
         },
         keycloak,
         fences,
@@ -542,7 +542,7 @@ describe('runProjectionCommand', () => {
         project: jest.fn(),
         reconcile: jest.fn(async () => null),
         repairOrphan: jest.fn(),
-        stopRecoveries: noRecoveries(),
+        cancelRecoveries: noRecoveries(),
       };
       const report = await runProjectionCommand('reconcile', {
         repository: noAccounts,

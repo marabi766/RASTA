@@ -12,7 +12,16 @@ import {
   type PlatformAttributes,
 } from '../src/keycloak/platform-attributes';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, id, newFences, newPrisma, tenants, waitFor } from './helpers';
+import {
+  asActor,
+  id,
+  newFences,
+  newPrisma,
+  pauseSenderAtNextPut,
+  SenderClock,
+  tenants,
+  waitFor,
+} from './helpers';
 import { KeycloakHttpStub, type StubRequest } from './keycloak-http-stub';
 
 /**
@@ -46,6 +55,8 @@ import { KeycloakHttpStub, type StubRequest } from './keycloak-http-stub';
 const SETTLE_SECONDS = 2;
 /** The stub client's request deadline (`stub.client()`), the fence's `deadline_at - started_at`. */
 const REQUEST_TIMEOUT_MS = 400;
+/** Longer than a request's deadline: how far a paused sender's clock moves on. */
+const PAUSE_MS = REQUEST_TIMEOUT_MS + 1_000;
 /** From a fence's opening until it is no longer live: deadline + settle, and a margin. */
 const TAKEOVER_MS = REQUEST_TIMEOUT_MS + SETTLE_SECONDS * 1000 + 300;
 
@@ -58,6 +69,8 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
   let service: IdentityService;
   let scanner: MembershipExpiryScanner;
   let fencing: Awaited<ReturnType<typeof newFences>>;
+  /** The senders' monotonic clock: a late timeout is a paused sender, said so (#458 r1 F5). */
+  const senders = new SenderClock();
 
   beforeAll(async () => {
     prisma = newPrisma();
@@ -67,7 +80,7 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
     stub = new KeycloakHttpStub();
     await stub.start();
     keycloak = stub.client(REQUEST_TIMEOUT_MS);
-    fencing = await newFences();
+    fencing = await newFences(senders);
     // Suite hygiene: fences other runs left behind would be re-asserted by
     // this suite's sweeps against a Keycloak that never had their accounts.
     await prisma.client.$executeRawUnsafe('DELETE FROM keycloak_write_attempt');
@@ -337,6 +350,8 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
         memberships: [{ in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] }],
       });
       stub.nextPut('hang');
+      // Paused while its PUT is at Keycloak: its timeout is heard late (D-070 D).
+      pauseSenderAtNextPut(stub, senders, PAUSE_MS);
 
       const error = await failure(demote(s, 0, ['OPERATOR']));
       expect(error).toMatchObject({ status: 503, code: 'KEYCLOAK_UNAVAILABLE' });
@@ -345,7 +360,7 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
         'OPERATOR',
       ]);
       expect(await events(s.memberships[0]!)).toEqual([]);
-      // Its fence stays: the write may still land. Its timeout was learned
+      // Its fence stays: the write may still land. Its timeout was heard
       // past its deadline, so a fresh live fence stands beside it (D-070 D),
       // and the recovery projection wrote the rows as committed — unchanged.
       expect(await settleRecoveryProjections(10_000)).toBe('finished');
@@ -813,11 +828,13 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       // applied it when the client's deadline passes. Aborting it did not
       // cancel it.
       stub.nextPut('hold');
+      pauseSenderAtNextPut(stub, senders, PAUSE_MS);
       await expect(projector.project(s.userId, 'event')).rejects.toMatchObject({
         code: 'UPSTREAM_UNAVAILABLE',
       });
       expect(stub.heldCount).toBe(1);
-      // Its own fence, and — its timeout learned past its deadline — a fresh
+      // Its own fence, and — its sender paused at Keycloak, its timeout heard
+      // past its deadline — a fresh
       // one beside it, and a recovery projection of the rows (D-070 D).
       expect(await settleRecoveryProjections(10_000)).toBe('finished');
       expect(carried(stub.puts(s.keycloakId).at(-1)!)).toEqual(wide);

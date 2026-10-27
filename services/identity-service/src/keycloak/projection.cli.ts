@@ -88,8 +88,9 @@ async function main(): Promise<number> {
   } finally {
     // Whatever ended the command — a thrown error included — no recovery
     // projection of it reaches the database after the disconnect (#458 r1
-    // F2): cancelled and waited for first. Joins the command's own stop.
-    await projector?.stopRecoveries({ deadlineAt: Date.now() + RECOVERY_STOP_MS });
+    // F2): none starts any more, and those running are cancelled and waited
+    // for first.
+    await projector?.stop({ deadlineAt: Date.now() + RECOVERY_STOP_MS });
     await fencePool.onModuleDestroy();
     await prisma.onModuleDestroy();
   }

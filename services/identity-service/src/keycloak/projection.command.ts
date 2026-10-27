@@ -53,7 +53,7 @@ import { grantsAnything, type PlatformAttributeName } from './platform-attribute
  * recovery projection running in the background: before the count, the
  * command waits for those projections (at most {@link RECOVERY_SETTLE_MS}),
  * then **cancels** any still running and waits for them to unwind (at most
- * {@link RECOVERY_STOP_MS}; `KeycloakProjector.stopRecoveries`, #458 r1 F2) —
+ * {@link RECOVERY_STOP_MS}; `KeycloakProjector.cancelRecoveries`, #458 r1 F2) —
  * so none of them reaches the database once the command disconnects; one
  * still unwinding then is reported (`fences.recoveriesAbandoned`, clean only
  * at zero). Then it writes every fresh fence still owed (`fences.owed`, clean
@@ -129,7 +129,10 @@ export async function runProjectionCommand(
   mode: ProjectionCommandMode,
   deps: {
     repository: Pick<IdentityRepository, 'listUserIdsWithAccount' | 'listUsersWithoutAccount'>;
-    projector: Pick<KeycloakProjector, 'project' | 'reconcile' | 'repairOrphan' | 'stopRecoveries'>;
+    projector: Pick<
+      KeycloakProjector,
+      'project' | 'reconcile' | 'repairOrphan' | 'cancelRecoveries'
+    >;
     keycloak: Pick<KeycloakAdminClient, 'findAccountByUsername'>;
     fences: Pick<KeycloakWriteFences, 'owners' | 'counts' | 'recoverOwed'>;
   },
@@ -193,7 +196,7 @@ export async function runProjectionCommand(
   // start nothing more — and waited for to unwind (#458 r1 F2); then their
   // fresh fences written, a cancelled recovery's own late write's included.
   await settleRecoveryProjections(RECOVERY_SETTLE_MS);
-  report.fences.recoveriesAbandoned = await deps.projector.stopRecoveries({
+  report.fences.recoveriesAbandoned = await deps.projector.cancelRecoveries({
     deadlineAt: Date.now() + RECOVERY_STOP_MS,
   });
   report.fences.owed = await deps.fences.recoverOwed();

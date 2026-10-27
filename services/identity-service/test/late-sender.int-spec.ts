@@ -37,8 +37,14 @@ import { KeycloakHttpStub, type StubRequest } from './keycloak-http-stub';
  * monotonic clock (`monotonicNow`, `performance.now` in production) is moved
  * past the deadline while the request is at Keycloak — after the dispatch
  * check passed — and Keycloak answers. A timeout (the request's own timer
- * firing first on resume) is the other way a paused sender can hear back; it
- * runs on the real clock (`nextPut('hang')`).
+ * firing first on resume) is the other way a paused sender can hear back:
+ * the same pause, and Keycloak never answers (`nextPut('hang')`).
+ *
+ * A timeout alone is **not** a late reply (#458 r1 F5): the request's timer
+ * is set to the whole milliseconds left, rounded down, so it may fire a
+ * fraction before the deadline, and an outcome observed then is on time —
+ * the attempt's own fence covers it. So no test here relies on the real
+ * timer to make a sender late: lateness is always a pause, said so.
  *
  * Every narrowing sender is driven through its own entry point: a projection
  * (the consumer's and the request's), an API narrowing's write-ahead, the
@@ -422,16 +428,35 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       expect(stub.platform(s.keycloakId)).toEqual(await rowsGrant(s.userId));
     });
 
-    it('a timeout on the real clock (the request’s own timer fired first): late, unknown — a fresh live fence', async () => {
+    it('a timeout heard after its sender paused at Keycloak (its own timer fires on resume): late, unknown — a fresh live fence', async () => {
       const s = await seed([{ in: 'a', roles: ['OPERATOR'] }]);
       const late = recordLateFences();
       stub.nextPut('hang');
+      pauseNextSender();
 
       await expect(projector.project(s.userId, 'event')).rejects.toBeDefined();
 
       expect(late).toEqual([expect.objectContaining({ known: false, written: true })]);
       const fresh = late[0]!.rows.filter((row) => row.attemptId !== late[0]!.late);
       expect(fresh).toEqual([expect.objectContaining({ live: true, window: SETTLE_SECONDS })]);
+    });
+
+    it('a timeout on the real clock alone is not lateness (#458 r1 F5): a fresh fence exactly when it was observed past the deadline, and its own live fence either way', async () => {
+      const s = await seed([{ in: 'a', roles: ['OPERATOR'] }]);
+      const late = recordLateFences();
+      stub.nextPut('hang');
+
+      await expect(projector.project(s.userId, 'event')).rejects.toBeDefined();
+      await settleRecoveryProjections(10_000);
+
+      // The timer may fire a fraction before the deadline (not late: nothing
+      // more) or after it (late: one fresh fence) — the verdict is the
+      // observation's, and the fences follow it, whichever it was.
+      expect(late.length).toBeLessThanOrEqual(1);
+      expect(late.every((record) => record.written && !record.known)).toBe(true);
+      const rows = await fencesOf(s.userId);
+      expect(rows).toHaveLength(1 + late.length);
+      expect(rows.every((row) => row.live)).toBe(true);
     });
 
     it('on time: no fresh fence and no recovery — the deadline is judged on the clock after the reply, not before', async () => {
@@ -687,6 +712,127 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       stub.releaseHeld();
       await sending;
       await settleRecoveryProjections(10_000);
+      await prisma.client
+        .$executeRaw`DELETE FROM keycloak_write_attempt WHERE user_id = ${s.userId}`;
+    });
+  });
+
+  describe('one lifecycle boundary: nothing of a stop runs after it returned (#458 r1 F2)', () => {
+    it('a stop whose flush waits for a fence connection past its deadline: after the stop returns, no transaction of it begins, inserts or commits — the fence stays owed', async () => {
+      const s = await seed([{ in: 'a', roles: ['OPERATOR'] }]);
+      // A sender still unanswered past its deadline: owed by the next flush.
+      const attempt = await prisma.transaction(
+        (tx) =>
+          fences.open(tx, {
+            userId: s.userId,
+            keycloakId: s.keycloakId,
+            operation: 'replace_attributes',
+            timeoutMs: REQUEST_TIMEOUT_MS,
+            settleSeconds: SETTLE_SECONDS,
+            transactionTimeoutMs: 5_000,
+          }),
+        { timeout: 5_000 },
+      );
+      attempt.assertDispatchable();
+      paused += PAUSE_MS;
+
+      // Every fence connection is busy: the flush's transaction waits.
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      const holders = Array.from({ length: FENCE_POOL_CONNECTIONS }, () =>
+        fencePool.transaction(() => released, { maxWait: 5_000, timeout: 10_000 }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      // What reached the fence pool's transactions, and when.
+      const log: string[] = [];
+      const real = fencePool.transaction.bind(fencePool);
+      jest.spyOn(fencePool, 'transaction').mockImplementation((fn, options) =>
+        real(async (tx) => {
+          log.push('BEGIN');
+          const result = await fn(tx);
+          log.push('CALLBACK DONE');
+          return result;
+        }, options).then((result) => {
+          log.push('COMMIT');
+          return result;
+        }),
+      );
+
+      await ownScanner().stop({ deadlineAt: Date.now() + 300 });
+      log.push('STOP RETURNED');
+      release();
+      await Promise.all(holders);
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+      expect(log).toEqual(['STOP RETURNED']);
+      // Nothing written, nothing forgotten: only the attempt's own row, and
+      // the fresh fence still owed in the process.
+      expect(await fencesOf(s.userId)).toEqual([
+        expect.objectContaining({ attemptId: attempt.id, live: true }),
+      ]);
+      expect(fences.owedCount).toBe(1);
+
+      jest.restoreAllMocks();
+      expect(await fences.recoverOwed()).toBe(0);
+      await prisma.client
+        .$executeRaw`DELETE FROM keycloak_write_attempt WHERE user_id = ${s.userId}`;
+    });
+
+    it('a request’s recovery projection has the application’s stop as its owner: stopped mid-projection, it reads, writes and commits nothing more', async () => {
+      const s = await seed([{ in: 'a', roles: ['OPERATOR'] }]);
+      // A projector of its own: its stop is for good.
+      const owned = new KeycloakProjector(repository, keycloak, fences, {
+        writeSettleSeconds: SETTLE_SECONDS,
+      });
+      // The recovery's first statement after the user lock completes, then
+      // it is held there — inside its transaction, with no signal of a
+      // request to stop it.
+      let reached!: () => void;
+      const atRecovery = new Promise<void>((resolve) => (reached = resolve));
+      let resume!: () => void;
+      const resumed = new Promise<void>((resolve) => (resume = resolve));
+      const databaseNow = repository.databaseNow.bind(repository);
+      let calls = 0;
+      jest.spyOn(repository, 'databaseNow').mockImplementation(async (client) => {
+        const now = await databaseNow(client);
+        calls += 1;
+        if (calls === 2) {
+          reached();
+          await resumed;
+        }
+        return now;
+      });
+      let stopped = false;
+      const after: string[] = [];
+      const findUserById = repository.findUserById.bind(repository);
+      jest.spyOn(repository, 'findUserById').mockImplementation(async (...args) => {
+        const user = await findUserById(...args);
+        if (stopped) after.push('findUserById');
+        return user;
+      });
+
+      // The request's projection: its sender paused at Keycloak, answered — late.
+      pauseNextSender();
+      await expect(owned.project(s.userId, 'request')).resolves.toBe('projected');
+      await atRecovery;
+      const puts = stub.puts(s.keycloakId).length;
+
+      const stop = owned.stop({ deadlineAt: Date.now() + 300 });
+      // One stop: a later call joins it.
+      expect(owned.stop()).toBe(stop);
+      await stop;
+      stopped = true;
+      resume();
+      expect(await settleRecoveryProjections(10_000)).toBe('finished');
+
+      // Resumed after the stop: no read reached the database, no PUT was sent.
+      expect(after).toEqual([]);
+      expect(stub.puts(s.keycloakId)).toHaveLength(puts);
+      // Its fresh fence stands for it, for the sweep: the reply was heard —
+      // a zero window, due at once — and nothing took it over.
+      expect(await fencesOf(s.userId)).toEqual([
+        expect.objectContaining({ live: false, window: 0 }),
+      ]);
       await prisma.client
         .$executeRaw`DELETE FROM keycloak_write_attempt WHERE user_id = ${s.userId}`;
     });
