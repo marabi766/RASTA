@@ -1,4 +1,5 @@
 const swcOptions = require('../../jest.swc.cjs');
+const disclosureGuard = require('../../jest.disclosure-guard.cjs');
 const swcTransform = { '^.+\\.(t|j)s$': ['@swc/jest', swcOptions] };
 
 // Expressed relative to the **package** root, with `roots` naming the folder
@@ -21,6 +22,7 @@ module.exports = {
   projects: [
     {
       displayName: 'unit',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: __dirname,
       roots: ['<rootDir>/src'],
       testEnvironment: 'node',
@@ -31,6 +33,7 @@ module.exports = {
     },
     {
       displayName: 'integration',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: __dirname,
       roots: ['<rootDir>/test'],
       testEnvironment: 'node',

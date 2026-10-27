@@ -141,10 +141,11 @@ function harness(
     ),
     findMany: jest.fn(async () => (stored ? [stored] : [])),
     create: jest.fn(async (args: { data: Record<string, unknown> }) => {
+      const now = new Date();
       stored = claimRow({
         ...(args.data as Partial<ClaimRow>),
-        createdAt: new Date(),
-        updatedAt: new Date(),
+        createdAt: now,
+        updatedAt: now,
       });
       return stored;
     }),

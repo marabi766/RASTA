@@ -92,7 +92,7 @@ export const notificationEnvSchema = baseEnvSchema
         fixed('must be a group in the notification-service. namespace'),
       ),
 
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /** Where recipient resolution goes. Never the gateway (D-007). */
     IDENTITY_SERVICE_URL: serviceUrlSchema,
@@ -103,27 +103,37 @@ export const notificationEnvSchema = baseEnvSchema
       .int()
       .min(500)
       .max(60_000)
-      .default(5_000),
+      .prefault(5_000),
 
     /**
      * Hard ceiling on recipients per intent (ADR-054 § 1). A resolution that
      * returns more is truncated, recorded and alerted on; unbounded fan-out is
      * a self-inflicted notification storm.
      */
-    NOTIFICATION_MAX_RECIPIENTS_PER_INTENT: z.coerce.number().int().min(1).max(10_000).default(500),
+    NOTIFICATION_MAX_RECIPIENTS_PER_INTENT: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(10_000)
+      .prefault(500),
 
     /** Short cache per `(organization, role)` so a burst is not N identical calls. */
-    NOTIFICATION_RECIPIENT_CACHE_TTL_SECONDS: z.coerce.number().int().min(0).max(3_600).default(60),
+    NOTIFICATION_RECIPIENT_CACHE_TTL_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(3_600)
+      .prefault(60),
 
     /**
      * How long `notification_dedupe` rows are kept (ADR-054 § 3). Longer than
      * the 30-day insurance warning window and the 7-day topic retention, so a
      * replay within retention cannot re-notify a window that already fired.
      */
-    NOTIFICATION_DEDUPE_RETENTION_DAYS: z.coerce.number().int().min(1).max(3_650).default(45),
+    NOTIFICATION_DEDUPE_RETENTION_DAYS: z.coerce.number().int().min(1).max(3_650).prefault(45),
 
     /** How long an unread in-app row stays visible before the sweep may remove it. */
-    NOTIFICATION_IN_APP_TTL_DAYS: z.coerce.number().int().min(1).max(3_650).default(60),
+    NOTIFICATION_IN_APP_TTL_DAYS: z.coerce.number().int().min(1).max(3_650).prefault(60),
 
     // Resolution worker — the claim-based loop of ADR-050's shape.
     NOTIFICATION_RESOLUTION_POLL_INTERVAL_MS: z.coerce
@@ -131,16 +141,16 @@ export const notificationEnvSchema = baseEnvSchema
       .int()
       .min(100)
       .max(60_000)
-      .default(1_000),
-    NOTIFICATION_RESOLUTION_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
-    NOTIFICATION_RESOLUTION_LEASE_SECONDS: z.coerce.number().int().min(10).max(3_600).default(60),
+      .prefault(1_000),
+    NOTIFICATION_RESOLUTION_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    NOTIFICATION_RESOLUTION_LEASE_SECONDS: z.coerce.number().int().min(10).max(3_600).prefault(60),
     /** Ceiling of the retry backoff when identity is unavailable. */
     NOTIFICATION_RESOLUTION_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(600),
+      .prefault(600),
 
     // Mail worker — the same claim shape, against a mail server (NTF-004).
     //
@@ -149,16 +159,21 @@ export const notificationEnvSchema = baseEnvSchema
     // server may take seconds per message. Sharing a lease length would size
     // one of them wrongly, and the one sized wrongly would be the one whose
     // leases expire mid-send.
-    NOTIFICATION_MAIL_POLL_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(2_000),
+    NOTIFICATION_MAIL_POLL_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(60_000)
+      .prefault(2_000),
     /**
      * How many messages one tick may send.
      *
      * Small on purpose: a tick sends them one after another, and a batch of
      * fifty against a slow server holds a lease long enough to lose it.
      */
-    NOTIFICATION_MAIL_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
-    NOTIFICATION_MAIL_LEASE_SECONDS: z.coerce.number().int().min(10).max(3_600).default(120),
-    NOTIFICATION_MAIL_BACKOFF_MAX_SECONDS: z.coerce.number().int().min(1).max(86_400).default(600),
+    NOTIFICATION_MAIL_BATCH_SIZE: z.coerce.number().int().min(1).max(100).prefault(10),
+    NOTIFICATION_MAIL_LEASE_SECONDS: z.coerce.number().int().min(10).max(3_600).prefault(120),
+    NOTIFICATION_MAIL_BACKOFF_MAX_SECONDS: z.coerce.number().int().min(1).max(86_400).prefault(600),
 
     // Mail channel (ADR-054 § 6, `docs/24` Q-37) ---------------------------
     /**
@@ -174,19 +189,19 @@ export const notificationEnvSchema = baseEnvSchema
      * engineering decision — Q-37 stays open until somebody with the authority
      * to sign a contract makes it.
      */
-    NOTIFICATION_MAIL_ADAPTER: z.enum(['smtp']).default('smtp'),
+    NOTIFICATION_MAIL_ADAPTER: z.enum(['smtp']).prefault('smtp'),
 
-    NOTIFICATION_SMTP_HOST: z.string().min(1).default('localhost'),
-    NOTIFICATION_SMTP_PORT: z.coerce.number().int().min(1).max(65_535).default(1025),
+    NOTIFICATION_SMTP_HOST: z.string().min(1).prefault('localhost'),
+    NOTIFICATION_SMTP_PORT: z.coerce.number().int().min(1).max(65_535).prefault(1025),
     /** Implicit TLS on connect. False for Mailpit; true for a submission port. */
     NOTIFICATION_SMTP_SECURE: z
       .enum(['true', 'false'])
-      .default('false')
+      .prefault('false')
       .transform((value) => value === 'true'),
     /** Both or neither. A user with no password is a misconfiguration, not anonymous auth. */
-    NOTIFICATION_SMTP_USER: z.string().default(''),
-    NOTIFICATION_SMTP_PASSWORD: z.string().default(''),
-    NOTIFICATION_SMTP_TIMEOUT_MS: z.coerce.number().int().min(100).max(120_000).default(10_000),
+    NOTIFICATION_SMTP_USER: z.string().prefault(''),
+    NOTIFICATION_SMTP_PASSWORD: z.string().prefault(''),
+    NOTIFICATION_SMTP_TIMEOUT_MS: z.coerce.number().int().min(100).max(120_000).prefault(10_000),
 
     /**
      * The sender identity, which **has no real default and must not get one**.
@@ -199,8 +214,8 @@ export const notificationEnvSchema = baseEnvSchema
      * Choosing a real domain here is half of answering Q-37; the other half is
      * the provider that is allowed to send for it.
      */
-    NOTIFICATION_MAIL_FROM_ADDRESS: z.string().min(3).default('notifications@rasta.invalid'),
-    NOTIFICATION_MAIL_FROM_NAME: z.string().default('رستا'),
+    NOTIFICATION_MAIL_FROM_ADDRESS: z.string().min(3).prefault('notifications@rasta.invalid'),
+    NOTIFICATION_MAIL_FROM_NAME: z.string().prefault('رستا'),
   })
   .superRefine((env, ctx) => {
     // Credentials are a pair. One without the other is a deployment that

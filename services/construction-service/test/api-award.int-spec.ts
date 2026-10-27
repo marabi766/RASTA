@@ -1,3 +1,4 @@
+import { errorEnvelope, expectNotDisclosed } from '@rasta/testing';
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
 import {
@@ -329,8 +330,10 @@ describe('award API', () => {
     );
     expect(conflicted.status).toBe(403);
     expect(conflicted.body.message).toContain('CONFLICT_OF_INTEREST');
-    // 1000 as a number of its own: the answer's ULIDs can contain it by chance.
-    expect(JSON.stringify(conflicted.body)).not.toMatch(/(?<![\w-])1000(?![\w-])/);
+    // Only envelope values verified against headers/the test clock are excused.
+    expectNotDisclosed(conflicted.body, ['1000'], {
+      metadata: errorEnvelope({ headers: conflicted.headers }),
+    });
 
     // Reads of the price are in the owner's log, the service's under its own name.
     const rows = await runUnscoped('the suite reads the log', () =>

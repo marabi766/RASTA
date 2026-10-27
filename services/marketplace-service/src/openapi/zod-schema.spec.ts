@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { toJsonSchema } from '@rasta/nest-common';
 import { createOrderSchema, listOrdersQuerySchema, submitReviewSchema } from '../order/dto';
 import { createOfferSchema, searchProductsQuerySchema, updateOfferSchema } from '../offer/dto';
@@ -59,7 +60,7 @@ describe('zod to JSON Schema', () => {
     });
 
     it('carries a date-time format', () => {
-      const s = toJsonSchema(z.object({ at: z.string().datetime() }));
+      const s = toJsonSchema(z.object({ at: z.string().check(isoDateTime()) }));
       const props = s.properties as Record<string, Record<string, unknown>>;
       expect(props.at).toMatchObject({ type: 'string', format: 'date-time' });
     });

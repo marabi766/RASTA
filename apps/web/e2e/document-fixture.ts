@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import { expect, type APIRequestContext } from '@playwright/test';
+import { type APIRequestContext } from './expect';
+import { expect } from './expect';
 
 /**
  * A document that really exists in document-service, for a test that needs to

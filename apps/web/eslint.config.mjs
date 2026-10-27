@@ -2,6 +2,9 @@ import js from '@eslint/js';
 import jsxA11y from 'eslint-plugin-jsx-a11y';
 import reactHooks from 'eslint-plugin-react-hooks';
 import tseslint from 'typescript-eslint';
+// The services' rule itself, not a copy: zod 4's `.default()` skips parsing;
+// `.prefault()` is zod 3's (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F2).
+import noZodDefault from '../../scripts/no-zod-default-rule.mjs';
 
 /**
  * The portal's lint rules.
@@ -36,6 +39,10 @@ export default tseslint.config(
       sourceType: 'module',
       globals: { console: 'readonly', process: 'readonly', URL: 'readonly' },
     },
+  },
+  {
+    plugins: { zod: { rules: { 'no-default': noZodDefault } } },
+    rules: { 'zod/no-default': 'error' },
   },
   {
     files: ['**/*.{ts,tsx}'],

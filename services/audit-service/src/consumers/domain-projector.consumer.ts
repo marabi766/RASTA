@@ -21,7 +21,7 @@ import {
   describeErrorClass,
   describeEventType,
   describeIssues,
-  zodIssuesOf,
+  schemaRefusalOf,
 } from '../audit/refusal-diagnostics';
 import {
   toPaymentReconciliationEvidence,
@@ -168,17 +168,17 @@ export class DomainProjectorConsumer implements OnModuleDestroy {
       auditIngestionFailuresTotal.inc({
         reason: INGESTION_FAILURE_REASONS.UNMAPPABLE_ORGANIZATION_EVENT,
       });
-      // Same rule as above. The `ZodError` is not rethrown as it is: its
-      // message carries Zod's own messages, which can quote a received value,
-      // and an issue path into an undeclared key would name that key. The
-      // refusal names issue codes and declared field names only, bounded, and
-      // stays an ordinary error, so it is retried and then dead-lettered as a
-      // malformed hierarchy event always was.
-      const issues = zodIssuesOf(error);
+      // Same rule as above. The schema's refusal is not rethrown as it is: an
+      // issue path into an undeclared key would name that key. The refusal
+      // names zod 3's issue codes (from the parse that refused, PR #444 r1 F1)
+      // and declared field names only, bounded, and stays an ordinary error, so
+      // it is retried and then dead-lettered as a malformed hierarchy event
+      // always was. Anything else is named by its class.
+      const schemaRefusal = schemaRefusalOf(error);
       const why =
-        issues === null
+        schemaRefusal === null
           ? `(${describeErrorClass(error)})`
-          : describeIssues(issues, ORGANIZATION_PROJECTION_FIELD_NAMES);
+          : describeIssues(schemaRefusal, ORGANIZATION_PROJECTION_FIELD_NAMES);
       const refusal = new AuditMappingError(
         `organization projection refused ${describeEventType(envelope)}: ${why}`,
         error,

@@ -32,11 +32,12 @@
     "react-dom": "^19.2.8",
     "react-hook-form": "^7.88.0",
     "tailwind-merge": "^3.7.0",
-    "zod": "^3.25.76"
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.62.1",
+    "@rasta/testing": "workspace:*",
     "@swc/core": "^1.10.7",
     "@swc/jest": "^0.2.37",
     "@tailwindcss/postcss": "^4.3.3",

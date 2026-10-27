@@ -1,3 +1,4 @@
+import { legacyParse } from '@rasta/contracts';
 import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
 import {
@@ -120,13 +121,13 @@ export class UsageConsumer implements OnModuleInit, OnApplicationShutdown {
       return 'SKIPPED';
     }
 
-    const parsed = usageRecordedSchema.safeParse(envelope.payload);
+    const parsed = legacyParse(usageRecordedSchema, envelope.payload);
     if (!parsed.success) {
       // A usage event that names no machine, or no record: a producer defect
       // no retry fixes. Dead-lettered at once, before the marker, so the
       // reading is not lost and a corrected replay still advances the meter
       // (audit L7-26, docs/07 § 7.6).
-      throw invalidPayloadError(envelope, parsed.error, USAGE_RECORDED_FIELDS);
+      throw invalidPayloadError(envelope, parsed.refusal, USAGE_RECORDED_FIELDS);
     }
 
     const payload = parsed.data;

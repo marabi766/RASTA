@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 import { PERFORMANCE_COMPONENTS } from '../performance/components';
 import { SUPPLIER_CAPABILITIES } from '../supplier/capabilities';
 
@@ -297,10 +298,10 @@ export function validateSupplierPayload<N extends PublishedEventName>(
   payload: unknown,
 ): z.infer<(typeof SUPPLIER_EVENT_SCHEMAS)[N]> {
   const schema = SUPPLIER_EVENT_SCHEMAS[eventName];
-  const parsed = schema.safeParse(payload);
+  const parsed = legacyParse(schema, payload);
   if (!parsed.success) {
     throw new Error(
-      `${eventName} payload does not match its published contract: ${parsed.error.message}`,
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
     );
   }
   return parsed.data as z.infer<(typeof SUPPLIER_EVENT_SCHEMAS)[N]>;

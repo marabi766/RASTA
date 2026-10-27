@@ -63,6 +63,8 @@ export const CLI_CONTRACT = Object.freeze({
   'apps/web/src/test/build-scripts.ts': { other: ['--input-type', '-e'] },
 
   // --- packages: test fixtures run by their specs ----------------------------
+  // The stock-zod oracle's build child (PR #444 r4): its input arrives on stdin.
+  'packages/contracts/src/common/__tests__/zod-stock-oracle.ts': { other: ['--no-warnings', '-e'] },
   'packages/nest-common/src/__tests__/correlated-logs.fixture.ts': {
     positionals: ['path', 'enum'],
   },

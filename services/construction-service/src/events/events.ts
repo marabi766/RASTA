@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 import { PROJECT_STATES } from '../project/project.state-machine';
 import { TENDER_WORKFLOW_KEYS, WORKFLOW_KEYS } from '../approval/approval.state-machine';
 import { CANCELLATION_CODES, TENDER_STATES } from '../tender/tender.state-machine';
@@ -127,7 +128,7 @@ export const CONSTRUCTION_EVENTS = {
 export type ConstructionEventName = (typeof CONSTRUCTION_EVENTS)[keyof typeof CONSTRUCTION_EVENTS];
 
 const identifier = z.string().min(1).max(64);
-const isoTimestamp = z.string().datetime();
+const isoTimestamp = z.string().check(isoDateTime());
 const amountMinor = z.string().regex(/^\d{1,19}$/);
 const projectState = z.enum(PROJECT_STATES);
 
@@ -964,10 +965,10 @@ export function validateConstructionPayload<N extends ConstructionEventName>(
   payload: unknown,
 ): ConstructionEventPayload<N> {
   const schema = CONSTRUCTION_EVENT_SCHEMAS[eventName];
-  const parsed = schema.safeParse(payload);
+  const parsed = legacyParse(schema, payload);
   if (!parsed.success) {
     throw new Error(
-      `${eventName} payload does not match its published contract: ${parsed.error.message}`,
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
     );
   }
   return parsed.data as ConstructionEventPayload<N>;

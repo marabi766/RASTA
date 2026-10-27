@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { numberInput } from '@rasta/contracts';
+import { isoDateTime, numberInput } from '@rasta/contracts';
 import { decodeAuditCursor, InvalidCursorError, type AuditCursor } from './audit.cursor';
 
 /**
@@ -91,7 +91,7 @@ const outcomeValues = ['SUCCESS', 'FAILURE', 'REFUSED'] as const;
  * platform stores UTC and converts only in the presentation layer, so the
  * boundary a client sends must say which instant it means.
  */
-const instant = z.string().datetime({ offset: true });
+const instant = z.string().check(isoDateTime({ offset: true }));
 
 /**
  * `from` and `to`, the two parameters no audit query may omit.
@@ -211,7 +211,7 @@ function refineWindow(
  */
 export function buildAuditEventQuerySchema(
   maxWindowDays: number = DEFAULT_MAX_QUERY_WINDOW_DAYS,
-): z.ZodType<AuditEventQuery, z.ZodTypeDef, unknown> {
+): z.ZodType<AuditEventQuery, unknown> {
   return z
     .object({
       ...windowShape,
@@ -224,7 +224,7 @@ export function buildAuditEventQuerySchema(
       correlationId: filterString(FILTER_LIMITS.correlationId).optional(),
       outcome: z.enum(outcomeValues).optional(),
       limit: numberInput(z.number().int().min(1).max(MAX_PAGE_LIMIT))
-        .default(DEFAULT_PAGE_LIMIT)
+        .prefault(DEFAULT_PAGE_LIMIT)
         .describe(`Page size. Defaults to ${DEFAULT_PAGE_LIMIT}, capped at ${MAX_PAGE_LIMIT}.`),
       cursor: z.string().min(1).max(512).optional(),
     })
@@ -272,7 +272,7 @@ export function buildAuditEventQuerySchema(
 /** Builds the detail query schema for a configured window ceiling. */
 export function buildAuditEventDetailQuerySchema(
   maxWindowDays: number = DEFAULT_MAX_QUERY_WINDOW_DAYS,
-): z.ZodType<AuditEventDetailQuery, z.ZodTypeDef, unknown> {
+): z.ZodType<AuditEventDetailQuery, unknown> {
   return z
     .object({ ...windowShape, ...commonFilterShape })
     .strict()
@@ -297,14 +297,14 @@ export function buildAuditEventDetailQuerySchema(
  */
 export function buildAuditVerifyQuerySchema(
   maxWindowDays: number = DEFAULT_MAX_QUERY_WINDOW_DAYS,
-): z.ZodType<AuditVerifyQuery, z.ZodTypeDef, unknown> {
+): z.ZodType<AuditVerifyQuery, unknown> {
   return z
     .object({
       ...windowShape,
       ...commonFilterShape,
       scope: z
         .enum(VERIFY_SCOPES)
-        .default('ORGANIZATION')
+        .prefault('ORGANIZATION')
         .describe(
           'Which chain to verify. `ORGANIZATION` verifies exactly one tenant’s ' +
             'chain; `PLATFORM` verifies the chain of records that have no tenant ' +
