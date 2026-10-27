@@ -154,6 +154,47 @@ describe('the build lock (r3 F1, r4 F1)', () => {
     ).toEqual({ first: true, gone: true, second: false, keptOthers: true, lost: true });
   });
 
+  it('a new exclusive owner can finish before the old wrapper unlinks its unique receipt marker', () => {
+    const nextOwner = `
+      import { mkdirSync, writeFileSync } from 'node:fs';
+      import { join } from 'node:path';
+      ${IMPORT_LOCK}
+      import { writeReceipt } from ${JSON.stringify(url('build-receipt.mjs'))};
+      const web = ${JSON.stringify(web)};
+      const b = await acquireBuildLock(web, { waitMs: 0 });
+      b.lock.beginOutput();
+      mkdirSync(join(web, '.next/server'), { recursive: true });
+      writeFileSync(join(web, '.next/BUILD_ID'), 'build-B');
+      writeFileSync(join(web, '.next/server/server-reference-manifest.json'), '{"node":{}}');
+      writeReceipt(web, { distDir: '.next', tsconfigPath: 'tsconfig.json', cleanDistDir: true });
+      console.log(JSON.stringify({ ok: b.ok, released: b.lock.release() }));
+    `;
+    expect(
+      run(`
+      import fs from 'node:fs';
+      import { spawnSync } from 'node:child_process';
+      import { syncBuiltinESMExports } from 'node:module';
+      import { checkedSnapshot } from ${JSON.stringify(url('build-receipt.mjs'))};
+      const a = await acquireBuildLock(web, { waitMs: 0 });
+      a.lock.beginOutput();
+      const unlink = fs.unlinkSync;
+      let other;
+      fs.unlinkSync = (file) => {
+        if (file === a.lock.receiptPending && !other) {
+          const b = spawnSync(process.execPath, ['--input-type=module', '-e', ${JSON.stringify(nextOwner)}], { encoding: 'utf8' });
+          other = JSON.parse(b.stdout.trim());
+        }
+        return unlink(file);
+      };
+      syncBuiltinESMExports();
+      const released = a.lock.release();
+      fs.unlinkSync = unlink;
+      syncBuiltinESMExports();
+      console.log(JSON.stringify({ released, other, problems: checkedSnapshot(web).problems }));
+    `),
+    ).toEqual({ released: true, other: { ok: true, released: true }, problems: [] });
+  });
+
   it('a lock whose wrapper is dead and whose build never started is taken over; a live wrapper is never taken from', () => {
     plantLock(web, { pid: deadPid() });
     expect(acquire(2000)).toEqual({ ok: true, busy: true });
@@ -172,6 +213,28 @@ describe('the build lock (r3 F1, r4 F1)', () => {
     await waitFor(() => !alive(-group));
     expect(acquire(2000)).toEqual({ ok: true, busy: true });
   });
+
+  it.each(['EPERM', 'EIO', 'EINVAL'])(
+    'only ESRCH is absence: %s keeps wrapper/group ownership and blocks reaping',
+    (code) => {
+      plantLock(web, { pid: deadPid(), group: deadPid() });
+      expect(
+        run(`
+      import { pidAlive, groupAlive } from ${JSON.stringify(url('build-lock.mjs'))};
+      const kill = process.kill;
+      process.kill = () => { const error = new Error('withheld'); error.code = ${JSON.stringify(code)}; throw error; };
+      const held = buildInProgress(web);
+      const pid = pidAlive(123);
+      const group = groupAlive(123);
+      const attempt = await acquireBuildLock(web, { waitMs: 0 });
+      process.kill = () => { const error = new Error('gone'); error.code = 'ESRCH'; throw error; };
+      const absent = !pidAlive(123) && !groupAlive(123) && !buildInProgress(web);
+      process.kill = kill;
+      console.log(JSON.stringify({ held, pid, group, refused: !attempt.ok, absent }));
+    `),
+      ).toEqual({ held: true, pid: true, group: true, refused: true, absent: true });
+    },
+  );
 
   it('a process that cannot be probed (EPERM: pid 1 for a non-root user) counts as alive', () => {
     plantLock(web, { pid: 1 });
@@ -366,13 +429,15 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
   let root: string;
   let nextFrom: string;
   let n = 0;
+  const caseApps = new Set<string>();
   const app = (plan: Plan): string => {
     n += 1;
     const dir = join(root, `app-${n}`);
     plantFakeApp(dir, plan);
+    caseApps.add(dir);
     return dir;
   };
-  const record = (dir: string): { pid: number; capturePath: string } =>
+  const record = (dir: string): { pid: number; group: number; capturePath: string } =>
     JSON.parse(readFileSync(join(dir, 'child.json'), 'utf8'));
   const ran = (dir: string): number[] =>
     readdirSync(dir)
@@ -380,7 +445,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       .map((f) => Number(f.slice(4)));
   const receipt = (dir: string): string[] =>
     runModule(
-      `import { receiptProblems } from ${JSON.stringify(url('build-receipt.mjs'))};\nconsole.log(JSON.stringify(receiptProblems(${JSON.stringify(dir)})));`,
+      `import { checkedSnapshot } from ${JSON.stringify(url('build-receipt.mjs'))};\nconsole.log(JSON.stringify(checkedSnapshot(${JSON.stringify(dir)}).problems));`,
     ).out as string[];
   const inProgress = (dir: string): unknown =>
     runModule(
@@ -389,6 +454,25 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
   beforeAll(() => {
     root = mkdtempSync(join(tmpdir(), 'owner-'));
     ({ nextFrom } = plantFakeNext(join(root, 'fake')));
+  });
+  afterEach(async () => {
+    // Mutation failures must leave no writer/supervisor behind on the shared host.
+    // These are exclusively the groups recorded at startup by THIS test's drivers.
+    for (const dir of caseApps) {
+      chmodSync(dir, 0o700);
+      if (existsSync(join(dir, '.next'))) chmodSync(join(dir, '.next'), 0o700);
+      for (const file of readdirSync(dir).filter((name) => name.startsWith('driver-child-'))) {
+        const { group } = JSON.parse(readFileSync(join(dir, file), 'utf8')) as { group: number };
+        if (!alive(-group)) continue;
+        try {
+          process.kill(-group, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+        await waitFor(() => !alive(-group), 5_000);
+      }
+    }
+    caseApps.clear();
   });
   afterAll(() => {
     for (const entry of readdirSync(root)) {
@@ -534,21 +618,326 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     },
   );
 
+  it.each(['SIGTERM', 'SIGINT', 'SIGHUP'] as const)(
+    'R4-1: a single %s bounds shutdown for roots ignoring TERM and blocked in synchronous work',
+    async (signal) => {
+      for (const unresponsive of ['ignore', 'sync'] as const) {
+        const dir = app({ holdMs: 60_000, unresponsive });
+        const driver = startDriver(dir, {
+          nextFrom,
+          recordChild: join(dir, 'child.json'),
+          stopGraceMs: 150,
+          stopWaitMs: 1_000,
+          recordGroupEvents: true,
+        });
+        await waitFor(() => existsSync(join(dir, 'unresponsive.ready')));
+        const started = performance.now();
+        process.kill(driver.pid, signal);
+        const result = await driver.done;
+        expect(performance.now() - started).toBeLessThan(3_150);
+        expect(result).toMatchObject({
+          status: 128 + { SIGTERM: 15, SIGINT: 2, SIGHUP: 1 }[signal],
+          problems: ['build: interrupted; the build was stopped before the lock was released'],
+        });
+        const { pid, group } = record(dir);
+        expect(alive(pid)).toBe(false);
+        expect(alive(-group)).toBe(false);
+        expect(existsSync(join(dir, LOCK))).toBe(false);
+        const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
+        expect(events.filter((e) => e === 'send-term')).toHaveLength(1);
+        expect(events.filter((e) => e === 'send-kill')).toHaveLength(1);
+      }
+    },
+  );
+
+  it('R4-1: TERM then INT shares one monotonic total shutdown budget, even with a frozen wall clock', async () => {
+    const dir = app({ holdMs: 60_000, unresponsive: 'ignore' });
+    const driver = startDriver(dir, {
+      nextFrom,
+      recordGroupEvents: true,
+      frozenWallClock: true,
+      stopGraceMs: 200,
+      stopWaitMs: 1_000,
+    });
+    await waitFor(() => existsSync(join(dir, 'unresponsive.ready')));
+    const started = performance.now();
+    process.kill(driver.pid, 'SIGTERM');
+    await sleep(25);
+    process.kill(driver.pid, 'SIGINT');
+    expect(await driver.done).toMatchObject({ status: 143 });
+    expect(performance.now() - started).toBeLessThan(3_200);
+    const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
+    expect(events.filter((e) => e === 'send-term')).toHaveLength(1);
+    expect(events.filter((e) => e === 'send-kill')).toHaveLength(1);
+  });
+
+  it('R4-1: INT during publication followed by TERM joins the first shutdown', async () => {
+    const dir = app({ holdMs: 60_000 });
+    const result = await runDriver(dir, {
+      nextFrom,
+      afterSpawn: 'interrupt',
+      mixedPublicationSignal: true,
+      stopGraceMs: 150,
+      stopWaitMs: 1_000,
+      recordGroupEvents: true,
+    });
+    expect(result).toMatchObject({ status: 130 });
+    expect(existsSync(join(dir, LOCK))).toBe(false);
+    expect(ran(dir)).toEqual([]);
+    const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
+    expect(events.filter((e) => e === 'send-term')).toHaveLength(1);
+  });
+
+  it('R4-2: the live supervisor reserves the PGID after root exit; it retires last, after receipt and the final possible signal', async () => {
+    const dir = app({});
+    const driver = startDriver(dir, {
+      nextFrom,
+      recordChild: join(dir, 'child.json'),
+      pauseDir: dir,
+      recordGroupEvents: true,
+    });
+    await waitFor(() => existsSync(join(dir, 'paused')));
+    const { pid, group } = record(dir);
+    expect(pid).not.toBe(group);
+    expect(alive(pid)).toBe(false);
+    expect(alive(group)).toBe(true);
+    expect(alive(-group)).toBe(true);
+    const census = spawnSync('ps', ['-axo', 'pid=,pgid='], { encoding: 'utf8' });
+    expect(census.status).toBe(0);
+    const members = census.stdout
+      .trim()
+      .split('\n')
+      .map((line) => line.trim().split(/\s+/).map(Number))
+      .filter(([, pgid]) => pgid === group)
+      .map(([member]) => member);
+    expect(members).toEqual([group]);
+    expect(inProgress(dir)).toBe(true);
+    expect((await runDriver(dir, { nextFrom, lockWaitMs: 0 })).status).toBe(1);
+    writeFileSync(join(dir, 'go'), '');
+    expect(await driver.done).toMatchObject({ status: 0, problems: [] });
+    expect(alive(-group)).toBe(false);
+    expect(existsSync(join(dir, LOCK))).toBe(false);
+    expect(receipt(dir)).toEqual([]);
+    const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
+    expect(events.indexOf('quiescent')).toBeLessThan(events.indexOf('receipt'));
+    expect(events.indexOf('receipt')).toBeLessThan(events.indexOf('send-retire'));
+    expect(events.indexOf('send-retire')).toBeLessThan(events.indexOf('final'));
+    expect(events.indexOf('final')).toBeLessThan(events.indexOf('absent'));
+  });
+
+  it.each([false, true])(
+    'R4-2: modeled PGID reuse after definite absence, late interrupts=%s: no signal reaches the reused group',
+    async (interruptOnAbsence) => {
+      const dir = app({});
+      const result = await runDriver(dir, { nextFrom, modelReuse: true, interruptOnAbsence });
+      expect(result.status).toBe(interruptOnAbsence ? 143 : 0);
+      expect(JSON.parse(readFileSync(join(dir, 'reuse.json'), 'utf8'))).toEqual({
+        absent: true,
+        signalsToReusedGroup: 0,
+      });
+      expect(existsSync(join(dir, LOCK))).toBe(false);
+      expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(
+        !interruptOnAbsence,
+      );
+    },
+  );
+
+  it('R4-2: unexpected supervisor death retires signalling and keeps the lock while writers live', async () => {
+    const dir = app({ holdMs: 60_000 });
+    const driver = startDriver(dir, {
+      nextFrom,
+      recordChild: join(dir, 'child.json'),
+      recordGroupEvents: true,
+      stopGraceMs: 100,
+      stopWaitMs: 1_000,
+    });
+    await waitFor(() => ran(dir).length === 1);
+    const { pid, group } = record(dir);
+    groups.push(group);
+    process.kill(group, 'SIGKILL');
+    expect(await driver.done).toMatchObject({
+      status: 1,
+      problems: [
+        'build: processes of this build could not be confirmed stopped; the build lock is kept; refusing',
+      ],
+    });
+    expect(alive(pid)).toBe(true);
+    expect(inProgress(dir)).toBe(true);
+    expect(existsSync(join(dir, LOCK))).toBe(true);
+    const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
+    expect(events.filter((e) => e === 'send-term' || e === 'send-kill')).toEqual([]);
+    process.kill(pid, 'SIGTERM');
+    await waitFor(() => !alive(-group));
+    expect(inProgress(dir)).toBe(false);
+  });
+
+  it.each(['interrupt', 'uncertain', 'supervisor-death'] as const)(
+    'after receipt publication, %s removes the receipt and refuses',
+    async (afterReceipt) => {
+      const dir = app({});
+      const result = await runDriver(dir, {
+        nextFrom,
+        afterReceipt,
+        stopGraceMs: 100,
+        stopWaitMs: 500,
+      });
+      expect(result.status).toBe(afterReceipt === 'interrupt' ? 130 : 1);
+      expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
+      expect(existsSync(join(dir, LOCK))).toBe(afterReceipt !== 'interrupt');
+    },
+  );
+
+  it.each([
+    'readonly-interrupt',
+    'readonly-uncertain',
+    'readonly-release',
+    'readonly-marker',
+  ] as const)(
+    'after publication, %s cannot unlink the receipt: retain the lock and checker refusal survives wrapper/group exit',
+    async (afterReceipt) => {
+      const dir = app({});
+      const result = await runDriver(dir, {
+        nextFrom,
+        afterReceipt,
+        stopGraceMs: 100,
+        stopWaitMs: 500,
+      });
+      expect(result.status).toBe(1);
+      expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(true);
+      expect(existsSync(join(dir, LOCK))).toBe(true);
+      expect(inProgress(dir)).toBe(false); // recovery may proceed, but this receipt cannot certify
+      const check =
+        runModule(`import { checkedSnapshot } from ${JSON.stringify(url('build-receipt.mjs'))};
+        console.log(JSON.stringify(checkedSnapshot(${JSON.stringify(dir)})));`).out;
+      expect(check).toEqual({ problems: [expect.stringContaining('lock needs recovery')] });
+      if (afterReceipt === 'readonly-interrupt') {
+        // Pause recovery after unlinking the dead owner, before another owner exists.
+        // The marker must block a checker even though the lock directory is empty.
+        const reaper = spawnLockProcess(dir, "{ waitMs: 0, pause: pauseAt('rmdir') }");
+        await waitFor(() => existsSync(join(dir, 'paused')));
+        expect(readdirSync(join(dir, LOCK))).toEqual([]);
+        const duringRecovery =
+          runModule(`import { checkedSnapshot } from ${JSON.stringify(url('build-receipt.mjs'))};
+          console.log(JSON.stringify(checkedSnapshot(${JSON.stringify(dir)}).problems));`).out;
+        expect(duringRecovery).toEqual([expect.stringContaining('lock needs recovery')]);
+        writeFileSync(join(dir, 'go'), '');
+        expect(await reaper.result).toEqual({ ok: false });
+      }
+      expect(result.printed).not.toMatch(/E[A-Z]{3,}|owner-|\/tmp\//);
+      chmodSync(dir, 0o700);
+      chmodSync(join(dir, '.next'), 0o700);
+      if (existsSync(join(dir, LOCK))) chmodSync(join(dir, LOCK), 0o700);
+      // Recovery takes the dead lock and invalidates its old receipt before a fresh build.
+      expect(await runDriver(dir, { nextFrom, lockWaitMs: 5_000 })).toMatchObject({
+        status: 0,
+        problems: [],
+      });
+      expect(receipt(dir)).toEqual([]);
+    },
+  );
+
+  it('definite absence before the final acknowledgement is uncertain: retain the lock and invalidate the receipt', async () => {
+    const dir = app({});
+    expect(await runDriver(dir, { nextFrom, prematureAbsence: true })).toMatchObject({
+      status: 1,
+      problems: [
+        'build: processes of this build could not be confirmed stopped; the build lock is kept; refusing',
+      ],
+    });
+    expect(existsSync(join(dir, LOCK))).toBe(true);
+    expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
+  });
+
+  it('a mis-published group cannot let the root write before correct ownership publication', async () => {
+    const dir = app({});
+    expect(
+      await runDriver(dir, {
+        nextFrom,
+        afterSpawn: 'mis-publish',
+        stopGraceMs: 100,
+        stopWaitMs: 1_000,
+      }),
+    ).toMatchObject({ status: 1 });
+    expect(ran(dir)).toEqual([]);
+    expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
+  });
+
+  it.each(['error', 'malformed', 'missing-supervisor'] as const)(
+    'supervisor census %s refuses with fixed diagnostics',
+    async (censusFault) => {
+      const dir = app({});
+      const result = await runDriver(dir, {
+        nextFrom,
+        censusFault,
+        inherit: true,
+        settleMs: 1_000,
+        stopGraceMs: 100,
+        stopWaitMs: 1_000,
+      });
+      expect(result).toMatchObject({
+        status: 1,
+        problems: ['next build: a process it started was still running after it exited; refusing'],
+      });
+      expect(result.printed).not.toMatch(/census-sentinel|not-a-process|EIO|private/);
+      // Verify the injected fault itself: an invalid test executable must not stand
+      // in for a well-formed census whose exit status or membership is wrong.
+      const probe = spawnSync(join(dir, 'census-bin/ps'), [], { encoding: 'utf8' });
+      expect(probe.status).toBe(censusFault === 'error' ? 1 : 0);
+      if (censusFault === 'missing-supervisor') expect(probe.stdout).toBe('1 1\n');
+      if (censusFault === 'error') expect(probe.stdout).toMatch(/^\d+ \d+\n\d+ \d+\n$/);
+      expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
+      expect(existsSync(join(dir, LOCK))).toBe(false);
+    },
+  );
+
+  it('shutdown is joined before ownership release even when a surviving writer ignores TERM', async () => {
+    const dir = app({ holdMs: 200, linger: { ms: 60_000, ignoreTerm: true } });
+    const result = await runDriver(dir, {
+      nextFrom,
+      settleMs: 0,
+      stopGraceMs: 200,
+      stopWaitMs: 1_000,
+    });
+    expect(result).toMatchObject({
+      status: 1,
+      problems: ['next build: a process it started was still running after it exited; refusing'],
+    });
+    expect(alive(Number(readFileSync(join(dir, 'linger.pid'), 'utf8')))).toBe(false);
+    expect(existsSync(join(dir, LOCK))).toBe(false);
+  });
+
+  it('R4-3: prompt TERM termination is confirmed separately from an explicitly unconfirmable probe', async () => {
+    const dir = app({ holdMs: 200, linger: { ms: 60_000 } });
+    const result = await runDriver(dir, {
+      nextFrom,
+      settleMs: 0,
+      stopGraceMs: 1_000,
+      stopWaitMs: 1_000,
+    });
+    expect(result).toMatchObject({
+      status: 1,
+      problems: ['next build: a process it started was still running after it exited; refusing'],
+    });
+    expect(existsSync(join(dir, LOCK))).toBe(false);
+    expect(alive(Number(readFileSync(join(dir, 'linger.pid'), 'utf8')))).toBe(false);
+  });
+
   it('(C) the wrapper killed with SIGKILL after publication: the lock stays held while the build lives, and recovery waits for it (fail closed)', async () => {
     const dir = app({ holdMs: 60_000 });
     const driver = startDriver(dir, { nextFrom, recordChild: join(dir, 'child.json') });
     await waitFor(() => ran(dir).length === 1);
     process.kill(driver.pid, 'SIGKILL');
     await driver.done;
-    const { pid } = record(dir);
-    groups.push(pid);
+    const { pid, group } = record(dir);
+    groups.push(group);
     expect(inProgress(dir)).toBe(true);
     const b = await runDriver(dir, { nextFrom, lockWaitMs: 1_000 });
     expect(b.status).toBe(1);
     expect(b.problems).toEqual([expect.stringContaining('build lock: another build')]);
     expect(ran(dir)).toEqual([pid]);
-    process.kill(-pid, 'SIGKILL');
-    await waitFor(() => !alive(-pid));
+    expect(alive(group)).toBe(true); // orphan leader still reserves the PGID while writers live
+    process.kill(pid, 'SIGTERM');
+    await waitFor(() => !alive(-group));
     expect(inProgress(dir)).toBe(false);
     // The next invocation builds normally (no hold this time).
     plantFakeApp(dir, {});
@@ -586,15 +975,18 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
   });
 
   it('(F) the build`s processes cannot be confirmed stopped: the lock is KEPT (it names the live group) and the build refuses', async () => {
-    // No settle and no stop deadline: the writer is still there when the wrapper gives up.
+    // Explicit uncertainty, independent of whether TERM happens to stop the writer promptly.
     const dir = app({ linger: { ms: 60_000 } });
+    const started = performance.now();
     const result = await runDriver(dir, {
       nextFrom,
       settleMs: 0,
       stopGraceMs: 0,
-      stopWaitMs: 0,
+      stopWaitMs: 500,
+      unconfirmableProbe: true,
       recordChild: join(dir, 'child.json'),
     });
+    expect(performance.now() - started).toBeLessThan(2_500);
     expect(result).toMatchObject({
       status: 1,
       problems: [
@@ -604,8 +996,8 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect(existsSync(join(dir, LOCK))).toBe(true);
     expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
     // It was sent SIGKILL: once the group is gone, the kept lock is free, and not before.
-    const { pid } = record(dir);
-    await waitFor(() => !alive(-pid));
+    const { group } = record(dir);
+    await waitFor(() => !alive(-group));
     expect(inProgress(dir)).toBe(false);
     plantFakeApp(dir, {});
     expect(await runDriver(dir, { nextFrom, lockWaitMs: 5_000 })).toMatchObject({
@@ -656,7 +1048,10 @@ describe('a report that cannot be written ends the build, visibly (r4 F3, fake `
     });
     return { dir, ...result };
   };
-  const REFUSED = ['next config: a build process could not write its report; refusing'];
+  const REFUSED = [
+    'next config: a build process could not write its report; refusing',
+    'build: processes of this build could not be confirmed stopped; the build lock is kept; refusing',
+  ];
 
   it('control: the fault preload with no fault changes nothing', async () => {
     const { status, problems } = await build({ workers: ['fork', 'thread'] }, '');
@@ -689,7 +1084,7 @@ describe('a report that cannot be written ends the build, visibly (r4 F3, fake `
       // The whole build stopped right there: it never wrote its output.
       expect(existsSync(join(dir, '.next/BUILD_ID'))).toBe(false);
       expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
-      expect(existsSync(join(dir, LOCK))).toBe(false);
+      expect(existsSync(join(dir, LOCK))).toBe(true);
     },
   );
 

@@ -5,12 +5,12 @@
 //   1. delete the previous receipt and the default output (`.next`, keeping Next's own
 //      `cache`, as `cleanDistDir` does), so nothing an earlier build left can be read as
 //      this build's;
-//   2. run the real `next build` as the leader of a process group of its own, with
+//   2. run the real `next build` under a live supervisor leading its own group, with
 //      `capture-next-config.cjs` preloaded into it and into every process it starts; publish
 //      that group in the lock (the build's first process waits for this before Next runs);
 //      the preload records the configuration each process got and that each process started
 //      (build-layout.mjs);
-//   3. when `next build` has exited, the group must be empty: a process of the build still
+//   3. when `next build` has exited, only the supervisor may remain: a process of the build still
 //      alive could still write, so the build is refused (and that process stopped);
 //   4. only if it exited 0, no process of it is left, no report failed, every started Node
 //      process reported, the recorded layout is the supported one and the output is where
@@ -25,17 +25,17 @@
 // The configuration is never evaluated by these scripts. Output of `next build` itself
 // (including whatever the project's config prints while Next loads it) is Next's and is not
 // touched here; every line these scripts print is a fixed sentence.
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setImmediate as afterIo, setTimeout as sleep } from 'node:timers/promises';
+import { setImmediate as afterIo } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import { layoutProblems, outputDirProblems, readCapture } from './build-layout.mjs';
-import { acquireBuildLock, groupAlive } from './build-lock.mjs';
+import { acquireBuildLock } from './build-lock.mjs';
+import { BuildGroup } from './build-group.mjs';
 import { RECEIPT_FILE, writeReceipt } from './build-receipt.mjs';
 
 const PRELOAD = fileURLToPath(new URL('./capture-next-config.cjs', import.meta.url));
@@ -59,44 +59,21 @@ export function invalidatePreviousOutput(webDir) {
   }
 }
 
-/** Waits until no process of `group` exists, at most `ms`. @returns whether it is gone */
-async function groupGone(group, ms) {
-  const deadline = Date.now() + ms;
-  while (groupAlive(group)) {
-    if (Date.now() >= deadline) return false;
-    await sleep(25);
-  }
-  return true;
-}
-
-function signalGroup(group, signal) {
-  try {
-    process.kill(-group, signal);
-  } catch {
-    // gone already
-  }
-}
-
-/** SIGTERM, then SIGKILL, and wait. @returns whether the group is confirmed gone */
-async function stopGroup(group, { graceMs, waitMs }) {
-  if (!groupAlive(group)) return true;
-  signalGroup(group, 'SIGTERM');
-  if (await groupGone(group, graceMs)) return true;
-  signalGroup(group, 'SIGKILL');
-  return groupGone(group, waitMs);
-}
-
 /**
  * @param {string} webDir
  * @param {{
  *   nextFrom?: string, env?: NodeJS.ProcessEnv, stdio?: 'inherit' | 'ignore', lockWaitMs?: number,
  *   settleMs?: number, stopGraceMs?: number, stopWaitMs?: number, handshakeMs?: number,
- *   afterSpawn?: (child: { pid: number, capturePath: string }) => Promise<void> | void,
- *   beforeReceipt?: () => Promise<void> | void,
+ *   afterSpawn?: (child: { pid: number, group: number, capturePath: string }) => Promise<void> | void,
+ *   beforeReceipt?: () => Promise<void> | void, afterReceipt?: () => Promise<void> | void,
+ *   probeGroup?: (group: number) => boolean,
+ *   onGroupEvent?: (event: string) => void,
  * }} [options]
  *   `afterSpawn` runs after `next build` started and before its group is published, and
  *   `beforeReceipt` after a good build and before the receipt is written: test seams, the two
  *   places where a crash or a competing invocation used to be able to break ownership.
+ *   afterReceipt, probeGroup and onGroupEvent are test-only seams, never populated
+ *   from environment/config by the production entry point.
  * @returns {Promise<{ status: number, problems: string[] }>}
  */
 export async function runWebBuild(webDir, options = {}) {
@@ -106,10 +83,15 @@ export async function runWebBuild(webDir, options = {}) {
   let group;
   let interrupted;
   let reportFailed = false;
+  let notifyInterrupt;
+  const interruption = new Promise((resolve) => {
+    notifyInterrupt = resolve;
+  });
   const onSignal = (signal) => {
-    // A second signal stops the build at once; the wrapper still waits for it to be gone.
-    if (group) signalGroup(group, interrupted ? 'SIGKILL' : 'SIGTERM');
     interrupted ??= signal;
+    // Start NOW, even if the root ignores TERM or blocks its JavaScript event loop.
+    group?.stop();
+    notifyInterrupt();
   };
   const onReportFailure = () => {
     reportFailed = true;
@@ -127,13 +109,17 @@ export async function runWebBuild(webDir, options = {}) {
     result = { status: 1, problems: [UNEXPECTED] };
   }
 
-  // Cleanup, in this order: no process of the build alive, scratch gone, lock released.
-  const stopped =
-    group === undefined ||
-    (await stopGroup(group, {
-      graceMs: options.stopGraceMs ?? 5_000,
-      waitMs: options.stopWaitMs ?? 30_000,
-    }));
+  // Join the first shutdown operation. The supervisor is retired LAST, after all
+  // writers and the final possible group signal, before ownership is released.
+  const stopped = group === undefined || (await group.stop());
+  await settleSignals();
+  if (interrupted) result = interruptedResult();
+  if (reportFailed) result = reportFailedResult();
+  let receiptRemoved = true;
+  if (!stopped || result.status !== 0) {
+    receiptRemoved = removeReceipt();
+  }
+  group?.disconnect();
   try {
     if (scratch) rmSync(scratch, { recursive: true, force: true });
   } catch {
@@ -145,17 +131,26 @@ export async function runWebBuild(webDir, options = {}) {
     return {
       status: 1,
       problems: [
+        ...(reportFailed ? reportFailedResult().problems : []),
         'build: processes of this build could not be confirmed stopped; the build lock is kept; refusing',
       ],
     };
   }
+  if (!receiptRemoved) {
+    // The checker refuses ANY unrecovered owner entry, even after this wrapper and
+    // its group exit. Keep that entry when the on-disk receipt cannot be removed.
+    return {
+      status: 1,
+      problems: [
+        ...result.problems,
+        'build: receipt could not be invalidated; the build lock is kept; refusing',
+      ],
+    };
+  }
   if (!lock.release()) {
-    // The receipt must not outlive a refusal.
-    try {
-      rmSync(join(webDir, RECEIPT_FILE), { force: true });
-    } catch {
-      // the refusal (status 1) stands
-    }
+    // Once the owner entry is gone, a new wrapper may own the output. Never unlink
+    // its receipt. A failed marker removal still gates the checker through recovery.
+    if (!lock.ownerReleased) removeReceipt();
     return {
       status: 1,
       problems: [
@@ -166,8 +161,18 @@ export async function runWebBuild(webDir, options = {}) {
   }
   return result;
 
+  function removeReceipt() {
+    try {
+      rmSync(join(webDir, RECEIPT_FILE), { force: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async function build() {
     if (interrupted) return interruptedResult();
+    lock.beginOutput();
     invalidatePreviousOutput(webDir);
     const require = createRequire(join(options.nextFrom ?? webDir, 'package.json'));
     const nextBin = require.resolve('next/dist/bin/next');
@@ -176,38 +181,40 @@ export async function runWebBuild(webDir, options = {}) {
     const nonce = randomBytes(12).toString('hex');
     const base = options.env ?? process.env;
     if (interrupted) return interruptedResult();
-    const child = spawn(process.execPath, [nextBin, 'build'], {
-      cwd: webDir,
-      stdio: options.stdio ?? 'inherit',
-      // setsid: `next build` leads a process group of its own, which every process it starts
-      // stays in; the group, not one pid, is what the lock waits for. It also keeps a group
-      // signal from ever reaching this wrapper, the shell or turbo above it.
-      detached: true,
-      env: {
-        ...base,
-        RASTA_BUILD_CAPTURE: capturePath,
-        RASTA_BUILD_NONCE: nonce,
-        RASTA_BUILD_WRAPPER: String(process.pid),
-        RASTA_BUILD_ROOT: '1',
-        RASTA_BUILD_OWNER_FILE: lock.ownerFile,
-        ...(options.handshakeMs ? { RASTA_BUILD_HANDSHAKE_MS: String(options.handshakeMs) } : {}),
-        NODE_OPTIONS: `${base.NODE_OPTIONS ?? ''} --require=${JSON.stringify(PRELOAD)}`.trim(),
+    group = new BuildGroup(
+      {
+        nextBin,
+        cwd: webDir,
+        stdio: options.stdio ?? 'inherit',
+        env: {
+          ...base,
+          RASTA_BUILD_CAPTURE: capturePath,
+          RASTA_BUILD_NONCE: nonce,
+          RASTA_BUILD_WRAPPER: String(process.pid),
+          RASTA_BUILD_ROOT: '1',
+          RASTA_BUILD_OWNER_FILE: lock.ownerFile,
+          ...(options.handshakeMs ? { RASTA_BUILD_HANDSHAKE_MS: String(options.handshakeMs) } : {}),
+          NODE_OPTIONS: `${base.NODE_OPTIONS ?? ''} --require=${JSON.stringify(PRELOAD)}`.trim(),
+        },
       },
+      options,
+    );
+    if (interrupted) group.stop();
+    const shutdownOnInterrupt = interruption.then(async () => {
+      await group.stop();
+      return { code: 1 };
     });
-    const exited = new Promise((resolve) => {
-      child.on('error', () => resolve({ code: 1 }));
-      child.on('exit', (code, signal) => resolve({ code, signal }));
-    });
-    if (typeof child.pid !== 'number') {
+    const rootPid = await Promise.race([group.root, shutdownOnInterrupt.then(() => undefined)]);
+    if (typeof rootPid !== 'number') {
       return { status: 1, problems: ['next build: could not be started; refusing'] };
     }
-    group = child.pid;
-    await options.afterSpawn?.({ pid: child.pid, capturePath });
-    lock.publishGroup(group);
-    if (interrupted) signalGroup(group, 'SIGTERM');
-    const { code, signal } = await exited;
+    await options.afterSpawn?.({ pid: rootPid, group: group.id, capturePath });
+    lock.publishGroup(group.id);
+    if (interrupted) group.stop();
+    // A first interrupt resolves shutdown independently of a root's exit message.
+    const { code, signal } = await Promise.race([group.exited, shutdownOnInterrupt]);
     // Next ends its workers before it exits; whatever is left of the group could still write.
-    const left = !(await groupGone(group, options.settleMs ?? 2_000));
+    const left = !(await group.writersGone(options.settleMs ?? 2_000));
     await settleSignals();
     if (interrupted) return interruptedResult();
     if (reportFailed) return reportFailedResult();
@@ -219,7 +226,7 @@ export async function runWebBuild(webDir, options = {}) {
     }
     if (signal) return { status: 1, problems: ['next build: ended by a signal; refusing'] };
     if (code !== 0) return { status: code ?? 1, problems: [] };
-    const layout = readCapture(capturePath, { nonce, rootPid: child.pid });
+    const layout = readCapture(capturePath, { nonce, rootPid });
     const problems = layoutProblems(layout);
     problems.push(...outputDirProblems(layout, join(webDir, '.next')));
     if (problems.length === 0) {
@@ -229,6 +236,7 @@ export async function runWebBuild(webDir, options = {}) {
       if (reportFailed) return reportFailedResult();
       lock.assertHeld();
       problems.push(...writeReceipt(webDir, layout));
+      await options.afterReceipt?.();
     }
     return { status: problems.length > 0 ? 1 : 0, problems };
   }

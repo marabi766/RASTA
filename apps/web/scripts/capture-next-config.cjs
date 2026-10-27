@@ -89,8 +89,16 @@ function confirmOwnership(ownerFile) {
   for (;;) {
     try {
       const owner = JSON.parse(readFileSync(ownerFile, 'utf8'));
-      // ... and this process really leads that group (it was started with setsid).
-      if (owner?.group === process.pid && process.kill(-process.pid, 0)) return true;
+      // The supervisor is our direct parent and group leader; the reporting root PID
+      // is separate. Nothing writes until the lock names that exact supervisor.
+      if (
+        group &&
+        process.ppid === group &&
+        owner?.group === group &&
+        owner?.pid === wrapperPid &&
+        process.kill(-group, 0)
+      )
+        return true;
     } catch {
       // not published yet, or not ours
     }
@@ -138,7 +146,6 @@ if (capturePath && nonce && process.env.RASTA_BUILD_ROOT === '1' && workerThread
     );
     process.exit(1);
   }
-  group = process.pid;
 }
 
 if (capturePath && nonce) {
@@ -218,7 +225,10 @@ if (capturePath && nonce) {
     } catch {
       return exported;
     }
+    // Next's CommonJS module export, not a Zod schema method.
+    // eslint-disable-next-line zod/no-default
     if (!CONFIG_MODULE.test(filename) || typeof exported?.default !== 'function') return exported;
+    // eslint-disable-next-line zod/no-default -- Next's configuration loader default export
     const loadConfig = exported.default;
     const recording = async (phase, dir, ...rest) => {
       if (phase !== PHASE_PRODUCTION_BUILD) return loadConfig(phase, dir, ...rest);

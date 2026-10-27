@@ -58,6 +58,7 @@ export const CLI_CONTRACT = Object.freeze({
   // The build's preload puts itself into every child's NODE_OPTIONS / execArgv (`--require`);
   // it reads no command line.
   'apps/web/scripts/capture-next-config.cjs': { other: ['--require'] },
+  'apps/web/scripts/build-supervisor.mjs': { other: ['-axo'] },
   'apps/web/src/app/fonts.ts': { other: ['--font-vazirmatn'] },
   // Test helper of the build-binding specs: runs the build scripts in a child Node.
   'apps/web/src/test/build-scripts.ts': { other: ['--input-type', '-e'] },

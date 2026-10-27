@@ -878,11 +878,14 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
   it('a worker whose config record cannot be written (EIO): the build is stopped and refused, no receipt (r4 F3)', () => {
     const { status, problems } = results.workerConfigLost;
     expect(status).toBe(1);
-    expect(problems).toEqual(['next config: a build process could not write its report; refusing']);
+    expect(problems).toEqual([
+      'next config: a build process could not write its report; refusing',
+      'build: processes of this build could not be confirmed stopped; the build lock is kept; refusing',
+    ]);
     expect(existsSync(join(dirs.workerConfigLost, '.next/server-action-build-receipt.json'))).toBe(
       false,
     );
-    expect(existsSync(join(dirs.workerConfigLost, LOCK))).toBe(false);
+    expect(existsSync(join(dirs.workerConfigLost, LOCK))).toBe(true);
   });
 
   it.each([

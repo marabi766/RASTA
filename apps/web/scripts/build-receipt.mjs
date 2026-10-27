@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { buildInProgress } from './build-lock.mjs';
+import { receiptBlockedByLock } from './build-lock.mjs';
 import { layoutProblems } from './build-layout.mjs';
 
 export const MANIFEST_FILE = '.next/server/server-reference-manifest.json';
@@ -134,13 +134,15 @@ export function receiptProblems(webDir) {
 
 /**
  * What the checker uses: ONE snapshot of the artifacts, validated, and the very bytes it
- * validated as text. Refuses while a build owns the package (a build that started during
+ * validated as text. Refuses until ownership was released (a build that started during
  * the read leaves a lock the second look sees).
  * @returns {{ problems: string[], manifestText?: string }}
  */
 export function checkedSnapshot(webDir, io = {}) {
-  const running = io.buildInProgress ?? buildInProgress;
-  const busy = ['a build is running in this package (see its build lock); nothing was verified'];
+  const running = io.buildInProgress ?? receiptBlockedByLock;
+  const busy = [
+    'a build is running or its lock needs recovery in this package; nothing was verified',
+  ];
   if (running(webDir)) return { problems: busy };
   const snapshot = readSnapshot(webDir, io.read);
   const problems = snapshotProblems(snapshot);

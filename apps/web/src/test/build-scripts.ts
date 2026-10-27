@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -58,12 +58,28 @@ export interface DriverOptions {
   stopGraceMs?: number;
   stopWaitMs?: number;
   handshakeMs?: number;
+  unconfirmableProbe?: boolean;
+  prematureAbsence?: boolean;
+  afterReceipt?:
+    | 'interrupt'
+    | 'uncertain'
+    | 'supervisor-death'
+    | 'readonly-interrupt'
+    | 'readonly-uncertain'
+    | 'readonly-release'
+    | 'readonly-marker';
+  modelReuse?: boolean;
+  interruptOnAbsence?: boolean;
+  recordGroupEvents?: boolean;
+  frozenWallClock?: boolean;
+  censusFault?: 'error' | 'malformed' | 'missing-supervisor';
+  mixedPublicationSignal?: boolean;
   /** Pause after a good build, before the receipt: writes `paused`, waits for `go`. */
   pauseDir?: string;
   /** Writes `{ pid, capturePath }` of `next build` here as soon as it started. */
   recordChild?: string;
   /** Between starting `next build` and publishing its group (the r3 F1 window). */
-  afterSpawn?: 'kill' | 'throw' | 'readonly-lock';
+  afterSpawn?: 'kill' | 'throw' | 'readonly-lock' | 'interrupt' | 'mis-publish';
   /** After a good build, before the receipt (`steal-lock`: another owner replaces ours). */
   beforeReceipt?: 'readonly-lock' | 'readonly-scratch' | 'steal-lock';
 }
@@ -77,14 +93,33 @@ const DRIVER = `
   const dir = process.argv[1];
   const lockDir = join(dir, ${JSON.stringify(LOCK)});
   let scratch;
-  const afterSpawn = async ({ pid, capturePath }) => {
+  let supervisor;
+  let uncertain = false;
+  const afterSpawn = async ({ pid, group, capturePath }) => {
     scratch = dirname(capturePath);
-    if (options.recordChild) writeFileSync(options.recordChild, JSON.stringify({ pid, capturePath }));
+    supervisor = group;
+    writeFileSync(join(dir, 'driver-child-' + process.pid + '.json'), JSON.stringify({ pid, group, capturePath }));
+    if (options.recordChild) writeFileSync(options.recordChild, JSON.stringify({ pid, group, capturePath }));
     if (options.afterSpawn === 'kill') process.kill(process.pid, 'SIGKILL');
     if (options.afterSpawn === 'throw') throw new Error('injected');
     if (options.afterSpawn === 'readonly-lock') chmodSync(lockDir, 0o500);
+    if (options.afterSpawn === 'mis-publish') {
+      const [owner] = readdirSync(lockDir);
+      const file = join(lockDir, owner);
+      const { readFileSync } = await import('node:fs');
+      const entry = JSON.parse(readFileSync(file, 'utf8'));
+      writeFileSync(file, JSON.stringify({ ...entry, group: pid }));
+      await sleep(200);
+      throw new Error('mis-published');
+    }
+    if (options.afterSpawn === 'interrupt') {
+      process.kill(process.pid, 'SIGINT');
+      await sleep(30);
+      if (options.mixedPublicationSignal) process.kill(process.pid, 'SIGTERM');
+    }
   };
   const beforeReceipt = async () => {
+    groupEvents.push('before-receipt');
     if (options.pauseDir) {
       writeFileSync(join(options.pauseDir, 'paused'), '');
       for (let i = 0; i < 2400 && !existsSync(join(options.pauseDir, 'go')); i += 1) await sleep(100);
@@ -98,6 +133,55 @@ const DRIVER = `
       writeFileSync(join(lockDir, 'owner-' + other), JSON.stringify({ pid: process.pid, nonce: other }));
     }
   };
+  const originalKill = process.kill.bind(process);
+  let signalsToReusedGroup = 0;
+  let absent = false;
+  if (options.modelReuse) process.kill = (target, signal) => {
+    if (target < 0 && signal !== 0) { signalsToReusedGroup += 1; return true; }
+    return originalKill(target, signal);
+  };
+  const probeGroup = (group) => {
+    if (options.prematureAbsence) return false;
+    if (options.unconfirmableProbe || uncertain) return true;
+    if (options.modelReuse && absent) return true; // an unrelated group now owns that number
+    try { originalKill(-group, 0); return true; } catch (error) {
+      if (error.code !== 'ESRCH') return true;
+      absent = true;
+      if (options.interruptOnAbsence) {
+        originalKill(process.pid, 'SIGTERM');
+        originalKill(process.pid, 'SIGINT');
+      }
+      return false;
+    }
+  };
+  const afterReceipt = async () => {
+    groupEvents.push('receipt');
+    if (options.afterReceipt?.startsWith('readonly-') && options.afterReceipt !== 'readonly-marker') chmodSync(join(dir, '.next'), 0o500);
+    if (options.afterReceipt === 'readonly-release') chmodSync(lockDir, 0o500);
+    if (options.afterReceipt === 'readonly-marker') chmodSync(dir, 0o500);
+    if (options.afterReceipt === 'interrupt' || options.afterReceipt === 'readonly-interrupt') {
+      process.kill(process.pid, 'SIGINT');
+      await sleep(20);
+      process.kill(process.pid, 'SIGTERM');
+    }
+    if (options.afterReceipt === 'uncertain' || options.afterReceipt === 'readonly-uncertain') uncertain = true;
+    if (options.afterReceipt === 'supervisor-death') { process.kill(supervisor, 'SIGKILL'); await sleep(20); }
+  };
+  const groupEvents = [];
+  if (options.frozenWallClock) Date.now = () => 0;
+  if (options.censusFault) {
+    const bin = join(dir, 'census-bin');
+    // Test-only replacement for ps. Neither this nor probeGroup is read from production config.
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(bin);
+    const source = options.censusFault === 'error'
+      ? 'process.stdout.write(process.ppid + " " + process.ppid + "\\\\n" + process.pid + " " + process.ppid + "\\\\n"); process.stderr.write("EIO /private/census-sentinel"); process.exit(1);'
+      : options.censusFault === 'malformed'
+        ? 'process.stdout.write("not-a-process-census");'
+        : 'process.stdout.write("1 1\\\\n");';
+    writeFileSync(join(bin, 'ps'), '#!' + process.execPath + '\\n' + source, { mode: 0o700 });
+    process.env.PATH = bin + ':' + process.env.PATH;
+  }
   const result = await runWebBuild(dir, {
     nextFrom: options.nextFrom ?? ${JSON.stringify(WEB)},
     stdio: options.inherit ? 'inherit' : 'ignore',
@@ -109,8 +193,18 @@ const DRIVER = `
     env: { ...process.env, ...options.env },
     afterSpawn,
     beforeReceipt,
+    afterReceipt,
+    probeGroup,
+    onGroupEvent: (event) => groupEvents.push(event),
   });
-  process.stdout.write(JSON.stringify(result) + '\\n');
+  if (options.recordGroupEvents) writeFileSync(join(dir, 'group-events.json'), JSON.stringify(groupEvents));
+  if (options.modelReuse) {
+    process.kill = originalKill;
+    writeFileSync(join(dir, 'reuse.json'), JSON.stringify({ absent, signalsToReusedGroup }));
+  }
+  // Match the production entry point: a returned result ends the wrapper immediately.
+  // Outstanding IPC handles/timers must not accidentally join missing cleanup in a test.
+  process.stdout.write(JSON.stringify(result) + '\\n', () => process.exit(result.status));
 `;
 
 /** Runs the wrapper in a driver process of its own; `pid` is the wrapper's. */
@@ -122,6 +216,22 @@ export function startDriver(
     cwd: tmpdir(),
     env: { ...process.env, DRIVER_OPTIONS: JSON.stringify(options) },
   });
+  // A failed mutation must not strand the wrapper or the exact group this driver
+  // started. Fake builds have a 20s watchdog; real Next builds use their spec's budget.
+  const watchdog = options.nextFrom
+    ? setTimeout(() => {
+        const file = join(dir, 'driver-child-' + child.pid + '.json');
+        if (existsSync(file)) {
+          const { group } = JSON.parse(readFileSync(file, 'utf8')) as { group: number };
+          try {
+            process.kill(-group, 'SIGKILL');
+          } catch {
+            /* already gone */
+          }
+        }
+        child.kill('SIGKILL');
+      }, 20_000)
+    : undefined;
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (chunk) => (stdout += chunk));
@@ -129,6 +239,7 @@ export function startDriver(
   const done = new Promise<Result>((resolve, reject) => {
     child.on('error', reject);
     child.on('close', (code, signal) => {
+      if (watchdog) clearTimeout(watchdog);
       const last = stdout.trim().split('\n').pop() ?? '';
       const parsed = (last.startsWith('{') ? JSON.parse(last) : { problems: [] }) as {
         status?: number;
@@ -190,11 +301,13 @@ export interface Plan {
   linger?: {
     ms: number;
     detached?: boolean;
+    ignoreTerm?: boolean;
     loadsAfterMs?: number;
     via?: 'spawnSync' | 'execFileSync' | 'execSync';
   };
   /** Stays alive this long before it writes its output (to be signalled meanwhile). */
   holdMs?: number;
+  unresponsive?: 'ignore' | 'sync';
   /** Exits with this code instead of writing the output. */
   exit?: number;
 }
@@ -232,7 +345,8 @@ export function plantFakeNext(root: string): { nextFrom: string; fault: string }
   writeFileSync(
     join(next, 'build/linger.js'),
     `const fs = require('fs');
-const [ms, loadsAfterMs] = process.argv.slice(2).map(Number);
+const [ms, loadsAfterMs, ignoreTerm] = process.argv.slice(2).map(Number);
+if (ignoreTerm) process.on('SIGTERM', () => {});
 fs.writeFileSync('linger.pid', String(process.pid));
 const timer = setInterval(() => { fs.mkdirSync('.next', { recursive: true }); fs.writeFileSync('.next/from-linger', String(Date.now())); }, 50);
 if (loadsAfterMs > 0) setTimeout(() => require('../server/config.js').default('phase-production-build', process.cwd()).catch(() => {}), loadsAfterMs);
@@ -263,7 +377,7 @@ const worker = path.join(__dirname, '../build/worker.js');
     if (via === 'thread') await new Promise((r) => new Worker(worker).on('exit', r).on('error', r));
   }
   if (plan.linger) {
-    const args = [path.join(__dirname, '../build/linger.js'), String(plan.linger.ms), String(plan.linger.loadsAfterMs ?? 0)];
+    const args = [path.join(__dirname, '../build/linger.js'), String(plan.linger.ms), String(plan.linger.loadsAfterMs ?? 0), String(Number(Boolean(plan.linger.ignoreTerm)))];
     const via = plan.linger.via;
     const sync = { stdio: 'ignore', detached: true };
     const starter = [path.join(__dirname, '../build/start.js'), ...args];
@@ -272,6 +386,9 @@ const worker = path.join(__dirname, '../build/worker.js');
     else if (via === 'execSync') cp.execSync([process.execPath, ...starter].map((a) => JSON.stringify(a)).join(' '), sync);
     else cp.spawn(process.execPath, args, { stdio: 'ignore', detached: Boolean(plan.linger.detached) }).unref();
   }
+  if (plan.unresponsive) process.on('SIGTERM', () => {});
+  if (plan.unresponsive) fs.writeFileSync('unresponsive.ready', '');
+  if (plan.unresponsive === 'sync') { for (;;) {} }
   if (plan.holdMs) await new Promise((r) => setTimeout(r, plan.holdMs));
   if (plan.exit) process.exit(plan.exit);
   fs.mkdirSync(path.join(dir, '.next/server'), { recursive: true });

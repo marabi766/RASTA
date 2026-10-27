@@ -7,10 +7,10 @@
 //
 // What "held" means. The lock is the DIRECTORY `.next.build-lock`, holding exactly one entry,
 // `owner-<nonce>`: the wrapper's pid, the invocation nonce and, once published, the process
-// GROUP of `next build`. build-run.mjs starts `next build` as the leader of its own group
-// (setsid), and every process the build starts stays in it (capture-next-config.cjs forces
-// `detached: false`), so the kernel keeps that group in existence exactly as long as any
-// process that could write the output lives. The lock is held while the wrapper OR any member
+// GROUP of `next build`. build-run.mjs starts a live supervisor as group leader
+// (setsid), with Next as its child. Every supported child stays in that group
+// (capture-next-config.cjs forces `detached: false`). The supervisor reserves the group
+// through the final possible signal, and retires last, after all writers are gone. The lock is held while the wrapper OR any member
 // of the group is alive; a pid that cannot be probed counts as alive.
 //
 // Why no flock(2): Node has no binding for it, `flock(1)` is not on macOS, and the holder that
@@ -24,14 +24,21 @@
 // reaper that paused for any length of time can never remove a lock someone else took since;
 // nothing is decided by elapsed time.
 //
+// Receipt completion additionally needs a unique `.next.build-lock.receipt-<nonce>`
+// marker to be removed after release. It blocks checking across recovery's empty-lock
+// window if a refused wrapper could not unlink its receipt. A new owner creates its own
+// marker before clearing old markers/invalidation; final unlink touches only its own name.
+//
 // The window between starting `next build` and publishing its group: the build's first process
 // waits, before Next runs, until this lock names its own group (capture-next-config.cjs,
 // handshake), and exits having written nothing if that never happens. So a wrapper killed in
 // that window leaves a lock that may be taken over at once, behind a process that cannot write.
 //
-// Stated residuals: a pid or group id reused by an unrelated process keeps the lock "held"
-// (the wait times out and the build refuses, naming the file: fail closed); a process that
-// leaves the group by itself (a non-Node program calling setsid) is not covered; an exited
+// Stated residuals: reused pids/pgids can conservatively keep an abandoned lock held.
+// Cleanup never signals a retained number: only the live group leader signals itself
+// through an IPC endpoint, retired permanently on loss/absence (build-group.mjs).
+// Unexpected supervisor death refuses and retains ownership; recovery probes only.
+// A process that leaves the group by itself (a non-Node program calling setsid) is not covered; an exited
 // process nobody reaps (a zombie under an init that does not reap) still counts as alive.
 import { randomBytes } from 'node:crypto';
 import {
@@ -53,6 +60,7 @@ const POLL_MS = 200;
 const OWNER = /^owner-([0-9a-f]{24})$/;
 const PENDING = /^pending-([0-9a-f]{24})-[0-9a-f]{12}$/;
 const ownerName = (nonce) => `owner-${nonce}`;
+const RECEIPT_PENDING = `${LOCK_DIR}.receipt-`;
 
 /** Whether a probe of `target` (a pid, or a negative group id) finds something alive. */
 function probe(target) {
@@ -212,6 +220,24 @@ export class BuildLock {
     return join(this.path, ownerName(this.owner.nonce));
   }
 
+  /**
+   * Cover the receipt through successful release, including recovery's gap between
+   * dead-owner removal and the next acquisition. Unique names mean an old wrapper's
+   * final unlink can never remove a new wrapper's marker. Only a NEW exclusive owner
+   * may discard old markers; its own marker already blocks checking before it does.
+   */
+  beginOutput() {
+    this.assertHeld();
+    const webDir = join(this.path, '..');
+    const ownName = `${RECEIPT_PENDING}${this.owner.nonce}`;
+    const marker = join(webDir, ownName);
+    writeFileSync(marker, '', { flag: 'wx' });
+    this.receiptPending = marker;
+    for (const name of readdirSync(webDir)) {
+      if (name.startsWith(RECEIPT_PENDING) && name !== ownName) unlinkSync(join(webDir, name));
+    }
+  }
+
   /** Names the process group of `next build`; from now on the lock lives as long as it does. */
   publishGroup(group) {
     this.assertHeld();
@@ -262,14 +288,38 @@ export class BuildLock {
     } catch {
       // someone created their lock in the emptied directory already; it is theirs
     }
+    this.ownerReleased = true;
+    try {
+      if (this.receiptPending) unlinkSync(this.receiptPending);
+    } catch (error) {
+      // A new exclusive owner may already have removed this old marker. It created
+      // its own marker FIRST, so checking was gated throughout that handoff.
+      if (error?.code === 'ENOENT') return true;
+      // Keep the marker: a receipt whose release cannot be completed must refuse.
+      return false;
+    }
     return true;
   }
 }
 
-/** For the checker: whether a build may own the package right now (unsure: yes). */
+/** Whether a writer may still own the package (used by recovery; unsure: yes). */
 export function buildInProgress(webDir) {
   const seen = inspect(join(webDir, LOCK_DIR));
   if (seen.free) return false;
   if (seen.owner) return ownerAlive(seen.owner);
   return true;
+}
+
+/**
+ * A receipt needs a COMPLETED release, not merely a dead owner. A refused wrapper may
+ * have left a published receipt it could not unlink. Recovery can reap the dead lock,
+ * but must invalidate that output before another receipt can be accepted.
+ */
+export function receiptBlockedByLock(webDir) {
+  try {
+    if (readdirSync(webDir).some((name) => name.startsWith(RECEIPT_PENDING))) return true;
+    return !inspect(join(webDir, LOCK_DIR)).free;
+  } catch {
+    return true;
+  }
 }
