@@ -3,8 +3,8 @@ import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
 import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
+import noZodDefault from './scripts/no-zod-default-rule.mjs';
 
-/** Restated in `apps/web/eslint.config.mjs`, which does not extend this file. */
 const NO_ZOD_COERCE = [
   {
     selector: "MemberExpression[object.name='z'][property.name='coerce']",
@@ -73,6 +73,14 @@ const base = tseslint.config(
         },
       ],
     },
+  },
+  {
+    // zod 4's `.default(value)` skips parsing `value`; `.prefault()` is zod 3's
+    // `.default()` (GHSA-mrhx-c7xc-m3w5). Every route to the method is refused
+    // — bracket, template, extraction, destructuring, call/apply/bind, Reflect
+    // (PR #444 r1 F2); `apps/web/eslint.config.mjs` loads the same rule.
+    plugins: { zod: { rules: { 'no-default': noZodDefault } } },
+    rules: { 'zod/no-default': 'error' },
   },
   {
     // Root `scripts/` — CI checkers, verifiers and campaign tooling, plain Node

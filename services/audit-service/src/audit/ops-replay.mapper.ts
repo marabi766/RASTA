@@ -1,13 +1,15 @@
-import type { ZodIssue } from 'zod';
 import {
+  type AuditChange,
+  type EventEnvelope,
   eventEnvelopeSchema,
+  legacyParse,
+  requireLegacyRefusal,
+  type LegacyRefusal,
   OPS_REPLAY_PRODUCER,
   OPS_REPLAY_TOPIC,
   REPLAY_EXECUTED,
   REPLAY_EXECUTED_VERSION,
   replayExecutedPayloadSchemaV1,
-  type AuditChange,
-  type EventEnvelope,
 } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { toEnvelopeProvenance, type AuditEventRecord } from './audit.mapper';
@@ -74,8 +76,11 @@ export class OpsReplayRejectedError extends Error {
   }
 }
 
-function describeIssues(issues: readonly ZodIssue[]): string {
-  const named = issues.map(
+/** Schema paths and zod 3 codes only (S-09). Exported for its tests. */
+export function describeIssues(refusal: LegacyRefusal): string {
+  // zod 3's codes, which these diagnostics have always carried, translated
+  // against the schema that refused (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F1).
+  const named = requireLegacyRefusal(refusal, 'describeIssues').issues.map(
     (issue) => `${issue.path.length === 0 ? '(root)' : issue.path.join('.')} ${issue.code}`,
   );
   const shown = named.slice(0, MAX_REPORTED_ISSUES).join(', ');
@@ -90,9 +95,9 @@ export function toReplayExecutedRecord(
   const unsupported = INGESTION_FAILURE_REASONS.REPLAY_UNSUPPORTED_EVENT;
   const invalid = INGESTION_FAILURE_REASONS.REPLAY_INVALID_PAYLOAD;
 
-  const parsedEnvelope = eventEnvelopeSchema.safeParse(envelope);
+  const parsedEnvelope = legacyParse(eventEnvelopeSchema, envelope);
   if (!parsedEnvelope.success) {
-    throw new OpsReplayRejectedError(unsupported, describeIssues(parsedEnvelope.error.issues));
+    throw new OpsReplayRejectedError(unsupported, describeIssues(parsedEnvelope.refusal));
   }
   const checked: EventEnvelope = { ...parsedEnvelope.data, payload: parsedEnvelope.data.payload };
 
@@ -111,9 +116,9 @@ export function toReplayExecutedRecord(
     throw new OpsReplayRejectedError(unsupported, `producer is not ${OPS_REPLAY_PRODUCER}`);
   }
 
-  const parsedPayload = replayExecutedPayloadSchemaV1.safeParse(checked.payload);
+  const parsedPayload = legacyParse(replayExecutedPayloadSchemaV1, checked.payload);
   if (!parsedPayload.success) {
-    throw new OpsReplayRejectedError(invalid, describeIssues(parsedPayload.error.issues));
+    throw new OpsReplayRejectedError(invalid, describeIssues(parsedPayload.refusal));
   }
   const payload = parsedPayload.data;
 

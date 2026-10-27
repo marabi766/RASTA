@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from './form-issues';
 import {
@@ -338,13 +339,13 @@ export type ParsedProjectForm<B, F extends string> =
 export function parseCreateForm(
   values: ProjectFormValues,
 ): ParsedProjectForm<ProjectBody, ProjectField> {
-  const parsed = projectFormSchema.safeParse(values);
+  const parsed = legacyParse(projectFormSchema, values);
   const estimate = parseEstimate(values.estimatedCost);
   if (!parsed.success || !estimate.ok) {
     return {
       ok: false,
       fieldErrors: {
-        ...(parsed.success ? {} : firstIssuePerField(parsed.error, PROJECT_FIELDS)),
+        ...(parsed.success ? {} : firstIssuePerField(parsed.refusal, PROJECT_FIELDS)),
         ...(estimate.ok ? {} : { estimatedCost: estimate.message }),
       },
     };
@@ -387,8 +388,8 @@ export function parseEditForm(
   const fieldErrors: Partial<Record<ProjectField, string>> = {};
   const body: { -readonly [K in keyof UpdateBody]: UpdateBody[K] } = {};
 
-  const parsed = projectFormSchema.safeParse(values);
-  const issues = parsed.success ? {} : firstIssuePerField(parsed.error, PROJECT_FIELDS);
+  const parsed = legacyParse(projectFormSchema, values);
+  const issues = parsed.success ? {} : firstIssuePerField(parsed.refusal, PROJECT_FIELDS);
   for (const field of changed) {
     if (field === 'estimatedCost') continue;
     const issue = issues[field];
@@ -413,10 +414,10 @@ export const CANCEL_UNCONFIRMED_MESSAGE = 'برای لغو باید تایید �
 export function parseCancelForm(
   values: CancelFormValues,
 ): ParsedProjectForm<{ readonly reason: string }, CancelField> {
-  const reason = reasonSchema.safeParse({ reason: values.reason });
+  const reason = legacyParse(reasonSchema, { reason: values.reason });
   const fieldErrors: Partial<Record<CancelField, string>> = reason.success
     ? {}
-    : firstIssuePerField(reason.error, ['reason']);
+    : firstIssuePerField(reason.refusal, ['reason']);
   if (values.confirm !== 'yes') fieldErrors.confirm = CANCEL_UNCONFIRMED_MESSAGE;
   if (Object.keys(fieldErrors).length > 0) return { ok: false, fieldErrors };
   return { ok: true, body: { reason: values.reason } };
@@ -433,21 +434,23 @@ export function parseGrantForm(
   { readonly decisionNumber?: string; readonly conditions?: string },
   GrantField
 > {
-  const parsed = z
-    .object({
-      decisionNumber: z
-        .string()
-        .max(
-          MAX_DECISION_NUMBER_LENGTH,
-          `شماره تصمیم حداکثر ${fa(MAX_DECISION_NUMBER_LENGTH)} نویسه است`,
-        ),
-      conditions: z
-        .string()
-        .max(MAX_CONDITIONS_LENGTH, `شرایط حداکثر ${fa(MAX_CONDITIONS_LENGTH)} نویسه است`),
-    })
-    .safeParse(values);
+  const grantSchema = z.object({
+    decisionNumber: z
+      .string()
+      .max(
+        MAX_DECISION_NUMBER_LENGTH,
+        `شماره تصمیم حداکثر ${fa(MAX_DECISION_NUMBER_LENGTH)} نویسه است`,
+      ),
+    conditions: z
+      .string()
+      .max(MAX_CONDITIONS_LENGTH, `شرایط حداکثر ${fa(MAX_CONDITIONS_LENGTH)} نویسه است`),
+  });
+  const parsed = legacyParse(grantSchema, values);
   if (!parsed.success)
-    return { ok: false, fieldErrors: firstIssuePerField(parsed.error, GRANT_FIELDS) };
+    return {
+      ok: false,
+      fieldErrors: firstIssuePerField(parsed.refusal, GRANT_FIELDS),
+    };
   return {
     ok: true,
     body: {
@@ -460,11 +463,12 @@ export function parseGrantForm(
 export function parseRejectForm(
   values: RejectFormValues,
 ): ParsedProjectForm<{ readonly reason: string }, RejectField> {
-  const reason = z
-    .object({ reason: text('دلیل رد', MIN_REASON_LENGTH, MAX_REASON_LENGTH) })
-    .safeParse({ reason: values.reason });
+  const rejectSchema = z.object({
+    reason: text('دلیل رد', MIN_REASON_LENGTH, MAX_REASON_LENGTH),
+  });
+  const reason = legacyParse(rejectSchema, { reason: values.reason });
   if (!reason.success) {
-    return { ok: false, fieldErrors: firstIssuePerField(reason.error, ['reason']) };
+    return { ok: false, fieldErrors: firstIssuePerField(reason.refusal, ['reason']) };
   }
   return { ok: true, body: { reason: values.reason } };
 }

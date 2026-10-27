@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import {
   cursorPaginationSchema,
-  seedIdSchema,
   ID_PREFIXES,
+  isoDateTime,
   plainText,
   referenceId,
+  seedIdSchema,
 } from '@rasta/contracts';
 
 /**
@@ -128,7 +129,7 @@ export type ListUsersQuery = z.infer<typeof listUsersQuerySchema>;
  * `from` and the database's clock as the query ran.
  */
 export const membershipWindowQuerySchema = z
-  .object({ from: z.string().datetime().optional() })
+  .object({ from: z.string().check(isoDateTime()).optional() })
   .strict();
 
 export type MembershipWindowQuery = z.infer<typeof membershipWindowQuerySchema>;
@@ -141,7 +142,7 @@ export const createMembershipSchema = z
   .object({
     organizationId,
     roles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length),
-    validUntil: z.string().datetime().optional(),
+    validUntil: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -191,7 +192,7 @@ export const submitRegistrationSchema = z
      * Document ids from document-service. Never file contents. Stored as
      * given, so no control or format character, bidi controls included (#209).
      */
-    documentRefs: z.array(referenceId().min(1)).max(10).default([]),
+    documentRefs: z.array(referenceId().min(1)).max(10).prefault([]),
   })
   .strict();
 

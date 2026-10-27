@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { businessLineSchema } from '@rasta/contracts';
+import { businessLineSchema, legacyParse, parsableUrl } from '@rasta/contracts';
 import {
   CONFIG_ENV_MESSAGES,
   EnvValidationError,
@@ -57,8 +57,9 @@ function refusedAlike<S extends z.ZodTypeAny>(
   const [a, b] = values.map((value) => refusalOf(() => loadEnv(schema, source(value), options)));
   expect(a).toEqual(b);
   for (const value of values) expect(JSON.stringify(a)).not.toContain(value);
-  const parsed = schema.safeParse(source(values[0]));
-  const codes = parsed.success ? [] : parsed.error.issues.map((issue) => issue.code);
+  // Parsed as loadEnv parses, and read in zod 3's vocabulary, which the refusal is written in.
+  const parsed = legacyParse(schema, source(values[0]));
+  const codes = parsed.success ? [] : parsed.refusal.issues.map((i) => i.code);
   return { ...(a as Refusal), codes };
 }
 
@@ -241,11 +242,7 @@ describe('every issue code, from the schema and the code alone', () => {
       // A refinement may raise the code with any options; only an enum's own are schema facts.
       const schema = z.object({
         A: z.string().superRefine((value, ctx) => {
-          ctx.addIssue({
-            code: z.ZodIssueCode.invalid_enum_value,
-            options: [value],
-            received: value,
-          });
+          ctx.addIssue({ code: 'invalid_value', values: [value] });
         }),
       });
       expect(refusedAlike(schema, only('A'))).toMatchObject({
@@ -273,7 +270,7 @@ describe('every issue code, from the schema and the code alone', () => {
           .transform((raw) => raw.split(','))
           .pipe(
             z.array(z.enum(['ADMIN', 'AUDITOR']), {
-              errorMap: (_issue, ctx) => ({ message: `bad: ${String(ctx.data)}` }),
+              error: (issue) => `bad: ${String(issue.input)}`,
             }),
           ),
       });
@@ -317,7 +314,7 @@ describe('every issue code, from the schema and the code alone', () => {
   it('invalid_string: the check, never the text', () => {
     const schema = z.object({
       R: z.string().regex(/^[0-9]+$/),
-      U: z.string().url(),
+      U: z.string().check(parsableUrl()),
       E: z.string().email(),
       P: z.string().startsWith('rasta-'),
     });
@@ -375,7 +372,10 @@ describe('every issue code, from the schema and the code alone', () => {
     });
   });
 
-  it('invalid_union_discriminator and invalid_intersection_types', () => {
+  // zod 4 throws on an intersection whose sides cannot be merged instead of raising
+  // invalid_intersection_types (no schema here uses an intersection), and has no
+  // function schemas to raise invalid_arguments / invalid_return_type.
+  it('invalid_union_discriminator', () => {
     const schema = z.object({
       K: z.preprocess(
         (raw) => JSON.parse(String(raw)),
@@ -384,46 +384,15 @@ describe('every issue code, from the schema and the code alone', () => {
           z.object({ kind: z.literal('b') }),
         ]),
       ),
-      I: z.intersection(
-        z.string().transform(() => 'left'),
-        z.string().transform(() => 'right'),
-      ),
     });
     expect(
       refusedAlike(
         schema,
-        (value) => ({ K: JSON.stringify({ kind: value }), I: value }) as NodeJS.ProcessEnv,
+        (value) => ({ K: JSON.stringify({ kind: value }) }) as NodeJS.ProcessEnv,
       ),
     ).toMatchObject({
-      codes: ['invalid_union_discriminator', 'invalid_intersection_types'],
-      issues: [
-        { path: 'K.kind', message: 'Invalid discriminator value' },
-        { path: 'I', message: 'Intersection results could not be merged' },
-      ],
-    });
-  });
-
-  it('invalid_arguments and invalid_return_type: fixed, whatever the nested error holds', () => {
-    // A schema raises these only through z.function(); a refinement raises them
-    // here with a nested ZodError that repeats the value, which must stay unprinted.
-    const nested = (value: string) =>
-      new z.ZodError([{ code: z.ZodIssueCode.custom, path: [value], message: `got ${value}` }]);
-    const schema = z.object({
-      F: z.string().superRefine((value, ctx) => {
-        ctx.addIssue({ code: z.ZodIssueCode.invalid_arguments, argumentsError: nested(value) });
-      }),
-      R: z.string().superRefine((value, ctx) => {
-        ctx.addIssue({ code: z.ZodIssueCode.invalid_return_type, returnTypeError: nested(value) });
-      }),
-    });
-    expect(
-      refusedAlike(schema, (value) => ({ F: value, R: value }) as NodeJS.ProcessEnv),
-    ).toMatchObject({
-      codes: ['invalid_arguments', 'invalid_return_type'],
-      issues: [
-        { path: 'F', message: 'Invalid function arguments' },
-        { path: 'R', message: 'Invalid function return type' },
-      ],
+      codes: ['invalid_union_discriminator'],
+      issues: [{ path: 'K.kind', message: 'Invalid discriminator value' }],
     });
   });
 
@@ -462,7 +431,7 @@ describe('every issue code, from the schema and the code alone', () => {
 describe('paths: only what the schema owns', () => {
   it('a record key, written by the operator, prints as the placeholder', () => {
     const schema = z.object({
-      MAP: z.preprocess((raw) => JSON.parse(String(raw)), z.record(z.number())),
+      MAP: z.preprocess((raw) => JSON.parse(String(raw)), z.record(z.string(), z.number())),
     });
     expect(
       refusedAlike(
@@ -490,10 +459,10 @@ describe('paths: only what the schema owns', () => {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['A'], message: 'x' });
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['NOT_DECLARED'], message: 'x' });
     });
-    const parsed = schema.safeParse({ A: 'ok' });
+    const parsed = legacyParse(schema, { A: 'ok' });
     expect(parsed.success).toBe(false);
     if (parsed.success) return;
-    expect(envIssues(parsed.error.issues, schema, new Set())).toEqual([
+    expect(envIssues(parsed.refusal, new Set())).toEqual([
       { path: 'A', message: 'Invalid input' },
       { path: ENV_PATH_PLACEHOLDER, message: 'Invalid input' },
     ]);
@@ -512,5 +481,53 @@ describe('fixedEnvMessages', () => {
     expect(messages.seal()).toBe(sealed);
     expect(() => messages.fixed('three')).toThrow(/while the schema is built/);
     expect(sealed).toEqual(['one', 'two']);
+  });
+});
+
+describe('a refusal legacyParse took from stock zod (D-078, addendum H)', () => {
+  const VALUE = 'SENTINEL-041-env-value';
+  const neverAllowed = { message: 'never allowed' };
+
+  it('is reported exactly as the same refusal reached the ordinary way, no value in it', () => {
+    // Codex PR-444 r3 F3's shape: run in zod 3's order the intersection
+    // reconciles the key issue away and nothing refuses; legacyParse keeps
+    // stock zod's refusal.
+    const fallback = z.intersection(
+      z
+        .object({ A: z.string() })
+        .strict()
+        .transform((value) => value)
+        .refine(() => false, neverAllowed),
+      z.object({ B: z.string() }),
+    );
+    const ordinary = z.object({ A: z.string(), B: z.string() }).refine(() => false, neverAllowed);
+    const source = { A: VALUE, B: VALUE };
+    expect(
+      fallback.safeParse(source, { [Symbol.for('@rasta/zod.legacyRunOrder')]: true } as never)
+        .success,
+    ).toBe(true);
+    const options = { fixedMessages: ['never allowed'] };
+    const a = refusalOf(() => loadEnv(fallback, source, options));
+    const b = refusalOf(() => loadEnv(ordinary, source, options));
+    expect(a.issues).toEqual(b.issues);
+    expect(a.issues).toEqual([{ path: '(root)', message: 'never allowed' }]);
+    expect(JSON.stringify(a)).not.toContain(VALUE);
+  });
+
+  it('a refusal neither pass can word is one fixed issue, no value and no raw error in it', () => {
+    const schema = z.object({
+      A: z.string().refine(() => false, {
+        error: () => {
+          throw new Error(VALUE);
+        },
+      }),
+    });
+    const refused = legacyParse(schema, { A: VALUE });
+    if (refused.success) throw new Error('expected a refusal');
+    expect(envIssues(refused.refusal, new Set())).toEqual([
+      { path: '(root)', message: expect.any(String) },
+    ]);
+    const thrown = refusalOf(() => loadEnv(schema, { A: VALUE }));
+    expect(JSON.stringify(thrown)).not.toContain(VALUE);
   });
 });

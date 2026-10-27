@@ -87,6 +87,8 @@ const cost = (over: Partial<typeof EMPTY_RECORD_COST_FORM> = {}) => ({
   ...over,
 });
 
+// zod 4 infers a field whose transform may return undefined as present-but-undefined (zod 3: optional).
+const NO_SUMMARY = { workSummary: undefined };
 describe('which commands an order leaves open', () => {
   it.each([
     ['OPEN', ['start', 'cancel', 'part', 'labour', 'cost']],
@@ -392,7 +394,7 @@ describe('writing', () => {
       'starts',
       'start',
       200,
-      (impl: typeof fetch) => startRepair(SESSION, ORDER, {}, 'sub_abc', impl),
+      (impl: typeof fetch) => startRepair(SESSION, ORDER, NO_SUMMARY, 'sub_abc', impl),
     ],
     [
       'completes',
@@ -473,7 +475,7 @@ describe('writing', () => {
 
   it('percent-encodes the order id: a slash must not address another endpoint', async () => {
     const { impl, calls } = recording(200, { id: 'X_1' });
-    await startRepair(SESSION, 'RPO/../x', {}, 's', impl);
+    await startRepair(SESSION, 'RPO/../x', NO_SUMMARY, 's', impl);
     expect(calls[0].url).toBe('http://gateway.test:3000/v1/repair-orders/RPO%2F..%2Fx/start');
   });
 
@@ -584,7 +586,7 @@ describe('writing', () => {
       : 'INVALID_STATE_TRANSITION';
 
     it.each([
-      ['start', (impl: typeof fetch) => startRepair(SESSION, ORDER, {}, 's', impl)],
+      ['start', (impl: typeof fetch) => startRepair(SESSION, ORDER, NO_SUMMARY, 's', impl)],
       [
         'complete',
         (impl: typeof fetch) =>
@@ -620,7 +622,7 @@ describe('writing', () => {
   });
 
   describe('a sentence the portal does not know', () => {
-    const call = (impl: typeof fetch) => startRepair(SESSION, ORDER, {}, 's', impl);
+    const call = (impl: typeof fetch) => startRepair(SESSION, ORDER, NO_SUMMARY, 's', impl);
 
     it('is said by the platform code: a transition the service words one more way', async () => {
       const result = await call(
@@ -676,10 +678,22 @@ describe('writing', () => {
 
   it('reports 403 as FORBIDDEN and 404 as the platform’s non-disclosure', async () => {
     expect(
-      await startRepair(SESSION, ORDER, {}, 's', recording(403, { code: 'FORBIDDEN' }).impl),
+      await startRepair(
+        SESSION,
+        ORDER,
+        NO_SUMMARY,
+        's',
+        recording(403, { code: 'FORBIDDEN' }).impl,
+      ),
     ).toMatchObject({ kind: 'FORBIDDEN' });
     expect(
-      await startRepair(SESSION, ORDER, {}, 's', recording(404, { code: 'NOT_FOUND' }).impl),
+      await startRepair(
+        SESSION,
+        ORDER,
+        NO_SUMMARY,
+        's',
+        recording(404, { code: 'NOT_FOUND' }).impl,
+      ),
     ).toMatchObject({ kind: 'NOT_FOUND' });
   });
 
@@ -687,7 +701,7 @@ describe('writing', () => {
     const result = await startRepair(
       SESSION,
       ORDER,
-      {},
+      NO_SUMMARY,
       's',
       recording(504, { code: 'GATEWAY_TIMEOUT' }).impl,
     );
