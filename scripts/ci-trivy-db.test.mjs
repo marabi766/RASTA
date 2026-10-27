@@ -1102,6 +1102,7 @@ const FAST = Object.freeze({
   repositoryWindowMs: 20_000,
   attemptMs: 10_000,
   canaryMs: 10_000,
+  officialCheckMs: 10_000,
   killGraceMs: 200,
   minAttemptMs: 100,
   validationMs: 10_000,
@@ -1109,12 +1110,39 @@ const FAST = Object.freeze({
   packMs: 10_000,
   unpackMs: 10_000,
 });
+function stubChecker(steps = ['ok'], dir = tmp()) {
+  const checker = join(dir, 'trivy-db-check');
+  writeFileSync(
+    checker,
+    `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const file = ${JSON.stringify(join(dir, 'checker-calls'))};
+const calls = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : [];
+const steps = ${JSON.stringify(steps)};
+const step = steps[Math.min(calls.length, steps.length - 1)];
+const db = process.argv[2];
+calls.push({ db, sealed: fs.existsSync(path.join(path.dirname(db), '..', 'ci-trivy-db-source.json')) });
+fs.writeFileSync(file, JSON.stringify(calls));
+if (step === 'panic') { process.stderr.write('panic: SECRET-DB-KEY\\n'); process.kill(process.pid, 'SIGABRT'); }
+if (step === 'corrupt') { process.stdout.write('SECRET-DB-KEY\\n'); process.exit(1); }
+if (step === 'exit') { process.stdout.write('ok\\n', () => process.exit(7)); return; }
+if (step === 'garbage') { process.stdout.write('SECRET-DB-KEY\\n'); process.exit(0); }
+if (step === 'huge') { process.stdout.write('SECRET-DB-KEY'.repeat(1000)); }
+else if (step === 'lines') { process.stdout.write('x\\n'.repeat(1000)); }
+else { process.stdout.write('ok\\n'); }
+`,
+  );
+  chmodSync(checker, 0o755);
+  return checker;
+}
 const fetchWith = (trivy, extra = {}) => {
   const cacheDir = join(tmp(), 'trivy-db');
   const lines = [];
   return fetchDb(cacheDir, {
     run: RUN,
     trivy: trivy.stub,
+    checker: stubChecker(),
     backoffMs: [0, 0],
     budget: FAST,
     log: (l) => lines.push(l),
@@ -1157,6 +1185,89 @@ test('fetch: the first repository works -> one download, one canary scan, sealed
   assert.equal(source.sha256['trivy.db'], sha256(join(FIXTURES, 'real.db')));
   assert.equal(checkDb(cacheDir, realClockCtx()).ok, true);
 });
+
+test('fetch: official checker runs on EACH attempt before sealing; corruption retries then falls back', async () => {
+  const checker = stubChecker(['corrupt', 'corrupt', 'corrupt', 'ok']);
+  const t = stubTrivy({ [GCR]: ['ok'], [GHCR]: ['ok'] });
+  const { result } = await fetchWith(t, { checker });
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.repository, GHCR);
+  const calls = JSON.parse(readFileSync(join(dirname(checker), 'checker-calls')));
+  assert.equal(calls.length, 4);
+  assert.ok(calls.every((c) => !c.sealed && c.db.endsWith('/db/trivy.db')));
+  assert.equal(t.calls().filter((c) => c.canary).length, 1);
+});
+
+for (const step of ['corrupt', 'panic', 'exit', 'garbage', 'huge', 'lines', 'missing']) {
+  test(`fetch: official checker ${step} refuses publication and exhausts both sources without leaking diagnostics`, async () => {
+    const checker = step === 'missing' ? join(tmp(), 'SECRET-DB-KEY') : stubChecker([step]);
+    const t = stubTrivy({ [GCR]: ['ok'], [GHCR]: ['ok'] });
+    const { result, cacheDir, lines } = await fetchWith(t, { checker, backoffMs: [] });
+    assert.equal(result.ok, false);
+    assert.deepEqual(t.repos(), [GCR, GHCR]);
+    assert.match(result.reason, /official bbolt check/);
+    if (step === 'corrupt') assert.match(result.reason, /exited 1/);
+    if (step === 'panic') assert.match(result.reason, /exited SIGABRT/);
+    if (step === 'exit') assert.match(result.reason, /exited 7/);
+    if (step === 'missing') assert.match(result.reason, /could not run.*ENOENT/);
+    if (step === 'garbage' || step === 'lines')
+      assert.match(result.reason, /printed no success marker/);
+    if (step === 'huge') assert.match(result.reason, /printed more than allowed and was stopped/);
+    assert.doesNotMatch(result.reason + lines.join('\n'), /SECRET-DB-KEY|panic:/);
+    assert.equal(existsSync(cacheDir), false);
+    assert.equal(t.calls().filter((c) => c.canary).length, 0);
+  });
+}
+
+test('fetch: official checker stderr (including panic traces) never reaches the parent log', () => {
+  const checker = stubChecker(['panic']);
+  const t = stubTrivy({ [GCR]: ['ok'], [GHCR]: ['ok'] });
+  const script = `import { fetchDb } from ${JSON.stringify(LIB)};
+    const r = await fetchDb(${JSON.stringify(join(tmp(), 'cache'))}, {
+      run: ${JSON.stringify(RUN)}, trivy: ${JSON.stringify(t.stub)},
+      checker: ${JSON.stringify(checker)}, budget: ${JSON.stringify(FAST)},
+      backoffMs: [], log: (line) => process.stderr.write(line + '\\n'),
+    });
+    process.stdout.write(JSON.stringify(r));`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).ok, false);
+  assert.doesNotMatch(r.stdout + r.stderr, /SECRET-DB-KEY|panic:/);
+});
+
+test(
+  'fetch: official checker deadline kills its descendants even when the leader exits on TERM, then falls back',
+  { timeout: 20_000 },
+  async () => {
+    const dir = tmp();
+    const checker = join(dir, 'trivy-db-check');
+    writeFileSync(
+      checker,
+      `#!${process.execPath}\n${leaderWithStubbornChild(dir, "process.on('SIGTERM', () => process.exit(0));")}
+require('node:fs').appendFileSync(${JSON.stringify(join(dir, 'all-pids'))}, require('node:fs').readFileSync(${JSON.stringify(join(dir, 'pids'))}, 'utf8') + '\\n');`,
+    );
+    chmodSync(checker, 0o755);
+    const t = stubTrivy({ [GCR]: ['ok'], [GHCR]: ['ok'] });
+    const started = performance.now();
+    const { result, cacheDir } = await fetchWith(t, {
+      checker,
+      backoffMs: [],
+      budget: { ...FAST, officialCheckMs: 1500, killGraceMs: 500 },
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /official bbolt check did not finish within its deadline/);
+    assert.deepEqual(t.repos(), [GCR, GHCR]);
+    assert.ok(performance.now() - started < 8000);
+    assert.equal(existsSync(cacheDir), false);
+    await new Promise((r) => setTimeout(r, 100));
+    const pids = readFileSync(join(dir, 'all-pids'), 'utf8').trim().split(/\s+/);
+    assert.equal(pids.length, 4);
+    for (const pid of pids) assert.equal(alive(pid), false);
+  },
+);
 
 test('fetch: the observed failure (404 on the mirror layer) is retried, then ghcr.io is used', async () => {
   const t = stubTrivy({ [GCR]: ['fail'], [GHCR]: ['ok'] });
@@ -1647,6 +1758,7 @@ test('CLI check: restore miss (empty directory) -> exit 1', () => {
 
 test('CLI fetch: fixed repositories and binary (`trivy` on PATH), knobs ignored, key published', () => {
   const t = stubTrivy({ [GCR]: ['ok'], [GHCR]: ['ok'], 'evil.example/trivy-db:2': ['ok'] });
+  stubChecker(['ok'], t.dir);
   const out = join(tmp(), 'github-output');
   writeFileSync(out, '');
   const cacheDir = join(tmp(), 'trivy-db');
@@ -1735,8 +1847,8 @@ const composite = parseYaml(
   readFileSync(join(ROOT, '.github/actions/restore-trivy-db/action.yml'), 'utf8'),
 );
 const SCANS = [
-  ['containers', 'rasta/${{ matrix.service }}:${{ github.sha }}', '.trivyignore.services'],
-  ['clamav-signatures', 'rasta/clamav-pinned:ci', '.trivyignore.clamav'],
+  ['containers', 'rasta/${{ matrix.service }}:${{ github.sha }}'],
+  ['clamav-signatures', 'rasta/clamav-pinned:ci'],
 ];
 const stepIndex = (job, pred) => workflow.jobs[job].steps.findIndex(pred);
 const compositeStep = (name) => composite.runs.steps.find((s) => s.name === name);
@@ -1894,7 +2006,8 @@ test('trivy-db job: the time budget fits the step and job limits (F3 arithmetic,
   );
   assert.ok(limits.reduce((a, b) => a + b, 0) <= job['timeout-minutes']);
   const fetch = producerStep((s) => s.id === 'fetch');
-  const fetchWorstMs = REPOSITORIES.length * (BUDGET.repositoryWindowMs + BUDGET.validationMs);
+  const fetchWorstMs =
+    REPOSITORIES.length * (BUDGET.repositoryWindowMs + BUDGET.validationMs + BUDGET.killGraceMs);
   assert.ok(fetchWorstMs <= fetch['timeout-minutes'] * 60_000, `${fetchWorstMs} ms`);
   assert.ok(BUDGET.packMs + 2 * BUDGET.killGraceMs <= PACK()['timeout-minutes'] * 60_000);
   assert.ok(
@@ -1906,6 +2019,9 @@ test('trivy-db job: the time budget fits the step and job limits (F3 arithmetic,
     "Trivy's own timeout stays generous",
   );
   assert.ok(BUDGET.canaryMs * ALPINE_RELEASES.length <= BUDGET.validationMs);
+  assert.ok(
+    BUDGET.officialCheckMs + BUDGET.canaryMs * ALPINE_RELEASES.length <= BUDGET.validationMs,
+  );
 });
 
 test('trivy-db job: the sparse checkout holds every file the fetch imports (addendum B)', () => {
@@ -1928,7 +2044,40 @@ test('trivy-db job: the sparse checkout holds every file the fetch imports (adde
     }
   };
   visit('scripts/ci-trivy-db.mjs');
+  for (const rel of ['go.mod', 'go.sum', 'main.go', 'main_test.go']) {
+    assert.ok(existsSync(join(ROOT, 'scripts/trivy-db-check', rel)));
+    seen.add(`scripts/trivy-db-check/${rel}`);
+  }
+  seen.add('scripts/fixtures/trivy-db/real.db');
   assert.deepEqual([...seen].sort(), sparse);
+});
+
+test('trivy-db job: pinned Go builds a sum-verified checker and runs its controls before fetch', () => {
+  const steps = workflow.jobs['trivy-db'].steps;
+  const setupAt = steps.findIndex((s) => s.uses?.startsWith('actions/setup-go@'));
+  const buildAt = steps.findIndex((s) => s.name === 'Build and test the official bbolt checker');
+  const fetchAt = steps.findIndex((s) => s.id === 'fetch');
+  assert.match(steps[setupAt].uses, /@[a-f0-9]{40}$/);
+  assert.equal(steps[setupAt].with['go-version'], '1.24.9');
+  assert.ok(setupAt < buildAt && buildAt < fetchAt);
+  const build = steps[buildAt];
+  assert.equal(build.if, undefined);
+  assert.equal(build.env.GOFLAGS, '-mod=readonly');
+  assert.equal(build.env.GOTOOLCHAIN, 'local');
+  assert.equal(build['working-directory'], 'scripts/trivy-db-check');
+  for (const command of [
+    'go mod download',
+    'go mod verify',
+    'go vet ./...',
+    'go test -v ./...',
+    'go build -o',
+    'GITHUB_PATH',
+  ])
+    assert.ok(build.run.includes(command), command);
+  assert.match(
+    readFileSync(join(ROOT, 'scripts/trivy-db-check/go.mod'), 'utf8'),
+    /go.etcd.io\/bbolt v1\.4\.3/,
+  );
 });
 
 test('the DB lives outside the checkout, at one path for producer and consumers (no build context carries it)', () => {

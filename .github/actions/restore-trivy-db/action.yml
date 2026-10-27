@@ -47,7 +47,8 @@ runs:
     - name: Unpack exactly the producer's archive
       # The one admission (unpackDb, scripts/ci-trivy-db-lib.mjs): the
       # artifact is exactly trivy-db.tar.zst, and the archive exactly the
-      # producer's five members (ustar, compared byte for byte, in order,
+      # producer's five members (ustar, names/types/magic/prefix checked,
+      # checksum and octal sizes validated; owner/mode/time ignored; in order,
       # each within its size limit; no link, no tar extension, nothing
       # else). It is decompressed once, bounded, and the parse that admits a
       # member is the one that writes it, into a fresh directory that only

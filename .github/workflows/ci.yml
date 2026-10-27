@@ -4222,17 +4222,44 @@ jobs:
       key: ${{ steps.fetch.outputs.key }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        timeout-minutes: 2
+        timeout-minutes: 1
         with:
           # Everything the fetch imports (node built-ins only besides these):
           # pinned by a test that follows the imports.
           sparse-checkout: |
             scripts/ci-trivy-db.mjs
             scripts/ci-trivy-db-lib.mjs
+            scripts/trivy-db-check/go.mod
+            scripts/trivy-db-check/go.sum
+            scripts/trivy-db-check/main.go
+            scripts/trivy-db-check/main_test.go
+            scripts/fixtures/trivy-db/real.db
           sparse-checkout-cone-mode: false
 
+      - name: Set up Go for the official bbolt checker
+        timeout-minutes: 1
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.24.9'
+          cache: false
+
+      - name: Build and test the official bbolt checker
+        timeout-minutes: 2
+        working-directory: scripts/trivy-db-check
+        env:
+          GOTOOLCHAIN: local
+          GOFLAGS: -mod=readonly
+        run: |
+          set -euo pipefail
+          go mod download
+          go mod verify
+          go vet ./...
+          go test -v ./...
+          go build -o "$RUNNER_TEMP/trivy-db-check-bin/trivy-db-check" .
+          echo "$RUNNER_TEMP/trivy-db-check-bin" >> "$GITHUB_PATH"
+
       - name: Install Trivy
-        timeout-minutes: 3
+        timeout-minutes: 2
         uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
         with:
           version: ${{ env.TRIVY_VERSION }}
@@ -4258,7 +4285,7 @@ jobs:
         run: node scripts/ci-trivy-db.mjs pack "$TRIVY_DB_DIR" "$TRIVY_DB_ARCHIVE"
 
       - name: Publish the DB as this run's artifact
-        timeout-minutes: 3
+        timeout-minutes: 2
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.fetch.outputs.key }}

@@ -18,8 +18,9 @@
 // are the library's fixed values. There are no test knobs here (a knob that
 // can loosen a security gate is not a gate); tests drive the library. The
 // only inputs are the run's identity (GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT), the
-// key, and `trivy` and `zstd` on PATH; the workflow installs Trivy at a
-// pinned version. Refusals never repeat a path or an unmatched key.
+// key, and `trivy`, `zstd` and `trivy-db-check` on PATH; the workflow pins
+// Trivy and builds the bbolt checker from a sum-verified pinned module.
+// Refusals never repeat a path or an unmatched key.
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { checkDb, fetchDb, packDb, unpackDb } from './ci-trivy-db-lib.mjs';
 

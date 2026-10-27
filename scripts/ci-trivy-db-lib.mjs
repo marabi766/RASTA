@@ -16,9 +16,11 @@
  * repository in turn, retrying on ANY failure inside a time window per
  * repository, and every scan restores that exact copy and scans with
  * `TRIVY_SKIP_DB_UPDATE`. Skip mode makes Trivy validate the schema only and
- * never age or content, so `checkDb` is the gate: it is the one acceptance
- * boundary, used by the producer before it publishes and by every consumer
- * before it scans. The copy travels as one archive; `packDb` writes it and
+ * never age or content, so `checkDb` is the shared admission gate,
+ * used by the producer before it publishes and by every consumer
+ * before it scans. The producer also runs the official bbolt v1.4.3
+ * Tx.Check on EACH download attempt before sealing. Consumers keep their
+ * current checks. The copy travels as one archive; `packDb` writes it and
  * `unpackDb` is the one boundary that admits it (PR #435 round 3).
  *
  * This module reads no environment and has no defaults that loosen anything:
@@ -26,7 +28,21 @@
  * the production policy. Tests inject through these parameters, and the ones
  * a consumer's check takes (a deadline) can only tighten it; the CLI
  * (ci-trivy-db.mjs) passes only the run identity and the producer's key.
- * Node built-ins only (plus `zstd` and `trivy` as children), so it runs
+ * Threat model (D-076): (1) transit/storage corruption after sealing is
+ * detected by every consumer's sha256. (2) Broken/truncated upstream bytes
+ * face structural sanity, official bbolt consistency checking and sampled
+ * per-ecosystem canaries, including a real Trivy lookup scan. (3a) Producer
+ * compromise is out of scope. (3b) Malicious or subtly wrong upstream bytes
+ * that pass those checks remain a residual risk: an uncompromised producer
+ * hashes whatever passed. Trust ends at the OCI artifact resolved by Trivy
+ * from mirror.gcr.io/aquasec/trivy-db:2, then ghcr.io/aquasecurity/trivy-db:2.
+ * The manifest/layer digests come from that registry's tag resolution; we
+ * neither pin an upstream digest nor verify a signature/attestation. The
+ * upstream trivy-db cron workflow publishes via oras push and declares no
+ * signing/attestation step (reviewed 2026-10-27); Trivy binary/image signing
+ * is separate and supplies no DB authenticity proof here.
+ *
+ * Node built-ins only (plus `zstd`, `trivy` and `trivy-db-check` as children), so it runs
  * before Trivy is installed and in the producer's sparse checkout.
  *
  * Refusals are fixed texts: they never repeat a path, an archive member's
@@ -76,31 +92,36 @@ export const BACKOFF_MS = Object.freeze([5_000, 15_000]);
  * group, then SIGKILL `killGraceMs` later, even when the leader already
  * exited), and the in-process checks of a copy stop at their own deadline:
  *
- *   fetch <= 2 x (180 s window + 90 s validation of the last copy) = 540 s
+ *   fetch <= 2 x (165 s window + 120 s validation + 5 s cleanup) = 580 s
  *
- * against the `trivy-db` job (ci.yml): checkout 2 min + setup-trivy 3 min +
- * fetch 10 min (600 s >= 540 s) + pack 2 min + upload 3 min = 20 min = its
+ * against the `trivy-db` job (ci.yml): checkout 1 min + setup-go 1 min +
+ * build/checker controls 2 min + setup-trivy 2 min + fetch 10 min
+ * (600 s >= 580 s) + pack 2 min + upload 2 min = 20 min = its
  * `timeout-minutes`. Every one of those steps carries its own
  * `timeout-minutes`, so none can borrow another's share.
  *
  * Measured on this host with the real DB (1.64 GB of 2026-10-25, 397 943
  * pages, 7.4 million elements): the full bbolt walk 3.3-3.8 s, one sha256
  * 6.7 s, the canary scan 0.23 s; one consumer check 9.4-10.1 s (limit 60 s),
- * one copy's whole validation 22.4 s (limit 90 s), pack 2.7-3.1 s and unpack
+ * round-3 validation 22.4 s (now limit 120 s), pack 2.7-3.1 s and unpack
  * 4.2-5.0 s (limits 90 s and 120 s). The runner hashed faster than this host
  * on run 40197545703 (a whole check, sha256 included, in 3.5 s).
+ * Round 4: official check 74.4 s / 1.45 GB peak on that saved DB (cold),
+ * 1.9 s on the fresh 1.64 GB DB of 2026-10-27; whole fresh fetch 31.9 s.
  */
 export const BUDGET = Object.freeze({
-  repositoryWindowMs: 180_000,
+  repositoryWindowMs: 165_000,
   /** One `--download-db-only`; a normal download takes 5-20 s. */
   attemptMs: 120_000,
   /** One canary scan (measured 0.23 s). */
   canaryMs: 30_000,
+  /** Official bbolt check, inside the same validation deadline. */
+  officialCheckMs: 90_000,
   killGraceMs: 5_000,
   /** An attempt is not started with less than this left in its window. */
   minAttemptMs: 20_000,
-  /** All in-process checks of one downloaded copy, its canary scans included (measured 22.4 s). */
-  validationMs: 90_000,
+  /** All validation of one copy, official checker and canaries included. */
+  validationMs: 120_000,
   /** One `checkDb` in a consumer: the walk and both sha256 (measured 9.4-10.1 s). */
   checkMs: 60_000,
   /** `packDb` (measured 2.7-3.1 s) and `unpackDb` (4.2-5.0 s), compressor included. */
@@ -132,7 +153,7 @@ export const SOURCE_FILE = 'ci-trivy-db-source.json';
  */
 export const SCANNED_BASES = Object.freeze({
   'node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402': '3.24',
-  'clamav/clamav:1.5.4@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6':
+  'clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d':
     '3.24',
 });
 export const ALPINE_RELEASES = Object.freeze([...new Set(Object.values(SCANNED_BASES))].sort());
@@ -357,9 +378,11 @@ function readMeta(page, expectedId) {
 
 /**
  * Opens a bbolt file the way bbolt does, but strictly (a freshly published,
- * closed DB has two valid meta pages), and walks ALL of it the way
- * `bbolt check` does (round 2 read only the first page of each top-level
- * bucket, so a corrupt nested page, inline bucket or branch child passed):
+ * closed DB has two valid meta pages), and walks all reachable records
+ * (structural sanity, NOT a full bbolt verifier: branch separators are not
+ * checked against child key ranges; the producer's official checker does
+ * that). Round 2 read only the first page of each top-level
+ * bucket, so a corrupt nested page, inline bucket or branch child passed:
  *  - every page reachable from the root bucket, through branch pages, leaf
  *    pages, nested buckets and inline buckets, in range, carrying its own id,
  *    a branch or leaf page (an inline bucket: a leaf page with id 0 and no
@@ -1043,7 +1066,9 @@ const describe = (what, r) =>
  * failed open on SIGPIPE). POSIX ustar, written by `packDb`, holding exactly
  * these members, in this order, under these exact names, and nothing else:
  * no tar extension (pax, GNU long names), no link, no device, no other path.
- * `unpackDb` compares every header byte for byte with this list, so there is
+ * `unpackDb` compares name/NUL padding, typeflag, empty link name, ustar
+ * magic/version and empty prefix; it validates checksum and strict octal
+ * size. Owner/mode/time bytes are ignored at extraction. There is
  * nothing to canonicalise: an alias (`./trivy-db/`, `trivy-db//db/`, a
  * directory without its slash, a file with one), a duplicate, a member out
  * of place or of the other type is simply not the next member.
@@ -1517,6 +1542,7 @@ export async function fetchDb(cacheDir, opts) {
   const {
     run,
     trivy = 'trivy',
+    checker = 'trivy-db-check',
     repositories = REPOSITORIES,
     backoffMs = BACKOFF_MS,
     budget = BUDGET,
@@ -1579,10 +1605,12 @@ export async function fetchDb(cacheDir, opts) {
             repository,
             attempt,
             trivy,
+            checker,
             budget,
             deadline,
             now,
             env,
+            log,
           });
         }
         if (problem === null) {
@@ -1613,13 +1641,14 @@ export async function fetchDb(cacheDir, opts) {
 
 /**
  * One downloaded copy, before it is sealed, within BUDGET.validationMs: the
- * copy itself first (cheap: a stale or hollow copy costs no canary), then
- * Trivy's canaries, then the provenance that vouches for exactly these
+ * copy itself first (cheap: a stale or hollow copy costs no checker or
+ * canary), then the official checker, Trivy's canaries and the provenance
+ * that vouches for exactly these
  * bytes. Null when it passed; the full check every consumer runs follows.
  */
 async function validateCopy(
   cacheDir,
-  { key, run, repository, attempt, trivy, budget, deadline, now, env },
+  { key, run, repository, attempt, trivy, checker, budget, deadline, now, env, log },
 ) {
   const now0 = now();
   const nowNs = clockNs(now0);
@@ -1632,6 +1661,22 @@ async function validateCopy(
     else throw e;
   }
   if (!content.ok) return `downloaded copy rejected: ${content.reason}`;
+  // Before canaries and sealing, on every attempt. No checker output is
+  // logged: even panic traces or forged diagnostics must not echo DB keys.
+  const officialStarted = performance.now();
+  const official = await runBounded(checker, [join(cacheDir, 'db/trivy.db')], {
+    limitMs: Math.min(budget.officialCheckMs, deadline - performance.now()),
+    graceMs: budget.killGraceMs,
+    env,
+    stdout: 'pipe',
+    stderr: 'ignore',
+    captureLimit: 4096,
+  });
+  const officialProblem = describe('the official bbolt check', official);
+  if (officialProblem !== null) return `downloaded copy rejected: ${officialProblem}`;
+  if (official.stdout !== 'ok\n')
+    return 'downloaded copy rejected: the official bbolt check printed no success marker';
+  log(`trivy-db: official bbolt check ok (${Math.round(performance.now() - officialStarted)} ms)`);
   const canary = await canaryScans(trivy, cacheDir, {
     deadline,
     limitMs: budget.canaryMs,
