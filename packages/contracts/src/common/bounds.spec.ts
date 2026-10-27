@@ -12,7 +12,7 @@ function countingRecord() {
     parsed();
     if (entry !== 'v') ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'bad entry' });
   });
-  return { schema: z.record(value), parsed };
+  return { schema: z.record(z.string(), value), parsed };
 }
 
 describe('withMaxKeys (a key-count cap checked before any entry)', () => {
@@ -30,15 +30,17 @@ describe('withMaxKeys (a key-count cap checked before any entry)', () => {
 
     expect(parsed).not.toHaveBeenCalled();
     expect(result.success).toBe(false);
-    // One issue, not one per entry.
+    // One issue, not one per entry. (zod 3 also kept its internal `fatal` flag on the issue.)
     expect(result.error?.issues).toEqual([
-      { code: 'custom', message: 'Expected at most 3 keys', fatal: true, path: [] },
+      { code: 'custom', message: 'Expected at most 3 keys', path: [] },
     ]);
   });
 
   it('leaves a refinement over the whole value unrun when the cap refuses', () => {
     const containsBidi = jest.fn();
-    const schema = withMaxKeys(z.record(z.unknown()), 2).superRefine(() => containsBidi());
+    const schema = withMaxKeys(z.record(z.string(), z.unknown()), 2).superRefine(() =>
+      containsBidi(),
+    );
 
     expect(schema.safeParse(entries(3)).success).toBe(false);
     expect(containsBidi).not.toHaveBeenCalled();
@@ -60,14 +62,16 @@ describe('withMaxKeys (a key-count cap checked before any entry)', () => {
     ['a string', 'abcd'],
     ['null', null],
   ])('passes %s through, so the record refuses it exactly as it did', (_label, input) => {
-    const capped = withMaxKeys(z.record(z.unknown()), 2).safeParse(input);
-    const plain = z.record(z.unknown()).safeParse(input);
+    const capped = withMaxKeys(z.record(z.string(), z.unknown()), 2).safeParse(input);
+    const plain = z.record(z.string(), z.unknown()).safeParse(input);
 
     expect(capped.error?.issues).toEqual(plain.error?.issues);
   });
 
   it('names the cap and nothing the caller sent (S-09)', () => {
-    const result = withoutBidiControlDeep(withMaxKeys(z.record(z.unknown()), 1)).safeParse({
+    const result = withoutBidiControlDeep(
+      withMaxKeys(z.record(z.string(), z.unknown()), 1),
+    ).safeParse({
       'SENTINEL-key': 'SENTINEL-value',
       other: 1,
     });

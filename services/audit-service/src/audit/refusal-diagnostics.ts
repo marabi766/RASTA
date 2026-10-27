@@ -1,4 +1,5 @@
-import type { ZodIssue, ZodTypeAny } from 'zod';
+import type { z, ZodTypeAny } from 'zod';
+import { legacyParse, requireLegacyRefusal, type LegacyRefusal } from '@rasta/contracts';
 
 /**
  * What a refusal may say about the message it refused (S-09; PR #378 r1 F3).
@@ -73,47 +74,45 @@ export function declaredFieldNames(...schemas: readonly ZodTypeAny[]): ReadonlyS
   const pending: unknown[] = [...schemas];
 
   while (pending.length > 0) {
-    const schema = pending.pop() as { _def?: Record<string, unknown> } | undefined;
-    if (!schema?._def || seen.has(schema)) continue;
+    const schema = pending.pop() as { _zod?: { def: Record<string, unknown> } } | undefined;
+    if (!schema?._zod || seen.has(schema)) continue;
     seen.add(schema);
-    const def = schema._def;
+    const def = schema._zod.def;
 
-    switch (def.typeName) {
-      case 'ZodObject': {
-        const shape = (def.shape as () => Record<string, unknown>)();
-        for (const [key, field] of Object.entries(shape)) {
+    switch (def.type) {
+      case 'object': {
+        for (const [key, field] of Object.entries(def.shape as Record<string, unknown>)) {
           names.add(key);
           pending.push(field);
         }
         pending.push(def.catchall);
         break;
       }
-      case 'ZodArray':
-        pending.push(def.type);
+      case 'array':
+        pending.push(def.element);
         break;
-      case 'ZodRecord':
-      case 'ZodMap':
+      case 'record':
+      case 'map':
         pending.push(def.valueType);
         break;
-      case 'ZodEffects':
-        pending.push(def.schema);
-        break;
-      case 'ZodUnion':
-      case 'ZodDiscriminatedUnion':
+      case 'union':
         pending.push(...(def.options as unknown[]));
         break;
-      case 'ZodIntersection':
+      case 'intersection':
         pending.push(def.left, def.right);
         break;
-      case 'ZodTuple':
+      case 'tuple':
         pending.push(...(def.items as unknown[]), def.rest);
         break;
-      case 'ZodPipeline':
+      case 'pipe':
+        // A transform or preprocess: the schema on either side of the function.
         pending.push(def.in, def.out);
         break;
+      case 'lazy':
+        break;
       default:
-        // ZodOptional, ZodNullable, ZodDefault, ZodCatch, ZodReadonly, ZodBranded
-        pending.push(def.innerType, def.type);
+        // optional, nullable, default, prefault, catch, readonly, non-optional
+        pending.push(def.innerType);
     }
   }
   return names;
@@ -125,7 +124,10 @@ export function declaredFieldNames(...schemas: readonly ZodTypeAny[]): ReadonlyS
  * {@link MAX_REPORTED_ISSUES} issues and {@link DIAGNOSTIC_MAX_LENGTH}
  * characters.
  */
-export function describeIssues(issues: readonly ZodIssue[], declared: ReadonlySet<string>): string {
+export function describeIssues(refusal: LegacyRefusal, declared: ReadonlySet<string>): string {
+  // zod 3's codes, which these diagnostics have always carried, translated
+  // against the schema that refused (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F1).
+  const { issues } = requireLegacyRefusal(refusal, 'describeIssues');
   let withheld = 0;
   const described = issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => {
     const path = issue.path.map((segment) => {
@@ -146,11 +148,31 @@ export function describeIssues(issues: readonly ZodIssue[], declared: ReadonlySe
     : `${text.slice(0, DIAGNOSTIC_MAX_LENGTH - 1)}…`;
 }
 
-/** A Zod error by shape: the schemas may come from another package's zod instance. */
-export function zodIssuesOf(error: unknown): readonly ZodIssue[] | null {
-  if (typeof error !== 'object' || error === null) return null;
-  const issues = (error as { issues?: unknown }).issues;
-  return (error as { name?: unknown }).name === 'ZodError' && Array.isArray(issues)
-    ? (issues as ZodIssue[])
-    : null;
+/**
+ * A payload a mapper refused, carrying the {@link LegacyRefusal} of the parse
+ * that refused it. Its own message is fixed text: the refusal is described by
+ * {@link describeIssues}, never by printing this error.
+ */
+export class SchemaRefusedError extends Error {
+  constructor(readonly refusal: LegacyRefusal) {
+    super('the payload does not match its schema');
+    this.name = 'SchemaRefusedError';
+  }
+}
+
+/**
+ * `value` parsed by `schema`, or a {@link SchemaRefusedError} — for a mapper
+ * whose caller describes the refusal ({@link schemaRefusalOf}). A bare
+ * `.parse()` would throw a `ZodError`, which has no schema to translate its
+ * codes against (PR #444 r1 F1).
+ */
+export function parseOrRefuse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
+  const parsed = legacyParse(schema, value);
+  if (!parsed.success) throw new SchemaRefusedError(parsed.refusal);
+  return parsed.data;
+}
+
+/** The refusal a {@link SchemaRefusedError} carries; `null` for anything else, a bare `ZodError` included. */
+export function schemaRefusalOf(error: unknown): LegacyRefusal | null {
+  return error instanceof SchemaRefusedError ? error.refusal : null;
 }

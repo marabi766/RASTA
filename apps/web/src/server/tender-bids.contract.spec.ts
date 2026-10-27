@@ -271,11 +271,11 @@ describe('which bid commands may be sent again after a lost answer (PR 345 revie
 describe('the replay window', () => {
   it('keeps the service’s retention bounds and bounds the portal’s mirror by what can boot', () => {
     expect(constructionEnv).toContain(
-      'CONSTRUCTION_IDEMPOTENCY_TTL_HOURS:z.coerce.number().int().min(1).max(168).default(24)',
+      'CONSTRUCTION_IDEMPOTENCY_TTL_HOURS:z.coerce.number().int().min(1).max(168).prefault(24)',
     );
     // The portal's maximum is derived (unresolved-request-policy.ts), not the service's 168.
     expect(squash(readSource('apps', 'web', 'src', 'server', 'env.ts'))).toContain(
-      'WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS:z.coerce.number().int().min(1).max(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS).default(1)',
+      'WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS:z.coerce.number().int().min(1).max(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS).prefault(1)',
     );
   });
 });

@@ -32,7 +32,7 @@ export const createProgressSchema = z
      * ownership, and therefore **not** published on `rasta.construction.v1`
      * until it is.
      */
-    assetsUsed: z.array(assetIdSchema).max(MAX_ASSETS_PER_REPORT).default([]),
+    assetsUsed: z.array(assetIdSchema).max(MAX_ASSETS_PER_REPORT).prefault([]),
   })
   .strict()
   .refine((value) => new Set(value.assetsUsed).size === value.assetsUsed.length, {

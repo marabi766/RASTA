@@ -193,6 +193,10 @@ describe('zod-3 golden: idempotent request bodies and their hashes', () => {
         empty: { expectedCurrentVersion: 0, windowDays: 30, contributions: [] },
         // No over-cap array of invalid elements here: zod 3 reports every element
         // after `too_big`, which is GHSA-mrhx-c7xc-m3w5 itself and what B changes.
+        // For the same reason the one line B removed from this case's recording:
+        // zod 3 also ran the each-triggerEvent-once refinement over the parsed
+        // elements; zod 4 refuses an over-cap array before parsing any element, so
+        // nothing that reads them runs (the advisory's fix, not a regression).
         overCap: {
           expectedCurrentVersion: 0,
           windowDays: 30,

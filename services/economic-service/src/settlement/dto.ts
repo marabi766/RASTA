@@ -13,7 +13,7 @@ import { cursorQueryParameter } from '../shared/cursor';
 export const listSettlementsQuerySchema = z
   .object({
     cursor: cursorQueryParameter,
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
     /**
      * The payee view: settlements that paid this organization.
      *

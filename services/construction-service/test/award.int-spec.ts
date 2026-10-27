@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ERROR_CODES, eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import { Logger } from '@nestjs/common';
 import { awardStandingChecksTotal } from '../src/observability/metrics';
 import { matrixDigest } from '../src/tender/evaluation-matrix';
@@ -355,13 +356,15 @@ describe('awarding an evaluated tender', () => {
       expect(view.amountMinor).toBe(price);
       expect((await awardRows(tenderId))[0]!.amountMinor).toBe(9007199254740993n);
       expect((await as(owner, () => w.award.getAward(tenderId))).amountMinor).toBe(price);
-      // Nowhere in the owner's event stream or log, whole or as a number.
-      const everything = JSON.stringify(
+      // No independently verified path exemption: generated values stay searched (#452).
+      expectNotDisclosed(
         [await outboxFor(w.prisma, owner), await logOf(tenderId)],
-        (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value),
+        [price, '9007199254740992'],
+        {
+          input: { prices: [price, '9007199254740995'] },
+          derived: ['9007199254740992'],
+        },
       );
-      expect(everything).not.toContain(price);
-      expect(everything).not.toContain('9007199254740992');
     });
 
     it('records the awarder’s issuer and subject beside the user id when the token carries both', async () => {
@@ -815,8 +818,8 @@ describe('awarding an evaluated tender', () => {
         const line = lines.find((l) => l.includes(tenderId));
         expect(line).toContain(bids[0]!.bidId);
         expect(line).toContain('UPSTREAM_UNAVAILABLE');
-        // 1000 as a number of its own: the line's ULIDs can contain it by chance.
-        expect(line).not.toMatch(/(?<![\w-])1000(?![\w-])|amount|price/i);
+        // Plain text has no verified JSON metadata paths: search every character, fail closed.
+        expectNotDisclosed(line, [/1000|amount|price/i]);
 
         // Not claimed again until the backoff has passed.
         expect((await w.awardCheckSweeper.runOnce(tenderId)).claimed).toBe(0);

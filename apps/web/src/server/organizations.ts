@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
@@ -34,13 +35,13 @@ export type { ReadResult };
 const organizationSchema = z.object({
   id: z.string(),
   name: z.string(),
-  shortName: z.string().nullable().default(null),
-  externalCode: z.string().nullable().default(null),
+  shortName: z.string().nullable().prefault(null),
+  externalCode: z.string().nullable().prefault(null),
   type: z.string(),
   status: z.string(),
-  parentId: z.string().nullable().default(null),
-  path: z.string().nullable().default(null),
-  depth: z.number().default(0),
+  parentId: z.string().nullable().prefault(null),
+  path: z.string().nullable().prefault(null),
+  depth: z.number().prefault(0),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -122,12 +123,12 @@ export type ParsedUpdateOrganizationForm =
 export function parseUpdateOrganizationForm(
   values: UpdateOrganizationFormValues,
 ): ParsedUpdateOrganizationForm {
-  const parsed = updateOrganizationFormSchema.safeParse(values);
+  const parsed = legacyParse(updateOrganizationFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, UPDATE_ORGANIZATION_FIELDS),
+    fieldErrors: firstIssuePerField(parsed.refusal, UPDATE_ORGANIZATION_FIELDS),
   };
 }
 

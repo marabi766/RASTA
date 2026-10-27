@@ -113,8 +113,8 @@ export type ApprovalRequest = z.infer<typeof APPROVAL_REQUEST_SCHEMA>;
 
 const requestPageSchema = z.object({
   items: z.array(APPROVAL_REQUEST_SCHEMA),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 /** `approvalViewSchema`, as much as a decision needs. */
