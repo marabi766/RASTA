@@ -26,6 +26,10 @@ env:
   # here `mc` is the entrypoint and needs none. Bump the two together.
   MINIO_IMAGE: 'cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1'
   MC_IMAGE: 'cgr.dev/chainguard/minio-client@sha256:b8b144ab34694ecea25aa352c4be9de4c26ee2a02701521dce02ee5593c57338'
+  # The Trivy CLI every scan and the one-per-run DB download use. This is
+  # trivy-action v0.36.0's own default, stated here so the DB schema the
+  # producer downloads and the CLI that reads it cannot drift apart.
+  TRIVY_VERSION: 'v0.70.0'
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -35,7 +39,10 @@ jobs:
   quality:
     name: Lint, types and unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 25, stopgap (2026-10-27): green runs take 14-19 min and slow runners hit
+    # 20 (main 33c5f29 and train runs cancelled at 1208-1218 s). #450 bounds
+    # the unit step's parallelism; return this to 20 once it has merged.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -275,6 +282,21 @@ jobs:
         # sha256 digest is refused. Also fails if a step runs a digest-pinned
         # image that no earlier step of its job pre-pulls.
         run: pnpm run test:ci-pull-image
+
+      - name: Trivy DB download, freshness and scan wiring
+        # The shared Trivy DB (`trivy-db` job): both repositories tried with
+        # bounded retries, a stale, damaged, foreign or missing copy refused,
+        # and every Trivy scan wired to restore it, skip Trivy's own update,
+        # and fail (not skip) when the download did not happen, with the gate's
+        # severity, exit code and ignore files pinned.
+        run: pnpm run test:ci-trivy-db
+
+      - name: PostgreSQL connection monitor
+        # The sampler and report that every parallel-suite job prints its
+        # connection peak with (scripts/ci-pg-connections-lib.mjs), and the
+        # wiring: a raised max_connections proven by SHOW, the watcher started
+        # before the first suite, the report always() after it.
+        run: pnpm run test:ci-pg-connections
 
       - name: Grafana dashboard contract
         # The provisioned local `Rasta Audit Evidence` dashboard: stable
@@ -1284,6 +1306,20 @@ jobs:
     services:
       postgres:
         image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+        # `command` replaces the image's default CMD (GitHub documents
+        # `services.<id>.command`; actionlint 1.7.12 does not know the key yet).
+        # PostgreSQL's default `max_connections` is 100, 3 of them reserved for
+        # superusers. Up to ten packages' suites run at once here, each Prisma
+        # client with a pool of its own and many specs opening several, so
+        # that ceiling was one new pool away from "remaining connection slots
+        # are reserved for roles with the SUPERUSER attribute" in whichever
+        # package asked next (run 40183450262). Sampled locally at 1 Hz (a
+        # lower bound): peaks of 70-73 suite sessions, per-database peaks
+        # summing to 217-225 — a sizing heuristic, not a bound; 300 covers
+        # that sum. Every run prints its own peaks ([pg-connections] lines).
+        # The pools themselves are NOT changed: tests that depend on a pool's
+        # size (the outbox-purge "gives up on a busy pool" proofs) keep it.
+        command: postgres -c max_connections=300
         env:
           POSTGRES_USER: rasta
           POSTGRES_PASSWORD: rasta_ci_password
@@ -1584,6 +1620,41 @@ jobs:
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
+      - name: PostgreSQL connection ceiling
+        # Proves the service's `command` took effect: a default 100 here would
+        # mean the override was ignored, and the suites below would run on the
+        # ceiling this job was changed to leave.
+        timeout-minutes: 2
+        run: |
+          ceiling="$(psql -X -At -c 'SHOW max_connections')"
+          echo "[pg-connections] SHOW max_connections = ${ceiling}"
+          test "${ceiling}" = 300
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+
+      - name: Watch PostgreSQL connections
+        # Samples pg_stat_activity once a second in the background until the
+        # report step below stops it (scripts/ci-pg-connections-lib.mjs).
+        # The launcher waits for independent ownership (at most 5 s). Its
+        # detached watcher leads a group the always() report can stop.
+        timeout-minutes: 2
+        run: |
+          node scripts/ci-pg-connections-start.mjs
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Integration tests
         # Two phases (`scripts/run-test-phases.mjs`): every package's
         # integration suites in parallel, then identity-service's aggregation
@@ -1658,6 +1729,21 @@ jobs:
           # proven by the `clamav-signatures` job.
           DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: '8760'
           REDIS_URL: redis://localhost:6379
+
+      - name: PostgreSQL connection peak
+        # Always, so a run that failed on the ceiling still shows how far over
+        # it went. Stops the watcher first (TERM, at most ~12 s until its
+        # process group is gone, KILL for what is left). Never fails: the
+        # job's verdict is its tests'. Reads the postgres container's memory
+        # from its cgroup.
+        if: always()
+        timeout-minutes: 2
+        run: node scripts/ci-pg-connections-report.mjs
+        env:
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          PG_CONTAINER_ID: ${{ job.services.postgres.id }}
 
       - name: Analytics database privilege integration tests
         timeout-minutes: 5
@@ -1790,6 +1876,20 @@ jobs:
     services:
       postgres:
         image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
+        # `command` replaces the image's default CMD (GitHub documents
+        # `services.<id>.command`; actionlint 1.7.12 does not know the key yet).
+        # PostgreSQL's default `max_connections` is 100, 3 of them reserved for
+        # superusers. Up to ten packages' suites run at once here, each Prisma
+        # client with a pool of its own and many specs opening several, so
+        # that ceiling was one new pool away from "remaining connection slots
+        # are reserved for roles with the SUPERUSER attribute" in whichever
+        # package asked next (run 40183450262). Sampled locally at 1 Hz (a
+        # lower bound): peaks of 70-73 suite sessions, per-database peaks
+        # summing to 217-225 — a sizing heuristic, not a bound; 300 covers
+        # that sum. Every run prints its own peaks ([pg-connections] lines).
+        # The pools themselves are NOT changed: tests that depend on a pool's
+        # size (the outbox-purge "gives up on a busy pool" proofs) keep it.
+        command: postgres -c max_connections=300
         env:
           POSTGRES_USER: rasta
           POSTGRES_PASSWORD: rasta_ci_password
@@ -2005,6 +2105,41 @@ jobs:
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
 
+      - name: PostgreSQL connection ceiling
+        # Proves the service's `command` took effect: a default 100 here would
+        # mean the override was ignored, and the suites below would run on the
+        # ceiling this job was changed to leave.
+        timeout-minutes: 2
+        run: |
+          ceiling="$(psql -X -At -c 'SHOW max_connections')"
+          echo "[pg-connections] SHOW max_connections = ${ceiling}"
+          test "${ceiling}" = 300
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+
+      - name: Watch PostgreSQL connections
+        # Samples pg_stat_activity once a second in the background until the
+        # report step below stops it (scripts/ci-pg-connections-lib.mjs).
+        # The launcher waits for independent ownership (at most 5 s). Its
+        # detached watcher leads a group the always() report can stop.
+        timeout-minutes: 2
+        run: |
+          node scripts/ci-pg-connections-start.mjs
+        env:
+          PGHOST: localhost
+          PGPORT: '5432'
+          PGUSER: rasta
+          PGPASSWORD: rasta_ci_password
+          PGDATABASE: postgres
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Test independence (F-25)
         # Runs every test in maintenance's event-flow suite on its own and
         # requires it to pass alone.
@@ -2153,6 +2288,21 @@ jobs:
           RETRY_REPLAY_REQUIRED: 'true'
           DATABASE_URL_AUDIT: postgresql://rasta_audit:rasta_audit_dev_password@localhost:5432/rasta_audit?schema=audit
           DATABASE_URL_AUDIT_MIGRATOR: postgresql://rasta_audit_migrator:rasta_audit_migrator_dev_password@localhost:5432/rasta_audit?schema=audit
+
+      - name: PostgreSQL connection peak
+        # Always, so a run that failed on the ceiling still shows how far over
+        # it went. Stops the watcher first (TERM, at most ~12 s until its
+        # process group is gone, KILL for what is left). Never fails: the
+        # job's verdict is its tests'. Reads the postgres container's memory
+        # from its cgroup.
+        if: always()
+        timeout-minutes: 2
+        run: node scripts/ci-pg-connections-report.mjs
+        env:
+          PG_CONNECTIONS_SAMPLES: ${{ runner.temp }}/pg-connections.jsonl
+          PG_CONNECTIONS_OWNER: ${{ runner.temp }}/pg-connections-${{ github.run_id }}-${{ github.run_attempt }}.owner.json
+          PG_CONNECTIONS_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          PG_CONTAINER_ID: ${{ job.services.postgres.id }}
 
   integration-coverage-critical:
     name: Coverage gates (construction, contract, inventory)
@@ -4131,6 +4281,177 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # The vulnerability DB for every Trivy scan of this run, downloaded once.
+  #
+  # Evidence (main run 40163416703 at 61a13bbc, #380): 10 of 17 image scans
+  # failed, and the rerun failed again on api-gateway, with
+  #   FATAL ... failed to download artifact from mirror.gcr.io/aquasec/trivy-db:2:
+  #   oci download error: failed to fetch the layer: GET
+  #   https://mirror.gcr.io/artifacts-downloads/...: unexpected status code 404
+  # Trivy falls back to ghcr.io only for errors it recognises as transient or
+  # BLOB_UNKNOWN; a 404 on the layer is neither, so ghcr.io was never tried.
+  # trivy-action's daily cache did not prevent it: every job restored
+  # `cache-trivy-<date>` and still logged "Need to update DB" and downloaded
+  # 129 MB itself, seventeen times plus the ClamAV scan's.
+  #
+  # Here the download is `trivy image --download-db-only` against
+  # mirror.gcr.io and then ghcr.io, retrying on ANY failure (3 attempts per
+  # repository, 5 s and 15 s apart), and the copy is published as an
+  # artifact named by a key of this run. The scans download exactly that
+  # artifact (`.github/actions/restore-trivy-db`), set TRIVY_SKIP_DB_UPDATE,
+  # and fail, rather than scan
+  # or skip, unless the copy is the one this producer validated. Skip mode
+  # checks the schema only, never the age or the content, so
+  # scripts/ci-trivy-db-lib.mjs does, at one boundary used by this job before
+  # it publishes and by every scan before it scans (PR #435 rounds 2 and 3):
+  #  - metadata: Version 2, strict RFC 3339 UpdatedAt / NextUpdate /
+  #    DownloadedAt, UpdatedAt at most 24 h old and not in the future;
+  #  - trivy.db: a real bbolt file, walked completely (both meta pages, then
+  #    every reachable branch, leaf, nested and inline bucket, every page
+  #    owned exactly once, within fixed limits and a deadline), holding
+  #    non-empty `vulnerability`, `data-source` and the advisory buckets of
+  #    each ecosystem the images contain: `alpine 3.24` (every image's base),
+  #    npm and cargo, with no empty package bucket and one known advisory per
+  #    ecosystem rated HIGH or CRITICAL (a hollow DB makes Trivy exit 0 with
+  #    no findings);
+  #  - here only, Trivy itself scans a canary root like an image (apk
+  #    zlib 1.2.12-r0, node_modules lodash 4.17.20, Cargo.lock tokio 1.8.0
+  #    on Alpine 3.24) and must report CVE-2022-37434, CVE-2021-23337 and
+  #    CVE-2021-45710, each HIGH or CRITICAL;
+  #  - provenance: this key, run and attempt, an allowed repository, and the
+  #    sha256 of both files, so a scan accepts exactly the validated bytes.
+  # A copy that fails any of this, or whose inspection errs or overruns its
+  # deadline, is a failed attempt: the next attempt or repository gets its
+  # turn. The scan gate is unchanged: same images, severity CRITICAL,HIGH,
+  # exit-code 1, ignore-unfixed and ignore files.
+  #
+  # Time: each repository owns a 180 s window the other cannot spend, every
+  # child is killed at its deadline (SIGTERM to its process group, SIGKILL
+  # 5 s later even if the leader already exited; Trivy also gets a matching
+  # --timeout), and one copy's in-process checks stop at 90 s, so a stalled
+  # mirror cannot keep ghcr.io from its turn. fetch <= 2 x (180 s + 90 s) =
+  # 540 s <= the step's 10 min; with checkout 2 + setup-trivy 3 + pack 2 +
+  # upload 3 min that is this job's 20 min, and each step has its own limit
+  # (measured on the real 1.64 GB DB: one copy's validation 22.4 s, a
+  # consumer's check 10 s, pack 3 s, unpack 5 s; see BUDGET in the script).
+  #
+  # Transport: an artifact, not actions/cache. Run 40191748744 saved the DB
+  # to the cache at 12:07, the ClamAV scan restored it at 12:08, and by 12:40,
+  # when the image scans asked for it, it had been evicted: the repository's
+  # caches stood at 10.43 GB against GitHub's 10 GB limit after another
+  # PR's image builds wrote ~10 GB of buildkit layers (`cache-to: type=gha,
+  # mode=max`) at 12:18-12:20, and eviction takes the least recently used
+  # entry. Artifacts are stored apart from that limit and are immutable;
+  # the download is by exact name, and the provenance check still binds the
+  # copy to this key. The archive (ustar + zstd, ~100 MB instead of 1.6 GB)
+  # is written by `ci-trivy-db.mjs pack` and admitted by `unpack`, the one
+  # admission every scan shares (round 2's shell checks failed open when
+  # `grep -q` closed its pipe early, PR #435 r2 R2-1).
+  #
+  # The DB lives in runner.temp, outside the checkout: in the workspace it
+  # would be part of every image's build context (`COPY . .`), as it was in
+  # round 1 (context 33.84 MB -> 1.67 GB).
+  #
+  # No `needs`: it starts with the fastest jobs, so the scans that wait for
+  # it (the ClamAV scan now; the image scans only after quality, integration
+  # and e2e) never wait on it for long.
+  #
+  # Reruns: the key carries the run attempt, because artifact names are
+  # unique within a run. "Re-run failed jobs" keeps this job's earlier output
+  # and so its earlier key; a scan on a later attempt downloads that
+  # artifact of the same run and accepts the copy the key names (expected run
+  # and attempt are read from the key, never from the scan's own attempt).
+  # Once that copy is older than 24 h (the artifact is kept one day) the
+  # scans fail and the run must be re-run in full, which makes this job
+  # publish a new key.
+  #
+  # The Java DB is not fetched: no scan log of main run 40163416703 contains
+  # a Java DB line (no .jar in any image), Trivy would fetch it on demand
+  # exactly as before, and TRIVY_SKIP_JAVA_DB_UPDATE is deliberately not set,
+  # so analyzer coverage is identical.
+  # ---------------------------------------------------------------------------
+  trivy-db:
+    name: Trivy vulnerability DB (downloaded once)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      key: ${{ steps.fetch.outputs.key }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 1
+        with:
+          # Everything the fetch imports (node built-ins only besides these):
+          # pinned by a test that follows the imports.
+          sparse-checkout: |
+            scripts/ci-trivy-db.mjs
+            scripts/ci-trivy-db-lib.mjs
+            scripts/trivy-db-check/go.mod
+            scripts/trivy-db-check/go.sum
+            scripts/trivy-db-check/main.go
+            scripts/trivy-db-check/main_test.go
+            scripts/fixtures/trivy-db/real.db
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Go for the official bbolt checker
+        timeout-minutes: 1
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.24.9'
+          cache: false
+
+      - name: Build and test the official bbolt checker
+        timeout-minutes: 2
+        working-directory: scripts/trivy-db-check
+        env:
+          GOTOOLCHAIN: local
+          GOFLAGS: -mod=readonly
+        run: |
+          set -euo pipefail
+          go mod download
+          go mod verify
+          go vet ./...
+          go test -v ./...
+          go build -o "$RUNNER_TEMP/trivy-db-check-bin/trivy-db-check" .
+          echo "$RUNNER_TEMP/trivy-db-check-bin" >> "$GITHUB_PATH"
+
+      - name: Install Trivy
+        timeout-minutes: 2
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Download and validate the DB (mirror.gcr.io, then ghcr.io)
+        # Writes `key=trivy-db-<run id>-<run attempt>` to GITHUB_OUTPUT only
+        # after the copy passed every check.
+        id: fetch
+        timeout-minutes: 10
+        env:
+          TRIVY_DB_DIR: ${{ runner.temp }}/trivy-db
+        run: node scripts/ci-trivy-db.mjs fetch "$TRIVY_DB_DIR"
+
+      - name: Pack the DB
+        # The validated directory exactly as it is, provenance included, as
+        # the archive the scans' `unpack` admits; the scans then run the same
+        # check.
+        timeout-minutes: 2
+        env:
+          TRIVY_DB_DIR: ${{ runner.temp }}/trivy-db
+          TRIVY_DB_ARCHIVE: ${{ runner.temp }}/trivy-db.tar.zst
+        run: node scripts/ci-trivy-db.mjs pack "$TRIVY_DB_DIR" "$TRIVY_DB_ARCHIVE"
+
+      - name: Publish the DB as this run's artifact
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.fetch.outputs.key }}
+          path: ${{ runner.temp }}/trivy-db.tar.zst
+          if-no-files-found: error
+          # Already zstd-compressed.
+          compression-level: 0
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
   # The malware scanner's own supply chain (ADR-049).
   #
   # Separate from `integration` on purpose, and the separation is the point.
@@ -4151,8 +4472,20 @@ jobs:
     name: ClamAV image scan and signature freshness
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Waits for the one DB download, and only for that. `!cancelled()` rather
+    # than the default success(): if the download failed this job still runs
+    # and fails at its restore step, red, never skipped (a required check
+    # counts "skipped" as passing).
+    needs: [trivy-db]
+    if: ${{ !cancelled() }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Restore the shared Trivy DB
+        id: trivy-db
+        uses: ./.github/actions/restore-trivy-db
+        with:
+          key: ${{ needs.trivy-db.outputs.key }}
 
       - name: Pull the pinned image
         # By digest, so this job scans exactly what the integration job, the
@@ -4167,14 +4500,37 @@ jobs:
           docker tag clamav/clamav:1.5.4@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d \
             rasta/clamav-pinned:ci
 
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Check the Trivy DB is still fresh
+        # Skip mode below validates the DB's schema and never its age or
+        # content; the same check as at restore.
+        env:
+          TRIVY_DB_DIR: ${{ steps.trivy-db.outputs.dir }}
+          TRIVY_DB_KEY: ${{ needs.trivy-db.outputs.key }}
+        run: node scripts/ci-trivy-db.mjs check "$TRIVY_DB_DIR" "$TRIVY_DB_KEY"
+
       - name: Scan the image
         # The same severity and the same `exit-code: 1` as every Rasta image
         # below — the threshold is not relaxed because the image is somebody
         # else's. When it fires, the fix is to bump the pinned digest, which is
         # a reviewable edit rather than a silent drift. Like that gate, it
         # rejects fixable HIGH/CRITICAL only (`ignore-unfixed`).
+        #
+        # Only the DB's origin changed (the `trivy-db` job, see there): the
+        # action neither installs Trivy nor restores its own daily DB cache,
+        # and Trivy is told not to download one.
+        env:
+          TRIVY_SKIP_DB_UPDATE: 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: 'true'
+          cache: 'false'
+          cache-dir: ${{ steps.trivy-db.outputs.dir }}
           image-ref: rasta/clamav-pinned:ci
           severity: CRITICAL,HIGH
           exit-code: '1'
@@ -4275,8 +4631,21 @@ jobs:
     # commit whose critical financial path was never exercised is not something
     # to publish (AGENTS.md § 6, § 7). The same gates hold on a pull request,
     # which now builds and scans the images it touches before merge (L7-35).
-    needs: [container-scope, quality, security, integration, migration-reversibility, e2e]
-    if: needs.container-scope.outputs.services != '[]'
+    # `trivy-db` is needed for its output, not as a gate: a failed download
+    # must fail the scans, not skip them (a required check counts "skipped"
+    # as passing), so the condition names every other job's result and leaves
+    # the download's to the restore step. Before this, the default success()
+    # skipped the job when any of the others failed; that still holds.
+    needs: [container-scope, quality, security, integration, migration-reversibility, e2e, trivy-db]
+    if: >-
+      ${{ !cancelled()
+      && needs.container-scope.outputs.services != '[]'
+      && needs.container-scope.result == 'success'
+      && needs.quality.result == 'success'
+      && needs.security.result == 'success'
+      && needs.integration.result == 'success'
+      && needs.migration-reversibility.result == 'success'
+      && needs.e2e.result == 'success' }}
 
     strategy:
       fail-fast: false
@@ -4290,6 +4659,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Restore the shared Trivy DB
+        # First, so a missing or stale DB fails the job in seconds rather than
+        # after the build.
+        id: trivy-db
+        uses: ./.github/actions/restore-trivy-db
+        with:
+          key: ${{ needs.trivy-db.outputs.key }}
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -4306,6 +4683,21 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Check the Trivy DB is still fresh
+        # Skip mode below validates the DB's schema and never its age or
+        # content, and the build above took minutes; the same check as at
+        # restore.
+        env:
+          TRIVY_DB_DIR: ${{ steps.trivy-db.outputs.dir }}
+          TRIVY_DB_KEY: ${{ needs.trivy-db.outputs.key }}
+        run: node scripts/ci-trivy-db.mjs check "$TRIVY_DB_DIR" "$TRIVY_DB_KEY"
+
       - name: Scan image
         # Tags on this action carry a `v` prefix; the unprefixed `0.28.0` this
         # once pinned does not resolve, so the job died at "Set up job" before
@@ -4321,8 +4713,20 @@ jobs:
         # .trivyignore entry per CVE with an owner and an expiry date, and the
         # gate run without ignore-unfixed) is the recorded follow-up (L7-35
         # review).
+        #
+        # Only the DB's origin changed (main run 40163416703: 10 of 17 scans
+        # died on a mirror.gcr.io 404 while downloading their own copy): the
+        # `trivy-db` job downloads it once, the action neither installs Trivy
+        # nor restores its own daily DB cache, and Trivy is told not to
+        # download one. Severity, exit code, ignore-unfixed, ignore file and
+        # image are as before.
+        env:
+          TRIVY_SKIP_DB_UPDATE: 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: 'true'
+          cache: 'false'
+          cache-dir: ${{ steps.trivy-db.outputs.dir }}
           image-ref: rasta/${{ matrix.service }}:${{ github.sha }}
           severity: CRITICAL,HIGH
           exit-code: '1'

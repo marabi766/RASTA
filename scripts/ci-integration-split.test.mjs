@@ -46,7 +46,15 @@ test('the parser sees the split it is meant to check', () => {
   assert.equal(workflow.jobs[AGGREGATE_JOB].name, 'Integration and security tests');
   for (const name of SPLIT_STEPS) assert.ok(jobRunning(workflow, name), name);
   assert.ok(workflow.jobs.containers.needs.includes(AGGREGATE_JOB));
-  assert.deepEqual(ALLOWED_CONDITIONS, []);
+  // Only the connection report may carry a condition, and never a step of the inventory.
+  assert.deepEqual(
+    ALLOWED_CONDITIONS.map((entry) => [entry.job, entry.step, entry.if]),
+    [
+      ['integration-suites', 'PostgreSQL connection peak', 'always()'],
+      ['integration-security', 'PostgreSQL connection peak', 'always()'],
+    ],
+  );
+  for (const entry of ALLOWED_CONDITIONS) assert.ok(!SPLIT_STEPS.includes(entry.step));
 });
 
 test('a split job the aggregate does not need is refused', () => {
@@ -156,6 +164,17 @@ test('comments and blank lines in a run are not commands', () => {
   const step = stepNamed(workflow, 'Contract coverage gate');
   step.run = `# the gate\n\n${step.run}\n`;
   assert.deepEqual(checkIntegrationSplit(workflow), []);
+});
+
+test('the connection report may be always(); nothing else may carry that condition', () => {
+  const workflow = real();
+  assert.equal(stepNamed(workflow, 'PostgreSQL connection peak').if, 'always()');
+  const other = real();
+  stepNamed(other, 'PostgreSQL connection peak').if = 'failure()';
+  fails(other, /"PostgreSQL connection peak" has if: failure\(\), which can skip it/);
+  const sibling = real();
+  stepNamed(sibling, 'Watch PostgreSQL connections').if = 'always()';
+  fails(sibling, /"Watch PostgreSQL connections" has if: always\(\), which can skip it/);
 });
 
 test('a test step that may skip, be forgiven or run in another shell is refused', () => {

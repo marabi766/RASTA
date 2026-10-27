@@ -44,7 +44,11 @@ describe('gateway RELAY rejects authenticated redirects', () => {
               expect(JSON.stringify(failure)).not.toContain('redirect-body-must-not-be-trusted');
               expect(JSON.stringify(failure)).not.toContain('redirect-target');
               expect(failure).not.toHaveProperty('headers.location');
-              expect(gateway.circuitStates().identity).toEqual({ failures: 1, open: true });
+              expect(gateway.circuitStates().identity).toEqual({
+                failures: 1,
+                open: true,
+                state: 'OPEN',
+              });
               await expect(
                 gateway.forward({
                   service: 'identity',
