@@ -1,5 +1,5 @@
 import type { IdentityRepository } from '../identity/identity.repository';
-import { PrismaService } from '../prisma/prisma.service';
+import type { PrismaService } from '../prisma/prisma.service';
 import type { KeycloakAdminClient } from './keycloak.client';
 import { settleRecoveryProjections, type KeycloakProjector } from './keycloak.projector';
 import { FENCE_POOL_CONNECTIONS, type KeycloakWriteFences } from './keycloak-write-fence';
@@ -127,21 +127,16 @@ export const RECOVERY_SETTLE_MS = 30_000;
 export const RECOVERY_STOP_MS = 5_000;
 
 /**
- * The command's two pools, as the CLI opens them: the business pool and the
- * write fences' own (D-069) — so a test holds exactly these to the pool's
- * close (#458 r3 F2).
+ * The command's two pools, as `projection.cli.ts` opens them — after its
+ * runtime-role preflight: the business pool (the default size) and the write
+ * fences' own (D-069), so the backfill's projections and orphan repairs are
+ * fenced like every other writer. One definition, so a test holds exactly
+ * these to the pool's close (#458 r3 F2).
  */
-export function projectionCommandPools(databaseUrl: string): {
-  prisma: PrismaService;
-  fencePool: PrismaService;
-} {
-  return {
-    prisma: new PrismaService(databaseUrl),
-    // The write fences' own pool, as in the service (D-069): the backfill's
-    // projections and orphan repairs are fenced like every other writer.
-    fencePool: new PrismaService(databaseUrl, { connections: FENCE_POOL_CONNECTIONS }),
-  };
-}
+export const PROJECTION_COMMAND_POOLS = {
+  prisma: undefined,
+  fencePool: { connections: FENCE_POOL_CONNECTIONS },
+} as const satisfies Record<string, ConstructorParameters<typeof PrismaService>[1]>;
 
 /**
  * The command's teardown, whatever ended it (#458 r1/r2/r3 F2, r3 F7): its

@@ -6,6 +6,7 @@ import {
   assertRuntimeRole as assertConnectedRuntimeRole,
   withinDeadline,
   type OutboxStopOptions,
+  type RuntimeRoleQueryClient,
 } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
 import { settleWithin, throwIfCancelled, trackInScope, transactionBounds } from './cancellation';
@@ -247,6 +248,12 @@ export class PrismaService implements OnModuleInit {
     return this.track(run());
   }
 
+  /** The bare client, as the role check reads it: admitted like any operation. */
+  private readonly roleCheck: RuntimeRoleQueryClient = {
+    $queryRawUnsafe: <T>(query: string, ...values: unknown[]) =>
+      this.admitDirect(() => this.base.$queryRawUnsafe<T>(query, ...values)),
+  };
+
   async onModuleInit(): Promise<void> {
     await this.base.$connect();
     this.logger.log('Database connection established');
@@ -263,12 +270,10 @@ export class PrismaService implements OnModuleInit {
    * integration suites open owner connections through this class on purpose.
    */
   async assertRuntimeRole(): Promise<void> {
-    const facts = await this.admitDirect(() =>
-      assertConnectedRuntimeRole(this.base, {
-        service: SERVICE_NAME,
-        runtimeVariable: 'DATABASE_URL_IDENTITY',
-      }),
-    );
+    const facts = await assertConnectedRuntimeRole(this.roleCheck, {
+      service: SERVICE_NAME,
+      runtimeVariable: 'DATABASE_URL_IDENTITY',
+    });
     this.logger.log(
       `Connected as ${facts.role}: not a superuser or a migrator, owns nothing, no CREATE`,
     );

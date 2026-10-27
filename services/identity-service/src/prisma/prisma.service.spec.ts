@@ -1,7 +1,10 @@
 import 'reflect-metadata';
 import { Logger, type InjectionToken } from '@nestjs/common';
 import { AppModule, FENCE_PRISMA, SAMPLER_PRISMA } from '../app.module';
-import { projectionCommandPools, tearDownProjectionCommand } from '../keycloak/projection.command';
+import {
+  PROJECTION_COMMAND_POOLS,
+  tearDownProjectionCommand,
+} from '../keycloak/projection.command';
 import { PoolClosedError, PrismaService } from './prisma.service';
 
 /**
@@ -32,12 +35,20 @@ function appPool(token: InjectionToken): PrismaService {
   return found.useFactory({ DATABASE_URL: URL }) as PrismaService;
 }
 
+/** The command's pools, as `projection.cli.ts` opens them. */
+function commandPools() {
+  return {
+    prisma: new PrismaService(URL, PROJECTION_COMMAND_POOLS.prisma),
+    fencePool: new PrismaService(URL, PROJECTION_COMMAND_POOLS.fencePool),
+  };
+}
+
 const POOLS: Array<[string, () => PrismaService]> = [
   ['the service’s business pool', () => appPool(PrismaService)],
   ['the service’s fence pool', () => appPool(FENCE_PRISMA)],
   ['the service’s sampler pool', () => appPool(SAMPLER_PRISMA)],
-  ['the command’s business pool', () => projectionCommandPools(URL).prisma],
-  ['the command’s fence pool', () => projectionCommandPools(URL).fencePool],
+  ['the command’s business pool', () => commandPools().prisma],
+  ['the command’s fence pool', () => commandPools().fencePool],
 ];
 
 interface NativeEngine {
@@ -228,7 +239,7 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
   });
 
   it('the command’s teardown over its real pools: a batch held past the deadline makes the run unclean, within its budget', async () => {
-    const { prisma, fencePool } = projectionCommandPools(URL);
+    const { prisma, fencePool } = commandPools();
     const engine = holdAnswers(fencePool);
     holdAnswers(prisma);
     const batch = fencePool.client.$transaction([fencePool.client.$executeRawUnsafe('SELECT 1')]);

@@ -3,13 +3,14 @@ import { createLogger } from '@rasta/logging';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
 import { loadIdentityEnv, SERVICE_NAME } from '../config/env';
+import { PrismaService } from '../prisma/prisma.service';
 import { IdentityRepository } from '../identity/identity.repository';
 import { KeycloakAdminClient } from './keycloak.client';
 import { KeycloakProjector } from './keycloak.projector';
 import { KeycloakWriteFences } from './keycloak-write-fence';
 import {
   isClean,
-  projectionCommandPools,
+  PROJECTION_COMMAND_POOLS,
   RECOVERY_STOP_MS,
   runProjectionCommand,
   tearDownProjectionCommand,
@@ -49,7 +50,8 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const { prisma, fencePool } = projectionCommandPools(env.DATABASE_URL);
+  const prisma = new PrismaService(env.DATABASE_URL, PROJECTION_COMMAND_POOLS.prisma);
+  const fencePool = new PrismaService(env.DATABASE_URL, PROJECTION_COMMAND_POOLS.fencePool);
   await prisma.onModuleInit();
   await fencePool.onModuleInit();
   let projector: KeycloakProjector | undefined;
