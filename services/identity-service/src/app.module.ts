@@ -382,9 +382,10 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
         }),
     },
     {
-      // D-052: both relays, the purge, the expiry scanner and the Keycloak
-      // projection consumer stop together in the destroy phase, by one deadline
-      // inside SHUTDOWN_TIMEOUT_MS. Before, the relays stopped in
+      // D-052: both relays, the purge, the expiry scanner, the Keycloak
+      // projection consumer and the projector's recovery projections (D-070 D,
+      // #458 r1 F2: a request's recovery has no other owner) stop together in
+      // the destroy phase, by one deadline inside SHUTDOWN_TIMEOUT_MS. Before, the relays stopped in
       // `onApplicationShutdown`, after the consumer's unbounded stop, while the
       // scanner went on writing outbox rows.
       provide: OutboxShutdown,
@@ -394,6 +395,7 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
         SECURITY_EVENT_RELAY,
         MembershipExpiryScanner,
         KeycloakProjectionConsumer,
+        KeycloakProjector,
         KafkaEventPublisher,
         ENV,
       ],
@@ -403,13 +405,14 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
         securityRelay: OutboxRelay,
         scanner: MembershipExpiryScanner,
         projection: KeycloakProjectionConsumer,
+        projector: KeycloakProjector,
         publisher: KafkaEventPublisher,
         env: IdentityEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [securityRelay, scanner, projection],
+          workers: [securityRelay, scanner, projection, projector],
           // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
           budgetMs: outboxShutdownBudgetMs(env),

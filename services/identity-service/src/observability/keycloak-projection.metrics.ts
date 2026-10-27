@@ -100,6 +100,8 @@ export interface FenceSampleView {
   retained: { overdue: number; expired: number };
   /** Seconds: how old the latest successful sample is, or the largest gap between two in the retention window — whichever is more. */
   ageSeconds: number;
+  /** The latest successful lapse count; null before the first, or once it is stale. */
+  lapseBacklog: number | null;
 }
 
 let fenceSampleReader: (() => FenceSampleView) | null = null;
@@ -111,6 +113,30 @@ export function readFenceSamplesFrom(
   const previous = fenceSampleReader;
   fenceSampleReader = reader;
   return previous;
+}
+
+/**
+ * An unlabelled gauge read from its producer at scrape, that exports **no
+ * sample at all** while there is no reading (#458 r1 F3). prom-client's own
+ * unlabelled gauge always exports one — `reset()` puts a zero back (15.1.3)
+ * — and zero is a healthy age, and an empty backlog: on a replica whose
+ * sampler is unwired, not started or detached it would keep `absent()`
+ * false for good and pull `min()` under every threshold. A null reading
+ * leaves the series out of the scrape instead, so the missing alerts fire.
+ */
+class ProducedGauge extends Gauge {
+  constructor(
+    configuration: { name: string; help: string },
+    private readonly read: () => number | null,
+  ) {
+    super({ ...configuration, registers: [registry] });
+  }
+
+  override async get(): Promise<Awaited<ReturnType<Gauge['get']>>> {
+    const value = this.read();
+    const metric = await super.get();
+    return { ...metric, values: value === null ? [] : [{ value, labels: {} }] };
+  }
 }
 
 /**
@@ -157,17 +183,17 @@ export const keycloakWriteFences = new Gauge({
  * retention window, if that is more, so a gap that ended between two scrapes
  * is still seen. Before the first success, the time since the sampler started.
  * Alerted on above `FENCE_SAMPLE_STALE_SECONDS` (`RastaIdentityKeycloakFenceSamplerStale`).
+ * No sampler attached — unwired, not started, or stopped — and there is **no
+ * series** (never a zero, `ProducedGauge`): `RastaIdentityKeycloakFenceSamplerMissing`
+ * fires when no replica has one, and `min()` is taken over those that do.
  */
-export const keycloakFenceSampleAge = new Gauge({
-  name: 'rasta_identity_keycloak_fence_sample_age_seconds',
-  help: 'Age of the latest successful Keycloak fence sample, or the largest gap between two in the retention window, computed at scrape',
-  registers: [registry],
-  collect() {
-    const view = fenceSampleReader?.();
-    this.reset();
-    if (view) this.set(view.ageSeconds);
+export const keycloakFenceSampleAge = new ProducedGauge(
+  {
+    name: 'rasta_identity_keycloak_fence_sample_age_seconds',
+    help: 'Age of the latest successful Keycloak fence sample, or the largest gap between two in the retention window, computed at scrape; absent without a sampler',
   },
-});
+  () => fenceSampleReader?.().ageSeconds ?? null,
+);
 
 /** How long each fence sample took, from its timer to its answer, by outcome (`ok`, `failed`). */
 export const keycloakFenceSampleDuration = new Histogram({
@@ -195,13 +221,18 @@ export const keycloakFenceSamplesTotal = new Counter({
  * D-064), sampled on the fence sampler's slower lapse timer, not by the sweep.
  * Each one is a membership the database no longer grants that Keycloak may
  * still put in tokens; a backlog that stays above zero is lapses the sweep
- * cannot write.
+ * cannot write. Read at scrape from the sampler's latest successful count: no
+ * sampler, no count yet, or a stale one — **no series** (never a zero, the
+ * same class as the age, #458 r1 F3), and
+ * `RastaIdentityMembershipLapseBacklogUnknown` fires when no replica has one.
  */
-export const membershipLapseBacklog = new Gauge({
-  name: 'rasta_identity_membership_lapse_backlog',
-  help: 'Lapsed memberships not yet acted on by the expiry sweep, sampled on their own timer',
-  registers: [registry],
-});
+export const membershipLapseBacklog = new ProducedGauge(
+  {
+    name: 'rasta_identity_membership_lapse_backlog',
+    help: 'Lapsed memberships not yet acted on by the expiry sweep, sampled on their own timer; absent without a recent count',
+  },
+  () => fenceSampleReader?.().lapseBacklog ?? null,
+);
 
 /** Lapses the sweep tried and could not act on (Keycloak refused or did not answer). */
 export const membershipLapseFailuresTotal = new Counter({

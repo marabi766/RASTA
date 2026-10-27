@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { withinDeadline } from '@rasta/nest-common';
 
 /**
  * The one cancellation boundary of every database operation (#402 r2 F2).
@@ -53,19 +54,125 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  * projection version in the token, after #381 PR 2). ADR-060 D-069 addendum
  * § 7.
  *
+ * **A deadline is part of the boundary** (#458 r1 F2). A stop's own last
+ * step — the flush of owed fences — runs outside the scope it cancelled, but
+ * not unbounded: {@link untilDeadline} runs it in a scope of its own that
+ * carries the shutdown's deadline, so every check above — before each
+ * operation, each transaction's setup and each COMMIT — also refuses once
+ * that deadline has passed, and {@link remainingMs} bounds each transaction
+ * it starts (its connection wait included) by what is left, less a margin
+ * ({@link transactionBudgetMs}). Should the stop
+ * give up on it at the deadline, that scope is aborted before the stop
+ * returns: nothing of the flush begins, inserts or commits afterwards — but
+ * the rollback of the transaction it was in.
+ *
  * The scope is the async context (`AsyncLocalStorage`), so it follows the
  * work through every `await`, and nothing outside it — a request — is
- * affected. Nested scopes combine: either signal refuses.
+ * affected. Nested scopes combine: either signal refuses, and the earlier
+ * deadline holds.
  */
-const scope = new AsyncLocalStorage<AbortSignal>();
-
-/** Runs `work` with every database operation it starts refused once `signal` is aborted. */
-export function withCancellation<T>(signal: AbortSignal, work: () => Promise<T>): Promise<T> {
-  const outer = scope.getStore();
-  return scope.run(outer ? AbortSignal.any([outer, signal]) : signal, work);
+interface Scope {
+  signal: AbortSignal;
+  /** Wall clock (`Date.now`), like every shutdown deadline (D-052); none when absent. */
+  deadlineAt?: number;
 }
 
-/** Throws the stop's reason when the work this runs in was cancelled; a no-op outside any scope. */
+const scope = new AsyncLocalStorage<Scope>();
+
+/**
+ * Runs `work` with every database operation it starts refused once `signal`
+ * is aborted — or, given `deadlineAt`, once that instant has passed.
+ */
+export function withCancellation<T>(
+  signal: AbortSignal,
+  work: () => Promise<T>,
+  options: { deadlineAt?: number } = {},
+): Promise<T> {
+  const outer = scope.getStore();
+  const deadlines = [outer?.deadlineAt, options.deadlineAt].filter(
+    (at): at is number => at !== undefined,
+  );
+  return scope.run(
+    {
+      signal: outer ? AbortSignal.any([outer.signal, signal]) : signal,
+      deadlineAt: deadlines.length > 0 ? Math.min(...deadlines) : undefined,
+    },
+    work,
+  );
+}
+
+/** The work this runs in was cancelled, or its deadline passed. */
+export class CancelledError extends Error {
+  constructor(reason: 'stopped' | 'deadline') {
+    super(
+      `refused: the work this runs in was ${reason === 'stopped' ? 'stopped' : 'past its deadline'}`,
+    );
+    this.name = 'CancelledError';
+  }
+}
+
+/**
+ * Throws when the work this runs in was cancelled — the stop's reason — or
+ * its deadline passed; a no-op outside any scope.
+ */
 export function throwIfCancelled(): void {
-  scope.getStore()?.throwIfAborted();
+  const current = scope.getStore();
+  if (!current) return;
+  current.signal.throwIfAborted();
+  if (current.deadlineAt !== undefined && Date.now() >= current.deadlineAt) {
+    throw new CancelledError('deadline');
+  }
+}
+
+/** Milliseconds left before this scope's deadline: infinite outside one, 0 once cancelled. */
+export function remainingMs(): number {
+  const current = scope.getStore();
+  if (!current) return Number.POSITIVE_INFINITY;
+  if (current.signal.aborted) return 0;
+  if (current.deadlineAt === undefined) return Number.POSITIVE_INFINITY;
+  return Math.max(0, current.deadlineAt - Date.now());
+}
+
+/**
+ * How much earlier than a scope's deadline a transaction's own bounds end
+ * ({@link transactionBudgetMs}): Prisma's engine enforces `maxWait` on its
+ * own clock, so a connection wait bounded to the very instant of the deadline
+ * could still begin a moment after the stop gave up and returned.
+ */
+export const DEADLINE_MARGIN_MS = 20;
+
+/**
+ * The bound of one transaction started in this scope, in whole milliseconds:
+ * `capMs`, or what is left of the scope's deadline less
+ * {@link DEADLINE_MARGIN_MS} if that is less — its connection wait, its
+ * statements and its own timeout all end before the deadline. Below 1, no
+ * transaction should begin at all.
+ */
+export function transactionBudgetMs(capMs: number): number {
+  const left = remainingMs();
+  return Math.floor(
+    Math.min(capMs, left === Number.POSITIVE_INFINITY ? capMs : left - DEADLINE_MARGIN_MS),
+  );
+}
+
+/**
+ * A stop's last step, bounded by its deadline (#458 r1 F2): `work` runs in a
+ * scope of its own that refuses every database operation past `deadlineAt`
+ * (see the header), and is waited for until then. Past it, the scope is
+ * aborted **before** this returns `'abandoned'`, so nothing of `work` reaches
+ * the database afterwards. Without a deadline it is simply waited for.
+ */
+export async function untilDeadline<T>(
+  work: () => Promise<T>,
+  deadlineAt: number | undefined,
+): Promise<{ outcome: 'finished'; value: T } | { outcome: 'abandoned' }> {
+  const stop = new AbortController();
+  const running = withCancellation(stop.signal, work, { deadlineAt });
+  if (deadlineAt === undefined) return { outcome: 'finished', value: await running };
+  if ((await withinDeadline(running, deadlineAt - Date.now())) === 'abandoned') {
+    stop.abort(new CancelledError('deadline'));
+    void running.catch(() => undefined);
+    return { outcome: 'abandoned' };
+  }
+  return { outcome: 'finished', value: await running };
 }

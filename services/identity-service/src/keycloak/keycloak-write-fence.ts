@@ -3,6 +3,7 @@ import { ulid } from 'ulid';
 import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
 import { Prisma } from '../generated/prisma';
+import { transactionBudgetMs } from '../prisma/cancellation';
 import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.service';
 import { keycloakWriteFenceEventsTotal } from '../observability/keycloak-projection.metrics';
 
@@ -199,9 +200,21 @@ interface SentWrite {
   flushed?: boolean;
 }
 
-/** A fresh fence not yet written: whether the late attempt's outcome is known. */
+/**
+ * A fresh fence not yet written — an **obligation** — and whether the late
+ * attempt's outcome is known. Never changed once made: what it says changes
+ * only by a newer obligation for the same attempt, with a newer `generation`.
+ */
 interface OwedFence extends SentWrite {
-  known: boolean;
+  readonly known: boolean;
+  /**
+   * Which obligation of its attempt this is (#458 r1 F1). A write that
+   * succeeds clears the obligation only while it is still this generation:
+   * one that a later reply replaced — a fence already taken over and
+   * repaired, then the sender hearing back late — is never erased by the
+   * completion of a write made for the one before it.
+   */
+  readonly generation: number;
 }
 
 export interface KeycloakWriteFencesOptions {
@@ -281,8 +294,12 @@ export interface FenceCounts {
  *   the sweep repairs it: so a window that closed still leaves a trace.
  *
  * `total` is every row, whatever its state: the rollback's readiness check
- * (`COUNT(*) = 0`). One full aggregate — never a page. As of the database's
+ * (zero rows). One full aggregate — never a page. As of the database's
  * clock now; `at` judges every row as of that one instant instead.
+ *
+ * The one clock row is outer-joined to the table, so an empty table still
+ * yields its instant: every count is of `attempt_id` — never `COUNT(*)`,
+ * which would count that clock row as a fence (#458 r1 F4).
  */
 export async function fenceCounts(
   client: Pick<ExtendedPrismaClient, '$queryRaw'>,
@@ -301,17 +318,18 @@ export async function fenceCounts(
       now: Date;
     }>
   >`
-    SELECT COUNT(*) FILTER (WHERE takeover_at > t.now) AS live,
-           COUNT(*) FILTER (WHERE takeover_at <= t.now AND account_missing_at IS NULL) AS due,
-           COUNT(*) FILTER (WHERE account_missing_at IS NOT NULL) AS account_missing,
-           COUNT(*) FILTER (
+    SELECT COUNT(attempt_id) FILTER (WHERE takeover_at > t.now) AS live,
+           COUNT(attempt_id) FILTER (
+             WHERE takeover_at <= t.now AND account_missing_at IS NULL) AS due,
+           COUNT(attempt_id) FILTER (WHERE account_missing_at IS NOT NULL) AS account_missing,
+           COUNT(attempt_id) FILTER (
              WHERE takeover_at > t.now
                AND t.now >= deadline_at + (takeover_at - deadline_at) / 2) AS overdue,
-           COUNT(*) FILTER (
+           COUNT(attempt_id) FILTER (
              WHERE takeover_at <= t.now
                AND deadline_at < takeover_at
                AND account_missing_at IS NULL) AS expired,
-           COUNT(*) AS total,
+           COUNT(attempt_id) AS total,
            t.now AS now
       FROM (SELECT ${instant} AS now) t
       LEFT JOIN keycloak_write_attempt ON true
@@ -332,8 +350,14 @@ export class KeycloakWriteFences {
   private readonly monotonicNow: () => number;
   /** Attempts dispatched whose outcome is not known yet, by attempt id (this process). */
   private readonly sent = new Map<string, SentWrite>();
-  /** Late attempts whose fresh fence is not written yet, by the late attempt's id. */
+  /**
+   * Late attempts whose fresh fence is not written yet, by the late attempt's
+   * id: the newest obligation of each. Replaced only through {@link owe},
+   * cleared only through {@link discharge}.
+   */
   private readonly owed = new Map<string, OwedFence>();
+  /** The last obligation's generation, in this process. */
+  private generations = 0;
   /**
    * The flushes, one after another, so two never write the same fresh fence
    * twice; each runs in its own caller's scope, so a stop's flush is never
@@ -467,7 +491,8 @@ export class KeycloakWriteFences {
       settleSeconds: input.settleSeconds,
       deadline,
     };
-    const { sent, owed } = this;
+    const { sent } = this;
+    const owe = (known: boolean) => this.owe(write, known);
     let dispatched = false;
     /** The monotonic instant the outcome became known; null until then. */
     let repliedAt: number | null = null;
@@ -491,7 +516,9 @@ export class KeycloakWriteFences {
           // Owed from this instant, as unknown — the conservative reading —
           // until its sender says what it heard (`recoverLate`); a flush that
           // runs first writes it live.
-          if (repliedAt >= deadline) owed.set(attemptId, { ...write, known: false });
+          // A new obligation, whatever a flush already wrote for it while it
+          // was unanswered: that fence may since have been taken over.
+          if (repliedAt >= deadline) owe(false);
         }
         return repliedAt >= deadline;
       },
@@ -514,19 +541,39 @@ export class KeycloakWriteFences {
    *
    * Never deletes or shortens any other row: the late attempt's own row, and
    * any fence of a newer attempt, are left exactly as they are.
+   *
+   * What its sender heard makes a new obligation (a new generation): a flush
+   * still writing the one before it can no longer clear this one.
    */
   async recoverLate(attempt: KeycloakWriteAttempt, known: boolean): Promise<boolean> {
     const pending = this.owed.get(attempt.id);
     // Not owed: not late, or a flush already wrote it (live: the safe reading).
     if (!pending) return true;
     keycloakWriteFenceEventsTotal.inc({ event: 'late_reply' });
-    pending.known = known;
-    if (await this.writeFresh(pending)) {
-      this.owed.delete(attempt.id);
+    const obligation = this.owe(pending, known);
+    if (await this.writeFresh(obligation)) {
+      this.discharge(obligation);
       return true;
     }
     keycloakWriteFenceEventsTotal.inc({ event: 'late_owed' });
     return false;
+  }
+
+  /** A new obligation for this attempt, replacing any older one: the next generation. */
+  private owe(write: SentWrite, known: boolean): OwedFence {
+    const obligation: OwedFence = { ...write, known, generation: ++this.generations };
+    this.owed.set(write.attemptId, obligation);
+    return obligation;
+  }
+
+  /**
+   * Its fresh fence is committed: clears the obligation — only if it is still
+   * the newest of its attempt (#458 r1 F1). A newer one stays owed.
+   */
+  private discharge(obligation: OwedFence): void {
+    if (this.owed.get(obligation.attemptId)?.generation === obligation.generation) {
+      this.owed.delete(obligation.attemptId);
+    }
   }
 
   /**
@@ -536,6 +583,11 @@ export class KeycloakWriteFences {
    * without a record. Called first by every sweep pass (the retry), and by
    * every worker's stop after its work unwound or was abandoned, before the
    * stop returns. Returns how many are still owed; never throws.
+   *
+   * Each write is bounded by what is left of the scope it runs in
+   * (`transactionBudgetMs`, a stop's deadline) and refused once that scope is
+   * cancelled or past it (`prisma/cancellation.ts`, #458 r1 F2): a stop's
+   * flush begins, inserts and commits nothing after the stop returned.
    */
   recoverOwed(): Promise<number> {
     const flush = this.flushes.then(() => this.flush());
@@ -550,15 +602,23 @@ export class KeycloakWriteFences {
       // Still unanswered past its deadline: its outcome is unknown. Once: if
       // its sender later hears back late, it writes a fresh fence of its own.
       write.flushed = true;
-      this.owed.set(write.attemptId, { ...write, known: false });
+      this.owe(write, false);
     }
-    for (const owed of [...this.owed.values()]) {
-      if (await this.writeFresh(owed)) this.owed.delete(owed.attemptId);
+    for (const id of [...this.owed.keys()]) {
+      // The newest obligation as of now: one replaced since the loop began
+      // is written as it is now, never as it was.
+      const owed = this.owed.get(id);
+      if (owed && (await this.writeFresh(owed))) this.discharge(owed);
     }
     return this.owed.size;
   }
 
   private async writeFresh(owed: OwedFence): Promise<boolean> {
+    // Never more than what is left of a stop's deadline, less a margin: the
+    // connection wait, the statement and the transaction all end before it.
+    // Nothing left, nothing begins.
+    const budget = transactionBudgetMs(LATE_FENCE_BUDGET_MS);
+    if (budget < MIN_INSERT_BUDGET_MS) return false;
     const attemptId = `KWA_${ulid()}`;
     const timeout = owed.timeoutMs / 1000;
     try {
@@ -576,11 +636,7 @@ export class KeycloakWriteFences {
                    CASE WHEN ${owed.known} THEN t.c
                         ELSE t.c + make_interval(secs => ${timeout + owed.settleSeconds}) END
                      AS takeover) w`,
-        {
-          maxWait: LATE_FENCE_BUDGET_MS,
-          timeout: LATE_FENCE_BUDGET_MS,
-          statementTimeoutMs: LATE_FENCE_BUDGET_MS,
-        },
+        { maxWait: budget, timeout: budget, statementTimeoutMs: budget },
       );
       keycloakWriteFenceEventsTotal.inc({ event: 'late_fenced' });
       return true;

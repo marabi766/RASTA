@@ -8,7 +8,12 @@ import { IdentityRepository } from '../identity/identity.repository';
 import { KeycloakAdminClient } from './keycloak.client';
 import { KeycloakProjector } from './keycloak.projector';
 import { FENCE_POOL_CONNECTIONS, KeycloakWriteFences } from './keycloak-write-fence';
-import { isClean, runProjectionCommand, type ProjectionCommandMode } from './projection.command';
+import {
+  isClean,
+  RECOVERY_STOP_MS,
+  runProjectionCommand,
+  type ProjectionCommandMode,
+} from './projection.command';
 
 /**
  * `pnpm --filter @rasta/identity-service keycloak:reconcile` / `keycloak:backfill`.
@@ -49,6 +54,7 @@ async function main(): Promise<number> {
   const fencePool = new PrismaService(env.DATABASE_URL, { connections: FENCE_POOL_CONNECTIONS });
   await prisma.onModuleInit();
   await fencePool.onModuleInit();
+  let projector: KeycloakProjector | undefined;
   try {
     const repository = new IdentityRepository(prisma);
     const keycloak = new KeycloakAdminClient({
@@ -59,7 +65,7 @@ async function main(): Promise<number> {
       enabled: true,
     });
     const fences = new KeycloakWriteFences(fencePool);
-    const projector = new KeycloakProjector(repository, keycloak, fences, {
+    projector = new KeycloakProjector(repository, keycloak, fences, {
       writeSettleSeconds: env.KEYCLOAK_WRITE_SETTLE_SECONDS,
     });
 
@@ -80,6 +86,10 @@ async function main(): Promise<number> {
     );
     return isClean(report) ? 0 : 1;
   } finally {
+    // Whatever ended the command — a thrown error included — no recovery
+    // projection of it reaches the database after the disconnect (#458 r1
+    // F2): cancelled and waited for first. Joins the command's own stop.
+    await projector?.stopRecoveries({ deadlineAt: Date.now() + RECOVERY_STOP_MS });
     await fencePool.onModuleDestroy();
     await prisma.onModuleDestroy();
   }

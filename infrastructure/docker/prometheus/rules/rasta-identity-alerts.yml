@@ -123,6 +123,8 @@ groups:
       # series is exported: silence is not zero). 6 s: a gap the overdue proof tolerates
       # (6 s + one sample's 1 s budget < 7.5 s, the shortest overdue window). `min` over
       # replicas: it fires when no replica samples; one that does keeps the gauges true.
+      # A replica without a sampler (unwired, not started, stopped) exports no age at all
+      # — never a zero (#458 r1 F3) — so `min` is over the replicas that have one.
       # At once: the condition already is a duration. Fires within 6 + 15 + 15 = 36 s of
       # the last successful sample.
       - alert: RastaIdentityKeycloakFenceSamplerStale
@@ -145,6 +147,21 @@ groups:
         annotations:
           summary: 'identity-service is scraped but exports no Keycloak fence sample age'
           description: 'identity-service is up, but rasta_identity_keycloak_fence_sample_age_seconds is missing from every replica: KeycloakFenceSampler is not running, so the fence gauges and RastaIdentityKeycloakWriteOverdue, RastaIdentityKeycloakWriteExpired and RastaIdentityKeycloakFenceSamplerStale are all silent. Check that the build in production wires KeycloakFenceSampler (app.module.ts) and that the metric name is unchanged.'
+          runbook: docs/runbooks/keycloak-projection.md
+
+      # The lapse backlog itself missing while identity-service is scraped (#458 r1 F3): no
+      # replica has a recent lapse count — the sampler is not running, or its count has
+      # failed for three lapse intervals (90 s) — so RastaIdentityMembershipLapseBacklog
+      # cannot fire. Exported as no series then, never as a zero or the last count.
+      # `for: 5m`: a count that fails a few times in a row is not yet this.
+      - alert: RastaIdentityMembershipLapseBacklogUnknown
+        expr: absent(rasta_identity_membership_lapse_backlog) and on() (count(up{job="identity-service"} == 1) > 0)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'identity-service is scraped but exports no recent membership lapse backlog'
+          description: 'identity-service is up, but rasta_identity_membership_lapse_backlog is missing from every replica: KeycloakFenceSampler is not running, or its lapse count (one bounded query on the business pool every 30 s) has failed for 90 s or more on every replica, so RastaIdentityMembershipLapseBacklog cannot fire. The identity-service log says why the count fails (a database that is slow or unreachable, a pool exhausted); RastaIdentityKeycloakFenceSamplerMissing fires as well when the sampler itself is missing.'
           runbook: docs/runbooks/keycloak-projection.md
 
       # Narrowing changes refused because Keycloak could not be written first, for ten

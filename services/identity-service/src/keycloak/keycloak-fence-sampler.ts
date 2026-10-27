@@ -5,7 +5,6 @@ import type { IdentityRepository } from '../identity/identity.repository';
 import {
   keycloakFenceSampleDuration,
   keycloakFenceSamplesTotal,
-  membershipLapseBacklog,
   readFenceSamplesFrom,
   type FenceSampleView,
 } from '../observability/keycloak-projection.metrics';
@@ -37,7 +36,7 @@ import { fenceCounts, type FenceCounts } from './keycloak-write-fence';
  *   of that same budget on this side: a sample that has not answered by then
  *   is a failure, however its transaction ends. Its next tick waits for that
  *   transaction to end (`busy`), so failures never pile up on the connection;
- * - **one full aggregate** (`fenceCounts`: `COUNT(*) FILTER`), never a page.
+ * - **one full aggregate** (`fenceCounts`: `COUNT(attempt_id) FILTER`), never a page.
  *
  * What the gauges read is computed **at scrape** (`readFenceSamplesFrom`):
  * `overdue` and `expired` are the largest of every sample in the last
@@ -53,7 +52,13 @@ import { fenceCounts, type FenceCounts } from './keycloak-write-fence';
  * The lapse backlog (`rasta_identity_membership_lapse_backlog`) leaves the
  * sweep's pass too, on a slower timer of its own ({@link LAPSE_SAMPLE_INTERVAL_MS}):
  * it counts memberships on the business pool, unindexed for this predicate,
- * and is alerted on only after 20 minutes.
+ * and is alerted on only after 20 minutes. Read at scrape like the rest: no
+ * count yet, or none for {@link LAPSE_SAMPLE_STALE_INTERVALS} intervals, and
+ * its series is absent rather than a stale or default number.
+ *
+ * Without a sampler attached — unwired, not started, stopped — nothing is
+ * exported at all: no fence series, no age, no backlog (#458 r1 F3; never
+ * prom-client's default zero), so the missing alerts fire.
  *
  * Per replica: every replica samples the same table and exports the same
  * counts; the rules take `max` of the counts and `min` of the age — overdue is
@@ -93,6 +98,13 @@ export const LAPSE_SAMPLE_INTERVAL_MS = 30_000;
 
 /** The bound of one lapse count, on the business pool: connection wait, statement, transaction. */
 export const LAPSE_SAMPLE_BUDGET_MS = 5_000;
+
+/**
+ * After this many lapse intervals without a successful count, the backlog is
+ * unknown: its series is dropped rather than left at the last count (#458 r1
+ * F3) — the 20-minute alert tolerates one missed count, not a stale one.
+ */
+export const LAPSE_SAMPLE_STALE_INTERVALS = 3;
 
 /** Where the sampler's numbers come from: each call one bounded query. */
 export interface FenceSampleSource {
@@ -171,6 +183,8 @@ export class KeycloakFenceSampler implements OnModuleInit, OnModuleDestroy {
   private startedAt = 0;
   private lastSuccessAt: number | null = null;
   private latest: FenceCounts | null = null;
+  /** The latest successful lapse count, and when it started (monotonic). */
+  private lapses: { backlog: number; at: number } | null = null;
   private readonly retained: Retained[] = [];
   /** Whether the last sample failed, so a run of failures logs once. */
   private failing = false;
@@ -262,6 +276,10 @@ export class KeycloakFenceSampler implements OnModuleInit, OnModuleDestroy {
         : null,
       retained: { overdue, expired },
       ageSeconds: Math.max(age, gap) / 1000,
+      lapseBacklog:
+        this.lapses && now - this.lapses.at <= LAPSE_SAMPLE_STALE_INTERVALS * this.lapseIntervalMs
+          ? this.lapses.backlog
+          : null,
     };
   }
 
@@ -319,14 +337,19 @@ export class KeycloakFenceSampler implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private sampleLapses(): void {
+  /** One tick of its lapse timer. Public so a test can drive it. */
+  sampleLapses(): void {
     if (this.cancel.signal.aborted || this.lapseInFlight) return;
+    const startedAt = this.clock();
     const run = withCancellation(this.cancel.signal, () =>
       this.source.lapseBacklog(this.lapseBudgetMs),
     );
     const settled = run.then(
-      (backlog) => membershipLapseBacklog.set(backlog),
-      // Stale until the next count: the 20-minute alert tolerates one missed.
+      (backlog) => {
+        this.lapses = { backlog, at: startedAt };
+      },
+      // The last count stands until the next — for at most
+      // LAPSE_SAMPLE_STALE_INTERVALS intervals, then the series goes (`view`).
       () => undefined,
     );
     this.lapseInFlight = settled.finally(() => {

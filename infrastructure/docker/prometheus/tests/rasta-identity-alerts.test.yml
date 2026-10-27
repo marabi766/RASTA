@@ -319,3 +319,115 @@ tests:
       - eval_time: 15m
         alertname: RastaIdentityKeycloakFenceSamplerMissing
         exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # #458 r1 F3 — the real collector's output, replica by replica. The series of the
+  # tests named `collector: …` are what `keycloak-projection.metrics.ts` exports, scrape
+  # by scrape: `src/observability/keycloak-projection.metrics.spec.ts` renders the real
+  # registry for each replica at each scrape and holds every value here to it (`_`: the
+  # collector exported no sample). Then promtool says what the rules make of them.
+  # ---------------------------------------------------------------------------
+  - name: 'collector: one replica without a sampler, one whose sampling hangs'
+    interval: 15s
+    input_series:
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1 1 1 1 1'
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '1 1 1 1 1'
+      # 3101: no sampler attached — no age, no backlog (never prom-client's zero).
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '_ _ _ _ _'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '_ _ _ _ _'
+      # 3111: one successful sample and lapse count at 0 s, then its sampling hangs.
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '0 15 30 45 60'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 0s
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts: []
+      # The replica without a sampler holds nothing back: `min` is over 3111 alone.
+      - eval_time: 15s
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Keycloak write fences have not been sampled for 15 seconds'
+              description: 'KeycloakFenceSampler has had no successful sample of keycloak_write_attempt on any replica for longer than 6 seconds: RastaIdentityKeycloakWriteOverdue and RastaIdentityKeycloakWriteExpired cannot be relied on until it recovers. Each sample is one bounded query on the sampler''s own one-connection pool (connection wait, lock_timeout and statement_timeout of 1 s each); rasta_identity_keycloak_fence_samples_total{outcome="failed"} and rasta_identity_keycloak_fence_sample_duration_seconds say whether it fails or is slow. Look for a lock on keycloak_write_attempt (a migration), a database that is slow or unreachable, or an event loop that is stalled.'
+              runbook: docs/runbooks/keycloak-projection.md
+      # One replica still exports the age: not missing.
+      - eval_time: 60s
+        alertname: RastaIdentityKeycloakFenceSamplerMissing
+        exp_alerts: []
+
+  - name: 'collector: no replica has a sampler'
+    interval: 1m
+    input_series:
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1 1 1 1 1 1 1 1'
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '1 1 1 1 1 1 1 1'
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '_ _ _ _ _ _ _ _'
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '_ _ _ _ _ _ _ _'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '_ _ _ _ _ _ _ _'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '_ _ _ _ _ _ _ _'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaIdentityKeycloakFenceSamplerMissing
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaIdentityKeycloakFenceSamplerMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'identity-service is scraped but exports no Keycloak fence sample age'
+              description: 'identity-service is up, but rasta_identity_keycloak_fence_sample_age_seconds is missing from every replica: KeycloakFenceSampler is not running, so the fence gauges and RastaIdentityKeycloakWriteOverdue, RastaIdentityKeycloakWriteExpired and RastaIdentityKeycloakFenceSamplerStale are all silent. Check that the build in production wires KeycloakFenceSampler (app.module.ts) and that the metric name is unchanged.'
+              runbook: docs/runbooks/keycloak-projection.md
+      - eval_time: 4m
+        alertname: RastaIdentityMembershipLapseBacklogUnknown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RastaIdentityMembershipLapseBacklogUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'identity-service is scraped but exports no recent membership lapse backlog'
+              description: 'identity-service is up, but rasta_identity_membership_lapse_backlog is missing from every replica: KeycloakFenceSampler is not running, or its lapse count (one bounded query on the business pool every 30 s) has failed for 90 s or more on every replica, so RastaIdentityMembershipLapseBacklog cannot fire. The identity-service log says why the count fails (a database that is slow or unreachable, a pool exhausted); RastaIdentityKeycloakFenceSamplerMissing fires as well when the sampler itself is missing.'
+              runbook: docs/runbooks/keycloak-projection.md
+      # Nothing to be stale: silence is the missing alerts' case.
+      - eval_time: 5m
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts: []
+
+  - name: 'collector: the lapse count fails on the only replica'
+    interval: 30s
+    input_series:
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+      # A count of 3 at 0 s, then every count fails: the last one stands for three
+      # intervals (to 90 s), then the series goes rather than staying at 3 (`stale`: the
+      # marker Prometheus writes when a scraped target stops exporting a series).
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '3 3 3 3 stale _ _ _ _ _ _ _ _ _ _ _'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RastaIdentityMembershipLapseBacklogUnknown
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: RastaIdentityMembershipLapseBacklogUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'identity-service is scraped but exports no recent membership lapse backlog'
+              description: 'identity-service is up, but rasta_identity_membership_lapse_backlog is missing from every replica: KeycloakFenceSampler is not running, or its lapse count (one bounded query on the business pool every 30 s) has failed for 90 s or more on every replica, so RastaIdentityMembershipLapseBacklog cannot fire. The identity-service log says why the count fails (a database that is slow or unreachable, a pool exhausted); RastaIdentityKeycloakFenceSamplerMissing fires as well when the sampler itself is missing.'
+              runbook: docs/runbooks/keycloak-projection.md

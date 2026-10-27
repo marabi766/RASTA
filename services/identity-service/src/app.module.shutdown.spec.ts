@@ -9,6 +9,7 @@ import {
 import { AppModule, ENV } from './app.module';
 import { MembershipExpiryScanner } from './identity/membership-expiry.scanner';
 import { KeycloakProjectionConsumer } from './keycloak/keycloak-projection.consumer';
+import { KeycloakProjector } from './keycloak/keycloak.projector';
 import { SECURITY_EVENT_RELAY } from './security-events/security-event.relay';
 
 /**
@@ -40,7 +41,7 @@ function outboxShutdownProvider(): FactoryProvider {
 }
 
 describe('AppModule shutdown wiring (D-052)', () => {
-  it('stops both relays, the purge, the scanner and the projection consumer by one deadline', async () => {
+  it('stops both relays, the purge, the scanner, the projection consumer and the recovery projections by one deadline', async () => {
     const provider = outboxShutdownProvider();
     const inject = provider.inject ?? [];
     const stops = new Map<unknown, (OutboxStopOptions | undefined)[]>();
@@ -66,6 +67,8 @@ describe('AppModule shutdown wiring (D-052)', () => {
         SECURITY_EVENT_RELAY,
         MembershipExpiryScanner,
         KeycloakProjectionConsumer,
+        // The owner of every recovery projection, a request's included (#458 r1 F2).
+        KeycloakProjector,
         ENV,
       ]),
     );
@@ -89,12 +92,19 @@ describe('AppModule shutdown wiring (D-052)', () => {
     );
     await projection.onModuleInit();
 
-    await projection.stop({ deadlineAt: 1234 });
-    await projection.onApplicationShutdown();
+    const deadlineAt = Date.now() + 5_000;
+    const first = projection.stop({ deadlineAt });
+    const again = projection.stop({ deadlineAt: deadlineAt + 1 });
+    const late = projection.onApplicationShutdown();
 
-    expect(consumerStop.mock.calls).toEqual([[{ deadlineAt: 1234 }], [undefined]]);
-    // Each stop writes the late senders' owed fences before it returns (D-070 D).
-    expect(recoverOwed).toHaveBeenCalledTimes(2);
+    // One stop (#458 r1 F2): the later calls are the same promise — never a
+    // second EventConsumer stop, never a second flush.
+    expect(again).toBe(first);
+    expect(late).toBe(first);
+    await first;
+    expect(consumerStop.mock.calls).toEqual([[{ deadlineAt }]]);
+    // The stop writes the late senders' owed fences before it returns (D-070 D).
+    expect(recoverOwed).toHaveBeenCalledTimes(1);
   });
 
   it('Keycloak sync off, the projection consumer has nothing to stop', async () => {

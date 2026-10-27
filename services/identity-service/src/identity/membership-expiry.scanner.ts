@@ -3,7 +3,7 @@ import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import type { KeycloakProjector } from '../keycloak/keycloak.projector';
 import type { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
 import { membershipLapseFailuresTotal } from '../observability/keycloak-projection.metrics';
-import { withCancellation } from '../prisma/cancellation';
+import { untilDeadline, withCancellation } from '../prisma/cancellation';
 import { IdentityRepository } from './identity.repository';
 import { IdentityService } from './identity.service';
 
@@ -195,16 +195,13 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
     }
     // Before returning, outside the scope the stop cancelled: the fresh fences
     // of late writes this process still owes — a late sender the stop refused,
-    // and any write still unanswered past its deadline (D-070 D). Bounded by
-    // what is left of the deadline; a fence not written by then is not, and
-    // the residual is stated in ADR-060.
-    const flush = this.fences.recoverOwed();
-    const owed =
-      deadlineAt === undefined
-        ? await flush
-        : (await withinDeadline(flush, Math.max(0, deadlineAt - Date.now()))) === 'finished'
-          ? await flush
-          : -1;
+    // and any write still unanswered past its deadline (D-070 D). In a scope
+    // of its own that carries the deadline (#458 r1 F2): each transaction is
+    // bounded by what is left of it and refused past it — its BEGIN, every
+    // statement and its COMMIT — and, abandoned, the scope is cancelled before
+    // this returns. A fence not written by then is not; ADR-060 § 7.
+    const flushed = await untilDeadline(() => this.fences.recoverOwed(), deadlineAt);
+    const owed = flushed.outcome === 'finished' ? flushed.value : -1;
     if (owed !== 0) {
       this.logger.error(
         `Stopping with ${owed < 0 ? 'unknown' : owed} late Keycloak write fences unwritten ` +

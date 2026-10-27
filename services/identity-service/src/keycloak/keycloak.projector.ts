@@ -1,7 +1,13 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ERROR_CODES } from '@rasta/contracts';
-import { RastaError, runUnscoped, withinDeadline } from '@rasta/nest-common';
+import {
+  RastaError,
+  runUnscoped,
+  withinDeadline,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import { IdentityRepository } from '../identity/identity.repository';
+import { withCancellation } from '../prisma/cancellation';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import {
   KeycloakAdminClient,
@@ -371,6 +377,17 @@ export type OrphanRepairOutcome =
 @Injectable()
 export class KeycloakProjector {
   private readonly logger = new Logger(KeycloakProjector.name);
+  /**
+   * The application-shutdown owner of every recovery projection this
+   * projector starts (#458 r1 F2): aborted by {@link stop}. A recovery a
+   * request asked for has no signal of its own; this one cancels its
+   * Keycloak calls and refuses every database operation it would start next.
+   */
+  private readonly recoveryStop = new AbortController();
+  /** The recovery projections this projector started and that have not finished. */
+  private readonly running = new Set<Promise<void>>();
+  /** The one stop; later calls join it. */
+  private stopping?: Promise<number>;
 
   constructor(
     private readonly repository: IdentityRepository,
@@ -692,14 +709,26 @@ export class KeycloakProjector {
    * nothing; it is best-effort, and the fresh fence is what is durable — the
    * sweep re-asserts from it if this one never lands. Its own late writes
    * fence again but ask for nothing more (`recovery`).
+   *
+   * Owned by this projector's stop, too (#458 r1 F2): it runs in a
+   * cancellation scope of {@link recoveryStop} — whoever asked for it, a
+   * request included — so once the application stops (or the command ends),
+   * it starts nothing more on the database, and its Keycloak call is aborted.
+   * None starts once stopped: the fresh fence stands for it.
    */
   private requestRecovery(userId: string, signal: AbortSignal | undefined): void {
-    const run = this.project(userId, KEYCLOAK_PROJECTION_TRIGGERS.RECOVERY, {
-      signal,
-      recovery: true,
-    }).then(
+    const owner = this.recoveryStop.signal;
+    if (owner.aborted) return;
+    const cancel = signal ? AbortSignal.any([owner, signal]) : owner;
+    const run = withCancellation(owner, () =>
+      this.project(userId, KEYCLOAK_PROJECTION_TRIGGERS.RECOVERY, {
+        signal: cancel,
+        recovery: true,
+      }),
+    ).then(
       () => undefined,
       (error: unknown) => {
+        if (owner.aborted) return;
         this.logger.error(
           `Keycloak recovery projection failed for user ${userId} after a late write; ` +
             `its fresh fence keeps it for the sweep. ${describe(error)}`,
@@ -707,7 +736,50 @@ export class KeycloakProjector {
       },
     );
     recoveries.add(run);
-    void run.finally(() => recoveries.delete(run));
+    this.running.add(run);
+    void run.finally(() => {
+      recoveries.delete(run);
+      this.running.delete(run);
+    });
+  }
+
+  /**
+   * Stops every recovery projection this projector started (#458 r1 F2): an
+   * `OutboxShutdown` worker, by the shutdown's deadline, and the command's
+   * last step before it disconnects. Cancels them at once — their Keycloak
+   * calls aborted, every database operation they would start next refused,
+   * a COMMIT included (`prisma/cancellation.ts`) — and waits for them to
+   * unwind, at most until `deadlineAt`. Resolves to how many are still
+   * unwinding then: cancelled, but with a statement already sent. A recovery
+   * is best-effort — its fresh fence is what is durable, and the sweep
+   * re-asserts from it — so cancelling one loses nothing. One stop per
+   * projector: later calls join it.
+   */
+  stopRecoveries(options: OutboxStopOptions = {}): Promise<number> {
+    this.stopping ??= this.haltRecoveries(options.deadlineAt);
+    return this.stopping;
+  }
+
+  /** {@link stopRecoveries}, as an `OutboxShutdown` worker. */
+  async stop(options: OutboxStopOptions = {}): Promise<void> {
+    await this.stopRecoveries(options);
+  }
+
+  private async haltRecoveries(deadlineAt: number | undefined): Promise<number> {
+    this.recoveryStop.abort();
+    const pending = [...this.running];
+    if (pending.length === 0) return 0;
+    const all = Promise.all(pending);
+    if (deadlineAt === undefined) await all;
+    else await withinDeadline(all, Math.max(0, deadlineAt - Date.now()));
+    const left = this.running.size;
+    if (left > 0) {
+      this.logger.error(
+        `Stopping with ${left} Keycloak recovery projections still unwinding (D-070 D); ` +
+          'they start nothing more, and their fresh fences keep them for the sweep',
+      );
+    }
+    return left;
   }
 
   /**
