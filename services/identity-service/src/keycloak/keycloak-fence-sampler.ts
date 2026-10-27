@@ -311,8 +311,11 @@ export class KeycloakFenceSampler implements OnModuleInit, OnModuleDestroy {
   }
 
   private prune(now: number): void {
-    while (this.retained.length > 0 && this.retained[0]!.at < now - this.retentionMs) {
+    const since = now - this.retentionMs;
+    let oldest = this.retained[0];
+    while (oldest && oldest.at < since) {
       this.retained.shift();
+      oldest = this.retained[0];
     }
   }
 
