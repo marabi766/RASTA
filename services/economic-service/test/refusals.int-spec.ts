@@ -1,7 +1,7 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
 import { runUnscoped } from '@rasta/nest-common';
-import { expectNotDisclosed, oneOf, thisRun } from '@rasta/testing';
+import { expectNotDisclosed } from '@rasta/testing';
 import { mockReferenceWithDirective } from '../src/payment/mock.provider';
 import { hashRequestBody } from '../src/shared/idempotency';
 import { admin, apiTenant, bearer, startApi, type ApiHarness } from './api-helpers';
@@ -176,11 +176,8 @@ describe('refusals and defaults', () => {
 
       expect(response.body.status).toBe('FAILED');
       expect(response.body.failureReason).toBe('UNSUPPORTED_DIRECTIVE');
-      // The card number is looked for once the ids and instants the run minted are set aside:
-      // a ULID can hold sixteen digits (#452). The same for the stored row and the events.
+      // Unknown ids and instants stay searched. Only request/header metadata is exempt below.
       const minted = {
-        known: [wallet.body.id as string, response.body.paymentIntentId as string],
-        instantsBetween: thisRun(),
         input: sent,
       };
       expectNotDisclosed(response.body, [pan], minted);
@@ -220,7 +217,6 @@ describe('refusals and defaults', () => {
         {
           ...minted,
           metadata: {
-            '*.eventId': oneOf(published.map((row) => row.id)),
             '*.correlationId': response.headers['x-correlation-id'] as string,
           },
         },

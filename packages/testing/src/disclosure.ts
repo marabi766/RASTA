@@ -1,5 +1,5 @@
 /**
- * Absence assertions that no generated value can fail or pass by accident.
+ * Absence assertions with explicit, path-bound metadata exemptions.
  *
  * `expect(JSON.stringify(body)).not.toContain('403')` looks for a secret in a
  * haystack that also carries values the run minted: a correlation ULID, the
@@ -8,11 +8,12 @@
  * holds `403`), so the test fails although nothing was disclosed (#452). This
  * module separates the two:
  *
- * - {@link expectNotDisclosed} verifies every generated value the caller
- *   declares — at an exact path with its expected identity, as a value the
- *   test holds, or as a clock reading inside the test's own window — removes
- *   it, refuses any generated value it was not told about, and only then looks
- *   for the secrets in what is left.
+ * - {@link expectNotDisclosed} verifies whole JSON values at declared paths
+ *   against independent expected values (or bounded instants at timestamp
+ *   paths). Only those values are excused. Unknown generated values, keys and
+ *   all adjacent content stay searched; identity secrets are checked in the
+ *   original payload too. Unknown values can still produce incidental matches:
+ *   without an independent source, the assertion deliberately fails closed.
  * - {@link absenceHazard} is the rule `disclosure-guard.ts` applies to every
  *   plain `not.toContain` / `not.toMatch` over a string in Jest: a sentinel
  *   that could occur inside a generated value present in the haystack is
@@ -521,24 +522,14 @@ function quantified(token: Token): Token {
 
 const MATCHER = Symbol('disclosure.matcher');
 
-/** A metadata expectation that is not a plain value. */
+/** Only independent exact values or bounded instants may exempt a declared JSON value. */
 export interface MetadataMatcher {
   readonly [MATCHER]: true;
-  readonly describe: string;
-  /** The value stays in what is searched once checked (`searched`), instead of being removed. */
-  readonly keep?: true;
-  /**
-   * Problems with `value`; empty when it is what was expected. `scope` is the list element the
-   * path's first `*` stands for (the whole haystack when it has none).
-   */
-  check(value: unknown, scope?: unknown): string[];
+  check(value: unknown): string[];
 }
 
-/** What a metadata path must hold: exactly this value, or what a matcher accepts. */
-export type MetadataExpectation = string | number | boolean | bigint | null | MetadataMatcher;
-
+export type MetadataExpectation = string | number | MetadataMatcher;
 type InstantInput = Date | string | number;
-
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const WELL_FORMED_CORRELATION_ID =
   /^(?:[0-7][0-9A-HJKMNP-TV-Z]{25}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
@@ -551,144 +542,44 @@ function epochOf(value: InstantInput): number {
       : Date.parse(value);
 }
 
-/**
- * An ISO-8601 UTC instant (`2026-10-25T01:39:12.584Z`) or a valid `Date` —
- * optionally inside `[from, to]`. For a clock reading the test cannot know
- * exactly, such as the error envelope's `timestamp`.
- */
-export function instant(between?: readonly [InstantInput, InstantInput]): MetadataMatcher {
+/** Use only at declared timestamp paths, with a window established independently of the payload. */
+export function instant(between: readonly [InstantInput, InstantInput]): MetadataMatcher {
   return {
     [MATCHER]: true,
-    describe: between ? 'an ISO instant inside the test window' : 'an ISO instant',
     check(value) {
-      const at =
-        value instanceof Date
-          ? value.getTime()
-          : typeof value === 'string' && ISO_INSTANT.test(value)
-            ? Date.parse(value)
-            : Number.NaN;
-      if (Number.isNaN(at)) return [`expected an ISO instant, got ${JSON.stringify(value)}`];
-      // `2026-02-30T…` parses (to March); only a value that round-trips is an instant.
+      const from = epochOf(between[0]);
+      const to = epochOf(between[1]);
+      if (!Number.isFinite(from) || !Number.isFinite(to) || from > to)
+        return ['invalid test window'];
+      if (typeof value !== 'string' || !ISO_INSTANT.test(value)) return ['expected an ISO instant'];
+      const at = Date.parse(value);
+      if (!Number.isFinite(at)) return ['expected a real instant'];
       const iso = new Date(at).toISOString();
-      if (typeof value === 'string' && iso !== value && iso !== value.replace(/Z$/, '.000Z')) {
-        return [`${JSON.stringify(value)} is not a real instant`];
-      }
-      if (between && (at < epochOf(between[0]) || at > epochOf(between[1]))) {
-        return [`${JSON.stringify(value)} lies outside the test window`];
-      }
-      return [];
+      if (iso !== value && iso !== value.replace(/Z$/, '.000Z')) return ['expected a real instant'];
+      return at >= from && at <= to ? [] : ['outside the test window'];
     },
   };
 }
 
-/** Exactly one of `values` (each element of a list of rows, say, is one of the rows the test made). */
-export function oneOf(values: readonly (string | number | bigint)[]): MetadataMatcher {
+/** Every candidate must come from request input, headers or an independent row lookup. */
+export function oneOf(values: readonly (string | number)[]): MetadataMatcher {
   return {
     [MATCHER]: true,
-    describe: `one of ${values.length} known values`,
     check(value) {
-      const actual = value instanceof Date ? value.toISOString() : value;
-      return values.some((expected) => expected === actual)
+      return values.some((expected) => expected === value)
         ? []
-        : [`${JSON.stringify(actual)} is none of the ${values.length} expected values`];
+        : [`none of the ${values.length} expected values`];
     },
   };
 }
 
-/**
- * A key a store minted for this very row or run — an outbox row's id, an access-log row's id
- * (`mintedKey('BAL')` for `BAL_<ULID>`), the correlation of work no request started — which no
- * other record holds, so no identity can be named for it. The one exemption by shape, and a
- * narrow one: the row type's own prefix, if it has one, then 26 Crockford characters, nothing
- * else (an organization, bid or user id must be named in `known`); use it only at the row's own
- * key paths, with every copy held to it by `sameAs`. A whole-identity secret is still looked for
- * in the haystack as it was.
- */
-export function mintedKey(prefix?: string): MetadataMatcher {
-  const shape = new RegExp(
-    `^${prefix === undefined ? '' : `${prefix}_`}[0-7][0-9A-HJKMNP-TV-Z]{25}$`,
-  );
-  const what = prefix === undefined ? 'a bare ULID' : `${prefix}_ and a ULID`;
-  return {
-    [MATCHER]: true,
-    describe: `${what} minted for this row`,
-    check(value) {
-      return typeof value === 'string' && shape.test(value)
-        ? []
-        : [`expected ${what}, got ${JSON.stringify(value)}`];
-    },
-  };
-}
-
-/**
- * A digest the test cannot compute — a bid's content commitment, a receipt it sees for the
- * first time — that stays in what is searched (C: a hash is set aside only as its expected value;
- * otherwise it is searched with the rest). Checked to be a digest, so nothing else rests at the
- * path; the closed-world check leaves it be. Pair it with secrets no digest can hold
- * (`wholeNumber`), or the assertion keeps the chance this module exists to remove.
- */
-export function searched(): MetadataMatcher {
-  return {
-    [MATCHER]: true,
-    describe: 'a digest, searched with the content',
-    keep: true,
-    check(value) {
-      return typeof value === 'string' && /^[0-9a-f]{32,}$/i.test(value) && /[a-f]/i.test(value)
-        ? []
-        : [`expected a digest, got ${JSON.stringify(value)}`];
-    },
-  };
-}
-
-/**
- * A number as a secret no generated value can hold: its digits with no word character or `-` on
- * either side. A ULID, a digest and a UUID segment are runs of word characters, an instant never
- * holds more than four digits in a row, so neither can produce the match — while a disclosure of
- * the number as a JSON value (`"4200000000"`, `:4200000000,`) or in text (`price 4200000000.`)
- * is found. For a haystack whose generated values cannot be declared one by one (events seen on
- * the broker in E2E); `absenceHazard` accepts it.
- */
-export function wholeNumber(digits: string): RegExp {
-  if (!/^\d+$/.test(digits))
-    throw new Error(`wholeNumber: ${JSON.stringify(digits)} is not digits`);
-  return new RegExp(`(?<![\\w-])${digits}(?![\\w-])`);
-}
-
-/**
- * The same value as another field of the same list element — the path after the first `*` is
- * read from that element (`'*.payload.eventId': sameAs('id')`: each envelope's event id is its
- * outbox row's id). The other field must be present and declared on its own.
- */
-export function sameAs(path: string): MetadataMatcher {
-  return {
-    [MATCHER]: true,
-    describe: `the same value as ${path}`,
-    check(value, scope) {
-      const other = valueAt(scope, path);
-      if (other === undefined) return [`${path}, which it must equal, is absent`];
-      return other === value
-        ? []
-        : [
-            `expected the value of ${path} (${JSON.stringify(other)}), got ${JSON.stringify(value)}`,
-          ];
-    },
-  };
-}
-
-/**
- * The request's correlation id: equal to the id the response carried in its
- * `x-correlation-id` header (or the id the test sent) and a well-formed ULID
- * or UUID — the identity and the shape, never the shape alone.
- */
 export function correlationId(expected: string | undefined): MetadataMatcher {
   return {
     [MATCHER]: true,
-    describe: 'the request’s correlation id',
     check(value) {
       if (expected === undefined) return ['the response carries no x-correlation-id header'];
-      if (!WELL_FORMED_CORRELATION_ID.test(expected)) {
-        return [`the expected correlation id ${JSON.stringify(expected)} is not a ULID or UUID`];
-      }
+      if (!WELL_FORMED_CORRELATION_ID.test(expected))
+        return ['expected correlation id is not a ULID or UUID'];
       return value === expected
         ? []
         : [`expected the correlation id ${expected}, got ${JSON.stringify(value)}`];
@@ -696,104 +587,50 @@ export function correlationId(expected: string | undefined): MetadataMatcher {
   };
 }
 
-/** When this module was loaded: once per test file in Jest, once per worker in Playwright. */
 const LOADED_AT = Date.now();
-
-/**
- * The window the calling test file has run in so far, five seconds wider on
- * either side for the database's clock: every instant it stamped or caused
- * lies inside. For `instantsBetween`.
- */
+/** Clock window established independently of the response, allowing five seconds of clock skew. */
 export function thisRun(): readonly [Date, Date] {
   return [new Date(LOADED_AT - 5_000), new Date(Date.now() + 5_000)];
 }
 
 type Headers = Record<string, string | string[] | undefined>;
-
 function header(headers: Headers, name: string): string | undefined {
   const value = headers[name] ?? headers[name.toLowerCase()];
   return Array.isArray(value) ? value[0] : value;
 }
 
-/**
- * The metadata of the platform's error envelope (`AllExceptionsFilter`):
- * `correlationId` equal to the response's `x-correlation-id`, `timestamp` an
- * ISO instant, `traceId` equal to `x-trace-id` when the response has one, and
- * `path` exactly the request path when the caller names it (a path that holds
- * an id is a generated value; one that does not may stay in the content).
- *
- * `headers` is supertest's `response.headers` or Playwright's
- * `response.headers()`.
- */
+/** Header identities, exact request path and a bounded clock reading at declared envelope paths. */
 export function errorEnvelope(options: {
   readonly headers: Headers;
   readonly path?: string;
   readonly correlationId?: string;
+  readonly instantsBetween?: readonly [InstantInput, InstantInput];
 }): Record<string, MetadataExpectation> {
   const traceId = header(options.headers, 'x-trace-id');
   return {
     correlationId: correlationId(
       options.correlationId ?? header(options.headers, 'x-correlation-id'),
     ),
-    timestamp: instant(),
+    timestamp: instant(options.instantsBetween ?? thisRun()),
     ...(traceId !== undefined ? { traceId } : {}),
     ...(options.path !== undefined ? { path: options.path } : {}),
   };
 }
 
 export interface DisclosureOptions {
-  /**
-   * Exact paths into the haystack (`'correlationId'`, `'payload.eventId'`,
-   * `'rows.0.createdAt'`; `*` stands for every element of an array, never for
-   * an object key), each with the value it must hold. A path that is absent,
-   * or holds anything else, fails the assertion; a verified value is removed
-   * before the secrets are looked for. Its key stays, and so does every field
-   * the caller did not name.
-   */
+  /** Exact paths; * matches array elements only. Expected values MUST be independent of the
+   * payload: request input, response headers, tenant-scoped primary-key/column lookups, or
+   * bounded instants at declared timestamp paths. Unknown generated values stay searched. */
   readonly metadata?: Readonly<Record<string, MetadataExpectation>>;
-  /**
-   * Generated identities the test holds — the ids it created or read back,
-   * fixture ULIDs, instants it recorded. Removed wherever they occur, whole or
-   * inside a string (`/v1/tenders/TND_…/bids`). Each must carry a generated
-   * value: words and amounts are content and stay.
-   */
-  readonly known?: readonly (string | Date)[];
-  /**
-   * The window the test ran in. An instant (with `Z` or an offset) inside it,
-   * anywhere in the haystack, is a clock reading of this run and is removed.
-   * Read from the clock that stamps the values (the database's, for rows).
-   */
-  readonly instantsBetween?: readonly [InstantInput, InstantInput];
-  /**
-   * What the caller sent. Every secret must occur in it, so an assertion can
-   * never pass because its sentinel was never there to leak; a secret that is
-   * derived rather than sent (a rounded price) is listed in `derived`.
-   */
   readonly input?: unknown;
-  /** Secrets exempt from the `input` check, each with its reason in the test. */
+  /** Input-presence exceptions only; these never exempt a disclosure. Explain each at the site. */
   readonly derived?: readonly (string | RegExp)[];
 }
 
-/** Stands in for a removed value inside a string; no secret contains it. */
-const REMOVED = '⁣';
-
-/**
- * Asserts that none of `secrets` occurs in `haystack` — a response body, a
- * row, an event, a list of them, or a text — with every generated value
- * accounted for first:
- *
- * 1. each `metadata` path is checked against its expectation, then removed;
- * 2. each `known` identity and each instant inside `instantsBetween` is
- *    removed wherever it occurs;
- * 3. any generated value still left (a ULID, a UUID, an instant, a digest) is
- *    refused: it would let a secret occur by chance, so it must be declared;
- * 4. each secret is looked for in what remains, serialized as
- *    `JSON.stringify` does it (a bigint as its digits). A secret that is a
- *    whole identity (another tenant's id) is also looked for in the haystack
- *    as it was, metadata included: no declaration can hide it.
- *
- * Strings are found by substring, regular expressions by `test`, with their
- * flags, as `not.toContain` and `not.toMatch` find them.
+/** Substring/RegExp search over all content and unmodified keys, after exact path exemptions.
+ * No recursive identity harvesting, shape-only removal, key rewriting or global replacement.
+ * Every identity secret (including RegExp matches) is searched in the original payload first.
+ * Callers are responsible for establishing metadata independently; otherwise leave it searched.
  */
 export function expectNotDisclosed(
   haystack: unknown,
@@ -802,179 +639,88 @@ export function expectNotDisclosed(
 ): void {
   const problems: string[] = [];
   if (secrets.length === 0) problems.push('no secrets to look for');
-
-  // Step 0: the assertion means something only if each secret was there to leak.
+  if (serialize(haystack) === '') problems.push('payload is absent or not JSON-serializable');
   if (options.input !== undefined) {
     const sent = typeof options.input === 'string' ? options.input : serialize(options.input);
     for (const secret of secrets) {
-      if (options.derived?.includes(secret)) continue;
-      if (!occurs(sent, secret)) problems.push(`the secret ${String(secret)} is not in the input`);
+      if (!options.derived?.includes(secret) && !occurs(sent, secret))
+        problems.push(`the secret ${String(secret)} is not in the input`);
     }
   }
 
-  // Step 4, first half: a whole-identity secret is never hidden by a declaration.
   const original = typeof haystack === 'string' ? haystack : serialize(haystack);
   for (const secret of secrets) {
-    if (typeof secret === 'string' && holdsIdentity(secret) && original.includes(secret)) {
-      problems.push(`discloses the identity ${secret}`);
+    if (typeof secret === 'string') {
+      if (holdsIdentity(secret) && original.includes(secret))
+        problems.push(`discloses the identity ${secret}`);
+    } else {
+      if (holdsIdentity(secret.source) && occurs(original, secret)) {
+        problems.push(`discloses the identity ${String(secret)}`);
+      }
+      const matches = original.matchAll(
+        new RegExp(secret.source, secret.flags.replace(/[gy]/g, '') + 'g'),
+      );
+      for (const match of matches) {
+        if (holdsIdentity(match[0])) problems.push(`discloses the identity ${String(secret)}`);
+      }
     }
   }
 
-  let content: unknown = typeof haystack === 'string' ? haystack : plain(haystack);
-
-  // Step 1.
-  const verified: Slot[] = [];
-  const kept = new Set<string>();
+  const content = plain(haystack);
   for (const [path, expected] of Object.entries(options.metadata ?? {})) {
-    if (typeof content === 'string') {
-      problems.push(`metadata ${path}: the haystack is a text, it has no paths`);
-      continue;
-    }
     const slots = resolve(content, path.split('.'));
     if (slots.length === 0) problems.push(`metadata ${path}: absent`);
     for (const slot of slots) {
       const value = slot.holder[slot.key];
-      for (const problem of checkExpected(value, expected, slot.scope)) {
-        problems.push(`metadata ${slot.path}: ${problem}`);
+      if (typeof value !== 'string' && typeof value !== 'number') {
+        problems.push(`metadata ${path}: must be a whole JSON string or number`);
+        continue;
       }
-      if (
-        expected !== null &&
-        typeof expected === 'object' &&
-        MATCHER in expected &&
-        expected.keep
-      ) {
-        kept.add(slot.path);
-      } else {
-        verified.push(slot);
-      }
+      const failures =
+        typeof expected === 'object' && expected !== null && MATCHER in expected
+          ? expected.check(value)
+          : value === expected
+            ? []
+            : [`expected ${JSON.stringify(expected)}, got ${JSON.stringify(value)}`];
+      problems.push(...failures.map((problem) => `metadata ${path}: ${problem}`));
+      // Only a successfully verified whole value at this exact path can be excused.
+      if (failures.length === 0) slot.holder[slot.key] = null;
     }
   }
-  // Removed only once every path is checked: a `sameAs` reads what another path declares.
-  for (const slot of verified) slot.holder[slot.key] = null;
 
-  // Step 2.
-  const known = (options.known ?? []).map((value) =>
-    value instanceof Date ? value.toISOString() : value,
-  );
-  for (const value of known) {
-    if (generatedValuesIn(value).length === 0) {
-      problems.push(`known ${JSON.stringify(value)} holds no generated value; content stays`);
-    }
-  }
-  const removable = [...known].sort((a, b) => b.length - a.length);
-  const [from, to] = options.instantsBetween?.map(epochOf) ?? [];
-  const strip = (text: string): string => {
-    let out = text;
-    for (const value of removable) out = out.split(value).join(REMOVED);
-    if (from !== undefined && to !== undefined) {
-      out = out.replace(new RegExp(GENERATED_VALUE_SHAPES.instant.source, 'g'), (match) => {
-        if (!/(?:Z|[+-]\d{2}:?\d{2})$/.test(match)) return match;
-        const at = Date.parse(match);
-        return at >= from && at <= to ? REMOVED : match;
-      });
-    }
-    return out;
-  };
-  content = mapStrings(content, strip);
-
-  // Step 3.
-  walkStrings(content, '', (text, where) => {
-    if (kept.has(where)) return;
-    for (const value of generatedValuesIn(text)) {
-      problems.push(
-        `undeclared generated ${value.shape} ${JSON.stringify(value.value)} at ${where || '(root)'}: ` +
-          'declare it (metadata, known or instantsBetween), so it can neither produce nor hide a secret',
-      );
-    }
-  });
-
-  // Step 4.
   const text = typeof content === 'string' ? content : serialize(content);
   for (const secret of secrets) {
-    const at = indexOf(text, secret);
-    if (at !== undefined) {
-      problems.push(`discloses ${String(secret)}: …${text.slice(Math.max(0, at - 40), at + 60)}…`);
-    }
+    if (occurs(text, secret)) problems.push(`discloses ${String(secret)}`);
   }
-
   if (problems.length > 0) {
     const error = new Error(`expectNotDisclosed:\n  - ${problems.join('\n  - ')}`);
-    // The runner's code frame then points at the assertion in the test, not in here.
     Error.captureStackTrace(error, expectNotDisclosed);
     throw error;
   }
 }
 
 function occurs(text: string, secret: string | RegExp): boolean {
-  return indexOf(text, secret) !== undefined;
+  return typeof secret === 'string'
+    ? text.includes(secret)
+    : new RegExp(secret.source, secret.flags.replace(/[gy]/g, '')).test(text);
 }
 
-function indexOf(text: string, secret: string | RegExp): number | undefined {
-  if (typeof secret === 'string') {
-    const at = text.indexOf(secret);
-    return at === -1 ? undefined : at;
-  }
-  const match = new RegExp(secret.source, secret.flags.replace(/[gy]/g, '')).exec(text);
-  return match === null ? undefined : match.index;
-}
-
-function checkExpected(value: unknown, expected: MetadataExpectation, scope?: unknown): string[] {
-  if (expected !== null && typeof expected === 'object' && MATCHER in expected) {
-    return expected.check(value, scope);
-  }
-  const actual = value instanceof Date ? value.toISOString() : value;
-  return actual === expected
-    ? []
-    : [
-        `expected ${JSON.stringify(serializable(expected))}, got ${JSON.stringify(serializable(actual))}`,
-      ];
-}
-
-function serializable(value: unknown): unknown {
-  return typeof value === 'bigint' ? `${value}n` : value;
-}
-
-/** `JSON.stringify`, with a bigint written as its digits — how the suites have always serialized. */
 function serialize(value: unknown): string {
   return (
     JSON.stringify(value, (_key, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)) ?? ''
   );
 }
 
-/** A plain copy as JSON sees it: `toJSON` applied (a `Date` becomes its ISO text), bigint kept. */
+/** Preserve every JSON property, including __proto__, without invoking prototype setters. */
 function plain(value: unknown): unknown {
-  if (
-    value !== null &&
-    typeof value === 'object' &&
-    typeof (value as { toJSON?: unknown }).toJSON === 'function'
-  ) {
-    return plain((value as { toJSON(): unknown }).toJSON());
-  }
-  if (Array.isArray(value)) return value.map((item) => (item === undefined ? null : plain(item)));
-  if (value !== null && typeof value === 'object') {
-    const copy: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) {
-      if (item !== undefined && typeof item !== 'function') copy[key] = plain(item);
-    }
-    return copy;
-  }
-  return value;
+  return JSON.parse(serialize(value) || 'null') as unknown;
 }
 
 interface Slot {
   readonly holder: Record<string, unknown>;
   readonly key: string;
-  readonly path: string;
-  readonly scope: unknown;
 }
-
-function resolve(
-  value: unknown,
-  segments: readonly string[],
-  at = '',
-  scope: unknown = value,
-  starred = false,
-): Slot[] {
+function resolve(value: unknown, segments: readonly string[]): Slot[] {
   const [segment, ...rest] = segments;
   if (segment === undefined || value === null || typeof value !== 'object') return [];
   const holder = value as Record<string, unknown>;
@@ -986,60 +732,7 @@ function resolve(
       : Object.prototype.hasOwnProperty.call(holder, segment)
         ? [segment]
         : [];
-  return keys.flatMap((key) => {
-    const path = at ? `${at}.${key}` : key;
-    // The first `*` binds the scope a `sameAs` reads from: that list element.
-    const inner = segment === '*' && !starred ? holder[key] : scope;
-    const bound = starred || segment === '*';
-    return rest.length === 0
-      ? [{ holder, key, path, scope }]
-      : resolve(holder[key], rest, path, inner, bound);
-  });
-}
-
-/** The value at `path` (dotted) inside `value`, or `undefined`. */
-function valueAt(value: unknown, path: string): unknown {
-  let at: unknown = value;
-  for (const segment of path.split('.')) {
-    if (
-      at === null ||
-      typeof at !== 'object' ||
-      !Object.prototype.hasOwnProperty.call(at, segment)
-    ) {
-      return undefined;
-    }
-    at = (at as Record<string, unknown>)[segment];
-  }
-  return at;
-}
-
-/** `value` with every string — keys included — passed through `map`. */
-function mapStrings(value: unknown, map: (text: string) => string): unknown {
-  if (typeof value === 'string') return map(value);
-  if (Array.isArray(value)) return value.map((item) => mapStrings(item, map));
-  if (value !== null && typeof value === 'object') {
-    const copy: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) copy[map(key)] = mapStrings(item, map);
-    return copy;
-  }
-  return value;
-}
-
-function walkStrings(
-  value: unknown,
-  at: string,
-  visit: (text: string, where: string) => void,
-): void {
-  if (typeof value === 'string') return visit(value, at);
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => walkStrings(item, at ? `${at}.${index}` : String(index), visit));
-    return;
-  }
-  if (value !== null && typeof value === 'object') {
-    for (const [key, item] of Object.entries(value)) {
-      const where = at ? `${at}.${key}` : key;
-      visit(key, `${where} (key)`);
-      walkStrings(item, where, visit);
-    }
-  }
+  return keys.flatMap((key) =>
+    rest.length === 0 ? [{ holder, key }] : resolve(holder[key], rest),
+  );
 }

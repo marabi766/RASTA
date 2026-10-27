@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { expectNotDisclosed, thisRun } from '@rasta/testing';
+import { expectNotDisclosed } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { EventPublisher } from '../src/events/publisher';
 import { ulid } from 'ulid';
@@ -118,10 +118,7 @@ describe('POST /v1/contracts/{id}/cancel', () => {
       cancelledAt: row.statusChangedAt.toISOString(),
     });
     // The code travels; the note and the amount never do.
-    expectNotDisclosed(events, ['withdrew in writing', award.amountMinor], {
-      known: [id, employer, contractor, award.tenderId, award.projectId, award.winningBidId],
-      instantsBetween: thisRun(),
-    });
+    expectNotDisclosed(events, ['withdrew in writing', award.amountMinor]);
   });
 
   it('both parties then read the reason, and the contractor can sign nothing any more', async () => {

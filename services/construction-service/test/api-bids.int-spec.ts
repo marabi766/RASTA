@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { expectNotDisclosed, thisRun } from '@rasta/testing';
+import { expectNotDisclosed } from '@rasta/testing';
 import { IdempotencyStore, hashRequestBody } from '../src/shared/idempotency';
 import {
   reasonsOf,
@@ -16,7 +16,6 @@ import {
   cleanup,
   publishedForBids,
   qualify,
-  recordedIdentities,
   wire,
   type Wiring,
 } from './helpers';
@@ -93,7 +92,7 @@ describe('bids API', () => {
   });
 
   it('submits (201), reads its own receipt (200), replaces (200) and withdraws (200), never returning content', async () => {
-    const { owner, bidder, tenderId } = await setup('flow');
+    const { bidder, tenderId } = await setup('flow');
 
     const submitted = await http()
       .post(`/v1/tenders/${tenderId}/bids`)
@@ -128,14 +127,10 @@ describe('bids API', () => {
     expect(withdrawn.status).toBe(200);
     expect(withdrawn.body.status).toBe('WITHDRAWN');
 
-    // Neither price, nor the note, nor an answer — with the receipts, ids and instants the bid
-    // store recorded set aside first, so a digest holding 900000000 cannot fail it (#452).
-    const recorded = await recordedIdentities([owner]);
+    // Receipt ids, digests and timestamps have no independent source here; keep them searched.
+
     for (const body of [submitted.body, mine.body, replaced.body, withdrawn.body]) {
-      expectNotDisclosed(body, [/1250000000|900000000|Mobilisation|Licence 1234/], {
-        known: recorded,
-        instantsBetween: thisRun(),
-      });
+      expectNotDisclosed(body, [/1250000000|900000000|Mobilisation|Licence 1234/]);
     }
   });
 
@@ -284,7 +279,7 @@ describe('bids API', () => {
     });
 
     it('answers a retry with the stored receipt, one bid, one receipt, one BID_SUBMITTED', async () => {
-      const { owner, bidder, tenderId } = await setup('key-replay');
+      const { bidder, tenderId } = await setup('key-replay');
       const user = userOf(bidder);
       const key = bidKey();
       const body = { content: bidContent('1250000000') };
@@ -318,16 +313,15 @@ describe('bids API', () => {
       const [stored] = await w.prisma.client.$queryRawUnsafe<
         { request_hash: string; response_body: unknown }[]
       >(
-        `SELECT request_hash, response_body FROM idempotency_key WHERE organization_id = $1 AND endpoint = $2`,
+        `SELECT request_hash, response_body FROM idempotency_key WHERE organization_id = $1 AND endpoint = $2 AND key = $3`,
         bidder,
         'POST /v1/tenders/:id/bids',
+        key,
       );
       expect(stored?.request_hash).toMatch(KEYED_SALTED);
       expect(stored?.request_hash).not.toContain(hashRequestBody({ id: tenderId, body }));
       // The stored answer is the receipt, ids and instants the store recorded — not the price.
       expectNotDisclosed(stored?.response_body, ['1250000000'], {
-        known: await recordedIdentities([owner, bidder]),
-        instantsBetween: thisRun(),
         input: body,
       });
     });

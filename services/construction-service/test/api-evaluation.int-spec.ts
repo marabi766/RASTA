@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
-import { expectNotDisclosed, thisRun } from '@rasta/testing';
+import { expectNotDisclosed } from '@rasta/testing';
 import {
   reasonsOf,
   actor,
@@ -20,7 +20,6 @@ import {
   loadStanding,
   publishedForBids,
   qualify,
-  recordedIdentities,
   testEnv,
   wire,
   type Wiring,
@@ -425,12 +424,8 @@ describe('evaluation API', () => {
       content: { priceMinor: '1250000000' },
       evaluation: { decision: null, completed: false, totalScaled: null },
     });
-    // Not the other bid (its id, looked for in the body as it is), not its price — with the
-    // tender's and the bids' generated values set aside first (#452).
-    expectNotDisclosed(res.body, [second.bidId, '1300000000'], {
-      known: await recordedIdentities([owner]),
-      instantsBetween: thisRun(),
-    });
+    // No independently verified path exemption: generated values stay searched (#452).
+    expectNotDisclosed(res.body, [second.bidId, '1300000000']);
 
     const other = await http()
       .get(path)

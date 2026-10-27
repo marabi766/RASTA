@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { type APIRequestContext } from '@playwright/test';
+import { type APIRequestContext } from './expect';
 import { expect } from './expect';
 
 /**

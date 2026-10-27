@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { test, type APIRequestContext } from '@playwright/test';
+import { test, type APIRequestContext } from './expect';
 import { expect } from './expect';
 
 import { formatMoney } from '../src/lib/format';

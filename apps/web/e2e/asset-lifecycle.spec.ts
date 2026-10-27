@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import AxeBuilder from '@axe-core/playwright';
-import { test, type APIRequestContext, type Page } from '@playwright/test';
+import { test, type APIRequestContext, type Page } from './expect';
 import { expect } from './expect';
 
 import { sharedDocument } from './document-fixture';

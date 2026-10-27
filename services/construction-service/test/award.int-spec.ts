@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ERROR_CODES, eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError, runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
-import { expectNotDisclosed, mintedKey, thisRun } from '@rasta/testing';
+import { expectNotDisclosed } from '@rasta/testing';
 import { Logger } from '@nestjs/common';
 import { awardStandingChecksTotal } from '../src/observability/metrics';
 import { matrixDigest } from '../src/tender/evaluation-matrix';
@@ -19,8 +19,6 @@ import {
   loadStanding,
   newUserId,
   outboxFor,
-  outboxKeys,
-  recordedIdentities,
   ownerClient,
   ownerSql,
   TEST_ISSUER,
@@ -358,16 +356,11 @@ describe('awarding an evaluated tender', () => {
       expect(view.amountMinor).toBe(price);
       expect((await awardRows(tenderId))[0]!.amountMinor).toBe(9007199254740993n);
       expect((await as(owner, () => w.award.getAward(tenderId))).amountMinor).toBe(price);
-      // Nowhere in the owner's event stream or log, whole or as a number — the rounded double is
-      // what a path through `Number` would write, never sent. Every generated value is set aside
-      // first, as one of the owner's records or a key minted for its own row (#452).
+      // No independently verified path exemption: generated values stay searched (#452).
       expectNotDisclosed(
         [await outboxFor(w.prisma, owner), await logOf(tenderId)],
         [price, '9007199254740992'],
         {
-          metadata: { ...outboxKeys('0.'), '1.*.id': mintedKey('BAL') },
-          known: await recordedIdentities([owner]),
-          instantsBetween: thisRun(),
           input: { prices: [price, '9007199254740995'] },
           derived: ['9007199254740992'],
         },
@@ -825,8 +818,8 @@ describe('awarding an evaluated tender', () => {
         const line = lines.find((l) => l.includes(tenderId));
         expect(line).toContain(bids[0]!.bidId);
         expect(line).toContain('UPSTREAM_UNAVAILABLE');
-        // 1000 as a number of its own: the line's ULIDs can contain it by chance.
-        expect(line).not.toMatch(/(?<![\w-])1000(?![\w-])|amount|price/i);
+        // Plain text has no verified JSON metadata paths: search every character, fail closed.
+        expectNotDisclosed(line, [/1000|amount|price/i]);
 
         // Not claimed again until the backoff has passed.
         expect((await w.awardCheckSweeper.runOnce(tenderId)).claimed).toBe(0);

@@ -10,7 +10,10 @@
     "jest.disclosure-guard.cjs",
     "packages/testing/src/disclosure-guard.ts",
     "packages/testing/src/absence-guard.ts",
-    "packages/testing/src/disclosure.ts"
+    "packages/testing/src/disclosure.ts",
+    "tests/e2e/src/expect.ts",
+    "tests/e2e/src/api.ts",
+    "apps/web/e2e/expect.ts"
   ],
   "globalEnv": ["NODE_ENV", "CI"],
   "tasks": {

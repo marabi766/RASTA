@@ -8,10 +8,9 @@ import {
   runUnscoped,
   type RequestContext,
 } from '@rasta/nest-common';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 import { eventEnvelopeSchema } from '@rasta/contracts';
-import { generatedValuesIn, mintedKey, sameAs, type MetadataExpectation } from '@rasta/testing';
 import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { EventPublisher } from '../src/events/publisher';
@@ -747,123 +746,18 @@ function currentRequest(): RequestContext | undefined {
   }
 }
 
-/** Every id this suite minted (organizations, users, keys, request contexts), in this test file. */
-const minted: string[] = [];
-
-/** Records an id the suite generated, so a disclosure check can name it as `known` (#452). */
-function mint(value: string): string {
-  minted.push(value);
-  return value;
-}
-
 /** A fresh organization id per test, so suites never collide or share rows. */
 export function newOrganizationId(): string {
-  return mint(`ORG_${ulid()}`);
+  return `ORG_${ulid()}`;
 }
 
 export function newUserId(): string {
-  return mint(`USR_${ulid()}`);
+  return `USR_${ulid()}`;
 }
 
 /** A fresh `Idempotency-Key` for a bid submission, which requires one (docs/06 § 6.8, F4). */
 export function bidKey(): string {
-  return mint(`bid-${ulid()}`);
-}
-
-/**
- * The keys an outbox row's publisher minted for it — its id and its correlation — and every copy
- * of them inside the row, as `expectNotDisclosed` metadata for a list of outbox rows at `at`
- * (`'0.'` when the rows are the haystack's first item). Each copy is held to the row's own column
- * (`sameAs`); the columns are bare ULIDs (`mintedKey`), the one exemption by shape (#452).
- */
-export function outboxKeys(at = ''): Record<string, MetadataExpectation> {
-  return {
-    [`${at}*.id`]: mintedKey(),
-    [`${at}*.payload.eventId`]: sameAs('id'),
-    [`${at}*.headers.x-event-id`]: sameAs('id'),
-    [`${at}*.correlationId`]: mintedKey(),
-    [`${at}*.payload.correlationId`]: sameAs('correlationId'),
-    [`${at}*.headers.x-correlation-id`]: sameAs('correlationId'),
-  };
-}
-
-/** The tables a disclosure check searches, so they are never also where its identities come from. */
-const SEARCHED_TABLES = ['outbox_message', 'bid_access_log'];
-
-/**
- * The generated values a disclosure check may set aside as `known` (#452): every id this suite
- * minted, and every generated value — an id, a receipt, a digest, an instant — the organizations'
- * own records hold, read through the owner connection from each table with an `organization_id`
- * (bar the outbox and the access log, which are searched). A value is set aside as the identity
- * of one of those records, never by its shape; one only another organization holds stays in what
- * is searched, and the check refuses it as undeclared.
- */
-export async function recordedIdentities(organizationIds: readonly string[]): Promise<string[]> {
-  const values = new Set<string>(minted);
-  const collect = (value: unknown): void => {
-    if (typeof value === 'string') {
-      if (generatedValuesIn(value).length === 0) return;
-      values.add(value);
-      // A timestamp reads back from jsonb as `…56.789123+00:00`; events and rows carry `…56.789Z`.
-      if (/^\d{4}-\d{2}-\d{2}T[\d:.]+[+-]\d{2}:\d{2}$/.test(value)) {
-        values.add(new Date(value).toISOString());
-      }
-    } else if (Array.isArray(value)) value.forEach(collect);
-    else if (value !== null && typeof value === 'object') Object.values(value).forEach(collect);
-  };
-  const owner = ownerClient();
-  try {
-    const tables = await owner.$queryRawUnsafe<{ table_name: string }[]>(
-      `SELECT DISTINCT table_name FROM information_schema.columns
-        WHERE table_schema = current_schema() AND column_name = 'organization_id'`,
-    );
-    for (const { table_name: table } of tables) {
-      if (SEARCHED_TABLES.includes(table)) continue;
-      // As jsonb, so every column type reads back (a geography, a bytea as its hex).
-      collect(
-        await owner.$queryRawUnsafe<{ row: unknown }[]>(
-          `SELECT to_jsonb(t) AS row FROM "${table}" t WHERE organization_id = ANY($1::text[])`,
-          organizationIds,
-        ),
-      );
-    }
-    // The digests the events carry, computed from the stored rows as the service computes them
-    // (C: a digest is set aside only as its expected value): BIDS_OPENED's `bidIdsDigest` over the
-    // tender's bids, and BID_SCORED's `scoresDigest` over the scores one call recorded.
-    const digest = (lines: readonly string[]): string =>
-      createHash('sha256')
-        .update([...lines].sort().join('\n'))
-        .digest('hex');
-    const bids = await owner.$queryRawUnsafe<{ tender_id: string; id: string; status: string }[]>(
-      'SELECT tender_id, id, status FROM bid WHERE organization_id = ANY($1::text[])',
-      organizationIds,
-    );
-    for (const tender of new Set(bids.map((bid) => bid.tender_id))) {
-      const of = bids.filter((bid) => bid.tender_id === tender);
-      values.add(digest(of.map((bid) => bid.id)));
-      values.add(digest(of.filter((bid) => bid.status !== 'WITHDRAWN').map((bid) => bid.id)));
-    }
-    const scores = await owner.$queryRawUnsafe<
-      { call: string; criterion_code: string; revision: number; score_scaled: number }[]
-    >(
-      `SELECT bid_id || '|' || evaluator_id || '|' || scored_at AS call, criterion_code, revision,
-              score_scaled
-         FROM bid_evaluation_score WHERE organization_id = ANY($1::text[])`,
-      organizationIds,
-    );
-    for (const call of new Set(scores.map((score) => score.call))) {
-      values.add(
-        digest(
-          scores
-            .filter((score) => score.call === call)
-            .map((score) => `${score.criterion_code}|${score.revision}|${score.score_scaled}`),
-        ),
-      );
-    }
-  } finally {
-    await owner.$disconnect();
-  }
-  return [...values];
+  return `bid-${ulid()}`;
 }
 
 /** The issuer every test token is verified against (a user token always has one, #188). */
@@ -877,8 +771,8 @@ export const TEST_ISSUER = 'http://test.invalid/realms/rasta';
 export function context(overrides: Partial<RequestContext>): RequestContext {
   const userId = overrides.userId;
   return {
-    requestId: mint(ulid()),
-    correlationId: mint(ulid()),
+    requestId: ulid(),
+    correlationId: ulid(),
     authType: 'USER',
     roles: [],
     startedAt: Date.now(),
@@ -1214,8 +1108,8 @@ export async function publishedForBids(
       scopeOfWork: 'Two kilometres of the main road',
       procurementNature: 'FORMAL_TENDER',
       visibility,
-      bidOpeningAt: mint(new Date(Date.now() - 3_600_000).toISOString()),
-      bidClosingAt: mint(new Date(Date.now() + 2 * 3_600_000).toISOString()),
+      bidOpeningAt: new Date(Date.now() - 3_600_000).toISOString(),
+      bidClosingAt: new Date(Date.now() + 2 * 3_600_000).toISOString(),
     }),
   );
   const set = await asAdmin(organizationId, () =>

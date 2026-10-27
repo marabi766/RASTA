@@ -1,4 +1,4 @@
-import { test, type APIRequestContext } from '@playwright/test';
+import { test, type APIRequestContext } from './expect';
 import { expect } from './expect';
 
 import { installLiveSession } from './live-session';
@@ -381,11 +381,11 @@ test.describe('reporting maintenance through the live stack', () => {
   }
 
   /** A form on the page, found by a control only it has. */
-  const formWith = (page: import('@playwright/test').Page, field: string) =>
+  const formWith = (page: import('./expect').Page, field: string) =>
     page.locator('form').filter({ has: page.locator(`[name="${field}"]`) });
 
   /** Opens a form that stays closed until asked for. */
-  const openDisclosure = async (page: import('@playwright/test').Page, summary: string) => {
+  const openDisclosure = async (page: import('./expect').Page, summary: string) => {
     await page.locator('summary', { hasText: summary }).click();
   };
 

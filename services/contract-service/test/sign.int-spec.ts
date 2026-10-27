@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { expectNotDisclosed, thisRun } from '@rasta/testing';
+import { expectNotDisclosed } from '@rasta/testing';
 import { EventPublisher } from '../src/events/publisher';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -146,22 +146,7 @@ describe('POST /v1/contracts/{id}/sign', () => {
         signedAt: second.body.contractorSignedAt,
       });
       // No amount on any event, however it is written.
-      // The employer's signature names the policy it rested on; its id is the stored signature's.
-      const policies = (await signaturesOf(id)).flatMap((signature) =>
-        signature.policyId ? [signature.policyId] : [],
-      );
-      expectNotDisclosed(events, [award.amountMinor], {
-        known: [
-          id,
-          employer,
-          contractor,
-          award.tenderId,
-          award.projectId,
-          award.winningBidId,
-          ...policies,
-        ],
-        instantsBetween: thisRun(),
-      });
+      expectNotDisclosed(events, [award.amountMinor]);
     });
 
     it('the contractor then the employer: the same contract, whichever signs first', async () => {

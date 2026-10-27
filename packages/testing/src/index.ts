@@ -63,12 +63,8 @@ export {
   expectNotDisclosed,
   generatedValuesIn,
   instant,
-  mintedKey,
   oneOf,
-  sameAs,
-  searched,
   thisRun,
-  wholeNumber,
 } from './disclosure';
 export { absenceRefusal, guardedAbsenceMatchers } from './absence-guard';
 export type { AbsenceMatcherResult } from './absence-guard';

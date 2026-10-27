@@ -1,4 +1,4 @@
-import { expect as playwrightExpect } from '@playwright/test';
+import { test as base, expect as playwrightExpect } from '@playwright/test';
 import { guardedAbsenceMatchers } from '@rasta/testing';
 
 /**
@@ -9,3 +9,14 @@ import { guardedAbsenceMatchers } from '@rasta/testing';
  * `@playwright/test`; scripts/disclosure-guard-wiring.test.mjs holds them to it.
  */
 export const expect = playwrightExpect.extend(guardedAbsenceMatchers(playwrightExpect));
+
+/** Every exported test.expect must share the same guarded assertion origin. */
+export const test = Object.assign(base.extend({}), { expect });
+export type {
+  APIRequestContext,
+  Browser,
+  BrowserContext,
+  Locator,
+  Page,
+  Route,
+} from '@playwright/test';

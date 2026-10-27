@@ -9,7 +9,7 @@ import {
   until,
   type ApiResponse,
 } from '../../src/api';
-import { wholeNumber } from '@rasta/testing';
+import { expectNotDisclosed } from '@rasta/testing';
 import { ORG, e2eConfig } from '../../src/env';
 import { EconomicEventTap, type ObservedEvent } from '../../src/events';
 import { enableSignIn, freshToken, membershipClaims } from '../../src/keycloak-accounts';
@@ -183,14 +183,6 @@ const SCENARIO_VALUES: readonly string[] = [
   (BigInt(STATEMENT_ONE_GROSS) + BigInt(STATEMENT_TWO_GROSS)).toString(),
   STATEMENT_LINE_WORDING,
 ];
-
-/**
- * A value as an absence sentinel: an amount as a whole number, which no correlation id, digest,
- * id or timestamp beside it can hold (#452); a wording as itself.
- */
-function sentinel(value: string): string | RegExp {
-  return /^\d+$/.test(value) ? wholeNumber(value) : value;
-}
 
 function bidContent(price: string, note: string) {
   return {
@@ -417,7 +409,7 @@ function expectRefusalExactly(
     ...(expected.details ? { details: expected.details } : {}),
   });
   for (const value of SCENARIO_VALUES) {
-    expect(text, `${what}: the body repeats ${value}`).not.toMatch(sentinel(value));
+    expectNotDisclosed(response.body, [value]);
   }
 }
 
@@ -3010,9 +3002,8 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       ).toBe(true);
     }
     for (const event of ofContracts) {
-      const label = `${event.eventName} of contract ${contractKey.get(event.key!)}`;
       for (const leak of amounts) {
-        expect(JSON.stringify(event.payload), label).not.toMatch(sentinel(leak));
+        expectNotDisclosed(event.payload, [leak]);
       }
     }
 

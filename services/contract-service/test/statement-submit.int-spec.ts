@@ -1,5 +1,5 @@
 import type { Server } from 'node:http';
-import { expectNotDisclosed, thisRun } from '@rasta/testing';
+import { expectNotDisclosed } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { StatementRepository } from '../src/statement/statement.repository';
@@ -224,10 +224,7 @@ describe('submitting a statement (CON-003 PR 5)', () => {
       submittedBy: row!.submittedBy,
       submittedAt: res.body.submittedAt,
     });
-    expectNotDisclosed(event, ['1500000001', '1200000000', 'Work 1', row!.submittedBySubject!], {
-      known: [c.id, c.employer, c.contractor, made.id, policies.technical, policies.financial],
-      instantsBetween: thisRun(),
-    });
+    expectNotDisclosed(event, ['1500000001', '1200000000', 'Work 1', row!.submittedBySubject!]);
   });
 
   it('two steps naming the same organization and role are both snapshotted, in order: a chain asks two people, not one authority once', async () => {

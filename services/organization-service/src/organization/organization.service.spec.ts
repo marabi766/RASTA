@@ -1037,13 +1037,11 @@ describe('contacts', () => {
 
     await runWithContext(context(), () => h.service.addContact(DEH1, contact));
 
-    // The id the service minted for the contact is the one it wrote; it is set aside before the
-    // phone (whose digits a ULID can hold, #452), email and name are looked for.
-    const written = h.tx.organizationContact.create.mock.calls[0]?.[0] as { data: { id: string } };
+    // The generated contact id has no independent source: keep it searched with the payload.
     expectNotDisclosed(
       h.enqueued[0]?.payload,
       [contact.phone, contact.email, contact.displayName],
-      { metadata: { contactId: written.data.id }, input: contact },
+      { input: contact },
     );
     expect(h.enqueued[0]?.payload).toMatchObject({
       organizationId: DEH1,

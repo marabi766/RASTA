@@ -1,5 +1,5 @@
 import type { Server } from 'node:http';
-import { expectNotDisclosed, thisRun } from '@rasta/testing';
+import { expectNotDisclosed } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { StatementRepository } from '../src/statement/statement.repository';
@@ -236,10 +236,7 @@ describe('deciding a statement (CON-003 PR 6)', () => {
       decidedBy: rows[0]!.decidedBy,
       decidedAt: first.body.approvalChains.technical.steps[0].decision.decidedAt,
     });
-    expectNotDisclosed(events, ['1500000001', 'Piles', rows[0]!.decidedBySubject], {
-      known: [c.id, c.employer, c.contractor, s.id, consultant],
-      instantsBetween: thisRun(),
-    });
+    expectNotDisclosed(events, ['1500000001', 'Piles', rows[0]!.decidedBySubject]);
 
     // APPROVED is final: no decision, and the database keeps it so. A step it decided is told so
     // (409); any other, that the statement is decided (422).

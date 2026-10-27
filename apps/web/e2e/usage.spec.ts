@@ -1,4 +1,4 @@
-import { test } from '@playwright/test';
+import { test } from './expect';
 import { expect } from './expect';
 
 import { SUBMISSION_FIELD } from '../src/lib/form-fields';

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import AxeBuilder from '@axe-core/playwright';
-import { test, type Browser, type Page } from '@playwright/test';
+import { test, type Browser, type Page } from './expect';
 import { expect } from './expect';
 
 import {

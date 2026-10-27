@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
-import { expectNotDisclosed, mintedKey, thisRun } from '@rasta/testing';
+import { expectNotDisclosed } from '@rasta/testing';
 import {
   reasonsOf,
   actor,
@@ -18,7 +18,6 @@ import {
   cleanup,
   publishedForBids,
   qualify,
-  recordedIdentities,
   wire,
   type Wiring,
   bidKey,
@@ -228,11 +227,8 @@ describe('open-bids API', () => {
       .set(as(orgAdmin(owner)));
     expect(before.status).toBe(200);
     expect(before.body).toMatchObject({ opened: false, bidCount: 1, bids: [] });
-    // The tender's and the receipts' generated values set aside first (#452).
-    expectNotDisclosed(before.body, [/1250000000|Licence 1234/], {
-      known: await recordedIdentities([owner]),
-      instantsBetween: thisRun(),
-    });
+    // No independently verified path exemption: generated values stay searched (#452).
+    expectNotDisclosed(before.body, [/1250000000|Licence 1234/]);
     expect(JSON.stringify(before.body)).not.toContain(bidder);
     expect(
       (
@@ -303,10 +299,7 @@ describe('open-bids API', () => {
       bidCount: 1,
       alreadyOpened: false,
     });
-    expectNotDisclosed(opened.body, [/1250000000|Licence 1234/], {
-      known: await recordedIdentities([owner]),
-      instantsBetween: thisRun(),
-    });
+    expectNotDisclosed(opened.body, [/1250000000|Licence 1234/]);
 
     const again = await http()
       .post(`/v1/tenders/${tenderId}/open-bids`)
@@ -347,12 +340,8 @@ describe('open-bids API', () => {
         'READ_BID:GRANTED',
       ]),
     );
-    // Each log row's own key, and the store's records, set aside first (#452).
-    expectNotDisclosed(log.body, [/1250000000|Licence 1234/], {
-      metadata: { 'items.*.id': mintedKey('BAL') },
-      known: await recordedIdentities([owner]),
-      instantsBetween: thisRun(),
-    });
+    // No independently verified path exemption: generated values stay searched (#452).
+    expectNotDisclosed(log.body, [/1250000000|Licence 1234/]);
   });
 
   it('a withdrawal names its proposal: a stale one is 409 PROPOSAL_SUPERSEDED with its code, and a retry under its key is its first answer (task 060)', async () => {

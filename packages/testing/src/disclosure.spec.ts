@@ -1,271 +1,230 @@
 import {
   absenceHazard,
+  correlationId,
   errorEnvelope,
   expectNotDisclosed,
   generatedValuesIn,
   instant,
-  mintedKey,
   oneOf,
-  sameAs,
-  searched,
-  wholeNumber,
 } from './disclosure';
 
-// A ULID that holds "403" and a timestamp whose milliseconds are .403: the r1 collision (#452).
 const CORRELATION = '01JABCDE403FGHJKMNPQRSTVWX';
 const TIMESTAMP = '2026-10-25T01:39:12.403Z';
 const OWN_ORG = 'ORG_01JQ0000000000000000000001';
 const OTHER_ORG = 'ORG_01JQ0000000000000000000002';
+const window = ['2026-10-25T01:39:00.000Z', '2026-10-25T01:40:00.000Z'] as const;
 const headers = { 'x-correlation-id': CORRELATION };
 const envelope = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
-  code: 'KEYCLOAK_UNAVAILABLE',
-  message: 'An unexpected error occurred',
   correlationId: CORRELATION,
   timestamp: TIMESTAMP,
-  path: `/v1/organizations/${OWN_ORG}/members`,
+  message: 'refused',
   ...extra,
 });
-const metadata = errorEnvelope({ headers, path: `/v1/organizations/${OWN_ORG}/members` });
+const metadata = errorEnvelope({ headers, instantsBetween: window });
 
-describe('expectNotDisclosed', () => {
-  it('is not failed by a secret-shaped run inside the declared timestamp or correlation ULID', () => {
-    // The plain assertion this replaces fails on this body although nothing leaked.
-    expect(JSON.stringify(envelope())).toMatch(/403/);
-    expect(() => expectNotDisclosed(envelope(), [/403/, '403'], { metadata })).not.toThrow();
+describe('expectNotDisclosed: path-bound independent exemptions', () => {
+  it('accepts a substring in verified metadata; rejects the SAME payload with adjacent content', () => {
+    const payload = envelope({ details: [{ reason: 'ordinary refusal' }] });
+    expect(() => expectNotDisclosed(payload, ['403', /403/], { metadata })).not.toThrow();
+    const leaking = { ...payload, details: [{ reason: 'answered 403' }] };
+    expect(() => expectNotDisclosed(leaking, ['403', /403/], { metadata })).toThrow(
+      /discloses 403/,
+    );
   });
 
-  it('still finds a secret in any field that is not declared metadata', () => {
+  it('only excuses a whole JSON value EQUAL to the independent expected value', () => {
+    const expected = `bid-${CORRELATION}`; // request input, not read from the payload
+    const options = { metadata: { requestKey: expected } };
+    expect(() => expectNotDisclosed({ requestKey: expected }, ['403'], options)).not.toThrow();
     expect(() =>
-      expectNotDisclosed(envelope({ message: 'Keycloak answered 403' }), [/403/], { metadata }),
-    ).toThrow(/discloses \/403\//);
+      expectNotDisclosed({ requestKey: expected + ':price=403' }, ['403'], options),
+    ).toThrow(/expected/);
     expect(() =>
-      expectNotDisclosed(envelope({ details: [{ field: 'x', reason: 'got 403' }] }), ['403'], {
-        metadata,
-      }),
+      expectNotDisclosed({ requestKey: expected, privateNote: '403' }, ['403'], options),
     ).toThrow(/discloses 403/);
   });
 
-  it('inspects keys and every undeclared field — no *Id/*At field disappears by its name', () => {
+  it('cached-response debug strings containing a generated token stay searched', () => {
+    const bidId = OWN_ORG; // independently established fixture id
+    const options = { metadata: { bidId } };
+    expect(() => expectNotDisclosed({ bidId }, ['1250000000'], options)).not.toThrow();
     expect(() =>
-      expectNotDisclosed(envelope({ '777777': true }), ['777777'], { metadata }),
-    ).toThrow(/discloses 777777/);
+      expectNotDisclosed({ bidId, debug: `${bidId}:price=1250000000` }, ['1250000000'], options),
+    ).toThrow(/discloses 1250000000/);
+  });
+
+  it('never rewrites keys or merges distinct generated-identity properties', () => {
+    const body = { id: OWN_ORG, [OWN_ORG]: '1250000000', [OTHER_ORG]: 'safe' };
+    expect(() => expectNotDisclosed(body, ['1250000000'], { metadata: { id: OWN_ORG } })).toThrow(
+      /discloses 1250000000/,
+    );
+    expect(() => expectNotDisclosed({ 'private-1250000000': true }, ['1250000000'])).toThrow(
+      /discloses/,
+    );
+    expect(() => expectNotDisclosed({ [OTHER_ORG]: true }, [OTHER_ORG])).toThrow(
+      /discloses the identity/,
+    );
+  });
+
+  it.each(['__proto__', 'constructor', 'prototype'])('preserves the JSON special key %s', (key) => {
+    const body: unknown = JSON.parse(`{"id":"${OWN_ORG}","${key}":{"note":"1250000000"}}`);
+    expect(() => expectNotDisclosed(body, ['1250000000'], { metadata: { id: OWN_ORG } })).toThrow(
+      /discloses 1250000000/,
+    );
+  });
+
+  it.each([
+    OTHER_ORG,
+    new RegExp(OTHER_ORG),
+    new RegExp(OTHER_ORG.toLowerCase(), 'gi'),
+    new RegExp(`(?:${OWN_ORG}|${OTHER_ORG})`),
+  ])('searches identity secret %s in the ORIGINAL payload', (secret) => {
     expect(() =>
-      expectNotDisclosed(envelope({ priceId: '777777', leakedAt: '777777' }), ['777777'], {
-        metadata,
+      expectNotDisclosed({ organizationId: OTHER_ORG }, [secret], {
+        metadata: { organizationId: oneOf([OTHER_ORG]) },
       }),
-    ).toThrow(/discloses 777777/);
-  });
-
-  describe('malformed metadata fails the assertion', () => {
-    it.each([
-      ['a timestamp that is not an ISO instant', { timestamp: '25/10/2026 01:39' }, /timestamp/],
-      [
-        'a timestamp that is no real instant',
-        { timestamp: '2026-02-30T01:39:12.403Z' },
-        /real instant/,
-      ],
-      [
-        'a correlation id that is not the response’s',
-        { correlationId: '01JABCDE403FGHJKMNPQRSTVWY' },
-        /correlation/,
-      ],
-      ['a correlation id missing', { correlationId: undefined }, /correlation/],
-      [
-        'a path that is not the request’s',
-        { path: `/v1/organizations/${OTHER_ORG}/members` },
-        /metadata path/,
-      ],
-    ])('%s', (_label, override, message) => {
-      const body = envelope(override);
-      if ('correlationId' in override && override.correlationId === undefined)
-        delete body.correlationId;
-      expect(() => expectNotDisclosed(body, ['secret'], { metadata })).toThrow(message);
-    });
-
-    it('a response without an x-correlation-id header', () => {
-      expect(() =>
-        expectNotDisclosed(envelope(), ['secret'], { metadata: errorEnvelope({ headers: {} }) }),
-      ).toThrow(/no x-correlation-id header/);
-    });
-
-    it('a valid-shaped but WRONG id in a metadata field (another organization’s)', () => {
-      const row = { organizationId: OTHER_ORG, note: 'n' };
-      expect(() =>
-        expectNotDisclosed(row, ['secret'], { metadata: { organizationId: OWN_ORG } }),
-      ).toThrow(`expected "${OWN_ORG}", got "${OTHER_ORG}"`);
-      expect(() =>
-        expectNotDisclosed([row], ['secret'], {
-          metadata: { '*.organizationId': oneOf([OWN_ORG]) },
-        }),
-      ).toThrow(/none of the 1 expected values/);
-    });
-
-    it('a path absent from the haystack, and a list with no element to check', () => {
-      expect(() => expectNotDisclosed({}, ['x'], { metadata: { timestamp: instant() } })).toThrow(
-        /metadata timestamp: absent/,
-      );
-      expect(() => expectNotDisclosed([], ['x'], { metadata: { '*.id': OWN_ORG } })).toThrow(
-        /absent/,
-      );
-    });
-  });
-
-  it('refuses a generated value nobody declared: it could produce or hide a match', () => {
-    for (const leftover of [
-      { correlationId: CORRELATION },
-      { at: TIMESTAMP },
-      { requestId: '0b7c62c1-6e7e-4e0e-9a40-5d3f0c2f8e11' },
-      { receipt: 'a'.repeat(63) + '0' },
-    ]) {
-      expect(() => expectNotDisclosed(leftover, ['zzz-not-there'])).toThrow(/undeclared generated/);
-    }
-    // A ULID inside a longer text, and inside a key, is found as well.
-    expect(() => expectNotDisclosed({ path: `/v1/organizations/${OWN_ORG}` }, ['secret'])).toThrow(
-      /undeclared generated ulid/,
-    );
-    expect(() => expectNotDisclosed({ [OWN_ORG]: 1 }, ['secret'])).toThrow(/\(key\)/);
-  });
-
-  it('sameAs holds each copy of a value to the field of its own list element', () => {
-    const rows = [
-      { id: OWN_ORG, payload: { eventId: OWN_ORG }, headers: { 'x-event-id': OWN_ORG } },
-      { id: OTHER_ORG, payload: { eventId: OTHER_ORG }, headers: { 'x-event-id': OTHER_ORG } },
-    ];
-    const metadata = {
-      '*.id': oneOf([OWN_ORG, OTHER_ORG]),
-      '*.payload.eventId': sameAs('id'),
-      '*.headers.x-event-id': sameAs('id'),
-    };
-    expect(() => expectNotDisclosed(rows, ['secret'], { metadata })).not.toThrow();
-    const crossed = [rows[0], { ...rows[1], payload: { eventId: OWN_ORG } }];
-    expect(() => expectNotDisclosed(crossed, ['secret'], { metadata })).toThrow(
-      `metadata 1.payload.eventId: expected the value of id ("${OTHER_ORG}"), got "${OWN_ORG}"`,
-    );
-  });
-
-  it('mintedKey takes a bare ULID only: never a prefixed id, never content', () => {
-    const minted = '01JABCDE403FGHJKMNPQRSTVWX';
+    ).toThrow(/discloses the identity/);
     expect(() =>
-      expectNotDisclosed({ id: minted }, ['403'], { metadata: { id: mintedKey() } }),
-    ).not.toThrow();
-    for (const value of [OWN_ORG, `${minted} 1250000000`, '1250000000', 42]) {
-      expect(() =>
-        expectNotDisclosed({ id: value }, ['zzz'], { metadata: { id: mintedKey() } }),
-      ).toThrow(/expected a bare ULID/);
-    }
-    // With the row type's prefix: that prefix and a ULID, no other.
-    expect(() =>
-      expectNotDisclosed({ id: `BAL_${minted}` }, ['403'], { metadata: { id: mintedKey('BAL') } }),
-    ).not.toThrow();
-    expect(() =>
-      expectNotDisclosed({ id: OWN_ORG }, ['zzz'], { metadata: { id: mintedKey('BAL') } }),
-    ).toThrow(/expected BAL_ and a ULID/);
-  });
-
-  it('a known identity is removed wherever it occurs; a word or an amount is never “known”', () => {
-    const event = {
-      aggregateId: OWN_ORG,
-      path: `/v1/organizations/${OWN_ORG}/bids`,
-      priceMinor: '1',
-    };
-    expect(() => expectNotDisclosed(event, ['1250000000'], { known: [OWN_ORG] })).not.toThrow();
-    expect(() =>
-      expectNotDisclosed(event, ['1250000000'], { known: [OWN_ORG, '1250000000'] }),
-    ).toThrow(/known "1250000000" holds no generated value/);
-  });
-
-  it('a whole-identity secret is caught even where a declaration would remove it', () => {
-    const row = { organizationId: OTHER_ORG };
-    expect(() => expectNotDisclosed(row, [OTHER_ORG], { known: [OTHER_ORG] })).toThrow(
-      `discloses the identity ${OTHER_ORG}`,
-    );
-    expect(() =>
-      expectNotDisclosed(row, [OTHER_ORG], { metadata: { organizationId: OTHER_ORG } }),
-    ).toThrow(`discloses the identity ${OTHER_ORG}`);
-  });
-
-  it('removes only instants inside the test window, anywhere; others must be declared', () => {
-    const from = new Date('2026-10-25T01:39:00.000Z');
-    const to = new Date('2026-10-25T01:40:00.000Z');
-    const rows = [{ createdAt: new Date(TIMESTAMP), log: `stored at ${TIMESTAMP}` }];
-    expect(() => expectNotDisclosed(rows, ['12.4'], { instantsBetween: [from, to] })).not.toThrow();
-    const outside = [{ createdAt: '2026-10-25T01:41:12.403Z' }];
-    expect(() => expectNotDisclosed(outside, ['12.4'], { instantsBetween: [from, to] })).toThrow(
-      /undeclared generated instant/,
-    );
-    expect(() =>
-      expectNotDisclosed(outside, ['secret'], {
-        metadata: { '0.createdAt': instant([from, to]) },
+      expectNotDisclosed({ path: `/org/${OTHER_ORG}/read` }, [secret], {
+        metadata: { path: `/org/${OTHER_ORG}/read` },
       }),
+    ).toThrow(/discloses the identity/);
+  });
+
+  it('only excuses bounded instants at declared timestamp paths; privateNote stays searched', () => {
+    const body = { createdAt: TIMESTAMP };
+    const options = { metadata: { createdAt: instant(window) } };
+    expect(() => expectNotDisclosed(body, [TIMESTAMP], options)).not.toThrow();
+    expect(() =>
+      expectNotDisclosed({ ...body, privateNote: TIMESTAMP }, [TIMESTAMP], options),
+    ).toThrow(/discloses/);
+    expect(() => expectNotDisclosed({ privateNote: `at ${TIMESTAMP}` }, [TIMESTAMP])).toThrow(
+      /discloses/,
+    );
+    expect(() =>
+      expectNotDisclosed({ createdAt: '2026-10-25T01:41:00.000Z' }, ['secret'], options),
     ).toThrow(/outside the test window/);
   });
 
-  it('a digest is either its expected value (then removed) or refused — never removed by shape', () => {
-    const digest = 'd206e5e97e66b744bc2fd021f7a50638bf1509931f75674d3f44d18a3857a411';
+  it('leaves unknown ids, receipts, digests and instants searched, without shape-only exemptions', () => {
+    for (const body of [
+      { id: CORRELATION },
+      { receipt: 'a'.repeat(64) },
+      { timestamp: TIMESTAMP },
+    ]) {
+      expect(() => expectNotDisclosed(body, ['zzz-not-there'])).not.toThrow();
+    }
     expect(() =>
-      expectNotDisclosed({ receipt: digest }, ['1250000000'], { metadata: { receipt: digest } }),
+      expectNotDisclosed({ receipt: 'a'.repeat(20) + '4200000000' + 'b'.repeat(34) }, [
+        '4200000000',
+      ]),
+    ).toThrow(/discloses/);
+    expect(() => expectNotDisclosed({ id: CORRELATION }, ['403'])).toThrow(/discloses/);
+  });
+
+  it.each(['price=4200000000IRR', 'price-4200000000', '4200000000', 4200000000])(
+    'catches E2E substring disclosure %s',
+    (value) => {
+      expect(() => expectNotDisclosed({ price: value }, ['4200000000'])).toThrow(
+        /discloses 4200000000/,
+      );
+    },
+  );
+
+  it('numeric and string values use exact path equality', () => {
+    expect(() =>
+      expectNotDisclosed({ reference: 123403 }, ['403'], { metadata: { reference: 123403 } }),
     ).not.toThrow();
-    expect(() => expectNotDisclosed({ receipt: digest }, ['1250000000'])).toThrow(
-      /undeclared generated digest/,
+    expect(() =>
+      expectNotDisclosed({ reference: 123404 }, ['403'], { metadata: { reference: 123403 } }),
+    ).toThrow(/expected/);
+    expect(() =>
+      expectNotDisclosed({ reference: { privateNote: '403' } }, ['403'], {
+        metadata: { reference: 123403 },
+      }),
+    ).toThrow(/whole JSON string or number/);
+  });
+
+  it('rejects malformed, absent or wrong metadata without excusing the value', () => {
+    expect(() =>
+      expectNotDisclosed(envelope({ timestamp: 'bad' }), ['secret'], { metadata }),
+    ).toThrow(/ISO instant/);
+    expect(() =>
+      expectNotDisclosed(envelope({ timestamp: '2026-02-30T01:39:12.403Z' }), ['secret'], {
+        metadata,
+      }),
+    ).toThrow(/real instant/);
+    expect(() =>
+      expectNotDisclosed(envelope({ correlationId: OTHER_ORG }), ['secret'], { metadata }),
+    ).toThrow(/correlation id/);
+    expect(() => expectNotDisclosed({}, ['secret'], { metadata })).toThrow(/absent/);
+    expect(() =>
+      expectNotDisclosed([], ['secret'], { metadata: { '*.id': oneOf([OWN_ORG]) } }),
+    ).toThrow(/absent/);
+    expect(() =>
+      expectNotDisclosed({ timestamp: TIMESTAMP }, ['secret'], {
+        metadata: { timestamp: instant(['bad', 'bad']) },
+      }),
+    ).toThrow(/invalid test window/);
+    expect(() =>
+      expectNotDisclosed({ correlationId: CORRELATION }, ['secret'], {
+        metadata: { correlationId: correlationId(undefined) },
+      }),
+    ).toThrow(/no x-correlation-id/);
+  });
+
+  it('rejects a valid-shaped but wrong tenant id at a declared path', () => {
+    const options = { metadata: { organizationId: OWN_ORG } };
+    expect(() =>
+      expectNotDisclosed({ organizationId: OWN_ORG }, ['000000'], options),
+    ).not.toThrow();
+    expect(() => expectNotDisclosed({ organizationId: OTHER_ORG }, ['secret'], options)).toThrow(
+      /expected/,
     );
   });
 
-  it('serializes as the suites did: a bigint as its digits, a Date as its instant, regex flags kept', () => {
+  it('array wildcard matches only arrays and leaves adjacent properties searched', () => {
+    const options = { metadata: { '*.id': oneOf([OWN_ORG]) } };
+    expect(() => expectNotDisclosed([{ id: OWN_ORG }], ['000000'], options)).not.toThrow();
     expect(() =>
-      expectNotDisclosed({ amountMinor: 9007199254740993n }, ['9007199254740993']),
-    ).toThrow(/discloses 9007199254740993/);
+      expectNotDisclosed([{ id: OWN_ORG, note: '000000' }], ['000000'], options),
+    ).toThrow(/discloses/);
+    expect(() => expectNotDisclosed({ first: { id: OWN_ORG } }, ['secret'], options)).toThrow(
+      /absent/,
+    );
+  });
+
+  it('preserves bigint digits, RegExp flags and substring semantics', () => {
+    expect(() => expectNotDisclosed({ amount: 9007199254740993n }, ['9007199254740993'])).toThrow(
+      /discloses/,
+    );
     expect(() => expectNotDisclosed({ reason: 'KEYCLOAK refused' }, [/keycloak/i])).toThrow(
       /discloses/,
     );
     expect(() => expectNotDisclosed({ reason: 'KEYCLOAK refused' }, [/keycloak/])).not.toThrow();
-    expect(() => expectNotDisclosed('plain text with 1250000000 in it', ['1250000000'])).toThrow(
-      /discloses/,
-    );
+    expect(() => expectNotDisclosed('price-4200000000', ['4200000000'])).toThrow(/discloses/);
   });
 
-  it('refuses a vacuous assertion: each secret must be in the input, unless derived', () => {
-    const input = { content: { priceMinor: '9007199254740993' } };
+  it('refuses an absent payload rather than passing a vacuous cached-response assertion', () => {
+    expect(() => expectNotDisclosed(undefined, ['1250000000'])).toThrow(/payload is absent/);
+  });
+
+  it('requires input sentinels, and derived never exempts a disclosure', () => {
+    const input = { amount: '9007199254740993' };
     expect(() => expectNotDisclosed({}, ['9007199254740993'], { input })).not.toThrow();
     expect(() => expectNotDisclosed({}, ['9007199254740992'], { input })).toThrow(
       /not in the input/,
     );
-    // The rounded double is what a corrupting path would write: derived, never sent.
     expect(() =>
       expectNotDisclosed({}, ['9007199254740992'], { input, derived: ['9007199254740992'] }),
     ).not.toThrow();
-  });
-});
-
-describe('searched and wholeNumber', () => {
-  const digest = '9c1f4200000000aa' + 'b'.repeat(48);
-
-  it('a searched digest stays in what is searched, and needs no other declaration', () => {
-    const view = { receipt: digest, note: 'n' };
     expect(() =>
-      expectNotDisclosed(view, ['4200000000'], { metadata: { receipt: searched() } }),
-    ).toThrow(/discloses 4200000000/);
-    expect(() =>
-      expectNotDisclosed(view, [wholeNumber('4200000000')], { metadata: { receipt: searched() } }),
-    ).not.toThrow();
-    expect(() =>
-      expectNotDisclosed({ receipt: 'not a digest' }, ['x'], { metadata: { receipt: searched() } }),
-    ).toThrow(/expected a digest/);
-  });
-
-  it('wholeNumber finds the number as a value or in text, never inside a generated value', () => {
-    const price = wholeNumber('4200000000');
-    for (const leak of [
-      '{"amountMinor":"4200000000"}',
-      '{"amount":4200000000}',
-      'price 4200000000.',
-    ]) {
-      expect(price.test(leak)).toBe(true);
-    }
-    for (const generated of [`ORG_01J4200000000ABCDEFGHJKM`, digest, '2026-10-25T01:39:12.420Z']) {
-      expect(price.test(JSON.stringify({ value: generated }))).toBe(false);
-      expect(absenceHazard(JSON.stringify({ value: generated }), price)).toBeUndefined();
-    }
-    expect(() => wholeNumber('42.5')).toThrow(/not digits/);
+      expectNotDisclosed({ leak: '9007199254740992' }, ['9007199254740992'], {
+        input,
+        derived: ['9007199254740992'],
+      }),
+    ).toThrow(/discloses/);
+    expect(() => expectNotDisclosed({}, [])).toThrow(/no secrets/);
   });
 });
 

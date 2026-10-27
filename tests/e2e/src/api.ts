@@ -1,4 +1,4 @@
-import { test as base, type APIRequestContext } from '@playwright/test';
+import { test as base, expect, type APIRequestContext } from './expect';
 import { randomUUID } from 'node:crypto';
 import { Actor, SessionToken, type ApiResponse } from './actor';
 import { e2eConfig, type E2eConfig } from './env';
@@ -129,7 +129,8 @@ export const test = base.extend<RastaFixtures>({
   },
 });
 
-export { expect } from './expect';
+Object.assign(test, { expect });
+export { expect };
 
 /** A key that cannot collide with another run's. */
 export function idempotencyKey(label: string): string {
