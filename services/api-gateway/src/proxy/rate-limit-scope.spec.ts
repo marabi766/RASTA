@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { GatewayController } from './gateway.controller';
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import type { RateLimiter, RateLimitRule } from './rate-limiter';
@@ -66,8 +67,11 @@ function requestFor(method: string, path: string) {
   } as never;
 }
 
+// An open connection: the controller listens for the caller going away.
 const response = () =>
-  ({
+  Object.assign(new EventEmitter(), {
+    closed: false,
+    writableFinished: false,
     setHeader: () => undefined,
     status: () => response(),
     json: () => undefined,
