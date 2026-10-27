@@ -90,6 +90,22 @@ const admitted = (pool: PrismaService) =>
 
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 
+/**
+ * Far past any deadline here, so a slow runner never trips it (#458 r3 F8):
+ * the close is shown bounded by returning while the engine's answer is still
+ * held — which an unbounded disconnect never does — not by a tight wall-clock
+ * figure. A close that waited for the answer loses this race, fast.
+ */
+const HUNG_MS = 10_000;
+
+function settledBefore<T>(work: Promise<T>): Promise<T | 'hung'> {
+  let timer: NodeJS.Timeout | undefined;
+  const hung = new Promise<'hung'>((resolve) => {
+    timer = setTimeout(() => resolve('hung'), HUNG_MS);
+  });
+  return Promise.race([work, hung]).finally(() => clearTimeout(timer));
+}
+
 async function until(condition: () => boolean): Promise<void> {
   for (let i = 0; i < 100 && !condition(); i += 1) await turn();
   if (!condition()) throw new Error('never happened');
@@ -118,8 +134,7 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
       // One batch, one entry — not the reviewer's "tracked=0".
       expect(admitted(pool)).toBe(1);
 
-      const startedAt = Date.now();
-      const closing = pool.stop({ deadlineAt: startedAt + 20 });
+      const closing = pool.stop({ deadlineAt: Date.now() + 20 });
       // Closing: nothing new is admitted, of any kind.
       await expect(pool.client.$executeRawUnsafe('SELECT 3')).rejects.toThrow(PoolClosedError);
       await expect(
@@ -128,13 +143,11 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
       expect(() => pool.transaction(async () => undefined)).toThrow(PoolClosedError);
       expect(await pool.isHealthy()).toBe(false);
 
-      const report = await closing;
-      const tookMs = Date.now() - startedAt;
+      const report = await settledBefore(closing);
       // Returned while the answer is still held: Prisma's disconnect is
       // still waiting for it, and the close did not wait with it.
       expect(engine.held).toHaveLength(1);
       expect(report).toEqual({ drained: false, unsettled: 1 });
-      expect(tookMs).toBeLessThan(1_000);
       expect(
         (Logger.prototype.error as jest.Mock).mock.calls.map(([message]) => String(message)),
       ).toEqual([
@@ -222,10 +235,12 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
     void batch.catch(() => undefined);
     await until(() => engine.held.length === 1);
 
-    const startedAt = Date.now();
-    const left = await tearDownProjectionCommand({ pools: [fencePool, prisma] }, startedAt + 20);
+    const left = await settledBefore(
+      tearDownProjectionCommand({ pools: [fencePool, prisma] }, Date.now() + 20),
+    );
 
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    // Returned with the answer still held: bounded, not waited out.
+    expect(engine.held).toHaveLength(1);
     expect(left).toEqual({ recoveriesUnwinding: 0, transactionsUnsettled: 1, poolsAbandoned: 1 });
     engine.release();
     await batch;

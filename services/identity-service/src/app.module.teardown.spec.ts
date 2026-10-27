@@ -324,7 +324,7 @@ describe('#458 r2 F2: the projection command’s teardown', () => {
 
     const outcome = await tearDownProjectionCommand(
       { projector: t.projector, pools: [failing, t.business.pool] },
-      Date.now() + 1_000,
+      Date.now() + 5_000,
     ).then(
       () => 'resolved',
       (error: unknown) => {
@@ -352,7 +352,7 @@ describe('#458 r2 F2: the projection command’s teardown', () => {
     await expect(
       tearDownProjectionCommand(
         { projector: t.projector, pools: [t.fence.pool, t.business.pool] },
-        Date.now() + 1_000,
+        Date.now() + 5_000,
       ),
     ).rejects.toThrow('projector stop failed');
     expect(t.log.sort()).toEqual(['DISCONNECT business', 'DISCONNECT fence']);
