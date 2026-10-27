@@ -8,7 +8,15 @@ import { isClean, runProjectionCommand } from './projection.command';
 /** No write fence anywhere: what every test below but the drain's assumes. */
 const noFences = () => ({
   owners: jest.fn(async () => [] as string[]),
-  counts: jest.fn(async () => ({ live: 0, due: 0, accountMissing: 0, overdue: 0, expired: 0, total: 0, at: new Date() })),
+  counts: jest.fn(async () => ({
+    live: 0,
+    due: 0,
+    accountMissing: 0,
+    overdue: 0,
+    expired: 0,
+    total: 0,
+    at: new Date(),
+  })),
   recoverOwed: jest.fn(async () => 0),
 });
 
@@ -312,12 +320,24 @@ describe('runProjectionCommand', () => {
       }),
       counts: jest.fn(async () => {
         order.push('counts');
-        return { live: 0, due: 0, accountMissing: 0, overdue: 0, expired: 0, total: 0, at: new Date() };
+        return {
+          live: 0,
+          due: 0,
+          accountMissing: 0,
+          overdue: 0,
+          expired: 0,
+          total: 0,
+          at: new Date(),
+        };
       }),
     };
     const report = await runProjectionCommand('backfill', {
       repository,
-      projector: { project: jest.fn(async () => 'projected' as const), reconcile: jest.fn(), repairOrphan: jest.fn() },
+      projector: {
+        project: jest.fn(async () => 'projected' as const),
+        reconcile: jest.fn(),
+        repairOrphan: jest.fn(),
+      },
       keycloak,
       fences,
     });
@@ -419,7 +439,15 @@ describe('runProjectionCommand', () => {
       };
       const fences = {
         owners: jest.fn(async () => [] as string[]),
-        counts: jest.fn(async () => ({ live: 1, due: 0, accountMissing: 0, overdue: 0, expired: 0, total: 1, at: new Date() })),
+        counts: jest.fn(async () => ({
+          live: 1,
+          due: 0,
+          accountMissing: 0,
+          overdue: 0,
+          expired: 0,
+          total: 1,
+          at: new Date(),
+        })),
         recoverOwed: jest.fn(async () => 0),
       };
       const report = await runProjectionCommand('backfill', {

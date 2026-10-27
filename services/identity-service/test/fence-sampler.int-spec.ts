@@ -57,7 +57,8 @@ describe('R3-2: the fence sampler on a real database', () => {
     await sampler.onModuleDestroy();
     jest.restoreAllMocks();
     if (inserted.length > 0) {
-      await prisma.client.$executeRaw`DELETE FROM keycloak_write_attempt WHERE attempt_id = ANY(${inserted})`;
+      await prisma.client
+        .$executeRaw`DELETE FROM keycloak_write_attempt WHERE attempt_id = ANY(${inserted})`;
       inserted.length = 0;
     }
   });
@@ -177,7 +178,11 @@ describe('R3-2: the fence sampler on a real database', () => {
       identity as unknown as IdentityService,
       { enabled: false, intervalSeconds: 60, batchSize: 50 },
       { project: jest.fn() } as unknown as Pick<KeycloakProjector, 'project'>,
-      { dueUsers: async () => [], deferReassert: async () => undefined, recoverOwed: async () => 0 },
+      {
+        dueUsers: async () => [],
+        deferReassert: async () => undefined,
+        recoverOwed: async () => 0,
+      },
     );
     const pass = scanner.scan();
     await lapsing;
@@ -210,7 +215,9 @@ describe('R3-2: the fence sampler on a real database', () => {
   it('a sample waiting on a lock fails within its budget; the age keeps growing at every scrape past the stale threshold, and stays reported for the retention window after recovery', async () => {
     await overdueFence();
     sampler.start();
-    await waitFor('a first sample', async () => ((await gauge('live')) !== undefined ? true : null));
+    await waitFor('a first sample', async () =>
+      (await gauge('live')) !== undefined ? true : null,
+    );
     const failed = await samples('failed');
 
     // The database stalls for the sampler: an ACCESS EXCLUSIVE lock on the
@@ -259,7 +266,9 @@ describe('R3-2: the fence sampler on a real database', () => {
 
   it('its one connection taken: the wait for it is bounded too, and counted a failure', async () => {
     sampler.start();
-    await waitFor('a first sample', async () => ((await gauge('live')) !== undefined ? true : null));
+    await waitFor('a first sample', async () =>
+      (await gauge('live')) !== undefined ? true : null,
+    );
     const failed = await samples('failed');
     const taken = exhaust(own, 1);
     await taken.held;

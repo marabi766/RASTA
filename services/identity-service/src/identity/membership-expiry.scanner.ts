@@ -135,7 +135,10 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
     /** Re-projects users with a write fence past takeover (D-069). */
     private readonly projector: Pick<KeycloakProjector, 'project'>,
     /** The write fences: who is due, their deferral, and late senders' owed fences (D-069, D-070 D). */
-    private readonly fences: Pick<KeycloakWriteFences, 'dueUsers' | 'deferReassert' | 'recoverOwed'>,
+    private readonly fences: Pick<
+      KeycloakWriteFences,
+      'dueUsers' | 'deferReassert' | 'recoverOwed'
+    >,
   ) {}
 
   onModuleInit(): void {

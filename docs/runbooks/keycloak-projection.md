@@ -156,7 +156,7 @@ now() AND deadline_at < takeover_at AND account_missing_at IS NULL`.
     — هر نتیجه‌ای — یک حصار **تازه** برای کاربر Commit می‌کند و Projection فوری او را می‌خواهد:
     `rasta_identity_keycloak_write_fence_events_total{event="late_reply"}` (پاسخ دیرکرده)، `late_fenced` (حصار تازه نوشته شد)،
     `late_owed` (نوشته نشد — پایگاه داده یا توقف Worker — و در حافظه ماند تا گذر بعدی یا توقف همان فرایند بنویسدش)، و
-    `rasta_identity_keycloak_projections_total{trigger="recovery"}`. افزایش `late_reply` یعنی مکث یا تاخیرهایی هم‌اندازه‌ی مهلت:
+    `rasta_identity_keycloak_projections_total{trigger="recovery"}`. افزایش `late_reply` یعنی مکث یا تأخیرهایی هم‌اندازه‌ی مهلت:
     همان بررسی بند ۷. هشدار جدا ندارد؛ حصار تازه در بندهای ۷ تا ۹ دیده می‌شود. لاگ «Stopping with N late Keycloak write fences
     unwritten» هنگام توقف یعنی N حصار تازه پیش از خروج نوشته نشد: حصار قدیمی، اگر هنوز Takeover نشده، می‌ماند؛ بندهای ۷ و ۸.
 

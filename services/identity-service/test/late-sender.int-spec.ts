@@ -159,7 +159,11 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
   async function rowsGrant(userId: string, at = Date.now()): Promise<PlatformAttributes> {
     const user = await repository.findUserById(userId);
     if (!user) throw new Error(`no user ${userId}`);
-    return platformAttributesFor(user, await repository.listMembershipsForUser(userId), new Date(at));
+    return platformAttributesFor(
+      user,
+      await repository.listMembershipsForUser(userId),
+      new Date(at),
+    );
   }
 
   const carried = (request: StubRequest) =>
@@ -286,7 +290,9 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
         .slice(0, take);
     const scopedFences = Object.create(using) as KeycloakWriteFences;
     scopedFences.dueUsers = async (after, take, until) =>
-      (await using.dueUsers(after, 1000, until)).filter((userId) => mine.has(userId)).slice(0, take);
+      (await using.dueUsers(after, 1000, until))
+        .filter((userId) => mine.has(userId))
+        .slice(0, take);
     return new MembershipExpiryScanner(
       scopedRepository,
       service,
@@ -559,7 +565,8 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       const [own] = await fencesOf(s.userId);
       const replacement = `KWA_${id('REPL')}`;
       await prisma.client.$transaction([
-        prisma.client.$executeRaw`DELETE FROM keycloak_write_attempt WHERE attempt_id = ${own!.attemptId}`,
+        prisma.client
+          .$executeRaw`DELETE FROM keycloak_write_attempt WHERE attempt_id = ${own!.attemptId}`,
         prisma.client.$executeRaw`
           INSERT INTO keycloak_write_attempt
                  (attempt_id, user_id, keycloak_id, operation,
@@ -603,7 +610,8 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
         // The fresh fence (a zero window) was taken over by the recovery; the
         // replacement, still live, holds the narrowing back until its takeover.
         expect(rows.map((row) => row.attemptId)).toEqual([ids.replacement]);
-        await prisma.client.$executeRaw`DELETE FROM keycloak_write_attempt WHERE attempt_id = ${ids.replacement}`;
+        await prisma.client
+          .$executeRaw`DELETE FROM keycloak_write_attempt WHERE attempt_id = ${ids.replacement}`;
       });
     }
   });
@@ -649,7 +657,8 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
         prisma.client.outboxMessage.findMany({ where: { aggregateId: s.memberships[1]! } }),
       );
       expect(events).toEqual([]);
-      await prisma.client.$executeRaw`DELETE FROM keycloak_write_attempt WHERE user_id = ${s.userId}`;
+      await prisma.client
+        .$executeRaw`DELETE FROM keycloak_write_attempt WHERE user_id = ${s.userId}`;
     });
 
     it('a sender still unanswered past its deadline when its worker stops: the flush writes a fresh live fence for it — the stop leaves a durable record of the paused sender', async () => {
@@ -678,7 +687,8 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       stub.releaseHeld();
       await sending;
       await settleRecoveryProjections(10_000);
-      await prisma.client.$executeRaw`DELETE FROM keycloak_write_attempt WHERE user_id = ${s.userId}`;
+      await prisma.client
+        .$executeRaw`DELETE FROM keycloak_write_attempt WHERE user_id = ${s.userId}`;
     });
   });
 

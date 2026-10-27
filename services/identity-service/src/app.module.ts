@@ -46,10 +46,7 @@ import { FENCE_POOL_CONNECTIONS, KeycloakWriteFences } from './keycloak/keycloak
 import { IdentityRepository } from './identity/identity.repository';
 import { IdentityService } from './identity/identity.service';
 import { MembershipExpiryScanner } from './identity/membership-expiry.scanner';
-import {
-  KeycloakFenceSampler,
-  pooledFenceSampleSource,
-} from './keycloak/keycloak-fence-sampler';
+import { KeycloakFenceSampler, pooledFenceSampleSource } from './keycloak/keycloak-fence-sampler';
 import {
   MembershipController,
   RegistrationController,

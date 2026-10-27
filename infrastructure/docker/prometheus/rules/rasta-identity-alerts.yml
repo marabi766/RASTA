@@ -131,7 +131,7 @@ groups:
           severity: warning
         annotations:
           summary: 'Keycloak write fences have not been sampled for {{ $value }} seconds'
-          description: "KeycloakFenceSampler has had no successful sample of keycloak_write_attempt on any replica for longer than 6 seconds: RastaIdentityKeycloakWriteOverdue and RastaIdentityKeycloakWriteExpired cannot be relied on until it recovers. Each sample is one bounded query on the sampler's own one-connection pool (connection wait, lock_timeout and statement_timeout of 1 s each); rasta_identity_keycloak_fence_samples_total{outcome=\"failed\"} and rasta_identity_keycloak_fence_sample_duration_seconds say whether it fails or is slow. Look for a lock on keycloak_write_attempt (a migration), a database that is slow or unreachable, or an event loop that is stalled."
+          description: 'KeycloakFenceSampler has had no successful sample of keycloak_write_attempt on any replica for longer than 6 seconds: RastaIdentityKeycloakWriteOverdue and RastaIdentityKeycloakWriteExpired cannot be relied on until it recovers. Each sample is one bounded query on the sampler''s own one-connection pool (connection wait, lock_timeout and statement_timeout of 1 s each); rasta_identity_keycloak_fence_samples_total{outcome="failed"} and rasta_identity_keycloak_fence_sample_duration_seconds say whether it fails or is slow. Look for a lock on keycloak_write_attempt (a migration), a database that is slow or unreachable, or an event loop that is stalled.'
           runbook: docs/runbooks/keycloak-projection.md
 
       # The age series itself missing while identity-service is scraped: the sampler is not
@@ -144,7 +144,7 @@ groups:
           severity: warning
         annotations:
           summary: 'identity-service is scraped but exports no Keycloak fence sample age'
-          description: "identity-service is up, but rasta_identity_keycloak_fence_sample_age_seconds is missing from every replica: KeycloakFenceSampler is not running, so the fence gauges and RastaIdentityKeycloakWriteOverdue, RastaIdentityKeycloakWriteExpired and RastaIdentityKeycloakFenceSamplerStale are all silent. Check that the build in production wires KeycloakFenceSampler (app.module.ts) and that the metric name is unchanged."
+          description: 'identity-service is up, but rasta_identity_keycloak_fence_sample_age_seconds is missing from every replica: KeycloakFenceSampler is not running, so the fence gauges and RastaIdentityKeycloakWriteOverdue, RastaIdentityKeycloakWriteExpired and RastaIdentityKeycloakFenceSamplerStale are all silent. Check that the build in production wires KeycloakFenceSampler (app.module.ts) and that the metric name is unchanged.'
           runbook: docs/runbooks/keycloak-projection.md
 
       # Narrowing changes refused because Keycloak could not be written first, for ten

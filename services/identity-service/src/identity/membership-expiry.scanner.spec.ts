@@ -588,7 +588,9 @@ describe('MembershipExpiryScanner', () => {
       const started = Date.now();
       await scanner.stop({ deadlineAt: started + 150 });
       expect(Date.now() - started).toBeLessThan(2_000);
-      expect(error).toHaveBeenCalledWith(expect.stringMatching(/unknown late Keycloak write fences/));
+      expect(error).toHaveBeenCalledWith(
+        expect.stringMatching(/unknown late Keycloak write fences/),
+      );
     });
   });
 });

@@ -264,13 +264,16 @@ describe('KeycloakFenceSampler', () => {
 
   it('its stop is bounded by one budget, and nothing it starts afterwards runs', async () => {
     const calls: number[] = [];
-    const sampler = new KeycloakFenceSampler({
-      fences: () => {
-        calls.push(Date.now());
-        return new Promise<FenceCounts>(() => undefined);
+    const sampler = new KeycloakFenceSampler(
+      {
+        fences: () => {
+          calls.push(Date.now());
+          return new Promise<FenceCounts>(() => undefined);
+        },
+        lapseBacklog: () => new Promise<number>(() => undefined),
       },
-      lapseBacklog: () => new Promise<number>(() => undefined),
-    }, { budgetMs: 100, lapseBudgetMs: 100 });
+      { budgetMs: 100, lapseBudgetMs: 100 },
+    );
     sampler.start();
     const started = Date.now();
     await sampler.onModuleDestroy();
