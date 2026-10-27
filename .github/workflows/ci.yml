@@ -39,7 +39,10 @@ jobs:
   quality:
     name: Lint, types and unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 25, stopgap (2026-10-27): green runs take 14-19 min and slow runners hit
+    # 20 (main 33c5f29 and train runs cancelled at 1208-1218 s). #450 bounds
+    # the unit step's parallelism; return this to 20 once it has merged.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
