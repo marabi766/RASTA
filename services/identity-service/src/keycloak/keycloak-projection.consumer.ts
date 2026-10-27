@@ -10,7 +10,7 @@ import {
   type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { IDENTITY_EVENTS } from '../identity/events';
-import { untilDeadline, withCancellation } from '../prisma/cancellation';
+import { settleWithin, untilDeadline, withCancellation } from '../prisma/cancellation';
 import { KeycloakProjector } from './keycloak.projector';
 
 /**
@@ -53,6 +53,8 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
    * refused (`prisma/cancellation.ts`).
    */
   private cancel = new AbortController();
+  /** The handlers' transactions not settled yet: a stop waits for them (#458 r2 F2). */
+  private readonly transactions = new Set<Promise<unknown>>();
   /** The one stop of this run; later calls join it (#458 r1 F2). */
   private stopping?: Promise<void>;
 
@@ -118,6 +120,16 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
           '(D-070 D); the old fences, if not yet taken over, still stand',
       );
     }
+    // Never "stopped" with a COMMIT still pending (#458 r2 F2): an abandoned
+    // handler's transaction already handed to the engine is waited for, by
+    // the deadline, and one that has not settled by then is reported.
+    const unsettled = flushed.unsettled + (await settleWithin(this.transactions, deadlineAt));
+    if (unsettled > 0) {
+      this.logger.error(
+        `Keycloak projection consumer stopped at the shutdown deadline with ${unsettled} ` +
+          'transactions unsettled: they may still commit',
+      );
+    }
   }
 
   /** Joins the stop `OutboxShutdown` began; returns at once. */
@@ -145,8 +157,10 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
     }
 
     const { signal } = this.cancel;
-    await withCancellation(signal, () =>
-      this.projector.project(parsed.data.userId, 'event', { signal }),
+    await withCancellation(
+      signal,
+      () => this.projector.project(parsed.data.userId, 'event', { signal }),
+      { transactions: this.transactions },
     );
   }
 }

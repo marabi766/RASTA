@@ -160,15 +160,25 @@ now() AND deadline_at < takeover_at AND account_missing_at IS NULL`.
     `rasta_identity_keycloak_projections_total{trigger="recovery"}`. افزایش `late_reply` یعنی مکث یا تأخیرهایی هم‌اندازه‌ی مهلت:
     همان بررسی بند ۷. هشدار جدا ندارد؛ حصار تازه در بندهای ۷ تا ۹ دیده می‌شود. لاگ «Stopping with N late Keycloak write fences
     unwritten» هنگام توقف یعنی N حصار تازه پیش از خروج نوشته نشد: حصار قدیمی، اگر هنوز Takeover نشده، می‌ماند؛ بندهای ۷ و ۸.
-    «unknown» به جای N یعنی Flush توقف تا مهلت تمام نشد و لغو شد: پس از برگشتن توقف هیچ تراکنشی از آن آغاز یا Commit نمی‌شود
-    (#458 r1 F2). لاگ «N Keycloak recovery projections still unwinding after cancellation» یعنی Projection بازیابی لغو شد و تا مهلت
+    «unknown» به جای N یعنی Flush توقف تا مهلت تمام نشد و لغو شد: پس از برگشتن توقف هیچ تراکنشی از آن آغاز نمی‌شود، و COMMIT‌ای
+    که پیش از آن سپرده شده بود یا تا مهلت رسیده یا در لاگ بند ۱۳ شمرده شده (#458 r1/r2 F2). لاگ «N Keycloak recovery projections still unwinding after cancellation» یعنی Projection بازیابی لغو شد و تا مهلت
     باز نشد؛ کاری به پایگاه داده نمی‌فرستد، و حصار تازه‌اش برای گذر می‌ماند. در گزارش Backfill/Reconcile همین
     `fences.recoveriesAbandoned` است و گزارش را ناپاک می‌کند: فرمان را دوباره اجرا کن.
-12. `RastaIdentityMembershipLapseBacklogUnknown` (هشدار، #458 r1 F3): identity-service Scrape می‌شود ولی هیچ Replicaیی
-    `rasta_identity_membership_lapse_backlog` تازه ندارد — نمونه‌گیر اجرا نمی‌شود، یا شمارش انقضا (هر ۳۰ ثانیه روی Pool کسب‌وکار)
-    سه دوره پیاپی شکست خورده — پس `RastaIdentityMembershipLapseBacklog` نمی‌تواند روشن شود. لاگ identity-service علت شکست شمارش را
-    می‌گوید (پایگاه داده‌ی کند یا در دسترس نبودن آن، Pool پر). تا بازگشت آن، فهرست انقضاهای عمل‌نشده را مستقیم بخوان:
+12. `RastaIdentityMembershipLapseBacklogUnknown` (هشدار، #458 r1 F3، r2 F6): هیچ Replicaیی بیش از ۳ دقیقه شمارش موفق انقضا
+    نداشته (`min(rasta_identity_membership_lapse_count_age_seconds) > 180`)، یا هیچ Replicaیی نمونه‌گیر ندارد و سرویس Scrape
+    می‌شود — پس به `RastaIdentityMembershipLapseBacklog` نمی‌شود تکیه کرد. شمارش هر ۳۰ ثانیه یک پرس‌وجوی کران‌دار روی Pool
+    کسب‌وکار است. `rasta_identity_membership_lapse_count_age_seconds` هر Replica می‌گوید آخرین شمارش موفقش چقدر کهنه است؛
+    `rasta_identity_membership_lapse_backlog` در این میان همان شمارش را نگه می‌دارد (شمارش ناموفق آن را حذف نمی‌کند). لاگ
+    identity-service علت شکست را می‌گوید (پایگاه داده‌ی کند یا در دسترس نبودن آن، Pool پر). اگر `RastaIdentityMembershipLapseBacklog`
+    هم روشن است ولی Replica دیگری شمارش تازه‌ی صفر دارد، عدد مثبت از Replicaیی است که شمارشش شکست می‌خورد (سنش را ببین): خطا به سوی
+    روشن شدن است. تا بازگشت شمارش، فهرست انقضاهای عمل‌نشده را مستقیم بخوان:
     `SELECT id, valid_until FROM membership WHERE valid_until <= now() AND lapse_handled_at IS NULL`.
+13. **توقف با تراکنش در راه (#458 r2 F2).** لاگ خطای «… stopped at the shutdown deadline with N transactions unsettled» (پیمایش
+    انقضا یا مصرف‌کننده‌ی Projection) یا «Closing a database pool with N transactions unsettled» یعنی N تراکنش که COMMIT‌شان پیش از
+    مهلت به پایگاه داده سپرده شده بود تا مهلت خاموش‌شدن پاسخ نگرفتند: **ممکن است پس از خروج فرایند Commit شده باشند** — نه «هیچ
+    تغییری نکرد». حصارها و انقضاها را با بندهای ۷ تا ۹ و ۱۲ بسنج؛ گذر بعدی هر Replica آنچه نیمه‌کاره مانده را از ردیف‌ها می‌یابد. در
+    Backfill/Reconcile همین با لاگ «teardown reached its deadline with work still in flight» می‌آید و فرمان با کد ۱ (ناپاک) بیرون
+    می‌رود: پس از آرام شدن پایگاه داده دوباره اجرا کن.
 
 <a id="registration-approval-orphan"></a>
 

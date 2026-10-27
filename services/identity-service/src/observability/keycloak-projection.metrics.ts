@@ -100,8 +100,10 @@ export interface FenceSampleView {
   retained: { overdue: number; expired: number };
   /** Seconds: how old the latest successful sample is, or the largest gap between two in the retention window — whichever is more. */
   ageSeconds: number;
-  /** The latest successful lapse count; null before the first, or once it is stale. */
+  /** The latest successful lapse count, however old; null before the first. */
   lapseBacklog: number | null;
+  /** Seconds since the latest successful lapse count started, or since the sampler started before one. */
+  lapseAgeSeconds: number;
 }
 
 let fenceSampleReader: (() => FenceSampleView) | null = null;
@@ -221,10 +223,12 @@ export const keycloakFenceSamplesTotal = new Counter({
  * D-064), sampled on the fence sampler's slower lapse timer, not by the sweep.
  * Each one is a membership the database no longer grants that Keycloak may
  * still put in tokens; a backlog that stays above zero is lapses the sweep
- * cannot write. Read at scrape from the sampler's latest successful count: no
- * sampler, no count yet, or a stale one — **no series** (never a zero, the
- * same class as the age, #458 r1 F3), and
- * `RastaIdentityMembershipLapseBacklogUnknown` fires when no replica has one.
+ * cannot write. Read at scrape: the sampler's latest **successful** count,
+ * which a failed count never drops (#458 r2 F6) — a positive backlog stands
+ * until a successful count says otherwise, so failures in between cannot
+ * restart `RastaIdentityMembershipLapseBacklog`'s 20 minutes. No sampler, or
+ * no count yet — **no series** (never a zero, #458 r1 F3). How fresh it is:
+ * {@link membershipLapseCountAge}.
  */
 export const membershipLapseBacklog = new ProducedGauge(
   {
@@ -232,6 +236,22 @@ export const membershipLapseBacklog = new ProducedGauge(
     help: 'Lapsed memberships not yet acted on by the expiry sweep, sampled on their own timer; absent without a recent count',
   },
   () => fenceSampleReader?.().lapseBacklog ?? null,
+);
+
+/**
+ * How old the lapse backlog is, **computed at scrape**: seconds since the
+ * latest successful lapse count started — or since the sampler started,
+ * before one — so it keeps growing while counts fail (#458 r2 F6). Its own
+ * series, so an unknown backlog and a positive one are two conditions and
+ * neither resets the other's duration: `RastaIdentityMembershipLapseBacklogUnknown`
+ * is on this one. No sampler attached: no series (`ProducedGauge`).
+ */
+export const membershipLapseCountAge = new ProducedGauge(
+  {
+    name: 'rasta_identity_membership_lapse_count_age_seconds',
+    help: 'Age of the latest successful membership lapse count (or of the sampler, before one), computed at scrape; absent without a sampler',
+  },
+  () => fenceSampleReader?.().lapseAgeSeconds ?? null,
 );
 
 /** Lapses the sweep tried and could not act on (Keycloak refused or did not answer). */

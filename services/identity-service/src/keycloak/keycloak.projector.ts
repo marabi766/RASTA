@@ -7,7 +7,7 @@ import {
   type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { IdentityRepository } from '../identity/identity.repository';
-import { withCancellation } from '../prisma/cancellation';
+import { settleWithin, withCancellation } from '../prisma/cancellation';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import {
   KeycloakAdminClient,
@@ -389,8 +389,10 @@ export class KeycloakProjector {
   private batch = new AbortController();
   /** The recovery projections this projector started and that have not finished. */
   private readonly running = new Set<Promise<void>>();
+  /** Their transactions not settled yet — a COMMIT in flight included (#458 r2 F2). */
+  private readonly transactions = new Set<Promise<unknown>>();
   /** The one stop; later calls join it. */
-  private stopping?: Promise<void>;
+  private stopping?: Promise<number>;
 
   constructor(
     private readonly repository: IdentityRepository,
@@ -723,11 +725,14 @@ export class KeycloakProjector {
     if (this.recoveryStop.signal.aborted) return;
     const owner = AbortSignal.any([this.recoveryStop.signal, this.batch.signal]);
     const cancel = signal ? AbortSignal.any([owner, signal]) : owner;
-    const run = withCancellation(owner, () =>
-      this.project(userId, KEYCLOAK_PROJECTION_TRIGGERS.RECOVERY, {
-        signal: cancel,
-        recovery: true,
-      }),
+    const run = withCancellation(
+      owner,
+      () =>
+        this.project(userId, KEYCLOAK_PROJECTION_TRIGGERS.RECOVERY, {
+          signal: cancel,
+          recovery: true,
+        }),
+      { transactions: this.transactions },
     ).then(
       () => undefined,
       (error: unknown) => {
@@ -761,11 +766,14 @@ export class KeycloakProjector {
     this.batch = new AbortController();
     batch.abort();
     const pending = [...this.running];
-    if (pending.length === 0) return 0;
+    if (pending.length === 0 && this.transactions.size === 0) return 0;
     const all = Promise.all(pending);
     if (options.deadlineAt === undefined) await all;
     else await withinDeadline(all, Math.max(0, options.deadlineAt - Date.now()));
-    const left = pending.filter((run) => this.running.has(run)).length;
+    // A transaction of theirs already handed to the engine is waited for too,
+    // by the same deadline, and counted (#458 r2 F2).
+    const unsettled = await settleWithin(this.transactions, options.deadlineAt);
+    const left = Math.max(pending.filter((run) => this.running.has(run)).length, unsettled);
     if (left > 0) {
       this.logger.error(
         `${left} Keycloak recovery projections still unwinding after cancellation (D-070 D); ` +
@@ -778,13 +786,14 @@ export class KeycloakProjector {
   /**
    * An `OutboxShutdown` worker, by the shutdown's deadline, and the command's
    * teardown before it disconnects: no recovery starts any more, and those
-   * running are cancelled ({@link cancelRecoveries}). One stop per
-   * projector: later calls join it.
+   * running are cancelled ({@link cancelRecoveries}). Resolves to how many
+   * were still unwinding — or had a transaction unsettled — at the deadline.
+   * One stop per projector: later calls join it.
    */
-  stop(options: OutboxStopOptions = {}): Promise<void> {
+  stop(options: OutboxStopOptions = {}): Promise<number> {
     this.stopping ??= (async () => {
       this.recoveryStop.abort();
-      await this.cancelRecoveries(options);
+      return this.cancelRecoveries(options);
     })();
     return this.stopping;
   }

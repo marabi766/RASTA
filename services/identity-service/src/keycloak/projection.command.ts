@@ -1,4 +1,5 @@
 import type { IdentityRepository } from '../identity/identity.repository';
+import type { PrismaService } from '../prisma/prisma.service';
 import type { KeycloakAdminClient } from './keycloak.client';
 import { settleRecoveryProjections, type KeycloakProjector } from './keycloak.projector';
 import type { KeycloakWriteFences } from './keycloak-write-fence';
@@ -124,6 +125,29 @@ export const RECOVERY_SETTLE_MS = 30_000;
 
 /** How long cancelled recovery projections are waited for to unwind, before the command counts. */
 export const RECOVERY_STOP_MS = 5_000;
+
+/**
+ * The command's teardown, whatever ended it (#458 r1/r2 F2): its projector
+ * stops first — no recovery starts any more, those running are cancelled
+ * and waited for, a COMMIT of theirs included — and the pools close last,
+ * by the same deadline: each waits for a transaction still in flight, then
+ * refuses everything and disconnects. What was still unwinding or unsettled
+ * at the deadline is returned, for the command to report unclean.
+ */
+export async function tearDownProjectionCommand(
+  deps: {
+    projector?: Pick<KeycloakProjector, 'stop'>;
+    pools: ReadonlyArray<Pick<PrismaService, 'stop'>>;
+  },
+  deadlineAt: number,
+): Promise<{ recoveriesUnwinding: number; transactionsUnsettled: number }> {
+  const recoveriesUnwinding = (await deps.projector?.stop({ deadlineAt })) ?? 0;
+  const unsettled = await Promise.all(deps.pools.map((pool) => pool.stop({ deadlineAt })));
+  return {
+    recoveriesUnwinding,
+    transactionsUnsettled: unsettled.reduce((sum, count) => sum + count, 0),
+  };
+}
 
 export async function runProjectionCommand(
   mode: ProjectionCommandMode,

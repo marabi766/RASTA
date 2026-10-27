@@ -1,8 +1,10 @@
 import { MembershipExpiryScanner } from '../identity/membership-expiry.scanner';
 import type { IdentityRepository } from '../identity/identity.repository';
 import type { IdentityService } from '../identity/identity.service';
-import { throwIfCancelled } from '../prisma/cancellation';
-import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
+import { Logger } from '@nestjs/common';
+import { COMMIT_RESERVE_MS } from '../prisma/cancellation';
+import type { ExtendedPrismaClient } from '../prisma/prisma.service';
+import { gate, modelledPool } from '../../test/modelled-engine';
 import { KeycloakProjectionConsumer } from './keycloak-projection.consumer';
 import type { KeycloakProjector } from './keycloak.projector';
 import { KeycloakWriteFences, type KeycloakWriteAttempt } from './keycloak-write-fence';
@@ -11,85 +13,16 @@ import { KeycloakWriteFences, type KeycloakWriteAttempt } from './keycloak-write
  * #458 r1 F1 and F2, on the fences' in-memory obligations and a stop's flush,
  * with interleavings a real database cannot be made to produce on demand.
  *
- * The pool is the **real** `PrismaService.transaction` — its check before a
- * transaction begins and before its COMMIT — over a model of Prisma's engine:
- * a transaction waits for a connection at most `maxWait`, then BEGIN, its
- * callback's statements (each through the client extension's cancellation
- * check, as in `PrismaService`), then COMMIT, or ROLLBACK when the callback
- * throws. Every step is logged, so a test can say exactly what reached the
+ * The pool is the **real** `PrismaService` — its `transaction` and its
+ * `stop` — over the model of Prisma's engine in `test/modelled-engine.ts`;
+ * every step is logged, so a test can say exactly what reached the
  * "database" and when.
  */
-
-interface Step {
-  /** Resolves when the connection is free; at most `maxWait` is waited. */
-  connection?: Promise<void>;
-  /** Fails the statement (the database failed, or the scope refused it). */
-  fail?: boolean;
-  /** Resolves when the COMMIT's answer comes back. */
-  commit?: Promise<void>;
-}
-
-function modelledPool() {
-  const log: string[] = [];
-  const steps: Step[] = [];
-  let transactions = 0;
-  const statement = (sql: string) => {
-    // The client extension's check (`PrismaService.buildClient`).
-    throwIfCancelled();
-    log.push(sql);
-    return Promise.resolve(1);
-  };
-  const tx = {
-    $executeRaw: (strings: TemplateStringsArray) =>
-      statement(strings.join('?').includes('INSERT') ? 'INSERT' : 'STATEMENT'),
-    $executeRawUnsafe: (sql: string) => statement(sql.startsWith('SET LOCAL') ? 'SET' : sql),
-  };
-  const client = {
-    async $transaction<T>(
-      callback: (client: unknown) => Promise<T>,
-      options: { maxWait?: number } = {},
-    ): Promise<T> {
-      const number = ++transactions;
-      const step = steps.shift() ?? {};
-      if (step.connection) {
-        let timer: NodeJS.Timeout | undefined;
-        const waited = await Promise.race([
-          step.connection.then(() => 'connected' as const),
-          new Promise<'timeout'>((resolve) => {
-            timer = setTimeout(() => resolve('timeout'), options.maxWait ?? 2_000);
-          }),
-        ]);
-        clearTimeout(timer);
-        if (waited === 'timeout') throw new Error(`transaction ${number}: no connection in time`);
-      }
-      log.push(`BEGIN ${number}`);
-      try {
-        if (step.fail) throw new Error(`transaction ${number}: refused`);
-        const result = await callback(tx);
-        await step.commit;
-        log.push(`COMMIT ${number}`);
-        return result;
-      } catch (error) {
-        log.push(`ROLLBACK ${number}`);
-        throw error;
-      }
-    },
-  };
-  const pool = Object.create(PrismaService.prototype) as PrismaService;
-  Object.assign(pool, { client });
-  return { pool, log, steps };
-}
 
 /** A business transaction that holds the user lock with all its budget left. */
 const lockHolder = {
   $queryRaw: async () => [{ elapsed_ms: 0 }],
 } as unknown as ExtendedPrismaClient;
-
-function gate() {
-  let open!: () => void;
-  const opened = new Promise<void>((resolve) => (open = resolve));
-  return { opened, open };
-}
 
 async function setup() {
   let now = 0;
@@ -263,10 +196,11 @@ describe('#458 r1 F2: a stop’s flush begins, inserts and commits nothing after
   );
 
   it.each(stops)(
-    '%s: a COMMIT whose callback resumes past the deadline is refused',
+    '%s: a callback held past its budget is rolled back by the engine’s own timeout before the stop returns',
     async (_name, stop) => {
       const t = await twoOwed();
-      // Its statement's answer is held past the deadline: the COMMIT check refuses.
+      // Its statement's answer is held for good: only the engine's timeout —
+      // inside the one budget — ends the transaction.
       const held = gate();
       const original = t.pool.transaction.bind(t.pool);
       jest.spyOn(t.pool, 'transaction').mockImplementationOnce((fn, options) =>
@@ -277,16 +211,26 @@ describe('#458 r1 F2: a stop’s flush begins, inserts and commits nothing after
         }, options),
       );
 
-      await stop(t, Date.now() + 50);
+      await stop(t, Date.now() + COMMIT_RESERVE_MS + 100);
       t.log.push('STOP RETURNED');
       held.open();
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      const after = t.log.slice(t.log.indexOf('STOP RETURNED') + 1);
-      expect(after.filter((step) => /^(BEGIN|SET|INSERT|COMMIT)/.test(step))).toEqual([]);
-      // The one transaction that had begun rolls back; the second never begins.
-      expect(after.filter((step) => step.startsWith('ROLLBACK'))).toHaveLength(1);
-      expect(t.fences.owedCount).toBe(2);
+      // (Transactions 1 and 2 opened the two fences.) The flush's first is
+      // rolled back by its own timeout, within the window; the second is
+      // written in what is left; nothing at all after the stop returned.
+      expect(t.log).toEqual([
+        'BEGIN 3',
+        'SET',
+        'INSERT',
+        'ROLLBACK 3',
+        'BEGIN 4',
+        'SET',
+        'INSERT',
+        'COMMIT 4',
+        'STOP RETURNED',
+      ]);
+      expect(t.fences.owedCount).toBe(1);
     },
   );
 
@@ -302,5 +246,158 @@ describe('#458 r1 F2: a stop’s flush begins, inserts and commits nothing after
     expect(t.log.filter((step) => step.startsWith('COMMIT'))).toHaveLength(2);
     expect(t.log.filter((step) => step === 'INSERT')).toHaveLength(2);
     expect(t.fences.owedCount).toBe(0);
+  });
+});
+
+describe('#458 r2 F2: one budget, and a COMMIT handed to the engine is waited for before the stop returns', () => {
+  async function twoOwed() {
+    const t = await setup();
+    const attempts = [await t.sent(), await t.sent()];
+    t.at(20);
+    for (const attempt of attempts) expect(attempt.observeReply()).toBe(true);
+    t.log.length = 0;
+    t.bounds.length = 0;
+    return t;
+  }
+
+  const stops: Array<
+    [string, (t: Awaited<ReturnType<typeof twoOwed>>, deadlineAt: number) => Promise<void>]
+  > = [
+    [
+      'the expiry scanner',
+      (t, deadlineAt) =>
+        new MembershipExpiryScanner(
+          {} as IdentityRepository,
+          {} as IdentityService,
+          { enabled: false, intervalSeconds: 60, batchSize: 50 },
+          {} as KeycloakProjector,
+          t.fences,
+        ).stop({ deadlineAt }),
+    ],
+    [
+      'the projection consumer',
+      async (t, deadlineAt) => {
+        const consumer = new KeycloakProjectionConsumer(
+          () => ({ start: async () => undefined, stop: async () => undefined }) as never,
+          { recoverOwed: () => t.fences.recoverOwed() } as unknown as KeycloakProjector,
+        );
+        await consumer.onModuleInit();
+        await consumer.stop({ deadlineAt });
+      },
+    ],
+  ];
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it.each(stops)(
+    '%s: the reviewer’s engine-model probe — a COMMIT sent before the deadline is waited for; the stop returns after it',
+    async (_name, stop) => {
+      const t = await twoOwed();
+      const startedAt = Date.now();
+      // The first COMMIT is sent at once; its answer comes back after the
+      // flush's own window closed, before the stop's deadline.
+      const answer = gate();
+      t.steps.push({ commit: answer.opened });
+      setTimeout(answer.open, 100 + 150);
+
+      await stop(t, startedAt + COMMIT_RESERVE_MS + 100);
+      t.log.push('STOP RETURNED');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // (Transactions 1 and 2 opened the two fences.) Not "BEGIN, SET,
+      // INSERT, STOP RETURNED, COMMIT" — the reviewer's trace.
+      expect(t.log).toEqual(['BEGIN 3', 'SET', 'INSERT', 'COMMIT 3', 'STOP RETURNED']);
+      // The second began nothing once the window closed: still owed.
+      expect(t.fences.owedCount).toBe(1);
+    },
+  );
+
+  it.each(stops)(
+    '%s: a COMMIT whose answer has not come back by the deadline is reported unsettled, never as drained',
+    async (_name, stop) => {
+      const t = await twoOwed();
+      const errors = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      const answer = gate();
+      t.steps.push({ commit: answer.opened });
+
+      await stop(t, Date.now() + COMMIT_RESERVE_MS + 100);
+      t.log.push('STOP RETURNED');
+      answer.open();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(t.log).toEqual(['BEGIN 3', 'SET', 'INSERT', 'STOP RETURNED', 'COMMIT 3']);
+      expect(errors.mock.calls.map(([message]) => String(message))).toEqual(
+        expect.arrayContaining([expect.stringMatching(/with 1 transactions unsettled/)]),
+      );
+    },
+  );
+
+  it.each(stops)(
+    '%s: the connection wait and the execution share one budget — a connection acquired late cannot run past the deadline',
+    async (_name, stop) => {
+      const t = await twoOwed();
+      const startedAt = Date.now();
+      const window = 200;
+      // The connection comes free 40% into the window; its statement then
+      // never answers. Only the transaction's own timeout can end it.
+      const connection = gate();
+      setTimeout(connection.open, window * 0.4);
+      const held = gate();
+      t.steps.push({ connection: connection.opened });
+      const original = t.pool.transaction.bind(t.pool);
+      jest.spyOn(t.pool, 'transaction').mockImplementationOnce((fn, options) =>
+        original(async (tx) => {
+          const result = await fn(tx);
+          await held.opened;
+          return result;
+        }, options),
+      );
+
+      await stop(t, startedAt + COMMIT_RESERVE_MS + window);
+      t.log.push('STOP RETURNED');
+      held.open();
+      await new Promise((resolve) => setTimeout(resolve, window));
+
+      const [first] = t.bounds;
+      expect(first!.maxWait! + first!.timeout!).toBeLessThanOrEqual(window);
+      // Ended — rolled back by its own timeout — before the stop returned, and
+      // nothing at all after it.
+      expect(t.log.indexOf('ROLLBACK 3')).toBeGreaterThan(-1);
+      expect(t.log.indexOf('ROLLBACK 3')).toBeLessThan(t.log.indexOf('STOP RETURNED'));
+      expect(t.log.slice(t.log.indexOf('STOP RETURNED') + 1)).toEqual([]);
+    },
+  );
+
+  it('the pool closes only once its transactions settled: a pending COMMIT comes back before DISCONNECT, and nothing begins after it', async () => {
+    const t = await setup();
+    const answer = gate();
+    t.steps.push({ commit: answer.opened });
+    const writing = t.pool.transaction((tx) => tx.$executeRawUnsafe('SET LOCAL x = 1'));
+
+    const closing = t.pool.stop({ deadlineAt: Date.now() + 1_000 });
+    // Closing: no transaction begins any more.
+    expect(() => t.pool.transaction(async () => undefined)).toThrow(/pool is closed/);
+    setTimeout(answer.open, 50);
+    expect(await closing).toBe(0);
+    await writing;
+    expect(t.log).toEqual(['BEGIN 1', 'SET', 'COMMIT 1', 'DISCONNECT']);
+  });
+
+  it('a pool whose transaction has not settled by the deadline still closes then, and says how many it left', async () => {
+    const t = await setup();
+    const errors = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const answer = gate();
+    t.steps.push({ commit: answer.opened });
+    const writing = t.pool.transaction((tx) => tx.$executeRawUnsafe('SET LOCAL x = 1'));
+
+    expect(await t.pool.stop({ deadlineAt: Date.now() + 50 })).toBe(1);
+    expect(errors.mock.calls.map(([message]) => String(message))).toEqual([
+      expect.stringMatching(/with 1 transactions unsettled/),
+    ]);
+    answer.open();
+    await writing;
+    expect(t.log).toEqual(['BEGIN 1', 'SET', 'DISCONNECT', 'COMMIT 1']);
   });
 });

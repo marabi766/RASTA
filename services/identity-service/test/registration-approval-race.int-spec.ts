@@ -230,8 +230,8 @@ describe('registration decisions and the Keycloak account an approval creates', 
       await prisma.client.registrationRequest.deleteMany({ where: { userId: { in: users } } });
       await prisma.client.user.deleteMany({ where: { id: { in: users } } });
     });
-    await fencing.pool.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await fencing.pool.stop();
+    await prisma.stop();
   });
 
   async function submit(): Promise<{ registrationId: string; userId: string; username: string }> {

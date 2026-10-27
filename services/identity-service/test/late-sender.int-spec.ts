@@ -93,8 +93,8 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
 
   afterAll(async () => {
     await stub.close();
-    await fencePool.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await fencePool.stop();
+    await prisma.stop();
   });
 
   // -------------------------------------------------------------------------

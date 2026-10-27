@@ -1,12 +1,13 @@
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { readUrl } from '@rasta/config';
 import { SERVICE_NAME } from '../config/env';
 import {
   createTenantGuardExtension,
   assertRuntimeRole as assertConnectedRuntimeRole,
+  type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
-import { throwIfCancelled } from './cancellation';
+import { settleWithin, throwIfCancelled, trackInScope, transactionBounds } from './cancellation';
 
 /**
  * Models in this service that carry an `organizationId` and must therefore be
@@ -50,10 +51,32 @@ export function separatePoolUrl(databaseUrl: string, connections: number, waitSe
   return url.toString();
 }
 
+/** This pool was closed (`PrismaService.stop`): nothing more runs on it. */
+export class PoolClosedError extends Error {
+  constructor() {
+    super('refused: this database pool is closed');
+    this.name = 'PoolClosedError';
+  }
+}
+
+/**
+ * One database pool. **Its close is not its own** (#458 r2 F2): it has no
+ * `onModuleDestroy`, because Nest runs every provider's destroy hook at once,
+ * and a pool that disconnected there did so beside the workers still
+ * flushing through it. `OutboxShutdown` closes it (`databases`), once every
+ * worker and timer that uses it has returned; the projection command, once
+ * its projector stopped. See {@link stop}.
+ */
 @Injectable()
-export class PrismaService implements OnModuleInit, OnModuleDestroy {
+export class PrismaService implements OnModuleInit {
   private readonly logger = new Logger(PrismaService.name);
   private readonly base: PrismaClient;
+  /** Every interactive transaction begun on this pool and not settled yet. */
+  private readonly transactions = new Set<Promise<unknown>>();
+  /** From the start of {@link stop}: no transaction begins any more. */
+  private closing?: Promise<number>;
+  /** Once {@link stop} closed it: no operation at all (no lazy reconnect). */
+  private closed = false;
 
   /** The client every repository uses. Tenant scoping is already applied. */
   readonly client: ExtendedPrismaClient;
@@ -79,13 +102,16 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   }
 
   private buildClient() {
+    const isClosed = () => this.closed;
     // First, so it runs before anything else: a cancelled worker starts no
-    // database operation at all (`cancellation.ts`, #402 r2 F2).
+    // database operation at all (`cancellation.ts`, #402 r2 F2), and nothing
+    // runs on a closed pool — Prisma would otherwise reconnect it.
     return this.base
       .$extends({
         name: 'cancellation-boundary',
         query: {
           $allOperations({ args, query }) {
+            if (isClosed()) throw new PoolClosedError();
             throwIfCancelled();
             return query(args);
           },
@@ -128,8 +154,33 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async onModuleDestroy(): Promise<void> {
+  /**
+   * Closes this pool, by the shutdown's deadline (#458 r2 F2): from now on no
+   * transaction begins on it; every one already begun — a COMMIT in flight
+   * included — is waited for until `deadlineAt`; then nothing runs on it any
+   * more, not even a request still being served (each operation refuses,
+   * {@link PoolClosedError}), and it disconnects. Resolves to how many
+   * transactions had not settled by the deadline — those may still commit —
+   * and logs them as an error: never closed as drained while one is pending.
+   * One close per pool; later calls join it. Named `stop` because that is
+   * what `OutboxShutdown` calls.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<number> {
+    this.closing ??= this.close(options.deadlineAt);
+    return this.closing;
+  }
+
+  private async close(deadlineAt: number | undefined): Promise<number> {
+    const unsettled = await settleWithin(this.transactions, deadlineAt);
+    this.closed = true;
+    if (unsettled > 0) {
+      this.logger.error(
+        `Closing a database pool with ${unsettled} transactions unsettled at the shutdown ` +
+          'deadline: they may still commit after this process stopped waiting for them',
+      );
+    }
     await this.base.$disconnect();
+    return unsettled;
   }
 
   /**
@@ -138,6 +189,7 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * state, not an exception.
    */
   async isHealthy(): Promise<boolean> {
+    if (this.closing) return false;
     try {
       await this.base.$queryRaw`SELECT 1`;
       return true;
@@ -166,8 +218,18 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     options?: TransactionOptions,
   ): Promise<T> {
     // Transaction setup is a database operation too: none begins once the
-    // worker this runs in was stopped (`cancellation.ts`).
+    // worker this runs in was stopped (`cancellation.ts`), or once this pool
+    // is closing (`stop`).
+    if (this.closing) throw new PoolClosedError();
     throwIfCancelled();
+    // One budget for its connection wait and its execution together, never
+    // past the deadline of the scope it runs in (#458 r2 F2); a statement
+    // timeout never outlasts it either.
+    const { maxWait, timeout } = transactionBounds({
+      maxWait: options?.maxWait,
+      timeout: options?.timeout,
+      budgetMs: options?.budgetMs,
+    });
     // And so is its COMMIT, which Prisma issues when the callback resolves,
     // without passing through the client extension (#402 r3 R3-1): a callback
     // that resumes after the stop returned — its last statement's reply held
@@ -175,27 +237,46 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     // Both branches below run `fn` only through this.
     const committable = async (tx: ExtendedPrismaClient): Promise<T> => {
       const result = await fn(tx);
+      if (this.closed) throw new PoolClosedError();
       throwIfCancelled();
       return result;
     };
-    if (options?.statementTimeoutMs === undefined) {
-      return this.client.$transaction((tx) => committable(tx as ExtendedPrismaClient), options);
-    }
-    const bound = localStatementTimeoutOf(options.statementTimeoutMs);
-    const { maxWait, timeout } = options;
-    return this.client.$transaction(
-      async (tx) => {
-        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${bound}`);
-        return committable(tx as ExtendedPrismaClient);
-      },
-      { maxWait, timeout },
-    );
+    const statementTimeoutMs =
+      options?.statementTimeoutMs === undefined || timeout === undefined
+        ? options?.statementTimeoutMs
+        : Math.min(options.statementTimeoutMs, timeout);
+    const run =
+      statementTimeoutMs === undefined
+        ? this.client.$transaction((tx) => committable(tx as ExtendedPrismaClient), {
+            maxWait,
+            timeout,
+          })
+        : this.client.$transaction(
+            async (tx) => {
+              await tx.$executeRawUnsafe(
+                `SET LOCAL statement_timeout = ${localStatementTimeoutOf(statementTimeoutMs)}`,
+              );
+              return committable(tx as ExtendedPrismaClient);
+            },
+            { maxWait, timeout },
+          );
+    // Until it settles, its worker's stop and this pool's close wait for it:
+    // a COMMIT handed to the engine is never left pending behind either.
+    this.transactions.add(run);
+    const settle = () => void this.transactions.delete(run);
+    run.then(settle, settle);
+    return trackInScope(run);
   }
 }
 
 export interface TransactionOptions {
   maxWait?: number;
   timeout?: number;
+  /**
+   * The whole of this transaction, its connection wait **and** its execution
+   * together (#458 r2 F2): `maxWait + timeout` never exceed it.
+   */
+  budgetMs?: number;
   /** `SET LOCAL statement_timeout` for this transaction only, in milliseconds. */
   statementTimeoutMs?: number;
 }

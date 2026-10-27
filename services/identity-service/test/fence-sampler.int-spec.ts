@@ -50,11 +50,13 @@ describe('R3-2: the fence sampler on a real database', () => {
   beforeEach(async () => {
     own = new PrismaService(databaseUrl(), { connections: 1, waitSeconds: 1 });
     await own.onModuleInit();
-    sampler = new KeycloakFenceSampler(pooledFenceSampleSource(own, repository), { ownPool: own });
+    sampler = new KeycloakFenceSampler(pooledFenceSampleSource(own, repository));
   });
 
   afterEach(async () => {
-    await sampler.onModuleDestroy();
+    await sampler.stop();
+    // Its pool closes after it, as OutboxShutdown closes it (#458 r2 F2).
+    await own.stop();
     jest.restoreAllMocks();
     if (inserted.length > 0) {
       await prisma.client
@@ -64,8 +66,8 @@ describe('R3-2: the fence sampler on a real database', () => {
   });
 
   afterAll(async () => {
-    await other.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await other.stop();
+    await prisma.stop();
   });
 
   /** A fence past its deadline plus half its settle window, not yet past takeover: overdue. */
@@ -206,7 +208,7 @@ describe('R3-2: the fence sampler on a real database', () => {
 
     fencesHeld.release();
     await fencesHeld.done;
-    await fencePool.onModuleDestroy();
+    await fencePool.stop();
     finishLapse();
     await pass;
     await scanner.stop();
@@ -292,6 +294,5 @@ describe('R3-2: the fence sampler on a real database', () => {
     expect(await gauge('overdue')).toBeUndefined();
     expect(await gauge('live')).toBeUndefined();
     expect(await age()).toBeGreaterThanOrEqual(FENCE_SAMPLE_INTERVAL_MS / 1000);
-    await own.onModuleDestroy();
   });
 });

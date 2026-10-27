@@ -107,8 +107,8 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
 
   afterAll(async () => {
     await stub.close();
-    await fencing.pool.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await fencing.pool.stop();
+    await prisma.stop();
   });
 
   // -------------------------------------------------------------------------

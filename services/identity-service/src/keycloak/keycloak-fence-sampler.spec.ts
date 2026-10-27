@@ -126,7 +126,7 @@ describe('R3-2: the overdue gauge does not depend on the sweep (logical clock)',
     }
     await scanner.stop({ deadlineAt: Date.now() });
     // SAMPLER-STOP-BEGIN
-    await sampler.onModuleDestroy();
+    await sampler.stop();
     // SAMPLER-STOP-END
 
     // The sweep really was busy across the whole window, as in the probe:
@@ -167,7 +167,7 @@ describe('KeycloakFenceSampler', () => {
 
   /** Its stop waits at most one budget for a hung sample — on the fake clock too. */
   async function stopOnFakeTimers(sampler: KeycloakFenceSampler): Promise<void> {
-    const stopped = sampler.onModuleDestroy();
+    const stopped = sampler.stop();
     await jest.advanceTimersByTimeAsync(10 * SECOND);
     await stopped;
   }
@@ -276,7 +276,7 @@ describe('KeycloakFenceSampler', () => {
     );
     sampler.start();
     const started = Date.now();
-    await sampler.onModuleDestroy();
+    await sampler.stop();
     expect(Date.now() - started).toBeLessThan(1_000);
     sampler.tick();
     expect(calls).toHaveLength(1);

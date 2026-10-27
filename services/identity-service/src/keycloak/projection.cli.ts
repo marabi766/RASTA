@@ -12,6 +12,7 @@ import {
   isClean,
   RECOVERY_STOP_MS,
   runProjectionCommand,
+  tearDownProjectionCommand,
   type ProjectionCommandMode,
 } from './projection.command';
 
@@ -55,6 +56,8 @@ async function main(): Promise<number> {
   await prisma.onModuleInit();
   await fencePool.onModuleInit();
   let projector: KeycloakProjector | undefined;
+  let clean = false;
+  let tornDown = false;
   try {
     const repository = new IdentityRepository(prisma);
     const keycloak = new KeycloakAdminClient({
@@ -84,16 +87,29 @@ async function main(): Promise<number> {
           ? ' (the fence migration may be rolled back while every identity-service replica stays stopped)'
           : ''),
     );
-    return isClean(report) ? 0 : 1;
+    clean = isClean(report);
   } finally {
     // Whatever ended the command — a thrown error included — no recovery
     // projection of it reaches the database after the disconnect (#458 r1
     // F2): none starts any more, and those running are cancelled and waited
-    // for first.
-    await projector?.stop({ deadlineAt: Date.now() + RECOVERY_STOP_MS });
-    await fencePool.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    // for first. Then both pools, last, by the same deadline (#458 r2 F2):
+    // each waits for a transaction still in flight — a COMMIT included —
+    // then refuses everything and disconnects. Anything still unwinding or
+    // unsettled then makes the command unclean, loudly.
+    const left = await tearDownProjectionCommand(
+      { projector, pools: [fencePool, prisma] },
+      Date.now() + RECOVERY_STOP_MS,
+    );
+    tornDown = left.recoveriesUnwinding === 0 && left.transactionsUnsettled === 0;
+    if (!tornDown) {
+      logger.error(
+        left,
+        `Keycloak ${mode}: teardown reached its deadline with work still in flight; ` +
+          'it may still commit after the command exits — the run is not clean',
+      );
+    }
   }
+  return clean && tornDown ? 0 : 1;
 }
 
 main().then(

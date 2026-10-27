@@ -119,9 +119,9 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
 
   afterAll(async () => {
     await stub.close();
-    await fencing.pool.onModuleDestroy();
-    await holder.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await fencing.pool.stop();
+    await holder.stop();
+    await prisma.stop();
   });
 
   // -------------------------------------------------------------------------
@@ -452,7 +452,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
           code: 'KEYCLOAK_WRITE_SETTLING',
         });
       } finally {
-        await fresh.pool.onModuleDestroy();
+        await fresh.pool.stop();
       }
     });
 
@@ -704,10 +704,10 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
           ).rejects.toThrow();
           expect(performance.now() - started).toBeGreaterThan(1500);
         } finally {
-          await shared.onModuleDestroy();
+          await shared.stop();
         }
       } finally {
-        await single.onModuleDestroy();
+        await single.stop();
       }
     });
 
@@ -1122,7 +1122,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
           ).lapseHandledAt,
         ).toBeNull();
       } finally {
-        await own.pool.onModuleDestroy();
+        await own.pool.stop();
       }
     });
 
@@ -1396,8 +1396,11 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
           ),
         ).rejects.toBeDefined();
         const ms = performance.now() - started;
-        expect(ms).toBeGreaterThan(1_000);
-        expect(ms).toBeLessThan(4_000);
+        // It waited its share, not refused at once — and its connection wait
+        // and its statement together never outlast what the business
+        // transaction had left (1.5 s): one budget (#458 r2 F2).
+        expect(ms).toBeGreaterThan(600);
+        expect(ms).toBeLessThan(1_500);
       } finally {
         unblock();
         await blocker;
@@ -1461,8 +1464,8 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
             only,
           ),
         close: async () => {
-          await pool.onModuleDestroy();
-          await business.onModuleDestroy();
+          await pool.stop();
+          await business.stop();
         },
       };
     }

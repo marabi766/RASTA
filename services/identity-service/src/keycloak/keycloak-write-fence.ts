@@ -3,7 +3,6 @@ import { ulid } from 'ulid';
 import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
 import { Prisma } from '../generated/prisma';
-import { transactionBudgetMs } from '../prisma/cancellation';
 import type { ExtendedPrismaClient, PrismaService } from '../prisma/prisma.service';
 import { keycloakWriteFenceEventsTotal } from '../observability/keycloak-projection.metrics';
 
@@ -453,7 +452,9 @@ export class KeycloakWriteFences {
                t.c + make_interval(secs => ${timeout + input.settleSeconds}),
                t.c + make_interval(secs => ${timeout + input.settleSeconds})
           FROM (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS c) t`,
-      { maxWait: budget, timeout: budget, statementTimeoutMs: budget },
+      // One budget for the connection wait and the insert together (#458 r2
+      // F2): never past what the business transaction has left.
+      { budgetMs: budget, statementTimeoutMs: budget },
     );
 
     // The fence is visible to every later reader. Is `tx` still the one
@@ -584,10 +585,12 @@ export class KeycloakWriteFences {
    * every worker's stop after its work unwound or was abandoned, before the
    * stop returns. Returns how many are still owed; never throws.
    *
-   * Each write is bounded by what is left of the scope it runs in
-   * (`transactionBudgetMs`, a stop's deadline) and refused once that scope is
-   * cancelled or past it (`prisma/cancellation.ts`, #458 r1 F2): a stop's
-   * flush begins, inserts and commits nothing after the stop returned.
+   * Each write is bounded by one budget for its connection wait and its
+   * insert together, never past what is left of the scope it runs in (a
+   * stop's deadline less its COMMIT reserve, `transactionBounds`), and
+   * refused once that scope is cancelled or past it (`prisma/cancellation.ts`,
+   * #458 r1/r2 F2): a stop's flush begins, inserts and commits nothing after
+   * the stop returned, and a COMMIT it already sent is waited for first.
    */
   recoverOwed(): Promise<number> {
     const flush = this.flushes.then(() => this.flush());
@@ -614,11 +617,6 @@ export class KeycloakWriteFences {
   }
 
   private async writeFresh(owed: OwedFence): Promise<boolean> {
-    // Never more than what is left of a stop's deadline, less a margin: the
-    // connection wait, the statement and the transaction all end before it.
-    // Nothing left, nothing begins.
-    const budget = transactionBudgetMs(LATE_FENCE_BUDGET_MS);
-    if (budget < MIN_INSERT_BUDGET_MS) return false;
     const attemptId = `KWA_${ulid()}`;
     const timeout = owed.timeoutMs / 1000;
     try {
@@ -636,7 +634,10 @@ export class KeycloakWriteFences {
                    CASE WHEN ${owed.known} THEN t.c
                         ELSE t.c + make_interval(secs => ${timeout + owed.settleSeconds}) END
                      AS takeover) w`,
-        { maxWait: budget, timeout: budget, statementTimeoutMs: budget },
+        // One budget, its connection wait and its insert together — and never
+        // past a stop's deadline (`transactionBounds`, #458 r2 F2); nothing
+        // left, nothing begins (refused, so owed).
+        { budgetMs: LATE_FENCE_BUDGET_MS, statementTimeoutMs: LATE_FENCE_BUDGET_MS },
       );
       keycloakWriteFenceEventsTotal.inc({ event: 'late_fenced' });
       return true;

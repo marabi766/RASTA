@@ -325,6 +325,59 @@ describe('OutboxShutdown', () => {
     });
   });
 
+  describe('the databases (Codex r2 on #458, F2)', () => {
+    it('closes the databases last: once the relay, the purge, every worker and the publishers returned, by the same deadline', async () => {
+      const calls: { name: string; deadlineAt?: number }[] = [];
+      const gates = new Map<string, () => void>();
+      const part = (name: string): OutboxStoppable => ({
+        stop: (options) => {
+          calls.push({ name, deadlineAt: options?.deadlineAt });
+          return new Promise<void>((resolve) => gates.set(name, resolve));
+        },
+      });
+      const open = async (name: string): Promise<void> => {
+        gates.get(name)!();
+        await new Promise((resolve) => setImmediate(resolve));
+      };
+      const shutdown = new OutboxShutdown({
+        relay: part('relay'),
+        purge: part('purge'),
+        workers: [part('sweep')],
+        publishers: [part('publisher')],
+        databases: [part('pool'), part('fence pool')],
+        budgetMs: 23_000,
+        now: () => 1_000_000,
+      });
+
+      const stopping = shutdown.stop();
+      const names = () => calls.map((call) => call.name);
+      await open('relay');
+      await open('purge');
+      // A worker still runs: no pool is closed under it.
+      expect(names()).toEqual(['relay', 'purge', 'sweep']);
+      await open('sweep');
+      expect(names()).toEqual(['relay', 'purge', 'sweep', 'publisher']);
+      await open('publisher');
+      expect(names()).toEqual(['relay', 'purge', 'sweep', 'publisher', 'pool', 'fence pool']);
+      expect(calls.every((call) => call.deadlineAt === 1_023_000)).toBe(true);
+      await open('pool');
+      await open('fence pool');
+      await stopping;
+    });
+
+    it('closes the databases even when a drain or a publisher fails, and still reports the failure', async () => {
+      const closed: string[] = [];
+      const shutdown = new OutboxShutdown({
+        relay: { stop: async () => Promise.reject(new Error('relay stop failed')) },
+        publishers: [{ stop: async () => Promise.reject(new Error('close failed')) }],
+        databases: [{ stop: async () => void closed.push('pool') }],
+        budgetMs: 1000,
+      });
+      await expect(shutdown.stop()).rejects.toThrow();
+      expect(closed).toEqual(['pool']);
+    });
+  });
+
   it('refuses a budget that is not a positive integer', () => {
     const relay = { stop: async () => undefined };
     for (const budgetMs of [0, -1, 1.5, Number.NaN]) {

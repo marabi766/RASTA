@@ -31,7 +31,7 @@ describe('#458 r1 F4: an empty fence table counts zero fences', () => {
   });
 
   afterAll(async () => {
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   /** Runs `read` on a truly empty `keycloak_write_attempt`, then rolls everything back. */

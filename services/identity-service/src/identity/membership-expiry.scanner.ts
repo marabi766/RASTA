@@ -3,7 +3,7 @@ import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import type { KeycloakProjector } from '../keycloak/keycloak.projector';
 import type { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
 import { membershipLapseFailuresTotal } from '../observability/keycloak-projection.metrics';
-import { untilDeadline, withCancellation } from '../prisma/cancellation';
+import { settleWithin, untilDeadline, withCancellation } from '../prisma/cancellation';
 import { IdentityRepository } from './identity.repository';
 import { IdentityService } from './identity.service';
 
@@ -124,6 +124,8 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
   private stopped = false;
   /** Aborted when the stop begins: cancels the Keycloak call of the pass in flight. */
   private readonly cancel = new AbortController();
+  /** The transactions of its passes not settled yet: a stop waits for them (#458 r2 F2). */
+  private readonly transactions = new Set<Promise<unknown>>();
   /** The one stop; later calls join it. */
   private stopping?: Promise<void>;
 
@@ -208,6 +210,16 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
           '(D-070 D); the old fences, if not yet taken over, still stand',
       );
     }
+    // Never "stopped" with a COMMIT still pending (#458 r2 F2): a pass's
+    // transaction already handed to the engine is waited for, by the
+    // deadline, and one that has not settled by then is reported.
+    const unsettled = flushed.unsettled + (await settleWithin(this.transactions, deadlineAt));
+    if (unsettled > 0) {
+      this.logger.error(
+        `Membership expiry stopped at the shutdown deadline with ${unsettled} transactions ` +
+          'unsettled: they may still commit',
+      );
+    }
   }
 
   /**
@@ -219,7 +231,9 @@ export class MembershipExpiryScanner implements OnModuleInit, OnApplicationShutd
     if (this.inFlight || this.stopped) return Promise.resolve(0);
     // Every database operation of the pass — wherever in the projector, the
     // service or the fences it starts — checks the stop first (#402 r2 F2).
-    const pass = withCancellation(this.cancel.signal, () => this.pass(now)).finally(() => {
+    const pass = withCancellation(this.cancel.signal, () => this.pass(now), {
+      transactions: this.transactions,
+    }).finally(() => {
       this.inFlight = undefined;
     });
     this.inFlight = pass;

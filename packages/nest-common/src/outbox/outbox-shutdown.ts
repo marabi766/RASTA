@@ -36,14 +36,26 @@ import type { OutboxStopOptions } from './outbox';
  * publish the broker never answered, and then its close is abandoned at once —
  * and the relay never publishes through a producer that is already closing.
  *
+ * The service's database pools (`databases`) close last of all, once the
+ * drain **and** the publishers' close have returned, by the same deadline
+ * (Codex r2 on #458, F2). Each pool's own `onModuleDestroy` ran beside this
+ * one — Nest runs every provider's destroy hook at once — so a pool could
+ * disconnect while a worker it stops here still flushed through it, and the
+ * worker's next statement reconnected it. A service that passes its pools
+ * here gives them no destroy hook of their own.
+ *
  * `stop()` is one promise: a later call — `onApplicationShutdown` confirming
  * the stop, a repeated signal — joins it, and once it has returned, returns at
  * once. Cross-cutting mechanism only (ADR-018).
  */
 
-/** What the coordinator needs of a component: a stop that honours a deadline. */
+/**
+ * What the coordinator needs of a component: a stop that honours a deadline.
+ * What it resolves to is the component's own report (a pool: how many
+ * transactions it left unsettled); the coordinator does not read it.
+ */
 export interface OutboxStoppable {
-  stop(options?: OutboxStopOptions): Promise<void>;
+  stop(options?: OutboxStopOptions): Promise<unknown>;
 }
 
 export interface OutboxShutdownOptions {
@@ -62,6 +74,14 @@ export interface OutboxShutdownOptions {
    * publisher, whose producer the relay publishes through.
    */
   publishers?: readonly OutboxStoppable[];
+  /**
+   * Closed last, after the relay, the purge, the workers and the publishers
+   * have all returned, by the same deadline: the service's database pools,
+   * which every one of them may use until it returns. Each waits, by the
+   * deadline, for the transactions still in flight on it, then refuses
+   * everything and disconnects.
+   */
+  databases?: readonly OutboxStoppable[];
   /** The shared budget, from the first `stop()` (`outboxShutdownBudgetMs`). */
   budgetMs: number;
   /** Injection seam for the tests; nothing else should pass this. */
@@ -83,7 +103,7 @@ export class OutboxShutdown {
 
   /**
    * Drains the relay, the purge and the workers concurrently, then closes the
-   * publishers, all by one deadline.
+   * publishers, then the databases, all by one deadline.
    */
   stop(): Promise<void> {
     this.stopping ??= this.drain();
@@ -107,9 +127,16 @@ export class OutboxShutdown {
       // After the drain, never beside it: a publish still in flight is the
       // relay's to finish or abandon, by the deadline, before its producer
       // closes. A drain that failed still leaves a producer to close.
-      await Promise.all(
-        (this.options.publishers ?? []).map((publisher) => publisher.stop({ deadlineAt })),
-      );
+      try {
+        await Promise.all(
+          (this.options.publishers ?? []).map((publisher) => publisher.stop({ deadlineAt })),
+        );
+      } finally {
+        // Last of all: nothing that could still use a pool is running.
+        await Promise.all(
+          (this.options.databases ?? []).map((database) => database.stop({ deadlineAt })),
+        );
+      }
     }
   }
 }

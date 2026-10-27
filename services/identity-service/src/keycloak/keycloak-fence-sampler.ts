@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks';
-import { Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import { withinDeadline } from '@rasta/nest-common';
+import { Logger, type OnModuleInit } from '@nestjs/common';
+import { withinDeadline, type OutboxStopOptions } from '@rasta/nest-common';
 import type { IdentityRepository } from '../identity/identity.repository';
 import {
   keycloakFenceSampleDuration,
@@ -30,10 +30,10 @@ import { fenceCounts, type FenceCounts } from './keycloak-write-fence';
  *   (which transactions queued on a user lock can exhaust) and from the fence
  *   pool (two connections, which every Keycloak write needs) — it can starve
  *   neither, and neither can starve it;
- * - **bounded**: one short transaction — the connection wait (`maxWait`), a
- *   `lock_timeout`, a `statement_timeout` and the transaction's own timeout,
- *   each {@link FENCE_SAMPLE_BUDGET_MS} — and, above all of them, a deadline
- *   of that same budget on this side: a sample that has not answered by then
+ * - **bounded**: one short transaction whose connection wait and execution
+ *   share one budget, {@link FENCE_SAMPLE_BUDGET_MS} (#458 r2 F2), under a
+ *   `lock_timeout` and a `statement_timeout` of no more — and, above all of
+ *   them, a deadline of that same budget on this side: a sample that has not answered by then
  *   is a failure, however its transaction ends. Its next tick waits for that
  *   transaction to end (`busy`), so failures never pile up on the connection;
  * - **one full aggregate** (`fenceCounts`: `COUNT(attempt_id) FILTER`), never a page.
@@ -52,12 +52,19 @@ import { fenceCounts, type FenceCounts } from './keycloak-write-fence';
  * The lapse backlog (`rasta_identity_membership_lapse_backlog`) leaves the
  * sweep's pass too, on a slower timer of its own ({@link LAPSE_SAMPLE_INTERVAL_MS}):
  * it counts memberships on the business pool, unindexed for this predicate,
- * and is alerted on only after 20 minutes. Read at scrape like the rest: no
- * count yet, or none for {@link LAPSE_SAMPLE_STALE_INTERVALS} intervals, and
- * its series is absent rather than a stale or default number.
+ * and is alerted on only after 20 minutes. Read at scrape like the rest. Its
+ * value is the latest **successful** count, and it stands until the next
+ * successful one — a failed count never drops it (#458 r2 F6): a positive
+ * backlog is unresolved until a count says otherwise, so counts that fail in
+ * between can never restart the 20 minutes. How fresh it is goes in a series
+ * of its own, `rasta_identity_membership_lapse_count_age_seconds` — the time
+ * since the latest successful count started, or since the sampler started
+ * before one — on which the unknown-backlog alert is: "positive" and
+ * "unknown" are two series, and neither resets the other's duration. No
+ * count yet: no backlog series, only the age.
  *
  * Without a sampler attached — unwired, not started, stopped — nothing is
- * exported at all: no fence series, no age, no backlog (#458 r1 F3; never
+ * exported at all: no fence series, no ages, no backlog (#458 r1 F3; never
  * prom-client's default zero), so the missing alerts fire.
  *
  * Per replica: every replica samples the same table and exports the same
@@ -96,15 +103,8 @@ export const FENCE_SAMPLE_STALE_SECONDS = 6;
 /** How often the lapse backlog is counted. */
 export const LAPSE_SAMPLE_INTERVAL_MS = 30_000;
 
-/** The bound of one lapse count, on the business pool: connection wait, statement, transaction. */
+/** The bound of one lapse count, on the business pool: connection wait and execution together. */
 export const LAPSE_SAMPLE_BUDGET_MS = 5_000;
-
-/**
- * After this many lapse intervals without a successful count, the backlog is
- * unknown: its series is dropped rather than left at the last count (#458 r1
- * F3) — the 20-minute alert tolerates one missed count, not a stale one.
- */
-export const LAPSE_SAMPLE_STALE_INTERVALS = 3;
 
 /** Where the sampler's numbers come from: each call one bounded query. */
 export interface FenceSampleSource {
@@ -131,7 +131,7 @@ export function pooledFenceSampleSource(
           await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = ${wholeMs(budgetMs)}`);
           return fenceCounts(tx);
         },
-        { maxWait: budgetMs, timeout: budgetMs, statementTimeoutMs: wholeMs(budgetMs) },
+        { budgetMs, statementTimeoutMs: wholeMs(budgetMs) },
       ),
     lapseBacklog: (budgetMs) =>
       business.transaction(
@@ -139,7 +139,7 @@ export function pooledFenceSampleSource(
           await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = ${wholeMs(budgetMs)}`);
           return business.countLapsedMemberships(await business.databaseNow(tx), tx);
         },
-        { maxWait: budgetMs, timeout: budgetMs, statementTimeoutMs: wholeMs(budgetMs) },
+        { budgetMs, statementTimeoutMs: wholeMs(budgetMs) },
       ),
   };
 }
@@ -152,8 +152,6 @@ export interface KeycloakFenceSamplerOptions {
   lapseBudgetMs?: number;
   /** A monotonic clock in milliseconds; `performance.now` unless a test drives its own. */
   clock?: () => number;
-  /** Closed by the sampler's stop: its own pool, which nothing else uses. */
-  ownPool?: Pick<PrismaService, 'onModuleDestroy'>;
 }
 
 interface Retained {
@@ -165,7 +163,7 @@ interface Retained {
   gap: number;
 }
 
-export class KeycloakFenceSampler implements OnModuleInit, OnModuleDestroy {
+export class KeycloakFenceSampler implements OnModuleInit {
   private readonly logger = new Logger(KeycloakFenceSampler.name);
   private readonly intervalMs: number;
   private readonly budgetMs: number;
@@ -183,7 +181,7 @@ export class KeycloakFenceSampler implements OnModuleInit, OnModuleDestroy {
   private startedAt = 0;
   private lastSuccessAt: number | null = null;
   private latest: FenceCounts | null = null;
-  /** The latest successful lapse count, and when it started (monotonic). */
+  /** The latest successful lapse count, and when it started (monotonic): it stands until the next. */
   private lapses: { backlog: number; at: number } | null = null;
   private readonly retained: Retained[] = [];
   /** Whether the last sample failed, so a run of failures logs once. */
@@ -192,7 +190,7 @@ export class KeycloakFenceSampler implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly source: FenceSampleSource,
-    private readonly options: KeycloakFenceSamplerOptions = {},
+    options: KeycloakFenceSamplerOptions = {},
   ) {
     this.intervalMs = options.intervalMs ?? FENCE_SAMPLE_INTERVAL_MS;
     this.budgetMs = options.budgetMs ?? FENCE_SAMPLE_BUDGET_MS;
@@ -220,22 +218,27 @@ export class KeycloakFenceSampler implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Its own bounded stop: the timers end, nothing more reaches the database,
-   * the sample in flight is waited for at most one budget, the gauges are
-   * detached and its own pool is closed.
+   * Its bounded stop — an `OutboxShutdown` worker (#458 r2 F2), so the pools
+   * it samples on close only after it returned: the timers end, nothing more
+   * reaches the database, the samples in flight are waited for at most one
+   * budget and never past `deadlineAt`, and the gauges are detached. Its own
+   * pool is the coordinator's to close (`databases`), like every other.
    */
-  async onModuleDestroy(): Promise<void> {
+  async stop(options: OutboxStopOptions = {}): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     if (this.lapseTimer) clearInterval(this.lapseTimer);
     this.timer = undefined;
     this.lapseTimer = undefined;
     this.cancel.abort();
     const pending = Promise.all([this.inFlight, this.lapseInFlight]);
-    await withinDeadline(pending, Math.max(this.budgetMs, this.lapseBudgetMs));
+    const bound = Math.max(this.budgetMs, this.lapseBudgetMs);
+    await withinDeadline(
+      pending,
+      options.deadlineAt === undefined ? bound : Math.min(bound, options.deadlineAt - Date.now()),
+    );
     // Detached only if the gauges still read this sampler.
     const previous = readFenceSamplesFrom(null);
     if (previous !== this.reader) readFenceSamplesFrom(previous);
-    await this.options.ownPool?.onModuleDestroy().catch(() => undefined);
   }
 
   /** One tick of its own timer. Public so a test can drive it. */
@@ -276,10 +279,10 @@ export class KeycloakFenceSampler implements OnModuleInit, OnModuleDestroy {
         : null,
       retained: { overdue, expired },
       ageSeconds: Math.max(age, gap) / 1000,
-      lapseBacklog:
-        this.lapses && now - this.lapses.at <= LAPSE_SAMPLE_STALE_INTERVALS * this.lapseIntervalMs
-          ? this.lapses.backlog
-          : null,
+      // The latest successful count, however old: only a successful count
+      // replaces it (#458 r2 F6). How old it is, beside it.
+      lapseBacklog: this.lapses?.backlog ?? null,
+      lapseAgeSeconds: (now - (this.lapses?.at ?? this.startedAt)) / 1000,
     };
   }
 
@@ -348,8 +351,8 @@ export class KeycloakFenceSampler implements OnModuleInit, OnModuleDestroy {
       (backlog) => {
         this.lapses = { backlog, at: startedAt };
       },
-      // The last count stands until the next — for at most
-      // LAPSE_SAMPLE_STALE_INTERVALS intervals, then the series goes (`view`).
+      // The last count stands until a successful one replaces it; its age
+      // grows meanwhile (`view`, #458 r2 F6).
       () => undefined,
     );
     this.lapseInFlight = settled.finally(() => {
