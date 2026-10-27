@@ -51,8 +51,8 @@ describe('one live membership per user and organization', () => {
       await prisma.client.membership.deleteMany({ where: { userId: { in: users } } });
       await prisma.client.user.deleteMany({ where: { id: { in: users } } });
     });
-    await fencing?.pool.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await fencing?.pool.stop();
+    await prisma.stop();
   });
 
   async function newUser(): Promise<string> {
