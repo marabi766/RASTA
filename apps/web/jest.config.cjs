@@ -34,7 +34,7 @@ module.exports = {
   testEnvironmentOptions: { customExportConditions: ['node'] },
   testRegex: '.*\\.spec\\.tsx?$',
   transform: { '^.+\\.(t|j)sx?$': ['@swc/jest', swcOptions] },
-  setupFilesAfterEnv: ['<rootDir>/src/test/setup.ts'],
+  setupFilesAfterEnv: [require('../../jest.disclosure-guard.cjs'), '<rootDir>/src/test/setup.ts'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
     // Jest cannot parse CSS. Components are asserted on behaviour and

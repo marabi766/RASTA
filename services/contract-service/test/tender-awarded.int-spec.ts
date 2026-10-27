@@ -1,4 +1,5 @@
 import { DLQ_REASONS } from '@rasta/contracts';
+import { expectNotDisclosed } from '@rasta/testing';
 import { RastaError, UnprocessableEventError, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import {
@@ -133,11 +134,8 @@ describe('TENDER_AWARDED drafts a contract', () => {
       winningBidId: award.winningBidId,
       draftedAt: row?.createdAt.toISOString(),
     });
-    expect(
-      JSON.stringify(message, (_key, value: unknown) =>
-        typeof value === 'bigint' ? value.toString() : value,
-      ),
-    ).not.toContain(award.amountMinor);
+    // No independently verified path exemption: generated values stay searched (#452).
+    expectNotDisclosed(message, [award.amountMinor]);
   });
 
   describe('is idempotent on the tender', () => {
