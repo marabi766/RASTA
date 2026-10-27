@@ -42,6 +42,8 @@ export const alive = (target: number): boolean => {
 export interface Result {
   /** Undefined when the driver died before printing its result. */
   status?: number;
+  /** Measured inside the driver, from its first TERM request through joined cleanup. */
+  shutdownElapsedMs?: number;
   problems: string[];
   printed: string;
   code: number | null;
@@ -168,6 +170,7 @@ const DRIVER = `
     if (options.afterReceipt === 'supervisor-death') { process.kill(supervisor, 'SIGKILL'); await sleep(20); }
   };
   const groupEvents = [];
+  let shutdownStarted;
   if (options.frozenWallClock) Date.now = () => 0;
   if (options.censusFault) {
     const bin = join(dir, 'census-bin');
@@ -195,8 +198,12 @@ const DRIVER = `
     beforeReceipt,
     afterReceipt,
     probeGroup,
-    onGroupEvent: (event) => groupEvents.push(event),
+    onGroupEvent: (event) => {
+      if (event === 'send-term') shutdownStarted ??= performance.now();
+      groupEvents.push(event);
+    },
   });
+  const shutdownElapsedMs = shutdownStarted === undefined ? undefined : performance.now() - shutdownStarted;
   if (options.recordGroupEvents) writeFileSync(join(dir, 'group-events.json'), JSON.stringify(groupEvents));
   if (options.modelReuse) {
     process.kill = originalKill;
@@ -204,7 +211,7 @@ const DRIVER = `
   }
   // Match the production entry point: a returned result ends the wrapper immediately.
   // Outstanding IPC handles/timers must not accidentally join missing cleanup in a test.
-  process.stdout.write(JSON.stringify(result) + '\\n', () => process.exit(result.status));
+  process.stdout.write(JSON.stringify({ ...result, shutdownElapsedMs }) + '\\n', () => process.exit(result.status));
 `;
 
 /** Runs the wrapper in a driver process of its own; `pid` is the wrapper's. */
@@ -302,6 +309,8 @@ export interface Plan {
     ms: number;
     detached?: boolean;
     ignoreTerm?: boolean;
+    /** A forced slow writer startup; readiness must be observed rather than guessed. */
+    startupMs?: number;
     loadsAfterMs?: number;
     via?: 'spawnSync' | 'execFileSync' | 'execSync';
   };
@@ -345,7 +354,8 @@ export function plantFakeNext(root: string): { nextFrom: string; fault: string }
   writeFileSync(
     join(next, 'build/linger.js'),
     `const fs = require('fs');
-const [ms, loadsAfterMs, ignoreTerm] = process.argv.slice(2).map(Number);
+const [ms, loadsAfterMs, ignoreTerm, startupMs] = process.argv.slice(2).map(Number);
+if (startupMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, startupMs);
 if (ignoreTerm) process.on('SIGTERM', () => {});
 fs.writeFileSync('linger.pid', String(process.pid));
 const timer = setInterval(() => { fs.mkdirSync('.next', { recursive: true }); fs.writeFileSync('.next/from-linger', String(Date.now())); }, 50);
@@ -377,7 +387,7 @@ const worker = path.join(__dirname, '../build/worker.js');
     if (via === 'thread') await new Promise((r) => new Worker(worker).on('exit', r).on('error', r));
   }
   if (plan.linger) {
-    const args = [path.join(__dirname, '../build/linger.js'), String(plan.linger.ms), String(plan.linger.loadsAfterMs ?? 0), String(Number(Boolean(plan.linger.ignoreTerm)))];
+    const args = [path.join(__dirname, '../build/linger.js'), String(plan.linger.ms), String(plan.linger.loadsAfterMs ?? 0), String(Number(Boolean(plan.linger.ignoreTerm))), String(plan.linger.startupMs ?? 0)];
     const via = plan.linger.via;
     const sync = { stdio: 'ignore', detached: true };
     const starter = [path.join(__dirname, '../build/start.js'), ...args];
@@ -385,6 +395,9 @@ const worker = path.join(__dirname, '../build/worker.js');
     else if (via === 'execFileSync') cp.execFileSync(process.execPath, starter, sync);
     else if (via === 'execSync') cp.execSync([process.execPath, ...starter].map((a) => JSON.stringify(a)).join(' '), sync);
     else cp.spawn(process.execPath, args, { stdio: 'ignore', detached: Boolean(plan.linger.detached) }).unref();
+    // The scenario requires an initialized writer. Root exit must never race its
+    // startup, including the asynchronous descendant left by a synchronous child.
+    while (!fs.existsSync(path.join(dir, 'linger.pid'))) await new Promise((r) => setTimeout(r, 10));
   }
   if (plan.unresponsive) process.on('SIGTERM', () => {});
   if (plan.unresponsive) fs.writeFileSync('unresponsive.ready', '');

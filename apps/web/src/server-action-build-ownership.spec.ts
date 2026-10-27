@@ -891,7 +891,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
   );
 
   it('shutdown is joined before ownership release even when a surviving writer ignores TERM', async () => {
-    const dir = app({ holdMs: 200, linger: { ms: 60_000, ignoreTerm: true } });
+    const dir = app({ holdMs: 200, linger: { ms: 60_000, ignoreTerm: true, startupMs: 500 } });
     const result = await runDriver(dir, {
       nextFrom,
       settleMs: 0,
@@ -907,7 +907,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
   });
 
   it('R4-3: prompt TERM termination is confirmed separately from an explicitly unconfirmable probe', async () => {
-    const dir = app({ holdMs: 200, linger: { ms: 60_000 } });
+    const dir = app({ holdMs: 200, linger: { ms: 60_000, startupMs: 500 } });
     const result = await runDriver(dir, {
       nextFrom,
       settleMs: 0,
@@ -977,7 +977,6 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
   it('(F) the build`s processes cannot be confirmed stopped: the lock is KEPT (it names the live group) and the build refuses', async () => {
     // Explicit uncertainty, independent of whether TERM happens to stop the writer promptly.
     const dir = app({ linger: { ms: 60_000 } });
-    const started = performance.now();
     const result = await runDriver(dir, {
       nextFrom,
       settleMs: 0,
@@ -986,7 +985,9 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       unconfirmableProbe: true,
       recordChild: join(dir, 'child.json'),
     });
-    expect(performance.now() - started).toBeLessThan(2_500);
+    // Startup and fixture readiness are outside the shutdown budget. Measure from
+    // the first TERM request in the driver, not before its Node process even starts.
+    expect(result.shutdownElapsedMs).toBeLessThan(2_500);
     expect(result).toMatchObject({
       status: 1,
       problems: [
