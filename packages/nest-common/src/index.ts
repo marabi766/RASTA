@@ -54,6 +54,7 @@ export {
 // Authentication -------------------------------------------------------------
 export { TokenVerifier, InternalTokenService } from './auth/token-verifier';
 export { internalGet } from './auth/internal-get';
+export { internalFetch } from './http/internal-fetch';
 export {
   currentActor,
   compareActors,
@@ -123,6 +124,7 @@ export {
   ZodValidationPipe,
   zodPipe,
   toErrorDetails,
+  validateRequestInput,
   formatPath,
 } from './pipes/zod-validation.pipe';
 
@@ -278,6 +280,7 @@ export type {
 export {
   CONNECTED_ROLE_SQL,
   RuntimeRoleRefusedError,
+  RuntimeRoleUnverifiedError,
   assertDemoSeedRuntimeRole,
   assertRuntimeRole,
   connectedRoleProblems,
@@ -289,3 +292,12 @@ export type {
   RuntimeRolePreflightClient,
   RuntimeRoleQueryClient,
 } from './database/runtime-role';
+
+// OpenAPI --------------------------------------------------------------------
+export {
+  toJsonSchema,
+  codePointLength,
+  isOptionalField,
+  objectShapeOf,
+} from './openapi/zod-schema';
+export type { JsonSchema } from './openapi/zod-schema';

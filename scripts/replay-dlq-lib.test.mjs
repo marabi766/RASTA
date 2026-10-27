@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
   MAX_CEILING,
   UsageError,
+  foreignFailureText,
   OPERATOR_PATTERN,
   assess,
   executeReplays,
@@ -18,6 +19,7 @@ import {
   parseCheckArgs,
   recordProblem,
   REPLAY_TRANSACTION_TIMEOUT_MS,
+  ReplayFailure,
   replayExecutedRecord,
   replayIdFor,
   replayMessage,
@@ -701,6 +703,77 @@ test('an event its record cannot state is refused by name before anything is sen
   assert.equal(recordProblem(replayable().summary, contracts), null);
 });
 
+// ---- zod 3's codes in the record's own refusal (PR #444 r1 F1) -----------
+
+/**
+ * A record that breaks its contract is refused naming paths and zod 3's codes,
+ * as audit's ops-replay mapper names them for the same record. The expected
+ * messages were recorded on main 745d0434 (zod 3.25.76) with the same inputs
+ * (~/worker2/session/t109/scripts/replay-record.mjs); the r1 head printed zod
+ * 4's `invalid_format` for two of them.
+ */
+const RECORD_SUMMARY = {
+  eventId: 'EVT_1',
+  eventName: 'USAGE_RECORDED',
+  tenantId: 'ORG_1',
+  dlq: 'rasta.fleet.v1.dlq',
+  dlqPartition: 0,
+  dlqOffset: '12',
+  target: 'rasta.fleet.v1.retry',
+  stale: false,
+};
+const RECORD_OPTIONS = {
+  reportId: REPORT,
+  operator: 'ops.alice',
+  landed: { partition: 1, offset: '40' },
+  eventId: 'EVT_RECORD_1',
+  occurredAt: '2026-09-30T08:00:00.000Z',
+};
+for (const [name, summary, options, zod3] of [
+  [
+    'operator a number',
+    {},
+    { operator: 7 },
+    'the replay record breaks its contract: operator invalid_type, actor.id invalid_type',
+  ],
+  [
+    'occurredAt not an instant',
+    {},
+    { occurredAt: 'yesterday' },
+    'the replay record breaks its contract: occurredAt invalid_string',
+  ],
+  [
+    'stale not a boolean',
+    { stale: 'no' },
+    {},
+    'the replay record breaks its contract: stale invalid_union',
+  ],
+  [
+    'empty event id and report id',
+    {},
+    { eventId: '', reportId: '' },
+    'the replay record breaks its contract: reportId invalid_string, eventId too_small, aggregateId too_small, correlationId too_small',
+  ],
+  [
+    'dlq partition a fraction',
+    { dlqPartition: 0.5 },
+    {},
+    'the replay record breaks its contract: dlq.partition invalid_type',
+  ],
+]) {
+  test(`a replay record (${name}) is refused in zod 3's words`, () => {
+    assert.throws(
+      () =>
+        replayExecutedRecord(
+          { summary: { ...RECORD_SUMMARY, ...summary } },
+          { ...RECORD_OPTIONS, ...options },
+          contracts,
+        ),
+      (error) => error instanceof ReplayFailure && error.message === zod3,
+    );
+  });
+}
+
 // ---- --check-marker (round 3 on #166) ------------------------------------
 
 const MARKER = `${REPORT}/ops.alice/2/EVT_2`;
@@ -765,4 +838,70 @@ test('ABORTED only after the last stable offset passed the position AND the tran
   assert.equal(verdict({ nowMs: at + REPLAY_TRANSACTION_TIMEOUT_MS - 1 }), 'STILL_UNKNOWN');
   // Retention removed the position: never "absent", never "aborted".
   assert.equal(verdict({ lowOffset: 42n }), 'STILL_UNKNOWN');
+});
+
+// #385 r4: the real tool refuses an unreadable CA file before it connects,
+// with a fixed text — never the configured path.
+test('replay-dlq.mjs: an unreadable CA file is refused before connecting, path unprinted', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { SENTINELS, assertNoSentinel } = await import('./refusal-probes.mjs');
+  const { UNREADABLE_CA_FILE } = await import('./kafka-acl-lib.mjs');
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const run = (env) =>
+    spawnSync(
+      process.execPath,
+      [
+        resolve(root, 'scripts/replay-dlq.mjs'),
+        '--dlq',
+        'rasta.fleet.v1.dlq',
+        '--event-id',
+        '00000000-0000-4000-8000-000000000001',
+      ],
+      { encoding: 'utf8', env: { PATH: process.env.PATH, ...env } },
+    );
+  for (const sentinel of SENTINELS) {
+    const result = run({
+      KAFKA_SSL_CA_FILE: `/nonexistent/${sentinel}/${sentinel.replaceAll('-', '_')}/ca.pem`,
+      KAFKA_SASL_PASSWORD_OPS_REPLAY: 'x',
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stderr, `replay-dlq: ${UNREADABLE_CA_FILE}\n`);
+    assertNoSentinel(result.stdout + result.stderr, sentinel);
+  }
+  // Positive control: a readable CA passes; the next check (no password) refuses.
+  const dir = mkdtempSync(resolve(tmpdir(), 'replay-ca-'));
+  try {
+    writeFileSync(resolve(dir, 'ca.pem'), 'PEM');
+    const result = run({ KAFKA_SSL_CA_FILE: resolve(dir, 'ca.pem') });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /KAFKA_SASL_PASSWORD_OPS_REPLAY and the broker CA are required/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failure the tool did not write is printed by category, class and code only (#385 r6)', () => {
+  const broker = 'private-sentinel-79.invalid:1';
+  const error = Object.assign(new Error(`Connection error: getaddrinfo ENOTFOUND ${broker}`), {
+    name: 'KafkaJSConnectionError',
+    broker,
+    cause: Object.assign(new Error(`getaddrinfo ENOTFOUND ${broker}`), { code: 'ENOTFOUND' }),
+  });
+  assert.equal(
+    foreignFailureText('the Kafka operation failed', error),
+    'the Kafka operation failed (KafkaJSConnectionError, code ENOTFOUND); its own text is withheld',
+  );
+  // A code or name that is not shaped like one is not printed either.
+  const odd = Object.assign(new Error('x'), {
+    name: broker,
+    code: broker,
+    type: 'JZ97-another-secret',
+  });
+  assert.doesNotMatch(foreignFailureText('c', odd), /sentinel|jz97|another/i);
+  assert.equal(
+    foreignFailureText('c', undefined),
+    'c (unknown, code unknown); its own text is withheld',
+  );
 });

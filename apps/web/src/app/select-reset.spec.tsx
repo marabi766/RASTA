@@ -16,6 +16,7 @@ import { PlaceOrderForm } from './marketplace/[productId]/PlaceOrderForm';
 import { ReportRequestForm } from './maintenance/ReportRequestForm';
 import { RecordCostForm, RecordPartForm } from './maintenance/[id]/RepairOrderForms';
 import { StatementCommandForm } from './contracts/[id]/StatementCommandForm';
+import { SubmitQualificationForm } from './suppliers/SupplierForms';
 
 /**
  * A `<select>` keeps the choice a person made after an attempt is refused.
@@ -89,6 +90,20 @@ jest.mock('./contracts/[id]/statement-actions', () => {
     message: 'refused',
   });
   return { submitStatementDraft: refuseDraft, submitStatementCommand: refuseDraft };
+});
+
+jest.mock('./suppliers/supplier-actions', () => {
+  const { REFUSED_SUBMISSION } = jest.requireActual('@/test/refusal');
+  const { submitFormValues } = jest.requireActual('@/lib/supplier-commands');
+  // The qualification form keeps structured values (evidence rows): the same refusal, in that shape.
+  const refuseRequest = async (...args: unknown[]) => ({
+    kind: 'INVALID',
+    submissionId: REFUSED_SUBMISSION,
+    values: submitFormValues(args[args.length - 1] as FormData),
+    fieldErrors: {},
+    message: 'refused',
+  });
+  return { submitQualificationRequest: refuseRequest };
 });
 
 const CSRF = 'csrf-token-for-this-session';
@@ -228,6 +243,19 @@ const CASES = [
           { id: 'MST_2', title: 'دوم' },
         ]}
         pageHref="/contracts/CTR_1"
+      />
+    ),
+  },
+  {
+    form: 'send a supplier qualification request (capability)',
+    select: 'capability',
+    mount: () => (
+      <SubmitQualificationForm
+        supplierId="SUP_01J00000000000000000000000"
+        csrfToken={CSRF}
+        submissionId={SUBMISSION}
+        baseline={BASELINE}
+        capabilities={['GOODS_SUPPLY', 'CONTRACTING']}
       />
     ),
   },

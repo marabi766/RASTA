@@ -2,8 +2,9 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
+import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
+import noZodDefault from './scripts/no-zod-default-rule.mjs';
 
-/** Restated in `apps/web/eslint.config.mjs`, which does not extend this file. */
 const NO_ZOD_COERCE = [
   {
     selector: "MemberExpression[object.name='z'][property.name='coerce']",
@@ -74,6 +75,14 @@ const base = tseslint.config(
     },
   },
   {
+    // zod 4's `.default(value)` skips parsing `value`; `.prefault()` is zod 3's
+    // `.default()` (GHSA-mrhx-c7xc-m3w5). Every route to the method is refused
+    // — bracket, template, extraction, destructuring, call/apply/bind, Reflect
+    // (PR #444 r1 F2); `apps/web/eslint.config.mjs` loads the same rule.
+    plugins: { zod: { rules: { 'no-default': noZodDefault } } },
+    rules: { 'zod/no-default': 'error' },
+  },
+  {
     // Root `scripts/` — CI checkers, verifiers and campaign tooling, plain Node
     // ESM run by `node scripts/x.mjs` or `node --test`. They are not services:
     // there is no bundler, no DOM, and no structured logger to reach for.
@@ -93,7 +102,29 @@ const base = tseslint.config(
     },
   },
   {
-    files: ['**/env.ts'],
+    // Workspaces re-export this config, so paths must match from their cwd too.
+    files: ['**/src/**/*.ts', '**/dev/**/*.ts', '**/prisma/**/*.ts', 'scripts/**/*.{js,mjs,cjs}'],
+    ignores: [
+      '**/*.spec.ts',
+      '**/*.test.ts',
+      '**/*.test.mjs',
+      '**/*.int-spec.ts',
+      '**/*.e2e-spec.ts',
+      '**/test/**',
+    ],
+    plugins: { internal: { rules: { transport: internalTokenTransport } } },
+    rules: { 'internal/transport': 'error' },
+  },
+  {
+    // @rasta/config's URL reader is plain CommonJS so the scripts can import
+    // it before any build (url-reader.js); Node's CommonJS globals apply.
+    files: ['**/src/url-reader.js'],
+    languageOptions: { sourceType: 'commonjs', globals: { ...globals.node } },
+  },
+  {
+    // `env-issues.spec.ts` builds environment schemas as `env.ts` does, from
+    // the same string-only `process.env` input, to test their refusal texts.
+    files: ['**/env.ts', '**/env-issues.spec.ts'],
     rules: { 'no-restricted-syntax': 'off' },
   },
   {

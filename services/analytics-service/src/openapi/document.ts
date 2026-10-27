@@ -3,7 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { isOptionalField, objectShapeOf, toJsonSchema } from '@rasta/nest-common';
 import { DashboardController } from '../maintenance/dashboard.controller';
 import { DashboardService } from '../maintenance/dashboard.service';
 import { fleetDashboardQuerySchema, fleetDashboardViewSchema } from '../maintenance/dto';
@@ -25,7 +25,7 @@ import { kpisQuerySchema, kpisViewSchema } from '../kpis/dto';
  *     application.
  *
  * Payload shapes come from the Zod schemas the pipes validate with (`src/maintenance/dto.ts`),
- * converted by `zod-schema.ts`; Nest supplies paths, methods and parameters from the decorators.
+ * converted by `toJsonSchema`; Nest supplies paths, methods and parameters from the decorators.
  *
  * Regenerate after changing the API: `pnpm --filter @rasta/analytics-service openapi:generate`.
  */
@@ -180,42 +180,14 @@ function isOperation(value: unknown): value is MutableOperation {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
+function toQueryParameters(schema: z.ZodType): unknown[] {
   const shape = objectShapeOf(schema);
   if (!shape) return [];
 
   return Object.entries(shape).map(([name, member]) => ({
     name,
     in: 'query',
-    required: !member.isOptional(),
+    required: !isOptionalField(member),
     schema: toJsonSchema(member),
   }));
-}
-
-function objectShapeOf(schema: z.ZodTypeAny): z.ZodRawShape | undefined {
-  // JUSTIFIED-ANY: zod's `_def` is untyped across its type-kinds, and the walk below re-checks
-  // the kind before reading a field.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = schema;
-
-  for (let depth = 0; depth < 10; depth += 1) {
-    const typeName = current?._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-      return (current as z.ZodObject<z.ZodRawShape>).shape;
-    }
-    if (
-      typeName === z.ZodFirstPartyTypeKind.ZodEffects ||
-      typeName === z.ZodFirstPartyTypeKind.ZodOptional ||
-      typeName === z.ZodFirstPartyTypeKind.ZodDefault
-    ) {
-      current =
-        typeName === z.ZodFirstPartyTypeKind.ZodEffects
-          ? current._def.schema
-          : current._def.innerType;
-      continue;
-    }
-    return undefined;
-  }
-
-  return undefined;
 }

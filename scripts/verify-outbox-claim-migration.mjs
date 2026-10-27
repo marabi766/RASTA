@@ -53,6 +53,7 @@ import { createRequire } from 'node:module';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { assertB1Definitions, assertB1Inert, assertB1Objects } from './verify-outbox-b1-lib.mjs';
+import { readUrl } from '../packages/config/src/url-reader.js';
 import { withUtcSession } from './prisma-lib.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -240,7 +241,8 @@ const args = process.argv.slice(2);
 const only = args.find((a) => !a.startsWith('--'));
 const targets = only ? [only] : SERVICES;
 if (only && !SERVICES.includes(only)) {
-  console.error(`Unknown service "${only}". Known: ${SERVICES.join(', ')}`);
+  // Echoed only once it is one of SERVICES (#385 r6).
+  console.error(`Unknown service; it is not repeated. Known: ${SERVICES.join(', ')}`);
   process.exit(1);
 }
 
@@ -266,7 +268,7 @@ const inPlace = args.includes('--in-place');
 const schemaFlag = args.indexOf('--schema');
 const scratchSchema = schemaFlag >= 0 ? args[schemaFlag + 1] : 'outbox_claim_check';
 if (!/^[a-z_][a-z0-9_]*$/.test(scratchSchema)) {
-  console.error(`--schema must be a plain lowercase identifier, received "${scratchSchema}".`);
+  console.error('--schema must be a plain lowercase identifier; its value is not repeated.');
   process.exit(1);
 }
 
@@ -316,7 +318,10 @@ function verify(service) {
 
   // In UTC whatever the server's or the role's default (L7-37): the probe rows
   // below write `now()` into `timestamp(3)` columns.
-  const url = new URL(withUtcSession(baseUrl));
+  // Refused with a fixed text naming the settings, never the value (#385 r5).
+  const url = readUrl(withUtcSession(baseUrl), {
+    refusal: `${envKey}_MIGRATOR (else ${envKey}, else DATABASE_URL) cannot be read as a URL`,
+  });
   if (!inPlace) url.searchParams.set('schema', scratchSchema);
   const scratchUrl = url.toString();
 

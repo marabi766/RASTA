@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { toJsonSchema, type JsonSchema } from './zod-schema';
+import { isoDateTime, parsableUrl } from '@rasta/contracts';
+import { toJsonSchema, type JsonSchema } from '@rasta/nest-common';
 import { listTransactionsQuerySchema } from '../transaction/dto';
 import { listSettlementsQuerySchema } from '../settlement/dto';
 
@@ -56,9 +57,9 @@ describe('toJsonSchema', () => {
     const schema = z.object({
       amountMinor: z.string().regex(/^\d{1,30}$/),
       note: z.string().min(3).max(10),
-      when: z.string().datetime(),
+      when: z.string().check(isoDateTime()),
       email: z.string().email(),
-      link: z.string().url(),
+      link: z.string().check(parsableUrl()),
     });
 
     const properties = propertiesOf(schema);
@@ -100,7 +101,7 @@ describe('toJsonSchema', () => {
       status: z.enum(['ACTIVE', 'INACTIVE']),
       kind: z.literal('SETTLEMENT'),
       names: z.array(z.string()),
-      metadata: z.record(z.string()),
+      metadata: z.record(z.string(), z.string()),
     });
 
     const properties = propertiesOf(schema);
@@ -118,7 +119,7 @@ describe('toJsonSchema', () => {
     const schema = z.object({
       maybe: z.string().optional(),
       nullable: z.string().nullable(),
-      withDefault: z.string().default('IRR'),
+      withDefault: z.string().prefault('IRR'),
     });
 
     const properties = propertiesOf(schema);

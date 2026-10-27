@@ -3,7 +3,36 @@
 // running Prisma.
 // -----------------------------------------------------------------------------
 
+import { tryReadUrl } from '../packages/config/src/url-reader.js';
+
 const IDENTIFIER = /^[a-z_][a-z0-9_]*$/;
+
+/**
+ * The refusals of this file, as fixed texts (#385 r4): each names the setting
+ * or the URL component at fault, never what was written there. The URLs carry
+ * credentials, and every refusal reaches stderr — `prisma.mjs` prints it, and
+ * a CI or deployment log keeps it.
+ */
+export const MIGRATION_REFUSALS = Object.freeze({
+  unreadableUrl:
+    'the migrator or runtime database URL cannot be read as a URL, so the runtime role ' +
+    'keeps its rights on the migration ledger; correct the URL and run again',
+  runtimeRole:
+    'the runtime role (the username of DATABASE_URL_<SERVICE>) is not a plain lowercase ' +
+    'identifier, so it cannot be named in the ledger revoke',
+  schema:
+    'the schema (the schema parameter of DATABASE_URL_<SERVICE>_MIGRATOR) is not a plain ' +
+    'lowercase identifier, so it cannot be named in the ledger revoke',
+  statementTimeout:
+    'RASTA_MIGRATION_STATEMENT_TIMEOUT is not a positive duration such as 90s or 15min',
+});
+
+/**
+ * A fresh error carrying only `text`: no `cause`, and none of the properties a
+ * native error adds — `new URL` puts the whole input on `.input`, which an
+ * uncaught throw prints (#385 r4).
+ */
+const refusal = (text) => new Error(text);
 
 /**
  * The SQL that takes the migration ledger away from a service's runtime role
@@ -14,20 +43,17 @@ const IDENTIFIER = /^[a-z_][a-z0-9_]*$/;
  * The ledger is `_prisma_migrations` in the migrator URL's `schema` (Prisma's
  * own rule; `public` when absent). Identifiers are quoted, and refused unless
  * they are plain lowercase names — they come from configuration, and they are
- * interpolated into SQL.
+ * interpolated into SQL. Every refusal is one of {@link MIGRATION_REFUSALS}.
  */
 export function ledgerRevoke({ migratorUrl, runtimeUrl }) {
   if (!migratorUrl || !runtimeUrl) return null;
-  const migrator = new URL(migratorUrl);
-  const runtime = decodeURIComponent(new URL(runtimeUrl).username);
-  if (decodeURIComponent(migrator.username) === runtime) return null;
-  const schema = migrator.searchParams.get('schema') ?? 'public';
-  for (const [what, name] of [
-    ['runtime role', runtime],
-    ['schema', schema],
-  ]) {
-    if (!IDENTIFIER.test(name)) throw new Error(`the ${what} "${name}" is not a plain identifier`);
-  }
+  const read = readUrls(migratorUrl, runtimeUrl);
+  // Thrown here, outside the catch, so nothing of the native error travels with it.
+  if (read === null) throw refusal(MIGRATION_REFUSALS.unreadableUrl);
+  const { migratorRole, runtime, schema } = read;
+  if (migratorRole === runtime) return null;
+  if (!IDENTIFIER.test(runtime)) throw refusal(MIGRATION_REFUSALS.runtimeRole);
+  if (!IDENTIFIER.test(schema)) throw refusal(MIGRATION_REFUSALS.schema);
   return (
     'DO $$ BEGIN\n' +
     `  IF to_regclass('"${schema}"."_prisma_migrations"') IS NOT NULL THEN\n` +
@@ -35,6 +61,23 @@ export function ledgerRevoke({ migratorUrl, runtimeUrl }) {
     '  END IF;\n' +
     'END $$;\n'
   );
+}
+
+/** The parts `ledgerRevoke` needs, or null when either URL cannot be read. */
+function readUrls(migratorUrl, runtimeUrl) {
+  const migrator = tryReadUrl(migratorUrl);
+  const runtime = tryReadUrl(runtimeUrl);
+  if (migrator === null || runtime === null) return null;
+  try {
+    return {
+      migratorRole: decodeURIComponent(migrator.username),
+      runtime: decodeURIComponent(runtime.username),
+      schema: migrator.searchParams.get('schema') ?? 'public',
+    };
+  } catch {
+    // A username that is not valid percent-encoding: unreadable too.
+    return null;
+  }
 }
 
 /** The startup option every migration session is opened with (L7-37). */
@@ -71,15 +114,12 @@ export const MIGRATION_STATEMENT_TIMEOUT_SETTING = 'rasta.migration_statement_ti
  * `options`: one run's override of a rewrite migration's statement timeout,
  * for a table an operator sized above the default (D-048 runbook). Unchanged
  * when `value` is empty. Refused unless a positive whole number of ms, s, min
- * or h — it becomes a startup option.
+ * or h — it becomes a startup option — with a fixed text: what was written is
+ * not a number yet, so it is not repeated (#385 r4).
  */
 export function withMigrationStatementTimeout(url, value) {
   if (!value) return url;
-  if (!/^[1-9][0-9]*(ms|s|min|h)$/.test(value)) {
-    throw new Error(
-      `the migration statement timeout "${value}" is not a positive duration such as 90s or 15min`,
-    );
-  }
+  if (!/^[1-9][0-9]*(ms|s|min|h)$/.test(value)) throw refusal(MIGRATION_REFUSALS.statementTimeout);
   const { existing, withOptions } = splitOptions(url);
   const option = `-c ${MIGRATION_STATEMENT_TIMEOUT_SETTING}=${value}`;
   return withOptions(existing ? `${existing} ${option}` : option);
@@ -119,9 +159,11 @@ function splitOptions(url) {
   const isOptions = (pair) => decode(pair.split('=')[0] ?? '') === 'options';
   const written = pairs.filter(isOptions);
   if (written.length > 1) {
+    // The services' text, word for word (`packages/config` DATABASE_URL_REPEATED_OPTIONS): fixed,
+    // without the count (#385 r3), and pinned equal by scripts/db-session-utc.pg.test.mjs (4).
     throw new Error(
-      `DATABASE_URL has ${written.length} options parameters, and the driver keeps only the ` +
-        'last one; write every startup option in a single options parameter',
+      'DATABASE_URL has more than one options parameter, and the driver keeps only the last ' +
+        'one; write every startup option in a single options parameter',
     );
   }
   const [pair] = written;

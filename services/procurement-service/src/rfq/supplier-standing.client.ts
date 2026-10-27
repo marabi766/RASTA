@@ -1,6 +1,8 @@
+import { internalFetch } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ProcurementEnv } from '../config/env';
 
@@ -10,7 +12,7 @@ export const SUPPLIER_SERVICE = 'supplier-service';
 /** One organization's standing is a few short records; anything over this is not the contract. */
 export const MAX_STANDING_BYTES = 256 * 1024;
 
-const instant = z.string().datetime();
+const instant = z.string().check(isoDateTime());
 
 /**
  * What supplier-service answers for one organization (plan PR 5,
@@ -92,7 +94,7 @@ export class SupplierStandingClient implements SupplierStandingSource {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url, {
+      const response = await internalFetch(url, {
         method: 'GET',
         headers: {
           accept: 'application/json',

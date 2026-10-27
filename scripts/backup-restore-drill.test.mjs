@@ -9,6 +9,8 @@ import {
   checkEnvServiceCoverage,
   normalizeSchemaDump,
   schemaDumpEvidence,
+  dumpSchema,
+  collectSchemaReference,
   checkSourceReference,
   schemaReferenceEvidence,
   schemaDiffSummary,
@@ -22,12 +24,19 @@ import {
 } from './backup-restore-drill-lib.mjs';
 
 function snapshot() {
-  const schemaDump = schemaDumpEvidence(dumpFixture(), 'pg_dump (PostgreSQL) 16.4');
+  const collected = (database, label) =>
+    dumpSchema(database, label, () => ({
+      raw: dumpFixture(),
+      version: 'pg_dump (PostgreSQL) 16.4',
+    })).evidence;
+  const schemaDump = collected('fixture', 'source');
+  const ref = collected('drill_ref_0123456789abcdef', 'reference');
+  const fixed = collected('drill_fixed_0123456789abcdef', 'fixed-point');
   const reference = schemaReferenceEvidence(
     schemaDump,
-    schemaDump,
-    schemaDump,
-    checkSourceReference(schemaDump, schemaDump, 'fixture'),
+    ref,
+    fixed,
+    checkSourceReference(schemaDump, ref, 'fixture'),
   );
   return {
     reference,
@@ -409,6 +418,10 @@ test('SOURCE/REF allowance scopes identities by database/schema/table/name and p
   assert.deepEqual(checkSourceReference(source, ref, 'rasta_test'), {
     database: 'rasta_test',
     checkLinesDifferent: 2,
+    checkConstraints: [
+      { schema: 'public', table: 'sample', name: 'same_name' },
+      { schema: 'audit', table: 'sample', name: 'same_name' },
+    ],
   });
   // Honest trust boundary: even a different bound passes this structural guard.
   assert.equal(
@@ -468,4 +481,67 @@ test('missing REF, fixed point or allowance and unstable REF cannot pass operato
     assert.equal(drillPassed([bypass], 1, ledger(), ledger()), false);
   }
   assert.equal(drillPassed([result], 1, ledger(), ledger()), true);
+});
+
+test('dump provenance refuses aliases, forged evidence, wrong databases/labels and mixed invocations', () => {
+  const collected = (database, label) =>
+    dumpSchema(database, label, () => ({
+      raw: dumpFixture(),
+      version: referenceVersion,
+    })).evidence;
+  const source = collected('fixture', 'source');
+  const ref = collected('drill_ref_0123456789abcdef', 'reference');
+  const fixed = collected('drill_fixed_0123456789abcdef', 'fixed-point');
+  const accept = (a, b, c) =>
+    schemaReferenceEvidence(a, b, c, checkSourceReference(a, b, 'fixture'));
+  assert.ok(accept(source, ref, fixed));
+  for (const [a, b, c] of [
+    [ref, ref, ref],
+    [source, ref, ref],
+    [source, source, fixed],
+    [evidence(), ref, fixed],
+    [source, ref, evidence()],
+    [source, { ...ref, content: ref.content }, fixed],
+    [collected('other', 'source'), ref, fixed],
+    [collected('fixture', 'restored'), ref, fixed],
+    [source, collected('fixture', 'reference'), fixed],
+    [source, collected('drill_ref_0123456789abcdef', 'fixed-point'), fixed],
+    [source, ref, collected('drill_ref_0123456789abcdef', 'fixed-point')],
+    [source, ref, collected('drill_fixed_0123456789abcdef', 'reference')],
+    [source, ref, collected('drill_fixed_fedcba9876543210', 'fixed-point')],
+  ])
+    assert.throws(() => accept(a, b, c), /Invalid schema dump provenance/);
+});
+
+test('scratch DROP failures retain the exact original collection error and attempt both drops', async () => {
+  const original = new Error('original collection refusal');
+  const dropError = new Error('drop refusal');
+  const source = evidence(checkBody);
+  const dropped = [],
+    failed = [];
+  await assert.rejects(
+    collectSchemaReference({
+      database: 'fixture',
+      suffix: '0123456789abcdef',
+      sourceDump: source,
+      dump: () => ({ path: 'fixture.sql', evidence: source }),
+      create: () => {
+        throw original;
+      },
+      restore: () => {},
+      drop: (name) => {
+        dropped.push(name);
+        throw dropError;
+      },
+      scratchDropFailed: (name, error) => {
+        failed.push({ name, error });
+      },
+    }),
+    (error) => error === original,
+  );
+  assert.deepEqual(dropped, ['drill_ref_0123456789abcdef', 'drill_fixed_0123456789abcdef']);
+  assert.deepEqual(
+    failed,
+    dropped.map((name) => ({ name, error: dropError })),
+  );
 });

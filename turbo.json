@@ -1,7 +1,20 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "ui": "stream",
-  "globalDependencies": ["tsconfig.base.json", ".env"],
+  // Every Jest configuration loads the disclosure guard by path, not as a
+  // dependency (#452), so a change to it must re-run every package's tests
+  // rather than replay a cached green.
+  "globalDependencies": [
+    "tsconfig.base.json",
+    ".env",
+    "jest.disclosure-guard.cjs",
+    "packages/testing/src/disclosure-guard.ts",
+    "packages/testing/src/absence-guard.ts",
+    "packages/testing/src/disclosure.ts",
+    "tests/e2e/src/expect.ts",
+    "tests/e2e/src/api.ts",
+    "apps/web/e2e/expect.ts"
+  ],
   "globalEnv": ["NODE_ENV", "CI"],
   "tasks": {
     "build": {
@@ -46,7 +59,15 @@
       "env": ["DATABASE_URL", "DATABASE_URL_*", "RASTA_ALLOW_DEMO_SEED"]
     },
     "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
-    "lint": { "dependsOn": ["^build"], "outputs": [] },
+    "lint": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/eslint.config.mjs",
+        "$TURBO_ROOT$/scripts/internal-token-transport-rule.mjs"
+      ],
+      "outputs": []
+    },
     // KAFKA_BROKERS is the same trap again (D-005), found by AUD-004 Phase C2:
     // identity-service's `test` runs its integration project too, and its
     // Kafka suite skips itself when the variable is absent. Undeclared, turbo
@@ -90,6 +111,7 @@
         "INVENTORY_SERVICE_URL",
         "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
+        "KEYCLOAK_WRITE_SETTLE_SECONDS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
@@ -169,6 +191,7 @@
         "INVENTORY_SERVICE_URL",
         "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
+        "KEYCLOAK_WRITE_SETTLE_SECONDS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
@@ -206,6 +229,7 @@
         "DATABASE_STATEMENT_TIMEOUT_MS",
         "OUTBOX_CLAIM_LEASE_SECONDS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
+        "KEYCLOAK_WRITE_SETTLE_SECONDS",
         "REDIS_URL",
         "KAFKA_BROKERS",
         "KAFKA_SASL_*",
@@ -340,6 +364,7 @@
         "INVENTORY_SERVICE_URL",
         "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
+        "KEYCLOAK_WRITE_SETTLE_SECONDS",
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",

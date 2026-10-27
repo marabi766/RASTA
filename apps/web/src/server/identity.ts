@@ -35,30 +35,30 @@ const membershipSchema = z.object({
    * kept beside it because a future trimmed response may omit the key.
    */
   organizationName: z.string().nullable().optional(),
-  roles: z.array(z.string()).default([]),
+  roles: z.array(z.string()).prefault([]),
   status: z.string(),
 });
 
 const currentUserSchema = z.object({
   id: z.string(),
   username: z.string(),
-  firstName: z.string().default(''),
-  lastName: z.string().default(''),
+  firstName: z.string().prefault(''),
+  lastName: z.string().prefault(''),
   status: z.string(),
-  activeOrganizationId: z.string().nullable().default(null),
-  memberships: z.array(membershipSchema).default([]),
-  effectiveRoles: z.array(z.string()).default([]),
+  activeOrganizationId: z.string().nullable().prefault(null),
+  memberships: z.array(membershipSchema).prefault([]),
+  effectiveRoles: z.array(z.string()).prefault([]),
   /**
    * Which roles this person may grant, straight from the service's configured
    * ladder (`docs/24` Q-60). The member-management form renders its options
    * from this and from nothing else.
    *
-   * `.default([])` rather than required: an older identity-service that does
+   * `.prefault([])` rather than required: an older identity-service that does
    * not send it leaves the picker empty, which offers nothing rather than
    * guessing — and guessing is the whole failure mode this field exists to
    * remove. The service refuses an ungrantable role regardless.
    */
-  grantableRoles: z.array(z.string()).default([]),
+  grantableRoles: z.array(z.string()).prefault([]),
 });
 
 export type CurrentUser = z.infer<typeof currentUserSchema>;

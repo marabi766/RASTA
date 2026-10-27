@@ -14,8 +14,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { KEY_SENTINELS, SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 import {
   ALLOWED_ENVIRONMENTS,
   B2RefusalError,
@@ -68,6 +70,11 @@ test('an unknown service is refused rather than skipped', () => {
   assert.match(
     refusal(() => parseOptions(['--service', 'Document'], {})),
     /Unknown service/,
+  );
+  // Counted, never repeated (#385 r6).
+  assert.doesNotMatch(
+    refusal(() => parseOptions(['--service', 'supplier'], {})),
+    /supplier/,
   );
 });
 
@@ -168,7 +175,9 @@ test('an option missing its value is refused rather than reading the next flag',
 
 test('an unknown option is refused and the known ones are named', () => {
   const message = refusal(() => parseOptions(['--service', 'document', '--force'], {}));
-  assert.match(message, /Unknown option "--force"/);
+  // By position, never repeated (#385 r6); the known ones are this script's own.
+  assert.match(message, /Unknown option at position 3; it is not repeated/);
+  assert.doesNotMatch(message, /--force/);
   assert.match(message, /--apply/);
 });
 
@@ -192,6 +201,81 @@ test('an unrecognised NODE_ENV is refused rather than assumed safe', () => {
       /unrecognised NODE_ENV/,
       `NODE_ENV=${bad} was accepted`,
     );
+  }
+});
+
+// #385 r4: the interlock names the setting and the values it knows, never the
+// one it refused — through the library, and through both real CLIs, whose
+// whole output is one `refused` event, before any database is opened.
+const UNRECOGNISED_NODE_ENV =
+  'Refusing to run with an unrecognised NODE_ENV. Known: development, test, ci.';
+
+function runB2Cli(cli, argv, env) {
+  const childEnv = { PATH: process.env.PATH, HOME: process.env.HOME, ...env };
+  const result = spawnSync(process.execPath, [path.join(root, 'scripts', cli), ...argv], {
+    cwd: root,
+    encoding: 'utf8',
+    env: childEnv,
+  });
+  const events = result.stdout
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  return { ...result, events };
+}
+
+test('an unrecognised NODE_ENV is not repeated by the refusal', () => {
+  for (const sentinel of SENTINELS) {
+    const message = refusal(() => assertEnvironment({ NODE_ENV: sentinel }));
+    assert.equal(message, UNRECOGNISED_NODE_ENV);
+    assertNoSentinel(message, sentinel);
+  }
+});
+
+for (const cli of ['outbox-b2-backfill.mjs', 'outbox-b2-vacuum.mjs']) {
+  test(`${cli}: an unrecognised NODE_ENV is one fixed refusal, and nothing else`, () => {
+    for (const sentinel of SENTINELS) {
+      const run = runB2Cli(cli, ['--service', 'document'], { NODE_ENV: sentinel });
+      assert.equal(run.status, 1, run.stdout + run.stderr);
+      assert.equal(run.stderr, '');
+      assert.equal(run.events.length, 1, run.stdout);
+      const [{ at, ...event }] = run.events;
+      assert.ok(at);
+      assert.deepEqual(event, { type: 'refused', reason: UNRECOGNISED_NODE_ENV });
+      assertNoSentinel(run.stdout, `${cli} (${sentinel})`);
+    }
+  });
+
+  test(`${cli}: an allowed NODE_ENV passes the interlock (positive control)`, () => {
+    // No connection configured: the run gets past the environment check and
+    // refuses at the service's missing URL instead, naming the service.
+    const run = runB2Cli(cli, ['--service', 'document'], { NODE_ENV: 'test' });
+    assert.equal(run.status, 1);
+    const refused = run.events.find((event) => event.type === 'refused');
+    assert.equal(refused.service, 'document', run.stdout);
+    assert.match(refused.reason, /^DATABASE_URL_DOCUMENT(_MIGRATOR)? is not set/);
+  });
+}
+
+// The backfill's global owner-credential refusal is @rasta/config's (built
+// dist): an unregistered key is counted, never named, in any spelling.
+test('outbox-b2-backfill.mjs: an owner credential named for no service is counted, not named', () => {
+  for (const key of KEY_SENTINELS) {
+    for (const name of [`DATABASE_URL_${key}_MIGRATOR`, `POSTGRES_PASSWORD_${key}_MIGRATOR`]) {
+      const run = runB2Cli('outbox-b2-backfill.mjs', ['--service', 'document'], {
+        NODE_ENV: 'test',
+        [name]: 'x',
+      });
+      assert.equal(run.status, 1);
+      assert.equal(run.events.length, 1, run.stdout);
+      assert.equal(run.events[0].type, 'refused');
+      assert.match(
+        run.events[0].reason,
+        /\(1 more \*_MIGRATOR variable\(s\) named for no service\)/,
+      );
+      assertNoSentinel(run.stdout + run.stderr, name);
+    }
   }
 });
 

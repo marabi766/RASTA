@@ -1,6 +1,8 @@
+import { internalFetch } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { readCapped } from '../organization/organization-directory';
@@ -21,7 +23,7 @@ const liveSchema = z
         z.object({ organizationId, roles: z.array(z.string().min(1).max(64)).max(100) }).strict(),
       )
       .max(1000),
-    asOf: z.string().datetime(),
+    asOf: z.string().check(isoDateTime()),
   })
   .strict();
 
@@ -29,7 +31,7 @@ const sinceSchema = z
   .object({
     userId: z.string().min(1).max(64),
     organizationIds: z.array(organizationId).max(1000),
-    asOf: z.string().datetime(),
+    asOf: z.string().check(isoDateTime()),
   })
   .strict();
 
@@ -111,7 +113,7 @@ export class MembershipClient implements MembershipSource {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url, {
+      const response = await internalFetch(url, {
         method: 'GET',
         headers: {
           accept: 'application/json',

@@ -151,9 +151,9 @@ describe('who may evaluate and award — `canEvaluate`, `canAward`, `mayDecideAw
       "WEB_TENDER_AWARD_ROLES:roleList('WEB_TENDER_AWARD_ROLES','',['SYSTEM_ADMIN','CONTRACTOR']),",
     );
     expect(constructionEnv).toContain(
-      "CONSTRUCTION_COI_RULES:z.string().default('AWARDER_NOT_EVALUATOR')",
+      "CONSTRUCTION_COI_RULES:z.string().prefault('AWARDER_NOT_EVALUATOR')",
     );
-    expect(webEnv).toContain("WEB_TENDER_COI_RULES:z.string().default('AWARDER_NOT_EVALUATOR')");
+    expect(webEnv).toContain("WEB_TENDER_COI_RULES:z.string().prefault('AWARDER_NOT_EVALUATOR')");
     const rules = literalsOf(topLevelConst(constructionEnvTree, 'COI_RULES').getText());
     expect(webEnv).toContain(`z.enum([${rules.map((rule) => `'${rule}'`).join(',')}])`);
   });
@@ -334,7 +334,7 @@ describe('an authority of another organization (PR 346 review 1, finding 3)', ()
       'inboxScope():{organizationId:string;roles:readonlystring[]}{assertNotAuditor();',
     );
     expect(squash(topLevelConst(approvalDto, 'inboxQuerySchema').getText())).toContain(
-      "status:z.enum(APPROVAL_STATES).default('PENDING')",
+      "status:z.enum(APPROVAL_STATES).prefault('PENDING')",
     );
     expect(method(approvalService, 'get')).toContain(
       "this.access.assertCanSeeApproval(approval);//Whatanawardapprovalisaboutnamesabid:notshowntooneinconflictwiththetender.if(approval.workflowKey==='tender.award'){awaitthis.tenderApprovals.assertMayReadAward(approval);}",

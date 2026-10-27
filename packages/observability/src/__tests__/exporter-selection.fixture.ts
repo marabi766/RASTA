@@ -12,7 +12,8 @@
  * exports are caught here. stdout reports whether spans were recorded at all,
  * what the console exporter printed and whether shutdown failed.
  *
- * argv: <mode> [explicit otlpEndpoint]
+ * argv: <mode>; an explicit otlpEndpoint comes in FIXTURE_OTLP_ENDPOINT (no
+ * argument takes a URL, #385 r6).
  */
 import { trace } from '@opentelemetry/api';
 import { NodeSDK } from '@opentelemetry/sdk-node';
@@ -57,7 +58,8 @@ function baselineInitTelemetry(config: TelemetryConfig): NodeSDK {
 }
 
 async function main(): Promise<void> {
-  const [mode, otlpEndpoint] = process.argv.slice(1);
+  const [mode] = process.argv.slice(1);
+  const otlpEndpoint = process.env.FIXTURE_OTLP_ENDPOINT;
   const config: TelemetryConfig = { serviceName: 'exporter-selection-fixture', otlpEndpoint };
 
   const printed: string[] = [];

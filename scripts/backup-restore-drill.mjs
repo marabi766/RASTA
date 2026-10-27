@@ -9,12 +9,15 @@ import {
   readFileSync,
   rmSync,
   writeFileSync,
+  writeSync,
+  ftruncateSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import YAML from 'yaml';
+import { readUrl } from '../packages/config/src/url-reader.js';
 import { servicesFromLibrary } from './infra-preflight-lib.mjs';
 import {
   discoverSchemaServices,
@@ -22,9 +25,8 @@ import {
   checkEnvServiceCoverage,
   SCHEMA_DUMP_FLAGS,
   DUMP_RESTRICT_KEY,
-  schemaDumpEvidence,
-  checkSourceReference,
-  schemaReferenceEvidence,
+  dumpSchema,
+  collectSchemaReference,
   schemaDiffSummary,
   checkServiceCoverage,
   OBJECT_STATE_SQL,
@@ -53,7 +55,16 @@ if (args.length !== 2 || args[0] !== '--report') {
 }
 // Exclusive creation avoids overwriting an operator's file (including through a symlink).
 const reportPath = resolve(args[1]);
-const reportFd = openSync(reportPath, 'wx', 0o600);
+let reportFd;
+try {
+  reportFd = openSync(reportPath, 'wx', 0o600);
+} catch {
+  // Not the path, nor the error that quotes it (#385 r6).
+  console.error(
+    'the --report file cannot be created (it must not exist yet); its path is not repeated',
+  );
+  process.exit(2);
+}
 let temporary;
 let project;
 let composeFile;
@@ -83,6 +94,28 @@ const report = {
   databases: [],
   cleanup: { passed: false },
 };
+
+function writeReport() {
+  const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(reportFd, bytes, offset, bytes.length - offset, offset);
+    if (!written) throw new Error('Could not write report');
+    offset += written;
+  }
+  ftruncateSync(reportFd, bytes.length);
+}
+
+function commandError(options, exitCode, message) {
+  const error = new Error(options.privateOutput ? 'Private schema command failed' : message);
+  if (options.privateOutput)
+    error.privateFailure = {
+      stage: options.stage ?? stage,
+      database: options.database ?? null,
+      exitCode,
+    };
+  return error;
+}
 
 function stopActive() {
   if (active) {
@@ -144,14 +177,14 @@ async function run(command, argv, options = {}) {
     child.on('error', () => {
       clearTimeout(timer);
       active = undefined;
-      reject(new Error('Could not start command'));
+      reject(commandError(options, null, 'Could not start command'));
     });
     child.on('close', (code) => {
       clearTimeout(timer);
       active = undefined;
       if (code !== 0 || overflow) {
         if (options.privateOutput) {
-          reject(new Error('Private schema command failed'));
+          reject(commandError(options, code, 'Private schema command failed'));
           return;
         }
         const detail =
@@ -190,48 +223,46 @@ const psql = (container, database, input, options = {}) =>
 
 let dumpVersion;
 let schemaDumpFlags;
-async function dumpSchema(container, database, label) {
-  const started = performance.now();
-  const version = await run('docker', ['exec', container, 'pg_dump', '--version']);
-  if (dumpVersion && version !== dumpVersion)
-    throw new Error('Schema dump binary version mismatch');
-  if (!dumpVersion) {
-    dumpVersion = version;
-    const help = await run('docker', ['exec', container, 'pg_dump', '--help']);
-    schemaDumpFlags = [
-      ...SCHEMA_DUMP_FLAGS,
-      ...(help.includes('--restrict-key') ? [`--restrict-key=${DUMP_RESTRICT_KEY}`] : []),
-    ];
-  }
-  const raw = await run(
-    'docker',
-    ['exec', container, 'pg_dump', ...schemaDumpFlags, '-U', 'rasta', '-d', database],
-    { raw: true, privateOutput: true, timeout: 60_000 },
-  );
-  const path = join(temporary, `${database}-${label}.schema.sql`);
-  writeFileSync(path, raw, { mode: 0o600 });
-  return {
-    path,
-    evidence: schemaDumpEvidence(raw, version, Math.round(performance.now() - started)),
-  };
+async function collectSchemaDump(container, database, label) {
+  return dumpSchema(database, label, async () => {
+    const started = performance.now();
+    const version = await run('docker', ['exec', container, 'pg_dump', '--version']);
+    if (dumpVersion && version !== dumpVersion)
+      throw new Error('Schema dump binary version mismatch');
+    if (!dumpVersion) {
+      dumpVersion = version;
+      const help = await run('docker', ['exec', container, 'pg_dump', '--help']);
+      schemaDumpFlags = [
+        ...SCHEMA_DUMP_FLAGS,
+        ...(help.includes('--restrict-key') ? [`--restrict-key=${DUMP_RESTRICT_KEY}`] : []),
+      ];
+    }
+    const raw = await run(
+      'docker',
+      ['exec', container, 'pg_dump', ...schemaDumpFlags, '-U', 'rasta', '-d', database],
+      { raw: true, privateOutput: true, database, timeout: 60_000 },
+    );
+    const path = join(temporary, `${database}-${label}.schema.sql`);
+    writeFileSync(path, raw, { mode: 0o600 });
+    return { path, raw, version, milliseconds: Math.round(performance.now() - started) };
+  });
 }
 
 async function collectReference(container, database, sourceDump) {
-  const started = performance.now();
-  // Ownership comes from names generated by this invocation, never restored markers.
   const suffix = project.slice('restore-drill-'.length);
-  const scratch = [`drill_ref_${suffix}`, `drill_fixed_${suffix}`];
-  report.scratchDatabases = scratch;
-  const separate = await dumpSchema(container, database, 'reference-input');
-  if (!sourceDump.content.equals(separate.evidence.content))
-    throw new Error('SOURCE schema changed during collection');
-  let reference, fixedPoint;
-  try {
-    for (const [index, name] of scratch.entries()) {
-      await psql(container, 'postgres', `CREATE DATABASE "${name}" TEMPLATE template0;`, {
+  report.scratchDatabases = [`drill_ref_${suffix}`, `drill_fixed_${suffix}`];
+  return collectSchemaReference({
+    database,
+    suffix,
+    sourceDump,
+    dump: (name, label) => collectSchemaDump(container, name, label),
+    create: (name) =>
+      psql(container, 'postgres', `CREATE DATABASE "${name}" TEMPLATE template0;`, {
         privateOutput: true,
-      });
-      const fd = openSync(index === 0 ? separate.path : reference.path, 'r');
+        database: name,
+      }),
+    restore: async (name, path) => {
+      const fd = openSync(path, 'r');
       try {
         await run(
           'docker',
@@ -249,36 +280,34 @@ async function collectReference(container, database, sourceDump) {
             '-d',
             name,
           ],
-          { inputFd: fd, privateOutput: true, timeout: 60_000 },
+          { inputFd: fd, privateOutput: true, database: name, timeout: 60_000 },
         );
       } finally {
         closeSync(fd);
       }
-      const dumped = await dumpSchema(container, name, index === 0 ? 'reference' : 'fixed-point');
-      if (index === 0) reference = dumped;
-      else fixedPoint = dumped;
-    }
-    const allowance = checkSourceReference(sourceDump, reference.evidence, database);
-    return schemaReferenceEvidence(
-      sourceDump,
-      reference.evidence,
-      fixedPoint.evidence,
-      allowance,
-      Math.round(performance.now() - started),
-    );
-  } finally {
-    // Signals use the same owned-cluster teardown, even when a child was killed mid-restore.
-    if (!interrupted)
-      for (const name of scratch)
-        await psql(container, 'postgres', `DROP DATABASE IF EXISTS "${name}" WITH (FORCE);`, {
-          privateOutput: true,
-        });
-  }
+    },
+    drop: (name) =>
+      psql(container, 'postgres', `DROP DATABASE IF EXISTS "${name}" WITH (FORCE);`, {
+        privateOutput: true,
+        database: name,
+        stage: 'scratch drop',
+      }),
+    shouldDrop: () => !interrupted,
+    scratchDropFailed: (name, error) => {
+      (report.scratchDropFailed ??= []).push(
+        error.privateFailure ?? {
+          stage: 'scratch drop',
+          database: name,
+          exitCode: null,
+        },
+      );
+    },
+  });
 }
 
 async function snapshot(container, service) {
   const database = `rasta_${service}`;
-  const { evidence: schemaDump } = await dumpSchema(
+  const { evidence: schemaDump } = await collectSchemaDump(
     container,
     database,
     container.endsWith('-source') ? 'source' : 'restored',
@@ -317,6 +346,9 @@ try {
   temporary = mkdtempSync(join(tmpdir(), 'rasta-restore-drill-'));
   project = `restore-drill-${randomBytes(8).toString('hex')}`;
   report.project = project;
+  report.temporary = temporary;
+  // Persist cleanup ownership before any child can allocate resources (including SIGKILL).
+  writeReport();
   composeFile = join(temporary, 'compose.json');
   services = servicesFromLibrary(
     readFileSync(join(ROOT, 'infrastructure/docker/postgres/lib/role-passwords.bash'), 'utf8'),
@@ -404,7 +436,7 @@ try {
   const dbEnv = { ...env };
   for (const [key, value] of Object.entries(examples)) {
     if (!key.startsWith('DATABASE_URL_')) continue;
-    const url = new URL(value);
+    const url = readUrl(value, { refusal: `${key} in the published examples is not a URL` });
     url.hostname = '127.0.0.1';
     url.port = port;
     dbEnv[key] = url.toString();
@@ -413,7 +445,12 @@ try {
     const cwd = join(ROOT, 'services', `${service}-service`);
     const pkg = JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8'));
     progress(`migrate ${service}`);
-    await run('pnpm', ['run', 'db:migrate'], { cwd, env: dbEnv });
+    await run('pnpm', ['run', 'db:migrate'], {
+      cwd,
+      env: dbEnv,
+      privateOutput: true,
+      database: `rasta_${service}`,
+    });
     if (pkg.scripts['db:seed']) {
       progress(`generate and demo seed ${service}`);
       await run('pnpm', ['exec', 'prisma', 'generate'], { cwd, env: dbEnv });
@@ -447,7 +484,7 @@ try {
       await run(
         'docker',
         ['exec', source, 'pg_dump', '-U', 'rasta', '-Fc', '-d', `rasta_${service}`],
-        { outputFd: fd },
+        { outputFd: fd, privateOutput: true, database: `rasta_${service}` },
       );
     } finally {
       closeSync(fd);
@@ -479,7 +516,7 @@ try {
           '-d',
           'postgres',
         ],
-        { inputFd: fd },
+        { inputFd: fd, privateOutput: true, database: `rasta_${service}` },
       );
     } finally {
       closeSync(fd);
@@ -507,7 +544,7 @@ try {
   );
 } catch (error) {
   // Command failures retain bounded diagnostics with database URLs redacted.
-  report.error = { stage, message: error.message };
+  report.error = error.privateFailure ?? { stage, message: error.message };
   report.passed = false;
 } finally {
   cleaning = true;
@@ -548,7 +585,7 @@ try {
   report.finishedAt = new Date().toISOString();
   report.interrupted = interrupted;
   if (interrupted) report.passed = false;
-  writeFileSync(reportFd, `${JSON.stringify(report, null, 2)}\n`);
+  writeReport();
   closeSync(reportFd);
 }
 console.log(

@@ -1,3 +1,4 @@
+import { legacyParse } from '@rasta/contracts';
 import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { z } from 'zod';
 import type { EventEnvelope } from '@rasta/contracts';
@@ -9,6 +10,7 @@ import {
   type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { IDENTITY_EVENTS } from '../identity/events';
+import { withCancellation } from '../prisma/cancellation';
 import { KeycloakProjector } from './keycloak.projector';
 
 /**
@@ -44,6 +46,13 @@ export type EventConsumerFactory = (handler: EventHandler) => EventConsumer;
 export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(KeycloakProjectionConsumer.name);
   private consumer?: EventConsumer;
+  /**
+   * Aborted when the bounded stop returns — the handler in flight drained, or
+   * abandoned at the deadline (#402 r2 F2): the projection it runs cancels its
+   * Keycloak call, and every database operation it would start next is
+   * refused (`prisma/cancellation.ts`).
+   */
+  private cancel = new AbortController();
 
   constructor(
     /** Null when Keycloak sync is off: there is nothing to project into. */
@@ -56,6 +65,7 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
       this.logger.warn('Keycloak re-projection consumer disabled — Keycloak sync is off');
       return;
     }
+    this.cancel = new AbortController();
     this.consumer = this.consumerFactory((envelope) => this.handle(envelope));
     await this.consumer.start();
   }
@@ -67,10 +77,14 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
    * again, which the projection absorbs by construction (above). Before, its
    * own `onModuleDestroy` stopped the consumer with no bound, so a Keycloak
    * write or a dead letter that hung held the close into the forced exit.
-   * Keycloak sync off, there is nothing to stop.
+   * Keycloak sync off, there is nothing to stop. When it returns, the
+   * projection of a handler it abandoned is cancelled (`cancel`).
    */
   stop(options?: OutboxStopOptions): Promise<void> {
-    return this.consumer?.stop(options) ?? Promise.resolve();
+    const stopping = this.consumer?.stop(options) ?? Promise.resolve();
+    // Once the stop returns, the handler it may have abandoned starts nothing
+    // more — before the caller resumes.
+    return stopping.finally(() => this.cancel.abort());
   }
 
   /** Joins the stop `OutboxShutdown` began; returns at once. */
@@ -88,15 +102,18 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
   async handle(envelope: EventEnvelope): Promise<HandlerOutcome> {
     if (!REPROJECTED_EVENTS.includes(envelope.eventName)) return 'SKIPPED';
 
-    const parsed = namesUser.safeParse(envelope.payload);
+    const parsed = legacyParse(namesUser, envelope.payload);
     if (!parsed.success) {
       // The producer is this service, and publish-time validation requires the
       // field; a payload without it is a defect a retry cannot fix. Dead-lettered
       // at once rather than acknowledged, so the missed projection has a record
       // an operator sees (audit L7-26, docs/07 § 7.6).
-      throw invalidPayloadError(envelope, parsed.error, Object.keys(namesUser.shape));
+      throw invalidPayloadError(envelope, parsed.refusal, Object.keys(namesUser.shape));
     }
 
-    await this.projector.project(parsed.data.userId, 'event');
+    const { signal } = this.cancel;
+    await withCancellation(signal, () =>
+      this.projector.project(parsed.data.userId, 'event', { signal }),
+    );
   }
 }

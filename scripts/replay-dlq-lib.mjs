@@ -56,6 +56,28 @@ export const OPERATOR_PATTERN = /^[A-Za-z0-9._@-]{1,64}$/;
 
 export class UsageError extends Error {}
 
+/** A refusal of the tool's own, mid-run: a fixed text, or one naming a topic of topics.txt. */
+export class ReplayFailure extends Error {}
+
+/**
+ * A failure the tool did not write — kafkajs's, a socket's — as it is
+ * printed: a fixed category and a code whose shape is checked (a kafkajs
+ * protocol type, a system error code), never its text, which quotes the
+ * broker it dialled or the broker's answer (#385 r6, the configuration-
+ * disclosure class).
+ */
+export function foreignFailureText(category, error) {
+  let code = 'unknown';
+  for (const candidate of [error?.type, error?.code, error?.cause?.code]) {
+    if (typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(candidate)) {
+      code = candidate;
+      break;
+    }
+  }
+  const type = /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error?.name ?? '') ? error.name : 'unknown';
+  return `${category} (${type}, code ${code}); its own text is withheld`;
+}
+
 const OFFSET = /^\d+$/;
 
 /**
@@ -112,7 +134,8 @@ export function parseArgs(argv) {
         options.execute = true;
         break;
       default:
-        throw new UsageError(`unknown argument ${flag}`);
+        // Echoed only once it matched a case above (#385 r6).
+        throw new UsageError(`unknown argument at position ${i + 1}; it is not repeated`);
     }
   }
 
@@ -192,7 +215,7 @@ export function parseTopics(text) {
  */
 export function topologyOf(dlq, { topics, consumers }) {
   if (topics.get(dlq) !== 'dead-letter') {
-    throw new UsageError(`${dlq} is not a dead-letter topic in topics.txt`);
+    throw new UsageError('--dlq is not a dead-letter topic in topics.txt; it is not repeated');
   }
   const owners = Object.entries(consumers).filter(([, c]) => c.deadLetterTopic === dlq);
   if (owners.length !== 1) {
@@ -357,7 +380,7 @@ const RECORD_PROBE = Object.freeze({
  * stood in by `0`; the run's report id and operator are checked on their own.
  */
 export function recordProblem(summary, contracts) {
-  const probe = contracts.replayExecutedPayloadSchemaV1.safeParse({
+  const probe = contracts.legacyParse(contracts.replayExecutedPayloadSchemaV1, {
     ...RECORD_PROBE,
     replayedEvent: {
       eventId: summary.eventId,
@@ -371,7 +394,7 @@ export function recordProblem(summary, contracts) {
     stale: false,
   });
   if (probe.success) return null;
-  return probe.error.issues[0].path.join('.') || '(root)';
+  return probe.refusal.issues[0].path.join('.') || '(root)';
 }
 
 /**
@@ -490,8 +513,12 @@ export function parseCheckArgs(argv) {
     '--replayed-at': 'replayedAt',
   };
   for (let i = 0; i < argv.length; i += 2) {
-    const name = flags[argv[i]];
-    if (!name) throw new UsageError(`unknown argument ${argv[i]} with --check-marker`);
+    const name = Object.hasOwn(flags, argv[i]) ? flags[argv[i]] : undefined;
+    if (!name) {
+      throw new UsageError(
+        `unknown argument at position ${i + 1} with --check-marker; it is not repeated`,
+      );
+    }
     const next = argv[i + 1];
     if (next === undefined || next.startsWith('--'))
       throw new UsageError(`${argv[i]} needs a value`);
@@ -641,14 +668,16 @@ export function replayExecutedRecord(
     actor: { type: 'USER', id: operator },
     payload,
   };
-  const checkedPayload = contracts.replayExecutedPayloadSchemaV1.safeParse(payload);
-  const checkedEnvelope = contracts.eventEnvelopeSchema.safeParse(envelope);
+  // zod 3's codes against the schema that refused, as audit's ops-replay
+  // mapper names them for the same record (PR #444 r1 F1).
+  const checkedPayload = contracts.legacyParse(contracts.replayExecutedPayloadSchemaV1, payload);
+  const checkedEnvelope = contracts.legacyParse(contracts.eventEnvelopeSchema, envelope);
   if (!checkedPayload.success || !checkedEnvelope.success) {
     const issues = [
-      ...(checkedPayload.success ? [] : checkedPayload.error.issues),
-      ...(checkedEnvelope.success ? [] : checkedEnvelope.error.issues),
+      ...(checkedPayload.success ? [] : checkedPayload.refusal.issues),
+      ...(checkedEnvelope.success ? [] : checkedEnvelope.refusal.issues),
     ].map((issue) => `${issue.path.join('.') || '(root)'} ${issue.code}`);
-    throw new Error(`the replay record breaks its contract: ${issues.join(', ')}`);
+    throw new ReplayFailure(`the replay record breaks its contract: ${issues.join(', ')}`);
   }
   const { EVENT_HEADERS } = contracts;
   const headers = {

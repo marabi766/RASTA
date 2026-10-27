@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Page } from '@playwright/test';
+import { test, type Page } from './expect';
+import { expect } from './expect';
 
 import { installLiveSession } from './live-session';
 
@@ -99,6 +100,7 @@ const SIGNED_IN_PAGES: readonly { readonly path: string; readonly title: string 
   { path: '/maintenance', title: 'نگهداری و تعمیرات' },
   { path: '/maintenance/MNT-SEED-0001', title: /.+/ },
   { path: '/usage', title: 'ثبت کارکرد' },
+  { path: '/suppliers', title: 'تامین‌کنندگان' },
   { path: '/projects', title: 'پروژه‌های عمرانی' },
   { path: '/organizations', title: /.+/ },
 ];

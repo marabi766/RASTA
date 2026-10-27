@@ -38,6 +38,7 @@ import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { readUrl, tryReadUrl } from '../packages/config/src/url-reader.js';
 import { libpqInvocation } from './verify-migration-reversible-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -71,7 +72,7 @@ const CASES = [
 
 /** The same server and credentials, but the `postgres` database: never marked. */
 function unmarkedSibling(url) {
-  const parsed = new URL(url);
+  const parsed = readUrl(url);
   parsed.pathname = '/postgres';
   return parsed.toString();
 }
@@ -93,7 +94,7 @@ const SNAPSHOT_SQL = `
 function psql(url, sql, extraOptions = '') {
   // psql does not understand Prisma's `?schema=` parameter; pass it as the
   // search_path instead, so current_schema() is the schema the seed writes.
-  const parsed = new URL(url);
+  const parsed = readUrl(url);
   const schema = parsed.searchParams.get('schema') ?? 'public';
   parsed.search = '';
   // The password travels in the environment, never in psql's argv.
@@ -156,7 +157,7 @@ function markerProblems(service, url, { probe, setting }) {
     problems.push(`${service}: a session-level ${setting} fooled the probe (${spoofed})`);
   }
 
-  const database = new URL(url).pathname.slice(1);
+  const database = readUrl(url).pathname.slice(1);
   const self = psql(url, `ALTER DATABASE "${database}" SET ${setting} = 'true'`);
   if (self.status === 0) {
     problems.push(`${service}: the service role could set ${setting} on its own database`);
@@ -187,6 +188,12 @@ for (const service of SERVICES) {
   const url = withDatabase ? process.env[urlKey] : CLOSED_PORT_URL;
   if (!url) {
     failures.push(`${service}: ${urlKey} is not set (required with --with-database)`);
+    continue;
+  }
+  // Refused by name before anything parses it again: `new URL`'s own error
+  // carries the value whole, password included (#385 r5).
+  if (tryReadUrl(url) === null) {
+    failures.push(`${service}: ${urlKey} cannot be read as a URL; its value is not repeated`);
     continue;
   }
 

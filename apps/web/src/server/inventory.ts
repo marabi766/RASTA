@@ -56,8 +56,8 @@ export type StockItemSummary = z.infer<typeof stockItemSchema>;
 function pageSchema<S extends z.ZodTypeAny>(item: S) {
   return z.object({
     items: z.array(item),
-    nextCursor: z.string().nullable().default(null),
-    hasMore: z.boolean().default(false),
+    nextCursor: z.string().nullable().prefault(null),
+    hasMore: z.boolean().prefault(false),
   });
 }
 

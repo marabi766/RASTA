@@ -1,5 +1,7 @@
+import { internalFetch } from '@rasta/nest-common';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
@@ -97,14 +99,20 @@ const answerSchemas: Record<WorkOwner, z.ZodType<Record<string, unknown>>> = {
     assetId: z.string(),
     fenceId: z.string(),
     clear: z.boolean(),
-    fencedUntil: z.string().datetime({ offset: true }).nullable(),
+    fencedUntil: z
+      .string()
+      .check(isoDateTime({ offset: true }))
+      .nullable(),
     openAssignments: count,
   }),
   [MAINTENANCE_SERVICE]: z.object({
     assetId: z.string(),
     fenceId: z.string(),
     clear: z.boolean(),
-    fencedUntil: z.string().datetime({ offset: true }).nullable(),
+    fencedUntil: z
+      .string()
+      .check(isoDateTime({ offset: true }))
+      .nullable(),
     openRequests: count,
     openRepairOrders: count,
   }),
@@ -250,9 +258,10 @@ export class TransferClearanceClient implements TransferClearance {
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     timer.unref?.();
     try {
-      const response = await this.fetchImpl(
+      const response = await internalFetch(
         `${this.options.baseUrls[owner].replace(/\/+$/, '')}${path}`,
         { method, headers, body, signal: controller.signal },
+        this.fetchImpl,
       );
       // The body is read inside the deadline too, and an answer that arrives
       // after it is not taken, even from a transport that ignored the abort.

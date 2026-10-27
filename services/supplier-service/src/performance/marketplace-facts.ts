@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, isoDateTime, legacyParse } from '@rasta/contracts';
 import { UnprocessableEventError } from '@rasta/nest-common';
 import { RESPONSIBILITY_ATTRIBUTIONS } from './components';
 import type { ConcludedOutcomeInput } from './concluded-outcome';
@@ -44,7 +44,7 @@ import type { PerformanceEventInput } from './performance-event';
 export const SUPPORTED_EVENT_VERSION = 1;
 
 const text = z.string().min(1);
-const instant = z.string().datetime({ offset: true });
+const instant = z.string().check(isoDateTime({ offset: true }));
 const attribution = z.enum(RESPONSIBILITY_ATTRIBUTIONS);
 
 /** The parties every consumed event names. § 5 reads the buyer; the fact is the supplier's. */
@@ -106,11 +106,11 @@ export function marketplaceContribution(envelope: EventEnvelope): MarketplaceCon
     );
   }
 
-  const parsed = CONSUMED_PAYLOADS[eventName].safeParse(envelope.payload);
+  const parsed = legacyParse(CONSUMED_PAYLOADS[eventName], envelope.payload);
   if (!parsed.success) {
     // Paths only: a message never repeats payload values (S-09).
     const paths = [
-      ...new Set(parsed.error.issues.map((issue) => issue.path.join('.') || '(root)')),
+      ...new Set(parsed.refusal.issues.map((issue) => issue.path.join('.') || '(root)')),
     ];
     throw new UnprocessableEventError(
       DLQ_REASONS.VALIDATION_FAILED,

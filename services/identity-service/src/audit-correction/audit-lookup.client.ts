@@ -1,4 +1,6 @@
+import { internalFetch } from '@rasta/nest-common';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
@@ -42,7 +44,7 @@ const auditTargetSchema = z
   .object({
     id: z.string().min(1).max(64),
     organizationId: z.string().min(1).max(128).nullable(),
-    occurredAt: z.string().datetime({ offset: true }),
+    occurredAt: z.string().check(isoDateTime({ offset: true })),
   })
   .strict();
 
@@ -102,7 +104,11 @@ export class AuditLookupClient {
     try {
       let response: Response;
       try {
-        response = await this.fetchImpl(url, { method: 'GET', headers, signal: controller.signal });
+        response = await internalFetch(
+          url,
+          { method: 'GET', headers, signal: controller.signal },
+          this.fetchImpl,
+        );
       } catch {
         // No cause attached: a runtime's transport error can quote the URL.
         throw controller.signal.aborted

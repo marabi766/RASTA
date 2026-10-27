@@ -7,6 +7,8 @@ import {
   assertActingAsSupplier,
   assertCanDecideAbout,
   assertCanReviewQualifications,
+  mayReadReviewerNote,
+  type SupplierOwnership,
 } from '../access/access';
 import { isUniqueViolation } from '../shared/prisma-errors';
 import { transactionNow } from '../shared/clock';
@@ -15,9 +17,9 @@ import { page, requireActor } from './supplier.service';
 import {
   assertNoBlockingQualification,
   assertQualificationTransition,
-  isCurrentlyQualified,
   type QualificationStateName,
 } from './qualification.state-machine';
+import { toQualificationView, type QualificationRow } from './views';
 import type {
   ApproveQualificationDto,
   QualificationView,
@@ -25,7 +27,6 @@ import type {
   ReviewQueueQuery,
   SubmitQualificationDto,
 } from './dto';
-import type { SupplierCapability } from './capabilities';
 import {
   qualificationDecisionsTotal,
   qualificationsSubmittedTotal,
@@ -124,7 +125,7 @@ export class QualificationService {
 
     qualificationsSubmittedTotal.inc({ service: SERVICE_NAME, capability: dto.capability });
 
-    return this.viewOf(qualificationId, supplier.status === 'SUSPENDED');
+    return this.viewOf(qualificationId, supplier);
   }
 
   /** ApproveQualification. */
@@ -203,6 +204,9 @@ export class QualificationService {
         decidedAt,
         decidedCorrelationId: context.correlationId,
         decisionNote: decision.note,
+        // The supplier-visible reason lives on the row as well as on the event:
+        // the event is a seven-day log, the row is the supplier's record of why.
+        rejectionReason: state === 'REJECTED' ? decision.reason : null,
       });
 
       if (changed === 0) {
@@ -258,7 +262,7 @@ export class QualificationService {
       capability: qualification.capability,
     });
 
-    return this.viewOf(qualificationId, supplier.status === 'SUSPENDED');
+    return this.viewOf(qualificationId, supplier);
   }
 
   /**
@@ -289,58 +293,31 @@ export class QualificationService {
     });
 
     return page(rows, query.limit, (row) => ({
-      ...projectQualification(row, row.supplier.status === 'SUSPENDED'),
+      // Per row: the queue crosses suppliers, and a reviewer who belongs to one
+      // of them reads that one's notes no more than its own organization does.
+      ...toQualificationView(
+        row as unknown as QualificationRow,
+        row.supplier.status === 'SUSPENDED',
+        { reviewer: mayReadReviewerNote(row.supplier) },
+      ),
       supplierId: row.supplier.id,
       supplierOrganizationId: row.supplier.organizationId,
       supplierDisplayName: row.supplier.displayName,
     }));
   }
 
-  private async viewOf(qualificationId: string, supplierSuspended: boolean) {
+  private async viewOf(
+    qualificationId: string,
+    supplier: SupplierOwnership & { readonly status: string },
+  ): Promise<QualificationView> {
     const row = await this.repository.findQualification(qualificationId);
     if (!row) {
       throw RastaError.internal('The qualification disappeared immediately after being written');
     }
-    return projectQualification(row, supplierSuspended);
+    return toQualificationView(
+      row as unknown as QualificationRow,
+      supplier.status === 'SUSPENDED',
+      { reviewer: mayReadReviewerNote(supplier) },
+    );
   }
-}
-
-/**
- * The private qualification projection.
- *
- * Deliberately not exported through `views.ts`'s directory path: this shape
- * carries evidence document identifiers and the reviewer's note, and the only
- * readers are the supplier's own organization and platform operators.
- */
-function projectQualification(
-  row: {
-    id: string;
-    capability: string;
-    state: string;
-    statement: string | null;
-    submittedBy: string;
-    submittedAt: Date;
-    decidedBy: string | null;
-    decidedAt: Date | null;
-    decisionNote: string | null;
-    evidence: { documentId: string; label: string | null }[];
-  },
-  supplierSuspended: boolean,
-): QualificationView {
-  return {
-    id: row.id,
-    capability: row.capability as SupplierCapability,
-    state: row.state as QualificationStateName,
-    statement: row.statement,
-    submittedBy: row.submittedBy,
-    submittedAt: row.submittedAt.toISOString(),
-    decidedBy: row.decidedBy,
-    decidedAt: row.decidedAt?.toISOString() ?? null,
-    decisionNote: row.decisionNote,
-    evidence: row.evidence.map((item) => ({ documentId: item.documentId, label: item.label })),
-    current: isCurrentlyQualified({
-      state: row.state as QualificationStateName,
-      supplierSuspended,
-    }),
-  };
 }

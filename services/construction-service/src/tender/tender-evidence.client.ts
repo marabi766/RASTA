@@ -1,6 +1,8 @@
+import { internalFetch } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
 import { readCapped } from '../organization/organization-directory';
@@ -30,7 +32,7 @@ export const tenderChainSchema = z
           seq: z.number().int().positive(),
           bidId: z.string().min(1).max(128),
           revision: z.number().int().positive(),
-          receivedAt: z.string().datetime(),
+          receivedAt: z.string().check(isoDateTime()),
           ciphertextSha256: digest,
           contentCommitment: digest,
           previousReceipt: digest,
@@ -86,7 +88,7 @@ export class TenderEvidenceClient implements TenderEvidenceSource {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url, {
+      const response = await internalFetch(url, {
         method: 'GET',
         headers: {
           accept: 'application/json',

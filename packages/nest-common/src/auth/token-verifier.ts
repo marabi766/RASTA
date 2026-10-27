@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify, SignJWT, type JWTPayload } from 'jose';
+import { readUrl } from '@rasta/config';
 import { RastaError } from '../errors/rasta-error';
 
 /**
@@ -101,7 +102,12 @@ export class TokenVerifier {
   private readonly jwks: ReturnType<typeof createRemoteJWKSet>;
 
   constructor(private readonly options: TokenVerifierOptions) {
-    this.jwks = createRemoteJWKSet(new URL(options.jwksUri), {
+    // A fixed refusal, never the URI: `new URL`'s own error keeps the whole
+    // input on `.input` (#385 r5).
+    const jwksUri = readUrl(options.jwksUri, {
+      refusal: 'the JWKS URI (OIDC_JWKS_URI) cannot be read as a URL; its value is not repeated',
+    });
+    this.jwks = createRemoteJWKSet(jwksUri, {
       cacheMaxAge: 60 * 60 * 1000, // an hour
       cooldownDuration: 30 * 1000, // at most one refetch per 30s on unknown kid
       timeoutDuration: 5_000,

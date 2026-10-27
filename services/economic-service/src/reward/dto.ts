@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { amountMinorSchema, organizationIdSchema, numberInput } from '@rasta/contracts';
+import {
+  amountMinorSchema,
+  isoDateTime,
+  numberInput,
+  organizationIdSchema,
+} from '@rasta/contracts';
 import { RULE_STATUSES } from '../commission/dto';
 import {
   PARTICIPATION_FACTS,
@@ -72,7 +77,7 @@ export const createRewardRuleSchema = z
     /** Omit for a platform-wide rule. */
     organizationId: organizationIdSchema.optional(),
     triggerEvent: z.enum(REWARD_TRIGGER_EVENTS),
-    rewardType: z.enum(REWARD_TYPES).default('POINTS'),
+    rewardType: z.enum(REWARD_TYPES).prefault('POINTS'),
     condition: conditionSchema.optional(),
     /** Positive. A rule granting nothing should be INACTIVE instead. */
     points: z.number().int().positive().max(1_000_000),
@@ -90,9 +95,9 @@ export const createRewardRuleSchema = z
      */
     periodCap: z.number().int().positive().max(10_000_000).optional(),
     periodType: z.enum(PERIOD_TYPES).optional(),
-    validFrom: z.string().datetime().optional(),
-    validTo: z.string().datetime().optional(),
-    status: z.enum(RULE_STATUSES).default('ACTIVE'),
+    validFrom: z.string().check(isoDateTime()).optional(),
+    validTo: z.string().check(isoDateTime()).optional(),
+    status: z.enum(RULE_STATUSES).prefault('ACTIVE'),
     /** "نمونه — نیازمند تصویب" for demonstration data (ADR-023). */
     label: z.string().trim().max(200).optional(),
   })
@@ -116,7 +121,7 @@ export type CreateRewardRuleDto = z.infer<typeof createRewardRuleSchema>;
 export const updateRewardRuleSchema = z
   .object({
     status: z.enum(RULE_STATUSES).optional(),
-    validTo: z.string().datetime().nullable().optional(),
+    validTo: z.string().check(isoDateTime()).nullable().optional(),
     label: z.string().trim().max(200).optional(),
   })
   .strict();
@@ -133,7 +138,7 @@ export type ListRewardRulesQuery = z.infer<typeof listRewardRulesQuerySchema>;
 
 export const myRewardsQuerySchema = z
   .object({
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 
@@ -192,7 +197,7 @@ export type CreateParticipationRuleDto = z.infer<typeof createParticipationRuleS
  */
 export const myParticipationQuerySchema = z
   .object({
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 

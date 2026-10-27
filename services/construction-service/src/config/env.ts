@@ -5,9 +5,11 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../tender/sealing/key-provider';
 import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
@@ -18,6 +20,35 @@ import {
   PROJECT_STATES,
   type ProjectStateName,
 } from '../project/project.state-machine';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const EVALUATORS_MIN_OVER_MAX = fixed(
+  'CONSTRUCTION_EVALUATION_MIN_EVALUATORS may not exceed CONSTRUCTION_EVALUATION_MAX_EVALUATORS: no bid could ever be complete',
+);
+const FOUR_EYES_OPT_OUT_REFUSED = fixed(
+  'CONSTRUCTION_TENDER_OPEN_FOUR_EYES=false is accepted only when NODE_ENV is development or test (Q-91)',
+);
+const KEK_CURRENT_NOT_IN_KEKS = fixed(
+  'CONSTRUCTION_TENDER_KEK_CURRENT must name one of the ids in CONSTRUCTION_TENDER_KEKS, ' +
+    'and be set exactly when CONSTRUCTION_TENDER_KEKS is',
+);
+
+const KEKS_MALFORMED = fixed(
+  'CONSTRUCTION_TENDER_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+);
+const KEK_CURRENT_MALFORMED = fixed('CONSTRUCTION_TENDER_KEK_CURRENT must be a KEK id (a-z0-9-)');
+
+const TENDER_OPEN_ROLES_REFUSED = fixed(
+  'CONSTRUCTION_TENDER_OPEN_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither opens or reads bids (ADR-066 § 4)',
+);
+const TENDER_EVALUATE_ROLES_REFUSED = fixed(
+  'CONSTRUCTION_TENDER_EVALUATE_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither evaluates bids (ADR-066 § 4, ADR-067 § 4)',
+);
+const TENDER_AWARD_ROLES_REFUSED = fixed(
+  'CONSTRUCTION_TENDER_AWARD_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither awards a tender (ADR-066 § 4, ADR-067 § 3)',
+);
 
 export const SERVICE_NAME = 'construction-service';
 
@@ -60,6 +91,11 @@ const REFUSED_ROLE = 'AUDITOR';
 export const COI_RULES = ['AWARDER_NOT_EVALUATOR', 'EVALUATOR_NOT_TENDER_AUTHOR'] as const;
 export type CoiRule = (typeof COI_RULES)[number];
 
+const UNKNOWN_COI_RULE = fixed(
+  `Unknown rule in CONSTRUCTION_COI_RULES; the closed set is ${COI_RULES.join(', ')}`,
+);
+const UNKNOWN_CANCELLABLE_STATE = fixed('Unknown state in CONSTRUCTION_CANCELLABLE_STATES');
+
 /** A comma-separated list, trimmed, with empty elements dropped. */
 function commaList() {
   return z.string().transform((raw) =>
@@ -72,12 +108,15 @@ function commaList() {
 
 /** A list of platform roles that may never include the oversight role. */
 function roleList(name: string, options: { min: number }) {
+  const unknownRole = fixed(`Unknown role in ${name}`);
   return commaList().pipe(
     z
-      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: `Unknown role in ${name}` }) }))
-      .min(options.min, `${name} must name at least ${options.min} role`)
+      .array(z.enum(PLATFORM_ROLES, { error: unknownRole }))
+      .min(options.min, fixed(`${name} must name at least ${options.min} role`))
       .refine((roles) => !roles.includes(REFUSED_ROLE), {
-        message: `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        message: fixed(
+          `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        ),
       }),
   );
 }
@@ -187,16 +226,16 @@ export const constructionEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     CONSTRUCTION_PROJECT_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('CONSTRUCTION_PROJECT_ROLES', { min: 1 })),
 
     CONSTRUCTION_PROJECT_READER_ROLES: z
       .string()
-      .default('')
+      .prefault('')
       .pipe(roleList('CONSTRUCTION_PROJECT_READER_ROLES', { min: 0 })),
 
     /**
@@ -208,11 +247,10 @@ export const constructionEnvSchema = baseEnvSchema
      */
     CONSTRUCTION_TENDER_OPEN_ROLES: z
       .string()
-      .default('')
+      .prefault('')
       .pipe(roleList('CONSTRUCTION_TENDER_OPEN_ROLES', { min: 0 }))
       .refine((roles) => !roles.includes('SYSTEM_ADMIN') && !roles.includes('CONTRACTOR'), {
-        message:
-          'CONSTRUCTION_TENDER_OPEN_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither opens or reads bids (ADR-066 § 4)',
+        message: TENDER_OPEN_ROLES_REFUSED,
       }),
 
     /**
@@ -231,11 +269,10 @@ export const constructionEnvSchema = baseEnvSchema
      */
     CONSTRUCTION_TENDER_EVALUATE_ROLES: z
       .string()
-      .default('')
+      .prefault('')
       .pipe(roleList('CONSTRUCTION_TENDER_EVALUATE_ROLES', { min: 0 }))
       .refine((roles) => !roles.includes('SYSTEM_ADMIN') && !roles.includes('CONTRACTOR'), {
-        message:
-          'CONSTRUCTION_TENDER_EVALUATE_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither evaluates bids (ADR-066 § 4, ADR-067 § 4)',
+        message: TENDER_EVALUATE_ROLES_REFUSED,
       }),
 
     /**
@@ -245,11 +282,10 @@ export const constructionEnvSchema = baseEnvSchema
      */
     CONSTRUCTION_TENDER_AWARD_ROLES: z
       .string()
-      .default('')
+      .prefault('')
       .pipe(roleList('CONSTRUCTION_TENDER_AWARD_ROLES', { min: 0 }))
       .refine((roles) => !roles.includes('SYSTEM_ADMIN') && !roles.includes('CONTRACTOR'), {
-        message:
-          'CONSTRUCTION_TENDER_AWARD_ROLES may not name SYSTEM_ADMIN or CONTRACTOR: neither awards a tender (ADR-066 § 4, ADR-067 § 3)',
+        message: TENDER_AWARD_ROLES_REFUSED,
       }),
 
     /**
@@ -259,8 +295,8 @@ export const constructionEnvSchema = baseEnvSchema
      * several evaluators' scores unnecessary. `MAX` above 1 turns it on: a bid's score is the
      * mean of its evaluators' totals, compared exactly (cross-multiplied, no rounding).
      */
-    CONSTRUCTION_EVALUATION_MIN_EVALUATORS: z.coerce.number().int().min(1).max(9).default(1),
-    CONSTRUCTION_EVALUATION_MAX_EVALUATORS: z.coerce.number().int().min(1).max(9).default(1),
+    CONSTRUCTION_EVALUATION_MIN_EVALUATORS: z.coerce.number().int().min(1).max(9).prefault(1),
+    CONSTRUCTION_EVALUATION_MAX_EVALUATORS: z.coerce.number().int().min(1).max(9).prefault(1),
 
     /**
      * Q-90 / Q-92 / Q-93: the optional conflict-of-interest rules, from the closed set in code
@@ -273,14 +309,12 @@ export const constructionEnvSchema = baseEnvSchema
      */
     CONSTRUCTION_COI_RULES: z
       .string()
-      .default('AWARDER_NOT_EVALUATOR')
+      .prefault('AWARDER_NOT_EVALUATOR')
       .pipe(
         commaList().pipe(
           z.array(
             z.enum(COI_RULES, {
-              errorMap: () => ({
-                message: `Unknown rule in CONSTRUCTION_COI_RULES; the closed set is ${COI_RULES.join(', ')}`,
-              }),
+              error: UNKNOWN_COI_RULE,
             }),
           ),
         ),
@@ -288,33 +322,37 @@ export const constructionEnvSchema = baseEnvSchema
 
     CONSTRUCTION_CANCELLABLE_STATES: z
       .string()
-      .default(CANCELLABLE_BY_LIFECYCLE.join(','))
+      .prefault(CANCELLABLE_BY_LIFECYCLE.join(','))
       .pipe(
         commaList().pipe(
           z
             .array(
               z.enum(PROJECT_STATES, {
-                errorMap: () => ({ message: 'Unknown state in CONSTRUCTION_CANCELLABLE_STATES' }),
+                error: UNKNOWN_CANCELLABLE_STATE,
               }),
             )
             .refine((states) => states.every((state) => CANCELLABLE_BY_LIFECYCLE.includes(state)), {
-              message:
+              message: fixed(
                 'CONSTRUCTION_CANCELLABLE_STATES may only name states the lifecycle can cancel from: ' +
-                CANCELLABLE_BY_LIFECYCLE.join(', '),
+                  CANCELLABLE_BY_LIFECYCLE.join(', '),
+              ),
             }),
         ),
       ),
 
     CONSTRUCTION_OPERATION_TYPES: z
       .string()
-      .default('')
+      .prefault('')
       .pipe(
         commaList().pipe(
           z.array(
             z
               .string()
-              .min(2, 'Each CONSTRUCTION_OPERATION_TYPES entry must be 2 to 100 characters')
-              .max(100, 'Each CONSTRUCTION_OPERATION_TYPES entry must be 2 to 100 characters'),
+              .min(2, fixed('Each CONSTRUCTION_OPERATION_TYPES entry must be 2 to 100 characters'))
+              .max(
+                100,
+                fixed('Each CONSTRUCTION_OPERATION_TYPES entry must be 2 to 100 characters'),
+              ),
           ),
         ),
       ),
@@ -330,14 +368,14 @@ export const constructionEnvSchema = baseEnvSchema
      * Where organization-service answers "is this organization within the
      * union?" (Q-70 (7)). Anything but a 200 or a 404 refuses the policy write.
      */
-    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    ORGANIZATION_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3102'),
     /**
      * Where the contractor-standing snapshot is read (CON-002 PR 5, ADR-061 § 4):
      * `GET {SUPPLIER_SERVICE_URL}/v1/suppliers/standing-snapshot`, a platform-wide
      * service call with a token signed for no tenant. Until it has been loaded
      * once, no contractor is eligible.
      */
-    SUPPLIER_SERVICE_URL: z.string().url().default('http://localhost:3108'),
+    SUPPLIER_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3108'),
     /**
      * Where the externally held receipt chain is read (CON-002 PR 6, ADR-066 § 2):
      * `GET {AUDIT_SERVICE_URL}/v1/internal/tender-evidence/{tenderId}/chain`, a
@@ -345,46 +383,46 @@ export const constructionEnvSchema = baseEnvSchema
      * takes the chain head from there and nowhere else: if it cannot be read, bids
      * are not opened.
      */
-    AUDIT_SERVICE_URL: z.string().url().default('http://localhost:3115'),
+    AUDIT_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3115'),
     /**
      * Where a user's current organizations are read (CON-002 PR 8, Q-91): `GET
      * {IDENTITY_SERVICE_URL}/v1/users/{id}/organizations`, a service call with a token
      * signed for no tenant. The conflict check at the approval of a bid opening uses it
      * for the proposer and the approver; if it cannot be read, the opening is refused.
      */
-    IDENTITY_SERVICE_URL: z.string().url().default('http://localhost:3101'),
+    IDENTITY_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3101'),
     CONSTRUCTION_IDENTITY_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
       .min(100)
       .max(60_000)
-      .default(5000),
+      .prefault(5000),
     CONSTRUCTION_AUDIT_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
       .min(100)
       .max(60_000)
-      .default(5000),
+      .prefault(5000),
     /** One page of the snapshot, headers to parse; an answer too slow is a failed attempt, retried. */
     CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
       .min(100)
       .max(60_000)
-      .default(5000),
+      .prefault(5000),
     /** Wait between failed attempts to load the snapshot. */
     CONSTRUCTION_STANDING_BOOTSTRAP_RETRY_MS: z.coerce
       .number()
       .int()
       .min(100)
       .max(600_000)
-      .default(15_000),
+      .prefault(15_000),
     CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
       .min(100)
       .max(30_000)
-      .default(3000),
+      .prefault(3000),
 
     /**
      * The sweeper behind ORGANIZATION_MOVED (Q-83, docs/23 D-041). A sweep
@@ -394,16 +432,21 @@ export const constructionEnvSchema = baseEnvSchema
      * another instance (harmless — the writes are conditional — but wasteful).
      * A failed task is retried after `BACKOFF_SECONDS`, doubling to `BACKOFF_MAX_SECONDS`.
      */
-    CONSTRUCTION_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(500).max(300_000).default(5000),
-    CONSTRUCTION_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
-    CONSTRUCTION_RECONCILE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(120),
-    CONSTRUCTION_RECONCILE_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).default(30),
+    CONSTRUCTION_RECONCILE_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(500)
+      .max(300_000)
+      .prefault(5000),
+    CONSTRUCTION_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    CONSTRUCTION_RECONCILE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).prefault(120),
+    CONSTRUCTION_RECONCILE_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).prefault(30),
     CONSTRUCTION_RECONCILE_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(900),
+      .prefault(900),
 
     /**
      * The sweeper that closes tenders past `bid_closing_at` (ADR-065 § 3). A sweep
@@ -419,9 +462,9 @@ export const constructionEnvSchema = baseEnvSchema
       .int()
       .min(500)
       .max(300_000)
-      .default(5000),
-    CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
-    CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(60),
+      .prefault(5000),
+    CONSTRUCTION_TENDER_CLOSE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    CONSTRUCTION_TENDER_CLOSE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).prefault(60),
     /**
      * A tender whose close failed is not claimed again for
      * `min(BACKOFF_MAX_SECONDS, BACKOFF_BASE_SECONDS × 2^failures)` — so a tender that
@@ -433,13 +476,13 @@ export const constructionEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(3600)
-      .default(10),
+      .prefault(10),
     CONSTRUCTION_TENDER_CLOSE_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(900),
+      .prefault(900),
 
     /**
      * The sweeper that makes the standing check after an award (ADR-067 § 3, residual), the close
@@ -456,29 +499,29 @@ export const constructionEnvSchema = baseEnvSchema
       .int()
       .min(500)
       .max(300_000)
-      .default(10_000),
-    CONSTRUCTION_AWARD_CHECK_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
-    CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(120),
+      .prefault(10_000),
+    CONSTRUCTION_AWARD_CHECK_BATCH_SIZE: z.coerce.number().int().min(1).max(100).prefault(10),
+    CONSTRUCTION_AWARD_CHECK_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).prefault(120),
     CONSTRUCTION_AWARD_CHECK_BACKOFF_BASE_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(3600)
-      .default(10),
+      .prefault(10),
     CONSTRUCTION_AWARD_CHECK_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(900),
+      .prefault(900),
     CONSTRUCTION_AWARD_CHECK_ALERT_AGE_SECONDS: z.coerce
       .number()
       .int()
       .min(10)
       .max(604_800)
-      .default(600),
+      .prefault(600),
 
-    CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).default(1),
+    CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS: z.coerce.number().int().min(0).max(1000).prefault(1),
     CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE: booleanEnv(true),
     CONSTRUCTION_START_REQUIRES_CONTRACT: booleanEnv(false),
     CONSTRUCTION_PROGRESS_ALLOW_DECREASE: booleanEnv(false),
@@ -504,8 +547,7 @@ export const constructionEnvSchema = baseEnvSchema
           }
         },
         {
-          message:
-            'CONSTRUCTION_TENDER_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+          message: KEKS_MALFORMED,
         },
       ),
     /** The id in `CONSTRUCTION_TENDER_KEKS` that wraps new tender keys; older ones only unwrap. */
@@ -513,7 +555,7 @@ export const constructionEnvSchema = baseEnvSchema
       .string()
       .optional()
       .refine((value) => value === undefined || value === '' || isKekId(value), {
-        message: 'CONSTRUCTION_TENDER_KEK_CURRENT must be a KEK id (a-z0-9-)',
+        message: KEK_CURRENT_MALFORMED,
       }),
 
     /**
@@ -526,7 +568,7 @@ export const constructionEnvSchema = baseEnvSchema
       .int()
       .min(0)
       .max(31_536_000)
-      .default(0),
+      .prefault(0),
 
     /**
      * The most receipts a tender's chain may hold (construction audit F2): every submission and
@@ -540,7 +582,7 @@ export const constructionEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(EVIDENCE_MAX_CHAIN_LINKS)
-      .default(EVIDENCE_MAX_CHAIN_LINKS),
+      .prefault(EVIDENCE_MAX_CHAIN_LINKS),
     /**
      * PROVISIONAL, pending the PM (construction audit F2, D1): the most revisions one bid may
      * have, its submission (revision 1) included; a replacement past it is `422
@@ -552,7 +594,7 @@ export const constructionEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(EVIDENCE_MAX_CHAIN_LINKS)
-      .default(50),
+      .prefault(50),
     /**
      * PROVISIONAL, pending the product owner (Q-117; Codex r2 on #250): the most bids that may
      * stand (submitted, not withdrawn) on one tender at once; a submission past it is `422
@@ -567,7 +609,7 @@ export const constructionEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(TENDER_MAX_STANDING_BIDS_CEILING)
-      .default(TENDER_MAX_STANDING_BIDS_DEFAULT),
+      .prefault(TENDER_MAX_STANDING_BIDS_DEFAULT),
     /**
      * How long the transaction that opens a tender's bids — and the owner's read of every opened
      * bid, which repeats the same work — may run (Codex r1 on #250, R2). It decrypts every
@@ -581,10 +623,10 @@ export const constructionEnvSchema = baseEnvSchema
       .int()
       .min(TENDER_OPEN_TIMEOUT_MIN_MS)
       .max(TENDER_OPEN_TIMEOUT_MAX_MS)
-      .default(TENDER_OPEN_TIMEOUT_DEFAULT_MS),
+      .prefault(TENDER_OPEN_TIMEOUT_DEFAULT_MS),
 
     /** docs/06 § 6.8: 24 hours unless configured. */
-    CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
 
     /**
      * The largest offset of any replica's clock from true time, in seconds (PM decision D-065).
@@ -596,7 +638,7 @@ export const constructionEnvSchema = baseEnvSchema
      * retention the TTL setting allows (1 hour), so a deadline can never be pushed before its claim
      * (`env.spec.ts` holds that arithmetic to the bounds).
      */
-    CONSTRUCTION_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).default(30),
+    CONSTRUCTION_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).prefault(30),
 
     /**
      * How long one interactive transaction may stay open, BEGIN to COMMIT, before
@@ -616,7 +658,7 @@ export const constructionEnvSchema = baseEnvSchema
       .int()
       .min(5_000)
       .max(60_000)
-      .default(15_000),
+      .prefault(15_000),
   })
   // The two key settings are one setting (Codex review of #163): keys with a
   // CURRENT that is not among them — or a CURRENT with no keys — used to pass
@@ -626,8 +668,7 @@ export const constructionEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['CONSTRUCTION_EVALUATION_MIN_EVALUATORS'],
-        message:
-          'CONSTRUCTION_EVALUATION_MIN_EVALUATORS may not exceed CONSTRUCTION_EVALUATION_MAX_EVALUATORS: no bid could ever be complete',
+        message: EVALUATORS_MIN_OVER_MAX,
       });
     }
     // The replay fence refuses a deadline later than claim + TTL − B (shared/idempotency.ts). The
@@ -654,8 +695,7 @@ export const constructionEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['CONSTRUCTION_TENDER_OPEN_FOUR_EYES'],
-        message:
-          'CONSTRUCTION_TENDER_OPEN_FOUR_EYES=false is accepted only when NODE_ENV is development or test (Q-91)',
+        message: FOUR_EYES_OPT_OUT_REFUSED,
       });
     }
     try {
@@ -669,12 +709,12 @@ export const constructionEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['CONSTRUCTION_TENDER_KEK_CURRENT'],
-        message:
-          'CONSTRUCTION_TENDER_KEK_CURRENT must name one of the ids in CONSTRUCTION_TENDER_KEKS, ' +
-          'and be set exactly when CONSTRUCTION_TENDER_KEKS is',
+        message: KEK_CURRENT_NOT_IN_KEKS,
       });
     }
   });
+
+export const CONSTRUCTION_ENV_MESSAGES = seal();
 
 export type ConstructionEnv = z.infer<typeof constructionEnvSchema>;
 
@@ -719,7 +759,7 @@ export function loadConstructionEnv(source: NodeJS.ProcessEnv = process.env): Co
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: constructionOperationBudgets },
+    { operationBudgets: constructionOperationBudgets, fixedMessages: CONSTRUCTION_ENV_MESSAGES },
   );
 }
 

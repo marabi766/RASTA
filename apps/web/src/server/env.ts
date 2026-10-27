@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parsableUrl, legacyParse } from '@rasta/contracts';
 
 import {
   MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS,
@@ -38,14 +39,28 @@ const MIN_SECRET_LENGTH = 32;
  * fetched, and the failure would surface as a connection error at runtime
  * rather than as a refusal at boot — which is the whole point of validating
  * configuration.
+ *
+ * Nor a username or password in it: the portal calls these with `fetch`, which
+ * refuses such a URL on every call with a TypeError that repeats it whole —
+ * the password in it — into the server log (#385 r5).
  */
 const httpUrl = z
   .string()
-  .url()
+  .check(parsableUrl())
   .refine(
     (value) => value.startsWith('http://') || value.startsWith('https://'),
     'Expected an http(s) URL',
-  );
+  )
+  .refine((value) => {
+    // Not URL.parse: jsdom's URL (the tests' environment) has no static parse.
+    try {
+      const url = new URL(value);
+      return url.username === '' && url.password === '';
+    } catch {
+      // Not a URL: refused by `.url()` above. The error is dropped, not kept.
+      return true;
+    }
+  }, 'Expected a URL without a username or password');
 
 /** The oversight role has aggregate access only; no setting here may grant it a screen. */
 const OVERSIGHT_ROLE = 'AUDITOR';
@@ -61,7 +76,7 @@ function roleList(name: string, fallback: string, alsoRefused: readonly string[]
   const refused = [OVERSIGHT_ROLE, ...alsoRefused];
   return z
     .string()
-    .default(fallback)
+    .prefault(fallback)
     .transform((raw) =>
       raw
         .split(',')
@@ -80,7 +95,7 @@ const REASON_CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
 function reasonCodeList(name: string, fallback: string) {
   return z
     .string()
-    .default(fallback)
+    .prefault(fallback)
     .transform((raw) =>
       raw
         .split(',')
@@ -137,7 +152,7 @@ const schema = z.object({
     .int()
     .min(300)
     .max(30 * 24 * 60 * 60)
-    .default(12 * 60 * 60),
+    .prefault(12 * 60 * 60),
 
   /**
    * Whether the session cookie carries `Secure`.
@@ -157,7 +172,7 @@ const schema = z.object({
    */
   WEB_REDIS_URL: z
     .string()
-    .url()
+    .check(parsableUrl())
     .refine(
       (value) => value.startsWith('redis://') || value.startsWith('rediss://'),
       'Expected a redis:// or rediss:// URL',
@@ -215,7 +230,7 @@ const schema = z.object({
    */
   WEB_TENDER_COI_RULES: z
     .string()
-    .default('AWARDER_NOT_EVALUATOR')
+    .prefault('AWARDER_NOT_EVALUATOR')
     .transform((raw) =>
       raw
         .split(',')
@@ -268,7 +283,7 @@ const schema = z.object({
    * (same bounds, 1..168) and must be changed together with it, or set lower.
    * The default is that setting's floor, as for economic-service's below.
    */
-  WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a
@@ -280,7 +295,7 @@ const schema = z.object({
     .int()
     .min(60)
     .max(30 * 60)
-    .default(10 * 60),
+    .prefault(10 * 60),
 
   /**
    * Who, on the employer's side, is drawn the forms that cancel a draft,
@@ -325,7 +340,7 @@ const schema = z.object({
    */
   WEB_CONTRACT_CANCEL_AFTER_SIGNATURE: z
     .enum(['true', 'false'])
-    .default('false')
+    .prefault('false')
     .transform((value) => value === 'true'),
 
   /**
@@ -340,7 +355,7 @@ const schema = z.object({
    * than the service's only offers the re-send for less time than it could
    * be; a higher one would offer a re-send the service may execute as new.
    */
-  WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a
@@ -354,7 +369,7 @@ const schema = z.object({
     .int()
     .min(60)
     .max(30 * 60)
-    .default(10 * 60),
+    .prefault(10 * 60),
 
   /**
    * How long contract-service keeps an idempotency record, in hours — the
@@ -377,7 +392,7 @@ const schema = z.object({
    * honest client never meets the refusal. With 1 h that means a margin of at
    * least 330 s.
    */
-  WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a
@@ -389,7 +404,7 @@ const schema = z.object({
     .int()
     .min(60)
     .max(30 * 60)
-    .default(10 * 60),
+    .prefault(10 * 60),
 
   /**
    * How long construction-service keeps an idempotency record, in hours — the
@@ -419,7 +434,7 @@ const schema = z.object({
     .int()
     .min(1)
     .max(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS)
-    .default(1),
+    .prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a bid
@@ -433,11 +448,11 @@ const schema = z.object({
     .int()
     .min(60)
     .max(MAX_REPLAY_MARGIN_SECONDS)
-    .default(10 * 60),
+    .prefault(10 * 60),
 
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
-    .default('true')
+    .prefault('true')
     .transform((value) => value === 'true'),
 });
 
@@ -455,8 +470,8 @@ export function loadWebServerEnv(
   // else. `NODE_ENV` is read for one rule only: `WEB_REDIS_URL` in production.
   source: Record<string, string | undefined> = process.env,
 ): WebServerEnv {
-  const parsed = schema.safeParse(source);
-  const missing = parsed.success ? [] : parsed.error.issues.map((issue) => issue.path.join('.'));
+  const parsed = legacyParse(schema, source);
+  const missing = parsed.success ? [] : parsed.refusal.issues.map((issue) => issue.path.join('.'));
 
   // The one rule that depends on where the portal runs. Production is two
   // replicas, and two replicas without shared coordination race for every

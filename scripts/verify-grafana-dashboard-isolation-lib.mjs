@@ -11,8 +11,11 @@
  * closed on anything unexpected.
  *
  * Docker is injected as `docker(args, { allowFailure })` returning
- * `{ status, stdout, stderr }`, so the tests use a fake. Node built-ins only.
+ * `{ status, stdout, stderr }`, so the tests use a fake. Node built-ins only, and
+ * @rasta/config's URL reader (plain JavaScript, read from the mounted repository).
  */
+
+import { tryReadUrl } from '../packages/config/src/url-reader.js';
 
 /** Container aliases on the internal network; the probe reaches the APIs only through these. */
 export const ALIASES = Object.freeze({ prometheus: 'prometheus', grafana: 'grafana' });
@@ -174,12 +177,8 @@ export function readProbeEnvironment(env) {
   const url = (key) => {
     const raw = env[key];
     if (!raw) throw new Error(`${key} is required`);
-    let parsed;
-    try {
-      parsed = new URL(raw);
-    } catch {
-      throw new Error(`${key} is not a URL`);
-    }
+    const parsed = tryReadUrl(raw);
+    if (parsed === null) throw new Error(`${key} is not a URL`);
     const plain =
       parsed.protocol === 'http:' &&
       /^[a-z][a-z0-9-]*$/.test(parsed.hostname) &&

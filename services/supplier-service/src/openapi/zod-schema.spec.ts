@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { isoDateTime, parsableUrl } from '@rasta/contracts';
+import { toJsonSchema } from '@rasta/nest-common';
 import {
   registerSupplierSchema,
   rejectQualificationSchema,
@@ -49,13 +50,13 @@ describe('the constructs the supplier DTOs are built from', () => {
   });
 
   it('publishes the formats a client can validate against', () => {
-    expect(toJsonSchema(z.string().url()).format).toBe('uri');
+    expect(toJsonSchema(z.string().check(parsableUrl())).format).toBe('uri');
     expect(toJsonSchema(z.string().email()).format).toBe('email');
-    expect(toJsonSchema(z.string().datetime()).format).toBe('date-time');
+    expect(toJsonSchema(z.string().check(isoDateTime())).format).toBe('date-time');
   });
 
   it('publishes a default rather than hiding it', () => {
-    expect(toJsonSchema(z.number().int().default(25))).toEqual({
+    expect(toJsonSchema(z.number().int().prefault(25))).toEqual({
       type: 'integer',
       default: 25,
     });
@@ -86,7 +87,7 @@ describe('the constructs the supplier DTOs are built from', () => {
   });
 
   it('publishes a record as an open object with a typed value', () => {
-    expect(toJsonSchema(z.record(z.string()))).toEqual({
+    expect(toJsonSchema(z.record(z.string(), z.string()))).toEqual({
       type: 'object',
       additionalProperties: { type: 'string' },
     });

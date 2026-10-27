@@ -51,3 +51,27 @@ export { SAGA_DISPUTE_RECOVERY } from './saga-dispute-recovery';
 export type { SagaDisputeRecoveryRow } from './saga-dispute-recovery';
 
 export { expireClaim, makeDue } from './eligibility-clock';
+
+export { withRedirectProbe, REDIRECT_CASES } from './redirect-probe';
+export type { RedirectProbe } from './redirect-probe';
+
+export {
+  GENERATED_VALUE_SHAPES,
+  absenceHazard,
+  correlationId,
+  errorEnvelope,
+  expectNotDisclosed,
+  generatedValuesIn,
+  instant,
+  oneOf,
+  thisRun,
+} from './disclosure';
+export { absenceRefusal, guardedAbsenceMatchers } from './absence-guard';
+export type { AbsenceMatcherResult } from './absence-guard';
+export type {
+  DisclosureOptions,
+  GeneratedShape,
+  GeneratedValue,
+  MetadataExpectation,
+  MetadataMatcher,
+} from './disclosure';

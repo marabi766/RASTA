@@ -352,6 +352,37 @@ describe('enrichOpenApiDocument', () => {
     });
   });
 
+  it('publishes the rule arrays without their bounds, as this service’s own converter did', () => {
+    // The shared converter publishes `minItems`/`maxItems`; this document has
+    // never carried them, and the replacement kept it byte-identical. When a
+    // change of its own publishes them, this test changes with the wrapper.
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/rewards/recognition-rules': { post: nest('201') },
+      '/v1/rewards/participation-rules': { post: nest('201') },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const body = (path: string) =>
+      (
+        (enriched.paths[path] as Record<string, never>).post as unknown as {
+          requestBody: {
+            content: { 'application/json': { schema: { properties: Record<string, unknown> } } };
+          };
+        }
+      ).requestBody.content['application/json'].schema.properties;
+
+    const recognition = body('/v1/rewards/recognition-rules');
+    const participation = body('/v1/rewards/participation-rules');
+    for (const array of [recognition.levels, recognition.badges, participation.contributions]) {
+      expect(array).toMatchObject({ type: 'array' });
+      expect(array).not.toHaveProperty('minItems');
+      expect(array).not.toHaveProperty('maxItems');
+    }
+    // Only array bounds are held back: a string's bounds are published.
+    expect(JSON.stringify(recognition)).toContain('"maxLength":80');
+  });
+
   it('leaves a route it knows nothing about with a success response and no body', () => {
     const document = emptyDocument();
     document.paths = { '/v1/not-a-real-route': { get: nest('200') } } as never;

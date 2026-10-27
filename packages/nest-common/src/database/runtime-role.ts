@@ -179,6 +179,36 @@ export async function assertRuntimeRole(
   return facts;
 }
 
+/**
+ * Why the startup gate could not ask the database at all: a fixed text naming
+ * the runtime URL's variable and the client's code (`P1000`, `P1001`,
+ * `ECONNREFUSED`), never the client's message — Prisma's names the user it
+ * connected as and the host (#385 r6, the configuration-disclosure class). It
+ * fails closed as before: nothing starts.
+ */
+export class RuntimeRoleUnverifiedError extends Error {
+  override readonly name = 'RuntimeRoleUnverifiedError';
+
+  constructor(
+    readonly runtimeVariable: string,
+    readonly code: string,
+  ) {
+    super(
+      `${runtimeVariable}: the connected role could not be checked (code ${code}); ` +
+        "the database client's own error is withheld",
+    );
+  }
+}
+
+/** A client's error code, if it is shaped like one (`P1000`, `ECONNREFUSED`); else `unknown`. */
+function clientCode(error: unknown): string {
+  const failure = error as { errorCode?: unknown; code?: unknown } | null | undefined;
+  for (const candidate of [failure?.errorCode, failure?.code]) {
+    if (typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(candidate)) return candidate;
+  }
+  return 'unknown';
+}
+
 /** A client {@link preflightRuntimeRole} can open, ask, and close. */
 export interface RuntimeRolePreflightClient extends RuntimeRoleQueryClient {
   $disconnect(): PromiseLike<void>;
@@ -189,19 +219,29 @@ export interface RuntimeRolePreflightClient extends RuntimeRoleQueryClient {
  * service's runtime URL (`open`, typically `new PrismaClient({ datasources })`),
  * runs {@link assertRuntimeRole} on it and closes it whatever the outcome.
  * Rejects with {@link RuntimeRoleRefusedError} when the connected role could act
- * as an owner — and with the connection error when it cannot connect at all,
- * so nothing starts on a database it cannot vouch for.
+ * as an owner — and with {@link RuntimeRoleUnverifiedError} when it cannot ask
+ * at all (no connection, a refused login), so nothing starts on a database it
+ * cannot vouch for. The client's own error is not passed on: the bootstrap
+ * logs what it is given.
  */
 export async function preflightRuntimeRole(
   open: () => RuntimeRolePreflightClient,
   options: AssertRuntimeRoleOptions,
 ): Promise<ConnectedRoleFacts> {
-  const client = open();
+  let client: RuntimeRolePreflightClient | undefined;
+  let code: string;
   try {
+    client = open();
     return await assertRuntimeRole(client, options);
+  } catch (error) {
+    if (error instanceof RuntimeRoleRefusedError) throw error;
+    code = clientCode(error);
   } finally {
-    await client.$disconnect();
+    // A failed close says no more than a failed connection would.
+    await client?.$disconnect().then(undefined, () => undefined);
   }
+  // Thrown outside the catch: nothing of the client's error travels with it.
+  throw new RuntimeRoleUnverifiedError(options.runtimeVariable, code);
 }
 
 /**

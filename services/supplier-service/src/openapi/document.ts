@@ -1,6 +1,6 @@
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { isOptionalField, objectShapeOf, toJsonSchema } from '@rasta/nest-common';
 import {
   approveQualificationSchema,
   listQualifiedForQuerySchema,
@@ -123,7 +123,7 @@ const ERROR_DESCRIPTIONS: Record<number, string> = {
   401: 'No credentials, or a token that is expired or invalid',
   403: 'Authenticated, but not permitted. Also returned when a platform operator belongs to the supplier’s own organization: no role exempts anybody from the rule that a supplier organization may not decide its own qualification, suspension or reinstatement.',
   404: 'Not found — also returned for a supplier owned by another organization, so its existence is never disclosed through the private endpoints. The directory is where a stranger legitimately learns a supplier exists, and it returns a catalogue-safe object.',
-  409: 'Conflict: this organization already has a supplier profile',
+  409: 'Conflict. `ALREADY_EXISTS`: this organization already has a supplier profile. `OPTIMISTIC_LOCK_FAILED` with `details[].code` `SUSPENSION_EPISODE_CHANGED` (suspend and reinstate only): the supplier’s suspension history is no longer the one the request names — reinstate’s `suspensionId` is not the open episode, or suspend’s `latestSuspensionId` is not the newest — and nothing was written; read the supplier again.',
   422: 'The request is well-formed but a business rule refuses it (see `code`) — a qualification that is already decided, a second submission for a capability that is open or approved, suspending a supplier that is already suspended, or reinstating one that is not.',
   500: 'Unexpected server error',
 };
@@ -224,7 +224,7 @@ function isOperation(value: unknown): value is MutableOperation {
  * no parameters at all, and the failure is invisible because the document is
  * still valid.
  */
-function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
+function toQueryParameters(schema: z.ZodType): unknown[] {
   const shape = objectShapeOf(schema);
   if (!shape) return [];
 
@@ -233,36 +233,8 @@ function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
     return {
       name,
       in: 'query',
-      required: !member.isOptional(),
+      required: !isOptionalField(member),
       schema: jsonSchema,
     };
   });
-}
-
-function objectShapeOf(schema: z.ZodTypeAny): z.ZodRawShape | undefined {
-  // JUSTIFIED-ANY: zod's `_def` is untyped across its type-kinds, and the walk
-  // below re-checks the kind before reading a field.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = schema;
-
-  for (let depth = 0; depth < 10; depth += 1) {
-    const typeName = current?._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-      return (current as z.ZodObject<z.ZodRawShape>).shape;
-    }
-    if (typeName === z.ZodFirstPartyTypeKind.ZodEffects) {
-      current = current._def.schema;
-      continue;
-    }
-    if (
-      typeName === z.ZodFirstPartyTypeKind.ZodOptional ||
-      typeName === z.ZodFirstPartyTypeKind.ZodDefault
-    ) {
-      current = current._def.innerType;
-      continue;
-    }
-    return undefined;
-  }
-
-  return undefined;
 }

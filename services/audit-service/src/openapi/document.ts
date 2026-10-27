@@ -1,7 +1,7 @@
 import type { INestApplication } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import { isOptionalField, objectShapeOf, toJsonSchema } from '@rasta/nest-common';
 import {
   auditEventDetailQuerySchema,
   auditEventQuerySchema,
@@ -226,7 +226,7 @@ function isOperation(value: unknown): value is MutableOperation {
  * because the document is still valid. Both audit query schemas carry both
  * wrappers, so this unwrapping is load-bearing rather than defensive.
  */
-function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
+function toQueryParameters(schema: z.ZodType): unknown[] {
   const shape = objectShapeOf(schema);
   if (!shape) return [];
 
@@ -237,36 +237,8 @@ function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
       in: 'query',
       // `from` and `to` are the two that matter: published as required, from
       // the same schema that rejects a request without them.
-      required: !member.isOptional(),
+      required: !isOptionalField(member),
       schema: jsonSchema,
     };
   });
-}
-
-function objectShapeOf(schema: z.ZodTypeAny): z.ZodRawShape | undefined {
-  // JUSTIFIED-ANY: zod's `_def` is untyped across its type-kinds, and the walk
-  // below re-checks the kind before reading a field.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = schema;
-
-  for (let depth = 0; depth < 10; depth += 1) {
-    const typeName = current?._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-      return (current as z.ZodObject<z.ZodRawShape>).shape;
-    }
-    if (typeName === z.ZodFirstPartyTypeKind.ZodEffects) {
-      current = current._def.schema;
-      continue;
-    }
-    if (
-      typeName === z.ZodFirstPartyTypeKind.ZodOptional ||
-      typeName === z.ZodFirstPartyTypeKind.ZodDefault
-    ) {
-      current = current._def.innerType;
-      continue;
-    }
-    return undefined;
-  }
-
-  return undefined;
 }

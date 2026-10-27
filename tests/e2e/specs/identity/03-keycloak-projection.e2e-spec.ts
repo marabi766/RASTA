@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { APIRequestContext } from '@playwright/test';
+import type { APIRequestContext } from '../../src/expect';
 import { test, expect, Actor, SessionToken } from '../../src/api';
 import { ORG } from '../../src/env';
 import {

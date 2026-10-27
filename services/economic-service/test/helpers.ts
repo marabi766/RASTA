@@ -120,13 +120,12 @@ export const ITEST_ISSUER = 'http://itest.invalid/realms/rasta';
  */
 export function testEnv(): EconomicEnv {
   return loadEconomicEnv({
-    // Authentication and broker settings the domain never reads, filled in so
-    // a suite can run without a Keycloak realm. They are placeholders rather
+    // Placeholder endpoints allow a suite to run without a Keycloak realm.
+    // These are placeholders rather
     // than omissions, and deliberately obvious ones: nothing in these tests
     // verifies a token, because authorization is a pure function over the
     // request context and is covered in `src/access/access.spec.ts` and in
     // `tenant-isolation.int-spec.ts` against the real tenant guard.
-    OIDC_ISSUER_URL: ITEST_ISSUER,
     OIDC_JWKS_URI: 'http://itest.invalid/realms/rasta/protocol/openid-connect/certs',
     OIDC_AUDIENCE: 'rasta-api',
     INTERNAL_TOKEN_SECRET: 'itest_internal_secret_at_least_32_characters',
@@ -137,6 +136,8 @@ export function testEnv(): EconomicEnv {
     FLEET_SERVICE_URL: 'http://127.0.0.1:9',
     CONTRACT_SERVICE_URL: 'http://127.0.0.1:9',
     ...process.env,
+    // asActor uses this existing fixture issuer: inherited host settings must not split identities.
+    OIDC_ISSUER_URL: ITEST_ISSUER,
     DATABASE_URL: databaseUrl(),
     ECONOMIC_PLATFORM_ORGANIZATION_ID: PLATFORM_ORGANIZATION_ID,
     // The reconciliation runs on a timer; a test drives it explicitly.

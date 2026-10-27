@@ -1,4 +1,5 @@
 const swcOptions = require('../../jest.swc.cjs');
+const disclosureGuard = require('../../jest.disclosure-guard.cjs');
 const swcTransform = { '^.+\.(t|j)s$': ['@swc/jest', swcOptions] };
 
 const setupFiles = [require.resolve('./jest.setup.cjs')];
@@ -26,6 +27,7 @@ module.exports = {
   projects: [
     {
       displayName: 'unit',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: __dirname,
       roots: ['<rootDir>/src'],
       testEnvironment: 'node',
@@ -41,6 +43,7 @@ module.exports = {
       // append-only guarantee lives in PostgreSQL privileges and triggers, and
       // a mock cannot refuse an UPDATE.
       displayName: 'integration',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: __dirname,
       roots: ['<rootDir>/test'],
       testEnvironment: 'node',

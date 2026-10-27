@@ -1,4 +1,6 @@
+import { internalFetch } from '@rasta/nest-common';
 import { z } from 'zod';
+import { readUrl } from '@rasta/config';
 import type { InternalTokenService } from '@rasta/nest-common';
 import { IDENTITY_SERVICE, SERVICE_NAME } from '../config/env';
 import { RESOLUTION_FAILURE_REASONS } from '../observability/metrics';
@@ -56,7 +58,7 @@ const userPageSchema = z.object({
     z.object({
       id: z.string().min(1),
       status: z.string(),
-      roles: z.array(z.string()).default([]),
+      roles: z.array(z.string()).prefault([]),
       // Optional rather than required: an identity deployment that stops
       // returning addresses has to degrade to "nobody is emailable", not to a
       // malformed-response failure that stops the in-app half working too.
@@ -64,7 +66,7 @@ const userPageSchema = z.object({
     }),
   ),
   nextCursor: z.string().nullable().optional(),
-  hasMore: z.boolean().default(false),
+  hasMore: z.boolean().prefault(false),
 });
 
 /** identity caps a page at `MAX_PAGE_SIZE` (200); asking for more is a 400. */
@@ -131,7 +133,12 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
     cursor: string | undefined,
     correlationId: string,
   ): Promise<z.infer<typeof userPageSchema>> {
-    const url = new URL('/v1/users', this.options.baseUrl);
+    // Against a base read by the shared reader: `new URL`'s own error keeps the
+    // base on `.base`, and an uncaught throw prints it (#385 r5).
+    const url = readUrl('/v1/users', {
+      base: this.options.baseUrl,
+      refusal: 'IDENTITY_SERVICE_URL cannot be read as a URL; its value is not repeated',
+    });
     url.searchParams.set('role', role);
     url.searchParams.set('status', 'ACTIVE');
     url.searchParams.set('limit', String(PAGE_SIZE));
@@ -142,15 +149,19 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
 
     let response: Response;
     try {
-      response = await this.fetchImpl(url, {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          'x-internal-token': token,
-          'x-correlation-id': correlationId,
+      response = await internalFetch(
+        url,
+        {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            'x-internal-token': token,
+            'x-correlation-id': correlationId,
+          },
+          signal: controller.signal,
         },
-        signal: controller.signal,
-      });
+        this.fetchImpl,
+      );
     } catch (error) {
       // The error object is not forwarded: depending on the runtime it can
       // carry the request URL and headers, and the header is the token.

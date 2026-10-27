@@ -1,16 +1,17 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
-  PROCUREMENT_NATURES,
-  RFQ_CANCELLATION_CODE_PATTERN,
   cursorPaginationSchema,
+  isoDateTime,
   organizationIdSchema,
   plainText,
+  PROCUREMENT_NATURES,
+  RFQ_CANCELLATION_CODE_PATTERN,
 } from '@rasta/contracts';
 import { canonicalize } from '@rasta/sealing';
 import { MAX_INVITEES_LIMIT } from '../config/env';
 import { MAX_QUANTITY, MAX_REASON_LENGTH } from '../demand/dto';
-import { codePointLength } from '../openapi/zod-schema';
+import { codePointLength } from '@rasta/nest-common';
 import { RFQ_STATES } from './rfq.state-machine';
 
 /**
@@ -81,7 +82,7 @@ export const issueRfqSchema = z
       .describe('Required, with no default (ADR-023, Q-03).'),
     quotationClosingAt: z
       .string()
-      .datetime({ offset: false })
+      .check(isoDateTime({ offset: false }))
       .describe(
         'The quotation deadline (UTC, ISO 8601 with Z; kept to the millisecond). Must be after ' +
           'the database clock at the issue; no minimum or maximum is invented (Q-121 (2)). ' +

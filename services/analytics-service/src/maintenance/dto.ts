@@ -1,14 +1,15 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 
 /**
  * The request and response shapes of the fleet dashboard (ADR-071 § 4, RUN-001 PR 1).
  *
- * The same Zod schemas validate input, type the code and — through `zod-schema.ts` — become
+ * The same Zod schemas validate input, type the code and — through `toJsonSchema` — become
  * the OpenAPI document, so the three cannot disagree. No body anywhere: this service has no
  * route that writes.
  */
 
-const instant = z.string().datetime({ offset: true });
+const instant = z.string().check(isoDateTime({ offset: true }));
 
 /**
  * The window, `[from, to)`, both required: a default window would be a number nobody chose

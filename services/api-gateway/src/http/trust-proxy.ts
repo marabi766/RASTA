@@ -51,6 +51,15 @@ function isAddressOrRange(entry: string): boolean {
 }
 
 /**
+ * The refusal of an entry, fixed: it used to quote the entry, which is configuration text and
+ * reached the boot log (S-09, #385 r1/r2). `loadGatewayEnv` keeps it verbatim (fixed messages).
+ */
+export const TRUSTED_PROXY_REFUSED =
+  `names an entry that is not an IP address, a CIDR range of /1 or narrower, or one of ` +
+  `${NAMED_RANGES.join(', ')}. Trusting every hop, a hop count or a /0 range is ` +
+  'refused: each believes a client-written header. Name proxy peers only.';
+
+/**
  * `GATEWAY_TRUSTED_PROXIES`: comma-separated addresses, CIDR ranges, or the
  * names above. Empty — the default — trusts no hop, which is the pre-existing
  * behaviour: safe against spoofing, but every request behind an ingress is
@@ -58,7 +67,7 @@ function isAddressOrRange(entry: string): boolean {
  */
 export const trustedProxiesSchema = z
   .string()
-  .default('')
+  .prefault('')
   .transform((raw) =>
     raw
       .split(',')
@@ -68,13 +77,7 @@ export const trustedProxiesSchema = z
   .superRefine((entries, context) => {
     for (const entry of entries) {
       if (!isAddressOrRange(entry)) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            `"${entry}" is not an IP address, a CIDR range of /1 or narrower, or one of ` +
-            `${NAMED_RANGES.join(', ')}. Trusting every hop, a hop count or a /0 range is ` +
-            'refused: each believes a client-written header. Name proxy peers only.',
-        });
+        context.addIssue({ code: z.ZodIssueCode.custom, message: TRUSTED_PROXY_REFUSED });
       }
     }
   });
