@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { expectNotDisclosed } from '@rasta/testing';
 import { ulid } from 'ulid';
 import {
   actor,
@@ -121,10 +122,8 @@ describe('amendments of a signed contract', () => {
         proposedBy: expect.any(String),
         proposedAt: res.body.proposedAt,
       });
-      // Neither the amount nor the text is on the shared topic.
-      const text = JSON.stringify(events);
-      expect(text).not.toContain('250000000');
-      expect(text).not.toContain('pile work');
+      // No independently verified path exemption: generated values stay searched (#452).
+      expectNotDisclosed(events, ['250000000', 'pile work']);
 
       const second = await propose(
         api,
@@ -421,8 +420,7 @@ describe('amendments of a signed contract', () => {
         effectiveAt: second.body.contractorSignedAt,
       });
       // No amount, no text, on any event of the amendment.
-      expect(JSON.stringify(events)).not.toContain('250000000');
-      expect(JSON.stringify(events)).not.toContain('pile work');
+      expectNotDisclosed(events, ['250000000', 'pile work']);
     });
 
     it('the contractor first, the employer second: the same amendment, whichever signs first', async () => {

@@ -24,6 +24,8 @@ const options: ResolutionWorkerOptions = {
 };
 
 function intent(overrides: Partial<NotificationIntent> = {}): NotificationIntent {
+  // One reading of the clock for every field that means "now".
+  const now = new Date();
   return {
     id: 'NTI_1',
     organizationId: 'ORG_A',
@@ -51,7 +53,7 @@ function intent(overrides: Partial<NotificationIntent> = {}): NotificationIntent
     },
     status: 'PENDING',
     resolutionAttempts: 0,
-    nextResolutionAt: new Date(),
+    nextResolutionAt: now,
     lastResolutionError: null,
     claimToken: 'token-1',
     claimOwner: 'worker-test',
@@ -59,8 +61,8 @@ function intent(overrides: Partial<NotificationIntent> = {}): NotificationIntent
     resolvedAt: null,
     dispatchedAt: null,
     terminalReason: null,
-    createdAt: new Date(),
-    updatedAt: new Date(),
+    createdAt: now,
+    updatedAt: now,
     ...overrides,
   };
 }

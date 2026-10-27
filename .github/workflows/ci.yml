@@ -78,6 +78,9 @@ jobs:
       - name: Outbox test eligibility clock guard
         run: pnpm run test:outbox-test-clock
 
+      - name: Disclosure guard reaches every Jest project and Playwright spec (#452)
+        run: pnpm run test:disclosure-guard-wiring
+
       - name: Local PostgreSQL defaults contract
         # `.env.example` must point host-side PostgreSQL at 127.0.0.1, not
         # `localhost`, which can try ::1 first against an IPv4-only listener
