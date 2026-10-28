@@ -8,7 +8,9 @@ import type { IdentityService } from './identity.service';
 import type { KeycloakProjector } from '../keycloak/keycloak.projector';
 import type { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
 import { membershipLapseFailuresTotal } from '../observability/keycloak-projection.metrics';
-import { onTheTestsClock, returnedBy } from '../../test/test-clock';
+import { gate, modelledPool } from '../../test/modelled-engine';
+import { onTheTestsClock, returnedBy, until } from '../../test/test-clock';
+import { COMMIT_RESERVE_MS } from '../prisma/cancellation';
 
 /**
  * The sweep that notices a validUntil passing (ADR-060 § 5), and re-asserts
@@ -571,14 +573,52 @@ describe('MembershipExpiryScanner', () => {
       });
       const pass = scanner.scan(now);
       await new Promise((resolve) => setImmediate(resolve));
-      const stopped = scanner.stop({ deadlineAt: Date.now() + 5_000 }).then(() => {
+      const startedAt = Date.now();
+      const stopped = scanner.stop({ deadlineAt: startedAt + 5_000 }).then(() => {
         order.push('stop returned');
       });
       release();
       // With the clock standing still: the deadline cannot pass first.
-      await returnedBy(stopped, 0);
+      expect(await returnedBy(stopped, 0)).toMatchObject({
+        status: 'fulfilled',
+        settledAt: startedAt,
+      });
       await pass;
       expect(order).toEqual(['recoverOwed', 'pass unwound', 'recoverOwed', 'stop returned']);
+    });
+
+    it('#912: a pass that gave up on the stop’s signal, its lapse’s COMMIT still with the engine — the stop returns only after that COMMIT', async () => {
+      const { pool, log, steps } = modelledPool();
+      const answer = gate();
+      steps.push({ commit: answer.opened });
+      // Its transaction's callback resolved — the COMMIT is with the engine —
+      // and the step itself ends on the stop's signal, before that answer.
+      const { scanner } = scannerWith(
+        (_membership, _at, { signal }) =>
+          new Promise<boolean>((_resolve, reject) => {
+            void pool.transaction((tx) => tx.$executeRawUnsafe('SET LOCAL x = 1'));
+            signal?.addEventListener('abort', () => reject(signal.reason as Error), {
+              once: true,
+            });
+          }),
+        [lapse(1)],
+      );
+      const pass = scanner.scan(now);
+      await until(() => log.includes('SET'));
+      const startedAt = Date.now();
+      setTimeout(answer.open, 100);
+
+      const stopped = await returnedBy(
+        scanner
+          .stop({ deadlineAt: startedAt + COMMIT_RESERVE_MS + 100 })
+          .then(() => void log.push('STOP RETURNED')),
+        COMMIT_RESERVE_MS + 100,
+      );
+
+      // Not "BEGIN, SET, STOP RETURNED, COMMIT": the stop waited for it.
+      expect(stopped).toMatchObject({ status: 'fulfilled', settledAt: startedAt + 100 });
+      expect(log).toEqual(['BEGIN 1', 'SET', 'COMMIT 1', 'STOP RETURNED']);
+      await pass;
     });
 
     it('a flush that outlives the shutdown deadline does not hold the stop past it', async () => {
@@ -590,8 +630,13 @@ describe('MembershipExpiryScanner', () => {
           'error',
         )
         .mockImplementation(() => undefined);
-      // Returned once the clock reached the deadline, the flush still hung.
-      await returnedBy(scanner.stop({ deadlineAt: Date.now() + 150 }), 150);
+      // A 150 ms window before the COMMIT reserve: returned once it closed,
+      // the flush still hung and nothing handed to the engine to wait for —
+      // then, not before, and not at the flush's pace.
+      const deadlineAt = Date.now() + COMMIT_RESERVE_MS + 150;
+      expect(await returnedBy(scanner.stop({ deadlineAt }), COMMIT_RESERVE_MS + 150)).toMatchObject(
+        { status: 'fulfilled', settledAt: deadlineAt - COMMIT_RESERVE_MS },
+      );
       expect(error).toHaveBeenCalledWith(
         expect.stringMatching(/unknown late Keycloak write fences/),
       );

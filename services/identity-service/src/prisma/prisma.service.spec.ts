@@ -130,7 +130,8 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
       // One batch, one entry — not the reviewer's "tracked=0".
       expect(admitted(pool)).toBe(1);
 
-      const closing = pool.stop({ deadlineAt: Date.now() + 20 });
+      const deadlineAt = Date.now() + 20;
+      const closing = pool.stop({ deadlineAt });
       const close = watch(closing);
       // Closing: nothing new is admitted, of any kind.
       await expect(pool.client.$executeRawUnsafe('SELECT 3')).rejects.toThrow(PoolClosedError);
@@ -148,7 +149,12 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
       await jest.advanceTimersByTimeAsync(1);
       await until(() => close.settled);
       expect(engine.held).toHaveLength(1);
-      expect(await closing).toEqual({ drained: false, unsettled: 1 });
+      // At the deadline, as the close itself recorded it (#912).
+      expect(close.settlement).toEqual({
+        status: 'fulfilled',
+        value: { drained: false, unsettled: 1 },
+        settledAt: deadlineAt,
+      });
       expect(
         (Logger.prototype.error as jest.Mock).mock.calls.map(([message]) => String(message)),
       ).toEqual([
@@ -169,7 +175,8 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
       await until(() => engine.held.length === 1);
       expect(admitted(pool)).toBe(1);
 
-      const closing = pool.stop({ deadlineAt: Date.now() + 5_000 });
+      const startedAt = Date.now();
+      const closing = pool.stop({ deadlineAt: startedAt + 5_000 });
       const close = watch(closing);
       await turn();
       expect(close.settled).toBe(false);
@@ -177,6 +184,8 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
       engine.release();
 
       expect(await closing).toEqual({ drained: true, unsettled: 0 });
+      // Closed once it was answered, the clock still where it was.
+      expect(close.settlement?.settledAt).toBe(startedAt);
       await expect(statement).resolves.toBe(1);
       expect(Logger.prototype.error).not.toHaveBeenCalled();
     });
@@ -240,7 +249,8 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
     void batch.catch(() => undefined);
     await until(() => engine.held.length === 1);
 
-    const tearingDown = tearDownProjectionCommand({ pools: [fencePool, prisma] }, Date.now() + 20);
+    const deadlineAt = Date.now() + 20;
+    const tearingDown = tearDownProjectionCommand({ pools: [fencePool, prisma] }, deadlineAt);
     const teardown = watch(tearingDown);
     // Each pool's own outcome (#910), not only the count. The idle one
     // disconnects with the clock standing still — before the deadline, by
@@ -256,10 +266,11 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
     await until(() => teardown.settled);
     expect(engine.held).toHaveLength(1);
     expect(await fencePool.stop()).toEqual({ drained: false, unsettled: 1 });
-    expect(await tearingDown).toEqual({
-      recoveriesUnwinding: 0,
-      transactionsUnsettled: 1,
-      poolsAbandoned: 1,
+    // At the deadline, as the teardown itself recorded it (#912).
+    expect(teardown.settlement).toEqual({
+      status: 'fulfilled',
+      value: { recoveriesUnwinding: 0, transactionsUnsettled: 1, poolsAbandoned: 1 },
+      settledAt: deadlineAt,
     });
     engine.release();
     await batch;

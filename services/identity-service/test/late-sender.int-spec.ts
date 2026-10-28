@@ -608,7 +608,8 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
   describe('the old attempt was already taken over while its sender was paused', () => {
     /**
      * While the sender is paused at Keycloak: its fence is taken over (its
-     * row gone) and a newer attempt's fence — the replacement — is live.
+     * row gone) and a newer attempt's fence — the replacement — is live, for
+     * hours: past the test's whole run, never a window it consumes (#912).
      */
     async function takeOverAndReplace(s: Seeded) {
       const [own] = await fencesOf(s.userId);
@@ -621,7 +622,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
                  (attempt_id, user_id, keycloak_id, operation,
                   started_at, deadline_at, takeover_at, next_reassert_at)
           SELECT ${replacement}, ${s.userId}, ${s.keycloakId}, 'replace_attributes',
-                 c, c + interval '30 seconds', c + interval '60 seconds', c + interval '60 seconds'
+                 c, c + interval '1 hour', c + interval '2 hours', c + interval '2 hours'
             FROM (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS c) t`,
       ]);
       return { own: own!.attemptId, replacement };

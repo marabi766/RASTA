@@ -287,7 +287,11 @@ describe('KeycloakFenceSampler', () => {
     await jest.advanceTimersByTimeAsync(99);
     await new Promise((resolve) => setImmediate(resolve));
     expect(stop.settled).toBe(false);
-    await returnedBy(stopping, 1);
+    expect(await returnedBy(stopping, 1)).toEqual({
+      status: 'fulfilled',
+      value: undefined,
+      settledAt: 100,
+    });
     sampler.tick();
     expect(calls).toHaveLength(1);
   });
