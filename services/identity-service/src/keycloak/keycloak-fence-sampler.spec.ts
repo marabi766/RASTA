@@ -3,6 +3,7 @@ import type { IdentityRepository } from '../identity/identity.repository';
 import type { IdentityService } from '../identity/identity.service';
 import type { KeycloakProjector } from './keycloak.projector';
 import type { FenceCounts, KeycloakWriteFences } from './keycloak-write-fence';
+import { returnedBy, watch } from '../../test/test-clock';
 import {
   keycloakFenceSampleAge,
   keycloakFenceSamplesTotal,
@@ -263,6 +264,12 @@ describe('KeycloakFenceSampler', () => {
   });
 
   it('its stop is bounded by one budget, and nothing it starts afterwards runs', async () => {
+    // On the test's clock (#910): bounded by the budget itself — not before
+    // it, and by it — never by how fast the runner is.
+    jest.useFakeTimers({
+      now: 0,
+      doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'queueMicrotask'],
+    });
     const calls: number[] = [];
     const sampler = new KeycloakFenceSampler(
       {
@@ -275,9 +282,12 @@ describe('KeycloakFenceSampler', () => {
       { budgetMs: 100, lapseBudgetMs: 100 },
     );
     sampler.start();
-    const started = Date.now();
-    await sampler.stop();
-    expect(Date.now() - started).toBeLessThan(1_000);
+    const stopping = sampler.stop();
+    const stop = watch(stopping);
+    await jest.advanceTimersByTimeAsync(99);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(stop.settled).toBe(false);
+    await returnedBy(stopping, 1);
     sampler.tick();
     expect(calls).toHaveLength(1);
   });

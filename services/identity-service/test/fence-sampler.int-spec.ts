@@ -3,7 +3,6 @@ import { IdentityRepository } from '../src/identity/identity.repository';
 import type { IdentityService } from '../src/identity/identity.service';
 import { MembershipExpiryScanner } from '../src/identity/membership-expiry.scanner';
 import {
-  FENCE_SAMPLE_BUDGET_MS,
   FENCE_SAMPLE_INTERVAL_MS,
   FENCE_SAMPLE_STALE_SECONDS,
   KeycloakFenceSampler,
@@ -13,7 +12,6 @@ import type { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import { FENCE_POOL_CONNECTIONS } from '../src/keycloak/keycloak-write-fence';
 import {
   keycloakFenceSampleAge,
-  keycloakFenceSampleDuration,
   keycloakFenceSamplesTotal,
   keycloakWriteFences,
 } from '../src/observability/keycloak-projection.metrics';
@@ -90,17 +88,21 @@ describe('R3-2: the fence sampler on a real database', () => {
   const samples = async (outcome: string) =>
     (await keycloakFenceSamplesTotal.get()).values.find((v) => v.labels.outcome === outcome)
       ?.value ?? 0;
-  /** The slowest sample of `outcome` so far, as an upper bucket bound, seconds. */
-  const slowest = async (outcome: string) => {
-    const buckets = (await keycloakFenceSampleDuration.get()).values
-      .filter((v) => v.labels.outcome === outcome && v.metricName?.endsWith('_bucket'))
-      .map((v) => ({ value: v.value, labels: v.labels as { le?: string | number } }));
-    const total = buckets.find((v) => v.labels.le === '+Inf')?.value ?? 0;
-    const under = buckets
-      .filter((v) => v.labels.le !== '+Inf' && v.value === total)
-      .map((v) => Number(v.labels.le));
-    return Math.min(...under);
-  };
+  /**
+   * The budget each transaction of the sampler on `pool` was given from now
+   * on — what the database enforces on it (its connection wait, its lock,
+   * its statement, its transaction) — read off the calls, not off a duration
+   * a loaded runner can stretch (#910).
+   */
+  function budgetsOn(pool: PrismaService): number[] {
+    const budgets: number[] = [];
+    const real = pool.transaction.bind(pool);
+    jest.spyOn(pool, 'transaction').mockImplementation((fn, options) => {
+      budgets.push(options?.budgetMs ?? Number.POSITIVE_INFINITY);
+      return real(fn, options);
+    });
+    return budgets;
+  }
 
   /** Holds `count` connections of `pool` in transactions until released. */
   function exhaust(pool: PrismaService, count: number) {
@@ -216,6 +218,7 @@ describe('R3-2: the fence sampler on a real database', () => {
 
   it('a sample waiting on a lock fails within its budget; the age keeps growing at every scrape past the stale threshold, and stays reported for the retention window after recovery', async () => {
     await overdueFence();
+    const budgets = budgetsOn(own);
     sampler.start();
     await waitFor('a first sample', async () =>
       (await gauge('live')) !== undefined ? true : null,
@@ -249,9 +252,16 @@ describe('R3-2: the fence sampler on a real database', () => {
       expect(ages[index]!).toBeGreaterThan(ages[index - 1]!);
     }
     expect(ages[ages.length - 1]!).toBeGreaterThan(FENCE_SAMPLE_STALE_SECONDS);
-    expect(await samples('failed')).toBeGreaterThan(failed);
-    // Each failed within its budget (the next bucket up from 1 s is 2 s).
-    expect(await slowest('failed')).toBeLessThanOrEqual(2);
+    // Counted failed while the lock is still held: bounded, it did not wait
+    // for the lock — and each within its budget, 1 s at most (#910: the
+    // budget the database enforced, not a duration a loaded runner can
+    // stretch; the client side's own bound is that same budget, on the fake
+    // clock in `keycloak-fence-sampler.spec.ts`).
+    await waitFor('a sample failed under the lock', async () =>
+      (await samples('failed')) > failed ? true : null,
+    );
+    expect(budgets.length).toBeGreaterThan(0);
+    expect(Math.max(...budgets)).toBeLessThanOrEqual(1_000);
     expect(Date.now() - lockedAt).toBeGreaterThan(FENCE_SAMPLE_STALE_SECONDS * 1000);
 
     unlock();
@@ -274,9 +284,15 @@ describe('R3-2: the fence sampler on a real database', () => {
     const failed = await samples('failed');
     const taken = exhaust(own, 1);
     await taken.held;
-    await sleep(FENCE_SAMPLE_INTERVAL_MS * 2 + FENCE_SAMPLE_BUDGET_MS);
-    expect(await samples('failed')).toBeGreaterThan(failed);
-    expect(await slowest('failed')).toBeLessThanOrEqual(2);
+    const budgets = budgetsOn(own);
+    // Counted failed while the connection is still taken: its wait did not
+    // outlast the holder, and was within its budget, 1 s at most (#910: the
+    // budget given, not a duration).
+    await waitFor('a sample failed with its connection taken', async () =>
+      (await samples('failed')) > failed ? true : null,
+    );
+    expect(budgets.length).toBeGreaterThan(0);
+    expect(Math.max(...budgets)).toBeLessThanOrEqual(1_000);
     taken.release();
     await taken.done;
   });

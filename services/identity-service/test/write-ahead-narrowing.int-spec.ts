@@ -851,15 +851,11 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       const s = await seed({
         memberships: [
           { in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] },
-          // Valid through the held write and its recovery; lapsed before it lands.
-          {
-            in: 'b',
-            roles: ['DRIVER'],
-            validUntil: new Date(Date.now() + DEADLINE_FIXTURE_MS + 1500),
-          },
+          // Valid through the held write and its recovery; lapsed — by the
+          // test, below — before it lands.
+          { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() + 3_600_000) },
         ],
       });
-      const lapsesAt = Date.now() + DEADLINE_FIXTURE_MS + 1500;
       const wide = await rowsGrant(s.userId);
 
       // A projection of the wide rows: Keycloak receives it and has not
@@ -889,9 +885,18 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       });
       expect(stub.puts(s.keycloakId)).toHaveLength(puts);
 
-      // Membership b lapses meanwhile; then Keycloak finally applies the old
+      // Membership b lapses meanwhile — when the test says so (#910), after
+      // the recovery read it, never when a window of real time a loaded
+      // runner can overrun runs out; then Keycloak finally applies the old
       // write: wider than the rows, which no longer grant b.
-      await new Promise((resolve) => setTimeout(resolve, Math.max(0, lapsesAt - Date.now()) + 100));
+      await prisma.transaction((tx) =>
+        runUnscoped('test lapses membership b', () =>
+          tx.membership.update({
+            where: { id: s.memberships[1]! },
+            data: { validUntil: new Date(Date.now() - 1_000), updatedBy: 'ITEST' },
+          }),
+        ),
+      );
       stub.releaseHeld();
       expect(stub.platform(s.keycloakId)).toEqual(wide);
       expect(isWithin(stub.platform(s.keycloakId), await rowsGrant(s.userId))).toBe(false);

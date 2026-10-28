@@ -3,6 +3,7 @@ import { Logger, type InjectionToken } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { OutboxPurgeScheduler, OutboxRelay, OutboxShutdown } from '@rasta/nest-common';
 import { gate, modelledPool } from '../test/modelled-engine';
+import { onTheTestsClock, returnedBy } from '../test/test-clock';
 import { AppModule, ENV, FENCE_PRISMA, SAMPLER_PRISMA } from './app.module';
 import type { IdentityRepository } from './identity/identity.repository';
 import type { IdentityService } from './identity/identity.service';
@@ -34,7 +35,9 @@ import { SECURITY_EVENT_RELAY } from './security-events/security-event.relay';
  * requires every pool's DISCONNECT to come after the last statement of every
  * worker: for the scanner's flush, the projection consumer's flush and a
  * recovery projection. The CLI's teardown, which has no Nest, is the last
- * block.
+ * block. Every deadline is on the test's clock (`test/test-clock.ts`, #910):
+ * an answer a test schedules comes when the test moves the clock there, so
+ * whether it came before a deadline never depends on the runner.
  */
 
 interface FactoryProvider {
@@ -164,6 +167,8 @@ async function boot(
 }
 
 describe('#458 r2 F2: Nest closes every pool only after every worker that uses it returned', () => {
+  onTheTestsClock();
+
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -177,7 +182,8 @@ describe('#458 r2 F2: Nest closes every pool only after every worker that uses i
     async (_name, worker, commits) => {
       const { moduleRef, log } = await boot(worker);
 
-      await moduleRef.close();
+      // The answer comes 100 ms into the shutdown budget.
+      await returnedBy(moduleRef.close(), 100);
 
       // The worker's writes all reached the database: none was refused by a
       // pool already closing.
@@ -215,7 +221,10 @@ describe('#458 r2 F2: Nest closes every pool only after every worker that uses i
     });
     log = booted.log;
 
-    await expect(booted.moduleRef.close()).rejects.toThrow('Kafka disconnect failed');
+    // The sibling finishes 150 ms into the shutdown budget.
+    await expect(returnedBy(booted.moduleRef.close(), 150)).rejects.toThrow(
+      'Kafka disconnect failed',
+    );
 
     const firstDisconnect = log.findIndex((step) => step.startsWith('DISCONNECT'));
     expect(log.indexOf('STOP REJECTED')).toBeGreaterThan(-1);
@@ -238,6 +247,8 @@ describe('#458 r2 F2: Nest closes every pool only after every worker that uses i
 });
 
 describe('#458 r2 F2: the projection command’s teardown', () => {
+  onTheTestsClock();
+
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -275,9 +286,12 @@ describe('#458 r2 F2: the projection command’s teardown', () => {
     await new Promise((resolve) => setImmediate(resolve));
     setTimeout(answer.open, 100);
 
-    const left = await tearDownProjectionCommand(
-      { projector: t.projector, pools: [t.fence.pool, t.business.pool] },
-      Date.now() + 1_000,
+    const left = await returnedBy(
+      tearDownProjectionCommand(
+        { projector: t.projector, pools: [t.fence.pool, t.business.pool] },
+        Date.now() + 1_000,
+      ),
+      100,
     );
 
     expect(left).toEqual({ recoveriesUnwinding: 0, transactionsUnsettled: 0, poolsAbandoned: 0 });
@@ -293,16 +307,23 @@ describe('#458 r2 F2: the projection command’s teardown', () => {
     t.recover();
     await new Promise((resolve) => setImmediate(resolve));
 
-    const left = await tearDownProjectionCommand(
-      { projector: t.projector, pools: [t.fence.pool, t.business.pool] },
-      Date.now() + 100,
+    const left = await returnedBy(
+      tearDownProjectionCommand(
+        { projector: t.projector, pools: [t.fence.pool, t.business.pool] },
+        Date.now() + 100,
+      ),
+      100,
     );
     answer.open();
 
     expect(left.recoveriesUnwinding).toBe(1);
     expect(left.transactionsUnsettled).toBe(1);
-    // The projector waited the whole deadline out: no time was left for
-    // either pool's disconnect, so neither reports drained.
+    // The projector waited the whole deadline out: the clock is exactly at
+    // it, on any runner, and no time was left for either pool's disconnect.
+    // Each pool's own outcome (#910): the business pool, its COMMIT still
+    // unanswered, and the idle fence pool, both abandoned — neither drained.
+    expect(await t.business.pool.stop()).toEqual({ drained: false, unsettled: 1 });
+    expect(await t.fence.pool.stop()).toEqual({ drained: false, unsettled: 0 });
     expect(left.poolsAbandoned).toBe(2);
   });
 
@@ -322,15 +343,18 @@ describe('#458 r2 F2: the projection command’s teardown', () => {
       },
     };
 
-    const outcome = await tearDownProjectionCommand(
-      { projector: t.projector, pools: [failing, t.business.pool] },
-      Date.now() + 5_000,
-    ).then(
-      () => 'resolved',
-      (error: unknown) => {
-        t.log.push('TEARDOWN REJECTED');
-        return (error as Error).message;
-      },
+    const outcome = await returnedBy(
+      tearDownProjectionCommand(
+        { projector: t.projector, pools: [failing, t.business.pool] },
+        Date.now() + 5_000,
+      ).then(
+        () => 'resolved',
+        (error: unknown) => {
+          t.log.push('TEARDOWN REJECTED');
+          return (error as Error).message;
+        },
+      ),
+      100,
     );
     await writing;
 

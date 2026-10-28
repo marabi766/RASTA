@@ -763,10 +763,22 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       // Every fence connection is busy: the flush's transaction waits.
       let release!: () => void;
       const released = new Promise<void>((resolve) => (release = resolve));
+      let inside = 0;
+      let allInside!: () => void;
+      const busy = new Promise<void>((resolve) => (allInside = resolve));
       const holders = Array.from({ length: FENCE_POOL_CONNECTIONS }, () =>
-        fencePool.transaction(() => released, { maxWait: 5_000, timeout: 10_000 }),
+        fencePool.transaction(
+          () => {
+            inside += 1;
+            if (inside === FENCE_POOL_CONNECTIONS) allInside();
+            return released;
+          },
+          { maxWait: 5_000, timeout: 10_000 },
+        ),
       );
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Each holder is inside its transaction, on its connection, before the
+      // flush asks for one (#910) — not a guess that 200 ms was enough.
+      await busy;
       // What reached the fence pool's transactions, and when.
       const log: string[] = [];
       const real = fencePool.transaction.bind(fencePool);

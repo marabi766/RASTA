@@ -5,6 +5,7 @@ import {
   PROJECTION_COMMAND_POOLS,
   tearDownProjectionCommand,
 } from '../keycloak/projection.command';
+import { onTheTestsClock, until, watch } from '../../test/test-clock';
 import { PoolClosedError, PrismaService } from './prisma.service';
 
 /**
@@ -19,6 +20,9 @@ import { PoolClosedError, PrismaService } from './prisma.service';
  * engine (`test/modelled-engine.ts`, an immediate DISCONNECT, no extension)
  * cannot express. Every pool the service and the projection command open, as
  * they open them: AppModule's three factories and the command's two.
+ *
+ * Every deadline here is on the test's clock (`test/test-clock.ts`, #910): no
+ * outcome depends on how fast the runner is.
  */
 
 const URL = 'postgresql://probe:probe@127.0.0.1:1/probe?schema=public';
@@ -101,28 +105,9 @@ const admitted = (pool: PrismaService) =>
 
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 
-/**
- * Far past any deadline here, so a slow runner never trips it (#458 r3 F8):
- * the close is shown bounded by returning while the engine's answer is still
- * held — which an unbounded disconnect never does — not by a tight wall-clock
- * figure. A close that waited for the answer loses this race, fast.
- */
-const HUNG_MS = 10_000;
-
-function settledBefore<T>(work: Promise<T>): Promise<T | 'hung'> {
-  let timer: NodeJS.Timeout | undefined;
-  const hung = new Promise<'hung'>((resolve) => {
-    timer = setTimeout(() => resolve('hung'), HUNG_MS);
-  });
-  return Promise.race([work, hung]).finally(() => clearTimeout(timer));
-}
-
-async function until(condition: () => boolean): Promise<void> {
-  for (let i = 0; i < 100 && !condition(); i += 1) await turn();
-  if (!condition()) throw new Error('never happened');
-}
-
 describe('#458 r3 F2: one admission point per pool, and a close bounded end to end', () => {
+  onTheTestsClock();
+
   beforeEach(() => {
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
@@ -146,6 +131,7 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
       expect(admitted(pool)).toBe(1);
 
       const closing = pool.stop({ deadlineAt: Date.now() + 20 });
+      const close = watch(closing);
       // Closing: nothing new is admitted, of any kind.
       await expect(pool.client.$executeRawUnsafe('SELECT 3')).rejects.toThrow(PoolClosedError);
       await expect(
@@ -154,11 +140,15 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
       expect(() => pool.transaction(async () => undefined)).toThrow(PoolClosedError);
       expect(await pool.isHealthy()).toBe(false);
 
-      const report = await settledBefore(closing);
-      // Returned while the answer is still held: Prisma's disconnect is
-      // still waiting for it, and the close did not wait with it.
+      // It waits for the batch until the deadline, not less ...
+      await jest.advanceTimersByTimeAsync(19);
+      expect(close.settled).toBe(false);
+      // ... and returns once it passed, with the answer still held: Prisma's
+      // disconnect is still waiting for it, and the close did not wait with it.
+      await jest.advanceTimersByTimeAsync(1);
+      await until(() => close.settled);
       expect(engine.held).toHaveLength(1);
-      expect(report).toEqual({ drained: false, unsettled: 1 });
+      expect(await closing).toEqual({ drained: false, unsettled: 1 });
       expect(
         (Logger.prototype.error as jest.Mock).mock.calls.map(([message]) => String(message)),
       ).toEqual([
@@ -180,7 +170,11 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
       expect(admitted(pool)).toBe(1);
 
       const closing = pool.stop({ deadlineAt: Date.now() + 5_000 });
-      setTimeout(() => engine.release(), 30);
+      const close = watch(closing);
+      await turn();
+      expect(close.settled).toBe(false);
+      // Answered with the clock standing still: the deadline cannot pass first.
+      engine.release();
 
       expect(await closing).toEqual({ drained: true, unsettled: 0 });
       await expect(statement).resolves.toBe(1);
@@ -241,18 +235,32 @@ describe('#458 r3 F2: one admission point per pool, and a close bounded end to e
   it('the command’s teardown over its real pools: a batch held past the deadline makes the run unclean, within its budget', async () => {
     const { prisma, fencePool } = commandPools();
     const engine = holdAnswers(fencePool);
-    holdAnswers(prisma);
+    const idle = holdAnswers(prisma);
     const batch = fencePool.client.$transaction([fencePool.client.$executeRawUnsafe('SELECT 1')]);
     void batch.catch(() => undefined);
     await until(() => engine.held.length === 1);
 
-    const left = await settledBefore(
-      tearDownProjectionCommand({ pools: [fencePool, prisma] }, Date.now() + 20),
-    );
-
-    // Returned with the answer still held: bounded, not waited out.
+    const tearingDown = tearDownProjectionCommand({ pools: [fencePool, prisma] }, Date.now() + 20);
+    const teardown = watch(tearingDown);
+    // Each pool's own outcome (#910), not only the count. The idle one
+    // disconnects with the clock standing still — before the deadline, by
+    // construction: drained. (On the real clock, a runner slow enough to let
+    // 20 ms pass first made it abandoned too — correctly, and the count 2.)
+    await until(() => idle.log.includes('DISCONNECT'));
+    expect(await prisma.stop()).toEqual({ drained: true, unsettled: 0 });
+    // The held one waits for its batch until the deadline ...
+    expect(teardown.settled).toBe(false);
+    await jest.advanceTimersByTimeAsync(20);
+    // ... and is abandoned once it passed, the answer still held: bounded,
+    // not waited out.
+    await until(() => teardown.settled);
     expect(engine.held).toHaveLength(1);
-    expect(left).toEqual({ recoveriesUnwinding: 0, transactionsUnsettled: 1, poolsAbandoned: 1 });
+    expect(await fencePool.stop()).toEqual({ drained: false, unsettled: 1 });
+    expect(await tearingDown).toEqual({
+      recoveriesUnwinding: 0,
+      transactionsUnsettled: 1,
+      poolsAbandoned: 1,
+    });
     engine.release();
     await batch;
   });

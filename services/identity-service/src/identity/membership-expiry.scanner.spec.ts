@@ -8,6 +8,7 @@ import type { IdentityService } from './identity.service';
 import type { KeycloakProjector } from '../keycloak/keycloak.projector';
 import type { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
 import { membershipLapseFailuresTotal } from '../observability/keycloak-projection.metrics';
+import { onTheTestsClock, returnedBy } from '../../test/test-clock';
 
 /**
  * The sweep that notices a validUntil passing (ADR-060 § 5), and re-asserts
@@ -537,6 +538,9 @@ describe('MembershipExpiryScanner', () => {
     });
   });
   describe('late senders’ owed fences (D-070 option D)', () => {
+    // A stop's deadline on the test's clock (#910): never a runner's speed.
+    onTheTestsClock();
+
     it('a pass writes them first, so a due one is re-asserted by that same pass', async () => {
       const order: string[] = [];
       const { scanner, fences, projector } = scannerWith(async () => true, [], { due: ['USR_A'] });
@@ -571,7 +575,8 @@ describe('MembershipExpiryScanner', () => {
         order.push('stop returned');
       });
       release();
-      await stopped;
+      // With the clock standing still: the deadline cannot pass first.
+      await returnedBy(stopped, 0);
       await pass;
       expect(order).toEqual(['recoverOwed', 'pass unwound', 'recoverOwed', 'stop returned']);
     });
@@ -585,9 +590,8 @@ describe('MembershipExpiryScanner', () => {
           'error',
         )
         .mockImplementation(() => undefined);
-      const started = Date.now();
-      await scanner.stop({ deadlineAt: started + 150 });
-      expect(Date.now() - started).toBeLessThan(2_000);
+      // Returned once the clock reached the deadline, the flush still hung.
+      await returnedBy(scanner.stop({ deadlineAt: Date.now() + 150 }), 150);
       expect(error).toHaveBeenCalledWith(
         expect.stringMatching(/unknown late Keycloak write fences/),
       );

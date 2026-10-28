@@ -1412,30 +1412,49 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         { timeout: 30_000, maxWait: 5_000 },
       );
       await isBlocked;
+      // What the insert's own transaction was given.
+      const given: Array<Parameters<PrismaService['transaction']>[1]> = [];
+      const fenceTransaction = fencing.pool.transaction.bind(fencing.pool);
+      jest.spyOn(fencing.pool, 'transaction').mockImplementation((fn, options) => {
+        given.push(options);
+        return fenceTransaction(fn, options);
+      });
       try {
+        let opening: unknown;
         const started = performance.now();
         await expect(
           repository.transaction(
             async (tx) => {
               await repository.lockUserMemberships(tx, s.userId);
-              return fencing.fences.open(tx, {
-                userId: s.userId,
-                keycloakId: s.keycloakId,
-                operation: 'replace_attributes',
-                timeoutMs: FENCE_TIMEOUT_FIXTURE_MS,
-                settleSeconds: SETTLE_SECONDS,
-                transactionTimeoutMs: 1_500,
-              });
+              return fencing.fences
+                .open(tx, {
+                  userId: s.userId,
+                  keycloakId: s.keycloakId,
+                  operation: 'replace_attributes',
+                  timeoutMs: FENCE_TIMEOUT_FIXTURE_MS,
+                  settleSeconds: SETTLE_SECONDS,
+                  transactionTimeoutMs: 1_500,
+                })
+                .catch((error: unknown) => {
+                  opening = error;
+                  throw error;
+                });
             },
             { timeout: 10_000, maxWait: 5_000 },
           ),
         ).rejects.toBeDefined();
         const ms = performance.now() - started;
-        // It waited its share, not refused at once — and its connection wait
-        // and its statement together never outlast what the business
-        // transaction had left (1.5 s): one budget (#458 r2 F2).
+        // It waited its share, not refused at once (a slow runner only adds) —
         expect(ms).toBeGreaterThan(600);
-        expect(ms).toBeLessThan(1_500);
+        // — and the insert's own bound ended it, not the business
+        // transaction's 10 s: its connection wait and its statement given one
+        // budget, never past what the business transaction had left (1.5 s):
+        // one budget (#458 r2 F2). Held to the budget itself (#910), not to a
+        // wall-clock figure a loaded runner overruns.
+        expect(opening).toBeDefined();
+        expect(given).toHaveLength(1);
+        expect(given[0]!.budgetMs).toBeLessThanOrEqual(1_500);
+        expect(given[0]!.statementTimeoutMs).toBe(given[0]!.budgetMs);
       } finally {
         unblock();
         await blocker;
