@@ -9,11 +9,22 @@
  * BASH_ENV and fromJSON env, eval of a reassigned credential variable,
  * dynamic commands via env/matrix (including composites/reusable workflows),
  * versioned npx/pnpm dlx launchers, and aliases running recursive Jest.
- * Covered static syntax: LF/CRLF/CR, backslash-newline continuations outside
- * single quotes, shell word-start comments outside quotes, quoted/escaped words,
- * and command separators ; && || | and newlines (also & and parentheses).
+ * Finite modelled lexical grammar (everything else REFUSES with its construct):
+ * LF/CRLF/CR; space/tab; backslash escapes/continuations; single/double quotes;
+ * word-start comments; literal words; ; && || | & and newline separators;
+ * balanced () / standalone {} groups; control-word prefixes; assignments;
+ * < > >> <& >& redirects; << / <<- with literal bare/single/double-quoted
+ * alphanumeric/underscore delimiters and isolated DATA payloads. Shell stdin
+ * and shell command strings refuse, including heredocs piped to a shell.
+ * Simple $name / ${name} / positional parameters and GitHub expressions are
+ * opaque dynamic atoms; balanced $(commands) uses this same lexer recursively.
+ * Their resolved values/field splitting are outside the dynamic scope above.
+ * ANSI-C/locale quotes, dangling escapes/quotes, process substitution, arithmetic,
+ * backticks, complex parameter/brace/pathname/tilde expansion, here-strings and
+ * unsupported operators refuse. Quoted literals do not acquire shell syntax.
  * Literal pnpm [run] test[:unit], turbo [run] test[:unit] (direct or via
- * pnpm exec/dlx or npx), and node/direct run-test-phases.mjs test are checked.
+ * pnpm exec/dlx, implicit pnpm dispatch or npx), and node/direct phase-runner
+ * calls are checked. All executable positions use one basename normalizer.
  * Launcher options are limited to LAUNCHER_OPTIONS below; unknown options before
  * the command fail loudly. This is not arbitrary-shell, environment-resolution
  * or root-script alias analysis.
@@ -35,68 +46,223 @@ export const UNBOUNDED_EXCEPTIONS = [
 ];
 
 /** One extractor for every run block; source stays exact for the exception identity. */
-function* logicalCommands(script) {
+function logicalCommands(script) {
   script = script.replace(/\r\n?/g, '\n');
-  let words = [];
-  let word = '';
-  let started = false;
-  let quote = null;
-  let source = '';
-  const endWord = () => {
-    if (started) words.push(word);
-    word = '';
-    started = false;
+  const commands = [];
+  let i = 0;
+  const refuse = (construct) => {
+    throw new Error(`unsupported shell construct: ${construct}`);
   };
-  for (let i = 0; i < script.length; i += 1) {
-    const char = script[i];
-    const next = script[i + 1];
-    if (char === '\\' && quote !== "'") {
-      if (next === '\n') {
-        source += char + next;
-        i += 1;
-        continue;
+  const scan = (closing = null) => {
+    let words = [];
+    let word = '';
+    let started = false;
+    let quote = null;
+    let source = '';
+    let redirect = false;
+    let shellInput = false;
+    const heredocs = [];
+    const endWord = () => {
+      if (started) {
+        if (!redirect) words.push(word);
+        redirect = false;
       }
-      if (next && (!quote || /[\\"$`]/.test(next))) {
-        word += next;
-        source += char + next;
-        started = true;
-        i += 1;
-        continue;
-      }
-    }
-    if (quote) {
-      source += char;
-      if (char === quote) quote = null;
-      else word += char;
-      continue;
-    }
-    // A hash starts a comment only at the start of an unquoted, unescaped word.
-    if (char === '#' && !started) {
-      while (i < script.length && script[i] !== '\n') source += script[i++];
-      i -= 1;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      started = true;
-      source += char;
-    } else if (/[;|&()\n]/.test(char)) {
+      word = '';
+      started = false;
+    };
+    const endCommand = () => {
       endWord();
-      if (words.length) yield { words, source: source.trim() };
+      if (redirect) refuse('missing redirection target');
+      if (words.length) commands.push({ words, source: source.trim(), shellInput });
       words = [];
       source = '';
-      if ((char === '&' || char === '|') && next === char) i += 1;
-    } else if (/\s/.test(char)) {
-      endWord();
-      source += char;
-    } else {
-      started = true;
-      word += char;
-      source += char;
+      shellInput = false;
+    };
+    while (i < script.length) {
+      const char = script[i];
+      const next = script[i + 1];
+      if (char === '\\' && quote !== "'") {
+        if (!next) refuse('dangling backslash');
+        if (next === '\n') {
+          source += char + next;
+          i += 2;
+          continue;
+        }
+        if (!quote || /[\\"$`]/.test(next)) {
+          word += next;
+          source += char + next;
+          started = true;
+          i += 2;
+          continue;
+        }
+      }
+      if (quote === "'") {
+        source += char;
+        if (char === quote) quote = null;
+        else word += char;
+        i += 1;
+        continue;
+      }
+      // Expansion boundaries are lexical; resolved values are never executed.
+      if (char === '$') {
+        if (!quote && (next === "'" || next === '"'))
+          refuse(next === "'" ? 'ANSI-C quoting' : 'locale quoting');
+        if (next === '[') refuse('legacy arithmetic expansion');
+        const begin = i;
+        if (next === '(') {
+          if (script[i + 2] === '(') refuse('arithmetic expansion');
+          i += 2;
+          scan(')');
+        } else if (next === '{') {
+          const github = script[i + 2] === '{';
+          const end = script.indexOf(github ? '}}' : '}', i + 2);
+          if (end < 0)
+            refuse(github ? 'unbalanced GitHub expression' : 'unbalanced parameter expansion');
+          if (
+            !github &&
+            !/^(?:[A-Za-z_][A-Za-z_0-9]*|[0-9@*#?$!-])$/.test(script.slice(i + 2, end))
+          )
+            refuse('complex parameter expansion');
+          i = end + (github ? 2 : 1);
+        } else {
+          const parameter = script.slice(i + 1).match(/^(?:[A-Za-z_][A-Za-z_0-9]*|[0-9@*#?$!-])/);
+          if (!parameter) {
+            // In double quotes these are literal dollars beside quote marks.
+            // Every other unknown prefix refuses, including a continuation
+            // that might assemble a different dollar construct after joining.
+            if (!quote || !['"', "'"].includes(next)) refuse('unrecognised dollar construct');
+            word += '$';
+            source += char;
+            started = true;
+            i += 1;
+            continue;
+          }
+          i += 1 + parameter[0].length;
+        }
+        word += '\0'; // An opaque atom cannot accidentally equal a literal command.
+        source += script.slice(begin, i);
+        started = true;
+        continue;
+      }
+      if (char === '`') refuse('backtick command substitution');
+      if (quote) {
+        source += char;
+        if (char === quote) quote = null;
+        else word += char;
+        i += 1;
+        continue;
+      }
+      if (char === '#' && !started) {
+        while (i < script.length && script[i] !== '\n') source += script[i++];
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        quote = char;
+        started = true;
+        source += char;
+      } else if (char === '<' || char === '>') {
+        if (next === '(') refuse('process substitution');
+        if (redirect) refuse('missing redirection target');
+        // A directly attached numeric file descriptor is not a command word.
+        if (/^\d+$/.test(word)) {
+          word = '';
+          started = false;
+        }
+        endWord();
+        const begin = i;
+        if (script.startsWith('<<<', i)) refuse('here-string');
+        if (script.startsWith('<<', i)) {
+          i += 2;
+          const tabs = script[i] === '-';
+          if (tabs) i += 1;
+          if (/^[ \t]*\$['"]/.test(script.slice(i))) refuse('ANSI-C/locale heredoc delimiter');
+          const delimiter = script
+            .slice(i)
+            .match(
+              /^[ \t]*(?:'([A-Za-z_0-9]+)'|"([A-Za-z_0-9]+)"|([A-Za-z_0-9]+))(?=[ \t\n;|&)]|$)/,
+            );
+          if (!delimiter) refuse('unsupported heredoc delimiter');
+          heredocs.push({ delimiter: delimiter[1] ?? delimiter[2] ?? delimiter[3], tabs });
+          heredocs[heredocs.length - 1].quoted = Boolean(delimiter[1] ?? delimiter[2]);
+          shellInput = true;
+          i += delimiter[0].length;
+        } else {
+          i += 1;
+          if (next === char || next === '&') i += 1;
+          if (/[<>|]/.test(script[i] ?? '')) refuse('unsupported redirection operator');
+          redirect = true;
+        }
+        source += script.slice(begin, i);
+        continue;
+      } else if (char === '(' || (char === '{' && !started && /[ \t\n]/.test(next ?? ''))) {
+        if (char === '(' && next === '(') refuse('arithmetic command');
+        if (char === '(' && /[?*+!@]$/.test(word)) refuse('extended pathname expansion');
+        if (char === '(' && word.includes('=')) refuse('array assignment');
+        endCommand();
+        i += 1;
+        scan(char === '(' ? ')' : '}');
+        continue;
+      } else if (char === ')' || char === '}') {
+        if (closing !== char) refuse(`unbalanced group ${char}`);
+        endCommand();
+        if (heredocs.length) refuse('unbalanced heredoc');
+        i += 1;
+        return;
+      } else if (/[;|&\n]/.test(char)) {
+        if (char === '&' && next === '>') refuse('combined output redirection');
+        if ((char === '&' || char === '|') && next === char && script[i + 2] === char)
+          refuse('unsupported control operator');
+        if ((char === ';' && /[;&]/.test(next ?? '')) || (char === '|' && next === '&'))
+          refuse('unsupported control operator');
+        endCommand();
+        i += 1;
+        if ((char === '&' || char === '|') && next === char) i += 1;
+        if (char === '\n') {
+          for (const { delimiter, tabs, quoted } of heredocs) {
+            let found = false;
+            while (i < script.length) {
+              const end = script.indexOf('\n', i);
+              const line = script.slice(i, end < 0 ? script.length : end);
+              i = end < 0 ? script.length : end + 1;
+              if ((tabs ? line.replace(/^\t+/, '') : line) === delimiter) {
+                found = true;
+                break;
+              }
+              if (!quoted && /[$`\\]/.test(line)) refuse('unquoted heredoc expansion or escape');
+            }
+            if (!found) refuse(`unbalanced heredoc ${delimiter}`);
+          }
+          heredocs.length = 0;
+        }
+        continue;
+      } else if (char === ' ' || char === '\t') {
+        endWord();
+        source += char;
+      } else {
+        // Assignments do not undergo pathname expansion; [ and ] delimit test.
+        if (char === '{') refuse('brace expansion');
+        if (char === '~') refuse('tilde expansion');
+        if (!/[A-Za-z0-9_./:@%=+,#!?*[\]-]/.test(char))
+          refuse(`unmodelled character ${JSON.stringify(char)}`);
+        if (
+          '?*['.includes(char) &&
+          !/^[A-Za-z_][A-Za-z_0-9]*=/.test(word) &&
+          !(char === '[' && !started && /[ \t]/.test(next ?? ''))
+        )
+          refuse('pathname expansion');
+        started = true;
+        word += char;
+        source += char;
+      }
+      i += 1;
     }
-  }
-  endWord();
-  if (words.length) yield { words, source: source.trim() };
+    if (quote) refuse(`unterminated ${quote === "'" ? 'single' : 'double'} quote`);
+    if (heredocs.length) refuse('unbalanced heredoc');
+    if (closing) refuse(`unbalanced group ${closing}`);
+    endCommand();
+  };
+  scan();
+  return commands;
 }
 
 // Explicit arity: 0 is a switch, 1 consumes a value (also --name=value).
@@ -217,17 +383,48 @@ function turboBounded(words) {
   return bounds.length === 1 && positiveInteger(bounds[0]);
 }
 
+// Built-ins/aliases from the pinned pnpm 11.22.0 command inventory.
+// Root scripts take precedence over implicit exec;
+// neither this inventory nor a script's body is executable/alias resolution.
+const PNPM_BUILTINS = new Set(
+  `access add adduser approve-builds audit bin bugs c cache cat-file cat-index change ci clean
+   clean-install completion config create dedupe deploy deprecate dislink dist-tag dist-tags dlx
+   docs doctor edit env exec fetch find find-hash get help home i ic ignored-builds import info
+   init install install-clean install-test issues it la lane licenses link list ll ln login logout
+   ls m multi outdated owner owners pack pack-app patch patch-commit patch-remove peers ping pkg
+   prefix profile prune publish purge rb rebuild recursive remove repo restart rm root rt run run-script
+   runtime s sbom se search self-update set set-script setup show ss stage star stars store
+   team token un undeprecate uni uninstall unlink unpublish unstar up update upgrade v version
+   view whoami why with xmas`.split(/\s+/),
+);
+const executable = (word) => word?.split('/').pop();
+
 /** Literal launchers only; arguments to other programs are never searched as commands. */
-function unbounded(words) {
+function unbounded(words, rootScripts, shellInput = false) {
+  while (
+    /^[A-Za-z_][A-Za-z_0-9]*=/.test(words[0] ?? '') ||
+    ['if', 'then', 'elif', 'else', 'do', 'while', 'until', '!'].includes(words[0])
+  )
+    words = words.slice(1);
   let [program, ...args] = words;
+  program = executable(program);
   if (program === 'pnpm') {
     args = afterOptions(args, 'pnpm');
     if (['exec', 'dlx'].includes(args[0]))
-      return unbounded(afterOptions(args.slice(1), `pnpm ${args[0]}`));
-    if (args[0] === 'run') args = afterOptions(args.slice(1), 'pnpm run');
-    return ['test', 'test:unit'].includes(args[0]);
+      return unbounded(afterOptions(args.slice(1), `pnpm ${args[0]}`), rootScripts, shellInput);
+    if (['run', 'run-script'].includes(args[0]))
+      return ['test', 'test:unit'].includes(afterOptions(args.slice(1), 'pnpm run')[0]);
+    if (['test', 'test:unit', 't'].includes(args[0])) return true;
+    if (!args[0] || PNPM_BUILTINS.has(args[0]) || Object.hasOwn(rootScripts ?? {}, args[0]))
+      return false;
+    return unbounded(afterOptions(args, 'pnpm exec'), rootScripts, shellInput);
   }
-  if (program === 'npx') return unbounded(afterOptions(args, 'npx'));
+  if (program === 'npx') return unbounded(afterOptions(args, 'npx'), rootScripts, shellInput);
+  if (
+    ['bash', 'sh', 'dash', 'zsh', 'ksh'].includes(program) &&
+    (shellInput || !args[0] || args[0].startsWith('-') || /^\/dev\/(stdin|fd\/0)$/.test(args[0]))
+  )
+    throw new Error('unsupported shell construct: shell stdin or command string');
   if (program === 'turbo') {
     args = afterOptions(args, 'turbo');
     if (args[0] === 'run') args = args.slice(1);
@@ -242,7 +439,7 @@ function unbounded(words) {
     );
   }
   if (program === 'node') [program, ...args] = afterOptions(args, 'node');
-  return program?.split('/').pop() === 'run-test-phases.mjs' && args[0] === 'test';
+  return executable(program) === 'run-test-phases.mjs' && args[0] === 'test';
 }
 
 /** Steps in workflows and local composite metadata, regardless of its directory. */
@@ -308,9 +505,16 @@ export function parsedProblems(docs, rootScripts) {
           .split('\n')
           .map((line) => line.trim()),
       );
-      for (const { words, source } of logicalCommands(step.run)) {
+      let commands;
+      try {
+        commands = logicalCommands(step.run);
+      } catch (error) {
+        problems.push(`${where}: ${error.message}`);
+        continue;
+      }
+      for (const { words, source, shellInput } of commands) {
         try {
-          if (!unbounded(words)) continue;
+          if (!unbounded(words, rootScripts, shellInput)) continue;
         } catch (error) {
           problems.push(`${where}: ${error.message}`);
           continue;

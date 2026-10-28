@@ -541,3 +541,216 @@ for (const option of ['-e', '--eval', '-p', '--print']) {
     assert.deepEqual(extraRun(`node ${option} '"safe"' scripts/run-test-phases.mjs test`), []);
   });
 }
+
+// Keep the full document path, YAML parser and exception contract in the matrix,
+// without reparsing unrelated production steps thousands of times.
+const grammarWorkflow = stringify({
+  jobs: {
+    quality: { steps: [unitStep(realDoc)] },
+    [exception.job]: { steps: [securityStep(realDoc)] },
+  },
+});
+const grammarProblems = (file, document, run, scripts = realScripts) =>
+  unitStepProblems({ 'ci.yml': grammarWorkflow, [file]: stringify(document(run)) }, scripts);
+const implicitForms = [
+  'pnpm turbo run test:unit',
+  'pnpm turbo test:unit',
+  'pnpm --reporter append-only turbo run test:unit',
+  'pnpm -C . turbo run test:unit',
+  'pnpm --filter=@rasta/web turbo run test:unit',
+  'pnpm turbo --cwd . run test:unit',
+  'pnpm turbo run --filter @rasta/web test:unit',
+  'pnpm node scripts/run-test-phases.mjs test',
+  'pnpm --reporter append-only node --no-warnings scripts/run-test-phases.mjs test',
+  'pnpm node --require ./setup.cjs scripts/run-test-phases.mjs test',
+  'npx pnpm turbo run test:unit',
+  'pnpm exec pnpm turbo run test:unit',
+  'pnpm dlx pnpm node scripts/run-test-phases.mjs test',
+  'npx --no-install pnpm --filter @rasta/web node scripts/run-test-phases.mjs test',
+  './node_modules/.bin/turbo run test:unit',
+  '/usr/bin/node scripts/run-test-phases.mjs test',
+  './node_modules/.bin/pnpm turbo run test:unit',
+  'pnpm ./node_modules/.bin/turbo run test:unit',
+  'pnpm /usr/bin/node scripts/run-test-phases.mjs test',
+  '/usr/bin/npx ./node_modules/.bin/turbo run test:unit',
+  'pnpm exec /usr/bin/node ./scripts/run-test-phases.mjs test',
+  'pnpm dlx ./node_modules/.bin/turbo run test:unit',
+  'pnpm run-script test:unit',
+  'pnpm t',
+];
+for (const [file, document] of scannedLocations) {
+  for (const command of implicitForms) {
+    for (const newline of [null, '\n', '\r\n']) {
+      const run = newline ? command.replaceAll(' ', ` \\${newline}`) : command;
+      test(`r4 implicit and path matrix ${file}: ${JSON.stringify(run)}`, () => {
+        refused(grammarProblems(file, document, run), /literal unbounded/);
+      });
+    }
+  }
+  // Superset of all 1,408 reviewer escapes: the original 22 forms, all delimiter
+  // quote styles, both heredoc operators, cat/shell recipients, both quote leaks.
+  for (const command of continuationForms) {
+    for (const operator of ['<<', '<<-']) {
+      for (const delimiter of ['TXT', "'TXT'", '"TXT"']) {
+        for (const program of ['cat', 'bash']) {
+          for (const data of ["it's a note", 'an unmatched "']) {
+            const tab = operator === '<<-' ? '\t' : '';
+            const run = `${program} ${operator}${delimiter}\n${tab}${data}\n${tab}TXT\n${command}`;
+            test(`r4 heredoc quote boundary ${file}: ${JSON.stringify(run)}`, () => {
+              refused(grammarProblems(file, document, run), /literal unbounded|shell stdin/);
+            });
+          }
+        }
+      }
+    }
+  }
+}
+
+const refusalCases = [
+  ["pnpm $'test:unit'", 'ANSI-C quoting'],
+  ["$'pnpm' run test:unit", 'ANSI-C quoting'],
+  ['pnpm $"test:unit"', 'locale quoting'],
+  ['$"pnpm" run test:unit', 'locale quoting'],
+  ["$\\\n'pnpm' run test:unit", 'unrecognised dollar construct'],
+  ["pnpm $\\\n'test:unit'", 'unrecognised dollar construct'],
+  ['$\\\n"pnpm" run test:unit', 'unrecognised dollar construct'],
+  ['pnpm $\\\r\n"test:unit"', 'unrecognised dollar construct'],
+  ['echo "$\\\n(pnpm test)"', 'unrecognised dollar construct'],
+  ['echo $', 'unrecognised dollar construct'],
+  ["echo 'unterminated", 'unterminated single quote'],
+  ['echo "unterminated', 'unterminated double quote'],
+  ['echo trailing\\', 'dangling backslash'],
+  ["cat <<'TXT'\nit's a note\n", 'unbalanced heredoc'],
+  ['cat <<-TXT\n\tdata\n TXT', 'unbalanced heredoc'],
+  ['cat <<TXT', 'unbalanced heredoc'],
+  ['(cat <<TXT)', 'unbalanced heredoc'],
+  ['cat <<"TXT"suffix\nTXT', 'unsupported heredoc delimiter'],
+  ["bash <<'TXT'\npnpm test\nTXT", 'shell stdin or command string'],
+  ['sh <<TXT\npnpm test\nTXT', 'shell stdin or command string'],
+  ["cat <<'TXT' | /bin/bash\npnpm test\nTXT", 'shell stdin or command string'],
+  ["pnpm exec /bin/bash /dev/stdin <<'TXT'\npnpm test\nTXT", 'shell stdin or command string'],
+  ["bash some-script.sh <<'TXT'\npnpm test\nTXT", 'shell stdin or command string'],
+  ["sh -c 'pnpm test'", 'shell stdin or command string'],
+  ['cat <<TXT\n$(pnpm test)\nTXT', 'unquoted heredoc expansion or escape'],
+  ['cat <<TXT\n`pnpm test`\nTXT', 'unquoted heredoc expansion or escape'],
+  ['cat <<TXT\ndata\\\nTXT', 'unquoted heredoc expansion or escape'],
+  ['cat <(pnpm test)', 'process substitution'],
+  ['cat >(pnpm test)', 'process substitution'],
+  ['echo $((1+2))', 'arithmetic expansion'],
+  ['echo $[1+2]', 'legacy arithmetic expansion'],
+  ["cat <<$'TXT'\ndata\nTXT", 'ANSI-C/locale heredoc delimiter'],
+  ['cat <<$"TXT"\ndata\nTXT', 'ANSI-C/locale heredoc delimiter'],
+  ['COMMAND=(pnpm test)', 'array assignment'],
+  ['(( 1 + 2 ))', 'arithmetic command'],
+  ['echo `pnpm test`', 'backtick command substitution'],
+  ['echo ${name:-value}', 'complex parameter expansion'],
+  ['echo ${name', 'unbalanced parameter expansion'],
+  ['echo ${{ expression', 'unbalanced GitHub expression'],
+  ['echo $(echo safe', 'unbalanced group'],
+  ['(echo safe', 'unbalanced group'],
+  ['echo safe)', 'unbalanced group'],
+  ['{ echo safe', 'unbalanced group'],
+  ['echo safe }', 'unbalanced group'],
+  ['pnpm {test,test:unit}', 'brace expansion'],
+  ['pnpm te*', 'pathname expansion'],
+  ['pnpm tes?', 'pathname expansion'],
+  ['pnpm [t]est', 'pathname expansion'],
+  ['echo @(one|two)', 'extended pathname expansion'],
+  ['echo ~user', 'tilde expansion'],
+  ['cat <<<"pnpm test"', 'here-string'],
+  ['echo safe;; pnpm test', 'unsupported control operator'],
+  ['echo safe |& pnpm test', 'unsupported control operator'],
+  ['echo safe &&& pnpm test', 'unsupported control operator'],
+  ['echo safe &> output', 'combined output redirection'],
+  ['echo safe <> output', 'unsupported redirection operator'],
+  ['echo safe >', 'missing redirection target'],
+  ['echo safe > > output', 'missing redirection target'],
+  ['echo safe\vdata', 'unmodelled character'],
+];
+for (const [file, document] of scannedLocations) {
+  for (const [run, construct] of refusalCases) {
+    test(`finite grammar refusal ${file}: ${construct}: ${JSON.stringify(run)}`, () => {
+      const problems = grammarProblems(file, document, run);
+      assert.ok(
+        problems.some(
+          (problem) =>
+            problem.startsWith(`${file} `) &&
+            problem.includes('/ (unnamed): unsupported shell construct: ') &&
+            problem.includes(construct),
+        ),
+        JSON.stringify(problems),
+      );
+    });
+  }
+}
+
+for (const [run, pattern] of [
+  ['RESULT=$(pnpm turbo run test:unit)', /literal unbounded/],
+  ['echo "$(pnpm node scripts/run-test-phases.mjs test)"', /literal unbounded/],
+  ['echo "$(echo "$(pnpm test)")"', /literal unbounded/],
+  ['(pnpm turbo run test:unit)', /literal unbounded/],
+  ['{ pnpm node scripts/run-test-phases.mjs test; }', /literal unbounded/],
+  ['if pnpm turbo run test:unit; then echo done; fi', /literal unbounded/],
+  ['FLAG=value /usr/bin/node scripts/run-test-phases.mjs test', /literal unbounded/],
+  ['>output pnpm test', /literal unbounded/],
+  ['pnpm >output test:unit', /literal unbounded/],
+  ['pnpm 2>&1 test:unit', /literal unbounded/],
+  ['pnpm turbo --unknown test:unit', /unrecognised launcher option/],
+  ['pnpm node --unknown scripts/run-test-phases.mjs test', /unrecognised launcher option/],
+]) {
+  test(`modelled command boundary finds invocation: ${run}`, () => {
+    for (const [file, document] of scannedLocations)
+      refused(grammarProblems(file, document, run), pattern);
+  });
+}
+
+const grammarControls = [
+  "cat <<'TXT'\nit's a note\nan unmatched \"\npnpm test\nTXT\npnpm run build",
+  'cat <<-TXT\n\tdata\n\tTXT\npnpm run build',
+  'cat <<"TXT"\n$(pnpm test)\n`pnpm test`\nTXT\npnpm run build',
+  'cat <<\'ONE\' <<-"TWO"\n\'single quote\nONE\n\t"double quote\n\tTWO\npnpm run build',
+  'cat <<TXT\ndata\nTXT',
+  'echo "literal <(pnpm test) and ${name}"',
+  'echo \'$"literal" and $\'',
+  'echo "literal $\'test:unit\'"',
+  "echo 'literal `pnpm test` ${name:-value} {a,b} ~ *'",
+  'echo "$(echo \'quoted\')"; pnpm run build',
+  '(echo safe); { pnpm run build; }',
+  'example() { echo safe; }; example',
+  'if [ "$name" = "value" ]; then pnpm run build; fi',
+  'for item in $(seq 1 3); do echo "$item"; done',
+  'NAME=value pnpm run build >output 2>&1',
+  'cat <input | tee output >>log',
+  'pnpm turbo run test:unit --concurrency=3',
+  '/usr/bin/pnpm /usr/bin/node scripts/run-test-phases.mjs build',
+  'bash scripts/build.sh',
+  'pnpm install --frozen-lockfile',
+  'pnpm run turbo run test:unit',
+  'echo "# ${{ github.ref }}"',
+  'pnpm ${task}',
+  'echo "a literal $"',
+  'pnpm "test$"',
+  'echo "$(cat <<\'TXT\'\n)"quote\nTXT\n)"; pnpm run build',
+];
+for (const run of grammarControls) {
+  test(`finite grammar accepted control: ${JSON.stringify(run)}`, () => {
+    for (const [file, document] of scannedLocations)
+      assert.deepEqual(grammarProblems(file, document, run), []);
+  });
+}
+test('implicit pnpm dispatch uses the supplied root scripts before executable lookup', () => {
+  for (const [file, document] of scannedLocations) {
+    for (const [name, command] of [
+      ['turbo', 'run test:unit'],
+      ['node', 'scripts/run-test-phases.mjs test'],
+    ])
+      assert.deepEqual(
+        grammarProblems(file, document, `pnpm ${name} ${command}`, {
+          ...realScripts,
+          [name]: 'echo safe',
+        }),
+        [],
+      );
+    assert.deepEqual(grammarProblems(file, document, 'pnpm help test:unit'), []);
+  }
+});
