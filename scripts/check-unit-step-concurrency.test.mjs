@@ -388,3 +388,156 @@ test('CLI normalizes CR-only workflow and composite metadata before discovery', 
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /local\/ci\/inner\/action.yml.*literal unbounded/);
 });
+
+// Superset of reviewer r3's 48-case sweep: both tasks for every Turbo launcher,
+// plus pnpm dlx, across all four document locations. Each has LF/CRLF and controls.
+const continuationForms = [
+  ...['test', 'test:unit'].flatMap((task) => [
+    `pnpm run ${task}`,
+    `pnpm ${task}`,
+    ...['turbo', 'pnpm exec turbo', 'pnpm dlx turbo', 'npx turbo'].flatMap((launcher) => [
+      `${launcher} run ${task}`,
+      `${launcher} ${task}`,
+    ]),
+  ]),
+  'node scripts/run-test-phases.mjs test',
+  './scripts/run-test-phases.mjs test',
+];
+const scannedLocations = [
+  ['other.yml', (run) => ({ jobs: { other: { steps: [{ run }] } } })],
+  ['other.yaml', (run) => ({ jobs: { other: { steps: [{ run }] } } })],
+  ['local/ci/action.yml', (run) => ({ runs: { using: 'composite', steps: [{ run }] } })],
+  ['local/ci/action.yaml', (run) => ({ runs: { using: 'composite', steps: [{ run }] } })],
+];
+for (const [file, document] of scannedLocations) {
+  for (const command of continuationForms) {
+    for (const newline of [null, '\n', '\r\n']) {
+      const label = newline === null ? 'unwrapped control' : newline === '\n' ? 'LF' : 'CRLF';
+      test(`continuation matrix ${label}: ${file}: ${command}`, () => {
+        const split = command.lastIndexOf(' ');
+        const run = newline
+          ? `${command.slice(0, split)} \\${newline}  ${command.slice(split + 1)}`
+          : command;
+        // Exercise actual YAML serialization/parsing, including CRLF inside run.
+        refused(
+          unitStepProblems(
+            { 'ci.yml': realWorkflow, [file]: stringify(document(run)) },
+            realScripts,
+          ),
+          /literal unbounded unit invocation/,
+        );
+      });
+    }
+  }
+}
+for (const command of [
+  'pnpm --reporter append-only run test:unit',
+  'npx --no-install turbo run test:unit',
+  'pnpm dlx turbo run test:unit',
+  'node --no-warnings scripts/run-test-phases.mjs test',
+  'pnpm --reporter=append-only run test:unit',
+  'pnpm run --reporter append-only test:unit',
+  'pnpm exec --parallel turbo run test:unit',
+  'pnpm dlx --package turbo turbo test:unit',
+  'npx --package turbo --no-install turbo test:unit',
+  'node --require ./setup.cjs --no-warnings scripts/run-test-phases.mjs test',
+  'turbo --cwd . run test:unit',
+  'turbo run --filter @rasta/web test:unit',
+  'turbo run test:unit --filter test',
+]) {
+  test(`declared launcher options expose unbounded invocation: ${command}`, () => {
+    for (const [file, document] of scannedLocations)
+      refused(
+        parsedProblems({ 'ci.yml': realDoc, [file]: document(command) }, realScripts),
+        /literal unbounded unit invocation/,
+      );
+  });
+}
+for (const command of [
+  'pnpm --unrecognised test:unit',
+  'pnpm run --unrecognised test:unit',
+  'pnpm exec --unrecognised turbo run test:unit',
+  'pnpm dlx --unrecognised turbo run test:unit',
+  'npx --unrecognised turbo run test:unit',
+  'node --unrecognised scripts/run-test-phases.mjs test',
+  'turbo --unrecognised run test:unit',
+  'turbo run --unrecognised test:unit',
+  'pnpm --unrecognised=anything build',
+]) {
+  test(`unknown launcher option fails loudly: ${command}`, () => {
+    for (const [file, document] of scannedLocations)
+      refused(
+        parsedProblems({ 'ci.yml': realDoc, [file]: document(command) }, realScripts),
+        /unrecognised launcher option/,
+      );
+  });
+}
+for (const command of ['pnpm --reporter', 'npx --package', 'node --require', 'turbo --cwd']) {
+  test(`missing launcher option value fails closed: ${command}`, () =>
+    refused(extraRun(command), /missing launcher option value/));
+}
+for (const command of [
+  '# comment; pnpm test',
+  'echo safe # comment; pnpm test',
+  '\t# comment && pnpm test || turbo test:unit | pnpm test',
+  '# comment with backslash \\\npnpm run build',
+  'echo "# comment; pnpm test"',
+  "echo '# comment; pnpm test'",
+  'echo \\# pnpm test',
+  'pnpm run build#suffix',
+  'pnpm ""#suffix test',
+  "pnpm 'test:\\\nunit'",
+  'pnpm --reporter test run build',
+  'npx --package test turbo build',
+  'node --require test scripts/run-test-phases.mjs build',
+  'turbo --concurrency 3 run test:unit',
+]) {
+  test(`logical command control accepted: ${JSON.stringify(command)}`, () => {
+    for (const [file, document] of scannedLocations)
+      assert.deepEqual(
+        parsedProblems({ 'ci.yml': realDoc, [file]: document(command) }, realScripts),
+        [],
+      );
+  });
+}
+for (const separator of [';', '&&', '||', '|', '\n']) {
+  test(`logical command separator exposes invocation: ${JSON.stringify(separator)}`, () =>
+    refused(extraRun(`echo safe ${separator} pnpm test`), /literal unbounded/));
+}
+for (const command of [
+  '# comment; pnpm build\npnpm test',
+  '# comment with backslash \\\npnpm test',
+  'echo word#suffix; pnpm test',
+  'echo "#"; pnpm test',
+  "echo '#'; pnpm test",
+  'echo \\#; pnpm test',
+  'pnpm "test:\\\nunit"',
+  'pnpm te\\\nst:unit',
+]) {
+  test(`comment and continuation boundaries retain invocation: ${JSON.stringify(command)}`, () =>
+    refused(extraRun(command), /literal unbounded/));
+}
+test('exception command text remains exact after logical extraction', () => {
+  for (const suffix of [' # comment', ' \\\n', '; true', ' && true', ' | cat'])
+    refused(
+      problemsAfter((doc) => {
+        securityStep(doc).run = exception.command + suffix;
+      }),
+      /must match exactly once/,
+    );
+});
+
+test('compound prefix cannot satisfy the exact exception line', () => {
+  refused(
+    problemsAfter((doc) => {
+      securityStep(doc).run = `true; ${exception.command}`;
+    }),
+    /must match exactly once/,
+  );
+});
+
+for (const option of ['-e', '--eval', '-p', '--print']) {
+  test(`node ${option} arguments are not treated as a script filename`, () => {
+    assert.deepEqual(extraRun(`node ${option} '"safe"' scripts/run-test-phases.mjs test`), []);
+  });
+}
