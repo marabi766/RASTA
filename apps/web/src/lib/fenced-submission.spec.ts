@@ -1,4 +1,8 @@
-import { submitThroughSlot, type SlotSubmission } from './fenced-submission';
+import { act, renderHook } from '@testing-library/react';
+import { startTransition } from 'react';
+
+import { submitThroughSlot, useSlotActionState, type SlotSubmission } from './fenced-submission';
+import { SESSION_PROBE_DEADLINE_MS } from './session-refusal';
 import type { StartOutcome } from './unresolved-tenancy';
 
 /**
@@ -7,6 +11,10 @@ import type { StartOutcome } from './unresolved-tenancy';
  * (addendum D); every completion after the send — returned or thrown, a first
  * send or a re-send — goes through the same finalization (R5); a key already
  * unresolved is never sent as a first send, nor settled by its answer (R4).
+ *
+ * Review 5, R6: a failed call is kept and its view returned before
+ * `/auth/session` is asked; the probe's answer never answers again, and a 401
+ * reaches only the very view that send returned (`useSlotActionState`).
  */
 
 type State =
@@ -34,6 +42,9 @@ const redirect = () =>
   Object.assign(new Error('NEXT_REDIRECT'), { digest: 'NEXT_REDIRECT;push;/x;307;' });
 
 let sessionStatus: number | 'NETWORK' = 204;
+
+/** Lets every settled promise run its callbacks. */
+const flush = () => act(async () => undefined);
 
 beforeEach(() => {
   sessionStatus = 204;
@@ -166,22 +177,23 @@ describe('every completion goes through one finalization (R5)', () => {
   });
 
   it.each([
-    ['204', 204, 'thrown'],
-    ['503', 503, 'thrown'],
-    ['a network failure', 'NETWORK', 'thrown'],
-    ['401', 401, 'ended'],
+    ['204', 204],
+    ['503', 503],
+    ['a network failure', 'NETWORK'],
+    ['401', 401],
   ] as const)(
-    'a failed call with /auth/session %s stays uncertain and is answered (addendum F)',
-    async (_label, status, note) => {
+    'a failed call with /auth/session %s: returned uncertain and answered once, as it was (addendum F, R6)',
+    async (_label, status) => {
       sessionStatus = status;
       const { submission, calls } = harness({
         send: async () => Promise.reject(new Error('lost')),
       });
       await expect(submitThroughSlot(submission)).resolves.toMatchObject({
         kind: 'UNCONFIRMED',
-        note,
+        note: 'thrown',
       });
-      expect(calls.answer).toHaveLength(1);
+      await flush();
+      expect(calls.answer).toEqual([UNCONFIRMED(K1, 'thrown')]);
       expect(calls.settle).toBe(0);
     },
   );
@@ -226,5 +238,143 @@ describe('every completion goes through one finalization (R5)', () => {
     await expect(submitThroughSlot(submission)).rejects.toBe(error);
     expect(calls.answer).toEqual([]);
     expect(calls.settle).toBe(0);
+  });
+});
+
+describe('R6: kept and shown first, the session asked after', () => {
+  const retrying = UNCONFIRMED(K1) as Extract<State, { kind: 'UNCONFIRMED' }>;
+  let session: { resolve: (status: number) => void; reject: () => void; asked: number };
+  let order: string[];
+
+  beforeEach(() => {
+    order = [];
+    let resolve: (status: number) => void = () => undefined;
+    let reject: () => void = () => undefined;
+    session = { resolve: (s) => resolve(s), reject: () => reject(), asked: 0 };
+    global.fetch = (() => {
+      session.asked += 1;
+      order.push('probe');
+      return new Promise((res, rej) => {
+        resolve = (status) => res({ status });
+        reject = () => rej(new TypeError('fetch failed'));
+      });
+    }) as unknown as typeof fetch;
+  });
+
+  const failing = (overrides: Partial<SlotSubmission<State>> = {}) => {
+    const made = harness({
+      send: async () => Promise.reject(new Error('lost')),
+      ...overrides,
+    });
+    const answer = made.submission.answer;
+    made.submission = {
+      ...made.submission,
+      answer: (state) => {
+        order.push('answer');
+        answer(state);
+      },
+    };
+    return made;
+  };
+
+  it.each([
+    ['a first send', {}],
+    ['a re-send', { retrying }],
+  ] as const)(
+    '%s whose call fails: answered and returned while /auth/session never answers',
+    async (_label, overrides) => {
+      const { submission, calls } = failing(overrides as Partial<SlotSubmission<State>>);
+      await expect(submitThroughSlot(submission)).resolves.toEqual(UNCONFIRMED(K1, 'thrown'));
+      expect(order).toEqual(['answer', 'probe']);
+      expect(calls.answer).toHaveLength(1);
+    },
+  );
+
+  it('a redirect and an unsent refusal ask nothing (addendum A)', async () => {
+    const redirected = harness({ send: async () => Promise.reject(redirect()) });
+    await expect(submitThroughSlot(redirected.submission)).rejects.toBeDefined();
+    const unsent = harness({ remembered: null, send: async () => Promise.reject(new Error('x')) });
+    await expect(submitThroughSlot(unsent.submission)).rejects.toBeDefined();
+    const held = harness({ remembered: 'HELD' });
+    await submitThroughSlot(held.submission);
+    expect(session.asked).toBe(0);
+    expect(redirected.calls.settle).toBe(1);
+    expect([redirected.calls.answer, unsent.calls.answer, held.calls.answer]).toEqual([[], [], []]);
+  });
+
+  /** A form holding its state through the hook, its action the boundary. */
+  function form(made: ReturnType<typeof failing>) {
+    const action = () => submitThroughSlot(made.submission);
+    const hook = renderHook(() => useSlotActionState<State>(action, { kind: 'IDLE' }));
+    const press = () =>
+      act(async () => {
+        startTransition(() => hook.result.current[1](new FormData()));
+      });
+    return { hook, press, shown: () => hook.result.current[0] };
+  }
+
+  it('a 401 later: the view it returned shows the session ended — answered once, nothing written again', async () => {
+    const made = failing();
+    const { press, shown } = form(made);
+    await press();
+    expect(shown()).toEqual(UNCONFIRMED(K1, 'thrown'));
+    await act(async () => session.resolve(401));
+    expect(shown()).toEqual(UNCONFIRMED(K1, 'ended'));
+    expect(made.calls.answer).toEqual([UNCONFIRMED(K1, 'thrown')]);
+  });
+
+  it.each([
+    ['204', () => session.resolve(204)],
+    ['503', () => session.resolve(503)],
+    ['a network failure', () => session.reject()],
+    ['no answer within the deadline', () => jest.advanceTimersByTime(SESSION_PROBE_DEADLINE_MS)],
+  ] as const)('%s: the view stays uncertain, answered once', async (_label, settle) => {
+    jest.useFakeTimers();
+    try {
+      const made = failing();
+      const { press, shown } = form(made);
+      await press();
+      await act(async () => settle());
+      // A 401 after the deadline is ignored too.
+      await act(async () => session.resolve(401));
+      expect(shown()).toEqual(UNCONFIRMED(K1, 'thrown'));
+      expect(made.calls.answer).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('a newer press out when the 401 arrives: not shown on it, nor on what it returns', async () => {
+    const made = failing();
+    const { press, shown, hook } = form(made);
+    await press();
+    // The same view sent again; its answer is still out when the first probe says 401.
+    let answerRetry: (state: State) => void = () => undefined;
+    made.submission = {
+      ...made.submission,
+      retrying,
+      send: () =>
+        new Promise<State>((resolve) => {
+          answerRetry = resolve;
+        }),
+    };
+    await press();
+    expect(hook.result.current[2]).toBe(true);
+    await act(async () => session.resolve(401));
+    expect(shown()).toEqual(UNCONFIRMED(K1, 'thrown'));
+    await act(async () => answerRetry(UNCONFIRMED(K1, 'returned')));
+    expect(shown()).toEqual(UNCONFIRMED(K1, 'returned'));
+  });
+
+  it('another form drawn anew never shows another view’s verdict', async () => {
+    const made = failing();
+    const first = form(made);
+    await first.press();
+    const second = renderHook(() =>
+      useSlotActionState<State>(async () => ({ kind: 'IDLE' }), UNCONFIRMED(K1, 'thrown')),
+    );
+    await act(async () => session.resolve(401));
+    expect(first.shown()).toEqual(UNCONFIRMED(K1, 'ended'));
+    expect(second.result.current[0]).toEqual(UNCONFIRMED(K1, 'thrown'));
   });
 });

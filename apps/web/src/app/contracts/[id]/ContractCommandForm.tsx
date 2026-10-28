@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState, useCallback } from 'react';
+import { useCallback } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import {
@@ -25,7 +25,7 @@ import {
 } from '@/lib/contract-command-input';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
-import { submitThroughSlot } from '@/lib/fenced-submission';
+import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import {
   answerUnresolvedContractCommand,
   clearUnresolvedContractCommand,
@@ -244,7 +244,7 @@ function ContractCommandFormBody({
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds],
   );
-  const [state, action, pending] = useActionState(send, initial);
+  const [state, action, pending] = useSlotActionState(send, initial);
   const headingId = `contract-command-${command}-${scope.subjectId ?? 'contract'}`;
   const title = titleOf(command, side, subjectLabel);
 

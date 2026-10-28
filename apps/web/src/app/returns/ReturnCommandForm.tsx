@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState, useCallback } from 'react';
+import { useCallback } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { toPersianDigits } from '@/lib/format';
@@ -22,7 +22,7 @@ import {
   type ReturnRequestValues,
 } from '@/lib/return-request';
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
-import { submitThroughSlot } from '@/lib/fenced-submission';
+import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import type { Binding } from '@/lib/unresolved-order';
 import {
   answerUnresolvedReturn,
@@ -247,7 +247,7 @@ function ReturnCommandFormBody({
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds, lines],
   );
-  const [state, action, pending] = useActionState(send, initial);
+  const [state, action, pending] = useSlotActionState(send, initial);
   const headingId = `return-command-${command}`;
 
   if (state.kind === 'UNCONFIRMED') {

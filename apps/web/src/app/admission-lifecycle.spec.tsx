@@ -13,7 +13,13 @@ import * as orderStore from '@/lib/unresolved-order';
 import * as returnStore from '@/lib/unresolved-return';
 import * as statementStore from '@/lib/unresolved-statement';
 import * as ownerStore from '@/lib/unresolved-tender-command';
-import { QUARANTINE_MARK, type Binding } from '@/lib/unresolved-tenancy';
+import { SESSION_PROBE_DEADLINE_MS } from '@/lib/session-refusal';
+import {
+  QUARANTINE_MARK,
+  resetUnrecordedOutcomes,
+  type Binding,
+  type QuarantineSource,
+} from '@/lib/unresolved-tenancy';
 import type { Offer } from '@/server/marketplace';
 import { OPEN_TENDER, TENDER_ID as BID_TENDER } from '@/test/bid-fixtures';
 import { TENDER_ID as OWNER_TENDER } from '@/test/owner-fixtures';
@@ -51,6 +57,14 @@ import { QUARANTINE_CONFIRM, QUARANTINE_CONTINUE, QUARANTINE_TITLE } from './Unr
  * outcome is shown (the fixed warning), K2 stays byte for byte, and nothing is
  * sent again under either key. `/auth/session` answering 503 or failing keeps
  * it uncertain; only 401 says the session ended (addendum F).
+ *
+ * Review 5, R6: the failed call is kept and shown BEFORE `/auth/session` is
+ * asked. With the probe held open (fake timers), the hold and the warning —
+ * or, in the form's own slot, its record and uncertainty view — are already
+ * there; then a 401, 204, 503, network failure or no answer within the
+ * deadline each leave exactly one record, K2 byte for byte. A 401 only adds
+ * the "session ended" view to the form whose very send failed — never to
+ * another identity's form, nor to a newer press (PM addenda B–F).
  */
 
 jest.setTimeout(30_000);
@@ -905,5 +919,315 @@ describe('addendum B: command-specific replay prohibitions survive the shared pa
     expect(screen.queryByRole('button', { name: RETRY })).toBeNull();
     expect(view.container.querySelector('textarea')).toBeNull();
     expect(disputeAction).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review 5, R6: kept and shown first, the session asked after
+
+describe('R6: a failed call is kept and shown before /auth/session answers', () => {
+  const QUARANTINES: Record<string, QuarantineSource> = {
+    order: orderStore.orderQuarantine,
+    dispute: disputeStore.disputeQuarantine,
+    return: returnStore.returnQuarantine,
+    statement: statementStore.statementQuarantine,
+    'contract command': contractStore.contractCommandQuarantine,
+    bid: bidStore.bidQuarantine,
+    'tender owner command': ownerStore.ownerCommandQuarantine,
+  };
+  const ENDED = /نشست شما پایان یافته است/;
+  const OUTCOMES = [
+    ['401', 401],
+    ['204', 204],
+    ['503', 503],
+    ['a network failure', 'NETWORK'],
+    ['no answer within the deadline', 'TIMEOUT'],
+  ] as const;
+  type Outcome = (typeof OUTCOMES)[number][1];
+
+  /** `/auth/session`, held open until the test answers it. */
+  let probe: {
+    asked: number;
+    signals: AbortSignal[];
+    answers: { resolve: (value: unknown) => void; reject: (error: unknown) => void }[];
+  };
+
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
+    probe = { asked: 0, signals: [], answers: [] };
+    global.fetch = ((_url: string, init: RequestInit) => {
+      probe.asked += 1;
+      probe.signals.push(init.signal as AbortSignal);
+      return new Promise((resolve, reject) => probe.answers.push({ resolve, reject }));
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    resetUnrecordedOutcomes();
+  });
+
+  /** Still asking: asked once, not answered, the deadline not reached (nothing aborted). */
+  const stillAsking = () => {
+    expect(probe.asked).toBe(1);
+    expect(probe.signals[0]!.aborted).toBe(false);
+  };
+
+  async function answerProbe(outcome: Outcome) {
+    await act(async () => {
+      if (outcome === 'TIMEOUT') jest.advanceTimersByTime(SESSION_PROBE_DEADLINE_MS);
+      else
+        for (const answer of probe.answers) {
+          if (outcome === 'NETWORK') answer.reject(new TypeError('fetch failed'));
+          else answer.resolve({ status: outcome });
+        }
+    });
+    if (outcome === 'TIMEOUT') {
+      expect(probe.signals[0]!.aborted).toBe(true);
+      // A 401 after the deadline, from a fetch that ignored the abort: ignored.
+      await act(async () => {
+        for (const answer of probe.answers) answer.resolve({ status: 401 });
+      });
+    }
+  }
+
+  const memoryHolds = (group: Group) =>
+    QUARANTINES[group.name]!.held({ person: BINDING.person, legacy: BINDING.legacy }).filter(
+      (held) => held.key.startsWith('memory:'),
+    );
+
+  /** Storage that refuses every set-aside record (a full quota): the memory fallback. */
+  const refuseSetAside = () => {
+    const setItem = Storage.prototype.setItem;
+    jest.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string,
+    ) {
+      if (key.includes(QUARANTINE_MARK)) throw new DOMException('full', 'QuotaExceededError');
+      return setItem.call(this, key, value);
+    });
+  };
+
+  /** The reviewer's case: K1 out, its form gone, K1 set aside, K2 in the slot — then K1's call fails. */
+  async function k1FailsAfterK2(group: Group) {
+    const k1Answer = deferred<unknown>();
+    group.action.mockImplementationOnce(() => k1Answer.promise);
+    const first = render(group.page(K1));
+    await waitFor(() => expect(first.container.querySelector('form')).not.toBeNull());
+    group.fill(first.container, 'one');
+    await submitIn(first.container);
+    first.unmount();
+    group.release(K1);
+    const second = render(group.page(K2));
+    await waitFor(() => expect(second.container.querySelector('form')).not.toBeNull());
+    await sendUnconfirmed(group, second.container, K2, 'two');
+    const k2 = window.sessionStorage.getItem(group.slot());
+    expect(JSON.parse(k2!)).toMatchObject({ submissionId: K2 });
+    expect(probe.asked).toBe(0);
+    await act(async () => {
+      k1Answer.reject(lostResponse());
+      await k1Answer.promise.catch(() => undefined);
+    });
+    return k2;
+  }
+
+  /** K1's own form, its call failing while K1 still holds the slot. */
+  async function ownSendFails(group: Group) {
+    group.action.mockRejectedValueOnce(lostResponse());
+    const view = render(group.page(K1));
+    await waitFor(() => expect(view.container.querySelector('form')).not.toBeNull());
+    group.fill(view.container, 'one');
+    await submitIn(view.container);
+    return view;
+  }
+
+  describe.each(GROUPS.map((group) => [group.name, group] as const))('%s', (_name, group) => {
+    it.each(OUTCOMES)(
+      'K1 set aside, K2 sent, K1’s call fails: the hold and the warning are there while /auth/session is pending; then %s leaves exactly one record, K2 byte for byte',
+      async (_label, outcome) => {
+        const k2 = await k1FailsAfterK2(group);
+
+        stillAsking();
+        expect(setAside()).toHaveLength(1);
+        expect(screen.getByText(QUARANTINE_TITLE)).toBeInTheDocument();
+        expect(window.sessionStorage.getItem(group.slot())).toBe(k2);
+        const record = setAside();
+
+        await answerProbe(outcome);
+
+        expect(setAside()).toEqual(record);
+        expect(memoryHolds(group)).toEqual([]);
+        expect(screen.getByText(QUARANTINE_TITLE)).toBeInTheDocument();
+        expect(window.sessionStorage.getItem(group.slot())).toBe(k2);
+        // K2's own view is K2's: no "session ended" from K1's probe; still retryable.
+        expect(document.body.textContent).not.toMatch(ENDED);
+        expect(screen.getByRole('button', { name: RETRY })).toBeInTheDocument();
+        expect(sentIds(group)).toEqual([K1, K2]);
+      },
+    );
+
+    it.each(OUTCOMES)(
+      'the same with storage refusing the set-aside record: one memory hold and the warning while pending; then %s leaves exactly that one',
+      async (_label, outcome) => {
+        const k2 = await k1FailsAfterK2((refuseSetAside(), group));
+
+        stillAsking();
+        expect(setAside()).toEqual([]);
+        expect(memoryHolds(group)).toHaveLength(1);
+        expect(screen.getByText(QUARANTINE_TITLE)).toBeInTheDocument();
+        const held = memoryHolds(group);
+
+        await answerProbe(outcome);
+
+        expect(memoryHolds(group)).toEqual(held);
+        expect(setAside()).toEqual([]);
+        expect(screen.getByText(QUARANTINE_TITLE)).toBeInTheDocument();
+        expect(window.sessionStorage.getItem(group.slot())).toBe(k2);
+        expect(document.body.textContent).not.toMatch(ENDED);
+      },
+    );
+
+    it.each([
+      ['in storage', false],
+      ['in memory', true],
+    ] as const)(
+      'the warning acknowledged while /auth/session is pending (%s): a later 401 makes no new hold',
+      async (_label, memory) => {
+        if (memory) refuseSetAside();
+        await k1FailsAfterK2(group);
+        stillAsking();
+        await acknowledgeWarning();
+        expect(screen.queryByText(QUARANTINE_TITLE)).toBeNull();
+
+        await answerProbe(401);
+
+        expect(screen.queryByText(QUARANTINE_TITLE)).toBeNull();
+        expect(QUARANTINES[group.name]!.held({ person: BINDING.person, legacy: [] })).toEqual([]);
+        expect(setAside()).toHaveLength(memory ? 0 : 1);
+        expect(screen.getByRole('button', { name: RETRY })).toBeInTheDocument();
+      },
+    );
+
+    it.each(OUTCOMES)(
+      'K1’s own call fails while K1 holds the slot: its record and uncertainty view are there while pending; then %s — the view says “session ended” only for 401, the record byte for byte',
+      async (_label, outcome) => {
+        const view = await ownSendFails(group);
+
+        stillAsking();
+        const k1 = window.sessionStorage.getItem(group.slot());
+        expect(JSON.parse(k1!)).toMatchObject({ submissionId: K1 });
+        expect(screen.getByRole('button', { name: RETRY })).toBeInTheDocument();
+        expect(document.body.textContent).not.toMatch(ENDED);
+        expect(setAside()).toEqual([]);
+
+        await answerProbe(outcome);
+
+        if (outcome === 401) {
+          expect(document.body.textContent).toMatch(ENDED);
+          expect(screen.queryByRole('button', { name: RETRY })).toBeNull();
+        } else {
+          expect(document.body.textContent).not.toMatch(ENDED);
+          expect(screen.getByRole('button', { name: RETRY })).toBeInTheDocument();
+        }
+        // Nothing written again, nothing held, nothing sent again.
+        expect(window.sessionStorage.getItem(group.slot())).toBe(k1);
+        expect(setAside()).toEqual([]);
+        expect(memoryHolds(group)).toEqual([]);
+        expect(screen.queryByText(QUARANTINE_TITLE)).toBeNull();
+        expect(sentIds(group)).toEqual([K1]);
+
+        // Addendum E: a remount restores exactly what it would have — a marker stays view-only.
+        view.unmount();
+        const again = render(group.page(K1));
+        await waitFor(() => expect(again.container.textContent).not.toBe(''));
+        if (group.markerOnly) {
+          expect(screen.queryByRole('button', { name: RETRY })).toBeNull();
+          expect(again.container.querySelector('textarea, input[type="text"], select')).toBeNull();
+        } else {
+          expect(screen.getByRole('button', { name: RETRY })).toBeInTheDocument();
+        }
+        expect(document.body.textContent).not.toMatch(ENDED);
+        expect(window.sessionStorage.getItem(group.slot())).toBe(k1);
+      },
+    );
+
+    it.each([
+      ['another person', bindingOf('owner-tag-A', 'session-tag-1', OTHER_PERSON)],
+      ['another organization', bindingOf('owner-tag-B', 'session-tag-1')],
+      ['another login', bindingOf('owner-tag-A', 'session-tag-2')],
+    ] as const)(
+      'addendum D: %s takes the page while /auth/session is pending: the late 401 never reaches its form',
+      async (_label, other) => {
+        const view = await ownSendFails(group);
+        stillAsking();
+        view.rerender(group.page(K2, other));
+        await waitFor(() => expect(view.container.textContent).not.toBe(''));
+
+        await answerProbe(401);
+
+        expect(document.body.textContent).not.toMatch(ENDED);
+        expect(screen.queryByRole('button', { name: RETRY })).toBeNull();
+      },
+    );
+
+    it('addendum D: a newer press out when the 401 arrives — neither it nor its answer shows “session ended”', async () => {
+      await ownSendFails(group);
+      const k1 = window.sessionStorage.getItem(group.slot());
+      const retried = deferred<unknown>();
+      group.action.mockImplementationOnce(() => retried.promise);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: RETRY }));
+      });
+
+      await answerProbe(401);
+      expect(document.body.textContent).not.toMatch(ENDED);
+
+      await act(async () => {
+        retried.resolve(group.unconfirmed(formOf(group.action.mock.calls[1]!), K1, 'COR_RETRY'));
+        await retried.promise;
+      });
+      expect(document.body.textContent).not.toMatch(ENDED);
+      expect(screen.getByRole('button', { name: RETRY })).toBeInTheDocument();
+      expect(sentIds(group)).toEqual([K1, K1]);
+      expect(setAside()).toEqual([]);
+      expect(JSON.parse(window.sessionStorage.getItem(group.slot())!)).toMatchObject({
+        submissionId: K1,
+      });
+      expect(window.sessionStorage.getItem(group.slot())).not.toBeNull();
+      expect(k1).not.toBeNull();
+    });
+  });
+
+  it('addendum E: a dispute stamp withdrawn while /auth/session is pending stays withdrawn after its 401', async () => {
+    const view = await ownSendFails(dispute);
+    stillAsking();
+    expect(JSON.parse(window.sessionStorage.getItem(dispute.slot())!)).toMatchObject({
+      replay: STAMP,
+    });
+    // The service withdraws the stamp meanwhile (a late answer past the deadline).
+    disputeStore.answerUnresolvedDispute(
+      'TXN_1',
+      {
+        command: 'DISPUTE',
+        submissionId: K1,
+        values: { ...EMPTY_DISPUTE_FORM, reason: REASONS.one },
+        correlationId: 'COR_LATE',
+        replay: null,
+      },
+      BINDING,
+    );
+    const withdrawn = window.sessionStorage.getItem(dispute.slot());
+
+    await answerProbe(401);
+
+    expect(window.sessionStorage.getItem(dispute.slot())).toBe(withdrawn);
+    expect(JSON.parse(withdrawn!)).toMatchObject({ replay: null, text: REASONS.one });
+    expect(screen.queryByRole('button', { name: RETRY })).toBeNull();
+    view.unmount();
+    render(dispute.page(K1));
+    await waitFor(() => expect(document.body.textContent).not.toBe(''));
+    expect(screen.queryByRole('button', { name: RETRY })).toBeNull();
+    expect(sentIds(dispute)).toEqual([K1]);
   });
 });

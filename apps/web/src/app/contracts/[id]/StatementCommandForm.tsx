@@ -1,11 +1,11 @@
 'use client';
 
-import { useActionState, useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
-import { submitThroughSlot } from '@/lib/fenced-submission';
+import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import { draftFormLines, parseDraft, rowsOfLines } from '@/lib/statement-draft';
 import {
   EMPTY_LINE,
@@ -234,7 +234,7 @@ function StatementCommandFormBody({
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds],
   );
-  const [state, action, pending] = useActionState(send, initial);
+  const [state, action, pending] = useSlotActionState(send, initial);
   const headingId = `statement-command-${command}`;
 
   if (state.kind === 'UNCONFIRMED') {

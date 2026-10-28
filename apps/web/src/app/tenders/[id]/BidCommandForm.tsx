@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState, useCallback } from 'react';
+import { useCallback } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import {
@@ -20,7 +20,7 @@ import { bidFormValues, parseBid, type BidFormValues } from '@/lib/bid-input';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { toPersianDigits } from '@/lib/format';
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
-import { submitThroughSlot } from '@/lib/fenced-submission';
+import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import {
   answerUnresolvedBid,
   clearUnresolvedBid,
@@ -227,7 +227,7 @@ function BidCommandFormBody({
     },
     [tenderId, command, replay, account],
   );
-  const [state, action, pending] = useActionState(send, initial);
+  const [state, action, pending] = useSlotActionState(send, initial);
   const headingId = `bid-command-${command}`;
 
   if (state.kind === 'UNCONFIRMED') {

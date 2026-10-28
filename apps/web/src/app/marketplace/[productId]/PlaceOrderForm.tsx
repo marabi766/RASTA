@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useActionState, useCallback } from 'react';
+import { useCallback } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { ProviderUnknownRefusal } from '@/app/DemoModeNotice';
@@ -25,7 +25,7 @@ import {
 } from '@/lib/unresolved-order';
 import type { Offer } from '@/server/marketplace';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
-import { submitThroughSlot } from '@/lib/fenced-submission';
+import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 
 import { submitPlaceOrder } from './place-order-actions';
 import {
@@ -181,7 +181,7 @@ function OrderForm({
     },
     [productId, binding, sessionMaxAgeSeconds],
   );
-  const [state, action, pending] = useActionState(send, initial);
+  const [state, action, pending] = useSlotActionState(send, initial);
 
   if (state.kind === 'UNCONFIRMED') {
     return (

@@ -1,12 +1,12 @@
 'use client';
 
-import { useActionState, useCallback, type ReactNode } from 'react';
+import { useCallback, type ReactNode } from 'react';
 
 import { Alert, Button, Field, Identifier, IsolatedText, controlClassName } from '@/ui';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { formatScaledDecimal, toPersianDigits } from '@/lib/format';
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
-import { submitThroughSlot } from '@/lib/fenced-submission';
+import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import {
   DISQUALIFICATION_REASON_LABELS,
   DISQUALIFY_TEXT_MAX,
@@ -258,7 +258,7 @@ function OwnerCommandFormBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [tenderId, command, replay, account, scoreRows, award],
   );
-  const [state, action, pending] = useActionState(send, initial);
+  const [state, action, pending] = useSlotActionState(send, initial);
   const headingId = `owner-command-${command}${scope ? `-${idPart(scope)}` : ''}`;
   const label = ownerLabel(command, execute);
   const heading = (
