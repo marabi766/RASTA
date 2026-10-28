@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Static accidental-regression tripwire; see the library header for its limits. */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { stepsOf, unitStepProblems } from './check-unit-step-concurrency-lib.mjs';
@@ -42,6 +42,15 @@ while (pending.length) {
   }
 }
 const { scripts } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-const problems = unitStepProblems(files, scripts);
+const problems = unitStepProblems(files, scripts, {
+  readRepoFile(path) {
+    const target = resolve(root, path);
+    const inside = (value) => value.startsWith(root + sep);
+    if (!inside(target) || !existsSync(target)) return null;
+    const actual = realpathSync(target);
+    if (!inside(actual)) return null;
+    return { path: relative(root, actual), text: readFileSync(actual, 'utf8') };
+  },
+});
 for (const problem of problems) console.error(problem);
 process.exit(problems.length === 0 ? 0 : 1);

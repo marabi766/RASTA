@@ -5,7 +5,7 @@
  * Workflow changes are reviewed code; code review handles deliberate evasion.
  *
  * Out of scope by design (review r2): set -n / set -o noexec, set -e +e,
- * command/builtin exec, cd, startup files exported through $GITHUB_ENV,
+ * shell execution effects (including exec), cd, startup files through $GITHUB_ENV,
  * BASH_ENV and fromJSON env, eval of a reassigned credential variable,
  * dynamic commands via env/matrix (including composites/reusable workflows),
  * versioned npx/pnpm dlx launchers, and aliases running recursive Jest.
@@ -14,13 +14,26 @@
  * word-start comments; literal words; ; && || | & and newline separators;
  * balanced () / standalone {} groups; control-word prefixes; assignments;
  * < > >> <& >& redirects; << / <<- with literal bare/single/double-quoted
- * alphanumeric/underscore delimiters and isolated DATA payloads. Shell stdin
- * and shell command strings refuse, including heredocs piped to a shell.
+ * alphanumeric/underscore delimiters and isolated DATA payloads; <<< here-strings.
+ * A: time (-p), !, coproc, command, exec, env, nice, nohup, timeout and xargs
+ * recursively expose their remaining command words; unmodelled options refuse.
+ * B': FULLY LITERAL eval arguments are joined and recursively parsed with this
+ * lexer. ANY expansion ($var, ${..}, $(..), backticks) makes the argument DYNAMIC:
+ * out of scope by D-074, neither parsed nor refused; its literal words OUTSIDE
+ * expansions are still classified. source/. of a literal repo path scans that
+ * file as a run block; a non-repo literal path is dynamic, UNLESS C feeds it.
+ * C: heredoc/here-string/pipeline input reaching sh/bash/dash/zsh/ksh/rbash or
+ * source/. is parsed as commands, independent of stdin path spelling. A payload
+ * that cannot be obtained statically refuses. Pipeline/group relationships and
+ * redirection precedence are preserved; arbitrary producer behavior is not run.
+ * Shell command strings continue to refuse; captured input never hides a
+ * literal repo source path, which is also scanned under B'.
  * Simple $name / ${name} / positional parameters and GitHub expressions are
  * opaque dynamic atoms; balanced $(commands) uses this same lexer recursively.
  * Their resolved values/field splitting are outside the dynamic scope above.
  * ANSI-C/locale quotes, dangling escapes/quotes, process substitution, arithmetic,
- * backticks, complex parameter/brace/pathname/tilde expansion, here-strings and
+ * backticks, complex parameter/brace/pathname/tilde expansion (except dynamic
+ * evaluation arguments as specified above), and
  * unsupported operators refuse. Quoted literals do not acquire shell syntax.
  * Literal pnpm [run] test[:unit], turbo [run] test[:unit] (direct or via
  * pnpm exec/dlx, implicit pnpm dispatch or npx), and node/direct phase-runner
@@ -60,11 +73,16 @@ function logicalCommands(script) {
     let quote = null;
     let source = '';
     let redirect = false;
-    let shellInput = false;
+    let input = null;
+    let pipedFrom = null;
+    let last = null;
+    const nodes = [];
     const heredocs = [];
     const endWord = () => {
       if (started) {
         if (!redirect) words.push(word);
+        else if (redirect === 'here-string') input.value = word;
+        else if (redirect === 'input') input.path = word;
         redirect = false;
       }
       word = '';
@@ -73,10 +91,15 @@ function logicalCommands(script) {
     const endCommand = () => {
       endWord();
       if (redirect) refuse('missing redirection target');
-      if (words.length) commands.push({ words, source: source.trim(), shellInput });
+      if (words.length) {
+        last = { words, source: source.trim(), input, pipedFrom };
+        nodes.push(last);
+        commands.push(last);
+        pipedFrom = null;
+      } else if (input && last?.children) last.input = input;
       words = [];
       source = '';
-      shellInput = false;
+      input = null;
     };
     while (i < script.length) {
       const char = script[i];
@@ -102,6 +125,18 @@ function logicalCommands(script) {
         else word += char;
         i += 1;
         continue;
+      }
+      // Evaluation arguments are opaque when expanded, including their internals.
+      // Preserve surrounding literal text, but do not parse or refuse the expansion.
+      if ((char === '$' || char === '`') && evaluationSite(words)) {
+        const end = dynamicEnd(script, i);
+        if (end !== null) {
+          word += '\0';
+          source += script.slice(i, end);
+          started = true;
+          i = end;
+          continue;
+        }
       }
       // Expansion boundaries are lexical; resolved values are never executed.
       if (char === '$') {
@@ -170,7 +205,13 @@ function logicalCommands(script) {
         }
         endWord();
         const begin = i;
-        if (script.startsWith('<<<', i)) refuse('here-string');
+        if (script.startsWith('<<<', i)) {
+          input = { kind: 'text', value: null };
+          redirect = 'here-string';
+          i += 3;
+          source += script.slice(begin, i);
+          continue;
+        }
         if (script.startsWith('<<', i)) {
           i += 2;
           const tabs = script[i] === '-';
@@ -182,15 +223,16 @@ function logicalCommands(script) {
               /^[ \t]*(?:'([A-Za-z_0-9]+)'|"([A-Za-z_0-9]+)"|([A-Za-z_0-9]+))(?=[ \t\n;|&)]|$)/,
             );
           if (!delimiter) refuse('unsupported heredoc delimiter');
-          heredocs.push({ delimiter: delimiter[1] ?? delimiter[2] ?? delimiter[3], tabs });
+          input = { kind: 'text', value: '' };
+          heredocs.push({ delimiter: delimiter[1] ?? delimiter[2] ?? delimiter[3], tabs, input });
           heredocs[heredocs.length - 1].quoted = Boolean(delimiter[1] ?? delimiter[2]);
-          shellInput = true;
           i += delimiter[0].length;
         } else {
           i += 1;
           if (next === char || next === '&') i += 1;
           if (/[<>|]/.test(script[i] ?? '')) refuse('unsupported redirection operator');
-          redirect = true;
+          redirect = char === '<' && next !== '&' ? 'input' : true;
+          if (char === '<') input = { kind: 'file', path: null };
         }
         source += script.slice(begin, i);
         continue;
@@ -200,14 +242,18 @@ function logicalCommands(script) {
         if (char === '(' && word.includes('=')) refuse('array assignment');
         endCommand();
         i += 1;
-        scan(char === '(' ? ')' : '}');
+        const children = scan(char === '(' ? ')' : '}');
+        last = { children, pipedFrom, input };
+        nodes.push(last);
+        pipedFrom = null;
+        input = null;
         continue;
       } else if (char === ')' || char === '}') {
         if (closing !== char) refuse(`unbalanced group ${char}`);
         endCommand();
         if (heredocs.length) refuse('unbalanced heredoc');
         i += 1;
-        return;
+        return nodes;
       } else if (/[;|&\n]/.test(char)) {
         if (char === '&' && next === '>') refuse('combined output redirection');
         if ((char === '&' || char === '|') && next === char && script[i + 2] === char)
@@ -215,10 +261,11 @@ function logicalCommands(script) {
         if ((char === ';' && /[;&]/.test(next ?? '')) || (char === '|' && next === '&'))
           refuse('unsupported control operator');
         endCommand();
+        if (char === '|' && next !== '|') pipedFrom = last ?? { unknown: true };
         i += 1;
         if ((char === '&' || char === '|') && next === char) i += 1;
         if (char === '\n') {
-          for (const { delimiter, tabs, quoted } of heredocs) {
+          for (const { delimiter, tabs, quoted, input: payload } of heredocs) {
             let found = false;
             while (i < script.length) {
               const end = script.indexOf('\n', i);
@@ -229,6 +276,7 @@ function logicalCommands(script) {
                 break;
               }
               if (!quoted && /[$`\\]/.test(line)) refuse('unquoted heredoc expansion or escape');
+              payload.value += (tabs ? line.replace(/^\t+/, '') : line) + '\n';
             }
             if (!found) refuse(`unbalanced heredoc ${delimiter}`);
           }
@@ -260,9 +308,172 @@ function logicalCommands(script) {
     if (heredocs.length) refuse('unbalanced heredoc');
     if (closing) refuse(`unbalanced group ${closing}`);
     endCommand();
+    return nodes;
   };
-  scan();
+  const nodes = scan();
+  // A group's stdin is inherited by every member without its own input;
+  // consumption/order is deliberately not simulated by this static tripwire.
+  const connect = (items, incoming = null, input = null) => {
+    for (const node of items) {
+      if (!node.input && !node.pipedFrom) {
+        if (input) node.input = input;
+        else if (incoming) node.pipedFrom = incoming;
+      }
+      if (node.children) connect(node.children, node.pipedFrom, node.input);
+    }
+  };
+  connect(nodes);
   return commands;
+}
+
+// Find only the end of an opaque expansion at an evaluation site. Its contents
+// are deliberately not shell-validated (D-074 / B'), even complex parameters.
+function dynamicEnd(text, start) {
+  const first = text[start];
+  const next = text[start + 1];
+  if (first === '`') {
+    let i = start + 1;
+    for (; i < text.length; i += 1) {
+      if (text[i] === '\\') i += 1;
+      else if (text[i] === '`') return i + 1;
+    }
+    throw new Error('unsupported shell construct: unbalanced dynamic backtick');
+  }
+  if (next !== '(' && next !== '{') {
+    const match = text.slice(start + 1).match(/^(?:[A-Za-z_][A-Za-z_0-9]*|[0-9@*#?$!-])/);
+    return match ? start + 1 + match[0].length : null;
+  }
+  const close = next === '(' ? ')' : '}';
+  let depth = 1;
+  let quote = null;
+  for (let i = start + 2; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === '\\' && quote !== "'") {
+      i += 1;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === next) depth += 1;
+    if (char === close) {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  throw new Error('unsupported shell construct: unbalanced dynamic expansion');
+}
+
+const CONTROL_PREFIXES = new Set(['if', 'then', 'elif', 'else', 'do', 'while', 'until', '!']);
+const WRAPPER_OPTIONS = {
+  time: { '-p': 0 },
+  coproc: {},
+  command: { '-p': 0, '-v': 0, '-V': 0 },
+  exec: { '-a': 1, '-c': 0, '-l': 0 },
+  env: {
+    '-i': 0,
+    '--ignore-environment': 0,
+    '-0': 0,
+    '--null': 0,
+    '-u': 1,
+    '--unset': 1,
+    '-C': 1,
+    '--chdir': 1,
+  },
+  nice: { '-n': 1, '--adjustment': 1 },
+  nohup: {},
+  timeout: {
+    '-s': 1,
+    '--signal': 1,
+    '-k': 1,
+    '--kill-after': 1,
+    '--foreground': 0,
+    '--preserve-status': 0,
+    '-v': 0,
+    '--verbose': 0,
+  },
+  xargs: {
+    '-0': 0,
+    '--null': 0,
+    '-r': 0,
+    '--no-run-if-empty': 0,
+    '-t': 0,
+    '--verbose': 0,
+    '-p': 0,
+    '--interactive': 0,
+    '-x': 0,
+    '--exit': 0,
+    '-n': 1,
+    '--max-args': 1,
+    '-P': 1,
+    '--max-procs': 1,
+    '-s': 1,
+    '--max-chars': 1,
+    '-d': 1,
+    '--delimiter': 1,
+    '-I': 1,
+    '--replace': 1,
+    '-L': 1,
+    '--max-lines': 1,
+    '-E': 1,
+    '--eof': 1,
+    '-a': 1,
+    '--arg-file': 1,
+  },
+};
+function commandWords(words) {
+  while (words.length) {
+    if (/^[A-Za-z_][A-Za-z_0-9]*=/.test(words[0]) || CONTROL_PREFIXES.has(words[0])) {
+      words = words.slice(1);
+      continue;
+    }
+    const program = executable(words[0]);
+    if (!Object.hasOwn(WRAPPER_OPTIONS, program)) return words;
+    let i = 1;
+    while (words[i]?.startsWith('-') && words[i] !== '--') {
+      const [name, ...value] = words[i].split('=');
+      const arity = WRAPPER_OPTIONS[program][name];
+      if (arity === undefined) throw new Error(`unmodelled wrapper option: ${program} ${name}`);
+      if (arity === 0 && value.length)
+        throw new Error(`wrapper switch takes no value: ${program} ${name}`);
+      if (arity === 1 && !(value.length ? value.join('=') : words[i + 1]))
+        throw new Error(`missing wrapper option value: ${program} ${name}`);
+      i += arity === 1 && !value.length ? 2 : 1;
+    }
+    if (words[i] === '--') i += 1;
+    if (program === 'command' && words.slice(1, i).some((word) => ['-v', '-V'].includes(word)))
+      return [];
+    if (program === 'timeout') {
+      if (!words[i]) throw new Error('missing timeout duration');
+      i += 1;
+    }
+    words = words.slice(i);
+  }
+  return words;
+}
+function evaluationSite(words) {
+  // Called while words are still being assembled: incomplete wrapper/launcher
+  // options are validated by the classifier only after the command is complete.
+  try {
+    words = commandWords(words);
+    const program = executable(words[0]);
+    if (['eval', 'source', '.'].includes(program)) return true;
+    if (program === 'npx') return evaluationSite(afterOptions(words.slice(1), 'npx'));
+    if (program === 'pnpm') {
+      const args = afterOptions(words.slice(1), 'pnpm');
+      if (['exec', 'dlx'].includes(args[0]))
+        return evaluationSite(afterOptions(args.slice(1), `pnpm ${args[0]}`));
+      if (args[0] && !PNPM_BUILTINS.has(args[0])) return evaluationSite(args);
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 // Explicit arity: 0 is a switch, 1 consumes a value (also --name=value).
@@ -399,31 +610,108 @@ const PNPM_BUILTINS = new Set(
 );
 const executable = (word) => word?.split('/').pop();
 
-/** Literal launchers only; arguments to other programs are never searched as commands. */
-function unbounded(words, rootScripts, shellInput = false) {
-  while (
-    /^[A-Za-z_][A-Za-z_0-9]*=/.test(words[0] ?? '') ||
-    ['if', 'then', 'elif', 'else', 'do', 'while', 'until', '!'].includes(words[0])
+// Pipeline data is obtained only from known literal producers, never executed.
+function pipelinePayload(node) {
+  if (!node) throw new Error('unsupported shell construct: interpreter input unavailable');
+  if (node.children) {
+    const outputs = node.children.filter(
+      (child) => !node.children.some((other) => other.pipedFrom === child),
+    );
+    return outputs.map(pipelinePayload).join('');
+  }
+  const [program, ...args] = commandWords(node.words ?? []);
+  if (executable(program) === 'cat' && !args.length) return inputPayload(node);
+  if (
+    executable(program) === 'echo' &&
+    !args.some((word) => word.startsWith('-') || word.includes('\0'))
   )
-    words = words.slice(1);
+    return args.join(' ') + '\n';
+  throw new Error('unsupported shell construct: interpreter pipeline payload unavailable');
+}
+function inputPayload(node) {
+  if (node.input?.kind === 'text' && node.input.value !== null && !node.input.value.includes('\0'))
+    return node.input.value;
+  if (!node.input && node.pipedFrom) return pipelinePayload(node.pipedFrom);
+  throw new Error('unsupported shell construct: interpreter input payload unavailable');
+}
+function scanPayload(payload, rootScripts, context) {
+  return logicalCommands(payload).some((command) =>
+    unbounded(command.words, rootScripts, command, context),
+  );
+}
+function dynamicLiterals(args, rootScripts, context) {
+  // Expansion atoms break command words; never join across them or recursively
+  // parse a dynamic eval as shell syntax. Only literal words outside are checked.
+  return args
+    .join(' ')
+    .split(/[\0;|&\n]/)
+    .some((literal) => {
+      try {
+        return unbounded(
+          literal.trim().split(/[ \t\r]+/),
+          rootScripts,
+          {},
+          { ...context, literalOnly: true },
+        );
+      } catch {
+        // B': a dynamic argument is never refused. Incomplete/unsupported
+        // literal fragments cannot establish a known unbounded invocation.
+        return false;
+      }
+    });
+}
+/** Literal launchers only; arguments to other programs are never searched as commands. */
+function unbounded(words, rootScripts, node = {}, context = {}) {
+  words = commandWords(words);
   let [program, ...args] = words;
   program = executable(program);
   if (program === 'pnpm') {
     args = afterOptions(args, 'pnpm');
     if (['exec', 'dlx'].includes(args[0]))
-      return unbounded(afterOptions(args.slice(1), `pnpm ${args[0]}`), rootScripts, shellInput);
+      return unbounded(afterOptions(args.slice(1), `pnpm ${args[0]}`), rootScripts, node, context);
     if (['run', 'run-script'].includes(args[0]))
       return ['test', 'test:unit'].includes(afterOptions(args.slice(1), 'pnpm run')[0]);
     if (['test', 'test:unit', 't'].includes(args[0])) return true;
     if (!args[0] || PNPM_BUILTINS.has(args[0]) || Object.hasOwn(rootScripts ?? {}, args[0]))
       return false;
-    return unbounded(afterOptions(args, 'pnpm exec'), rootScripts, shellInput);
+    return unbounded(afterOptions(args, 'pnpm exec'), rootScripts, node, context);
   }
-  if (program === 'npx') return unbounded(afterOptions(args, 'npx'), rootScripts, shellInput);
-  if (
-    ['bash', 'sh', 'dash', 'zsh', 'ksh'].includes(program) &&
-    (shellInput || !args[0] || args[0].startsWith('-') || /^\/dev\/(stdin|fd\/0)$/.test(args[0]))
-  )
+  if (program === 'npx') return unbounded(afterOptions(args, 'npx'), rootScripts, node, context);
+  if (context.literalOnly && ['eval', 'source', '.'].includes(program)) return false;
+  if (program === 'eval') {
+    if (args[0] === '--') args = args.slice(1);
+    if (args.some((arg) => arg.includes('\0'))) return dynamicLiterals(args, rootScripts, context);
+    if (args[0]?.startsWith('-')) throw new Error(`unmodelled evaluation option: eval ${args[0]}`);
+    return scanPayload(args.join(' '), rootScripts, context);
+  }
+  const sourcing = ['source', '.'].includes(program);
+  const shell = ['bash', 'sh', 'dash', 'zsh', 'ksh', 'rbash'].includes(program);
+  if ((sourcing || shell) && (node.input || node.pipedFrom)) {
+    if (scanPayload(inputPayload(node), rootScripts, context)) return true;
+    if (shell) {
+      if (args[0]?.startsWith('-') && !['-s', '-'].includes(args[0]))
+        throw new Error('unsupported shell construct: shell input option or command string');
+      return false;
+    }
+    // Sourcing a repo file still runs that file even when stdin is redirected.
+  }
+  if (sourcing) {
+    if (args[0] === '--') args = args.slice(1);
+    if (args.some((arg) => arg.includes('\0'))) return dynamicLiterals(args, rootScripts, context);
+    if (args[0]?.startsWith('-'))
+      throw new Error(`unmodelled evaluation option: ${program} ${args[0]}`);
+    const path = args[0];
+    if (!path) throw new Error('unsupported shell construct: missing source path');
+    const file = context.readRepoFile?.(path);
+    if (file == null) return false; // B': non-repo literal paths are dynamic.
+    if (context.sources?.has(file.path))
+      throw new Error('unsupported shell construct: recursive source cycle');
+    return scanPayload(file.text, rootScripts, {
+      ...context,
+      sources: new Set([...(context.sources ?? []), file.path]),
+    });
+  }
+  if (shell && (!args[0] || args[0].startsWith('-') || /^\/dev\/(stdin|fd\/0)$/.test(args[0])))
     throw new Error('unsupported shell construct: shell stdin or command string');
   if (program === 'turbo') {
     args = afterOptions(args, 'turbo');
@@ -452,7 +740,7 @@ export function* stepsOf(doc) {
   }
 }
 
-export function unitStepProblems(files, rootScripts) {
+export function unitStepProblems(files, rootScripts, context = {}) {
   const docs = {};
   for (const [file, text] of Object.entries(files)) {
     try {
@@ -462,10 +750,10 @@ export function unitStepProblems(files, rootScripts) {
       docs[file] = error;
     }
   }
-  return parsedProblems(docs, rootScripts);
+  return parsedProblems(docs, rootScripts, context);
 }
 
-export function parsedProblems(docs, rootScripts) {
+export function parsedProblems(docs, rootScripts, context = {}) {
   const problems = [];
   // Exactly one Turbo command/flag; no forwarded flag or conflicting second bound.
   if (!/^turbo run test:unit --concurrency=[1-9]\d*$/.test(rootScripts?.['test:unit:ci'] ?? '')) {
@@ -512,9 +800,10 @@ export function parsedProblems(docs, rootScripts) {
         problems.push(`${where}: ${error.message}`);
         continue;
       }
-      for (const { words, source, shellInput } of commands) {
+      for (const command of commands) {
+        const { source } = command;
         try {
-          if (!unbounded(words, rootScripts, shellInput)) continue;
+          if (!unbounded(command.words, rootScripts, command, context)) continue;
         } catch (error) {
           problems.push(`${where}: ${error.message}`);
           continue;

@@ -301,6 +301,7 @@ function cliFixture(t) {
   const workflow = () => write('.github/workflows/ci.yml', stringify(doc));
   workflow();
   return {
+    directory: fixture,
     write,
     doc,
     workflow,
@@ -597,7 +598,10 @@ for (const [file, document] of scannedLocations) {
             const tab = operator === '<<-' ? '\t' : '';
             const run = `${program} ${operator}${delimiter}\n${tab}${data}\n${tab}TXT\n${command}`;
             test(`r4 heredoc quote boundary ${file}: ${JSON.stringify(run)}`, () => {
-              refused(grammarProblems(file, document, run), /literal unbounded|shell stdin/);
+              refused(
+                grammarProblems(file, document, run),
+                /literal unbounded|unterminated .* quote/,
+              );
             });
           }
         }
@@ -625,11 +629,6 @@ const refusalCases = [
   ['cat <<TXT', 'unbalanced heredoc'],
   ['(cat <<TXT)', 'unbalanced heredoc'],
   ['cat <<"TXT"suffix\nTXT', 'unsupported heredoc delimiter'],
-  ["bash <<'TXT'\npnpm test\nTXT", 'shell stdin or command string'],
-  ['sh <<TXT\npnpm test\nTXT', 'shell stdin or command string'],
-  ["cat <<'TXT' | /bin/bash\npnpm test\nTXT", 'shell stdin or command string'],
-  ["pnpm exec /bin/bash /dev/stdin <<'TXT'\npnpm test\nTXT", 'shell stdin or command string'],
-  ["bash some-script.sh <<'TXT'\npnpm test\nTXT", 'shell stdin or command string'],
   ["sh -c 'pnpm test'", 'shell stdin or command string'],
   ['cat <<TXT\n$(pnpm test)\nTXT', 'unquoted heredoc expansion or escape'],
   ['cat <<TXT\n`pnpm test`\nTXT', 'unquoted heredoc expansion or escape'],
@@ -657,7 +656,6 @@ const refusalCases = [
   ['pnpm [t]est', 'pathname expansion'],
   ['echo @(one|two)', 'extended pathname expansion'],
   ['echo ~user', 'tilde expansion'],
-  ['cat <<<"pnpm test"', 'here-string'],
   ['echo safe;; pnpm test', 'unsupported control operator'],
   ['echo safe |& pnpm test', 'unsupported control operator'],
   ['echo safe &&& pnpm test', 'unsupported control operator'],
@@ -752,5 +750,348 @@ test('implicit pnpm dispatch uses the supplied root scripts before executable lo
         [],
       );
     assert.deepEqual(grammarProblems(file, document, 'pnpm help test:unit'), []);
+  }
+});
+
+// Round 6: every reproduced command context, in both workflow extensions and
+// both composite extensions, unwrapped and continued with LF/CRLF.
+const r6Wrappers = [
+  'time',
+  'time -p',
+  'time !',
+  '! time',
+  'coproc',
+  'command',
+  'command -p',
+  'exec',
+  'exec -a worker -c -l',
+  'env FLAG=value',
+  'env -i --unset=OLD --chdir . FLAG=value',
+  'nice',
+  'nice -n 5',
+  'nohup',
+  'timeout 30s',
+  'timeout --signal TERM --kill-after=2s --foreground 30s',
+  'xargs',
+  'xargs -0 -r -n 1 -P 2',
+  '! time -p env FLAG=value command nice -n 1 timeout 30s nohup exec',
+];
+const r6Evaluations = [
+  (command) => `eval '${command}'`,
+  (command) => `eval ${command}`,
+  (command) => `eval 'pn'"pm" 'run' 'test:'"unit"; ${command}`,
+  (command) => `eval 'eval "${command}"'`,
+];
+const r6Interpreters = [
+  'sh',
+  '/bin/bash',
+  'dash',
+  'zsh',
+  'ksh',
+  'rbash',
+  '/bin/rbash',
+  'source /dev/stdin',
+  '. /dev/stdin',
+  'bash /proc/self/fd/0',
+  'bash /proc/thread-self/fd/0',
+  'bash //dev/stdin',
+  'bash /dev/./stdin',
+  'pnpm exec /bin/rbash /proc/self/fd/0',
+  'npx pnpm exec env FLAG=value bash /proc/thread-self/fd/0',
+  '(bash /proc/self/fd/0)',
+  '{ pnpm exec bash //dev/stdin; }',
+];
+const continued = (run, newline) => {
+  if (!newline) return run;
+  const end = run.indexOf('\n');
+  const header = end < 0 ? run : run.slice(0, end);
+  return (header.replaceAll(' ', ` \\\n`) + (end < 0 ? '' : run.slice(end))).replaceAll(
+    '\n',
+    newline,
+  );
+};
+for (const [file, document] of scannedLocations) {
+  for (const newline of [null, '\n', '\r\n']) {
+    for (const command of continuationForms) {
+      for (const wrapper of r6Wrappers) {
+        const run = continued(`${wrapper} ${command}`, newline);
+        test(`r6 A wrapper FOUND ${file}: ${JSON.stringify(run)}`, () =>
+          refused(grammarProblems(file, document, run), /literal unbounded/));
+      }
+      for (const evaluation of r6Evaluations) {
+        const run = continued(evaluation(command), newline);
+        test(`r6 B literal eval FOUND ${file}: ${JSON.stringify(run)}`, () =>
+          refused(grammarProblems(file, document, run), /literal unbounded/));
+      }
+    }
+    for (const interpreter of r6Interpreters) {
+      for (const operator of ['<<', '<<-']) {
+        for (const delimiter of ['TXT', "'TXT'", '"TXT"']) {
+          const tab = operator === '<<-' ? '\t' : '';
+          for (const producer of ['', 'cat ']) {
+            const header = producer
+              ? `${producer}${operator}${delimiter} | ${interpreter}`
+              : `${interpreter} ${operator}${delimiter}`;
+            const run = continued(`${header}\n${tab}pnpm run test:unit\n${tab}TXT`, newline);
+            test(`r6 C interpreter FOUND ${file}: ${JSON.stringify(run)}`, () =>
+              refused(grammarProblems(file, document, run), /literal unbounded/));
+          }
+        }
+      }
+    }
+  }
+}
+for (const [file, document] of scannedLocations) {
+  for (const run of [
+    // B': main's actual credential-loading forms, plus all expansion families.
+    'eval "${x}"',
+    'eval "${asset_credentials}" && eval "${fleet_credentials}"',
+    'eval "${kafka_credentials}"',
+    'eval "$x"',
+    'eval "${x:-${y}}"',
+    'eval "$(echo \'pnpm run test:unit\')"',
+    'eval "`echo pnpm run test:unit`"',
+    'eval $(pnpm run test:unit)',
+    'command env FLAG=value eval "${x:-value}"',
+    'pnpm exec eval "${x:-value}"',
+    'eval "pre${x}post"',
+    'source "$x"',
+    '. "${x:-fallback}"',
+    'source /outside/repo/file.sh',
+    '. /dev/stdin',
+    'eval "echo pnpm run test:unit $x"',
+    'eval "echo safe"',
+    // Quoted data remains data until a known interpreter receives it.
+    'echo "eval pnpm run test:unit"',
+    "cat <<'TXT' | cat\npnpm run test:unit\nTXT",
+    "bash <<'TXT'\npnpm run build\nTXT",
+    "cat <<'TXT' | bash /proc/self/fd/0\necho safe\nTXT",
+    "bash <<< 'pnpm run build'",
+    "cat <<< 'pnpm run test:unit'",
+    "echo 'pnpm run build' | bash",
+    'command -v pnpm run test:unit',
+    'command -V pnpm run test:unit',
+    'env --unset "$x" pnpm run build',
+    'timeout 20s pnpm run build',
+  ]) {
+    test(`r6 accepted control ${file}: ${JSON.stringify(run)}`, () =>
+      assert.deepEqual(grammarProblems(file, document, run), []));
+  }
+  for (const run of [
+    'eval "pnpm run test:unit $x"',
+    'eval "$x pnpm run test:unit"',
+    'eval pnpm run test:unit "$x"',
+    'eval "pnpm run test:unit ${x:-fallback}"',
+    'eval "pnpm run test:unit $(echo safe)"',
+    'eval "pnpm run test:unit `echo safe`"',
+    // Literal concatenation/quote removal and literal eval recursion.
+    "eval 'pn'\"pm\" 'run' 'test:'\"unit\"",
+    'eval "pnpm run te""st:unit"',
+    "eval -- 'pnpm run test:unit'",
+    'eval "echo safe; pnpm run test:unit"',
+    "bash <<< 'pnpm run test:unit'",
+    "source /proc/self/fd/0 <<< 'pnpm run test:unit'",
+    ". arbitrary-path <<< 'pnpm run test:unit'",
+    "cat <<< 'pnpm run test:unit' | bash /not-a-stdin-spelling",
+    "echo 'pnpm run test:unit' | rbash arbitrary-path",
+    "(cat <<'TXT'\npnpm run test:unit\nTXT\n) | (env FLAG=value rbash)",
+    "(bash) <<'TXT'\npnpm run test:unit\nTXT",
+    "(echo 'pnpm run test:unit'; echo safe) | bash /proc/self/fd/0",
+    "cat <<'TXT' | (echo safe; bash /proc/self/fd/0)\npnpm run test:unit\nTXT",
+    "cat <<'TXT' | cat | (pnpm exec rbash)\npnpm run test:unit\nTXT",
+    "cat <<'ONE' <<'TWO' | bash\necho safe\nONE\npnpm run test:unit\nTWO",
+    "echo safe | bash <<'TXT'\npnpm run test:unit\nTXT",
+  ]) {
+    test(`r6 branch FOUND ${file}: ${JSON.stringify(run)}`, () =>
+      refused(grammarProblems(file, document, run), /literal unbounded/));
+  }
+  for (const [run, pattern] of [
+    ...Object.keys({
+      time: 0,
+      command: 0,
+      exec: 0,
+      env: 0,
+      nice: 0,
+      nohup: 0,
+      timeout: 0,
+      xargs: 0,
+    }).map((wrapper) => [`${wrapper} --unknown pnpm test`, /unmodelled wrapper option/]),
+    ['eval -unknown pnpm test', /unmodelled evaluation option/],
+    ['env --unset', /missing wrapper option value/],
+    ['time -p=bad pnpm test', /wrapper switch takes no value/],
+    ['timeout', /missing timeout duration/],
+    ['bash <<< "$x"', /interpreter input payload unavailable/],
+    ['cat generated.sh | bash /proc/self/fd/0', /interpreter pipeline payload unavailable/],
+    ['fetch-command | source /anything', /interpreter pipeline payload unavailable/],
+    ["cat <<'TXT' | bash <unknown\npnpm test\nTXT", /interpreter input payload unavailable/],
+    ['source', /missing source path/],
+    ['source -bad', /unmodelled evaluation option/],
+  ]) {
+    test(`r6 branch REFUSED ${file}: ${JSON.stringify(run)}`, () =>
+      refused(grammarProblems(file, document, run), pattern));
+  }
+}
+for (const site of ['source', '.']) {
+  test(`r6 B repo source recursively scanned via CLI: ${site}`, (t) => {
+    const fixture = cliFixture(t);
+    fixture.doc.jobs.quality.steps.push({ run: `${site} ./ci/one.sh` });
+    fixture.workflow();
+    fixture.write('ci/one.sh', '. ./ci/two.sh');
+    fixture.write('ci/two.sh', 'pnpm run test:unit');
+    let result = fixture.run();
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /Another command|literal unbounded/);
+    fixture.write('ci/two.sh', 'pnpm run build');
+    result = fixture.run();
+    assert.equal(result.status, 0, result.stderr);
+    fixture.write('ci/two.sh', '. ./ci/one.sh');
+    result = fixture.run();
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /recursive source cycle/);
+  });
+}
+test('r6 B unreadable repo source refuses via CLI', (t) => {
+  const fixture = cliFixture(t);
+  fixture.doc.jobs.quality.steps.push({ run: 'source ./ci/directory' });
+  fixture.workflow();
+  fixture.write('ci/directory/child', '');
+  const result = fixture.run();
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /EISDIR/);
+});
+
+test('r6 command-context boundary probes', () => {
+  const probe = (run) => grammarProblems(...scannedLocations[0], run);
+  const found = [
+    ...r6Wrappers.map((wrapper) => `${wrapper} pnpm test`),
+    'time -- pnpm test',
+    'env -u OLD pnpm test',
+    'env --unset=OLD pnpm test',
+    'command env FLAG=value time -p ! pnpm test',
+    "eval 'pnpm test'",
+    'eval pnpm test',
+    "eval 'pn'\"pm\" 'test'",
+    "eval -- 'pnpm test'",
+    `eval 'eval "pnpm test"'`,
+    'eval "pnpm test $x"',
+    'eval -- "pnpm test $x"',
+    'eval "env --unknown $x pnpm test"',
+    '. "pnpm test $x"',
+    'eval "$x pnpm test"',
+    'eval "pnpm test ${x:-value}"',
+    'eval "${x:-${y}} pnpm test"',
+    'eval "$(echo \')\') pnpm test"',
+    'eval "$(echo \\) safe) pnpm test"',
+    'eval "pnpm test $(echo safe)"',
+    'eval "pnpm test `echo safe`"',
+    "bash <<'TXT'\npnpm test\nTXT",
+    'bash <<-TXT\n\tpnpm test\n\tTXT',
+    "cat <<'TXT' | rbash arbitrary-path\npnpm test\nTXT",
+    "cat <<'TXT' | source arbitrary-path\npnpm test\nTXT",
+    ". arbitrary-path <<< 'pnpm test'",
+    "rbash <<< 'pnpm test'",
+    "cat <<< 'pnpm test' | cat | bash arbitrary-path",
+    "echo 'pnpm test' | bash arbitrary-path",
+    "(echo 'pnpm test'; echo safe) | bash arbitrary-path",
+    "cat <<'TXT' | (echo safe; bash)\npnpm test\nTXT",
+    "echo safe | (bash) <<'TXT'\npnpm test\nTXT",
+    "cat <<'TXT' | (bash)\npnpm test\nTXT",
+    "(bash) <<'TXT'\npnpm test\nTXT",
+    "cat <<'ONE' <<'TWO' | bash\necho safe\nONE\npnpm test\nTWO",
+    "pnpm exec env FLAG=value rbash <<< 'pnpm test'",
+  ];
+  for (const run of found) refused(probe(run), /literal unbounded/);
+  for (const run of [
+    'eval "${x}"',
+    'eval "$x"',
+    'eval "${x:-${y}}"',
+    'eval $(pnpm test)',
+    'eval "$(pnpm test)"',
+    'eval "`pnpm test`"',
+    'eval "${x:-"quoted"}"',
+    'eval "$(echo \'quoted\')"',
+    'eval "$(echo \') pnpm test\')"',
+    'eval "$(echo \\) safe)"',
+    'eval "`echo \\` safe`"',
+    'pnpm exec eval "${x:-value}"',
+    'npx env FLAG=value eval "${x:-value}"',
+    'eval "echo safe $x"',
+    "bash -s <<< 'echo safe'",
+    'eval "bash -c $x"',
+    'eval "env --unknown $x"',
+    'eval "--unknown $x"',
+    'source "-bad $x"',
+    'eval "${x}" "source /outside.sh"',
+    'source /outside.sh',
+    '. "$x"',
+    "cat <<'TXT' | bash <<< 'echo safe'\npnpm test\nTXT",
+    "cat <<'TXT' | (bash) <<< 'echo safe'\npnpm test\nTXT",
+    "echo 'pnpm test' | cat",
+    'command -v pnpm test',
+    'command -V pnpm test',
+    'env -u "$x" pnpm run build',
+  ])
+    assert.deepEqual(probe(run), [], run);
+  for (const [run, pattern] of [
+    ['env --bad pnpm test', /unmodelled wrapper option/],
+    ['coproc --bad pnpm test', /unmodelled wrapper option/],
+    ['env --unset', /missing wrapper option value/],
+    ['time -p=bad pnpm test', /wrapper switch takes no value/],
+    ['timeout', /missing timeout duration/],
+    ['eval --bad pnpm test', /unmodelled evaluation option/],
+    ['source', /missing source path/],
+    ['source -bad', /unmodelled evaluation option/],
+    ['bash <<< "$x"', /interpreter input payload unavailable/],
+    ['cat unknown | bash arbitrary-path', /interpreter pipeline payload unavailable/],
+    ['echo "$x" | bash arbitrary-path', /interpreter pipeline payload unavailable/],
+    ['bash <unknown', /interpreter input payload unavailable/],
+    ["bash -c 'pnpm test' <<< 'echo safe'", /shell input option or command string/],
+    ["rbash -lc 'pnpm test' <<< 'echo safe'", /shell input option or command string/],
+    ['eval "${x"', /unbalanced dynamic expansion/],
+    ['eval "`x"', /unbalanced dynamic backtick/],
+  ])
+    refused(probe(run), pattern);
+  const readRepoFile = (path) =>
+    path === './ci/source.sh' ? { path: 'ci/source.sh', text: 'pnpm test' } : null;
+  for (const site of ['source', '.', 'source --', '. --']) {
+    for (const input of ['', " <<< 'echo safe'"]) {
+      const docs = {
+        'ci.yml': parse(grammarWorkflow),
+        'other.yml': { runs: { steps: [{ run: `${site} ./ci/source.sh${input}` }] } },
+      };
+      refused(parsedProblems(docs, realScripts, { readRepoFile }), /literal unbounded/);
+      refused(
+        parsedProblems(docs, realScripts, { readRepoFile, sources: new Set(['ci/source.sh']) }),
+        /recursive source cycle/,
+      );
+    }
+  }
+});
+
+test('r6 B repo source path boundaries via CLI', (t) => {
+  const fixture = cliFixture(t);
+  const outside = mkdtempSync(join(tmpdir(), 'unit-tripwire-outside-'));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  writeFileSync(join(outside, 'external.sh'), 'pnpm test');
+  fixture.write('ci/local.sh', 'pnpm test');
+  symlinkSync(join(fixture.directory, 'ci/local.sh'), join(outside, 'back-link.sh'));
+  symlinkSync(join(fixture.directory, 'ci/local.sh'), join(fixture.directory, 'ci/inside-link.sh'));
+  symlinkSync(join(outside, 'external.sh'), join(fixture.directory, 'ci/outside-link.sh'));
+  const step = { run: 'source ./ci/inside-link.sh' };
+  fixture.doc.jobs.quality.steps.push(step);
+  fixture.workflow();
+  let result = fixture.run();
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /literal unbounded/);
+  for (const path of [
+    './ci/outside-link.sh',
+    join(outside, 'external.sh'),
+    join(outside, 'back-link.sh'),
+    './ci/missing.sh',
+  ]) {
+    step.run = `source ${path}`;
+    fixture.workflow();
+    result = fixture.run();
+    assert.equal(result.status, 0, result.stderr);
   }
 });
