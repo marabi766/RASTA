@@ -512,9 +512,12 @@ export class IdentityRepository {
   }
 
   /** How many lapses are past `validUntil` and not yet acted on: the sweep's backlog. */
-  async countLapsedMemberships(now: Date): Promise<number> {
+  async countLapsedMemberships(
+    now: Date,
+    client: ExtendedPrismaClient = this.client,
+  ): Promise<number> {
     return runUnscoped('the membership expiry backlog covers every organization', () =>
-      this.client.membership.count({
+      client.membership.count({
         where: { deletedAt: null, lapseHandledAt: null, validUntil: { lte: now } },
       }),
     );

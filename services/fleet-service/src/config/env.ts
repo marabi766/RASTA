@@ -25,7 +25,7 @@ export const fleetEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * asset-service, asked whether a transfer was recorded when an assignment
@@ -58,7 +58,7 @@ export const fleetEnvSchema = baseEnvSchema
       .int()
       .min(100)
       .max(30_000)
-      .default(3000),
+      .prefault(3000),
 
     /**
      * Default window for the utilization report, in days.
@@ -67,7 +67,7 @@ export const fleetEnvSchema = baseEnvSchema
      * means a month to a fleet manager and a quarter to a union administrator,
      * and neither is the platform's call to make.
      */
-    UTILIZATION_DEFAULT_WINDOW_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+    UTILIZATION_DEFAULT_WINDOW_DAYS: z.coerce.number().int().min(1).max(365).prefault(30),
 
     /**
      * Hours per day a machine is counted as available when computing
@@ -78,7 +78,7 @@ export const fleetEnvSchema = baseEnvSchema
      * buried in a formula (AGENTS.md § 9). An organization running two shifts
      * sets this to 16 without a code change.
      */
-    UTILIZATION_AVAILABLE_HOURS_PER_DAY: z.coerce.number().min(1).max(24).default(8),
+    UTILIZATION_AVAILABLE_HOURS_PER_DAY: z.coerce.number().min(1).max(24).prefault(8),
 
     /**
      * Insurance coverages whose lapse withdraws a machine from dispatch,
@@ -93,7 +93,7 @@ export const fleetEnvSchema = baseEnvSchema
      */
     FLEET_DISPATCH_BLOCKING_COVERAGES: z
       .string()
-      .default(INSURANCE_COVERAGES.join(','))
+      .prefault(INSURANCE_COVERAGES.join(','))
       .transform((value) =>
         value
           .split(',')
@@ -132,14 +132,14 @@ export const fleetEnvSchema = baseEnvSchema
      * `Idempotency-Key` is replayed, in hours (EXP-002 slice 7). Past it the
      * key is free again. Counted from the response, not from the claim.
      */
-    FLEET_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    FLEET_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
 
     /**
      * How long a claim on an `Idempotency-Key` stays **in flight**, in seconds:
      * the lease after which an abandoned claim (its process died between the
      * claim and the window) is taken over by a retry under a new token.
      */
-    FLEET_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).default(120),
+    FLEET_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).prefault(120),
 
     /**
      * Parked `INSURANCE_RECORDED` events (#240 r8): asset-service answered for a
@@ -153,14 +153,14 @@ export const fleetEnvSchema = baseEnvSchema
       .int()
       .min(30)
       .max(86_400)
-      .default(300),
+      .prefault(300),
 
     /**
      * Attempts after which a parked event is dead-lettered as
      * `PARKED_VERIFICATION_EXHAUSTED` — never applied unverified. With the
      * default age that is about an hour of the source staying ahead.
      */
-    FLEET_INSURANCE_PARKED_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(1_000).default(12),
+    FLEET_INSURANCE_PARKED_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(1_000).prefault(12),
 
     /** How often the sweep runs, in seconds, and how many parked events it tries per run. */
     FLEET_INSURANCE_PARKED_SWEEP_INTERVAL_SECONDS: z.coerce
@@ -168,8 +168,8 @@ export const fleetEnvSchema = baseEnvSchema
       .int()
       .min(5)
       .max(3_600)
-      .default(60),
-    FLEET_INSURANCE_PARKED_SWEEP_BATCH: z.coerce.number().int().min(1).max(1_000).default(50),
+      .prefault(60),
+    FLEET_INSURANCE_PARKED_SWEEP_BATCH: z.coerce.number().int().min(1).max(1_000).prefault(50),
 
     /**
      * The asset-sync consumer's transactions that hold a machine's lock while
@@ -187,7 +187,7 @@ export const fleetEnvSchema = baseEnvSchema
       .int()
       .min(1_000)
       .max(CONSUMER_SESSION_TIMEOUT_MS)
-      .default(14_200),
+      .prefault(14_200),
 
     /**
      * How long each asset-sync transaction may wait to start (Prisma's `maxWait`:
@@ -201,7 +201,7 @@ export const fleetEnvSchema = baseEnvSchema
       .int()
       .min(50)
       .max(10_000)
-      .default(500),
+      .prefault(500),
   });
 
 export type FleetEnv = z.infer<typeof fleetEnvSchema>;

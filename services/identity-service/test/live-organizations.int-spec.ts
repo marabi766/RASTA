@@ -78,7 +78,7 @@ describe('which organizations a user belongs to — on the database clock', () =
 
   afterAll(async () => {
     jest.useRealTimers();
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('sees a membership created just now although the application clock lags by an hour', async () => {

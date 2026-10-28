@@ -94,8 +94,8 @@ export const analyticsEnvSchema = baseEnvSchema
   .merge(kafkaEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
-    ANALYTICS_FLEET_DASHBOARD_ROLES: roleList('ANALYTICS_FLEET_DASHBOARD_ROLES').default(
+    CORS_ORIGINS: z.string().prefault(''),
+    ANALYTICS_FLEET_DASHBOARD_ROLES: roleList('ANALYTICS_FLEET_DASHBOARD_ROLES').prefault(
       'ORGANIZATION_ADMIN,FLEET_MANAGER',
     ),
     ANALYTICS_MAINTENANCE_FACTS_CONSUMER_ENABLED: booleanEnv(false),

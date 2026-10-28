@@ -7,11 +7,10 @@ import type { IdentityRepository } from './identity.repository';
 import type { IdentityService } from './identity.service';
 import type { KeycloakProjector } from '../keycloak/keycloak.projector';
 import type { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
-import {
-  keycloakWriteFences,
-  membershipLapseBacklog,
-  membershipLapseFailuresTotal,
-} from '../observability/keycloak-projection.metrics';
+import { membershipLapseFailuresTotal } from '../observability/keycloak-projection.metrics';
+import { gate, modelledPool } from '../../test/modelled-engine';
+import { onTheTestsClock, returnedBy, until } from '../../test/test-clock';
+import { COMMIT_RESERVE_MS } from '../prisma/cancellation';
 
 /**
  * The sweep that notices a validUntil passing (ADR-060 § 5), and re-asserts
@@ -112,13 +111,8 @@ describe('MembershipExpiryScanner', () => {
         state.failures += 1;
         state.nextAt = db.clock + interval * 1000 * Math.min(2 ** state.failures, max);
       }),
-      counts: jest.fn(async () => ({
-        live: 1,
-        due: db.fence.size,
-        accountMissing: 2,
-        overdue: 1,
-        total: db.fence.size + 3,
-      })),
+      /** The late senders' owed fences (D-070 D): nothing owed here. */
+      recoverOwed: jest.fn(async () => 0),
     };
     return { db, repository, fences };
   }
@@ -167,7 +161,10 @@ describe('MembershipExpiryScanner', () => {
       identity as unknown as IdentityService,
       { enabled: true, intervalSeconds: INTERVAL_SECONDS, batchSize: options.batchSize ?? 50 },
       projector as unknown as Pick<KeycloakProjector, 'project'>,
-      store.fences as unknown as Pick<KeycloakWriteFences, 'dueUsers' | 'deferReassert' | 'counts'>,
+      store.fences as unknown as Pick<
+        KeycloakWriteFences,
+        'dueUsers' | 'deferReassert' | 'recoverOwed'
+      >,
     );
     return { scanner, identity, projector, ...store };
   }
@@ -363,16 +360,14 @@ describe('MembershipExpiryScanner', () => {
       expect(expire.mock.calls.length).toBeLessThanOrEqual(6);
     });
 
-    it('publishes the backlog and the fence gauges after every pass, and counts each failed attempt', async () => {
+    it('counts each failed attempt, and samples no gauge: the sampler does, on its own timer (#402 r3 R3-2)', async () => {
       const before = (await membershipLapseFailuresTotal.get()).values[0]?.value ?? 0;
-      const { scanner } = scannerWith(failing(new Set(['MBR_002'])), undefined, { due: ['USR_X'] });
+      const { scanner, repository } = scannerWith(failing(new Set(['MBR_002'])), undefined, {
+        due: ['USR_X'],
+      });
       await scanner.scan(now);
-      expect((await membershipLapseBacklog.get()).values[0]?.value).toBe(1);
       expect((await membershipLapseFailuresTotal.get()).values[0]?.value).toBe(before + 1);
-      const states = Object.fromEntries(
-        (await keycloakWriteFences.get()).values.map((v) => [v.labels.state, v.value]),
-      );
-      expect(states).toEqual({ live: 1, due: 0, account_missing: 2, overdue: 1 });
+      expect(repository.countLapsedMemberships).not.toHaveBeenCalled();
     });
   });
 
@@ -499,11 +494,12 @@ describe('MembershipExpiryScanner', () => {
       expect(repository.deferLapse).not.toHaveBeenCalled();
       expect(fences.dueUsers).toHaveBeenCalledTimes(callsAtStop.due);
       expect(fences.dueUsers).not.toHaveBeenCalled();
-      expect(repository.countLapsedMemberships).not.toHaveBeenCalled();
-      expect(fences.counts).not.toHaveBeenCalled();
+      // The stop's own flush of owed late fences (D-070 D), before it
+      // returned, besides the pass's first one; the resumed pass adds none.
+      expect(fences.recoverOwed).toHaveBeenCalledTimes(2);
     });
 
-    it('a stop during re-assertion: the projection is cancelled, and neither gauge is read', async () => {
+    it('a stop during re-assertion: the projection is cancelled, and nothing more is read', async () => {
       const project = jest.fn(
         (_userId: string, opts: { signal?: AbortSignal }) =>
           new Promise<string>((_resolve, reject) =>
@@ -522,7 +518,7 @@ describe('MembershipExpiryScanner', () => {
       expect(project).toHaveBeenCalledTimes(1);
       expect(fences.deferReassert).not.toHaveBeenCalled();
       expect(repository.countLapsedMemberships).not.toHaveBeenCalled();
-      expect(fences.counts).not.toHaveBeenCalled();
+      expect(fences.recoverOwed).toHaveBeenCalledTimes(2);
     });
 
     it('starts no pass once stopping, and a later stop joins the first', async () => {
@@ -541,6 +537,109 @@ describe('MembershipExpiryScanner', () => {
       const startedAt = Date.now();
       await scanner.stop({ deadlineAt: Date.now() + 5000 });
       expect(Date.now() - startedAt).toBeLessThan(100);
+    });
+  });
+  describe('late senders’ owed fences (D-070 option D)', () => {
+    // A stop's deadline on the test's clock (#910): never a runner's speed.
+    onTheTestsClock();
+
+    it('a pass writes them first, so a due one is re-asserted by that same pass', async () => {
+      const order: string[] = [];
+      const { scanner, fences, projector } = scannerWith(async () => true, [], { due: ['USR_A'] });
+      fences.recoverOwed.mockImplementation(async () => {
+        order.push('recoverOwed');
+        return 0;
+      });
+      projector.project.mockImplementation(async () => {
+        order.push('project');
+        return 'projected';
+      });
+      await scanner.scan(now);
+      expect(order).toEqual(['recoverOwed', 'project']);
+    });
+
+    it('a stop writes them before it returns, after the pass unwound — outside the stopped scope', async () => {
+      const order: string[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const { scanner, fences } = scannerWith(async () => {
+        await gate;
+        order.push('pass unwound');
+        return true;
+      });
+      fences.recoverOwed.mockImplementation(async () => {
+        order.push('recoverOwed');
+        return 0;
+      });
+      const pass = scanner.scan(now);
+      await new Promise((resolve) => setImmediate(resolve));
+      const startedAt = Date.now();
+      const stopped = scanner.stop({ deadlineAt: startedAt + 5_000 }).then(() => {
+        order.push('stop returned');
+      });
+      release();
+      // With the clock standing still: the deadline cannot pass first.
+      expect(await returnedBy(stopped, 0)).toMatchObject({
+        status: 'fulfilled',
+        settledAt: startedAt,
+      });
+      await pass;
+      expect(order).toEqual(['recoverOwed', 'pass unwound', 'recoverOwed', 'stop returned']);
+    });
+
+    it('#912: a pass that gave up on the stop’s signal, its lapse’s COMMIT still with the engine — the stop returns only after that COMMIT', async () => {
+      const { pool, log, steps } = modelledPool();
+      const answer = gate();
+      steps.push({ commit: answer.opened });
+      // Its transaction's callback resolved — the COMMIT is with the engine —
+      // and the step itself ends on the stop's signal, before that answer.
+      const { scanner } = scannerWith(
+        (_membership, _at, { signal }) =>
+          new Promise<boolean>((_resolve, reject) => {
+            void pool.transaction((tx) => tx.$executeRawUnsafe('SET LOCAL x = 1'));
+            signal?.addEventListener('abort', () => reject(signal.reason as Error), {
+              once: true,
+            });
+          }),
+        [lapse(1)],
+      );
+      const pass = scanner.scan(now);
+      await until(() => log.includes('SET'));
+      const startedAt = Date.now();
+      setTimeout(answer.open, 100);
+
+      const stopped = await returnedBy(
+        scanner
+          .stop({ deadlineAt: startedAt + COMMIT_RESERVE_MS + 100 })
+          .then(() => void log.push('STOP RETURNED')),
+        COMMIT_RESERVE_MS + 100,
+      );
+
+      // Not "BEGIN, SET, STOP RETURNED, COMMIT": the stop waited for it.
+      expect(stopped).toMatchObject({ status: 'fulfilled', settledAt: startedAt + 100 });
+      expect(log).toEqual(['BEGIN 1', 'SET', 'COMMIT 1', 'STOP RETURNED']);
+      await pass;
+    });
+
+    it('a flush that outlives the shutdown deadline does not hold the stop past it', async () => {
+      const { scanner, fences } = scannerWith(async () => true, []);
+      fences.recoverOwed.mockImplementation(() => new Promise<number>(() => undefined));
+      const error = jest
+        .spyOn(
+          (scanner as unknown as { logger: { error: (message: string) => void } }).logger,
+          'error',
+        )
+        .mockImplementation(() => undefined);
+      // A 150 ms window before the COMMIT reserve: returned once it closed,
+      // the flush still hung and nothing handed to the engine to wait for —
+      // then, not before, and not at the flush's pace.
+      const deadlineAt = Date.now() + COMMIT_RESERVE_MS + 150;
+      expect(await returnedBy(scanner.stop({ deadlineAt }), COMMIT_RESERVE_MS + 150)).toMatchObject(
+        { status: 'fulfilled', settledAt: deadlineAt - COMMIT_RESERVE_MS },
+      );
+      expect(error).toHaveBeenCalledWith(
+        expect.stringMatching(/unknown late Keycloak write fences/),
+      );
     });
   });
 });

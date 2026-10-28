@@ -7,7 +7,7 @@ import { cursorQueryParameter } from '../shared/cursor';
 export const listEntriesQuerySchema = z
   .object({
     cursor: cursorQueryParameter,
-    limit: numberInput(z.number().int().min(1).max(200)).default(50),
+    limit: numberInput(z.number().int().min(1).max(200)).prefault(50),
   })
   .strict();
 
@@ -15,7 +15,7 @@ export type ListEntriesQuery = z.infer<typeof listEntriesQuerySchema>;
 
 export const trialBalanceQuerySchema = z
   .object({
-    currency: currencySchema.default('IRR'),
+    currency: currencySchema.prefault('IRR'),
   })
   .strict();
 

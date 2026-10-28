@@ -54,6 +54,12 @@ export async function runOutboxShutdownProvider(
 export function publisherCloseProblems(
   stops: readonly ParticipantStop[],
   publisherToken: unknown,
+  /**
+   * The database pools (`OutboxShutdown`'s `databases`, Codex r2 on #458):
+   * closed after the publisher and every other participant, so not among
+   * what the publisher waits for.
+   */
+  databaseTokens: readonly unknown[] = [],
 ): string[] {
   const problems: string[] = [];
   const name = (token: unknown): string =>
@@ -64,7 +70,22 @@ export function publisherCloseProblems(
     return problems;
   }
   const [close] = publisher;
-  const others = stops.filter((stop) => stop.token !== publisherToken);
+  for (const database of stops.filter((stop) => databaseTokens.includes(stop.token))) {
+    for (const other of stops.filter((stop) => !databaseTokens.includes(stop.token))) {
+      if (!database.after.includes(other.token)) {
+        problems.push(
+          `${name(database.token)} is closed before ${name(other.token)}'s stop returned`,
+        );
+      }
+    }
+  }
+  for (const token of databaseTokens) {
+    if (!stops.some((stop) => stop.token === token))
+      problems.push(`${name(token)} is never closed`);
+  }
+  const others = stops.filter(
+    (stop) => stop.token !== publisherToken && !databaseTokens.includes(stop.token),
+  );
   if (others.length === 0) problems.push('nothing is drained before the publisher');
   for (const other of others) {
     if (!close!.after.includes(other.token)) {

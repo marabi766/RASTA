@@ -31,6 +31,12 @@ groups:
       # backlog that lasts 20 minutes is a lapse it keeps failing to write, not one it
       # has not reached yet. The database already grants nothing for it; Keycloak still
       # names the organization in new tokens until it is written.
+      # The gauge is each replica's latest **successful** count, and a failed count never
+      # drops it (#458 r2 F6): a positive backlog stands until a successful count says
+      # otherwise, so counts that fail in between cannot restart these 20 minutes — the
+      # reviewer's hour of one success per 120 s fires at 20 m like a steady backlog. A
+      # replica whose counts keep failing holds its last positive count: fail-closed
+      # (rasta_identity_membership_lapse_count_age_seconds says which replica is stale).
       - alert: RastaIdentityMembershipLapseBacklog
         expr: max(rasta_identity_membership_lapse_backlog) > 0
         for: 20m
@@ -76,14 +82,20 @@ groups:
       # (ADR-060 D-069 addendum § 6). This is its signal: a write whose outcome is still
       # unresolved past its deadline plus half the settle window (timed out, broken off,
       # answered 5xx, or its sender paused). Each one is a write that is relying on the
-      # window right now; a delivery that late would land after takeover. Fires at once, well
-      # before the window ends, so an operator can look at Keycloak's and the network's latency
-      # while it still matters. NOT reliable yet (#402 r3 R3-2): the gauge is sampled only at
-      # the end of a sweep pass, after its serial lapses and re-assertions, and not at all by a
-      # pass that fails earlier or a tick the overlap guard skips; and a fence past takeover is
-      # due, not overdue, so a window missed between two samples leaves no trace. No scan
-      # interval makes it reliable: a fence's whole overdue window can pass unsampled even at
-      # the defaults. Follow-up: an independent, bounded sampler (with its staleness exposed).
+      # window right now; a delivery that late would land after takeover.
+      #
+      # Sampled by KeycloakFenceSampler on its own timer and its own one-connection pool,
+      # never by the sweep (#402 r3 R3-2): every 2 s, each sample bounded at 1 s, and the
+      # gauge keeps the largest `overdue` of the last 30 s. What is proven (ADR-060 D-069
+      # addendum § 8): every overdue window (settle/2, at least 7.5 s) contains a
+      # successful sample's database instant, or a gap between two successful samples
+      # exceeded 6 s and RastaIdentityKeycloakFenceSamplerStale fires instead. Once
+      # sampled, it reaches a scrape (15 s) within the 30 s it is kept, and this rule
+      # (evaluated every 15 s, no `for`) fires within at most 7 + 15 + 15 = 37 s of the
+      # window opening. That is before takeover when settle/2 > 37 s — the default 120 s
+      # gives 60 s — and may be after it for a settle window under 75 s; then
+      # RastaIdentityKeycloakWriteExpired still fires for it. `max` over replicas: each
+      # samples the same table, so one replica sampling is enough.
       - alert: RastaIdentityKeycloakWriteOverdue
         expr: max(rasta_identity_keycloak_write_fences{state="overdue"}) > 0
         labels:
@@ -91,6 +103,75 @@ groups:
         annotations:
           summary: '{{ $value }} Keycloak writes are unresolved past half their settle window'
           description: "Keycloak writes whose answer was lost (timeout, broken connection, 5xx) or whose sender stalled are still live past their deadline plus half of KEYCLOAK_WRITE_SETTLE_SECONDS (keycloak_write_attempt, D-069). Narrowing changes of these users are refused until takeover; nothing is unsafe yet. But the guarantee that such a write cannot land after a later narrowing rests on the deployment assumption D-070: no request is delivered or applied, and no sender resumes, later than the settle window. Look now at Keycloak's admin API latency, the proxies and network in front of it, and identity-service's event-loop pauses; if any approach the window, raise KEYCLOAK_WRITE_SETTLE_SECONDS. The log names the users; this alert deliberately does not."
+          runbook: docs/runbooks/keycloak-projection.md
+
+      # D-070, after the window: a write whose outcome was never learned and whose whole
+      # settle window passed, not yet re-asserted (`expired`, a subset of `due`). What an
+      # overdue fence becomes at takeover until the sweep repairs it — so a window that
+      # closed before the overdue alert could fire, or while sampling was stale, still
+      # leaves a trace. The sweep re-asserts it within an interval (60 s by default);
+      # until then Keycloak may hold what the old write carried. Kept 30 s by the sampler
+      # like `overdue`, so a repair between two scrapes is still seen once. At once.
+      - alert: RastaIdentityKeycloakWriteExpired
+        expr: max(rasta_identity_keycloak_write_fences{state="expired"}) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $value }} Keycloak writes passed their whole settle window unresolved'
+          description: "Keycloak writes whose outcome was never learned (timeout, broken connection, 5xx, or a sender that stalled) are past takeover (deadline + KEYCLOAK_WRITE_SETTLE_SECONDS) and not re-asserted yet (keycloak_write_attempt, D-069). The sweep writes the users' committed state over them within an interval; until it does, Keycloak may hold what the old write carried. If such a write is delivered later still, it lands after takeover: the deployment assumption D-070 failed for it. Check Keycloak's admin API latency, the network in front of it and identity-service's event-loop pauses, and raise KEYCLOAK_WRITE_SETTLE_SECONDS if they approach the window. The log names the users; this alert deliberately does not."
+          runbook: docs/runbooks/keycloak-projection.md
+
+      # #402 r3 R3-2: the fence gauges are only as good as their sampler. The age is
+      # computed at scrape — the time since the latest successful sample started, or the
+      # largest gap between two in the last 30 s if larger — so it keeps growing while
+      # sampling hangs or fails, and a gap that closed between two scrapes is still seen.
+      # Before a first success it is the time since the sampler started (and no fence
+      # series is exported: silence is not zero). 6 s: a gap the overdue proof tolerates
+      # (6 s + one sample's 1 s budget < 7.5 s, the shortest overdue window). `min` over
+      # replicas: it fires when no replica samples; one that does keeps the gauges true.
+      # A replica without a sampler (unwired, not started, stopped) exports no age at all
+      # — never a zero (#458 r1 F3) — so `min` is over the replicas that have one.
+      # At once: the condition already is a duration. Fires within 6 + 15 + 15 = 36 s of
+      # the last successful sample.
+      - alert: RastaIdentityKeycloakFenceSamplerStale
+        expr: min(rasta_identity_keycloak_fence_sample_age_seconds) > 6
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Keycloak write fences have not been sampled for {{ $value }} seconds'
+          description: 'KeycloakFenceSampler has had no successful sample of keycloak_write_attempt on any replica for longer than 6 seconds: RastaIdentityKeycloakWriteOverdue and RastaIdentityKeycloakWriteExpired cannot be relied on until it recovers. Each sample is one bounded query on the sampler''s own one-connection pool (its connection wait and its execution share 1 s, under a lock_timeout and a statement_timeout of no more); rasta_identity_keycloak_fence_samples_total{outcome="failed"} and rasta_identity_keycloak_fence_sample_duration_seconds say whether it fails or is slow. Look for a lock on keycloak_write_attempt (a migration), a database that is slow or unreachable, or an event loop that is stalled.'
+          runbook: docs/runbooks/keycloak-projection.md
+
+      # The age series itself missing while identity-service is scraped: the sampler is not
+      # running (not wired, or the metric renamed) — and no stale alert could fire. `for: 2m`
+      # like RastaIdentityServiceMetricsUnavailable, which covers a service not scraped.
+      - alert: RastaIdentityKeycloakFenceSamplerMissing
+        expr: absent(rasta_identity_keycloak_fence_sample_age_seconds) and on() (count(up{job="identity-service"} == 1) > 0)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'identity-service is scraped but exports no Keycloak fence sample age'
+          description: 'identity-service is up, but rasta_identity_keycloak_fence_sample_age_seconds is missing from every replica: KeycloakFenceSampler is not running, so the fence gauges and RastaIdentityKeycloakWriteOverdue, RastaIdentityKeycloakWriteExpired and RastaIdentityKeycloakFenceSamplerStale are all silent. Check that the build in production wires KeycloakFenceSampler (app.module.ts) and that the metric name is unchanged.'
+          runbook: docs/runbooks/keycloak-projection.md
+
+      # The lapse backlog unknown (#458 r1 F3, r2 F6): no replica has counted successfully
+      # for more than 180 s (six lapse intervals) — or no replica exports the count's age
+      # at all while identity-service is scraped (no sampler running) — so
+      # RastaIdentityMembershipLapseBacklog cannot be trusted to fire. On its own series,
+      # the age of the latest successful count, never on the backlog's presence: a
+      # positive backlog and an unknown one are two conditions, and neither resets the
+      # other's duration. Both branches give one label set, so `for` survives a switch
+      # between them. Fires within 180 s + 2 m (+ one evaluation) of the last successful
+      # count on any replica; `for: 2m` covers a restart's moment without a sampler.
+      - alert: RastaIdentityMembershipLapseBacklogUnknown
+        expr: (min(rasta_identity_membership_lapse_count_age_seconds) > 180) or (absent(rasta_identity_membership_lapse_count_age_seconds) and on() (count(up{job="identity-service"} == 1) > 0))
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'identity-service has no recent membership lapse count'
+          description: "No identity-service replica has counted lapsed memberships successfully for more than 3 minutes, or none runs KeycloakFenceSampler at all: RastaIdentityMembershipLapseBacklog cannot be trusted to fire. The count is one bounded query on the business pool every 30 s; rasta_identity_membership_lapse_count_age_seconds says how old each replica's latest successful count is (the backlog gauge keeps that count meanwhile). The identity-service log says why the count fails (a database that is slow or unreachable, a pool exhausted); RastaIdentityKeycloakFenceSamplerMissing fires as well when the sampler itself is missing."
           runbook: docs/runbooks/keycloak-projection.md
 
       # Narrowing changes refused because Keycloak could not be written first, for ten

@@ -45,8 +45,8 @@ const holdSchema = z.object({
   reference: z.string(),
   referenceType: z.string(),
   placedAt: renderableDate,
-  resolvedAt: z.string().nullable().default(null),
-  resolutionNote: z.string().nullable().default(null),
+  resolvedAt: z.string().nullable().prefault(null),
+  resolutionNote: z.string().nullable().prefault(null),
 });
 
 export type WalletHold = z.infer<typeof holdSchema>;
@@ -64,19 +64,19 @@ const transactionSchema = z.object({
   netAmountMinor: z.string(),
   currency: z.string(),
   occurredAt: renderableDate,
-  sourceType: z.string().nullable().default(null),
-  sourceReference: z.string().nullable().default(null),
-  disputeReason: z.string().nullable().default(null),
-  settledAt: z.string().nullable().default(null),
-  failureReason: z.string().nullable().default(null),
+  sourceType: z.string().nullable().prefault(null),
+  sourceReference: z.string().nullable().prefault(null),
+  disputeReason: z.string().nullable().prefault(null),
+  settledAt: z.string().nullable().prefault(null),
+  failureReason: z.string().nullable().prefault(null),
 });
 
 export type WalletTransaction = z.infer<typeof transactionSchema>;
 
 const transactionPageSchema = z.object({
   items: z.array(transactionSchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type TransactionPage = z.infer<typeof transactionPageSchema>;
@@ -180,7 +180,7 @@ const topUpResultSchema = z.object({
   currency: z.string(),
   provider: z.string(),
   simulated: z.boolean(),
-  failureReason: z.string().nullable().default(null),
+  failureReason: z.string().nullable().prefault(null),
 });
 
 export type TopUpResult = z.infer<typeof topUpResultSchema>;

@@ -226,7 +226,7 @@ describe('who may publish — `assertCanWrite`', () => {
 
   it('the project roles default as the portal’s do', () => {
     expect(constructionEnv).toContain(
-      "CONSTRUCTION_PROJECT_ROLES:z.string().default('ORGANIZATION_ADMIN')",
+      "CONSTRUCTION_PROJECT_ROLES:z.string().prefault('ORGANIZATION_ADMIN')",
     );
     expect(webEnv).toContain(
       "WEB_PROJECT_ROLES:roleList('WEB_PROJECT_ROLES','ORGANIZATION_ADMIN')",
@@ -388,7 +388,7 @@ describe('who may open — `assertCanOpenBids`', () => {
   });
 
   it('the opening roles default to none — the owner’s own — as the portal’s do', () => {
-    expect(constructionEnv).toContain("CONSTRUCTION_TENDER_OPEN_ROLES:z.string().default('')");
+    expect(constructionEnv).toContain("CONSTRUCTION_TENDER_OPEN_ROLES:z.string().prefault('')");
     expect(webEnv).toContain(
       "WEB_TENDER_OPEN_ROLES:roleList('WEB_TENDER_OPEN_ROLES','',['SYSTEM_ADMIN','CONTRACTOR'])",
     );

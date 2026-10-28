@@ -1,4 +1,4 @@
-import { request } from '@playwright/test';
+import { request } from './src/expect';
 import { Kafka, logLevel } from 'kafkajs';
 import { e2eConfig } from './src/env';
 import { accessToken, ensureTenantBUser, E2E_USERS, verifyDisposableRealm } from './src/keycloak';

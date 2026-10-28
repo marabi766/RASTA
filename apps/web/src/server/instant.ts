@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 
 /**
  * Timestamps in upstream responses, checked where the response is parsed.
@@ -25,7 +26,7 @@ function isReadable(value: string): boolean {
  */
 export const utcInstant = z
   .string()
-  .datetime({ offset: true })
+  .check(isoDateTime({ offset: true }))
   .refine(isReadable, 'not a valid instant');
 
 /**

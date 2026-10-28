@@ -2,7 +2,9 @@ import type { EventEnvelope } from '@rasta/contracts';
 import { KeycloakProjectionConsumer, REPROJECTED_EVENTS } from './keycloak-projection.consumer';
 import type { KeycloakProjector } from './keycloak.projector';
 import type { EventConsumer, EventHandler } from '@rasta/nest-common';
-import { throwIfCancelled } from '../prisma/cancellation';
+import { COMMIT_RESERVE_MS, throwIfCancelled } from '../prisma/cancellation';
+import { gate, modelledPool } from '../../test/modelled-engine';
+import { onTheTestsClock, returnedBy, until } from '../../test/test-clock';
 
 /**
  * The durable path of the Keycloak projection: each membership or role event
@@ -94,7 +96,11 @@ describe('KeycloakProjectionConsumer', () => {
       let resume!: () => void;
       const resumed = new Promise<void>((resolve) => (resume = resolve));
       /** The signal the projection got, and the operations of it that passed the boundary once resumed. */
-      const seen: { signal?: AbortSignal; started: string[] } = { started: [] };
+      const seen: {
+        signal?: AbortSignal;
+        started: string[];
+        flushedAfterAbort?: boolean | null;
+      } = { started: [] };
       const projector = {
         project: jest.fn(
           async (_userId: string, _trigger: string, options: { signal?: AbortSignal }) => {
@@ -112,6 +118,11 @@ describe('KeycloakProjectionConsumer', () => {
             return 'projected' as const;
           },
         ),
+        /** The late senders' owed fences (D-070 D): when the stop flushed them, against its signal. */
+        recoverOwed: jest.fn(async () => {
+          seen.flushedAfterAbort = seen.signal?.aborted ?? null;
+          return 0;
+        }),
       };
       const consumer = new KeycloakProjectionConsumer(
         (h) => {
@@ -138,6 +149,10 @@ describe('KeycloakProjectionConsumer', () => {
 
       await c.consumer.stop({ deadlineAt: Date.now() });
       expect(c.seen.signal?.aborted).toBe(true);
+      // Its owed late fences were written before the stop returned, once the
+      // handler's scope was cancelled — the flush is not in that scope (D-070 D).
+      expect(c.projector.recoverOwed).toHaveBeenCalledTimes(1);
+      expect(c.seen.flushedAfterAbort).toBe(true);
 
       c.resume();
       await inFlight;
@@ -153,6 +168,48 @@ describe('KeycloakProjectionConsumer', () => {
       await inFlight;
       expect(c.seen.signal?.aborted).toBe(false);
       expect(c.seen.started).toEqual(['databaseNow', 'findUserById', 'fences.ofUser']);
+    });
+  });
+
+  describe('#912: a stop waits for the COMMIT of a handler it abandoned', () => {
+    onTheTestsClock();
+
+    it('the Kafka stop abandoned the handler, its projection’s COMMIT still with the engine — the stop returns only after that COMMIT', async () => {
+      const { pool, log, steps } = modelledPool();
+      const answer = gate();
+      steps.push({ commit: answer.opened });
+      let handler!: EventHandler;
+      // Kafka's stop returns at once, abandoning the handler in flight.
+      const c = new KeycloakProjectionConsumer(
+        (h) => {
+          handler = h;
+          return { start: async () => undefined, stop: async () => undefined } as never;
+        },
+        {
+          project: () =>
+            pool
+              .transaction((tx) => tx.$executeRawUnsafe('SET LOCAL x = 1'))
+              .then(() => 'projected'),
+          recoverOwed: async () => 0,
+        } as unknown as KeycloakProjector,
+      );
+      await c.onModuleInit();
+      const handling = handler(envelope('ROLE_REVOKED', { userId: 'USR_1' }), {} as never);
+      await until(() => log.includes('SET'));
+      const startedAt = Date.now();
+      setTimeout(answer.open, 100);
+
+      const stopped = await returnedBy(
+        c
+          .stop({ deadlineAt: startedAt + COMMIT_RESERVE_MS + 100 })
+          .then(() => void log.push('STOP RETURNED')),
+        COMMIT_RESERVE_MS + 100,
+      );
+
+      // Not "BEGIN, SET, STOP RETURNED, COMMIT": the stop waited for it.
+      expect(stopped).toMatchObject({ status: 'fulfilled', settledAt: startedAt + 100 });
+      expect(log).toEqual(['BEGIN 1', 'SET', 'COMMIT 1', 'STOP RETURNED']);
+      await handling;
     });
   });
 });

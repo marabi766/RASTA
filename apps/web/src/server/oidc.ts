@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey, type KeyLike } from 'jose';
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 /**
  * The four OIDC steps this portal needs, on the server (ADR-059 § 2).
@@ -204,11 +205,11 @@ async function postForm(
     throw new OidcError('MALFORMED_RESPONSE', 'the token response was not JSON');
   }
 
-  const parsed = tokenResponseSchema.safeParse(payload);
+  const parsed = legacyParse(tokenResponseSchema, payload);
   if (!parsed.success) {
     throw new OidcError(
       'MALFORMED_RESPONSE',
-      `the token response is missing ${parsed.error.issues.map((i) => i.path.join('.')).join(', ')}`,
+      `the token response is missing ${parsed.refusal.issues.map((i) => i.path.join('.')).join(', ')}`,
     );
   }
   return parsed.data;

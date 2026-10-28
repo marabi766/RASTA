@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import type { BrowserContext } from '@playwright/test';
+import type { BrowserContext } from './expect';
 import { decodeJwt } from 'jose';
 import { z } from 'zod';
 

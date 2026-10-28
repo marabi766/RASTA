@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
+import { errorEnvelope, expectNotDisclosed } from '@rasta/testing';
 import { platformAttributesFor } from '../src/keycloak/platform-attributes';
 import { startIdentityApi, userToken, type IdentityApiHarness } from './api-helpers';
 import { id, tenants } from './helpers';
@@ -118,14 +119,21 @@ describe('narrowing over HTTP (D-064)', () => {
       )
     ).map((event) => event.eventName);
 
-  /** The fixed 503, and nothing of what Keycloak answered. */
-  function expectKeycloakUnavailable(response: request.Response): void {
+  /**
+   * The fixed 503, and nothing of what Keycloak answered: neither its status (`403`), its
+   * refusal, the connection error nor the stub's address — looked for once the envelope's
+   * correlation ULID, timestamp and the path (which holds the membership id) are verified and
+   * set aside, so neither `.403Z` nor a ULID holding `403` is taken for a disclosure (#452).
+   */
+  function expectKeycloakUnavailable(response: request.Response, path: string): void {
     expect(response.status).toBe(503);
     expect(response.body.code).toBe('KEYCLOAK_UNAVAILABLE');
     expect(response.body.details).toBeUndefined();
-    const text = JSON.stringify(response.body);
-    expect(text).not.toMatch(/keycloak(?!_unavailable)/i);
-    expect(text).not.toMatch(/stub|403|refused|ECONN|127\.0\.0\.1/i);
+    expectNotDisclosed(
+      response.body,
+      [/keycloak(?!_unavailable)/i, /stub|403|refused|ECONN|127\.0\.0\.1/i],
+      { metadata: errorEnvelope({ headers: response.headers, path }) },
+    );
   }
 
   it('a demotion while Keycloak refuses: 503 KEYCLOAK_UNAVAILABLE, the roles unchanged, no event', async () => {
@@ -134,7 +142,7 @@ describe('narrowing over HTTP (D-064)', () => {
 
     const response = await roles(s.membershipId, s.org.a, ['OPERATOR']);
 
-    expectKeycloakUnavailable(response);
+    expectKeycloakUnavailable(response, `/v1/memberships/${s.membershipId}/roles`);
     expect((await membership(s.membershipId))?.roles).toEqual(['ORGANIZATION_ADMIN', 'OPERATOR']);
     expect(await eventNames(s.membershipId)).toEqual([]);
   });
@@ -149,7 +157,7 @@ describe('narrowing over HTTP (D-064)', () => {
       await stub.up();
     }
 
-    expectKeycloakUnavailable(response);
+    expectKeycloakUnavailable(response, `/v1/memberships/${s.membershipId}/revoke`);
     expect(await membership(s.membershipId)).toMatchObject({ status: 'ACTIVE', deletedAt: null });
     expect(await eventNames(s.membershipId)).toEqual([]);
   });
@@ -183,10 +191,10 @@ describe('narrowing over HTTP (D-064)', () => {
     expect((await roles(s.membershipId, s.org.b, ['OPERATOR'])).status).toBe(404);
     expect((await revoke(s.membershipId, s.org.b)).status).toBe(404);
 
-    for (const response of [
-      await roles(s.membershipId, s.org.a, ['OPERATOR']),
-      await revoke(s.membershipId, s.org.a),
-    ]) {
+    for (const [command, response] of [
+      ['roles', await roles(s.membershipId, s.org.a, ['OPERATOR'])],
+      ['revoke', await revoke(s.membershipId, s.org.a)],
+    ] as const) {
       expect(response.status).toBe(503);
       expect(Object.keys(response.body).sort()).toEqual(
         ['code', 'correlationId', 'message', 'path', 'timestamp']
@@ -200,9 +208,14 @@ describe('narrowing over HTTP (D-064)', () => {
       const retryAfter = Number(response.headers['retry-after']);
       expect(retryAfter).toBeGreaterThan(100);
       expect(retryAfter).toBeLessThanOrEqual(130);
-      expect(JSON.stringify(response.body)).not.toMatch(
-        /keycloak(?!_write_settling)|attempt|KWA_/i,
-      );
+      // Nothing of the fence: not Keycloak, not the attempt or its id — with the envelope's
+      // generated values verified and set aside first (a ULID can spell ATTEMPT, #452).
+      expectNotDisclosed(response.body, [/keycloak(?!_write_settling)|attempt|KWA_/i], {
+        metadata: errorEnvelope({
+          headers: response.headers,
+          path: `/v1/memberships/${s.membershipId}/${command}`,
+        }),
+      });
     }
     expect(stub.requests).toHaveLength(before);
     expect((await membership(s.membershipId))?.roles).toEqual(['ORGANIZATION_ADMIN', 'OPERATOR']);

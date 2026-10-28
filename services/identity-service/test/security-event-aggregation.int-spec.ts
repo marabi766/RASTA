@@ -187,7 +187,7 @@ describe('windowed refusal aggregation (real PostgreSQL)', () => {
       'DELETE FROM security_event_outbox WHERE actor_id LIKE $1',
       `%_${TAG}_%`,
     );
-    await Promise.all(clients.map((client) => client.onModuleDestroy()));
+    await Promise.all(clients.map((client) => client.stop()));
     await harness?.close();
   }, 60_000);
 

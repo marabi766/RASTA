@@ -8,6 +8,7 @@ import {
   type ReturnShipmentInspectedPayload,
   type ReturnShipmentReceivedPayload,
   type ReturnShipmentResolvedPayload,
+  legacyParse,
 } from '@rasta/contracts';
 import { UnprocessableEventError } from '@rasta/nest-common';
 import type { PhysicalReturnStatus, ReturnStatus } from './state-machine';
@@ -93,10 +94,10 @@ export function mirrorStepOf(envelope: EventEnvelope): MirrorStep | null {
       `eventVersion ${String(envelope.eventVersion)} is not ${MIRRORED_EVENT_VERSION}`,
     );
   }
-  const parsed = INVENTORY_RETURN_EVENT_SCHEMAS[envelope.eventName].safeParse(envelope.payload);
+  const parsed = legacyParse(INVENTORY_RETURN_EVENT_SCHEMAS[envelope.eventName], envelope.payload);
   if (!parsed.success) {
     const fields = [
-      ...new Set(parsed.error.issues.map((issue) => issue.path.join('.') || '(root)')),
+      ...new Set(parsed.refusal.issues.map((issue) => issue.path.join('.') || '(root)')),
     ];
     throw refuse(
       DLQ_REASONS.VALIDATION_FAILED,

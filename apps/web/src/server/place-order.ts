@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { BIDI_CONTROL, toLatinDigits, toPersianDigits } from '@/lib/format';
@@ -110,9 +111,12 @@ export type ParsedPlaceOrderForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<PlaceOrderField, string>> };
 
 export function parsePlaceOrderForm(values: PlaceOrderFormValues): ParsedPlaceOrderForm {
-  const parsed = placeOrderSchema.safeParse(values);
+  const parsed = legacyParse(placeOrderSchema, values);
   if (!parsed.success) {
-    return { ok: false, fieldErrors: firstIssuePerField(parsed.error, PLACE_ORDER_FIELDS) };
+    return {
+      ok: false,
+      fieldErrors: firstIssuePerField(parsed.refusal, PLACE_ORDER_FIELDS),
+    };
   }
 
   const { offerId, quantity } = parsed.data;

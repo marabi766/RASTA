@@ -1,6 +1,7 @@
 import { internalFetch } from '@rasta/nest-common';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
@@ -98,14 +99,20 @@ const answerSchemas: Record<WorkOwner, z.ZodType<Record<string, unknown>>> = {
     assetId: z.string(),
     fenceId: z.string(),
     clear: z.boolean(),
-    fencedUntil: z.string().datetime({ offset: true }).nullable(),
+    fencedUntil: z
+      .string()
+      .check(isoDateTime({ offset: true }))
+      .nullable(),
     openAssignments: count,
   }),
   [MAINTENANCE_SERVICE]: z.object({
     assetId: z.string(),
     fenceId: z.string(),
     clear: z.boolean(),
-    fencedUntil: z.string().datetime({ offset: true }).nullable(),
+    fencedUntil: z
+      .string()
+      .check(isoDateTime({ offset: true }))
+      .nullable(),
     openRequests: count,
     openRepairOrders: count,
   }),

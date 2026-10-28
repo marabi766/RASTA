@@ -1,7 +1,8 @@
 import type { IdentityRepository } from '../identity/identity.repository';
+import type { PrismaService } from '../prisma/prisma.service';
 import type { KeycloakAdminClient } from './keycloak.client';
-import type { KeycloakProjector } from './keycloak.projector';
-import type { KeycloakWriteFences } from './keycloak-write-fence';
+import { settleRecoveryProjections, type KeycloakProjector } from './keycloak.projector';
+import { FENCE_POOL_CONNECTIONS, type KeycloakWriteFences } from './keycloak-write-fence';
 import { grantsAnything, type PlatformAttributeName } from './platform-attributes';
 
 /**
@@ -43,11 +44,22 @@ import { grantsAnything, type PlatformAttributeName } from './platform-attribute
  * every fence that is no longer live (`KeycloakProjector.write`). An unlinked
  * user's projection makes the account its fences addressed harmless and
  * clears them; a repaired orphan's earlier attempts go the same way. Then it
- * counts **every** row (`COUNT(*)`): the report says how many are left, and is
+ * counts **every** row (`COUNT(attempt_id)`): the report says how many are left, and is
  * clean only at zero — the one state in which the migration's `down.sql`
  * accepts a rollback. A live fence (a writer still running, or not yet past
  * takeover) or a terminal one whose account is still missing keeps it unclean.
  * Reconcile counts them too, without draining.
+ *
+ * A late write of either mode (D-070 option D) leaves a fresh fence and a
+ * recovery projection running in the background: before the count, the
+ * command waits for those projections (at most {@link RECOVERY_SETTLE_MS}),
+ * then **cancels** any still running and waits for them to unwind (at most
+ * {@link RECOVERY_STOP_MS}; `KeycloakProjector.cancelRecoveries`, #458 r1 F2) —
+ * so none of them reaches the database once the command disconnects; one
+ * still unwinding then is reported (`fences.recoveriesAbandoned`, clean only
+ * at zero). Then it writes every fresh fence still owed (`fences.owed`, clean
+ * only at zero) — so neither is lost when the command disconnects, and the
+ * count sees them.
  *
  * Separated from the CLI entry point so the sweep itself is tested without a
  * database or a Keycloak.
@@ -86,13 +98,19 @@ export interface ProjectionCommandReport {
   enabledDivergent: { userId: string; keycloakEnabled: boolean; platformStatus: string }[];
   /**
    * Either mode: Keycloak write fences (D-069). `drained`: backfill projected
-   * this many fence owners in its drain. `outstanding` is `COUNT(*)` over
+   * this many fence owners in its drain. `outstanding` is `COUNT(attempt_id)` over
    * `keycloak_write_attempt` after it — every row, whatever its state — and
    * the report is clean, and a rollback of the fence migration ready, only at
-   * zero. `live`, `due` and `accountMissing` say why any are left.
+   * zero. `live`, `due` and `accountMissing` say why any are left. `owed`:
+   * late writes' fresh fences (D-070 D) this command could not write before
+   * it ends — clean only at zero. `recoveriesAbandoned`: late writes'
+   * recovery projections cancelled at the end and still unwinding when the
+   * command stopped waiting — they start nothing more; clean only at zero.
    */
   fences: {
     drained: number;
+    owed: number;
+    recoveriesAbandoned: number;
     outstanding: number;
     live: number;
     due: number;
@@ -102,13 +120,88 @@ export interface ProjectionCommandReport {
 
 const PAGE = 200;
 
+/** How long the command waits for late writes' recovery projections (D-070 D) before it counts. */
+export const RECOVERY_SETTLE_MS = 30_000;
+
+/** How long cancelled recovery projections are waited for to unwind, before the command counts. */
+export const RECOVERY_STOP_MS = 5_000;
+
+/**
+ * The command's two pools, as `projection.cli.ts` opens them — after its
+ * runtime-role preflight: the business pool (the default size) and the write
+ * fences' own (D-069), so the backfill's projections and orphan repairs are
+ * fenced like every other writer. One definition, so a test holds exactly
+ * these to the pool's close (#458 r3 F2).
+ */
+export const PROJECTION_COMMAND_POOLS = {
+  prisma: undefined,
+  fencePool: { connections: FENCE_POOL_CONNECTIONS },
+} as const satisfies Record<string, ConstructorParameters<typeof PrismaService>[1]>;
+
+/**
+ * The command's teardown, whatever ended it (#458 r1/r2/r3 F2, r3 F7): its
+ * projector stops first — no recovery starts any more, those running are
+ * cancelled and waited for, a COMMIT of theirs included — and the pools close
+ * last, by the same deadline: each refuses new work, waits for what it
+ * admitted, then disconnects within what is left. Each step waits for
+ * **every** participant to settle, a failed one included, before the next
+ * begins — a pool whose close fails never ends the wait for its sibling — and
+ * every failure is rethrown only then (`settleAll`). What was still
+ * unwinding, unsettled or abandoned at the deadline is returned, for the
+ * command to report unclean.
+ */
+export async function tearDownProjectionCommand(
+  deps: {
+    projector?: Pick<KeycloakProjector, 'stop'>;
+    pools: ReadonlyArray<Pick<PrismaService, 'stop'>>;
+  },
+  deadlineAt: number,
+): Promise<{ recoveriesUnwinding: number; transactionsUnsettled: number; poolsAbandoned: number }> {
+  const failures: unknown[] = [];
+  const projector = deps.projector;
+  const [stopped] = await settleAll(
+    projector ? [() => projector.stop({ deadlineAt })] : [],
+    failures,
+  );
+  const closed = await settleAll(
+    deps.pools.map((pool) => () => pool.stop({ deadlineAt })),
+    failures,
+  );
+  if (failures.length > 0) {
+    throw failures.length === 1
+      ? failures[0]
+      : new AggregateError(failures, 'the projection command teardown failed');
+  }
+  return {
+    recoveriesUnwinding: stopped ?? 0,
+    transactionsUnsettled: closed.reduce((sum, close) => sum + (close?.unsettled ?? 0), 0),
+    poolsAbandoned: closed.filter((close) => !close?.drained).length,
+  };
+}
+
+/** Starts every one, waits for all of them to settle; a failure is collected, its value undefined. */
+async function settleAll<T>(
+  starts: ReadonlyArray<() => Promise<T>>,
+  failures: unknown[],
+): Promise<Array<T | undefined>> {
+  const settled = await Promise.allSettled(starts.map((start) => start()));
+  return settled.map((outcome) => {
+    if (outcome.status === 'fulfilled') return outcome.value;
+    failures.push(outcome.reason);
+    return undefined;
+  });
+}
+
 export async function runProjectionCommand(
   mode: ProjectionCommandMode,
   deps: {
     repository: Pick<IdentityRepository, 'listUserIdsWithAccount' | 'listUsersWithoutAccount'>;
-    projector: Pick<KeycloakProjector, 'project' | 'reconcile' | 'repairOrphan'>;
+    projector: Pick<
+      KeycloakProjector,
+      'project' | 'reconcile' | 'repairOrphan' | 'cancelRecoveries'
+    >;
     keycloak: Pick<KeycloakAdminClient, 'findAccountByUsername'>;
-    fences: Pick<KeycloakWriteFences, 'owners' | 'counts'>;
+    fences: Pick<KeycloakWriteFences, 'owners' | 'counts' | 'recoverOwed'>;
   },
 ): Promise<ProjectionCommandReport> {
   const report: ProjectionCommandReport = {
@@ -120,7 +213,15 @@ export async function runProjectionCommand(
     orphans: [],
     activationPending: [],
     enabledDivergent: [],
-    fences: { drained: 0, outstanding: 0, live: 0, due: 0, accountMissing: 0 },
+    fences: {
+      drained: 0,
+      owed: 0,
+      recoveriesAbandoned: 0,
+      outstanding: 0,
+      live: 0,
+      due: 0,
+      accountMissing: 0,
+    },
   };
 
   let after: string | null = null;
@@ -157,6 +258,15 @@ export async function runProjectionCommand(
 
   await sweepOrphans(report, deps);
   if (mode === 'backfill') await drainFences(report, deps);
+  // Late writes' recoveries (D-070 D), before the count and the disconnect:
+  // their projections given time to finish, then the rest cancelled — they
+  // start nothing more — and waited for to unwind (#458 r1 F2); then their
+  // fresh fences written, a cancelled recovery's own late write's included.
+  await settleRecoveryProjections(RECOVERY_SETTLE_MS);
+  report.fences.recoveriesAbandoned = await deps.projector.cancelRecoveries({
+    deadlineAt: Date.now() + RECOVERY_STOP_MS,
+  });
+  report.fences.owed = await deps.fences.recoverOwed();
   // Every row, whatever its state: an empty page of anything is not proof.
   const counts = await deps.fences.counts();
   report.fences.outstanding = counts.total;
@@ -242,7 +352,7 @@ async function sweepOrphans(
 /**
  * Whether the report describes a clean, fully converged realm — with no
  * Keycloak write fence left at all (`fences.outstanding`, an explicit
- * `COUNT(*)`), which is also what a rollback of the fence migration needs.
+ * `COUNT(attempt_id)`), which is also what a rollback of the fence migration needs.
  */
 export function isClean(report: ProjectionCommandReport): boolean {
   return (
@@ -251,6 +361,8 @@ export function isClean(report: ProjectionCommandReport): boolean {
     report.activationPending.length === 0 &&
     report.enabledDivergent.length === 0 &&
     report.orphans.every((orphan) => orphan.repaired || (!orphan.enabled && !orphan.grants)) &&
-    report.fences.outstanding === 0
+    report.fences.outstanding === 0 &&
+    report.fences.owed === 0 &&
+    report.fences.recoveriesAbandoned === 0
   );
 }

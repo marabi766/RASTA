@@ -44,7 +44,7 @@ const projectSchema = z.object({
   title: z.string(),
   operationType: z.string(),
   locationDescription: z.string(),
-  estimatedCostMinor: minorUnits.nullable().default(null),
+  estimatedCostMinor: minorUnits.nullable().prefault(null),
   status: z.string(),
   statusChangedAt: utcInstant,
 });
@@ -58,10 +58,10 @@ const projectDetailSchema = projectSchema.extend({
    * command, because nothing could be sent that the service would accept.
    */
   version: z.number().int().min(1).optional(),
-  hasArea: z.boolean().default(false),
-  statusReason: z.string().nullable().default(null),
+  hasArea: z.boolean().prefault(false),
+  statusReason: z.string().nullable().prefault(null),
   createdAt: utcInstant,
-  scopeOfWork: z.string().default(''),
+  scopeOfWork: z.string().prefault(''),
   needsSummary: z
     .object({
       draft: z.number().int(),
@@ -69,15 +69,15 @@ const projectDetailSchema = projectSchema.extend({
       withdrawn: z.number().int(),
     })
     .nullable()
-    .default(null),
+    .prefault(null),
 });
 
 export type ProjectDetail = z.infer<typeof projectDetailSchema>;
 
 const projectPageSchema = z.object({
   items: z.array(projectSchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type ProjectPage = z.infer<typeof projectPageSchema>;
@@ -104,16 +104,16 @@ const approvalSchema = z.object({
   authorityRole: z.string(),
   authorityLabel: z.string(),
   status: z.string(),
-  requestedAt: utcInstant.nullable().default(null),
-  decidedAt: utcInstant.nullable().default(null),
-  decisionNumber: z.string().nullable().default(null),
-  conditions: z.string().nullable().default(null),
-  reason: z.string().nullable().default(null),
+  requestedAt: utcInstant.nullable().prefault(null),
+  decidedAt: utcInstant.nullable().prefault(null),
+  decisionNumber: z.string().nullable().prefault(null),
+  conditions: z.string().nullable().prefault(null),
+  reason: z.string().nullable().prefault(null),
   version: z.number().int().min(1),
   project: z
     .object({
       title: z.string(),
-      estimatedCostMinor: minorUnits.nullable().default(null),
+      estimatedCostMinor: minorUnits.nullable().prefault(null),
     })
     .optional(),
 });
@@ -125,8 +125,8 @@ const approvalsSchema = z.array(approvalSchema);
 
 const inboxSchema = z.object({
   items: z.array(approvalSchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type ApprovalInbox = z.infer<typeof inboxSchema>;
@@ -159,7 +159,7 @@ const policyPageSchema = z.object({
       workflowKey: z.string(),
       status: z.string(),
       label: z.string(),
-      isSample: z.boolean().default(false),
+      isSample: z.boolean().prefault(false),
       steps: z.array(
         z.object({
           stepOrder: z.number().int(),
@@ -169,7 +169,7 @@ const policyPageSchema = z.object({
       ),
     }),
   ),
-  hasMore: z.boolean().default(false),
+  hasMore: z.boolean().prefault(false),
 });
 
 export interface ProjectListQuery {

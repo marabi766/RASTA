@@ -1,6 +1,8 @@
+import { expectNotDisclosed } from '@rasta/testing';
 import { randomUUID } from 'node:crypto';
 
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { test, type APIRequestContext, type Page } from './expect';
+import { expect } from './expect';
 
 import { installLiveSession, type LiveSession } from './live-session';
 import { withContext } from '../src/lib/page-context';
@@ -374,7 +376,8 @@ test.describe('tenant isolation through the live stack', () => {
       await page.goto('/assets');
       const text = await mainText(page);
       expect(text).not.toContain(OWN_ASSET_TAG);
-      expect(text).not.toContain('D1-');
+      // Rendered text has no independently verified metadata paths; keep all text searched.
+      expectNotDisclosed(text, ['D1-']);
     });
 
     test('ORG-DEH-0001’s machine is answered as a missing one, from this side too', async ({

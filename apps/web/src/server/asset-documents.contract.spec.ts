@@ -166,8 +166,8 @@ describe('the reference body', () => {
 
   it('takes the dates as ISO datetimes, optional, with no ordering rule the form could be missing', () => {
     const properties = schemaProperties(assetDto, 'attachDocumentSchema');
-    expect(squash(properties.get('issuedAt'))).toBe('z.string().datetime().optional()');
-    expect(squash(properties.get('expiresAt'))).toBe('z.string().datetime().optional()');
+    expect(squash(properties.get('issuedAt'))).toBe('z.string().check(isoDateTime()).optional()');
+    expect(squash(properties.get('expiresAt'))).toBe('z.string().check(isoDateTime()).optional()');
     expect(squash(topLevelConst(assetDto, 'attachDocumentSchema').getText())).not.toContain(
       '.refine(',
     );
