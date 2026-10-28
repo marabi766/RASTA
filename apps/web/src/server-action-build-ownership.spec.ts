@@ -629,9 +629,9 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect(existsSync(capturePath)).toBe(false);
     rmSync(join(capturePath, '..'), { recursive: true, force: true });
     expect(receipt(dir)).toEqual([]);
-    // The preload self-kills the abandoned group without a supervisor final report.
-    // Observing its absence does not turn the lost lifecycle into a normal exit.
-    await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
+    // R6-1: the orphan's handshake fails, so its supervisor's census turns quiescent and
+    // it announces its own normal end: both lifetimes are confirmed, not merely EOF.
+    await expect(cleanupFixtures()).resolves.toBeUndefined();
   });
 
   it.each([

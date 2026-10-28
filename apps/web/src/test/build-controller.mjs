@@ -3,7 +3,7 @@
 //
 // ONE acknowledged lifecycle on that channel (R6-1). Connectivity is never readiness:
 //   READY       only once the PRODUCTION supervisor 'message' handler is installed;
-//               command bytes stay buffered in the socket until then.
+//               command bytes stay unread in the command channel until then.
 //   ACK         per command, after the production handler (or root gate) ran.
 //   FINAL       flushed BEFORE the supervisor's own final group SIGKILL is performed.
 //   NORMAL_END  flushed BEFORE the supervisor's own successful exit.
@@ -14,10 +14,18 @@ import { connect } from 'node:net';
 import process from 'node:process';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-export async function supervise(socketPath, supervisorUrl, importDelayMs = 0) {
-  const socket = connect(socketPath);
+async function open(path) {
+  const socket = connect(path);
   await new Promise((resolve, reject) => socket.once('connect', resolve).once('error', reject));
   socket.on('error', () => socket.destroy());
+  return socket;
+}
+
+export async function supervise(socketPath, supervisorUrl, importDelayMs = 0) {
+  // Two ONE-WAY channels. The test never writes to `socket`, so a command write that
+  // fails against an ending supervisor cannot discard an unread announcement.
+  const socket = await open(socketPath);
+  const commands = await open(`${socketPath}.commands`);
   let root;
   const spawn = cp.spawn;
   cp.spawn = (...args) => {
@@ -77,7 +85,7 @@ export async function supervise(socketPath, supervisorUrl, importDelayMs = 0) {
           root && root.exitCode === null && root.signalCode === null && root.kill(signal),
         );
         send([{ kind: 'ACK', id, acted }]);
-      } else socket.destroy();
+      } else socket.destroy(); // Protocol error: unannounced EOF, so LOST.
     }
   };
   // The supervisor module installs its handler during evaluation, then never resolves
@@ -89,7 +97,7 @@ export async function supervise(socketPath, supervisorUrl, importDelayMs = 0) {
     process.off('newListener', installed);
     process.nextTick(() => {
       send([{ kind: 'READY', group: process.pid }]);
-      socket.on('data', onData);
+      commands.on('data', onData);
     });
   });
   // Test-only widening of the startup window (R6-1 regression); 0 in every other case.

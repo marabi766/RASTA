@@ -74,7 +74,14 @@ const groupAbsent = (group: number): boolean => {
   }
 };
 
-/** One accepted connection, one acknowledged lifecycle. EOF alone never confirms cleanup. */
+/** The controller's command channel, next to its event channel `path`. */
+export const commandPath = (path: string): string => `${path}.commands`;
+
+/**
+ * One acknowledged lifecycle over two one-way channels, each accepted once and held:
+ * events (READY / ACK / FINAL / NORMAL_END, then EOF) and commands. EOF alone never
+ * confirms cleanup, and a failed command write can never discard an unread event.
+ */
 export function supervisorEndpoint(deadlineMs = 5_000): {
   path: string;
   ready: Promise<void>;
@@ -88,6 +95,7 @@ export function supervisorEndpoint(deadlineMs = 5_000): {
   const dir = mkdtempSync(join(tmpdir(), 'build-control-'));
   const path = join(dir, 'ipc');
   let socket: Socket | undefined;
+  let commands: Socket | undefined;
   let connected = false;
   let group: number | undefined;
   let announced = false;
@@ -153,18 +161,28 @@ export function supervisorEndpoint(deadlineMs = 5_000): {
         wake();
       }
     });
+    // Only this channel's EOF decides; an error is followed by that same 'close'.
     incoming.once('close', eof);
-    incoming.on('error', () => {
-      lose();
-      incoming.destroy();
-    });
+    incoming.on('error', () => incoming.destroy());
     server.close();
     wake();
   });
-  const ready = new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(path, resolve);
+  // Write-only. Its failure settles nothing: the event channel or the deadline decides.
+  const commandServer = createServer((incoming) => {
+    if (outcome || commands) return incoming.destroy();
+    commands = incoming;
+    incoming.on('error', () => incoming.destroy());
+    commandServer.close();
+    wake();
   });
+  const listen = (on: ReturnType<typeof createServer>, at: string): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      on.once('error', reject);
+      on.listen(at, resolve);
+    });
+  const ready = Promise.all([listen(server, path), listen(commandServer, commandPath(path))]).then(
+    () => undefined,
+  );
   let groupRequest: Promise<Completion> | undefined;
   function command(target: 'group' | 'root', signal?: NodeJS.Signals): Promise<unknown> {
     const id = ++sequence;
@@ -179,17 +197,16 @@ export function supervisorEndpoint(deadlineMs = 5_000): {
       };
       const update = (): void => {
         if (outcome) return finish(target === 'group' ? outcome : false);
-        if (group !== undefined && !sent && socket && !socket.destroyed) {
+        if (group !== undefined && !sent && commands && !commands.destroyed) {
           sent = true;
-          socket.write(JSON.stringify({ id, target, signal }) + '\n', (error) => {
-            if (error) lose();
-          });
+          commands.write(JSON.stringify({ id, target, signal }) + '\n', () => {});
         }
         if (target === 'root' && acknowledgements.has(id)) finish(acknowledgements.get(id));
       };
       const timer = setTimeout(() => {
         lose();
         socket?.destroy();
+        commands?.destroy();
       }, deadlineMs);
       listeners.add(update);
       update();
@@ -215,7 +232,10 @@ export function supervisorEndpoint(deadlineMs = 5_000): {
     async close() {
       lose();
       socket?.destroy();
-      if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+      commands?.destroy();
+      for (const listening of [server, commandServer])
+        if (listening.listening)
+          await new Promise<void>((resolve) => listening.close(() => resolve()));
       rmSync(dir, { recursive: true, force: true });
     },
   };
