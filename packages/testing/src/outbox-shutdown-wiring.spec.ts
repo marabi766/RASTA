@@ -80,4 +80,42 @@ describe('outbox shutdown wiring helpers', () => {
     ];
     expect(publisherCloseProblems(stops, Publisher)).toEqual(['Relay is stopped more than once']);
   });
+
+  describe('the database pools (Codex r2 on #458)', () => {
+    class Pool {}
+    const stopsOf = (order: Array<[unknown, unknown[]]>): ParticipantStop[] =>
+      order.map(([token, after]) => ({ token, deadlineAt: 6000, after }));
+
+    it('pools closed last — after the drain and the publisher — are no problem', () => {
+      const stops = stopsOf([
+        [Relay, []],
+        [Purge, []],
+        [Publisher, [Relay, Purge]],
+        [Pool, [Relay, Purge, Publisher]],
+      ]);
+      expect(publisherCloseProblems(stops, Publisher, [Pool])).toEqual([]);
+    });
+
+    it('a pool closed beside a participant still running is reported', () => {
+      const stops = stopsOf([
+        [Relay, []],
+        [Pool, []],
+        [Purge, []],
+        [Publisher, [Relay, Purge]],
+      ]);
+      expect(publisherCloseProblems(stops, Publisher, [Pool])).toEqual([
+        "Pool is closed before Relay's stop returned",
+        "Pool is closed before Purge's stop returned",
+        "Pool is closed before Publisher's stop returned",
+      ]);
+    });
+
+    it('a pool the coordinator never closes is reported', () => {
+      const stops = stopsOf([
+        [Relay, []],
+        [Publisher, [Relay]],
+      ]);
+      expect(publisherCloseProblems(stops, Publisher, [Pool])).toEqual(['Pool is never closed']);
+    });
+  });
 });

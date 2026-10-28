@@ -108,6 +108,7 @@ const unfenced: KeycloakWriteFence = async () => ({
   id: 'KWA_LIVE',
   signal: AbortSignal.timeout(10_000),
   assertDispatchable() {},
+  observeReply: () => false,
 });
 
 function platform(userId: string, roles: string[]): PlatformAttributes {

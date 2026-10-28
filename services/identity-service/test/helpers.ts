@@ -32,11 +32,59 @@ export function newPrisma(): PrismaService {
 /**
  * The Keycloak write fences on a pool of their own, as the service runs them
  * (D-069, `app.module.ts`). Connected; the suite closes `pool` in `afterAll`.
+ * Their senders' monotonic clock is `clock`, when given ({@link SenderClock}).
  */
-export async function newFences(): Promise<{ fences: KeycloakWriteFences; pool: PrismaService }> {
+export async function newFences(
+  clock?: SenderClock,
+): Promise<{ fences: KeycloakWriteFences; pool: PrismaService }> {
   const pool = new PrismaService(databaseUrl(), { connections: FENCE_POOL_CONNECTIONS });
   await pool.onModuleInit();
-  return { fences: new KeycloakWriteFences(pool), pool };
+  return {
+    fences: new KeycloakWriteFences(pool, clock ? { monotonicNow: clock.now } : {}),
+    pool,
+  };
+}
+
+/**
+ * The senders' monotonic clock of a suite (`monotonicNow`): `performance.now`
+ * plus every pause so far.
+ *
+ * A timeout is not, by itself, a late reply (#458 r1 F5): the request's own
+ * abort timer is set to the whole milliseconds left, rounded down, so it may
+ * fire a fraction **before** the deadline — and an outcome observed then is
+ * on time, covered by the attempt's own fence. Whether a sender is late is
+ * decided by the clock it reads after the reply. A test that means a late
+ * timeout says so: {@link pauseSenderAtNextPut} moves this clock past the
+ * deadline while the request is at Keycloak — the sender paused there — so
+ * the observation after the timer fires is past it, on every run.
+ */
+export class SenderClock {
+  private paused = 0;
+  readonly now = (): number => performance.now() + this.paused;
+
+  pause(ms: number): void {
+    this.paused += ms;
+  }
+}
+
+/**
+ * The next PUT that reaches `stub` finds its sender paused for `ms` — longer
+ * than its request timeout — on `clock`: whatever it hears afterwards, its
+ * own timer's abort included, it hears after its deadline. Once.
+ */
+export function pauseSenderAtNextPut(
+  stub: { onPut: ((request: never) => Promise<void>) | null },
+  clock: SenderClock,
+  ms: number,
+): void {
+  const previous = stub.onPut;
+  let armed = true;
+  stub.onPut = async (request: never) => {
+    await previous?.(request);
+    if (!armed) return;
+    armed = false;
+    clock.pause(ms);
+  };
 }
 
 export function id(prefix: string): string {
@@ -99,6 +147,25 @@ export async function databaseNowMs(prisma: PrismaService): Promise<number> {
   const ms = rows[0]?.ms;
   if (typeof ms !== 'number') throw new Error('the database did not report its clock');
   return ms;
+}
+
+/**
+ * Waits until every Keycloak write fence of `userId` is past its takeover, on
+ * the database clock the fences were written with (#458 r3 F8) — not a fixed
+ * sleep computed from when the test began: a late sender's fresh fence starts
+ * when its outcome was heard, which a slow runner moves later.
+ */
+export async function untilEveryFenceTakenOver(
+  prisma: PrismaService,
+  userId: string,
+  marginMs = 300,
+): Promise<void> {
+  const rows = await prisma.client.$queryRaw<Array<{ ms: number | null }>>`
+    SELECT (EXTRACT(EPOCH FROM max(takeover_at) - (clock_timestamp() AT TIME ZONE 'UTC'))
+              * 1000)::float8 AS ms
+      FROM keycloak_write_attempt WHERE user_id = ${userId}`;
+  const leftMs = Math.max(0, rows[0]?.ms ?? 0);
+  await new Promise((resolve) => setTimeout(resolve, leftMs + marginMs));
 }
 
 /**

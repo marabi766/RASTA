@@ -81,8 +81,8 @@ describe('Keycloak projection ordering (ADR-060 § 5)', () => {
 
   afterAll(async () => {
     openGate();
-    await fencing?.pool.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await fencing?.pool.stop();
+    await prisma.stop();
   });
 
   // The user row lock every Keycloak writer takes (D-064): a session of this

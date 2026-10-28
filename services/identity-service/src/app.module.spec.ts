@@ -1,6 +1,7 @@
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { AllExceptionsFilter, AuthGuard, OutboxShutdown, RolesGuard } from '@rasta/nest-common';
 import { AppModule } from './app.module';
+import { OutboxGauges } from './observability/outbox-gauges';
 import { IdentityRolesGuard } from './security-events/identity-roles.guard';
 import { RefusalAuditExceptionFilter } from './security-events/refusal-audit.filter';
 import { SECURITY_EVENT_RELAY } from './security-events/security-event.relay';
@@ -65,14 +66,14 @@ describe('AppModule refusal-audit wiring', () => {
     security.start.mockImplementation(() => order.push('security relay'));
     purge.start.mockImplementation(() => order.push('purge'));
     const prisma = { assertRuntimeRole: jest.fn(async () => void order.push('role check')) };
+    const gauges = new OutboxGauges(store() as never, store() as never);
     const module = new AppModule(
       prisma as never,
       domain as never,
-      store() as never,
       security as never,
-      store() as never,
       purge as never,
-      new OutboxShutdown({ relay: domain, purge, workers: [security], budgetMs: 1000 }),
+      gauges,
+      new OutboxShutdown({ relay: domain, purge, workers: [security, gauges], budgetMs: 1000 }),
     );
 
     await module.onModuleInit();
@@ -98,14 +99,14 @@ describe('AppModule refusal-audit wiring', () => {
         );
       }),
     };
+    const gauges = new OutboxGauges(store() as never, store() as never);
     const module = new AppModule(
       prisma as never,
       domain as never,
-      store() as never,
       security as never,
-      store() as never,
       purge as never,
-      new OutboxShutdown({ relay: domain, purge, workers: [security], budgetMs: 1000 }),
+      gauges,
+      new OutboxShutdown({ relay: domain, purge, workers: [security, gauges], budgetMs: 1000 }),
     );
 
     await expect(module.onModuleInit()).rejects.toThrow(/refuses to start/);
