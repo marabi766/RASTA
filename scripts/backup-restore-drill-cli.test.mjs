@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
+  chmodSync,
   cpSync,
   writeFileSync,
   readFileSync,
@@ -92,6 +93,16 @@ test('operator root with local .env still refuses before setup', async () => {
     const evidence = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
     assert.match(evidence.error.message, /Use a clean worktree without local env files/);
     assert.equal(evidence.databases.length, 0);
+    // Cleanup ownership serializes before everything else, so a torn rewrite still names it.
+    assert.deepEqual(Object.keys(evidence).slice(0, 2), ['project', 'temporary']);
+    const raw = readFileSync(join(directory, 'report.json'), 'utf8');
+    assert.ok(raw.indexOf('"project"') < raw.indexOf('"databases"'));
+    assert.ok(raw.indexOf('"temporary"') < raw.indexOf('"databases"'));
+    // No sibling residue of the atomic rewrite survives a normal run.
+    assert.deepEqual(
+      readdirSync(directory).filter((name) => name.startsWith('report.json.')),
+      [],
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -343,7 +354,9 @@ async function referenceCliFixture(directory, mode) {
   cpSync(join(repo, reader), join(directory, reader));
   symlinkSync(join(repo, 'node_modules'), join(copied, 'node_modules'), 'dir');
   const path = join(copied, 'backup-restore-drill.mjs');
-  const target = mode === 'bypass-ref' ? path : join(copied, 'backup-restore-drill-lib.mjs');
+  const target = ['bypass-ref', 'ignore-input'].includes(mode)
+    ? path
+    : join(copied, 'backup-restore-drill-lib.mjs');
   let implementation = readFileSync(target, 'utf8');
   const replacements = {
     'bypass-ref': [
@@ -351,8 +364,15 @@ async function referenceCliFixture(directory, mode) {
       'before.reference = { checkLinesDifferent: 0, milliseconds: 0 };',
     ],
     'bypass-fixed': [
-      "const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point');",
-      "const dumped = await dump(scratch[0], index === 0 ? 'reference' : 'fixed-point');",
+      "const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point', {",
+      "const dumped = await dump(scratch[0], index === 0 ? 'reference' : 'fixed-point', {",
+    ],
+    // The WRONG VALID evidence: SOURCE's separate dump is restored again as the fixed point.
+    'wrong-input': ['const input = index === 0 ? separate : reference;', 'const input = separate;'],
+    // The restore callback ignores the evidence it is handed and reads SOURCE's file.
+    'ignore-input': [
+      "const fd = openSync(dumpPath(input), 'r');",
+      "const fd = openSync(join(temporary, `${database}-reference-input.schema.sql`), 'r');",
     ],
     'bypass-guard': [
       'const allowance = checkSourceReference(sourceDump, reference.evidence, database);',
@@ -398,7 +418,7 @@ case "$*" in
       *'drill_ref_'*) ${mode === 'failed-ref-dump' ? 'echo PRIVATE_REF_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
       *'drill_fixed_'*) ${mode === 'failed-fixed-dump' ? 'echo PRIVATE_FIXED_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
     esac
-    ${mode === 'check-drift' ? `case "$*" in *'drill_ref_'*|*'drill_fixed_'*|*'-restored '*) sed 's/((id >= 0))/(id >= 0)/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : mode === 'original-and-drop-fail' ? `case "$*" in *'drill_ref_'*) sed 's/"id" integer/"id" bigint/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : `cat '${directory}/schema.sql'`} ;;
+    ${['check-drift', 'ignore-input'].includes(mode) ? `case "$*" in *'drill_ref_'*|*'drill_fixed_'*|*'-restored '*) sed 's/((id >= 0))/(id >= 0)/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : mode === 'original-and-drop-fail' ? `case "$*" in *'drill_ref_'*) sed 's/"id" integer/"id" bigint/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : `cat '${directory}/schema.sql'`} ;;
   *'pg_restore '*) ${mode === 'failed-archive' ? 'echo PRIVATE_ARCHIVE_SQL; echo PRIVATE_ARCHIVE_SQL >&2; exit 42' : ':'} ;;
   *'psql '*)
     body=$(cat)
@@ -411,8 +431,10 @@ case "$*" in
       *'PostgreSQL database dump'*)
         case "$*" in
           *'drill_ref_'*)
+            printf '%s\\n' "$body" >> '${directory}/ref-input'
             ${mode === 'signal-ref' ? `touch '${directory}/started'; exec sleep 30` : mode === 'failed-ref-restore' ? 'echo PRIVATE_REF_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
           *'drill_fixed_'*)
+            printf '%s\\n' "$body" >> '${directory}/fixed-input'
             ${mode === 'signal-fixed' ? `touch '${directory}/started'; exec sleep 30` : mode === 'failed-fixed-restore' ? 'echo PRIVATE_FIXED_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
         esac ;;
       *'json_agg(datname'*) echo '${JSON.stringify(names)}' ;;
@@ -422,7 +444,7 @@ case "$*" in
       *'WITH namespaces AS'*) echo '{"schemas":[{"name":"public","owner":"rasta"}],"relations":[{"name":"public.fixture","owner":"rasta"}],"defaultPrivileges":[]}' ;;
       *'row_to_json(t)'*) echo '{"name":"public.fixture","rows":"1","kind":"application","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' ;;
     esac ;;
-  *'down --volumes'*) touch '${directory}/cleaned' ;;
+  *'down --volumes'*) touch '${directory}/cleaned'${mode === 'final-write-fails' ? `; chmod 555 '${directory}'` : ''} ;;
 esac
 `,
     { mode: 0o700 },
@@ -439,6 +461,8 @@ for (const mode of [
   'original-and-drop-fail',
   'bypass-ref',
   'bypass-fixed',
+  'wrong-input',
+  'ignore-input',
   'bypass-guard',
   'failed-ref-restore',
   'failed-fixed-restore',
@@ -476,7 +500,7 @@ for (const mode of [
         child.kill('SIGTERM');
       }
       const [code] = await exited;
-      const success = ['baseline', 'check-drift'].includes(mode);
+      const success = ['baseline', 'check-drift', 'ignore-input'].includes(mode);
       assert.equal(code, success ? 0 : 1);
       const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
       assert.equal(report.passed, success);
@@ -490,7 +514,7 @@ for (const mode of [
         readdirSync(directory).some((name) => name.startsWith('rasta-restore-drill-')),
         false,
       );
-      if (mode === 'bypass-fixed') {
+      if (mode === 'bypass-fixed' || mode === 'wrong-input') {
         assert.equal(report.error.message, 'Invalid schema dump provenance');
         assert.doesNotMatch(report.error.message, /TypeError|undefined|properties/);
       }
@@ -537,6 +561,17 @@ for (const mode of [
           assert.match(dropped, /drill_fixed_/);
         }
       }
+      if (['check-drift', 'ignore-input'].includes(mode)) {
+        // The stub's REF differs from SOURCE, so the restore inputs are observable: REF is restored
+        // from SOURCE's separate dump, and the fixed point from REF (never SOURCE again).
+        const ref = readFileSync(join(directory, 'ref-input'), 'utf8');
+        const fixed = readFileSync(join(directory, 'fixed-input'), 'utf8');
+        assert.match(ref, /CHECK \(\(id >= 0\)\)/);
+        if (mode === 'check-drift') {
+          assert.match(fixed, /CHECK \(id >= 0\)/);
+          assert.doesNotMatch(fixed, /CHECK \(\(id >= 0\)\)/);
+        } else assert.match(fixed, /CHECK \(\(id >= 0\)\)/);
+      }
       if (mode === 'baseline') {
         assert.equal(report.databases.length, 16);
         assert.ok(
@@ -556,20 +591,41 @@ for (const mode of [
   });
 }
 
-test('SIGKILL leaves a provisional private report with project and Compose cleanup path', async () => {
+const alive = (pgid) => {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+async function waitGone(pgid) {
+  for (let attempt = 0; attempt < 200 && alive(pgid); attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  return !alive(pgid);
+}
+
+test('SIGKILL leaves a provisional private report naming the project, directory and live process groups', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'drill-sigkill-test-'));
   let child;
+  let pgid;
   try {
     const root = fixture(directory);
-    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    // The migration child's argv never contains the project name: pgrep -f <project> cannot find it.
+    writeFileSync(
+      join(directory, 'pnpm'),
+      `#!/bin/sh
+echo $$ > '${directory}/migrate-pgid'
+touch '${directory}/migrating'
+while [ ! -f '${directory}/release' ]; do sleep 0.05; done
+touch '${directory}/migrate-released'
+`,
+      { mode: 0o700 },
+    );
     writeFileSync(
       join(directory, 'docker'),
       `#!/bin/sh
 case "$*" in
-  *'up -d'*)
-    touch '${directory}/started'
-    while [ ! -f '${directory}/release' ]; do sleep 0.05; done
-    touch '${directory}/released' ;;
   *'down --volumes'*) touch '${directory}/unexpected-cleanup' ;;
 esac
 `,
@@ -577,7 +633,8 @@ esac
     );
     child = start(directory, root);
     const exited = once(child, 'exit');
-    await waitFor(join(directory, 'started'));
+    await waitFor(join(directory, 'migrating'));
+    pgid = Number(readFileSync(join(directory, 'migrate-pgid'), 'utf8'));
     child.kill('SIGKILL');
     const [code, signal] = await exited;
     assert.equal(code, null);
@@ -593,10 +650,152 @@ esac
     const compose = JSON.parse(readFileSync(join(report.temporary, 'compose.json'), 'utf8'));
     assert.equal(compose.services.source.container_name, `${report.project}-source`);
     assert.equal(existsSync(join(directory, 'unexpected-cleanup')), false);
+    // The detached child outlived the drill, and the report recorded its group before awaiting it.
+    assert.ok(alive(pgid), 'the orphan keeps running after SIGKILL');
+    assert.deepEqual(report.processGroups, [pgid]);
+    assert.equal(
+      execFileSync('ps', ['-o', 'args=', '-p', String(pgid)], { encoding: 'utf8' }).includes(
+        report.project,
+      ),
+      false,
+    );
   } finally {
     child?.kill('SIGKILL');
-    writeFileSync(join(directory, 'release'), 'go');
-    await waitFor(join(directory, 'released'));
+    if (pgid) process.kill(-pgid, 'SIGKILL');
+    if (pgid) assert.ok(await waitGone(pgid), 'orphan group stopped');
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a group member that outlives its leader is killed, recorded and never ignored', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-orphan-test-'));
+  let child;
+  let orphan;
+  try {
+    const root = fixture(directory);
+    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    writeFileSync(
+      join(directory, 'docker'),
+      `#!/bin/sh
+case "$*" in
+  *'up -d'*)
+    sleep 60 >/dev/null 2>&1 </dev/null &
+    echo $! > '${directory}/orphan-pid' ;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    child = start(directory, root);
+    const [code] = await once(child, 'exit');
+    assert.equal(code, 1);
+    orphan = Number(readFileSync(join(directory, 'orphan-pid'), 'utf8'));
+    const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+    assert.equal(report.reapedProcessGroups.length, 1);
+    assert.match(report.reapedProcessGroups[0].stage, /start disposable source PostgreSQL/);
+    assert.equal(report.orphanProcessGroups, undefined);
+    assert.deepEqual(report.processGroups, []);
+    assert.equal(report.cleanup.passed, true);
+    assert.ok(await waitGone(report.reapedProcessGroups[0].pgid), 'reaped group is gone');
+    assert.throws(() => process.kill(orphan, 0), /ESRCH/);
+  } finally {
+    child?.kill('SIGKILL');
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a failed final report write keeps the provisional report and its cleanup ownership', async (t) => {
+  if (process.getuid?.() === 0) return t.skip('root ignores directory permissions');
+  const directory = mkdtempSync(join(tmpdir(), 'drill-writefail-test-'));
+  let child;
+  try {
+    const root = fixture(directory);
+    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    // The report directory becomes read-only before cleanup: sibling creation (and the
+    // temporary directory's removal) then fail, so the final write cannot replace the report.
+    writeFileSync(
+      join(directory, 'docker'),
+      `#!/bin/sh
+case "$*" in
+  *'up -d'*) exit 1 ;;
+  *'down --volumes'*) chmod 555 '${directory}' ;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    child = start(directory, root);
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const [code] = await once(child, 'close');
+    chmodSync(directory, 0o755);
+    assert.equal(code, 1);
+    assert.match(stderr, /final report could not be written/);
+    assert.doesNotMatch(stderr, new RegExp(directory));
+    const path = join(directory, 'report.json');
+    const report = JSON.parse(readFileSync(path, 'utf8'));
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.match(report.project, /^restore-drill-[a-f0-9]{16}$/);
+    assert.ok(report.temporary.startsWith(directory + '/rasta-restore-drill-'));
+    assert.equal(report.passed, false);
+    assert.equal(report.cleanup.passed, false);
+    assert.equal(report.finishedAt, undefined);
+    // A write that started before the directory turned read-only cannot unlink its sibling:
+    // any such residue is private like the report itself.
+    for (const name of readdirSync(directory).filter((entry) => entry.startsWith('report.json.')))
+      assert.equal(statSync(join(directory, name)).mode & 0o777, 0o600);
+  } finally {
+    child?.kill('SIGKILL');
+    try {
+      chmodSync(directory, 0o755);
+    } catch {
+      /* removed already */
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a full passing drill whose final report write fails is never reported as passed', async (t) => {
+  if (process.getuid?.() === 0) return t.skip('root ignores directory permissions');
+  const directory = mkdtempSync(join(tmpdir(), 'drill-final-write-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'drill-final-write-tmp-'));
+  let child;
+  try {
+    const { root, path } = await referenceCliFixture(directory, 'final-write-fails');
+    // Temporary files live elsewhere, so cleanup itself succeeds; only the report directory
+    // turns read-only (after Compose is down), making the sibling creation fail.
+    child = start(directory, root, { TMPDIR: scratch }, path);
+    let stdout = '',
+      stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const [code] = await once(child, 'close');
+    chmodSync(directory, 0o755);
+    assert.equal(code, 1);
+    const summary = JSON.parse(stdout.trim().split('\n').at(-1));
+    assert.equal(summary.passed, false);
+    assert.equal(summary.cleanup.passed, true);
+    assert.match(stderr, /final report could not be written; the previous report remains/);
+    assert.doesNotMatch(stderr, new RegExp(directory));
+    const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+    assert.equal(report.passed, false);
+    assert.equal(report.finishedAt, undefined);
+    assert.match(report.project, /^restore-drill-[a-f0-9]{16}$/);
+    assert.ok(report.temporary.startsWith(scratch));
+    assert.equal(statSync(join(directory, 'report.json')).mode & 0o777, 0o600);
+    assert.equal(readdirSync(scratch).length, 0, 'temporary files were still removed');
+  } finally {
+    child?.kill('SIGKILL');
+    try {
+      chmodSync(directory, 0o755);
+    } catch {
+      /* removed already */
+    }
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
   }
 });

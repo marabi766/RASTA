@@ -69,10 +69,30 @@ REF equality proves the backup under test restores to exactly what PostgreSQL it
 
 Restore REF into a second fresh scratch database and dump it: these bytes must
 also equal REF. Private WeakMap provenance, issued only by schema dump collection,
-requires three distinct dumps: SOURCE from the service database with label `source`,
-REF from `drill_ref_<suffix>` with label `reference`, and the fixed point from
-`drill_fixed_<suffix>` with label `fixed-point`. Both scratch names must share the
-same invocation suffix. Dumping the wrong database refuses even if its bytes match.
+requires four distinct dumps: SOURCE from the service database with label `source`,
+the separate SOURCE dump that gets restored (`reference-input`, same database, same
+`pg_dump` version, bytes equal to SOURCE), REF from `drill_ref_<suffix>` with label
+`reference`, and the fixed point from `drill_fixed_<suffix>` with label `fixed-point`.
+Both scratch names must share the same invocation suffix.
+
+The restore INPUTS are bound as well as the dump outputs. `restore` receives the input
+evidence object (never a caller-chosen path: the private file is looked up through the
+provenance), and the dump that follows records `restoredFrom: <input dumpId>`, taken from
+the evidence actually restored. REF must name the reference-input dump, the fixed point
+must name REF, and a dump callback that drops or changes the lineage refuses. Restoring
+SOURCE a second time instead of REF therefore cannot produce a pass, even though PostgreSQL's
+deparse is deterministic and the bytes would match. On the restored side, `compareSnapshots`
+requires the post-restore dump to carry the `restored` label for the same database, and
+SOURCE must be the very dump REF was built from (object identity, not equal bytes), so
+`compareSnapshots(before, before)` refuses.
+
+Limit: the database name in a provenance record is the caller's claim. It is tied to
+`pg_dump -d` only by construction: `scripts/backup-restore-drill.mjs` passes one variable to
+both. A dump claimed for another database or label refuses even if its bytes match; a dump
+whose claim lies about its own `-d` argument cannot be detected by this library.
+The same holds for the archive file given to `pg_restore` (`<temporary>/<service>.dump`) and for
+the SOURCE/restored ledger objects: they are named by construction in the CLI, not by evidence;
+the library refuses only the same ledger object on both sides.
 Missing REF, missing fixed-point evidence, a skipped allowance
 guard, or any failed reference restore/dump refuses operator acceptance. The drill
 creates both databases with its random suffix inside its existing single active
@@ -156,8 +176,36 @@ consistency with active writers, or full-system recovery.
 پاکسازی را شروع می‌کنند؛ سیگنال‌های بعدی ثبت می‌شوند و فرمان پاکسازی را نمی‌کشند.
 خطای نوشتن stderr پس از قطع پایپ مانع پاکسازی نمی‌شود. برای هر فرمان سقف زمان داریم. SIGKILL، قطع برق یا از دست
 رفتن Docker daemon می‌تواند منابع را باقی بگذارد. بلافاصله پس از ساخت نام پروژه، گزارش اولیه با
-`project` و `temporary` و `passed: false` نوشته می‌شود؛ نبود `finishedAt` یعنی اجرا کامل نشده است.
-فقط با همین نام پروژه ثبت‌شده در گزارش و فایل `compose.json` در مسیر `temporary` پاکسازی کنید؛
+`project` و `temporary` و `passed: false` نوشته می‌شود و این دو همیشه نخستین کلیدهای گزارش‌اند؛
+نبود `finishedAt` یعنی اجرا کامل نشده است. هر گزارش ناتمام `passed: false` دارد.
+
+هر نوشتن گزارش اتمی است: فایل خواهر تصادفی (`<report>.<hex>.tmp`) با ساخت انحصاری و مجوز `0600`
+(بدون دنبال‌کردن symlink) نوشته، fsync و روی گزارش rename می‌شود. پس قطع در هر لحظه گزارش
+اولیه یا گزارش کامل را باقی می‌گذارد؛ هر دو JSON معتبر با `project` و `temporary`‌اند. شکست نوشتن،
+fsync یا rename گزارش قبلی را نگه می‌دارد، فایل خواهر را حذف می‌کند و فقط روی stderr (بدون مسیر)
+اعلام می‌شود؛ تمرین هرگز با چنین شکستی موفق گزارش نمی‌شود و کد خروج غیرصفر است. نوشتن‌های میانی فقط
+در برابر مرگ فرایند ایمن‌اند؛ تنها نوشتن اولیه و پایانی پوشه والد را هم fsync می‌کنند و تنها برای آن‌ها
+می‌توان ماندگاری پس از قطع برق را ادعا کرد؛ اگر fsync پوشه شکست بخورد، گزارش کامل در جای خود می‌ماند و
+هشدار روی stderr چاپ می‌شود. اگر قطع یا شکست میانه نوشتن رخ دهد، فایل خواهر
+`<report>.<hex>.tmp` با مجوز `0600` ممکن است بماند؛ پس از بررسی حذفش کنید.
+
+هر فرزند در گروه فرایند جدا (`detached`) اجرا می‌شود، پس SIGKILL تمرین فرزندان را نمی‌کشد:
+`docker compose up --wait`، `pg_dump` یا `pnpm db:migrate` ممکن است همچنان منابع بگیرند.
+شناسه گروه (PGID) هر فرزند پیش از انتظار برای آن در `processGroups` گزارش نوشته می‌شود (گروه‌های
+در حال اجرا؛ ورودی تازه‌تمام‌شده ممکن است بماند، پس عضویت را بررسی کنید). پنجره چند میلی‌ثانیه‌ای
+بین ساخت فرزند و نوشتن گزارش ثبت‌نشده می‌ماند. جست‌وجوی `pgrep -f <project>` به‌تنهایی کافی نیست:
+فرزندان migration و build نام پروژه را در argv ندارند. پس از SIGKILL به این ترتیب عمل کنید:
+
+1. برای هر PGID در `processGroups` اجرا کنید `ps -o pid,pgid,args -g <PGID>`. فقط گروهی که
+   فرایندهای همین تمرین را نشان می‌دهد (نه PGID بازمصرف‌شده کاربر دیگر) با `kill -KILL -- -<PGID>`
+   متوقف شود. هرگز بر پایه الگو (`pkill -f`، `killall`) نکشید.
+2. صبر کنید تا `ps -g` برای همه PGIDها خالی شود و `pgrep -f <project>` هم چیزی نشان ندهد.
+3. فقط سپس `docker compose --project-name <project> --file <temporary>/compose.json down --volumes`.
+4. سپس پوشه `temporary` (فایل‌های SQL و آرشیوهای dump با مجوز `0600`) و فایل‌های خواهر `.tmp` گزارش را حذف کنید.
+
+در اجرای عادی، اگر عضوی از گروه فرزند پس از خروج رهبر گروه بماند، کشته و در
+`reapedProcessGroups` ثبت می‌شود. اگر پس از انتظار محدود باز هم بماند، در `orphanProcessGroups`
+ثبت می‌شود و `cleanup.passed: false` همراه `project` و `temporary` می‌ماند.
 هرگز stack مشترک را reset نکنید. شکست حذف پایگاه scratch در `scratchDropFailed` ثبت می‌شود؛
 خطای اصلی جمع‌آوری مدرک حفظ می‌شود و پاکسازی خوشه متعلق به تمرین همچنان انجام می‌شود.
 

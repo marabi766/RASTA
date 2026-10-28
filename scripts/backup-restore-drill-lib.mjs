@@ -1,6 +1,15 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import {
+  closeSync,
+  fsyncSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 // No broad comment/whitespace filtering: only these two generated version lines,
@@ -59,18 +68,48 @@ export function schemaDumpEvidence(raw, version, milliseconds = 0) {
 
 // Only this collection boundary can issue provenance; raw/evidence constructors cannot.
 // The collector supports synchronous PG tests and asynchronous operator subprocesses.
+// Limit: `database` is the caller's claim. It is tied to pg_dump's `-d` argument only by
+// construction in the caller (scripts/backup-restore-drill.mjs passes one variable to both).
 const dumpProvenance = new WeakMap();
-export function dumpSchema(database, label, collect) {
+const dumpInputs = new WeakMap();
+const dumpPaths = new WeakMap();
+const PROVENANCE_ERROR = 'Invalid schema dump provenance';
+/**
+ * `restoredFrom` is the evidence object whose bytes were restored into `database` before this
+ * dump; the provenance keeps its dumpId and the object itself (never serialized).
+ */
+export function dumpSchema(database, label, collect, { restoredFrom } = {}) {
+  const input = restoredFrom === undefined ? undefined : dumpProvenance.get(restoredFrom);
+  if (restoredFrom !== undefined && !input) throw new Error(PROVENANCE_ERROR);
   const finish = ({ raw, version, milliseconds = 0, path }) => {
     const evidence = schemaDumpEvidence(raw, version, milliseconds);
-    dumpProvenance.set(evidence, Object.freeze({ database, label, dumpId: randomUUID() }));
+    dumpProvenance.set(
+      evidence,
+      Object.freeze({
+        database,
+        label,
+        dumpId: randomUUID(),
+        ...(input ? { restoredFrom: input.dumpId } : {}),
+      }),
+    );
+    if (input) dumpInputs.set(evidence, restoredFrom);
+    if (path) dumpPaths.set(evidence, path);
     return { path, evidence };
   };
   const collected = collect(database, label);
   return collected instanceof Promise ? collected.then(finish) : finish(collected);
 }
 
+// A restore receives evidence, never a caller-chosen path: the private file comes from here.
+export function dumpPath(evidence) {
+  const path = dumpPaths.get(evidence);
+  if (!path) throw new Error('Missing schema dump file');
+  return path;
+}
+
 // Own the two round trips together so callers cannot accidentally reuse REF as fixed point.
+// The lineage is derived here from the evidence handed to `restore`, then checked against what
+// the following dump recorded; a dump callback that drops or changes it is refused.
 export async function collectSchemaReference({
   database,
   suffix,
@@ -91,9 +130,13 @@ export async function collectSchemaReference({
   let reference, fixedPoint, originalError, result;
   try {
     for (const [index, name] of scratch.entries()) {
+      const input = index === 0 ? separate : reference;
       await create(name);
-      await restore(name, index === 0 ? separate.path : reference.path);
-      const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point');
+      await restore(name, input.evidence);
+      const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point', {
+        restoredFrom: input.evidence,
+      });
+      if (dumpInputs.get(dumped.evidence) !== input.evidence) throw new Error(PROVENANCE_ERROR);
       if (index === 0) reference = dumped;
       else fixedPoint = dumped;
     }
@@ -369,18 +412,31 @@ export function schemaReferenceEvidence(
 ) {
   const provenance = [source, reference, fixedPoint].map((dump) => dumpProvenance.get(dump));
   const [sourceOrigin, refOrigin, fixedOrigin] = provenance;
+  // The reference input is the separate SOURCE dump whose bytes were restored into REF (the
+  // object recorded when REF was issued); the fixed point must name REF itself.
+  const input = dumpInputs.get(reference);
+  const inputOrigin = dumpProvenance.get(input);
   const refSuffix = refOrigin?.database?.match(/^drill_ref_([a-f0-9]{16})$/)?.[1];
   if (
     !sourceOrigin ||
     sourceOrigin.database !== allowance?.database ||
     sourceOrigin.label !== 'source' ||
+    sourceOrigin.restoredFrom !== undefined ||
     !refSuffix ||
     refOrigin.label !== 'reference' ||
+    !inputOrigin ||
+    inputOrigin.database !== sourceOrigin.database ||
+    inputOrigin.label !== 'reference-input' ||
+    inputOrigin.restoredFrom !== undefined ||
+    input.version !== source.version ||
+    !Buffer.isBuffer(input.content) ||
+    !input.content.equals(source.content) ||
     fixedOrigin?.database !== `drill_fixed_${refSuffix}` ||
     fixedOrigin?.label !== 'fixed-point' ||
-    new Set(provenance.map((origin) => origin?.dumpId)).size !== 3
+    fixedOrigin.restoredFrom !== refOrigin.dumpId ||
+    new Set([...provenance, inputOrigin].map((origin) => origin?.dumpId)).size !== 4
   )
-    throw new Error('Invalid schema dump provenance');
+    throw new Error(PROVENANCE_ERROR);
   const allowed = allowances.get(allowance);
   if (!allowed || allowed.source !== source || allowed.reference !== reference)
     throw new Error('Missing SOURCE/REF allowance guard');
@@ -465,13 +521,20 @@ function validateSnapshot(snapshot) {
 export function compareSnapshots(source, restored) {
   validateSnapshot(source);
   validateSnapshot(restored);
+  // SOURCE is bound by object identity, RESTORED by its own provenance: the same database, a
+  // distinct dump issued with the `restored` label (compareSnapshots(before, before) refuses).
   const proof = references.get(source.reference);
-  if (
-    !proof ||
-    !proof.source.content.equals(source.schemaDump.content) ||
-    proof.source.version !== source.schemaDump.version
-  )
+  if (!proof || proof.source !== source.schemaDump)
     throw new Error('Missing schema reference evidence');
+  const sourceOrigin = dumpProvenance.get(source.schemaDump);
+  const restoredOrigin = dumpProvenance.get(restored.schemaDump);
+  if (
+    sourceOrigin?.label !== 'source' ||
+    restoredOrigin?.label !== 'restored' ||
+    restoredOrigin.database !== sourceOrigin.database ||
+    restoredOrigin.restoredFrom !== undefined
+  )
+    throw new Error('Invalid restored schema dump provenance');
   return {
     referenceChecked: true,
     fixedPointEqual: true,
@@ -508,8 +571,14 @@ export function ledgerPassed(ledger) {
   );
 }
 
+// The same evidence object on both sides is a database compared with itself, not a restore.
 export function compareLedgers(source, restored) {
-  return ledgerPassed(source) && ledgerPassed(restored) && isDeepStrictEqual(source, restored);
+  return (
+    source !== restored &&
+    ledgerPassed(source) &&
+    ledgerPassed(restored) &&
+    isDeepStrictEqual(source, restored)
+  );
 }
 
 /** The same acceptance gate is exercised by the SQL drift tests and the operator command. */
@@ -751,3 +820,100 @@ INSERT INTO public.wallet_hold
 VALUES ('HLD_DRILL', 'ORG-RESTORE-DRILL', 'WLT_DRILL', 2500, 'IRR', 'DRILL', 'RESTORE_TEST', 'JRN_DRILL_HOLD', now(), 'restore-drill');
 COMMIT;
 `;
+
+const reportFs = { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync };
+
+/**
+ * Replace the report in one step: a random sibling is created exclusively (never through a
+ * symlink) with mode 0600, written, fsynced and renamed over the destination, so a kill at any
+ * point leaves the previous complete report or the new one. A failure removes the sibling and
+ * keeps the previous report. `durable` additionally fsyncs the parent directory. The result is
+ * true only when that fsync succeeded: only then may a caller claim the rename survives power
+ * loss. A failed directory fsync leaves the complete new report in place and returns false.
+ * Errors never quote the path.
+ */
+export function writeReportAtomically(path, report, { durable = false, fs = reportFs } = {}) {
+  const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
+  const sibling = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+  let fd;
+  try {
+    fd = fs.openSync(sibling, 'wx', 0o600);
+    for (let offset = 0; offset < bytes.length;) {
+      const written = fs.writeSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (!written) throw new Error('Could not write report');
+      offset += written;
+    }
+    fs.fsyncSync(fd);
+    const closing = fd;
+    fd = undefined;
+    fs.closeSync(closing);
+    fs.renameSync(sibling, path);
+  } catch (error) {
+    if (fd !== undefined)
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* the write error is the one to report */
+      }
+    try {
+      fs.unlinkSync(sibling);
+    } catch {
+      /* never created, or already renamed */
+    }
+    throw new Error(`Could not write report (${error?.code ?? 'failed'})`);
+  }
+  if (!durable) return false;
+  let directory;
+  try {
+    directory = fs.openSync(dirname(path), 'r');
+    fs.fsyncSync(directory);
+    return true;
+  } catch {
+    // The renamed report is complete; only its power-loss durability is unproven.
+    return false;
+  } finally {
+    if (directory !== undefined)
+      try {
+        fs.closeSync(directory);
+      } catch {
+        /* nothing more to report */
+      }
+  }
+}
+
+/** A process group is a Linux/macOS pgid; `kill(-pgid, 0)` reports whether any member remains. */
+export function groupAlive(pgid) {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+export function killGroup(pgid) {
+  try {
+    process.kill(-pgid, 'SIGKILL');
+  } catch {
+    /* already stopped */
+  }
+}
+
+/**
+ * The group leader has exited; anything still in its group is an orphan of this invocation.
+ * Returns 'gone' (nothing left), 'reaped' (members killed and confirmed gone within the
+ * bounded wait) or 'orphan' (still present: cleanup cannot be reported as passed).
+ */
+export async function reapProcessGroup(
+  pgid,
+  {
+    alive = groupAlive,
+    kill = killGroup,
+    wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    attempts = 100,
+  } = {},
+) {
+  if (!alive(pgid)) return 'gone';
+  kill(pgid);
+  for (let attempt = 0; attempt < attempts && alive(pgid); attempt++) await wait(50);
+  return alive(pgid) ? 'orphan' : 'reaped';
+}
