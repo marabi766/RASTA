@@ -10,7 +10,8 @@
 rule_files:
   - ../rules/rasta-identity-alerts.yml
 
-evaluation_interval: 1m
+# The local Prometheus evaluates every 15 s (prometheus.yml); so do these tests.
+evaluation_interval: 15s
 
 tests:
   # ---------------------------------------------------------------------------
@@ -166,4 +167,399 @@ tests:
       # Keycloak back at 16: no new refusals within the 5-minute window after 21.
       - eval_time: 23m
         alertname: RastaIdentityNarrowingRefused
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityKeycloakWriteOverdue (D-070): per replica, `max`
+  # ---------------------------------------------------------------------------
+  - interval: 15s
+    input_series:
+      # Two replicas sample the same table; only the second saw the overdue fence
+      # (the first was between samples): one is enough.
+      - series: 'rasta_identity_keycloak_write_fences{state="overdue",service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '0x8'
+      - series: 'rasta_identity_keycloak_write_fences{state="overdue",service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '0 0 1 1 0x4'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: RastaIdentityKeycloakWriteOverdue
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: RastaIdentityKeycloakWriteOverdue
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '1 Keycloak writes are unresolved past half their settle window'
+              description: "Keycloak writes whose answer was lost (timeout, broken connection, 5xx) or whose sender stalled are still live past their deadline plus half of KEYCLOAK_WRITE_SETTLE_SECONDS (keycloak_write_attempt, D-069). Narrowing changes of these users are refused until takeover; nothing is unsafe yet. But the guarantee that such a write cannot land after a later narrowing rests on the deployment assumption D-070: no request is delivered or applied, and no sender resumes, later than the settle window. Look now at Keycloak's admin API latency, the proxies and network in front of it, and identity-service's event-loop pauses; if any approach the window, raise KEYCLOAK_WRITE_SETTLE_SECONDS. The log names the users; this alert deliberately does not."
+              runbook: docs/runbooks/keycloak-projection.md
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityKeycloakWriteExpired (D-070, after the window)
+  # ---------------------------------------------------------------------------
+  - interval: 15s
+    input_series:
+      # The overdue window was never seen (sampling stale through it); at takeover the
+      # fence is expired until the sweep re-asserts it 45 s later. Due fences that are
+      # not expired (an outcome that was learned) never fire it.
+      - series: 'rasta_identity_keycloak_write_fences{state="overdue",service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '0x10'
+      - series: 'rasta_identity_keycloak_write_fences{state="due",service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '2 2 3 3 3 2x5'
+      - series: 'rasta_identity_keycloak_write_fences{state="expired",service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '0 0 1 1 1 0x5'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: RastaIdentityKeycloakWriteExpired
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: RastaIdentityKeycloakWriteExpired
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '1 Keycloak writes passed their whole settle window unresolved'
+              description: "Keycloak writes whose outcome was never learned (timeout, broken connection, 5xx, or a sender that stalled) are past takeover (deadline + KEYCLOAK_WRITE_SETTLE_SECONDS) and not re-asserted yet (keycloak_write_attempt, D-069). The sweep writes the users' committed state over them within an interval; until it does, Keycloak may hold what the old write carried. If such a write is delivered later still, it lands after takeover: the deployment assumption D-070 failed for it. Check Keycloak's admin API latency, the network in front of it and identity-service's event-loop pauses, and raise KEYCLOAK_WRITE_SETTLE_SECONDS if they approach the window. The log names the users; this alert deliberately does not."
+              runbook: docs/runbooks/keycloak-projection.md
+      - eval_time: 75s
+        alertname: RastaIdentityKeycloakWriteExpired
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityKeycloakFenceSamplerStale (#402 r3 R3-2)
+  # ---------------------------------------------------------------------------
+  - interval: 15s
+    input_series:
+      # Replica A samples throughout (age under 2 s); replica B's sampling hangs from
+      # 30 s: its age, computed at scrape, keeps growing. While A samples, nothing fires;
+      # A stops at 75 s too (its age grows as well), and the alert fires at the first
+      # scrape where every replica is past 6 s.
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1 0.5 1.5 1 0.8 1.2 5 20 35'
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '1 1 1 15 30 45 60 75 90'
+    alert_rule_test:
+      - eval_time: 60s
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts: []
+      # A at 5 s: still under the threshold.
+      - eval_time: 90s
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts: []
+      - eval_time: 105s
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Keycloak write fences have not been sampled for 20 seconds'
+              description: 'KeycloakFenceSampler has had no successful sample of keycloak_write_attempt on any replica for longer than 6 seconds: RastaIdentityKeycloakWriteOverdue and RastaIdentityKeycloakWriteExpired cannot be relied on until it recovers. Each sample is one bounded query on the sampler''s own one-connection pool (its connection wait and its execution share 1 s, under a lock_timeout and a statement_timeout of no more); rasta_identity_keycloak_fence_samples_total{outcome="failed"} and rasta_identity_keycloak_fence_sample_duration_seconds say whether it fails or is slow. Look for a lock on keycloak_write_attempt (a migration), a database that is slow or unreachable, or an event loop that is stalled.'
+              runbook: docs/runbooks/keycloak-projection.md
+
+  - interval: 15s
+    input_series:
+      # One replica that never succeeded: no fence series, and its age is the time
+      # since the sampler started — so it fires, rather than reading silence as zero.
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '0.1 15 30'
+    alert_rule_test:
+      - eval_time: 0s
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts: []
+      - eval_time: 15s
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Keycloak write fences have not been sampled for 15 seconds'
+              description: 'KeycloakFenceSampler has had no successful sample of keycloak_write_attempt on any replica for longer than 6 seconds: RastaIdentityKeycloakWriteOverdue and RastaIdentityKeycloakWriteExpired cannot be relied on until it recovers. Each sample is one bounded query on the sampler''s own one-connection pool (its connection wait and its execution share 1 s, under a lock_timeout and a statement_timeout of no more); rasta_identity_keycloak_fence_samples_total{outcome="failed"} and rasta_identity_keycloak_fence_sample_duration_seconds say whether it fails or is slow. Look for a lock on keycloak_write_attempt (a migration), a database that is slow or unreachable, or an event loop that is stalled.'
+              runbook: docs/runbooks/keycloak-projection.md
+
+  # ---------------------------------------------------------------------------
+  # RastaIdentityKeycloakFenceSamplerMissing (#402 r3 R3-2)
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # identity-service is up throughout; it exports the age until minute 3, then a
+      # build without the sampler is deployed. The last sample stays visible for the
+      # 5-minute lookback (to 8m); then 2 minutes of `for`.
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1x20'
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1 1 1 1 _x16'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: RastaIdentityKeycloakFenceSamplerMissing
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: RastaIdentityKeycloakFenceSamplerMissing
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: RastaIdentityKeycloakFenceSamplerMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'identity-service is scraped but exports no Keycloak fence sample age'
+              description: 'identity-service is up, but rasta_identity_keycloak_fence_sample_age_seconds is missing from every replica: KeycloakFenceSampler is not running, so the fence gauges and RastaIdentityKeycloakWriteOverdue, RastaIdentityKeycloakWriteExpired and RastaIdentityKeycloakFenceSamplerStale are all silent. Check that the build in production wires KeycloakFenceSampler (app.module.ts) and that the metric name is unchanged.'
+              runbook: docs/runbooks/keycloak-projection.md
+      # Silence is not staleness: the stale rule cannot see a missing series.
+      - eval_time: 11m
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # identity-service not scraped at all (its target down): RastaIdentityServiceMetricsUnavailable's
+      # case, not this one.
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: RastaIdentityKeycloakFenceSamplerMissing
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # #458 r1 F3 — the real collector's output, replica by replica. The series of the
+  # tests named `collector: …` are what `keycloak-projection.metrics.ts` exports, scrape
+  # by scrape: `src/observability/keycloak-projection.metrics.spec.ts` renders the real
+  # registry for each replica at each scrape and holds every value here to it (`_`: the
+  # collector exported no sample). Then promtool says what the rules make of them.
+  # ---------------------------------------------------------------------------
+  - name: 'collector: one replica without a sampler, one whose sampling hangs'
+    interval: 15s
+    input_series:
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1 1 1 1 1'
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '1 1 1 1 1'
+      # 3101: no sampler attached — no age, no backlog (never prom-client's zero).
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '_ _ _ _ _'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '_ _ _ _ _'
+      - series: 'rasta_identity_membership_lapse_count_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '_ _ _ _ _'
+      # 3111: one successful sample and lapse count at 0 s, then its sampling hangs.
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '0 15 30 45 60'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '0 0 0 0 0'
+      - series: 'rasta_identity_membership_lapse_count_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '0 15 30 45 60'
+    alert_rule_test:
+      - eval_time: 0s
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts: []
+      # The replica without a sampler holds nothing back: `min` is over 3111 alone.
+      - eval_time: 15s
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Keycloak write fences have not been sampled for 15 seconds'
+              description: 'KeycloakFenceSampler has had no successful sample of keycloak_write_attempt on any replica for longer than 6 seconds: RastaIdentityKeycloakWriteOverdue and RastaIdentityKeycloakWriteExpired cannot be relied on until it recovers. Each sample is one bounded query on the sampler''s own one-connection pool (its connection wait and its execution share 1 s, under a lock_timeout and a statement_timeout of no more); rasta_identity_keycloak_fence_samples_total{outcome="failed"} and rasta_identity_keycloak_fence_sample_duration_seconds say whether it fails or is slow. Look for a lock on keycloak_write_attempt (a migration), a database that is slow or unreachable, or an event loop that is stalled.'
+              runbook: docs/runbooks/keycloak-projection.md
+      # One replica still exports the age: not missing.
+      - eval_time: 60s
+        alertname: RastaIdentityKeycloakFenceSamplerMissing
+        exp_alerts: []
+
+  - name: 'collector: no replica has a sampler'
+    interval: 1m
+    input_series:
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1 1 1 1 1 1 1 1'
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '1 1 1 1 1 1 1 1'
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '_ _ _ _ _ _ _ _'
+      - series: 'rasta_identity_keycloak_fence_sample_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '_ _ _ _ _ _ _ _'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '_ _ _ _ _ _ _ _'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '_ _ _ _ _ _ _ _'
+      - series: 'rasta_identity_membership_lapse_count_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '_ _ _ _ _ _ _ _'
+      - series: 'rasta_identity_membership_lapse_count_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '_ _ _ _ _ _ _ _'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RastaIdentityKeycloakFenceSamplerMissing
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaIdentityKeycloakFenceSamplerMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'identity-service is scraped but exports no Keycloak fence sample age'
+              description: 'identity-service is up, but rasta_identity_keycloak_fence_sample_age_seconds is missing from every replica: KeycloakFenceSampler is not running, so the fence gauges and RastaIdentityKeycloakWriteOverdue, RastaIdentityKeycloakWriteExpired and RastaIdentityKeycloakFenceSamplerStale are all silent. Check that the build in production wires KeycloakFenceSampler (app.module.ts) and that the metric name is unchanged.'
+              runbook: docs/runbooks/keycloak-projection.md
+      # No replica exports the lapse count's age: unknown, after `for: 2m`.
+      - eval_time: 1m
+        alertname: RastaIdentityMembershipLapseBacklogUnknown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RastaIdentityMembershipLapseBacklogUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'identity-service has no recent membership lapse count'
+              description: "No identity-service replica has counted lapsed memberships successfully for more than 3 minutes, or none runs KeycloakFenceSampler at all: RastaIdentityMembershipLapseBacklog cannot be trusted to fire. The count is one bounded query on the business pool every 30 s; rasta_identity_membership_lapse_count_age_seconds says how old each replica's latest successful count is (the backlog gauge keeps that count meanwhile). The identity-service log says why the count fails (a database that is slow or unreachable, a pool exhausted); RastaIdentityKeycloakFenceSamplerMissing fires as well when the sampler itself is missing."
+              runbook: docs/runbooks/keycloak-projection.md
+      # Nothing to be stale: silence is the missing alerts' case.
+      - eval_time: 5m
+        alertname: RastaIdentityKeycloakFenceSamplerStale
+        exp_alerts: []
+
+  - name: 'collector: the lapse count fails on the only replica'
+    interval: 30s
+    input_series:
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1x50'
+      # A count of 3 at 0 s, then every count fails: the 3 stands — a failed count never
+      # drops it (#458 r2 F6) — and its age grows by 30 s a scrape.
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '3x50'
+      - series: 'rasta_identity_membership_lapse_count_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '0+30x50'
+    alert_rule_test:
+      # Above 180 s from 210 s; unknown once that has held for 2 m.
+      - eval_time: 5m15s
+        alertname: RastaIdentityMembershipLapseBacklogUnknown
+        exp_alerts: []
+      - eval_time: 5m30s
+        alertname: RastaIdentityMembershipLapseBacklogUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'identity-service has no recent membership lapse count'
+              description: "No identity-service replica has counted lapsed memberships successfully for more than 3 minutes, or none runs KeycloakFenceSampler at all: RastaIdentityMembershipLapseBacklog cannot be trusted to fire. The count is one bounded query on the business pool every 30 s; rasta_identity_membership_lapse_count_age_seconds says how old each replica's latest successful count is (the backlog gauge keeps that count meanwhile). The identity-service log says why the count fails (a database that is slow or unreachable, a pool exhausted); RastaIdentityKeycloakFenceSamplerMissing fires as well when the sampler itself is missing."
+              runbook: docs/runbooks/keycloak-projection.md
+      # Fail-closed: the unresolved 3 still fires at 20 m, unknown or not.
+      - eval_time: 19m45s
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '3 lapsed memberships have not been taken out of Keycloak'
+              description: "The membership expiry sweep has lapses past validUntil that it has not acted on for 20 minutes. identity-service already refuses them, but each stays in the user's Keycloak attributes, and so in new tokens, until its write lands; the gateway's cutoff covers those tokens only once the lapse is acted on and its MEMBERSHIP_EXPIRED is out. The identity-service log names each membership and why it failed (Keycloak refused, unreachable, or a write of the user still settling). This alert deliberately carries none of them."
+              runbook: docs/runbooks/keycloak-projection.md
+
+  # #458 r2 F6 — the reviewer's hour: the backlog stays at 3, fence sampling is healthy,
+  # and the lapse count succeeds once every 120 s and fails otherwise. Before, a count
+  # stood 90 s and then its series went ("3, absent, 3, absent") and neither alert ever
+  # reached its threshold; now the 3 stands between successes, and its age is a series
+  # of its own.
+  - name: 'collector: the lapse count succeeds once every 120 s on the only replica, for an hour'
+    interval: 15s
+    input_series:
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1x240'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '3x240'
+      - series: 'rasta_identity_membership_lapse_count_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0'
+    alert_rule_test:
+      - eval_time: 19m45s
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '3 lapsed memberships have not been taken out of Keycloak'
+              description: "The membership expiry sweep has lapses past validUntil that it has not acted on for 20 minutes. identity-service already refuses them, but each stays in the user's Keycloak attributes, and so in new tokens, until its write lands; the gateway's cutoff covers those tokens only once the lapse is acted on and its MEMBERSHIP_EXPIRED is out. The identity-service log names each membership and why it failed (Keycloak refused, unreachable, or a write of the user still settling). This alert deliberately carries none of them."
+              runbook: docs/runbooks/keycloak-projection.md
+      - eval_time: 60m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '3 lapsed memberships have not been taken out of Keycloak'
+              description: "The membership expiry sweep has lapses past validUntil that it has not acted on for 20 minutes. identity-service already refuses them, but each stays in the user's Keycloak attributes, and so in new tokens, until its write lands; the gateway's cutoff covers those tokens only once the lapse is acted on and its MEMBERSHIP_EXPIRED is out. The identity-service log names each membership and why it failed (Keycloak refused, unreachable, or a write of the user still settling). This alert deliberately carries none of them."
+              runbook: docs/runbooks/keycloak-projection.md
+      # Counted every 120 s: known, never unknown.
+      - eval_time: 60m
+        alertname: RastaIdentityMembershipLapseBacklogUnknown
+        exp_alerts: []
+
+  # The same on two replicas, a minute apart (3111's first count fails: no backlog until
+  # its first success at 60 s, its age from its start).
+  - name: 'collector: two replicas, each counting once every 120 s, a minute apart'
+    interval: 15s
+    input_series:
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1x240'
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '1x240'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '3x240'
+      - series: 'rasta_identity_membership_lapse_count_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '_x4 3x236'
+      - series: 'rasta_identity_membership_lapse_count_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '0+15x3 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x4'
+    alert_rule_test:
+      - eval_time: 19m45s
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '3 lapsed memberships have not been taken out of Keycloak'
+              description: "The membership expiry sweep has lapses past validUntil that it has not acted on for 20 minutes. identity-service already refuses them, but each stays in the user's Keycloak attributes, and so in new tokens, until its write lands; the gateway's cutoff covers those tokens only once the lapse is acted on and its MEMBERSHIP_EXPIRED is out. The identity-service log names each membership and why it failed (Keycloak refused, unreachable, or a write of the user still settling). This alert deliberately carries none of them."
+              runbook: docs/runbooks/keycloak-projection.md
+      - eval_time: 60m
+        alertname: RastaIdentityMembershipLapseBacklogUnknown
+        exp_alerts: []
+
+  # And beside a replica without a sampler, which exports neither series.
+  - name: 'collector: one replica counting once every 120 s, the other without a sampler'
+    interval: 15s
+    input_series:
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '1x240'
+      - series: 'up{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '1x240'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '3x240'
+      - series: 'rasta_identity_membership_lapse_count_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3101"}'
+        values: '0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0+15x7 0'
+      - series: 'rasta_identity_membership_lapse_backlog{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '_x241'
+      - series: 'rasta_identity_membership_lapse_count_age_seconds{service="identity-service",job="identity-service",environment="local",instance="host.docker.internal:3111"}'
+        values: '_x241'
+    alert_rule_test:
+      - eval_time: 19m45s
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RastaIdentityMembershipLapseBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: '3 lapsed memberships have not been taken out of Keycloak'
+              description: "The membership expiry sweep has lapses past validUntil that it has not acted on for 20 minutes. identity-service already refuses them, but each stays in the user's Keycloak attributes, and so in new tokens, until its write lands; the gateway's cutoff covers those tokens only once the lapse is acted on and its MEMBERSHIP_EXPIRED is out. The identity-service log names each membership and why it failed (Keycloak refused, unreachable, or a write of the user still settling). This alert deliberately carries none of them."
+              runbook: docs/runbooks/keycloak-projection.md
+      - eval_time: 60m
+        alertname: RastaIdentityMembershipLapseBacklogUnknown
         exp_alerts: []

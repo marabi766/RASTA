@@ -7,8 +7,15 @@ import { PrismaService } from '../prisma/prisma.service';
 import { IdentityRepository } from '../identity/identity.repository';
 import { KeycloakAdminClient } from './keycloak.client';
 import { KeycloakProjector } from './keycloak.projector';
-import { FENCE_POOL_CONNECTIONS, KeycloakWriteFences } from './keycloak-write-fence';
-import { isClean, runProjectionCommand, type ProjectionCommandMode } from './projection.command';
+import { KeycloakWriteFences } from './keycloak-write-fence';
+import {
+  isClean,
+  PROJECTION_COMMAND_POOLS,
+  RECOVERY_STOP_MS,
+  runProjectionCommand,
+  tearDownProjectionCommand,
+  type ProjectionCommandMode,
+} from './projection.command';
 
 /**
  * `pnpm --filter @rasta/identity-service keycloak:reconcile` / `keycloak:backfill`.
@@ -43,12 +50,13 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const prisma = new PrismaService(env.DATABASE_URL);
-  // The write fences' own pool, as in the service (D-069): the backfill's
-  // projections and orphan repairs are fenced like every other writer.
-  const fencePool = new PrismaService(env.DATABASE_URL, { connections: FENCE_POOL_CONNECTIONS });
+  const prisma = new PrismaService(env.DATABASE_URL, PROJECTION_COMMAND_POOLS.prisma);
+  const fencePool = new PrismaService(env.DATABASE_URL, PROJECTION_COMMAND_POOLS.fencePool);
   await prisma.onModuleInit();
   await fencePool.onModuleInit();
+  let projector: KeycloakProjector | undefined;
+  let clean = false;
+  let tornDown = false;
   try {
     const repository = new IdentityRepository(prisma);
     const keycloak = new KeycloakAdminClient({
@@ -59,7 +67,7 @@ async function main(): Promise<number> {
       enabled: true,
     });
     const fences = new KeycloakWriteFences(fencePool);
-    const projector = new KeycloakProjector(repository, keycloak, fences, {
+    projector = new KeycloakProjector(repository, keycloak, fences, {
       writeSettleSeconds: env.KEYCLOAK_WRITE_SETTLE_SECONDS,
     });
 
@@ -78,11 +86,34 @@ async function main(): Promise<number> {
           ? ' (the fence migration may be rolled back while every identity-service replica stays stopped)'
           : ''),
     );
-    return isClean(report) ? 0 : 1;
+    clean = isClean(report);
   } finally {
-    await fencePool.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    // Whatever ended the command — a thrown error included — no recovery
+    // projection of it reaches the database after the disconnect (#458 r1
+    // F2): none starts any more, and those running are cancelled and waited
+    // for first. Then both pools, last, by the same deadline (#458 r2/r3
+    // F2): each refuses new work, waits for every operation it admitted — a
+    // COMMIT included — then disconnects within what is left. Both are
+    // waited for even when one fails (#458 r3 F7): nothing exits while a pool
+    // is still closing. Anything still unwinding, unsettled or abandoned then
+    // makes the command unclean, loudly.
+    const left = await tearDownProjectionCommand(
+      { projector, pools: [fencePool, prisma] },
+      Date.now() + RECOVERY_STOP_MS,
+    );
+    tornDown =
+      left.recoveriesUnwinding === 0 &&
+      left.transactionsUnsettled === 0 &&
+      left.poolsAbandoned === 0;
+    if (!tornDown) {
+      logger.error(
+        left,
+        `Keycloak ${mode}: teardown reached its deadline with work still in flight; ` +
+          'it may still commit after the command exits — the run is not clean',
+      );
+    }
   }
+  return clean && tornDown ? 0 : 1;
 }
 
 main().then(

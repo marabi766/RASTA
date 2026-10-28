@@ -1,7 +1,13 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ERROR_CODES } from '@rasta/contracts';
-import { RastaError, runUnscoped } from '@rasta/nest-common';
+import {
+  RastaError,
+  runUnscoped,
+  withinDeadline,
+  type OutboxStopOptions,
+} from '@rasta/nest-common';
 import { IdentityRepository } from '../identity/identity.repository';
+import { settleWithin, withCancellation } from '../prisma/cancellation';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import {
   KeycloakAdminClient,
@@ -25,6 +31,7 @@ import {
 } from './platform-attributes';
 import {
   KEYCLOAK_PROJECTION_OUTCOMES,
+  KEYCLOAK_PROJECTION_TRIGGERS,
   KEYCLOAK_WRITE_AHEAD_OUTCOMES,
   keycloakProjectionsTotal,
   keycloakWriteAheadTotal,
@@ -84,6 +91,12 @@ export interface ProjectOptions {
    * sweep's shutdown (#402 r1 F4). A write cut off mid-flight keeps its fence.
    */
   signal?: AbortSignal;
+  /**
+   * This projection is a late sender's recovery (D-070 D): a write of its own
+   * that is late fences again, but asks for no further projection, so one
+   * late write never starts a chain of them.
+   */
+  recovery?: boolean;
 }
 
 /**
@@ -205,6 +218,13 @@ class FencedWrites {
       transactionTimeoutMs: number;
     },
     readonly cancel: AbortSignal | undefined,
+    /**
+     * Asks for an immediate projection of the user once a write here is late
+     * (D-070 D) — started, never awaited: this transaction holds the user
+     * lock that projection takes. Null for a recovery projection's own writes,
+     * so a late recovery fences again but asks for nothing more.
+     */
+    private readonly requestProjection: (() => void) | null,
   ) {}
 
   async write(
@@ -228,17 +248,39 @@ class FencedWrites {
       await call({ fence, cancel: this.cancel });
     } catch (error) {
       const opened = attempt as KeycloakWriteAttempt | null;
-      // Provably not applied — never sent, refused, 404, its deadline passed
-      // before dispatch: nothing can land, so its fence goes now. Unknown: it
-      // stays, and holds narrowing back until the sweep takes it over.
-      if (opened && !(error instanceof KeycloakWriteUnconfirmedError)) {
-        const released = await this.fences.release(opened.id);
-        keycloakWriteFenceEventsTotal.inc({ event: released ? 'released' : 'release_failed' });
+      if (opened) {
+        const unknown = error instanceof KeycloakWriteUnconfirmedError;
+        // Provably not applied — never sent, refused, 404, its deadline passed
+        // before dispatch: nothing can land, so its fence goes now. Unknown: it
+        // stays, and holds narrowing back until the sweep takes it over.
+        if (!unknown) {
+          const released = await this.fences.release(opened.id);
+          keycloakWriteFenceEventsTotal.inc({ event: released ? 'released' : 'release_failed' });
+        }
+        // Whatever the answer, heard after the deadline (D-070 D).
+        await this.afterLateReply(opened, !unknown);
       }
       throw error;
     }
     const opened = attempt as KeycloakWriteAttempt | null;
-    if (opened) this.landed.push(opened.id);
+    if (opened) {
+      this.landed.push(opened.id);
+      await this.afterLateReply(opened, true);
+    }
+  }
+
+  /**
+   * D-070 option D: an attempt whose outcome was learned only after its
+   * deadline — judged on the monotonic clock read after the reply — gets a
+   * fresh fence for the user, then an immediate projection is asked for.
+   * `known`: the attempt landed or provably was not applied. The old
+   * attempt's own row is left to its usual owner, by its own id: nothing here
+   * deletes or shortens a fence.
+   */
+  private async afterLateReply(attempt: KeycloakWriteAttempt, known: boolean): Promise<void> {
+    if (!attempt.observeReply()) return;
+    await this.fences.recoverLate(attempt, known);
+    this.requestProjection?.();
   }
 }
 
@@ -335,6 +377,22 @@ export type OrphanRepairOutcome =
 @Injectable()
 export class KeycloakProjector {
   private readonly logger = new Logger(KeycloakProjector.name);
+  /**
+   * The application-shutdown owner of every recovery projection this
+   * projector starts (#458 r1 F2): aborted by {@link stop}, for good. A
+   * recovery a request asked for has no signal of its own; this one cancels
+   * its Keycloak calls and refuses every database operation it would start
+   * next.
+   */
+  private readonly recoveryStop = new AbortController();
+  /** The recoveries running now: aborted by {@link cancelRecoveries}, then replaced. */
+  private batch = new AbortController();
+  /** The recovery projections this projector started and that have not finished. */
+  private readonly running = new Set<Promise<void>>();
+  /** Their transactions not settled yet — a COMMIT in flight included (#458 r2 F2). */
+  private readonly transactions = new Set<Promise<unknown>>();
+  /** The one stop; later calls join it. */
+  private stopping?: Promise<number>;
 
   constructor(
     private readonly repository: IdentityRepository,
@@ -629,6 +687,7 @@ export class KeycloakProjector {
     userId: string,
     transactionTimeoutMs: number,
     cancel?: AbortSignal,
+    recovery = false,
   ) {
     return new FencedWrites(
       this.fences,
@@ -640,7 +699,112 @@ export class KeycloakProjector {
         transactionTimeoutMs,
       },
       cancel,
+      recovery ? null : () => this.requestRecovery(userId, cancel),
     );
+  }
+
+  /**
+   * D-070 option D: a write of this user was late — its sender learned the
+   * outcome only after its deadline — and a fresh fence for the user is
+   * committed (or owed). Starts a projection of the user now: the rows as
+   * committed, written under the user lock, the last word after the late
+   * PUT. **Never awaited** by the sender, which may hold that very lock: it
+   * waits for the lock like any projection, after the sender's transaction
+   * ends. In the sender's scope, so a stopped worker's recovery starts
+   * nothing; it is best-effort, and the fresh fence is what is durable — the
+   * sweep re-asserts from it if this one never lands. Its own late writes
+   * fence again but ask for nothing more (`recovery`).
+   *
+   * Owned by this projector's stop, too (#458 r1 F2): it runs in a
+   * cancellation scope of {@link recoveryStop} — whoever asked for it, a
+   * request included — so once the application stops (or the command ends),
+   * it starts nothing more on the database, and its Keycloak call is aborted.
+   * None starts once stopped: the fresh fence stands for it.
+   */
+  private requestRecovery(userId: string, signal: AbortSignal | undefined): void {
+    if (this.recoveryStop.signal.aborted) return;
+    const owner = AbortSignal.any([this.recoveryStop.signal, this.batch.signal]);
+    const cancel = signal ? AbortSignal.any([owner, signal]) : owner;
+    const run = withCancellation(
+      owner,
+      () =>
+        this.project(userId, KEYCLOAK_PROJECTION_TRIGGERS.RECOVERY, {
+          signal: cancel,
+          recovery: true,
+        }),
+      { transactions: this.transactions },
+    ).then(
+      () => undefined,
+      (error: unknown) => {
+        if (owner.aborted) return;
+        this.logger.error(
+          `Keycloak recovery projection failed for user ${userId} after a late write; ` +
+            `its fresh fence keeps it for the sweep. ${describe(error)}`,
+        );
+      },
+    );
+    recoveries.add(run);
+    this.running.add(run);
+    void run.finally(() => {
+      recoveries.delete(run);
+      this.running.delete(run);
+    });
+  }
+
+  /**
+   * Cancels every recovery projection running now (#458 r1 F2) — their
+   * Keycloak calls aborted, every database operation they would start next
+   * refused, a COMMIT included (`prisma/cancellation.ts`) — and waits for
+   * them to unwind, at most until `deadlineAt`. Resolves to how many are
+   * still unwinding then: cancelled, but with a statement already sent. A
+   * recovery is best-effort — its fresh fence is what is durable, and the
+   * sweep re-asserts from it — so cancelling one loses nothing. The
+   * command's step before it counts; a recovery asked for later still runs.
+   */
+  async cancelRecoveries(options: OutboxStopOptions = {}): Promise<number> {
+    const batch = this.batch;
+    this.batch = new AbortController();
+    batch.abort();
+    const pending = [...this.running];
+    if (pending.length === 0 && this.transactions.size === 0) return 0;
+    const all = Promise.all(pending);
+    if (options.deadlineAt === undefined) await all;
+    else await withinDeadline(all, Math.max(0, options.deadlineAt - Date.now()));
+    // A transaction of theirs already handed to the engine is waited for too,
+    // by the same deadline, and counted (#458 r2 F2).
+    const unsettled = await settleWithin(this.transactions, options.deadlineAt);
+    const left = Math.max(pending.filter((run) => this.running.has(run)).length, unsettled);
+    if (left > 0) {
+      this.logger.error(
+        `${left} Keycloak recovery projections still unwinding after cancellation (D-070 D); ` +
+          'they start nothing more, and their fresh fences keep them for the sweep',
+      );
+    }
+    return left;
+  }
+
+  /**
+   * An `OutboxShutdown` worker, by the shutdown's deadline, and the command's
+   * teardown before it disconnects: no recovery starts any more, and those
+   * running are cancelled ({@link cancelRecoveries}). Resolves to how many
+   * were still unwinding — or had a transaction unsettled — at the deadline.
+   * One stop per projector: later calls join it.
+   */
+  stop(options: OutboxStopOptions = {}): Promise<number> {
+    this.stopping ??= (async () => {
+      this.recoveryStop.abort();
+      return this.cancelRecoveries(options);
+    })();
+    return this.stopping;
+  }
+
+  /**
+   * Writes the fresh fences of late writes this process still owes (D-070 D,
+   * `KeycloakWriteFences.recoverOwed`): for a worker's stop, before it
+   * returns, outside the scope it cancelled. Never throws.
+   */
+  recoverOwed(): Promise<number> {
+    return this.fences.recoverOwed();
   }
 
   /**
@@ -703,6 +867,7 @@ export class KeycloakProjector {
           userId,
           PROJECTION_TRANSACTION_OPTIONS.timeout,
           signal,
+          options.recovery === true,
         );
         writes = fenced;
         const linked = user.keycloakId;
@@ -905,6 +1070,18 @@ export class KeycloakProjector {
       'Account disabled: the platform user is not ACTIVE, and its status is the authority',
     );
   }
+}
+
+/** The recovery projections started in this process and not finished yet (D-070 D). */
+const recoveries = new Set<Promise<void>>();
+
+/**
+ * Waits for every recovery projection started so far in this process, at most
+ * `timeoutMs`: for the backfill command before it disconnects, and for tests.
+ * Their fresh fences are durable either way.
+ */
+export function settleRecoveryProjections(timeoutMs: number): Promise<'finished' | 'abandoned'> {
+  return withinDeadline(Promise.all([...recoveries]), timeoutMs);
 }
 
 function describe(error: unknown): string {

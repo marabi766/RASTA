@@ -32,7 +32,7 @@ describe('identity-service starts only as its runtime role (D-045)', () => {
   };
 
   afterAll(async () => {
-    await Promise.all(opened.map((prisma) => prisma.onModuleDestroy()));
+    await Promise.all(opened.map((prisma) => prisma.stop()));
   });
 
   it('accepts the runtime role', async () => {
