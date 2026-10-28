@@ -36,16 +36,10 @@ import {
   pauseSenderAtNextPut,
   SenderClock,
   tenants,
-  untilEveryFenceTakenOver,
+  FenceTestTimeline,
   waitFor,
 } from './helpers';
-import {
-  DEADLINE_FIXTURE_MS,
-  KeycloakHttpStub,
-  SLOW_ROUND_TRIP_MS,
-  SUCCESS_REQUEST_BUDGET_MS,
-  type StubRequest,
-} from './keycloak-http-stub';
+import { KeycloakHttpStub, SLOW_ROUND_TRIP_MS, type StubRequest } from './keycloak-http-stub';
 
 /**
  * D-069 (#402 r1 F1–F4, #381 r3 F1): the durable in-flight fence of every
@@ -75,13 +69,8 @@ import {
  */
 
 const SETTLE_SECONDS = 2;
-/**
- * The shared client's request budget — every ordinary success path's — and
- * so its fences' `deadline_at - started_at` (#458 r3 F8): generous, so a slow
- * runner never turns a success into a timeout. Only a test about a deadline
- * uses the short fixture (`short`, {@link DEADLINE_FIXTURE_MS}).
- */
-const REQUEST_BUDGET_MS = SUCCESS_REQUEST_BUDGET_MS;
+/** The shared timeline owns signals; DB lifetimes exceed the 60 s harness bound. */
+const REQUEST_BUDGET_MS = FenceTestTimeline.requestBudgetMs;
 /** Longer than any request's deadline here: how far a paused sender's clock moves on. */
 const PAUSE_MS = REQUEST_BUDGET_MS + 1_000;
 /**
@@ -102,16 +91,13 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
   let fencing: Awaited<ReturnType<typeof newFences>>;
   let projector: KeycloakProjector;
   let service: IdentityService;
-  /**
-   * The explicit short-budget fixture (#458 r3 F8): only for a test about a
-   * deadline — the request that must time out goes through it, nothing that
-   * must succeed does.
-   */
-  let short: { projector: KeycloakProjector; service: IdentityService };
   /** Users this suite made, so its sweeps touch nobody else's fences or lapses. */
   const mine = new Set<string>();
   /** The senders' monotonic clock: a late timeout is a paused sender, said so (#458 r1 F5). */
-  const senders = new SenderClock();
+  const timeline = new FenceTestTimeline();
+  const senders = new SenderClock(timeline.monotonicNow);
+  const nativeTimeout = AbortSignal.timeout;
+  beforeEach(() => timeline.install());
 
   beforeAll(async () => {
     prisma = newPrisma();
@@ -128,22 +114,19 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       writeSettleSeconds: SETTLE_SECONDS,
     });
     service = new IdentityService(repository, keycloak, projector);
-    const shortClient = stub.client(DEADLINE_FIXTURE_MS);
-    const shortProjector = new KeycloakProjector(repository, shortClient, fencing.fences, {
-      writeSettleSeconds: SETTLE_SECONDS,
-    });
-    short = {
-      projector: shortProjector,
-      service: new IdentityService(repository, shortClient, shortProjector),
-    };
   });
 
   afterEach(async () => {
     // A late write's recovery projection runs in the background (D-070 D):
     // done before the next test, so it never takes that test's stub modes.
-    await settleRecoveryProjections(30_000);
-    stub.onPut = null;
-    jest.restoreAllMocks();
+    try {
+      await settleRecoveryProjections(30_000);
+    } finally {
+      timeline.restore();
+      expect(AbortSignal.timeout).toBe(nativeTimeout);
+      stub.onPut = null;
+      jest.restoreAllMocks();
+    }
   });
 
   afterAll(async () => {
@@ -151,6 +134,13 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
     await fencing.pool.stop();
     await holder.stop();
     await prisma.stop();
+  });
+
+  it('restores the native AbortSignal.timeout descriptor between tests', () => {
+    expect(AbortSignal.timeout).not.toBe(nativeTimeout);
+    timeline.restore();
+    expect(AbortSignal.timeout).toBe(nativeTimeout);
+    timeline.install();
   });
 
   // -------------------------------------------------------------------------
@@ -251,7 +241,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       (error: unknown) => error,
     );
 
-  const fencesOf = async (userId: string) =>
+  const fencesOf = async (userId: string, at?: Date) =>
     (
       await prisma.client.$queryRaw<
         Array<{
@@ -264,7 +254,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         }>
       >`
         SELECT attempt_id, operation,
-               takeover_at > (clock_timestamp() AT TIME ZONE 'UTC') AS live,
+               takeover_at > COALESCE(${at ?? null}::timestamp, clock_timestamp() AT TIME ZONE 'UTC') AS live,
                account_missing_at IS NOT NULL AS account_missing,
                reassert_failures,
                EXTRACT(EPOCH FROM next_reassert_at - (clock_timestamp() AT TIME ZONE 'UTC'))::float AS next_in
@@ -381,9 +371,8 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         memberships: [{ in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] }],
       });
       const wide = await rowsGrant(s.userId);
-      // The short fixture: a deadline long enough to line the demotion up
-      // behind it, and one the held PUT must run past.
-      const slow = stub.client(DEADLINE_FIXTURE_MS);
+      // The deadline is fired only after the second request is waiting on the lock.
+      const slow = stub.client(REQUEST_BUDGET_MS);
       const slowProjector = new KeycloakProjector(repository, slow, fencing.fences, {
         writeSettleSeconds: SETTLE_SECONDS,
       });
@@ -396,10 +385,12 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       );
       await waitFor('the held PUT', async () => (stub.heldCount === 1 ? true : null));
 
+      await timeline.holdLive(prisma, s.userId);
       // 2. Another administrator's demotion is already waiting for the lock.
       const putsBefore = stub.puts(s.keycloakId).length;
       const demotion = failure(demote(s, ['OPERATOR']));
       await someoneWaitsOnALock();
+      timeline.fireDeadline();
 
       // 3. The projection's deadline passes; its transaction rolls back and
       //    the lock passes to the demotion — which reads the fence.
@@ -416,7 +407,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       expect(stub.platform(s.keycloakId)).toEqual(wide);
 
       // 5. Once it can no longer land, the sweep re-asserts the rows and clears it.
-      await untilEveryFenceTakenOver(prisma, s.userId);
+      await timeline.expire(prisma, s.userId);
       await ownScanner(50, undefined, new Set([s.userId])).scan();
       expect(stub.platform(s.keycloakId)).toEqual(await rowsGrant(s.userId));
       expect(await fencesOf(s.userId)).toEqual([]);
@@ -431,7 +422,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const s = await seed({
         memberships: [{ in: 'a', roles: ['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'OPERATOR'] }],
       });
-      const slow = stub.client(DEADLINE_FIXTURE_MS);
+      const slow = stub.client(REQUEST_BUDGET_MS);
       const slowService = new IdentityService(
         repository,
         slow,
@@ -445,14 +436,16 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       pauseSenderAtNextPut(stub, senders, PAUSE_MS);
       const first = failure(demoteWith(slowService, s, ['FLEET_MANAGER', 'OPERATOR']));
       await waitFor('the held PUT', async () => (stub.heldCount === 1 ? true : null));
+      await timeline.holdLive(prisma, s.userId);
       const second = failure(demote(s, ['OPERATOR']));
       await someoneWaitsOnALock();
+      timeline.fireDeadline();
 
       expect(await first).toMatchObject({ status: 503, code: 'KEYCLOAK_UNAVAILABLE' });
       expect(await second).toMatchObject({ status: 503, code: 'KEYCLOAK_WRITE_SETTLING' });
       expect(await events(s.memberships[0]!)).toEqual([]);
       // Its own, and — its timeout heard past its deadline — a fresh one (D-070 D).
-      expect(await fencesOf(s.userId)).toEqual([
+      expect(await fencesOf(s.userId, await timeline.observation(prisma, s.userId))).toEqual([
         expect.objectContaining({ live: true }),
         expect.objectContaining({ live: true }),
       ]);
@@ -464,8 +457,10 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         memberships: [{ in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] }],
       });
       stub.nextPut('hang');
-      // A request that must time out: the short fixture.
-      await expect(short.projector.project(s.userId, 'event')).rejects.toMatchObject({
+      // The test fires the deadline after the complete PUT reaches the server.
+      await expect(
+        timeline.timeoutAfterPut(stub, () => projector.project(s.userId, 'event')),
+      ).rejects.toMatchObject({
         code: 'UPSTREAM_UNAVAILABLE',
       });
 
@@ -479,6 +474,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
             writeSettleSeconds: SETTLE_SECONDS,
           }),
         );
+        await timeline.holdLive(prisma, s.userId);
         expect(await failure(demoteWith(freshService, s, ['OPERATOR']))).toMatchObject({
           code: 'KEYCLOAK_WRITE_SETTLING',
         });
@@ -494,32 +490,37 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const scanner = ownScanner(50, undefined, new Set([s.userId]));
       stub.nextPut('hang');
       pauseSenderAtNextPut(stub, senders, PAUSE_MS);
-      // A request that must time out: the short fixture.
-      await expect(short.projector.project(s.userId, 'event')).rejects.toBeDefined();
+      // The test fires the deadline after the complete PUT reaches the server.
+      await expect(
+        timeline.timeoutAfterPut(stub, () => projector.project(s.userId, 'event')),
+      ).rejects.toBeDefined();
       // Its sender paused at Keycloak, its timeout was heard past its
       // deadline: a fresh fence beside it, and a recovery projection of the
       // rows (D-070 D).
       await settleRecoveryProjections(10_000);
       const [old, fresh] = await fencesOf(s.userId);
 
+      await timeline.holdLive(prisma, s.userId);
       // Before takeover: the sweep leaves them, and sends nothing.
       const puts = stub.puts(s.keycloakId).length;
       await scanner.scan();
       expect(stub.puts(s.keycloakId)).toHaveLength(puts);
-      expect(await fencesOf(s.userId)).toEqual([
+      expect(await fencesOf(s.userId, await timeline.observation(prisma, s.userId))).toEqual([
         expect.objectContaining({ attemptId: old!.attemptId, live: true }),
         expect.objectContaining({ attemptId: fresh!.attemptId, live: true }),
       ]);
 
       // After it: re-asserted, and cleared.
-      await untilEveryFenceTakenOver(prisma, s.userId);
+      await timeline.expire(prisma, s.userId);
       await scanner.scan();
       expect(await fencesOf(s.userId)).toEqual([]);
 
       // A newer attempt, in flight — and its own late sender's fresh fence.
       stub.nextPut('hang');
       pauseSenderAtNextPut(stub, senders, PAUSE_MS);
-      await expect(short.projector.project(s.userId, 'event')).rejects.toBeDefined();
+      await expect(
+        timeline.timeoutAfterPut(stub, () => projector.project(s.userId, 'event')),
+      ).rejects.toBeDefined();
       await settleRecoveryProjections(10_000);
       const [newer, newerFresh] = await fencesOf(s.userId);
       expect(newer!.attemptId).not.toBe(old!.attemptId);
@@ -529,13 +530,31 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       // newer attempts, and never a replacement fence.
       await fencing.fences.release(old!.attemptId);
       await fencing.fences.confirmLanded([old!.attemptId, fresh!.attemptId]);
-      expect(await fencesOf(s.userId)).toEqual([
+      expect(await fencesOf(s.userId, await timeline.observation(prisma, s.userId))).toEqual([
         expect.objectContaining({ attemptId: newer!.attemptId, live: true }),
         expect.objectContaining({ attemptId: newerFresh!.attemptId, live: true }),
       ]);
+      await timeline.holdLive(prisma, s.userId);
       expect(await failure(demote(s, ['OPERATOR']))).toMatchObject({
         code: 'KEYCLOAK_WRITE_SETTLING',
       });
+    });
+
+    it('observes liveness at the chosen instant even after the fixture forces real expiry', async () => {
+      const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
+      stub.nextPut('hang');
+      await expect(
+        timeline.timeoutAfterPut(stub, () => projector.project(s.userId, 'event')),
+      ).rejects.toBeDefined();
+      await timeline.expire(prisma, s.userId);
+      const at = await timeline.observation(prisma, s.userId);
+      expect(await fencesOf(s.userId, at)).toEqual([expect.objectContaining({ live: true })]);
+      expect(await fencesOf(s.userId)).toEqual([expect.objectContaining({ live: false })]);
+      expect(await fencing.fences.ofUser(prisma.client, s.userId, at)).toEqual([
+        expect.objectContaining({ live: true }),
+      ]);
+      await ownScanner(50, undefined, new Set([s.userId])).scan();
+      expect(await fencesOf(s.userId)).toEqual([]);
     });
 
     it('a write provably not applied releases its fence at once: refused 4xx, and a deadline passed before dispatch', async () => {
@@ -710,33 +729,52 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         ]);
         await fencing.fences.release(opened.attempt.id);
 
-        // Control: the same insert on the business pool would wait for the
-        // connection its own transaction holds, and fail by the pool's wait.
+        // Control: start the pool under the shared fixture budget. Only the
+        // fence transaction's acquire below gets the short, measured wait.
         const sameUrl = new URL(withDatabasePool(databaseUrl(), { size: 1 }));
-        sameUrl.searchParams.set('pool_timeout', '2');
+        sameUrl.searchParams.set('pool_timeout', String(REQUEST_BUDGET_MS / 1000));
         const shared = new PrismaService(sameUrl.toString());
         await shared.onModuleInit();
         try {
           const onSamePool = new KeycloakWriteFences(shared);
           const sharedRepository = new IdentityRepository(shared);
-          const started = performance.now();
-          await expect(
-            sharedRepository.transaction(
-              async (tx) => {
-                await sharedRepository.lockUserMemberships(tx, s.userId);
-                await onSamePool.open(tx, {
-                  userId: s.userId,
-                  keycloakId: s.keycloakId,
-                  operation: 'replace_attributes',
-                  timeoutMs: REQUEST_BUDGET_MS,
-                  settleSeconds: SETTLE_SECONDS,
-                  transactionTimeoutMs: 20_000,
+          await sharedRepository.transaction(
+            async (tx) => {
+              // This completed query proves the holder owns the only
+              // connection before the measured fence insert even starts.
+              await sharedRepository.lockUserMemberships(tx, s.userId);
+              const transaction = shared.transaction.bind(shared);
+              const acquireWaitMs = 2_000;
+              const acquire = jest
+                .spyOn(shared, 'transaction')
+                .mockImplementation((work, options) =>
+                  transaction(work, { ...options, maxWait: acquireWaitMs }),
+                );
+              try {
+                const started = performance.now();
+                await expect(
+                  onSamePool.open(tx, {
+                    userId: s.userId,
+                    keycloakId: s.keycloakId,
+                    operation: 'replace_attributes',
+                    timeoutMs: REQUEST_BUDGET_MS,
+                    settleSeconds: SETTLE_SECONDS,
+                    transactionTimeoutMs: REQUEST_BUDGET_MS,
+                  }),
+                ).rejects.toMatchObject({
+                  code: 'P2028',
+                  message: expect.stringContaining(
+                    'Unable to start a transaction in the given time',
+                  ),
                 });
-              },
-              { timeout: 20_000, maxWait: 5_000 },
-            ),
-          ).rejects.toThrow();
-          expect(performance.now() - started).toBeGreaterThan(1500);
+                expect(performance.now() - started).toBeGreaterThan(1500);
+                expect(acquire).toHaveBeenCalledTimes(1);
+              } finally {
+                acquire.mockRestore();
+              }
+            },
+            { timeout: REQUEST_BUDGET_MS, maxWait: REQUEST_BUDGET_MS },
+          );
         } finally {
           await shared.stop();
         }
@@ -895,18 +933,21 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       stub.nextPut('hold');
       pauseSenderAtNextPut(stub, senders, PAUSE_MS);
       await expect(
-        // A request that must time out: the short fixture.
-        reviewer(() => short.service.approveRegistration(registrationId, {})),
+        // The test fires the deadline after the complete PUT reaches the server.
+        timeline.timeoutAfterPut(stub, () =>
+          reviewer(() => service.approveRegistration(registrationId, {})),
+        ),
       ).rejects.toBeDefined();
       // Its own fence, and — its sender paused at Keycloak, its timeout heard
       // past its deadline — a fresh one for the same account and operation
       // (D-070 D).
       await settleRecoveryProjections(10_000);
-      expect(await fencesOf(userId)).toEqual([
+      expect(await fencesOf(userId, await timeline.observation(prisma, userId))).toEqual([
         expect.objectContaining({ live: true, operation: 'disable' }),
         expect.objectContaining({ live: true, operation: 'disable' }),
       ]);
 
+      await timeline.holdLive(prisma, userId);
       // 2. The second approval adopts again (still enabled), commits, and projects:
       //    the grants are written, the enable waits for the held disable.
       await reviewer(() => service.approveRegistration(registrationId, {}));
@@ -920,7 +961,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       expect(stub.accounts.get(legacy)!.enabled).toBe(false);
 
       // 4. Once it can no longer land, the sweep re-asserts and activates.
-      await untilEveryFenceTakenOver(prisma, userId);
+      await timeline.expire(prisma, userId);
       await ownScanner(50, undefined, new Set([userId])).scan();
       expect(stub.accounts.get(legacy)!.enabled).toBe(true);
       expect(stub.accounts.get(legacy)!.attributes.rasta_activation).toEqual([registrationId]);
@@ -1412,30 +1453,49 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         { timeout: 30_000, maxWait: 5_000 },
       );
       await isBlocked;
+      // What the insert's own transaction was given.
+      const given: Array<Parameters<PrismaService['transaction']>[1]> = [];
+      const fenceTransaction = fencing.pool.transaction.bind(fencing.pool);
+      jest.spyOn(fencing.pool, 'transaction').mockImplementation((fn, options) => {
+        given.push(options);
+        return fenceTransaction(fn, options);
+      });
       try {
+        let opening: unknown;
         const started = performance.now();
         await expect(
           repository.transaction(
             async (tx) => {
               await repository.lockUserMemberships(tx, s.userId);
-              return fencing.fences.open(tx, {
-                userId: s.userId,
-                keycloakId: s.keycloakId,
-                operation: 'replace_attributes',
-                timeoutMs: FENCE_TIMEOUT_FIXTURE_MS,
-                settleSeconds: SETTLE_SECONDS,
-                transactionTimeoutMs: 1_500,
-              });
+              return fencing.fences
+                .open(tx, {
+                  userId: s.userId,
+                  keycloakId: s.keycloakId,
+                  operation: 'replace_attributes',
+                  timeoutMs: FENCE_TIMEOUT_FIXTURE_MS,
+                  settleSeconds: SETTLE_SECONDS,
+                  transactionTimeoutMs: 1_500,
+                })
+                .catch((error: unknown) => {
+                  opening = error;
+                  throw error;
+                });
             },
             { timeout: 10_000, maxWait: 5_000 },
           ),
         ).rejects.toBeDefined();
         const ms = performance.now() - started;
-        // It waited its share, not refused at once — and its connection wait
-        // and its statement together never outlast what the business
-        // transaction had left (1.5 s): one budget (#458 r2 F2).
+        // It waited its share, not refused at once (a slow runner only adds) —
         expect(ms).toBeGreaterThan(600);
-        expect(ms).toBeLessThan(1_500);
+        // — and the insert's own bound ended it, not the business
+        // transaction's 10 s: its connection wait and its statement given one
+        // budget, never past what the business transaction had left (1.5 s):
+        // one budget (#458 r2 F2). Held to the budget itself (#910), not to a
+        // wall-clock figure a loaded runner overruns.
+        expect(opening).toBeDefined();
+        expect(given).toHaveLength(1);
+        expect(given[0]!.budgetMs).toBeLessThanOrEqual(1_500);
+        expect(given[0]!.statementTimeoutMs).toBe(given[0]!.budgetMs);
       } finally {
         unblock();
         await blocker;
@@ -1725,7 +1785,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       stack: Awaited<ReturnType<typeof recordedStack>>,
       userId: string,
     ) {
-      await untilEveryFenceTakenOver(prisma, userId);
+      await timeline.expire(prisma, userId);
       await stack.scanner(new Set([userId])).scan();
       await waitFor('the sweep to re-assert and clear every fence', async () =>
         (await fencesOf(userId)).length === 0 ? true : null,

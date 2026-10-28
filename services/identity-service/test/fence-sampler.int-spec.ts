@@ -3,7 +3,6 @@ import { IdentityRepository } from '../src/identity/identity.repository';
 import type { IdentityService } from '../src/identity/identity.service';
 import { MembershipExpiryScanner } from '../src/identity/membership-expiry.scanner';
 import {
-  FENCE_SAMPLE_BUDGET_MS,
   FENCE_SAMPLE_INTERVAL_MS,
   FENCE_SAMPLE_STALE_SECONDS,
   KeycloakFenceSampler,
@@ -13,7 +12,6 @@ import type { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import { FENCE_POOL_CONNECTIONS } from '../src/keycloak/keycloak-write-fence';
 import {
   keycloakFenceSampleAge,
-  keycloakFenceSampleDuration,
   keycloakFenceSamplesTotal,
   keycloakWriteFences,
 } from '../src/observability/keycloak-projection.metrics';
@@ -27,9 +25,17 @@ import { databaseUrl, id, newPrisma, tenants, waitFor } from './helpers';
  * and when its own query cannot answer — a lock it waits on, its one
  * connection taken — each sample ends within its budget and the age the
  * stale alert reads keeps growing at every scrape.
+ *
+ * The sampler's clock is the test's (#912), and so is when it samples: its
+ * timers are an hour apart and each sample is a tick the test asks for. So
+ * an age, a gap and its retention are what the test set them to, never how
+ * long the runner took between a sample and a scrape; and the fence fixture
+ * stays overdue for an hour — its state is the test's, not a window the
+ * test consumes. Its own timer and the ages' arithmetic: on fake timers in
+ * `keycloak-fence-sampler.spec.ts`.
  */
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const HOUR_MS = 3_600_000;
 
 describe('R3-2: the fence sampler on a real database', () => {
   let prisma: PrismaService;
@@ -37,7 +43,10 @@ describe('R3-2: the fence sampler on a real database', () => {
   let repository: IdentityRepository;
   let own: PrismaService;
   let sampler: KeycloakFenceSampler;
+  /** The sampler's monotonic clock, in ms: it moves only when a test moves it. */
+  let now = 0;
   const inserted: string[] = [];
+  const onTheTestsClock = { clock: () => now, intervalMs: HOUR_MS, lapseIntervalMs: HOUR_MS };
 
   beforeAll(async () => {
     prisma = newPrisma();
@@ -50,7 +59,8 @@ describe('R3-2: the fence sampler on a real database', () => {
   beforeEach(async () => {
     own = new PrismaService(databaseUrl(), { connections: 1, waitSeconds: 1 });
     await own.onModuleInit();
-    sampler = new KeycloakFenceSampler(pooledFenceSampleSource(own, repository));
+    now = 0;
+    sampler = new KeycloakFenceSampler(pooledFenceSampleSource(own, repository), onTheTestsClock);
   });
 
   afterEach(async () => {
@@ -70,7 +80,10 @@ describe('R3-2: the fence sampler on a real database', () => {
     await prisma.stop();
   });
 
-  /** A fence past its deadline plus half its settle window, not yet past takeover: overdue. */
+  /**
+   * A fence past its deadline plus half its settle window, not yet past
+   * takeover: overdue — for the next hour, so for the whole test.
+   */
   async function overdueFence(): Promise<string> {
     const attemptId = `KWA_${id('OVD')}`;
     inserted.push(attemptId);
@@ -79,7 +92,7 @@ describe('R3-2: the fence sampler on a real database', () => {
              (attempt_id, user_id, keycloak_id, operation,
               started_at, deadline_at, takeover_at, next_reassert_at)
       SELECT ${attemptId}, ${id('USR-SMP')}, 'kc-sampler', 'replace_attributes',
-             c - interval '40 seconds', c - interval '30 seconds', c + interval '20 seconds', c + interval '20 seconds'
+             c - interval '3 hours', c - interval '2 hours', c + interval '1 hour', c + interval '1 hour'
         FROM (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS c) t`;
     return attemptId;
   }
@@ -90,17 +103,35 @@ describe('R3-2: the fence sampler on a real database', () => {
   const samples = async (outcome: string) =>
     (await keycloakFenceSamplesTotal.get()).values.find((v) => v.labels.outcome === outcome)
       ?.value ?? 0;
-  /** The slowest sample of `outcome` so far, as an upper bucket bound, seconds. */
-  const slowest = async (outcome: string) => {
-    const buckets = (await keycloakFenceSampleDuration.get()).values
-      .filter((v) => v.labels.outcome === outcome && v.metricName?.endsWith('_bucket'))
-      .map((v) => ({ value: v.value, labels: v.labels as { le?: string | number } }));
-    const total = buckets.find((v) => v.labels.le === '+Inf')?.value ?? 0;
-    const under = buckets
-      .filter((v) => v.labels.le !== '+Inf' && v.value === total)
-      .map((v) => Number(v.labels.le));
-    return Math.min(...under);
-  };
+  /**
+   * Ticks the sampler — again while one is still in flight (counted busy) —
+   * until one more sample ended with `outcome`; the clock stands still, so it
+   * started at `now`.
+   */
+  async function sampled(outcome: 'ok' | 'failed'): Promise<void> {
+    const before = await samples(outcome);
+    await waitFor(`a sample ${outcome} at ${now} ms`, async () => {
+      if ((await samples(outcome)) > before) return true;
+      sampler.tick();
+      return null;
+    });
+  }
+
+  /**
+   * The budget each transaction of the sampler on `pool` was given from now
+   * on — what the database enforces on it (its connection wait, its lock,
+   * its statement, its transaction) — read off the calls, not off a duration
+   * a loaded runner can stretch (#910).
+   */
+  function budgetsOn(pool: PrismaService): number[] {
+    const budgets: number[] = [];
+    const real = pool.transaction.bind(pool);
+    jest.spyOn(pool, 'transaction').mockImplementation((fn, options) => {
+      budgets.push(options?.budgetMs ?? Number.POSITIVE_INFINITY);
+      return real(fn, options);
+    });
+    return budgets;
+  }
 
   /** Holds `count` connections of `pool` in transactions until released. */
   function exhaust(pool: PrismaService, count: number) {
@@ -125,7 +156,7 @@ describe('R3-2: the fence sampler on a real database', () => {
     return { held, release, done };
   }
 
-  it('samples on its own timer and its own connection while the sweep is busy in a lapse (its overlap guard skipping ticks) and the fence pool’s connections are all taken', async () => {
+  it('samples on its own connection, fresh at every scrape, while the sweep is busy in a lapse (its overlap guard skipping ticks) and the fence pool’s connections are all taken', async () => {
     await overdueFence();
 
     // The sweep: busy in a lapse that does not end until the test says so.
@@ -197,13 +228,19 @@ describe('R3-2: the fence sampler on a real database', () => {
     const fencesHeld = exhaust(fencePool, FENCE_POOL_CONNECTIONS);
     await fencesHeld.held;
 
-    const ok = await samples('ok');
+    // Two more samples while the sweep is busy, 4 s apart on its clock.
     sampler.start();
-    await waitFor('two samples while the sweep is busy', async () =>
-      (await samples('ok')) >= ok + 2 ? true : null,
-    );
+    await sampled('ok');
+    now = 4_000;
+    await sampled('ok');
+    now = 8_000;
+    await sampled('ok');
     expect(await gauge('overdue')).toBeGreaterThanOrEqual(1);
-    expect(await age()).toBeLessThan(FENCE_SAMPLE_STALE_SECONDS);
+    // Fresh: the longest gap between two successes, 4 s — had the last one
+    // not succeeded, 8 s, past the stale threshold.
+    const fresh = await age();
+    expect(fresh).toBe(4);
+    expect(fresh).toBeLessThan(FENCE_SAMPLE_STALE_SECONDS);
     expect(identity.expireLapsedMembership).toHaveBeenCalledTimes(1);
 
     fencesHeld.release();
@@ -216,11 +253,9 @@ describe('R3-2: the fence sampler on a real database', () => {
 
   it('a sample waiting on a lock fails within its budget; the age keeps growing at every scrape past the stale threshold, and stays reported for the retention window after recovery', async () => {
     await overdueFence();
+    const budgets = budgetsOn(own);
     sampler.start();
-    await waitFor('a first sample', async () =>
-      (await gauge('live')) !== undefined ? true : null,
-    );
-    const failed = await samples('failed');
+    await sampled('ok');
 
     // The database stalls for the sampler: an ACCESS EXCLUSIVE lock on the
     // table, as a down migration would take.
@@ -237,46 +272,51 @@ describe('R3-2: the fence sampler on a real database', () => {
       { timeout: 60_000, maxWait: 10_000 },
     );
     await isLocked;
-    const lockedAt = Date.now();
 
+    // A scrape every 2 s on its clock, a sample failing under the lock before
+    // each — counted failed while the lock is still held: bounded, it did not
+    // wait for the lock.
     const ages: number[] = [];
     for (let scrape = 0; scrape < 4; scrape += 1) {
-      await sleep(2_000);
+      now += 2_000;
+      await sampled('failed');
       ages.push((await age())!);
     }
     // Computed at scrape: it never stops growing while no sample succeeds.
-    for (let index = 1; index < ages.length; index += 1) {
-      expect(ages[index]!).toBeGreaterThan(ages[index - 1]!);
-    }
+    expect(ages).toEqual([2, 4, 6, 8]);
     expect(ages[ages.length - 1]!).toBeGreaterThan(FENCE_SAMPLE_STALE_SECONDS);
-    expect(await samples('failed')).toBeGreaterThan(failed);
-    // Each failed within its budget (the next bucket up from 1 s is 2 s).
-    expect(await slowest('failed')).toBeLessThanOrEqual(2);
-    expect(Date.now() - lockedAt).toBeGreaterThan(FENCE_SAMPLE_STALE_SECONDS * 1000);
+    // Each within its budget, 1 s at most (#910: the budget the database
+    // enforced, not a duration a loaded runner can stretch; the client
+    // side's own bound is that same budget, on the fake clock in
+    // `keycloak-fence-sampler.spec.ts`).
+    expect(budgets.length).toBeGreaterThan(0);
+    expect(Math.max(...budgets)).toBeLessThanOrEqual(1_000);
 
     unlock();
     await holding;
-    const okBefore = await samples('ok');
-    await waitFor('a sample after the stall', async () =>
-      (await samples('ok')) > okBefore ? true : null,
-    );
-    // Sampling recovered, but the gap stays reported (retention window), so a
-    // stale period between two scrapes is still seen by the alert.
-    expect(await age()).toBeGreaterThan(FENCE_SAMPLE_STALE_SECONDS);
+    await sampled('ok');
+    // Sampling recovered, but the 8 s gap stays reported (retention window),
+    // so a stale period between two scrapes is still seen by the alert ...
+    expect(await age()).toBe(8);
+    // ... a fresh sample 2 s later does not hide it ...
+    now += 2_000;
+    await sampled('ok');
+    expect(await age()).toBe(8);
     expect(await gauge('overdue')).toBeGreaterThanOrEqual(1);
   });
 
   it('its one connection taken: the wait for it is bounded too, and counted a failure', async () => {
     sampler.start();
-    await waitFor('a first sample', async () =>
-      (await gauge('live')) !== undefined ? true : null,
-    );
-    const failed = await samples('failed');
+    await sampled('ok');
     const taken = exhaust(own, 1);
     await taken.held;
-    await sleep(FENCE_SAMPLE_INTERVAL_MS * 2 + FENCE_SAMPLE_BUDGET_MS);
-    expect(await samples('failed')).toBeGreaterThan(failed);
-    expect(await slowest('failed')).toBeLessThanOrEqual(2);
+    const budgets = budgetsOn(own);
+    // Counted failed while the connection is still taken: its wait did not
+    // outlast the holder, and was within its budget, 1 s at most (#910: the
+    // budget given, not a duration).
+    await sampled('failed');
+    expect(budgets.length).toBeGreaterThan(0);
+    expect(Math.max(...budgets)).toBeLessThanOrEqual(1_000);
     taken.release();
     await taken.done;
   });
@@ -287,12 +327,14 @@ describe('R3-2: the fence sampler on a real database', () => {
         fences: () => Promise.reject(new Error('the database is unreachable')),
         lapseBacklog: () => Promise.reject(new Error('the database is unreachable')),
       },
-      {},
+      onTheTestsClock,
     );
     sampler.start();
-    await sleep(FENCE_SAMPLE_INTERVAL_MS + 200);
+    await sampled('failed');
+    now = FENCE_SAMPLE_INTERVAL_MS;
+    await sampled('failed');
     expect(await gauge('overdue')).toBeUndefined();
     expect(await gauge('live')).toBeUndefined();
-    expect(await age()).toBeGreaterThanOrEqual(FENCE_SAMPLE_INTERVAL_MS / 1000);
+    expect(await age()).toBe(FENCE_SAMPLE_INTERVAL_MS / 1000);
   });
 });
