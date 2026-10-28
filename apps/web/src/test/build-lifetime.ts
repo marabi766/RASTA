@@ -10,8 +10,17 @@ export function signalChild(child: ChildProcess, signal: NodeJS.Signals): boolea
   return child.kill(signal);
 }
 
+/**
+ * COMPLETED: the supervisor announced its own ending (FINAL before its group SIGKILL, or
+ * NORMAL_END before exit 0) before EOF, and the group was then observed absent.
+ * LOST: anything else — EOF, send failure, malformed reply or the deadline.
+ */
+export type Completion = 'COMPLETED' | 'LOST';
+export const LOST_DIAGNOSTIC =
+  'fixture supervisor lifetime LOST; termination unconfirmed; no numeric fallback';
+
 export interface FixtureLifetime {
-  group(): Promise<boolean>;
+  group(): Promise<Completion>;
   wrapper(signal: NodeJS.Signals): boolean;
   close(): Promise<void>;
 }
@@ -21,16 +30,18 @@ export function trackFixture(fixture: FixtureLifetime): void {
 }
 
 /** Both afterEach and watchdog use this boundary; disk records are observation only. */
-export async function stopFixture(fixture: FixtureLifetime): Promise<boolean> {
-  const sent = await fixture.group();
-  fixture.wrapper('SIGKILL');
-  return sent;
+export async function stopFixture(fixture: FixtureLifetime): Promise<Completion> {
+  try {
+    return await fixture.group();
+  } finally {
+    fixture.wrapper('SIGKILL');
+  }
 }
 export async function cleanupFixtures(): Promise<void> {
   const failures: unknown[] = [];
   for (const fixture of fixtures) {
     try {
-      await stopFixture(fixture);
+      if ((await stopFixture(fixture)) === 'LOST') throw new Error(LOST_DIAGNOSTIC);
     } catch (error) {
       failures.push(error);
     }
@@ -45,98 +56,167 @@ export async function cleanupFixtures(): Promise<void> {
   if (failures.length) throw new AggregateError(failures, 'fixture cleanup failed');
 }
 export async function watchdogFixture(fixture: FixtureLifetime): Promise<never> {
-  const sent = await stopFixture(fixture);
+  const outcome = await stopFixture(fixture);
   throw new Error(
-    sent
-      ? 'fixture watchdog expired; requested owned supervisor shutdown'
-      : 'fixture watchdog expired; supervisor lifetime unavailable; no group signal authorized',
+    outcome === 'COMPLETED'
+      ? 'fixture watchdog expired; owned group shutdown COMPLETED'
+      : `fixture watchdog expired; ${LOST_DIAGNOSTIC}`,
   );
 }
 
-/** One accepted connection, held for its lifetime. No lookup/reconnect after EOF. */
-export function supervisorEndpoint(): {
+/** Observation only: a signal-0 probe never authorizes a signal. */
+const groupAbsent = (group: number): boolean => {
+  try {
+    process.kill(-group, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH';
+  }
+};
+
+/** One accepted connection, one acknowledged lifecycle. EOF alone never confirms cleanup. */
+export function supervisorEndpoint(deadlineMs = 5_000): {
   path: string;
   ready: Promise<void>;
-  request(target: 'group' | 'root', signal?: NodeJS.Signals): Promise<boolean>;
+  connected: Promise<void>;
+  ended: Promise<Completion>;
+  request(target: 'group'): Promise<Completion>;
+  request(target: 'root', signal: NodeJS.Signals): Promise<boolean>;
   close(): Promise<void>;
-  wrapperEnded(): void;
+  noSupervisor(): void;
 } {
   const dir = mkdtempSync(join(tmpdir(), 'build-control-'));
   const path = join(dir, 'ipc');
   let socket: Socket | undefined;
-  let retired = false;
   let connected = false;
-  let settle: () => void;
-  const accepted = new Promise<void>((resolve) => (settle = resolve));
+  let group: number | undefined;
+  let announced = false;
+  let outcome: Completion | undefined;
+  let sequence = 0;
+  let onConnected: () => void;
+  const transportConnected = new Promise<void>((resolve) => (onConnected = resolve));
+  let onEnded: (outcome: Completion) => void;
+  const ended = new Promise<Completion>((resolve) => (onEnded = resolve));
+  const acknowledgements = new Map<number, boolean>();
+  const listeners = new Set<() => void>();
+  const wake = (): void => {
+    for (const listener of listeners) listener();
+  };
+  const settle = (result: Completion): void => {
+    if (outcome) return;
+    outcome = result;
+    onEnded(result);
+    wake();
+  };
+  const lose = (): void => settle('LOST');
+  const eof = (): void => {
+    if (outcome) return;
+    if (!announced || group === undefined) return lose();
+    // Announced ending: confirm the group is gone within the deadline (observation only).
+    const owned = group;
+    const deadline = performance.now() + deadlineMs;
+    const check = (): void => {
+      if (outcome) return;
+      if (groupAbsent(owned)) return settle('COMPLETED');
+      if (performance.now() >= deadline) return lose();
+      setTimeout(check, 10);
+    };
+    check();
+  };
   const server = createServer((incoming) => {
-    if (retired || connected) return incoming.destroy();
+    if (outcome || connected) return incoming.destroy();
     connected = true;
     socket = incoming;
-    incoming.once('close', () => {
-      retired = true;
-      settle();
+    onConnected();
+    let buffer = '';
+    incoming.on('data', (data) => {
+      buffer += data;
+      while (buffer.includes('\n')) {
+        const end = buffer.indexOf('\n');
+        const line = buffer.slice(0, end);
+        buffer = buffer.slice(end + 1);
+        let message: { kind?: unknown; id?: unknown; acted?: unknown; group?: unknown };
+        try {
+          message = JSON.parse(line) as typeof message;
+        } catch {
+          message = {};
+        }
+        if (message.kind === 'READY' && group === undefined && Number.isInteger(message.group))
+          group = message.group as number;
+        else if (message.kind === 'ACK' && typeof message.id === 'number')
+          acknowledgements.set(message.id, message.acted === true);
+        else if (message.kind === 'FINAL' || message.kind === 'NORMAL_END') announced = true;
+        else {
+          lose();
+          incoming.destroy();
+        }
+        wake();
+      }
     });
-    incoming.on('error', () => incoming.destroy());
+    incoming.once('close', eof);
+    incoming.on('error', () => {
+      lose();
+      incoming.destroy();
+    });
     server.close();
-    settle();
+    wake();
   });
   const ready = new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(path, resolve);
   });
+  let groupRequest: Promise<Completion> | undefined;
+  function command(target: 'group' | 'root', signal?: NodeJS.Signals): Promise<unknown> {
+    const id = ++sequence;
+    // The SAME timer spans connection, READY, the ACK and confirmed completion.
+    return new Promise((resolve) => {
+      let sent = false;
+      const finish = (result: unknown): void => {
+        clearTimeout(timer);
+        listeners.delete(update);
+        acknowledgements.delete(id);
+        resolve(result);
+      };
+      const update = (): void => {
+        if (outcome) return finish(target === 'group' ? outcome : false);
+        if (group !== undefined && !sent && socket && !socket.destroyed) {
+          sent = true;
+          socket.write(JSON.stringify({ id, target, signal }) + '\n', (error) => {
+            if (error) lose();
+          });
+        }
+        if (target === 'root' && acknowledgements.has(id)) finish(acknowledgements.get(id));
+      };
+      const timer = setTimeout(() => {
+        lose();
+        socket?.destroy();
+      }, deadlineMs);
+      listeners.add(update);
+      update();
+    });
+  }
+  function request(target: 'group'): Promise<Completion>;
+  function request(target: 'root', signal: NodeJS.Signals): Promise<boolean>;
+  function request(target: 'group' | 'root', signal?: NodeJS.Signals): Promise<unknown> {
+    if (target === 'root') return command(target, signal);
+    groupRequest ??= command(target) as Promise<Completion>;
+    return groupRequest;
+  }
   return {
     path,
     ready,
-    async request(target, signal) {
-      // Startup is bounded too. Timeout permanently retires this endpoint.
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([
-        accepted,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(() => {
-            retired = true;
-            resolve();
-          }, 5_000);
-        }),
-      ]);
-      clearTimeout(timer);
-      if (retired || !socket || socket.destroyed) return false;
-      return new Promise<boolean>((resolve) => {
-        socket?.write(JSON.stringify({ target, signal }) + '\n', (error) => {
-          if (error) retired = true;
-          resolve(!error);
-        });
-      });
-    },
-    wrapperEnded() {
-      // A wrapper that never received a root cannot leave an established controller.
-      // Wake pending startup requests without consulting any recorded process number.
-      if (!connected) {
-        retired = true;
-        settle();
-      }
+    connected: transportConnected,
+    ended,
+    request,
+    noSupervisor() {
+      // An explicit wrapper report: it never spawned a supervisor, so no group exists.
+      if (!connected) settle('COMPLETED');
     },
     async close() {
-      retired = true;
-      settle();
-      try {
-        if (socket && !socket.destroyed) {
-          const held = socket;
-          await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(() => {
-              reject(new Error('fixture supervisor did not end within cleanup deadline'));
-            }, 5_000);
-            held.once('close', () => {
-              clearTimeout(timer);
-              resolve();
-            });
-          });
-        }
-      } finally {
-        socket?.destroy();
-        if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
-        rmSync(dir, { recursive: true, force: true });
-      }
+      lose();
+      socket?.destroy();
+      if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
     },
   };
 }

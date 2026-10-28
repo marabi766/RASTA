@@ -53,6 +53,7 @@ export interface Result {
 }
 
 export interface DriverOptions {
+  controllerImportDelayMs?: number;
   inherit?: boolean;
   lockWaitMs?: number;
   env?: Record<string, string>;
@@ -104,7 +105,7 @@ const DRIVER = `
     if (args?.[0] === ${JSON.stringify(join(SCRIPTS, 'build-supervisor.mjs'))}) {
       const bootstrap = 'import { supervise } from ' + JSON.stringify(${JSON.stringify(pathToFileURL(join(__dirname, 'build-controller.mjs')).href)})
         + '; await supervise(' + JSON.stringify(options.controlPath) + ', '
-        + JSON.stringify(${JSON.stringify(url('build-supervisor.mjs'))}) + ');';
+        + JSON.stringify(${JSON.stringify(url('build-supervisor.mjs'))}) + ', ' + JSON.stringify(options.controllerImportDelayMs ?? 0) + ');';
       supervisorChild = originalSpawn(file, ['--input-type=module', '-e', bootstrap], given);
       return supervisorChild;
     }
@@ -233,6 +234,7 @@ const DRIVER = `
   }
   // Match the production entry point: a returned result ends the wrapper immediately.
   // Outstanding IPC handles/timers must not accidentally join missing cleanup in a test.
+  if (!supervisorChild) await new Promise((resolve) => process.send({ kind: 'no-supervisor' }, resolve));
   process.stdout.write(JSON.stringify({ ...result, shutdownElapsedMs }) + '\\n', () => process.exit(result.status));
 `;
 
@@ -242,6 +244,9 @@ export function startDriver(
   options: DriverOptions = {},
 ): {
   done: Promise<Result>;
+  controllerConnected: Promise<void>;
+  /** The lifecycle outcome, once known; sends nothing. */
+  ended: Promise<'COMPLETED' | 'LOST'>;
   signal(signal: NodeJS.Signals): boolean;
   root(signal: NodeJS.Signals): Promise<boolean>;
   killSupervisor(): boolean;
@@ -263,13 +268,15 @@ export function startDriver(
     close: () => endpoint.close(),
   };
   trackFixture(fixture);
-  let watchdogError: Error | undefined;
+  let rejectDone: (error: Error) => void;
+  let watchdogExpired = false;
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   const armWatchdog = (ms: number): void => {
     clearTimeout(watchdog);
     watchdog = setTimeout(() => {
+      watchdogExpired = true;
       void watchdogFixture(fixture).catch((error: Error) => {
-        watchdogError = error;
+        rejectDone(error);
       });
     }, ms);
   };
@@ -279,12 +286,15 @@ export function startDriver(
   child.stdout?.on('data', (chunk) => (stdout += chunk));
   child.stderr?.on('data', (chunk) => (stderr += chunk));
   const done = new Promise<Result>((resolve, reject) => {
+    rejectDone = reject;
     void endpoint.ready.catch(reject);
+    child.on('message', (message: { kind: string }) => {
+      if (message.kind === 'no-supervisor') endpoint.noSupervisor();
+    });
     child.on('error', reject);
     child.on('close', (code, signal) => {
-      endpoint.wrapperEnded();
       if (watchdog) clearTimeout(watchdog);
-      if (watchdogError) return reject(watchdogError);
+      if (watchdogExpired) return;
       const last = stdout.trim().split('\n').pop() ?? '';
       const parsed = (last.startsWith('{') ? JSON.parse(last) : { problems: [] }) as {
         status?: number;
@@ -295,6 +305,8 @@ export function startDriver(
   });
   return {
     done,
+    controllerConnected: endpoint.connected,
+    ended: endpoint.ended,
     signal: fixture.wrapper,
     watchdog: () => watchdogFixture(fixture),
     expireWatchdog: () => armWatchdog(0),

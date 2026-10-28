@@ -16,7 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { cleanupFixtures, signalChild } from './test/build-lifetime';
+import { cleanupFixtures, LOST_DIAGNOSTIC, signalChild } from './test/build-lifetime';
 import {
   alive,
   LOCK,
@@ -472,6 +472,8 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       const dir = app({});
       const driver = startDriver(dir, { nextFrom, recordChild: join(dir, 'child.json') });
       expect(await driver.done).toMatchObject({ status: 0 });
+      // R6-1: completion is the supervisor's announced ending plus observed absence.
+      expect(await driver.ended).toBe('COMPLETED');
       const { group } = record(dir);
       // The original lifetime has ended. Resume the ACTUAL cleanup/watchdog body
       // after a pause, with a model in which every old numeric ID is now live again.
@@ -484,7 +486,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       try {
         expect(alive(-group)).toBe(true);
         if (path === 'afterEach') await cleanupFixtures();
-        else await expect(driver.watchdog()).rejects.toThrow('supervisor lifetime unavailable');
+        else await expect(driver.watchdog()).rejects.toThrow('owned group shutdown COMPLETED');
         expect(signals).toEqual([]);
         expect(driver.signal('SIGTERM')).toBe(false);
         expect(driver.killSupervisor()).toBe(false);
@@ -521,6 +523,51 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect(await runDriver(dir, { nextFrom })).toMatchObject({ status: 0, problems: [] });
     expect(receipt(dir)).toEqual([]);
     expect(existsSync(join(dir, LOCK))).toBe(false);
+  });
+
+  it('R6-1: cleanup sent while the supervisor import is pending waits for its handler and confirms termination', async () => {
+    // Bounded: a regressed controller that drops the shutdown strands nothing for long.
+    const dir = app({ holdMs: 10_000 });
+    const driver = startDriver(dir, { nextFrom, controllerImportDelayMs: 500 });
+    // Connected, but the production handler does not exist yet: request shutdown NOW.
+    await driver.controllerConnected;
+    await expect(cleanupFixtures()).resolves.toBeUndefined();
+    expect(await driver.ended).toBe('COMPLETED');
+    await driver.done;
+    // COMPLETED required the supervisor's own FINAL plus observed group absence.
+    for (const pid of ran(dir)) expect(alive(pid)).toBe(false);
+  });
+
+  it('R6-1: controller loss is LOST, and the watchdog rejects while inherited pipes stay held', async () => {
+    // A bounded root holds the wrapper's inherited stdout/stderr pipes after its
+    // supervisor dies, so the wrapper's 'close' cannot arrive until it exits.
+    const dir = app({ holdMs: 4_000 });
+    const driver = startDriver(dir, {
+      nextFrom,
+      inherit: true,
+      recordChild: join(dir, 'child.json'),
+      stopGraceMs: 100,
+      stopWaitMs: 500,
+    });
+    await waitFor(() => ran(dir).length === 1);
+    const { group } = record(dir);
+    expect(driver.killSupervisor()).toBe(true);
+    expect(await driver.ended).toBe('LOST'); // Unexpected loss is not a completed fixture.
+    const started = performance.now();
+    driver.expireWatchdog();
+    const outcome = await Promise.race([
+      driver.done.then(
+        () => 'resolved',
+        (error: Error) => error.message,
+      ),
+      sleep(2_000).then(() => 'still waiting for close'),
+    ]);
+    expect(outcome).toBe(`fixture watchdog expired; ${LOST_DIAGNOSTIC}`);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(alive(-group)).toBe(true); // The pipe holder still lives: rejection did not wait.
+    // Its parent died: no endpoint can authorize a root signal. Observe its natural exit.
+    await waitFor(() => !alive(-group));
+    await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
   });
 
   it('(a) publishing the group fails with an I/O error: `next build` is stopped and awaited, and the lock is KEPT because it cannot be removed either; refused', async () => {
@@ -582,6 +629,9 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect(existsSync(capturePath)).toBe(false);
     rmSync(join(capturePath, '..'), { recursive: true, force: true });
     expect(receipt(dir)).toEqual([]);
+    // The preload self-kills the abandoned group without a supervisor final report.
+    // Observing its absence does not turn the lost lifecycle into a normal exit.
+    await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
   });
 
   it.each([
@@ -803,6 +853,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     // Observe this bounded fixture's natural exit instead of using its saved PID.
     await waitFor(() => !alive(-group));
     expect(inProgress(dir)).toBe(false);
+    await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
   });
 
   it.each(['interrupt', 'uncertain', 'supervisor-death'] as const)(
@@ -818,6 +869,9 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       expect(result.status).toBe(afterReceipt === 'interrupt' ? 130 : 1);
       expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
       expect(existsSync(join(dir, LOCK))).toBe(afterReceipt !== 'interrupt');
+      if (afterReceipt === 'supervisor-death') {
+        await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
+      }
     },
   );
 
@@ -1080,6 +1134,11 @@ describe('a report that cannot be written ends the build, visibly (r4 F3, fake `
       nextFrom,
       env: { FAULT: faultSpec, NODE_OPTIONS: `--require=${JSON.stringify(fault)}` },
     });
+    if (faultSpec) {
+      // Fatal preload persistence faults kill the supervisor too. Assert LOST at
+      // the test lifecycle boundary instead of silently accepting that EOF.
+      await expect(cleanupFixtures()).rejects.toThrow('fixture cleanup failed');
+    }
     return { dir, ...result };
   };
   const REFUSED = [

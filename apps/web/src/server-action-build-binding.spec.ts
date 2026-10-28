@@ -27,7 +27,7 @@ import {
   WEB,
   type Result,
 } from './test/build-scripts';
-import { cleanupFixtures } from './test/build-lifetime';
+import { cleanupFixtures, LOST_DIAGNOSTIC } from './test/build-lifetime';
 import { MANIFEST_PATH } from './test/server-action-manifest';
 
 /**
@@ -781,6 +781,8 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
   ];
   const dirs: Record<string, string> = {};
   const results: Record<string, Result> = {};
+  const lifecycles: Record<string, 'COMPLETED' | 'LOST'> = {};
+  let sharedCleanup: unknown;
   let root: string;
   beforeAll(async () => {
     root = mkdtempSync(join(tmpdir(), 'wrapper-'));
@@ -789,15 +791,21 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
       dirs[fixture.name] = join(root, fixture.name);
       plant(dirs[fixture.name], fixture.config, fixture.page, fixture.stale);
     }
-    const done = await Promise.all(
-      FIXTURES.map((f) =>
-        runDriver(dirs[f.name], {
-          inherit: f.inherit,
-          env: f.env && { ...f.env, NODE_OPTIONS: `--require=${JSON.stringify(fault)}` },
-        }),
-      ),
+    const drivers = FIXTURES.map((f) =>
+      startDriver(dirs[f.name], {
+        inherit: f.inherit,
+        env: f.env && { ...f.env, NODE_OPTIONS: `--require=${JSON.stringify(fault)}` },
+      }),
     );
+    const done = await Promise.all(drivers.map((d) => d.done));
     FIXTURES.forEach((f, i) => (results[f.name] = done[i]));
+    // R6-1: consume every lifecycle outcome here, before the first afterEach.
+    const ended = await Promise.all(drivers.map((d) => d.ended));
+    FIXTURES.forEach((f, i) => (lifecycles[f.name] = ended[i]));
+    sharedCleanup = await cleanupFixtures().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
   }, 280_000);
   afterAll(() => rmSync(root, { recursive: true, force: true }));
 
@@ -805,6 +813,20 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
     runModule(
       `import { receiptProblems } from ${JSON.stringify(url('build-receipt.mjs'))};\nconsole.log(JSON.stringify(receiptProblems(${JSON.stringify(dirs[name])})));`,
     ).out as string[];
+
+  it('R6-1: only the fixture whose preload kills its own group loses the supervisor lifetime', () => {
+    // A fatal persistence fault SIGKILLs the group from a member, so the supervisor never
+    // announces its ending: LOST, and shared cleanup says so instead of passing silently.
+    expect(lifecycles).toEqual(
+      Object.fromEntries(
+        FIXTURES.map((f) => [f.name, f.name === 'workerConfigLost' ? 'LOST' : 'COMPLETED']),
+      ),
+    );
+    expect(sharedCleanup).toMatchObject({
+      message: 'fixture cleanup failed',
+      errors: [expect.objectContaining({ message: LOST_DIAGNOSTIC })],
+    });
+  });
 
   it('control: a default build is receipted, from its own output only', () => {
     expect(results.control.problems).toEqual([]);
