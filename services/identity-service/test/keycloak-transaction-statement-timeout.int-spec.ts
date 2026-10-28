@@ -168,9 +168,9 @@ describe('Keycloak projection and approval transactions outlast the connection s
       await holder.client.registrationRequest.deleteMany({ where: { userId: { in: users } } });
       await holder.client.user.deleteMany({ where: { id: { in: users } } });
     });
-    await fencing.pool.onModuleDestroy();
-    await prisma.onModuleDestroy();
-    await holder.onModuleDestroy();
+    await fencing.pool.stop();
+    await prisma.stop();
+    await holder.stop();
   });
 
   async function submit(): Promise<{ registrationId: string; userId: string; username: string }> {

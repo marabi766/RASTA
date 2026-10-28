@@ -397,7 +397,7 @@ describe('security_event_outbox (real PostgreSQL)', () => {
         await sleep(300);
         expect(await rowsFor(lockedCaller.userId)).toHaveLength(0);
       } finally {
-        await locker.onModuleDestroy();
+        await locker.stop();
         await bounded.close();
       }
     });

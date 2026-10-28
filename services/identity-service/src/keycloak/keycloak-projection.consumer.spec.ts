@@ -94,7 +94,11 @@ describe('KeycloakProjectionConsumer', () => {
       let resume!: () => void;
       const resumed = new Promise<void>((resolve) => (resume = resolve));
       /** The signal the projection got, and the operations of it that passed the boundary once resumed. */
-      const seen: { signal?: AbortSignal; started: string[] } = { started: [] };
+      const seen: {
+        signal?: AbortSignal;
+        started: string[];
+        flushedAfterAbort?: boolean | null;
+      } = { started: [] };
       const projector = {
         project: jest.fn(
           async (_userId: string, _trigger: string, options: { signal?: AbortSignal }) => {
@@ -112,6 +116,11 @@ describe('KeycloakProjectionConsumer', () => {
             return 'projected' as const;
           },
         ),
+        /** The late senders' owed fences (D-070 D): when the stop flushed them, against its signal. */
+        recoverOwed: jest.fn(async () => {
+          seen.flushedAfterAbort = seen.signal?.aborted ?? null;
+          return 0;
+        }),
       };
       const consumer = new KeycloakProjectionConsumer(
         (h) => {
@@ -138,6 +147,10 @@ describe('KeycloakProjectionConsumer', () => {
 
       await c.consumer.stop({ deadlineAt: Date.now() });
       expect(c.seen.signal?.aborted).toBe(true);
+      // Its owed late fences were written before the stop returned, once the
+      // handler's scope was cancelled — the flush is not in that scope (D-070 D).
+      expect(c.projector.recoverOwed).toHaveBeenCalledTimes(1);
+      expect(c.seen.flushedAfterAbort).toBe(true);
 
       c.resume();
       await inFlight;
