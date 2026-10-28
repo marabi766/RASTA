@@ -10,7 +10,7 @@ import {
   type OutboxStopOptions,
 } from '@rasta/nest-common';
 import { IDENTITY_EVENTS } from '../identity/events';
-import { withCancellation } from '../prisma/cancellation';
+import { settleWithin, untilDeadline, withCancellation } from '../prisma/cancellation';
 import { KeycloakProjector } from './keycloak.projector';
 
 /**
@@ -53,6 +53,10 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
    * refused (`prisma/cancellation.ts`).
    */
   private cancel = new AbortController();
+  /** The handlers' transactions not settled yet: a stop waits for them (#458 r2 F2). */
+  private readonly transactions = new Set<Promise<unknown>>();
+  /** The one stop of this run; later calls join it (#458 r1 F2). */
+  private stopping?: Promise<void>;
 
   constructor(
     /** Null when Keycloak sync is off: there is nothing to project into. */
@@ -66,6 +70,7 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
       return;
     }
     this.cancel = new AbortController();
+    this.stopping = undefined;
     this.consumer = this.consumerFactory((envelope) => this.handle(envelope));
     await this.consumer.start();
   }
@@ -78,13 +83,62 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
    * own `onModuleDestroy` stopped the consumer with no bound, so a Keycloak
    * write or a dead letter that hung held the close into the forced exit.
    * Keycloak sync off, there is nothing to stop. When it returns, the
-   * projection of a handler it abandoned is cancelled (`cancel`).
+   * projection of a handler it abandoned is cancelled (`cancel`). One stop:
+   * a later call — `onApplicationShutdown` after `OutboxShutdown`'s — joins
+   * it, and never starts a second flush.
    */
   stop(options?: OutboxStopOptions): Promise<void> {
-    const stopping = this.consumer?.stop(options) ?? Promise.resolve();
-    // Once the stop returns, the handler it may have abandoned starts nothing
-    // more — before the caller resumes.
-    return stopping.finally(() => this.cancel.abort());
+    this.stopping ??= this.halt(options?.deadlineAt);
+    return this.stopping;
+  }
+
+  private async halt(deadlineAt: number | undefined): Promise<void> {
+    try {
+      await (this.consumer?.stop({ deadlineAt }) ?? Promise.resolve());
+    } finally {
+      // Once the stop returns — or fails: a Kafka disconnect that rejects
+      // (#458 r3 F7) — the handler it may have abandoned starts nothing more,
+      // before the caller resumes; and the owed fences and the handlers'
+      // pending transactions are still flushed and waited for, by the
+      // deadline. The failure is rethrown after that, never instead of it.
+      this.cancel.abort();
+      await this.recoverOwed(deadlineAt);
+    }
+  }
+
+  /**
+   * Before the stop returns, outside the scope it cancelled: the fresh fences
+   * of late writes still owed — one the cancelled handler heard back for
+   * after its deadline, or one still unanswered past it (D-070 D). In a scope
+   * that carries the deadline (#458 r1 F2): bounded by what is left of it,
+   * refused past it, and cancelled before this returns. Never throws: in the
+   * stop's `finally`, it must not replace the stop's own failure.
+   */
+  private async recoverOwed(deadlineAt: number | undefined): Promise<void> {
+    if (!this.consumerFactory) return;
+    const flushed = await untilDeadline(() => this.projector.recoverOwed(), deadlineAt).catch(
+      (error: unknown) => {
+        this.logger.error(`Flushing owed Keycloak write fences failed: ${String(error)}`);
+        return { outcome: 'abandoned' as const, unsettled: 0 };
+      },
+    );
+    const owed = flushed.outcome === 'finished' ? flushed.value : -1;
+    if (owed !== 0) {
+      this.logger.error(
+        `Stopping with ${owed < 0 ? 'unknown' : owed} late Keycloak write fences unwritten ` +
+          '(D-070 D); the old fences, if not yet taken over, still stand',
+      );
+    }
+    // Never "stopped" with a COMMIT still pending (#458 r2 F2): an abandoned
+    // handler's transaction already handed to the engine is waited for, by
+    // the deadline, and one that has not settled by then is reported.
+    const unsettled = flushed.unsettled + (await settleWithin(this.transactions, deadlineAt));
+    if (unsettled > 0) {
+      this.logger.error(
+        `Keycloak projection consumer stopped at the shutdown deadline with ${unsettled} ` +
+          'transactions unsettled: they may still commit',
+      );
+    }
   }
 
   /** Joins the stop `OutboxShutdown` began; returns at once. */
@@ -112,8 +166,10 @@ export class KeycloakProjectionConsumer implements OnModuleInit, OnApplicationSh
     }
 
     const { signal } = this.cancel;
-    await withCancellation(signal, () =>
-      this.projector.project(parsed.data.userId, 'event', { signal }),
+    await withCancellation(
+      signal,
+      () => this.projector.project(parsed.data.userId, 'event', { signal }),
+      { transactions: this.transactions },
     );
   }
 }

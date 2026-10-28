@@ -138,8 +138,8 @@ describe('membership validUntil (ADR-060 § 5)', () => {
 
   afterAll(async () => {
     jest.useRealTimers();
-    await fencing?.pool.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await fencing?.pool.stop();
+    await prisma.stop();
   });
 
   const asUser = <T>(fn: () => Promise<T>) =>

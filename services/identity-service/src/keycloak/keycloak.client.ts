@@ -314,7 +314,10 @@ export class KeycloakAdminClient {
    * committed by `context.fence` — then, immediately before dispatch, the
    * attempt's own deadline is checked again, and the request carries it as
    * its abort signal. A deadline that passed before dispatch is a request that
-   * was never sent.
+   * was never sent. As soon as the outcome is known — an answer, or a failure
+   * after dispatch — the attempt reads the monotonic clock again
+   * (`observeReply`): a sender that hears back only after its deadline is a
+   * late sender, and its caller fences the user afresh (D-070 option D).
    */
   private async putUser(
     keycloakId: string,
@@ -340,6 +343,9 @@ export class KeycloakAdminClient {
         },
       );
     } catch (error) {
+      // Its outcome is known now: the monotonic clock is read here, after the
+      // failure and before anything else (D-070 option D).
+      attempt.observeReply();
       if (error instanceof RastaError) throw error;
       if (neverSent(error)) {
         throw RastaError.upstreamUnavailable('keycloak', { operation, reason: 'unreachable' });
@@ -350,6 +356,8 @@ export class KeycloakAdminClient {
         name === 'TimeoutError' || name === 'AbortError' ? 'deadline' : 'connection',
       );
     }
+    // The answer arrived: the clock is read here, before anything else.
+    attempt.observeReply();
     if (response.ok) return;
     if (response.status >= 500) throw new KeycloakWriteUnconfirmedError(operation, 'server_error');
     if (response.status === 404 && missing === 'not_found') {

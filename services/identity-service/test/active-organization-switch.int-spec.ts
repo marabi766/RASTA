@@ -42,8 +42,8 @@ describe('active organization switch audit (L7-14)', () => {
   });
 
   afterAll(async () => {
-    await fencing?.pool.onModuleDestroy();
-    await prisma.onModuleDestroy();
+    await fencing?.pool.stop();
+    await prisma.stop();
   });
 
   /** A user active in `org.a`, a member of both `org.a` and `org.b`. */

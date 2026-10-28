@@ -44,6 +44,33 @@ export interface StubAccount {
   attributes: Record<string, string[]>;
 }
 
+/**
+ * The request budget of every ordinary success path in the Keycloak suites
+ * (#458 r3 F8): generous, so a slow runner never turns a request that should
+ * succeed into a timeout — and a fence it opens into one left behind. A
+ * sender is made late by a pause on its own clock (`SenderClock`), never by
+ * real time running past this.
+ */
+export const SUCCESS_REQUEST_BUDGET_MS = 5_000;
+
+/**
+ * The explicit short budget of a test **about** a deadline: a request that
+ * must time out (a held or hung PUT) uses a client of its own with this.
+ * What else such a test sends on that client — a recovery projection its
+ * late sender asks for — still gets well over the 400 ms the suites once
+ * gave every request.
+ */
+export const DEADLINE_FIXTURE_MS = 1_500;
+
+/**
+ * A slow runner's round trip, simulated in the success controls (#458 r3 F8):
+ * longer than the 400 ms the suites once gave every request — the budget
+ * under which train run 40512610264 and main run 40529495529 left fences
+ * behind or timed out, and #450 run 40542848722 refused a late sample — and
+ * well inside {@link SUCCESS_REQUEST_BUDGET_MS}.
+ */
+export const SLOW_ROUND_TRIP_MS = 600;
+
 export interface StubRequest {
   /** `Date.now()` when the request arrived. */
   at: number;
@@ -166,8 +193,13 @@ export class KeycloakHttpStub {
     );
   }
 
-  /** The real client, pointed here, with a short deadline so a hang costs the suite little. */
-  client(requestTimeoutMs = 400): KeycloakAdminClient {
+  /**
+   * The real client, pointed here, with the budget the caller names: always
+   * {@link SUCCESS_REQUEST_BUDGET_MS} for an ordinary path, and a short one
+   * ({@link DEADLINE_FIXTURE_MS}) only for a test about a deadline (#458 r3
+   * F8). No default: a short budget is never taken by accident.
+   */
+  client(requestTimeoutMs: number): KeycloakAdminClient {
     return new KeycloakAdminClient({
       baseUrl: this.url,
       realm: 'rasta',
