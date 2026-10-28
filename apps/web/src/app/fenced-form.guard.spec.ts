@@ -219,6 +219,11 @@ describe('the guard fails where it must', () => {
         edit(
           ["from '@/lib/thing-store'", "from '@/lib/stores'"],
           ['import { answerThing, clearThing,', 'import { answerThing, clearThing, keepThing,'],
+          // A name no barrel exports: the whole cycle is walked, and the walk ends.
+          [
+            "from '@/lib/stores';",
+            "from '@/lib/stores';\n    import type { NotExported } from '@/lib/stores';",
+          ],
           ['remember: () => saveThing()', 'remember: () => keepThing()'],
           [
             "import { UnresolvedForm } from '@/app/UnresolvedQuarantine';",
@@ -416,6 +421,18 @@ describe('the guard fails where it must', () => {
         ),
         {},
         ['store'],
+      ],
+      [
+        "a 'use server' module's action, whatever the module is called, outside send",
+        edit(
+          [
+            "import { submitThing } from './thing-actions';",
+            "import { submitThing } from './thing-actions';\n    import { sendThing } from './send-thing';",
+          ],
+          ['remember: () => saveThing(),', 'remember: () => (sendThing(form), saveThing()),'],
+        ),
+        { 'app/thing/send-thing.ts': "'use server';\nexport async function sendThing() {}" },
+        ['transport'],
       ],
       [
         'a namespace action call outside send',
