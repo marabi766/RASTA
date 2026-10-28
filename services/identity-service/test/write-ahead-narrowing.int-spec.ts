@@ -20,15 +20,10 @@ import {
   pauseSenderAtNextPut,
   SenderClock,
   tenants,
-  untilEveryFenceTakenOver,
+  FenceTestTimeline,
   waitFor,
 } from './helpers';
-import {
-  DEADLINE_FIXTURE_MS,
-  KeycloakHttpStub,
-  SUCCESS_REQUEST_BUDGET_MS,
-  type StubRequest,
-} from './keycloak-http-stub';
+import { KeycloakHttpStub, type StubRequest } from './keycloak-http-stub';
 
 /**
  * ADR-060, write-ahead addendum (D-064): a change that takes access away
@@ -59,13 +54,8 @@ import {
  */
 
 const SETTLE_SECONDS = 2;
-/**
- * The shared client's request budget — every ordinary success path's — and
- * so its fences' `deadline_at - started_at` (#458 r3 F8): generous, so a slow
- * runner never turns a success into a timeout. Only a test about a deadline
- * uses the short fixture (`short`, {@link DEADLINE_FIXTURE_MS}).
- */
-const REQUEST_BUDGET_MS = SUCCESS_REQUEST_BUDGET_MS;
+/** The shared timeline owns signals; DB lifetimes exceed the 60 s harness bound. */
+const REQUEST_BUDGET_MS = FenceTestTimeline.requestBudgetMs;
 /** Longer than any request's deadline here: how far a paused sender's clock moves on. */
 const PAUSE_MS = REQUEST_BUDGET_MS + 1_000;
 
@@ -77,15 +67,13 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
   let projector: KeycloakProjector;
   let service: IdentityService;
   let scanner: MembershipExpiryScanner;
-  /**
-   * The explicit short-budget fixture (#458 r3 F8): only for a test about a
-   * deadline — the request that must time out (or fail) goes through it,
-   * nothing that must succeed does.
-   */
-  let short: { projector: KeycloakProjector; service: IdentityService };
   let fencing: Awaited<ReturnType<typeof newFences>>;
   /** The senders' monotonic clock: a late timeout is a paused sender, said so (#458 r1 F5). */
-  const senders = new SenderClock();
+
+  const timeline = new FenceTestTimeline();
+  const senders = new SenderClock(timeline.monotonicNow);
+  const nativeTimeout = AbortSignal.timeout;
+  beforeEach(() => timeline.install());
 
   beforeAll(async () => {
     prisma = newPrisma();
@@ -103,14 +91,7 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       writeSettleSeconds: SETTLE_SECONDS,
     });
     service = new IdentityService(repository, keycloak, projector);
-    const shortClient = stub.client(DEADLINE_FIXTURE_MS);
-    const shortProjector = new KeycloakProjector(repository, shortClient, fencing.fences, {
-      writeSettleSeconds: SETTLE_SECONDS,
-    });
-    short = {
-      projector: shortProjector,
-      service: new IdentityService(repository, shortClient, shortProjector),
-    };
+
     scanner = new MembershipExpiryScanner(
       repository,
       service,
@@ -123,9 +104,14 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
   afterEach(async () => {
     // A late write's recovery projection runs in the background (D-070 D):
     // done before the next test, so it never takes that test's stub modes.
-    await settleRecoveryProjections(30_000);
-    stub.onPut = null;
-    jest.restoreAllMocks();
+    try {
+      await settleRecoveryProjections(30_000);
+    } finally {
+      timeline.restore();
+      expect(AbortSignal.timeout).toBe(nativeTimeout);
+      stub.onPut = null;
+      jest.restoreAllMocks();
+    }
   });
 
   afterAll(async () => {
@@ -259,13 +245,13 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
     );
 
   /** The user's Keycloak write fences (D-069), as the table holds them. */
-  const fencesOf = async (userId: string) =>
+  const fencesOf = async (userId: string, at?: Date) =>
     (
       await prisma.client.$queryRaw<
         Array<{ attempt_id: string; live: boolean; operation: string }>
       >`
         SELECT attempt_id, operation,
-               takeover_at > (clock_timestamp() AT TIME ZONE 'UTC') AS live
+               takeover_at > COALESCE(${at ?? null}::timestamp, clock_timestamp() AT TIME ZONE 'UTC') AS live
           FROM keycloak_write_attempt WHERE user_id = ${userId}
          ORDER BY started_at, attempt_id`
     ).map((row) => ({ attemptId: row.attempt_id, operation: row.operation, live: row.live }));
@@ -382,8 +368,10 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       // Paused while its PUT is at Keycloak: its timeout is heard late (D-070 D).
       pauseSenderAtNextPut(stub, senders, PAUSE_MS);
 
-      // A request that must time out: the short fixture.
-      const error = await failure(demote(s, 0, ['OPERATOR'], 'a', short.service));
+      // The test fires the deadline after the complete PUT reaches the server.
+      const error = await timeline.timeoutAfterPut(stub, () =>
+        failure(demote(s, 0, ['OPERATOR'], 'a', service)),
+      );
       expect(error).toMatchObject({ status: 503, code: 'KEYCLOAK_UNAVAILABLE' });
       expect((await committedMembership(s.memberships[0]!))?.roles).toEqual([
         'ORGANIZATION_ADMIN',
@@ -394,7 +382,7 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       // past its deadline, so a fresh live fence stands beside it (D-070 D),
       // and the recovery projection wrote the rows as committed — unchanged.
       expect(await settleRecoveryProjections(10_000)).toBe('finished');
-      expect(await fencesOf(s.userId)).toEqual([
+      expect(await fencesOf(s.userId, await timeline.observation(prisma, s.userId))).toEqual([
         expect.objectContaining({ live: true }),
         expect.objectContaining({ live: true }),
       ]);
@@ -402,13 +390,14 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
 
       // The retry, while that write may still land: refused before writing.
       const putsBefore = stub.puts(s.keycloakId).length;
+      await timeline.holdLive(prisma, s.userId);
       const settling = await failure(demote(s, 0, ['OPERATOR']));
       expect(settling).toMatchObject({ status: 503, code: 'KEYCLOAK_WRITE_SETTLING' });
       expect((settling as RastaError).retryAfterSeconds).toBeGreaterThan(0);
       expect(stub.puts(s.keycloakId)).toHaveLength(putsBefore);
 
       // Once it can no longer land, the retry commits — once.
-      await untilEveryFenceTakenOver(prisma, s.userId);
+      await timeline.expire(prisma, s.userId);
       await demote(s, 0, ['OPERATOR']);
       await demote(s, 0, ['OPERATOR']);
       expect((await events(s.memberships[0]!)).map((event) => event.eventName)).toEqual([
@@ -423,9 +412,8 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       });
       stub.nextPut('apply-then-drop');
 
-      // A request that must fail: the short fixture, whose fence is taken
-      // over sooner.
-      const error = await failure(demote(s, 0, ['OPERATOR'], 'a', short.service));
+      // A lost answer: takeover below is an explicit fixture transition.
+      const error = await failure(demote(s, 0, ['OPERATOR'], 'a', service));
 
       expect(error).toMatchObject({ status: 503, code: 'KEYCLOAK_UNAVAILABLE' });
       expect(await events(s.memberships[0]!)).toEqual([]);
@@ -435,7 +423,7 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       expect(stub.platform(s.keycloakId)).not.toEqual(rows);
 
       // The next projection under the lock, once the mark passes, re-asserts the rows.
-      await untilEveryFenceTakenOver(prisma, s.userId);
+      await timeline.expire(prisma, s.userId);
       await scanner.scan();
       expect(stub.platform(s.keycloakId)).toEqual(rows);
       expect(await fencesOf(s.userId)).toEqual([]);
@@ -686,7 +674,7 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       stub.stopRefusing(s.keycloakId);
       // A 5xx may have landed: wait until it cannot, then the next pass that
       // reaches it — past its backoff — acts.
-      await untilEveryFenceTakenOver(prisma, s.userId);
+      await timeline.expire(prisma, s.userId);
       await own.scan(new Date(now.getTime() + 3 * 60_000));
       expect((await committedMembership(s.memberships[1]!))?.lapseHandledAt).not.toBeNull();
       expect((await events(s.memberships[1]!)).map((event) => event.eventName)).toEqual([
@@ -863,8 +851,10 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       // cancel it.
       stub.nextPut('hold');
       pauseSenderAtNextPut(stub, senders, PAUSE_MS);
-      // A request that must time out: the short fixture.
-      await expect(short.projector.project(s.userId, 'event')).rejects.toMatchObject({
+      // The test fires the deadline after the complete PUT reaches the server.
+      await expect(
+        timeline.timeoutAfterPut(stub, () => projector.project(s.userId, 'event')),
+      ).rejects.toMatchObject({
         code: 'UPSTREAM_UNAVAILABLE',
       });
       expect(stub.heldCount).toBe(1);
@@ -873,13 +863,14 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       // one beside it, and a recovery projection of the rows (D-070 D).
       expect(await settleRecoveryProjections(10_000)).toBe('finished');
       expect(carried(stub.puts(s.keycloakId).at(-1)!)).toEqual(wide);
-      expect(await fencesOf(s.userId)).toEqual([
+      expect(await fencesOf(s.userId, await timeline.observation(prisma, s.userId))).toEqual([
         expect.objectContaining({ live: true, operation: 'replace_attributes' }),
         expect.objectContaining({ live: true, operation: 'replace_attributes' }),
       ]);
 
       // A demotion now could be overtaken by that write: refused, nothing sent.
       const puts = stub.puts(s.keycloakId).length;
+      await timeline.holdLive(prisma, s.userId);
       await expect(demote(s, 0, ['OPERATOR'])).rejects.toMatchObject({
         code: 'KEYCLOAK_WRITE_SETTLING',
       });
@@ -903,7 +894,7 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
 
       // It does not stay so: once the mark passes, the sweep projects the
       // rows again and acts on the lapse, under the lock.
-      await untilEveryFenceTakenOver(prisma, s.userId);
+      await timeline.expire(prisma, s.userId);
       const only = new Set([s.memberships[1]]);
       const real = repository.findLapsedMemberships.bind(repository);
       jest
