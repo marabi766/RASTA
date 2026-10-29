@@ -10,8 +10,16 @@ import { guardedAbsenceMatchers } from '@rasta/testing';
  */
 export const expect = playwrightExpect.extend(guardedAbsenceMatchers(playwrightExpect));
 
-/** Every exported test.expect must share the same guarded assertion origin. */
-export const test = Object.assign(base.extend({}), { expect });
+/** Playwright resets test.expect on extend; guard every descendant at its creation. */
+function withGuard<T extends typeof base>(derived: T): T {
+  const extend = derived.extend;
+  return Object.assign(derived, {
+    expect,
+    extend: ((fixtures) => withGuard(extend(fixtures))) as T['extend'],
+  });
+}
+
+export const test = withGuard(base.extend({}));
 export type {
   APIRequestContext,
   Browser,
