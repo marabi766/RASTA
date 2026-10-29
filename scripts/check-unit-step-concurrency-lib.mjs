@@ -20,8 +20,9 @@
  * B': FULLY LITERAL eval arguments are joined and recursively parsed with this
  * lexer. ANY expansion ($var, ${..}, $(..), backticks) makes the argument DYNAMIC:
  * out of scope by D-074, neither parsed nor refused; its literal words OUTSIDE
- * expansions are still classified. source/. of a literal repo path scans that
- * file after the unit-token pre-check below; a non-repo literal path is dynamic,
+ * expansions are still classified; literal syntax/input failures REFUSE.
+ * source/. of a literal repo path scans that file after the unit-token pre-check
+ * below; a non-repo literal path is dynamic,
  * UNLESS C feeds it.
  * C: heredoc/here-string/pipeline input reaching sh/bash/dash/zsh/ksh/rbash or
  * source/. is parsed as commands, independent of stdin path spelling. A payload
@@ -338,7 +339,15 @@ function logicalCommands(script, opaqueFragments = false) {
     endCommand();
     return nodes;
   };
-  const nodes = scan();
+  let nodes;
+  try {
+    nodes = scan();
+  } catch (error) {
+    // Keep already completed commands available to the eval classifier. The
+    // malformed remainder still refuses; no unknown syntax is recovered/modelled.
+    error.commands = commands;
+    throw error;
+  }
   // A group's stdin is inherited by every member without its own input;
   // consumption/order is deliberately not simulated by this static tripwire.
   const connect = (items, incoming = null, input = null) => {
@@ -669,44 +678,62 @@ function inputPayload(node) {
   if (!node.input && node.pipedFrom) return pipelinePayload(node.pipedFrom);
   throw new Error('unsupported shell construct: interpreter input payload unavailable');
 }
-function scanPayload(payload, rootScripts, context) {
-  return logicalCommands(payload).some((command) =>
-    unbounded(command.words, rootScripts, command, context),
-  );
+function scanPayload(payload, rootScripts, context, opaqueFragments = false) {
+  let commands;
+  let failure;
+  try {
+    commands = logicalCommands(payload, opaqueFragments);
+  } catch (error) {
+    commands = error.commands ?? [];
+    failure = error;
+  }
+  let found = false;
+  for (const command of commands) {
+    try {
+      // Do not short-circuit: a refused literal command must not discard other
+      // complete commands, on either side of a classifier/input failure.
+      if (unbounded(command.words, rootScripts, command, context)) found = true;
+    } catch (error) {
+      found ||= error.literalUnbounded === true;
+      failure ??= error;
+    }
+  }
+  if (failure) {
+    const detection = found
+      ? '; literal unbounded unit invocation in complete literal fragment'
+      : '';
+    const refusal = new Error(failure.message + detection, { cause: failure });
+    refusal.literalUnbounded = found;
+    throw refusal;
+  }
+  return found;
 }
 function dynamicLiterals(args, rootScripts, context) {
-  // B': use the run-block lexer, including quote removal, groups and nested
-  // evaluation. Expansion atoms remain opaque and never generate shell code.
-  try {
-    return logicalCommands(args.join(' '), true).some((command) => {
-      try {
-        return unbounded(command.words, rootScripts, command, context);
-      } catch {
-        return false; // Dynamic/incomplete fragments are never refused (D-074).
-      }
-    });
-  } catch {
-    return false;
-  }
+  // Expansion atoms remain opaque. Failures in the surrounding literal syntax,
+  // repo reads or interpreter input are refusals, just as in literal eval.
+  return scanPayload(args.join(' '), rootScripts, context, true);
 }
 
-// Shell options stop at the script/command operand. A c in any short-option
-// cluster selects the next operand, even if an earlier option included s.
+// Bash consumes the whole option vector before selecting its command/script
+// operand, including options AFTER -c. Only this finite option set is modelled;
+// unknown option-like words must never fall through as alleged script paths.
 function shellArguments(args) {
   let i = 0;
   let stdin = false;
-  while (args[i]?.startsWith('-') && !['-', '--'].includes(args[i])) {
+  let command = false;
+  while (/^[-+]/.test(args[i] ?? '')) {
     const option = args[i++];
-    if (!/^-[acefhlmnprstuvxBCEHPT]+$/.test(option))
+    if (['-', '+', '--'].includes(option)) break;
+    if (!/^[-+][acefhlmnprstuvxBCEHPT]+$/.test(option))
       throw new Error(`unsupported shell construct: shell input option ${option}`);
     if (option.includes('s')) stdin = true;
-    if (option.includes('c')) {
-      if (args[i] == null)
-        throw new Error('unsupported shell construct: missing shell command string');
-      return { command: args[i] };
-    }
+    if (option.includes('c')) command = true;
   }
-  if (args[i] === '--') i += 1;
+  if (command) {
+    if (args[i] == null)
+      throw new Error('unsupported shell construct: missing shell command string');
+    return { command: args[i] };
+  }
   return { path: stdin ? undefined : args[i] };
 }
 

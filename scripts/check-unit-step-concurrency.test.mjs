@@ -1018,8 +1018,6 @@ test('r6 command-context boundary probes', () => {
     'npx env FLAG=value eval "${x:-value}"',
     'eval "echo safe $x"',
     "bash -s <<< 'echo safe'",
-    'eval "bash -c $x"',
-    'eval "env --unknown $x"',
     'eval "--unknown $x"',
     'source "-bad $x"',
     'eval "${x}" "source /outside.sh"',
@@ -1034,6 +1032,10 @@ test('r6 command-context boundary probes', () => {
   ])
     assert.deepEqual(probe(run), [], run);
   for (const [run, pattern] of [
+    // TASK 860: opaque expansions do not suppress literal interpreter/wrapper
+    // input refusals. The old permissive expectations preceded this PM decision.
+    ['eval "bash -c $x"', /missing shell command string/],
+    ['eval "env --unknown $x"', /unmodelled wrapper option/],
     ['env --bad pnpm test', /unmodelled wrapper option/],
     ['coproc --bad pnpm test', /unmodelled wrapper option/],
     ['env --unset', /missing wrapper option value/],
@@ -1409,3 +1411,223 @@ test('r7 script precheck real infra, unit scripts, and recursive paths via CLI',
     assert.match(result.stderr, pattern);
   }
 });
+
+// TASK 860 / r8: both review classes fail closed. These are option-vector and
+// literal-failure regressions, not extensions of the finite shell grammar.
+const r8Shells = ['sh', 'bash', 'dash', 'rbash', 'zsh', 'ksh'];
+const r8OptionVectors = [
+  '-c -e',
+  '-c --',
+  '+e -c',
+  '-ec -x',
+  '-c +e',
+  '-e +x -c',
+  '-s -c +x',
+  '+e -sx -ec +x --',
+  '-c -',
+  '-c +',
+  '+c',
+  '-s +s -c',
+];
+const r8Entries = ['source', '.', 'builtin -- source', 'bash', 'sh -e'];
+const r8Eval = (payload) => `eval ${JSON.stringify(payload)}`;
+const r8Quote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
+const r8EvalSites = [
+  (payload) => r8Eval(payload),
+  (payload) => `builtin -- ${r8Eval(payload)}`,
+  (payload) => `eval ${r8Quote(r8Eval(payload))}`,
+  (payload) => `builtin -- eval ${r8Quote(r8Eval(payload))}`,
+];
+const r8Failures = [
+  'ls *.log',
+  'echo ~',
+  'echo {one,two}',
+  "echo $'literal'",
+  'cat <(echo safe)',
+  'values=(one two)',
+  'bash --not-modelled',
+  'bash',
+  'bash <unknown',
+  'source ./ci/unreadable.sh',
+  'source ./ci/array.sh',
+];
+const r8Reader = (path) => {
+  if (path === './ci/unreadable.sh') throw new Error('unreadable repo script');
+  if (path === './ci/array.sh') return { path, text: 'values=(one two)\npnpm run test:unit' };
+  return r7ReadRepoFile(path);
+};
+const r8Closed = /literal unbounded|unsupported shell construct|unreadable repo script/;
+for (const [file, document] of scannedLocations) {
+  for (const newline of [null, '\n', '\r\n', '\r']) {
+    for (const shell of r8Shells) {
+      for (const options of r8OptionVectors) {
+        const original = `${shell} ${options} 'pnpm run test:unit' <<< 'echo safe'`;
+        const run = continued(original, newline);
+        test(`r8 options FOUND ${file} ${JSON.stringify(newline)}: ${original}`, () => {
+          refused(r7Problems(file, document, run), /literal unbounded/);
+          // The same vector must work when reached through a repository script.
+          for (const site of r8Entries) {
+            const reader = (path) => ({ path, text: run });
+            refused(
+              r7Problems(file, document, `${site} ./ci/options.sh`, reader),
+              /literal unbounded/,
+            );
+          }
+        });
+      }
+      for (const options of ['+Q -c', '-c -Q', '-c +Q', '--unknown -c', '-eo pipefail -c']) {
+        const run = continued(`${shell} ${options} 'pnpm run test:unit'`, newline);
+        test(`r8 options REFUSED ${file} ${JSON.stringify(newline)}: ${run}`, () => {
+          refused(r7Problems(file, document, run), /shell input option/);
+          for (const site of r8Entries) {
+            refused(
+              r7Problems(file, document, `${site} ./ci/options.sh`, (path) => ({
+                path,
+                text: run,
+              })),
+              /shell input option/,
+            );
+          }
+        });
+      }
+    }
+    for (const failure of r8Failures) {
+      for (const payload of [
+        `pnpm run test:unit $args; ${failure}`,
+        `${failure}; pnpm run test:unit $args`,
+        `${failure} $args; pnpm run test:unit`,
+        `pnpm run test:unit; ${failure} $args; pnpm test`,
+      ]) {
+        for (const evaluate of r8EvalSites) {
+          const run = continued(evaluate(payload), newline);
+          test(`r8 literal CLOSED ${file} ${JSON.stringify(newline)}: ${run}`, () => {
+            refused(r7Problems(file, document, run, r8Reader), r8Closed);
+            for (const site of r8Entries) {
+              const reader = (path) =>
+                path === './ci/outer.sh' ? { path, text: run } : r8Reader(path);
+              refused(r7Problems(file, document, `${site} ./ci/outer.sh`, reader), r8Closed);
+            }
+          });
+        }
+      }
+      // A classifier refusal in one eval must not suppress adjacent independent
+      // commands. Verify both the refusal AND the unit-command diagnostic.
+      for (const before of [true, false]) {
+        const failing = r8Eval(`${failure} $args`);
+        const run = before ? `pnpm test; ${failing}` : `${failing}; pnpm test`;
+        test(`r8 independent commands ${file}: ${run}`, () => {
+          const problems = r7Problems(file, document, continued(run, newline), r8Reader);
+          refused(problems, /literal unbounded/);
+          refused(problems, /unsupported shell construct|unreadable repo script/);
+        });
+      }
+    }
+    for (const payload of [
+      'pnpm --filter @rasta/* run test:unit $args',
+      'source ./ci/array.sh $args',
+      'bash ./ci/array.sh $args',
+      'source ./ci/unreadable.sh $args',
+      'bash ./ci/unreadable.sh $args',
+    ]) {
+      for (const evaluate of r8EvalSites) {
+        const run = continued(evaluate(payload), newline);
+        test(`r8 reviewer CLOSED ${file} ${JSON.stringify(newline)}: ${run}`, () =>
+          refused(r7Problems(file, document, run, r8Reader), r8Closed));
+      }
+    }
+  }
+  for (const shell of r8Shells) {
+    for (const options of ['-c -e', '+e -c', '-ec +x --']) {
+      test(`r8 options safe operand ${file}: ${shell} ${options}`, () => {
+        assert.deepEqual(
+          r7Problems(file, document, `${shell} ${options} 'echo safe' 'pnpm run test:unit'`),
+          [],
+        );
+      });
+    }
+    test(`r8 options stop at script operand ${file}: ${shell}`, () => {
+      assert.deepEqual(
+        r7Problems(file, document, `${shell} ./safe.sh -c 'pnpm run test:unit'`),
+        [],
+      );
+      // Bash's invocation +s selects stdin too; it does not undo -s.
+      refused(
+        r7Problems(file, document, `${shell} -s +s ./ci/unit.sh`),
+        /shell stdin or command string/,
+      );
+    });
+    test(`r8 options missing operand ${file}: ${shell}`, () =>
+      refused(r7Problems(file, document, `${shell} -c +e --`), /missing shell command string/));
+  }
+  for (const payload of [
+    '$args',
+    '${args}',
+    '${args:-ls *.log}',
+    '${args:-values=(one two)}',
+    '${args:-bash --unknown}',
+    'echo "$args"',
+  ]) {
+    for (const evaluate of r8EvalSites) {
+      test(`r8 opaque ACCEPTED ${file}: ${evaluate(payload)}`, () =>
+        assert.deepEqual(r7Problems(file, document, evaluate(payload)), []));
+    }
+  }
+}
+
+test('r8 CLI propagates unreadable repo script and interpreter-input refusals through eval', (t) => {
+  const fixture = cliFixture(t);
+  // Reading a directory fails deterministically, including when run as root.
+  mkdirSync(join(fixture.directory, 'ci/unreadable.sh'), { recursive: true });
+  fixture.write('ci/array.sh', 'values=(one two)\npnpm run test:unit');
+  const step = { run: '' };
+  fixture.doc.jobs.quality.steps.push(step);
+  for (const payload of [
+    'source ./ci/unreadable.sh $args',
+    'source ./ci/array.sh $args',
+    'bash ./ci/array.sh $args',
+    'bash $args',
+    'bash <unknown $args',
+  ]) {
+    for (const evaluate of r8EvalSites) {
+      step.run = evaluate(payload);
+      fixture.workflow();
+      const result = fixture.run();
+      assert.equal(result.status, 1, step.run + result.stderr);
+      assert.match(result.stderr, /EISDIR|array assignment|shell stdin|interpreter input/);
+    }
+  }
+});
+
+for (const [file, document] of scannedLocations) {
+  for (const failure of [
+    'source ./ci/unreadable.sh',
+    'source ./ci/array.sh',
+    'bash <unknown',
+    'bash --not-modelled',
+  ]) {
+    for (const payload of [`pnpm test $args; ${failure}`, `${failure} $args; pnpm test`]) {
+      for (const evaluate of r8EvalSites) {
+        test(`r8 complete fragments ${file}: ${evaluate(payload)}`, () => {
+          const problems = r7Problems(file, document, evaluate(payload), r8Reader);
+          refused(problems, /unsupported shell construct|unreadable repo script/);
+          refused(problems, /literal unbounded/);
+        });
+      }
+    }
+  }
+  test(`r8 reviewer complete command before literal lexer failure ${file}`, () => {
+    const problems = r7Problems(file, document, 'eval "pnpm run test:unit $args; ls *.log"');
+    refused(problems, /pathname expansion/);
+    refused(problems, /literal unbounded/);
+  });
+}
+
+for (const [file, document] of scannedLocations) {
+  test(`r8 nested detection survives an earlier refusal ${file}`, () => {
+    const run =
+      'eval "source ./ci/unreadable.sh $args; builtin -- eval \\"source ./ci/array.sh; pnpm test\\"; bash <unknown"';
+    const problems = r7Problems(file, document, run, r8Reader);
+    refused(problems, /unreadable repo script/);
+    refused(problems, /literal unbounded/);
+  });
+}
