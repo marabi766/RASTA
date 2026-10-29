@@ -1,12 +1,13 @@
 // Fail closed at every Jest configuration and Playwright assertion entry point (#452).
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { tokenizeShell } from './check-dockerfile-pins-lib.mjs';
+import { jestCommands } from './disclosure-jest-launches.mjs';
+export { jestCommands } from './disclosure-jest-launches.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const require = createRequire(import.meta.url);
@@ -80,73 +81,6 @@ async function effectiveJestProblems(config, name, directory, args) {
   } finally {
     process.chdir(previous);
   }
-}
-
-/** Commands from package scripts and workflow run steps, including forwarded overrides. */
-export function jestCommands(paths, read) {
-  const yaml = require('yaml');
-  const packages = paths
-    .filter((path) => /(^|\/)package\.json$/.test(path))
-    .map((path) => ({ path, pkg: JSON.parse(read(path)), directory: dirname(path) }));
-  const commands = [];
-  const inspect = (script, name, directory) => {
-    const parsed = tokenizeShell(script);
-    let cwd = directory;
-    for (const command of parsed.commands) {
-      const words = command.words.map(({ value }) => value);
-      if (words[0] === 'cd') {
-        cwd = join(cwd, words[1] ?? '.');
-        continue;
-      }
-      const jestIndex = words.findIndex((word) => /(?:^|\/)jest(?:\.js)?$/.test(word));
-      const override = words.findIndex((word) =>
-        /^--(?:setupFilesAfterEnv|setup-files-after-env|projects|preset|rootDir|root-dir)(?:=|$)/.test(
-          word,
-        ),
-      );
-      if (jestIndex < 0 && override < 0) {
-        for (const word of words)
-          if (/\s/.test(word) && /(?:\bjest\b|--setup)/.test(word)) inspect(word, name, cwd);
-        continue;
-      }
-      // pnpm --filter/--dir selects Jest's cwd before its CLI is invoked.
-      const selector = words.findIndex((word) => ['--filter', '-F', '--dir', '-C'].includes(word));
-      let selected = cwd;
-      if (selector >= 0) {
-        const option = words[selector];
-        const value = words[selector + 1];
-        const pkg = packages.find(({ pkg }) => pkg.name === value);
-        selected = ['--dir', '-C'].includes(option) ? join(cwd, value) : pkg?.directory;
-      }
-      commands.push({
-        name,
-        directory: selected && resolve(root, selected),
-        args: words
-          .slice(jestIndex >= 0 ? jestIndex + 1 : override)
-          .filter((word) => word !== '--'),
-        opaque: command.words.some(({ value, opaque }) => opaque || value.includes('$')),
-      });
-    }
-    for (const nested of parsed.nested) inspect(nested.script, name, cwd);
-  };
-  for (const { path, pkg, directory } of packages)
-    for (const [name, script] of Object.entries(pkg.scripts ?? {}))
-      inspect(script, `${path} script ${name}`, directory);
-  for (const path of paths.filter((path) => /^\.github\/workflows\/.*\.ya?ml$/.test(path))) {
-    const workflow = yaml.parse(read(path));
-    for (const [jobName, job] of Object.entries(workflow.jobs ?? {}))
-      for (const [index, step] of (job.steps ?? []).entries())
-        if (typeof step.run === 'string')
-          inspect(
-            step.run,
-            `${path} ${jobName} step ${index}`,
-            step['working-directory'] ??
-              job.defaults?.run?.['working-directory'] ??
-              workflow.defaults?.run?.['working-directory'] ??
-              '.',
-          );
-  }
-  return commands;
 }
 
 /** Enumerate defaults, embedded package configuration, and EVERY explicit script selection. */
@@ -483,7 +417,7 @@ test('every package/CI Jest command retains the guard after CLI overrides', asyn
   const problems = [];
   for (const command of commands) {
     if (!command.directory || command.opaque)
-      problems.push(`${command.name}: unresolved Jest command`);
+      problems.push(`${command.name}: unresolved Jest command (${command.reason ?? 'opaque'})`);
     else
       problems.push(
         ...(await jestWiringProblems(undefined, command.name, command.directory, command.args)),
@@ -852,6 +786,7 @@ test('package, forwarded alias, shell wrapper and CI overrides reach effective J
     [paths[0]]: JSON.stringify({
       name: '@rasta/web',
       scripts: {
+        test: 'jest',
         direct: `jest --setupFilesAfterEnv ${setup}`,
         forwarded: `pnpm run test -- --setupFilesAfterEnv ${setup}`,
         wrapped: `bash -c 'jest --setupFilesAfterEnv ${setup}'`,
@@ -861,8 +796,8 @@ test('package, forwarded alias, shell wrapper and CI overrides reach effective J
     [paths[1]]: `jobs:\n  control:\n    steps:\n      - run: pnpm --filter @rasta/web exec jest --setup-files-after-env=${setup}\n`,
   };
   const commands = jestCommands(paths, (path) => sources[path]);
-  assert.equal(commands.length, 5);
-  for (const command of commands) {
+  assert.equal(commands.length, 6);
+  for (const command of commands.filter((command) => !command.name.endsWith('script test'))) {
     assert.equal(command.directory, join(root, 'apps/web'));
     assert.equal(command.opaque, false);
     const problems = await jestWiringProblems(
@@ -977,4 +912,304 @@ test('a guarded side import does not approve a different exported assertion bind
       read,
     ).length > 0,
   );
+});
+
+// R1: ordinary launch paths must reach readConfigs, or explicitly refuse.
+function launchControl(run, place = 'workflow', extra = {}) {
+  const path =
+    place === 'package'
+      ? 'apps/web/package.json'
+      : place === 'composite'
+        ? '.github/actions/control/action.yml'
+        : '.github/workflows/control.yml';
+  const sources = {
+    'apps/web/package.json': JSON.stringify({ name: '@rasta/web', scripts: { test: 'jest' } }),
+    ...extra,
+  };
+  sources[path] =
+    place === 'package'
+      ? JSON.stringify({ name: '@rasta/web', scripts: { test: 'jest', control: run } })
+      : place === 'composite'
+        ? require('yaml').stringify({
+            runs: { using: 'composite', steps: [{ run, shell: 'bash' }] },
+          })
+        : require('yaml').stringify({ jobs: { control: { steps: [{ run }] } } });
+  return jestCommands(Object.keys(sources), (path) => {
+    if (!Object.hasOwn(sources, path)) throw new Error('missing control source');
+    return sources[path];
+  }).filter(({ name }) =>
+    place === 'package' ? name.endsWith('script control') : name.startsWith(path),
+  );
+}
+
+const selectionFlags = [
+  '--config',
+  '--config=',
+  '-c',
+  '--projects',
+  '--preset',
+  '--rootDir',
+  '--root-dir',
+];
+for (const flag of selectionFlags) {
+  for (const place of ['workflow', 'composite', 'package']) {
+    for (const wrapped of [false, true]) {
+      test(`R1 ${place} ${wrapped ? 'shell' : 'forwarded'} ${flag} reaches effective configuration`, async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'rasta-jest-selection-'));
+        try {
+          const config = join(
+            directory,
+            flag === '--preset' ? 'jest-preset.json' : 'alternative.json',
+          );
+          writeFileSync(config, JSON.stringify(flag === '--preset' ? {} : { rootDir: directory }));
+          const value = flag === '--preset' ? directory : config;
+          const argument = flag === '--config=' ? `${flag}${value}` : `${flag} ${value}`;
+          let run =
+            place === 'package'
+              ? `pnpm test -- ${argument}`
+              : `pnpm --filter @rasta/web test -- ${argument}`;
+          if (wrapped) run = `bash -lc '${run}'`;
+          const commands = launchControl(run, place);
+          assert.equal(commands.length, 1);
+          assert.equal(commands[0].opaque, false);
+          assert.equal(commands[0].directory, join(root, 'apps/web'));
+          const args = flag === '--config=' ? [`${flag}${value}`] : [flag, value];
+          assert.deepEqual(commands[0].args, args);
+          const problems = await jestWiringProblems(
+            undefined,
+            'R1',
+            commands[0].directory,
+            commands[0].args,
+          );
+          // Presets merge with the guarded default; root/config/projects either resolve or refuse.
+          if (['--config', '--config=', '-c', '--projects'].includes(flag)) {
+            assert.equal(problems.length, 1);
+            assert.match(problems[0], /setupFilesAfterEnv lacks/);
+          } else if (flag === '--preset') assert.deepEqual(problems, []);
+          else assert.ok(problems.length > 0);
+        } finally {
+          rmSync(directory, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+  test(`R1 opaque ${flag} refuses in all three sources and shell wrappers`, () => {
+    for (const place of ['workflow', 'composite', 'package']) {
+      const prefix = place === 'package' ? 'pnpm test' : 'pnpm --filter @rasta/web test';
+      const argument = flag.endsWith('=') ? `${flag}"$ALT"` : `${flag} "$ALT"`;
+      for (const run of [`${prefix} -- ${argument}`, `bash -c '${prefix} -- ${argument}'`]) {
+        const commands = launchControl(run, place);
+        assert.equal(commands.length, 1);
+        assert.equal(commands[0].opaque, true);
+      }
+    }
+  });
+}
+
+for (const place of ['workflow', 'composite', 'package']) {
+  for (const extension of ['sh', 'bash', 'mjs', 'cjs', 'js', 'ts']) {
+    for (const launch of ['jest', 'pnpm test']) {
+      test(`R1 ${place} unregistered .${extension} spawning ${launch} refuses`, () => {
+        const file = `${place === 'package' ? 'apps/web/' : ''}control.${extension}`;
+        const body = /^(?:sh|bash)$/.test(extension)
+          ? launch
+          : launch === 'jest'
+            ? "require('node:child_process').spawnSync('jest', []);"
+            : "import { spawn as launch } from 'node:child_process'; launch('pnpm', ['test']);";
+        const commands = launchControl(
+          `${/^(?:sh|bash)$/.test(extension) ? 'bash' : 'node'} control.${extension}`,
+          place,
+          { [file]: body },
+        );
+        assert.equal(commands.length, 1);
+        assert.equal(commands[0].opaque, true);
+        assert.match(commands[0].reason, /unregistered Jest launcher/);
+      });
+    }
+  }
+}
+
+test('R1 guarded alternative configuration is accepted through npm, pnpm and shell forwarding', async () => {
+  const config = JSON.stringify({ rootDir: join(root, 'apps/web'), setupFilesAfterEnv: [GUARD] });
+  for (const run of [
+    `pnpm --filter=@rasta/web test -- --config '${config}'`,
+    `npm --prefix apps/web run test -- -c '${config}'`,
+    `bash -c 'pnpm --dir apps/web test -- --config ${JSON.stringify(config)}'`,
+  ]) {
+    const commands = launchControl(run);
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].opaque, false);
+    assert.deepEqual(
+      await jestWiringProblems(
+        undefined,
+        'guarded alternative',
+        commands[0].directory,
+        commands[0].args,
+      ),
+      [],
+    );
+  }
+});
+
+test('R1 every Node --test operand and pnpm exec file launcher is pre-checked', () => {
+  const extra = {
+    'safe.mjs': 'export {};',
+    'unsafe.mjs': "import { spawn } from 'node:child_process'; spawn('pnpm', ['test']);",
+    'wrapped.mjs': "import launch from 'execa'; launch('pnpm', ['test']);",
+  };
+  for (const run of [
+    'node --test safe.mjs unsafe.mjs',
+    'pnpm exec node unsafe.mjs',
+    'pnpm exec tsx wrapped.mjs',
+  ]) {
+    const commands = launchControl(run, 'workflow', extra);
+    assert.equal(commands.length, 1);
+    assert.match(commands[0].reason, /unregistered/);
+  }
+});
+
+test('R1 registry checks all three real launch paths and refuses executable/helper drift', async () => {
+  const { JEST_LAUNCHERS } = await import('./disclosure-jest-launchers.mjs');
+  const paths = everyFile.filter((path) => /(^|\/)package\.json$/.test(path));
+  const control = '.github/workflows/registry-control.yml';
+  paths.push(control);
+  for (const [file, args] of [
+    ['scripts/verify-test-independence.mjs', 'services/maintenance-service event-flow'],
+    ['scripts/aggregation-evidence.mjs', 'report.txt'],
+    ['scripts/run-test-phases.mjs', 'test:integration'],
+  ]) {
+    const read = (path) =>
+      path === control
+        ? `jobs:\n  control:\n    steps:\n      - run: node ${file} ${args}\n`
+        : readFileSync(join(root, path), 'utf8');
+    const commands = jestCommands(paths, read).filter(({ name }) => name.startsWith(control));
+    assert.ok(commands.length > 0);
+    for (const command of commands) {
+      assert.equal(command.opaque, false);
+      assert.deepEqual(
+        await jestWiringProblems(undefined, file, command.directory, command.args),
+        [],
+      );
+    }
+    for (const dependency of Object.keys(JEST_LAUNCHERS[file].sha256)) {
+      const drifted = jestCommands(
+        paths,
+        (path) => read(path) + (path === dependency ? '\n// changed' : ''),
+      ).filter(({ name }) => name.startsWith(control));
+      assert.equal(drifted.length, 1);
+      assert.match(drifted[0].reason, /changed\/unreadable/);
+    }
+  }
+});
+
+test('R1 subshell cwd does not leak to sibling launches', () => {
+  const commands = launchControl(
+    '( cd apps/web && pnpm test -- --config a.json ); pnpm --filter @rasta/web test -- --config b.json',
+  );
+  assert.equal(commands.length, 2);
+  assert.ok(commands.every(({ directory }) => directory === join(root, 'apps/web')));
+  assert.deepEqual(
+    commands.map(({ args }) => args),
+    [
+      ['--config', 'a.json'],
+      ['--config', 'b.json'],
+    ],
+  );
+});
+
+test('R1 root phase scripts preserve forwarded configuration through Turbo in both phases', async () => {
+  const control = '.github/workflows/root-control.yml';
+  const args = [
+    '--config',
+    JSON.stringify({ rootDir: join(root, 'apps/web'), setupFilesAfterEnv: [GUARD] }),
+  ];
+  const run = `pnpm run test:integration -- --config '${args[1]}'`;
+  const commands = jestCommands(
+    [...everyFile.filter((path) => /(^|\/)package\.json$/.test(path)), control],
+    (path) =>
+      path === control
+        ? require('yaml').stringify({ jobs: { control: { steps: [{ run }] } } })
+        : readFileSync(join(root, path), 'utf8'),
+  ).filter(({ name }) => name.startsWith(control));
+  assert.equal(commands.length, 18);
+  assert.ok(commands.at(-1).args.includes('aggregation-stress'));
+  for (const command of commands) {
+    assert.equal(command.opaque, false);
+    assert.ok(command.args.includes(args[1]));
+    assert.deepEqual(
+      await jestWiringProblems(undefined, 'root forwarding', command.directory, command.args),
+      [],
+    );
+  }
+});
+
+test('R1 env-prefixed shell wrappers and unresolved script aliases fail closed', () => {
+  for (const run of [
+    'env CI=1 bash -lc \'pnpm --filter @rasta/web test -- --config "$CONFIG"\'',
+    'pnpm --filter @rasta/web missing-script -- --config alternative.cjs',
+    'pnpm --filter "$PACKAGE" test -- --config alternative.cjs',
+  ]) {
+    const commands = launchControl(run);
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].opaque, true);
+  }
+});
+
+test('R1 reviewer trigger: forwarded configs/unit.cjs with normal web transform and no setup refuses', async () => {
+  const directory = mkdtempSync(join(root, 'apps/web/.disclosure-reviewer-'));
+  try {
+    mkdirSync(join(directory, 'configs'));
+    writeFileSync(
+      join(directory, 'configs/unit.cjs'),
+      `module.exports = { ...require(${JSON.stringify(join(root, 'apps/web/jest.config.cjs'))}), setupFilesAfterEnv: [] };`,
+    );
+    const pkg = relative(root, join(directory, 'package.json'));
+    const workflow = '.github/workflows/reviewer-control.yml';
+    const commands = jestCommands([pkg, workflow], (path) =>
+      path === pkg
+        ? JSON.stringify({ name: '@rasta/web', scripts: { test: 'jest' } })
+        : 'jobs:\n  control:\n    steps:\n      - run: pnpm --filter @rasta/web test -- --config configs/unit.cjs\n',
+    ).filter(({ name }) => name.startsWith(workflow));
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].opaque, false);
+    assert.deepEqual(commands[0].args, ['--config', 'configs/unit.cjs']);
+    const problems = await jestWiringProblems(
+      undefined,
+      'reviewer trigger',
+      commands[0].directory,
+      commands[0].args,
+    );
+    assert.equal(problems.length, 1);
+    assert.match(problems[0], /setupFilesAfterEnv lacks/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('R1 unsupported shell/inline launchers refuse instead of hiding configuration flags', () => {
+  for (const run of [
+    'eval "pnpm --filter @rasta/web test -- --config alternative.cjs"',
+    'npx -c "jest --config alternative.cjs"',
+    'bash -c \'"$RUNNER" --config alternative.cjs\'',
+    'fish -c "pnpm --filter @rasta/web test -- --projects alternative.cjs"',
+  ]) {
+    const commands = launchControl(run);
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].opaque, true);
+  }
+});
+
+test('R1 unsupported cwd selectors and ambiguous Jest script dispatch refuse', () => {
+  for (const prefix of [
+    'pnpm -Capps/web exec',
+    'pnpm -F@rasta/web exec',
+    'pnpm -r exec',
+    'env --chdir=apps/web pnpm exec',
+    'pnpm --filter @rasta/web run',
+    'pnpm --filter @rasta/web test --',
+  ]) {
+    const commands = launchControl(`${prefix} jest --config alternative.cjs`);
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].opaque, true);
+  }
 });
