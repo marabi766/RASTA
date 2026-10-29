@@ -87,7 +87,11 @@ now + grace`) در همان تراکنشی که ساخته می‌شود، و ه
 `422 BUSINESS_RULE_VIOLATION` رد می‌شود، پیش از هر Hold یا فراخوانی Provider و بی Hold باقی‌مانده، و Intent پس از فعال‌شدن
 دوبارهٔ کیف پول بازپرداخت‌پذیر می‌ماند. معکوس‌کردنِ بدهکار پس از بازپرداخت Provider (`REFUNDED_NOT_REVERSED`) هم با مبلغ
 Hold‌شده منتظر می‌ماند؛ فقط برگرداندن Hold یک ردِ Provider (`REFUND_DECLINED_RELEASE_PENDING`) که پول را به کیف پول
-برمی‌گرداند مجاز است.
+برمی‌گرداند مجاز است. پاسخ آن بازپرداخت، و هر تلاش بعدی تا فعال‌شدن کیف پول، `422` با `details[].code =
+REFUND_REVERSAL_PENDING` است: Provider بازپرداخت کرده، نه ردِ پیش از پرسیدن از آن (`docs/06` § ۶٫۸؛ Codex #480 دور ۲، N1).
+آشتی‌دهنده معکوس را تا فعال‌شدن کیف پول به تعویق می‌اندازد، ولی فقط تا وقتی تسک `PENDING` است: پس از
+`ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS` (پیش‌فرض ۷۲ ساعت) تسک `ESCALATED` می‌شود و فعال‌شدن دوباره به‌تنهایی آن را
+حل نمی‌کند؛ روال اپراتور: [runbook](../runbooks/payment-refund-stuck.md) § ۲.
 
 `MockPaymentProvider` بازپرداخت را با کلید Idempotency (و مرجع) Dedupe می‌کند و بازپرداخت دوم یک مرجع با کلید دیگر را
 `ALREADY_REFUNDED` رد می‌کند، تا فراخوانی دوم در تست دیدنی باشد.
