@@ -175,7 +175,7 @@ describe('Keycloak projection and approval transactions outlast the connection s
 
   async function submit(): Promise<{ registrationId: string; userId: string; username: string }> {
     const username = `stmt-${ulid().slice(-12)}`.toLowerCase();
-    const { registrationId } = await service.submitRegistration({
+    const { registrationId } = (await service.recordRegistration({
       username,
       email: `${username}@example.test`,
       firstName: 'متقاضی',
@@ -183,7 +183,7 @@ describe('Keycloak projection and approval transactions outlast the connection s
       requestedOrganizationId: org.a,
       requestedRoles: ['FLEET_MANAGER'],
       documentRefs: [],
-    } as never);
+    } as never))!;
     const request = await runUnscoped('the suite reads the request it filed', () =>
       prisma.client.registrationRequest.findUniqueOrThrow({ where: { id: registrationId } }),
     );

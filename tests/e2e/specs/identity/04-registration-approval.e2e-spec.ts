@@ -20,17 +20,22 @@ import {
  * Keycloak drops it), and that an administrator's later disable survives a
  * projection.
  *
+ * The submission's answer carries no id (task 117, F5: it is the same
+ * acknowledgement whether or not the username or email was already held), so
+ * the reviewer finds the request in the review queue,
+ * `GET /v1/registration-requests`, by the applicant's username.
+ *
  * Gateway budget: the `registration-requests` prefix allows 5 calls per caller
  * per hour (`services/api-gateway/src/config/routes.ts`). This file makes one
- * anonymous call (the submission) and one as `system.admin` (the approval);
- * no other scenario uses either budget on that prefix.
+ * anonymous call (the submission) and two as `system.admin` (the queue read
+ * and the approval); no other scenario uses either budget on that prefix.
  */
 test.describe.serial('Self-registration approved through the gateway (#219)', () => {
   const username = `e2e.registration.${randomUUID().slice(0, 8)}`;
   let registrationId = '';
   let userId = '';
 
-  test('an anonymous submission is accepted and creates no account', async ({
+  test('an anonymous submission is acknowledged, and creates no account', async ({
     request,
     config,
   }) => {
@@ -51,12 +56,23 @@ test.describe.serial('Self-registration approved through the gateway (#219)', ()
       },
       failOnStatusCode: false,
     });
-    expect(submitted.status()).toBe(201);
-    registrationId = ((await submitted.json()) as { registrationId: string }).registrationId;
-    expect(registrationId).not.toBe('');
+    // The one acknowledgement every valid submission gets, byte for byte.
+    expect(submitted.status()).toBe(202);
+    expect(await submitted.text()).toBe('{"status":"RECEIVED"}');
 
     // Nothing in Keycloak until a reviewer decides.
     await expect(readAccount(username)).rejects.toThrow(/No Keycloak account/);
+  });
+
+  test('the reviewer finds it in the review queue', async ({ systemAdmin }) => {
+    const queue = await systemAdmin.get(
+      `/v1/registration-requests?status=PENDING&username=${encodeURIComponent(username)}`,
+    );
+    expect(queue.status).toBe(200);
+    const items = (queue.body as { items: { id: string; username: string; status: string }[] })
+      .items;
+    expect(items).toEqual([expect.objectContaining({ username, status: 'PENDING' })]);
+    registrationId = items[0]!.id;
   });
 
   test('the approval commits, then enables the account once, marked with the request', async ({

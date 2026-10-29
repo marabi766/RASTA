@@ -54,7 +54,7 @@ export {
 // Authentication -------------------------------------------------------------
 export { TokenVerifier, InternalTokenService } from './auth/token-verifier';
 export { internalGet } from './auth/internal-get';
-export { internalFetch } from './http/internal-fetch';
+export { RedirectRefusedError, internalFetch } from './http/internal-fetch';
 export {
   currentActor,
   compareActors,

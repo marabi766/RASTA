@@ -473,6 +473,31 @@ model AuditCorrectionCommand {
   @@map("audit_correction_command")
 }
 
+/// A direct provisioning's intent (`POST /v1/users`, task 117 F6): written and
+/// committed before the Keycloak account is created, with the stable user id
+/// the account carries as `rasta_user_id`. A retry with the same actor, key,
+/// acting organization and body creates under that id or adopts the account an
+/// earlier attempt created; once the user committed, it replays the answer.
+/// Not tenant-scoped: keyed by the verified actor, like `AuditCorrectionCommand`.
+model UserProvisioningIntent {
+  actorId              String    @map("actor_id") @db.VarChar(256)
+  idempotencyKey       String    @map("idempotency_key") @db.VarChar(255)
+  actingOrganizationId String?   @map("acting_organization_id") @db.VarChar(64)
+  /// SHA-256 of the normalised request body — never the body itself.
+  requestHash          String    @map("request_hash") @db.Char(64)
+  userId               String    @unique(map: "ux_user_provisioning_intent_user") @map("user_id") @db.VarChar(64)
+  membershipId         String    @map("membership_id") @db.VarChar(64)
+  createdAt            DateTime  @default(now()) @map("created_at")
+  completedAt          DateTime? @map("completed_at")
+  /// The answer a retry replays once the user committed.
+  responseBody         Json?     @map("response_body")
+
+  // SQL-only (migration 20261029120000): CHECK completed_at and response_body
+  // are both null or both set.
+  @@id([actorId, idempotencyKey])
+  @@map("user_provisioning_intent")
+}
+
 /// One Keycloak write attempt of a user that may still land (D-069, ADR-060
 /// write-ahead addendum): the durable in-flight fence. Inserted and committed,
 /// on its own connection pool, **before** the PUT is sent; deleted only when

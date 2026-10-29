@@ -1,4 +1,4 @@
-import { internalFetch } from './internal-fetch';
+import { RedirectRefusedError, internalFetch } from './internal-fetch';
 
 describe('internalFetch', () => {
   it.each([301, 302, 303, 307, 308])(
@@ -10,13 +10,14 @@ describe('internalFetch', () => {
       const transport = jest.fn(
         async (_input: Parameters<typeof fetch>[0], _init?: RequestInit) => response,
       );
-      await expect(
-        internalFetch(
-          'http://source.test',
-          { headers: { 'x-internal-token': 'token' } },
-          transport,
-        ),
-      ).rejects.toThrow('Internal service redirect refused');
+      const refusal = internalFetch(
+        'http://source.test',
+        { headers: { 'x-internal-token': 'token' } },
+        transport,
+      );
+      await expect(refusal).rejects.toThrow('Internal service redirect refused');
+      // Typed, so a caller can tell a redirect from every other failure.
+      await expect(refusal).rejects.toBeInstanceOf(RedirectRefusedError);
       expect(transport).toHaveBeenCalledTimes(1);
       expect(transport.mock.calls[0]).toEqual([
         'http://source.test',

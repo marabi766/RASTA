@@ -3,7 +3,7 @@ import { runUnscoped } from '@rasta/nest-common';
 import { errorEnvelope, expectNotDisclosed } from '@rasta/testing';
 import { platformAttributesFor } from '../src/keycloak/platform-attributes';
 import { startIdentityApi, userToken, type IdentityApiHarness } from './api-helpers';
-import { id, tenants } from './helpers';
+import { ensureLiveMember, id, tenants } from './helpers';
 import { KeycloakHttpStub } from './keycloak-http-stub';
 
 /**
@@ -85,6 +85,13 @@ describe('narrowing over HTTP (D-064)', () => {
         ],
         new Date(),
       ),
+    });
+    // The administrator the tokens below name, live in the database: what a
+    // membership change re-reads under its locks (task 117, F1).
+    await ensureLiveMember(harness.prisma, {
+      userId: 'USR-WAH-ADMIN',
+      organizationId: org.a,
+      roles: ['ORGANIZATION_ADMIN'],
     });
     return { org, userId, membershipId, keycloakId };
   }

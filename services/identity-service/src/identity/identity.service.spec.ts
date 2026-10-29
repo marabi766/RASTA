@@ -1,4 +1,4 @@
-import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
+import { RastaError, getContext, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { TEST_ORG_A, TEST_ORG_B, TEST_USER_A, TEST_USER_B } from '@rasta/testing';
 import { IdentityService } from './identity.service';
 import type { IdentityRepository } from './identity.repository';
@@ -74,6 +74,7 @@ interface Harness {
 
 function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harness {
   const enqueued: Array<{ eventName: string; payload: unknown }> = [];
+  const intents: Record<string, Record<string, unknown>> = {};
 
   const tx = {
     user: { create: jest.fn(), update: jest.fn() },
@@ -108,8 +109,48 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
     lockUserMemberships: jest.fn(async () => ({ activeOrganizationId: TEST_ORG_A })),
     findOrganizationRefs: jest.fn(async () => []),
     listUsersInOrganization: jest.fn(),
+    // The caller's live roles (task 117, F1): by default what the token says,
+    // so the tests of everything else read as they did; `live-authority` tests
+    // set the two apart.
+    findLiveRoles: jest.fn(async () =>
+      getContext().roles.filter((role) => role !== 'SYSTEM_ADMIN'),
+    ),
+    // Access proof for another person (F3): whatever `findMembership` answers.
+    findLiveMembership: jest.fn((...args: Parameters<IdentityRepository['findMembership']>) =>
+      repository.findMembership(args[0], args[1]),
+    ),
+    // A direct provisioning's intent (F6): one per key, held here.
+    claimProvisioningIntent: jest.fn(
+      async (_tx: unknown, input: Record<string, unknown>) =>
+        (intents[String(input.idempotencyKey)] ??= {
+          ...input,
+          completedAt: null,
+          responseBody: null,
+        }),
+    ),
+    lockProvisioningIntent: jest.fn(
+      async (_tx: unknown, _actor: string, key: string) => intents[key] ?? null,
+    ),
+    completeProvisioningIntent: jest.fn(
+      async (_tx: unknown, _actor: string, key: string, response: unknown) => {
+        intents[key] = { ...intents[key], completedAt: new Date(), responseBody: response };
+      },
+    ),
     ...overrides,
   } as unknown as jest.Mocked<IdentityRepository>;
+  // Every user lock of an administration write, the caller's beside the
+  // target's (`lockUsersInOrder`): the targets' through `lockUserMemberships`.
+  (repository as unknown as Record<string, unknown>).lockUsersInOrder ??= jest.fn(
+    async (lockTx: unknown, targets: string[]) =>
+      new Map(
+        await Promise.all(
+          targets.map(
+            async (target) =>
+              [target, await repository.lockUserMemberships(lockTx as never, target)] as const,
+          ),
+        ),
+      ),
+  );
   // A revocation reads ended memberships too (sent again, it answers as it
   // did): here the same rows as `findMembershipById`, whatever a test mocks.
   (repository as unknown as Record<string, unknown>).findMembershipByIdIncludingRevoked ??= jest.fn(
@@ -364,14 +405,17 @@ describe('createUser', () => {
 
     const error = await runWithContext(context(), () =>
       h.service
-        .createUser({
-          username: 'someone',
-          email: 'someone@rasta.local',
-          firstName: 'A',
-          lastName: 'B',
-          organizationId: TEST_ORG_A,
-          roles: ['OPERATOR'],
-        })
+        .createUser(
+          {
+            username: 'someone',
+            email: 'someone@rasta.local',
+            firstName: 'A',
+            lastName: 'B',
+            organizationId: TEST_ORG_A,
+            roles: ['OPERATOR'],
+          },
+          'itest-key',
+        )
         .catch((e: unknown) => e),
     );
 
@@ -390,14 +434,17 @@ describe('createUser', () => {
     client.membership.create.mockResolvedValue(membershipRow());
 
     await runWithContext(context(), () =>
-      h.service.createUser({
-        username: 'new.user',
-        email: 'new.user@rasta.local',
-        firstName: 'نو',
-        lastName: 'کاربر',
-        organizationId: TEST_ORG_A,
-        roles: ['OPERATOR'],
-      }),
+      h.service.createUser(
+        {
+          username: 'new.user',
+          email: 'new.user@rasta.local',
+          firstName: 'نو',
+          lastName: 'کاربر',
+          organizationId: TEST_ORG_A,
+          roles: ['OPERATOR'],
+        },
+        'itest-key',
+      ),
     );
 
     expect(h.enqueued.map((e) => e.eventName)).toEqual([
@@ -405,10 +452,11 @@ describe('createUser', () => {
       IDENTITY_EVENTS.MEMBERSHIP_CREATED,
     ]);
     // The events go through the same transaction callback as the writes, which
-    // is what the outbox guarantee rests on. The second transaction is the
-    // projection after commit, which writes the grants and enables the
+    // is what the outbox guarantee rests on. The first transaction commits the
+    // provisioning's intent before Keycloak is called (task 117, F6); the third
+    // is the projection after commit, which writes the grants and enables the
     // account (D-069 addendum D).
-    expect(h.repository.transaction).toHaveBeenCalledTimes(2);
+    expect(h.repository.transaction).toHaveBeenCalledTimes(3);
     expect(h.enqueued).toHaveLength(2);
   });
 });
@@ -643,14 +691,17 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
     client.membership.create.mockResolvedValue(membershipRow());
 
     await runWithContext(context(), () =>
-      h.service.createUser({
-        username: 'new.user',
-        email: 'new.user@rasta.local',
-        firstName: 'نو',
-        lastName: 'کاربر',
-        organizationId: TEST_ORG_A,
-        roles: ['OPERATOR', 'DRIVER'],
-      }),
+      h.service.createUser(
+        {
+          username: 'new.user',
+          email: 'new.user@rasta.local',
+          firstName: 'نو',
+          lastName: 'کاربر',
+          organizationId: TEST_ORG_A,
+          roles: ['OPERATOR', 'DRIVER'],
+        },
+        'itest-key',
+      ),
     );
 
     const input = (h.keycloak.createUser as unknown as jest.Mock).mock.calls[0]![0] as Record<

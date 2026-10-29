@@ -169,14 +169,16 @@ export type SwitchOrganizationDto = z.infer<typeof switchOrganizationSchema>;
 // Registration
 // ---------------------------------------------------------------------------
 
+const registrationUsername = z
+  .string()
+  .trim()
+  .min(3)
+  .max(64)
+  .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/);
+
 export const submitRegistrationSchema = z
   .object({
-    username: z
-      .string()
-      .trim()
-      .min(3)
-      .max(64)
-      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    username: registrationUsername,
     email: z.string().trim().toLowerCase().email().max(255),
     firstName: personName,
     lastName: personName,
@@ -204,6 +206,22 @@ export const approveRegistrationSchema = z
     roles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length).optional(),
   })
   .strict();
+
+export const REGISTRATION_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'] as const;
+
+/**
+ * `GET /v1/registration-requests`: the review queue. The public submission no
+ * longer answers with the request's id (task 117, F5), so this is where a
+ * reviewer finds a request — by status, or by the applicant's exact username.
+ */
+export const listRegistrationRequestsQuerySchema = cursorPaginationSchema
+  .extend({
+    status: z.enum(REGISTRATION_STATUSES).optional(),
+    username: registrationUsername.optional(),
+  })
+  .strict();
+
+export type ListRegistrationRequestsQuery = z.infer<typeof listRegistrationRequestsQuerySchema>;
 
 export type ApproveRegistrationDto = z.infer<typeof approveRegistrationSchema>;
 

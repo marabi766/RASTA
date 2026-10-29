@@ -38,6 +38,7 @@ import {
   tenants,
   FenceTestTimeline,
   waitFor,
+  ensureLiveMember,
 } from './helpers';
 import { KeycloakHttpStub, SLOW_ROUND_TRIP_MS, type StubRequest } from './keycloak-http-stub';
 
@@ -220,8 +221,16 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
     );
   }
 
-  const asAdmin = <T>(organizationId: string, fn: () => Promise<T>) =>
-    asActor({ organizationId, userId: 'USR-FN-ADMIN', roles: ['ORGANIZATION_ADMIN'] }, fn);
+  // A live administrator of the organization, in the database: the authority
+  // a membership change re-reads under its locks (task 117, F1).
+  const asAdmin = async <T>(organizationId: string, fn: () => Promise<T>) => {
+    await ensureLiveMember(prisma, {
+      userId: 'USR-FN-ADMIN',
+      organizationId,
+      roles: ['ORGANIZATION_ADMIN'],
+    });
+    return asActor({ organizationId, userId: 'USR-FN-ADMIN', roles: ['ORGANIZATION_ADMIN'] }, fn);
+  };
 
   const demoteWith = (on: IdentityService, s: Seeded, roles: string[], membership = 0) =>
     asAdmin(s.org.a, () =>
@@ -833,14 +842,17 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       };
 
       const created = await operator(org.a, () =>
-        service.createUser({
-          username,
-          email: `${username}@example.test`,
-          firstName: 'آزمون',
-          lastName: 'اپراتور',
-          organizationId: org.a,
-          roles: ['OPERATOR'],
-        } as never),
+        service.createUser(
+          {
+            username,
+            email: `${username}@example.test`,
+            firstName: 'آزمون',
+            lastName: 'اپراتور',
+            organizationId: org.a,
+            roles: ['OPERATOR'],
+          } as never,
+          `fn-op-${username}`,
+        ),
       );
       mine.add(created.id);
 
@@ -873,14 +885,17 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
 
       await expect(
         operator(org.a, () =>
-          service.createUser({
-            username,
-            email: `${username}@example.test`,
-            firstName: 'آزمون',
-            lastName: 'اپراتور',
-            organizationId: org.a,
-            roles: ['ORGANIZATION_ADMIN'],
-          } as never),
+          service.createUser(
+            {
+              username,
+              email: `${username}@example.test`,
+              firstName: 'آزمون',
+              lastName: 'اپراتور',
+              organizationId: org.a,
+              roles: ['ORGANIZATION_ADMIN'],
+            } as never,
+            `fn-op-${username}`,
+          ),
         ),
       ).rejects.toThrow(/went away/);
       const account = [...stub.accounts.values()].find((a) => a.username === username)!;
@@ -896,7 +911,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
     it('an adoption whose disable outlives its approval: the next approval commits, but the enable waits until that disable can no longer land — then the sweep activates', async () => {
       const org = tenants();
       const username = `fn-reg-${ulid().slice(-10)}`.toLowerCase();
-      const { registrationId } = await service.submitRegistration({
+      const { registrationId } = (await service.recordRegistration({
         username,
         email: `${username}@example.test`,
         firstName: 'متقاضی',
@@ -904,7 +919,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         requestedOrganizationId: org.a,
         requestedRoles: ['FLEET_MANAGER'],
         documentRefs: [],
-      } as never);
+      } as never))!;
       const request = await runUnscoped('the suite reads the request it filed', () =>
         prisma.client.registrationRequest.findUniqueOrThrow({ where: { id: registrationId } }),
       );
