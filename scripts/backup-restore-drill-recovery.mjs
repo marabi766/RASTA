@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync, readlinkSync, unlinkSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, readlinkSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -33,6 +33,10 @@ import {
 //     journal's groups first. The journal also holds the completion checkpoint ("recovered" before
 //     the directory is removed, "removed" after), so a retry after any interruption finishes or
 //     succeeds instead of refusing on what the removal already deleted.
+//     The directory is deleted in ONE place (removeOwnedDirectory) for the end of a normal run, a
+//     recovery and the resumption of an earlier recovery alike, and only after a durable
+//     "recovered" checkpoint written afresh by that very invocation: a checkpoint merely read back
+//     from disk may be one whose directory fsync failed, so it never licenses a removal by itself.
 //   * ONE owner at a time: every run and every recovery of a report holds an exclusive lock
 //     (acquireDrillLock) for its whole lifetime, so two recoveries, or a recovery and a live run,
 //     can never both act on the same groups, journal or directory. A lock whose owner is not
@@ -287,6 +291,41 @@ export function writeRecoveryJournal(
     { durable: true, ...(fs && { fs }) },
   );
   if (!synced) throw new Error('the recovery journal could not be made durable');
+}
+
+/**
+ * THE deletion boundary of the drill's temporary directory: the end of a normal run, a recovery
+ * and the resumption of an earlier recovery's checkpoint all remove it here and nowhere else.
+ * Nothing owned is left (the caller proved it) and the directory is only deleted once a DURABLE
+ * "recovered" checkpoint exists outside it. That write is made afresh on EVERY call, also when
+ * the journal already holds one: a checkpoint read back from disk may be a write that threw after
+ * its rename but before the directory fsync, so it proves nothing about durability until this
+ * invocation has written it again and the file and the directory are both confirmed. A failed
+ * write stops before any removal (`onFailure` tells the caller, who must treat it as sticky).
+ * Afterwards the "removed" checkpoint is written the same way. `remove` may throw part-way: the
+ * checkpoint already stands, so the next invocation finishes the removal.
+ */
+export function removeOwnedDirectory({
+  journalPath,
+  project,
+  id,
+  temporary,
+  directoryPresent = true,
+  remove = () => rmSync(temporary, { recursive: true, force: true }),
+  onFailure = () => {},
+  fs,
+}) {
+  const publish = (checkpoint) => {
+    try {
+      writeRecoveryJournal(journalPath, { project, id, temporary, groups: [], checkpoint }, { fs });
+    } catch (error) {
+      onFailure(error);
+      throw error;
+    }
+  };
+  publish('recovered');
+  if (directoryPresent) remove();
+  publish('removed');
 }
 
 const CHECKPOINTS = new Set(['recovered', 'removed']);

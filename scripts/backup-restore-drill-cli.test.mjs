@@ -98,10 +98,11 @@ test('operator root with local .env still refuses before setup', async () => {
     const raw = readFileSync(join(directory, 'report.json'), 'utf8');
     assert.ok(raw.indexOf('"project"') < raw.indexOf('"databases"'));
     assert.ok(raw.indexOf('"temporary"') < raw.indexOf('"databases"'));
-    // No sibling residue of the atomic rewrite survives a normal run.
+    // No sibling residue of the atomic rewrite survives a normal run; the only file beside the
+    // report is the journal whose checkpoint licensed the directory's removal.
     assert.deepEqual(
       readdirSync(directory).filter((name) => name.startsWith('report.json.')),
-      [],
+      ['report.json.recovery-journal.json'],
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -447,7 +448,7 @@ case "$*" in
       *'WITH namespaces AS'*) echo '{"schemas":[{"name":"public","owner":"rasta"}],"relations":[{"name":"public.fixture","owner":"rasta"}],"defaultPrivileges":[]}' ;;
       *'row_to_json(t)'*) echo '{"name":"public.fixture","rows":"1","kind":"application","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' ;;
     esac ;;
-  *'down --volumes'*) ${mode === 'cleanup-write-fails' ? `chmod 755 '${directory}'; ` : ''}touch '${directory}/cleaned'${mode === 'final-write-fails' ? `; chmod 555 '${directory}'` : ''} ;;
+  *'down --volumes'*) ${mode === 'cleanup-write-fails' ? `chmod 755 '${directory}'; ` : ''}touch '${directory}/cleaned' ;;
 esac
 `,
     { mode: 0o700 },
@@ -797,9 +798,25 @@ test('a full passing drill whose final report write fails is never reported as p
   let child;
   try {
     const { root, path } = await referenceCliFixture(directory, 'final-write-fails');
-    // Temporary files live elsewhere, so cleanup itself succeeds; only the report directory
-    // turns read-only (after Compose is down), making the sibling creation fail.
-    child = start(directory, root, { TMPDIR: scratch }, path);
+    // Temporary files live elsewhere, so cleanup itself succeeds (the checkpoint is written and
+    // the directory removed); only the replacement of the report fails, after the removal.
+    child = start(
+      directory,
+      root,
+      {
+        TMPDIR: scratch,
+        ...faultEnv({
+          rm: { mode: 'after', times: 0 },
+          rename: {
+            match: join(directory, 'report.json'),
+            exact: true,
+            afterRm: true,
+            times: 1000,
+          },
+        }),
+      },
+      path,
+    );
     let stdout = '',
       stderr = '';
     child.stdout.on('data', (chunk) => {
@@ -1890,6 +1907,100 @@ test('a removal interrupted at any step is finished or refused correctly by the 
     } finally {
       rmSync(context.directory, { recursive: true, force: true });
     }
+  }
+});
+
+// --- one deletion boundary for a run's own teardown, recovery and resumption (#478 r5 F2) ---------
+/**
+ * An ordinary run that fails early (the stand-in `docker compose up` exits 1) and so reaches its
+ * own teardown and the removal of its directory. Resolves when the process is gone.
+ */
+async function ordinaryRun(directory, root, extra = {}) {
+  writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  writeFileSync(
+    join(directory, 'docker'),
+    `#!/bin/sh
+case "$*" in
+  *'up -d'*) exit 1 ;;
+esac
+`,
+    { mode: 0o700 },
+  );
+  const child = start(directory, root, extra);
+  const [code, signal] = await once(child, 'close');
+  const reportPath = join(directory, 'report.json');
+  return { code, signal, reportPath, report: JSON.parse(readFileSync(reportPath, 'utf8')) };
+}
+const journalOf = (reportPath) =>
+  JSON.parse(readFileSync(`${reportPath}.recovery-journal.json`, 'utf8'));
+
+test('a run killed during its own directory removal, or before its report is replaced, is finished cleanly by the next recovery', async () => {
+  for (const mode of ['kill-before', 'kill-mid', 'kill-after']) {
+    const directory = mkdtempSync(join(tmpdir(), 'drill-ordinary-kill-'));
+    try {
+      const root = fixture(directory);
+      const run = await ordinaryRun(directory, root, faultEnv({ rm: { mode } }));
+      assert.equal(run.signal, 'SIGKILL', mode);
+      // The provisional report is all the killed run left; the checkpoint is outside the tree.
+      assert.equal(run.report.cleanup.passed, false, mode);
+      assert.equal(journalOf(run.reportPath).checkpoint, 'recovered', mode);
+      assert.equal(existsSync(run.report.temporary), mode !== 'kill-after', mode);
+      recordingDocker(directory);
+      const retry = await recover(directory, root, run.reportPath);
+      assert.equal(retry.code, 0, `${mode}: ${retry.stderr}`);
+      assert.doesNotMatch(retry.stderr, /marker is missing|does not say cleanup finished/, mode);
+      assert.equal(existsSync(run.report.temporary), false, mode);
+      assert.equal(journalOf(run.reportPath).checkpoint, 'removed', mode);
+      assert.equal(calls(directory), '', `${mode}: nothing left to ask Docker`);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a normal run removes its directory only once the checkpoint is durable', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-ordinary-durable-'));
+  try {
+    const root = fixture(directory);
+    const run = await ordinaryRun(directory, root, faultEnv({ fsyncDirectory: { times: 1000 } }));
+    assert.equal(run.code, 1);
+    assert.equal(
+      run.report.cleanup.passed,
+      false,
+      'no durable checkpoint, so cleanup did not finish',
+    );
+    assert.equal(existsSync(run.report.temporary), true, 'and the directory was not removed');
+    recordingDocker(directory);
+    const retry = await recover(directory, root, run.reportPath);
+    assert.equal(retry.code, 0, retry.stderr);
+    assert.equal(existsSync(run.report.temporary), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a checkpoint read back from disk is made durable again before it licenses a removal', async () => {
+  const context = await recoverable('drill-recover-reload-');
+  try {
+    // The "recovered" write renames, then its directory fsync fails: readable, not confirmed.
+    const fault = faultEnv({ fsyncDirectory: { afterCheckpoint: true, times: 1000 } });
+    const first = await recover(context.directory, context.root, context.run.reportPath, fault);
+    assert.equal(first.code, 1, first.stderr);
+    assert.equal(journalOf(context.run.reportPath).checkpoint, 'recovered');
+    assert.equal(existsSync(context.run.report.temporary), true);
+    rmSync(join(context.directory, 'docker-calls'), { force: true });
+    // Retried with the fault still there: the loaded checkpoint proves nothing, so nothing goes.
+    const again = await recover(context.directory, context.root, context.run.reportPath, fault);
+    assert.equal(again.code, 1, again.stderr);
+    assert.equal(existsSync(context.run.report.temporary), true, 'the directory is kept');
+    // The fault gone: it completes, without asking Docker anything.
+    const retry = await recover(context.directory, context.root, context.run.reportPath);
+    assert.equal(retry.code, 0, retry.stderr);
+    assert.equal(existsSync(context.run.report.temporary), false);
+    assert.equal(journalOf(context.run.reportPath).checkpoint, 'removed');
+    assert.equal(calls(context.directory), '');
+  } finally {
+    rmSync(context.directory, { recursive: true, force: true });
   }
 });
 

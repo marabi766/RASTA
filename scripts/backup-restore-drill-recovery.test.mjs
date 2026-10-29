@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   closeSync,
+  existsSync,
   fsyncSync,
   openSync,
   readdirSync,
@@ -34,6 +35,7 @@ import {
   loadRecoveryRecord,
   newRecoveryId,
   recoverProcessGroups,
+  removeOwnedDirectory,
   validateComposeDefinition,
   writeRecoveryJournal,
   writeRecoveryMarker,
@@ -707,6 +709,87 @@ test('a journal write whose durability is not confirmed throws: file fsync and d
       /Could not write report/,
     );
     writeRecoveryJournal(path, { ...base, checkpoint: 'recovered' }, { fs: real });
+  }));
+
+// --- one deletion boundary (#478 r5 F2) ---------------------------------------------------------
+test('removeOwnedDirectory: the removal runs only between two durable checkpoints, written afresh every time', () =>
+  withRoot((root) => {
+    const ownerOf = (record) => ({
+      journalPath: recoveryJournalPath(record.reportPath),
+      project: record.project,
+      id: record.id,
+      temporary: record.temporary,
+    });
+    const checkpoint = (owner) => JSON.parse(readFileSync(owner.journalPath, 'utf8')).checkpoint;
+    const real = { openSync, writeSync, fsyncSync, closeSync, unlinkSync, renameSync };
+    // The directory descriptor is the only one opened without 'wx'.
+    const brokenDirectory = () => {
+      const directories = new Set();
+      return {
+        ...real,
+        openSync: (target, flags, mode) => {
+          const fd = openSync(target, flags, mode);
+          if (flags === 'r') directories.add(fd);
+          return fd;
+        },
+        fsyncSync: (fd) => {
+          if (directories.has(fd)) throw errno('EIO');
+          return fsyncSync(fd);
+        },
+      };
+    };
+    // Order: the durable "recovered" checkpoint stands when the removal starts.
+    const first = ownerOf(makeRecord(root));
+    const seen = [];
+    removeOwnedDirectory({
+      ...first,
+      remove: () => {
+        seen.push(checkpoint(first));
+        rmSync(first.temporary, { recursive: true });
+      },
+    });
+    assert.deepEqual(seen, ['recovered']);
+    assert.equal(checkpoint(first), 'removed');
+    assert.equal(existsSync(first.temporary), false);
+
+    // A checkpoint whose directory fsync failed is on disk and readable, but proves nothing:
+    // while the fault stays, a loaded one never licenses the removal (and the failure is told).
+    const fresh = ownerOf(makeRecord(root));
+    let failures = 0;
+    for (let attempt = 0; attempt < 2; attempt++)
+      assert.throws(() =>
+        removeOwnedDirectory({
+          ...fresh,
+          fs: brokenDirectory(),
+          remove: () => assert.fail('removed without a durable checkpoint'),
+          onFailure: () => failures++,
+        }),
+      );
+    assert.equal(failures, 2);
+    assert.equal(checkpoint(fresh), 'recovered', 'the unconfirmed checkpoint is readable');
+    assert.equal(existsSync(fresh.temporary), true);
+    // The fault gone: the same call completes.
+    removeOwnedDirectory(fresh);
+    assert.equal(existsSync(fresh.temporary), false);
+    assert.equal(checkpoint(fresh), 'removed');
+
+    // A directory that is already gone is not removed again, and still ends at "removed".
+    removeOwnedDirectory({
+      ...fresh,
+      directoryPresent: false,
+      remove: () => assert.fail('nothing to remove'),
+    });
+    // A removal that throws part-way leaves the "recovered" checkpoint standing.
+    const last = ownerOf(makeRecord(root));
+    assert.throws(() =>
+      removeOwnedDirectory({
+        ...last,
+        remove: () => {
+          throw errno('EIO');
+        },
+      }),
+    );
+    assert.equal(checkpoint(last), 'recovered');
   }));
 
 // --- special files never block an input (#478 r3 R3) -----------------------------------------

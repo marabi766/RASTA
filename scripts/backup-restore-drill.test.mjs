@@ -507,6 +507,43 @@ test('a multi-line CHECK may differ on its own lines only, once per constraint',
     checkLinesDifferent: 2,
     checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
   });
+  // Separated differences (the first WHEN and the ELSE, the line between them unchanged): still
+  // one entry, as adjacent ones are.
+  const separated = evidence(
+    caseBody.replace('THEN true', 'THEN (true)').replace('ELSE false', 'ELSE (false)'),
+  );
+  assert.deepEqual(checkSourceReference(source, separated, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 2,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  // Every line of the span, with and without gaps: one entry.
+  const everyOther = evidence(
+    caseBody
+      .replace('THEN true', 'THEN (true)')
+      .replace(`'B'::character varying, 'C'`, `'B', 'C'`)
+      .replace('ELSE false', 'ELSE (false)'),
+  );
+  assert.deepEqual(checkSourceReference(source, everyOther, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 3,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  // Two ADJACENT constraints that both changed (the last line of one, the line of the next):
+  // two entries, one per constraint.
+  const neighbours = evidence(
+    caseBody
+      .replace('END),\n', 'END ),\n')
+      .replace(`CHECK (("kind" <> ''::"text"))`, `CHECK ("kind" <> ''::"text")`),
+  );
+  assert.deepEqual(checkSourceReference(source, neighbours, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 2,
+    checkConstraints: [
+      { schema: 'public', table: 'intake', name: 'ck_actor' },
+      { schema: 'public', table: 'intake', name: 'ck_other' },
+    ],
+  });
   for (const body of [
     // outside the constraint: the column, the closing line
     caseBody.replace('character varying(16)', 'character varying(17)'),

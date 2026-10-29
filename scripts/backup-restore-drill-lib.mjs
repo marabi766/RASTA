@@ -393,13 +393,15 @@ export function checkSourceReference(source, reference, database) {
     throw new Error('SOURCE/REF CHECK identity or line count differs');
   let checkLinesDifferent = 0;
   const checkConstraints = [];
+  const reported = new Set();
   for (let i = 0; i < a.lines.length; i++) {
     if (a.lines[i] === b.lines[i]) continue;
     if (!a.checks.has(i) || a.checks.get(i) !== b.checks.get(i))
       throw new Error('SOURCE/REF non-CHECK difference');
     checkLinesDifferent++;
-    // Once per constraint, however many of its lines differ.
-    if (a.checks.get(i - 1) === a.checks.get(i) && a.lines[i - 1] !== b.lines[i - 1]) continue;
+    // Once per constraint, however many of its lines differ and wherever they sit in its span.
+    if (reported.has(a.checks.get(i))) continue;
+    reported.add(a.checks.get(i));
     const [, schema, table, name] = JSON.parse(a.checks.get(i));
     checkConstraints.push({ schema, table, name });
   }

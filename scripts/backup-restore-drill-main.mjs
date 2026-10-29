@@ -6,15 +6,7 @@
 // report write for the run, a journal write for recovery; milliseconds) can leave that one group
 // unrecorded. Reserving before the spawn is impossible: the group id is the child's pid.
 import { randomBytes } from 'node:crypto';
-import {
-  closeSync,
-  existsSync,
-  mkdtempSync,
-  openSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,6 +50,7 @@ import {
   assertOwnedCompose,
   loadRecoveryRecord,
   newRecoveryId,
+  removeOwnedDirectory,
   recoverProcessGroups,
   recoveryJournalPath,
   writeRecoveryJournal,
@@ -180,6 +173,20 @@ function writeReport({ durable = false, final = false } = {}) {
 let journalOwner;
 let carried = [];
 let publicationFailed = false;
+/**
+ * The only way the temporary directory is ever deleted (end of a run, recovery, resumption of an
+ * earlier recovery's checkpoint): see removeOwnedDirectory. A checkpoint write that fails is
+ * sticky here as everywhere else.
+ */
+const deleteTemporary = (directoryPresent = true) =>
+  removeOwnedDirectory({
+    journalPath: recoveryJournalPath(reportPath),
+    ...journalOwner,
+    directoryPresent,
+    onFailure: () => {
+      publicationFailed = true;
+    },
+  });
 function writeJournal(extra = {}) {
   if (!journalOwner) return;
   const groups = [
@@ -457,9 +464,7 @@ async function recoverRecorded() {
   let removed = !failed && verdict.passed && !groups.unknown.length && !groups.orphan.length;
   if (removed && !publicationFailed) {
     try {
-      writeJournal({ groups: [], checkpoint: 'recovered' });
-      if (record.directoryPresent) rmSync(temporary, { recursive: true, force: true });
-      writeJournal({ groups: [], checkpoint: 'removed' });
+      deleteTemporary(record.directoryPresent);
     } catch {
       removed = false;
     }
@@ -490,8 +495,7 @@ async function recoverRecorded() {
 function finishFromCheckpoint(record) {
   if (record.checkpoint === 'removed') return 0;
   try {
-    if (record.directoryPresent) rmSync(temporary, { recursive: true, force: true });
-    writeJournal({ groups: [], checkpoint: 'removed' });
+    deleteTemporary(record.directoryPresent);
   } catch {
     console.error(
       '[backup-restore-drill] the removal an earlier recovery started could not be finished',
@@ -744,8 +748,9 @@ try {
   });
   let removed = verdict.passed;
   if (removed && temporary) {
+    journalOwner = { temporary, project, id: recoveryId };
     try {
-      rmSync(temporary, { recursive: true, force: true });
+      deleteTemporary();
     } catch {
       removed = false;
     }
