@@ -1,17 +1,30 @@
 import { Inject, Injectable, InternalServerErrorException } from '@nestjs/common';
 import type { Logger } from '@rasta/logging';
-import { LOGGER } from '../tokens';
+import { ENV, LOGGER } from '../tokens';
 import { DashboardAccess } from '../access/access';
+import type { AnalyticsEnv } from '../config/env';
+import { projectionCoversWindow } from './coverage';
 import { KPI_DEFINITIONS } from './definitions';
 import { baselineValue, kpisViewSchema, type KpiValue, type KpisQuery, type KpisView } from './dto';
 import { KpiRepository, type KpiRead } from './kpi.repository';
 
 export const KPI_VALUE_READERS = Symbol('KPI_VALUE_READERS');
-export type KpiValueReaders = Readonly<Record<string, (read: KpiRead) => KpiValue>>;
+
+/** The read plus the one coverage verdict every projection-backed KPI must honour. */
+export interface KpiContext extends KpiRead {
+  /** The maintenance projection can vouch for the whole requested window (`coverage.ts`). */
+  readonly projection_covers_window: boolean;
+}
+export type KpiValueReaders = Readonly<Record<string, (read: KpiContext) => KpiValue>>;
 
 /** Explicit dispatch: adding metadata never silently borrows another KPI's value. */
 export const kpiValueReaders: KpiValueReaders = {
-  MAINTENANCE_COMPLETED_COUNT: (read) => ({ status: 'AVAILABLE', value: read.completed_count }),
+  // Counting facts is only a statement about the world when the projection saw the whole window
+  // (D-082): otherwise "0" would read as "nothing happened" when the truth is "we do not know".
+  MAINTENANCE_COMPLETED_COUNT: (read) =>
+    read.projection_covers_window
+      ? { status: 'AVAILABLE', value: read.completed_count }
+      : { status: 'NO_DATA' },
   MAINTENANCE_DOWNTIME_BASELINE_MINUTES: (read) => baselineValue(read.baseline_minutes),
 };
 
@@ -21,6 +34,8 @@ export class KpiService {
     private readonly access: DashboardAccess,
     private readonly repository: KpiRepository,
     @Inject(LOGGER) private readonly logger: Pick<Logger, 'error'>,
+    @Inject(ENV)
+    private readonly env: Pick<AnalyticsEnv, 'ANALYTICS_MAINTENANCE_FACTS_CONSUMER_ENABLED'>,
     @Inject(KPI_VALUE_READERS) private readonly readers: KpiValueReaders = kpiValueReaders,
   ) {}
 
@@ -30,7 +45,17 @@ export class KpiService {
     const organizationId = this.access.assertCanReadFleet();
     const from = new Date(query.from);
     const to = new Date(query.to);
-    const read = await this.repository.read(from, to);
+    const raw = await this.repository.read(from, to);
+    const read: KpiContext = {
+      ...raw,
+      projection_covers_window: projectionCoversWindow({
+        consumerEnabled: this.env.ANALYTICS_MAINTENANCE_FACTS_CONSUMER_ENABLED,
+        coverageStart: raw.coverage_start,
+        readAt: raw.read_at,
+        from,
+        to,
+      }),
+    };
     const response = {
       organizationId,
       from: from.toISOString(),
