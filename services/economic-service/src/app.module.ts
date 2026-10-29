@@ -25,7 +25,12 @@ import {
   kafkaConnection,
 } from '@rasta/nest-common';
 import { outboxShutdownBudgetMs } from '@rasta/config';
-import { createLogger, setLogContextProvider, type Logger } from '@rasta/logging';
+import {
+  createLogger,
+  setLogContextProvider,
+  type Logger,
+  type LoggerConfig,
+} from '@rasta/logging';
 import {
   outboxAckFencedTotal,
   outboxClaimAttemptsTotal,
@@ -118,6 +123,27 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
 // about the dependency. `OutboxShutdown` injects the sweeper and the two
 // consumers because it stops them.
 
+/**
+ * The service's logger, as `LOGGER` provides it. A function so the suite that
+ * reads what the service logs (`log-disclosure.int-spec.ts`) builds the same
+ * logger — level, redaction, scrubbing — with a `destination` it can read.
+ */
+export function economicLogger(
+  env: EconomicEnv,
+  destination?: LoggerConfig['destination'],
+): Logger {
+  const logger = createLogger({
+    serviceName: SERVICE_NAME,
+    serviceVersion: env.SERVICE_VERSION,
+    environment: env.NODE_ENV,
+    level: env.LOG_LEVEL,
+    pretty: env.NODE_ENV === 'development',
+    ...(destination ? { destination } : {}),
+  });
+  setLogContextProvider(() => toLogContext());
+  return logger;
+}
+
 @Module({
   controllers: [
     WalletController,
@@ -138,17 +164,7 @@ const REWARD_TRIGGER_TOPICS = ['rasta.fleet.v1', 'rasta.maintenance.v1'];
     {
       provide: LOGGER,
       inject: [ENV],
-      useFactory: (env: EconomicEnv): Logger => {
-        const logger = createLogger({
-          serviceName: SERVICE_NAME,
-          serviceVersion: env.SERVICE_VERSION,
-          environment: env.NODE_ENV,
-          level: env.LOG_LEVEL,
-          pretty: env.NODE_ENV === 'development',
-        });
-        setLogContextProvider(() => toLogContext());
-        return logger;
-      },
+      useFactory: (env: EconomicEnv): Logger => economicLogger(env),
     },
     { provide: EXCEPTION_FILTER_LOGGER, inject: [LOGGER], useFactory: (l: Logger) => l },
 

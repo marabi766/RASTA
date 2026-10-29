@@ -109,7 +109,8 @@ SELECT pi.id                 AS payment_intent_id,
   باشد (تلاش دوبارهٔ Top-up حلش می‌کند). علامتی بی تسک باز یک ناسازگاری است — دست نزن و گزارش کن.
 - رویدادهای مربوط: `PAYMENT_REFUND_UNRECONCILED` با همان `paymentIntentId` (در Outbox یا `audit-service`؛ ردیف Outbox فقط
   تا `OUTBOX_PURGE_RETENTION_HOURS` پس از انتشار می‌ماند، پیش‌فرض ۱۶۸ ساعت، D-052) دلیل (`reason`) را
-  می‌گوید: `PROVIDER_OUTCOME_UNKNOWN`، `PROVIDER_DECLINED_RELEASE_PENDING`، `REVERSAL_FAILED` یا `INSUFFICIENT_BALANCE`.
+  می‌گوید: `PROVIDER_OUTCOME_UNKNOWN`، `PROVIDER_DECLINED_RELEASE_PENDING`، `REVERSAL_FAILED`، `INSUFFICIENT_BALANCE` یا
+  `WALLET_NOT_ACTIVE` (§ ۲).
   `REFUND_REQUESTED` عمداً رویداد ندارد — یعنی ثبت خود نتیجه هم شکست خورد.
 
 ## ۲. کیف پول منجمد
@@ -117,6 +118,18 @@ SELECT pi.id                 AS payment_intent_id,
 اگر کیف پول `FROZEN` باشد، هیچ بازپرداختی (حتی § ۳-الف) اجرا نمی‌شود: از کیف پول منجمد پولی بیرون نمی‌رود. Hold سر جایش
 می‌ماند و این درست است. پس از فعال‌شدن دوبارهٔ کیف پول ادامه بده. فقط § ۳-ب (برگرداندن Hold به کیف پول) روی کیف پول منجمد هم
 مجاز است.
+
+کیف پولی که **در مدت فراخوانی Provider** منجمد یا بسته شد هم همین‌جاست: بازپرداخت با `422 BUSINESS_RULE_VIOLATION` و
+`details[].code = REFUND_REVERSAL_PENDING` تمام شد — یعنی Provider **بازپرداخت کرده** و فقط معکوس‌کردن در دفتر کل مانده است،
+نه ردی پیش از پرسیدن از Provider (بازبینی Codex روی #480 دور ۲، N1). هر تلاش بعدی تا فعال‌شدن کیف پول همین پاسخ را می‌گیرد و
+از Provider چیزی نمی‌پرسد. ردیف `REFUNDED_NOT_REVERSED` با Hold فعال و تسک باز می‌ماند و رویداد دلیل `WALLET_NOT_ACTIVE` دارد.
+
+**بازیابی خودکار فقط تا وقتی است که تسک `PENDING` است.** آشتی‌دهنده تا فعال‌شدن کیف پول صبر می‌کند (`last_outcome =
+WALLET_NOT_ACTIVE`، بی شمردن تلاش) و اگر کیف پول در این مدت فعال شود، یک بار معکوس می‌کند؛ کاری لازم نیست. ولی صبر سقف دارد:
+وقتی عمر تسک از `ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS` (پیش‌فرض ۷۲ ساعت، از ساخت تسک) بگذرد، تسک `ESCALATED` می‌شود
+و `PAYMENT_RECONCILIATION_ESCALATED` می‌رود (§ ۰، گام ۴). آشتی‌دهنده تسک `ESCALATED` را دیگر برنمی‌دارد، پس **فعال‌شدن دوبارهٔ
+کیف پول به‌تنهایی آن را حل نمی‌کند.** پس از فعال‌شدن: بازپرداخت § ۳-الف را با همان API بفرست (معکوس می‌کند و تسک را `DONE`
+می‌کند، بی پرسیدن از Provider)، یا تسک را با `requeue` (§ ۴-۲، گام ۳) به آشتی‌دهنده برگردان.
 
 ## ۳. نتیجهٔ Provider معلوم است — خودِ سرویس حلش می‌کند
 

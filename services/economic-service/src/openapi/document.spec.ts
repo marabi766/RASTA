@@ -153,6 +153,29 @@ describe('enrichOpenApiDocument', () => {
     },
   );
 
+  it('publishes reward rule creation as idempotent, with its key’s errors (economic audit F1)', () => {
+    // The service requires the key itself: the gateway's `rewards` prefix
+    // does not (api-gateway routes.ts), so it is this document that tells a
+    // client a retry is safe only with one.
+    const document = emptyDocument();
+    document.paths = { '/v1/rewards/rules': { post: nest('201') } } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const create = (enriched.paths['/v1/rewards/rules'] as Record<string, never>)
+      .post as unknown as {
+      parameters: { name: string; in: string; required: boolean }[];
+      responses: Record<string, { description?: string; headers?: Record<string, unknown> }>;
+    };
+    const key = create.parameters.find((parameter) => parameter.name === 'Idempotency-Key');
+    expect(key).toMatchObject({ in: 'header', required: true });
+    expect(Object.keys(create.responses).sort()).toEqual(
+      ['201', '400', '401', '403', '404', '409', '422', '500'].sort(),
+    );
+    expect(create.responses['400']?.description).toContain('Idempotency-Key');
+    expect(create.responses['409']?.description).toContain('idempotency key reused');
+    expect(create.responses['409']?.headers?.['Retry-After']).toBeDefined();
+  });
+
   it('documents the success body under the status the route declares, never a guessed one', () => {
     // `dispute` takes a body and answers 200 (`@HttpCode(200)`). Guessed from
     // the body, it was documented as a 201 carrying the view, and its real
