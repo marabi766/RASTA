@@ -104,9 +104,12 @@ export function displayName(user: CurrentUser): string {
   return full.length > 0 ? full : user.username;
 }
 
-/** The membership for the organization this session is acting in, if any. */
-export function activeMembership(user: CurrentUser) {
-  return user.memberships.find(
-    (membership) => membership.organizationId === user.activeOrganizationId,
-  );
+/**
+ * The membership for the organization this session acts for — the access
+ * token's (`actingOrganizationId`), not identity's `activeOrganizationId`,
+ * which a switch made elsewhere moves before the token follows it.
+ */
+export function membershipIn(user: CurrentUser, organizationId: string | null) {
+  if (organizationId === null) return undefined;
+  return user.memberships.find((membership) => membership.organizationId === organizationId);
 }

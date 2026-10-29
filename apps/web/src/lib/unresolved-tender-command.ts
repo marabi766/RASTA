@@ -1,8 +1,14 @@
 import { isOwnerCommand, type OwnerCommand } from './tender-owner-fields';
-import { markerStore, type SaveOutcome, type UnresolvedMarker } from './unresolved-marker';
+import {
+  markerStore,
+  type AnswerOutcome,
+  type SaveOutcome,
+  type UnresolvedMarker,
+} from './unresolved-marker';
+import type { AccountTags, Binding } from './unresolved-tenancy';
 import type { ReplayStamp } from './unresolved-statement';
 
-export type { ReplayStamp, SaveOutcome };
+export type { AnswerOutcome, ReplayStamp, SaveOutcome };
 
 /**
  * An owner's tender command whose outcome is unknown — publishing, deciding the
@@ -40,20 +46,41 @@ export const markOwnerCommandsOpen = (): void => store.markOpen();
 
 export const purgeAllUnresolvedOwnerCommands = (): void => store.purgeAll();
 
-export const purgeForeignUnresolvedOwnerCommands = (owner: string): void =>
-  store.purgeForeign(owner);
+export const purgeForeignUnresolvedOwnerCommands = (tags: AccountTags): void =>
+  store.purgeForeign(tags);
 
 export const saveUnresolvedOwnerCommand = (
   tenderId: string,
   entry: Omit<UnresolvedOwnerCommand, 'savedAt'>,
-  owner: string,
+  binding: Binding,
   now?: number,
-): SaveOutcome => store.save(tenderId, entry, owner, now);
+): SaveOutcome => store.save(tenderId, entry, binding, now);
 
-export const clearUnresolvedOwnerCommand = (tenderId: string, submissionId: string): void =>
-  store.clear(tenderId, submissionId);
+/** An answer still in doubt: updates its own record, or is kept aside (`lib/unresolved-tenancy.ts`). */
+export const answerUnresolvedOwnerCommand = (
+  tenderId: string,
+  entry: Omit<UnresolvedOwnerCommand, 'savedAt'>,
+  binding: Binding,
+  now?: number,
+): AnswerOutcome => store.answer(tenderId, entry, binding, now);
+
+/** A definite answer to `submissionId`: its record, and only that one, goes. */
+export const settleUnresolvedOwnerCommand = (
+  tenderId: string,
+  submissionId: string,
+  binding: Binding,
+): void => store.settle(tenderId, submissionId, binding);
+
+export const clearUnresolvedOwnerCommand = (
+  tenderId: string,
+  submissionId: string,
+  binding: Binding,
+): void => store.clear(tenderId, submissionId, binding);
 
 export const restoreUnresolvedOwnerCommand = (
   tenderId: string,
-  owner: string,
-): UnresolvedOwnerCommand | null => store.restore(tenderId, owner);
+  binding: Binding,
+): UnresolvedOwnerCommand | null => store.restore(tenderId, binding);
+
+/** What holds a fresh command of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
+export const ownerCommandQuarantine = store.quarantine;

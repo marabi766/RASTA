@@ -34,3 +34,6 @@ export const EMPTY_USAGE_FORM: UsageFormValues = {
   odometer: '',
   notes: '',
 };
+
+/** The flash a recorded usage leaves on `/usage` (`server/flash.ts`). */
+export const USAGE_CREATED = 'created';

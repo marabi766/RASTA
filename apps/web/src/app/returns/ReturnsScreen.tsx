@@ -19,6 +19,7 @@ import {
 } from '@/lib/return-fields';
 import type { ReadResult } from '@/server/assets';
 import type { ReturnListQuery, ReturnPage, ReturnRequest } from '@/server/returns';
+import { withContext, type InContext } from '@/lib/page-context';
 
 /**
  * The return requests of this organization (EXP-003, `/returns`), on either
@@ -33,20 +34,20 @@ import type { ReturnListQuery, ReturnPage, ReturnRequest } from '@/server/return
 
 export interface ReturnsScreenProps {
   readonly result: ReadResult<ReturnPage>;
-  readonly query: ReturnListQuery;
+  readonly query: InContext<ReturnListQuery>;
   /** The requests on which this viewer has a command to issue now (`returnCommandsFor`). */
   readonly actionable: ReadonlySet<string>;
 }
 
-function hrefWith(query: ReturnListQuery, changes: Partial<ReturnListQuery>): string {
+function hrefWith(query: InContext<ReturnListQuery>, changes: Partial<ReturnListQuery>): string {
   const merged = { ...query, ...changes };
   const params = new URLSearchParams({ role: merged.side });
   if (merged.status) params.set('status', merged.status);
   if (merged.cursor) params.set('cursor', merged.cursor);
-  return `/returns?${params.toString()}`;
+  return withContext(query.context, `/returns?${params.toString()}`);
 }
 
-function SideTabs({ query }: { query: ReturnListQuery }) {
+function SideTabs({ query }: { query: InContext<ReturnListQuery> }) {
   return (
     <nav aria-label="سمت درخواست بازگشت" className="flex flex-wrap gap-2">
       {RETURN_LIST_SIDES.map((side: ReturnListSide) => (
@@ -67,7 +68,7 @@ function SideTabs({ query }: { query: ReturnListQuery }) {
   );
 }
 
-function StatusFilter({ query }: { query: ReturnListQuery }) {
+function StatusFilter({ query }: { query: InContext<ReturnListQuery> }) {
   return (
     <nav aria-label="وضعیت درخواست بازگشت" className="flex flex-wrap gap-2 text-sm">
       <Link

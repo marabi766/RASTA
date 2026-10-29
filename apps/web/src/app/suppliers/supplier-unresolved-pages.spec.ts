@@ -12,6 +12,8 @@
  */
 
 import { isValidElement, type ReactElement } from 'react';
+import { actingAccessToken } from '@/test/session-token';
+import { boundQuery } from '@/test/page-context';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -115,10 +117,10 @@ const props = (tree: ReactElement, type: unknown) =>
 const detailTree = (searchParams: Record<string, string> = {}) =>
   DetailPage({
     params: Promise.resolve({ id: SUPPLIER_ID }),
-    searchParams: Promise.resolve(searchParams),
+    searchParams: Promise.resolve(boundQuery(mockSession.current, searchParams)),
   });
 const listTree = (searchParams: Record<string, string> = {}) =>
-  ListPage({ searchParams: Promise.resolve(searchParams) });
+  ListPage({ searchParams: Promise.resolve(boundQuery(mockSession.current, searchParams)) });
 
 /**
  * What the page's notices draw: the page hands `SupplierPendingNotices` its
@@ -198,7 +200,11 @@ describe('a supplier page with an unresolved write', () => {
   it('is shown to nobody else: another person, organization, login or supplier', async () => {
     const others = [
       { ...SESSION, subject: 'user-2' },
-      { ...SESSION, organizationId: 'ORG-OTHER' },
+      {
+        ...SESSION,
+        organizationId: 'ORG-OTHER',
+        accessToken: actingAccessToken('ORG-OTHER', ['SUPPLIER']),
+      },
       { ...SESSION, csrfToken: 'a-later-login' },
     ];
     for (const other of others) {

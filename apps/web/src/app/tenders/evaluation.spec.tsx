@@ -31,6 +31,7 @@ import { OwnerCommands, type OfferedOwnerCommand } from './[id]/OwnerCommands';
 import type { OwnerFormState } from './[id]/owner-form-state';
 import { OwnerFlash } from './[id]/OwnerSections';
 import { OwnTenderDetailScreen } from './[id]/TenderDetailScreen';
+import { bindingOf } from '@/test/unresolved-binding';
 
 // Each test renders the owner's tender screen and runs jest-axe over it once (#341): room to finish.
 jest.setTimeout(20_000);
@@ -87,7 +88,7 @@ const group = (offered: OfferedOwnerCommand[]) => (
     tenderId={TENDER_ID}
     offered={offered}
     csrfToken="csrf-token-for-this-session"
-    owner="owner-tag"
+    account={bindingOf('owner-tag', 'session-tag')}
     pageHref={PAGE}
     showsRestored
   />

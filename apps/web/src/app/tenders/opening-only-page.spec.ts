@@ -14,6 +14,8 @@
  */
 
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { boundQuery } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -129,7 +131,7 @@ const offered = (tree: ReactNode): string[] =>
 function run(view?: string): Promise<ReactElement> {
   return TenderPage({
     params: Promise.resolve({ id: 'TND_1' }),
-    searchParams: Promise.resolve(view ? { view } : {}),
+    searchParams: Promise.resolve(boundQuery(mockSession.current, view ? { view } : {})),
   });
 }
 
@@ -272,7 +274,13 @@ it('an opener whose bids read succeeds is given its publication decision from th
   const [failure] = ofType(failed, AuthorityInboxSection);
   expect(failure?.props).toMatchObject({
     steps: [],
-    failure: { correlationId: 'corr-9', retryHref: '/tenders/TND_1?view=own' },
+    failure: {
+      correlationId: 'corr-9',
+      retryHref: withContext(
+        boundQuery(mockSession.current).ctx as string,
+        '/tenders/TND_1?view=own',
+      ),
+    },
   });
 });
 
