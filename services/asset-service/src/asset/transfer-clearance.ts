@@ -137,12 +137,13 @@ export interface TransferClearanceClientOptions {
 
 export class TransferClearanceClient implements TransferClearance {
   readonly fenceTtlSeconds: number;
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
   private readonly clock: () => number;
 
   constructor(private readonly options: TransferClearanceClientOptions) {
     this.fenceTtlSeconds = options.fenceTtlSeconds;
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
     this.clock = options.now ?? (() => performance.now());
   }
 

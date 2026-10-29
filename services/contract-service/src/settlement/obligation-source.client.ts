@@ -71,10 +71,11 @@ export interface ObligationSourceClientOptions {
 }
 
 export class ObligationSourceClient implements ObligationSource {
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
 
   constructor(private readonly options: ObligationSourceClientOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
   }
 
   async obligation(organizationId: string, statementId: string): Promise<ObligationFact | null> {

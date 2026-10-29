@@ -1,3 +1,5 @@
+import { guardedFetch } from '@rasta/testing';
+
 import { test, expect, errorCode, type Actor } from '../../src/api';
 import { e2eConfig } from '../../src/env';
 import { EconomicEventTap } from '../../src/events';
@@ -56,11 +58,12 @@ function htmlBytes(): Buffer {
  * Uploads straight to object storage, the way a browser does.
  *
  * A plain `fetch` carrying no platform credential of any kind: the signed URL
- * is the entire authorisation. Using an S3 client here would prove something
+ * is the entire authorisation — so a redirect is refused (`guardedFetch`), never
+ * followed with the bytes to a host nobody chose (Q-155, PR #492 r1 F2). Using an S3 client here would prove something
  * else — that a program holding bucket credentials can write to a bucket.
  */
 async function putToSignedUrl(url: string, body: Buffer, contentType: string): Promise<number> {
-  const response = await fetch(url, {
+  const response = await guardedFetch(url, {
     method: 'PUT',
     headers: { 'content-type': contentType },
     body: new Uint8Array(body),
@@ -254,7 +257,7 @@ test.describe.serial('the document direct-upload lifecycle', () => {
     const link = await tenantA.post(`/v1/documents/${documentId}/download-url`);
     expect(link.status).toBe(200);
 
-    const fetched = await fetch(String((link.body as Record<string, unknown>).downloadUrl));
+    const fetched = await guardedFetch(String((link.body as Record<string, unknown>).downloadUrl));
     expect(fetched.status).toBe(200);
     expect(Buffer.from(await fetched.arrayBuffer()).equals(pdfBytes())).toBe(true);
     // Never rendered: ADR-014 forbids serving stored content as HTML.

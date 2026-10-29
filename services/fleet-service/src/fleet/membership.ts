@@ -102,10 +102,11 @@ export interface LiveMembershipClientOptions {
  * same `503`.
  */
 export class LiveMembershipClient implements MembershipSource {
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
 
   constructor(private readonly options: LiveMembershipClientOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
   }
 
   async isLiveMember(organizationId: string, userId: string): Promise<boolean> {

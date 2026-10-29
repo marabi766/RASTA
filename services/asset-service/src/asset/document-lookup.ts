@@ -85,10 +85,11 @@ export interface DocumentLookupClientOptions {
 }
 
 export class DocumentLookupClient implements DocumentLookup {
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
 
   constructor(private readonly options: DocumentLookupClientOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
   }
 
   async find(documentId: string, organizationId: string): Promise<ResolvedDocument | null> {

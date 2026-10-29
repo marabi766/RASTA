@@ -110,10 +110,11 @@ export interface ReturnRequestSourceClientOptions {
 }
 
 export class ReturnRequestSourceClient implements ReturnRequestSource {
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
 
   constructor(private readonly options: ReturnRequestSourceClientOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
   }
 
   async read(supplierOrganizationId: string, returnRequestId: string) {

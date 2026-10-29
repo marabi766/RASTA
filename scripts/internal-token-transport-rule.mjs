@@ -33,7 +33,7 @@ export default {
     schema: [],
     messages: {
       unsafe:
-        'Send credentials only through a redirect-refusing transport: internalFetch from @rasta/nest-common, or credentialFetch in apps/web and scripts.',
+        'Send credentials only through a redirect-refusing transport: internalFetch from @rasta/nest-common, credentialFetch in apps/web and scripts, or guardedFetch / guardRequestContext from @rasta/testing in E2E code.',
     },
   },
   create(context) {

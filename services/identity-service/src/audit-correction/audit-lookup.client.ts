@@ -67,11 +67,12 @@ export interface AuditLookupClientOptions {
 }
 
 export class AuditLookupClient {
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
   private readonly baseUrl: string;
 
   constructor(private readonly options: AuditLookupClientOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
   }
 

@@ -211,7 +211,8 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     throw new Error('a replay deadline needs an idempotency key and a positive safe integer');
   }
   const correlationId = call.correlationId ?? randomUUID();
-  const fetchImpl = call.fetchImpl ?? fetch;
+  // Absent: credentialFetch's own fetch, the only raw one (Q-155 boundary).
+  const fetchImpl = call.fetchImpl;
 
   let response: Response;
   try {

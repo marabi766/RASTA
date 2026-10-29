@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { decodeJwt } from 'jose';
+import { guardedFetch } from '@rasta/testing';
 import { z } from 'zod';
 
 import type { ProvisionedPerson } from './live-session';
@@ -40,7 +41,7 @@ function realmOf(): { base: string; realm: string } {
 
 async function adminToken(): Promise<string> {
   const { base } = realmOf();
-  const response = await fetch(`${base}/realms/master/protocol/openid-connect/token`, {
+  const response = await guardedFetch(`${base}/realms/master/protocol/openid-connect/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -61,7 +62,7 @@ async function admin(
   body?: unknown,
 ): Promise<Response> {
   const { base, realm } = realmOf();
-  return fetch(`${base}/admin/realms/${realm}${path}`, {
+  return guardedFetch(`${base}/admin/realms/${realm}${path}`, {
     method,
     headers: {
       authorization: `Bearer ${token}`,
@@ -97,7 +98,7 @@ const TOKEN_WAIT_MS = 30_000;
 /** One password grant for `person`: its access token, or why there is none. */
 async function passwordGrant(person: ProvisionedPerson): Promise<string | number> {
   const issuer = requiredEnv('OIDC_ISSUER_URL').replace(/\/+$/, '');
-  const response = await fetch(`${issuer}/protocol/openid-connect/token`, {
+  const response = await guardedFetch(`${issuer}/protocol/openid-connect/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -152,7 +153,7 @@ export async function provisionPerson(
   organizationId: string,
   roles: readonly string[],
 ): Promise<ProvisionedPerson> {
-  const created = await fetch(gatewayUrl('/v1/users'), {
+  const created = await guardedFetch(gatewayUrl('/v1/users'), {
     method: 'POST',
     headers: {
       authorization: `Bearer ${systemAdminToken}`,

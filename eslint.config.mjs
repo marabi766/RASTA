@@ -3,7 +3,16 @@ import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
 import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
+import rawHttpBoundary from './scripts/raw-http-boundary-rule.mjs';
 import noZodDefault from './scripts/no-zod-default-rule.mjs';
+
+/**
+ * The transport rules, one plugin object for every block that turns them on
+ * (flat config refuses a plugin name defined twice with different objects).
+ */
+export const internalPlugin = {
+  rules: { transport: internalTokenTransport, 'raw-http': rawHttpBoundary },
+};
 
 const NO_ZOD_COERCE = [
   {
@@ -103,7 +112,12 @@ const base = tseslint.config(
   },
   {
     // Workspaces re-export this config, so paths must match from their cwd too.
-    files: ['**/src/**/*.ts', '**/dev/**/*.ts', '**/prisma/**/*.ts', 'scripts/**/*.{js,mjs,cjs}'],
+    files: [
+      '**/src/**/*.{ts,js,mjs,cjs}',
+      '**/dev/**/*.{ts,js,mjs,cjs}',
+      '**/prisma/**/*.{ts,js,mjs,cjs}',
+      'scripts/**/*.{js,mjs,cjs}',
+    ],
     ignores: [
       '**/*.spec.ts',
       '**/*.test.ts',
@@ -114,8 +128,12 @@ const base = tseslint.config(
       // Test-only helpers too: child-process fixtures and fakes, never deployed.
       '**/__tests__/**',
     ],
-    plugins: { internal: { rules: { transport: internalTokenTransport } } },
-    rules: { 'internal/transport': 'error' },
+    plugins: { internal: internalPlugin },
+    // Two layers (Q-155). `raw-http` is the boundary: outside the audited
+    // transports (AUDITED_TRANSPORTS in the rule) no raw HTTP primitive at all,
+    // however it is reached. `transport` is the second layer: a module that
+    // spells a credential must name the redirect-refusing transport.
+    rules: { 'internal/transport': 'error', 'internal/raw-http': 'error' },
   },
   {
     // @rasta/config's URL reader is plain CommonJS so the scripts can import

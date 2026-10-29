@@ -23,6 +23,7 @@ test('Turbo hashes the shared internal transport lint policy and the sending wor
   for (const file of [
     '../../eslint.config.mjs',
     '../../scripts/internal-token-transport-rule.mjs',
+    '../../scripts/raw-http-boundary-rule.mjs',
     'src/fleet/transfer-record.ts',
   ]) {
     assert.equal(typeof task.inputs[file], 'string', `lint cache must hash ${file}`);
@@ -47,7 +48,10 @@ test('Turbo hashes the shared rule for the portal lint too (Q-155)', () => {
   for (const file of [
     'eslint.config.mjs',
     '../../scripts/internal-token-transport-rule.mjs',
+    '../../scripts/raw-http-boundary-rule.mjs',
     'src/server/credential-fetch.ts',
+    // The browser suite is linted too (PR #492 r1 F2).
+    'e2e/provisioned-people.ts',
   ]) {
     assert.equal(typeof task.inputs[file], 'string', `lint cache must hash ${file}`);
   }

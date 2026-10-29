@@ -75,3 +75,11 @@ export type {
   MetadataExpectation,
   MetadataMatcher,
 } from './disclosure';
+
+export {
+  guardedFetch,
+  guardRequestContext,
+  RedirectRefusedError,
+  REFUSED_REDIRECT_STATUSES,
+} from './guarded-http';
+export type { GuardableRequestContext } from './guarded-http';

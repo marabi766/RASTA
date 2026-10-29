@@ -50,7 +50,8 @@ export async function internalGet(
     headers['x-correlation-id'] = context.correlationId;
   }
 
-  const fetchImpl = options.fetch ?? fetch;
+  // Absent: internalFetch's own fetch, the only raw one (Q-155 boundary).
+  const fetchImpl = options.fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs);
   timer.unref?.();

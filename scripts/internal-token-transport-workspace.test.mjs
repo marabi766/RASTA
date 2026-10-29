@@ -148,14 +148,14 @@ for (const [workspace, filePath, transport] of WORKSPACES) {
   });
 }
 
-const ruleIn = (workspace, filename) => {
+const ruleIn = (workspace, filename, rule = 'internal/transport') => {
   const result = spawnSync(
     process.execPath,
     [`${root}node_modules/eslint/bin/eslint.js`, '--print-config', filename],
     { cwd: `${root}${workspace}`, encoding: 'utf8' },
   );
   assert.equal(result.status, 0, result.stderr);
-  return JSON.parse(result.stdout).rules?.['internal/transport']?.[0];
+  return JSON.parse(result.stdout).rules?.[rule]?.[0];
 };
 
 test('the portal enforces the rule on production source, not on specs or test helpers', () => {
@@ -174,4 +174,10 @@ test('the Keycloak exemption is one file and expires when that file uses interna
   );
   // Until PR #483 lands the client sends raw; once it uses internalFetch, delete the exemption.
   assert.equal(ruleIn('services/identity-service', exempt), migrated ? 2 : 0);
+  // The transport boundary is suspended by the same block, for the same file, until the same day.
+  assert.equal(ruleIn('services/identity-service', exempt, 'internal/raw-http'), migrated ? 2 : 0);
+  assert.equal(
+    ruleIn('services/identity-service', 'src/keycloak/other.ts', 'internal/raw-http'),
+    2,
+  );
 });

@@ -147,7 +147,8 @@ const TOKEN_ENDPOINT_TIMEOUT_MS = 10_000;
 async function postForm(
   endpoint: string,
   body: Record<string, string>,
-  fetchImpl: typeof fetch,
+  // Absent: credentialFetch's own fetch, the only raw one (Q-155 boundary).
+  fetchImpl: typeof fetch | undefined,
   timeoutMs: number = TOKEN_ENDPOINT_TIMEOUT_MS,
 ): Promise<TokenResponse> {
   // One deadline for the whole exchange, body included: the signal stays
@@ -255,7 +256,7 @@ export interface ExchangeRequest {
 
 export function exchangeCode(
   request: ExchangeRequest,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
 ): Promise<TokenResponse> {
   return postForm(
     request.endpoints.token,
@@ -279,7 +280,7 @@ export function refreshTokens(
     /** Overrides {@link TOKEN_ENDPOINT_TIMEOUT_MS}. Exists for tests. */
     timeoutMs?: number;
   },
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
 ): Promise<TokenResponse> {
   return postForm(
     request.endpoints.token,

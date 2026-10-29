@@ -9,6 +9,11 @@ import noZodDefault from '../../scripts/no-zod-default-rule.mjs';
 // cookie, API key or secret/grant form field must send it through
 // credentialFetch, which refuses redirects (Q-155).
 import credentialTransport from '../../scripts/internal-token-transport-rule.mjs';
+// And the transport boundary: no raw HTTP primitive outside the audited
+// transports, however it is reached (Q-155 Follow-up 1).
+import rawHttpBoundary from '../../scripts/raw-http-boundary-rule.mjs';
+
+const internal = { rules: { transport: credentialTransport, 'raw-http': rawHttpBoundary } };
 
 /**
  * The portal's lint rules.
@@ -40,8 +45,20 @@ export default tseslint.config(
     // build credential sentinels against local fakes.
     files: ['src/**/*.{ts,tsx}'],
     ignores: ['**/*.spec.{ts,tsx}', 'src/test/**'],
-    plugins: { internal: { rules: { transport: credentialTransport } } },
-    rules: { 'internal/transport': 'error' },
+    plugins: { internal },
+    rules: { 'internal/transport': 'error', 'internal/raw-http': 'error' },
+  },
+  {
+    // The browser suite's helpers and specs send real credentials (the
+    // Keycloak admin password, password grants, bearers) and signed storage
+    // URLs: all of them, specs included, go through guardedFetch or the
+    // request fixture that e2e/expect.ts guards (PR #492 r1 F2).
+    files: ['e2e/**/*.ts'],
+    plugins: { internal },
+    rules: {
+      'internal/transport': 'error',
+      'internal/raw-http': ['error', { playwright: true }],
+    },
   },
   {
     files: ['**/*.{ts,tsx}'],

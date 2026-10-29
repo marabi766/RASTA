@@ -158,10 +158,11 @@ export interface SourceFactsClientOptions {
 }
 
 export class SourceFactsClient implements SourceFacts {
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
 
   constructor(private readonly options: SourceFactsClientOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
   }
 
   maintenanceRequest(organizationId: string, id: string): Promise<MaintenanceRequestFact | null> {

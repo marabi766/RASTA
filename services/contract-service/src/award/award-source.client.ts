@@ -77,10 +77,11 @@ export interface AwardSourceClientOptions {
 const ABSENT_RESOURCES = ['Tender', 'TenderAward'] as const;
 
 export class AwardSourceClient implements AwardSource {
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
 
   constructor(private readonly options: AwardSourceClientOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
   }
 
   async award(organizationId: string, tenderId: string): Promise<AwardFact | null> {

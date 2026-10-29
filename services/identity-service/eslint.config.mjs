@@ -8,7 +8,9 @@ export default [
     // three exchanges to internalFetch and must delete this block;
     // scripts/internal-token-transport-workspace.test.mjs fails once the file
     // uses internalFetch while the exemption is still here.
+    // The transport boundary (`raw-http`) is suspended for the same file and
+    // expires with the same block.
     files: ['src/keycloak/keycloak.client.ts'],
-    rules: { 'internal/transport': 'off' },
+    rules: { 'internal/transport': 'off', 'internal/raw-http': 'off' },
   },
 ];
