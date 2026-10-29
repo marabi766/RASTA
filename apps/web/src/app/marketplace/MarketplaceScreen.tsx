@@ -4,6 +4,8 @@ import type { DemoMode } from '@/lib/demo-mode';
 import { productKindLabel } from '@/lib/labels';
 import { formatMoney } from '@/lib/format';
 import type { ProductPage, ProductSearchQuery, ReadResult } from '@/server/marketplace';
+import type { InContext } from '@/lib/page-context';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * `/marketplace` — جست‌وجوی کالا و خدمت (docs/16 § ۱۶٫۶, role
@@ -23,7 +25,7 @@ import type { ProductPage, ProductSearchQuery, ReadResult } from '@/server/marke
 
 export interface MarketplaceScreenProps {
   readonly result: ReadResult<ProductPage>;
-  readonly query: ProductSearchQuery;
+  readonly query: InContext<ProductSearchQuery>;
   /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
   readonly demoMode: DemoMode;
 }
@@ -33,7 +35,7 @@ const CONTROL =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ' +
   'focus-visible:outline-focus';
 
-function Filters({ query }: { query: ProductSearchQuery }) {
+function Filters({ query }: { query: InContext<ProductSearchQuery> }) {
   return (
     <form
       method="get"
@@ -41,6 +43,7 @@ function Filters({ query }: { query: ProductSearchQuery }) {
       className="flex flex-wrap items-end gap-4"
       aria-label="جست‌وجوی کالا و خدمت"
     >
+      <ContextField context={query.context} />
       <label htmlFor="filter-q" className="flex flex-col gap-1 text-sm text-content-muted">
         <span id="filter-q-label">جست‌وجو</span>
         <input

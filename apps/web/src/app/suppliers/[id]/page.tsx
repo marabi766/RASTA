@@ -13,7 +13,9 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { SupplierPendingNotices } from '../UnresolvedSupplierNotice';
 import { SupplierDetailScreen } from './SupplierDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 import { NO_COMMANDS, supplierCommandsFor } from './SupplierCommands';
+import { pageParams } from '@/server/page-context';
 
 /**
  * The `/suppliers/[id]` route — پرونده‌ی تامین‌کننده (docs/16 § ۱۶٫۶).
@@ -36,9 +38,9 @@ export default async function SupplierPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const query = await searchParams;
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/suppliers/${id}`)}`);
+  const query = await pageParams(session, searchParams);
 
   const [result, unresolved] = await Promise.all([
     fetchSupplier(session, id),
@@ -48,8 +50,9 @@ export default async function SupplierPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

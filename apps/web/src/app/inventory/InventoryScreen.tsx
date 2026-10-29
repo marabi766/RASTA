@@ -13,6 +13,7 @@ import {
 import { formatJalaliDateLong, toPersianDigits } from '@/lib/format';
 import { formatQuantity } from '@/lib/inventory-fields';
 import type { ReadResult, StockPage, WarehousePage, WarehouseSummary } from '@/server/inventory';
+import { withContext, type InContext } from '@/lib/page-context';
 
 /**
  * Warehouses and their stock levels (docs/16 § ۱۶٫۶, `/inventory`). Read-only.
@@ -45,17 +46,20 @@ export interface InventorySelection {
 export interface InventoryScreenProps {
   readonly warehouses: ReadResult<WarehousePage>;
   readonly selection: InventorySelection | null;
-  readonly query: InventoryQuery;
+  readonly query: InContext<InventoryQuery>;
 }
 
-export function inventoryHref(query: InventoryQuery, changes: Partial<InventoryQuery>): string {
+export function inventoryHref(
+  query: InContext<InventoryQuery>,
+  changes: Partial<InventoryQuery>,
+): string {
   const merged = { ...query, ...changes };
   const params = new URLSearchParams();
   if (merged.warehouse) params.set('warehouse', merged.warehouse);
   if (merged.warehouseCursor) params.set('wcursor', merged.warehouseCursor);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const text = params.toString();
-  return text ? `/inventory?${text}` : '/inventory';
+  return withContext(query.context, text ? `/inventory?${text}` : '/inventory');
 }
 
 export function InventoryScreen({ warehouses, selection, query }: InventoryScreenProps) {
@@ -72,7 +76,7 @@ function WarehousesSection({
   query,
 }: {
   result: ReadResult<WarehousePage>;
-  query: InventoryQuery;
+  query: InContext<InventoryQuery>;
 }) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="انبارهای این سازمان در اختیار شما نیست." />;
@@ -144,7 +148,7 @@ function StockSection({
   query,
 }: {
   selection: InventorySelection;
-  query: InventoryQuery;
+  query: InContext<InventoryQuery>;
 }) {
   const { warehouse, stock } = selection;
 
@@ -179,7 +183,7 @@ function StockBody({
   query,
 }: {
   stock: ReadResult<StockPage> | null;
-  query: InventoryQuery;
+  query: InContext<InventoryQuery>;
 }) {
   if (stock === null) return null;
 

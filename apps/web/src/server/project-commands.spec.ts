@@ -68,7 +68,7 @@ function tokenFor(organizationId: string | null, roles: string[]): string {
   });
 }
 
-const session = (accessToken = 'access-token-value'): WebSession => ({
+const session = (accessToken = tokenFor('ORG-A', ['ORGANIZATION_ADMIN'])): WebSession => ({
   subject: 'user-1',
   username: 'u',
   organizationId: 'ORG-A',
@@ -388,7 +388,7 @@ describe('what is sent to the gateway', () => {
       expect(seen[0]!.url).toBe(`http://gateway.test:3000${call.path}`);
       expect(seen[0]!.method).toBe(call.method);
       expect(seen[0]!.body).toEqual(call.body);
-      expect(seen[0]!.headers.get('authorization')).toBe('Bearer access-token-value');
+      expect(seen[0]!.headers.get('authorization')).toBe(`Bearer ${session().accessToken}`);
       expect(seen[0]!.headers.has('idempotency-key')).toBe(false);
     },
   );

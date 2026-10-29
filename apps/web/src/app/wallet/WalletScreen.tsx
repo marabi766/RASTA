@@ -33,6 +33,8 @@ import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
 import { demoModeOf } from '@/lib/demo-mode';
 import { providerNotice } from '@/lib/wallet-fields';
 import { TopUpForm } from './TopUpForm';
+import { withContext, type InContext } from '@/lib/page-context';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * `/wallet` — کیف پول و تراکنش (docs/16 § ۱۶٫۶, role `ORGANIZATION_ADMIN`).
@@ -64,19 +66,22 @@ export interface WalletScreenProps {
   readonly holds: ReadResult<HoldsPage>;
   readonly transactions: ReadResult<TransactionPage>;
   readonly provider: ReadResult<PaymentProviderDisclosure>;
-  readonly query: TransactionListQuery;
+  readonly query: InContext<TransactionListQuery>;
   readonly csrfToken: string;
   readonly submissionId: string;
 }
 
-function hrefWith(query: TransactionListQuery, changes: Partial<TransactionListQuery>): string {
+function hrefWith(
+  query: InContext<TransactionListQuery>,
+  changes: Partial<TransactionListQuery>,
+): string {
   const params = new URLSearchParams();
   const merged = { ...query, ...changes };
   if (merged.status) params.set('status', merged.status);
   if (merged.transactionType) params.set('transactionType', merged.transactionType);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const search = params.toString();
-  return search ? `/wallet?${search}` : '/wallet';
+  return withContext(query.context, search ? `/wallet?${search}` : '/wallet');
 }
 
 const CONTROL =
@@ -152,7 +157,7 @@ function HoldRows({ holds }: { holds: HoldsPage }) {
   );
 }
 
-function TransactionFilters({ query }: { query: TransactionListQuery }) {
+function TransactionFilters({ query }: { query: InContext<TransactionListQuery> }) {
   return (
     <form
       method="get"
@@ -160,6 +165,7 @@ function TransactionFilters({ query }: { query: TransactionListQuery }) {
       className="flex flex-wrap items-end gap-4"
       aria-label="پالایش تراکنش‌ها"
     >
+      <ContextField context={query.context} />
       <label htmlFor="filter-status" className="flex flex-col gap-1 text-sm text-content-muted">
         وضعیت
         <select
@@ -199,7 +205,13 @@ function TransactionFilters({ query }: { query: TransactionListQuery }) {
   );
 }
 
-function TransactionRows({ page, query }: { page: TransactionPage; query: TransactionListQuery }) {
+function TransactionRows({
+  page,
+  query,
+}: {
+  page: TransactionPage;
+  query: InContext<TransactionListQuery>;
+}) {
   return (
     <>
       <table className="w-full border-collapse text-sm">

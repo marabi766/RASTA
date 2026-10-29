@@ -23,6 +23,7 @@ import type {
   SettlementListQuery,
   SettlementPage,
 } from '@/server/settlements';
+import { withContext, type InContext } from '@/lib/page-context';
 
 /**
  * The settlement list (docs/16 § ۱۶٫۶, `/settlements`).
@@ -41,22 +42,22 @@ import type {
 
 export interface SettlementsScreenProps {
   readonly result: ReadResult<SettlementPage>;
-  readonly query: SettlementListQuery;
+  readonly query: InContext<SettlementListQuery>;
 }
 
-function hrefWith(view: SettlementView, cursor?: string): string {
+function hrefWith(context: string, view: SettlementView, cursor?: string): string {
   const params = new URLSearchParams({ view });
   if (cursor) params.set('cursor', cursor);
-  return `/settlements?${params.toString()}`;
+  return withContext(context, `/settlements?${params.toString()}`);
 }
 
-function ViewTabs({ query }: { query: SettlementListQuery }) {
+function ViewTabs({ query }: { query: InContext<SettlementListQuery> }) {
   return (
     <nav aria-label="سمت تسویه" className="flex flex-wrap gap-2">
       {SETTLEMENT_VIEWS.map((view) => (
         <Link
           key={view}
-          href={hrefWith(view)}
+          href={hrefWith(query.context, view)}
           aria-current={view === query.view ? 'page' : undefined}
           className={
             view === query.view
@@ -153,7 +154,7 @@ function SettlementsBody({ result, query }: SettlementsScreenProps) {
 
       {page.nextCursor ? (
         <div className="mt-4">
-          <ButtonLink href={hrefWith(query.view, page.nextCursor)} tone="secondary">
+          <ButtonLink href={hrefWith(query.context, query.view, page.nextCursor)} tone="secondary">
             صفحهٔ بعد
           </ButtonLink>
         </div>

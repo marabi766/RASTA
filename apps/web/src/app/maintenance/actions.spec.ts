@@ -7,6 +7,7 @@ import { SUBMISSION_FIELD, isBoundSubmissionId, mintSubmissionId } from '@/serve
 import type { WebSession } from '@/server/session';
 
 import { EDIT_AS_NEW_INTENT, IDLE_REPORT_REQUEST_FORM, REPORT_INTENT_FIELD } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The `/maintenance` report form's write path, from a posted form to a call on
@@ -54,7 +55,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'operator',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

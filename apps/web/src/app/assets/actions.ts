@@ -14,6 +14,8 @@ import {
 } from '@/server/asset-commands';
 
 import type { RegisterAssetFormState } from './form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The `/assets` registration form's server action.
@@ -60,7 +62,10 @@ export async function submitRegisterAsset(
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
     // form must carry a fresh submission id.
     redirect(
-      `/assets/${encodeURIComponent(result.data.id)}?${FLASH_PARAM}=${mintFlash(session, result.data.id, 'created')}`,
+      withContext(
+        pageContext(session),
+        `/assets/${encodeURIComponent(result.data.id)}?${FLASH_PARAM}=${mintFlash(session, result.data.id, 'created')}`,
+      ),
     );
   }
 
