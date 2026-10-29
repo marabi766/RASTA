@@ -213,7 +213,14 @@ object state, reference allowance, schema fixed point, ledger equality including
 per-currency totals, wallets/escrow/active holds, the `9007199254740993` amount above the safe
 integer range, and cleanup of the CLI's own containers, networks and volumes.
 
-**Measured duration.** The full drill took 703 s (11 min 43 s, from `scripts/backup-restore-drill` start to exit) for 16 databases on the dev host on 2026-10-29: 260 tables, 262 application rows, 193 migration rows, 25.0 s of schema-dump collection and 119.0 s of reference and fixed-point work in total. The workflow's limits come from that, separately from the 5-minute PostgreSQL test step of `ci.yml`: 45 minutes for the drill step (about four times the measurement, because a 2-vCPU runner also pulls the image) and 60 for the job. Read the real duration of the runner from the run's summary ("total seconds") and move the limits if it approaches them.
+**Measured duration.** On a GitHub-hosted `ubuntu-latest` runner the drill step took 219 s (run
+40800884574, 2026-10-29: install 28 s, the drill 3 min 39 s; 16 databases, 260 tables, 262
+application rows, 193 migration rows; 7.4 s of schema-dump collection and 31.8 s of reference and
+fixed-point work in total). On the dev host the same command took 703 s. The workflow's limits come
+from those, separately from the 5-minute PostgreSQL test step of `ci.yml`: 20 minutes for the drill
+step (about five times the runner's measurement, under twice the slower host's) and 30 for the job.
+Read the real duration from each run's summary ("total seconds") and move the limits if it
+approaches them.
 
 **What the job shows.** The CLI's stdout (it carries synthetic ledger amounts), stderr and the
 JSON report stay in a private directory under `RUNNER_TEMP`; nothing is uploaded and the last step

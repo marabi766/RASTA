@@ -45,7 +45,7 @@ jobs:
   drill:
     name: Full backup restore drill (synthetic data)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -60,10 +60,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Run the full drill
         id: drill
-        # Its own limit, apart from the 5-minute PostgreSQL tests in ci.yml. Measured: the
-        # whole drill takes 703 s on the dev host (16 databases, 2026-10-29); a 2-vCPU runner
-        # also pulls the image, so the limit is about four times that.
-        timeout-minutes: 45
+        # Its own limit, apart from the 5-minute PostgreSQL tests in ci.yml. Measured: the whole
+        # drill took 219 s on a GitHub runner (run 40800884574) and 703 s on the slower dev
+        # host (2026-10-29); the limit is under 2x the slower and about 5x the runner's.
+        timeout-minutes: 20
         run: |
           # One private directory per run holds the report, the CLI's stdout (it carries
           # synthetic ledger amounts) and stderr. Nothing in it is printed or uploaded; the next
