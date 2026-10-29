@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -85,7 +85,11 @@ export class SupplierStandingClient implements SupplierStandingSource {
   ) {}
 
   async fetchStanding(organizationId: string): Promise<StandingOfOrganization> {
-    const token = await this.tokens.issue(SERVICE_NAME, SUPPLIER_SERVICE, 'SERVICE');
+    const sender = await new InternalHttpClient(this.tokens).authorize({
+      from: SERVICE_NAME,
+      to: SUPPLIER_SERVICE,
+      purpose: 'SERVICE',
+    });
     const url =
       `${this.env.SUPPLIER_SERVICE_URL.replace(/\/+$/, '')}` +
       `/v1/suppliers/standing-snapshot/${encodeURIComponent(organizationId)}`;
@@ -94,11 +98,10 @@ export class SupplierStandingClient implements SupplierStandingSource {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await internalFetch(url, {
+      const response = await sender.send(url, {
         method: 'GET',
         headers: {
           accept: 'application/json',
-          'x-internal-token': token,
           'x-correlation-id': correlationId(),
         },
         signal: controller.signal,

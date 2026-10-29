@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -117,18 +117,21 @@ export class SupplierSnapshotClient implements StandingSnapshotSource, StandingO
   }
 
   private async get<T>(path: string, schema: z.ZodType<T>): Promise<T> {
-    const token = await this.tokens.issue(SERVICE_NAME, SUPPLIER_SERVICE, 'SERVICE');
+    const sender = await new InternalHttpClient(this.tokens).authorize({
+      from: SERVICE_NAME,
+      to: SUPPLIER_SERVICE,
+      purpose: 'SERVICE',
+    });
     const url = `${this.env.SUPPLIER_SERVICE_URL.replace(/\/+$/, '')}${path}`;
 
     const timeoutMs = this.env.CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await internalFetch(url, {
+      const response = await sender.send(url, {
         method: 'GET',
         headers: {
           accept: 'application/json',
-          'x-internal-token': token,
           // A background call has no request; a fresh id still lets the callee's logs be joined.
           'x-correlation-id': safeCorrelationId(),
         },

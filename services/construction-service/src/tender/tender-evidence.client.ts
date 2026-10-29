@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -79,7 +79,12 @@ export class TenderEvidenceClient implements TenderEvidenceSource {
 
   /** `organizationId` is the tender **owner's**: the organization the bids are stored under. */
   async fetchChain(organizationId: string, tenderId: string): Promise<TenderChain> {
-    const token = await this.tokens.issue(SERVICE_NAME, AUDIT_SERVICE, 'SERVICE', organizationId);
+    const sender = await new InternalHttpClient(this.tokens).authorize({
+      from: SERVICE_NAME,
+      to: AUDIT_SERVICE,
+      purpose: 'SERVICE',
+      organizationId,
+    });
     const url =
       `${this.env.AUDIT_SERVICE_URL.replace(/\/+$/, '')}` +
       `/v1/internal/tender-evidence/${encodeURIComponent(tenderId)}/chain`;
@@ -88,11 +93,10 @@ export class TenderEvidenceClient implements TenderEvidenceSource {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await internalFetch(url, {
+      const response = await sender.send(url, {
         method: 'GET',
         headers: {
           accept: 'application/json',
-          'x-internal-token': token,
           'x-correlation-id': safeCorrelationId(),
         },
         signal: controller.signal,
