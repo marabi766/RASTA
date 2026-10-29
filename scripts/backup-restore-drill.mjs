@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
   closeSync,
@@ -32,8 +31,7 @@ import {
   SEQUENCES_SQL,
   compareSnapshots,
   writeReportAtomically,
-  killGroup,
-  reapProcessGroup,
+  createProcessRunner,
   drillPassed,
   checkDatabaseCoverage,
   summarizeTables,
@@ -113,106 +111,35 @@ function writeReport({ durable = false, final = false } = {}) {
     );
 }
 
-function commandError(options, exitCode, message) {
-  const error = new Error(options.privateOutput ? 'Private schema command failed' : message);
-  if (options.privateOutput)
-    error.privateFailure = {
-      stage: options.stage ?? stage,
-      database: options.database ?? null,
-      exitCode,
-    };
-  return error;
-}
-
-// Every child leads its own process group (detached). The group id is written to the report
-// before the child is awaited, so a SIGKILL of the drill leaves the operator the groups to stop.
-const groups = new Set();
-function stopActive() {
-  for (const pgid of groups) killGroup(pgid);
-}
-async function settleGroup(pgid, stageName) {
-  const outcome = await reapProcessGroup(pgid);
-  if (outcome !== 'gone') (report.reapedProcessGroups ??= []).push({ pgid, stage: stageName });
-  if (outcome === 'orphan') (report.orphanProcessGroups ??= []).push(pgid);
-  groups.delete(pgid);
-  report.processGroups = [...groups];
-}
+// The one process lifecycle boundary (createProcessRunner): every child leads its own group,
+// whose id is written to the report before the child is awaited, so a SIGKILL of the drill
+// leaves the operator the groups to stop. A group stays owned until it is confirmed gone.
+// A report write that fails is recorded and makes the final result fail (see finally below).
+const runner = createProcessRunner({
+  report,
+  persist: () => writeReport(),
+  persistFailed: (stageName) => {
+    (report.reportWriteFailures ??= []).push({ stage: stageName ?? stage });
+    process.stderr.write(
+      '[backup-restore-drill] a report write failed; the run cannot be reported as passed\n',
+    );
+  },
+  isInterrupted: () => interrupted,
+  currentStage: () => stage,
+  cwd: ROOT,
+  env,
+});
+const run = runner.run;
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     interrupted = true;
     report.signals.push({ signal, duringCleanup: cleaning });
-    if (!cleaning) stopActive();
-    else process.stderr.write(`[backup-restore-drill] cleanup continues after ${signal}\n`);
-  });
-}
-
-/** Bounded children; failure diagnostics retain the last 4 KB per stream.
- * Database URLs are redacted; synthetic seed payloads can appear in diagnostics. */
-async function run(command, argv, options = {}) {
-  if (interrupted && !options.cleanup) throw new Error('Interrupted');
-  return new Promise((accept, reject) => {
-    const child = spawn(command, argv, {
-      cwd: options.cwd ?? ROOT,
-      env: options.env ?? env,
-      detached: true,
-      stdio: [options.inputFd ?? 'pipe', options.outputFd ?? 'pipe', 'pipe'],
-    });
-    const pgid = child.pid;
-    if (pgid) {
-      groups.add(pgid);
-      report.processGroups = [...groups];
-      try {
-        writeReport();
-      } catch {
-        // An unrecorded group cannot be handed over; cleanup commands still have to run.
-        if (!options.cleanup) {
-          killGroup(pgid);
-          groups.delete(pgid);
-          report.processGroups = [...groups];
-          reject(new Error('Could not record process group'));
-          return;
-        }
-      }
+    if (!cleaning) runner.stopActive();
+    else {
+      // Cleanup commands are not killed, but a group that survived an earlier kill is retried.
+      runner.killOrphans();
+      process.stderr.write(`[backup-restore-drill] cleanup continues after ${signal}\n`);
     }
-    const output = [];
-    let diagnostic = '';
-    let bytes = 0;
-    let overflow = false;
-    const timer = setTimeout(() => killGroup(pgid), options.timeout ?? 600_000);
-    child.stdout?.on('data', (chunk) => {
-      bytes += chunk.length;
-      if (bytes > 64 * 1024 * 1024) {
-        overflow = true;
-        killGroup(pgid);
-      } else output.push(chunk);
-    });
-    child.stderr.on('data', (chunk) => {
-      diagnostic = (diagnostic + chunk.toString('utf8')).slice(-4000);
-    });
-    child.stdin?.on('error', () => {});
-    if (child.stdin) child.stdin.end(options.input);
-    child.on('error', () => {
-      clearTimeout(timer);
-      if (pgid) groups.delete(pgid);
-      reject(commandError(options, null, 'Could not start command'));
-    });
-    child.on('close', async (code) => {
-      clearTimeout(timer);
-      if (pgid) await settleGroup(pgid, stage);
-      if (code !== 0 || overflow) {
-        if (options.privateOutput) {
-          reject(commandError(options, code, 'Private schema command failed'));
-          return;
-        }
-        const detail =
-          `${Buffer.concat(output).toString('utf8').slice(-4000)}\n${diagnostic}`.replace(
-            /postgres(?:ql)?:\/\/[^\s"']+/gi,
-            '[database URL redacted]',
-          );
-        reject(new Error(`Command failed (exit ${code}): ${detail}`));
-      } else
-        accept(options.raw ? Buffer.concat(output) : Buffer.concat(output).toString('utf8').trim());
-    });
   });
 }
 
@@ -363,6 +290,13 @@ function progress(value) {
   stage = value;
   process.stderr.write(`[backup-restore-drill] ${stage}\n`);
 }
+
+const failedCleanup = () => ({
+  passed: false,
+  project,
+  temporary,
+  ...(report.orphanProcessGroups?.length && { orphanProcessGroups: report.orphanProcessGroups }),
+});
 
 try {
   temporary = mkdtempSync(join(tmpdir(), 'rasta-restore-drill-'));
@@ -592,27 +526,23 @@ try {
           ),
         )
       : [];
+    // A group that survived its reap is retried once more; only a confirmed disappearance counts.
+    await runner.retryOrphans();
     if (resources.some(Boolean) || report.orphanProcessGroups?.length) {
-      report.cleanup = {
-        passed: false,
-        project,
-        temporary,
-        ...(report.orphanProcessGroups?.length && {
-          orphanProcessGroups: report.orphanProcessGroups,
-        }),
-      };
+      report.cleanup = failedCleanup();
       report.passed = false;
     } else {
       report.cleanup.passed = true;
       if (temporary) rmSync(temporary, { recursive: true, force: true });
     }
   } catch {
-    report.cleanup = { passed: false, project, temporary };
+    report.cleanup = failedCleanup();
     report.passed = false;
   }
   report.finishedAt = new Date().toISOString();
   report.interrupted = interrupted;
-  if (interrupted) report.passed = false;
+  // A report write that failed at any point (cleanup included) is never forgotten.
+  if (interrupted || report.reportWriteFailures?.length) report.passed = false;
   try {
     writeReport({ durable: true, final: true });
   } catch {

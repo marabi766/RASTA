@@ -9,7 +9,9 @@ import {
   rmSync,
 } from 'node:fs';
 import * as realFs from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { spawnSync } from 'node:child_process';
+import { PassThrough } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -34,6 +36,7 @@ import {
   summarizeTables,
   writeReportAtomically,
   reapProcessGroup,
+  createProcessRunner,
 } from './backup-restore-drill-lib.mjs';
 
 const SUFFIX = '0123456789abcdef';
@@ -924,4 +927,255 @@ test('process groups: nothing left is gone; members are killed and confirmed; su
   assert.equal(await reapProcessGroup(43, { ...stuck, wait, attempts: 3 }), 'orphan');
   assert.deepEqual(stuck.killed, [43]);
   assert.equal(waits.length, 1 + 3);
+});
+
+// The process lifecycle boundary: real children for what the kernel decides, a fake spawn for
+// the orderings a real child cannot be forced into.
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const pidAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+async function becomesGone(pid) {
+  for (let attempt = 0; attempt < 200 && pidAlive(pid); attempt++) await sleep(25);
+  return !pidAlive(pid);
+}
+function fakeChild(pid) {
+  const child = new EventEmitter();
+  Object.assign(child, {
+    pid,
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    stdin: new PassThrough(),
+  });
+  child.finish = (code) => {
+    child.emit('exit', code, null);
+    child.stdout.end();
+    child.stderr.end();
+    child.emit('close', code, null);
+  };
+  return child;
+}
+const realRunner = (overrides = {}) =>
+  createProcessRunner({
+    report: {},
+    persist: () => {},
+    cwd: tmpdir(),
+    env: { PATH: process.env.PATH },
+    drainMilliseconds: 200,
+    ...overrides,
+  });
+
+test('a leader that exits 0 while a descendant holds stdout/stderr is reaped long before the timeout and recorded', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-runner-'));
+  let descendant;
+  try {
+    const report = {};
+    const runner = realRunner({ report });
+    const started = Date.now();
+    const output = await runner.run(
+      '/bin/sh',
+      ['-c', `sleep 60 & echo $! > '${directory}/pid'; echo leader-output`],
+      { timeout: 20_000 },
+    );
+    descendant = Number(readFileSync(join(directory, 'pid'), 'utf8'));
+    assert.equal(output, 'leader-output');
+    assert.ok(Date.now() - started < 5000, 'reaped by the drain bound, not the 20 s timeout');
+    assert.equal(report.reapedProcessGroups.length, 1);
+    assert.equal(report.orphanProcessGroups, undefined);
+    assert.deepEqual(report.processGroups, []);
+    assert.ok(await becomesGone(descendant), 'the descendant holding the pipes is gone');
+  } finally {
+    if (descendant && pidAlive(descendant)) process.kill(descendant, 'SIGKILL');
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a timeout is a failure whatever exit code follows the kill', async () => {
+  const kills = [];
+  const child = fakeChild(424242);
+  const runner = createProcessRunner({
+    report: {},
+    persist: () => {},
+    spawn: () => child,
+    kill: (pgid) => kills.push(pgid),
+    reap: async () => 'gone',
+  });
+  const command = runner.run('slow', [], { timeout: 30, privateOutput: true, database: 'rasta_x' });
+  await sleep(120);
+  assert.deepEqual(kills, [424242]);
+  child.finish(0);
+  await assert.rejects(command, (error) => {
+    assert.deepEqual(error.privateFailure, {
+      stage: undefined,
+      database: 'rasta_x',
+      exitCode: 0,
+      timedOut: true,
+    });
+    return true;
+  });
+  const plain = fakeChild(424243);
+  const second = createProcessRunner({
+    report: {},
+    persist: () => {},
+    spawn: () => plain,
+    kill: () => {},
+    reap: async () => 'gone',
+  }).run('slow', [], { timeout: 30 });
+  await sleep(120);
+  plain.finish(0);
+  await assert.rejects(second, /Command timed out \(exit 0\)/);
+});
+
+test('a persist failure right after spawn still reaps the group and confirms it is gone', async () => {
+  const reaped = [];
+  const failed = [];
+  const report = {};
+  const runner = realRunner({
+    report,
+    persist: () => {
+      throw new Error('Could not write report (ENOSPC)');
+    },
+    persistFailed: (stage) => failed.push(stage),
+    currentStage: () => 'migrate identity',
+    reap: (pgid) => {
+      reaped.push(pgid);
+      return reapProcessGroup(pgid);
+    },
+  });
+  await assert.rejects(
+    runner.run('/bin/sh', ['-c', 'sleep 60 & wait']),
+    /Could not record process group/,
+  );
+  assert.equal(reaped.length, 1, 'the group went through the reap, not a single kill');
+  assert.deepEqual(failed, ['migrate identity']);
+  assert.equal(runner.groups.size, 0);
+  assert.deepEqual(report.processGroups, []);
+  // The group, whatever it had forked by then, is confirmed gone.
+  assert.throws(() => process.kill(-reaped[0], 0), /ESRCH/);
+});
+
+test('a group that survives the kill after a persist failure stays owned and is reported', async () => {
+  const child = fakeChild(424250);
+  const kills = [];
+  const report = {};
+  const runner = createProcessRunner({
+    report,
+    persist: () => {
+      throw new Error('Could not write report (EIO)');
+    },
+    spawn: () => child,
+    kill: (pgid) => kills.push(pgid),
+    reap: async () => 'orphan',
+  });
+  const command = runner.run('x', []);
+  child.finish(null);
+  await assert.rejects(command, /Could not record process group/);
+  assert.deepEqual(kills, [424250]);
+  assert.deepEqual([...runner.groups], [424250]);
+  assert.deepEqual(report.processGroups, [424250]);
+  assert.deepEqual(report.orphanProcessGroups, [424250]);
+});
+
+test('a cleanup command continues after a persist failure, which is still reported', async () => {
+  const child = fakeChild(424260);
+  const failed = [];
+  const runner = createProcessRunner({
+    report: {},
+    persist: () => {
+      throw new Error('Could not write report (EACCES)');
+    },
+    persistFailed: (stage) => failed.push(stage),
+    currentStage: () => 'cleanup',
+    spawn: () => child,
+    kill: () => assert.fail('a cleanup command is not killed for an unrecorded group'),
+    reap: async () => 'gone',
+  });
+  const command = runner.run('down', [], { cleanup: true });
+  child.stdout.write('done\n');
+  child.finish(0);
+  assert.equal(await command, 'done');
+  assert.deepEqual(failed, ['cleanup']);
+});
+
+test('an orphan stays owned: in the report list, the signal set and the retry set until it is gone', async () => {
+  const listed = [];
+  const kills = [];
+  const report = {};
+  const first = fakeChild(424270);
+  const second = fakeChild(424271);
+  const queue = [first, second];
+  const survivors = new Set([424270]);
+  const runner = createProcessRunner({
+    report,
+    persist: () => listed.push([...report.processGroups]),
+    spawn: () => queue.shift(),
+    kill: (pgid) => kills.push(pgid),
+    reap: async (pgid) => (survivors.has(pgid) ? 'orphan' : 'gone'),
+  });
+  const one = runner.run('a', []);
+  first.finish(0);
+  // The command itself succeeded; only the group's disappearance is unconfirmed.
+  assert.equal(await one, '');
+  assert.deepEqual(report.processGroups, [424270]);
+  assert.deepEqual(report.orphanProcessGroups, [424270]);
+  assert.equal(report.reapedProcessGroups.length, 1);
+  // A later command persists the orphan alongside its own group: the runbook list keeps it.
+  const two = runner.run('b', []);
+  assert.deepEqual(listed.at(-1), [424270, 424271]);
+  second.finish(0);
+  await two;
+  assert.deepEqual(report.processGroups, [424270]);
+  // Signals retry it, before and during cleanup.
+  runner.stopActive();
+  runner.killOrphans();
+  assert.deepEqual(kills, [424270, 424270]);
+  // A retry that still finds it keeps it owned; the one that finds it gone releases it.
+  await runner.retryOrphans();
+  assert.deepEqual([...runner.orphans], [424270]);
+  assert.deepEqual(report.orphanProcessGroups, [424270]);
+  survivors.clear();
+  await runner.retryOrphans();
+  assert.equal(runner.groups.size, 0);
+  assert.deepEqual(report.processGroups, []);
+  assert.deepEqual(report.orphanProcessGroups, []);
+  assert.equal(report.reapedProcessGroups.length, 1, 'a retry does not record the group twice');
+});
+
+test('an error event on a child that has a pid still settles its group', async () => {
+  const child = fakeChild(424280);
+  const reaped = [];
+  const runner = createProcessRunner({
+    report: {},
+    persist: () => {},
+    spawn: () => child,
+    kill: () => {},
+    reap: async (pgid) => {
+      reaped.push(pgid);
+      return 'orphan';
+    },
+  });
+  const command = runner.run('x', [], { privateOutput: true, database: 'rasta_x' });
+  child.emit('error', new Error('boom'));
+  await assert.rejects(command, (error) => error.privateFailure.exitCode === null);
+  assert.deepEqual(reaped, [424280]);
+  assert.deepEqual([...runner.groups], [424280], 'unconfirmed: still owned');
+  assert.equal(
+    await createProcessRunner({
+      report: {},
+      persist: () => {},
+      spawn: () => {
+        const noPid = fakeChild(undefined);
+        queueMicrotask(() => noPid.emit('error', new Error('ENOENT')));
+        return noPid;
+      },
+    })
+      .run('missing', [])
+      .catch((error) => error.message),
+    'Could not start command',
+  );
 });

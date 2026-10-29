@@ -1,3 +1,4 @@
+import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   closeSync,
@@ -916,4 +917,180 @@ export async function reapProcessGroup(
   kill(pgid);
   for (let attempt = 0; attempt < attempts && alive(pgid); attempt++) await wait(50);
   return alive(pgid) ? 'orphan' : 'reaped';
+}
+
+/**
+ * The one lifecycle boundary for every child of the drill. Each child leads its own process
+ * group, and a group stays OWNED until its disappearance is confirmed:
+ *  - handlers are installed before anything that can throw (the report write), so a failed
+ *    persist still ends in reaping;
+ *  - the leader's `exit` (not only `close`, which waits for inherited pipes) starts a bounded
+ *    drain, after which the group is reaped, so a descendant holding stdout/stderr cannot
+ *    outlive the command;
+ *  - a timeout is a failure whatever the exit code that follows the kill;
+ *  - a group that survives the reap (an orphan) stays in `groups`/`report.processGroups`,
+ *    in `report.orphanProcessGroups` and in the signal/retry set until a later retry sees it
+ *    gone.
+ * `persist()` writes the report and may throw; `persistFailed(stage)` records that, stickily.
+ */
+export function createProcessRunner({
+  report,
+  persist,
+  persistFailed = () => {},
+  isInterrupted = () => false,
+  currentStage = () => undefined,
+  cwd,
+  env,
+  spawn = nodeSpawn,
+  reap = reapProcessGroup,
+  kill = killGroup,
+  drainMilliseconds = 2000,
+  maxOutputBytes = 64 * 1024 * 1024,
+}) {
+  const groups = new Set();
+  const orphans = new Set();
+  const publish = () => {
+    report.processGroups = [...groups];
+    if (orphans.size || report.orphanProcessGroups) report.orphanProcessGroups = [...orphans];
+  };
+  async function settle(pgid, stageName, retry = false) {
+    const outcome = await reap(pgid);
+    if (outcome !== 'gone' && !retry)
+      (report.reapedProcessGroups ??= []).push({ pgid, stage: stageName });
+    if (outcome === 'orphan') orphans.add(pgid);
+    else {
+      orphans.delete(pgid);
+      groups.delete(pgid);
+    }
+    publish();
+    return outcome;
+  }
+  const failure = (options, exitCode, message, extra) => {
+    const error = new Error(options.privateOutput ? 'Private schema command failed' : message);
+    if (options.privateOutput)
+      error.privateFailure = {
+        stage: options.stage ?? currentStage(),
+        database: options.database ?? null,
+        exitCode,
+        ...extra,
+      };
+    return error;
+  };
+
+  async function run(command, argv, options = {}) {
+    if (isInterrupted() && !options.cleanup) throw new Error('Interrupted');
+    return new Promise((accept, reject) => {
+      const child = spawn(command, argv, {
+        cwd: options.cwd ?? cwd,
+        env: options.env ?? env,
+        detached: true,
+        stdio: [options.inputFd ?? 'pipe', options.outputFd ?? 'pipe', 'pipe'],
+      });
+      const pgid = child.pid;
+      const stageName = currentStage();
+      const output = [];
+      let diagnostic = '';
+      let bytes = 0;
+      let overflow = false;
+      let timedOut = false;
+      let unrecorded = false;
+      let startFailed = false;
+      let finished = false;
+      let drainTimer;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        kill(pgid);
+      }, options.timeout ?? 600_000);
+      const finish = async (code) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        clearTimeout(drainTimer);
+        try {
+          if (pgid) await settle(pgid, stageName);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        if (startFailed) reject(failure(options, null, 'Could not start command'));
+        else if (unrecorded) reject(new Error('Could not record process group'));
+        else if (code !== 0 || overflow || timedOut) {
+          const detail =
+            `${Buffer.concat(output).toString('utf8').slice(-4000)}\n${diagnostic}`.replace(
+              /postgres(?:ql)?:\/\/[^\s"']+/gi,
+              '[database URL redacted]',
+            );
+          reject(
+            failure(
+              options,
+              code,
+              `Command ${timedOut ? 'timed out' : 'failed'} (exit ${code}): ${detail}`,
+              timedOut ? { timedOut: true } : undefined,
+            ),
+          );
+        } else
+          accept(
+            options.raw ? Buffer.concat(output) : Buffer.concat(output).toString('utf8').trim(),
+          );
+      };
+      child.stdout?.on('data', (chunk) => {
+        bytes += chunk.length;
+        if (bytes > maxOutputBytes) {
+          overflow = true;
+          kill(pgid);
+        } else output.push(chunk);
+      });
+      child.stderr.on('data', (chunk) => {
+        diagnostic = (diagnostic + chunk.toString('utf8')).slice(-4000);
+      });
+      child.stdin?.on('error', () => {});
+      child.on('error', () => {
+        startFailed = true;
+        if (pgid) finish(null);
+        else {
+          finished = true;
+          clearTimeout(timer);
+          reject(failure(options, null, 'Could not start command'));
+        }
+      });
+      // `exit` is the leader; `close` additionally waits for every inherited pipe end.
+      child.on('exit', (code) => {
+        if (!finished) drainTimer = setTimeout(() => finish(code), drainMilliseconds);
+      });
+      child.on('close', (code) => finish(code));
+      if (child.stdin) child.stdin.end(options.input);
+      if (pgid) {
+        groups.add(pgid);
+        publish();
+        try {
+          persist();
+        } catch {
+          persistFailed(stageName);
+          // An unrecorded group cannot be handed over: stop it and let `finish` confirm it is
+          // gone. Cleanup commands still have to run, so they are only reported.
+          if (!options.cleanup) {
+            unrecorded = true;
+            kill(pgid);
+          }
+        }
+      }
+    });
+  }
+
+  return {
+    run,
+    groups,
+    orphans,
+    stopActive: () => {
+      for (const pgid of groups) kill(pgid);
+    },
+    killOrphans: () => {
+      for (const pgid of orphans) kill(pgid);
+    },
+    retryOrphans: async () => {
+      for (const pgid of [...orphans]) await settle(pgid, undefined, true);
+    },
+  };
 }
