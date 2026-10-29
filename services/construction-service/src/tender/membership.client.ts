@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -104,7 +104,11 @@ export class MembershipClient implements MembershipSource {
     query: string,
     schema: z.ZodType<T>,
   ): Promise<T> {
-    const token = await this.tokens.issue(SERVICE_NAME, IDENTITY_SERVICE, 'SERVICE');
+    const sender = await new InternalHttpClient(this.tokens).authorize({
+      from: SERVICE_NAME,
+      to: IDENTITY_SERVICE,
+      purpose: 'SERVICE',
+    });
     const url =
       `${this.env.IDENTITY_SERVICE_URL.replace(/\/+$/, '')}` +
       `/v1/users/${encodeURIComponent(userId)}/organizations${query}`;
@@ -113,11 +117,10 @@ export class MembershipClient implements MembershipSource {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await internalFetch(url, {
+      const response = await sender.send(url, {
         method: 'GET',
         headers: {
           accept: 'application/json',
-          'x-internal-token': token,
           'x-correlation-id': safeCorrelationId(),
         },
         signal: controller.signal,

@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -30,22 +30,21 @@ export class ProcurementThresholdPolicy {
   ) {}
 
   async get(organizationId: string): Promise<ThresholdPolicy | null> {
-    const token = await this.tokens.issue(
-      SERVICE_NAME,
-      ORGANIZATION_SERVICE,
-      'SERVICE',
+    const sender = await new InternalHttpClient(this.tokens).authorize({
+      from: SERVICE_NAME,
+      to: ORGANIZATION_SERVICE,
+      purpose: 'SERVICE',
       organizationId,
-    );
+    });
     const timeoutMs = this.env.CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await internalFetch(
+      const response = await sender.send(
         `${this.env.ORGANIZATION_SERVICE_URL.replace(/\/+$/, '')}/v1/organizations/${encodeURIComponent(organizationId)}/procurement-thresholds`,
         {
           headers: {
             accept: 'application/json',
-            'x-internal-token': token,
             'x-correlation-id': getContext().correlationId,
           },
           signal: controller.signal,

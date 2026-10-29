@@ -1,10 +1,10 @@
 import { z } from 'zod';
 import { ERROR_CODES } from '@rasta/contracts';
 import {
-  internalFetch,
   RastaError,
   tryGetContext,
   type InternalTokenService,
+  InternalHttpClient,
 } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
@@ -109,16 +109,13 @@ export class LiveMembershipClient implements MembershipSource {
   }
 
   async isLiveMember(organizationId: string, userId: string): Promise<boolean> {
-    const token = await this.options.tokens.issue(
-      SERVICE_NAME,
-      IDENTITY_SERVICE,
-      'SERVICE',
+    const sender = await new InternalHttpClient(this.options.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: IDENTITY_SERVICE,
+      purpose: 'SERVICE',
       organizationId,
-    );
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'x-internal-token': token,
-    };
+    });
+    const headers: Record<string, string> = { accept: 'application/json' };
     const context = tryGetContext();
     if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
       headers['x-correlation-id'] = context.correlationId;
@@ -129,11 +126,10 @@ export class LiveMembershipClient implements MembershipSource {
     timer.unref?.();
     let text: string | null;
     try {
-      const response = await internalFetch(
+      const response = await sender.send(
         `${this.options.baseUrl.replace(/\/+$/, '')}/v1/users/` +
           `${encodeURIComponent(userId)}/live-membership`,
         { method: 'GET', headers, signal: controller.signal },
-        this.fetchImpl,
       );
       if (response.status === 200 && !response.redirected) {
         text = await readCapped(response, MAX_MEMBERSHIP_ANSWER_BYTES);

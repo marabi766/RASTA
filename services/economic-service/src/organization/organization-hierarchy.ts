@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import { RastaError, getContext, type InternalTokenService } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -66,12 +66,12 @@ export class OrganizationHierarchy implements HierarchyQuestion {
     scopeOrganizationId: string,
     organizationId: string,
   ): Promise<WithinAnswer | null> {
-    const token = await this.options.tokens.issue(
-      SERVICE_NAME,
-      ORGANIZATION_SERVICE,
-      'SERVICE',
-      scopeOrganizationId,
-    );
+    const sender = await new InternalHttpClient(this.options.tokens).authorize({
+      from: SERVICE_NAME,
+      to: ORGANIZATION_SERVICE,
+      purpose: 'SERVICE',
+      organizationId: scopeOrganizationId,
+    });
     const url =
       `${this.options.baseUrl.replace(/\/+$/, '')}` +
       `/v1/organizations/${encodeURIComponent(organizationId)}`;
@@ -82,11 +82,10 @@ export class OrganizationHierarchy implements HierarchyQuestion {
     // One deadline for the whole exchange: headers, body and parse. A server that answers 200 and
     // then stalls its body is a timeout, not a hang inside a transaction holding a row lock.
     try {
-      const response = await internalFetch(url, {
+      const response = await sender.send(url, {
         method: 'GET',
         headers: {
           accept: 'application/json',
-          'x-internal-token': token,
           'x-correlation-id': getContext().correlationId,
         },
         signal: controller.signal,

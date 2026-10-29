@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { readCapped } from '../award/award-source.client';
@@ -78,17 +78,14 @@ export class ObligationSourceClient implements ObligationSource {
   }
 
   async obligation(organizationId: string, statementId: string): Promise<ObligationFact | null> {
-    const token = await this.options.tokens.issue(
-      SERVICE_NAME,
-      ECONOMIC_SERVICE,
-      'SERVICE',
+    const sender = await new InternalHttpClient(this.options.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: ECONOMIC_SERVICE,
+      purpose: 'SERVICE',
       organizationId,
-    );
+    });
 
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'x-internal-token': token,
-    };
+    const headers: Record<string, string> = { accept: 'application/json' };
     const context = tryGetContext();
     if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
       headers['x-correlation-id'] = context.correlationId;
@@ -111,10 +108,9 @@ export class ObligationSourceClient implements ObligationSource {
     try {
       let response: Response;
       try {
-        response = await internalFetch(
+        response = await sender.send(
           `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/obligations/by-source/STATEMENT/${encodeURIComponent(statementId)}`,
           { method: 'GET', headers, signal: controller.signal },
-          this.fetchImpl,
         );
       } catch {
         // No cause attached: a runtime's transport error can quote the URL.

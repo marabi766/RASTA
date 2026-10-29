@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
@@ -77,16 +77,17 @@ export class AuditLookupClient {
 
   /** The target, or `null` when it does not exist exactly as named. */
   async findTarget(id: string, occurredAt: Date): Promise<AuditTarget | null> {
-    const token = await this.options.tokens.issue(SERVICE_NAME, AUDIT_SERVICE, 'SERVICE');
+    const sender = await new InternalHttpClient(this.options.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: AUDIT_SERVICE,
+      purpose: 'SERVICE',
+    });
 
     const url =
       `${this.baseUrl}/v1/internal/audit-events/${encodeURIComponent(id)}` +
       `?occurredAt=${encodeURIComponent(occurredAt.toISOString())}`;
 
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'x-internal-token': token,
-    };
+    const headers: Record<string, string> = { accept: 'application/json' };
     const context = tryGetContext();
     if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
       headers['x-correlation-id'] = context.correlationId;
@@ -104,11 +105,7 @@ export class AuditLookupClient {
     try {
       let response: Response;
       try {
-        response = await internalFetch(
-          url,
-          { method: 'GET', headers, signal: controller.signal },
-          this.fetchImpl,
-        );
+        response = await sender.send(url, { method: 'GET', headers, signal: controller.signal });
       } catch {
         // No cause attached: a runtime's transport error can quote the URL.
         throw controller.signal.aborted
