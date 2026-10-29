@@ -241,14 +241,17 @@ test('a test step without its time limit, or above it, is refused', () => {
     fails(workflow, new RegExp(`"${escape(name)}" has no timeout-minutes`));
   }
   const raised = real();
-  stepNamed(raised, 'Construction coverage gate')['timeout-minutes'] = 9;
-  fails(raised, /"Construction coverage gate" has timeout-minutes 9, above its 8/);
+  stepNamed(raised, 'Construction coverage gate')['timeout-minutes'] = 12;
+  fails(raised, /"Construction coverage gate" has timeout-minutes 12, above its 11/);
+  const raisedOther = real();
+  stepNamed(raisedOther, 'Contract coverage gate')['timeout-minutes'] = 9;
+  fails(raisedOther, /"Contract coverage gate" has timeout-minutes 9, above its 8/);
   const expression = real();
   stepNamed(expression, 'Construction coverage gate')['timeout-minutes'] = '${{ 600 }}';
   fails(expression, /"Construction coverage gate" has no timeout-minutes/);
   const aboveJob = real();
   aboveJob.jobs['integration-suites']['timeout-minutes'] = 10;
-  fails(aboveJob, /"Integration tests" has timeout-minutes 16, above its job's 10/);
+  fails(aboveJob, /"Integration tests" has timeout-minutes 21, above its job's 10/);
   const tightened = real();
   stepNamed(tightened, 'Construction coverage gate')['timeout-minutes'] = 7;
   assert.deepEqual(checkIntegrationSplit(tightened), []);

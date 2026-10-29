@@ -105,10 +105,10 @@ const withKafka = (principal, ...commands) => [
   'eval "${kafka_credentials}"',
   ...commands,
 ];
-const coverageGate = (service, env = {}) => ({
+const coverageGate = (service, env = {}, timeout = 8) => ({
   run: withKafka('tests', `pnpm --filter @rasta/${service}-service run test:coverage`),
   env: { ...KAFKA_TESTS, ...databases(service.toUpperCase()), ...env },
-  timeout: 8,
+  timeout,
 });
 const postgresGuard = (command) => ({ run: [command], env: POSTGRES, timeout: 5 });
 
@@ -129,7 +129,8 @@ export const STEP_INVENTORY = Object.freeze({
       ...MAILPIT,
     },
     // Stopgap until the integration step is sharded (owner, 2026-10-24); back to 12 then.
-    timeout: 16,
+    // 21 = ceil(806 s x 1.5 / 60): the slowest of the last 20 green runs took 806 s.
+    timeout: 21,
   },
   'Backup restore SQL on a disposable database': postgresGuard(
     'pnpm run test:backup-restore-drill-pg',
@@ -138,7 +139,8 @@ export const STEP_INVENTORY = Object.freeze({
   'Marketplace coverage gate': coverageGate('marketplace'),
   'Document coverage gate': coverageGate('document', { ...BUCKET, ...SCANNER }),
   'Supplier coverage gate': coverageGate('supplier'),
-  'Construction coverage gate': coverageGate('construction'),
+  // 11 = ceil(429 s x 1.5 / 60): the slowest of the last 20 green runs took 429 s.
+  'Construction coverage gate': coverageGate('construction', {}, 11),
   'Contract coverage gate': coverageGate('contract'),
   'Inventory coverage gate': coverageGate('inventory'),
   'Audit coverage gate': coverageGate('audit'),

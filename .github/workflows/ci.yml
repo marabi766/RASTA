@@ -1298,7 +1298,11 @@ jobs:
     # the guards 28 s). 25 is twice that, and the suites carry their own 12.
     # History of the single job's limit: 60 (#197), 35 once reversibility
     # moved out (#198), 50 as #273's stopgap until this split.
-    timeout-minutes: 25
+    # 34 minutes (headroom measurement, last 20 green CI runs on main and
+    # merge-train branches): the job took up to 1359 s (p50 1210 s), 91 % of
+    # 25, and the Integration tests step now has 21 minutes of its own, so
+    # 25 could no longer hold it. 34 is ceil(1359 s x 1.5 / 60).
+    timeout-minutes: 34
     needs: quality
 
     services:
@@ -1661,9 +1665,11 @@ jobs:
         # PostgreSQL they measured shared WAL load, not the upsert (docs/14
         # § 14.3). Never `turbo run test:integration` directly — that runs
         # the workspace phase only; `check:test-phases` enforces it.
-        # 16 is a STOPGAP (owner decision 2026-10-24): main measured 7m26s to
-        # 11m29s against the old 12. The sharding PR returns it to 12.
-        timeout-minutes: 16
+        # 21 minutes: the slowest of the last 20 green CI runs on main and
+        # merge-train branches took 806 s (p50 704 s), 84 % of the 16 this
+        # step carried (the owner's 2026-10-24 stopgap, up from 12). The limit
+        # is ceil(806 s x 1.5 / 60); the sharding PR returns it to 12.
+        timeout-minutes: 21
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
@@ -2426,7 +2432,10 @@ jobs:
         # that serialises need and project commands, the tenant-bound foreign
         # key, the PostGIS validity check, the outbox coupling and the HTTP
         # surface exist only against a real database and broker.
-        timeout-minutes: 8
+        # 11 minutes: the slowest of the last 20 green CI runs took 429 s (p50
+        # 412 s), 89 % of the 8 it had, and run 40890559589 attempt 1 timed
+        # out. The limit is ceil(429 s x 1.5 / 60).
+        timeout-minutes: 11
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
@@ -2482,7 +2491,10 @@ jobs:
     runs-on: ubuntu-latest
     # About 10.5 minutes on main run 38600385830 (setup ~4m, the seven gates
     # 399 s together, economic the longest at 115 s). Each keeps its own 8.
-    timeout-minutes: 25
+    # 34 minutes (headroom measurement, last 20 green CI runs on main and
+    # merge-train branches): the job took up to 1326 s (p50 1224 s), 88 % of
+    # 25. 34 is ceil(1326 s x 1.5 / 60). The slowest gate, economic, took 285 s.
+    timeout-minutes: 34
     needs: quality
 
     services:
