@@ -7,10 +7,11 @@ import {
   statSync,
   writeFileSync,
   rmSync,
+  symlinkSync,
 } from 'node:fs';
 import * as realFs from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,6 +35,8 @@ import {
   compareLedgers,
   checkDatabaseCoverage,
   summarizeTables,
+  InputFileError,
+  readRegularFile,
   writeReportAtomically,
   reapProcessGroup,
   createProcessRunner,
@@ -1607,4 +1610,77 @@ test('a leader that exited before the deadline is settled by the drain and reap,
   });
   await assert.rejects(runner.run('slow', [], { timeout: 10 }), /Command timed out \(exit 137\)/);
   assert.equal(report.unconfirmedProcessGroups, undefined);
+});
+
+// --- readRegularFile: the one reader of files somebody else could have substituted -------------
+test('readRegularFile reads a regular file within its bound and refuses everything else by kind', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-read-regular-'));
+  try {
+    const file = join(directory, 'f');
+    writeFileSync(file, 'héllo', { mode: 0o600 });
+    assert.equal(readRegularFile(file, { maxBytes: 100 }), 'héllo');
+    writeFileSync(join(directory, 'empty'), '');
+    assert.equal(readRegularFile(join(directory, 'empty'), { maxBytes: 0 }), '');
+    const kind = (action) => {
+      try {
+        action();
+      } catch (error) {
+        assert.ok(error instanceof InputFileError);
+        assert.doesNotMatch(error.message, new RegExp(directory));
+        return error.kind;
+      }
+      return 'accepted';
+    };
+    // Exactly the cap is fine; one byte more is refused, on the descriptor's size.
+    assert.equal(readRegularFile(file, { maxBytes: 6 }), 'héllo');
+    assert.equal(
+      kind(() => readRegularFile(file, { maxBytes: 5 })),
+      'too-large',
+    );
+    assert.equal(
+      kind(() => readRegularFile(join(directory, 'absent'), { maxBytes: 9 })),
+      'missing',
+    );
+    assert.equal(
+      kind(() => readRegularFile(directory, { maxBytes: 9 })),
+      'not-file',
+    );
+    symlinkSync(file, join(directory, 'link'));
+    assert.equal(readRegularFile(join(directory, 'link'), { maxBytes: 9 }), 'héllo');
+    assert.equal(
+      kind(() => readRegularFile(join(directory, 'link'), { maxBytes: 9, noFollow: true })),
+      'open',
+    );
+    // The caller's own refusal (owner, mode) propagates untouched.
+    assert.throws(
+      () =>
+        readRegularFile(file, {
+          maxBytes: 9,
+          inspect: () => {
+            throw new RangeError('mine');
+          },
+        }),
+      RangeError,
+    );
+    // A FIFO is refused by kind, and the open itself does not wait for a writer: the child has a
+    // deadline, so a blocking open fails here instead of hanging the suite.
+    const fifo = join(directory, 'fifo');
+    execFileSync('mkfifo', [fifo]);
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `import { readRegularFile } from ${JSON.stringify(new URL('./backup-restore-drill-lib.mjs', import.meta.url).href)};
+         try { readRegularFile(process.argv[1], { maxBytes: 9 }); console.log('accepted'); } catch (e) { console.log(e.kind); }`,
+        '--',
+        fifo,
+      ],
+      { encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL' },
+    );
+    assert.equal(child.signal, null, 'the open blocked on a FIFO');
+    assert.equal(child.stdout.trim(), 'not-file');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

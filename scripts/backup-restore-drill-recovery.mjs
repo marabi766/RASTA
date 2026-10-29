@@ -1,18 +1,13 @@
 import { randomBytes } from 'node:crypto';
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  lstatSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-} from 'node:fs';
+import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import {
+  InputFileError,
+  MAX_REPORT_BYTES,
   groupAlive,
+  readRegularFile,
   reapProcessGroup,
   writeReportAtomically,
 } from './backup-restore-drill-lib.mjs';
@@ -28,7 +23,13 @@ import {
 //   * compose.json is a regular file (not a link) whose definition is constrained to what the CLI
 //     writes for THAT project, before `docker compose` ever reads it;
 //   * a recorded process group is signalled only when every live member carries the run's id in
-//     its own environment (/proc), never because a name or a command line matched.
+//     its own environment (/proc), never because a name or a command line matched. A group is
+//     GONE (kill(-pgid, 0) proves it), PROVEN (every member read and matched) or UNKNOWN (any
+//     read error, malformed field, foreign member, or no member visible while it is alive):
+//     UNKNOWN is never signalled and never counts as success;
+//   * recovery's OWN children are recorded too, in a separate atomic journal in the same
+//     directory (the report stays immutable) and carry the same id: a later recovery reaps the
+//     journal's groups first, and the directory is removed only after a "recovered" checkpoint.
 // The same checks guard the normal teardown (`assertOwnedCompose`). Every refusal is a fixed
 // phrase: it never quotes the record, a path or a name from it.
 // ---------------------------------------------------------------------------------------------
@@ -37,13 +38,14 @@ export const RECOVERY_VERSION = 1;
 /** Present in every child's environment: how a recorded process group proves it is ours. */
 export const RECOVERY_ENV = 'RASTA_DRILL_RECOVERY_ID';
 export const RECOVERY_MARKER = 'recovery.json';
+export const RECOVERY_JOURNAL = 'recovery-journal.json';
 export const PROJECT_PATTERN = /^restore-drill-[0-9a-f]{16}$/;
 export const DIRECTORY_PATTERN = /^rasta-restore-drill-[A-Za-z0-9]{6}$/;
 export const RECOVERY_ID_PATTERN = /^[0-9a-f]{32}$/;
 
-const MAX_RECORD_BYTES = 256 * 1024 * 1024;
 const MAX_MARKER_BYTES = 4096;
 const MAX_COMPOSE_BYTES = 64 * 1024;
+const MAX_JOURNAL_BYTES = 1024 * 1024;
 // Linux pid_max ceiling: anything above is not a process group of this host.
 const MAX_PID = 2 ** 22;
 
@@ -71,31 +73,38 @@ export function writeRecoveryMarker(temporary, { project, id }) {
   });
 }
 
+const READ_REFUSALS = {
+  open: 'cannot be opened safely',
+  'not-file': 'is not a regular file',
+  'too-large': 'is too large',
+  read: 'cannot be read',
+};
 /**
- * Reads a private regular file the way recovery may trust it: opened without following a
- * symlink, then checked on the descriptor (kind, owner, no group/other access, size).
- * Returns the text; throws RecoveryRefused. `missing` is returned instead when asked and absent.
+ * Reads a private regular file the way recovery may trust it (readRegularFile: never blocking,
+ * never through a link, only a regular file, bounded), then checked on the descriptor for owner
+ * and mode. Returns the text; throws RecoveryRefused. `undefined` is returned instead when asked
+ * and the file is absent.
  */
 function readPrivateFile(path, { maxBytes, what, uid, allowMissing = false }) {
-  let fd;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    if (allowMissing && error?.code === 'ENOENT') return undefined;
-    refuse(error?.code === 'ENOENT' ? `${what} is missing` : `${what} cannot be opened safely`);
-  }
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile()) refuse(`${what} is not a regular file`);
-    if (uid !== undefined && stat.uid !== uid) refuse(`${what} belongs to another user`);
-    if ((stat.mode & 0o077) !== 0) refuse(`${what} is not private`);
-    if (stat.size > maxBytes) refuse(`${what} is too large`);
-    return readFileSync(fd, 'utf8');
+    return readRegularFile(path, {
+      maxBytes,
+      noFollow: true,
+      inspect: (stat) => {
+        if (uid !== undefined && stat.uid !== uid) refuse(`${what} belongs to another user`);
+        if ((stat.mode & 0o077) !== 0) refuse(`${what} is not private`);
+      },
+    });
   } catch (error) {
     if (error instanceof RecoveryRefused) throw error;
+    if (error instanceof InputFileError) {
+      if (error.kind === 'missing') {
+        if (allowMissing) return undefined;
+        return refuse(`${what} is missing`);
+      }
+      return refuse(`${what} ${READ_REFUSALS[error.kind] ?? 'cannot be read'}`);
+    }
     return refuse(`${what} cannot be read`);
-  } finally {
-    closeSync(fd);
   }
 }
 
@@ -209,34 +218,91 @@ export function assertOwnedCompose(path, project, { uid = process.getuid?.() } =
   validateComposeDefinition(parseJson(text, 'compose.json'), project);
 }
 
+const validGroups = (found) => {
+  for (const pgid of found)
+    if (!Number.isSafeInteger(pgid) || pgid <= 1 || pgid > MAX_PID)
+      refuse('the record lists an invalid process group');
+  return [...new Set(found)];
+};
+
 function recordedGroups(record) {
   const list = (value) => {
     if (value === undefined) return [];
     if (!Array.isArray(value)) return refuse('the record lists process groups in an unknown shape');
     return value;
   };
-  const found = [
+  return validGroups([
     ...list(record.processGroups),
     ...list(record.orphanProcessGroups),
     ...list(record.unconfirmedProcessGroups).map((entry) => (isObject(entry) ? entry.pgid : NaN)),
-  ];
-  for (const pgid of found)
-    if (!Number.isSafeInteger(pgid) || pgid <= 1 || pgid > MAX_PID)
-      refuse('the record lists an invalid process group');
-  return [...new Set(found)];
+  ]);
+}
+
+/**
+ * The recovery journal: what `--cleanup-from` itself started and has not seen end. A separate
+ * file, written atomically (sibling + fsync + rename) in the run's private directory, because
+ * the report is the immutable claim of the original run. `groups` are the process groups of
+ * recovery's own children (and any group an earlier recovery could not settle); `recovered` is
+ * the checkpoint that says every owned resource and process is gone and only the directory
+ * remains. Bound to the same project, id and directory name as the marker.
+ */
+export function writeRecoveryJournal(
+  temporary,
+  { project, id, groups = [], recovered = false },
+  { fs } = {},
+) {
+  writeReportAtomically(
+    join(temporary, RECOVERY_JOURNAL),
+    {
+      version: RECOVERY_VERSION,
+      id,
+      project,
+      directory: basename(temporary),
+      groups: [...new Set(groups)],
+      ...(recovered && { checkpoint: 'recovered' }),
+    },
+    { durable: recovered, ...(fs && { fs }) },
+  );
+}
+
+function loadRecoveryJournal(temporary, { id, project, uid }) {
+  const text = readPrivateFile(join(temporary, RECOVERY_JOURNAL), {
+    maxBytes: MAX_JOURNAL_BYTES,
+    what: 'the recovery journal',
+    uid,
+    allowMissing: true,
+  });
+  if (text === undefined) return { groups: [], recovered: false };
+  const journal = parseJson(text, 'the recovery journal');
+  if (!isObject(journal)) refuse('the recovery journal is not an object');
+  const { groups, checkpoint, ...bound } = journal;
+  if (
+    !isDeepStrictEqual(bound, {
+      version: RECOVERY_VERSION,
+      id,
+      project,
+      directory: basename(temporary),
+    }) ||
+    (checkpoint !== undefined && checkpoint !== 'recovered') ||
+    !Array.isArray(groups)
+  )
+    refuse('the recovery journal does not match the directory it is in');
+  return { groups: validGroups(groups), recovered: checkpoint === 'recovered' };
 }
 
 /**
  * Proves what a report claims, or refuses (RecoveryRefused). Returns what recovery may act on:
- * `{ project, temporary, id, composeFile, processGroups, directoryPresent }`; `composeFile` is
- * null when the definition is gone (teardown already ran: the project label alone is checked).
+ * `{ project, temporary, id, composeFile, processGroups, journalGroups, recovered,
+ * directoryPresent }`; `composeFile` is null when the definition is gone (teardown already ran:
+ * the project label alone is checked); `recovered` says an earlier recovery finished and only the
+ * directory is left (its journal carries the checkpoint).
  */
 export function loadRecoveryRecord(
   reportPath,
   { tmpRoot = tmpdir(), uid = process.getuid?.() } = {},
 ) {
   const record = parseJson(
-    readPrivateFile(reportPath, { maxBytes: MAX_RECORD_BYTES, what: 'the report', uid }),
+    readPrivateFile(reportPath, { maxBytes: MAX_REPORT_BYTES, what: 'the report', uid }),
     'the report',
   );
   if (!isObject(record)) refuse('the report is not an object');
@@ -258,8 +324,31 @@ export function loadRecoveryRecord(
     // Nothing to bind the project to: acceptable only when the run itself finished its cleanup.
     if (record.cleanup?.passed !== true || processGroups.length)
       refuse('the temporary directory is gone but the report does not say cleanup finished');
-    return { project, temporary, id, composeFile: null, processGroups, directoryPresent: false };
+    return {
+      project,
+      temporary,
+      id,
+      composeFile: null,
+      processGroups,
+      journalGroups: [],
+      recovered: false,
+      directoryPresent: false,
+    };
   }
+  const journal = loadRecoveryJournal(temporary, { id, project, uid });
+  if (journal.recovered)
+    // The checkpoint was written after everything owned was gone; the removal that followed may
+    // have been cut short (the marker may be among what it already deleted).
+    return {
+      project,
+      temporary,
+      id,
+      composeFile: null,
+      processGroups: [],
+      journalGroups: [],
+      recovered: true,
+      directoryPresent: true,
+    };
   const marker = parseJson(
     readPrivateFile(join(temporary, RECOVERY_MARKER), {
       maxBytes: MAX_MARKER_BYTES,
@@ -291,81 +380,98 @@ export function loadRecoveryRecord(
     id,
     composeFile: text === undefined ? null : composeFile,
     processGroups,
+    journalGroups: journal.groups,
+    recovered: false,
     directoryPresent: true,
   };
 }
 
+const VANISHED = new Set(['ENOENT', 'ESRCH']);
+// "pid (comm) state ppid pgrp ...": comm may hold spaces and parentheses, so the LAST ") " counts.
+const PROC_STAT = /^(\d+) \(.*\) ([A-Za-z]) (-?\d+) (-?\d+) /s;
+
 /**
- * Live members of process group `pgid` from /proc, each with whether its environment carries the
- * recovery id. null when the group cannot be listed (no /proc, unreadable): nothing is proven.
- * Zombies are not members: they are dead and cannot be signalled.
+ * What /proc says about process group `pgid`, as one of three outcomes:
+ *  - 'gone'    kill(-pgid, 0) fails (or every remaining member is a zombie): nothing can be signalled;
+ *  - 'proven'  at least one live member, and EVERY member was read completely and carries `id`;
+ *  - 'unknown' anything else: the listing or any member's stat/environ could not be read (an
+ *              entry that merely vanished between the listing and the read is not an error),
+ *              a field is malformed, a member does not carry the id, or the group is alive but
+ *              no member is visible.
+ * 'unknown' is neither signalled nor success: the caller refuses and says so.
  */
-function groupMembers(pgid, id, { procRoot, readdir, readFile }) {
-  let entries;
+export function inspectProcessGroup(
+  pgid,
+  id,
+  { procRoot = '/proc', alive = groupAlive, readdir = readdirSync, readFile = readFileSync } = {},
+) {
   try {
-    entries = readdir(procRoot);
+    if (!alive(pgid)) return 'gone';
+    const entries = readdir(procRoot);
+    const vanished = (error) => VANISHED.has(error?.code);
+    let live = 0;
+    let dead = 0;
+    for (const entry of entries) {
+      if (!/^\d+$/.test(entry)) continue;
+      let text;
+      try {
+        text = readFile(join(procRoot, entry, 'stat'), 'utf8');
+      } catch (error) {
+        if (vanished(error)) continue; // exited between the listing and the read
+        return 'unknown';
+      }
+      const fields = PROC_STAT.exec(String(text));
+      if (fields === null || fields[1] !== entry) return 'unknown';
+      if (Number(fields[4]) !== pgid) continue;
+      if ('ZXx'.includes(fields[2])) {
+        dead += 1; // a zombie is dead and cannot be signalled
+        continue;
+      }
+      let environ;
+      try {
+        environ = readFile(join(procRoot, entry, 'environ'), 'utf8');
+      } catch (error) {
+        if (!vanished(error)) return 'unknown';
+        try {
+          readFile(join(procRoot, entry, 'stat'), 'utf8');
+          return 'unknown'; // the process is there but its environment is not readable
+        } catch (again) {
+          if (vanished(again)) continue;
+          return 'unknown';
+        }
+      }
+      if (!String(environ).split('\0').includes(`${RECOVERY_ENV}=${id}`)) return 'unknown';
+      live += 1;
+    }
+    if (live) return 'proven';
+    if (dead) return 'gone';
+    // The last member may have exited since the first check; otherwise nothing proves anything.
+    return alive(pgid) ? 'unknown' : 'gone';
   } catch {
-    return null;
+    return 'unknown';
   }
-  const members = [];
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry)) continue;
-    let fields;
-    try {
-      const stat = readFile(join(procRoot, entry, 'stat'), 'utf8');
-      // "pid (comm) state ppid pgrp ...": comm may hold spaces and parentheses.
-      fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    } catch {
-      continue; // gone between the listing and the read
-    }
-    if (Number(fields[2]) !== pgid || fields[0] === 'Z' || fields[0] === 'X') continue;
-    let owned = false;
-    try {
-      owned = readFile(join(procRoot, entry, 'environ'), 'utf8')
-        .split('\0')
-        .includes(`${RECOVERY_ENV}=${id}`);
-    } catch {
-      owned = false;
-    }
-    members.push({ pid: Number(entry), owned });
-  }
-  return members;
 }
 
 /**
  * Stops the recorded process groups that provably belong to this run. Per group:
  * 'gone' (nothing left), 'reaped' (killed and confirmed), 'orphan' (still there after the
- * bounded wait) or 'refused' (a member that does not carry the id, or a group that cannot be
- * listed: nothing is signalled). Never matches on a name or command line.
+ * bounded wait) or 'unknown' (not proven ours, or not fully inspectable: nothing is signalled).
+ * Never matches on a name or command line. Journal groups and report groups go through here alike.
  */
 export async function recoverProcessGroups(
   pgids,
   id,
-  {
-    procRoot = '/proc',
-    alive = groupAlive,
-    reap = reapProcessGroup,
-    readdir = readdirSync,
-    readFile = readFileSync,
-  } = {},
+  { reap = reapProcessGroup, ...inspect } = {},
 ) {
-  const outcome = { gone: [], reaped: [], refused: [], orphan: [] };
+  const outcome = { gone: [], reaped: [], unknown: [], orphan: [] };
   for (const pgid of pgids) {
-    if (!alive(pgid)) {
-      outcome.gone.push(pgid);
-      continue;
+    const state = inspectProcessGroup(pgid, id, inspect);
+    if (state === 'gone') outcome.gone.push(pgid);
+    else if (state === 'unknown') outcome.unknown.push(pgid);
+    else {
+      const result = await reap(pgid);
+      outcome[result === 'orphan' ? 'orphan' : result === 'gone' ? 'gone' : 'reaped'].push(pgid);
     }
-    const members = groupMembers(pgid, id, { procRoot, readdir, readFile });
-    if (members === null || members.some((member) => !member.owned)) {
-      outcome.refused.push(pgid);
-      continue;
-    }
-    if (!members.length) {
-      outcome.gone.push(pgid);
-      continue;
-    }
-    const result = await reap(pgid);
-    outcome[result === 'orphan' ? 'orphan' : result === 'gone' ? 'gone' : 'reaped'].push(pgid);
   }
   return outcome;
 }

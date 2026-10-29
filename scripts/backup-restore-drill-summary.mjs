@@ -5,7 +5,6 @@
 // summarizeDrillReport allows (booleans, bounded counts, names of the service registry, closed
 // stage names). Every failure of this script itself is one fixed message: a thrown error would
 // print a stack with source paths, and a malformed report is untrusted input.
-import { readFileSync } from 'node:fs';
 
 const OPTIONS = new Set(['--report', '--exit-code', '--progress']);
 const USAGE =
@@ -18,13 +17,8 @@ const FAILED = [
   '',
 ].join('\n');
 
-function readOrNull(path, parse) {
-  try {
-    return parse(readFileSync(path, 'utf8'));
-  } catch {
-    return null;
-  }
-}
+// The progress file is the CLI's stderr: stage lines only, so far below this.
+const MAX_PROGRESS_BYTES = 8 * 1024 * 1024;
 
 async function main() {
   const values = new Map();
@@ -42,8 +36,23 @@ async function main() {
     return 2;
   }
   // Loaded here, not at the top, so that a failing import is also one fixed message.
-  const { lastAllowedStage, renderDrillSummary, summarizeDrillReport, summaryRegistry } =
-    await import('./backup-restore-drill-lib.mjs');
+  const {
+    MAX_REPORT_BYTES,
+    lastAllowedStage,
+    readRegularFile,
+    renderDrillSummary,
+    summarizeDrillReport,
+    summaryRegistry,
+  } = await import('./backup-restore-drill-lib.mjs');
+  // Either input may be anything the filesystem holds: a FIFO must not block the summary, a
+  // huge file must not be read whole, and what cannot be read as a regular file is "no input".
+  const readOrNull = (path, maxBytes, parse) => {
+    try {
+      return parse(readRegularFile(path, { maxBytes }));
+    } catch {
+      return null;
+    }
+  };
   const { servicesFromLibrary } = await import('./infra-preflight-lib.mjs');
   // The real registry (the list the drill iterates), not names taken from the run's own output.
   const services = servicesFromLibrary();
@@ -52,9 +61,9 @@ async function main() {
   const exitCode = /^\d{1,3}$/.test(values.get('--exit-code'))
     ? Number(values.get('--exit-code'))
     : null;
-  const report = readOrNull(values.get('--report'), JSON.parse);
+  const report = readOrNull(values.get('--report'), MAX_REPORT_BYTES, JSON.parse);
   const lastStage = values.has('--progress')
-    ? readOrNull(values.get('--progress'), (text) =>
+    ? readOrNull(values.get('--progress'), MAX_PROGRESS_BYTES, (text) =>
         lastAllowedStage(text, summaryRegistry(services)),
       )
     : null;

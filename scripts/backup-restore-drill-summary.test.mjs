@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, symlinkSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -544,6 +544,39 @@ test('summary CLI: a report that claims two databases is not a pass against the 
     assert.equal(result.status, 1);
     assert.ok(!`${result.stdout}${result.stderr}`.includes(HUGE));
     assert.doesNotMatch(result.stderr, /at |Error/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// #478 r3 R3: the summary's two inputs are read like the recovery's: never blocking on a special
+// file, only as a regular file, bounded. The child has a deadline, so a blocking open fails the
+// test instead of hanging it.
+test('summary CLI: a FIFO as the report or the progress file is "no input", never a hang', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-summary-fifo-'));
+  try {
+    const fifo = join(directory, 'fifo');
+    execFileSync('mkfifo', [fifo]);
+    const run = (args) =>
+      spawnSync(process.execPath, [summaryCli, ...args], {
+        encoding: 'utf8',
+        timeout: 15_000,
+        killSignal: 'SIGKILL',
+      });
+    const asReport = run(['--report', fifo, '--exit-code', '0']);
+    assert.equal(asReport.signal, null, 'blocked on a FIFO report');
+    assert.equal(asReport.status, 1);
+    assert.match(asReport.stdout, /FAILED|did not pass|not available/i);
+    const report = join(directory, 'report.json');
+    writeFileSync(report, JSON.stringify(passingReport(REGISTRY)));
+    const asProgress = run(['--report', report, '--exit-code', '0', '--progress', fifo]);
+    assert.equal(asProgress.signal, null, 'blocked on a FIFO progress file');
+    assert.ok(asProgress.status === 0 || asProgress.status === 1, asProgress.stderr);
+    const bounded = join(directory, 'progress.log');
+    writeFileSync(bounded, 'x'.repeat(9 * 1024 * 1024));
+    const asBig = run(['--report', report, '--exit-code', '0', '--progress', bounded]);
+    assert.equal(asBig.signal, null);
+    assert.ok(asBig.status === 0 || asBig.status === 1, asBig.stderr);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

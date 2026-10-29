@@ -1,26 +1,37 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  closeSync,
+  fsyncSync,
+  openSync,
+  readdirSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   RECOVERY_ENV,
   RECOVERY_MARKER,
+  RECOVERY_JOURNAL,
   RecoveryRefused,
   assertOwnedCompose,
+  inspectProcessGroup,
   loadRecoveryRecord,
   newRecoveryId,
   recoverProcessGroups,
   validateComposeDefinition,
+  writeRecoveryJournal,
   writeRecoveryMarker,
 } from './backup-restore-drill-recovery.mjs';
 
@@ -348,7 +359,7 @@ test('process groups: only a group whose every live member carries the id is sig
     assert.deepEqual(outcome, {
       gone: [600, 700],
       reaped: [200],
-      refused: [300, 400, 500],
+      unknown: [300, 400, 500],
       orphan: [],
     });
   }));
@@ -363,12 +374,296 @@ test('process groups: a group that stays after the bounded wait is an orphan; no
         alive: () => true,
         reap: async () => 'orphan',
       }),
-      { gone: [], reaped: [], refused: [], orphan: [200] },
+      { gone: [], reaped: [], unknown: [], orphan: [200] },
     );
     const outcome = await recoverProcessGroups([200], id, {
       procRoot: join(root, 'no-proc-here'),
       alive: () => true,
       reap: async () => assert.fail('must not signal what it cannot list'),
     });
-    assert.deepEqual(outcome.refused, [200]);
+    assert.deepEqual(outcome.unknown, [200]);
+  }));
+
+// --- UNKNOWN is never GONE and never signalled (#478 r3 R2) ----------------------------------
+// The /proc view is injected, so each failure is exactly the one named. `alive` stays true: the
+// group exists, only the inspection fails.
+const ID = 'a'.repeat(32);
+const errno = (code) => Object.assign(new Error(code), { code });
+const stat = (pid, pgrp, state = 'S', comm = 'x') =>
+  `${pid} (${comm}) ${state} 1 ${pgrp} ${pgrp} 0\n`;
+function procView(files, { listing } = {}) {
+  return {
+    readdir: () => {
+      if (listing) throw listing;
+      return Object.keys(files);
+    },
+    readFile: (path) => {
+      const [, , pid, name] = path.split('/');
+      let value = files[pid]?.[name];
+      if (typeof value === 'function') value = value();
+      if (value instanceof Error) throw value;
+      if (value === undefined) throw errno('ENOENT');
+      return value;
+    },
+  };
+}
+async function recoverWith(files, options = {}) {
+  const signalled = [];
+  const outcome = await recoverProcessGroups([50], ID, {
+    procRoot: '/proc',
+    alive: () => true,
+    reap: async (pgid) => {
+      signalled.push(pgid);
+      return 'reaped';
+    },
+    ...procView(files, options),
+  });
+  return { outcome, signalled };
+}
+
+test('an incomplete /proc inspection is UNKNOWN: not gone, not success, nothing signalled', async () => {
+  const cases = {
+    'every read denied': {
+      100: { stat: errno('EACCES'), environ: errno('EACCES') },
+      101: { stat: errno('EACCES'), environ: errno('EACCES') },
+    },
+    'a malformed stat': { 100: { stat: 'garbage\n', environ: owns(ID) } },
+    'a stat whose pid is not its directory': { 100: { stat: stat(999, 50), environ: owns(ID) } },
+    'a proven member and one with a malformed stat': {
+      100: { stat: stat(100, 50), environ: owns(ID) },
+      101: { stat: 'garbage\n', environ: owns(ID) },
+    },
+    'a proven member and one whose stat names another pid': {
+      100: { stat: stat(100, 50), environ: owns(ID) },
+      101: { stat: stat(999, 50), environ: owns(ID) },
+    },
+    'a proven member and one with a non-numeric process group': {
+      100: { stat: stat(100, 50), environ: owns(ID) },
+      101: { stat: '101 (x) S 1 notanumber 50 0\n', environ: owns(ID) },
+    },
+    'a non-numeric process group': {
+      100: { stat: '100 (x) S 1 notanumber 50 0\n', environ: owns(ID) },
+    },
+    'an empty view while the group is alive': {},
+    'a view with only other groups while the group is alive': {
+      100: { stat: stat(100, 77), environ: owns(ID) },
+    },
+    'one proven member and one whose stat cannot be read': {
+      100: { stat: stat(100, 50), environ: owns(ID) },
+      101: { stat: errno('EACCES'), environ: errno('EACCES') },
+    },
+    'one proven member and one whose environment cannot be read': {
+      100: { stat: stat(100, 50), environ: owns(ID) },
+      101: { stat: stat(101, 50), environ: errno('EACCES') },
+    },
+    'one proven member and one whose environment vanished while the process did not': {
+      100: { stat: stat(100, 50), environ: owns(ID) },
+      101: { stat: stat(101, 50) },
+    },
+    'one proven member and one without the id': {
+      100: { stat: stat(100, 50), environ: owns(ID) },
+      101: { stat: stat(101, 50), environ: 'PATH=/bin\0' },
+    },
+  };
+  for (const [name, files] of Object.entries(cases)) {
+    const { outcome, signalled } = await recoverWith(files);
+    assert.deepEqual(outcome, { gone: [], reaped: [], unknown: [50], orphan: [] }, name);
+    assert.deepEqual(signalled, [], `${name}: nothing was signalled`);
+  }
+  const listing = await recoverWith({}, { listing: errno('EACCES') });
+  assert.deepEqual(listing.outcome.unknown, [50], 'a listing that fails');
+  assert.deepEqual(listing.signalled, []);
+});
+
+test('an entry that vanishes between the listing and the read is not an inspection failure', async () => {
+  const states = (files, alive = () => true) =>
+    inspectProcessGroup(50, ID, { alive, ...procView(files) });
+  // The proven member plus a sibling that exited (its stat is gone): the group is proven.
+  assert.equal(
+    states({
+      100: { stat: stat(100, 50), environ: owns(ID) },
+      101: { stat: errno('ENOENT') },
+      // Readable at the listing, gone by the time its environment is read.
+      102: {
+        stat: (() => {
+          let reads = 0;
+          return () => {
+            if (++reads > 1) throw errno('ENOENT');
+            return stat(102, 50);
+          };
+        })(),
+        environ: errno('ESRCH'),
+      },
+    }),
+    'proven',
+  );
+  // The last member exited after the first check: gone, not unknown.
+  let calls = 0;
+  assert.equal(
+    states({ 100: { stat: errno('ENOENT') } }, () => ++calls === 1),
+    'gone',
+  );
+  // Zombies only: dead, nothing to signal.
+  assert.equal(states({ 100: { stat: stat(100, 50, 'Z') } }), 'gone');
+  assert.equal(inspectProcessGroup(50, ID, { alive: () => false }), 'gone');
+});
+
+test('the same boundary holds for every recorded list: report groups and journal groups alike', async () => {
+  const outcome = await recoverProcessGroups([50, 60, 70], ID, {
+    alive: () => true,
+    reap: async () => assert.fail('nothing may be signalled'),
+    ...procView({ 100: { stat: stat(100, 50), environ: errno('EACCES') } }),
+  });
+  assert.deepEqual(outcome.unknown, [50, 60, 70]);
+});
+
+// --- the recovery journal ---------------------------------------------------------------------
+test('the journal is bound to the record, optional, and read like every other input', () =>
+  withRoot((root) => {
+    const record = makeRecord(root);
+    const path = join(record.temporary, RECOVERY_JOURNAL);
+    const load = () => loadRecoveryRecord(record.reportPath, { tmpRoot: root });
+    assert.deepEqual(load().journalGroups, [], 'no journal yet: nothing to carry');
+    writeRecoveryJournal(record.temporary, {
+      project: record.project,
+      id: record.id,
+      groups: [4242, 4242, 4243],
+    });
+    assert.deepEqual(load().journalGroups, [4242, 4243]);
+    assert.equal(load().recovered, false);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const good = readFileSync(path, 'utf8');
+    for (const [name, change, reason] of [
+      ['another id', (j) => ({ ...j, id: 'b'.repeat(32) }), /does not match/],
+      [
+        'another project',
+        (j) => ({ ...j, project: 'restore-drill-0123456789abcdef' }),
+        /does not match/,
+      ],
+      [
+        'another directory',
+        (j) => ({ ...j, directory: 'rasta-restore-drill-AAAAAA' }),
+        /does not match/,
+      ],
+      ['an unknown key', (j) => ({ ...j, extra: 1 }), /does not match/],
+      ['an unknown checkpoint', (j) => ({ ...j, checkpoint: 'done' }), /does not match/],
+      ['groups of the wrong shape', (j) => ({ ...j, groups: '4242' }), /does not match/],
+      ['an invalid group', (j) => ({ ...j, groups: [1] }), /invalid process group/],
+    ]) {
+      writeFileSync(path, JSON.stringify(change(JSON.parse(good))), { mode: 0o600 });
+      refused(load, reason);
+      assert.ok(name);
+    }
+    writeFileSync(path, '{', { mode: 0o600 });
+    refused(load, /not valid JSON/);
+    writeFileSync(path, good, { mode: 0o666 });
+    chmodSync(path, 0o666);
+    refused(load, /not private/);
+    rmSync(path);
+    symlinkSync(join(root, 'elsewhere'), path);
+    refused(load, /cannot be opened safely/);
+  }));
+
+test('the recovered checkpoint stands without the marker (a removal cut short)', () =>
+  withRoot((root) => {
+    const record = makeRecord(root);
+    writeRecoveryJournal(record.temporary, {
+      project: record.project,
+      id: record.id,
+      recovered: true,
+    });
+    rmSync(join(record.temporary, RECOVERY_MARKER));
+    rmSync(join(record.temporary, 'compose.json'));
+    const loaded = loadRecoveryRecord(record.reportPath, { tmpRoot: root });
+    assert.equal(loaded.recovered, true);
+    assert.equal(loaded.directoryPresent, true);
+    // ... but only for a journal bound to THIS record.
+    writeFileSync(
+      join(record.temporary, RECOVERY_JOURNAL),
+      JSON.stringify({
+        version: 1,
+        id: 'c'.repeat(32),
+        project: record.project,
+        directory: record.temporary.split('/').at(-1),
+        groups: [],
+        checkpoint: 'recovered',
+      }),
+      { mode: 0o600 },
+    );
+    refused(() => loadRecoveryRecord(record.reportPath, { tmpRoot: root }), /recovery journal/);
+  }));
+
+test('a journal write is atomic: a failure leaves the previous complete journal', () =>
+  withRoot((root) => {
+    const record = makeRecord(root);
+    const base = { project: record.project, id: record.id };
+    writeRecoveryJournal(record.temporary, { ...base, groups: [4242] });
+    const before = readFileSync(join(record.temporary, RECOVERY_JOURNAL), 'utf8');
+    const fs = {
+      openSync,
+      writeSync,
+      fsyncSync,
+      closeSync,
+      unlinkSync,
+      renameSync: () => {
+        throw errno('EIO');
+      },
+    };
+    assert.throws(() =>
+      writeRecoveryJournal(record.temporary, { ...base, groups: [9999] }, { fs }),
+    );
+    assert.equal(readFileSync(join(record.temporary, RECOVERY_JOURNAL), 'utf8'), before);
+    assert.deepEqual(
+      readdirSync(record.temporary).filter((name) => name.endsWith('.tmp')),
+      [],
+      'no sibling left behind',
+    );
+  }));
+
+// --- special files never block an input (#478 r3 R3) -----------------------------------------
+// Each case runs in a child with a deadline: a blocking open would hang it (and the test fails
+// by the deadline) instead of hanging this process.
+const recoveryModule = new URL('./backup-restore-drill-recovery.mjs', import.meta.url).href;
+function inChild(source, args) {
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', source, '--', ...args], {
+    timeout: 10_000,
+    killSignal: 'SIGKILL',
+    encoding: 'utf8',
+  });
+  assert.equal(result.signal, null, 'the child blocked on a special file');
+  return result;
+}
+const LOAD = `import { loadRecoveryRecord, assertOwnedCompose } from ${JSON.stringify(recoveryModule)};
+try { const [mode, a, b, c] = process.argv.slice(1);
+  if (mode === 'record') loadRecoveryRecord(a, { tmpRoot: b });
+  else assertOwnedCompose(a, b);
+  console.log('accepted'); } catch (e) { console.log(e.name + ': ' + e.message); }`;
+
+test('a FIFO in place of the report, marker, journal or compose file is refused without blocking', () =>
+  withRoot((root) => {
+    const swapFifo = (path) => {
+      rmSync(path, { force: true });
+      execFileSync('mkfifo', [path]);
+    };
+    const expectRefusal = (record, reason) => {
+      const result = inChild(LOAD, ['record', record.reportPath, root]);
+      assert.match(result.stdout, reason, result.stdout);
+    };
+    let record = makeRecord(root);
+    swapFifo(record.reportPath);
+    expectRefusal(record, /RecoveryRefused: recovery refused: the report is not a regular file/);
+    record = makeRecord(root);
+    swapFifo(join(record.temporary, RECOVERY_MARKER));
+    expectRefusal(record, /directory marker is not a regular file/);
+    record = makeRecord(root);
+    swapFifo(join(record.temporary, 'compose.json'));
+    expectRefusal(record, /compose.json is not a regular file/);
+    record = makeRecord(root);
+    swapFifo(join(record.temporary, RECOVERY_JOURNAL));
+    expectRefusal(record, /recovery journal is not a regular file/);
+    // The gate in front of `compose down` reads the same way.
+    const fifo = join(root, 'gate-compose.json');
+    execFileSync('mkfifo', [fifo]);
+    const gate = inChild(LOAD, ['compose', fifo, 'restore-drill-0123456789abcdef']);
+    assert.match(gate.stdout, /compose.json is not a regular file/);
   }));

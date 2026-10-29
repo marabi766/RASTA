@@ -2,10 +2,13 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   closeSync,
+  constants,
+  fstatSync,
   fsyncSync,
   openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeSync,
@@ -879,6 +882,67 @@ export function writeReportAtomically(path, report, { durable = false, fs = repo
       } catch {
         /* nothing more to report */
       }
+  }
+}
+
+/** The largest report any tool of the drill will read (a full report is a few MiB). */
+export const MAX_REPORT_BYTES = 256 * 1024 * 1024;
+
+/** Why `readRegularFile` refused: a closed vocabulary, never a path or a message from the OS. */
+export class InputFileError extends Error {
+  constructor(kind) {
+    super(`input file refused: ${kind}`);
+    this.name = 'InputFileError';
+    this.kind = kind;
+  }
+}
+
+/**
+ * The one way the drill's tools read a file somebody else could have substituted (the report, its
+ * recovery marker, journal and Compose definition, the summary's report and progress file).
+ * The open never blocks (`O_NONBLOCK`: a FIFO has no writer to wait for) and, when asked, never
+ * follows a link; the kind is checked on the DESCRIPTOR, so only a regular file is read, and the
+ * read is bounded by `maxBytes` whatever the file claims or grows to. `inspect(stat)` may refuse
+ * further (owner, mode); whatever it throws propagates. Throws InputFileError otherwise:
+ * `missing`, `open`, `not-file`, `too-large`, `read`.
+ */
+export function readRegularFile(path, { maxBytes, noFollow = false, inspect } = {}) {
+  let fd;
+  try {
+    fd = openSync(
+      path,
+      constants.O_RDONLY | constants.O_NONBLOCK | (noFollow ? constants.O_NOFOLLOW : 0),
+    );
+  } catch (error) {
+    throw new InputFileError(error?.code === 'ENOENT' ? 'missing' : 'open');
+  }
+  try {
+    let stat;
+    try {
+      stat = fstatSync(fd);
+    } catch {
+      throw new InputFileError('read');
+    }
+    if (!stat.isFile()) throw new InputFileError('not-file');
+    inspect?.(stat);
+    // The buffer holds one byte more than the cap (or than the file): a file over the cap, or one
+    // that grew while being read, fills it and is refused.
+    const buffer = Buffer.allocUnsafe(Math.min(stat.size, maxBytes) + 1);
+    let length = 0;
+    try {
+      for (;;) {
+        const count = readSync(fd, buffer, length, buffer.length - length, null);
+        if (!count) break;
+        length += count;
+        if (length === buffer.length) break;
+      }
+    } catch {
+      throw new InputFileError('read');
+    }
+    if (length === buffer.length) throw new InputFileError('too-large');
+    return buffer.toString('utf8', 0, length);
+  } finally {
+    closeSync(fd);
   }
 }
 

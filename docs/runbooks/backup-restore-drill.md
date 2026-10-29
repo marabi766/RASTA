@@ -251,6 +251,16 @@ Compose فایل را بخواند رد می‌شود. همین بررسی پی�
 یا گروهی ماند یا بررسی نشد (پوشه و گزارش برای تلاش دوباره می‌مانند) و ۲ یعنی گزارش رد شد. استثنا: پوشه
 `temporary` وجود ندارد و خود گزارش `cleanup.passed: true` را دارد؛ آن‌گاه فقط برچسب منابع پروژه بررسی می‌شود.
 بازیابی هیچ‌گاه گزارش را بازنویسی نمی‌کند و پیام‌هایش مسیر، نام یا شناسه‌ای از گزارش را تکرار نمی‌کنند.
+فرزندهای خود بازیابی هم ثبت می‌شوند: بلافاصله پس از هر spawn شناسه گروهشان در دفترچه جداگانه
+`recovery-journal.json` (نوشتن اتمی با فایل موقت و `fsync` و `rename`، در همان پوشه خصوصی) می‌آید و همان
+`RASTA_DRILL_RECOVERY_ID` را دارند. اگر خود بازیابی با SIGKILL کشته شود، بازیابی بعدی پیش از هر کار دیگر
+گروه‌های دفترچه را با همان اثبات می‌کشد و تا وقتی گروهی زنده باشد موفقیت گزارش نمی‌کند؛ گزارش اصلی
+تغییر نمی‌کند. پوشه فقط پس از نوشته‌شدن نقطه بازرسی `recovered` در دفترچه حذف می‌شود. وضعیت هر گروه سه‌حالته
+است: ناپدیدشده (`kill(-pgid, 0)` ثابت می‌کند)، اثبات‌شده (همه اعضا خوانده و با شناسه مطابق شده‌اند) یا
+نامشخص (هر خطای خواندن `/proc`، فیلد ناقص، عضو بدون شناسه، یا گروه زنده‌ای که هیچ عضوی از آن دیده نمی‌شود).
+گروه نامشخص هرگز سیگنال نمی‌گیرد و هرگز موفقیت حساب نمی‌شود: بازیابی با کد ۱ و پیام ثابتی که فقط شناسه گروه
+را می‌گوید تمام می‌شود. ورودی‌های قابل جایگزینی (گزارش، نشانگر، دفترچه، `compose.json` و دو ورودی خلاصه)
+بدون مسدودشدن باز می‌شوند، فقط اگر فایل عادی باشند خوانده می‌شوند و اندازه‌شان سقف دارد؛ FIFO رد می‌شود.
 هرگز stack مشترک را reset نکنید. شکست حذف پایگاه scratch در `scratchDropFailed` ثبت می‌شود؛
 خطای اصلی جمع‌آوری مدرک حفظ می‌شود و پاکسازی خوشه متعلق به تمرین همچنان انجام می‌شود.
 
@@ -334,6 +344,9 @@ after a cancellation or a timeout; see the recovery paragraph above for what it 
 removes or kills anything). A missing, unreadable or unprovable record fails the step (exit 2), and
 so does anything it could not remove (exit 1); the private directory, the recovery record included,
 is deleted only after a cleanup that succeeded.
+Every invocation of the CLI goes through a guarded entry without static imports: a module that cannot
+be loaded (for example a checkout without `pnpm install`) ends in one fixed line and exit 1, never a
+stack trace with source paths; `--cleanup-from` itself needs only Node's built-in modules.
 
 **Who reacts to a red run.** The host's bot watches this workflow's runs and reports a red one to
 the project manager; the infrastructure owner of RUN-003 triages it. Open the run, read the
