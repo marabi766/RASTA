@@ -327,7 +327,7 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/check-local-postgres-config.mjs': { positionals: [], accepts: { '--file': 'path' } },
   'scripts/check-service-boundaries.mjs': { positionals: [], accepts: { '--root': 'path' } },
   'scripts/check-test-phases.mjs': { positionals: ['script'] },
-  'scripts/ci-image-matrix.mjs': { other: ['--all'] },
+  'scripts/ci-image-matrix.mjs': { other: ['--run'] },
   'scripts/ci-integration-split-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
   'scripts/ci-migration-reversibility-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
   // Trivy's own options, passed to the pinned trivy binary (download and canary
@@ -361,7 +361,7 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'scripts/container-scope.mjs': {
     positionals: [],
-    accepts: { '--all': 'switch', '--base': 'sha' },
+    accepts: { '--all': 'switch', '--base': 'sha', '--run': 'switch' },
     other: ['--name-only', '--no-renames', '-C', '-e', '-z'],
   },
   'scripts/database-services.mjs': { other: ['-service'] },
