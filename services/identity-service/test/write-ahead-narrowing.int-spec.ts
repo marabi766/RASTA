@@ -22,6 +22,7 @@ import {
   tenants,
   FenceTestTimeline,
   waitFor,
+  ensureLiveMember,
 } from './helpers';
 import { KeycloakHttpStub, type StubRequest } from './keycloak-http-stub';
 
@@ -208,8 +209,16 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
     );
   }
 
-  const asAdmin = <T>(organizationId: string, fn: () => Promise<T>) =>
-    asActor({ organizationId, userId: 'USR-WA-ADMIN', roles: ['ORGANIZATION_ADMIN'] }, fn);
+  // A live administrator of the organization, in the database: the authority
+  // a membership change re-reads under its locks (task 117, F1).
+  const asAdmin = async <T>(organizationId: string, fn: () => Promise<T>) => {
+    await ensureLiveMember(prisma, {
+      userId: 'USR-WA-ADMIN',
+      organizationId,
+      roles: ['ORGANIZATION_ADMIN'],
+    });
+    return asActor({ organizationId, userId: 'USR-WA-ADMIN', roles: ['ORGANIZATION_ADMIN'] }, fn);
+  };
 
   const demote = (
     s: Seeded,
@@ -404,6 +413,33 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
         'ROLE_REVOKED',
       ]);
       expect(stub.platform(s.keycloakId)).toEqual(await rowsGrant(s.userId));
+    });
+
+    it('a write answered with a redirect (task 117, F7): 503, unchanged, no event — its fence stays live, never settled on what the redirect target said', async () => {
+      const s = await seed({
+        memberships: [{ in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] }],
+      });
+      const held = stub.platform(s.keycloakId);
+      stub.nextPut('redirect');
+
+      const error = await failure(demote(s, 0, ['OPERATOR'], 'a', service));
+
+      expect(error).toMatchObject({ status: 503, code: 'KEYCLOAK_UNAVAILABLE' });
+      // Never followed: the login page saw no request, and no bearer token.
+      expect(stub.redirectTargetHits).toEqual([]);
+      expect((await committedMembership(s.memberships[0]!))?.roles).toEqual([
+        'ORGANIZATION_ADMIN',
+        'OPERATOR',
+      ]);
+      expect(await events(s.memberships[0]!)).toEqual([]);
+      expect(stub.platform(s.keycloakId)).toEqual(held);
+      // Unknown, not refused: whatever answered may have forwarded it, so its
+      // fence stays live, and the next narrowing waits it out (D-069).
+      expect(await fencesOf(s.userId)).toEqual([
+        expect.objectContaining({ operation: 'replace_attributes', live: true }),
+      ]);
+      const settling = await failure(demote(s, 0, ['OPERATOR']));
+      expect(settling).toMatchObject({ status: 503, code: 'KEYCLOAK_WRITE_SETTLING' });
     });
 
     it('a write that landed with its answer lost: 503, unchanged rows, Keycloak narrower than them, then put back from the rows', async () => {

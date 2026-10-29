@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ERROR_CODES } from '@rasta/contracts';
-import { RastaError } from '@rasta/nest-common';
+import { RastaError, RedirectRefusedError, internalFetch } from '@rasta/nest-common';
 import {
   PLATFORM_ATTRIBUTE_NAMES,
   provenanceOnly,
@@ -104,9 +104,9 @@ export interface KeycloakAccount {
  * it by looking the account up, or does not commit.
  */
 export class KeycloakCreateUnconfirmedError extends RastaError {
-  constructor() {
+  constructor(reason: 'no-id' | 'redirect' = 'no-id') {
     super(ERROR_CODES.UPSTREAM_UNAVAILABLE, 'The identity provider did not confirm the account', {
-      internalContext: { service: 'keycloak', operation: 'createUser', reason: 'no-id' },
+      internalContext: { service: 'keycloak', operation: 'createUser', reason },
     });
     this.name = 'KeycloakCreateUnconfirmedError';
   }
@@ -117,7 +117,9 @@ export class KeycloakCreateUnconfirmedError extends RastaError {
  * reached Keycloak, so it may have been applied — now, or later. Its deadline
  * passed, the connection broke after it was sent, or something answered 5xx
  * (Keycloak itself, or a proxy in front of it that may still be forwarding
- * it). An aborted request is not a cancelled one: aborting stops this side
+ * it), or something answered with a redirect (task 117, F7: a proxy may have
+ * forwarded the request before redirecting the caller to a login page, and
+ * nothing in a redirect says whether). An aborted request is not a cancelled one: aborting stops this side
  * waiting, and nothing more.
  *
  * Distinct from every other failure of a write, which is **confirmed**: the
@@ -128,7 +130,7 @@ export class KeycloakCreateUnconfirmedError extends RastaError {
  * stays (`KeycloakWriteFences`, D-069).
  */
 export class KeycloakWriteUnconfirmedError extends RastaError {
-  constructor(operation: string, reason: 'deadline' | 'connection' | 'server_error') {
+  constructor(operation: string, reason: 'deadline' | 'connection' | 'server_error' | 'redirect') {
     super(ERROR_CODES.UPSTREAM_UNAVAILABLE, 'A required service is temporarily unavailable', {
       internalContext: { service: 'keycloak', operation, reason, unconfirmed: true },
     });
@@ -164,6 +166,29 @@ function neverSent(error: unknown): boolean {
   if (name === 'TimeoutError' || name === 'AbortError') return false;
   const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
   return typeof cause?.code === 'string' && NEVER_SENT.has(cause.code);
+}
+
+/**
+ * Any 3xx. `internalFetch` already refuses the five statuses fetch would
+ * follow (`RedirectRefusedError`); the rest — 300, 304, 305, an unknown 3xx —
+ * reach the caller as a response, and are no answer from Keycloak either.
+ */
+function isRedirectStatus(status: number): boolean {
+  return status >= 300 && status < 400;
+}
+
+/**
+ * Every request to Keycloak, the token request included, and the only call of
+ * `fetch` in this client (`keycloak.client.spec.ts` holds it to that): through
+ * `internalFetch`, so `redirect: 'manual'` is set whatever the caller passed
+ * and a redirect is refused before its body is read (task 117, F7). Native
+ * fetch follows redirects by default — with the bearer token or the client
+ * secret — and reported the redirect target's answer as Keycloak's: a `303`
+ * to a login page, then its `200`, turned a PUT that never applied into "ok",
+ * and a narrowing change's fence settled on it.
+ */
+function send(url: string, init: Omit<RequestInit, 'redirect'>): Promise<Response> {
+  return internalFetch(url, init);
 }
 
 /** A Keycloak user id as the Location header carries it: one path segment, nothing else. */
@@ -208,11 +233,26 @@ async function unreachableAsUpstream<T>(operation: string, call: () => Promise<T
     return await call();
   } catch (error) {
     if (error instanceof RastaError) throw error;
+    if (error instanceof RedirectRefusedError) throw new KeycloakRedirectError(operation);
     const reason =
       error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
         ? 'deadline'
         : 'unreachable';
     throw RastaError.upstreamUnavailable('keycloak', { operation, reason });
+  }
+}
+
+/**
+ * Keycloak's address answered with a redirect (task 117, F7): the upstream
+ * failure every caller already handles, typed so the one caller for whom it
+ * means more — an account create that may have been applied — can tell.
+ */
+export class KeycloakRedirectError extends RastaError {
+  constructor(readonly operation: string) {
+    super(ERROR_CODES.UPSTREAM_UNAVAILABLE, 'A required service is temporarily unavailable', {
+      internalContext: { service: 'keycloak', operation, reason: 'redirect' },
+    });
+    this.name = 'KeycloakRedirectError';
   }
 }
 
@@ -254,7 +294,7 @@ export class KeycloakAdminClient {
     // without bound (#219 r4). The signal also bounds reading the body below.
     const deadline = this.deadline(cancel);
     const response = await unreachableAsUpstream('client_credentials', () =>
-      fetch(`${this.options.baseUrl}/realms/${this.options.realm}/protocol/openid-connect/token`, {
+      send(`${this.options.baseUrl}/realms/${this.options.realm}/protocol/openid-connect/token`, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -268,6 +308,7 @@ export class KeycloakAdminClient {
 
     if (!response.ok) {
       // The body may echo the client secret back; it never reaches the log.
+      // A 3xx lands here too: no token was issued by it.
       throw RastaError.upstreamUnavailable('keycloak', {
         status: response.status,
         operation: 'client_credentials',
@@ -292,7 +333,7 @@ export class KeycloakAdminClient {
   ): Promise<Response> {
     const token = await this.accessToken(cancel);
     return unreachableAsUpstream('admin', () =>
-      fetch(`${this.options.baseUrl}/admin/realms/${this.options.realm}${path}`, {
+      send(`${this.options.baseUrl}/admin/realms/${this.options.realm}${path}`, {
         ...init,
         headers: {
           ...init.headers,
@@ -333,7 +374,7 @@ export class KeycloakAdminClient {
     let response: Response;
     try {
       attempt.assertDispatchable();
-      response = await fetch(
+      response = await send(
         `${this.options.baseUrl}/admin/realms/${this.options.realm}/users/${keycloakId}`,
         {
           method: 'PUT',
@@ -347,6 +388,12 @@ export class KeycloakAdminClient {
       // failure and before anything else (D-070 option D).
       attempt.observeReply();
       if (error instanceof RastaError) throw error;
+      // Answered with a redirect: the request was sent, and whatever forwarded
+      // it may have applied it before redirecting. Unknown, never refused —
+      // and never followed to an answer that is not Keycloak's (F7).
+      if (error instanceof RedirectRefusedError) {
+        throw new KeycloakWriteUnconfirmedError(operation, 'redirect');
+      }
       if (neverSent(error)) {
         throw RastaError.upstreamUnavailable('keycloak', { operation, reason: 'unreachable' });
       }
@@ -360,6 +407,9 @@ export class KeycloakAdminClient {
     attempt.observeReply();
     if (response.ok) return;
     if (response.status >= 500) throw new KeycloakWriteUnconfirmedError(operation, 'server_error');
+    if (isRedirectStatus(response.status)) {
+      throw new KeycloakWriteUnconfirmedError(operation, 'redirect');
+    }
     if (response.status === 404 && missing === 'not_found') {
       throw RastaError.notFound('KeycloakUser', keycloakId);
     }
@@ -398,11 +448,22 @@ export class KeycloakAdminClient {
         // All four, `rasta_user_id` set and the rest empty.
         attributes: provenanceOnly(input.userId),
       }),
+    }).catch((error: unknown) => {
+      // The create itself was redirected — sent, so perhaps applied (F7). A
+      // redirect of the token request before it is a create never sent, and
+      // stays the plain upstream failure.
+      if (error instanceof KeycloakRedirectError && error.operation === 'admin') {
+        throw new KeycloakCreateUnconfirmedError('redirect');
+      }
+      throw error;
     });
 
     if (response.status === 409) {
       throw RastaError.alreadyExists('User');
     }
+    // A redirect says nothing about whether the account was made (F7): as
+    // unconfirmed as a success without an id, and resolved the same way.
+    if (isRedirectStatus(response.status)) throw new KeycloakCreateUnconfirmedError('redirect');
     if (!response.ok) {
       throw RastaError.upstreamUnavailable('keycloak', {
         status: response.status,

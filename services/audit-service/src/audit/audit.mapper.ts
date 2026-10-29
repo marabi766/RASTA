@@ -237,14 +237,20 @@ export function toAuditEventRecord(
   delivery: EventDelivery,
 ): AuditEventRecord {
   // ADR § 5: actor is assigned explicitly, never left blank. An envelope with
-  // an actor keeps it; one without is attributed to the producing service as
-  // SYSTEM, so an insurance expiry sweep reads as
-  // `SYSTEM / asset-service` rather than an unexplained gap. ANONYMOUS remains
-  // for an envelope that names neither, which today's schema makes impossible
-  // — `producer` is required — but the branch is here because the ADR defines
-  // it and a future envelope version could relax that.
-  const actorType: AuditActorType = envelope.actor ? envelope.actor.type : 'SYSTEM';
-  const rawActorId = envelope.actor ? envelope.actor.id : envelope.producer;
+  // an actor keeps it. One that says its request was unauthenticated
+  // (`anonymous`, PR #483 r3 F1) is ANONYMOUS with no id — never the producer,
+  // and never an id the sender chose. One with neither is background work of
+  // the producing service, attributed as SYSTEM, so an insurance expiry sweep
+  // reads as `SYSTEM / asset-service` rather than an unexplained gap. (An
+  // envelope naming no producer would be ANONYMOUS too, which today's schema
+  // makes impossible — `producer` is required — but the ADR defines it.)
+  const anonymous = !envelope.actor && envelope.anonymous === true;
+  const actorType: AuditActorType = envelope.actor
+    ? envelope.actor.type
+    : anonymous
+      ? 'ANONYMOUS'
+      : 'SYSTEM';
+  const rawActorId = envelope.actor ? envelope.actor.id : anonymous ? undefined : envelope.producer;
   const actorId = boundOptional(rawActorId, LIMITS.actorId);
 
   // The published events that record a refusal (S-06). Contract-service's: its closed action and

@@ -67,6 +67,21 @@ export const eventEnvelopeSchema = z.object({
   traceparent: z.string().optional(),
 
   actor: eventActorSchema.optional(),
+  /**
+   * `true`: the event records a request whose caller was **not authenticated**
+   * — a public self-registration — so there is no principal to name, and that
+   * is the fact (PR #483 r3 F1). Absent `actor` *and* absent `anonymous`:
+   * background work of the producer, which audit records as `SYSTEM /
+   * <producer>`. Only with no `actor`; a producer never sets both, and a
+   * consumer that sees both reads the actor.
+   *
+   * A sibling flag, not a fourth `actor.type`: `parseEnvelope` runs on consume
+   * too, and a consumer still on the previous schema would refuse an actor
+   * type it does not know — the whole envelope, to its dead-letter topic. An
+   * unknown key is dropped instead, so an old consumer reads the event exactly
+   * as before. Optional, so `eventVersion` does not change.
+   */
+  anonymous: z.literal(true).optional(),
 
   /**
    * ADR-051 — the event's position within its ordered stream.

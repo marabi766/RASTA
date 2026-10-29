@@ -326,6 +326,32 @@ export interface ActorOptions {
   authType?: 'USER' | 'SERVICE';
 }
 
+/**
+ * Makes `userId` an `ACTIVE` user with a live membership holding `roles` in
+ * `organizationId`, as the database sees it — the authority every
+ * identity-administration write re-reads under its locks (task 117, F1; a
+ * token's roles alone no longer commit anything). Idempotent and safe to call
+ * concurrently: an existing user or live membership is left as it is. Valid
+ * since 2000, so no clock a test moves can put it outside its window. No
+ * Keycloak account: nothing ever projects it.
+ */
+export async function ensureLiveMember(
+  prisma: PrismaService,
+  member: { userId: string; organizationId: string; roles: string[] },
+): Promise<void> {
+  const handle = `itest-${member.userId.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+  await prisma.client.$executeRaw`
+    INSERT INTO "user" (id, username, email, first_name, last_name, status, created_by, updated_by, updated_at)
+    VALUES (${member.userId}, ${handle}, ${`${handle}@example.test`}, 'آزمون', 'مدیر', 'ACTIVE',
+            'ITEST', 'ITEST', now())
+    ON CONFLICT DO NOTHING`;
+  await prisma.client.$executeRaw`
+    INSERT INTO membership (id, user_id, organization_id, roles, status, valid_from, created_by, updated_by, updated_at)
+    VALUES (${`MBR_ITEST_${ulid()}`}, ${member.userId}, ${member.organizationId}, ${member.roles}::text[],
+            'ACTIVE', TIMESTAMP '2000-01-01 00:00:00', 'ITEST', 'ITEST', now())
+    ON CONFLICT DO NOTHING`;
+}
+
 /** Runs `fn` as a user acting for an organization. */
 export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise<T> {
   const context: RequestContext = {
