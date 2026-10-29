@@ -164,6 +164,8 @@ describe('MaintenanceFactsConsumer lifecycle', () => {
     await expect(consumer.stop()).resolves.toBeUndefined();
   });
 
+  const quietLog = { info: () => undefined, warn: () => undefined, debug: () => undefined };
+
   it('starts the consumer its factory builds and stops the same one, by the deadline it is given', async () => {
     const calls: string[] = [];
     const fake = {
@@ -172,15 +174,74 @@ describe('MaintenanceFactsConsumer lifecycle', () => {
         void calls.push(`stop by ${options?.deadlineAt}`),
       isRunning: () => true,
     };
+    const facts = {
+      recordCoverageStart: async (name: string) => void calls.push(`coverage ${name}`),
+    };
     const consumer = new MaintenanceFactsConsumer(
       () => fake as never,
       {} as PrismaService,
-      {} as MaintenanceFactRepository,
-      { info: () => undefined, warn: () => undefined, debug: () => undefined },
+      facts as unknown as MaintenanceFactRepository,
+      quietLog,
     );
     await consumer.start();
     expect(consumer.isRunning()).toBe(true);
     await consumer.stop({ deadlineAt: 1234 });
-    expect(calls).toEqual(['start', 'stop by 1234']);
+    expect(calls).toEqual(['start', `coverage ${MAINTENANCE_FACTS_CONSUMER}`, 'stop by 1234']);
+  });
+
+  it('records coverage only AFTER the consumer is running: a failed start claims nothing (Q-154)', async () => {
+    const recorded = jest.fn();
+    const fake = {
+      start: async () => {
+        throw new Error('broker unreachable');
+      },
+      stop: async () => undefined,
+      isRunning: () => false,
+    };
+    const consumer = new MaintenanceFactsConsumer(
+      () => fake as never,
+      {} as PrismaService,
+      { recordCoverageStart: recorded } as unknown as MaintenanceFactRepository,
+      quietLog,
+    );
+    await expect(consumer.start()).rejects.toThrow('broker unreachable');
+    expect(recorded).not.toHaveBeenCalled();
+  });
+
+  it('stops the consumer again when the coverage start cannot be recorded, and refuses to start', async () => {
+    const stop = jest.fn(async () => undefined);
+    const fake = { start: async () => undefined, stop, isRunning: () => true };
+    const consumer = new MaintenanceFactsConsumer(
+      () => fake as never,
+      {} as PrismaService,
+      {
+        recordCoverageStart: async () => {
+          throw new Error('database unavailable');
+        },
+      } as unknown as MaintenanceFactRepository,
+      quietLog,
+    );
+    await expect(consumer.start()).rejects.toThrow('database unavailable');
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('handling a delivery never touches coverage: replay, duplicate and rollback cannot advance it', async () => {
+    const recordCoverageStart = jest.fn();
+    const facts = {
+      recordCoverageStart,
+      record: async () => ({ kind: 'ALREADY_PROCESSED' }),
+    };
+    const prisma = { transaction: async (fn: (tx: unknown) => unknown) => fn({}) };
+    const consumer = new MaintenanceFactsConsumer(
+      () => {
+        throw new Error('not started in this suite');
+      },
+      prisma as unknown as PrismaService,
+      facts as unknown as MaintenanceFactRepository,
+      quietLog,
+    );
+    await consumer.handle(envelope());
+    await consumer.handle(envelope());
+    expect(recordCoverageStart).not.toHaveBeenCalled();
   });
 });

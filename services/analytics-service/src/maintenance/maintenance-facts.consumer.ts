@@ -96,8 +96,19 @@ export class MaintenanceFactsConsumer {
   ) {}
 
   async start(): Promise<void> {
-    this.consumer = this.createConsumer((envelope) => this.handle(envelope));
-    await this.consumer.start();
+    const consumer = this.createConsumer((envelope) => this.handle(envelope));
+    this.consumer = consumer;
+    await consumer.start();
+    // Only after the consumer is subscribed and running: "the projection is complete from here"
+    // must not be claimed for an instant before it could have heard an event (ADR-071 § 6,
+    // Q-154). A failed start above records nothing; a failed record stops the consumer again,
+    // so the service never runs a projection whose coverage is unknown.
+    try {
+      await this.facts.recordCoverageStart(MAINTENANCE_FACTS_CONSUMER);
+    } catch (error) {
+      await consumer.stop();
+      throw error;
+    }
   }
 
   /**

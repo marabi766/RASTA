@@ -5,6 +5,7 @@ import { PrismaClient } from '../src/generated/prisma';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { MaintenanceFactRepository } from '../src/maintenance/maintenance-fact.repository';
 import { MaintenanceFactsConsumer } from '../src/maintenance/maintenance-facts.consumer';
+import { MAINTENANCE_FACTS_CONSUMER } from '../src/maintenance/maintenance-fact';
 
 /**
  * Scaffolding for the integration suites.
@@ -139,6 +140,43 @@ export function wire(): Wiring {
 export function ownerClient(): PrismaClient {
   return new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
 }
+
+/**
+ * Sets the deployment-wide coverage start of the maintenance projection to exactly `at`, or
+ * removes it (`null`: the consumer has never run). The service itself can only insert it once,
+ * stamped by the database clock, so a test that needs an exact instant — a boundary, a window
+ * before coverage — plants it through the **owner** connection with the two guards lifted for
+ * one transaction. The coverage table is global, not per organization: suites that depend on it
+ * set it in `beforeAll` and call `clearCoverage()` in `afterAll`.
+ */
+export async function plantCoverage(at: Date | null): Promise<void> {
+  const owner = ownerClient();
+  try {
+    await owner.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "projection_coverage" DISABLE TRIGGER "tg_projection_coverage_append_only"',
+      );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "projection_coverage" DISABLE TRIGGER "tg_projection_coverage_started_at"',
+      );
+      await tx.$executeRawUnsafe('DELETE FROM "projection_coverage"');
+      if (at !== null) {
+        await tx.$executeRaw`INSERT INTO projection_coverage (consumer_name, covered_from)
+          VALUES (${MAINTENANCE_FACTS_CONSUMER}, ${at})`;
+      }
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "projection_coverage" ENABLE TRIGGER "tg_projection_coverage_started_at"',
+      );
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "projection_coverage" ENABLE TRIGGER "tg_projection_coverage_append_only"',
+      );
+    });
+  } finally {
+    await owner.$disconnect();
+  }
+}
+
+export const clearCoverage = (): Promise<void> => plantCoverage(null);
 
 /**
  * Removes everything the given organizations' facts and the given events' markers left. A fact
