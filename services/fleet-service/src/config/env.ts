@@ -50,7 +50,7 @@ export const fleetEnvSchema = baseEnvSchema
     IDENTITY_SERVICE_URL: serviceUrlSchema,
 
     /** That one question, body included. A timeout refuses the registration. */
-    FLEET_IDENTITY_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+    FLEET_IDENTITY_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).prefault(3000),
 
     /** One such question, body included. A timeout refuses the assignment. */
     ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS: z.coerce

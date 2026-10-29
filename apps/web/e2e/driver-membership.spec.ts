@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Browser, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Page } from './expect';
 
 import { NOT_A_MEMBER_TEXT } from '../src/lib/driver-fields';
 import {
