@@ -15,25 +15,28 @@
  * balanced () / standalone {} groups; control-word prefixes; assignments;
  * < > >> <& >& redirects; << / <<- with literal bare/single/double-quoted
  * alphanumeric/underscore delimiters and isolated DATA payloads; <<< here-strings.
- * A: time (-p), !, coproc, command, exec, env, nice, nohup, timeout and xargs
+ * A: time (-p), !, coproc, builtin, command, exec, env, nice, nohup, timeout and xargs
  * recursively expose their remaining command words; unmodelled options refuse.
  * B': FULLY LITERAL eval arguments are joined and recursively parsed with this
  * lexer. ANY expansion ($var, ${..}, $(..), backticks) makes the argument DYNAMIC:
  * out of scope by D-074, neither parsed nor refused; its literal words OUTSIDE
  * expansions are still classified. source/. of a literal repo path scans that
- * file as a run block; a non-repo literal path is dynamic, UNLESS C feeds it.
+ * file after the unit-token pre-check below; a non-repo literal path is dynamic,
+ * UNLESS C feeds it.
  * C: heredoc/here-string/pipeline input reaching sh/bash/dash/zsh/ksh/rbash or
  * source/. is parsed as commands, independent of stdin path spelling. A payload
  * that cannot be obtained statically refuses. Pipeline/group relationships and
  * redirection precedence are preserved; arbitrary producer behavior is not run.
- * Shell command strings continue to refuse; captured input never hides a
- * literal repo source path, which is also scanned under B'.
- * Simple $name / ${name} / positional parameters and GitHub expressions are
- * opaque dynamic atoms; balanced $(commands) uses this same lexer recursively.
+ * Only descriptor 0 supplies stdin; its last redirection wins. Unknown input
+ * refuses. Shell -c operands anywhere in the option vector use this lexer;
+ * literal repo shell scripts are scanned regardless of their stdin or arguments.
+ * Simple $name, ANY balanced ${...} parameter expansion, positional parameters
+ * and GitHub expressions are opaque dynamic atoms in run blocks AND scripts;
+ * balanced $(commands) uses this same lexer recursively.
  * Their resolved values/field splitting are outside the dynamic scope above.
  * ANSI-C/locale quotes, dangling escapes/quotes, process substitution, arithmetic,
- * backticks, complex parameter/brace/pathname/tilde expansion (except dynamic
- * evaluation arguments as specified above), and
+ * backticks (except dynamic evaluation arguments), brace/pathname/tilde
+ * expansion, and
  * unsupported operators refuse. Quoted literals do not acquire shell syntax.
  * Literal pnpm [run] test[:unit], turbo [run] test[:unit] (direct or via
  * pnpm exec/dlx, implicit pnpm dispatch or npx), and node/direct phase-runner
@@ -41,6 +44,15 @@
  * Launcher options are limited to LAUNCHER_OPTIONS below; unknown options before
  * the command fail loudly. This is not arbitrary-shell, environment-resolution
  * or root-script alias analysis.
+ * Repo-script pre-check (TASK 858): token-free text is accepted WITHOUT full
+ * parsing. The classifier's unit triggers are test:unit; run-test-phases.mjs;
+ * pnpm [options] [run|run-script] [options] test|t; turbo [options] [run] test.
+ * The pre-check conservatively searches these spellings after removing quotes,
+ * escapes and continuations (options/other intervening words may overmatch).
+ * Direct Jest is not a trigger in the existing run-block classifier. Comments
+ * and data may trigger parsing too. Only token-bearing scripts use the finite
+ * lexer and recurse into literal repo paths; token-free scripts are opaque.
+ * This exemption applies only to repo scripts, never workflow run blocks.
  */
 import { parse as parseYaml } from 'yaml';
 
@@ -59,7 +71,7 @@ export const UNBOUNDED_EXCEPTIONS = [
 ];
 
 /** One extractor for every run block; source stays exact for the exception identity. */
-function logicalCommands(script) {
+function logicalCommands(script, opaqueFragments = false) {
   script = script.replace(/\r\n?/g, '\n');
   const commands = [];
   let i = 0;
@@ -81,8 +93,8 @@ function logicalCommands(script) {
     const endWord = () => {
       if (started) {
         if (!redirect) words.push(word);
-        else if (redirect === 'here-string') input.value = word;
-        else if (redirect === 'input') input.path = word;
+        else if (redirect.kind === 'text') redirect.value = word;
+        else if (redirect.kind === 'file') redirect.path = word;
         redirect = false;
       }
       word = '';
@@ -104,6 +116,14 @@ function logicalCommands(script) {
     while (i < script.length) {
       const char = script[i];
       const next = script[i + 1];
+      // The expansion itself remains opaque. Outside quotes it separates
+      // independently literal command fragments; inside quotes it taints a word.
+      if (opaqueFragments && char === '\0') {
+        if (quote) word += char;
+        else endCommand();
+        i += 1;
+        continue;
+      }
       if (char === '\\' && quote !== "'") {
         if (!next) refuse('dangling backslash');
         if (next === '\n') {
@@ -150,15 +170,17 @@ function logicalCommands(script) {
           scan(')');
         } else if (next === '{') {
           const github = script[i + 2] === '{';
-          const end = script.indexOf(github ? '}}' : '}', i + 2);
-          if (end < 0)
-            refuse(github ? 'unbalanced GitHub expression' : 'unbalanced parameter expansion');
-          if (
-            !github &&
-            !/^(?:[A-Za-z_][A-Za-z_0-9]*|[0-9@*#?$!-])$/.test(script.slice(i + 2, end))
-          )
-            refuse('complex parameter expansion');
-          i = end + (github ? 2 : 1);
+          if (github) {
+            const end = script.indexOf('}}', i + 3);
+            if (end < 0) refuse('unbalanced GitHub expression');
+            i = end + 2;
+          } else {
+            try {
+              i = dynamicEnd(script, i);
+            } catch {
+              refuse('unbalanced parameter expansion');
+            }
+          }
         } else {
           const parameter = script.slice(i + 1).match(/^(?:[A-Za-z_][A-Za-z_0-9]*|[0-9@*#?$!-])/);
           if (!parameter) {
@@ -199,6 +221,7 @@ function logicalCommands(script) {
         if (next === '(') refuse('process substitution');
         if (redirect) refuse('missing redirection target');
         // A directly attached numeric file descriptor is not a command word.
+        const descriptor = /^\d+$/.test(word) ? Number(word) : char === '<' ? 0 : 1;
         if (/^\d+$/.test(word)) {
           word = '';
           started = false;
@@ -206,8 +229,8 @@ function logicalCommands(script) {
         endWord();
         const begin = i;
         if (script.startsWith('<<<', i)) {
-          input = { kind: 'text', value: null };
-          redirect = 'here-string';
+          redirect = { kind: 'text', value: null };
+          if (descriptor === 0) input = redirect;
           i += 3;
           source += script.slice(begin, i);
           continue;
@@ -223,16 +246,21 @@ function logicalCommands(script) {
               /^[ \t]*(?:'([A-Za-z_0-9]+)'|"([A-Za-z_0-9]+)"|([A-Za-z_0-9]+))(?=[ \t\n;|&)]|$)/,
             );
           if (!delimiter) refuse('unsupported heredoc delimiter');
-          input = { kind: 'text', value: '' };
-          heredocs.push({ delimiter: delimiter[1] ?? delimiter[2] ?? delimiter[3], tabs, input });
+          const payload = { kind: 'text', value: '' };
+          if (descriptor === 0) input = payload;
+          heredocs.push({
+            delimiter: delimiter[1] ?? delimiter[2] ?? delimiter[3],
+            tabs,
+            input: payload,
+          });
           heredocs[heredocs.length - 1].quoted = Boolean(delimiter[1] ?? delimiter[2]);
           i += delimiter[0].length;
         } else {
           i += 1;
           if (next === char || next === '&') i += 1;
           if (/[<>|]/.test(script[i] ?? '')) refuse('unsupported redirection operator');
-          redirect = char === '<' && next !== '&' ? 'input' : true;
-          if (char === '<') input = { kind: 'file', path: null };
+          redirect = { kind: 'file', path: null };
+          if (descriptor === 0) input = redirect;
         }
         source += script.slice(begin, i);
         continue;
@@ -326,8 +354,8 @@ function logicalCommands(script) {
   return commands;
 }
 
-// Find only the end of an opaque expansion at an evaluation site. Its contents
-// are deliberately not shell-validated (D-074 / B'), even complex parameters.
+// Find only the end of an opaque expansion. ANY parameter form uses this in
+// run blocks and repo scripts too; its contents are never validated/evaluated.
 function dynamicEnd(text, start) {
   const first = text[start];
   const next = text[start + 1];
@@ -352,6 +380,12 @@ function dynamicEnd(text, start) {
       i += 1;
       continue;
     }
+    // Nested substitutions have their own quotes, including inside double
+    // quotes. Their braces/quotes must not close the enclosing expansion.
+    if (quote !== "'" && ((char === '$' && ['{', '('].includes(text[i + 1])) || char === '`')) {
+      i = dynamicEnd(text, i) - 1;
+      continue;
+    }
     if (quote) {
       if (char === quote) quote = null;
       continue;
@@ -373,6 +407,7 @@ const CONTROL_PREFIXES = new Set(['if', 'then', 'elif', 'else', 'do', 'while', '
 const WRAPPER_OPTIONS = {
   time: { '-p': 0 },
   coproc: {},
+  builtin: {},
   command: { '-p': 0, '-v': 0, '-V': 0 },
   exec: { '-a': 1, '-c': 0, '-l': 0 },
   env: {
@@ -640,25 +675,62 @@ function scanPayload(payload, rootScripts, context) {
   );
 }
 function dynamicLiterals(args, rootScripts, context) {
-  // Expansion atoms break command words; never join across them or recursively
-  // parse a dynamic eval as shell syntax. Only literal words outside are checked.
-  return args
-    .join(' ')
-    .split(/[\0;|&\n]/)
-    .some((literal) => {
+  // B': use the run-block lexer, including quote removal, groups and nested
+  // evaluation. Expansion atoms remain opaque and never generate shell code.
+  try {
+    return logicalCommands(args.join(' '), true).some((command) => {
       try {
-        return unbounded(
-          literal.trim().split(/[ \t\r]+/),
-          rootScripts,
-          {},
-          { ...context, literalOnly: true },
-        );
+        return unbounded(command.words, rootScripts, command, context);
       } catch {
-        // B': a dynamic argument is never refused. Incomplete/unsupported
-        // literal fragments cannot establish a known unbounded invocation.
-        return false;
+        return false; // Dynamic/incomplete fragments are never refused (D-074).
       }
     });
+  } catch {
+    return false;
+  }
+}
+
+// Shell options stop at the script/command operand. A c in any short-option
+// cluster selects the next operand, even if an earlier option included s.
+function shellArguments(args) {
+  let i = 0;
+  let stdin = false;
+  while (args[i]?.startsWith('-') && !['-', '--'].includes(args[i])) {
+    const option = args[i++];
+    if (!/^-[acefhlmnprstuvxBCEHPT]+$/.test(option))
+      throw new Error(`unsupported shell construct: shell input option ${option}`);
+    if (option.includes('s')) stdin = true;
+    if (option.includes('c')) {
+      if (args[i] == null)
+        throw new Error('unsupported shell construct: missing shell command string');
+      return { command: args[i] };
+    }
+  }
+  if (args[i] === '--') i += 1;
+  return { path: stdin ? undefined : args[i] };
+}
+
+// Same unit-launch spellings as unbounded(), intentionally an over-approximation
+// before shell parsing. Never evaluate the script to discover its contents.
+function hasUnitToken(text) {
+  const literal = text.replace(/\\\r?\n|\\\r/g, '').replace(/[\\'"]/g, '');
+  return (
+    /test:unit|run-test-phases\.mjs/.test(literal) ||
+    /\bpnpm\b[^\n\r;&|]*\b(?:test|t)\b/.test(literal) ||
+    /\bturbo\b[^\n\r;&|]*\btest\b/.test(literal)
+  );
+}
+
+function scanRepoScript(path, rootScripts, context) {
+  const file = context.readRepoFile?.(path);
+  if (file == null) return false; // B': non-repo literal paths are dynamic.
+  if (!hasUnitToken(file.text)) return false;
+  if (context.sources?.has(file.path))
+    throw new Error('unsupported shell construct: recursive source cycle');
+  return scanPayload(file.text, rootScripts, {
+    ...context,
+    sources: new Set([...(context.sources ?? []), file.path]),
+  });
 }
 /** Literal launchers only; arguments to other programs are never searched as commands. */
 function unbounded(words, rootScripts, node = {}, context = {}) {
@@ -677,7 +749,6 @@ function unbounded(words, rootScripts, node = {}, context = {}) {
     return unbounded(afterOptions(args, 'pnpm exec'), rootScripts, node, context);
   }
   if (program === 'npx') return unbounded(afterOptions(args, 'npx'), rootScripts, node, context);
-  if (context.literalOnly && ['eval', 'source', '.'].includes(program)) return false;
   if (program === 'eval') {
     if (args[0] === '--') args = args.slice(1);
     if (args.some((arg) => arg.includes('\0'))) return dynamicLiterals(args, rootScripts, context);
@@ -686,32 +757,33 @@ function unbounded(words, rootScripts, node = {}, context = {}) {
   }
   const sourcing = ['source', '.'].includes(program);
   const shell = ['bash', 'sh', 'dash', 'zsh', 'ksh', 'rbash'].includes(program);
-  if ((sourcing || shell) && (node.input || node.pipedFrom)) {
-    if (scanPayload(inputPayload(node), rootScripts, context)) return true;
-    if (shell) {
-      if (args[0]?.startsWith('-') && !['-s', '-'].includes(args[0]))
-        throw new Error('unsupported shell construct: shell input option or command string');
-      return false;
-    }
-    // Sourcing a repo file still runs that file even when stdin is redirected.
+  let shellArgs;
+  if (shell) {
+    shellArgs = shellArguments(args);
+    if (shellArgs.command != null) return scanPayload(shellArgs.command, rootScripts, context);
+    if (
+      shellArgs.path &&
+      !shellArgs.path.includes('\0') &&
+      scanRepoScript(shellArgs.path, rootScripts, context)
+    )
+      return true;
   }
   if (sourcing) {
     if (args[0] === '--') args = args.slice(1);
-    if (args.some((arg) => arg.includes('\0'))) return dynamicLiterals(args, rootScripts, context);
+    // Only the filename decides whether the source is literal, not its $@.
+    if (args[0]?.includes('\0')) return dynamicLiterals(args, rootScripts, context);
     if (args[0]?.startsWith('-'))
       throw new Error(`unmodelled evaluation option: ${program} ${args[0]}`);
-    const path = args[0];
-    if (!path) throw new Error('unsupported shell construct: missing source path');
-    const file = context.readRepoFile?.(path);
-    if (file == null) return false; // B': non-repo literal paths are dynamic.
-    if (context.sources?.has(file.path))
-      throw new Error('unsupported shell construct: recursive source cycle');
-    return scanPayload(file.text, rootScripts, {
-      ...context,
-      sources: new Set([...(context.sources ?? []), file.path]),
-    });
+    if (!args[0]) throw new Error('unsupported shell construct: missing source path');
+    if (scanRepoScript(args[0], rootScripts, context)) return true;
   }
-  if (shell && (!args[0] || args[0].startsWith('-') || /^\/dev\/(stdin|fd\/0)$/.test(args[0])))
+  if ((sourcing || shell) && (node.input || node.pipedFrom)) {
+    return scanPayload(inputPayload(node), rootScripts, context);
+  }
+  if (
+    shell &&
+    (!shellArgs.path || shellArgs.path === '-' || /^\/dev\/(stdin|fd\/0)$/.test(shellArgs.path))
+  )
     throw new Error('unsupported shell construct: shell stdin or command string');
   if (program === 'turbo') {
     args = afterOptions(args, 'turbo');

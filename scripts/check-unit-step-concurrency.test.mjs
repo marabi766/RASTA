@@ -629,7 +629,6 @@ const refusalCases = [
   ['cat <<TXT', 'unbalanced heredoc'],
   ['(cat <<TXT)', 'unbalanced heredoc'],
   ['cat <<"TXT"suffix\nTXT', 'unsupported heredoc delimiter'],
-  ["sh -c 'pnpm test'", 'shell stdin or command string'],
   ['cat <<TXT\n$(pnpm test)\nTXT', 'unquoted heredoc expansion or escape'],
   ['cat <<TXT\n`pnpm test`\nTXT', 'unquoted heredoc expansion or escape'],
   ['cat <<TXT\ndata\\\nTXT', 'unquoted heredoc expansion or escape'],
@@ -642,7 +641,6 @@ const refusalCases = [
   ['COMMAND=(pnpm test)', 'array assignment'],
   ['(( 1 + 2 ))', 'arithmetic command'],
   ['echo `pnpm test`', 'backtick command substitution'],
-  ['echo ${name:-value}', 'complex parameter expansion'],
   ['echo ${name', 'unbalanced parameter expansion'],
   ['echo ${{ expression', 'unbalanced GitHub expression'],
   ['echo $(echo safe', 'unbalanced group'],
@@ -889,6 +887,7 @@ for (const [file, document] of scannedLocations) {
     'eval "pnpm run te""st:unit"',
     "eval -- 'pnpm run test:unit'",
     'eval "echo safe; pnpm run test:unit"',
+    "sh -c 'pnpm test'",
     "bash <<< 'pnpm run test:unit'",
     "source /proc/self/fd/0 <<< 'pnpm run test:unit'",
     ". arbitrary-path <<< 'pnpm run test:unit'",
@@ -936,7 +935,7 @@ for (const site of ['source', '.']) {
     const fixture = cliFixture(t);
     fixture.doc.jobs.quality.steps.push({ run: `${site} ./ci/one.sh` });
     fixture.workflow();
-    fixture.write('ci/one.sh', '. ./ci/two.sh');
+    fixture.write('ci/one.sh', '# test:unit\n. ./ci/two.sh');
     fixture.write('ci/two.sh', 'pnpm run test:unit');
     let result = fixture.run();
     assert.equal(result.status, 1, result.stderr);
@@ -944,7 +943,7 @@ for (const site of ['source', '.']) {
     fixture.write('ci/two.sh', 'pnpm run build');
     result = fixture.run();
     assert.equal(result.status, 0, result.stderr);
-    fixture.write('ci/two.sh', '. ./ci/one.sh');
+    fixture.write('ci/two.sh', '# test:unit\n. ./ci/one.sh');
     result = fixture.run();
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /recursive source cycle/);
@@ -984,6 +983,8 @@ test('r6 command-context boundary probes', () => {
     'eval "$(echo \\) safe) pnpm test"',
     'eval "pnpm test $(echo safe)"',
     'eval "pnpm test `echo safe`"',
+    "bash -c 'pnpm test' <<< 'echo safe'",
+    "rbash -lc 'pnpm test' <<< 'echo safe'",
     "bash <<'TXT'\npnpm test\nTXT",
     'bash <<-TXT\n\tpnpm test\n\tTXT',
     "cat <<'TXT' | rbash arbitrary-path\npnpm test\nTXT",
@@ -1045,8 +1046,6 @@ test('r6 command-context boundary probes', () => {
     ['cat unknown | bash arbitrary-path', /interpreter pipeline payload unavailable/],
     ['echo "$x" | bash arbitrary-path', /interpreter pipeline payload unavailable/],
     ['bash <unknown', /interpreter input payload unavailable/],
-    ["bash -c 'pnpm test' <<< 'echo safe'", /shell input option or command string/],
-    ["rbash -lc 'pnpm test' <<< 'echo safe'", /shell input option or command string/],
     ['eval "${x"', /unbalanced dynamic expansion/],
     ['eval "`x"', /unbalanced dynamic backtick/],
   ])
@@ -1093,5 +1092,320 @@ test('r6 B repo source path boundaries via CLI', (t) => {
     fixture.workflow();
     result = fixture.run();
     assert.equal(result.status, 0, result.stderr);
+  }
+});
+
+// Round 7: the reviewer's exact 9 B' + 8 C forms, each at four document
+// locations with plain/LF/CRLF headers (204 probes), plus all four builtins.
+const r7ReviewerB = [
+  `eval "pnpm run 'test:unit' $x"`,
+  `eval "pnpm run \\"test:unit\\" $x"`,
+  `eval "pnpm run te''st:unit $x"`,
+  `eval "(pnpm run test:unit) $x"`,
+  `eval "true && pnpm run 'test:unit' $x"`,
+  `eval "eval pnpm run test:unit $x"`,
+  'source ./ci/unit.sh "$x"',
+  '. ./ci/unit.sh "$x"',
+  'eval "source ./ci/unit.sh $x"',
+];
+const r7ReviewerC = [
+  `bash <<'UNIT' 3<<'DATA'\npnpm run test:unit\nUNIT\necho safe\nDATA`,
+  `bash <<'UNIT' 3<<< 'echo safe'\npnpm run test:unit\nUNIT`,
+  `cat <<'UNIT' | (bash) 3<<< 'echo safe'\npnpm run test:unit\nUNIT`,
+  `cat <<'UNIT' | cat 3<<< 'echo safe' | bash\npnpm run test:unit\nUNIT`,
+  `cat <<'UNIT' | bash 3<<< 'echo safe'\npnpm run test:unit\nUNIT`,
+  `bash -s -c 'pnpm run test:unit' <<< 'echo safe'`,
+  `bash -s -ec 'pnpm run test:unit' <<< 'echo safe'`,
+  `echo safe | bash ./ci/unit.sh`,
+];
+
+const r7Builtins = [
+  "builtin eval 'pnpm run test:unit'",
+  "builtin -- eval 'pnpm run test:unit'",
+  "builtin source /dev/stdin <<'TXT'\npnpm run test:unit\nTXT",
+  "builtin . /dev/stdin <<'TXT'\npnpm run test:unit\nTXT",
+];
+const r7ReadRepoFile = (path) =>
+  ['./ci/unit.sh', './x.sh'].includes(path)
+    ? { path: path.slice(2), text: 'pnpm run test:unit' }
+    : null;
+const r7Problems = (file, document, run, readRepoFile = r7ReadRepoFile) =>
+  unitStepProblems({ 'ci.yml': grammarWorkflow, [file]: stringify(document(run)) }, realScripts, {
+    readRepoFile,
+  });
+const r7Found = [
+  ...r7ReviewerB,
+  ...r7ReviewerC,
+  ...r7Builtins,
+  `eval "'pnpm' run test:unit $x"`,
+  `eval "{ pnpm run 'test:unit'; } $x"`,
+  `eval "eval 'pnpm run test:unit' $x"`,
+  `eval "eval "pnpm run 'test:unit'" $x"`,
+  `eval "eval source ./ci/unit.sh $x"`,
+  `eval "builtin eval 'pnpm run test:unit' $x"`,
+  `builtin -- eval "pnpm run 'test:unit' $x"`,
+  'builtin source ./ci/unit.sh "$x"',
+  'builtin -- . ./ci/unit.sh "$x"',
+  'source -- ./ci/unit.sh "$x"',
+  '. -- ./ci/unit.sh "${x}"',
+  `eval ". ./ci/unit.sh $x"`,
+  'bash ./ci/unit.sh "$x"',
+  'sh -e ./x.sh "$x"',
+  "bash ./ci/unit.sh <<< 'echo safe'",
+  'sh -e ./x.sh <unknown',
+  "echo safe | bash ./ci/unit.sh 3<<< 'echo safe'",
+  "bash -ec 'pnpm run test:unit'",
+  "sh -sc 'pnpm run test:unit' <<< 'echo safe'",
+  "bash -s -e -c 'pnpm run test:unit' <<< 'echo safe'",
+  "bash -s -ec 'pnpm run test:unit' <unknown",
+  "rbash -s -lc 'pnpm run test:unit' 3<<< 'echo safe'",
+  'bash -e -s -c \'eval "pnpm run test:unit"\'',
+  "bash -c 'pnpm run test:unit' <<< 'pnpm run build'",
+  "bash <<< 'echo safe' 0<<< 'pnpm run test:unit'",
+  "bash 0<<< 'echo safe' <<'UNIT'\npnpm run test:unit\nUNIT",
+  "bash <<'SAFE' <<'UNIT'\necho safe\nSAFE\npnpm run test:unit\nUNIT",
+  "bash <<'UNIT' 3<<'DATA' 4<<< 'echo safe'\npnpm run test:unit\nUNIT\necho safe\nDATA",
+  "bash 3<<< 'echo safe' <<'UNIT'\npnpm run test:unit\nUNIT",
+  "cat <<'UNIT' | (bash 3<<'DATA'\necho safe\nDATA\n)\npnpm run test:unit\nUNIT",
+  "cat 3<<< 'echo safe' <<'UNIT' | bash\npnpm run test:unit\nUNIT",
+  "bash <unknown 0<<< 'pnpm run test:unit'",
+];
+for (const [file, document] of scannedLocations) {
+  for (const newline of [null, '\n', '\r\n']) {
+    for (const original of r7Found) {
+      const run = continued(original, newline);
+      test(`r7 boundary FOUND ${file}: ${JSON.stringify(run)}`, () =>
+        refused(r7Problems(file, document, run), /literal unbounded/));
+    }
+  }
+  for (const run of [
+    'builtin eval "${x}"',
+    'builtin -- eval "${x}"',
+    'eval "echo pnpm run \'test:unit\' $x"',
+    `eval "echo "pnpm run test:unit" $x"`,
+    'eval "${x:-pnpm run test:unit}"',
+    'eval "$(pnpm run test:unit)"',
+    'eval "`pnpm run test:unit`"',
+    'source "$x" ignored',
+    'bash -- ./safe.sh "$x"',
+    'sh -e ./safe.sh',
+    "bash -s ./ci/unit.sh <<< 'echo safe'",
+    "bash -s -c 'echo safe' <<< 'pnpm run test:unit'",
+    "bash -ec 'echo safe' <<< 'pnpm run test:unit'",
+    "bash -sc 'echo safe' <<< 'pnpm run test:unit'",
+    "bash <<< 'pnpm run test:unit' 0<<< 'echo safe'",
+    "bash <<'UNIT' 0<<< 'echo safe'\npnpm run test:unit\nUNIT",
+    "bash <<'UNIT' <<'SAFE'\npnpm run test:unit\nUNIT\necho safe\nSAFE",
+    "bash <<< 'echo safe' 3<<< 'pnpm run test:unit'",
+    "bash 3<<< 'pnpm run test:unit' <<< 'echo safe'",
+    "bash <<'SAFE' 3<<'UNIT'\necho safe\nSAFE\npnpm run test:unit\nUNIT",
+    "cat <<'UNIT' | bash 0<<< 'echo safe'\npnpm run test:unit\nUNIT",
+    "echo safe | cat 3<<< 'pnpm run test:unit' | bash",
+    "(bash) <<< 'pnpm run test:unit' 0<<< 'echo safe'",
+  ]) {
+    test(`r7 boundary ACCEPTED ${file}: ${JSON.stringify(run)}`, () =>
+      assert.deepEqual(r7Problems(file, document, run), []));
+  }
+  for (const [run, pattern] of [
+    ["bash 3<<< 'pnpm run test:unit'", /shell stdin or command string/],
+    ["bash 3<<'UNIT'\npnpm run test:unit\nUNIT", /shell stdin or command string/],
+    ["bash <<< 'pnpm run test:unit' <unknown", /interpreter input payload unavailable/],
+    ["bash <<< 'pnpm run test:unit' 0<&3", /interpreter input payload unavailable/],
+    ["bash <<< 'pnpm run test:unit' 0>&3", /interpreter input payload unavailable/],
+    ['bash <<< \'pnpm run test:unit\' 0<<< "$x"', /interpreter input payload unavailable/],
+    ['bash -s -c', /missing shell command string/],
+    ['bash --unknown', /shell input option/],
+    ['builtin --unknown eval pnpm test', /unmodelled wrapper option/],
+  ]) {
+    test(`r7 boundary REFUSED ${file}: ${JSON.stringify(run)}`, () =>
+      refused(r7Problems(file, document, run), pattern));
+  }
+}
+
+test('r7 repo source and shell scripts use real filesystem via CLI', (t) => {
+  const fixture = cliFixture(t);
+  fixture.write('ci/unit.sh', 'pnpm run test:unit');
+  const step = { run: '' };
+  fixture.doc.jobs.quality.steps.push(step);
+  for (const run of [
+    'source ./ci/unit.sh "$x"',
+    '. ./ci/unit.sh "$x"',
+    'builtin -- source ./ci/unit.sh "$x"',
+    `eval "source ./ci/unit.sh $x"`,
+    'bash ./ci/unit.sh "$x"',
+    'sh -e ./ci/unit.sh "$x"',
+    "bash ./ci/unit.sh <<< 'echo safe'",
+    'echo safe | sh -e ./ci/unit.sh',
+  ]) {
+    step.run = run;
+    fixture.workflow();
+    const result = fixture.run();
+    assert.equal(result.status, 1, run + result.stderr);
+    assert.match(result.stderr, /literal unbounded/);
+  }
+  fixture.write('ci/unit.sh', 'echo safe');
+  step.run = 'sh -e ./ci/unit.sh "$x"';
+  fixture.workflow();
+  const result = fixture.run();
+  assert.equal(result.status, 0, result.stderr);
+});
+
+// TASK 858(a): all parameter forms are opaque; nested quote/brace state must
+// never expose their contents or swallow the following literal unit command.
+const r7Parameters = [
+  '${x:-safe}',
+  '${arr[$i]}',
+  '${BASH_SOURCE[0]}',
+  '${#x}',
+  '${x/a/b}',
+  '${x//a/b}',
+  '${!x}',
+  '${x:?missing}',
+  '${x:=safe}',
+  '${x:+safe}',
+  '${x:1:2}',
+  '${x^^}',
+  '${x%pattern}',
+  '${x##pattern}',
+  '${x:-${y:-safe}}',
+  '${x:-"quoted } { text"}',
+  "${x:-'quoted } { text'}",
+  '${x:-"${y:-\'}\'}"}',
+  '${x:-$(echo "}")}',
+  '${x:-"$(echo "}")"}',
+  '${x:-`echo "}"`}',
+  '${x:-safe\\}tail}',
+  '${x:-pnpm run test:unit}',
+  '${x:-$(pnpm run test:unit)}',
+];
+for (const [file, document] of scannedLocations) {
+  for (const parameter of r7Parameters) {
+    for (const run of [
+      `echo ${parameter}`,
+      `echo "${parameter}"`,
+      `pnpm ${parameter}`,
+      `pnpm "test${parameter}"`,
+    ]) {
+      test(`r7 parameter ACCEPTED ${file}: ${JSON.stringify(run)}`, () =>
+        assert.deepEqual(r7Problems(file, document, run), []));
+    }
+    for (const run of [
+      `echo ${parameter}; pnpm run 'test:unit'`,
+      `echo "${parameter}"; pnpm run test:unit`,
+      `eval "pnpm run 'test:unit' ${parameter}"`,
+    ]) {
+      test(`r7 parameter FOUND ${file}: ${JSON.stringify(run)}`, () =>
+        refused(r7Problems(file, document, run), /literal unbounded/));
+    }
+    test(`r7 parameter scanned script ${file}: ${parameter}`, () => {
+      const reader = (path) =>
+        path === './ci/parameter.sh' ? { path, text: `# test:unit\necho "${parameter}"` } : null;
+      assert.deepEqual(r7Problems(file, document, 'bash ./ci/parameter.sh', reader), []);
+      const foundReader = (path) => ({ ...reader(path), text: `echo ${parameter}; pnpm test` });
+      refused(
+        r7Problems(file, document, 'source ./ci/parameter.sh "$x"', foundReader),
+        /literal unbounded/,
+      );
+    });
+  }
+  for (const parameter of ['${x', '${x:-${y}', '${x:-"}"', '${x:-$(echo safe}', '${x:-safe\\}']) {
+    test(`r7 parameter REFUSED ${file}: ${parameter}`, () => {
+      refused(r7Problems(file, document, `echo ${parameter}`), /unbalanced parameter expansion/);
+      const reader = (path) => ({ path, text: `# test:unit\necho ${parameter}` });
+      refused(
+        r7Problems(file, document, 'sh ./ci/parameter.sh', reader),
+        /unbalanced parameter expansion/,
+      );
+    });
+  }
+}
+
+const r7InfraText = `#!/usr/bin/env bash
+values=(one two)
+choose() {
+  case "$1" in one) echo safe ;; *) echo other ;; esac
+}
+choose "${'${values[0]}'}"
+`;
+const r7UnitTokenLaunches = [
+  'pnpm test',
+  'pnpm t',
+  'pnpm run test',
+  'pnpm run-script test',
+  'pnpm --filter @rasta/example run --silent test',
+  'pnpm test:unit',
+  'pnpm run test:unit',
+  'turbo run test',
+  'turbo test',
+  'turbo --filter @rasta/example run test',
+  'turbo run test:unit',
+  'pnpm exec turbo run test',
+  'npx turbo run test',
+  'node scripts/run-test-phases.mjs test',
+  './scripts/run-test-phases.mjs test',
+  "'pnpm' r''un 'test'",
+  'pn\\pm test',
+  'pnpm \\\nrun \\\ntest',
+  'pnpm \\\r\nrun \\\r\ntest',
+  'pnpm \\\rrun \\\rtest',
+];
+for (const [file, document] of scannedLocations) {
+  for (const site of ['source', '.', 'builtin -- source', 'bash', 'sh -e']) {
+    test(`r7 script precheck ACCEPTED ${file}: ${site}`, () => {
+      const reader = (path) => ({ path, text: r7InfraText });
+      assert.deepEqual(r7Problems(file, document, `${site} ./ci/infra.sh "$x"`, reader), []);
+      // The exemption is specific to repo scripts. Run blocks still refuse.
+      refused(r7Problems(file, document, r7InfraText), /unsupported shell construct/);
+    });
+  }
+  for (const launch of r7UnitTokenLaunches) {
+    test(`r7 script precheck FOUND ${file}: ${JSON.stringify(launch)}`, () => {
+      const reader = (path) => ({ path, text: `set -eu\nhelper() { echo safe; }\n${launch}` });
+      refused(r7Problems(file, document, 'bash ./ci/unit.sh', reader), /literal unbounded/);
+    });
+    test(`r7 script precheck REFUSED ${file}: ${JSON.stringify(launch)}`, () => {
+      const reader = (path) => ({ path, text: `${r7InfraText}\n${launch}` });
+      refused(r7Problems(file, document, 'sh ./ci/unit.sh', reader), /array assignment/);
+    });
+  }
+}
+
+test('r7 script precheck real infra, unit scripts, and recursive paths via CLI', (t) => {
+  const fixture = cliFixture(t);
+  const step = { run: '' };
+  fixture.doc.jobs.quality.steps.push(step);
+  fixture.write('ci/infra.sh', r7InfraText);
+  for (const path of [
+    'infrastructure/docker/postgres/00-init-databases.sh',
+    'infrastructure/docker/kafka/ci-up.sh',
+  ])
+    fixture.write(path, readFileSync(join(root, path), 'utf8'));
+  for (const path of [
+    './ci/infra.sh',
+    'infrastructure/docker/postgres/00-init-databases.sh',
+    'infrastructure/docker/kafka/ci-up.sh',
+  ]) {
+    for (const site of ['source', '.', 'bash', 'sh -e']) {
+      step.run = `${site} ${path} "$x"`;
+      fixture.workflow();
+      const result = fixture.run();
+      assert.equal(result.status, 0, result.stderr);
+    }
+  }
+  fixture.write('ci/outer.sh', '# test:unit\nsource ./ci/inner.sh "$x"');
+  fixture.write('ci/inner.sh', '# test:unit\nsh -e ./ci/leaf.sh');
+  step.run = 'bash ./ci/outer.sh';
+  fixture.workflow();
+  for (const [text, status, pattern] of [
+    [r7InfraText, 0, /^$/],
+    ['helper() { echo safe; }\npnpm run test:unit', 1, /literal unbounded/],
+    [r7InfraText + '\npnpm run test:unit', 1, /array assignment/],
+    ['# test:unit\necho "${x:-${y:-safe}}"', 0, /^$/],
+    ['# test:unit\necho "${x:-${y:-safe}}"\npnpm run test:unit', 1, /literal unbounded/],
+  ]) {
+    fixture.write('ci/leaf.sh', text);
+    const result = fixture.run();
+    assert.equal(result.status, status, result.stderr);
+    assert.match(result.stderr, pattern);
   }
 });
