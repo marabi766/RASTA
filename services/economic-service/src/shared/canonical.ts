@@ -103,9 +103,7 @@ export function canonicalWithin(
 ): unknown {
   const canonical = canonicalize(value);
   if (canonical === value) return value;
-  return schema.safeParse(value).success && schema.safeParse(canonical).success
-    ? canonical
-    : value;
+  return schema.safeParse(value).success && schema.safeParse(canonical).success ? canonical : value;
 }
 
 const DECLARED_FORMS = new WeakMap<z.ZodType, (value: unknown) => unknown>();
