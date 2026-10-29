@@ -920,6 +920,14 @@ export async function reapProcessGroup(
 }
 
 /**
+ * How long a stopped command may stay unconfirmed before the runner gives up waiting for the
+ * child's own `exit`/`close`/`error`. It applies to EVERY stop reason (timeout, output overflow,
+ * unrecorded group, signal) and does not depend on the child: a leader stuck in uninterruptible
+ * I/O survives SIGKILL and may never emit anything.
+ */
+export const KILL_CONFIRMATION_DEADLINE_MS = 10_000;
+
+/**
  * The one lifecycle boundary for every child of the drill. Each child leads its own process
  * group, and a group stays OWNED until its disappearance is confirmed:
  *  - handlers are installed before anything that can throw (the report write), so a failed
@@ -928,6 +936,11 @@ export async function reapProcessGroup(
  *    drain, after which the group is reaped, so a descendant holding stdout/stderr cannot
  *    outlive the command;
  *  - a timeout is a failure whatever the exit code that follows the kill;
+ *  - every stop (timeout, output overflow, unrecorded group, `stopActive()`) goes through ONE
+ *    function that kills the group and starts the kill-confirmation deadline; if the child has
+ *    not exited when it expires the command rejects with code `KILL_UNCONFIRMED`, the group
+ *    stays owned as an orphan (recorded in `report.unconfirmedProcessGroups`) for the retry and
+ *    the report, and the command counts as settled for `settleAll()`;
  *  - a group that survives the reap (an orphan) stays in `groups`/`report.processGroups`,
  *    in `report.orphanProcessGroups` and in the signal/retry set until a later retry sees it
  *    gone;
@@ -948,11 +961,13 @@ export function createProcessRunner({
   reap = reapProcessGroup,
   kill = killGroup,
   drainMilliseconds = 2000,
+  killDeadlineMilliseconds = KILL_CONFIRMATION_DEADLINE_MS,
   maxOutputBytes = 64 * 1024 * 1024,
 }) {
   const groups = new Set();
   const orphans = new Set();
   const outstanding = new Set();
+  const active = new Map();
   const publish = () => {
     report.processGroups = [...groups];
     if (orphans.size || report.orphanProcessGroups) report.orphanProcessGroups = [...orphans];
@@ -1013,16 +1028,55 @@ export function createProcessRunner({
       let unrecorded = false;
       let startFailed = false;
       let finished = false;
+      let exited = false;
+      let exitCode;
       let drainTimer;
+      let deadlineTimer;
+      // The one stop: kill the group and (once) start the deadline that does not wait for the child.
+      const stop = (reason) => {
+        kill(pgid);
+        deadlineTimer ??= setTimeout(() => unconfirmed(reason), killDeadlineMilliseconds);
+      };
       const timer = setTimeout(() => {
         timedOut = true;
-        kill(pgid);
+        stop('timeout');
       }, options.timeout ?? 600_000);
+      const unconfirmed = (reason) => {
+        if (finished) return;
+        // The leader did exit: the bounded drain and reap decide, not this deadline.
+        if (exited) {
+          finish(exitCode);
+          return;
+        }
+        finished = true;
+        clearTimeout(timer);
+        clearTimeout(drainTimer);
+        active.delete(pgid);
+        orphans.add(pgid);
+        (report.unconfirmedProcessGroups ??= []).push({ pgid, stage: stageName, reason });
+        publish();
+        try {
+          persist();
+        } catch {
+          persistFailed(stageName);
+        }
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref?.();
+        const error = failure(options, null, `Command could not be confirmed stopped (${reason})`, {
+          killUnconfirmed: true,
+          reason,
+        });
+        error.code = 'KILL_UNCONFIRMED';
+        reject(error);
+      };
       const finish = async (code) => {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
         clearTimeout(drainTimer);
+        clearTimeout(deadlineTimer);
+        active.delete(pgid);
         try {
           if (pgid) await settle(pgid, stageName);
         } catch (error) {
@@ -1056,7 +1110,7 @@ export function createProcessRunner({
         bytes += chunk.length;
         if (bytes > maxOutputBytes) {
           overflow = true;
-          kill(pgid);
+          stop('output');
         } else output.push(chunk);
       });
       child.stderr.on('data', (chunk) => {
@@ -1069,17 +1123,21 @@ export function createProcessRunner({
         else {
           finished = true;
           clearTimeout(timer);
+          clearTimeout(deadlineTimer);
           reject(failure(options, null, 'Could not start command'));
         }
       });
       // `exit` is the leader; `close` additionally waits for every inherited pipe end.
       child.on('exit', (code) => {
+        exited = true;
+        exitCode = code;
         if (!finished) drainTimer = setTimeout(() => finish(code), drainMilliseconds);
       });
       child.on('close', (code) => finish(code));
       if (child.stdin) child.stdin.end(options.input);
       if (pgid) {
         groups.add(pgid);
+        active.set(pgid, stop);
         publish();
         try {
           persist();
@@ -1089,7 +1147,7 @@ export function createProcessRunner({
           // gone. Cleanup commands still have to run, so they are only reported.
           if (!options.cleanup) {
             unrecorded = true;
-            kill(pgid);
+            stop('unrecorded');
           }
         }
       }
@@ -1101,7 +1159,11 @@ export function createProcessRunner({
     groups,
     orphans,
     stopActive: () => {
-      for (const pgid of groups) kill(pgid);
+      for (const pgid of groups) {
+        const stopCommand = active.get(pgid);
+        if (stopCommand) stopCommand('signal');
+        else kill(pgid);
+      }
     },
     killOrphans: () => {
       for (const pgid of orphans) kill(pgid);

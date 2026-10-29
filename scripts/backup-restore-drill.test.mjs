@@ -1004,13 +1004,14 @@ test('a timeout is a failure whatever exit code follows the kill', async () => {
     report: {},
     persist: () => {},
     spawn: () => child,
-    kill: (pgid) => kills.push(pgid),
+    // The kill takes effect the way SIGKILL does: the child exits (here with code 0).
+    kill: (pgid) => {
+      kills.push(pgid);
+      child.finish(0);
+    },
     reap: async () => 'gone',
   });
   const command = runner.run('slow', [], { timeout: 30, privateOutput: true, database: 'rasta_x' });
-  await sleep(120);
-  assert.deepEqual(kills, [424242]);
-  child.finish(0);
   await assert.rejects(command, (error) => {
     assert.deepEqual(error.privateFailure, {
       stage: undefined,
@@ -1020,16 +1021,15 @@ test('a timeout is a failure whatever exit code follows the kill', async () => {
     });
     return true;
   });
+  assert.deepEqual(kills, [424242]);
   const plain = fakeChild(424243);
   const second = createProcessRunner({
     report: {},
     persist: () => {},
     spawn: () => plain,
-    kill: () => {},
+    kill: () => plain.finish(0),
     reap: async () => 'gone',
   }).run('slow', [], { timeout: 30 });
-  await sleep(120);
-  plain.finish(0);
   await assert.rejects(second, /Command timed out \(exit 0\)/);
 });
 
@@ -1424,4 +1424,187 @@ test('leftover resources and unverified kinds fail the verdict', async () => {
     (await finalizeCleanup({ runner, report, teardown: async () => ({}) })).passed,
     true,
   );
+});
+
+// A child that survives SIGKILL (uninterruptible I/O) and NEVER emits exit/close/error: the
+// fake `kill` only records. Each stop reason must still end at the runner's own deadline.
+const NEVER_EXITS = 150;
+const stopReasons = [
+  ['timeout', (runner) => runner.run('slow', [], { timeout: 20, privateOutput: true }), 'timeout'],
+  [
+    'timeout of a cleanup command',
+    (runner) => runner.run('down', [], { timeout: 20, cleanup: true, privateOutput: true }),
+    'timeout',
+  ],
+  [
+    'output overflow',
+    (runner, child) => {
+      const command = runner.run('noisy', [], { timeout: 60_000, privateOutput: true });
+      child.stdout.write('0123456789');
+      return command;
+    },
+    'output',
+  ],
+  [
+    'a group whose pgid could not be persisted',
+    (runner) => runner.run('x', [], { timeout: 60_000, privateOutput: true }),
+    'unrecorded',
+    {
+      persist: () => {
+        throw new Error('Could not write report (EIO)');
+      },
+    },
+  ],
+  [
+    'stopActive() (a signal)',
+    (runner) => {
+      const command = runner.run('long', [], { timeout: 60_000, privateOutput: true });
+      runner.stopActive();
+      return command;
+    },
+    'signal',
+  ],
+];
+for (const [name, start, reason, extra = {}] of stopReasons) {
+  test(`a command that never exits after SIGKILL (${name}) is released at the kill deadline, unconfirmed and recorded`, async () => {
+    const child = fakeChild(424900);
+    const kills = [];
+    const report = {};
+    const runner = createProcessRunner({
+      report,
+      persist: () => {},
+      spawn: () => child,
+      kill: (pgid) => kills.push(pgid),
+      reap: async () => 'orphan',
+      maxOutputBytes: 4,
+      killDeadlineMilliseconds: NEVER_EXITS,
+      currentStage: () => 'cleanup',
+      ...extra,
+    });
+    const started = Date.now();
+    const command = start(runner, child);
+    const rejection = assert.rejects(command, (error) => {
+      assert.equal(error.code, 'KILL_UNCONFIRMED');
+      assert.equal(error.privateFailure.killUnconfirmed, true);
+      assert.equal(error.privateFailure.reason, reason);
+      return true;
+    });
+    let barrier = false;
+    const waiting = runner.settleAll().then(() => {
+      barrier = true;
+    });
+    await sleep(NEVER_EXITS / 3);
+    assert.equal(barrier, false, 'the deadline has not expired yet');
+    await rejection;
+    await waiting;
+    assert.ok(Date.now() - started < NEVER_EXITS * 10, 'released by the deadline, not by a timer');
+    assert.ok(kills.includes(424900));
+    // The group stays owned and unconfirmed: report list, signal set, retry set.
+    assert.deepEqual(report.unconfirmedProcessGroups, [{ pgid: 424900, stage: 'cleanup', reason }]);
+    assert.deepEqual(report.orphanProcessGroups, [424900]);
+    assert.deepEqual(report.processGroups, [424900]);
+    assert.deepEqual([...runner.orphans], [424900]);
+
+    // Cleanup finishes FAILED, still retries the group, and the final report is written.
+    const verdict = await finalizeCleanup({ runner, report, teardown: async () => ({}) });
+    assert.equal(verdict.passed, false);
+    assert.deepEqual(verdict.orphanRetry, { retried: [424900], remaining: [424900] });
+    const directory = mkdtempSync(join(tmpdir(), 'drill-unconfirmed-'));
+    try {
+      const path = join(directory, 'report.json');
+      report.cleanup = { passed: false, orphanProcessGroups: report.orphanProcessGroups };
+      report.finishedAt = 'set';
+      writeReportAtomically(path, report, { durable: true });
+      const written = JSON.parse(readFileSync(path, 'utf8'));
+      assert.deepEqual(written.orphanProcessGroups, [424900]);
+      assert.equal(written.unconfirmedProcessGroups[0].pgid, 424900);
+      assert.equal(written.finishedAt, 'set');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+    // A late event from the stuck child changes nothing.
+    child.finish(null);
+    await sleep(20);
+    assert.deepEqual(report.orphanProcessGroups, [424900]);
+  });
+}
+
+test('an unconfirmed group that disappears later is released by the retry, the record stays', async () => {
+  const child = fakeChild(424910);
+  const report = {};
+  let gone = false;
+  const runner = createProcessRunner({
+    report,
+    persist: () => {},
+    spawn: () => child,
+    kill: () => {},
+    reap: async () => (gone ? 'gone' : 'orphan'),
+    killDeadlineMilliseconds: 40,
+  });
+  await assert.rejects(runner.run('slow', [], { timeout: 10 }), { code: 'KILL_UNCONFIRMED' });
+  assert.deepEqual(report.orphanProcessGroups, [424910]);
+  gone = true;
+  const verdict = await finalizeCleanup({ runner, report, teardown: async () => ({}) });
+  assert.deepEqual(verdict.orphanRetry, { retried: [424910], remaining: [] });
+  assert.equal(verdict.passed, true);
+  assert.deepEqual(report.orphanProcessGroups, []);
+  assert.equal(report.unconfirmedProcessGroups.length, 1);
+});
+
+test('a stuck command does not hold back its siblings or the barrier beyond the deadline', async () => {
+  const stuck = fakeChild(424920);
+  const fine = fakeChild(424921);
+  const queue = [stuck, fine];
+  const report = {};
+  const runner = createProcessRunner({
+    report,
+    persist: () => {},
+    spawn: () => queue.shift(),
+    kill: () => {},
+    reap: async (pgid) => (pgid === 424920 ? 'orphan' : 'gone'),
+    killDeadlineMilliseconds: 80,
+  });
+  const first = runner.run('stuck', [], { timeout: 10 });
+  const second = runner.run('fine', [], { timeout: 60_000 });
+  const settled = Promise.allSettled([first, second]);
+  fine.finish(0);
+  const [one, two] = await settled;
+  assert.equal(one.status, 'rejected');
+  assert.equal(two.status, 'fulfilled');
+  await runner.settleAll();
+  assert.deepEqual(report.orphanProcessGroups, [424920]);
+});
+
+test('a child that exits within the deadline is a plain timeout, nothing is left unconfirmed', async () => {
+  const child = fakeChild(424930);
+  const report = {};
+  const runner = createProcessRunner({
+    report,
+    persist: () => {},
+    spawn: () => child,
+    kill: () => setTimeout(() => child.finish(137), 20),
+    reap: async () => 'gone',
+    killDeadlineMilliseconds: 300,
+  });
+  await assert.rejects(runner.run('slow', [], { timeout: 10 }), /Command timed out \(exit 137\)/);
+  await sleep(350);
+  assert.equal(report.unconfirmedProcessGroups, undefined);
+  assert.equal(report.orphanProcessGroups, undefined);
+  assert.deepEqual(report.processGroups, []);
+});
+
+test('a leader that exited before the deadline is settled by the drain and reap, not rejected as unconfirmed', async () => {
+  const child = fakeChild(424940);
+  const report = {};
+  const runner = createProcessRunner({
+    report,
+    persist: () => {},
+    spawn: () => child,
+    kill: () => child.emit('exit', 137, null),
+    reap: async () => 'gone',
+    drainMilliseconds: 5_000,
+    killDeadlineMilliseconds: 40,
+  });
+  await assert.rejects(runner.run('slow', [], { timeout: 10 }), /Command timed out \(exit 137\)/);
+  assert.equal(report.unconfirmedProcessGroups, undefined);
 });
