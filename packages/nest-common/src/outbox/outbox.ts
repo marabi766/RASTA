@@ -6,7 +6,8 @@ import {
   formatStreamSeq,
   type EventEnvelope,
 } from '@rasta/contracts';
-import { tryGetContext } from '../context/request-context';
+import { tryGetContext, type RequestContext } from '../context/request-context';
+import { isServiceCorrelationId } from '../middleware/request-context.middleware';
 
 /**
  * Transactional Outbox (ADR-021).
@@ -74,6 +75,81 @@ export interface OutboxMessageInput<TPayload = unknown> {
    * ULID: the id is also the outbox primary key and the consumers' marker.
    */
   eventId?: string;
+  /**
+   * Whose request this event records, and the chain it continues — for work
+   * done **after** that request ended: a durable queue drained later by a
+   * worker, where no request context is left to read (PR #483 r2 N1).
+   *
+   * Omitted (every call inside its request): taken from the request context,
+   * as always — {@link captureOutboxProvenance} is that rule. Supplied: the
+   * provenance captured by that same function when the request was received
+   * and persisted with the work, and then **the ambient context is not read
+   * at all** — not the actor, the correlation, the trace or the tenant
+   * (`organizationId` falls back to none). A worker running inside some other
+   * context cannot lend it its own. Validated: a provenance that is not one
+   * the platform could have captured is refused here, not published.
+   */
+  provenance?: OutboxProvenance;
+}
+
+/**
+ * An event's provenance on the envelope: the verified principal the work is
+ * on behalf of (`actor`), and the correlation id of the request it began in.
+ *
+ * `actor` is the platform user id or the calling service, as the auth guard
+ * verified it — never anything the request's body says — and `null` when the
+ * request had neither: anonymous, which the audit trail records as the
+ * producing service (`SYSTEM`). Holds no credential: a bearer token is never
+ * part of it, so it is safe to persist.
+ */
+export interface OutboxProvenance {
+  readonly actor: { readonly type: 'USER' | 'SERVICE'; readonly id: string } | null;
+  readonly correlationId: string;
+}
+
+/** `actor.id` bound: the audit trail's `actor_id VARCHAR(256)`, printable ASCII, no spaces. */
+const PROVENANCE_ACTOR_ID = /^[\x21-\x7E]{1,256}$/;
+
+/**
+ * The provenance of the request in `context`: the one rule both an event built
+ * inside its request and work queued for later use, so the two cannot drift.
+ * The actor comes only from the verified context (`userId`, else
+ * `callerService`); the correlation id is the context's — already adopted or
+ * minted by the request pipeline — or `fallbackCorrelationId` when there is
+ * no context at all.
+ */
+export function captureOutboxProvenance(
+  context: RequestContext | undefined = tryGetContext(),
+  fallbackCorrelationId: string = ulid(),
+): OutboxProvenance {
+  return {
+    actor: context?.userId
+      ? { type: 'USER', id: context.userId }
+      : context?.callerService
+        ? { type: 'SERVICE', id: context.callerService }
+        : null,
+    correlationId: context?.correlationId ?? fallbackCorrelationId,
+  };
+}
+
+/**
+ * Refuses a provenance the platform could not have captured: a correlation id
+ * outside what a verified service may forward (`isServiceCorrelationId`), an
+ * actor of another type, or an actor id outside the audit trail's bound. For
+ * provenance read back from storage, where the row is the only witness.
+ */
+export function assertOutboxProvenance(provenance: OutboxProvenance): void {
+  if (!isServiceCorrelationId(provenance.correlationId)) {
+    throw new Error('outbox provenance: the correlation id is not one the platform issues');
+  }
+  const { actor } = provenance;
+  if (actor === null) return;
+  if (actor.type !== 'USER' && actor.type !== 'SERVICE') {
+    throw new Error('outbox provenance: the actor must be a USER or a SERVICE');
+  }
+  if (!PROVENANCE_ACTOR_ID.test(actor.id)) {
+    throw new Error('outbox provenance: the actor id is not a bounded identifier');
+  }
 }
 
 const ULID_PATTERN = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
@@ -163,7 +239,9 @@ export function buildOutboxRow<TPayload>(
   input: OutboxMessageInput<TPayload>,
   options: BuildOutboxOptions,
 ): Omit<OutboxRow, 'publishedAt' | 'attempts' | 'lastError'> {
-  const context = tryGetContext();
+  // Explicit provenance replaces the ambient context entirely (see the input).
+  if (input.provenance) assertOutboxProvenance(input.provenance);
+  const context = input.provenance ? undefined : tryGetContext();
   const partitionKey = input.partitionKey ?? input.aggregateId;
 
   // Both stream fields travel together or not at all. A sequence without the
@@ -195,7 +273,7 @@ export function buildOutboxRow<TPayload>(
   }
   const eventId = input.eventId ?? ulid();
   const occurredAt = input.occurredAt ?? new Date();
-  const correlationId = context?.correlationId ?? eventId;
+  const { actor, correlationId } = input.provenance ?? captureOutboxProvenance(context, eventId);
   // `null` is an explicit "no tenant"; only an omitted value falls back.
   const organizationId =
     input.organizationId === null
@@ -218,11 +296,7 @@ export function buildOutboxRow<TPayload>(
     ...(context?.traceId && context.spanId
       ? { traceparent: `00-${context.traceId}-${context.spanId}-01` }
       : {}),
-    ...(context?.userId
-      ? { actor: { type: 'USER' as const, id: context.userId } }
-      : context?.callerService
-        ? { actor: { type: 'SERVICE' as const, id: context.callerService } }
-        : {}),
+    ...(actor ? { actor: { type: actor.type, id: actor.id } } : {}),
     ...(input.streamSeq !== undefined && input.streamKey !== undefined
       ? { streamSeq: input.streamSeq, streamKey: input.streamKey }
       : {}),

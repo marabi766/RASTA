@@ -218,9 +218,12 @@ export {
   RENEWAL_TRANSACTION_MARGIN_MS,
   outboxRenewalOperationBudget,
   withinDeadline,
+  captureOutboxProvenance,
+  assertOutboxProvenance,
 } from './outbox/outbox';
 export type {
   OutboxMessageInput,
+  OutboxProvenance,
   OutboxRow,
   OutboxStore,
   EventPublisher,

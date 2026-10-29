@@ -246,6 +246,11 @@ model RegistrationIntake {
   receivedAt    DateTime @default(now()) @map("received_at")
   attempts      Int      @default(0)
   nextAttemptAt DateTime @default(now()) @map("next_attempt_at")
+  /// The submitting request's verified principal (`USER` | `SERVICE`); null when anonymous. Never from the body.
+  actorType     String?  @map("actor_type") @db.VarChar(16)
+  actorId       String?  @map("actor_id") @db.VarChar(256)
+  /// The submitting request's correlation id, carried to REGISTRATION_SUBMITTED.
+  correlationId String   @map("correlation_id") @db.VarChar(128)
 
   @@index([nextAttemptAt, id], map: "ix_registration_intake_due")
   @@map("registration_intake")

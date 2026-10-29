@@ -1,8 +1,10 @@
 import {
   buildOutboxRow,
+  captureOutboxProvenance,
   OutboxRelay,
   type ClaimRequest,
   type OutboxClaim,
+  type OutboxProvenance,
   type OutboxRow,
   type OutboxStore,
 } from './outbox';
@@ -197,6 +199,112 @@ describe('buildOutboxRow eventId', () => {
       '81J9ZZZZZZZZZZZZZZZZZZZZZZ',
     ]) {
       expect(() => buildOutboxRow({ ...input, eventId }, options)).toThrow('ULID');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Explicit provenance (PR #483 r2 N1). Work drained from a durable queue after
+// its request ended carries the provenance captured at that request, and the
+// envelope takes it from there and from nowhere else.
+// ---------------------------------------------------------------------------
+
+describe('buildOutboxRow explicit provenance', () => {
+  const input = {
+    aggregateType: 'RegistrationRequest',
+    aggregateId: 'REG_01JBQ8Z4K7M2N5P8R1T3V6X9Y2',
+    eventName: 'REGISTRATION_SUBMITTED',
+    topic: 'rasta.identity.v1',
+    organizationId: ORG_A,
+    payload: { registrationId: 'REG_01JBQ8Z4K7M2N5P8R1T3V6X9Y2' },
+  };
+  const options = { producer: 'identity-service' };
+  const envelopeOf = (row: ReturnType<typeof buildOutboxRow>) =>
+    row.payload as Record<string, unknown>;
+
+  it('captures what the in-request envelope would carry: the verified actor and the correlation id', () => {
+    const inRequest = envelopeOf(runWithContext(context, () => buildOutboxRow(input, options)));
+    const captured = runWithContext(context, () => captureOutboxProvenance());
+
+    expect(captured).toEqual({ actor: { type: 'USER', id: 'USR_1' }, correlationId: 'CORR_1' });
+    expect({ actor: inRequest.actor, correlationId: inRequest.correlationId }).toEqual(captured);
+    expect(
+      captureOutboxProvenance({ ...context, userId: undefined, callerService: 'fleet-service' }),
+    ).toEqual({ actor: { type: 'SERVICE', id: 'fleet-service' }, correlationId: 'CORR_1' });
+    expect(captureOutboxProvenance({ ...context, userId: undefined })).toEqual({
+      actor: null,
+      correlationId: 'CORR_1',
+    });
+    expect(captureOutboxProvenance(undefined, 'COR_FALLBACK')).toEqual({
+      actor: null,
+      correlationId: 'COR_FALLBACK',
+    });
+  });
+
+  it('builds the envelope from the supplied provenance, outside any request context', () => {
+    const row = buildOutboxRow(
+      {
+        ...input,
+        provenance: { actor: { type: 'USER', id: 'USR_SUBMITTER' }, correlationId: 'COR_ORIGINAL' },
+      },
+      options,
+    );
+
+    expect(envelopeOf(row).actor).toEqual({ type: 'USER', id: 'USR_SUBMITTER' });
+    expect(envelopeOf(row).correlationId).toBe('COR_ORIGINAL');
+    expect(row.correlationId).toBe('COR_ORIGINAL');
+    expect(row.headers['x-correlation-id']).toBe('COR_ORIGINAL');
+  });
+
+  it('a null actor stays null, with the original correlation', () => {
+    const row = buildOutboxRow(
+      { ...input, provenance: { actor: null, correlationId: 'COR_ANON' } },
+      options,
+    );
+
+    expect(envelopeOf(row)).not.toHaveProperty('actor');
+    expect(envelopeOf(row).correlationId).toBe('COR_ANON');
+  });
+
+  it('reads nothing from an ambient context: not its actor, correlation, trace or tenant', () => {
+    const row = runWithContext(context, () =>
+      buildOutboxRow(
+        {
+          ...input,
+          organizationId: undefined,
+          provenance: { actor: null, correlationId: 'COR_QUEUED' },
+        },
+        options,
+      ),
+    );
+
+    const envelope = envelopeOf(row);
+    expect(envelope).not.toHaveProperty('actor');
+    expect(envelope.correlationId).toBe('COR_QUEUED');
+    expect(envelope).not.toHaveProperty('traceparent');
+    expect(envelope).not.toHaveProperty('tenantId');
+    expect(row.organizationId).toBeNull();
+  });
+
+  it('refuses a provenance the platform could not have captured', () => {
+    const bad = [
+      { actor: null, correlationId: '' },
+      { actor: null, correlationId: 'has space' },
+      { actor: null, correlationId: 'x'.repeat(129) },
+      { actor: null, correlationId: 'Bearer eyJhbGciOi.payload.sig\n' },
+      { actor: { type: 'SYSTEM', id: 'identity-service' }, correlationId: 'COR_1' },
+      { actor: { type: 'USER', id: '' }, correlationId: 'COR_1' },
+      { actor: { type: 'USER', id: 'USR 1' }, correlationId: 'COR_1' },
+      { actor: { type: 'USER', id: 'U'.repeat(257) }, correlationId: 'COR_1' },
+    ];
+    for (const provenance of bad) {
+      expect(() =>
+        // Deliberately ill-typed, as storage could return it.
+        buildOutboxRow(
+          { ...input, provenance: provenance as unknown as OutboxProvenance },
+          options,
+        ),
+      ).toThrow('outbox provenance');
     }
   });
 });

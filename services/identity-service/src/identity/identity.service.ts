@@ -4,6 +4,7 @@ import { ERROR_CODES, ID_PREFIXES } from '@rasta/contracts';
 import {
   RastaError,
   assertRolesAdmitted,
+  captureOutboxProvenance,
   createSystemContext,
   getContext,
   runUnscoped,
@@ -1102,11 +1103,18 @@ export class IdentityService {
    * bait in front of a reviewer — refused whoever the applicant is, so it says
    * nothing about who has an account. The grant itself is still checked at
    * approval.
+   *
+   * Stored with it, in their own columns: the request's provenance (PR #483
+   * r2 N1) — the verified principal the auth guard put in the request context
+   * (none for an anonymous submission) and the request's correlation id, by
+   * the same rule an event built inside the request applies
+   * (`captureOutboxProvenance`). Never anything from the body: the submission
+   * is the applicant's claim, the provenance is the platform's.
    */
   async receiveRegistration(dto: SubmitRegistrationDto): Promise<string> {
     assertRolesMayBeRequested(dto.requestedRoles);
     const intakeId = `REG_${ulid()}`;
-    await this.repository.receiveRegistration(intakeId, dto);
+    await this.repository.receiveRegistration(intakeId, dto, captureOutboxProvenance());
     return intakeId;
   }
 
@@ -1180,6 +1188,9 @@ export class IdentityService {
           eventName: IDENTITY_EVENTS.REGISTRATION_SUBMITTED,
           topic: IDENTITY_TOPIC,
           organizationId: dto.requestedOrganizationId,
+          // The submitting request's, as received — this runs after it ended,
+          // and no ambient context may stand in for it (PR #483 r2 N1).
+          provenance: intake.provenance,
           payload: validateIdentityPayload(IDENTITY_EVENTS.REGISTRATION_SUBMITTED, {
             registrationId: intakeId,
             userId,
@@ -1200,13 +1211,14 @@ export class IdentityService {
     // applicant's details with it.
     const discarded = await this.repository.transaction(async (tx) => {
       const intake = await this.repository.lockRegistrationIntake(tx, intakeId);
-      if (!intake) return false;
+      if (!intake) return null;
       await this.repository.deleteRegistrationIntake(tx, intakeId);
-      return true;
+      return intake.provenance;
     });
     if (!discarded) return { outcome: 'GONE' };
     this.logger.log(
-      { intakeId },
+      // The submission's own trail: this line runs after its request ended.
+      { intakeId, correlationId: discarded.correlationId },
       'Registration discarded without a record: the username or the email is already held',
     );
     return { outcome: 'DUPLICATE' };

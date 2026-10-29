@@ -1,11 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import {
   allocateStreamSeqSql,
+  assertOutboxProvenance,
   buildOutboxRow,
   getContext,
   RastaError,
   runUnscoped,
   type OutboxMessageInput,
+  type OutboxProvenance,
 } from '@rasta/nest-common';
 import { assertTopicFor, resolvePartitionKey, type OutboundEventName } from './routing';
 import {
@@ -329,11 +331,23 @@ export class IdentityRepository {
    * committed on its own — the same statement whoever the applicant is. No
    * lookup and no unique index on the username or the email, so nothing here
    * costs differently when an account already holds either.
+   *
+   * With the submitting request's provenance in their own columns, apart from
+   * the applicant's submission (PR #483 r2 N1): the event is built after the
+   * request has ended, and this row is the only thing that outlives it.
+   * Validated before it is stored, as the table's checks require.
    */
-  async receiveRegistration(id: string, submission: object): Promise<void> {
+  async receiveRegistration(
+    id: string,
+    submission: object,
+    provenance: OutboxProvenance,
+  ): Promise<void> {
+    assertOutboxProvenance(provenance);
     await this.client.$executeRaw`
-      INSERT INTO registration_intake (id, submission)
-      VALUES (${id}, ${JSON.stringify(submission)}::jsonb)`;
+      INSERT INTO registration_intake (id, submission, actor_type, actor_id, correlation_id)
+      VALUES (${id}, ${JSON.stringify(submission)}::jsonb,
+              ${provenance.actor?.type ?? null}, ${provenance.actor?.id ?? null},
+              ${provenance.correlationId})`;
   }
 
   /**
@@ -353,18 +367,46 @@ export class IdentityRepository {
 
   /**
    * One intake row, locked `FOR UPDATE SKIP LOCKED`: null when it is gone —
-   * handled already — or another worker holds it.
+   * handled already — or another worker holds it. With the provenance of the
+   * request that submitted it, as {@link receiveRegistration} stored it.
    */
   async lockRegistrationIntake(
     tx: ExtendedPrismaClient,
     id: string,
-  ): Promise<{ id: string; submission: unknown; receivedAt: Date } | null> {
-    const rows = await tx.$queryRaw<Array<{ id: string; submission: unknown; received_at: Date }>>`
-      SELECT id, submission, received_at FROM registration_intake
+  ): Promise<{
+    id: string;
+    submission: unknown;
+    receivedAt: Date;
+    provenance: OutboxProvenance;
+  } | null> {
+    const rows = await tx.$queryRaw<
+      Array<{
+        id: string;
+        submission: unknown;
+        received_at: Date;
+        actor_type: 'USER' | 'SERVICE' | null;
+        actor_id: string | null;
+        correlation_id: string;
+      }>
+    >`
+      SELECT id, submission, received_at, actor_type, actor_id, correlation_id
+        FROM registration_intake
        WHERE id = ${id}
          FOR UPDATE SKIP LOCKED`;
     const row = rows[0];
-    return row ? { id: row.id, submission: row.submission, receivedAt: row.received_at } : null;
+    if (!row) return null;
+    return {
+      id: row.id,
+      submission: row.submission,
+      receivedAt: row.received_at,
+      provenance: {
+        actor:
+          row.actor_type !== null && row.actor_id !== null
+            ? { type: row.actor_type, id: row.actor_id }
+            : null,
+        correlationId: row.correlation_id,
+      },
+    };
   }
 
   /** Removes a handled intake row, in the transaction that handled it. */
