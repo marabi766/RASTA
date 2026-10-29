@@ -54,6 +54,20 @@
 }
 ```
 
+**`anonymous: true` (اختیاری، PR #483 r3 F1).** رویداد درخواستی را ثبت می‌کند که فرستنده‌اش احراز هویت نشده بود — امروز فقط
+ثبت‌نام عمومی (`POST /v1/registration-requests`) — پس `actor` ندارد و هیچ شناسه‌ای به جایش نمی‌آید. نبودِ هر دو یعنی کار
+پس‌زمینهٔ خود ناشر (Sweep، Consumer، زمان‌بند) که ممیزی آن را `SYSTEM / <producer>` ثبت می‌کند؛ `anonymous` در ممیزی
+`ANONYMOUS` با `actorId` خالی است. ناشر هرگز هر دو را با هم نمی‌گذارد و اگر Consumerی هر دو را دید `actor` را می‌خواند. فیلدی
+کنار `actor` است، نه نوع چهارمی برای آن: `parseEnvelope` در مصرف هم اجرا می‌شود و Consumerی با Schema قبلی نوعِ ناشناخته را رد
+می‌کرد و کل Envelope را به DLQ می‌فرستاد، ولی کلید ناشناخته را فقط حذف می‌کند؛ پس افزودنش سازگار است و `eventVersion` تغییر
+نمی‌کند (`envelope.spec.ts`).
+
+**منشأ رویداد را فقط Context تأییدشده تعیین می‌کند (PR #483 r3 F2).** `buildOutboxRow` کنشگر، Correlation ID، Trace و (وقتی
+`organizationId` داده نشود) مستأجر را از Context درخواست می‌گیرد و هیچ ورودی ناشر جایش را نمی‌گیرد؛ ورودی‌ای که `provenance`
+داشته باشد رد می‌شود. تنها راه دیگر، بازگرداندن منشأ ذخیره‌شدهٔ صف دریافت ثبت‌نام است (`restoreOutboxProvenance` و
+`buildRestoredOutboxRow`) که مستأجر را الزامی می‌کند و آزمون `scripts/outbox-provenance-restoration-guard.test.mjs` استفاده از آن
+را بیرون از همان صف رد می‌کند.
+
 ## سیاست Retry و DLQ (پیش‌فرض همه رویدادها)
 
 | نوع خطا                           | رفتار                                    |

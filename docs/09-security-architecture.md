@@ -493,10 +493,20 @@ Indexهای یکتای جزئی `ux_bid_evaluation_person` و `ux_bid_recusal_pe
 
 **منشأ ممیزی از صف دریافت عبور می‌کند (PR #483 r2 N1).** رویداد `REGISTRATION_SUBMITTED` پس از پایان درخواست، در کارگر ساخته
 می‌شود و Context آن درخواست دیگر وجود ندارد؛ پس ردیف `registration_intake` منشأ درخواست را جدا از بدنهٔ متقاضی نگه می‌دارد:
-کنشگر تأییدشده (`actor_type` و `actor_id`، فقط از Context احراز هویت و هرگز از بدنه؛ برای درخواست ناشناس هر دو خالی) و
-Correlation ID همان درخواست. کارگر آن را صریحاً به رویداد می‌دهد (`OutboxMessageInput.provenance`) و Context محیطی خوانده
-نمی‌شود؛ پس ممیزی فرستندهٔ واقعی و زنجیرهٔ همان درخواست را ثبت می‌کند، نه `SYSTEM / identity-service`. هیچ توکن یا اعتبارنامه‌ای
-ذخیره نمی‌شود. آزمون: `registration-provenance.int-spec.ts` (پس از پایان درخواست، زیر Context دیگر، و پس از راه‌اندازی دوباره).
+کنشگر تأییدشده (`actor_type` و `actor_id`، فقط از Context احراز هویت و هرگز از بدنه؛ برای درخواست ناشناس `ANONYMOUS` بی
+شناسه) و Correlation ID همان درخواست. کارگر آن را با تنها مسیر بازگرداندن (`restoreOutboxProvenance` و `buildRestoredOutboxRow`)
+به رویداد می‌دهد و Context محیطی خوانده نمی‌شود؛ پس ممیزی فرستندهٔ واقعی و زنجیرهٔ همان درخواست را ثبت می‌کند و ثبت‌نام ناشناس
+را `ANONYMOUS` — نه `SYSTEM / identity-service`، که کار پس‌زمینهٔ خود سرویس است (PR #483 r3 F1؛ Envelope: `anonymous: true`).
+هیچ توکن یا اعتبارنامه‌ای ذخیره نمی‌شود. آزمون: `registration-provenance.int-spec.ts` (پس از پایان درخواست، زیر Context دیگر، و
+پس از راه‌اندازی دوباره) و تا رکورد ممیزی: `audit-service/test/ingestion.int-spec.ts` و E2E `04-registration-approval`.
+
+**منشأ را هیچ ناشری نمی‌تواند جایگزین کند (PR #483 r3 F2).** ورودی عادی Outbox (`OutboxMessageInput`) منشأ ندارد:
+`buildOutboxRow` کنشگر و Correlation ID را فقط از Context تأییدشده می‌گیرد و ورودی‌ای را که `provenance` داشته باشد رد می‌کند.
+منشأ بازگردانده‌شده مقداری مُهرخورده است (`OutboxProvenance`) که فقط `captureOutboxProvenance` (از Context) و
+`restoreOutboxProvenance` (از ردیف ذخیره‌شده) می‌سازند؛ شیء دست‌نوشته نه Typecheck می‌شود نه در اجرا پذیرفته می‌شود، و
+`buildRestoredOutboxRow` مستأجر را الزامی می‌کند. آزمون `scripts/outbox-provenance-restoration-guard.test.mjs` نام‌بردن از این
+مسیر را بیرون از صف دریافت ثبت‌نام رد می‌کند؛ آزمون `enqueue-provenance.spec.ts` در identity، asset، fleet، maintenance و
+organization نشان می‌دهد `enqueueEvent` منشأ داده‌شده را رد می‌کند و کنشگر، Correlation و مستأجر دیگر را نادیده می‌گیرد.
 
 ### دامنه Asset / Fleet
 

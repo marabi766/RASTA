@@ -260,7 +260,9 @@ Flusher پس‌زمینه، با همان شکل `OutboxRelay` (ADR-050)، آن 
 | `correctionOf`                           | text?          | § ۷                                                             |
 
 **`actorType = SYSTEM` صریح تخصیص می‌یابد، نه خالی رها می‌شود.** قاعدهٔ ورودی: `envelope.actor` هست → همان؛ نیست و
-`envelope.producer` هست → `SYSTEM` با `actorId = producer`؛ وگرنه `ANONYMOUS`. Sweep انقضای بیمه می‌شود
+`envelope.anonymous` هست → `ANONYMOUS` بی `actorId` (درخواست احراز هویت‌نشده، مثل ثبت‌نام عمومی — نه کار پس‌زمینهٔ ناشر و نه
+شناسه‌ای که فرستنده انتخاب کرده؛ PR #483 r3 F1)؛ نیست و `envelope.producer` هست → `SYSTEM` با `actorId = producer`؛ وگرنه
+`ANONYMOUS`. Sweep انقضای بیمه می‌شود
 `actorType=SYSTEM, actorId=asset-service` به‌جای یک جای خالی بی‌توضیح. انباری پر از null، انباری است که کسی به آن اعتماد نمی‌کند.
 
 **`changes` هرگز Dump خام ردیف نیست:**
