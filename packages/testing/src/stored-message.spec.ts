@@ -184,6 +184,7 @@ describe('storedMessageProblems: the whole shape, at every depth', () => {
       causationId: exactly('c'),
       traceparent: exactly('t'),
       actor: { type: exactly('USER'), id: exactly('u') },
+      anonymous: exactly(true),
       streamSeq: exactly(1),
       streamKey: exactly('k'),
     };
@@ -225,6 +226,7 @@ describe('storedMessageProblems: envelope data nested under an allowed key (PR #
     causationId: null,
     traceparent: optional(wholly(TRACEPARENT_SHAPE)),
     actor: { type: exactly('USER'), id: exactly('USR-1') },
+    anonymous: null,
     streamSeq: exactly(2),
     streamKey: exactly('AST-1'),
   });
@@ -349,6 +351,7 @@ describe('storedMessageProblems: punctuation in a permitted envelope string (PR 
     causationId: optional(wholly(ULID_SHAPE)),
     traceparent: optional(wholly(TRACEPARENT_SHAPE)),
     actor: { type: exactly('USER'), id: exactly(full.actor.id) },
+    anonymous: null,
     streamSeq: exactly(2),
     streamKey: exactly(full.streamKey),
   };

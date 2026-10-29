@@ -212,6 +212,7 @@ describe('schedule changes reach the audit trail', () => {
           causationId: null,
           traceparent: optional(wholly(TRACEPARENT_SHAPE)),
           actor: { type: exactly('USER'), id: exactly(actor) },
+          anonymous: null,
           streamSeq: exactly(2),
           streamKey: exactly(assetId),
         },

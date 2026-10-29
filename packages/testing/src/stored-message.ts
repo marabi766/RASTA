@@ -119,6 +119,8 @@ export interface EnvelopePins {
   readonly causationId: Pin | Optional | null;
   readonly traceparent: Pin | Optional | null;
   readonly actor: { readonly type: Pin; readonly id: Pin } | null;
+  /** #483: `true` only for an anonymous request origin (no `actor`); `null` when the test expects it absent. */
+  readonly anonymous: Pin | Optional | null;
   readonly streamSeq: Pin | Optional | null;
   readonly streamKey: Pin | Optional | null;
 }
@@ -147,6 +149,7 @@ export function envelopeShape(payload: Shape, pins: EnvelopePins): ObjectShape {
     ...present('causationId', pins.causationId),
     ...present('traceparent', pins.traceparent),
     ...(pins.actor === null ? {} : { actor: pins.actor }),
+    ...present('anonymous', pins.anonymous),
     ...present('streamSeq', pins.streamSeq),
     ...present('streamKey', pins.streamKey),
     payload,

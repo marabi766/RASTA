@@ -160,6 +160,7 @@ describe('the transactional outbox', () => {
           causationId: null,
           traceparent: optional(wholly(TRACEPARENT_SHAPE)),
           actor: { type: exactly('USER'), id: exactly(creator) },
+          anonymous: null,
           streamSeq: exactly(1),
           streamKey: exactly(created.body.id),
         },
