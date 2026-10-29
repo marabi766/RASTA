@@ -106,6 +106,17 @@ describe('storedMessageProblems', () => {
     );
   });
 
+  it('pins a boolean by value and by type (PR #486 r9 N4)', () => {
+    expect(exactly(true).accepts(true)).toBe(true);
+    expect(exactly(true).accepts(false)).toBe(false);
+    expect(exactly(false).accepts(false)).toBe(true);
+    expect(exactly(true).accepts('true')).toBe(false);
+    expect(exactly(true).accepts(1)).toBe(false);
+    expect(exactly(false).accepts(0)).toBe(false);
+    expect(exactly(false).accepts(null)).toBe(false);
+    expect(exactly(true).describe()).toBe('exactly true');
+  });
+
   it('knows the strict instant shape', () => {
     expect(ISO_INSTANT_SHAPE.test('2026-10-29T10:20:50Z')).toBe(true);
     expect(ISO_INSTANT_SHAPE.test('2026-10-29T10:20:50.001Z intervalHours=500.00')).toBe(false);

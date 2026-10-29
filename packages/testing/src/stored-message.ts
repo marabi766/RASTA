@@ -58,8 +58,8 @@ export interface ObjectShape {
  * pattern cannot be written loosely.
  */
 export class Pin {
-  readonly expected: string | number | RegExp;
-  constructor(expected: string | number | RegExp) {
+  readonly expected: string | number | boolean | RegExp;
+  constructor(expected: string | number | boolean | RegExp) {
     if (expected instanceof RegExp) {
       if (/[gmy]/.test(expected.flags)) {
         throw new Error(`a pinned pattern takes no g, m or y flag: ${String(expected)}`);
@@ -82,7 +82,7 @@ export class Pin {
 }
 
 /** A leaf pinned to a value the test knows. */
-export const exactly = (value: string | number): Pin => new Pin(value);
+export const exactly = (value: string | number | boolean): Pin => new Pin(value);
 /** A leaf pinned to a strict whole-value pattern; the anchors are added, `m`/`g`/`y` refused. */
 export const wholly = (pattern: RegExp): Pin => new Pin(pattern);
 
