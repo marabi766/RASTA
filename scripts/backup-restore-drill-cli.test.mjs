@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
+  chmodSync,
   cpSync,
   writeFileSync,
   readFileSync,
@@ -92,6 +93,16 @@ test('operator root with local .env still refuses before setup', async () => {
     const evidence = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
     assert.match(evidence.error.message, /Use a clean worktree without local env files/);
     assert.equal(evidence.databases.length, 0);
+    // Cleanup ownership serializes before everything else, so a torn rewrite still names it.
+    assert.deepEqual(Object.keys(evidence).slice(0, 2), ['project', 'temporary']);
+    const raw = readFileSync(join(directory, 'report.json'), 'utf8');
+    assert.ok(raw.indexOf('"project"') < raw.indexOf('"databases"'));
+    assert.ok(raw.indexOf('"temporary"') < raw.indexOf('"databases"'));
+    // No sibling residue of the atomic rewrite survives a normal run.
+    assert.deepEqual(
+      readdirSync(directory).filter((name) => name.startsWith('report.json.')),
+      [],
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -343,7 +354,9 @@ async function referenceCliFixture(directory, mode) {
   cpSync(join(repo, reader), join(directory, reader));
   symlinkSync(join(repo, 'node_modules'), join(copied, 'node_modules'), 'dir');
   const path = join(copied, 'backup-restore-drill.mjs');
-  const target = mode === 'bypass-ref' ? path : join(copied, 'backup-restore-drill-lib.mjs');
+  const target = ['bypass-ref', 'ignore-input'].includes(mode)
+    ? path
+    : join(copied, 'backup-restore-drill-lib.mjs');
   let implementation = readFileSync(target, 'utf8');
   const replacements = {
     'bypass-ref': [
@@ -351,8 +364,15 @@ async function referenceCliFixture(directory, mode) {
       'before.reference = { checkLinesDifferent: 0, milliseconds: 0 };',
     ],
     'bypass-fixed': [
-      "const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point');",
-      "const dumped = await dump(scratch[0], index === 0 ? 'reference' : 'fixed-point');",
+      "const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point', {",
+      "const dumped = await dump(scratch[0], index === 0 ? 'reference' : 'fixed-point', {",
+    ],
+    // The WRONG VALID evidence: SOURCE's separate dump is restored again as the fixed point.
+    'wrong-input': ['const input = index === 0 ? separate : reference;', 'const input = separate;'],
+    // The restore callback ignores the evidence it is handed and reads SOURCE's file.
+    'ignore-input': [
+      "const fd = openSync(dumpPath(input), 'r');",
+      "const fd = openSync(join(temporary, `${database}-reference-input.schema.sql`), 'r');",
     ],
     'bypass-guard': [
       'const allowance = checkSourceReference(sourceDump, reference.evidence, database);',
@@ -398,7 +418,7 @@ case "$*" in
       *'drill_ref_'*) ${mode === 'failed-ref-dump' ? 'echo PRIVATE_REF_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
       *'drill_fixed_'*) ${mode === 'failed-fixed-dump' ? 'echo PRIVATE_FIXED_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
     esac
-    ${mode === 'check-drift' ? `case "$*" in *'drill_ref_'*|*'drill_fixed_'*|*'-restored '*) sed 's/((id >= 0))/(id >= 0)/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : mode === 'original-and-drop-fail' ? `case "$*" in *'drill_ref_'*) sed 's/"id" integer/"id" bigint/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : `cat '${directory}/schema.sql'`} ;;
+    ${['check-drift', 'ignore-input'].includes(mode) ? `case "$*" in *'drill_ref_'*|*'drill_fixed_'*|*'-restored '*) sed 's/((id >= 0))/(id >= 0)/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : mode === 'original-and-drop-fail' ? `case "$*" in *'drill_ref_'*) sed 's/"id" integer/"id" bigint/' '${directory}/schema.sql';; *) cat '${directory}/schema.sql';; esac` : `cat '${directory}/schema.sql'`} ;;
   *'pg_restore '*) ${mode === 'failed-archive' ? 'echo PRIVATE_ARCHIVE_SQL; echo PRIVATE_ARCHIVE_SQL >&2; exit 42' : ':'} ;;
   *'psql '*)
     body=$(cat)
@@ -411,18 +431,21 @@ case "$*" in
       *'PostgreSQL database dump'*)
         case "$*" in
           *'drill_ref_'*)
+            printf '%s\\n' "$body" >> '${directory}/ref-input'
             ${mode === 'signal-ref' ? `touch '${directory}/started'; exec sleep 30` : mode === 'failed-ref-restore' ? 'echo PRIVATE_REF_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
           *'drill_fixed_'*)
+            printf '%s\\n' "$body" >> '${directory}/fixed-input'
             ${mode === 'signal-fixed' ? `touch '${directory}/started'; exec sleep 30` : mode === 'failed-fixed-restore' ? 'echo PRIVATE_FIXED_SQL; echo PRIVATE_ERROR >&2; exit 1' : ':'} ;;
         esac ;;
       *'json_agg(datname'*) echo '${JSON.stringify(names)}' ;;
-      *'journalsChecked'*) echo '${JSON.stringify(ledger)}' ;;
+      *'journalsChecked'*) echo '${JSON.stringify(ledger)}'
+        ${mode === 'cleanup-write-fails' ? `[ -f '${directory}/ledger-seen' ] && chmod 555 '${directory}'; touch '${directory}/ledger-seen' 2>/dev/null` : ':'} ;;
       *'row_to_json(m)'*) echo '[{"migration_name":"fixture","checksum":"fixture","finished_at":"2026-01-01","rolled_back_at":null}]' ;;
       *'FROM pg_database d WHERE'*) echo '{"owner":"rasta","acl":[],"settings":[]}' ;;
       *'WITH namespaces AS'*) echo '{"schemas":[{"name":"public","owner":"rasta"}],"relations":[{"name":"public.fixture","owner":"rasta"}],"defaultPrivileges":[]}' ;;
       *'row_to_json(t)'*) echo '{"name":"public.fixture","rows":"1","kind":"application","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' ;;
     esac ;;
-  *'down --volumes'*) touch '${directory}/cleaned' ;;
+  *'down --volumes'*) ${mode === 'cleanup-write-fails' ? `chmod 755 '${directory}'; ` : ''}touch '${directory}/cleaned'${mode === 'final-write-fails' ? `; chmod 555 '${directory}'` : ''} ;;
 esac
 `,
     { mode: 0o700 },
@@ -439,6 +462,8 @@ for (const mode of [
   'original-and-drop-fail',
   'bypass-ref',
   'bypass-fixed',
+  'wrong-input',
+  'ignore-input',
   'bypass-guard',
   'failed-ref-restore',
   'failed-fixed-restore',
@@ -476,7 +501,7 @@ for (const mode of [
         child.kill('SIGTERM');
       }
       const [code] = await exited;
-      const success = ['baseline', 'check-drift'].includes(mode);
+      const success = ['baseline', 'check-drift', 'ignore-input'].includes(mode);
       assert.equal(code, success ? 0 : 1);
       const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
       assert.equal(report.passed, success);
@@ -490,7 +515,7 @@ for (const mode of [
         readdirSync(directory).some((name) => name.startsWith('rasta-restore-drill-')),
         false,
       );
-      if (mode === 'bypass-fixed') {
+      if (mode === 'bypass-fixed' || mode === 'wrong-input') {
         assert.equal(report.error.message, 'Invalid schema dump provenance');
         assert.doesNotMatch(report.error.message, /TypeError|undefined|properties/);
       }
@@ -537,6 +562,17 @@ for (const mode of [
           assert.match(dropped, /drill_fixed_/);
         }
       }
+      if (['check-drift', 'ignore-input'].includes(mode)) {
+        // The stub's REF differs from SOURCE, so the restore inputs are observable: REF is restored
+        // from SOURCE's separate dump, and the fixed point from REF (never SOURCE again).
+        const ref = readFileSync(join(directory, 'ref-input'), 'utf8');
+        const fixed = readFileSync(join(directory, 'fixed-input'), 'utf8');
+        assert.match(ref, /CHECK \(\(id >= 0\)\)/);
+        if (mode === 'check-drift') {
+          assert.match(fixed, /CHECK \(id >= 0\)/);
+          assert.doesNotMatch(fixed, /CHECK \(\(id >= 0\)\)/);
+        } else assert.match(fixed, /CHECK \(\(id >= 0\)\)/);
+      }
       if (mode === 'baseline') {
         assert.equal(report.databases.length, 16);
         assert.ok(
@@ -556,20 +592,49 @@ for (const mode of [
   });
 }
 
-test('SIGKILL leaves a provisional private report with project and Compose cleanup path', async () => {
+const alive = (pgid) => {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const pidExists = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+async function waitGone(pgid) {
+  for (let attempt = 0; attempt < 200 && alive(pgid); attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  return !alive(pgid);
+}
+
+test('SIGKILL leaves a provisional private report naming the project, directory and live process groups', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'drill-sigkill-test-'));
   let child;
+  let pgid;
   try {
     const root = fixture(directory);
-    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    // The migration child's argv never contains the project name: pgrep -f <project> cannot find it.
+    writeFileSync(
+      join(directory, 'pnpm'),
+      `#!/bin/sh
+echo $$ > '${directory}/migrate-pgid'
+touch '${directory}/migrating'
+while [ ! -f '${directory}/release' ]; do sleep 0.05; done
+touch '${directory}/migrate-released'
+`,
+      { mode: 0o700 },
+    );
     writeFileSync(
       join(directory, 'docker'),
       `#!/bin/sh
 case "$*" in
-  *'up -d'*)
-    touch '${directory}/started'
-    while [ ! -f '${directory}/release' ]; do sleep 0.05; done
-    touch '${directory}/released' ;;
   *'down --volumes'*) touch '${directory}/unexpected-cleanup' ;;
 esac
 `,
@@ -577,7 +642,15 @@ esac
     );
     child = start(directory, root);
     const exited = once(child, 'exit');
-    await waitFor(join(directory, 'started'));
+    await waitFor(join(directory, 'migrating'));
+    pgid = Number(readFileSync(join(directory, 'migrate-pgid'), 'utf8'));
+    // The child is blocked until `release`: its group must be recorded while it still runs. The
+    // record is written right after spawn, so wait for it instead of racing the child's start.
+    for (let attempt = 0; attempt < 400; attempt++) {
+      const recorded = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+      if (recorded.processGroups?.includes(pgid)) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
     child.kill('SIGKILL');
     const [code, signal] = await exited;
     assert.equal(code, null);
@@ -593,10 +666,393 @@ esac
     const compose = JSON.parse(readFileSync(join(report.temporary, 'compose.json'), 'utf8'));
     assert.equal(compose.services.source.container_name, `${report.project}-source`);
     assert.equal(existsSync(join(directory, 'unexpected-cleanup')), false);
+    // The detached child outlived the drill, and the report recorded its group before awaiting it.
+    assert.ok(alive(pgid), 'the orphan keeps running after SIGKILL');
+    assert.deepEqual(report.processGroups, [pgid]);
+    assert.equal(
+      execFileSync('ps', ['-o', 'args=', '-p', String(pgid)], { encoding: 'utf8' }).includes(
+        report.project,
+      ),
+      false,
+    );
   } finally {
     child?.kill('SIGKILL');
-    writeFileSync(join(directory, 'release'), 'go');
-    await waitFor(join(directory, 'released'));
+    if (pgid) process.kill(-pgid, 'SIGKILL');
+    if (pgid) assert.ok(await waitGone(pgid), 'orphan group stopped');
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+for (const holdsPipes of [false, true]) {
+  test(
+    `a group member that outlives its leader is killed, recorded and never ignored; holds stdout/stderr=${holdsPipes}`,
+    { timeout: 60_000 },
+    async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'drill-orphan-test-'));
+      let child;
+      let orphan;
+      try {
+        const root = fixture(directory);
+        writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+        // Holding the pipes keeps `close` from firing: only the leader's `exit` can end the wait,
+        // far below the 10 minute command timeout.
+        writeFileSync(
+          join(directory, 'docker'),
+          `#!/bin/sh
+case "$*" in
+  *'up -d'*)
+    sleep 60 ${holdsPipes ? '' : '>/dev/null 2>&1 </dev/null'} &
+    echo $! > '${directory}/orphan-pid' ;;
+esac
+`,
+          { mode: 0o700 },
+        );
+        const started = Date.now();
+        child = start(directory, root);
+        const [code] = await once(child, 'exit');
+        assert.ok(Date.now() - started < 30_000, 'reaped by the drain bound, not the timeout');
+        assert.equal(code, 1);
+        orphan = Number(readFileSync(join(directory, 'orphan-pid'), 'utf8'));
+        const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+        assert.equal(report.reapedProcessGroups.length, 1);
+        assert.match(report.reapedProcessGroups[0].stage, /start disposable source PostgreSQL/);
+        assert.equal(report.orphanProcessGroups, undefined);
+        assert.deepEqual(report.processGroups, []);
+        assert.equal(report.cleanup.passed, true);
+        assert.ok(await waitGone(report.reapedProcessGroups[0].pgid), 'reaped group is gone');
+        assert.throws(() => process.kill(orphan, 0), /ESRCH/);
+      } finally {
+        child?.kill('SIGKILL');
+        if (orphan) {
+          try {
+            process.kill(orphan, 'SIGKILL');
+          } catch {
+            /* already gone */
+          }
+        }
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+}
+
+test('a failed final report write keeps the provisional report and its cleanup ownership', async (t) => {
+  if (process.getuid?.() === 0) return t.skip('root ignores directory permissions');
+  const directory = mkdtempSync(join(tmpdir(), 'drill-writefail-test-'));
+  let child;
+  try {
+    const root = fixture(directory);
+    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    // The report directory becomes read-only before cleanup: sibling creation (and the
+    // temporary directory's removal) then fail, so the final write cannot replace the report.
+    writeFileSync(
+      join(directory, 'docker'),
+      `#!/bin/sh
+case "$*" in
+  *'up -d'*) exit 1 ;;
+  *'down --volumes'*) chmod 555 '${directory}' ;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    child = start(directory, root);
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const [code] = await once(child, 'close');
+    chmodSync(directory, 0o755);
+    assert.equal(code, 1);
+    assert.match(stderr, /final report could not be written/);
+    assert.doesNotMatch(stderr, new RegExp(directory));
+    const path = join(directory, 'report.json');
+    const report = JSON.parse(readFileSync(path, 'utf8'));
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.match(report.project, /^restore-drill-[a-f0-9]{16}$/);
+    assert.ok(report.temporary.startsWith(directory + '/rasta-restore-drill-'));
+    assert.equal(report.passed, false);
+    assert.equal(report.cleanup.passed, false);
+    assert.equal(report.finishedAt, undefined);
+    // A write that started before the directory turned read-only cannot unlink its sibling:
+    // any such residue is private like the report itself.
+    for (const name of readdirSync(directory).filter((entry) => entry.startsWith('report.json.')))
+      assert.equal(statSync(join(directory, name)).mode & 0o777, 0o600);
+  } finally {
+    child?.kill('SIGKILL');
+    try {
+      chmodSync(directory, 0o755);
+    } catch {
+      /* removed already */
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a full passing drill whose final report write fails is never reported as passed', async (t) => {
+  if (process.getuid?.() === 0) return t.skip('root ignores directory permissions');
+  const directory = mkdtempSync(join(tmpdir(), 'drill-final-write-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'drill-final-write-tmp-'));
+  let child;
+  try {
+    const { root, path } = await referenceCliFixture(directory, 'final-write-fails');
+    // Temporary files live elsewhere, so cleanup itself succeeds; only the report directory
+    // turns read-only (after Compose is down), making the sibling creation fail.
+    child = start(directory, root, { TMPDIR: scratch }, path);
+    let stdout = '',
+      stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const [code] = await once(child, 'close');
+    chmodSync(directory, 0o755);
+    assert.equal(code, 1);
+    const summary = JSON.parse(stdout.trim().split('\n').at(-1));
+    assert.equal(summary.passed, false);
+    assert.equal(summary.cleanup.passed, true);
+    assert.match(stderr, /final report could not be written; the previous report remains/);
+    assert.doesNotMatch(stderr, new RegExp(directory));
+    const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+    assert.equal(report.passed, false);
+    assert.equal(report.finishedAt, undefined);
+    assert.match(report.project, /^restore-drill-[a-f0-9]{16}$/);
+    assert.ok(report.temporary.startsWith(scratch));
+    assert.equal(statSync(join(directory, 'report.json')).mode & 0o777, 0o600);
+    assert.equal(readdirSync(scratch).length, 0, 'temporary files were still removed');
+  } finally {
+    child?.kill('SIGKILL');
+    try {
+      chmodSync(directory, 0o755);
+    } catch {
+      /* removed already */
+    }
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('a report write that fails while cleanup starts is never forgotten: the run cannot pass', async (t) => {
+  if (process.getuid?.() === 0) return t.skip('root ignores directory permissions');
+  const directory = mkdtempSync(join(tmpdir(), 'drill-cleanup-write-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'drill-cleanup-write-tmp-'));
+  let child;
+  try {
+    // Every comparison passes. The directory turns read-only after the restored ledger query, so
+    // the write that records the `compose down` group fails; `down` makes it writable again, and
+    // every later write succeeds.
+    const { root, path } = await referenceCliFixture(directory, 'cleanup-write-fails');
+    child = start(directory, root, { TMPDIR: scratch }, path);
+    let stdout = '',
+      stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const [code] = await once(child, 'close');
+    chmodSync(directory, 0o755);
+    assert.equal(code, 1);
+    assert.match(stderr, /a report write failed; the run cannot be reported as passed/);
+    assert.doesNotMatch(stderr, new RegExp(directory));
+    const summary = JSON.parse(stdout.trim().split('\n').at(-1));
+    assert.equal(summary.passed, false);
+    assert.ok(existsSync(join(directory, 'cleaned')), 'cleanup continued after the failed write');
+    assert.equal(summary.cleanup.passed, true);
+    const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+    assert.equal(report.passed, false);
+    assert.deepEqual(report.reportWriteFailures, [
+      { stage: 'cleanup owned containers, networks and volumes' },
+    ]);
+    assert.ok(report.finishedAt, 'the final write succeeded and carries the marker');
+    assert.ok(
+      report.databases.every((db) => db.tablesEqual),
+      'the comparisons themselves passed',
+    );
+    assert.equal(readdirSync(scratch).length, 0, 'temporary files were removed');
+  } finally {
+    child?.kill('SIGKILL');
+    try {
+      chmodSync(directory, 0o755);
+    } catch {
+      /* removed already */
+    }
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('a failed process-group record stops the child, confirms it is gone and still cleans up', async (t) => {
+  if (process.getuid?.() === 0) return t.skip('root ignores directory permissions');
+  const directory = mkdtempSync(join(tmpdir(), 'drill-record-fails-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'drill-record-fails-tmp-'));
+  let child;
+  let leader;
+  try {
+    const root = fixture(directory);
+    // The write that records the next child's group fails (read-only directory); the cleanup
+    // command makes it writable again.
+    writeFileSync(join(directory, 'pnpm'), `#!/bin/sh\nchmod 555 '${directory}'\n`, {
+      mode: 0o700,
+    });
+    writeFileSync(
+      join(directory, 'docker'),
+      `#!/bin/sh
+case "$*" in
+  *'up -d'*) echo $$ > '${directory}/up-pid' 2>/dev/null; exec sleep 60 ;;
+  *'down --volumes'*) chmod 755 '${directory}'; touch '${directory}/cleaned' ;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    child = start(directory, root, { TMPDIR: scratch });
+    const [code] = await once(child, 'close');
+    chmodSync(directory, 0o755);
+    assert.equal(code, 1);
+    if (existsSync(join(directory, 'up-pid'))) {
+      leader = Number(readFileSync(join(directory, 'up-pid'), 'utf8'));
+      assert.ok(await waitGone(leader), 'the unrecorded group was stopped');
+    }
+    const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+    assert.equal(report.passed, false);
+    assert.equal(report.error.message, 'Could not record process group');
+    assert.ok(report.reportWriteFailures.length >= 1);
+    assert.deepEqual(report.processGroups, []);
+    assert.ok(existsSync(join(directory, 'cleaned')));
+    assert.equal(report.cleanup.passed, true);
+  } finally {
+    child?.kill('SIGKILL');
+    if (leader) {
+      try {
+        process.kill(-leader, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    try {
+      chmodSync(directory, 0o755);
+    } catch {
+      /* removed already */
+    }
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('a failing container check while volume and network still run: no final report until both settled and their groups are reaped', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-parallel-check-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'drill-parallel-check-tmp-'));
+  const descendants = [];
+  let child;
+  try {
+    const root = fixture(directory);
+    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    // The container check fails at once. The volume and network checks keep running, leave a
+    // descendant holding their stdout, and note whether the final report already existed when
+    // they finished.
+    const slow = (name, seconds, output) =>
+      `sleep ${seconds}; sleep 60 & echo $! > '${directory}/${name}-pid'; grep -c finishedAt '${directory}/report.json' > '${directory}/${name}-final-seen'; echo '${output}'`;
+    writeFileSync(
+      join(directory, 'docker'),
+      `#!/bin/sh
+case "$*" in
+  *'up -d'*) exit 1 ;;
+  *'container ls'*) exit 1 ;;
+  *'volume ls'*) ${slow('volume', 1, 'vol-left')} ;;
+  *'network ls'*) ${slow('network', 2, '')} ;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    child = start(directory, root, { TMPDIR: scratch });
+    let stdout = '',
+      stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const [code] = await once(child, 'close');
+    assert.equal(code, 1);
+    for (const name of ['volume', 'network'])
+      descendants.push(Number(readFileSync(join(directory, `${name}-pid`), 'utf8')));
+    for (const name of ['volume', 'network'])
+      assert.equal(
+        readFileSync(join(directory, `${name}-final-seen`), 'utf8').trim(),
+        '0',
+        `${name}: the final report did not exist while the check was still running`,
+      );
+    const summary = JSON.parse(stdout.trim().split('\n').at(-1));
+    assert.equal(summary.cleanup.passed, false);
+    assert.deepEqual(summary.cleanup.leftovers, ['volume']);
+    assert.deepEqual(summary.cleanup.unverified, ['container']);
+    const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+    assert.ok(report.finishedAt, 'the final report was written');
+    assert.equal(report.passed, false);
+    assert.deepEqual(report.cleanup.leftovers, ['volume']);
+    assert.deepEqual(report.cleanup.unverified, ['container']);
+    const cleanupReaps = report.reapedProcessGroups.filter(
+      (entry) => entry.stage === 'cleanup owned containers, networks and volumes',
+    );
+    assert.equal(
+      cleanupReaps.length,
+      2,
+      'both siblings were reaped and recorded in the final report',
+    );
+    assert.deepEqual(report.processGroups, []);
+    assert.equal(report.orphanProcessGroups, undefined);
+    for (const pid of descendants) {
+      for (let attempt = 0; attempt < 200 && pidExists(pid); attempt++)
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(pidExists(pid), false, 'the descendant is gone');
+    }
+    assert.doesNotMatch(stderr, new RegExp(directory));
+    assert.doesNotMatch(JSON.stringify(report.cleanup), /vol-left/);
+  } finally {
+    child?.kill('SIGKILL');
+    for (const pid of descendants) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('a rejected compose down still reaches the final report with a failed cleanup verdict', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-down-rejects-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'drill-down-rejects-tmp-'));
+  let child;
+  try {
+    const root = fixture(directory);
+    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    writeFileSync(
+      join(directory, 'docker'),
+      `#!/bin/sh
+case "$*" in
+  *'up -d'*) exit 1 ;;
+  *'down --volumes'*) exit 1 ;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    child = start(directory, root, { TMPDIR: scratch });
+    const [code] = await once(child, 'close');
+    assert.equal(code, 1);
+    const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+    assert.ok(report.finishedAt);
+    assert.equal(report.passed, false);
+    assert.equal(report.cleanup.passed, false);
+    assert.deepEqual(report.processGroups, []);
+  } finally {
+    child?.kill('SIGKILL');
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
   }
 });
