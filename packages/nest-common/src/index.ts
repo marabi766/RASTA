@@ -218,12 +218,26 @@ export {
   RENEWAL_TRANSACTION_MARGIN_MS,
   outboxRenewalOperationBudget,
   withinDeadline,
-  captureOutboxProvenance,
-  assertOutboxProvenance,
+  buildRestoredOutboxRow,
 } from './outbox/outbox';
+// Provenance across a durable queue (PR #483 r3). `restoreOutboxProvenance` and
+// `buildRestoredOutboxRow` are the registration intake's only: the restoration
+// guard (scripts/outbox-provenance-restoration-guard.test.mjs) fails on any
+// other file that names them.
+export {
+  captureOutboxProvenance,
+  isOutboxProvenance,
+  persistedOutboxProvenance,
+  restoreOutboxProvenance,
+} from './outbox/outbox-provenance';
+export type {
+  OutboxActor,
+  OutboxProvenance,
+  PersistedOutboxProvenance,
+} from './outbox/outbox-provenance';
 export type {
   OutboxMessageInput,
-  OutboxProvenance,
+  RestoredOutboxMessageInput,
   OutboxRow,
   OutboxStore,
   EventPublisher,

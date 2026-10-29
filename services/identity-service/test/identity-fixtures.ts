@@ -1,5 +1,6 @@
 import request from 'supertest';
-import { runUnscoped } from '@rasta/nest-common';
+import { ulid } from 'ulid';
+import { runUnscoped, runWithContext } from '@rasta/nest-common';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { RegistrationIntakeWorker } from '../src/identity/registration-intake.worker';
 import type { IdentityService } from '../src/identity/identity.service';
@@ -183,6 +184,26 @@ export async function processRegistrations(harness: IdentityApiHarness): Promise
 }
 
 /**
+ * Runs `fn` as the public registration route does: inside an HTTP request
+ * that presented no credential (`authType: 'ANONYMOUS'`). An intake is always
+ * some request's; outside one there is no origin to record, and it is refused
+ * (PR #483 r3 F1).
+ */
+export function asAnonymousRequest<T>(fn: () => T): T {
+  return runWithContext(
+    {
+      correlationId: ulid(),
+      requestId: ulid(),
+      organizationIds: [],
+      roles: [],
+      authType: 'ANONYMOUS',
+      startedAt: Date.now(),
+    },
+    fn,
+  );
+}
+
+/**
  * A registration received and recorded at once — the intake, then the
  * worker's step for it: the request's id. For suites about what happens to a
  * request after it exists.
@@ -191,7 +212,7 @@ export async function recordRegistration(
   service: IdentityService,
   dto: SubmitRegistrationDto,
 ): Promise<string> {
-  const intakeId = await service.receiveRegistration(dto);
+  const intakeId = await asAnonymousRequest(() => service.receiveRegistration(dto));
   const handled = await service.processRegistrationIntake(intakeId);
   if (handled.outcome !== 'RECORDED') throw new Error(`registration ${handled.outcome}`);
   return handled.registrationId;

@@ -1,13 +1,16 @@
 import { Injectable } from '@nestjs/common';
 import {
   allocateStreamSeqSql,
-  assertOutboxProvenance,
   buildOutboxRow,
+  buildRestoredOutboxRow,
+  persistedOutboxProvenance,
+  restoreOutboxProvenance,
   getContext,
   RastaError,
   runUnscoped,
   type OutboxMessageInput,
   type OutboxProvenance,
+  type RestoredOutboxMessageInput,
 } from '@rasta/nest-common';
 import { assertTopicFor, resolvePartitionKey, type OutboundEventName } from './routing';
 import {
@@ -335,19 +338,21 @@ export class IdentityRepository {
    * With the submitting request's provenance in their own columns, apart from
    * the applicant's submission (PR #483 r2 N1): the event is built after the
    * request has ended, and this row is the only thing that outlives it.
-   * Validated before it is stored, as the table's checks require.
+   * Only a provenance the platform captured is accepted
+   * (`persistedOutboxProvenance` refuses anything else); an anonymous
+   * request is stored as `ANONYMOUS` with no id (PR #483 r3 F1), as the
+   * table's checks require.
    */
   async receiveRegistration(
     id: string,
     submission: object,
     provenance: OutboxProvenance,
   ): Promise<void> {
-    assertOutboxProvenance(provenance);
+    const stored = persistedOutboxProvenance(provenance);
     await this.client.$executeRaw`
       INSERT INTO registration_intake (id, submission, actor_type, actor_id, correlation_id)
       VALUES (${id}, ${JSON.stringify(submission)}::jsonb,
-              ${provenance.actor?.type ?? null}, ${provenance.actor?.id ?? null},
-              ${provenance.correlationId})`;
+              ${stored.actorType}, ${stored.actorId}, ${stored.correlationId})`;
   }
 
   /**
@@ -368,7 +373,9 @@ export class IdentityRepository {
   /**
    * One intake row, locked `FOR UPDATE SKIP LOCKED`: null when it is gone —
    * handled already — or another worker holds it. With the provenance of the
-   * request that submitted it, as {@link receiveRegistration} stored it.
+   * request that submitted it, as {@link receiveRegistration} stored it,
+   * restored by the platform's one restoration path (`restoreOutboxProvenance`,
+   * which refuses a row no capture could have produced).
    */
   async lockRegistrationIntake(
     tx: ExtendedPrismaClient,
@@ -384,7 +391,7 @@ export class IdentityRepository {
         id: string;
         submission: unknown;
         received_at: Date;
-        actor_type: 'USER' | 'SERVICE' | null;
+        actor_type: 'USER' | 'SERVICE' | 'ANONYMOUS';
         actor_id: string | null;
         correlation_id: string;
       }>
@@ -399,13 +406,11 @@ export class IdentityRepository {
       id: row.id,
       submission: row.submission,
       receivedAt: row.received_at,
-      provenance: {
-        actor:
-          row.actor_type !== null && row.actor_id !== null
-            ? { type: row.actor_type, id: row.actor_id }
-            : null,
+      provenance: restoreOutboxProvenance({
+        actorType: row.actor_type,
+        actorId: row.actor_id,
         correlationId: row.correlation_id,
-      },
+      }),
     };
   }
 
@@ -450,6 +455,37 @@ export class IdentityRepository {
    * outside the transaction that produced it (ADR-021).
    */
   async enqueueEvent(tx: ExtendedPrismaClient, input: OutboxMessageInput): Promise<string> {
+    return this.insertEvent(tx, input, (sequenced, options) => buildOutboxRow(sequenced, options));
+  }
+
+  /**
+   * {@link enqueueEvent} for an event whose request has ended — the
+   * registration intake's, and only it: `provenance` is the one
+   * {@link lockRegistrationIntake} restored, the ambient context is not read,
+   * and the tenant is stated (`buildRestoredOutboxRow`, PR #483 r3 F2).
+   */
+  async enqueueRestoredEvent(
+    tx: ExtendedPrismaClient,
+    input: RestoredOutboxMessageInput,
+    provenance: OutboxProvenance,
+  ): Promise<string> {
+    return this.insertEvent(tx, input, (sequenced, options) =>
+      buildRestoredOutboxRow(
+        { ...sequenced, organizationId: input.organizationId },
+        provenance,
+        options,
+      ),
+    );
+  }
+
+  private async insertEvent(
+    tx: ExtendedPrismaClient,
+    input: OutboxMessageInput,
+    build: (
+      input: OutboxMessageInput,
+      options: { producer: string; producerVersion: string },
+    ) => ReturnType<typeof buildOutboxRow>,
+  ): Promise<string> {
     // ADR-051 B3, in the order the ADR requires: routing is final *first*, the
     // sequence is allocated against that exact `(topic, partitionKey)` pair
     // *second*, and only then is the row built and inserted. All three happen
@@ -461,7 +497,7 @@ export class IdentityRepository {
     const partition = resolvePartitionKey(eventName, input.aggregateId);
     const streamSeq = await allocateStreamSeqSql(tx, input.topic, partition.key);
 
-    const row = buildOutboxRow(
+    const row = build(
       { ...input, partitionKey: partition.key, streamSeq, streamKey: partition.key },
       {
         producer: SERVICE_NAME,

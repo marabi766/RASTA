@@ -25,18 +25,20 @@
 -- with the row. `submission` holds the validated request body; it is personal
 -- data (username, email, name, phone) for that short time only.
 --
--- ## Provenance (PR #483 r2 N1)
+-- ## Provenance (PR #483 r2 N1, r3 F1/F2)
 --
 -- The event the worker writes is built after the request has ended, so the
 -- request context it used to be built in is gone. The provenance that context
 -- carried is stored here, beside the applicant's submission and apart from it:
 -- `actor_type`/`actor_id` -- the verified principal of the submitting request
 -- (a platform user, or a calling service), taken from the auth guard's
--- context, never from the body; both NULL for an anonymous submission -- and
--- `correlation_id`, the request's own. The worker passes them, explicitly, to
--- the event (`OutboxMessageInput.provenance`), so REGISTRATION_SUBMITTED is
--- attributed to the submitter and continues the submission's trail, as when it
--- was written in the request. No credential is stored: an id, not a token.
+-- context, never from the body; `ANONYMOUS` with no id for an unauthenticated
+-- submission -- and `correlation_id`, the request's own. The worker restores
+-- them (`restoreOutboxProvenance`) and builds the event with them alone
+-- (`buildRestoredOutboxRow`), so REGISTRATION_SUBMITTED is attributed to the
+-- submitter -- or recorded as anonymous, never as the service's own work --
+-- and continues the submission's trail, as when it was written in the
+-- request. No credential is stored: an id, not a token.
 --
 -- ## Retry
 --
@@ -49,22 +51,26 @@ CREATE TABLE "registration_intake" (
     "received_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "attempts" INTEGER NOT NULL DEFAULT 0,
     "next_attempt_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "actor_type" VARCHAR(16),
+    "actor_type" VARCHAR(16) NOT NULL,
     "actor_id" VARCHAR(256),
     "correlation_id" VARCHAR(128) NOT NULL,
 
     CONSTRAINT "registration_intake_pkey" PRIMARY KEY ("id"),
-    -- What `captureOutboxProvenance` can produce, and nothing else: a user or a
-    -- service, both columns or neither, and a correlation id in the charset and
-    -- bound a verified service may forward (`isServiceCorrelationId`). A CASE,
-    -- not an OR: a NULL in one column would make an OR unknown, and a CHECK
-    -- passes on unknown. (The id's bound is its VARCHAR(256); PostgreSQL's
-    -- regular expressions cap a repetition count at 255.)
+    -- What `captureOutboxProvenance` can produce for a request, and nothing
+    -- else (`restoreOutboxProvenance` holds the same rule on the way out): a
+    -- user or a service with its id, or ANONYMOUS — an unauthenticated
+    -- submission, PR #483 r3 F1 — with none. Never NULL: an intake row is
+    -- always some request's, never background work. A correlation id in the
+    -- charset and bound a verified service may forward
+    -- (`isServiceCorrelationId`). A CASE, not an OR: a NULL in one column would
+    -- make an OR unknown, and a CHECK passes on unknown. (The id's bound is its
+    -- VARCHAR(256); PostgreSQL's regular expressions cap a repetition count at
+    -- 255.)
     CONSTRAINT "ck_registration_intake_actor" CHECK (
-        CASE WHEN "actor_type" IS NULL THEN "actor_id" IS NULL
-             ELSE "actor_type" IN ('USER', 'SERVICE')
-                  AND "actor_id" IS NOT NULL
-                  AND "actor_id" ~ '^[!-~]+$'
+        CASE WHEN "actor_type" = 'ANONYMOUS' THEN "actor_id" IS NULL
+             WHEN "actor_type" IN ('USER', 'SERVICE')
+                  THEN "actor_id" IS NOT NULL AND "actor_id" ~ '^[!-~]+$'
+             ELSE FALSE
         END
     ),
     CONSTRAINT "ck_registration_intake_correlation" CHECK (

@@ -1,7 +1,13 @@
 import { Logger } from '@nestjs/common';
 import { runUnscoped } from '@rasta/nest-common';
 import { startIdentityApi, type IdentityApiHarness } from './api-helpers';
-import { http, processRegistrations, registrationBody, seedPerson } from './identity-fixtures';
+import {
+  asAnonymousRequest,
+  http,
+  processRegistrations,
+  registrationBody,
+  seedPerson,
+} from './identity-fixtures';
 import { id, tenants } from './helpers';
 import { IdentityService } from '../src/identity/identity.service';
 import type { SubmitRegistrationDto } from '../src/identity/dto';
@@ -305,7 +311,7 @@ describe('public registration answers the same, and does the same, whoever alrea
     const atService = await measure(async (body) => {
       const dto = { ...body, documentRefs: [] } as unknown as SubmitRegistrationDto;
       const started = performance.now();
-      await service.submitRegistration(dto);
+      await asAnonymousRequest(() => service.submitRegistration(dto));
       return performance.now() - started;
     });
     const overHttp = await measure(async (body) => {

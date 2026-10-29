@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { ulid } from 'ulid';
+import { eventEnvelopeSchema } from '@rasta/contracts';
 import { runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { startIdentityApi, userToken, type IdentityApiHarness } from './api-helpers';
 import { processRegistrations, registrationBody } from './identity-fixtures';
@@ -21,6 +22,14 @@ import type { SubmitRegistrationDto } from '../src/identity/dto';
  * the request's correlation id) and the worker hands it to the event
  * explicitly. Every case here submits in one request and drains after it
  * ended — from the same process, from another context, and after a restart.
+ *
+ * An unauthenticated submission is its own origin (PR #483 r3 F1): stored as
+ * `ANONYMOUS` with no id, published with `anonymous: true` and no actor, so
+ * audit records it as ANONYMOUS — never as `SYSTEM / identity-service`, the
+ * service's own background work. The audit record itself is asserted where
+ * audit-service runs: `audit-service/test/ingestion.int-spec.ts` (this
+ * envelope, persisted) and `tests/e2e/specs/identity/04-registration-approval`
+ * (through the broker, read back from `GET /v1/audit-events`).
  */
 describe('REGISTRATION_SUBMITTED keeps the submitting request’s actor and correlation across the intake queue (PR #483 r2 N1)', () => {
   let harness: IdentityApiHarness;
@@ -62,9 +71,11 @@ describe('REGISTRATION_SUBMITTED keeps the submitting request’s actor and corr
     );
     expect(rows).toHaveLength(1);
     const row = rows[0]!;
-    const envelope = row.payload as { actor?: unknown; correlationId: string };
+    // As every consumer reads it, audit-service's included.
+    const envelope = eventEnvelopeSchema.parse(row.payload);
     return {
       actor: envelope.actor ?? null,
+      anonymous: envelope.anonymous ?? false,
       correlationId: envelope.correlationId,
       rowCorrelationId: row.correlationId,
       headerCorrelationId: (row.headers as Record<string, string>)['x-correlation-id'],
@@ -102,11 +113,12 @@ describe('REGISTRATION_SUBMITTED keeps the submitting request’s actor and corr
     const event = await submittedEvent(intake!.id);
     expect(event).toEqual({
       actor: { type: 'USER', id: submitter },
+      anonymous: false,
       ...sameEverywhere(correlationId),
     });
   });
 
-  it('an anonymous submitter: no actor, and the correlation id the request was answered under', async () => {
+  it('an anonymous submitter: ANONYMOUS with no id — never the service’s own work — and the correlation id the request was answered under (PR #483 r3 F1)', async () => {
     const org = tenants();
     const sent = fresh();
     const minted = fresh();
@@ -132,7 +144,9 @@ describe('REGISTRATION_SUBMITTED keeps the submitting request’s actor and corr
     const intakes = await Promise.all(
       [sent, minted, refused].map((identity) => intakeOf(harness, identity.username)),
     );
-    for (const intake of intakes) expect(intake).toMatchObject({ actorType: null, actorId: null });
+    for (const intake of intakes) {
+      expect(intake).toMatchObject({ actorType: 'ANONYMOUS', actorId: null });
+    }
 
     // Drained inside some other request's context: it lends the events nothing.
     const unrelated: RequestContext = {
@@ -149,15 +163,18 @@ describe('REGISTRATION_SUBMITTED keeps the submitting request’s actor and corr
 
     expect(await submittedEvent(intakes[0]!.id)).toEqual({
       actor: null,
+      anonymous: true,
       ...sameEverywhere(correlationId),
     });
     expect(await submittedEvent(intakes[1]!.id)).toEqual({
       actor: null,
+      anonymous: true,
       ...sameEverywhere(withoutHeader.headers['x-correlation-id'] as string),
     });
     const badHeader = await submittedEvent(intakes[2]!.id);
     expect(badHeader).toEqual({
       actor: null,
+      anonymous: true,
       ...sameEverywhere(withBadHeader.headers['x-correlation-id'] as string),
     });
     expect(badHeader.correlationId).not.toBe('forged correlation');
@@ -197,6 +214,7 @@ describe('REGISTRATION_SUBMITTED keeps the submitting request’s actor and corr
 
     expect(await submittedEvent(intakeId)).toEqual({
       actor: { type: 'USER', id: submitter },
+      anonymous: false,
       ...sameEverywhere(correlationId),
     });
   });
@@ -260,10 +278,12 @@ describe('REGISTRATION_SUBMITTED keeps the submitting request’s actor and corr
 
     expect(await submittedEvent(anonymousId)).toEqual({
       actor: null,
+      anonymous: true,
       ...sameEverywhere(anonymousContext.correlationId),
     });
     expect(await submittedEvent(authenticatedId)).toEqual({
       actor: { type: 'USER', id: submitter },
+      anonymous: false,
       ...sameEverywhere(submitterContext.correlationId),
     });
   });
@@ -280,14 +300,31 @@ describe('REGISTRATION_SUBMITTED keeps the submitting request’s actor and corr
     for (const [actorType, actorId, correlationId] of [
       ['SYSTEM', 'identity-service', ulid()],
       ['USER', null, ulid()],
-      [null, 'USR_1', ulid()],
       ['USER', 'USR 1', ulid()],
-      [null, null, 'has space'],
-      [null, null, ''],
+      // An anonymous origin has no id — not even a plausible one.
+      ['ANONYMOUS', 'USR_1', ulid()],
+      ['ANONYMOUS', null, 'has space'],
+      ['ANONYMOUS', null, ''],
     ] as const) {
       await expect(insert(actorType, actorId, correlationId)).rejects.toThrow(
         /ck_registration_intake_(actor|correlation)/,
       );
     }
+    // Never no origin at all: an intake row is always some request's.
+    for (const [actorType, actorId] of [
+      [null, null],
+      [null, 'USR_1'],
+    ] as const) {
+      await expect(insert(actorType, actorId, ulid())).rejects.toThrow(/Code: `23502`/); // not_null_violation
+    }
+    // And what a capture produces is accepted (and removed: it is no submission).
+    const accepted = `REG_${ulid()}`;
+    await runUnscoped('test writes an intake row by hand', async () => {
+      await harness.prisma.client.$executeRaw`
+        INSERT INTO registration_intake (id, submission, actor_type, actor_id, correlation_id)
+        VALUES (${accepted}, '{}'::jsonb, 'ANONYMOUS', NULL, ${ulid()})`;
+      await harness.prisma.client
+        .$executeRaw`DELETE FROM registration_intake WHERE id = ${accepted}`;
+    });
   });
 });

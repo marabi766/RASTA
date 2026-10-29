@@ -1106,10 +1106,11 @@ export class IdentityService {
    *
    * Stored with it, in their own columns: the request's provenance (PR #483
    * r2 N1) — the verified principal the auth guard put in the request context
-   * (none for an anonymous submission) and the request's correlation id, by
-   * the same rule an event built inside the request applies
-   * (`captureOutboxProvenance`). Never anything from the body: the submission
-   * is the applicant's claim, the provenance is the platform's.
+   * (`ANONYMOUS`, with no id, for an unauthenticated submission — r3 F1) and
+   * the request's correlation id, by the same rule an event built inside the
+   * request applies (`captureOutboxProvenance`, which reads the ambient
+   * context and takes no argument). Never anything from the body: the
+   * submission is the applicant's claim, the provenance is the platform's.
    */
   async receiveRegistration(dto: SubmitRegistrationDto): Promise<string> {
     assertRolesMayBeRequested(dto.requestedRoles);
@@ -1182,22 +1183,26 @@ export class IdentityService {
           },
         });
 
-        await this.repository.enqueueEvent(tx, {
-          aggregateType: 'RegistrationRequest',
-          aggregateId: intakeId,
-          eventName: IDENTITY_EVENTS.REGISTRATION_SUBMITTED,
-          topic: IDENTITY_TOPIC,
-          organizationId: dto.requestedOrganizationId,
-          // The submitting request's, as received — this runs after it ended,
-          // and no ambient context may stand in for it (PR #483 r2 N1).
-          provenance: intake.provenance,
-          payload: validateIdentityPayload(IDENTITY_EVENTS.REGISTRATION_SUBMITTED, {
-            registrationId: intakeId,
-            userId,
-            requestedOrganizationId: dto.requestedOrganizationId,
-            requestedRoles: dto.requestedRoles,
-          }),
-        });
+        // The submitting request's provenance, as received — this runs after
+        // it ended, and no ambient context may stand in for it (PR #483 r2 N1,
+        // r3 F2): the one restoration path, not the ordinary enqueue.
+        await this.repository.enqueueRestoredEvent(
+          tx,
+          {
+            aggregateType: 'RegistrationRequest',
+            aggregateId: intakeId,
+            eventName: IDENTITY_EVENTS.REGISTRATION_SUBMITTED,
+            topic: IDENTITY_TOPIC,
+            organizationId: dto.requestedOrganizationId,
+            payload: validateIdentityPayload(IDENTITY_EVENTS.REGISTRATION_SUBMITTED, {
+              registrationId: intakeId,
+              userId,
+              requestedOrganizationId: dto.requestedOrganizationId,
+              requestedRoles: dto.requestedRoles,
+            }),
+          },
+          intake.provenance,
+        );
 
         await this.repository.deleteRegistrationIntake(tx, intakeId);
         return true;
