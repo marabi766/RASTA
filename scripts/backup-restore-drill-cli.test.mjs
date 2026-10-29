@@ -1399,3 +1399,39 @@ esac`,
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('the normal teardown uses the same compose gate: a definition swapped during the run is never handed to `compose down`', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-teardown-gate-'));
+  try {
+    const root = fixture(directory);
+    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    // `up` replaces the project's compose.json with a privileged service, then fails.
+    recordingDocker(
+      directory,
+      `case "$*" in
+  *'up -d'*)
+    file=$(echo "$*" | sed -n 's/.*--file \\([^ ]*\\) .*/\\1/p')
+    printf '%s' '{"services":{"source":{"privileged":true,"container_name":"host"}},"volumes":{}}' > "$file"
+    exit 1 ;;
+esac`,
+    );
+    const child = start(directory, root);
+    let stdout = '';
+    child.stdout.on('data', (chunk) => (stdout += chunk));
+    const [code] = await once(child, 'close');
+    assert.equal(code, 1);
+    const calls = readFileSync(join(directory, 'docker-calls'), 'utf8');
+    assert.doesNotMatch(calls, /down --volumes/, 'compose down never ran on the swapped file');
+    const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+    assert.equal(report.cleanup.passed, false, 'a refused teardown is a failed cleanup');
+    assert.equal(report.passed, false);
+    assert.ok(existsSync(report.temporary), 'the directory is kept for recovery');
+    // ... and recovery refuses the same definition (exit 2) rather than trusting the report.
+    rmSync(join(directory, 'docker-calls'));
+    const result = await recover(directory, root, join(directory, 'report.json'));
+    assert.equal(result.code, 2);
+    assert.equal(existsSync(join(directory, 'docker-calls')), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

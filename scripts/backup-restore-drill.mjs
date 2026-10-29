@@ -407,7 +407,15 @@ const failedCleanup = ({ leftovers = [], unverified = [] } = {}) => ({
   ...(report.orphanProcessGroups?.length && { orphanProcessGroups: report.orphanProcessGroups }),
 });
 
-if (cleanupOnly) process.exit(await recoverRecorded());
+// Recovery's output goes to the CI job log, unlike a run's (private files): an unexpected
+// failure there is one fixed line, never a stack trace with source paths.
+if (cleanupOnly)
+  process.exit(
+    await recoverRecorded().catch(() => {
+      console.error('[backup-restore-drill] recovery failed unexpectedly; nothing was reported');
+      return 1;
+    }),
+  );
 
 try {
   temporary = mkdtempSync(join(tmpdir(), 'rasta-restore-drill-'));
