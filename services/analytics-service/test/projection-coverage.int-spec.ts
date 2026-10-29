@@ -35,6 +35,7 @@ function fakeEventConsumer(start: () => Promise<void> = async () => undefined) {
         await start();
       },
       stop: async () => void calls.push('stop'),
+      stopAfterFailedStart: async () => void calls.push('stopAfterFailedStart'),
       isRunning: () => true,
     },
   };
@@ -105,7 +106,7 @@ describe('recording the coverage start', () => {
       silent,
     );
     await expect(broken.start()).rejects.toThrow('database unavailable');
-    expect(calls).toEqual(['start', 'stop']);
+    expect(calls).toEqual(['start', 'stopAfterFailedStart']);
     expect(await rows()).toEqual([]);
   });
 

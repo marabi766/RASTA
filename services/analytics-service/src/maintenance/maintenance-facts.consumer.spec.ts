@@ -1,7 +1,10 @@
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
-import { UnprocessableEventError, getContext } from '@rasta/nest-common';
+import { UnprocessableEventError, getContext, type EventConsumer } from '@rasta/nest-common';
 import { registry } from '@rasta/observability';
-import { MaintenanceFactsConsumer } from './maintenance-facts.consumer';
+import {
+  MaintenanceFactsConsumer,
+  maintenanceFactsConsumerFactory,
+} from './maintenance-facts.consumer';
 import type { MaintenanceFactRepository, RecordResult } from './maintenance-fact.repository';
 import {
   MAINTENANCE_FACTS_CONSUMER,
@@ -209,8 +212,8 @@ describe('MaintenanceFactsConsumer lifecycle', () => {
   });
 
   it('stops the consumer again when the coverage start cannot be recorded, and refuses to start', async () => {
-    const stop = jest.fn(async () => undefined);
-    const fake = { start: async () => undefined, stop, isRunning: () => true };
+    const stopAfterFailedStart = jest.fn(async () => undefined);
+    const fake = { start: async () => undefined, stopAfterFailedStart, isRunning: () => true };
     const consumer = new MaintenanceFactsConsumer(
       () => fake as never,
       {} as PrismaService,
@@ -222,7 +225,93 @@ describe('MaintenanceFactsConsumer lifecycle', () => {
       quietLog,
     );
     await expect(consumer.start()).rejects.toThrow('database unavailable');
-    expect(stop).toHaveBeenCalledTimes(1);
+    expect(stopAfterFailedStart).toHaveBeenCalledTimes(1);
+    expect(stopAfterFailedStart).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'database unavailable' }),
+    );
+  });
+
+  describe('startup-failure cleanup is bounded (PR #493 r1, F1)', () => {
+    const BUDGET_MS = 200;
+    const connection = {
+      brokers: ['localhost:9092'],
+      clientId: 'analytics-service',
+      shutdownBudgetMs: BUDGET_MS,
+    };
+
+    /** The REAL EventConsumer from the real factory; only the kafkajs client is a fake. */
+    function realConsumer(disconnect: 'stalls' | 'fails', lines: string[]) {
+      const kafka = {
+        disconnects: 0,
+        connect: async () => undefined,
+        subscribe: async () => undefined,
+        run: async () => undefined,
+        disconnect: async (): Promise<void> => {
+          kafka.disconnects += 1;
+          if (disconnect === 'stalls') return new Promise<void>(() => undefined);
+          throw new Error('Connection already closed');
+        },
+      };
+      const factory = maintenanceFactsConsumerFactory(
+        connection as never,
+        {
+          info: () => undefined,
+          warn: (m: string) => void lines.push(`warn: ${m}`),
+          error: (_: unknown, m?: string) => void lines.push(`error: ${m}`),
+        } as never,
+      );
+      const consumer = new MaintenanceFactsConsumer(
+        (handler) => {
+          const real: EventConsumer = factory(handler);
+          (real as unknown as { kafka: unknown }).kafka = { consumer: () => kafka };
+          return real;
+        },
+        {} as PrismaService,
+        {
+          recordCoverageStart: async () => {
+            throw new Error('database unavailable');
+          },
+        } as unknown as MaintenanceFactRepository,
+        quietLog,
+      );
+      return { consumer, kafka };
+    }
+
+    it('rejects with the coverage error within the budget when the Kafka disconnect stalls', async () => {
+      const lines: string[] = [];
+      const { consumer, kafka } = realConsumer('stalls', lines);
+
+      const startedAt = Date.now();
+      let timer: NodeJS.Timeout | undefined;
+      const outcome = await Promise.race([
+        consumer.start().then(
+          () => 'started',
+          (error: Error) => `rejected: ${error.message}`,
+        ),
+        new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve('STALLED'), 2000);
+        }),
+      ]);
+      clearTimeout(timer);
+
+      expect(outcome).toBe('rejected: database unavailable');
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(BUDGET_MS - 20);
+      expect(Date.now() - startedAt).toBeLessThan(1500);
+      expect(kafka.disconnects).toBe(1);
+      expect(consumer.isRunning()).toBe(false);
+      expect(
+        lines.some((line) => line.includes('cleanup after a failed start did not finish')),
+      ).toBe(true);
+    });
+
+    it('rejects with the coverage error, not the disconnect error, when the cleanup fails', async () => {
+      const lines: string[] = [];
+      const { consumer } = realConsumer('fails', lines);
+
+      await expect(consumer.start()).rejects.toThrow('database unavailable');
+
+      expect(lines.some((line) => line.includes('Connection already closed'))).toBe(true);
+    });
   });
 
   it('handling a delivery never touches coverage: replay, duplicate and rollback cannot advance it', async () => {
