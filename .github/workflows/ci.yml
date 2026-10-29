@@ -42,7 +42,12 @@ jobs:
     # 25, stopgap (2026-10-27): green runs take 14-19 min and slow runners hit
     # 20 (main 33c5f29 and train runs cancelled at 1208-1218 s). #450 bounds
     # the unit step's parallelism; return this to 20 once it has merged.
-    timeout-minutes: 25
+    # 37 minutes (headroom measurement, last 20 green CI runs on main and
+    # merge-train branches): the job took up to 1446 s (p50 1259 s), 96 % of
+    # 25, and train run 40936057488 was cancelled at the limit. Every
+    # integration job needs this one, so no limit downstream can save a
+    # cancelled train. 37 is ceil(1446 s x 1.5 / 60).
+    timeout-minutes: 37
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -512,7 +517,10 @@ jobs:
   web-browser:
     name: Portal in a browser
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 37 minutes (headroom measurement, last 20 green CI runs on main and
+    # merge-train branches): the job took up to 1462 s (p50 946 s), 81 % of
+    # 30. 37 is ceil(1462 s x 1.5 / 60).
+    timeout-minutes: 37
     needs: quality
     permissions:
       contents: read
@@ -1295,14 +1303,19 @@ jobs:
     name: Integration tests and database guards
     runs-on: ubuntu-latest
     # About 11.5 minutes on main run 38600385830 (setup ~4m, the suites 428 s,
-    # the guards 28 s). 25 is twice that, and the suites carry their own 12.
+    # the guards 28 s), when the suites carried their own 12.
     # History of the single job's limit: 60 (#197), 35 once reversibility
     # moved out (#198), 50 as #273's stopgap until this split.
-    # 34 minutes (headroom measurement, last 20 green CI runs on main and
-    # merge-train branches): the job took up to 1359 s (p50 1210 s), 91 % of
-    # 25, and the Integration tests step now has 21 minutes of its own, so
-    # 25 could no longer hold it. 34 is ceil(1359 s x 1.5 / 60).
-    timeout-minutes: 34
+    # 70 minutes: the job must hold every step at its own limit, one after
+    # the other (scripts/ci-integration-split-lib.mjs, JOB_SETUP_MINUTES):
+    # the steps' limits sum to 62 (Integration tests 21, the seven 5-minute
+    # guards 35, the three 2-minute PostgreSQL connection steps 6) and the
+    # steps without a limit of their own took up to 298 s over the last 20
+    # green runs, which is 8 minutes at x 1.5. The job itself took up to
+    # 1359 s (p50 1210 s), so 70 is a ceiling that no healthy run comes near;
+    # the sharding PR returns the Integration tests step, and with it this
+    # job, to its smaller size.
+    timeout-minutes: 70
     needs: quality
 
     services:
@@ -1874,7 +1887,11 @@ jobs:
     # About 9.5 minutes on main run 38600385830 (setup ~4m, independence 57 s,
     # tenant isolation 253 s, retry replay 22 s). Tenant isolation keeps its
     # own 10.
-    timeout-minutes: 25
+    # 37 minutes: the steps' limits sum to 29 (independence 8, tenant
+    # isolation 10, retry replay 5, three PostgreSQL connection steps of 2)
+    # and the steps without a limit took up to 309 s over the last 20 green
+    # runs (8 minutes at x 1.5); the job itself took up to 872 s.
+    timeout-minutes: 37
     needs: quality
 
     services:
@@ -2312,8 +2329,12 @@ jobs:
     name: Coverage gates (construction, contract, inventory)
     runs-on: ubuntu-latest
     # About 11.5 minutes on main run 38600385830 (setup ~3.5m, construction
-    # 325 s, contract 105 s, inventory 54 s). Each gate keeps its own 8.
-    timeout-minutes: 25
+    # 325 s, contract 105 s, inventory 54 s). Each gate keeps its own limit
+    # (construction 11, the others 8).
+    # 35 minutes: the gates' limits sum to 27 and the steps without a limit
+    # took up to 281 s over the last 20 green runs (8 minutes at x 1.5); the
+    # job itself took up to 1041 s.
+    timeout-minutes: 35
     needs: quality
 
     services:
@@ -2491,10 +2512,12 @@ jobs:
     runs-on: ubuntu-latest
     # About 10.5 minutes on main run 38600385830 (setup ~4m, the seven gates
     # 399 s together, economic the longest at 115 s). Each keeps its own 8.
-    # 34 minutes (headroom measurement, last 20 green CI runs on main and
-    # merge-train branches): the job took up to 1326 s (p50 1224 s), 88 % of
-    # 25. 34 is ceil(1326 s x 1.5 / 60). The slowest gate, economic, took 285 s.
-    timeout-minutes: 34
+    # 80 minutes: nine gates at 8 minutes each is 72, and the steps without a
+    # limit took up to 310 s over the last 20 green runs (8 minutes at
+    # x 1.5). The job itself took up to 1326 s (p50 1224 s) and the slowest
+    # gate, economic, 285 s, so 80 is a ceiling that no healthy run comes
+    # near; the gates' own limits are what catch a hang.
+    timeout-minutes: 80
     needs: quality
 
     services:
@@ -4383,7 +4406,9 @@ jobs:
   trivy-db:
     name: Trivy vulnerability DB (downloaded once)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 21: the seven steps' limits sum to 20 and the runner's own set-up and
+    # completion took up to 5 s (1 minute at x 1.5).
+    timeout-minutes: 21
     outputs:
       key: ${{ steps.fetch.outputs.key }}
     steps:
