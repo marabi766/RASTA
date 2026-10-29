@@ -203,7 +203,8 @@ Commit، Projector صفت‌ها را می‌نویسد و حساب را **یک 
 دوبرابرشونده (تا ۱۶ بازه) دوباره امتحان می‌شود و جلوی بقیه را نمی‌گیرد؛ Log آن `Failed to handle registration intake <id>` است.
 عقب‌ماندگی: `SELECT count(*), min(received_at) FROM registration_intake;` — ردیف‌های قدیمی‌تر از چند بازه یعنی کارگر اجرا نمی‌شود
 یا هر بار شکست می‌خورد. برگرداندن Migration (`down.sql` در `20261029130000_registration_intake`) فقط با جدول خالی و کارگر
-متوقف، وگرنه درخواست‌هایی که `202` گرفته‌اند گم می‌شوند.
+متوقف، وگرنه درخواست‌هایی که `202` گرفته‌اند گم می‌شوند. ردگیری یک ثبت‌نام: ستون `correlation_id` همان شناسه‌ای است که پاسخ
+`202` در `x-correlation-id` برگرداند و رویداد `REGISTRATION_SUBMITTED` و Log کنار گذاشتنِ تکراری همان را دارند (PR #483 r2 N1).
 
 **ساخت مستقیم حساب که پس از Keycloak شکست خورد (task 117، F6).** `POST /v1/users` اکنون `Idempotency-Key` لازم دارد و پیش از
 Keycloak یک Intent (`user_provisioning_intent`) با شناسهٔ پایدار کاربر Commit می‌کند؛ حساب با همان شناسه (`rasta_user_id`)
