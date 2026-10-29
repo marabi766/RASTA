@@ -33,7 +33,9 @@ import { ApprovalInbox } from './ApprovalInbox';
 import { CreateProjectForm } from './CreateProjectForm';
 import { UnresolvedCreateNotice } from './UnresolvedCreateNotice';
 import { ProjectsScreen } from './ProjectsScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 import type { DecisionTokens } from './[id]/ProjectApprovals';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/projects` route — پروژه‌های عمرانی (docs/16 § ۱۶٫۶).
@@ -78,7 +80,7 @@ export default async function ProjectsPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/projects');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const status = one(params.status);
   // A status the service would not accept is dropped, not forwarded to earn a
   // 400 the person cannot act on.
@@ -99,8 +101,9 @@ export default async function ProjectsPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -174,7 +177,11 @@ export default async function ProjectsPage({
             />
           )}
         </Section>
-        <ProjectsScreen result={result} query={query} demoMode={demoMode} />
+        <ProjectsScreen
+          result={result}
+          query={{ ...query, context: pageContext(session) }}
+          demoMode={demoMode}
+        />
       </div>
     </AppShell>
   );

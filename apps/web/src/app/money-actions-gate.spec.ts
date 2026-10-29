@@ -25,6 +25,7 @@ import { CSRF_FIELD } from '@/server/csrf';
 import { sealRepairOrderBaseline } from '@/server/repair-order-commands';
 import type { WebSession } from '@/server/session';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
+import { actingAccessToken } from '@/test/session-token';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -38,7 +39,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'u',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

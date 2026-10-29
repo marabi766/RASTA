@@ -22,6 +22,7 @@ import {
 } from '@/test/contract-command-fixtures';
 
 import { contractCommandOffers } from './contract-offers';
+import { storedOrganizationFor } from '@/server/session-organization';
 
 /**
  * Which contract forms the page draws for whom — the eligibility copies put
@@ -52,7 +53,8 @@ function sessionFor(token: string): WebSession {
   return {
     subject: 'user-1',
     username: 'person',
-    organizationId: EMPLOYER,
+    // The stored copy is the token's, as in every stored session.
+    organizationId: storedOrganizationFor(token),
     accessToken: token,
     accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
     refreshToken: 'refresh',

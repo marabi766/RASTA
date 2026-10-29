@@ -12,6 +12,8 @@ import {
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ReturnsScreen } from './ReturnsScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/returns` route — درخواست‌های بازگشت کالا (EXP-003, RUN-005).
@@ -40,7 +42,7 @@ export default async function ReturnsPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/returns');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const role = one(params.role);
   const status = one(params.status);
   // Anything the service would not accept falls back to its own default (or
@@ -63,8 +65,9 @@ export default async function ReturnsPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -80,7 +83,11 @@ export default async function ReturnsPage({
         description="درخواست‌های بازگشت کالا که این سازمان داده یا به آن داده شده، و وضعیت هر کدام. بازپرداخت از این صفحه انجام نمی‌شود."
       />
       <div className="mt-4">
-        <ReturnsScreen result={result} query={query} actionable={actionable} />
+        <ReturnsScreen
+          result={result}
+          query={{ ...query, context: pageContext(session) }}
+          actionable={actionable}
+        />
       </div>
     </AppShell>
   );

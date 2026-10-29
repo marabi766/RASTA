@@ -5,6 +5,8 @@ import { fetchDemoMode } from '@/server/demo-mode';
 import { OFFER_SORTS, searchProducts, type ProductSearchQuery } from '@/server/marketplace';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { MarketplaceScreen } from './MarketplaceScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/marketplace` route — جست‌وجوی کالا و خدمت (docs/16 § ۱۶٫۶, role
@@ -39,7 +41,7 @@ export default async function MarketplacePage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/marketplace');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const query: ProductSearchQuery = {
     q: one(params.q),
     category: one(params.category),
@@ -52,8 +54,9 @@ export default async function MarketplacePage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -64,7 +67,11 @@ export default async function MarketplacePage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/marketplace" />}
     >
-      <MarketplaceScreen result={result} query={query} demoMode={demoMode} />
+      <MarketplaceScreen
+        result={result}
+        query={{ ...query, context: pageContext(session) }}
+        demoMode={demoMode}
+      />
     </AppShell>
   );
 }

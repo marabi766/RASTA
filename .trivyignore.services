@@ -1,0 +1,17 @@
+# Time-boxed exceptions for the Rasta service image scans (ci.yml job
+# "Build and scan images", step "Scan image"). One entry per CVE, each with
+# the reason it is not reachable and an expiry date; an expired entry turns
+# the scan red again on its own.
+#
+# CVE-2026-115905 (CRITICAL, 2026-10-29 in CI) — Rust `zip` crate 8.5.1, listed
+# in node_modules/@temporalio/core-bridge@1.23.0/Cargo.lock (marketplace-service
+# image). Inside sdk-core the crate is used only by `ephemeral_server`, which
+# downloads and unpacks a local Temporal dev/test server archive; that path is
+# reached only through @temporalio/testing (a devDependency) and never by the
+# production worker or client, which connect to the deployed Temporal
+# frontend. The fix (zip 9.0.5) ships in @temporalio/core-bridge 1.25.0,
+# published 2026-10-27 — younger than the seven-day minimum release age until
+# 2026-11-03 18:28 UTC. Expires 2026-11-04: by then bump every @temporalio/*
+# package to 1.25.0 (lockfile shows core-bridge 1.25.0) and delete this entry
+# and, if it is the last one, this file and the `trivyignores` input.
+CVE-2026-115905 exp:2026-11-04

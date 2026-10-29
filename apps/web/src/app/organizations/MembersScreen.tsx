@@ -5,6 +5,8 @@ import type { ReadResult } from '@/server/assets';
 
 import { MemberRolesForm } from './MemberRolesForm';
 import { RevokeMembershipForm } from './RevokeMembershipForm';
+import { withContext, type InContext } from '@/lib/page-context';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * The people in this organization, and the two changes an administrator may
@@ -20,7 +22,7 @@ import { RevokeMembershipForm } from './RevokeMembershipForm';
 
 export interface MembersScreenProps {
   readonly result: ReadResult<MemberPage>;
-  readonly query: MemberListQuery;
+  readonly query: InContext<MemberListQuery>;
   readonly grantableRoles: readonly string[];
   readonly csrfToken: string;
   /**
@@ -31,14 +33,14 @@ export interface MembersScreenProps {
   readonly mintSubmissionId: () => string;
 }
 
-function hrefWith(query: MemberListQuery, changes: Partial<MemberListQuery>): string {
+function hrefWith(query: InContext<MemberListQuery>, changes: Partial<MemberListQuery>): string {
   const params = new URLSearchParams();
   const merged = { ...query, ...changes };
   if (merged.q) params.set('q', merged.q);
   if (merged.role) params.set('role', merged.role);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const search = params.toString();
-  return search ? `/organizations?${search}` : '/organizations';
+  return withContext(query.context, search ? `/organizations?${search}` : '/organizations');
 }
 
 const CONTROL =
@@ -46,7 +48,7 @@ const CONTROL =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ' +
   'focus-visible:outline-focus';
 
-function Search({ query }: { query: MemberListQuery }) {
+function Search({ query }: { query: InContext<MemberListQuery> }) {
   return (
     <form
       method="get"
@@ -54,6 +56,7 @@ function Search({ query }: { query: MemberListQuery }) {
       className="flex flex-wrap items-end gap-4"
       aria-label="جست‌وجوی اعضا"
     >
+      <ContextField context={query.context} />
       <label htmlFor="member-q" className="flex flex-col gap-1 text-sm text-content-muted">
         نام، نام کاربری یا رایانامه
         <input

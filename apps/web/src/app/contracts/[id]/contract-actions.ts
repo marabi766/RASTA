@@ -15,6 +15,8 @@ import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
 import { afterRetry, type ContractFormState } from './contract-form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The server action behind the contract command forms on `/contracts/[id]`:
@@ -38,7 +40,10 @@ import { afterRetry, type ContractFormState } from './contract-form-state';
 /** Back to the contract, with a confirmation this session earned for it — never a typed flag. */
 function toContract(session: WebSession, contractId: string, command: ContractCommand): never {
   redirect(
-    `/contracts/${encodeURIComponent(contractId)}?${FLASH_PARAM}=${mintFlash(session, contractId, command)}`,
+    withContext(
+      pageContext(session),
+      `/contracts/${encodeURIComponent(contractId)}?${FLASH_PARAM}=${mintFlash(session, contractId, command)}`,
+    ),
   );
 }
 
