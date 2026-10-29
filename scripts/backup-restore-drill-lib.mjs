@@ -1,6 +1,16 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawn as nodeSpawn } from 'node:child_process';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import {
+  closeSync,
+  fsyncSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 // No broad comment/whitespace filtering: only these two generated version lines,
@@ -59,18 +69,48 @@ export function schemaDumpEvidence(raw, version, milliseconds = 0) {
 
 // Only this collection boundary can issue provenance; raw/evidence constructors cannot.
 // The collector supports synchronous PG tests and asynchronous operator subprocesses.
+// Limit: `database` is the caller's claim. It is tied to pg_dump's `-d` argument only by
+// construction in the caller (scripts/backup-restore-drill.mjs passes one variable to both).
 const dumpProvenance = new WeakMap();
-export function dumpSchema(database, label, collect) {
+const dumpInputs = new WeakMap();
+const dumpPaths = new WeakMap();
+const PROVENANCE_ERROR = 'Invalid schema dump provenance';
+/**
+ * `restoredFrom` is the evidence object whose bytes were restored into `database` before this
+ * dump; the provenance keeps its dumpId and the object itself (never serialized).
+ */
+export function dumpSchema(database, label, collect, { restoredFrom } = {}) {
+  const input = restoredFrom === undefined ? undefined : dumpProvenance.get(restoredFrom);
+  if (restoredFrom !== undefined && !input) throw new Error(PROVENANCE_ERROR);
   const finish = ({ raw, version, milliseconds = 0, path }) => {
     const evidence = schemaDumpEvidence(raw, version, milliseconds);
-    dumpProvenance.set(evidence, Object.freeze({ database, label, dumpId: randomUUID() }));
+    dumpProvenance.set(
+      evidence,
+      Object.freeze({
+        database,
+        label,
+        dumpId: randomUUID(),
+        ...(input ? { restoredFrom: input.dumpId } : {}),
+      }),
+    );
+    if (input) dumpInputs.set(evidence, restoredFrom);
+    if (path) dumpPaths.set(evidence, path);
     return { path, evidence };
   };
   const collected = collect(database, label);
   return collected instanceof Promise ? collected.then(finish) : finish(collected);
 }
 
+// A restore receives evidence, never a caller-chosen path: the private file comes from here.
+export function dumpPath(evidence) {
+  const path = dumpPaths.get(evidence);
+  if (!path) throw new Error('Missing schema dump file');
+  return path;
+}
+
 // Own the two round trips together so callers cannot accidentally reuse REF as fixed point.
+// The lineage is derived here from the evidence handed to `restore`, then checked against what
+// the following dump recorded; a dump callback that drops or changes it is refused.
 export async function collectSchemaReference({
   database,
   suffix,
@@ -91,9 +131,13 @@ export async function collectSchemaReference({
   let reference, fixedPoint, originalError, result;
   try {
     for (const [index, name] of scratch.entries()) {
+      const input = index === 0 ? separate : reference;
       await create(name);
-      await restore(name, index === 0 ? separate.path : reference.path);
-      const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point');
+      await restore(name, input.evidence);
+      const dumped = await dump(name, index === 0 ? 'reference' : 'fixed-point', {
+        restoredFrom: input.evidence,
+      });
+      if (dumpInputs.get(dumped.evidence) !== input.evidence) throw new Error(PROVENANCE_ERROR);
       if (index === 0) reference = dumped;
       else fixedPoint = dumped;
     }
@@ -369,18 +413,31 @@ export function schemaReferenceEvidence(
 ) {
   const provenance = [source, reference, fixedPoint].map((dump) => dumpProvenance.get(dump));
   const [sourceOrigin, refOrigin, fixedOrigin] = provenance;
+  // The reference input is the separate SOURCE dump whose bytes were restored into REF (the
+  // object recorded when REF was issued); the fixed point must name REF itself.
+  const input = dumpInputs.get(reference);
+  const inputOrigin = dumpProvenance.get(input);
   const refSuffix = refOrigin?.database?.match(/^drill_ref_([a-f0-9]{16})$/)?.[1];
   if (
     !sourceOrigin ||
     sourceOrigin.database !== allowance?.database ||
     sourceOrigin.label !== 'source' ||
+    sourceOrigin.restoredFrom !== undefined ||
     !refSuffix ||
     refOrigin.label !== 'reference' ||
+    !inputOrigin ||
+    inputOrigin.database !== sourceOrigin.database ||
+    inputOrigin.label !== 'reference-input' ||
+    inputOrigin.restoredFrom !== undefined ||
+    input.version !== source.version ||
+    !Buffer.isBuffer(input.content) ||
+    !input.content.equals(source.content) ||
     fixedOrigin?.database !== `drill_fixed_${refSuffix}` ||
     fixedOrigin?.label !== 'fixed-point' ||
-    new Set(provenance.map((origin) => origin?.dumpId)).size !== 3
+    fixedOrigin.restoredFrom !== refOrigin.dumpId ||
+    new Set([...provenance, inputOrigin].map((origin) => origin?.dumpId)).size !== 4
   )
-    throw new Error('Invalid schema dump provenance');
+    throw new Error(PROVENANCE_ERROR);
   const allowed = allowances.get(allowance);
   if (!allowed || allowed.source !== source || allowed.reference !== reference)
     throw new Error('Missing SOURCE/REF allowance guard');
@@ -465,13 +522,20 @@ function validateSnapshot(snapshot) {
 export function compareSnapshots(source, restored) {
   validateSnapshot(source);
   validateSnapshot(restored);
+  // SOURCE is bound by object identity, RESTORED by its own provenance: the same database, a
+  // distinct dump issued with the `restored` label (compareSnapshots(before, before) refuses).
   const proof = references.get(source.reference);
-  if (
-    !proof ||
-    !proof.source.content.equals(source.schemaDump.content) ||
-    proof.source.version !== source.schemaDump.version
-  )
+  if (!proof || proof.source !== source.schemaDump)
     throw new Error('Missing schema reference evidence');
+  const sourceOrigin = dumpProvenance.get(source.schemaDump);
+  const restoredOrigin = dumpProvenance.get(restored.schemaDump);
+  if (
+    sourceOrigin?.label !== 'source' ||
+    restoredOrigin?.label !== 'restored' ||
+    restoredOrigin.database !== sourceOrigin.database ||
+    restoredOrigin.restoredFrom !== undefined
+  )
+    throw new Error('Invalid restored schema dump provenance');
   return {
     referenceChecked: true,
     fixedPointEqual: true,
@@ -508,8 +572,14 @@ export function ledgerPassed(ledger) {
   );
 }
 
+// The same evidence object on both sides is a database compared with itself, not a restore.
 export function compareLedgers(source, restored) {
-  return ledgerPassed(source) && ledgerPassed(restored) && isDeepStrictEqual(source, restored);
+  return (
+    source !== restored &&
+    ledgerPassed(source) &&
+    ledgerPassed(restored) &&
+    isDeepStrictEqual(source, restored)
+  );
 }
 
 /** The same acceptance gate is exercised by the SQL drift tests and the operator command. */
@@ -751,3 +821,410 @@ INSERT INTO public.wallet_hold
 VALUES ('HLD_DRILL', 'ORG-RESTORE-DRILL', 'WLT_DRILL', 2500, 'IRR', 'DRILL', 'RESTORE_TEST', 'JRN_DRILL_HOLD', now(), 'restore-drill');
 COMMIT;
 `;
+
+const reportFs = { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync };
+
+/**
+ * Replace the report in one step: a random sibling is created exclusively (never through a
+ * symlink) with mode 0600, written, fsynced and renamed over the destination, so a kill at any
+ * point leaves the previous complete report or the new one. A failure removes the sibling and
+ * keeps the previous report. `durable` additionally fsyncs the parent directory. The result is
+ * true only when that fsync succeeded: only then may a caller claim the rename survives power
+ * loss. A failed directory fsync leaves the complete new report in place and returns false.
+ * Errors never quote the path.
+ */
+export function writeReportAtomically(path, report, { durable = false, fs = reportFs } = {}) {
+  const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
+  const sibling = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+  let fd;
+  try {
+    fd = fs.openSync(sibling, 'wx', 0o600);
+    for (let offset = 0; offset < bytes.length;) {
+      const written = fs.writeSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (!written) throw new Error('Could not write report');
+      offset += written;
+    }
+    fs.fsyncSync(fd);
+    const closing = fd;
+    fd = undefined;
+    fs.closeSync(closing);
+    fs.renameSync(sibling, path);
+  } catch (error) {
+    if (fd !== undefined)
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* the write error is the one to report */
+      }
+    try {
+      fs.unlinkSync(sibling);
+    } catch {
+      /* never created, or already renamed */
+    }
+    throw new Error(`Could not write report (${error?.code ?? 'failed'})`);
+  }
+  if (!durable) return false;
+  let directory;
+  try {
+    directory = fs.openSync(dirname(path), 'r');
+    fs.fsyncSync(directory);
+    return true;
+  } catch {
+    // The renamed report is complete; only its power-loss durability is unproven.
+    return false;
+  } finally {
+    if (directory !== undefined)
+      try {
+        fs.closeSync(directory);
+      } catch {
+        /* nothing more to report */
+      }
+  }
+}
+
+/** A process group is a Linux/macOS pgid; `kill(-pgid, 0)` reports whether any member remains. */
+export function groupAlive(pgid) {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+export function killGroup(pgid) {
+  try {
+    process.kill(-pgid, 'SIGKILL');
+  } catch {
+    /* already stopped */
+  }
+}
+
+/**
+ * The group leader has exited; anything still in its group is an orphan of this invocation.
+ * Returns 'gone' (nothing left), 'reaped' (members killed and confirmed gone within the
+ * bounded wait) or 'orphan' (still present: cleanup cannot be reported as passed).
+ */
+export async function reapProcessGroup(
+  pgid,
+  {
+    alive = groupAlive,
+    kill = killGroup,
+    wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    attempts = 100,
+  } = {},
+) {
+  if (!alive(pgid)) return 'gone';
+  kill(pgid);
+  for (let attempt = 0; attempt < attempts && alive(pgid); attempt++) await wait(50);
+  return alive(pgid) ? 'orphan' : 'reaped';
+}
+
+/**
+ * How long a stopped command may stay unconfirmed before the runner gives up waiting for the
+ * child's own `exit`/`close`/`error`. It applies to EVERY stop reason (timeout, output overflow,
+ * unrecorded group, signal) and does not depend on the child: a leader stuck in uninterruptible
+ * I/O survives SIGKILL and may never emit anything.
+ */
+export const KILL_CONFIRMATION_DEADLINE_MS = 10_000;
+
+/**
+ * The one lifecycle boundary for every child of the drill. Each child leads its own process
+ * group, and a group stays OWNED until its disappearance is confirmed:
+ *  - handlers are installed before anything that can throw (the report write), so a failed
+ *    persist still ends in reaping;
+ *  - the leader's `exit` (not only `close`, which waits for inherited pipes) starts a bounded
+ *    drain, after which the group is reaped, so a descendant holding stdout/stderr cannot
+ *    outlive the command;
+ *  - a timeout is a failure whatever the exit code that follows the kill;
+ *  - every stop (timeout, output overflow, unrecorded group, `stopActive()`) goes through ONE
+ *    function that kills the group and starts the kill-confirmation deadline; if the child has
+ *    not exited when it expires the command rejects with code `KILL_UNCONFIRMED`, the group
+ *    stays owned as an orphan (recorded in `report.unconfirmedProcessGroups`) for the retry and
+ *    the report, and the command counts as settled for `settleAll()`;
+ *  - a group that survives the reap (an orphan) stays in `groups`/`report.processGroups`,
+ *    in `report.orphanProcessGroups` and in the signal/retry set until a later retry sees it
+ *    gone;
+ *  - `settleAll()` is the shutdown barrier: it resolves only when EVERY command started
+ *    through `run` has settled and been reaped, siblings of a rejected one included, so nothing
+ *    is still running (or still unrecorded) when the cleanup verdict and final report are made.
+ * `persist()` writes the report and may throw; `persistFailed(stage)` records that, stickily.
+ */
+export function createProcessRunner({
+  report,
+  persist,
+  persistFailed = () => {},
+  isInterrupted = () => false,
+  currentStage = () => undefined,
+  cwd,
+  env,
+  spawn = nodeSpawn,
+  reap = reapProcessGroup,
+  kill = killGroup,
+  drainMilliseconds = 2000,
+  killDeadlineMilliseconds = KILL_CONFIRMATION_DEADLINE_MS,
+  maxOutputBytes = 64 * 1024 * 1024,
+}) {
+  const groups = new Set();
+  const orphans = new Set();
+  const outstanding = new Set();
+  const active = new Map();
+  const publish = () => {
+    report.processGroups = [...groups];
+    if (orphans.size || report.orphanProcessGroups) report.orphanProcessGroups = [...orphans];
+  };
+  async function settle(pgid, stageName, retry = false) {
+    const outcome = await reap(pgid);
+    if (outcome !== 'gone' && !retry)
+      (report.reapedProcessGroups ??= []).push({ pgid, stage: stageName });
+    if (outcome === 'orphan') orphans.add(pgid);
+    else {
+      orphans.delete(pgid);
+      groups.delete(pgid);
+    }
+    publish();
+    return outcome;
+  }
+  const failure = (options, exitCode, message, extra) => {
+    const error = new Error(options.privateOutput ? 'Private schema command failed' : message);
+    if (options.privateOutput)
+      error.privateFailure = {
+        stage: options.stage ?? currentStage(),
+        database: options.database ?? null,
+        exitCode,
+        ...extra,
+      };
+    return error;
+  };
+
+  // Every command is tracked until it has settled (its group reaped), whoever awaits it.
+  function run(command, argv, options = {}) {
+    const command_ = launch(command, argv, options);
+    const done = command_
+      .then(
+        () => {},
+        () => {},
+      )
+      .then(() => outstanding.delete(done));
+    outstanding.add(done);
+    return command_;
+  }
+
+  async function launch(command, argv, options) {
+    if (isInterrupted() && !options.cleanup) throw new Error('Interrupted');
+    return new Promise((accept, reject) => {
+      const child = spawn(command, argv, {
+        cwd: options.cwd ?? cwd,
+        env: options.env ?? env,
+        detached: true,
+        stdio: [options.inputFd ?? 'pipe', options.outputFd ?? 'pipe', 'pipe'],
+      });
+      const pgid = child.pid;
+      const stageName = currentStage();
+      const output = [];
+      let diagnostic = '';
+      let bytes = 0;
+      let overflow = false;
+      let timedOut = false;
+      let unrecorded = false;
+      let startFailed = false;
+      let finished = false;
+      let exited = false;
+      let exitCode;
+      let drainTimer;
+      let deadlineTimer;
+      // The one stop: kill the group and (once) start the deadline that does not wait for the child.
+      const stop = (reason) => {
+        kill(pgid);
+        deadlineTimer ??= setTimeout(() => unconfirmed(reason), killDeadlineMilliseconds);
+      };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        stop('timeout');
+      }, options.timeout ?? 600_000);
+      const unconfirmed = (reason) => {
+        if (finished) return;
+        // The leader did exit: the bounded drain and reap decide, not this deadline.
+        if (exited) {
+          finish(exitCode);
+          return;
+        }
+        finished = true;
+        clearTimeout(timer);
+        clearTimeout(drainTimer);
+        active.delete(pgid);
+        orphans.add(pgid);
+        (report.unconfirmedProcessGroups ??= []).push({ pgid, stage: stageName, reason });
+        publish();
+        try {
+          persist();
+        } catch {
+          persistFailed(stageName);
+        }
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref?.();
+        const error = failure(options, null, `Command could not be confirmed stopped (${reason})`, {
+          killUnconfirmed: true,
+          reason,
+        });
+        error.code = 'KILL_UNCONFIRMED';
+        reject(error);
+      };
+      const finish = async (code) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        clearTimeout(drainTimer);
+        clearTimeout(deadlineTimer);
+        active.delete(pgid);
+        try {
+          if (pgid) await settle(pgid, stageName);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        if (startFailed) reject(failure(options, null, 'Could not start command'));
+        else if (unrecorded) reject(new Error('Could not record process group'));
+        else if (code !== 0 || overflow || timedOut) {
+          const detail =
+            `${Buffer.concat(output).toString('utf8').slice(-4000)}\n${diagnostic}`.replace(
+              /postgres(?:ql)?:\/\/[^\s"']+/gi,
+              '[database URL redacted]',
+            );
+          reject(
+            failure(
+              options,
+              code,
+              `Command ${timedOut ? 'timed out' : 'failed'} (exit ${code}): ${detail}`,
+              timedOut ? { timedOut: true } : undefined,
+            ),
+          );
+        } else
+          accept(
+            options.raw ? Buffer.concat(output) : Buffer.concat(output).toString('utf8').trim(),
+          );
+      };
+      child.stdout?.on('data', (chunk) => {
+        bytes += chunk.length;
+        if (bytes > maxOutputBytes) {
+          overflow = true;
+          stop('output');
+        } else output.push(chunk);
+      });
+      child.stderr.on('data', (chunk) => {
+        diagnostic = (diagnostic + chunk.toString('utf8')).slice(-4000);
+      });
+      child.stdin?.on('error', () => {});
+      child.on('error', () => {
+        startFailed = true;
+        if (pgid) finish(null);
+        else {
+          finished = true;
+          clearTimeout(timer);
+          clearTimeout(deadlineTimer);
+          reject(failure(options, null, 'Could not start command'));
+        }
+      });
+      // `exit` is the leader; `close` additionally waits for every inherited pipe end.
+      child.on('exit', (code) => {
+        exited = true;
+        exitCode = code;
+        if (!finished) drainTimer = setTimeout(() => finish(code), drainMilliseconds);
+      });
+      child.on('close', (code) => finish(code));
+      if (child.stdin) child.stdin.end(options.input);
+      if (pgid) {
+        groups.add(pgid);
+        active.set(pgid, stop);
+        publish();
+        try {
+          persist();
+        } catch {
+          persistFailed(stageName);
+          // An unrecorded group cannot be handed over: stop it and let `finish` confirm it is
+          // gone. Cleanup commands still have to run, so they are only reported.
+          if (!options.cleanup) {
+            unrecorded = true;
+            stop('unrecorded');
+          }
+        }
+      }
+    });
+  }
+
+  return {
+    run,
+    groups,
+    orphans,
+    stopActive: () => {
+      for (const pgid of groups) {
+        const stopCommand = active.get(pgid);
+        if (stopCommand) stopCommand('signal');
+        else kill(pgid);
+      }
+    },
+    killOrphans: () => {
+      for (const pgid of orphans) kill(pgid);
+    },
+    settleAll: async () => {
+      // Commands started while waiting are awaited too.
+      while (outstanding.size) await Promise.allSettled([...outstanding]);
+    },
+    // Returns what the retry did, for the report: nothing is silently dropped.
+    retryOrphans: async () => {
+      const retried = [...orphans];
+      for (const pgid of retried) await settle(pgid, undefined, true);
+      return { retried, remaining: retried.filter((pgid) => orphans.has(pgid)) };
+    },
+  };
+}
+
+/**
+ * Check every resource kind and keep EVERY outcome (no short-circuit on the first rejection):
+ * `leftovers` are kinds with something still listed, `unverified` are kinds whose check failed.
+ */
+export async function verifyResourceKinds(kinds, list) {
+  const outcomes = await Promise.allSettled(kinds.map((kind) => list(kind)));
+  return {
+    leftovers: kinds.filter(
+      (_, index) => outcomes[index].status === 'fulfilled' && outcomes[index].value,
+    ),
+    unverified: kinds.filter((_, index) => outcomes[index].status === 'rejected'),
+  };
+}
+
+/**
+ * The one cleanup finalization. The order is fixed and unconditional:
+ *  1. barrier: every outstanding command has settled before anything is torn down;
+ *  2. `teardown()` (compose down, resource listing); a rejection fails the cleanup but never
+ *     skips what follows;
+ *  3. barrier again, so siblings of a failed step are settled and their groups reaped;
+ *  4. the retry of every group whose disappearance was unconfirmed (success path or not),
+ *     including a sibling's group that only became an orphan when the barrier let it settle;
+ *  5. the verdict, with the retry outcome, ready for the final report.
+ */
+export async function finalizeCleanup({ runner, report, teardown }) {
+  let torn = { leftovers: [], unverified: [] };
+  let failed = false;
+  await runner.settleAll();
+  try {
+    torn = { ...torn, ...(await teardown()) };
+  } catch {
+    failed = true;
+  }
+  await runner.settleAll();
+  let orphanRetry = { retried: [], remaining: [] };
+  try {
+    orphanRetry = await runner.retryOrphans();
+  } catch {
+    failed = true;
+  }
+  const passed =
+    !failed &&
+    !torn.leftovers.length &&
+    !torn.unverified.length &&
+    !report.orphanProcessGroups?.length;
+  return { passed, leftovers: torn.leftovers, unverified: torn.unverified, orphanRetry };
+}

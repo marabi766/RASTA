@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
   closeSync,
@@ -9,8 +8,6 @@ import {
   readFileSync,
   rmSync,
   writeFileSync,
-  writeSync,
-  ftruncateSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -26,12 +23,17 @@ import {
   SCHEMA_DUMP_FLAGS,
   DUMP_RESTRICT_KEY,
   dumpSchema,
+  dumpPath,
   collectSchemaReference,
   schemaDiffSummary,
   checkServiceCoverage,
   OBJECT_STATE_SQL,
   SEQUENCES_SQL,
   compareSnapshots,
+  writeReportAtomically,
+  createProcessRunner,
+  finalizeCleanup,
+  verifyResourceKinds,
   drillPassed,
   checkDatabaseCoverage,
   summarizeTables,
@@ -54,10 +56,10 @@ if (args.length !== 2 || args[0] !== '--report') {
   process.exit(2);
 }
 // Exclusive creation avoids overwriting an operator's file (including through a symlink).
+// Later writes replace it atomically through a sibling file (see writeReportAtomically).
 const reportPath = resolve(args[1]);
-let reportFd;
 try {
-  reportFd = openSync(reportPath, 'wx', 0o600);
+  closeSync(openSync(reportPath, 'wx', 0o600));
 } catch {
   // Not the path, nor the error that quotes it (#385 r6).
   console.error(
@@ -83,9 +85,11 @@ let stage = 'preflight';
 let interrupted = false;
 let cleaning = false;
 process.stderr.on('error', () => {});
-let active;
 let composeReady = false;
+// Cleanup ownership serializes first: a torn or partial rewrite still names what to remove.
 const report = {
+  project: undefined,
+  temporary: undefined,
   version: 5,
   signals: [],
   startedAt: new Date().toISOString(),
@@ -95,107 +99,49 @@ const report = {
   cleanup: { passed: false },
 };
 
-function writeReport() {
-  const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
-  let offset = 0;
-  while (offset < bytes.length) {
-    const written = writeSync(reportFd, bytes, offset, bytes.length - offset, offset);
-    if (!written) throw new Error('Could not write report');
-    offset += written;
-  }
-  ftruncateSync(reportFd, bytes.length);
+// Persist cleanup ownership before any child can allocate resources (including SIGKILL).
+// A failure keeps the previous complete report. Only `durable` writes fsync the directory:
+// the others protect against the process being killed, not against power loss.
+// Every report but the final one says `passed: false`: an unfinished run has not passed.
+function writeReport({ durable = false, final = false } = {}) {
+  const synced = writeReportAtomically(reportPath, final ? report : { ...report, passed: false }, {
+    durable,
+  });
+  if (durable && !synced)
+    process.stderr.write(
+      '[backup-restore-drill] the report directory could not be synced; the report is written but power-loss durability is not confirmed\n',
+    );
 }
 
-function commandError(options, exitCode, message) {
-  const error = new Error(options.privateOutput ? 'Private schema command failed' : message);
-  if (options.privateOutput)
-    error.privateFailure = {
-      stage: options.stage ?? stage,
-      database: options.database ?? null,
-      exitCode,
-    };
-  return error;
-}
-
-function stopActive() {
-  if (active) {
-    try {
-      process.kill(-active.pid, 'SIGKILL');
-    } catch {
-      /* already stopped */
-    }
-  }
-}
+// The one process lifecycle boundary (createProcessRunner): every child leads its own group,
+// whose id is written to the report before the child is awaited, so a SIGKILL of the drill
+// leaves the operator the groups to stop. A group stays owned until it is confirmed gone.
+// A report write that fails is recorded and makes the final result fail (see finally below).
+const runner = createProcessRunner({
+  report,
+  persist: () => writeReport(),
+  persistFailed: (stageName) => {
+    (report.reportWriteFailures ??= []).push({ stage: stageName ?? stage });
+    process.stderr.write(
+      '[backup-restore-drill] a report write failed; the run cannot be reported as passed\n',
+    );
+  },
+  isInterrupted: () => interrupted,
+  currentStage: () => stage,
+  cwd: ROOT,
+  env,
+});
+const run = runner.run;
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     interrupted = true;
     report.signals.push({ signal, duringCleanup: cleaning });
-    if (!cleaning) stopActive();
-    else process.stderr.write(`[backup-restore-drill] cleanup continues after ${signal}\n`);
-  });
-}
-
-/** Bounded children; failure diagnostics retain the last 4 KB per stream.
- * Database URLs are redacted; synthetic seed payloads can appear in diagnostics. */
-async function run(command, argv, options = {}) {
-  if (interrupted && !options.cleanup) throw new Error('Interrupted');
-  return new Promise((accept, reject) => {
-    const child = spawn(command, argv, {
-      cwd: options.cwd ?? ROOT,
-      env: options.env ?? env,
-      detached: true,
-      stdio: [options.inputFd ?? 'pipe', options.outputFd ?? 'pipe', 'pipe'],
-    });
-    active = child;
-    const output = [];
-    let diagnostic = '';
-    let bytes = 0;
-    let overflow = false;
-    const timer = setTimeout(() => {
-      try {
-        process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        /* already stopped */
-      }
-    }, options.timeout ?? 600_000);
-    child.stdout?.on('data', (chunk) => {
-      bytes += chunk.length;
-      if (bytes > 64 * 1024 * 1024) {
-        overflow = true;
-        try {
-          process.kill(-child.pid, 'SIGKILL');
-        } catch {
-          /* already stopped */
-        }
-      } else output.push(chunk);
-    });
-    child.stderr.on('data', (chunk) => {
-      diagnostic = (diagnostic + chunk.toString('utf8')).slice(-4000);
-    });
-    child.stdin?.on('error', () => {});
-    if (child.stdin) child.stdin.end(options.input);
-    child.on('error', () => {
-      clearTimeout(timer);
-      active = undefined;
-      reject(commandError(options, null, 'Could not start command'));
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      active = undefined;
-      if (code !== 0 || overflow) {
-        if (options.privateOutput) {
-          reject(commandError(options, code, 'Private schema command failed'));
-          return;
-        }
-        const detail =
-          `${Buffer.concat(output).toString('utf8').slice(-4000)}\n${diagnostic}`.replace(
-            /postgres(?:ql)?:\/\/[^\s"']+/gi,
-            '[database URL redacted]',
-          );
-        reject(new Error(`Command failed (exit ${code}): ${detail}`));
-      } else
-        accept(options.raw ? Buffer.concat(output) : Buffer.concat(output).toString('utf8').trim());
-    });
+    if (!cleaning) runner.stopActive();
+    else {
+      // Cleanup commands are not killed, but a group that survived an earlier kill is retried.
+      runner.killOrphans();
+      process.stderr.write(`[backup-restore-drill] cleanup continues after ${signal}\n`);
+    }
   });
 }
 
@@ -223,29 +169,34 @@ const psql = (container, database, input, options = {}) =>
 
 let dumpVersion;
 let schemaDumpFlags;
-async function collectSchemaDump(container, database, label) {
-  return dumpSchema(database, label, async () => {
-    const started = performance.now();
-    const version = await run('docker', ['exec', container, 'pg_dump', '--version']);
-    if (dumpVersion && version !== dumpVersion)
-      throw new Error('Schema dump binary version mismatch');
-    if (!dumpVersion) {
-      dumpVersion = version;
-      const help = await run('docker', ['exec', container, 'pg_dump', '--help']);
-      schemaDumpFlags = [
-        ...SCHEMA_DUMP_FLAGS,
-        ...(help.includes('--restrict-key') ? [`--restrict-key=${DUMP_RESTRICT_KEY}`] : []),
-      ];
-    }
-    const raw = await run(
-      'docker',
-      ['exec', container, 'pg_dump', ...schemaDumpFlags, '-U', 'rasta', '-d', database],
-      { raw: true, privateOutput: true, database, timeout: 60_000 },
-    );
-    const path = join(temporary, `${database}-${label}.schema.sql`);
-    writeFileSync(path, raw, { mode: 0o600 });
-    return { path, raw, version, milliseconds: Math.round(performance.now() - started) };
-  });
+async function collectSchemaDump(container, database, label, options) {
+  return dumpSchema(
+    database,
+    label,
+    async () => {
+      const started = performance.now();
+      const version = await run('docker', ['exec', container, 'pg_dump', '--version']);
+      if (dumpVersion && version !== dumpVersion)
+        throw new Error('Schema dump binary version mismatch');
+      if (!dumpVersion) {
+        dumpVersion = version;
+        const help = await run('docker', ['exec', container, 'pg_dump', '--help']);
+        schemaDumpFlags = [
+          ...SCHEMA_DUMP_FLAGS,
+          ...(help.includes('--restrict-key') ? [`--restrict-key=${DUMP_RESTRICT_KEY}`] : []),
+        ];
+      }
+      const raw = await run(
+        'docker',
+        ['exec', container, 'pg_dump', ...schemaDumpFlags, '-U', 'rasta', '-d', database],
+        { raw: true, privateOutput: true, database, timeout: 60_000 },
+      );
+      const path = join(temporary, `${database}-${label}.schema.sql`);
+      writeFileSync(path, raw, { mode: 0o600 });
+      return { path, raw, version, milliseconds: Math.round(performance.now() - started) };
+    },
+    options,
+  );
 }
 
 async function collectReference(container, database, sourceDump) {
@@ -255,14 +206,14 @@ async function collectReference(container, database, sourceDump) {
     database,
     suffix,
     sourceDump,
-    dump: (name, label) => collectSchemaDump(container, name, label),
+    dump: (name, label, options) => collectSchemaDump(container, name, label, options),
     create: (name) =>
       psql(container, 'postgres', `CREATE DATABASE "${name}" TEMPLATE template0;`, {
         privateOutput: true,
         database: name,
       }),
-    restore: async (name, path) => {
-      const fd = openSync(path, 'r');
+    restore: async (name, input) => {
+      const fd = openSync(dumpPath(input), 'r');
       try {
         await run(
           'docker',
@@ -342,13 +293,22 @@ function progress(value) {
   process.stderr.write(`[backup-restore-drill] ${stage}\n`);
 }
 
+const failedCleanup = ({ leftovers = [], unverified = [] } = {}) => ({
+  passed: false,
+  project,
+  temporary,
+  // Resource kinds only (no ids): what still exists, and what could not be checked.
+  ...(leftovers.length && { leftovers }),
+  ...(unverified.length && { unverified }),
+  ...(report.orphanProcessGroups?.length && { orphanProcessGroups: report.orphanProcessGroups }),
+});
+
 try {
   temporary = mkdtempSync(join(tmpdir(), 'rasta-restore-drill-'));
   project = `restore-drill-${randomBytes(8).toString('hex')}`;
   report.project = project;
   report.temporary = temporary;
-  // Persist cleanup ownership before any child can allocate resources (including SIGKILL).
-  writeReport();
+  writeReport({ durable: true });
   composeFile = join(temporary, 'compose.json');
   services = servicesFromLibrary(
     readFileSync(join(ROOT, 'infrastructure/docker/postgres/lib/role-passwords.bash'), 'utf8'),
@@ -549,44 +509,60 @@ try {
 } finally {
   cleaning = true;
   progress('cleanup owned containers, networks and volumes');
-  try {
-    if (composeReady)
+  // Unconditional finalization (barrier, teardown, barrier, orphan retry, verdict): a failing
+  // step fails the cleanup but never skips the retry or lets the report out before every
+  // command has settled.
+  const verdict = await finalizeCleanup({
+    runner,
+    report,
+    teardown: async () => {
+      if (!composeReady) return {};
       await compose(['down', '--volumes', '--timeout', '15'], { cleanup: true, timeout: 60_000 });
-    // Confirm no owned resources survived (never enumerate/remove another project's resources).
-    const resources = composeReady
-      ? await Promise.all(
-          ['container', 'volume', 'network'].map((kind) =>
-            run(
-              'docker',
-              [
-                kind,
-                'ls',
-                ...(kind === 'container' ? ['-a'] : []),
-                '--quiet',
-                '--filter',
-                `label=com.docker.compose.project=${project}`,
-              ],
-              { cleanup: true, timeout: 15_000 },
-            ),
-          ),
-        )
-      : [];
-    if (resources.some(Boolean)) {
-      report.cleanup = { passed: false, project, temporary };
-      report.passed = false;
-    } else {
-      report.cleanup.passed = true;
-      if (temporary) rmSync(temporary, { recursive: true, force: true });
+      // Confirm no owned resources survived (never enumerate/remove another project's resources).
+      return verifyResourceKinds(['container', 'volume', 'network'], (kind) =>
+        run(
+          'docker',
+          [
+            kind,
+            'ls',
+            ...(kind === 'container' ? ['-a'] : []),
+            '--quiet',
+            '--filter',
+            `label=com.docker.compose.project=${project}`,
+          ],
+          { cleanup: true, timeout: 15_000 },
+        ),
+      );
+    },
+  });
+  let removed = verdict.passed;
+  if (removed && temporary) {
+    try {
+      rmSync(temporary, { recursive: true, force: true });
+    } catch {
+      removed = false;
     }
-  } catch {
-    report.cleanup = { passed: false, project, temporary };
+  }
+  if (removed) report.cleanup.passed = true;
+  else {
+    report.cleanup = failedCleanup(verdict);
     report.passed = false;
   }
+  if (verdict.orphanRetry.retried.length) report.cleanup.orphanRetry = verdict.orphanRetry;
   report.finishedAt = new Date().toISOString();
   report.interrupted = interrupted;
-  if (interrupted) report.passed = false;
-  writeReport();
-  closeSync(reportFd);
+  // A report write that failed at any point (cleanup included) is never forgotten.
+  if (interrupted || report.reportWriteFailures?.length) report.passed = false;
+  try {
+    writeReport({ durable: true, final: true });
+  } catch {
+    // The provisional report stays: it still names the project, temporary directory and groups.
+    // A complete cleanup is then reported only on stderr, never as a passing report.
+    report.passed = false;
+    process.stderr.write(
+      '[backup-restore-drill] the final report could not be written; the previous report remains\n',
+    );
+  }
 }
 console.log(
   JSON.stringify({

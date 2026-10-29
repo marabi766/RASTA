@@ -69,10 +69,30 @@ REF equality proves the backup under test restores to exactly what PostgreSQL it
 
 Restore REF into a second fresh scratch database and dump it: these bytes must
 also equal REF. Private WeakMap provenance, issued only by schema dump collection,
-requires three distinct dumps: SOURCE from the service database with label `source`,
-REF from `drill_ref_<suffix>` with label `reference`, and the fixed point from
-`drill_fixed_<suffix>` with label `fixed-point`. Both scratch names must share the
-same invocation suffix. Dumping the wrong database refuses even if its bytes match.
+requires four distinct dumps: SOURCE from the service database with label `source`,
+the separate SOURCE dump that gets restored (`reference-input`, same database, same
+`pg_dump` version, bytes equal to SOURCE), REF from `drill_ref_<suffix>` with label
+`reference`, and the fixed point from `drill_fixed_<suffix>` with label `fixed-point`.
+Both scratch names must share the same invocation suffix.
+
+The restore INPUTS are bound as well as the dump outputs. `restore` receives the input
+evidence object (never a caller-chosen path: the private file is looked up through the
+provenance), and the dump that follows records `restoredFrom: <input dumpId>`, taken from
+the evidence actually restored. REF must name the reference-input dump, the fixed point
+must name REF, and a dump callback that drops or changes the lineage refuses. Restoring
+SOURCE a second time instead of REF therefore cannot produce a pass, even though PostgreSQL's
+deparse is deterministic and the bytes would match. On the restored side, `compareSnapshots`
+requires the post-restore dump to carry the `restored` label for the same database, and
+SOURCE must be the very dump REF was built from (object identity, not equal bytes), so
+`compareSnapshots(before, before)` refuses.
+
+Limit: the database name in a provenance record is the caller's claim. It is tied to
+`pg_dump -d` only by construction: `scripts/backup-restore-drill.mjs` passes one variable to
+both. A dump claimed for another database or label refuses even if its bytes match; a dump
+whose claim lies about its own `-d` argument cannot be detected by this library.
+The same holds for the archive file given to `pg_restore` (`<temporary>/<service>.dump`) and for
+the SOURCE/restored ledger objects: they are named by construction in the CLI, not by evidence;
+the library refuses only the same ledger object on both sides.
 Missing REF, missing fixed-point evidence, a skipped allowance
 guard, or any failed reference restore/dump refuses operator acceptance. The drill
 creates both databases with its random suffix inside its existing single active
@@ -156,8 +176,63 @@ consistency with active writers, or full-system recovery.
 پاکسازی را شروع می‌کنند؛ سیگنال‌های بعدی ثبت می‌شوند و فرمان پاکسازی را نمی‌کشند.
 خطای نوشتن stderr پس از قطع پایپ مانع پاکسازی نمی‌شود. برای هر فرمان سقف زمان داریم. SIGKILL، قطع برق یا از دست
 رفتن Docker daemon می‌تواند منابع را باقی بگذارد. بلافاصله پس از ساخت نام پروژه، گزارش اولیه با
-`project` و `temporary` و `passed: false` نوشته می‌شود؛ نبود `finishedAt` یعنی اجرا کامل نشده است.
-فقط با همین نام پروژه ثبت‌شده در گزارش و فایل `compose.json` در مسیر `temporary` پاکسازی کنید؛
+`project` و `temporary` و `passed: false` نوشته می‌شود و این دو همیشه نخستین کلیدهای گزارش‌اند؛
+نبود `finishedAt` یعنی اجرا کامل نشده است. هر گزارش ناتمام `passed: false` دارد.
+
+هر نوشتن گزارش اتمی است: فایل خواهر تصادفی (`<report>.<hex>.tmp`) با ساخت انحصاری و مجوز `0600`
+(بدون دنبال‌کردن symlink) نوشته، fsync و روی گزارش rename می‌شود. پس قطع در هر لحظه گزارش
+اولیه یا گزارش کامل را باقی می‌گذارد؛ هر دو JSON معتبر با `project` و `temporary`‌اند. شکست نوشتن،
+fsync یا rename گزارش قبلی را نگه می‌دارد، فایل خواهر را حذف می‌کند و فقط روی stderr (بدون مسیر)
+اعلام می‌شود؛ تمرین هرگز با چنین شکستی موفق گزارش نمی‌شود و کد خروج غیرصفر است. شکست نوشتن در
+حین پاکسازی هم فراموش نمی‌شود: پاکسازی ادامه می‌یابد، مرحله شکست (بدون مسیر) در `reportWriteFailures`
+می‌ماند و در نوشتن بعدی گزارش (از جمله نوشتن پایانی) ثبت می‌شود و `passed: false` و کد خروج ۱ می‌دهد. نوشتن‌های میانی فقط
+در برابر مرگ فرایند ایمن‌اند؛ تنها نوشتن اولیه و پایانی پوشه والد را هم fsync می‌کنند و تنها برای آن‌ها
+می‌توان ماندگاری پس از قطع برق را ادعا کرد؛ اگر fsync پوشه شکست بخورد، گزارش کامل در جای خود می‌ماند و
+هشدار روی stderr چاپ می‌شود. اگر قطع یا شکست میانه نوشتن رخ دهد، فایل خواهر
+`<report>.<hex>.tmp` با مجوز `0600` ممکن است بماند؛ پس از بررسی حذفش کنید.
+
+هر فرزند در گروه فرایند جدا (`detached`) اجرا می‌شود، پس SIGKILL تمرین فرزندان را نمی‌کشد:
+`docker compose up --wait`، `pg_dump` یا `pnpm db:migrate` ممکن است همچنان منابع بگیرند.
+شناسه گروه (PGID) هر فرزند پیش از انتظار برای آن در `processGroups` گزارش نوشته می‌شود (گروه‌های
+در حال اجرا؛ ورودی تازه‌تمام‌شده ممکن است بماند، پس عضویت را بررسی کنید). پنجره چند میلی‌ثانیه‌ای
+بین ساخت فرزند و نوشتن گزارش ثبت‌نشده می‌ماند. جست‌وجوی `pgrep -f <project>` به‌تنهایی کافی نیست:
+فرزندان migration و build نام پروژه را در argv ندارند. پس از SIGKILL به این ترتیب عمل کنید:
+
+1. فهرست گروه‌ها اجتماع `processGroups` و `orphanProcessGroups` است (گروه بازمانده همیشه در هر دو
+   می‌ماند). برای هر PGID اجرا کنید `ps -o pid,pgid,args -g <PGID>`. خروجی خالی یعنی گروه رفته است.
+   فقط گروهی که فرایندهای همین تمرین را نشان می‌دهد (نه PGID بازمصرف‌شده کاربر یا فرمان دیگر) با
+   `kill -KILL -- -<PGID>` متوقف شود؛ پیش از هر kill همین بررسی را دوباره انجام دهید. هرگز بر پایه الگو
+   (`pkill -f`، `killall`) نکشید.
+2. صبر کنید تا `ps -g` برای همه PGIDها خالی شود و `pgrep -f <project>` هم چیزی نشان ندهد.
+3. فقط سپس `docker compose --project-name <project> --file <temporary>/compose.json down --volumes`.
+4. سپس پوشه `temporary` (فایل‌های SQL و آرشیوهای dump با مجوز `0600`) و فایل‌های خواهر `.tmp` گزارش را حذف کنید.
+
+در اجرای عادی، پایان رهبر گروه (رویداد `exit`، نه بسته‌شدن پایپ‌ها) ملاک است: اگر فرزندی پایپ
+stdout/stderr را نگه دارد، پس از انتظار کوتاه و محدود (۲ ثانیه) گروه کشته می‌شود و تا سقف زمان فرمان
+(تا ۱۰ دقیقه) باقی نمی‌ماند. عضوی که پس از خروج رهبر بماند کشته و در `reapedProcessGroups` ثبت می‌شود.
+گروهی که پس از انتظار محدود باز هم بماند در `processGroups` و `orphanProcessGroups` می‌ماند، سیگنال‌های
+بعدی (حتی در حین پاکسازی) دوباره آن را می‌کشند، پیش از نتیجه پاکسازی یک بار دیگر بررسی می‌شود و
+`cleanup.passed: false` همراه `project` و `temporary` می‌ماند. گروه فقط وقتی از مالکیت خارج می‌شود
+که ناپدیدشدنش تأیید شده باشد. سقف زمان فرمان همیشه شکست است، حتی اگر کد خروج پس از kill صفر باشد
+(`timedOut: true` در شکست خصوصی). اگر نوشتن PGID در گزارش شکست بخورد، فرمان غیر پاکسازی متوقف
+می‌شود، گروهش کشته و ناپدیدشدنش تأیید می‌شود و خطا `Could not record process group` است؛ فرمان پاکسازی
+ادامه می‌یابد. در هر دو حالت `reportWriteFailures` ثبت و نتیجه ناموفق است.
+پاکسازی همیشه به همین ترتیب پایان می‌یابد: ابتدا همه فرمان‌های در حال اجرا (از جمله همتایان فرمانی که
+شکست خورده، مثل بررسی هم‌زمان container، volume و network) تمام و گروه‌هایشان بررسی می‌شود؛ بعد
+`compose down` و فهرست منابع؛ سپس یک بار دیگر هر گروه بازمانده بررسی می‌شود، حتی اگر `down` یا فهرست
+منابع شکست خورده باشد؛ و فقط پس از آن گزارش نهایی نوشته می‌شود. نتیجه این بررسی در
+`cleanup.orphanRetry` (`retried` و `remaining`) و منابع باقی‌مانده یا بررسی‌نشده (فقط نوع منبع، بدون
+شناسه) در `cleanup.leftovers` و `cleanup.unverified` ثبت می‌شود.
+انتظار برای پایان فرمانی که کشته شده به رویدادهای خود فرزند وابسته نیست. هر توقف (سقف زمان، سرریز
+خروجی، ثبت‌نشدن PGID، سیگنال) از یک مسیر می‌گذرد: گروه با SIGKILL کشته می‌شود و مهلت تأیید کشتن
+(`KILL_CONFIRMATION_DEADLINE_MS`، در `scripts/backup-restore-drill-lib.mjs`، ۱۰ ثانیه) شروع می‌شود. فرزندی
+که در I/O غیرقابل‌وقفه گیر کرده ممکن است پس از SIGKILL هیچ‌گاه `exit`، `close` یا `error` نفرستد. اگر
+مهلت تمام شود و رهبر گروه خارج نشده باشد، فرمان با کد `KILL_UNCONFIRMED` رد می‌شود و در انتظار پایان
+همه فرمان‌ها تمام‌شده حساب می‌شود، پس پاکسازی و گزارش نهایی منتظر آن نمی‌مانند. PGID آن بدون تأیید می‌ماند: در
+`unconfirmedProcessGroups` (`pgid`، `stage`، `reason`)، در `processGroups` و `orphanProcessGroups` ثبت
+می‌شود و بررسی دوباره پیش از نتیجه پاکسازی آن را می‌آزماید؛ تا وقتی ناپدیدشدنش تأیید نشود
+`cleanup.passed` برابر `false` است. برای چنین گروهی همان مراحل بازیابی بالا (`ps -g`، سپس `kill -KILL`)
+را دنبال کنید؛ اگر فرایند در حالت `D` بماند فقط راه‌اندازی مجدد میزبان آن را آزاد می‌کند.
 هرگز stack مشترک را reset نکنید. شکست حذف پایگاه scratch در `scratchDropFailed` ثبت می‌شود؛
 خطای اصلی جمع‌آوری مدرک حفظ می‌شود و پاکسازی خوشه متعلق به تمرین همچنان انجام می‌شود.
 
