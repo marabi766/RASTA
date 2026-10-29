@@ -4163,6 +4163,14 @@ Endpoint نوشتن با نقش، Audit و احتمالاً Four-Eyes (الگو�
 
 **Decision owner:** PM, security and identity/web maintainers. Internal-token source-boundary enforcement is Follow-up 1 in `docs/internal-token-transport-scope.md`, a separate scope from this question.
 
+**Status (2026-10-29, task 106, branch `fix/credential-redirects`): partly closed, still open.** Closed by this change:
+
+- The portal's two sites (3 and 4 above) send through `credentialFetch` (`apps/web/src/server/credential-fetch.ts`), the portal's copy of `internalFetch` (the portal cannot import `@rasta/nest-common`). A redirected gateway call is `GatewayOutcomeUnknownError`, so a write is `UNKNOWN_OUTCOME` with its key, body and replay deadline kept for recovery — never `neverSent` or a refusal. A redirected token request is `TOKEN_REQUEST_FAILED`, never `INVALID_GRANT`: a refresh it answers is `REFUSED` and does not end the session.
+- The E2E harness (`tests/e2e/src/http.ts`) refuses redirects for every request — bearer tokens and Keycloak form grants, not only `x-internal-token`. The Grafana probe's Basic-auth calls use `scripts/credential-fetch.mjs`.
+- The `internal/transport` lint rule now covers authorization, proxy-authorization, cookie and API-key headers, `Bearer`/`Basic` values, and the `client_secret`, `client_assertion`, `refresh_token`, `code_verifier`, `access_token`, `subject_token` and `password` form fields. It runs in `apps/web/eslint.config.mjs` too. Real-workspace tests cover both directions.
+
+Still open: (1) the identity Keycloak client (sites 1 and 2, plus its third fetch; now `keycloak.client.ts:257, 295, 336` on `main`). PR #483 routes all three through `internalFetch`. Until #483 merges, `services/identity-service/eslint.config.mjs` exempts that one file, and a workspace test fails once the file uses `internalFetch` while the exemption remains. Q-155 can close when #483 merges and the exemption is deleted. (2) The rule is syntactic and per module; a credential built in another file is Follow-up 1 of `docs/internal-token-transport-scope.md`. Excluded with reasons: the browser's same-origin cookie request (`apps/web/src/lib/session-refusal.ts`), and the portal's browser-E2E helpers and specs under `apps/web/e2e/` (test-only, not linted). The full sweep is in that document.
+
 ---
 
 ## ۲۴٫۱۰ خلاصه وضعیت

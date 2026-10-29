@@ -69,5 +69,43 @@ wired into root `lint:scripts`, and disables the real configured rule to verify
 that test detects missing enforcement. No claim of complete alias/data-flow
 coverage follows from either mutant.
 
-Other credential-bearing redirect paths are tracked separately in Q-155 in
-`docs/24-open-questions.md`.
+## Q-155: every credential, not only the internal token (task 106)
+
+The same policy now covers every credential-bearing call outside the services'
+`internalFetch`: the portal's `credentialFetch` (`apps/web/src/server/credential-fetch.ts`,
+for the gateway bearer and the OIDC token grants), `scripts/credential-fetch.mjs` (the
+Grafana probe's Basic auth, run unbuilt in a bare Node container), and the E2E hand guard,
+which now refuses redirects for every request. The portal and scripts cannot import
+nest-common, so each keeps a copy; `scripts/credential-fetch.test.mjs` pins all four to the
+same five statuses and the same `redirect: 'manual'` placement, and tests the scripts copy
+over real HTTP. `apps/web/src/server/credential-redirects.spec.ts` does the same for the
+portal's callers.
+
+The lint rule now triggers on a module that sends any credential, detected
+**syntactically in the same module**: a property key or string literal naming
+`authorization`, `proxy-authorization`, `cookie`, `x-api-key`/`api-key`/`apiKey` or
+`x-internal-token`; a `Bearer `/`Basic ` value; or the form fields `client_secret`,
+`client_assertion`, `refresh_token`, `code_verifier`, `access_token`, `subject_token` and
+`password`. In such a module every raw `fetch`/`fetchImpl`/`request`/`axios` call (and alias),
+and every `http`/`https`/`undici`/`axios`/`node-fetch` import, fails. The portal's own
+`eslint.config.mjs` now runs the rule on `src` (specs and `src/test` excluded). The real
+workspace tests cover services, packages, `dev`, E2E, the portal (`.ts` and `.tsx`) and
+root scripts, both directions, for every credential kind. `__tests__` fixtures are excluded
+with the other test helpers.
+
+This is **syntactic coverage, not a credential-source boundary**. A header name or form
+field built in another file, a computed name from a variable, or the other evasions in the
+table above still pass. They stay open in Follow-up 1, which must cover credential headers
+as well as internal-token issuance.
+
+Temporary exemption: `services/identity-service/src/keycloak/keycloak.client.ts` still
+sends its client secret and admin bearer with raw `fetch` on `main`. PR #483 moves all
+three exchanges to `internalFetch`. Until then, `services/identity-service/eslint.config.mjs`
+exempts that one file. `internal-token-transport-workspace.test.mjs` proves the exemption
+is limited to it and fails once the file uses `internalFetch` with the exemption still in place.
+
+Sweep (task 106) and exclusions: Q-155 in `docs/24-open-questions.md`. The browser's
+same-origin `/auth/session` probe sends only the browser's own cookie
+(`credentials: 'same-origin'`, never a cross-origin target). The portal's browser-E2E
+helpers and specs under `apps/web/e2e/` are test-only and outside the portal's linted
+`src`. Both are excluded.
