@@ -1,8 +1,9 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { releaseWithin } from '@rasta/nest-common';
+import { ISO_INSTANT_SHAPE, expectStoredMessageWithout } from '@rasta/testing';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { validateInventoryPayload, type InventoryEventName } from '../src/events/events';
-import { client, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
+import { actor, client, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, newOrganizationId } from './helpers';
 
 /**
@@ -88,7 +89,8 @@ describe('the transactional outbox', () => {
 
   it('carries no warehouse name or location — identifiers, quantities and instants only', async () => {
     const a = org();
-    const owner = client(api, orgAdmin(a));
+    const creator = 'USR-APITEST-OUTBOX';
+    const owner = client(api, actor(a, ['ORGANIZATION_ADMIN'], { rastaUserId: creator }));
     const name = 'Very identifiable name';
     const location = { latitude: 35.689197, longitude: 51.388974 };
     const created = await owner.createWarehouse({ name, location });
@@ -105,29 +107,30 @@ describe('the transactional outbox', () => {
     expect(envelope.payload).toEqual({
       warehouseId: created.body.id,
       organizationId: a,
-      createdBy: expect.any(String),
-      createdAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/),
+      createdBy: creator,
+      createdAt: expect.stringMatching(ISO_INSTANT_SHAPE),
     });
 
-    // The whole stored message, envelope included, value by value. Never as a substring of its
-    // JSON: that text carries ULIDs and instants, and a short coordinate such as "35.7" occurs
-    // inside "…:35.712Z" about one run in 600 (train run 40130819112).
-    const values: unknown[] = [];
+    // The whole stored message, envelope included, key by key and value by value: the name and
+    // both coordinates (as text or as numbers) may be nowhere in it, not as a value, not as part
+    // of one and not as a property NAME (envelope parsing strips an unknown key, so only the raw
+    // row shows it). Never as a substring of its JSON: that text carries ULIDs and instants, and
+    // a short coordinate such as "35.7" occurs inside "…:35.712Z" about one run in 600 (train run
+    // 40130819112); strict instants are not searched, and a full six-decimal coordinate is.
+    expectStoredMessageWithout(rows[0]?.payload, {
+      anywhere: [name, String(location.latitude), String(location.longitude)],
+      topLevelKeys: Object.keys(eventEnvelopeSchema.shape),
+    });
+    // A coordinate rounded to a number in the same neighbourhood is also a disclosure.
+    const numbers: number[] = [];
     JSON.stringify(rows[0]?.payload, (_key, value: unknown) => {
-      values.push(value);
+      if (typeof value === 'number') numbers.push(value);
       return value;
     });
-    for (const value of values) {
-      if (typeof value === 'string') {
-        expect(value === name || value.includes(name)).toBe(false);
-        expect(value.includes('35.689197') || value.includes('51.388974')).toBe(false);
-      }
-      if (typeof value === 'number') {
-        expect(Math.abs(value - location.latitude)).toBeGreaterThan(0.5);
-        expect(Math.abs(value - location.longitude)).toBeGreaterThan(0.5);
-      }
+    for (const value of numbers) {
+      expect(Math.abs(value - location.latitude)).toBeGreaterThan(0.5);
+      expect(Math.abs(value - location.longitude)).toBeGreaterThan(0.5);
     }
-    expect(values.length).toBeGreaterThan(10);
   });
 
   it('writes nothing when a command is refused', async () => {

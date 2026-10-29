@@ -137,7 +137,7 @@ const hasControlCharacter = (text) =>
  *
  *  - `main`    a push to refs/heads/main: every image;
  *  - `train`   a pull request from this repository whose head is `mq/train-N`
- *              (the PM merge train, which merges only what its run proved):
+ *              (the PM merge train; its run is the scan evidence for what it merges):
  *              the affected images, ALL on any classification error;
  *  - `pr`      any other pull request: no image (built on the train);
  *  - `unknown` anything else — another event or branch, missing or malformed

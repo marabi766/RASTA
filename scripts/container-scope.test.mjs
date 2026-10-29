@@ -307,6 +307,34 @@ test('workflow decides images from the event through env, installs its parser on
   assert.equal(scope.if, undefined);
 });
 
+// The repository cannot know what the merge host enforces, so no text here may claim it. It states
+// the contract instead: an ordinary pull request passes without scanning; the scan evidence is the
+// aggregate on the train pull request and the push run on main (review of #486, finding 1).
+test('the aggregate check states its contract and claims nothing about the host', () => {
+  const workflow = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
+  const docs = readFileSync(join(root, 'docs/14-testing-strategy.md'), 'utf8');
+  assert.match(workflow, /ordinary pull request it PASSES WITHOUT scanning/);
+  assert.match(workflow, /the merge host must require the aggregate to PASS/);
+  assert.match(workflow, /must not merge ordinary pull\s+#\s+requests outside the train/);
+  assert.match(docs, /عمداً بدون اسکن/);
+  assert.match(docs, /نباید PR عادی را بیرون از قطار ادغام کند/);
+  const claims =
+    /(?:host|merge train) (?:merge )?(?:script )?(?:already )?requires|the one the merge train requires/i;
+  for (const [name, text] of [
+    ['ci.yml', workflow],
+    ['docs/14', docs],
+    ...['container-scope-gate.mjs', 'container-scope-lib.mjs'].map((file) => [
+      file,
+      readFileSync(join(root, 'scripts', file), 'utf8'),
+    ]),
+  ]) {
+    const lines = text
+      .split('\n')
+      .filter((line) => claims.test(line) && !line.includes('claims ='));
+    assert.deepEqual(lines, [], `${name} states what the host does`);
+  }
+});
+
 test('the aggregate check is "Images built and scanned", always runs and reads both image jobs', () => {
   const { jobs } = parseYaml(readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8'));
   const images = jobs.images;
@@ -318,7 +346,7 @@ test('the aggregate check is "Images built and scanned", always runs and reads b
   assert.equal(gate.run, 'node scripts/container-scope-gate.mjs');
   assert.equal(jobs['container-scope'].outputs.mode, '${{ steps.scope.outputs.mode }}');
   assert.equal(jobs['container-scope'].name, 'Images to build and scan');
-  // No other job may carry the aggregate's name: the merge train requires it.
+  // No other job may carry the aggregate's name: the merge host is to require it by this name (see the workflow header).
   assert.deepEqual(
     Object.values(jobs).filter((job) => job.name === 'Images built and scanned').length,
     1,

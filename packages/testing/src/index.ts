@@ -67,6 +67,12 @@ export {
   thisRun,
 } from './disclosure';
 export { absenceRefusal, guardedAbsenceMatchers } from './absence-guard';
+export {
+  ISO_INSTANT_SHAPE,
+  expectStoredMessageWithout,
+  storedMessageProblems,
+} from './stored-message';
+export type { StoredMessageRules } from './stored-message';
 export type { AbsenceMatcherResult } from './absence-guard';
 export type {
   DisclosureOptions,

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-// The "Images built and scanned" check: the one stable name the merge train
-// and branch protection can require. Reads the job's toJSON(needs) from NEEDS.
+// The "Images built and scanned" check: the one stable name the merge host
+// can require on the train pull request (it passes without scanning on an
+// ordinary one; contract in the header of .github/workflows/ci.yml). Reads the
+// job's toJSON(needs) from NEEDS.
 import { appendFileSync } from 'node:fs';
 import { imagesGateVerdict } from './container-scope-lib.mjs';
 

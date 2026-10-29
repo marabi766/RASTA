@@ -1,4 +1,6 @@
+import { eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
+import { ISO_INSTANT_SHAPE, expectStoredMessageWithout } from '@rasta/testing';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
 import { ScheduleService } from '../src/maintenance/schedule.service';
 import type { MaintenanceEnv } from '../src/config/env';
@@ -119,7 +121,7 @@ describe('schedule changes reach the audit trail', () => {
   });
 
   it('records which fields an edit moved, and nothing about their values', async () => {
-    const { schedule } = await ownSchedule('ویرایش قاعده');
+    const { assetId, schedule } = await ownSchedule('ویرایش قاعده');
 
     await asActor({ organizationId: org.a, userId: actor }, () =>
       schedules.update(schedule.id, { intervalHours: '500.00', leadHours: '50.00' }),
@@ -139,25 +141,33 @@ describe('schedule changes reach the audit trail', () => {
 
     // The new interval is this service's data. It is not copied into a log
     // every service reads and retains — see the note on the payload schema.
-    // The exact allowed fields: one added to the payload (the interval, the
-    // lead time, in any form) fails here. The values are compared whole, never
-    // as a substring of the payload's JSON, which carries ULIDs and instants a
-    // short number can occur inside by chance.
-    expect(Object.keys(events[1].payload).sort()).toEqual([
-      'assetId',
-      'change',
-      'changedAt',
-      'changedBy',
-      'changedFields',
-      'organizationId',
-      'previousStatus',
-      'reason',
-      'scheduleId',
-      'status',
-    ]);
-    const held = Object.values(events[1].payload).flat();
-    for (const moved of ['500.00', '500', 500, '50.00', '50', 50])
-      expect(held).not.toContain(moved);
+    // The WHOLE domain payload, pinned: ids and the actor by exact value, the instant by its
+    // strict shape. A field added to it, or text appended to one of its values, fails here.
+    const { changedAt, ...held } = events[1].payload;
+    expect(held).toEqual({
+      scheduleId: schedule.id,
+      assetId,
+      organizationId: org.a,
+      change: 'UPDATED',
+      status: 'ACTIVE',
+      previousStatus: 'ACTIVE',
+      reason: null,
+      changedFields: ['intervalHours', 'leadHours'],
+      changedBy: actor,
+    });
+    expect(changedAt).toMatch(ISO_INSTANT_SHAPE);
+    expect(new Date(changedAt as string).toISOString()).toBe(changedAt);
+
+    // The whole stored message, envelope included, key by key and value by value: the new values
+    // may be nowhere in it, as a key, a value or part of one. `intervalHours` may only be a NAME
+    // in `changedFields`, so it is refused as a key. Never as a substring of the payload's JSON
+    // alone: that text carries instants a short number can occur inside by chance.
+    expectStoredMessageWithout(events[1].envelope, {
+      anywhere: ['500.00', '50.00'],
+      inKeys: ['intervalHours', 'leadHours', 'lastServicedHourMeter'],
+      topLevelKeys: Object.keys(eventEnvelopeSchema.shape),
+    });
+    expect(JSON.stringify(events[1].envelope)).not.toContain('500.00');
   });
 
   // The transition D-011 was actually written about.

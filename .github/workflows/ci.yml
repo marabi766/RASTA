@@ -2,9 +2,10 @@
 # on pushes to main (every image) and on merge-train runs, pull requests from
 # `mq/train-N` (the affected images); NOT on ordinary pull requests, which
 # still run the cheap early checks (scope-rule tests, Dockerfile pins, the
-# narrowing proof). The check "Images built and scanned" reports it and is
-# the one the merge train requires; see the comment above `container-scope`
-# and docs/14-testing-strategy.md § 14.11.
+# narrowing proof). The check "Images built and scanned" reports it. On an
+# ordinary pull request it passes WITHOUT scanning (by design): the merge host
+# must require it on the train pull request, not rely on it elsewhere. See the
+# contract above `container-scope` and docs/14-testing-strategy.md § 14.11.
 
 name: CI
 
@@ -4587,11 +4588,19 @@ jobs:
   # tests (with their BuildKit .dockerignore proof on a scratch fixture), the
   # Dockerfile pin checks, and the filtered-install narrowing proof below.
   #
-  # Merge enforcement: the host merge script requires the check named
-  # "Images built and scanned" (job `images`) to be SUCCESS on every train
-  # prefix run. It is success only when every selected image was built and
-  # scanned (a skipped, cancelled or failed image job fails it), or when a
-  # train selected none for docs/tests only. Docs/14 § 14.11 has the table.
+  # Contract of the check named "Images built and scanned" (job `images`):
+  #   - On an ordinary pull request it PASSES WITHOUT scanning, by design.
+  #     A green aggregate there is not scan evidence.
+  #   - The scan evidence is the aggregate on the mq/train-N pull request (the
+  #     tested prefix) and the push run on main. On those it is success only
+  #     when every selected image was built and scanned (a skipped, cancelled
+  #     or failed image job fails it), or when a train selected none for
+  #     docs/tests only.
+  #   - So the merge host must require the aggregate to PASS (present, not
+  #     skipped) on the train pull request, and must not merge ordinary pull
+  #     requests outside the train. This file cannot enforce that: it is host
+  #     configuration outside the repository, and nothing here states what the
+  #     host does today. Docs/14 § 14.11 has the table.
   # ---------------------------------------------------------------------------
   container-scope:
     name: Images to build and scan
