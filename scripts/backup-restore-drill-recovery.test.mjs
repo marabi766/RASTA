@@ -23,7 +23,11 @@ import { join } from 'node:path';
 import {
   RECOVERY_ENV,
   RECOVERY_MARKER,
-  RECOVERY_JOURNAL,
+  LockRefused,
+  acquireDrillLock,
+  currentLockOwner,
+  inspectLockOwner,
+  recoveryJournalPath,
   RecoveryRefused,
   assertOwnedCompose,
   inspectProcessGroup,
@@ -521,16 +525,21 @@ test('the same boundary holds for every recorded list: report groups and journal
 test('the journal is bound to the record, optional, and read like every other input', () =>
   withRoot((root) => {
     const record = makeRecord(root);
-    const path = join(record.temporary, RECOVERY_JOURNAL);
+    const path = recoveryJournalPath(record.reportPath);
     const load = () => loadRecoveryRecord(record.reportPath, { tmpRoot: root });
     assert.deepEqual(load().journalGroups, [], 'no journal yet: nothing to carry');
-    writeRecoveryJournal(record.temporary, {
+    writeRecoveryJournal(path, {
       project: record.project,
       id: record.id,
+      temporary: record.temporary,
       groups: [4242, 4242, 4243],
     });
     assert.deepEqual(load().journalGroups, [4242, 4243]);
-    assert.equal(load().recovered, false);
+    assert.equal(load().checkpoint, undefined);
+    assert.ok(
+      !readdirSync(record.temporary).some((name) => name.includes('journal')),
+      'outside the tree',
+    );
     assert.equal(statSync(path).mode & 0o777, 0o600);
     const good = readFileSync(path, 'utf8');
     for (const [name, change, reason] of [
@@ -547,6 +556,7 @@ test('the journal is bound to the record, optional, and read like every other in
       ],
       ['an unknown key', (j) => ({ ...j, extra: 1 }), /does not match/],
       ['an unknown checkpoint', (j) => ({ ...j, checkpoint: 'done' }), /does not match/],
+      ['the old checkpoint flag', (j) => ({ ...j, recovered: true }), /does not match/],
       ['groups of the wrong shape', (j) => ({ ...j, groups: '4242' }), /does not match/],
       ['an invalid group', (j) => ({ ...j, groups: [1] }), /invalid process group/],
     ]) {
@@ -564,22 +574,35 @@ test('the journal is bound to the record, optional, and read like every other in
     refused(load, /cannot be opened safely/);
   }));
 
-test('the recovered checkpoint stands without the marker (a removal cut short)', () =>
+const checkpointFor = (record, checkpoint, groups = []) =>
+  writeRecoveryJournal(recoveryJournalPath(record.reportPath), {
+    project: record.project,
+    id: record.id,
+    temporary: record.temporary,
+    groups,
+    checkpoint,
+  });
+
+test('the checkpoint outlives what it authorizes deleting: it stands without the marker, and without the directory', () =>
   withRoot((root) => {
     const record = makeRecord(root);
-    writeRecoveryJournal(record.temporary, {
-      project: record.project,
-      id: record.id,
-      recovered: true,
-    });
+    checkpointFor(record, 'recovered');
     rmSync(join(record.temporary, RECOVERY_MARKER));
     rmSync(join(record.temporary, 'compose.json'));
-    const loaded = loadRecoveryRecord(record.reportPath, { tmpRoot: root });
-    assert.equal(loaded.recovered, true);
+    let loaded = loadRecoveryRecord(record.reportPath, { tmpRoot: root });
+    assert.equal(loaded.checkpoint, 'recovered');
     assert.equal(loaded.directoryPresent, true);
-    // ... but only for a journal bound to THIS record.
+    assert.deepEqual([loaded.processGroups, loaded.journalGroups], [[], []]);
+    // The removal finished and its exit was lost: the report still says cleanup failed.
+    rmSync(record.temporary, { recursive: true });
+    loaded = loadRecoveryRecord(record.reportPath, { tmpRoot: root });
+    assert.equal(loaded.checkpoint, 'recovered');
+    assert.equal(loaded.directoryPresent, false);
+    checkpointFor(record, 'removed');
+    assert.equal(loadRecoveryRecord(record.reportPath, { tmpRoot: root }).checkpoint, 'removed');
+    // ... but only for a journal bound to THIS record,
     writeFileSync(
-      join(record.temporary, RECOVERY_JOURNAL),
+      recoveryJournalPath(record.reportPath),
       JSON.stringify({
         version: 1,
         id: 'c'.repeat(32),
@@ -593,12 +616,41 @@ test('the recovered checkpoint stands without the marker (a removal cut short)',
     refused(() => loadRecoveryRecord(record.reportPath, { tmpRoot: root }), /recovery journal/);
   }));
 
+test('a directory that is back after a "removed" checkpoint is refused; without a checkpoint a vanished directory still needs the report to say cleanup finished', () =>
+  withRoot((root) => {
+    const record = makeRecord(root);
+    checkpointFor(record, 'removed');
+    refused(
+      () => loadRecoveryRecord(record.reportPath, { tmpRoot: root }),
+      /reappeared after it was removed/,
+    );
+    rmSync(recoveryJournalPath(record.reportPath));
+    rmSync(record.temporary, { recursive: true });
+    refused(
+      () => loadRecoveryRecord(record.reportPath, { tmpRoot: root }),
+      /directory is gone but the report does not say cleanup finished/,
+    );
+  }));
+
+test('a directory-absent record still hands over the groups its earlier recovery journaled', () =>
+  withRoot((root) => {
+    const record = makeRecord(root, { report: { cleanup: { passed: true } } });
+    rmSync(record.temporary, { recursive: true });
+    checkpointFor(record, undefined, [4242]);
+    const loaded = loadRecoveryRecord(record.reportPath, { tmpRoot: root });
+    assert.equal(loaded.directoryPresent, false);
+    assert.deepEqual(loaded.journalGroups, [4242]);
+    assert.equal(loaded.checkpoint, undefined);
+  }));
+
 test('a journal write is atomic: a failure leaves the previous complete journal', () =>
   withRoot((root) => {
     const record = makeRecord(root);
-    const base = { project: record.project, id: record.id };
-    writeRecoveryJournal(record.temporary, { ...base, groups: [4242] });
-    const before = readFileSync(join(record.temporary, RECOVERY_JOURNAL), 'utf8');
+    const path = recoveryJournalPath(record.reportPath);
+    const base = { project: record.project, id: record.id, temporary: record.temporary };
+    writeRecoveryJournal(path, { ...base, groups: [4242] });
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const before = readFileSync(path, 'utf8');
     const fs = {
       openSync,
       writeSync,
@@ -609,15 +661,52 @@ test('a journal write is atomic: a failure leaves the previous complete journal'
         throw errno('EIO');
       },
     };
-    assert.throws(() =>
-      writeRecoveryJournal(record.temporary, { ...base, groups: [9999] }, { fs }),
-    );
-    assert.equal(readFileSync(join(record.temporary, RECOVERY_JOURNAL), 'utf8'), before);
+    assert.throws(() => writeRecoveryJournal(path, { ...base, groups: [9999] }, { fs }));
+    assert.equal(readFileSync(path, 'utf8'), before);
     assert.deepEqual(
-      readdirSync(record.temporary).filter((name) => name.endsWith('.tmp')),
+      readdirSync(root).filter((name) => name.endsWith('.tmp')),
       [],
       'no sibling left behind',
     );
+  }));
+
+test('a journal write whose durability is not confirmed throws: file fsync and directory fsync alike', () =>
+  withRoot((root) => {
+    const record = makeRecord(root);
+    const path = recoveryJournalPath(record.reportPath);
+    const base = { project: record.project, id: record.id, temporary: record.temporary };
+    const real = { openSync, writeSync, fsyncSync, closeSync, unlinkSync, renameSync };
+    // The directory descriptor is the only one opened without 'wx'.
+    const failing = (where) => {
+      const directories = new Set();
+      return {
+        ...real,
+        openSync: (target, flags, mode) => {
+          const fd = openSync(target, flags, mode);
+          if (flags === 'r') directories.add(fd);
+          return fd;
+        },
+        fsyncSync: (fd) => {
+          if (directories.has(fd) === (where === 'directory')) throw errno('EIO');
+          return fsyncSync(fd);
+        },
+      };
+    };
+    assert.throws(
+      () =>
+        writeRecoveryJournal(
+          path,
+          { ...base, checkpoint: 'recovered' },
+          { fs: failing('directory') },
+        ),
+      /could not be made durable/,
+    );
+    assert.throws(
+      () =>
+        writeRecoveryJournal(path, { ...base, checkpoint: 'recovered' }, { fs: failing('file') }),
+      /Could not write report/,
+    );
+    writeRecoveryJournal(path, { ...base, checkpoint: 'recovered' }, { fs: real });
   }));
 
 // --- special files never block an input (#478 r3 R3) -----------------------------------------
@@ -659,11 +748,185 @@ test('a FIFO in place of the report, marker, journal or compose file is refused 
     swapFifo(join(record.temporary, 'compose.json'));
     expectRefusal(record, /compose.json is not a regular file/);
     record = makeRecord(root);
-    swapFifo(join(record.temporary, RECOVERY_JOURNAL));
+    swapFifo(recoveryJournalPath(record.reportPath));
     expectRefusal(record, /recovery journal is not a regular file/);
     // The gate in front of `compose down` reads the same way.
     const fifo = join(root, 'gate-compose.json');
     execFileSync('mkfifo', [fifo]);
     const gate = inChild(LOAD, ['compose', fifo, 'restore-drill-0123456789abcdef']);
     assert.match(gate.stdout, /compose.json is not a regular file/);
+  }));
+
+// --- the lock: one owner at a time (#478 r4 F1) -----------------------------------------------
+const BOOT = '0123456789abcdef0123456789abcdef-123'.slice(0, 36);
+const claim = (overrides = {}) => ({
+  version: 1,
+  pid: 4242,
+  start: '1000',
+  boot: BOOT,
+  ns: 'pid:[4026531836]',
+  ...overrides,
+});
+/** A /proc stand-in for inspectLockOwner: `stat` is the text (or an errno) of /proc/<pid>/stat. */
+function ownerView({ stat: statText, kill = () => {}, boot = BOOT, ns = 'pid:[4026531836]' } = {}) {
+  const read = (path) => {
+    if (path.endsWith('boot_id')) return `${boot}\n`;
+    if (statText instanceof Error) throw statText;
+    return statText;
+  };
+  return { procRoot: '/proc', kill, readFile: read, readlink: () => ns, self: 1 };
+}
+const statLine = (pid, state, start) =>
+  `${pid} (a) b) ${state} 1 ${pid} ${pid} 0 -1 4194560 100 0 0 0 0 0 0 0 20 0 1 0 ${start} 1000 100 18446744073709551615`;
+
+test('a lock owner is gone, alive or UNKNOWN, with the same strictness as a process group', () => {
+  const inspect = (owner, view) => inspectLockOwner(owner, ownerView(view));
+  const exists = { stat: statLine(4242, 'S', '1000') };
+  assert.equal(inspect(claim(), exists), 'alive');
+  assert.equal(inspect(claim(), { stat: statLine(4242, 'S', '1001') }), 'gone', 'pid reused');
+  assert.equal(inspect(claim(), { stat: statLine(4242, 'Z', '1000') }), 'gone', 'zombie');
+  assert.equal(inspect(claim(), { ...exists, boot: 'f'.repeat(36) }), 'gone', 'another boot');
+  assert.equal(inspect(claim(), { stat: errno('ENOENT') }), 'gone', 'exited since the kill check');
+  const noProcess = () => {
+    throw errno('ESRCH');
+  };
+  assert.equal(inspect(claim(), { ...exists, kill: noProcess }), 'gone');
+  const foreignUser = () => {
+    throw errno('EPERM');
+  };
+  assert.equal(inspect(claim(), { ...exists, kill: foreignUser }), 'alive');
+  assert.equal(inspect(claim({ start: null }), { kill: () => {}, stat: errno('EACCES') }), 'alive');
+  // Everything else is UNKNOWN, never gone.
+  assert.equal(inspect(claim(), { ...exists, ns: 'pid:[1]' }), 'unknown', 'another pid namespace');
+  assert.equal(inspect(claim(), { stat: errno('EACCES') }), 'unknown', 'unreadable');
+  assert.equal(inspect(claim(), { stat: 'garbage' }), 'unknown', 'malformed');
+  assert.equal(inspect(claim(), { stat: statLine(4242, '9', 'x') }), 'unknown', 'malformed fields');
+  const odd = () => {
+    throw errno('EINVAL');
+  };
+  assert.equal(inspect(claim(), { ...exists, kill: odd }), 'unknown');
+  const unreadableBoot = {
+    ...ownerView(exists),
+    readFile: () => {
+      throw errno('EACCES');
+    },
+  };
+  assert.equal(inspectLockOwner(claim(), unreadableBoot), 'unknown');
+  // This very process is alive; a child that has exited is gone.
+  assert.equal(inspectLockOwner(currentLockOwner()), 'alive');
+  const dead = spawnSync(process.execPath, ['-e', '']).pid;
+  assert.equal(inspectLockOwner({ ...currentLockOwner(), pid: dead }), 'gone');
+});
+
+const lockFiles = (root) => readdirSync(root).filter((name) => name.includes('.lock.'));
+const quick = { pollMilliseconds: 2 };
+
+test('two contenders, either order: the second is refused while the first holds, and released means free', () =>
+  withRoot(async (root) => {
+    const report = join(root, 'report.json');
+    for (const [first, second] of [
+      ['A', 'B'],
+      ['B', 'A'],
+    ]) {
+      const one = await acquireDrillLock(report, {
+        ...quick,
+        owner: claim({ pid: first === 'A' ? 11 : 22 }),
+        inspect: () => 'alive',
+      });
+      await assert.rejects(
+        acquireDrillLock(report, {
+          ...quick,
+          waitMilliseconds: 30,
+          owner: claim({ pid: second === 'A' ? 11 : 22 }),
+          inspect: () => 'alive',
+        }),
+        (error) => error instanceof LockRefused && error.reason === 'busy',
+      );
+      assert.equal(lockFiles(root).length, 1, 'the refused contender left no claim');
+      one.release();
+      assert.deepEqual(lockFiles(root), []);
+    }
+  }));
+
+test('many contenders at once: never two holders, every one gets its turn', () =>
+  withRoot(async (root) => {
+    const report = join(root, 'report.json');
+    let holders = 0;
+    let most = 0;
+    const turn = async (pid) => {
+      const lock = await acquireDrillLock(report, {
+        ...quick,
+        waitMilliseconds: 8000,
+        owner: claim({ pid }),
+        inspect: () => 'alive',
+      });
+      holders += 1;
+      most = Math.max(most, holders);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      holders -= 1;
+      lock.release();
+    };
+    await Promise.all(Array.from({ length: 8 }, (_, index) => turn(100 + index)));
+    assert.equal(most, 1);
+    assert.deepEqual(lockFiles(root), []);
+  }));
+
+test('a stale claim is taken over only when its owner is PROVEN gone; UNKNOWN refuses and leaves it alone', () =>
+  withRoot(async (root) => {
+    const report = join(root, 'report.json');
+    const stale = join(root, 'report.json.lock.0123456789abcdef');
+    const dead = spawnSync(process.execPath, ['-e', '']).pid;
+    writeFileSync(stale, JSON.stringify({ ...currentLockOwner(), pid: dead }), { mode: 0o600 });
+    const lock = await acquireDrillLock(report, quick);
+    assert.equal(lockFiles(root).length, 1, 'the stale claim was removed, ours is the only one');
+    assert.ok(!lockFiles(root).includes('report.json.lock.0123456789abcdef'));
+    lock.release();
+
+    // Owner in another pid namespace: its pid means nothing here.
+    writeFileSync(stale, JSON.stringify(claim({ ns: 'pid:[1]', boot: currentLockOwner().boot })), {
+      mode: 0o600,
+    });
+    await assert.rejects(
+      acquireDrillLock(report, { ...quick, waitMilliseconds: 0, owner: currentLockOwner() }),
+      (error) =>
+        error instanceof LockRefused && error.reason === 'owner' && !error.message.includes(root),
+    );
+    assert.deepEqual(lockFiles(root), ['report.json.lock.0123456789abcdef'], 'left untouched');
+  }));
+
+test('a file that is not a claim this drill wrote is refused, never taken over', () =>
+  withRoot(async (root) => {
+    const report = join(root, 'report.json');
+    const path = join(root, 'report.json.lock.0123456789abcdef');
+    const attempt = () => acquireDrillLock(report, { ...quick, waitMilliseconds: 0 });
+    const cases = [
+      ['not JSON', () => writeFileSync(path, '{', { mode: 0o600 })],
+      [
+        'unknown key',
+        () => writeFileSync(path, JSON.stringify({ ...claim(), extra: 1 }), { mode: 0o600 }),
+      ],
+      [
+        'wrong type',
+        () => writeFileSync(path, JSON.stringify(claim({ pid: '4242' })), { mode: 0o600 }),
+      ],
+      [
+        'not private',
+        () => {
+          writeFileSync(path, JSON.stringify(claim()));
+          chmodSync(path, 0o644);
+        },
+      ],
+      ['a link', () => symlinkSync(join(root, 'elsewhere'), path)],
+      ['oversize', () => writeFileSync(path, 'x'.repeat(5000), { mode: 0o600 })],
+    ];
+    for (const [name, make] of cases) {
+      rmSync(path, { force: true });
+      make();
+      await assert.rejects(
+        attempt(),
+        (error) => error instanceof LockRefused && error.reason === 'foreign',
+        name,
+      );
+      assert.deepEqual(lockFiles(root), ['report.json.lock.0123456789abcdef'], name);
+    }
   }));

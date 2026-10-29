@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, readlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -27,9 +27,26 @@ import {
 //     GONE (kill(-pgid, 0) proves it), PROVEN (every member read and matched) or UNKNOWN (any
 //     read error, malformed field, foreign member, or no member visible while it is alive):
 //     UNKNOWN is never signalled and never counts as success;
-//   * recovery's OWN children are recorded too, in a separate atomic journal in the same
-//     directory (the report stays immutable) and carry the same id: a later recovery reaps the
-//     journal's groups first, and the directory is removed only after a "recovered" checkpoint.
+//   * recovery's OWN children are recorded too, in a separate atomic journal NEXT TO THE REPORT
+//     (outside the directory recovery deletes; the report stays immutable) for every invocation,
+//     the directory-absent one included, and carry the same id: a later recovery reaps the
+//     journal's groups first. The journal also holds the completion checkpoint ("recovered" before
+//     the directory is removed, "removed" after), so a retry after any interruption finishes or
+//     succeeds instead of refusing on what the removal already deleted.
+//   * ONE owner at a time: every run and every recovery of a report holds an exclusive lock
+//     (acquireDrillLock) for its whole lifetime, so two recoveries, or a recovery and a live run,
+//     can never both act on the same groups, journal or directory. A lock whose owner is not
+//     PROVEN gone is never taken over.
+//   * A journal or report write that fails is STICKY: the invocation can no longer report success,
+//     whatever later writes do, and nothing is removed after it.
+// RESIDUAL (stated, accepted by the project manager, not engineered around): between a child's
+// spawn() and the synchronous journal/report write that names its process group (the same tick,
+// the cost of one small write plus two fsyncs: milliseconds, longer on a slow disk) a SIGKILL of
+// the parent leaves that one group unrecorded; the next recovery cannot find it by its id. A
+// reservation BEFORE the spawn cannot close this: the group id is the child's pid, unknown until
+// the child exists, so it could only say "a child may be starting", and finding it again would
+// need a /proc sweep by environment alone, which signals on weaker proof than the per-group check
+// and misses processes a hidepid mount hides.
 // The same checks guard the normal teardown (`assertOwnedCompose`). Every refusal is a fixed
 // phrase: it never quotes the record, a path or a name from it.
 // ---------------------------------------------------------------------------------------------
@@ -38,7 +55,9 @@ export const RECOVERY_VERSION = 1;
 /** Present in every child's environment: how a recorded process group proves it is ours. */
 export const RECOVERY_ENV = 'RASTA_DRILL_RECOVERY_ID';
 export const RECOVERY_MARKER = 'recovery.json';
-export const RECOVERY_JOURNAL = 'recovery-journal.json';
+/** The journal's suffix: it lives next to the report, never inside the directory it may delete. */
+export const RECOVERY_JOURNAL = '.recovery-journal.json';
+export const recoveryJournalPath = (reportPath) => `${reportPath}${RECOVERY_JOURNAL}`;
 export const PROJECT_PATTERN = /^restore-drill-[0-9a-f]{16}$/;
 export const DIRECTORY_PATTERN = /^rasta-restore-drill-[A-Za-z0-9]{6}$/;
 export const RECOVERY_ID_PATTERN = /^[0-9a-f]{32}$/;
@@ -239,40 +258,46 @@ function recordedGroups(record) {
 }
 
 /**
- * The recovery journal: what `--cleanup-from` itself started and has not seen end. A separate
- * file, written atomically (sibling + fsync + rename) in the run's private directory, because
- * the report is the immutable claim of the original run. `groups` are the process groups of
- * recovery's own children (and any group an earlier recovery could not settle); `recovered` is
- * the checkpoint that says every owned resource and process is gone and only the directory
- * remains. Bound to the same project, id and directory name as the marker.
+ * The recovery journal: what `--cleanup-from` itself started and has not seen end, and how far the
+ * recovery got. A separate file NEXT TO THE REPORT (the report is the immutable claim of the
+ * original run; the directory is what recovery deletes, so nothing that must outlive the deletion
+ * can live in it), written atomically (sibling + fsync + rename + directory fsync) with mode 0600.
+ * `groups` are the process groups of recovery's own children (and any group an earlier recovery
+ * could not settle). `checkpoint` is 'recovered' (every owned resource and process is gone; the
+ * directory removal may start) or 'removed' (the directory is gone too). Bound to the same
+ * project, id and directory name as the marker. EVERY write must be durable: when the file or the
+ * directory could not be synced the write throws, and the caller treats that as a failure that
+ * does not heal (a later successful write does not undo it).
  */
 export function writeRecoveryJournal(
-  temporary,
-  { project, id, groups = [], recovered = false },
+  journalPath,
+  { project, id, temporary, groups = [], checkpoint },
   { fs } = {},
 ) {
-  writeReportAtomically(
-    join(temporary, RECOVERY_JOURNAL),
+  const synced = writeReportAtomically(
+    journalPath,
     {
       version: RECOVERY_VERSION,
       id,
       project,
       directory: basename(temporary),
       groups: [...new Set(groups)],
-      ...(recovered && { checkpoint: 'recovered' }),
+      ...(checkpoint && { checkpoint }),
     },
-    { durable: recovered, ...(fs && { fs }) },
+    { durable: true, ...(fs && { fs }) },
   );
+  if (!synced) throw new Error('the recovery journal could not be made durable');
 }
 
-function loadRecoveryJournal(temporary, { id, project, uid }) {
-  const text = readPrivateFile(join(temporary, RECOVERY_JOURNAL), {
+const CHECKPOINTS = new Set(['recovered', 'removed']);
+function loadRecoveryJournal(journalPath, { id, project, temporary, uid }) {
+  const text = readPrivateFile(journalPath, {
     maxBytes: MAX_JOURNAL_BYTES,
     what: 'the recovery journal',
     uid,
     allowMissing: true,
   });
-  if (text === undefined) return { groups: [], recovered: false };
+  if (text === undefined) return { groups: [], checkpoint: undefined };
   const journal = parseJson(text, 'the recovery journal');
   if (!isObject(journal)) refuse('the recovery journal is not an object');
   const { groups, checkpoint, ...bound } = journal;
@@ -283,19 +308,21 @@ function loadRecoveryJournal(temporary, { id, project, uid }) {
       project,
       directory: basename(temporary),
     }) ||
-    (checkpoint !== undefined && checkpoint !== 'recovered') ||
+    (checkpoint !== undefined && !CHECKPOINTS.has(checkpoint)) ||
     !Array.isArray(groups)
   )
-    refuse('the recovery journal does not match the directory it is in');
-  return { groups: validGroups(groups), recovered: checkpoint === 'recovered' };
+    refuse('the recovery journal does not match the directory it is for');
+  return { groups: validGroups(groups), checkpoint };
 }
 
 /**
  * Proves what a report claims, or refuses (RecoveryRefused). Returns what recovery may act on:
- * `{ project, temporary, id, composeFile, processGroups, journalGroups, recovered,
+ * `{ project, temporary, id, composeFile, processGroups, journalGroups, checkpoint,
  * directoryPresent }`; `composeFile` is null when the definition is gone (teardown already ran:
- * the project label alone is checked); `recovered` says an earlier recovery finished and only the
- * directory is left (its journal carries the checkpoint).
+ * the project label alone is checked); `checkpoint` is what an earlier recovery's journal says
+ * ('recovered': everything owned was gone and the directory removal had started; 'removed': it
+ * finished), the evidence a retry needs when the removal took the marker, or the whole directory,
+ * with it.
  */
 export function loadRecoveryRecord(
   reportPath,
@@ -319,8 +346,27 @@ export function loadRecoveryRecord(
   )
     refuse('the report names no directory this drill created');
   const processGroups = recordedGroups(record);
+  const journal = loadRecoveryJournal(recoveryJournalPath(reportPath), {
+    id,
+    project,
+    temporary,
+    uid,
+  });
+  // A checkpoint was written after everything owned was gone: nothing is left to reap or ask
+  // Docker; only the directory (if still there) remains.
+  const finished = (directoryPresent) => ({
+    project,
+    temporary,
+    id,
+    composeFile: null,
+    processGroups: [],
+    journalGroups: [],
+    checkpoint: journal.checkpoint,
+    directoryPresent,
+  });
 
   if (inspectDirectory(temporary, uid) === 'absent') {
+    if (journal.checkpoint) return finished(false);
     // Nothing to bind the project to: acceptable only when the run itself finished its cleanup.
     if (record.cleanup?.passed !== true || processGroups.length)
       refuse('the temporary directory is gone but the report does not say cleanup finished');
@@ -330,25 +376,15 @@ export function loadRecoveryRecord(
       id,
       composeFile: null,
       processGroups,
-      journalGroups: [],
-      recovered: false,
+      journalGroups: journal.groups,
+      checkpoint: undefined,
       directoryPresent: false,
     };
   }
-  const journal = loadRecoveryJournal(temporary, { id, project, uid });
-  if (journal.recovered)
-    // The checkpoint was written after everything owned was gone; the removal that followed may
-    // have been cut short (the marker may be among what it already deleted).
-    return {
-      project,
-      temporary,
-      id,
-      composeFile: null,
-      processGroups: [],
-      journalGroups: [],
-      recovered: true,
-      directoryPresent: true,
-    };
+  // A removal cut short may have taken the marker with it: the checkpoint stands on its own.
+  if (journal.checkpoint === 'recovered') return finished(true);
+  if (journal.checkpoint === 'removed')
+    refuse('the temporary directory reappeared after it was removed');
   const marker = parseJson(
     readPrivateFile(join(temporary, RECOVERY_MARKER), {
       maxBytes: MAX_MARKER_BYTES,
@@ -381,7 +417,7 @@ export function loadRecoveryRecord(
     composeFile: text === undefined ? null : composeFile,
     processGroups,
     journalGroups: journal.groups,
-    recovered: false,
+    checkpoint: undefined,
     directoryPresent: true,
   };
 }
@@ -474,4 +510,223 @@ export async function recoverProcessGroups(
     }
   }
   return outcome;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The lock: one run or recovery at a time per report (the drill's identity). A contender writes
+// its own claim file `<report>.lock.<hex>` (atomic: complete or absent), then lists every claim
+// beside the report; it holds the lock only when no other claim has an owner that is not PROVEN
+// gone. A contender that finds another live claim removes its own and tries again after a
+// jittered pause, so two contenders never both pass (each wrote before it listed: the later
+// listing sees the earlier write), and a claim is never removed by anyone but its owner, or by a
+// holder that has proven the owner gone. Unique names, no unlink of a name somebody else may have
+// just re-created: a stale claim needs no takeover race.
+// ---------------------------------------------------------------------------------------------
+
+export const LOCK_WAIT_MILLISECONDS = 30_000;
+const MAX_LOCK_BYTES = 4096;
+const LOCK_NAME = /^[0-9a-f]{16}$/;
+const BOOT_ID = /^[0-9a-f-]{36}$/;
+const PID_NAMESPACE = /^pid:\[\d+\]$/;
+
+const LOCK_REASONS = {
+  busy: 'another run or recovery of this drill is in progress',
+  owner: 'a lock left next to the report cannot be proven stale',
+  foreign: 'a lock file next to the report is not one this drill wrote',
+  create: 'the lock next to the report cannot be created',
+};
+/** Refused before anything was touched; the phrase is fixed (no path, pid or name). */
+export class LockRefused extends Error {
+  constructor(reason) {
+    super(`${LOCK_REASONS[reason]}; nothing was done`);
+    this.name = 'LockRefused';
+    this.reason = reason;
+  }
+}
+
+const orNull = (read) => {
+  try {
+    return read();
+  } catch {
+    return null;
+  }
+};
+/** "pid (comm) state ..." -> { state, start }; comm may hold ") ", so the LAST one counts. */
+function parseStat(text) {
+  const rest = String(text)
+    .slice(String(text).lastIndexOf(') ') + 2)
+    .split(' ');
+  // Field 3 is the state, field 22 the start time in clock ticks since boot.
+  if (!/^[A-Za-z]$/.test(rest[0] ?? '') || !/^\d+$/.test(rest[19] ?? '')) throw new Error('stat');
+  return { state: rest[0], start: rest[19] };
+}
+
+/** Who a lock claim names: enough to prove later that exactly this process is gone. */
+export function currentLockOwner({
+  pid = process.pid,
+  procRoot = '/proc',
+  readFile = readFileSync,
+  readlink = readlinkSync,
+} = {}) {
+  return {
+    version: 1,
+    pid,
+    start: orNull(() => parseStat(readFile(join(procRoot, String(pid), 'stat'), 'utf8')).start),
+    boot: orNull(() => readFile(join(procRoot, 'sys/kernel/random/boot_id'), 'utf8').trim()),
+    ns: orNull(() => readlink(join(procRoot, String(pid), 'ns/pid'))),
+  };
+}
+
+/**
+ * The same three outcomes as inspectProcessGroup, for the process that owns a claim:
+ *  - 'gone'    another boot, or kill(pid, 0) says no such process, or the pid now belongs to a
+ *              process that started at another time (or is a zombie);
+ *  - 'alive'   the process is there (and, when the start time was recorded, is the same one);
+ *  - 'unknown' anything else: another pid namespace (the pid means nothing here), a read error,
+ *              a malformed field. 'unknown' is never taken over: the caller refuses.
+ * Without a /proc start time a live pid cannot be told from a reused one, so it counts as alive.
+ */
+export function inspectLockOwner(
+  owner,
+  {
+    procRoot = '/proc',
+    kill = (pid, signal) => process.kill(pid, signal),
+    readFile = readFileSync,
+    readlink = readlinkSync,
+    self = process.pid,
+  } = {},
+) {
+  try {
+    if (owner.boot !== null) {
+      const boot = readFile(join(procRoot, 'sys/kernel/random/boot_id'), 'utf8').trim();
+      if (boot !== owner.boot) return 'gone';
+    }
+    if (owner.ns !== orNull(() => readlink(join(procRoot, String(self), 'ns/pid'))))
+      return 'unknown';
+    try {
+      kill(owner.pid, 0);
+    } catch (error) {
+      if (error?.code === 'ESRCH') return 'gone';
+      if (error?.code !== 'EPERM') return 'unknown';
+    }
+    if (owner.start === null) return 'alive';
+    let text;
+    try {
+      text = readFile(join(procRoot, String(owner.pid), 'stat'), 'utf8');
+    } catch (error) {
+      return VANISHED.has(error?.code) ? 'gone' : 'unknown';
+    }
+    const { state, start } = parseStat(text);
+    if ('ZXx'.includes(state)) return 'gone';
+    return start === owner.start ? 'alive' : 'gone';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function readClaim(path, uid) {
+  let text;
+  try {
+    text = readRegularFile(path, {
+      maxBytes: MAX_LOCK_BYTES,
+      noFollow: true,
+      inspect: (stat) => {
+        if (uid !== undefined && stat.uid !== uid) throw new LockRefused('foreign');
+        if ((stat.mode & 0o077) !== 0) throw new LockRefused('foreign');
+      },
+    });
+  } catch (error) {
+    if (error instanceof LockRefused) throw error;
+    if (error instanceof InputFileError && error.kind === 'missing') return null; // released
+    throw new LockRefused('foreign');
+  }
+  let claim;
+  try {
+    claim = JSON.parse(text);
+  } catch {
+    throw new LockRefused('foreign');
+  }
+  const shaped =
+    isObject(claim) &&
+    isDeepStrictEqual(Object.keys(claim).sort(), ['boot', 'ns', 'pid', 'start', 'version']) &&
+    claim.version === 1 &&
+    Number.isSafeInteger(claim.pid) &&
+    claim.pid > 0 &&
+    claim.pid <= MAX_PID &&
+    (claim.start === null || (typeof claim.start === 'string' && /^\d{1,20}$/.test(claim.start))) &&
+    (claim.boot === null || (typeof claim.boot === 'string' && BOOT_ID.test(claim.boot))) &&
+    (claim.ns === null || (typeof claim.ns === 'string' && PID_NAMESPACE.test(claim.ns)));
+  if (!shaped) throw new LockRefused('foreign');
+  return claim;
+}
+
+/**
+ * Takes the lock for `reportPath` (the drill's identity), waiting at most `waitMilliseconds` for a
+ * live owner, and returns `{ release }`. Throws LockRefused: 'busy' (a live owner after the wait),
+ * 'owner' (a claim whose owner is neither provably alive nor provably gone), 'foreign' (a file
+ * that is not a claim this drill wrote), 'create'. Claims of owners proven gone are removed.
+ */
+export async function acquireDrillLock(
+  reportPath,
+  {
+    waitMilliseconds = LOCK_WAIT_MILLISECONDS,
+    pollMilliseconds = 100,
+    // Monotonic: a wall-clock step must not stretch or cut the bounded wait.
+    now = () => performance.now(),
+    sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    random = Math.random,
+    owner = currentLockOwner(),
+    inspect = inspectLockOwner,
+    uid = process.getuid?.(),
+  } = {},
+) {
+  const directory = dirname(reportPath);
+  const prefix = `${basename(reportPath)}.lock.`;
+  const deadline = now() + waitMilliseconds;
+  const remove = (path) => {
+    try {
+      unlinkSync(path);
+    } catch {
+      /* already gone */
+    }
+  };
+  for (;;) {
+    const mine = `${reportPath}.lock.${randomBytes(8).toString('hex')}`;
+    try {
+      writeReportAtomically(mine, owner);
+    } catch {
+      throw new LockRefused('create');
+    }
+    let busy = false;
+    const stale = [];
+    try {
+      let names;
+      try {
+        names = readdirSync(directory);
+      } catch {
+        throw new LockRefused('create');
+      }
+      for (const name of names) {
+        if (!name.startsWith(prefix) || !LOCK_NAME.test(name.slice(prefix.length))) continue;
+        const path = join(directory, name);
+        if (path === mine) continue;
+        const claim = readClaim(path, uid);
+        if (claim === null) continue;
+        const state = inspect(claim);
+        if (state === 'gone') stale.push(path);
+        else if (state === 'alive') busy = true;
+        else throw new LockRefused('owner');
+      }
+    } catch (error) {
+      remove(mine);
+      throw error;
+    }
+    if (!busy) {
+      stale.forEach(remove);
+      return { release: () => remove(mine) };
+    }
+    remove(mine);
+    if (now() >= deadline) throw new LockRefused('busy');
+    await sleep(pollMilliseconds + Math.floor(random() * pollMilliseconds));
+  }
 }

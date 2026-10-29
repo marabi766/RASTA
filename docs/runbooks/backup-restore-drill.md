@@ -251,11 +251,24 @@ Compose فایل را بخواند رد می‌شود. همین بررسی پی�
 یا گروهی ماند یا بررسی نشد (پوشه و گزارش برای تلاش دوباره می‌مانند) و ۲ یعنی گزارش رد شد. استثنا: پوشه
 `temporary` وجود ندارد و خود گزارش `cleanup.passed: true` را دارد؛ آن‌گاه فقط برچسب منابع پروژه بررسی می‌شود.
 بازیابی هیچ‌گاه گزارش را بازنویسی نمی‌کند و پیام‌هایش مسیر، نام یا شناسه‌ای از گزارش را تکرار نمی‌کنند.
-فرزندهای خود بازیابی هم ثبت می‌شوند: بلافاصله پس از هر spawn شناسه گروهشان در دفترچه جداگانه
-`recovery-journal.json` (نوشتن اتمی با فایل موقت و `fsync` و `rename`، در همان پوشه خصوصی) می‌آید و همان
-`RASTA_DRILL_RECOVERY_ID` را دارند. اگر خود بازیابی با SIGKILL کشته شود، بازیابی بعدی پیش از هر کار دیگر
-گروه‌های دفترچه را با همان اثبات می‌کشد و تا وقتی گروهی زنده باشد موفقیت گزارش نمی‌کند؛ گزارش اصلی
-تغییر نمی‌کند. پوشه فقط پس از نوشته‌شدن نقطه بازرسی `recovered` در دفترچه حذف می‌شود. وضعیت هر گروه سه‌حالته
+فرزندهای خود بازیابی هم ثبت می‌شوند، در هر بار اجرا و حتی وقتی پوشه `temporary` دیگر وجود ندارد: بلافاصله پس از هر
+spawn شناسه گروهشان در دفترچه جداگانه `<report>.recovery-journal.json` می‌آید و همان `RASTA_DRILL_RECOVERY_ID` را
+دارند. این دفترچه کنار گزارش است و بیرون از پوشه‌ای که بازیابی حذف می‌کند (نوشتن اتمی با فایل موقت، `fsync` فایل و
+پوشه، و `rename`). اگر خود بازیابی با SIGKILL کشته شود، بازیابی بعدی پیش از هر کار دیگر گروه‌های دفترچه را با
+همان اثبات می‌کشد و تا وقتی گروهی زنده باشد موفقیت گزارش نمی‌کند؛ گزارش اصلی تغییر نمی‌کند. نقطه‌های بازرسی هم در
+همین دفترچه‌اند: `recovered` پیش از حذف پوشه و `removed` پس از آن. پس تلاش دوباره پس از قطع در هر مرحله حذف (نشانگر
+یا خود پوشه رفته، یا خروج به فراخواننده نرسیده) به‌جای رد شدن کار را تمام می‌کند و بدون پرسیدن از Docker موفق می‌شود.
+شکست نوشتن دفترچه یا گزارش، از جمله شکست `fsync` فایل یا پوشه، چسبنده است: آن بازیابی دیگر هرگز با کد ۰ تمام نمی‌شود و
+چیزی را بیشتر حذف نمی‌کند، حتی اگر نوشتن‌های بعدی موفق باشند. هر اجرا و هر بازیابی یک گزارش قفل انحصاری
+(فایل‌های `<report>.lock.<hex>` کنار گزارش) را تا پایان عمرش نگه می‌دارد؛ بازیابی دوم، یا بازیابی هم‌زمان با اجرای
+زنده، تا ۳۰ ثانیه منتظر می‌ماند و سپس با کد ۲ و یک پیام ثابت رد می‌شود. قفل بازمانده از فرایند کشته‌شده فقط وقتی
+برداشته می‌شود که نبودن صاحبش اثبات شود (شناسه فرایند و زمان شروع آن، بوت و فضای نام)؛ حالت نامشخص هرگز برداشته
+نمی‌شود. محدودیت اعلام‌شده (مدیر پروژه آن را پذیرفته است و راه‌حل مهندسی‌شده‌ای برایش نیست): SIGKILL بین spawn و نوشتن
+همان لحظه دفترچه (یا گزارش) می‌تواند یک گروه را ثبت‌نشده بگذارد. پنجره، یک نوشتن کوچک با دو `fsync` است: چند
+میلی‌ثانیه و روی دیسک کند بیشتر. رزرو پیش از spawn ممکن نیست، چون شناسه گروه همان pid فرزند است و پیش از ساخته‌شدن
+فرزند وجود ندارد؛ یافتن بعدی آن فقط با پیمایش `/proc` بر پایه محیط ممکن می‌شد که با اثبات ضعیف‌تری سیگنال می‌دهد و
+فرایندهای پنهان‌شده با `hidepid` را نمی‌بیند. قفل و دفترچه به مسیر گزارش وابسته‌اند: نسخه کپی‌شده گزارش در مسیر
+دیگر هویت دیگری است و با اصلی هم‌زمان‌سازی نمی‌شود، پس از یک گزارش فقط یک نسخه را به بازیابی بدهید. وضعیت هر گروه سه‌حالته
 است: ناپدیدشده (`kill(-pgid, 0)` ثابت می‌کند)، اثبات‌شده (همه اعضا خوانده و با شناسه مطابق شده‌اند) یا
 نامشخص (هر خطای خواندن `/proc`، فیلد ناقص، عضو بدون شناسه، یا گروه زنده‌ای که هیچ عضوی از آن دیده نمی‌شود).
 گروه نامشخص هرگز سیگنال نمی‌گیرد و هرگز موفقیت حساب نمی‌شود: بازیابی با کد ۱ و پیام ثابتی که فقط شناسه گروه
@@ -344,6 +357,22 @@ after a cancellation or a timeout; see the recovery paragraph above for what it 
 removes or kills anything). A missing, unreadable or unprovable record fails the step (exit 2), and
 so does anything it could not remove (exit 1); the private directory, the recovery record included,
 is deleted only after a cleanup that succeeded.
+One run or recovery of a report at a time: each holds an exclusive lock (`<report>.lock.<hex>` files
+beside the report) for its whole lifetime; a second one waits up to 30 s for a live owner and then
+exits 2 with a fixed line, and a claim left by a killed process is taken over only after its owner is
+proven gone (pid, start time, boot, pid namespace; an unprovable owner is never taken over). Recovery's
+own journal (`<report>.recovery-journal.json`, beside the report, outside the directory it deletes)
+exists for every invocation, also when the directory is already gone, and carries the completion
+checkpoints (`recovered` before the removal, `removed` after), so a retry after any interruption
+finishes or succeeds without asking Docker. A journal or report write that fails, a failed directory
+fsync included, is sticky for that invocation: it never exits 0 and removes nothing more.
+**Residual, accepted by the project manager:** a SIGKILL between a child's spawn and the synchronous
+write that names its process group (one small write plus two fsyncs: milliseconds, more on a slow
+disk) can leave that one group unrecorded, for the original run's children and recovery's alike. A
+reservation before the spawn is not done: the group id is the child's pid and does not exist yet, and
+finding it again would need a `/proc` sweep by environment alone, which signals on weaker proof than
+the per-group check and misses processes a `hidepid` mount hides. The lock and the journal are keyed
+by the report's path: a copy of a report at another path is another identity.
 Every invocation of the CLI goes through a guarded entry without static imports: a module that cannot
 be loaded (for example a checkout without `pnpm install`) ends in one fixed line and exit 1, never a
 stack trace with source paths; `--cleanup-from` itself needs only Node's built-in modules.

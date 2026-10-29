@@ -1,6 +1,10 @@
 // The drill CLI proper, loaded by backup-restore-drill.mjs (the guarded entry). Imports needed
 // only by a normal run (yaml, the URL reader, the service registry) are loaded where they are
 // used, so `--cleanup-from` needs nothing but node: built-ins and the two drill modules.
+// Stated residual (accepted by the project manager; details in backup-restore-drill-recovery.mjs):
+// a SIGKILL between a child's spawn() and the synchronous write that names its process group (a
+// report write for the run, a journal write for recovery; milliseconds) can leave that one group
+// unrecorded. Reserving before the spawn is impossible: the group id is the child's pid.
 import { randomBytes } from 'node:crypto';
 import {
   closeSync,
@@ -46,12 +50,16 @@ import {
   FIXTURE_SQL,
 } from './backup-restore-drill-lib.mjs';
 import {
+  LOCK_WAIT_MILLISECONDS,
+  LockRefused,
   RECOVERY_ENV,
   RecoveryRefused,
+  acquireDrillLock,
   assertOwnedCompose,
   loadRecoveryRecord,
   newRecoveryId,
   recoverProcessGroups,
+  recoveryJournalPath,
   writeRecoveryJournal,
   writeRecoveryMarker,
 } from './backup-restore-drill-recovery.mjs';
@@ -71,9 +79,27 @@ if (!cleanupOnly && (args.length !== 2 || args[0] !== '--report')) {
   );
   process.exit(2);
 }
+const reportPath = resolve(args[1]);
+// One owner at a time: a run and a recovery of the same report hold this lock for their whole
+// lifetime (released when the process exits; a killed owner leaves a claim that a later one takes
+// over only after proving the owner gone). RASTA_DRILL_LOCK_WAIT_MS bounds the wait for a live
+// owner (milliseconds; the tests shorten it).
+const lockWait = /^\d{1,7}$/.test(process.env.RASTA_DRILL_LOCK_WAIT_MS ?? '')
+  ? Number(process.env.RASTA_DRILL_LOCK_WAIT_MS)
+  : LOCK_WAIT_MILLISECONDS;
+let drillLock;
+try {
+  drillLock = await acquireDrillLock(reportPath, { waitMilliseconds: lockWait });
+} catch (error) {
+  // Fixed phrases only: never the path, a pid or anything read from a claim.
+  console.error(
+    `[backup-restore-drill] ${error instanceof LockRefused ? error.message : 'the lock next to the report could not be taken; nothing was done'}`,
+  );
+  process.exit(2);
+}
+process.on('exit', () => drillLock.release());
 // Exclusive creation avoids overwriting an operator's file (including through a symlink).
 // Later writes replace it atomically through a sibling file (see writeReportAtomically).
-const reportPath = resolve(args[1]);
 if (!cleanupOnly) {
   try {
     closeSync(openSync(reportPath, 'wx', 0o600));
@@ -146,11 +172,14 @@ function writeReport({ durable = false, final = false } = {}) {
     );
 }
 
-// Recovery's own journal (see writeRecoveryJournal). `journalOwner` is set once the record is
-// proven and its directory is still there; `carried` are groups an earlier recovery (or the
-// record) left that could not be settled and stay owned until a later recovery sees them gone.
+// Recovery's own journal (see writeRecoveryJournal), next to the report. `journalOwner` is set
+// once the record is proven, whether or not its directory is still there; `carried` are groups an
+// earlier recovery (or the record) left that could not be settled and stay owned until a later
+// recovery sees them gone. A write that fails is STICKY (`publicationFailed`): nothing that
+// happens afterwards makes this invocation a success.
 let journalOwner;
 let carried = [];
+let publicationFailed = false;
 function writeJournal(extra = {}) {
   if (!journalOwner) return;
   const groups = [
@@ -159,7 +188,12 @@ function writeJournal(extra = {}) {
     ...(report.orphanProcessGroups ?? []),
     ...(report.unconfirmedProcessGroups ?? []).map((entry) => entry.pgid),
   ];
-  writeRecoveryJournal(journalOwner.temporary, { ...journalOwner, groups, ...extra });
+  try {
+    writeRecoveryJournal(recoveryJournalPath(reportPath), { ...journalOwner, groups, ...extra });
+  } catch (error) {
+    publicationFailed = true;
+    throw error;
+  }
 }
 
 // The one process lifecycle boundary (createProcessRunner): every child leads its own group,
@@ -375,15 +409,17 @@ async function ownedTeardown() {
 
 /**
  * Exit status for --cleanup-from: 0 nothing owned is left, 1 something is (or could not be
- * checked or proven ours), 2 the record is refused. Everything started here has settled and been
- * reaped (finalizeCleanup's barriers) before the status is returned. Order:
- *  1. the record and the journal are proven (loadRecoveryRecord);
+ * checked or proven ours, or a journal write failed), 2 the record is refused. Everything started
+ * here has settled and been reaped (finalizeCleanup's barriers) before the status is returned.
+ * The lock (taken at startup) is held throughout. Order:
+ *  1. the record and the journal are proven (loadRecoveryRecord); a journal checkpoint from an
+ *     earlier recovery finishes (or confirms) the removal without asking Docker anything;
  *  2. every group either names (an earlier recovery's children first, then the run's) is
  *     inspected and, if PROVEN ours, reaped; an UNKNOWN group is never signalled and fails the run;
  *  3. finalizeCleanup: compose down + the three label checks, each child recorded in the journal
- *     right after its spawn and carrying the run's id;
- *  4. only when everything is gone, the "recovered" checkpoint is written (durably), and only
- *     then is the directory removed.
+ *     right after its spawn and carrying the run's id (also when the directory is already gone);
+ *  4. only when everything is gone AND no journal write ever failed, the "recovered" checkpoint is
+ *     written (durably), then the directory is removed, then the "removed" checkpoint is written.
  */
 async function recoverRecorded() {
   let record;
@@ -398,20 +434,12 @@ async function recoverRecorded() {
   }
   project = record.project;
   temporary = record.temporary;
-  if (record.recovered) {
-    // An earlier recovery finished and was cut short while removing the directory.
-    try {
-      rmSync(temporary, { recursive: true, force: true });
-      return 0;
-    } catch {
-      return 1;
-    }
-  }
+  journalOwner = { temporary, project, id: record.id };
+  if (record.checkpoint) return finishFromCheckpoint(record);
   composeFile = record.composeFile ?? undefined;
   composeReady = record.composeFile !== null;
   // Every child of this recovery carries the run's id, so a later recovery can prove its group.
   env[RECOVERY_ENV] = record.id;
-  if (record.directoryPresent) journalOwner = { temporary, project, id: record.id };
   cleaning = true;
   progress('cleanup owned containers, networks and volumes');
   let failed = false;
@@ -427,15 +455,16 @@ async function recoverRecorded() {
   carried = [...groups.unknown, ...groups.orphan];
   const verdict = await finalizeCleanup({ runner, report, teardown: ownedTeardown });
   let removed = !failed && verdict.passed && !groups.unknown.length && !groups.orphan.length;
-  if (removed && record.directoryPresent) {
+  if (removed && !publicationFailed) {
     try {
-      writeJournal({ groups: [], recovered: true });
-      rmSync(temporary, { recursive: true, force: true });
+      writeJournal({ groups: [], checkpoint: 'recovered' });
+      if (record.directoryPresent) rmSync(temporary, { recursive: true, force: true });
+      writeJournal({ groups: [], checkpoint: 'removed' });
     } catch {
       removed = false;
     }
   }
-  if (removed) return 0;
+  if (removed && !publicationFailed) return 0;
   // Kinds, counts and group ids only: no resource ids, names or paths.
   console.error(
     `[backup-restore-drill] owned resources could not all be removed (leftover: ${verdict.leftovers.join(',') || 'none'}; unverified: ${verdict.unverified.join(',') || 'none'}; still running: ${groups.orphan.length + (report.orphanProcessGroups?.length ?? 0)})`,
@@ -446,7 +475,30 @@ async function recoverRecorded() {
     );
   if (groups.unknown.length > 20)
     console.error(`[backup-restore-drill] ${groups.unknown.length - 20} more such groups`);
+  if (publicationFailed)
+    console.error(
+      '[backup-restore-drill] a journal write failed during this recovery; success is not reported and nothing more was removed',
+    );
   return 1;
+}
+
+/**
+ * An earlier recovery's journal says every owned resource and process was gone ('recovered') and
+ * may say the directory was removed too ('removed'). Finish what is left of the removal, record
+ * it, and succeed; ask Docker nothing.
+ */
+function finishFromCheckpoint(record) {
+  if (record.checkpoint === 'removed') return 0;
+  try {
+    if (record.directoryPresent) rmSync(temporary, { recursive: true, force: true });
+    writeJournal({ groups: [], checkpoint: 'removed' });
+  } catch {
+    console.error(
+      '[backup-restore-drill] the removal an earlier recovery started could not be finished',
+    );
+    return 1;
+  }
+  return 0;
 }
 
 const failedCleanup = ({ leftovers = [], unverified = [] } = {}) => ({
