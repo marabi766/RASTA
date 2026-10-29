@@ -201,7 +201,8 @@ backup، انتقال و نگهداری خارج از میزبان، Kafka و of
 month (`17 3 1 * *`), on demand (Actions → "Backup restore drill (monthly)" → Run workflow,
 or `gh workflow run backup-drill-monthly.yml`), and on a pull request that changes that file
 or `scripts/backup-restore-drill*` (so the change itself proves the job still runs).
-Overlapping runs of one ref queue; a running drill is never cancelled.
+Runs of one ref do not overlap and a running drill is never cancelled (GitHub keeps one pending
+run per group, so a newer pending run replaces an older pending one).
 
 **What it runs.** The same command as an operator, `scripts/backup-restore-drill --report <new
 file>`, on an `ubuntu-latest` runner after `pnpm install --frozen-lockfile`. The CLI owns its two
