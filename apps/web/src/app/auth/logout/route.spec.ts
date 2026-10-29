@@ -2,7 +2,13 @@
  * @jest-environment node
  */
 const LOGIN = { csrfToken: 'csrf-token-for-this-session' };
-jest.mock('@/server/current-session', () => ({ readSession: async () => LOGIN }));
+// Logout reads the stored session on its own path, so a session `readSession()` refuses — one
+// whose organization cannot be told (PR 405 review 2, F3) — can still sign out.
+const stored = { current: LOGIN as unknown };
+jest.mock('@/server/current-session', () => ({
+  readSession: async () => null,
+  readStoredSessionForLogout: async () => stored.current,
+}));
 const purge = jest.fn<Promise<boolean>, [unknown]>(async () => true);
 jest.mock('@/server/unresolved-request', () => ({
   ...jest.requireActual('@/server/unresolved-request'),
@@ -19,6 +25,8 @@ jest.mock('next/headers', () => ({
 }));
 
 beforeEach(() => {
+  stored.current = LOGIN;
+  purge.mockClear();
   Object.assign(process.env, {
     API_GATEWAY_URL: 'http://gateway.test:3000',
     OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
@@ -59,4 +67,34 @@ describe('logout', () => {
     );
     expect(cleared).not.toContain('unrelated');
   });
+
+  it('signs out a session whose organization cannot be told — the one the recovery page offers it to', async () => {
+    const body = new FormData();
+    body.set('csrf', LOGIN.csrfToken);
+    const response = await POST(
+      new Request('http://localhost:3200/auth/logout', { method: 'POST', body }),
+    );
+    expect(response.status).toBe(307);
+    expect(response.headers.get('location')).toMatch(/^http:\/\/keycloak\.test\/realms\/rasta\//);
+    expect(response.headers.getSetCookie().join('\n')).toMatch(/rasta_session=;/);
+  });
+
+  it.each([
+    ['a wrong token', 'not-the-csrf-token'],
+    ['no token', null],
+  ])(
+    'with %s, changes nothing: 403, no cookie touched, nothing purged, no redirect',
+    async (_label, csrf) => {
+      const body = new FormData();
+      if (csrf !== null) body.set('csrf', csrf);
+      const response = await POST(
+        new Request('http://localhost:3200/auth/logout', { method: 'POST', body }),
+      );
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: 'CSRF_TOKEN_MISMATCH' });
+      expect(response.headers.getSetCookie()).toEqual([]);
+      expect(response.headers.get('location')).toBeNull();
+      expect(purge).not.toHaveBeenCalled();
+    },
+  );
 });

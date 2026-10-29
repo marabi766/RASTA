@@ -10,6 +10,8 @@ import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { parseUsageForm, recordUsage, usageFormValues } from '@/server/usage';
 
 import type { UsageFormState } from './form-state';
+import { flashHref } from '@/server/flash';
+import { USAGE_CREATED } from '@/lib/usage-fields';
 
 /**
  * The `/usage` form's server action — the first write path in the portal.
@@ -70,8 +72,11 @@ export async function submitUsage(
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
     // form must carry a fresh submission id. The record id is not sensitive
     // and the query string is the only channel that survives a redirect
-    // without JavaScript.
-    redirect(`/usage?created=${encodeURIComponent(result.data.id)}`);
+    // without JavaScript; the flash beside it, signed for this session and
+    // organization, is what makes the page say "recorded" (PR 405 review 2, F2).
+    redirect(
+      flashHref(session, '/usage', result.data.id, USAGE_CREATED, { created: result.data.id }),
+    );
   }
 
   switch (result.kind) {

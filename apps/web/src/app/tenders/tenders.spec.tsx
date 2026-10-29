@@ -18,6 +18,8 @@ import {
 
 import { TendersScreen, formatBidWindow, type TendersView } from './TendersScreen';
 import { OpenTenderDetailScreen, OwnTenderDetailScreen } from './[id]/TenderDetailScreen';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * What `/tenders` and `/tenders/[id]` render: every outcome the server read can
@@ -128,7 +130,9 @@ it('shows the persisted procurement threshold warning on the tender screen', () 
 
 describe('the tender list, owner side', () => {
   it('shows each tender with a status word, a Jalali window in Persian digits and a link to it', () => {
-    const { container } = render(<TendersScreen view={sides(ownPage([OWN]), null)} query={{}} />);
+    const { container } = render(
+      <TendersScreen view={sides(ownPage([OWN]), null)} query={{ context: TEST_CONTEXT }} />,
+    );
 
     expect(screen.getByRole('link', { name: OWN.title })).toHaveAttribute('href', '/tenders/TND_1');
     expect(screen.getAllByText('منتشرشده').length).toBeGreaterThan(0);
@@ -145,26 +149,38 @@ describe('the tender list, owner side', () => {
 
   it('marks the active filter and keeps it in the next-page link', () => {
     render(
-      <TendersScreen view={sides(ownPage([OWN], 'c2'), null)} query={{ status: 'PUBLISHED' }} />,
+      <TendersScreen
+        view={sides(ownPage([OWN], 'c2'), null)}
+        query={{ context: TEST_CONTEXT, status: 'PUBLISHED' }}
+      />,
     );
 
     expect(screen.getByRole('link', { name: 'منتشرشده' })).toHaveAttribute('aria-current', 'page');
     expect(screen.getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      '/tenders?status=PUBLISHED&cursor=c2',
+      withContext(TEST_CONTEXT, '/tenders?status=PUBLISHED&cursor=c2'),
     );
   });
 
   it('says so when there are none, with and without a filter', () => {
-    const { rerender } = render(<TendersScreen view={sides(ownPage([]), null)} query={{}} />);
+    const { rerender } = render(
+      <TendersScreen view={sides(ownPage([]), null)} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(screen.getByText('این سازمان هنوز مناقصه‌ای ثبت نکرده است.')).toBeInTheDocument();
 
-    rerender(<TendersScreen view={sides(ownPage([]), null)} query={{ status: 'DRAFT' }} />);
+    rerender(
+      <TendersScreen
+        view={sides(ownPage([]), null)}
+        query={{ context: TEST_CONTEXT, status: 'DRAFT' }}
+      />,
+    );
     expect(screen.getByText('مناقصه‌ای در وضعیت «پیش‌نویس» نیست.')).toBeInTheDocument();
   });
 
   it('renders a refusal as no access, with fixed text', () => {
-    render(<TendersScreen view={sides({ kind: 'FORBIDDEN' }, null)} query={{}} />);
+    render(
+      <TendersScreen view={sides({ kind: 'FORBIDDEN' }, null)} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(screen.getByText('فهرست مناقصه‌های این سازمان در اختیار شما نیست.')).toBeInTheDocument();
   });
 
@@ -174,7 +190,7 @@ describe('the tender list, owner side', () => {
   ] as const)(
     'renders a degraded read ($kind) with the correlation id and fixed text',
     (result) => {
-      render(<TendersScreen view={sides(result, null)} query={{}} />);
+      render(<TendersScreen view={sides(result, null)} query={{ context: TEST_CONTEXT }} />);
       expect(screen.getByText(/فهرست مناقصه‌ها خوانده نشد/)).toBeInTheDocument();
       expect(screen.getByText(/corr-1/)).toBeInTheDocument();
     },
@@ -183,11 +199,13 @@ describe('the tender list, owner side', () => {
 
 describe('the tender list, bidder side', () => {
   it('links each open tender to the bidder’s door and shows no status or bid information', () => {
-    const { container } = render(<TendersScreen view={sides(null, openPage([OPEN]))} query={{}} />);
+    const { container } = render(
+      <TendersScreen view={sides(null, openPage([OPEN]))} query={{ context: TEST_CONTEXT }} />,
+    );
 
     expect(screen.getByRole('link', { name: OPEN.title })).toHaveAttribute(
       'href',
-      '/tenders/TND_9?view=open',
+      withContext(TEST_CONTEXT, '/tenders/TND_9?view=open'),
     );
     expect(screen.getByText(/استعلام · عمومی/)).toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'وضعیت مناقصه' })).not.toBeInTheDocument();
@@ -198,7 +216,7 @@ describe('the tender list, bidder side', () => {
     render(
       <TendersScreen
         view={sides(ownPage([OWN], 'o2'), openPage([OPEN], 'b2'))}
-        query={{ status: 'PUBLISHED', cursor: 'o1' }}
+        query={{ context: TEST_CONTEXT, status: 'PUBLISHED', cursor: 'o1' }}
       />,
     );
 
@@ -206,22 +224,26 @@ describe('the tender list, bidder side', () => {
       .getAllByRole('link', { name: 'صفحهٔ بعد' })
       .map((a) => a.getAttribute('href'));
     expect(next).toEqual([
-      '/tenders?status=PUBLISHED&cursor=o2',
-      '/tenders?status=PUBLISHED&cursor=o1&openCursor=b2',
+      withContext(TEST_CONTEXT, '/tenders?status=PUBLISHED&cursor=o2'),
+      withContext(TEST_CONTEXT, '/tenders?status=PUBLISHED&cursor=o1&openCursor=b2'),
     ]);
   });
 
   it('says so when nothing is open, and renders refusal and degraded reads as fixed text', () => {
-    const { rerender } = render(<TendersScreen view={sides(null, openPage([]))} query={{}} />);
+    const { rerender } = render(
+      <TendersScreen view={sides(null, openPage([]))} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(screen.getByText('مناقصهٔ بازی نیست')).toBeInTheDocument();
 
-    rerender(<TendersScreen view={sides(null, { kind: 'FORBIDDEN' })} query={{}} />);
+    rerender(
+      <TendersScreen view={sides(null, { kind: 'FORBIDDEN' })} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(screen.getByText('مناقصه‌های باز برای پیشنهاد در اختیار شما نیست.')).toBeInTheDocument();
 
     rerender(
       <TendersScreen
         view={sides(null, { kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-7' })}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
       />,
     );
     expect(screen.getByText(/فهرست مناقصه‌های باز خوانده نشد/)).toBeInTheDocument();
@@ -247,7 +269,7 @@ describe('the tender list has no accessibility violations in any state', () => {
       [`open side ${failure.kind}`, sides(null, failure)],
     ]),
   ])('passes jest-axe (%s)', async (_name, view) => {
-    const { container } = render(<TendersScreen view={view} query={{}} />);
+    const { container } = render(<TendersScreen view={view} query={{ context: TEST_CONTEXT }} />);
     expect(await axe(container)).toHaveNoViolations();
   });
 });
@@ -477,7 +499,9 @@ describe('a malformed timestamp, from the response to the page', () => {
       });
       const result = await fetchTenders(session);
 
-      const { container } = render(<TendersScreen view={sides(result, null)} query={{}} />);
+      const { container } = render(
+        <TendersScreen view={sides(result, null)} query={{ context: TEST_CONTEXT }} />,
+      );
       expect(screen.getByText(/فهرست مناقصه‌ها خوانده نشد/)).toBeInTheDocument();
       expect(screen.getByText(/corr-list/)).toBeInTheDocument();
       expect(container.textContent).not.toContain(UPSTREAM);
@@ -510,7 +534,10 @@ describe('a malformed timestamp, from the response to the page', () => {
         correlationId: 'corr-open',
       });
       const list = render(
-        <TendersScreen view={sides(null, await fetchOpenTenders(session))} query={{}} />,
+        <TendersScreen
+          view={sides(null, await fetchOpenTenders(session))}
+          query={{ context: TEST_CONTEXT }}
+        />,
       );
       expect(screen.getByText(/فهرست مناقصه‌های باز خوانده نشد/)).toBeInTheDocument();
       expect(list.container.textContent).not.toContain(UPSTREAM);

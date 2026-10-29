@@ -4,6 +4,7 @@
 import { mintReturnStamp, returnReplayWindowSeconds, verifyReturnStamp } from './return-replay';
 import { mintSubmissionId } from './submission';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The return replay stamp: what it binds a submission to, and until when the
@@ -23,7 +24,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'supplier',
   organizationId: 'ORG-DEH-0002',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0002'),
   accessTokenExpiresAt: 1_900_000_600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

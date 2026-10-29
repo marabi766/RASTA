@@ -10,6 +10,7 @@ import { mintReplayStamp, replayWindowSeconds } from '@/server/dispute-replay';
 import { REPLAY_FIELD } from '@/lib/form-fields';
 
 import { IDLE_DISPUTE_FORM, type UnconfirmedDispute } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The dispute commands' one write path — the order of checks of
@@ -55,7 +56,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'payer',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

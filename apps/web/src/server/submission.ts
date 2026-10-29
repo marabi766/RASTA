@@ -3,7 +3,13 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { SUBMISSION_FIELD } from '@/lib/form-fields';
 
 import { webServerEnv } from './env';
+import { tokenPerson } from './realm-roles';
 import type { WebSession } from './session';
+import {
+  actingOrganizationId,
+  formerOrganizationCopy,
+  sessionOrganization,
+} from './session-organization';
 
 /**
  * A per-render reference for one form: minted when the form is rendered and
@@ -38,9 +44,20 @@ import type { WebSession } from './session';
  * ## Bound to the session
  *
  * The id carries a MAC, keyed from the server's session secret, over the
- * session's subject, its CSRF token and the id's own nonce. A well-formed id
- * this server never issued, another person's id, and an id minted under an
- * earlier login are all refused before anything reaches the gateway.
+ * session's subject, its CSRF token, **the organization the access token acts
+ * for** and the id's own nonce. A well-formed id this server never issued,
+ * another person's id, an id minted under an earlier login, and an id minted
+ * while the token acted for another organization are all refused before
+ * anything reaches the gateway.
+ *
+ * The organization is the one the access token acts for, read through
+ * `session-organization.ts` like every other consumer: after the person
+ * switches their active organization elsewhere the next refresh sends every
+ * write for the new one (task 095). A form drawn for the old organization — a
+ * member picked from its list, a record of its own — is then refused as stale
+ * (`REFUSED`, `SUBMISSION`: refresh the page), never sent for the new one. A
+ * refresh that keeps the organization keeps every form valid. A session whose
+ * organization cannot be told mints no id and verifies none (task 100).
  *
  * Every form uses this pair. There used to be a second, shape-only pair (a
  * random id and a regular-expression check) that proved an id was the right
@@ -67,12 +84,15 @@ const MAC_CHARS = 22;
 const BOUND_SUBMISSION_ID = new RegExp(`^sub_[A-Za-z0-9_-]{${NONCE_CHARS + MAC_CHARS}}$`);
 
 /** A purpose for the key, so this MAC cannot be confused with any other use of the secret. */
-const KEY_PURPOSE = 'rasta-web/submission-id/v1';
+const KEY_PURPOSE = 'rasta-web/submission-id/v2';
 
-function macFor(session: WebSession, nonce: string): Buffer {
+function macFor(session: WebSession, nonce: string): Buffer | null {
+  const organizationId = sessionOrganization(session);
+  if (organizationId === undefined) return null;
   const key = createHmac('sha256', webServerEnv().WEB_SESSION_SECRET).update(KEY_PURPOSE).digest();
+  const organization = organizationId ?? '';
   return createHmac('sha256', key)
-    .update(`${session.subject}\n${session.csrfToken}\n${nonce}`)
+    .update(`${session.subject}\n${session.csrfToken}\n${organization}\n${nonce}`)
     .digest()
     .subarray(0, MAC_BYTES);
 }
@@ -86,7 +106,11 @@ function macFor(session: WebSession, nonce: string): Buffer {
  */
 export function mintSubmissionId(session: WebSession): string {
   const nonce = randomBytes(NONCE_BYTES).toString('base64url');
-  return `${PREFIX}${nonce}${macFor(session, nonce).toString('base64url')}`;
+  const mac = macFor(session, nonce);
+  // `readSession()` refuses such a session; a caller that got one anyway draws no form.
+  if (mac === null)
+    throw new Error('No submission id for a session whose organization is unknown.');
+  return `${PREFIX}${nonce}${mac.toString('base64url')}`;
 }
 
 /** True only for an id `mintSubmissionId` issued to **this** session. */
@@ -105,6 +129,7 @@ export function isBoundSubmissionId(value: unknown, session: WebSession): value 
   if (received.toString('base64url') !== macText) return false;
 
   const expected = macFor(session, nonce);
+  if (expected === null) return false;
 
   // Constant-time, and only between equal lengths: `timingSafeEqual` throws on
   // unequal ones, and the regex above has already fixed the length.
@@ -121,22 +146,41 @@ const BINDING_BYTES = 12;
 const BINDING_PURPOSE = 'rasta-web/unresolved-submission-binding/v1';
 
 /**
- * Two one-way tags the page hands to a form that keeps an unresolved submission
- * in `sessionStorage` (`lib/unresolved-order.ts`), so the browser can tell
+ * The one-way tags the page hands to a form that keeps an unresolved submission
+ * in `sessionStorage` (`lib/unresolved-tenancy.ts`), so the browser can tell
  * *whose* entry it is without the entry holding anything of the session.
  *
- * - `owner`: this person acting for this organization. A different owner's entry
- *   is not shown at all.
- * - `session`: this login. The submission id is bound to the login's CSRF token
- *   (`mintSubmissionId`), so after a re-login the stored id is refused and the
- *   entry can only be shown, never re-sent.
+ * - `person`: this person, whichever organization they act for. An entry of
+ *   another person is removed on this person's first page (an account boundary).
+ * - `owner`: this person acting for **this** organization — the one the access
+ *   token acts for (`actingOrganizationId`). Entries are kept, and keyed, per
+ *   owner: an entry of the same person for another organization stays in
+ *   storage untouched, but is neither shown nor resolved here, so after a
+ *   switch from A to B nothing of A's appears on B's pages, and back on A it is
+ *   all still there (PR 405 review 1, F1).
+ * - `session`: this login, for this organization. The submission id is bound
+ *   to the login's CSRF token and the organization (`mintSubmissionId`), so
+ *   after a re-login the stored id is refused and the entry can only be shown,
+ *   never re-sent.
+ * - `legacy`: the `owner` tags an entry written before entries were keyed per
+ *   organization may carry for this person — one per organization the token
+ *   lists them as a member of, none, and the copy an older cookie of this
+ *   login kept (`formerOrganizationCopy`). Such an entry cannot say which
+ *   organization it was sent for (the tag was the login's organization, not
+ *   necessarily the token's), so it is never retagged and never guessed: it is
+ *   kept for this person and shown view-only, never re-sent. One whose tag is
+ *   none of these — a membership that has ended since, another person — cannot
+ *   be told to be anyone's: quarantined on the device, never removed
+ *   (`lib/unresolved-tenancy.ts`; PR 405 review 2, F1).
  *
- * Keyed MACs of the session's own values: neither tag reveals, nor can be used
- * to derive, the subject, the CSRF token or any token.
+ * Keyed MACs of the session's own values: no tag reveals, nor can be used to
+ * derive, the subject, an organization, the CSRF token or any token.
  */
 export interface SubmissionBinding {
+  readonly person: string;
   readonly owner: string;
   readonly session: string;
+  readonly legacy: readonly string[];
 }
 
 export function submissionBinding(session: WebSession): SubmissionBinding {
@@ -149,8 +193,27 @@ export function submissionBinding(session: WebSession): SubmissionBinding {
       .digest()
       .subarray(0, BINDING_BYTES)
       .toString('base64url');
-  const owner = `${session.subject}\n${session.organizationId ?? ''}`;
-  return { owner: tag(`owner\n${owner}`), session: tag(`session\n${owner}\n${session.csrfToken}`) };
+  const ownerOf = (organizationId: string | null) =>
+    tag(`owner\n${session.subject}\n${organizationId ?? ''}`);
+  const organizationId = actingOrganizationId(session);
+  const owner = `${session.subject}\n${organizationId ?? ''}`;
+  const memberships = tokenPerson(session.accessToken)?.memberships ?? [];
+  // The copy an older cookie kept: the organization that build tagged this login's entries
+  // with, even after the membership has ended (PR 405 review 2, F1).
+  const former = formerOrganizationCopy(session);
+  const legacy = [
+    ...new Set(
+      [null, organizationId, ...memberships, ...(former === undefined ? [] : [former])].map(
+        ownerOf,
+      ),
+    ),
+  ].sort();
+  return {
+    person: tag(`person\n${session.subject}`),
+    owner: ownerOf(organizationId),
+    session: tag(`session\n${owner}\n${session.csrfToken}`),
+    legacy,
+  };
 }
 
 export { SUBMISSION_FIELD };

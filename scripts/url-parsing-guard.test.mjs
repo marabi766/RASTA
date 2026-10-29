@@ -68,6 +68,11 @@ const ALLOWED = Object.freeze([
     reason: "the stub server's incoming request path against a literal base; no configuration",
   },
   {
+    file: 'apps/web/src/test/landing.ts',
+    call: "new URL(url, 'http://portal.test')",
+    reason: 'test helper: a redirect the portal drew, against a literal base; no configuration',
+  },
+  {
     file: 'services/identity-service/test/keycloak-http-stub.ts',
     call: "new URL(request.url ?? '', this.url)",
     reason: "the stub server's incoming request path against its own loopback base; no configuration",
