@@ -925,12 +925,7 @@ export class PaymentService {
       // moves money back *into* the wallet and is still allowed. A reversal
       // still owed after the provider refunded waits too, with its amount
       // held, so nothing can spend it meanwhile.
-      if (wallet.status !== 'ACTIVE') {
-        throw RastaError.businessRule(
-          'This wallet is not active; a refund cannot take money out of it until it is',
-          { paymentIntentId: intentId, walletId: wallet.id, walletStatus: wallet.status },
-        );
-      }
+      if (wallet.status !== 'ACTIVE') throw refundWalletNotActive(intentId, wallet);
       // Refunded at the provider by an earlier attempt that could not record
       // it: the hold is still there, and only step 3 is retried.
       if (row.failureReason === REFUNDED_NOT_REVERSED) return { row, next: 'RECORD' as const };
@@ -1046,12 +1041,7 @@ export class PaymentService {
         return view;
       });
     } catch (error) {
-      const code = (error as { code?: string } | null)?.code;
-      await this.markRefundUnresolved(
-        requested.row,
-        REFUNDED_NOT_REVERSED,
-        code === 'INSUFFICIENT_BALANCE' ? 'INSUFFICIENT_BALANCE' : 'REVERSAL_FAILED',
-      );
+      await this.markRefundUnresolved(requested.row, REFUNDED_NOT_REVERSED, reversalFailure(error));
       throw error;
     }
   }
@@ -1064,6 +1054,15 @@ export class PaymentService {
    *
    * The reconciler runs this same method for a refund the provider made
    * (ADR-064 step B2): one reversal path, not two.
+   *
+   * The reversal takes money out of the wallet, so the wallet must be ACTIVE
+   * here, on the row this transaction locked. Step 1's check does not carry
+   * over: its COMMIT released the lock, and a freeze committed during the
+   * provider call, or between a retry's two transactions, would otherwise be
+   * reversed past (Codex PR-480 r1, R1). Refused, nothing in this transaction
+   * is written: the hold stays and the intent keeps its marker, which the
+   * request path turns into `REFUNDED_NOT_REVERSED` — the state the reconciler
+   * already waits on (`WALLET_NOT_ACTIVE`) until the wallet is active again.
    */
   async recordRefund(
     tx: ExtendedPrismaClient,
@@ -1072,6 +1071,7 @@ export class PaymentService {
     actor: string,
     reason: string,
   ): Promise<RefundResultView> {
+    if (wallet.status !== 'ACTIVE') throw refundWalletNotActive(row.id, wallet);
     const hold = await this.refundHoldOf(tx, wallet.id, row.id);
     const returned = await this.wallets.refundHold(tx, {
       wallet,
@@ -1333,8 +1333,7 @@ export class PaymentService {
     reason:
       | 'PROVIDER_OUTCOME_UNKNOWN'
       | 'PROVIDER_DECLINED_RELEASE_PENDING'
-      | 'INSUFFICIENT_BALANCE'
-      | 'REVERSAL_FAILED',
+      | ReversalFailure,
   ): Promise<void> {
     try {
       const marked = await this.prisma.transaction(async (tx) => {
@@ -1566,6 +1565,38 @@ function refundUnresolved(intentId: string, marker: string): RastaError {
       'reconciled before another refund can be made',
     { paymentIntentId: intentId, outcome: marker },
   );
+}
+
+/** `last_outcome` of a reversal that waits for its wallet; the reconciler's own code. */
+const WALLET_NOT_ACTIVE = 'WALLET_NOT_ACTIVE';
+
+/**
+ * A refund refused because its wallet is not ACTIVE: no money leaves a frozen
+ * or closed wallet (PM ruling, round 2 on #143). Raised by step 1 before any
+ * hold, and by `recordRefund` under the recording transaction's wallet lock.
+ */
+function refundWalletNotActive(intentId: string, wallet: LockedWallet): RastaError {
+  return RastaError.businessRule(
+    'This wallet is not active; a refund cannot take money out of it until it is',
+    {
+      paymentIntentId: intentId,
+      walletId: wallet.id,
+      walletStatus: wallet.status,
+      outcome: WALLET_NOT_ACTIVE,
+    },
+  );
+}
+
+/** The reason step 3 failed, as `PAYMENT_REFUND_UNRECONCILED` names it. */
+type ReversalFailure = 'INSUFFICIENT_BALANCE' | typeof WALLET_NOT_ACTIVE | 'REVERSAL_FAILED';
+
+function reversalFailure(error: unknown): ReversalFailure {
+  if (error instanceof RastaError && error.internalContext?.outcome === WALLET_NOT_ACTIVE) {
+    return WALLET_NOT_ACTIVE;
+  }
+  return (error as { code?: string } | null)?.code === 'INSUFFICIENT_BALANCE'
+    ? 'INSUFFICIENT_BALANCE'
+    : 'REVERSAL_FAILED';
 }
 
 /** The top-up transaction a CAPTURED intent funded. */

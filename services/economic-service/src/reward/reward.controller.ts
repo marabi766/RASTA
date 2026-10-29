@@ -18,6 +18,7 @@ import { RecognitionService } from './recognition.service';
 import { toRecognitionRuleApiView, toRecognitionView } from './recognition-views';
 import { assertNotAuditor } from '../access/access';
 import { IdempotencyStore } from '../shared/idempotency';
+import { canonicalPipe } from '../shared/canonical';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import {
   toRewardBalanceView,
@@ -279,7 +280,10 @@ export class RewardController {
   })
   async createRule(
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    @Body(zodPipe(createRewardRuleSchema)) dto: CreateRewardRuleDto,
+    // Canonical first (the amount, the instants, the label's line endings), so
+    // a retry that says the same thing differently replays rather than 409s.
+    @Body(canonicalPipe(createRewardRuleSchema), zodPipe(createRewardRuleSchema))
+    dto: CreateRewardRuleDto,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
