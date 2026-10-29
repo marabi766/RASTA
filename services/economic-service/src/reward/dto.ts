@@ -377,3 +377,30 @@ export interface RewardBalanceView {
   lifetimeCreditMinor: string;
   updatedAt: string;
 }
+
+/**
+ * A reward rule as every rule route answers it — the list, the create (and
+ * its replay), the update. `creditPerPointMinor` is a decimal string in minor
+ * units, or null on a points-only rule (ADR-022, ADR-033); `periodCap` is a
+ * number of **points**, not money.
+ */
+export interface RewardRuleApiView {
+  id: string;
+  /** Null for a platform-wide rule. */
+  organizationId: string | null;
+  triggerEvent: string;
+  rewardType: string;
+  condition: unknown;
+  points: number;
+  creditPerPointMinor: string | null;
+  periodCap: number | null;
+  periodType: string | null;
+  validFrom: string;
+  validTo: string | null;
+  status: string;
+  label: string | null;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  updatedBy: string;
+}
