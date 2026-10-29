@@ -47,7 +47,7 @@ export async function submitCreateDriver(
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
     // form must carry a fresh submission id.
-    redirect(`/drivers/${encodeURIComponent(result.data.id)}?created=1`);
+    redirect(`/drivers/${encodeURIComponent(result.data.id)}`);
   }
 
   switch (result.kind) {

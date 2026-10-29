@@ -22,7 +22,8 @@ export function identityDocumentConfig(version: string): Omit<OpenAPIObject, 'pa
         name: 'x-internal-token',
         description:
           'A signed internal service token minted for identity-service (ADR-020). ' +
-          '`GET /v1/users/{id}/organizations` takes it, signed for no tenant, instead of ' +
+          '`GET /v1/users/{id}/organizations` takes it, signed for no tenant, and ' +
+          '`GET /v1/users/{id}/live-membership` signed for a tenant, instead of ' +
           'the bearer.',
       },
       INTERNAL_TOKEN_SCHEME,

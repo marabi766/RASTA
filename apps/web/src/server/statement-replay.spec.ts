@@ -8,6 +8,7 @@ import {
 } from './statement-replay';
 import { mintSubmissionId } from './submission';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The statement replay stamp: what it binds a submission to, and until when
@@ -27,7 +28,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'contractor',
   organizationId: 'ORG-CON-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-CON-0001'),
   accessTokenExpiresAt: 1_900_000_600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

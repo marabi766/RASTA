@@ -16,6 +16,7 @@ import {
   type AwardFormTerms,
   type ScoreRow,
 } from './OwnerCommandForm';
+import type { Binding } from '@/lib/unresolved-tenancy';
 
 export interface OfferedOwnerCommand {
   readonly command: OwnerCommand;
@@ -34,7 +35,8 @@ export interface OwnerCommandsProps {
   /** The forms of this group (`server/tender-owner.ts`), each with a fresh submission. */
   readonly offered: readonly OfferedOwnerCommand[];
   readonly csrfToken: string;
-  readonly owner: string;
+  /** This person's one-way tags for this organization (`submissionBinding`). */
+  readonly account: Binding;
   readonly pageHref: string;
   /**
    * Whether a command in doubt is drawn here when none of these forms holds it:
@@ -57,7 +59,7 @@ export function OwnerCommands({
   tenderId,
   offered,
   csrfToken,
-  owner,
+  account,
   pageHref,
   showsRestored = false,
   pageSubmissionIds = [],
@@ -67,10 +69,10 @@ export function OwnerCommands({
   } | null>(null);
 
   useEffect(() => {
-    const read = () => setChecked({ restored: restoreUnresolvedOwnerCommand(tenderId, owner) });
+    const read = () => setChecked({ restored: restoreUnresolvedOwnerCommand(tenderId, account) });
     read();
     return subscribeUnresolvedOwnerCommands(read);
-  }, [tenderId, owner]);
+  }, [tenderId, account]);
 
   if (checked === null) return null;
   const { restored } = checked;
@@ -89,7 +91,7 @@ export function OwnerCommands({
           csrfToken={csrfToken}
           submissionId={restored.submissionId}
           replay={null}
-          owner={owner}
+          account={account}
           pageHref={pageHref}
           initial={unconfirmedFrom(restored)}
         />
@@ -114,7 +116,7 @@ export function OwnerCommands({
           submissionId={submission.id}
           replay={submission.replay}
           binding={submission.binding}
-          owner={owner}
+          account={account}
           pageHref={pageHref}
           heldBy={restored?.submissionId ?? null}
         />

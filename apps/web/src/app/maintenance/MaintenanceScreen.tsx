@@ -24,6 +24,8 @@ import type {
   MaintenanceRequestPage,
   ReadResult,
 } from '@/server/maintenance';
+import { withContext, type InContext } from '@/lib/page-context';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * Maintenance and repairs (docs/16 § 16.6, `/maintenance`).
@@ -49,7 +51,7 @@ import type {
 
 export interface MaintenanceScreenProps {
   readonly result: ReadResult<MaintenanceRequestPage>;
-  readonly query: MaintenanceRequestListQuery;
+  readonly query: InContext<MaintenanceRequestListQuery>;
   /**
    * The report form, when this person may use it. The screen stays a pure
    * function of what the server read: whether to offer the form is decided by
@@ -60,7 +62,7 @@ export interface MaintenanceScreenProps {
 
 /** Rebuilds this screen's URL with one value changed. */
 function hrefWith(
-  query: MaintenanceRequestListQuery,
+  query: InContext<MaintenanceRequestListQuery>,
   changes: Partial<MaintenanceRequestListQuery>,
 ): string {
   const params = new URLSearchParams();
@@ -70,7 +72,7 @@ function hrefWith(
   if (merged.severity) params.set('severity', merged.severity);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const search = params.toString();
-  return search ? `/maintenance?${search}` : '/maintenance';
+  return withContext(query.context, search ? `/maintenance?${search}` : '/maintenance');
 }
 
 /**
@@ -83,7 +85,7 @@ const CONTROL =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ' +
   'focus-visible:outline-focus';
 
-function Filters({ query }: { query: MaintenanceRequestListQuery }) {
+function Filters({ query }: { query: InContext<MaintenanceRequestListQuery> }) {
   return (
     <form
       method="get"
@@ -91,6 +93,7 @@ function Filters({ query }: { query: MaintenanceRequestListQuery }) {
       className="flex flex-wrap items-end gap-4"
       aria-label="پالایش فهرست"
     >
+      <ContextField context={query.context} />
       <label htmlFor="filter-status" className="flex flex-col gap-1 text-sm text-content-muted">
         وضعیت
         <select
@@ -147,7 +150,7 @@ function RequestRows({
   query,
 }: {
   page: MaintenanceRequestPage;
-  query: MaintenanceRequestListQuery;
+  query: InContext<MaintenanceRequestListQuery>;
 }) {
   return (
     <>

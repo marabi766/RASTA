@@ -13,6 +13,8 @@ import { formatJalaliDateLong, formatMoney } from '@/lib/format';
 import type { AssetTimelinePage, AssetTimelineQuery, ReadResult } from '@/server/assets';
 import { DemoModeNotice } from '@/app/DemoModeNotice';
 import type { DemoMode } from '@/lib/demo-mode';
+import { withContext, type InContext } from '@/lib/page-context';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * Full asset history (docs/16 § 16.6, `/assets/[id]/timeline`).
@@ -32,14 +34,14 @@ import type { DemoMode } from '@/lib/demo-mode';
 export interface TimelineScreenProps {
   readonly result: ReadResult<AssetTimelinePage>;
   readonly assetId: string;
-  readonly query: AssetTimelineQuery;
+  readonly query: InContext<AssetTimelineQuery>;
   /** What the provider says (`fetchDemoMode`, Q-14), over the entries' amounts. Nothing here moves money. */
   readonly demoMode: DemoMode;
 }
 
 function hrefWith(
   assetId: string,
-  query: AssetTimelineQuery,
+  query: InContext<AssetTimelineQuery>,
   changes: Partial<AssetTimelineQuery>,
 ) {
   const params = new URLSearchParams();
@@ -48,7 +50,7 @@ function hrefWith(
   if (merged.cursor) params.set('cursor', merged.cursor);
   const search = params.toString();
   const base = `/assets/${encodeURIComponent(assetId)}/timeline`;
-  return search ? `${base}?${search}` : base;
+  return withContext(query.context, search ? `${base}?${search}` : base);
 }
 
 /**
@@ -61,7 +63,7 @@ const CONTROL =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ' +
   'focus-visible:outline-focus';
 
-function Filters({ assetId, query }: { assetId: string; query: AssetTimelineQuery }) {
+function Filters({ assetId, query }: { assetId: string; query: InContext<AssetTimelineQuery> }) {
   return (
     <form
       method="get"
@@ -69,6 +71,7 @@ function Filters({ assetId, query }: { assetId: string; query: AssetTimelineQuer
       className="flex flex-wrap items-end gap-4"
       aria-label="پالایش تاریخچه"
     >
+      <ContextField context={query.context} />
       <label htmlFor="filter-category" className="flex flex-col gap-1 text-sm text-content-muted">
         بخش
         <select
@@ -98,7 +101,7 @@ function EntryRows({
 }: {
   page: AssetTimelinePage;
   assetId: string;
-  query: AssetTimelineQuery;
+  query: InContext<AssetTimelineQuery>;
 }) {
   return (
     <>

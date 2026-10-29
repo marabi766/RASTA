@@ -22,6 +22,8 @@ import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import type { WriteResult } from '@/server/write';
 
 import type { ProjectFormState } from './project-form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The one path every project command takes.
@@ -74,10 +76,18 @@ function subjectOf(baseline: ProjectBaseline, place: ProjectPlace): string {
   return place === 'project' ? baseline.projectId : INBOX_FLASH_SUBJECT;
 }
 
-function landing(baseline: ProjectBaseline, place: ProjectPlace, flash: string): string {
+function landing(
+  session: WebSession,
+  baseline: ProjectBaseline,
+  place: ProjectPlace,
+  flash: string,
+): string {
   return place === 'project'
-    ? `/projects/${encodeURIComponent(baseline.projectId)}?${FLASH_PARAM}=${flash}`
-    : `/projects?${FLASH_PARAM}=${flash}`;
+    ? withContext(
+        pageContext(session),
+        `/projects/${encodeURIComponent(baseline.projectId)}?${FLASH_PARAM}=${flash}`,
+      )
+    : withContext(pageContext(session), `/projects?${FLASH_PARAM}=${flash}`);
 }
 
 export async function runProjectCommand<V, B, F extends string>(
@@ -126,7 +136,12 @@ export async function runProjectCommand<V, B, F extends string>(
     // Redirect, not state: a refreshed page must not resubmit, and the page the
     // person lands on reads the record again, so it shows what the command did.
     redirect(
-      landing(baseline, place, mintFlash(session, subjectOf(baseline, place), command.notice)),
+      landing(
+        session,
+        baseline,
+        place,
+        mintFlash(session, subjectOf(baseline, place), command.notice),
+      ),
     );
   }
 
@@ -135,7 +150,14 @@ export async function runProjectCommand<V, B, F extends string>(
       if (result.message === STALE_MESSAGE) {
         // The same stale baseline would conflict again, so the typed values are
         // not offered back for another try: the person sees the page as it is.
-        redirect(landing(baseline, place, mintFlash(session, subjectOf(baseline, place), 'stale')));
+        redirect(
+          landing(
+            session,
+            baseline,
+            place,
+            mintFlash(session, subjectOf(baseline, place), 'stale'),
+          ),
+        );
       }
       return {
         kind: 'INVALID',

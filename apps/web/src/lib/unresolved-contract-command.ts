@@ -6,7 +6,21 @@ import {
   type ContractSlot,
 } from './contract-command-fields';
 import { isCommandInput, type CommandInput } from './contract-command-input';
-import type { Binding } from './unresolved-order';
+import {
+  fencedSlot,
+  keysUnder,
+  locate,
+  ownedHere,
+  purgeForeign,
+  storedKeyOf,
+  type AccountTags,
+  type AnswerOutcome,
+  type Binding,
+  type StoredKey,
+  type StartOutcome,
+} from './unresolved-tenancy';
+
+export type { AnswerOutcome };
 
 /**
  * A contract command whose outcome is unknown, kept in `sessionStorage` so
@@ -151,8 +165,8 @@ function storage(): Storage | null {
   }
 }
 
-function keyOf(scope: ContractScope): string {
-  return `${KEY_PREFIX}${scope.contractId}.${scope.slot}.${scope.subjectId ?? '-'}`;
+function scopeText(scope: ContractScope): string {
+  return `${scope.contractId}.${scope.slot}.${scope.subjectId ?? '-'}`;
 }
 
 /** Whether `command` is held in `scope`'s slot — a record of another slot is not this one's. */
@@ -239,9 +253,8 @@ function markerOf(entry: Stored): string {
   });
 }
 
-/** The scope a stored key names, or null — for the purges, which read every slot. */
-function scopeOfKey(key: string): ContractScope | null {
-  const rest = key.slice(KEY_PREFIX.length);
+/** The scope a stored key's scope text names, or null — for the purges, which read every slot. */
+function scopeOfText(rest: string): ContractScope | null {
   const parts = rest.split('.');
   if (parts.length < 3) return null;
   const subject = parts.pop() as string;
@@ -251,31 +264,41 @@ function scopeOfKey(key: string): ContractScope | null {
   return { contractId, slot, subjectId: subject === '-' ? null : subject };
 }
 
-function ownKeys(store: Storage): string[] {
-  const keys: string[] = [];
-  for (let index = 0; index < store.length; index += 1) {
-    const key = store.key(index);
-    if (key !== null && key.startsWith(KEY_PREFIX)) keys.push(key);
-  }
-  return keys;
+function parseIn(raw: string, scopeText: string): Stored | null {
+  const scope = scopeOfText(scopeText);
+  return scope === null ? null : parse(raw, scope);
 }
 
 function stored(store: Storage, key: string): Stored | null {
   const raw = store.getItem(key);
-  const scope = scopeOfKey(key);
-  return raw === null || scope === null ? null : parse(raw, scope);
+  const located = storedKeyOf(KEY_PREFIX, key);
+  return raw === null || located === null ? null : parseIn(raw, located.scope);
 }
 
-/** Logout: every entry reduced to a marker; unreadable ones removed. */
+/** `parse` for `lib/unresolved-tenancy.ts`, which hands the key too. */
+const parseEntry = (raw: string, key: StoredKey): Stored | null => parseIn(raw, key.scope);
+
+/** The quarantine of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
+/** The one slot per scope, fenced to its submission (`lib/unresolved-tenancy.ts`). */
+const slot = fencedSlot(KEY_PREFIX, parseEntry, { closing: () => accountClosing, changed });
+
+export const contractCommandQuarantine = slot.quarantine;
+
+/**
+ * Logout: every entry reduced to a marker; a record that does not read, and one
+ * from before entries were kept per organization, are left as they are.
+ */
 export function purgeAllUnresolvedContractCommands(): void {
   markContractCommandsClosing();
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) {
+    for (const key of keysUnder(store, KEY_PREFIX)) {
+      // An entry from before entries were kept per organization stays as it is: whose it
+      // is cannot be told here, and it is never written over (PR 405 review 2, F1).
+      if (storedKeyOf(KEY_PREFIX, key)?.kind !== 'TENANT') continue;
       const entry = stored(store, key);
       if (entry) store.setItem(key, markerOf(entry));
-      else store.removeItem(key);
     }
   } catch {
     // Unavailable storage holds nothing to purge.
@@ -283,92 +306,113 @@ export function purgeAllUnresolvedContractCommands(): void {
   changed();
 }
 
-/** A page for `owner`: entries of anyone else, and unreadable ones, are removed. */
-export function purgeForeignUnresolvedContractCommands(owner: string): void {
+/**
+ * A page for this person: entries of anyone else are reduced to content-free
+ * markers; theirs stay, for every organization, and nothing that cannot be
+ * attributed is touched (`lib/unresolved-tenancy.ts`).
+ */
+export function purgeForeignUnresolvedContractCommands(tags: AccountTags): void {
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) {
-      const entry = stored(store, key);
-      if (!entry || entry.owner !== owner) store.removeItem(key);
-    }
+    purgeForeign(store, KEY_PREFIX, tags, parseEntry);
   } catch {
     // See above.
   }
 }
 
-/**
- * `SAVED`: stored. `HELD`: another submission's record holds this slot — it is
- * left exactly as it was, and this one must not be sent. `UNAVAILABLE`: storage
- * refused it, or a logout has started.
- */
-export type SaveOutcome = 'SAVED' | 'HELD' | 'UNAVAILABLE';
+/** What a save before the first send says (`StartOutcome`, `lib/unresolved-tenancy.ts`). */
+export type SaveOutcome = StartOutcome;
 
+/**
+ * What is stored for `entry`, or null to keep a marker as it is: a marker is
+ * never turned back into something that can be re-sent. When the slot already
+ * keeps this submission, its first command, input and time stay, and a withdrawn
+ * replay stays withdrawn.
+ */
+function recordOf(
+  entry: Omit<UnresolvedContractCommand, 'savedAt' | 'marker'>,
+  earlier: Stored | null,
+  binding: Binding,
+  now: number,
+): string | null {
+  if (earlier?.marker) return null;
+  return JSON.stringify({
+    v: VERSION,
+    marker: false,
+    command: earlier ? earlier.command : entry.command,
+    submissionId: entry.submissionId,
+    // The input is the first send's, whatever a later answer carries.
+    input: earlier ? earlier.input : entry.input,
+    correlationId: entry.correlationId,
+    // The entry dates from the first send.
+    savedAt: earlier ? earlier.savedAt : now,
+    // Once withdrawn — the server said the deadline passed — never restored.
+    replay: earlier && earlier.replay === null ? null : entry.replay,
+    owner: binding.owner,
+    session: binding.session,
+  });
+}
+
+/** Before the first send (`StartOutcome`, `lib/unresolved-tenancy.ts`). */
 export function saveUnresolvedContractCommand(
   scope: ContractScope,
   entry: Omit<UnresolvedContractCommand, 'savedAt' | 'marker'>,
   binding: Binding,
   now: number = Date.now(),
 ): SaveOutcome {
-  if (accountClosing || !fits(scope, entry.command)) return 'UNAVAILABLE';
-  try {
-    const store = storage();
-    if (!store) return 'UNAVAILABLE';
-    const previous = store.getItem(keyOf(scope));
-    const parsed = previous === null ? null : parse(previous, scope);
-    // Someone else's is not this person's to keep (`purgeForeignUnresolvedContractCommands`).
-    const earlier = parsed?.owner === binding.owner ? parsed : null;
-    // Another submission's record — even a marker — is never replaced.
-    if (earlier !== null && earlier.submissionId !== entry.submissionId) return 'HELD';
-    // A marker is never turned back into something that can be re-sent.
-    if (earlier?.marker) return 'SAVED';
-    const same = earlier !== null;
-    store.setItem(
-      keyOf(scope),
-      JSON.stringify({
-        v: VERSION,
-        marker: false,
-        command: entry.command,
-        submissionId: entry.submissionId,
-        input: entry.input,
-        correlationId: entry.correlationId,
-        // The entry dates from the first send.
-        savedAt: same ? earlier.savedAt : now,
-        // Once withdrawn — the server said the deadline passed — never restored.
-        replay: same && earlier.replay === null ? null : entry.replay,
-        owner: binding.owner,
-        session: binding.session,
-      }),
-    );
-    changed();
-    return 'SAVED';
-  } catch {
-    return 'UNAVAILABLE';
-  }
+  if (!fits(scope, entry.command)) return 'UNAVAILABLE';
+  return slot.start(binding, scopeText(scope), entry.submissionId, () =>
+    recordOf(entry, null, binding, now),
+  );
 }
 
 /**
- * Forgets the record of `submissionId` — and only that one: a record another
- * submission holds stays. An unreadable record is left to
- * `restoreUnresolvedContractCommand`, which removes it.
+ * An answer to `entry.submissionId` still in doubt: its record is updated
+ * while the slot holds it; otherwise the slot is left as it is and the answer
+ * is kept aside (`SET_ASIDE`; `lib/unresolved-tenancy.ts`).
  */
-export function clearUnresolvedContractCommand(scope: ContractScope, submissionId: string): void {
-  try {
-    const store = storage();
-    const raw = store?.getItem(keyOf(scope));
-    if (!store || raw === null || raw === undefined) return;
-    if (parse(raw, scope)?.submissionId !== submissionId) return;
-    store.removeItem(keyOf(scope));
-  } catch {
-    // See above.
-    return;
-  }
-  changed();
+export function answerUnresolvedContractCommand(
+  scope: ContractScope,
+  entry: Omit<UnresolvedContractCommand, 'savedAt' | 'marker'>,
+  binding: Binding,
+  now: number = Date.now(),
+): AnswerOutcome {
+  return slot.answer(
+    binding,
+    scopeText(scope),
+    entry.submissionId,
+    (earlier) => recordOf(entry, earlier, binding, now),
+    now,
+  );
+}
+
+/** A definite answer to `submissionId`, from the login it was sent under: its record, and only that, goes. */
+export function settleUnresolvedContractCommand(
+  scope: ContractScope,
+  submissionId: string,
+  binding: Binding,
+): void {
+  slot.settle(binding, scopeText(scope), submissionId);
+}
+
+/**
+ * The person sets aside the record of `submissionId` — and only that one: a
+ * record another submission holds stays, and so does every other
+ * organization's. A record that cannot be attributed is never removed
+ * (quarantined).
+ */
+export function clearUnresolvedContractCommand(
+  scope: ContractScope,
+  submissionId: string,
+  binding: Binding,
+): void {
+  slot.release(binding, scopeText(scope), submissionId);
 }
 
 /**
  * The unresolved command in this slot, if this person has one. Unreadable, or
- * someone else's: removed, read as none. Older than the session's lifetime:
+ * not this person's: read as none and left as it is (quarantined). Older than the session's lifetime:
  * reduced to the marker, and read as that — never as none.
  */
 export function restoreUnresolvedContractCommand(
@@ -379,17 +423,15 @@ export function restoreUnresolvedContractCommand(
 ): RestoredContractCommand | null {
   try {
     const store = storage();
-    const raw = store?.getItem(keyOf(scope));
-    if (!store || raw === null || raw === undefined) return null;
+    const found = store ? locate(store, KEY_PREFIX, binding, scopeText(scope)) : null;
+    if (!store || found === null) return null;
 
-    const entry = parse(raw, scope);
-    if (!entry || entry.owner !== binding.owner) {
-      store.removeItem(keyOf(scope));
-      return null;
-    }
+    const entry = parse(found.raw, scope);
+    // Not this person's, or does not read: none here, and left as it is (quarantined).
+    if (!entry || !ownedHere(binding, found.legacy, entry.owner)) return null;
     const { command, submissionId, correlationId, savedAt } = entry;
     if (entry.marker || now - savedAt > maxAgeSeconds * 1000) {
-      if (!entry.marker) store.setItem(keyOf(scope), markerOf(entry));
+      if (!entry.marker) store.setItem(found.key, markerOf(entry));
       return {
         kind: 'VIEW_ONLY',
         entry: {
@@ -412,8 +454,12 @@ export function restoreUnresolvedContractCommand(
       replay: entry.replay,
       marker: false,
     };
+    // An old-format record may have been sent for another organization: never re-sent.
     const retryable =
-      entry.session === binding.session && entry.replay !== null && now < entry.replay.until;
+      !found.legacy &&
+      entry.session === binding.session &&
+      entry.replay !== null &&
+      now < entry.replay.until;
     return { kind: retryable ? 'RETRYABLE' : 'VIEW_ONLY', entry: restored };
   } catch {
     return null;

@@ -19,6 +19,8 @@ import {
 } from '@/lib/labels';
 import { formatJalaliDateLong } from '@/lib/format';
 import type { AssetListQuery, AssetPage, ReadResult } from '@/server/assets';
+import { withContext, type InContext } from '@/lib/page-context';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * The machinery list (docs/16 § 16.6, `/assets`).
@@ -44,7 +46,7 @@ import type { AssetListQuery, AssetPage, ReadResult } from '@/server/assets';
 
 export interface AssetsScreenProps {
   readonly result: ReadResult<AssetPage>;
-  readonly query: AssetListQuery;
+  readonly query: InContext<AssetListQuery>;
   /**
    * The registration form, when this person may use it. The screen stays a
    * pure function of what the server read: whether to offer the form is
@@ -54,7 +56,7 @@ export interface AssetsScreenProps {
 }
 
 /** Rebuilds this screen's URL with one value changed. */
-function hrefWith(query: AssetListQuery, changes: Partial<AssetListQuery>): string {
+function hrefWith(query: InContext<AssetListQuery>, changes: Partial<AssetListQuery>): string {
   const params = new URLSearchParams();
   const merged = { ...query, ...changes };
   if (merged.status) params.set('status', merged.status);
@@ -62,7 +64,7 @@ function hrefWith(query: AssetListQuery, changes: Partial<AssetListQuery>): stri
   if (merged.q) params.set('q', merged.q);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const search = params.toString();
-  return search ? `/assets?${search}` : '/assets';
+  return withContext(query.context, search ? `/assets?${search}` : '/assets');
 }
 
 /**
@@ -85,7 +87,7 @@ const CONTROL =
  * Either alone associates the two for a screen reader; both together also
  * satisfy the stricter lint rule this repository runs, and cost nothing.
  */
-function Filters({ query }: { query: AssetListQuery }) {
+function Filters({ query }: { query: InContext<AssetListQuery> }) {
   return (
     <form
       method="get"
@@ -93,6 +95,7 @@ function Filters({ query }: { query: AssetListQuery }) {
       className="flex flex-wrap items-end gap-4"
       aria-label="پالایش فهرست"
     >
+      <ContextField context={query.context} />
       <label htmlFor="filter-status" className="flex flex-col gap-1 text-sm text-content-muted">
         وضعیت
         <select
@@ -143,7 +146,7 @@ function Filters({ query }: { query: AssetListQuery }) {
   );
 }
 
-function AssetRows({ page, query }: { page: AssetPage; query: AssetListQuery }) {
+function AssetRows({ page, query }: { page: AssetPage; query: InContext<AssetListQuery> }) {
   return (
     <>
       <TableScroll label="فهرست ماشین‌آلات این سازمان">
