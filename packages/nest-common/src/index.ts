@@ -302,3 +302,23 @@ export {
   objectShapeOf,
 } from './openapi/zod-schema';
 export type { JsonSchema } from './openapi/zod-schema';
+export { publishedApiErrorSchema, publishedErrorDetailSchema } from './openapi/api-error';
+// Conformance checks of a published document against the real error bodies; for tests.
+export {
+  errorEnvelopeProblems,
+  httpErrorBodyProblems,
+  publishedErrorResponses,
+  publishedPathOf,
+  publishedResponseSchemaOf,
+  realFilterResponse,
+  validatePublishedBody,
+  PROBE_CONTEXTS,
+  PROBE_TRACEPARENT,
+} from './openapi/published-body';
+export type {
+  EnvelopeOptions,
+  ProbeContext,
+  PublishedDocument,
+  PublishedErrorResponse,
+  PublishedSchema,
+} from './openapi/published-body';

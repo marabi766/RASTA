@@ -370,15 +370,40 @@
           "message": {
             "type": "string"
           },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                }
+              },
+              "required": ["path", "message"],
+              "additionalProperties": false
+            }
+          },
           "correlationId": {
             "type": "string"
           },
-          "details": {
-            "type": "array",
-            "items": {}
+          "traceId": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "path": {
+            "type": "string"
           }
         },
-        "required": ["code", "message"],
+        "required": ["code", "message", "correlationId", "timestamp"],
         "additionalProperties": false
       }
     }
