@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
-import { WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { ERROR_CODES, WITHOUT_BIDI_CONTROL } from '@rasta/contracts';
+import { errorEnvelopeProblems } from '@rasta/nest-common';
 import {
   INTERNAL_TOKEN_SCHEME,
   RESPONSE_BODIES,
@@ -9,6 +10,7 @@ import {
   buildDocumentationApp,
   formatDocument,
 } from './document';
+import { REFUSAL_REASONS, refusal, type ReasonOf, type RefusalArea } from '../shared/refusal';
 
 /**
  * The committed contract is exactly what the generator produces.
@@ -598,5 +600,21 @@ describe('the committed OpenAPI document', () => {
     expect(Object.keys(document.paths ?? {}).some((path) => path.startsWith('/health'))).toBe(
       false,
     );
+  });
+
+  it('accepts the error bodies the shared filter really sends, typed refusals included (audit 10-26 F3)', () => {
+    const refusalOf = (area: string, code: string) => {
+      const status = (REFUSAL_REASONS as Record<string, Record<string, number>>)[area]![code]!;
+      const errorCode =
+        status === 403
+          ? ERROR_CODES.FORBIDDEN
+          : status === 409
+            ? ERROR_CODES.INVALID_STATE_TRANSITION
+            : ERROR_CODES.BUSINESS_RULE_VIOLATION;
+      return refusal(errorCode, 'Refused', area as RefusalArea, [code as ReasonOf<RefusalArea>]);
+    };
+    expect(
+      errorEnvelopeProblems(buildContractOpenApiDocument(app), { refusal: refusalOf }),
+    ).toEqual([]);
   });
 });
