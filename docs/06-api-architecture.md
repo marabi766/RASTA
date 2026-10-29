@@ -611,6 +611,20 @@ Hash ـِ کنشگری را که کلید را گرفت نگه می‌دارد (
 **بازپرداخت از کیف پول `FROZEN`** با `422 BUSINESS_RULE_VIOLATION` رد می‌شود، پیش از هر Hold یا فراخوانی Provider؛ از کیف
 پول منجمد پولی بیرون نمی‌رود و Intent پس از فعال‌شدن دوبارهٔ کیف پول بازپرداخت‌پذیر می‌ماند (تصمیم مدیر پروژه، ADR-064).
 
+**تسویهٔ بی‌Hold از کیف پولی که `ACTIVE` نیست** (`POST /v1/settlements`، ممیزی economic، F2) هم با `422
+BUSINESS_RULE_VIOLATION` رد می‌شود و هیچ چیز مالی نمی‌نویسد — حتی کیف پول دریافت‌کننده‌ای که تسویه باز می‌کرد. معنای
+`FROZEN` در Schema «بدون برداشت یا Hold تازه» است، و تسویهٔ تعهدی که Hold ندارد (ADR-032) برداشت تازه از کیف پول است؛
+`CLOSED` هم برداشت نمی‌پذیرد. وضعیت از ردیفِ قفل‌شدهٔ کیف پول خوانده می‌شود. **تسویهٔ Hold موجود** مجاز می‌ماند: پول از
+Escrow می‌رود، نه از موجودی قابل خرج، و Schema حل Holdهای موجود را صریحاً مجاز می‌داند. **واریز به کیف پول منجمد** هم مجاز
+است: انجماد جلوی بیرون‌رفتن پول را می‌گیرد، نه رسیدنش را — همان که پاداش و آزادشدن Hold از پیش می‌کنند.
+
+**قاعدهٔ پاداش** در هر سه مسیر (`GET`، `POST` و بازپخشش، `PATCH`) با یک نما پاسخ داده می‌شود (`toRewardRuleView`):
+`creditPerPointMinor` رشتهٔ دهدهی به واحد خرد یا `null`، و `periodCap` عدد **امتیاز** (ممیزی economic، F1). پیش‌تر ردیف
+Prisma با `bigint` خام برمی‌گشت؛ قاعده Commit می‌شد و پاسخ `500` بود، و تکرار قاعدهٔ پولی دومی می‌ساخت. اکنون کلید
+**در خودِ economic-service اجباری** است (Gateway برای پیشوند `rewards` کلید نمی‌خواهد)، و پاسخ در همان تراکنشِ قاعده و
+رویداد `REWARD_RULE_CHANGED` آن ذخیره می‌شود. قاعده‌های تکراریِ پیشین:
+[`runbooks/reward-rule-duplicates.md`](runbooks/reward-rule-duplicates.md).
+
 ---
 
 ## ۶٫۹ Rate Limiting
@@ -985,7 +999,7 @@ PATCH  /v1/commissions/rules/{id}                  اصلاح نرخ   (SYSTEM_A
 
 GET    /v1/rewards/me                              امتیاز، سطح و پاداش‌های اخیر
 GET    /v1/rewards/rules                           قواعد قابل اعمال
-POST   /v1/rewards/rules                           تعریف قاعده   (SYSTEM_ADMIN)
+POST   /v1/rewards/rules                           تعریف قاعده   [K] (SYSTEM_ADMIN)
 PATCH  /v1/rewards/rules/{id}                      اصلاح قاعده   (SYSTEM_ADMIN)
 GET    /v1/rewards/me/participation                امتیاز مشارکت خودِ فراخوان با Breakdown — جدا از امتیاز پاداش، قابل خرج نیست (ADR-047، Q-139)
 GET    /v1/rewards/participation-rules             نسخه‌های قاعدهٔ مشارکت، تازه‌ترین اول   (SYSTEM_ADMIN/UNION_ADMIN/ORGANIZATION_ADMIN)
