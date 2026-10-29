@@ -15,10 +15,10 @@ import {
 } from '../prisma/prisma.service';
 import { SERVICE_NAME } from '../config/env';
 import { BACKOFF_EXPONENT_CAP, BACKOFF_FAILURES_CAP } from '../keycloak/keycloak-write-fence';
-import { liveMembershipWhere } from './membership-window';
 import type { ProvisioningBinding, ProvisioningIntent } from './provisioning-intent';
 import type { ListUsersQuery } from './dto';
 import type { Prisma } from '../generated/prisma';
+import { liveMembershipWhere } from './membership-window';
 
 /**
  * Data access for identity.
@@ -531,6 +531,29 @@ export class IdentityRepository {
     const row = rows[0];
     if (!row) throw new Error('the database did not answer its own clock');
     return { memberships: row.memberships, asOf: row.as_of };
+  }
+
+  /**
+   * Whether `userId` holds a live membership in **the requesting organization** now, and
+   * the instant that was: one bit, for fleet-service registering a driver (task 095).
+   *
+   * The organization is never a parameter. `Membership` is tenant-scoped, so the guard
+   * extension adds the organization the caller's token was signed for; a membership in any
+   * other organization is not seen. Live is `liveMembershipWhere` — the one definition —
+   * judged on the **database's** clock, read first, for the reason
+   * {@link findLiveMemberships} gives. The person must still be one: not deleted, and
+   * `ACTIVE` (a suspended, deactivated or pending account cannot act for anybody).
+   */
+  async findLiveMembershipInScope(userId: string): Promise<{ live: boolean; asOf: Date }> {
+    const rows = await this.client.$queryRaw<Array<{ now: Date }>>`
+      SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS now`;
+    const now = rows[0]?.now;
+    if (!now) throw new Error('the database did not answer its own clock');
+    const membership = await this.client.membership.findFirst({
+      where: { userId, ...liveMembershipWhere(now), user: { deletedAt: null, status: 'ACTIVE' } },
+      select: { id: true },
+    });
+    return { live: membership !== null, asOf: now };
   }
 
   /**

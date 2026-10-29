@@ -21,8 +21,7 @@
     "AUDIT_TENDER_GAP_ALERT_SECONDS": ["dev", "test", "test:integration"]
   },
   "construction-service": {
-    "AUDIT_SERVICE_URL": ["dev", "test", "test:integration"],
-    "IDENTITY_SERVICE_URL": ["dev", "test", "test:integration"]
+    "AUDIT_SERVICE_URL": ["dev", "test", "test:integration"]
   },
   "contract-service": {
     "CONTRACT_AMENDMENT_REASON_CODES": ["dev", "test", "test:integration"],
@@ -213,7 +212,6 @@
     "TEMPORAL_NAMESPACE": ["dev", "test", "test:integration"]
   },
   "notification-service": {
-    "IDENTITY_SERVICE_URL": ["dev", "test", "test:integration"],
     "KAFKA_CONSUMER_GROUP": ["dev", "test", "test:integration"],
     "NOTIFICATION_DEDUPE_RETENTION_DAYS": ["dev", "test", "test:integration"],
     "NOTIFICATION_IDENTITY_REQUEST_TIMEOUT_MS": ["dev", "test", "test:integration"],

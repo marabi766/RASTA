@@ -5,7 +5,9 @@ import { NextRequest } from 'next/server';
 
 import { middleware } from './middleware';
 import { renewSession } from '@/server/session-refresh';
-import { SESSION_COOKIE, sealSession } from '@/server/session';
+import { SESSION_COOKIE, openSession, sealSession, type WebSession } from '@/server/session';
+import { actingAccessToken } from '@/test/session-token';
+import { OidcError } from '@/server/oidc';
 import { REFRESH_UNAVAILABLE, SESSION_STATE_HEADER } from '@/server/session-state';
 
 // Only the session wiring below reaches these: a request without a session
@@ -339,5 +341,79 @@ describe('what is refused before the body is read (ADR-069)', () => {
   it('leaves a signed-out page view alone', async () => {
     const response = await middleware(new NextRequest('http://localhost:3200/login'));
     expect(response.status).toBe(200);
+  });
+});
+
+describe('an organization switch reaches the render of the same request (task 100)', () => {
+  const SECRET = 'a-session-secret-that-is-long-enough-to-be-one';
+  const actual = jest.requireActual(
+    '@/server/session-refresh',
+  ) as typeof import('@/server/session-refresh');
+  const now = Math.floor(Date.now() / 1000);
+  const inA: WebSession = {
+    subject: 'USR_1',
+    username: 'u',
+    organizationId: 'ORG_A',
+    accessToken: actingAccessToken('ORG_A'),
+    // Inside the refresh skew: this request refreshes.
+    accessTokenExpiresAt: now + 30,
+    refreshToken: 'refresh-a',
+    csrfToken: 'csrf',
+    issuedAt: now - 60,
+  };
+  const request = (session: WebSession) =>
+    new NextRequest('http://localhost:3200/drivers', {
+      headers: { cookie: `${SESSION_COOKIE}=${sealSession(session, SECRET)}` },
+    });
+  /** The real renewal, with a provider whose next token acts for `answer`. */
+  const renewingWith = (answer: () => Promise<import('@/server/oidc').TokenResponse>) =>
+    renew.mockImplementation((sealed, deps) =>
+      actual.renewSession(sealed, { ...deps, refresh: answer }),
+    );
+  /** The session the route reads in this same request. */
+  const rendered = (response: Response): WebSession | null => {
+    const forwarded = response.headers.get('x-middleware-request-cookie') ?? '';
+    const value = forwarded
+      .split('; ')
+      .find((part) => part.startsWith(`${SESSION_COOKIE}=`))
+      ?.slice(SESSION_COOKIE.length + 1);
+    return value ? openSession(value, SECRET) : null;
+  };
+
+  beforeEach(() => {
+    renew.mockReset();
+    actual.forgetSharedRefreshes();
+  });
+
+  it('the refresh that brings B’s token hands this render — and the browser — a session acting for B', async () => {
+    renewingWith(async () => ({
+      access_token: actingAccessToken('ORG_B'),
+      refresh_token: 'refresh-b',
+      id_token: 'id-b',
+      expires_in: 900,
+      token_type: 'Bearer',
+    }));
+
+    const response = await middleware(request(inA));
+
+    expect(rendered(response)).toMatchObject({
+      organizationId: 'ORG_B',
+      accessToken: actingAccessToken('ORG_B'),
+    });
+    const written = openSession(response.cookies.get(SESSION_COOKIE)!.value, SECRET);
+    expect(written).toMatchObject({ organizationId: 'ORG_B' });
+  });
+
+  it('a cookie whose copy disagrees with its token, on a refused refresh: hidden from this render, the browser’s cookie untouched', async () => {
+    renewingWith(async () => {
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider answered 503');
+    });
+
+    const stale = { ...inA, accessToken: actingAccessToken('ORG_B') };
+    const response = await middleware(request(stale));
+
+    expect(rendered(response)).toBeNull();
+    expect(response.cookies.get(SESSION_COOKIE)).toBeUndefined();
+    expect(forwardedHeader(response, SESSION_STATE_HEADER)).toBe(REFRESH_UNAVAILABLE);
   });
 });

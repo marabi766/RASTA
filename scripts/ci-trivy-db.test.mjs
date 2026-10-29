@@ -1847,7 +1847,7 @@ const composite = parseYaml(
   readFileSync(join(ROOT, '.github/actions/restore-trivy-db/action.yml'), 'utf8'),
 );
 const SCANS = [
-  ['containers', 'rasta/${{ matrix.service }}:${{ github.sha }}'],
+  ['containers', 'rasta/${{ matrix.service }}:${{ github.sha }}', '.trivyignore.services'],
   ['clamav-signatures', 'rasta/clamav-pinned:ci'],
 ];
 const stepIndex = (job, pred) => workflow.jobs[job].steps.findIndex(pred);

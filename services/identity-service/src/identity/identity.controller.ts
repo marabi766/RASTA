@@ -11,7 +11,11 @@ import {
 } from '@nestjs/common';
 import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { AllowService, AuditorSelfService, Public, Roles, zodPipe } from '@rasta/nest-common';
-import { IdentityService, MEMBERSHIP_READ_CALLERS } from './identity.service';
+import {
+  IdentityService,
+  LIVE_MEMBERSHIP_CALLERS,
+  MEMBERSHIP_READ_CALLERS,
+} from './identity.service';
 import { MEMBERSHIP_ADMIN_ROLES, REGISTRATION_REVIEW_ROLES } from './live-authority';
 import {
   approveRegistrationSchema,
@@ -111,6 +115,24 @@ export class UserController {
     @Query(zodPipe(membershipWindowQuerySchema)) query: MembershipWindowQuery,
   ) {
     return this.identity.getMemberships(id, query.from ? new Date(query.from) : undefined);
+  }
+
+  @Get(':id/live-membership')
+  @AllowService(...LIVE_MEMBERSHIP_CALLERS)
+  @ApiSecurity(INTERNAL_TOKEN_SCHEME)
+  @ApiOperation({
+    summary: 'Whether a user is a live member of the organization the caller acts for',
+    description:
+      'Service-to-service only: `fleet-service` with a token signed for a tenant, in ' +
+      '`X-Internal-Token`; a person, any other service, or a token signed for no tenant is ' +
+      'refused 403. The organization is the signed one, never a parameter. Answers ' +
+      '`{ userId, organizationId, live, asOf }`: live = an ACTIVE, not deleted membership ' +
+      'whose validity window holds the database clock, of an ACTIVE, not deleted user. A ' +
+      'user who does not exist gets the same `live: false` as one who belongs elsewhere. ' +
+      'Used before a driver is registered.',
+  })
+  liveMembership(@Param('id') id: string) {
+    return this.identity.getLiveMembership(id);
   }
 
   @Get(':id')

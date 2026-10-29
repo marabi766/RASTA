@@ -10,6 +10,7 @@ import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { issueOrderCommand, orderCommandFormValues, parseOrderCommand } from '@/server/orders';
 
 import type { OrderCommandFormState } from './form-state';
+import { flashHref } from '@/server/flash';
 
 /**
  * The one server action behind every command on `/orders/[id]`.
@@ -71,7 +72,14 @@ export async function submitOrderCommand(
       // not a returned state, so a refresh cannot repeat the command — and on
       // `orders` a repeat would replay, not act twice, but the page should not
       // lean on that.
-      redirect(`/orders/${encodeURIComponent(orderId)}?done=${parsed.request.command}`);
+      redirect(
+        flashHref(
+          session,
+          `/orders/${encodeURIComponent(orderId)}`,
+          orderId,
+          parsed.request.command,
+        ),
+      );
       break;
     case 'INVALID':
       return {
