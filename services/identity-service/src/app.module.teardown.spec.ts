@@ -9,6 +9,7 @@ import { COMMIT_RESERVE_MS } from './prisma/cancellation';
 import { AppModule, ENV, FENCE_PRISMA, SAMPLER_PRISMA } from './app.module';
 import type { IdentityRepository } from './identity/identity.repository';
 import type { IdentityService } from './identity/identity.service';
+import { RegistrationIntakeWorker } from './identity/registration-intake.worker';
 import { MembershipExpiryScanner } from './identity/membership-expiry.scanner';
 import type { KeycloakAdminClient } from './keycloak/keycloak.client';
 import { KeycloakProjector } from './keycloak/keycloak.projector';
@@ -121,6 +122,7 @@ async function boot(
       { provide: KeycloakWriteFences, useValue: fences },
       { provide: KeycloakProjector, useValue: projector },
       { provide: MembershipExpiryScanner, useValue: scanner },
+      { provide: RegistrationIntakeWorker, useValue: stub() },
       { provide: KeycloakProjectionConsumer, useValue: consumer },
       { provide: OutboxRelay, useValue: stub() },
       { provide: OutboxPurgeScheduler, useValue: stub() },

@@ -1,6 +1,11 @@
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { z } from 'zod';
-import { isOptionalField, objectShapeOf, toJsonSchema } from '@rasta/nest-common';
+import {
+  isOptionalField,
+  objectShapeOf,
+  publishedApiErrorSchema,
+  toJsonSchema,
+} from '@rasta/nest-common';
 import {
   approveQualificationSchema,
   listQualifiedForQuerySchema,
@@ -34,15 +39,6 @@ import {
  * against it might assume the directory already shows them what the queue does.
  * The document says which is which.
  */
-
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
-  })
-  .strict();
 
 const cursorPageOf = (item: z.ZodTypeAny) =>
   z.object({
@@ -131,7 +127,7 @@ const ERROR_DESCRIPTIONS: Record<number, string> = {
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
-  document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
   // The standing routes are not bearer-authenticated: construction-service reaches them
   // with a signed internal service token (ADR-020/035), signed for no tenant. Publishing
   // them under the bearer scheme would describe a door that does not exist and hide the

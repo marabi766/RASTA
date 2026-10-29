@@ -332,8 +332,6 @@ const WORKSPACE_OF = (file) =>
   /^(?:apps|services|packages)\/[^/]+\//.exec(file)?.[0].slice(0, -1) ??
   (file.startsWith('tests/e2e/') ? 'tests/e2e' : '.');
 const E2E_TREE = /^(?:apps\/web\/e2e|tests\/e2e)\//;
-/** Until #483 moves it to internalFetch (then 2, and the exemption must go). */
-const KEYCLOAK = 'services/identity-service/src/keycloak/keycloak.client.ts';
 
 test('the boundary is on for every in-scope file, in every workspace, and the lint scripts reach them', () => {
   const tracked = spawnSync('git', ['ls-files'], {
@@ -379,10 +377,9 @@ test('the boundary is on for every in-scope file, in every workspace, and the li
     const rules = JSON.parse(result.stdout);
     list.forEach((file, index) => {
       const rule = rules[relative[index]];
-      const expected = file === KEYCLOAK ? 0 : 2;
-      if (rule?.[0] !== expected)
-        problems.push(`${file}: internal/raw-http is ${JSON.stringify(rule)}`);
-      else if (expected === 2 && E2E_TREE.test(file) && rule[1]?.playwright !== true)
+      // No exemption: #483 moved the Keycloak client to internalFetch and the block went.
+      if (rule?.[0] !== 2) problems.push(`${file}: internal/raw-http is ${JSON.stringify(rule)}`);
+      else if (E2E_TREE.test(file) && rule[1]?.playwright !== true)
         problems.push(`${file}: the E2E tree needs { playwright: true }`);
     });
   }

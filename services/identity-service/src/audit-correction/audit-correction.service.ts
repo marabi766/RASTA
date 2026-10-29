@@ -5,6 +5,7 @@ import {
   AUDIT_TRAIL_TOPIC,
 } from '@rasta/contracts';
 import { RastaError, getContext, type RequestContext } from '@rasta/nest-common';
+import { IDEMPOTENCY_KEY_PATTERN } from '../idempotency-key';
 import { IdentityRepository, isUniqueViolation } from '../identity/identity.repository';
 import { AuditLookupClient } from './audit-lookup.client';
 import {
@@ -47,9 +48,6 @@ import { hashCorrectionCommand, type AuditCorrectionCommand } from './dto';
 /** ADR-053 § 7: corrections are SYSTEM_ADMIN only. */
 export const AUDIT_CORRECTION_ROLE = 'SYSTEM_ADMIN';
 
-/** 1–255 printable ASCII characters, no spaces — a key, not a message. */
-const IDEMPOTENCY_KEY_PATTERN = /^[\x21-\x7E]{1,255}$/;
-
 /** What the command answers, and what a retry with the same key replays. */
 export interface AuditCorrectionAccepted {
   readonly status: 'ACCEPTED';
@@ -69,6 +67,13 @@ export interface AuditCorrectionAccepted {
  * A human `USER` token holding `SYSTEM_ADMIN`. A service token is refused even
  * though the shared role guard treats one as satisfying every role: a
  * correction must be traceable to one accountable person (ADR-053 § 7).
+ *
+ * Decided on the token, deliberately, where identity's other administration
+ * now re-reads the caller's live membership (task 117, `live-authority.ts`):
+ * `SYSTEM_ADMIN` is a Keycloak realm role assigned outside the platform, not
+ * membership data, so this database holds nothing to re-read (ADR-060 § 2).
+ * A realm role removed in Keycloak keeps working here until the token
+ * expires — the residual window the gateway revocation list (#381) narrows.
  */
 export function assertCorrectionAuthority(context: RequestContext): {
   actorId: string;

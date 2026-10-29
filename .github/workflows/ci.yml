@@ -344,6 +344,14 @@ jobs:
         # internalFetch to the same five statuses. Static, no build needed.
         run: pnpm run test:credential-fetch
 
+      - name: Queued-event provenance is restored by the registration intake only (PR #483 r3 F2)
+        # An ordinary event's actor and correlation id are the verified
+        # request context's (`buildOutboxRow` takes no provenance). The one
+        # restoration path — restoreOutboxProvenance, buildRestoredOutboxRow,
+        # identity's enqueueRestoredEvent — may be named only by the files the
+        # guard allow-lists. Static.
+        run: pnpm run test:outbox-provenance-restoration-guard
+
       - name: Format check
         run: pnpm run format:check
 

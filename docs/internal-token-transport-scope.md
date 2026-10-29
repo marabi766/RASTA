@@ -106,11 +106,10 @@ field built in another file, a computed name from a variable, or the other evasi
 table above still pass. They stay open in Follow-up 1, which must cover credential headers
 as well as internal-token issuance.
 
-Temporary exemption: `services/identity-service/src/keycloak/keycloak.client.ts` still
-sends its client secret and admin bearer with raw `fetch` on `main`. PR #483 moves all
-three exchanges to `internalFetch`. Until then, `services/identity-service/eslint.config.mjs`
-exempts that one file. `internal-token-transport-workspace.test.mjs` proves the exemption
-is limited to it and fails once the file uses `internalFetch` with the exemption still in place.
+Temporary exemption (task 106, now gone): `keycloak.client.ts` was exempt until #483 moved
+its three exchanges to `internalFetch`. #483 merged (`main` 5908da19), the branch merged
+that `main`, and the block was deleted. Both transport rules run on the file, and
+`internal-token-transport-workspace.test.mjs` fails if an exemption returns.
 
 Sweep (task 106) and exclusions: Q-155 in `docs/24-open-questions.md`. Superseded in round 2
 (next section): the `apps/web/e2e` helpers and specs are no longer excluded. The browser's
