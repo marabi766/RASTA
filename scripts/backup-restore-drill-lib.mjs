@@ -930,7 +930,10 @@ export async function reapProcessGroup(
  *  - a timeout is a failure whatever the exit code that follows the kill;
  *  - a group that survives the reap (an orphan) stays in `groups`/`report.processGroups`,
  *    in `report.orphanProcessGroups` and in the signal/retry set until a later retry sees it
- *    gone.
+ *    gone;
+ *  - `settleAll()` is the shutdown barrier: it resolves only when EVERY command started
+ *    through `run` has settled and been reaped, siblings of a rejected one included, so nothing
+ *    is still running (or still unrecorded) when the cleanup verdict and final report are made.
  * `persist()` writes the report and may throw; `persistFailed(stage)` records that, stickily.
  */
 export function createProcessRunner({
@@ -949,6 +952,7 @@ export function createProcessRunner({
 }) {
   const groups = new Set();
   const orphans = new Set();
+  const outstanding = new Set();
   const publish = () => {
     report.processGroups = [...groups];
     if (orphans.size || report.orphanProcessGroups) report.orphanProcessGroups = [...orphans];
@@ -977,7 +981,20 @@ export function createProcessRunner({
     return error;
   };
 
-  async function run(command, argv, options = {}) {
+  // Every command is tracked until it has settled (its group reaped), whoever awaits it.
+  function run(command, argv, options = {}) {
+    const command_ = launch(command, argv, options);
+    const done = command_
+      .then(
+        () => {},
+        () => {},
+      )
+      .then(() => outstanding.delete(done));
+    outstanding.add(done);
+    return command_;
+  }
+
+  async function launch(command, argv, options) {
     if (isInterrupted() && !options.cleanup) throw new Error('Interrupted');
     return new Promise((accept, reject) => {
       const child = spawn(command, argv, {
@@ -1089,8 +1106,63 @@ export function createProcessRunner({
     killOrphans: () => {
       for (const pgid of orphans) kill(pgid);
     },
+    settleAll: async () => {
+      // Commands started while waiting are awaited too.
+      while (outstanding.size) await Promise.allSettled([...outstanding]);
+    },
+    // Returns what the retry did, for the report: nothing is silently dropped.
     retryOrphans: async () => {
-      for (const pgid of [...orphans]) await settle(pgid, undefined, true);
+      const retried = [...orphans];
+      for (const pgid of retried) await settle(pgid, undefined, true);
+      return { retried, remaining: retried.filter((pgid) => orphans.has(pgid)) };
     },
   };
+}
+
+/**
+ * Check every resource kind and keep EVERY outcome (no short-circuit on the first rejection):
+ * `leftovers` are kinds with something still listed, `unverified` are kinds whose check failed.
+ */
+export async function verifyResourceKinds(kinds, list) {
+  const outcomes = await Promise.allSettled(kinds.map((kind) => list(kind)));
+  return {
+    leftovers: kinds.filter(
+      (_, index) => outcomes[index].status === 'fulfilled' && outcomes[index].value,
+    ),
+    unverified: kinds.filter((_, index) => outcomes[index].status === 'rejected'),
+  };
+}
+
+/**
+ * The one cleanup finalization. The order is fixed and unconditional:
+ *  1. barrier: every outstanding command has settled before anything is torn down;
+ *  2. `teardown()` (compose down, resource listing); a rejection fails the cleanup but never
+ *     skips what follows;
+ *  3. barrier again, so siblings of a failed step are settled and their groups reaped;
+ *  4. the retry of every group whose disappearance was unconfirmed (success path or not),
+ *     including a sibling's group that only became an orphan when the barrier let it settle;
+ *  5. the verdict, with the retry outcome, ready for the final report.
+ */
+export async function finalizeCleanup({ runner, report, teardown }) {
+  let torn = { leftovers: [], unverified: [] };
+  let failed = false;
+  await runner.settleAll();
+  try {
+    torn = { ...torn, ...(await teardown()) };
+  } catch {
+    failed = true;
+  }
+  await runner.settleAll();
+  let orphanRetry = { retried: [], remaining: [] };
+  try {
+    orphanRetry = await runner.retryOrphans();
+  } catch {
+    failed = true;
+  }
+  const passed =
+    !failed &&
+    !torn.leftovers.length &&
+    !torn.unverified.length &&
+    !report.orphanProcessGroups?.length;
+  return { passed, leftovers: torn.leftovers, unverified: torn.unverified, orphanRetry };
 }

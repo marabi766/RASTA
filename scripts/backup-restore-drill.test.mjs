@@ -37,6 +37,8 @@ import {
   writeReportAtomically,
   reapProcessGroup,
   createProcessRunner,
+  finalizeCleanup,
+  verifyResourceKinds,
 } from './backup-restore-drill-lib.mjs';
 
 const SUFFIX = '0123456789abcdef';
@@ -1177,5 +1179,249 @@ test('an error event on a child that has a pid still settles its group', async (
       .run('missing', [])
       .catch((error) => error.message),
     'Could not start command',
+  );
+});
+
+// A runner on fake children: `children[pgid]` is finished by the test; `reap` is injectable.
+function fakeRunner(pgids, { reap = async () => 'gone', report = {} } = {}) {
+  const children = new Map(pgids.map((pgid) => [pgid, fakeChild(pgid)]));
+  const queue = [...children.values()];
+  const runner = createProcessRunner({
+    report,
+    persist: () => {},
+    spawn: () => queue.shift(),
+    kill: () => {},
+    reap,
+  });
+  return { runner, children, report };
+}
+
+test('settleAll waits for every command, siblings of a rejected one included, and their reaps', async () => {
+  const reaped = [];
+  const { runner, children } = fakeRunner([5001, 5002, 5003], {
+    reap: async (pgid) => {
+      await sleep(40);
+      reaped.push(pgid);
+      return 'gone';
+    },
+  });
+  const commands = [1, 2, 3].map(() => runner.run('x', []));
+  // The first command fails at once (what a Promise.all consumer would stop at).
+  children.get(5001).finish(1);
+  await assert.rejects(commands[0], /Command failed/);
+  let barrier = false;
+  const waiting = runner.settleAll().then(() => {
+    barrier = true;
+  });
+  await sleep(120);
+  assert.equal(barrier, false, 'two siblings are still running');
+  assert.deepEqual(reaped, [5001]);
+  children.get(5002).finish(0);
+  await sleep(120);
+  assert.equal(barrier, false, 'one sibling is still running');
+  children.get(5003).finish(0);
+  await waiting;
+  assert.deepEqual(reaped.sort(), [5001, 5002, 5003], 'every group was reaped before the barrier');
+  assert.equal(runner.groups.size, 0);
+  await Promise.all(commands.slice(1));
+});
+
+test('settleAll also waits for a command started while it waits, and never rejects', async () => {
+  const { runner, children } = fakeRunner([5011, 5012]);
+  const first = runner.run('a', []);
+  let barrier = false;
+  const waiting = runner.settleAll().then(() => {
+    barrier = true;
+  });
+  const second = runner.run('b', []);
+  children.get(5011).finish(2);
+  await assert.rejects(first);
+  await sleep(40);
+  assert.equal(barrier, false);
+  children.get(5012).finish(0);
+  await second;
+  await waiting;
+  assert.equal(barrier, true);
+});
+
+test('verifyResourceKinds keeps every outcome: no short-circuit on the first rejection', async () => {
+  const finished = [];
+  const result = await verifyResourceKinds(['container', 'volume', 'network'], async (kind) => {
+    if (kind === 'container') throw new Error('exit 1');
+    await sleep(kind === 'volume' ? 40 : 80);
+    finished.push(kind);
+    return kind === 'volume' ? 'abc123' : '';
+  });
+  assert.deepEqual(finished, ['volume', 'network'], 'resolved only after every check settled');
+  assert.deepEqual(result, { leftovers: ['volume'], unverified: ['container'] });
+});
+
+test('the reviewer trigger: a failing container check while volume and network still run', async () => {
+  const reaped = [];
+  const report = {};
+  const { runner, children } = fakeRunner([5021, 5022, 5023], {
+    report,
+    reap: async (pgid) => {
+      reaped.push(pgid);
+      return 'gone';
+    },
+  });
+  let verdictAt;
+  const verdict = finalizeCleanup({
+    runner,
+    report,
+    teardown: async () => {
+      // A Promise.all consumer: rejects as soon as the first check does, siblings keep running.
+      await Promise.all(['container', 'volume', 'network'].map(() => runner.run('docker', [])));
+    },
+  }).then((value) => {
+    verdictAt = reaped.length;
+    return value;
+  });
+  await sleep(30);
+  children.get(5021).finish(1);
+  await sleep(80);
+  assert.equal(verdictAt, undefined, 'no verdict while two checks are still running');
+  assert.equal(runner.groups.size, 2);
+  children.get(5022).finish(0);
+  await sleep(40);
+  assert.equal(verdictAt, undefined, 'no verdict while one check is still running');
+  children.get(5023).finish(0);
+  const result = await verdict;
+  assert.equal(verdictAt, 3, 'every group was reaped and recorded before the verdict');
+  assert.equal(result.passed, false);
+  assert.equal(runner.groups.size, 0);
+  assert.equal(
+    report.reapedProcessGroups,
+    undefined,
+    'groups that were already gone are not listed',
+  );
+});
+
+test('a sibling that only becomes an orphan after the failed step is retried before the verdict', async () => {
+  const seen = new Map();
+  const report = {};
+  const { runner, children } = fakeRunner([5041, 5042], {
+    report,
+    // The first reap of 5042 finds a survivor; the retry finds it gone.
+    reap: async (pgid) => {
+      seen.set(pgid, (seen.get(pgid) ?? 0) + 1);
+      return pgid === 5042 && seen.get(pgid) === 1 ? 'orphan' : 'gone';
+    },
+  });
+  const verdict = finalizeCleanup({
+    runner,
+    report,
+    teardown: async () => {
+      await Promise.all([runner.run('a', []), runner.run('b', [])]);
+    },
+  });
+  await sleep(20);
+  children.get(5041).finish(1);
+  await sleep(40);
+  children.get(5042).finish(0);
+  const result = await verdict;
+  assert.deepEqual(result.orphanRetry, { retried: [5042], remaining: [] });
+  assert.equal(seen.get(5042), 2, 'retried after it settled');
+  assert.deepEqual(report.orphanProcessGroups, []);
+  assert.equal(result.passed, false, 'the failed step still fails the cleanup');
+});
+
+test('teardown starts only after a command still running from earlier has settled', async () => {
+  const { runner, children } = fakeRunner([5051]);
+  const earlier = runner.run('main-step', []);
+  const order = [];
+  const verdict = finalizeCleanup({
+    runner,
+    report: {},
+    teardown: async () => {
+      order.push('teardown');
+    },
+  });
+  await sleep(40);
+  assert.deepEqual(order, [], 'the earlier command is still running');
+  children.get(5051).finish(0);
+  await earlier;
+  assert.equal((await verdict).passed, true);
+  assert.deepEqual(order, ['teardown']);
+});
+
+// One orphan (group 5031) known before cleanup starts; the retry finds it gone or not.
+async function cleanupWithOrphan(teardown, { survives }) {
+  const alive = new Set([5031]);
+  const report = {};
+  const { runner, children } = fakeRunner([5031], {
+    report,
+    reap: async (pgid) => (survives && alive.has(pgid) ? 'orphan' : 'gone'),
+  });
+  const first = runner.run('earlier', []);
+  children.get(5031).finish(0);
+  await first;
+  if (!survives) {
+    // The orphan existed when the cleanup began; only the retry sees it disappear.
+    runner.orphans.add(5031);
+    runner.groups.add(5031);
+    report.processGroups = [5031];
+    report.orphanProcessGroups = [5031];
+  }
+  assert.deepEqual(report.orphanProcessGroups, [5031]);
+  const verdict = await finalizeCleanup({ runner, report, teardown: () => teardown(runner) });
+  return { verdict, report, runner };
+}
+
+for (const [name, teardown] of [
+  [
+    'compose down rejects',
+    async () => {
+      throw new Error('compose down failed');
+    },
+  ],
+  [
+    'the resource listing rejects',
+    async () => {
+      // `down` succeeded; then the enumeration itself throws.
+      await verifyResourceKinds(['container'], async () => 'x');
+      throw new Error('docker ls failed');
+    },
+  ],
+  [
+    'a resource check rejects (all-settled outcome)',
+    () =>
+      verifyResourceKinds(['container', 'volume', 'network'], async (kind) => {
+        if (kind === 'volume') throw new Error('exit 1');
+        return '';
+      }),
+  ],
+]) {
+  test(`a known orphan is retried and the outcome recorded when ${name}`, async () => {
+    const stillThere = await cleanupWithOrphan(teardown, { survives: true });
+    assert.equal(stillThere.verdict.passed, false);
+    assert.deepEqual(stillThere.verdict.orphanRetry, { retried: [5031], remaining: [5031] });
+    assert.deepEqual(stillThere.report.orphanProcessGroups, [5031], 'still owned for recovery');
+    const released = await cleanupWithOrphan(teardown, { survives: false });
+    assert.equal(released.verdict.passed, false, 'the failed step still fails the cleanup');
+    assert.deepEqual(released.verdict.orphanRetry, { retried: [5031], remaining: [] });
+    assert.deepEqual(released.report.orphanProcessGroups, [], 'the retry released the group');
+    assert.deepEqual(released.report.processGroups, []);
+  });
+}
+
+test('a clean teardown with a released orphan passes and records the retry', async () => {
+  const { verdict } = await cleanupWithOrphan(async () => ({ leftovers: [], unverified: [] }), {
+    survives: false,
+  });
+  assert.equal(verdict.passed, true);
+  assert.deepEqual(verdict.orphanRetry, { retried: [5031], remaining: [] });
+});
+
+test('leftover resources and unverified kinds fail the verdict', async () => {
+  const { runner, report } = fakeRunner([]);
+  for (const torn of [{ leftovers: ['volume'] }, { unverified: ['network'] }]) {
+    const verdict = await finalizeCleanup({ runner, report, teardown: async () => torn });
+    assert.equal(verdict.passed, false);
+  }
+  assert.equal(
+    (await finalizeCleanup({ runner, report, teardown: async () => ({}) })).passed,
+    true,
   );
 });

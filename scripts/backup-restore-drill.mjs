@@ -32,6 +32,8 @@ import {
   compareSnapshots,
   writeReportAtomically,
   createProcessRunner,
+  finalizeCleanup,
+  verifyResourceKinds,
   drillPassed,
   checkDatabaseCoverage,
   summarizeTables,
@@ -291,10 +293,13 @@ function progress(value) {
   process.stderr.write(`[backup-restore-drill] ${stage}\n`);
 }
 
-const failedCleanup = () => ({
+const failedCleanup = ({ leftovers = [], unverified = [] } = {}) => ({
   passed: false,
   project,
   temporary,
+  // Resource kinds only (no ids): what still exists, and what could not be checked.
+  ...(leftovers.length && { leftovers }),
+  ...(unverified.length && { unverified }),
   ...(report.orphanProcessGroups?.length && { orphanProcessGroups: report.orphanProcessGroups }),
 });
 
@@ -504,41 +509,46 @@ try {
 } finally {
   cleaning = true;
   progress('cleanup owned containers, networks and volumes');
-  try {
-    if (composeReady)
+  // Unconditional finalization (barrier, teardown, barrier, orphan retry, verdict): a failing
+  // step fails the cleanup but never skips the retry or lets the report out before every
+  // command has settled.
+  const verdict = await finalizeCleanup({
+    runner,
+    report,
+    teardown: async () => {
+      if (!composeReady) return {};
       await compose(['down', '--volumes', '--timeout', '15'], { cleanup: true, timeout: 60_000 });
-    // Confirm no owned resources survived (never enumerate/remove another project's resources).
-    const resources = composeReady
-      ? await Promise.all(
-          ['container', 'volume', 'network'].map((kind) =>
-            run(
-              'docker',
-              [
-                kind,
-                'ls',
-                ...(kind === 'container' ? ['-a'] : []),
-                '--quiet',
-                '--filter',
-                `label=com.docker.compose.project=${project}`,
-              ],
-              { cleanup: true, timeout: 15_000 },
-            ),
-          ),
-        )
-      : [];
-    // A group that survived its reap is retried once more; only a confirmed disappearance counts.
-    await runner.retryOrphans();
-    if (resources.some(Boolean) || report.orphanProcessGroups?.length) {
-      report.cleanup = failedCleanup();
-      report.passed = false;
-    } else {
-      report.cleanup.passed = true;
-      if (temporary) rmSync(temporary, { recursive: true, force: true });
+      // Confirm no owned resources survived (never enumerate/remove another project's resources).
+      return verifyResourceKinds(['container', 'volume', 'network'], (kind) =>
+        run(
+          'docker',
+          [
+            kind,
+            'ls',
+            ...(kind === 'container' ? ['-a'] : []),
+            '--quiet',
+            '--filter',
+            `label=com.docker.compose.project=${project}`,
+          ],
+          { cleanup: true, timeout: 15_000 },
+        ),
+      );
+    },
+  });
+  let removed = verdict.passed;
+  if (removed && temporary) {
+    try {
+      rmSync(temporary, { recursive: true, force: true });
+    } catch {
+      removed = false;
     }
-  } catch {
-    report.cleanup = failedCleanup();
+  }
+  if (removed) report.cleanup.passed = true;
+  else {
+    report.cleanup = failedCleanup(verdict);
     report.passed = false;
   }
+  if (verdict.orphanRetry.retried.length) report.cleanup.orphanRetry = verdict.orphanRetry;
   report.finishedAt = new Date().toISOString();
   report.interrupted = interrupted;
   // A report write that failed at any point (cleanup included) is never forgotten.

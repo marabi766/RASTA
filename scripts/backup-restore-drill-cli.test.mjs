@@ -600,6 +600,14 @@ const alive = (pgid) => {
     return false;
   }
 };
+const pidExists = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 async function waitGone(pgid) {
   for (let attempt = 0; attempt < 200 && alive(pgid); attempt++)
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -928,6 +936,122 @@ esac
     } catch {
       /* removed already */
     }
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('a failing container check while volume and network still run: no final report until both settled and their groups are reaped', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-parallel-check-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'drill-parallel-check-tmp-'));
+  const descendants = [];
+  let child;
+  try {
+    const root = fixture(directory);
+    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    // The container check fails at once. The volume and network checks keep running, leave a
+    // descendant holding their stdout, and note whether the final report already existed when
+    // they finished.
+    const slow = (name, seconds, output) =>
+      `sleep ${seconds}; sleep 60 & echo $! > '${directory}/${name}-pid'; grep -c finishedAt '${directory}/report.json' > '${directory}/${name}-final-seen'; echo '${output}'`;
+    writeFileSync(
+      join(directory, 'docker'),
+      `#!/bin/sh
+case "$*" in
+  *'up -d'*) exit 1 ;;
+  *'container ls'*) exit 1 ;;
+  *'volume ls'*) ${slow('volume', 1, 'vol-left')} ;;
+  *'network ls'*) ${slow('network', 2, '')} ;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    child = start(directory, root, { TMPDIR: scratch });
+    let stdout = '',
+      stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const [code] = await once(child, 'close');
+    assert.equal(code, 1);
+    for (const name of ['volume', 'network'])
+      descendants.push(Number(readFileSync(join(directory, `${name}-pid`), 'utf8')));
+    for (const name of ['volume', 'network'])
+      assert.equal(
+        readFileSync(join(directory, `${name}-final-seen`), 'utf8').trim(),
+        '0',
+        `${name}: the final report did not exist while the check was still running`,
+      );
+    const summary = JSON.parse(stdout.trim().split('\n').at(-1));
+    assert.equal(summary.cleanup.passed, false);
+    assert.deepEqual(summary.cleanup.leftovers, ['volume']);
+    assert.deepEqual(summary.cleanup.unverified, ['container']);
+    const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+    assert.ok(report.finishedAt, 'the final report was written');
+    assert.equal(report.passed, false);
+    assert.deepEqual(report.cleanup.leftovers, ['volume']);
+    assert.deepEqual(report.cleanup.unverified, ['container']);
+    const cleanupReaps = report.reapedProcessGroups.filter(
+      (entry) => entry.stage === 'cleanup owned containers, networks and volumes',
+    );
+    assert.equal(
+      cleanupReaps.length,
+      2,
+      'both siblings were reaped and recorded in the final report',
+    );
+    assert.deepEqual(report.processGroups, []);
+    assert.equal(report.orphanProcessGroups, undefined);
+    for (const pid of descendants) {
+      for (let attempt = 0; attempt < 200 && pidExists(pid); attempt++)
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(pidExists(pid), false, 'the descendant is gone');
+    }
+    assert.doesNotMatch(stderr, new RegExp(directory));
+    assert.doesNotMatch(JSON.stringify(report.cleanup), /vol-left/);
+  } finally {
+    child?.kill('SIGKILL');
+    for (const pid of descendants) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('a rejected compose down still reaches the final report with a failed cleanup verdict', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-down-rejects-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'drill-down-rejects-tmp-'));
+  let child;
+  try {
+    const root = fixture(directory);
+    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    writeFileSync(
+      join(directory, 'docker'),
+      `#!/bin/sh
+case "$*" in
+  *'up -d'*) exit 1 ;;
+  *'down --volumes'*) exit 1 ;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    child = start(directory, root, { TMPDIR: scratch });
+    const [code] = await once(child, 'close');
+    assert.equal(code, 1);
+    const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+    assert.ok(report.finishedAt);
+    assert.equal(report.passed, false);
+    assert.equal(report.cleanup.passed, false);
+    assert.deepEqual(report.processGroups, []);
+  } finally {
+    child?.kill('SIGKILL');
     rmSync(directory, { recursive: true, force: true });
     rmSync(scratch, { recursive: true, force: true });
   }
