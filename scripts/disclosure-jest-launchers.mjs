@@ -133,4 +133,17 @@ export const JEST_LAUNCHERS = {
         '576fc00222954d453db30b1159975e24889521544f1c68fe1516a674a1e02dde',
     },
   },
+  'scripts/check-unit-step-concurrency.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; Jest and pnpm test commands are inspected source strings, never executed.',
+    sha256: {
+      'scripts/check-unit-step-concurrency.test.mjs':
+        '73681f4236521393a019e49a406e217f6b2578bc58d8469c69bb29d1dcd37408',
+      'scripts/check-unit-step-concurrency.mjs':
+        'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
+      'scripts/check-unit-step-concurrency-lib.mjs':
+        '67bd3962244fdf7c909bfb93ce1f07d7ab3643203570f87d3af1d36900ee8795',
+    },
+  },
 };
