@@ -365,6 +365,19 @@ export const CLI_CONTRACT = Object.freeze({
     other: ['--name-only', '--no-renames', '-C', '-e', '-z'],
   },
   'scripts/database-services.mjs': { other: ['-service'] },
+  // Jest/pnpm command lines inspected as source text; this module reads no process argv.
+  'scripts/disclosure-jest-launches.mjs': {
+    other: [
+      '--filter',
+      '--json',
+      '--project',
+      '--runInBand',
+      '--selectProjects',
+      '--workspace',
+      '-F',
+      '-w',
+    ],
+  },
   'scripts/disposable-broker.mjs': { positionals: ['script'] },
   'scripts/infra-preflight-lib.mjs': { other: ['-service'] },
   'scripts/kafka-acl.mjs': { accepts: { '--profile': 'enum' }, positionals: ['enum'] },

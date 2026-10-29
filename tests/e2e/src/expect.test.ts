@@ -43,3 +43,21 @@ describe('the e2e expect', () => {
     assert.throws(() => expect(['a']).not.toContain('a'), /toContain/);
   });
 });
+
+for (const harness of ['api', 'portal']) {
+  for (const depth of [1, 3]) {
+    it(`${harness}: ${depth} fixture extension(s) retain guarded test.expect`, async () => {
+      const { expect: guardedExpect, test: initial } =
+        harness === 'api'
+          ? await import('./expect.ts')
+          : await import(pathToFileURL(resolve('../../apps/web/e2e/expect.ts')).href);
+      let derived = initial;
+      for (let step = 0; step < depth; step++) derived = derived.extend({});
+      assert.equal(LUCKY.includes('12.5'), false);
+      // Exercise the real installed Playwright object, including the reviewer's lucky timestamp.
+      assert.throws(() => derived.expect(LUCKY).not.toContain('12.5'), /can fail by chance/);
+      assert.equal(derived.expect, guardedExpect);
+      assert.notEqual(derived, initial);
+    });
+  }
+}
