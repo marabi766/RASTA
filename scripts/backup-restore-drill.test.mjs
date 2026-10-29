@@ -471,6 +471,54 @@ test('SOURCE/REF allowance scopes identities by database/schema/table/name and p
     assert.throws(() => checkSourceReference(source, evidence(body), 'rasta_test'));
 });
 
+// PostgreSQL prints a CASE expression over several physical lines (a real one: identity's
+// registration-intake actor constraint) and deparses `ANY ((ARRAY[...])::text[])` differently in
+// the reference. The constraint owns every one of its physical lines, and only those.
+const caseBody = `CREATE TABLE "public"."intake" (
+    "kind" character varying(16) NOT NULL,
+    CONSTRAINT "ck_actor" CHECK (
+CASE
+    WHEN (("kind")::"text" = 'A'::"text") THEN true
+    WHEN (("kind")::"text" = ANY ((ARRAY['B'::character varying, 'C'::character varying])::"text"[])) THEN false
+    ELSE false
+END),
+    CONSTRAINT "ck_other" CHECK (("kind" <> ''::"text"))
+);
+`;
+test('a multi-line CHECK may differ on its own lines only, once per constraint', () => {
+  const source = evidence(caseBody);
+  const ref = evidence(
+    caseBody.replace(
+      `ANY ((ARRAY['B'::character varying, 'C'::character varying])::"text"[])`,
+      `ANY (ARRAY[('B'::character varying)::"text", ('C'::character varying)::"text"])`,
+    ),
+  );
+  assert.deepEqual(checkSourceReference(source, ref, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 1,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  // Two of its lines differ: still one constraint.
+  const two = evidence(
+    caseBody.replace('THEN true', 'THEN (true)').replace(`'B'::character varying, 'C'`, `'B', 'C'`),
+  );
+  assert.deepEqual(checkSourceReference(source, two, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 2,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  for (const body of [
+    // outside the constraint: the column, the closing line
+    caseBody.replace('character varying(16)', 'character varying(17)'),
+    caseBody.replace('\n);\n', '\n) WITH (fillfactor=50);\n'),
+    // the structure of the constraint: fewer lines, another name
+    caseBody.replace('END),\n', 'END),\n\n'),
+    caseBody.replace('    ELSE false\nEND)', '    ELSE false END)'),
+    caseBody.replace('"ck_actor"', '"ck_renamed"'),
+  ])
+    assert.throws(() => checkSourceReference(source, evidence(body), 'rasta_test'));
+});
+
 test('CHECK-looking lines in functions, comments, COMMENT strings and nested SQL never qualify', () => {
   const forged = '    CONSTRAINT "same_name" CHECK ((amount >= 0))';
   for (const body of [

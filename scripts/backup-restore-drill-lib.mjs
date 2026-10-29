@@ -347,19 +347,18 @@ function checkLines(evidence, database) {
           end,
           text.indexOf('\n', end) < 0 ? text.length : text.indexOf('\n', end),
         );
-        // A whole physical line, not an arbitrary fragment of a statement, is permitted.
-        if (
-          /^[ \t]*$/.test(prefix) &&
-          /^[ \t]*,?[ \t]*$/.test(suffix) &&
-          !text.slice(token.start, end).includes('\n')
-        ) {
+        // Whole physical lines, not an arbitrary fragment of a statement, are permitted: the
+        // constraint starts a line and ends one. PostgreSQL prints a CASE expression over several
+        // lines, so a constraint may own more than one; each of them carries its identity.
+        if (/^[ \t]*$/.test(prefix) && /^[ \t]*,?[ \t]*$/.test(suffix)) {
           const identity = JSON.stringify([
             database,
             schema.value,
             table.value,
             statement[i + 1].value,
           ]);
-          checks.set(line, identity);
+          const last = lineAt.get(text.lastIndexOf('\n', end - 1) + 1);
+          for (let owned = line; owned <= last; owned++) checks.set(owned, identity);
           identities.push(identity);
         }
       }
@@ -399,6 +398,8 @@ export function checkSourceReference(source, reference, database) {
     if (!a.checks.has(i) || a.checks.get(i) !== b.checks.get(i))
       throw new Error('SOURCE/REF non-CHECK difference');
     checkLinesDifferent++;
+    // Once per constraint, however many of its lines differ.
+    if (a.checks.get(i - 1) === a.checks.get(i) && a.lines[i - 1] !== b.lines[i - 1]) continue;
     const [, schema, table, name] = JSON.parse(a.checks.get(i));
     checkConstraints.push({ schema, table, name });
   }
