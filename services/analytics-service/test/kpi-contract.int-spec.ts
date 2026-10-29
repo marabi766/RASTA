@@ -1,11 +1,19 @@
 import request from 'supertest';
 import type { Logger } from '@rasta/logging';
 import { buildAnalyticsOpenApiDocument } from '../src/openapi/document';
-import { kpiValueReaders } from '../src/kpis/kpi.service';
+import { kpiValueReaders, type KpiContext } from '../src/kpis/kpi.service';
 import { KpiRepository } from '../src/kpis/kpi.repository';
 import { actor, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, maintenanceCompleted, newCompletion, newOrganizationId, wire } from './helpers';
-import { KPI_WINDOW } from './baseline-helpers';
+import {
+  cleanup,
+  clearCoverage,
+  maintenanceCompleted,
+  newCompletion,
+  newOrganizationId,
+  plantCoverage,
+  wire,
+} from './helpers';
+import { COVERED_SINCE, KPI_WINDOW } from './baseline-helpers';
 
 // Test-only registry injection, before DTO/OpenAPI/service imports are evaluated.
 // There is no third production KPI or implicit fallback dispatch.
@@ -38,21 +46,26 @@ const logger = {
 let api: ApiHarness;
 const organizationId = newOrganizationId();
 const wiring = wire();
-const event = maintenanceCompleted(newCompletion(organizationId));
+const event = maintenanceCompleted(
+  newCompletion(organizationId, { completedAt: '2026-07-10T07:30:00.000Z' }),
+);
 const readers = {
   ...kpiValueReaders,
-  TEST_ONLY_DOUBLE_COUNT: (read: Awaited<ReturnType<KpiRepository['read']>>) => ({
-    status: 'AVAILABLE' as const,
-    value: (BigInt(read.completed_count) * 2n).toString(),
-  }),
+  // Honours the coverage verdict like the production count: the contract is the same.
+  TEST_ONLY_DOUBLE_COUNT: (read: KpiContext) =>
+    read.projection_covers_window
+      ? { status: 'AVAILABLE' as const, value: (BigInt(read.completed_count) * 2n).toString() }
+      : { status: 'NO_DATA' as const },
 };
 
 beforeAll(async () => {
   api = await startApi({ kpiReaders: readers, logger });
+  await plantCoverage(COVERED_SINCE);
   await wiring.consumer.handle(event);
 });
 afterAll(async () => {
   await cleanup([organizationId], [event.eventId]);
+  await clearCoverage();
   await Promise.all([api.close(), wiring.close()]);
 });
 
@@ -80,7 +93,11 @@ it('a synthetic third definition reaches both published enums and a served, sema
     schema && 'content' in schema ? schema.content?.['application/json']?.schema : undefined,
   ).toMatchObject({
     properties: {
-      kpis: { items: { anyOf: [{ properties: metadata }, { properties: metadata }] } },
+      kpis: {
+        items: {
+          anyOf: [{ properties: metadata }, { properties: metadata }, { properties: metadata }],
+        },
+      },
     },
   });
   const response = await getKpis().expect(200);
@@ -109,6 +126,34 @@ it('a synthetic third definition reaches both published enums and a served, sema
   ]);
 });
 
+it('NO_DATA is published as its own variant with no value property, and served when coverage is gone', async () => {
+  const doc = buildAnalyticsOpenApiDocument(api.app);
+  const response = doc.paths['/v1/kpis']?.get?.responses?.['200'];
+  const published = JSON.stringify(
+    response && 'content' in response ? response.content?.['application/json']?.schema : undefined,
+  );
+  expect(published).toContain('NO_DATA');
+  await clearCoverage();
+  try {
+    const served = await getKpis().expect(200);
+    expect(served.body.kpis[0]).toEqual({
+      key: 'MAINTENANCE_COMPLETED_COUNT',
+      unit: 'COUNT',
+      dependsOnBaseline: false,
+      status: 'NO_DATA',
+    });
+    expect(served.body.kpis[2]).toEqual({
+      key: 'TEST_ONLY_DOUBLE_COUNT',
+      unit: 'TEST_COUNT',
+      dependsOnBaseline: false,
+      status: 'NO_DATA',
+    });
+    expect(served.body.kpis[1].status).toBe('INSUFFICIENT_BASELINE');
+  } finally {
+    await plantCoverage(COVERED_SINCE);
+  }
+});
+
 it('an unhandled definition fails closed as 500 rather than borrowing a value', async () => {
   const missing = await startApi({ logger });
   try {
@@ -131,6 +176,8 @@ it('response validation failure exposes no sentinel through the real global filt
     completed_count: '1',
     baseline_minutes: sentinel,
     earliest_completion: null,
+    coverage_start: COVERED_SINCE,
+    read_at: new Date(),
   });
   logs.length = 0;
   try {

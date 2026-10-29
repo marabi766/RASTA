@@ -87,7 +87,7 @@ describe('the committed OpenAPI document', () => {
     ).toEqual([]);
   });
 
-  it('publishes the closed KPI statuses with null-only insufficient values', () => {
+  it('publishes the closed KPI statuses: null-only insufficient values and a value-free NO_DATA (D-082)', () => {
     const document = buildAnalyticsOpenApiDocument(app);
     const operation = document.paths['/v1/kpis']?.get;
     expect(
@@ -103,7 +103,7 @@ describe('the committed OpenAPI document', () => {
         kpis: {
           items: {
             description: expect.stringContaining(
-              'MAINTENANCE_COMPLETED_COUNT: AVAILABLE "0" can mean no facts held for the window',
+              'MAINTENANCE_COMPLETED_COUNT: AVAILABLE only when the maintenance projection covers the',
             ),
             anyOf: [
               {
@@ -114,6 +114,10 @@ describe('the committed OpenAPI document', () => {
               },
               {
                 properties: { status: { const: 'INSUFFICIENT_BASELINE' }, value: { const: null } },
+              },
+              {
+                properties: { status: { const: 'NO_DATA' } },
+                required: ['key', 'unit', 'dependsOnBaseline', 'status'],
               },
             ],
           },
