@@ -8,6 +8,7 @@ import {
   tenants,
   wire,
   type Wiring,
+  unanswered,
 } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
@@ -164,15 +165,18 @@ describe('wallet concurrency (real database)', () => {
     const creditPerGrant = 5_000n;
 
     await asActor({ organizationId, roles: ['SYSTEM_ADMIN'] }, () =>
-      wiring.rewards.createRule({
-        organizationId,
-        triggerEvent: 'USAGE_RECORDED',
-        rewardType: 'POINTS',
-        points: 5,
-        creditPerPointMinor: '1000',
-        status: 'ACTIVE',
-        validFrom: new Date(Date.now() - 60_000).toISOString(),
-      } as never),
+      wiring.rewards.createRule(
+        {
+          organizationId,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points: 5,
+          creditPerPointMinor: '1000',
+          status: 'ACTIVE',
+          validFrom: new Date(Date.now() - 60_000).toISOString(),
+        } as never,
+        unanswered(),
+      ),
     );
     // Opened first, so the grants race on the balance and not on opening it.
     const wallet = await asActor({ organizationId }, () => wiring.wallets.getOrOpen('IRR'));

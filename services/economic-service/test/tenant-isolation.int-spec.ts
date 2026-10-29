@@ -1,6 +1,15 @@
 import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { asActor, cleanup, fundWallet, newPrisma, tenants, wire, type Wiring } from './helpers';
+import {
+  asActor,
+  cleanup,
+  fundWallet,
+  newPrisma,
+  tenants,
+  wire,
+  type Wiring,
+  unanswered,
+} from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -275,14 +284,17 @@ describe('tenant isolation (real database)', () => {
 
     it('keeps reward rules scoped the same way', async () => {
       await asActor({ organizationId: org.a, roles: ['SYSTEM_ADMIN'] }, () =>
-        wiring.rewards.createRule({
-          organizationId: org.a,
-          triggerEvent: 'USAGE_RECORDED',
-          rewardType: 'POINTS',
-          points: 7,
-          status: 'ACTIVE',
-          label: 'itest-reward-private-to-a',
-        }),
+        wiring.rewards.createRule(
+          {
+            organizationId: org.a,
+            triggerEvent: 'USAGE_RECORDED',
+            rewardType: 'POINTS',
+            points: 7,
+            status: 'ACTIVE',
+            label: 'itest-reward-private-to-a',
+          },
+          unanswered(),
+        ),
       );
 
       const seenByB = await asActor({ organizationId: org.b }, () =>

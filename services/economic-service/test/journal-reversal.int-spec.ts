@@ -10,6 +10,7 @@ import {
   wire,
   type Wiring,
   testEnv,
+  unanswered,
 } from './helpers';
 import { JournalReversalService } from '../src/ledger/journal-reversal.service';
 import { PaymentService, type TopUpResult } from '../src/payment/payment.service';
@@ -255,15 +256,18 @@ describe('journal reversal refusals (real database)', () => {
   it('refuses a reward grant, and leaves the reward as it was', async () => {
     const userId = `USR-ITEST-REV-${ulid().slice(-6)}`;
     await asActor({ organizationId: payer, roles: ['SYSTEM_ADMIN'] }, () =>
-      wiring.rewards.createRule({
-        organizationId: payer,
-        triggerEvent: 'USAGE_RECORDED',
-        rewardType: 'POINTS',
-        points: 2,
-        creditPerPointMinor: '1000',
-        status: 'ACTIVE',
-        validFrom: new Date(Date.now() - 60_000).toISOString(),
-      } as never),
+      wiring.rewards.createRule(
+        {
+          organizationId: payer,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points: 2,
+          creditPerPointMinor: '1000',
+          status: 'ACTIVE',
+          validFrom: new Date(Date.now() - 60_000).toISOString(),
+        } as never,
+        unanswered(),
+      ),
     );
     const [outcome] = await asActor({ organizationId: payer, userId }, () =>
       wiring.rewards.grantFor({

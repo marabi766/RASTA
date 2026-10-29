@@ -28,6 +28,7 @@ export {
   RETRY_AFTER_MAX_SECONDS,
   RETRY_AFTER_MIN_SECONDS,
 } from './errors/rasta-error';
+export type { LedgerUnbalancedReason } from './errors/rasta-error';
 export { safeLogText } from './errors/safe-log-text';
 
 // Decorators -----------------------------------------------------------------
