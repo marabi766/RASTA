@@ -3,6 +3,8 @@ import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
 import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
+import internalTokenSource from './scripts/internal-token-source-rule.mjs';
+import { typedOrUntypedParser } from './scripts/internal-token-parser.mjs';
 import noZodDefault from './scripts/no-zod-default-rule.mjs';
 
 const NO_ZOD_COERCE = [
@@ -15,6 +17,51 @@ const NO_ZOD_COERCE = [
     selector: "ImportDeclaration[source.value=/^zod/] ImportSpecifier[imported.name='coerce']",
     message:
       'z.coerce converts unchecked input (a TypeError is a 500). Use numberInput from @rasta/contracts.',
+  },
+];
+
+/** Both internal-token rules, one plugin object: flat config refuses two under one name. */
+const internal = {
+  rules: { transport: internalTokenTransport, 'token-source': internalTokenSource },
+};
+
+/**
+ * The internal-token source boundary (PR #423 follow-up 1): on every file ESLint
+ * lints, typed through the file's own workspace project where one covers it.
+ * Its only exceptions are named here and tested in
+ * scripts/internal-token-source-workspace.test.mjs.
+ */
+export const INTERNAL_TOKEN_SOURCE = [
+  {
+    files: ['**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    languageOptions: { parser: typedOrUntypedParser(tseslint.parser) },
+    plugins: { internal },
+    rules: {
+      'internal/token-source': [
+        'error',
+        {
+          allow: [
+            // The E2E harness has no nest-common dependency: its transport sets
+            // the header in send(), behind the same redirect hand guard, and its
+            // token factory signs the wire format itself (src/internal.ts).
+            { file: 'tests/e2e/src/http.ts', function: 'send', kinds: ['header'] },
+            { file: 'tests/e2e/src/internal.ts', function: 'mintInternalToken', kinds: ['signer'] },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // Test token factories: specs and test/ trees mint and send tokens to test
+    // the services' guards. Nothing else is exempt.
+    files: [
+      '**/*.spec.{ts,tsx}',
+      '**/*.int-spec.ts',
+      '**/*.e2e-spec.ts',
+      '**/*.test.{ts,tsx,mjs}',
+      '**/test/**',
+    ],
+    rules: { 'internal/token-source': 'off' },
   },
 ];
 
@@ -112,9 +159,10 @@ const base = tseslint.config(
       '**/*.e2e-spec.ts',
       '**/test/**',
     ],
-    plugins: { internal: { rules: { transport: internalTokenTransport } } },
+    plugins: { internal },
     rules: { 'internal/transport': 'error' },
   },
+  ...INTERNAL_TOKEN_SOURCE,
   {
     // @rasta/config's URL reader is plain CommonJS so the scripts can import
     // it before any build (url-reader.js); Node's CommonJS globals apply.

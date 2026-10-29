@@ -5,7 +5,7 @@ import { createServer } from 'node:net';
 import { describe, it } from 'node:test';
 import { inspect } from 'node:util';
 import { Actor, SessionToken, until } from './actor.ts';
-import { failureMessage, TransportError, type Fetch } from './http.ts';
+import { failureMessage, send, TransportError, type Fetch } from './http.ts';
 import { CHECK_STILL_RUNNING, waitFor } from './poll.ts';
 
 /**
@@ -370,4 +370,47 @@ describe('internal-token non-redirect statuses', () => {
       assert.equal(answer.headers.etag, '"unchanged"');
     });
   }
+});
+
+describe('the internal-token header is set by send() alone', () => {
+  it('replaces one supplied in the headers, in any letter case, and keeps the redirect guard', async () => {
+    const seen: [string | undefined, RequestInit][] = [];
+    const transport: Fetch = async (url, init) => {
+      seen.push([url, init]);
+      return new Response('{}', { status: 200 });
+    };
+    await send(
+      {
+        method: 'GET',
+        baseUrl: 'http://service.test',
+        path: '/v1/internal/x',
+        headers: {
+          accept: 'application/json',
+          'X-Internal-Token': 'forged',
+          'x-INTERNAL-token': 'forged',
+        },
+        internalToken: INTERNAL_TOKEN,
+      },
+      transport,
+    );
+    const [[, init]] = seen as [[string, RequestInit]];
+    assert.equal(init.redirect, 'manual');
+    const headers = init.headers as Record<string, string>;
+    assert.deepEqual(
+      Object.keys(headers).filter((name) => name.toLowerCase() === 'x-internal-token'),
+      ['x-internal-token'],
+    );
+    assert.equal(headers['x-internal-token'], INTERNAL_TOKEN);
+    assert.equal(headers.accept, 'application/json');
+  });
+
+  it('an actor passes the token to send(), never as a header of its own', async () => {
+    const seen: Record<string, string>[] = [];
+    await actor(async (_url, init) => {
+      seen.push(init.headers as Record<string, string>);
+      return new Response('{}', { status: 200 });
+    }).call('GET', '/v1/internal/x', { internalToken: INTERNAL_TOKEN });
+    assert.equal(seen[0]?.['x-internal-token'], INTERNAL_TOKEN);
+    assert.equal(seen[0]?.authorization, undefined);
+  });
 });

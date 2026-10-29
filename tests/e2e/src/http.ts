@@ -45,6 +45,12 @@ export interface HttpRequest {
   baseUrl: string;
   path: string;
   headers: Record<string, string>;
+  /**
+   * Sent as `X-Internal-Token` by `send()` — the one place in this suite that puts the header on
+   * a request, behind its redirect guard (internal-token source boundary, PR #423 follow-up 1).
+   * A header of that name in `headers`, in any letter case, is replaced.
+   */
+  internalToken?: string;
   /** Serialised as JSON; `undefined` sends no body. */
   body?: unknown;
   /** Sent form-encoded instead (a token grant); takes precedence over `body`. */
@@ -201,7 +207,15 @@ export async function send(
   fetchImpl: Fetch = fetch,
   timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<HttpAnswer> {
-  const internal = new Headers(request.headers).has('x-internal-token');
+  const internal =
+    request.internalToken !== undefined || new Headers(request.headers).has('x-internal-token');
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (request.internalToken === undefined || name.toLowerCase() !== 'x-internal-token') {
+      headers[name] = value;
+    }
+  }
+  if (request.internalToken !== undefined) headers['x-internal-token'] = request.internalToken;
   const deadline = Date.now() + timeoutMs;
   const body =
     request.form !== undefined
@@ -216,7 +230,7 @@ export async function send(
         method: request.method,
         ...(internal ? { redirect: 'manual' as const } : {}),
         headers: {
-          ...request.headers,
+          ...headers,
           ...(request.form !== undefined
             ? { 'content-type': 'application/x-www-form-urlencoded' }
             : {}),
