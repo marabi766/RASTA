@@ -81,7 +81,7 @@ describe('is this user a live member of the organization fleet acts for (task 09
 
   afterAll(async () => {
     jest.useRealTimers();
-    await prisma.onModuleDestroy();
+    await prisma.stop();
   });
 
   it('answers live: true for a live member, naming the user, the signed organization and the database instant', async () => {
