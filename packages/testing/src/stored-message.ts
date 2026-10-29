@@ -12,6 +12,11 @@
  * - `shape`: the exact expected structure, at every depth. A key the shape does not name, a
  *   missing required key, a value of another type: each is a problem, so nothing can be added
  *   under `actor` (or anywhere) unseen, and a marker split across nested keys has no place to go.
+ * - `exactly` / `wholly`: a leaf pinned to the value the test itself knows, or to a strict
+ *   WHOLE-value pattern (ULID, traceparent, semver). A string leaf typed only `'string'` is
+ *   unconstrained text, and no tokenizer can be sure to find a number written into text with
+ *   punctuation (`intervalHours:500`, `{"x":500}`, `x/5e2`, `lat:35.7/51.4`); a pinned leaf has no
+ *   place for appended text. `envelopeShape` therefore REQUIRES a pin for every envelope field.
  * - `anywhere` / `inKeys`: text markers, case-insensitive, in keys and string/number leaves.
  * - `numbers`: sensitive numbers as VALUES (`'500.00'`, `500`). A number leaf, a string that is
  *   wholly a decimal literal, or a decimal word inside a string equals the marker when its exact
@@ -47,35 +52,103 @@ export interface ObjectShape {
   readonly [key: string]: Shape | Optional;
 }
 
-/** A leaf kind, a union of leaf kinds, an array of one shape, or an object of named shapes. */
-export type Shape = Leaf | readonly Leaf[] | ArrayOf | ObjectShape;
+/**
+ * A leaf pinned to a value: equal to `expected` (same type, `===`), or, for a pattern, a string
+ * the pattern matches from its first character to its last. The anchors are added here, so a
+ * pattern cannot be written loosely.
+ */
+export class Pin {
+  readonly expected: string | number | RegExp;
+  constructor(expected: string | number | RegExp) {
+    if (expected instanceof RegExp) {
+      if (/[gmy]/.test(expected.flags)) {
+        throw new Error(`a pinned pattern takes no g, m or y flag: ${String(expected)}`);
+      }
+      this.expected = new RegExp(`^(?:${expected.source})$`, expected.flags);
+    } else {
+      this.expected = expected;
+    }
+  }
+  accepts(value: unknown): boolean {
+    return this.expected instanceof RegExp
+      ? typeof value === 'string' && this.expected.test(value)
+      : value === this.expected;
+  }
+  describe(): string {
+    return this.expected instanceof RegExp
+      ? `matching ${String(this.expected)}`
+      : `exactly ${JSON.stringify(this.expected)}`;
+  }
+}
+
+/** A leaf pinned to a value the test knows. */
+export const exactly = (value: string | number): Pin => new Pin(value);
+/** A leaf pinned to a strict whole-value pattern; the anchors are added, `m`/`g`/`y` refused. */
+export const wholly = (pattern: RegExp): Pin => new Pin(pattern);
+
+/** A ULID as `ulid()` writes it: 26 Crockford base32 characters. */
+export const ULID_SHAPE = /[0-9A-HJKMNP-TV-Z]{26}/;
+/** A W3C traceparent as the outbox writes it: version 00, 32 + 16 hex, flags 00 or 01. */
+export const TRACEPARENT_SHAPE = /00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]/;
+/** Plain `major.minor.patch` semver, no prerelease or build text. */
+export const SEMVER_SHAPE = /(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)/;
+
+/** A leaf kind, a union of leaf kinds, a pin, an array of one shape, or an object of named shapes. */
+export type Shape = Leaf | readonly Leaf[] | Pin | ArrayOf | ObjectShape;
 
 export const arrayOf = (item: Shape): ArrayOf => new ArrayOf(item);
 export const optional = (shape: Shape): Optional => new Optional(shape);
 
 /**
- * The envelope `eventEnvelopeSchema` describes, as it is stored, with the domain payload's shape
- * given by the caller. One place for the envelope's nested shapes (`actor`), so a spec cannot
- * leave one open; `stored-message.spec.ts` keeps its keys equal to the schema's.
+ * What a spec knows about the envelope it expects: a pin for EVERY envelope field except
+ * `occurredAt` (the one designated instant). `null` means the test expects the field absent, and
+ * then any value there is an unknown key. `optional(pin)` allows absence but pins a present value.
+ * A field the test cannot pin must be written as a strict `wholly(...)` pattern, with the reason.
  */
-export function envelopeShape(payload: Shape): ObjectShape {
+export interface EnvelopePins {
+  readonly eventId: Pin;
+  readonly eventName: Pin;
+  readonly eventVersion: Pin;
+  readonly producer: Pin;
+  readonly producerVersion: Pin;
+  readonly aggregateType: Pin;
+  readonly aggregateId: Pin;
+  readonly aggregateVersion: Pin | Optional | null;
+  readonly tenantId: Pin | Optional | null;
+  readonly correlationId: Pin;
+  readonly causationId: Pin | Optional | null;
+  readonly traceparent: Pin | Optional | null;
+  readonly actor: { readonly type: Pin; readonly id: Pin } | null;
+  readonly streamSeq: Pin | Optional | null;
+  readonly streamKey: Pin | Optional | null;
+}
+
+/**
+ * The envelope `eventEnvelopeSchema` describes, as it is stored, with the domain payload's shape
+ * given by the caller and every other field pinned (`EnvelopePins`). One place for the envelope's
+ * nested shapes (`actor`), so a spec cannot leave one open and no string field is left as bare
+ * text; `stored-message.spec.ts` keeps its keys equal to the schema's.
+ */
+export function envelopeShape(payload: Shape, pins: EnvelopePins): ObjectShape {
+  const present = (name: string, pin: Pin | Optional | null): ObjectShape =>
+    pin === null ? {} : { [name]: pin };
   return {
-    eventId: 'string',
-    eventName: 'string',
-    eventVersion: 'number',
+    eventId: pins.eventId,
+    eventName: pins.eventName,
+    eventVersion: pins.eventVersion,
     occurredAt: 'instant',
-    producer: 'string',
-    producerVersion: 'string',
-    aggregateType: 'string',
-    aggregateId: 'string',
-    aggregateVersion: optional('number'),
-    tenantId: optional('string'),
-    correlationId: 'string',
-    causationId: optional('string'),
-    traceparent: optional('string'),
-    actor: optional({ type: 'string', id: 'string' }),
-    streamSeq: optional('number'),
-    streamKey: optional('string'),
+    producer: pins.producer,
+    producerVersion: pins.producerVersion,
+    aggregateType: pins.aggregateType,
+    aggregateId: pins.aggregateId,
+    ...present('aggregateVersion', pins.aggregateVersion),
+    ...present('tenantId', pins.tenantId),
+    correlationId: pins.correlationId,
+    ...present('causationId', pins.causationId),
+    ...present('traceparent', pins.traceparent),
+    ...(pins.actor === null ? {} : { actor: pins.actor }),
+    ...present('streamSeq', pins.streamSeq),
+    ...present('streamKey', pins.streamKey),
     payload,
   };
 }
@@ -201,6 +274,7 @@ export function storedMessageProblems(message: unknown, rules: StoredMessageRule
         inner !== undefined &&
         typeof inner === 'object' &&
         !Array.isArray(inner) &&
+        !(inner instanceof Pin) &&
         !(inner instanceof ArrayOf)
           ? (inner as ObjectShape)
           : undefined;
@@ -228,7 +302,14 @@ export function storedMessageProblems(message: unknown, rules: StoredMessageRule
     leaves += 1;
     const kind = leafKind(value);
     const allowed: readonly unknown[] | undefined =
-      inner === undefined ? undefined : Array.isArray(inner) ? inner : [inner];
+      inner === undefined || inner instanceof Pin
+        ? undefined
+        : Array.isArray(inner)
+          ? inner
+          : [inner];
+    if (inner instanceof Pin && !inner.accepts(value)) {
+      problems.push(`value ${JSON.stringify(value)} at ${path} is not ${inner.describe()}`);
+    }
     if (allowed !== undefined) {
       const fits =
         kind !== null &&

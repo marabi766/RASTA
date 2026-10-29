@@ -1,6 +1,16 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { releaseWithin } from '@rasta/nest-common';
-import { ISO_INSTANT_SHAPE, envelopeShape, expectStoredMessageWithout } from '@rasta/testing';
+import {
+  ISO_INSTANT_SHAPE,
+  SEMVER_SHAPE,
+  TRACEPARENT_SHAPE,
+  ULID_SHAPE,
+  envelopeShape,
+  exactly,
+  expectStoredMessageWithout,
+  optional,
+  wholly,
+} from '@rasta/testing';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { validateInventoryPayload, type InventoryEventName } from '../src/events/events';
 import { actor, client, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
@@ -123,12 +133,37 @@ describe('the transactional outbox', () => {
       anywhere: [name, String(location.latitude), String(location.longitude)],
       numbers: [location.latitude, location.longitude],
       near: { values: [location.latitude, location.longitude], within: 0.5 },
-      shape: envelopeShape({
-        warehouseId: 'string',
-        organizationId: 'string',
-        createdBy: 'string',
-        createdAt: 'instant',
-      }),
+      shape: envelopeShape(
+        {
+          warehouseId: exactly(created.body.id),
+          organizationId: exactly(a),
+          createdBy: exactly(creator),
+          createdAt: 'instant',
+        },
+        // Every envelope string is pinned, so no text can be appended to one (`… location:35.7/51.4`,
+        // `{"lat":35.7}`: punctuation that no tokenizer is sure to split on): by the value this test
+        // itself knows, or by a strict whole-value shape for what the writer makes — the request's
+        // correlation id is minted by the service (a ULID), the version is `SERVICE_VERSION` or its
+        // default, a trace id exists only under a tracer, hence optional. No cause, no aggregate
+        // version: the command passes none.
+        {
+          eventId: exactly(rows[0]?.id as string),
+          eventName: exactly('WAREHOUSE_CREATED'),
+          eventVersion: exactly(1),
+          producer: exactly('inventory-service'),
+          producerVersion: wholly(SEMVER_SHAPE),
+          aggregateType: exactly('Warehouse'),
+          aggregateId: exactly(created.body.id),
+          aggregateVersion: null,
+          tenantId: exactly(a),
+          correlationId: wholly(ULID_SHAPE),
+          causationId: null,
+          traceparent: optional(wholly(TRACEPARENT_SHAPE)),
+          actor: { type: exactly('USER'), id: exactly(creator) },
+          streamSeq: exactly(1),
+          streamKey: exactly(created.body.id),
+        },
+      ),
     });
   });
 

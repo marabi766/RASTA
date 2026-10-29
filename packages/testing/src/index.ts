@@ -69,13 +69,25 @@ export {
 export { absenceRefusal, guardedAbsenceMatchers } from './absence-guard';
 export {
   ISO_INSTANT_SHAPE,
+  SEMVER_SHAPE,
+  TRACEPARENT_SHAPE,
+  ULID_SHAPE,
   arrayOf,
   envelopeShape,
+  exactly,
   expectStoredMessageWithout,
   optional,
   storedMessageProblems,
+  wholly,
 } from './stored-message';
-export type { Leaf, ObjectShape, Shape, StoredMessageRules } from './stored-message';
+export type {
+  EnvelopePins,
+  Leaf,
+  ObjectShape,
+  Pin,
+  Shape,
+  StoredMessageRules,
+} from './stored-message';
 export type { AbsenceMatcherResult } from './absence-guard';
 export type {
   DisclosureOptions,

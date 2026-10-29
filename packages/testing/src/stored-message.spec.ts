@@ -1,11 +1,17 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import {
   ISO_INSTANT_SHAPE,
+  SEMVER_SHAPE,
+  TRACEPARENT_SHAPE,
+  ULID_SHAPE,
   arrayOf,
   envelopeShape,
+  exactly,
   expectStoredMessageWithout,
   optional,
   storedMessageProblems,
+  wholly,
+  type EnvelopePins,
 } from './stored-message';
 
 const clean = {
@@ -164,7 +170,24 @@ describe('storedMessageProblems: the whole shape, at every depth', () => {
   });
 
   it('keeps envelopeShape in step with eventEnvelopeSchema, key for key', () => {
-    expect(Object.keys(envelopeShape('string')).sort()).toEqual(
+    const pinned: EnvelopePins = {
+      eventId: exactly('a'),
+      eventName: exactly('A'),
+      eventVersion: exactly(1),
+      producer: exactly('p'),
+      producerVersion: exactly('0.0.0'),
+      aggregateType: exactly('T'),
+      aggregateId: exactly('i'),
+      aggregateVersion: exactly(1),
+      tenantId: exactly('t'),
+      correlationId: exactly('c'),
+      causationId: exactly('c'),
+      traceparent: exactly('t'),
+      actor: { type: exactly('USER'), id: exactly('u') },
+      streamSeq: exactly(1),
+      streamKey: exactly('k'),
+    };
+    expect(Object.keys(envelopeShape('string', pinned)).sort()).toEqual(
       Object.keys(eventEnvelopeSchema.shape).sort(),
     );
   });
@@ -183,13 +206,36 @@ describe('storedMessageProblems: envelope data nested under an allowed key (PR #
     tenantId: 'org-1',
     correlationId: '01J0000000000000000000000A',
     actor: { type: 'USER', id: 'USR-1' },
+    streamSeq: 2,
+    streamKey: 'AST-1',
     payload: { changedFields: ['intervalHours', 'leadHours'], changedAt: '2026-10-29T10:20:50Z' },
   };
+  // What a spec knows of its own envelope: ids and the actor by value, the rest by strict shape.
+  const pinsFor = (eventName: string): EnvelopePins => ({
+    eventId: exactly('01J0000000000000000000000A'),
+    eventName: exactly(eventName),
+    eventVersion: exactly(1),
+    producer: exactly('maintenance-service'),
+    producerVersion: wholly(SEMVER_SHAPE),
+    aggregateType: exactly('MaintenanceSchedule'),
+    aggregateId: exactly('AST-1'),
+    aggregateVersion: null,
+    tenantId: exactly('org-1'),
+    correlationId: wholly(ULID_SHAPE),
+    causationId: null,
+    traceparent: optional(wholly(TRACEPARENT_SHAPE)),
+    actor: { type: exactly('USER'), id: exactly('USR-1') },
+    streamSeq: exactly(2),
+    streamKey: exactly('AST-1'),
+  });
   const maintenanceRules = {
     anywhere: ['500.00', '50.00'],
     numbers: ['500.00', '50.00'],
     inKeys: ['intervalHours', 'leadHours', 'lastServicedHourMeter'],
-    shape: envelopeShape({ changedFields: arrayOf('string'), changedAt: 'instant' }),
+    shape: envelopeShape(
+      { changedFields: arrayOf('string'), changedAt: 'instant' },
+      pinsFor('MAINTENANCE_SCHEDULE_CHANGED'),
+    ),
   };
   const inventory = {
     ...maintenance,
@@ -200,7 +246,10 @@ describe('storedMessageProblems: envelope data nested under an allowed key (PR #
     anywhere: ['Very identifiable name', '35.689197', '51.388974'],
     numbers: [35.689197, 51.388974],
     near: { values: [35.689197, 51.388974], within: 0.5 },
-    shape: envelopeShape({ warehouseId: 'string', createdAt: 'instant' }),
+    shape: envelopeShape(
+      { warehouseId: 'string', createdAt: 'instant' },
+      pinsFor('WAREHOUSE_CREATED'),
+    ),
   };
   const mutate = (base: typeof maintenance, change: (copy: any) => void) => {
     const copy = structuredClone(base);
@@ -261,6 +310,244 @@ describe('storedMessageProblems: envelope data nested under an allowed key (PR #
     expect(storedMessageProblems(split, maintenanceRules)).toEqual(
       expect.arrayContaining(['unknown key "interval" at $.actor']),
     );
+  });
+});
+
+describe('storedMessageProblems: punctuation in a permitted envelope string (PR #486 r3 N1)', () => {
+  const ULID_A = '01J0000000000000000000000A';
+  const full = {
+    eventId: ULID_A,
+    eventName: 'MAINTENANCE_SCHEDULE_CHANGED',
+    eventVersion: 1,
+    occurredAt: '2026-10-29T10:20:50.001Z',
+    producer: 'maintenance-service',
+    producerVersion: '0.1.0',
+    aggregateType: 'MaintenanceSchedule',
+    aggregateId: 'MSC_01J0000000000000000000000B',
+    tenantId: 'ORG-ITEST-A-1',
+    correlationId: 'itest-01J0000000000000000000000C',
+    causationId: '01J0000000000000000000000D',
+    traceparent: '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
+    actor: { type: 'USER', id: 'USR-ITEST-FLEET-MANAGER' },
+    streamSeq: 2,
+    streamKey: 'AST-ITEST_01J0000000000000000000000E',
+    payload: { changedFields: ['intervalHours'], changedAt: '2026-10-29T10:20:50.001Z' },
+  };
+  // Every envelope string pinned as a real spec would: by the value the test knows, or by a strict
+  // whole-value shape where the writer makes the value (a ULID, a prefixed ULID, a traceparent).
+  const pins: EnvelopePins = {
+    eventId: exactly(full.eventId),
+    eventName: exactly(full.eventName),
+    eventVersion: exactly(1),
+    producer: exactly(full.producer),
+    producerVersion: wholly(SEMVER_SHAPE),
+    aggregateType: exactly(full.aggregateType),
+    aggregateId: exactly(full.aggregateId),
+    aggregateVersion: null,
+    tenantId: exactly(full.tenantId),
+    correlationId: wholly(/itest-[0-9A-HJKMNP-TV-Z]{26}/),
+    causationId: optional(wholly(ULID_SHAPE)),
+    traceparent: optional(wholly(TRACEPARENT_SHAPE)),
+    actor: { type: exactly('USER'), id: exactly(full.actor.id) },
+    streamSeq: exactly(2),
+    streamKey: exactly(full.streamKey),
+  };
+  const shape = envelopeShape({ changedFields: arrayOf('string'), changedAt: 'instant' }, pins);
+  const maintenanceRules = {
+    anywhere: ['500.00', '50.00'],
+    numbers: ['500.00', '50.00'],
+    inKeys: ['intervalHours', 'leadHours', 'lastServicedHourMeter'],
+    shape,
+  };
+  const inventoryRules = {
+    anywhere: ['Very identifiable name', '35.689197', '51.388974'],
+    numbers: [35.689197, 51.388974],
+    near: { values: [35.689197, 51.388974], within: 0.5 },
+    shape,
+  };
+  const set = (path: string, change: (old: string) => string) => {
+    const copy = structuredClone(full) as Record<string, any>;
+    if (path === 'actor.id') copy.actor.id = change(copy.actor.id);
+    else copy[path] = change(copy[path]);
+    return copy;
+  };
+
+  it('accepts the fully pinned envelope', () => {
+    expect(storedMessageProblems(full, maintenanceRules)).toEqual([]);
+    expect(storedMessageProblems(full, inventoryRules)).toEqual([]);
+  });
+
+  // The four strings the reviewer appended (maintenance x3, inventory x1): none of `:` `/` `{` `"`
+  // is a word boundary, so a tokenizer finds no number. The pin has no place for appended text.
+  const fields = [
+    'eventId',
+    'producerVersion',
+    'aggregateType',
+    'aggregateId',
+    'tenantId',
+    'correlationId',
+    'causationId',
+    'traceparent',
+    'streamKey',
+    'actor.id',
+  ];
+  const suffixes = [
+    ' intervalHours:500',
+    ' {"intervalHours":500}',
+    ' intervalHours/5e2',
+    ' location:35.7/51.4',
+  ];
+  it.each(fields.flatMap((field) => suffixes.map((suffix) => [field, suffix] as const)))(
+    "refuses %s with %j appended, under both callers' rules",
+    (field, suffix) => {
+      const mutant = set(field, (old) => old + suffix);
+      for (const rules of [maintenanceRules, inventoryRules]) {
+        expect(storedMessageProblems(mutant, rules)).toEqual(
+          expect.arrayContaining([expect.stringContaining(`at $.${field}`)]),
+        );
+      }
+    },
+  );
+
+  it.each(fields)('refuses %s with the number alone as its value', (field) => {
+    for (const value of ['500', '5e2', '35.7']) {
+      expect(
+        storedMessageProblems(
+          set(field, () => value),
+          maintenanceRules,
+        ),
+      ).not.toEqual([]);
+    }
+  });
+
+  it.each(['eventName', 'producer', 'aggregateType'])(
+    'refuses text appended to %s, the other pinned strings, too',
+    (field) => {
+      for (const suffix of suffixes) {
+        expect(
+          storedMessageProblems(
+            set(field, (old) => old + suffix),
+            maintenanceRules,
+          ),
+        ).not.toEqual([]);
+      }
+    },
+  );
+
+  it('refuses text appended to the actor type, and a field the test expects absent', () => {
+    const type = structuredClone(full) as any;
+    type.actor.type = 'USER intervalHours:500';
+    expect(storedMessageProblems(type, maintenanceRules)).not.toEqual([]);
+    const noCause = envelopeShape(
+      { changedFields: arrayOf('string'), changedAt: 'instant' },
+      {
+        ...pins,
+        causationId: null,
+      },
+    );
+    expect(storedMessageProblems(full, { ...maintenanceRules, shape: noCause })).toEqual([
+      'unknown key "causationId" at $',
+    ]);
+  });
+
+  it('lets an optional pinned field be absent, and still pins it when present', () => {
+    const { causationId: _c, traceparent: _t, ...bare } = full;
+    expect(storedMessageProblems(bare, maintenanceRules)).toEqual([]);
+    expect(storedMessageProblems({ ...bare, traceparent: 'x' }, maintenanceRules)).toEqual([
+      expect.stringContaining('is not matching'),
+    ]);
+  });
+
+  it('refuses a missing pinned field, a number for a string and a string for a number', () => {
+    const { eventId: _e, ...noId } = full;
+    expect(storedMessageProblems(noId, maintenanceRules)).toEqual(['missing key "eventId" at $']);
+    expect(storedMessageProblems({ ...full, streamSeq: '2' }, maintenanceRules)).toHaveLength(1);
+    expect(storedMessageProblems({ ...full, tenantId: 7 }, maintenanceRules)).toHaveLength(1);
+  });
+
+  describe('a pinned pattern', () => {
+    it('has no place for appended, prepended or line-broken text', () => {
+      const pin = wholly(ULID_SHAPE);
+      expect(pin.accepts(ULID_A)).toBe(true);
+      for (const bad of [
+        `${ULID_A} x`,
+        ` ${ULID_A}`,
+        `${ULID_A}\n`,
+        `x\n${ULID_A}`,
+        `${ULID_A}:500`,
+      ]) {
+        expect(pin.accepts(bad)).toBe(false);
+      }
+      expect(pin.accepts(5)).toBe(false);
+    });
+
+    it('is anchored whatever it was written like, alternations included', () => {
+      const pin = wholly(/ab|cd/);
+      expect(pin.accepts('ab')).toBe(true);
+      expect(pin.accepts('cd')).toBe(true);
+      expect(pin.accepts('abx')).toBe(false);
+      expect(pin.accepts('xcd')).toBe(false);
+      expect(wholly(/^ab$/).accepts('ab')).toBe(true);
+    });
+
+    it('refuses flags that would loosen or break it', () => {
+      expect(() => wholly(/a/m)).toThrow(/no g, m or y flag/);
+      expect(() => wholly(/a/g)).toThrow(/no g, m or y flag/);
+      expect(() => wholly(/a/y)).toThrow(/no g, m or y flag/);
+    });
+
+    it('matches the shapes the writer produces, and nothing looser', () => {
+      expect(
+        wholly(TRACEPARENT_SHAPE).accepts(
+          '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00',
+        ),
+      ).toBe(true);
+      expect(
+        wholly(TRACEPARENT_SHAPE).accepts(
+          '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-02',
+        ),
+      ).toBe(false);
+      expect(
+        wholly(TRACEPARENT_SHAPE).accepts(
+          '00-0AF7651916CD43DD8448EB211C80319C-b7ad6b7169203331-01',
+        ),
+      ).toBe(false);
+      for (const ok of ['0.0.0', '0.1.0', '12.30.4'])
+        expect(wholly(SEMVER_SHAPE).accepts(ok)).toBe(true);
+      for (const bad of ['1.0', '01.0.0', '1.0.0-rc.1', '1.0.0+500', '1.0.0 x', 'v1.0.0']) {
+        expect(wholly(SEMVER_SHAPE).accepts(bad)).toBe(false);
+      }
+    });
+
+    it('does not mistake a ULID with digits for a number', () => {
+      // Digits and an `E` in one id, a run equal to the marker inside it: one word, with letters.
+      for (const id of [
+        '01J5E500500500500500500500',
+        '0000000000000000000000500A',
+        '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      ]) {
+        expect(ULID_SHAPE.test(id)).toBe(true);
+        const message = { ...full, eventId: id };
+        const rules = {
+          ...maintenanceRules,
+          numbers: ['500', '50.00', '69'],
+          shape: envelopeShape(
+            { changedFields: arrayOf('string'), changedAt: 'instant' },
+            {
+              ...pins,
+              eventId: wholly(ULID_SHAPE),
+            },
+          ),
+        };
+        expect(storedMessageProblems(message, rules)).toEqual([]);
+      }
+    });
+  });
+
+  it('pins by type: 1 is not "1", and "x " is not "x"', () => {
+    expect(exactly(1).accepts('1')).toBe(false);
+    expect(exactly('x').accepts('x ')).toBe(false);
+    expect(exactly(1).accepts(1)).toBe(true);
   });
 });
 

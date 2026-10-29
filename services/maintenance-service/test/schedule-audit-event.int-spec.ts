@@ -1,9 +1,15 @@
 import { RastaError } from '@rasta/nest-common';
 import {
   ISO_INSTANT_SHAPE,
+  SEMVER_SHAPE,
+  TRACEPARENT_SHAPE,
+  ULID_SHAPE,
   arrayOf,
   envelopeShape,
+  exactly,
   expectStoredMessageWithout,
+  optional,
+  wholly,
 } from '@rasta/testing';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
 import { ScheduleService } from '../src/maintenance/schedule.service';
@@ -173,18 +179,43 @@ describe('schedule changes reach the audit trail', () => {
       anywhere: ['500.00', '50.00'],
       numbers: ['500.00', '50.00'],
       inKeys: ['intervalHours', 'leadHours', 'lastServicedHourMeter'],
-      shape: envelopeShape({
-        scheduleId: 'string',
-        assetId: 'string',
-        organizationId: 'string',
-        change: 'string',
-        status: 'string',
-        previousStatus: ['string', 'null'],
-        reason: ['string', 'null'],
-        changedFields: arrayOf('string'),
-        changedBy: 'string',
-        changedAt: 'instant',
-      }),
+      shape: envelopeShape(
+        {
+          scheduleId: exactly(schedule.id),
+          assetId: exactly(assetId),
+          organizationId: exactly(org.a),
+          change: exactly('UPDATED'),
+          status: exactly('ACTIVE'),
+          previousStatus: exactly('ACTIVE'),
+          reason: 'null',
+          changedFields: arrayOf(wholly(/intervalHours|leadHours/)),
+          changedBy: exactly(actor),
+          changedAt: 'instant',
+        },
+        // Every envelope string is pinned, so no text can be appended to one (`… intervalHours:500`,
+        // `{"intervalHours":500}`, `…/5e2`: punctuation that no tokenizer is sure to split on):
+        // by the value this test itself knows, or by a strict whole-value shape for what the
+        // writer makes — `asActor` mints `itest-<ULID>` per call, so only its shape can be known;
+        // the version is the service's `SERVICE_VERSION` or its default; a trace id exists only
+        // under a tracer, hence optional. No cause is passed to the command, so none may appear.
+        {
+          eventId: exactly(events[1].row.id),
+          eventName: exactly('MAINTENANCE_SCHEDULE_CHANGED'),
+          eventVersion: exactly(1),
+          producer: exactly('maintenance-service'),
+          producerVersion: wholly(SEMVER_SHAPE),
+          aggregateType: exactly('MaintenanceSchedule'),
+          aggregateId: exactly(schedule.id),
+          aggregateVersion: null,
+          tenantId: exactly(org.a),
+          correlationId: wholly(new RegExp(`itest-${ULID_SHAPE.source}`)),
+          causationId: null,
+          traceparent: optional(wholly(TRACEPARENT_SHAPE)),
+          actor: { type: exactly('USER'), id: exactly(actor) },
+          streamSeq: exactly(2),
+          streamKey: exactly(assetId),
+        },
+      ),
     });
     expect(JSON.stringify(events[1].envelope)).not.toContain('500.00');
   });
