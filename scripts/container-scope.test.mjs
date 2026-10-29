@@ -323,13 +323,15 @@ test('the aggregate check is "Images built and scanned", always runs and reads b
     Object.values(jobs).filter((job) => job.name === 'Images built and scanned').length,
     1,
   );
-  // The Trivy DB is only fetched by a run that can scan: its condition reads
-  // the event alone and is a superset of what classifyRun builds images for.
+  // Every run downloads the Trivy DB: the ClamAV image scan, a required check on
+  // every pull request, reads it as well as the service-image scans.
   assert.equal(jobs['trivy-db'].needs, undefined);
-  assert.equal(
-    jobs['trivy-db'].if,
-    "${{ github.event_name != 'pull_request' || !github.event.pull_request.head.ref || startsWith(github.event.pull_request.head.ref, 'mq/') }}",
+  assert.equal(jobs['trivy-db'].if, undefined);
+  const readers = Object.entries(jobs).filter(([, job]) =>
+    job.steps?.some((step) => step.uses === './.github/actions/restore-trivy-db'),
   );
+  assert.deepEqual(readers.map(([name]) => name).sort(), ['clamav-signatures', 'containers']);
+  for (const [name, job] of readers) assert.ok(job.needs.includes('trivy-db'), name);
 });
 
 test('CLI: missing YAML dependency warns once and keeps stdout JSON-only', (t) => {
@@ -1086,11 +1088,12 @@ test('probeBuildx: a probe that times out is broken, not missing', (t) => {
 });
 
 test('maySkipBuildKitProof: only a missing tool outside CI may skip', () => {
-  assert.equal(maySkipBuildKitProof({ state: 'missing' }, undefined), true);
+  // The second argument is passed explicitly: an omitted one reads process.env.CI.
   assert.equal(maySkipBuildKitProof({ state: 'missing' }, ''), true);
   assert.equal(maySkipBuildKitProof({ state: 'missing' }, 'true'), false);
-  assert.equal(maySkipBuildKitProof({ state: 'broken' }, undefined), false);
-  assert.equal(maySkipBuildKitProof({ state: 'available' }, undefined), false);
+  assert.equal(maySkipBuildKitProof({ state: 'missing' }, '1'), false);
+  assert.equal(maySkipBuildKitProof({ state: 'broken' }, ''), false);
+  assert.equal(maySkipBuildKitProof({ state: 'available' }, ''), false);
 });
 
 // Run the real BuildKit test of this suite under a docker of our choosing.
@@ -1146,46 +1149,4 @@ test('BuildKit proof: a broken probe (permission denied) fails locally', (t) => 
   const result = buildKitProofUnder(t, dir, false);
   assert.notEqual(result.status, 0, result.stdout);
   assert.match(result.stdout, /^not ok \d+ - BuildKit: /m);
-});
-
-// The Trivy DB job's condition is the workflow's own expression, evaluated here
-// as JavaScript (it uses only ||, !, != and startsWith). It must run for every
-// run that classifyRun would build images for.
-test('trivy-db runs for every run that builds an image and skips only ordinary pull requests', () => {
-  const { jobs } = parseYaml(readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8'));
-  const expression = jobs['trivy-db'].if
-    .trim()
-    .replace(/^\$\{\{\s*/, '')
-    .replace(/\s*\}\}$/, '');
-  const startsWith = (value, prefix) =>
-    String(value).toLowerCase().startsWith(prefix.toLowerCase());
-  const runs = (env) =>
-    new Function('github', 'startsWith', `return (${expression});`)(
-      {
-        event_name: env.EVENT_NAME,
-        event: { pull_request: { head: { ref: env.HEAD_REF } } },
-      },
-      startsWith,
-    );
-  const envs = [
-    push('refs/heads/main'),
-    push('refs/heads/feat/x'),
-    { EVENT_NAME: 'workflow_dispatch' },
-    {},
-    pull('mq/train-1'),
-    pull('mq/train-1', 'someone/RASTA'),
-    pull('MQ/train-3'),
-    pull('mq/other'),
-    pull('mq/'),
-    pull(''),
-    { ...pull('x'), HEAD_REF: undefined },
-    pull('feat/x'),
-    pull('feat/mq/train-1'),
-    pull('fix/ci-images-on-train'),
-  ];
-  for (const env of envs) {
-    const builds = classifyRun(env).mode !== 'pr';
-    if (builds) assert.equal(runs(env), true, JSON.stringify(env));
-    else assert.equal(runs(env), false, JSON.stringify(env));
-  }
 });

@@ -4364,19 +4364,10 @@ jobs:
     name: Trivy vulnerability DB (downloaded once)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Only a run that scans downloads the DB. An ordinary pull request builds
-    # no image, so it skips this job; this stays free of `needs` (it starts
-    # with the fastest jobs), so the condition reads the event alone and errs
-    # toward running: everything but a pull request, and any pull request
-    # whose head ref is empty or under the reserved `mq/` namespace (the
-    # train, and whatever `classifyRun` cannot place). startsWith ignores
-    # case, like the reserved namespace. A wrongly skipped download is not a
-    # pass: the scans' restore step fails on the missing key, and "Images
-    # built and scanned" is red when selected images were not scanned.
-    if: >-
-      ${{ github.event_name != 'pull_request'
-      || !github.event.pull_request.head.ref
-      || startsWith(github.event.pull_request.head.ref, 'mq/') }}
+    # Every run downloads the DB, ordinary pull requests included: the required
+    # ClamAV image scan (`clamav-signatures`) reads it too, so skipping this job
+    # on a PR that builds no service image broke that check. No `if`, and no
+    # `needs`: it starts with the fastest jobs.
     outputs:
       key: ${{ steps.fetch.outputs.key }}
     steps:
