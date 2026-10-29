@@ -28,6 +28,7 @@ import {
   type OwnerFormState,
   type UnconfirmedOwnerCommand,
 } from './owner-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The evaluation's and the award's write path through the owner's action:
@@ -65,7 +66,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'author',
   organizationId: OWNER,
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken(OWNER),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

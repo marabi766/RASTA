@@ -3,12 +3,13 @@
  */
 import { FLASH_TTL_SECONDS, mintFlash, readFlash } from './flash';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_1'),
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

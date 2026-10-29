@@ -15,6 +15,8 @@ import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import type { WriteResult } from '@/server/write';
 
 import type { RecordFormState } from './record-form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The one path both record commands on `/assets/[id]` take.
@@ -61,8 +63,11 @@ export interface RecordCommand<V, B, F extends string> {
   ) => Promise<WriteResult<{ id: string }, F>>;
 }
 
-const assetPath = (assetId: string, flash: string): string =>
-  `/assets/${encodeURIComponent(assetId)}?${FLASH_PARAM}=${flash}`;
+const assetPath = (session: WebSession, assetId: string, flash: string): string =>
+  withContext(
+    pageContext(session),
+    `/assets/${encodeURIComponent(assetId)}?${FLASH_PARAM}=${flash}`,
+  );
 
 export async function runRecord<V, B, F extends string>(
   command: RecordCommand<V, B, F>,
@@ -110,7 +115,9 @@ export async function runRecord<V, B, F extends string>(
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and the page the
     // person lands on reads the lists again, so it shows what was recorded.
-    redirect(assetPath(baseline.assetId, mintFlash(session, baseline.assetId, command.notice)));
+    redirect(
+      assetPath(session, baseline.assetId, mintFlash(session, baseline.assetId, command.notice)),
+    );
   }
 
   switch (result.kind) {

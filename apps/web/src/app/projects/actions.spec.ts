@@ -30,6 +30,9 @@ import {
   IDLE_CREATE_PROJECT_FORM,
   RELEASE_FIELD,
 } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
+import { boundQuery } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The create form's write path: the order is the assertion (session, CSRF,
@@ -77,7 +80,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'owner',
   organizationId: 'ORG-OWNER',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-OWNER'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -831,7 +834,9 @@ describe('an unresolved create outlives the form that sent it', () => {
           [RELEASE_FIELD]: token,
           [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE,
         }),
-      ).toBe('NEXT_REDIRECT:/projects?release=UNAVAILABLE');
+      ).toBe(
+        `NEXT_REDIRECT:${withContext(boundQuery(SESSION).ctx as string, '/projects?release=UNAVAILABLE')}`,
+      );
       expect(mem.records.get(key!)).toBe(bytes);
       // …and the page cannot be used to send a fresh create either.
       createProject.mockClear();
@@ -851,7 +856,9 @@ describe('an unresolved create outlives the form that sent it', () => {
           [RELEASE_FIELD]: stale,
           [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE,
         }),
-      ).toBe('NEXT_REDIRECT:/projects?release=STALE');
+      ).toBe(
+        `NEXT_REDIRECT:${withContext(boundQuery(SESSION).ctx as string, '/projects?release=STALE')}`,
+      );
       expect((await heldRequest()).key).toBe(second.get(SUBMISSION_FIELD));
     });
 
@@ -859,7 +866,9 @@ describe('an unresolved create outlives the form that sent it', () => {
       await sendAndLose();
       const fields: Record<string, string> = { [CONFIRM_DUPLICATE_FIELD]: CONFIRM_DUPLICATE_VALUE };
       if (name !== null) fields[RELEASE_FIELD] = name;
-      expect(await release(fields)).toBe('NEXT_REDIRECT:/projects?release=STALE');
+      expect(await release(fields)).toBe(
+        `NEXT_REDIRECT:${withContext(boundQuery(SESSION).ctx as string, '/projects?release=STALE')}`,
+      );
       expect((await held()).kind).toBe('PENDING');
     });
   });
@@ -868,7 +877,10 @@ describe('an unresolved create outlives the form that sent it', () => {
     it.each([
       ['another person', { ...SESSION, subject: 'user-2' }],
       ['the same person after a new login', { ...SESSION, csrfToken: 'a-later-login' }],
-      ['the same person acting for another organization', { ...SESSION, organizationId: 'ORG-2' }],
+      [
+        'the same person acting for another organization',
+        { ...SESSION, organizationId: 'ORG-2', accessToken: actingAccessToken('ORG-2') },
+      ],
     ])('is not seen by %s', async (_name, other) => {
       await sendAndLose();
       expect(await readUnresolved(other, scope)).toEqual({ kind: 'NONE' });

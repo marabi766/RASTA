@@ -23,6 +23,8 @@ import { OwnerCommandForm } from './[id]/OwnerCommandForm';
 import { OwnerCommands } from './[id]/OwnerCommands';
 import { OwnTenderDetailScreen } from './[id]/TenderDetailScreen';
 import type { OwnerFormState } from './[id]/owner-form-state';
+import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
+import type { Binding } from '@/lib/unresolved-tenancy';
 
 jest.setTimeout(20_000);
 
@@ -43,7 +45,8 @@ const KEY = 'sub_FIRSTKEYFIRSTKEYFIRS';
 const OTHER = 'sub_OTHERKEYOTHERKEYOTH';
 const FRESH = 'sub_FRESHKEYFRESHKEYFRE';
 const OWNER = 'owner-tag-A';
-const STORE_KEY = `rasta.unresolved-tender-command.${TENDER_ID}`;
+const ACCOUNT = bindingOf(OWNER, 'session-tag-1');
+const STORE_KEY = keyFor('rasta.unresolved-tender-command.', ACCOUNT, TENDER_ID);
 const STAMP: ReplayStamp = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
 const PAGE = `/tenders/${TENDER_ID}?view=own`;
 const REASON = 'معیارها کامل نیست';
@@ -71,7 +74,7 @@ function renderForm(
       csrfToken="csrf"
       submissionId={KEY}
       replay={STAMP}
-      owner={OWNER}
+      account={ACCOUNT}
       pageHref={PAGE}
       {...(command === 'SCORE' ? { scoreRows: SCORE_ROWS, binding: BINDING } : {})}
       {...(command === 'AWARD' ? { award, binding: BINDING } : {})}
@@ -250,14 +253,14 @@ it('after a reload a keyed command’s record is view-only, as any other: no re-
     saveUnresolvedOwnerCommand(
       TENDER_ID,
       { command, submissionId: KEY, correlationId: 'COR_ORIGINAL' },
-      OWNER,
+      ACCOUNT,
     );
     const { unmount } = render(
       <OwnerCommands
         tenderId={TENDER_ID}
         offered={[]}
         csrfToken="csrf"
-        owner={OWNER}
+        account={ACCOUNT}
         pageHref={PAGE}
         showsRestored
         pageSubmissionIds={[]}
@@ -351,7 +354,7 @@ it('a publication whose answer was lost — then rejected — offers no retry, a
       tenderId={TENDER_ID}
       offered={[{ command: 'PUBLISH', submission: { id: FRESH, replay: STAMP } }]}
       csrfToken="csrf"
-      owner={OWNER}
+      account={ACCOUNT}
       pageHref={PAGE}
       showsRestored
     />,
@@ -368,14 +371,14 @@ it('after a reload the record is view-only instead of any fresh form, until set 
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'PUBLISH', submissionId: KEY, correlationId: 'COR_ORIGINAL' },
-    OWNER,
+    ACCOUNT,
   );
   const { container } = render(
     <OwnerCommands
       tenderId={TENDER_ID}
       offered={[{ command: 'PUBLISH', submission: { id: FRESH, replay: STAMP } }]}
       csrfToken="csrf"
-      owner={OWNER}
+      account={ACCOUNT}
       pageHref={PAGE}
       showsRestored
       pageSubmissionIds={[FRESH]}
@@ -395,25 +398,25 @@ it('an authority’s decision on its last step, its answer lost: after the reloa
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'GRANT_AWARD', submissionId: KEY, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
   // The page as `page.tsx` draws it once the inbox holds no pending step: the absence, and the
   // session's recovery next to it.
-  const absence = (owner: string) => (
+  const absence = (account: Binding) => (
     <>
       <OwnTenderDetailScreen result={{ kind: 'NOT_FOUND' }} criteria={null} />
       <OwnerCommands
         tenderId={TENDER_ID}
         offered={[]}
         csrfToken="csrf"
-        owner={owner}
+        account={account}
         pageHref={PAGE}
         showsRestored
         pageSubmissionIds={[]}
       />
     </>
   );
-  const { container, unmount } = render(absence(OWNER));
+  const { container, unmount } = render(absence(ACCOUNT));
   expect(screen.getByText('این مناقصه پیدا نشد')).toBeInTheDocument();
   expect(screen.getByText(/این درخواست پیش از تازه‌شدن صفحه فرستاده شد/)).toBeInTheDocument();
   expect(screen.getByRole('heading', { name: /موافقت با واگذاری/ })).toBeInTheDocument();
@@ -431,9 +434,9 @@ it('an authority’s decision on its last step, its answer lost: after the reloa
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'GRANT_AWARD', submissionId: KEY, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
-  render(absence('owner-tag-B'));
+  render(absence(bindingOf('owner-tag-B', 'session-tag-B', OTHER_PERSON)));
   expect(screen.getByText('این مناقصه پیدا نشد')).toBeInTheDocument();
   expect(screen.queryByText(/این درخواست پیش از تازه‌شدن صفحه فرستاده شد/)).toBeNull();
   expect(screen.queryByRole('link', { name: /این درخواست را کنار بگذار/ })).toBeNull();
@@ -443,7 +446,7 @@ it('one slot per tender: another submission’s record is never replaced, the fo
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'GRANT', submissionId: OTHER, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
   const { container } = renderForm('OPEN_BIDS');
   await submit(container);
@@ -453,7 +456,7 @@ it('one slot per tender: another submission’s record is never replaced, the fo
     saveUnresolvedOwnerCommand(
       TENDER_ID,
       { command: 'OPEN_BIDS', submissionId: KEY, correlationId: null },
-      OWNER,
+      ACCOUNT,
     ),
   ).toBe('HELD');
 });
@@ -462,11 +465,11 @@ it('a record is cleared only by its own submission id', () => {
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'GRANT', submissionId: OTHER, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
-  clearUnresolvedOwnerCommand(TENDER_ID, KEY);
+  clearUnresolvedOwnerCommand(TENDER_ID, KEY, ACCOUNT);
   expect(stored()).toMatchObject({ submissionId: OTHER });
-  clearUnresolvedOwnerCommand(TENDER_ID, OTHER);
+  clearUnresolvedOwnerCommand(TENDER_ID, OTHER, ACCOUNT);
   expect(stored()).toBeNull();
 });
 
@@ -474,14 +477,14 @@ it('the other group of the page does not show a record a form of the page holds'
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'OPEN_BIDS', submissionId: KEY, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
   const { container } = render(
     <OwnerCommands
       tenderId={TENDER_ID}
       offered={[]}
       csrfToken="csrf"
-      owner={OWNER}
+      account={ACCOUNT}
       pageHref={PAGE}
       showsRestored
       pageSubmissionIds={[KEY]}
@@ -494,7 +497,7 @@ it('logout writes nothing more; another person’s page removes the record', () 
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'PUBLISH', submissionId: KEY, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
   purgeAllUnresolvedOwnerCommands();
   expect(stored()).toMatchObject({ submissionId: KEY });
@@ -502,9 +505,9 @@ it('logout writes nothing more; another person’s page removes the record', () 
     saveUnresolvedOwnerCommand(
       'TND_OTHER',
       { command: 'PUBLISH', submissionId: OTHER, correlationId: null },
-      OWNER,
+      ACCOUNT,
     ),
   ).toBe('UNAVAILABLE');
-  purgeForeignUnresolvedOwnerCommands('owner-tag-B');
+  purgeForeignUnresolvedOwnerCommands({ person: OTHER_PERSON, legacy: [] });
   expect(stored()).toBeNull();
 });

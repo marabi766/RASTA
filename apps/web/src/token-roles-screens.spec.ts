@@ -22,6 +22,7 @@
  */
 
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { UnresolvedSessionOrganization } from '@/server/session-organization';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -274,10 +275,12 @@ describe.each(SCREENS)('$name', ({ path, params, admitted, refused, offered }) =
     expect(offered(await run(path, params))).toBe(false);
   });
 
-  it('a token whose roles cannot be read: not offered', async () => {
+  it('a token whose roles cannot be read: nothing is drawn at all (task 100)', async () => {
+    // `readSession()` refuses such a session; one that reached a page anyway
+    // draws no organization, no list and no form.
     mockSession.current = { ...signedInWith([admitted]), accessToken: 'opaque' };
     identityReports([admitted]);
-    expect(offered(await run(path, params))).toBe(false);
+    await expect(run(path, params)).rejects.toThrow(UnresolvedSessionOrganization);
   });
 });
 
@@ -292,6 +295,8 @@ describe.each(SCREENS)(
     /** A session whose token carries these claims. */
     const withClaims = (claims: Record<string, unknown>) => ({
       ...signedInWith([]),
+      // The stored copy is the token's (`session-organization.ts`).
+      organizationId: typeof claims.org_id === 'string' ? claims.org_id : null,
       accessToken: jwt(claims),
     });
 
@@ -353,11 +358,10 @@ describe('/tenders — which doors are asked', () => {
     expect(mockFetched).toEqual(['fetchTenders']);
   });
 
-  it('a token whose roles cannot be read: the owner’s door, whose own answer is shown', async () => {
+  it('a token whose roles cannot be read: nothing is drawn at all (task 100)', async () => {
     mockSession.current = { ...signedInWith(['CONTRACTOR']), accessToken: 'opaque' };
     identityReports(['CONTRACTOR']);
-    await run('./app/tenders/page');
-    expect(mockFetched).toEqual(['fetchTenders']);
+    await expect(run('./app/tenders/page')).rejects.toThrow(UnresolvedSessionOrganization);
   });
 });
 

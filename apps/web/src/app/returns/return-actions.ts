@@ -21,6 +21,8 @@ import type { WebSession } from '@/server/session';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
 import { afterRetry, type ReturnFormState } from './return-form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The server actions behind the return forms on `/orders/[id]` (asking for a
@@ -105,7 +107,10 @@ function outcome(
 function toReturn(session: WebSession, command: ReturnCommand) {
   return (returnId: string): never =>
     redirect(
-      `/returns/${encodeURIComponent(returnId)}?${FLASH_PARAM}=${mintFlash(session, returnId, command)}`,
+      withContext(
+        pageContext(session),
+        `/returns/${encodeURIComponent(returnId)}?${FLASH_PARAM}=${mintFlash(session, returnId, command)}`,
+      ),
     );
 }
 
