@@ -66,10 +66,11 @@ function multiCommitPush() {
   git(dir, 'init', '-q', '--bare', '-b', 'main', origin);
   git(dir, 'init', '-q', '-b', 'main', work);
   const a = commitList(work, { svc: { X: ['dev'] } }, 'A');
-  git(work, 'push', '-q', origin, 'main');
+  // Populate only this disposable local bare remote; no push to main is needed.
+  git(origin, 'fetch', '-q', work, 'main:main');
   const b = commitList(work, { svc: { X: ['dev'], Y: ['dev'] } }, 'B: list Y');
   const c = commitOther(work, 'C: unrelated');
-  git(work, 'push', '-q', origin, 'main');
+  git(origin, 'fetch', '-q', work, 'main:main');
   git(dir, 'clone', '-q', '--depth=2', '--branch', 'main', pathToFileURL(origin).href, ci);
   return { dir, origin, work, ci, a, b, c };
 }
