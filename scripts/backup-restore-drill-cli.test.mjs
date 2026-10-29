@@ -600,3 +600,43 @@ esac
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("children get PNPM_HOME (the install's store) and no other inherited variable", async () => {
+  for (const withHome of [true, false]) {
+    const directory = mkdtempSync(join(tmpdir(), 'drill-env-pass-'));
+    try {
+      const root = fixture(directory);
+      writeFileSync(
+        join(directory, 'pnpm'),
+        `#!/bin/sh\nenv | sort > '${directory}/child-env'\nexit 1\n`,
+        {
+          mode: 0o700,
+        },
+      );
+      writeFileSync(join(directory, 'docker'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+      const child = start(directory, root, {
+        PNPM_HOME: withHome ? '/synthetic/pnpm-home' : '',
+        SYNTHETIC_SECRET_TOKEN: 'inherited-secret',
+        DATABASE_URL_ECONOMIC: 'postgresql://real.example/prod',
+        CI: 'true',
+      });
+      const [code] = await once(child, 'exit');
+      assert.equal(code, 1);
+      const lines = readFileSync(join(directory, 'child-env'), 'utf8').split('\n');
+      assert.equal(lines.includes('PNPM_HOME=/synthetic/pnpm-home'), withHome);
+      assert.ok(!lines.some((line) => line.startsWith('PNPM_HOME=')) || withHome);
+      const names = lines.filter(Boolean).map((line) => line.split('=')[0]);
+      for (const name of [
+        'SYNTHETIC_SECRET_TOKEN',
+        'DATABASE_URL_ECONOMIC',
+        'CI',
+        'RASTA_DRILL_ROOT',
+        'TMPDIR',
+      ])
+        assert.ok(!names.includes(name), name);
+      assert.ok(lines.includes('RASTA_ALLOW_DEMO_SEED=true'));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});

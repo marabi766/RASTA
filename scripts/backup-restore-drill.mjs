@@ -81,6 +81,10 @@ let services;
 const env = {
   PATH: process.env.PATH,
   HOME: process.env.HOME,
+  // pnpm keeps its store under PNPM_HOME when set. The install that built node_modules chose a
+  // store with it; without it here, `pnpm exec` finds a different store, wants to purge
+  // node_modules and aborts for lack of a TTY (the GitHub runner sets it, a laptop does not).
+  ...(process.env.PNPM_HOME ? { PNPM_HOME: process.env.PNPM_HOME } : {}),
   DOCKER_CONTEXT: 'default',
   DOCKER_HOST: 'unix:///var/run/docker.sock',
   LANG: 'C.UTF-8',
