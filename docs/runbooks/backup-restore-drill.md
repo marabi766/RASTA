@@ -158,7 +158,10 @@ consistency with active writers, or full-system recovery.
 رفتن Docker daemon می‌تواند منابع را باقی بگذارد. بلافاصله پس از ساخت نام پروژه، گزارش اولیه با
 `project` و `temporary` و `passed: false` نوشته می‌شود؛ نبود `finishedAt` یعنی اجرا کامل نشده است.
 فقط با همین نام پروژه ثبت‌شده در گزارش و فایل `compose.json` در مسیر `temporary` پاکسازی کنید؛
-هرگز stack مشترک را reset نکنید. شکست حذف پایگاه scratch در `scratchDropFailed` ثبت می‌شود؛
+هرگز stack مشترک را reset نکنید. `scripts/backup-restore-drill --cleanup-from /path/to/report.json`
+دقیقاً همین کار را می‌کند و فقط وقتی عمل می‌کند که نام پروژه و مسیر موقت همان الگویی باشند که
+خود تمرین می‌سازد (کد خروج ۰ یعنی چیزی باقی نیست، ۱ یعنی منبعی ماند، ۲ یعنی گزارش رد شد).
+شکست حذف پایگاه scratch در `scratchDropFailed` ثبت می‌شود؛
 خطای اصلی جمع‌آوری مدرک حفظ می‌شود و پاکسازی خوشه متعلق به تمرین همچنان انجام می‌شود.
 
 فایل‌های dump موقت، شامل schema و بدنه تابع، پس از موفقیت پاکسازی حذف می‌شوند؛ گزارش JSON باقی می‌ماند.
@@ -184,10 +187,65 @@ backup، انتقال و نگهداری خارج از میزبان، Kafka و of
 سرویس‌های در حال نوشتن و بازیابی سامانه کامل در دامنه این تمرین نیستند. منبع هیچ
 نویسنده فعال ندارد؛ dumpهای جدا تضمین snapshot توزیع‌شده production نیستند.
 
-برای خودکارسازی ماهانه باید مالک زیرساخت یک job زمان‌بندی‌شده جدا با نگهداری گزارش
-تصویب کند. تست‌های مقایسه و SQL منفی در CI اجرا می‌شوند؛ job مستقل
-`integration-backup-drill` با سقف ۱۰ دقیقه عضو گیت `Integration and security tests` است؛ اجرای کامل تمرین
-زمان‌بندی نشده است. سقف گام آزمون PostgreSQL پنج دقیقه است و افزایش نیافته؛ زمان این job در CI و زمان کامل فرمان ۱۶ پایگاه باید جدا گزارش شوند. جمع `before.schemaDump.milliseconds` و `after.schemaDump.milliseconds` هزینه جمع‌آوری schema را نشان می‌دهد.
+خودکارسازی ماهانه: approved 2026-10-24 (owner), scheduled monthly by
+`backup-drill-monthly.yml` (بخش «Monthly scheduled drill» پایین). تست‌های مقایسه و SQL
+منفی در CI اجرا می‌شوند؛ job مستقل `integration-backup-drill` با سقف ۱۰ دقیقه عضو گیت
+`Integration and security tests` است و فقط این تست‌ها را اجرا می‌کند، نه فرمان کامل
+۱۶ پایگاه. سقف گام آزمون PostgreSQL پنج دقیقه است و افزایش نیافته؛ زمان این job در CI و
+زمان کامل فرمان ۱۶ پایگاه باید جدا گزارش شوند. جمع `before.schemaDump.milliseconds` و
+`after.schemaDump.milliseconds` هزینه جمع‌آوری schema را نشان می‌دهد.
+
+## Monthly scheduled drill
+
+**When.** `.github/workflows/backup-drill-monthly.yml` runs at 03:17 UTC on the 1st of every
+month (`17 3 1 * *`), on demand (Actions → "Backup restore drill (monthly)" → Run workflow,
+or `gh workflow run backup-drill-monthly.yml`), and on a pull request that changes that file
+or `scripts/backup-restore-drill*` (so the change itself proves the job still runs).
+Overlapping runs of one ref queue; a running drill is never cancelled.
+
+**What it runs.** The same command as an operator, `scripts/backup-restore-drill --report <new
+file>`, on an `ubuntu-latest` runner after `pnpm install --frozen-lockfile`. The CLI owns its two
+PostgreSQL servers (the image pinned in `docker-compose.yml`, the same digest `ci.yml` pins);
+the workflow declares no service container and no database URL. It builds, migrates and seeds all
+databases, adds the synthetic ledger fixture, dumps, restores into a fresh server, and applies
+every gate of this runbook: database coverage, row counts and digests, migrations, database and
+object state, reference allowance, schema fixed point, ledger equality including the
+per-currency totals, wallets/escrow/active holds, the `9007199254740993` amount above the safe
+integer range, and cleanup of the CLI's own containers, networks and volumes.
+
+**Measured duration.** The full drill took 703 s (11 min 43 s, from `scripts/backup-restore-drill` start to exit) for 16 databases on the dev host on 2026-10-29: 260 tables, 262 application rows, 193 migration rows, 25.0 s of schema-dump collection and 119.0 s of reference and fixed-point work in total. The workflow's limits come from that, separately from the 5-minute PostgreSQL test step of `ci.yml`: 45 minutes for the drill step (about four times the measurement, because a 2-vCPU runner also pulls the image) and 60 for the job. Read the real duration of the runner from the run's summary ("total seconds") and move the limits if it approaches them.
+
+**What the job shows.** The CLI's stdout (it carries synthetic ledger amounts), stderr and the
+JSON report stay in a private directory under `RUNNER_TEMP`; nothing is uploaded and the last step
+deletes it. The log and the job summary come from `scripts/backup-restore-drill-summary.mjs`,
+which builds them from an allowlist (pass/fail per gate, counts, durations, the failing stage and
+database names, the CLI's exit code) and never copies a field from the report by key. A failing
+run is red: the drill step exits with the CLI's status, the summary step exits non-zero unless
+every gate passed and the CLI status is 0, and the summary names the failing gates. The workflow
+has `permissions: contents: read`, references no secret (the repository is public) and sends no
+alert itself. Its last step runs `scripts/backup-restore-drill --cleanup-from <report>` (also
+after a cancellation or a timeout), which removes only the Compose project and the temporary
+directory the report names, and only when both match what the CLI creates.
+
+**Who reacts to a red run.** The host's bot watches this workflow's runs and reports a red one to
+the project manager; the infrastructure owner of RUN-003 triages it. Open the run, read the
+summary (failing gates, failed stage, database, exit code), reproduce with the command above in a
+clean worktree, and fix or file the cause. One re-run is fair when the failing stage is an image
+or package download; a second red run is not noise. A red drill is never left until the next
+month: restore capability is unproven while it is red. A month with no run at all is also a
+failure to react to: GitHub disables scheduled workflows of a public repository after 60 days
+without repository activity, so check that the workflow is still enabled when a run is missing.
+
+**What a green run proves.** The tools of this commit restore a logical dump of the seeded
+databases plus a synthetic ledger into a fresh cluster, and every gate above holds there.
+
+**What it does not prove.** Synthetic data only: this is not a production restore, nor a
+restore of production-sized data or roles. Restored writers, services, consumers and publishers
+stay stopped (restored outboxes never publish), so it does not prove runtime tenant isolation,
+event replay or consumer idempotency after a restore, or that a service works against the
+restored databases. The limits in "دامنه اثبات و محدودیت‌ها" above (PITR, WAL archiving, RPO/RTO,
+off-host backup storage and retention, encryption, Keycloak/Temporal, object storage, Kafka
+offsets) apply unchanged to the scheduled run.
 
 ## آزمون منطق مقایسه
 

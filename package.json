@@ -52,7 +52,7 @@
     "test:local-postgres-config": "node --test scripts/check-local-postgres-config.test.mjs",
     "check:local-postgres-config": "node scripts/check-local-postgres-config.mjs",
     "test:compose-ports": "node --test scripts/check-compose-ports.test.mjs",
-    "test:backup-restore-drill-lib": "node --test scripts/backup-restore-drill.test.mjs scripts/backup-restore-drill-cli.test.mjs",
+    "test:backup-restore-drill-lib": "node --test scripts/backup-restore-drill.test.mjs scripts/backup-restore-drill-cli.test.mjs scripts/backup-restore-drill-summary.test.mjs scripts/backup-restore-drill-workflow.test.mjs",
     "test:backup-restore-drill-pg": "node --test scripts/backup-restore-drill.pg.test.mjs",
     "test:infra-preflight": "node --test scripts/infra-preflight.test.mjs",
     "check:compose-ports": "node scripts/check-compose-ports.mjs",

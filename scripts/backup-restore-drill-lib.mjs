@@ -751,3 +751,226 @@ INSERT INTO public.wallet_hold
 VALUES ('HLD_DRILL', 'ORG-RESTORE-DRILL', 'WLT_DRILL', 2500, 'IRR', 'DRILL', 'RESTORE_TEST', 'JRN_DRILL_HOLD', now(), 'restore-drill');
 COMMIT;
 `;
+
+// ---------------------------------------------------------------------------------------------
+// Scheduled-run summary (backup-drill-monthly.yml). The CLI's report and stdout carry table
+// names, ledger amounts and, on failure, bounded subprocess output; a public job log and step
+// summary may carry none of it. So the summary is BUILT from an allowlist: every value below is
+// a boolean, a bounded integer, a name this drill generates or a stage from a closed pattern.
+// Nothing is copied from the report by key, so a new report field cannot leak by being added.
+// ---------------------------------------------------------------------------------------------
+
+/** Gate names, in the order the summary prints them. Each is pass/fail and nothing else. */
+export const SUMMARY_GATES = Object.freeze([
+  'database-coverage',
+  'rows-and-digests',
+  'migrations',
+  'database-and-object-state',
+  'schema-dump',
+  'reference-allowance',
+  'fixed-point',
+  'ledger-equality',
+  'wallet-escrow-and-holds',
+  'beyond-safe-integer-amount',
+  'cleanup',
+  'acceptance',
+]);
+
+const STAGE =
+  /^(preflight|scratch drop|build seed dependencies serially|start disposable source PostgreSQL|migrate [a-z0-9_]{1,40}|generate and demo seed [a-z0-9_]{1,40}|install synthetic postings fixture|dump rasta_[a-z0-9_]{1,40}|start fresh restore PostgreSQL|restore and compare rasta_[a-z0-9_]{1,40}|cleanup owned containers, networks and volumes)$/;
+const DATABASE = /^rasta_[a-z0-9_]{1,40}$/;
+const SAFE_NUMBER = /^\d{1,18}$/;
+const PER_DATABASE_FLAGS = [
+  'tablesEqual',
+  'migrationsEqual',
+  'databaseStateEqual',
+  'objectStateEqual',
+  'schemaDumpEqual',
+  'referenceChecked',
+  'allowanceChecked',
+  'fixedPointEqual',
+];
+
+/** A stage the drill prints, or null: anything else (a diagnostic, a payload) is not repeated. */
+export function allowedStage(value) {
+  return typeof value === 'string' && STAGE.test(value) ? value : null;
+}
+
+/** The last progress line of the CLI's stderr that matches the closed stage list. */
+export function lastAllowedStage(stderrText) {
+  const prefix = '[backup-restore-drill] ';
+  let last = null;
+  for (const line of String(stderrText).split('\n')) {
+    if (line.startsWith(prefix)) last = allowedStage(line.slice(prefix.length)) ?? last;
+  }
+  return last;
+}
+
+function safeCount(value) {
+  const text = typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value;
+  return typeof text === 'string' && SAFE_NUMBER.test(text) ? BigInt(text) : null;
+}
+function sumCounts(values) {
+  let total = 0n;
+  for (const value of values) {
+    const next = safeCount(value);
+    if (next === null) return null;
+    total += next;
+  }
+  return total;
+}
+function attempt(check) {
+  try {
+    return check() === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The allowlisted view of a drill run. `report` is untrusted JSON (possibly absent or partial);
+ * `exitCode` is the CLI's own status. A gate is true only on positive evidence in the report.
+ * Never returns a ledger value, amount, table name, SQL, path, project name or diagnostic.
+ */
+export function summarizeDrillReport(report, { exitCode = null, lastStage = null } = {}) {
+  const readable = report !== null && typeof report === 'object' && !Array.isArray(report);
+  const r = readable ? report : {};
+  const databases = Array.isArray(r.databases)
+    ? r.databases.filter((db) => db && typeof db === 'object')
+    : [];
+  const expected = Array.isArray(r.schemaServices) ? r.schemaServices.length : 0;
+  const every = (flag) => databases.length > 0 && databases.every((db) => db[flag] === true);
+  const gates = {
+    'database-coverage': databases.length > 0 && databases.length === expected,
+    'rows-and-digests': every('tablesEqual'),
+    migrations: every('migrationsEqual'),
+    'database-and-object-state': every('databaseStateEqual') && every('objectStateEqual'),
+    'schema-dump': every('schemaDumpEqual'),
+    'reference-allowance': every('referenceChecked') && every('allowanceChecked'),
+    'fixed-point': every('fixedPointEqual'),
+    // Source and restored ledgers equal, including the per-currency totals.
+    'ledger-equality': attempt(() => compareLedgers(r.sourceLedger, r.restoredLedger)),
+    // Balanced journals, wallet = WALLET postings, pending = ESCROW = ACTIVE holds, non-empty.
+    'wallet-escrow-and-holds': attempt(() => ledgerPassed(r.restoredLedger)),
+    'beyond-safe-integer-amount':
+      r.sourceLedger?.fixtureAmount === '9007199254740993' &&
+      r.restoredLedger?.fixtureAmount === '9007199254740993',
+    cleanup: r.cleanup?.passed === true,
+  };
+  // The gates above split drillPassed (same flags, same ledger predicates; a test holds them
+  // equal), so the verdict needs the CLI's own status and word to agree with the evidence.
+  gates.acceptance =
+    exitCode === 0 &&
+    r.passed === true &&
+    r.interrupted !== true &&
+    SUMMARY_GATES.filter((name) => name !== 'acceptance').every((name) => gates[name] === true);
+
+  const text = (value) => (value === null ? null : value.toString());
+  const started = Date.parse(r.startedAt);
+  const finished = Date.parse(r.finishedAt);
+  const failure = r.error && typeof r.error === 'object' ? r.error : null;
+  return {
+    reportReadable: readable,
+    exitCode: Number.isInteger(exitCode) ? exitCode : null,
+    passed: Object.values(gates).every(Boolean),
+    gates,
+    counts: {
+      databases: databases.length,
+      expectedDatabases: expected,
+      tables: text(sumCounts(databases.map((db) => Object.keys(db.before?.tables ?? {}).length))),
+      applicationRows: text(
+        sumCounts(databases.map((db) => db.before?.summary?.application?.rows)),
+      ),
+      migrationRows: text(sumCounts(databases.map((db) => db.before?.summary?.migration?.rows))),
+      journals: text(safeCount(r.restoredLedger?.journalsChecked)),
+      entries: text(safeCount(r.restoredLedger?.entriesChecked)),
+      wallets: text(safeCount(r.restoredLedger?.walletsChecked)),
+      journalMismatches: text(safeCount(r.restoredLedger?.journalMismatches)),
+      walletMismatches: text(safeCount(r.restoredLedger?.walletMismatches)),
+    },
+    durations: {
+      totalSeconds:
+        Number.isFinite(started) && Number.isFinite(finished) && finished >= started
+          ? Math.round((finished - started) / 1000)
+          : null,
+      schemaDumpMilliseconds: text(
+        sumCounts(
+          databases.flatMap((db) => [
+            db.before?.schemaDump?.milliseconds,
+            db.after?.schemaDump?.milliseconds,
+          ]),
+        ),
+      ),
+      referenceAndFixedPointMilliseconds: text(
+        sumCounts(databases.map((db) => db.before?.reference?.milliseconds)),
+      ),
+    },
+    failingDatabases: databases
+      .filter((db) => PER_DATABASE_FLAGS.some((flag) => db[flag] !== true))
+      .map((db) => db.database)
+      .filter((name) => typeof name === 'string' && DATABASE.test(name)),
+    failure: failure
+      ? {
+          stage: allowedStage(failure.stage),
+          database:
+            typeof failure.database === 'string' && DATABASE.test(failure.database)
+              ? failure.database
+              : null,
+          commandExitCode: Number.isInteger(failure.exitCode) ? failure.exitCode : null,
+        }
+      : null,
+    lastStage: allowedStage(lastStage),
+  };
+}
+
+/** Markdown for the job summary and the log: only what summarizeDrillReport allows. */
+export function renderDrillSummary(summary) {
+  const value = (v) => (v === null || v === undefined ? 'n/a' : String(v));
+  const lines = [
+    `## Monthly backup/restore drill: ${summary.passed ? 'PASSED' : 'FAILED'}`,
+    '',
+    'Synthetic data only, in a cluster this job created. Not a production restore.',
+    '',
+    `CLI exit code: ${value(summary.exitCode)}`,
+    '',
+    '| Gate | Result |',
+    '| --- | --- |',
+    ...SUMMARY_GATES.map(
+      (name) => `| ${name} | ${summary.gates[name] === true ? 'pass' : 'FAIL'} |`,
+    ),
+    '',
+    '| Count | Value |',
+    '| --- | --- |',
+    ...Object.entries(summary.counts).map(([name, v]) => `| ${name} | ${value(v)} |`),
+    '',
+    '| Duration | Value |',
+    '| --- | --- |',
+    `| total seconds | ${value(summary.durations.totalSeconds)} |`,
+    `| schema dump milliseconds (sum) | ${value(summary.durations.schemaDumpMilliseconds)} |`,
+    `| reference and fixed point milliseconds (sum) | ${value(summary.durations.referenceAndFixedPointMilliseconds)} |`,
+  ];
+  if (!summary.passed) {
+    lines.push(
+      '',
+      `Failing gates: ${SUMMARY_GATES.filter((name) => summary.gates[name] !== true).join(', ')}`,
+    );
+    if (summary.failingDatabases.length)
+      lines.push(`Failing databases: ${summary.failingDatabases.join(', ')}`);
+    if (summary.failure)
+      lines.push(
+        `Failed stage: ${value(summary.failure.stage)}` +
+          (summary.failure.database ? ` (${summary.failure.database})` : '') +
+          (summary.failure.commandExitCode !== null
+            ? `, command exit ${summary.failure.commandExitCode}`
+            : ''),
+      );
+    if (summary.lastStage) lines.push(`Last stage started: ${summary.lastStage}`);
+    if (!summary.reportReadable) lines.push('The drill left no readable report.');
+    lines.push(
+      '',
+      'Details are deliberately not printed or uploaded (they can hold synthetic financial',
+      'values). Re-run locally: scripts/backup-restore-drill --report <new file>.',
+    );
+  }
+  return `${lines.join('\n')}\n`;
+}

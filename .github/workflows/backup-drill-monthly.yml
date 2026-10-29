@@ -1,0 +1,98 @@
+name: Backup restore drill (monthly)
+
+# The full RUN-003 drill (docs/runbooks/backup-restore-drill.md, "Monthly scheduled drill"),
+# monthly and on demand: scripts/backup-restore-drill creates its own source and restore
+# PostgreSQL servers (the image pinned in docker-compose.yml, the one ci.yml's service container
+# pins too), migrates and seeds 16 databases, adds a synthetic ledger fixture, dumps, restores into
+# a fresh server and checks every gate. Synthetic data only; no secret, no shared database.
+# A red run is the alert: the host's bot watches this workflow's runs.
+# The pull_request trigger is limited to this file and the drill's scripts, so the change that
+# touches them proves it still runs. The path filter below is guarded by
+# scripts/backup-restore-drill-workflow.test.mjs.
+
+on:
+  schedule:
+    - cron: '17 3 1 * *' # 03:17 UTC on the 1st: off the hour, after the nightly dependency jobs
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/backup-drill-monthly.yml'
+      - 'scripts/backup-restore-drill*'
+
+# Read the repository, nothing else. No secret is referenced in this file (the repository is
+# public); the guard test refuses one.
+permissions:
+  contents: read
+
+concurrency:
+  # Per ref, so a pull request never queues behind (or replaces the pending run of) the monthly
+  # one. A drill that is running is never cancelled: its teardown must finish.
+  group: backup-drill-monthly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+  # Must match `packageManager` in package.json and ci.yml (pnpm/action-setup refuses otherwise).
+  PNPM_VERSION: '11.22.0'
+
+defaults:
+  run:
+    # Named, not the runner's default (bash -e): a failing pipe must fail the step.
+    shell: bash
+
+jobs:
+  drill:
+    name: Full backup restore drill (synthetic data)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Run the full drill
+        id: drill
+        # Its own limit, apart from the 5-minute PostgreSQL tests in ci.yml. Measured: the
+        # whole drill takes 703 s on the dev host (16 databases, 2026-10-29); a 2-vCPU runner
+        # also pulls the image, so the limit is about four times that.
+        timeout-minutes: 45
+        run: |
+          # One private directory per run holds the report, the CLI's stdout (it carries
+          # synthetic ledger amounts) and stderr. Nothing in it is printed or uploaded; the next
+          # step logs an allowlisted summary and the last step deletes it.
+          dir="$(mktemp -d "${RUNNER_TEMP}/backup-drill.XXXXXX")"
+          echo "BACKUP_DRILL_DIR=${dir}" >> "${GITHUB_ENV}"
+          status=0
+          scripts/backup-restore-drill --report "${dir}/report.json" \
+            >"${dir}/stdout.json" 2>"${dir}/stderr.log" || status=$?
+          echo "${status}" >"${dir}/exit-code"
+          echo "The drill command exited with status ${status}."
+          exit "${status}"
+      - name: Summary (allowlisted fields only)
+        if: ${{ always() && steps.drill.conclusion != 'skipped' }}
+        run: |
+          status="$(cat "${BACKUP_DRILL_DIR}/exit-code" 2>/dev/null || echo none)"
+          node scripts/backup-restore-drill-summary.mjs \
+            --report "${BACKUP_DRILL_DIR}/report.json" \
+            --exit-code "${status}" \
+            --progress "${BACKUP_DRILL_DIR}/stderr.log" | tee -a "${GITHUB_STEP_SUMMARY}"
+      - name: Remove anything the drill left
+        # Also after a cancellation or a timeout, when the CLI may not have finished its own
+        # teardown: removes the project the report recorded (never another project's
+        # resources) and then the private directory.
+        if: ${{ always() && steps.drill.conclusion != 'skipped' }}
+        run: |
+          status=0
+          if [ -f "${BACKUP_DRILL_DIR}/report.json" ]; then
+            scripts/backup-restore-drill --cleanup-from "${BACKUP_DRILL_DIR}/report.json" || status=$?
+          fi
+          rm -rf -- "${BACKUP_DRILL_DIR:?}"
+          exit "${status}"

@@ -49,21 +49,29 @@ const ROOT = process.env.RASTA_DRILL_ROOT
   ? resolve(process.env.RASTA_DRILL_ROOT)
   : resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
-if (args.length !== 2 || args[0] !== '--report') {
-  console.error('Usage: scripts/backup-restore-drill --report /path/to/new-report.json');
+// --cleanup-from tears down what an earlier --report run recorded (a scheduled CI job's
+// last step, after a cancelled or timed-out run); it starts nothing and writes no report.
+const cleanupOnly = args.length === 2 && args[0] === '--cleanup-from';
+if (!cleanupOnly && (args.length !== 2 || args[0] !== '--report')) {
+  console.error(
+    'Usage: scripts/backup-restore-drill --report /path/to/new-report.json\n' +
+      '       scripts/backup-restore-drill --cleanup-from /path/to/that-report.json',
+  );
   process.exit(2);
 }
 // Exclusive creation avoids overwriting an operator's file (including through a symlink).
 const reportPath = resolve(args[1]);
 let reportFd;
-try {
-  reportFd = openSync(reportPath, 'wx', 0o600);
-} catch {
-  // Not the path, nor the error that quotes it (#385 r6).
-  console.error(
-    'the --report file cannot be created (it must not exist yet); its path is not repeated',
-  );
-  process.exit(2);
+if (!cleanupOnly) {
+  try {
+    reportFd = openSync(reportPath, 'wx', 0o600);
+  } catch {
+    // Not the path, nor the error that quotes it (#385 r6).
+    console.error(
+      'the --report file cannot be created (it must not exist yet); its path is not repeated',
+    );
+    process.exit(2);
+  }
 }
 let temporary;
 let project;
@@ -337,10 +345,84 @@ async function snapshot(container, service) {
   };
 }
 
+/** Never enumerates another project's resources: only this invocation's Compose label. */
+async function ownedResourcesLeft() {
+  const resources = await Promise.all(
+    ['container', 'volume', 'network'].map((kind) =>
+      run(
+        'docker',
+        [
+          kind,
+          'ls',
+          ...(kind === 'container' ? ['-a'] : []),
+          '--quiet',
+          '--filter',
+          `label=com.docker.compose.project=${project}`,
+        ],
+        { cleanup: true, timeout: 15_000 },
+      ),
+    ),
+  );
+  return resources.some(Boolean);
+}
+
+/** Removes this invocation's Compose project; true when no owned resource survived. */
+async function teardown() {
+  if (!composeReady) return true;
+  await compose(['down', '--volumes', '--timeout', '15'], { cleanup: true, timeout: 60_000 });
+  return !(await ownedResourcesLeft());
+}
+
+/** Exit status for --cleanup-from: 0 nothing owned is left, 1 something is, 2 the report is refused. */
+async function cleanupRecorded() {
+  let recorded;
+  try {
+    recorded = JSON.parse(readFileSync(reportPath, 'utf8'));
+  } catch {
+    // Not even the provisional report exists: the run never allocated anything to remove.
+    console.error('[backup-restore-drill] no readable report: nothing recorded to clean up');
+    return 0;
+  }
+  project = recorded?.project;
+  temporary = recorded?.temporary;
+  if (project === undefined && temporary === undefined) {
+    console.error('[backup-restore-drill] the report records no project: nothing to clean up');
+    return 0;
+  }
+  // The report is only a pointer: act on nothing but a name and a directory this CLI makes.
+  const base = tmpdir();
+  if (
+    typeof project !== 'string' ||
+    !/^restore-drill-[0-9a-f]{16}$/.test(project) ||
+    typeof temporary !== 'string' ||
+    dirname(temporary) !== base ||
+    !/^rasta-restore-drill-[A-Za-z0-9]{6}$/.test(temporary.slice(base.length + 1))
+  ) {
+    console.error('[backup-restore-drill] the report does not name a project this drill created');
+    return 2;
+  }
+  composeFile = join(temporary, 'compose.json');
+  // `down` needs the file; a missing one means teardown already finished, and labels still say.
+  composeReady = existsSync(composeFile);
+  cleaning = true;
+  progress('cleanup owned containers, networks and volumes');
+  try {
+    const left = composeReady ? !(await teardown()) : await ownedResourcesLeft();
+    if (left) throw new Error('owned resources survived');
+    rmSync(temporary, { recursive: true, force: true });
+    return 0;
+  } catch {
+    console.error('[backup-restore-drill] owned resources could not be removed');
+    return 1;
+  }
+}
+
 function progress(value) {
   stage = value;
   process.stderr.write(`[backup-restore-drill] ${stage}\n`);
 }
+
+if (cleanupOnly) process.exit(await cleanupRecorded());
 
 try {
   temporary = mkdtempSync(join(tmpdir(), 'rasta-restore-drill-'));
@@ -550,33 +632,12 @@ try {
   cleaning = true;
   progress('cleanup owned containers, networks and volumes');
   try {
-    if (composeReady)
-      await compose(['down', '--volumes', '--timeout', '15'], { cleanup: true, timeout: 60_000 });
-    // Confirm no owned resources survived (never enumerate/remove another project's resources).
-    const resources = composeReady
-      ? await Promise.all(
-          ['container', 'volume', 'network'].map((kind) =>
-            run(
-              'docker',
-              [
-                kind,
-                'ls',
-                ...(kind === 'container' ? ['-a'] : []),
-                '--quiet',
-                '--filter',
-                `label=com.docker.compose.project=${project}`,
-              ],
-              { cleanup: true, timeout: 15_000 },
-            ),
-          ),
-        )
-      : [];
-    if (resources.some(Boolean)) {
-      report.cleanup = { passed: false, project, temporary };
-      report.passed = false;
-    } else {
+    if (await teardown()) {
       report.cleanup.passed = true;
       if (temporary) rmSync(temporary, { recursive: true, force: true });
+    } else {
+      report.cleanup = { passed: false, project, temporary };
+      report.passed = false;
     }
   } catch {
     report.cleanup = { passed: false, project, temporary };
