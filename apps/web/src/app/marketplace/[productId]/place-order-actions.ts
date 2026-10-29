@@ -15,6 +15,8 @@ import {
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
 import { withRetryNote, type PlaceOrderFormState } from './place-order-form-state';
+import { flashHref } from '@/server/flash';
+import { ORDER_PLACED } from '@/lib/order-fields';
 
 /**
  * The place-order form's one server action.
@@ -88,7 +90,14 @@ async function attempt(form: FormData): Promise<PlaceOrderFormState> {
 
   switch (result.kind) {
     case 'CREATED':
-      redirect(`/orders/${encodeURIComponent(result.data.id)}?placed=1`);
+      redirect(
+        flashHref(
+          session,
+          `/orders/${encodeURIComponent(result.data.id)}`,
+          result.data.id,
+          ORDER_PLACED,
+        ),
+      );
       break;
     case 'INVALID':
       return {

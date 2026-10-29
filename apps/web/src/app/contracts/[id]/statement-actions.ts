@@ -19,6 +19,8 @@ import { verifyStatementStamp, type VerifiedStatementStamp } from '@/server/stat
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
 import { afterRetry, type StatementFormState } from './statement-form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The server actions behind the statement forms on `/contracts/[id]` and
@@ -121,7 +123,10 @@ function outcome(
 function toStatement(session: WebSession, contractId: string, command: StatementCommand) {
   return (statementId: string): never =>
     redirect(
-      `/contracts/${encodeURIComponent(contractId)}/statements/${encodeURIComponent(statementId)}?${FLASH_PARAM}=${mintFlash(session, statementId, command)}`,
+      withContext(
+        pageContext(session),
+        `/contracts/${encodeURIComponent(contractId)}/statements/${encodeURIComponent(statementId)}?${FLASH_PARAM}=${mintFlash(session, statementId, command)}`,
+      ),
     );
 }
 

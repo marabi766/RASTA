@@ -20,6 +20,8 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ContractDetailScreen } from './ContractDetailScreen';
 import { contractCommandOffers } from './contract-offers';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/contracts/[id]` route — جزئیات قرارداد (docs/16 § ۱۶٫۶, ADR-068).
@@ -64,7 +66,7 @@ export default async function ContractPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/contracts/${id}`)}`);
 
-  const query = await searchParams;
+  const query = await pageParams(session, searchParams);
   const amendmentCursor = one(query.amendmentCursor);
   const statementCursor = one(query.statementCursor);
 
@@ -123,8 +125,9 @@ export default async function ContractPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -146,6 +149,7 @@ export default async function ContractPage({
       </div>
       <div className="mt-4">
         <ContractDetailScreen
+          context={pageContext(session)}
           result={result}
           amendments={amendments}
           milestones={milestones}

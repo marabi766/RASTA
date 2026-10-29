@@ -25,7 +25,9 @@ jest.mock('@/server/current-session', () => ({
     subject: 'USR_1',
     username: 'u',
     organizationId: 'ORG-DEH-0001',
-    accessToken: 'a',
+    accessToken: jest
+      .requireActual<typeof import('@/test/session-token')>('@/test/session-token')
+      .actingAccessToken('ORG-DEH-0001'),
     accessTokenExpiresAt: 2_000_000_000,
     refreshToken: 'r',
     csrfToken: 'csrf',
@@ -81,7 +83,16 @@ describe('the roles list', () => {
   });
 
   it('shows a role this portal has no name for as sent, and only that one', async () => {
-    user = makeUser({ effectiveRoles: ['FLEET_MANAGER', 'BRAND_NEW_ROLE'] });
+    user = makeUser({
+      memberships: [
+        {
+          organizationId: 'ORG-DEH-0001',
+          organizationName: 'دهیاری نمونه یک',
+          roles: ['FLEET_MANAGER', 'BRAND_NEW_ROLE'],
+          status: 'ACTIVE',
+        },
+      ],
+    });
     const { container } = await renderHome();
     const roles = container.querySelector('#roles, [aria-labelledby="roles"]') as HTMLElement;
     expect(roles.textContent).toContain(ROLE_LABELS.FLEET_MANAGER);
@@ -121,6 +132,39 @@ describe('the organisation', () => {
     });
     const { container } = await renderHome();
     expect(container.querySelector('header')!.textContent).toContain('ORG-DEH-0001');
+  });
+});
+
+describe('the organization the token acts for, not identity’s active one (task 100)', () => {
+  it('names, codes and lists the roles of the acting membership after a switch elsewhere', async () => {
+    // identity already moved to B; the token — what every request acts for — is still A.
+    user = makeUser({
+      activeOrganizationId: 'ORG-DEH-0002',
+      memberships: [
+        {
+          organizationId: 'ORG-DEH-0001',
+          organizationName: 'دهیاری نمونه یک',
+          roles: ['FLEET_MANAGER'],
+          status: 'ACTIVE',
+        },
+        {
+          organizationId: 'ORG-DEH-0002',
+          organizationName: 'دهیاری نمونه دو',
+          roles: ['ORGANIZATION_ADMIN'],
+          status: 'ACTIVE',
+        },
+      ],
+      effectiveRoles: ['ORGANIZATION_ADMIN'],
+    });
+    const { container } = await renderHome();
+    const text = container.textContent ?? '';
+    expect(container.querySelector('header')!.textContent).toContain('دهیاری نمونه یک');
+    expect(text).toContain('ORG-DEH-0001');
+    expect(text).not.toContain('دهیاری نمونه دو');
+    expect(text).not.toContain('ORG-DEH-0002');
+    const roles = container.querySelector('#roles, [aria-labelledby="roles"]') as HTMLElement;
+    expect(roles.textContent).toContain(ROLE_LABELS.FLEET_MANAGER);
+    expect(roles.textContent).not.toContain(ROLE_LABELS.ORGANIZATION_ADMIN);
   });
 });
 

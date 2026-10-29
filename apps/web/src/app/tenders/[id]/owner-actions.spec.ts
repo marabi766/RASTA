@@ -35,6 +35,7 @@ import {
   type OwnerFormState,
   type UnconfirmedOwnerCommand,
 } from './owner-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The owner's write path — the order of checks every portal write keeps, then
@@ -70,7 +71,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'author',
   organizationId: OWNER,
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken(OWNER),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

@@ -23,6 +23,7 @@ import type { WebSession } from '@/server/session';
 import { withForgedMac } from '@/test/forged-token';
 
 import { IDLE_DOCUMENT_FORM } from './document-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The attach-document form's write path (EXP-002 slice 7). Mirrors
@@ -70,7 +71,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'manager',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

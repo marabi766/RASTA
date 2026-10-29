@@ -18,6 +18,8 @@ import {
 
 import { ContractsScreen } from './ContractsScreen';
 import { ContractDetailScreen } from './[id]/ContractDetailScreen';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * What `/contracts` and `/contracts/[id]` render: every outcome the server
@@ -125,7 +127,13 @@ const milestonePage = (items: Milestone[]): ReadResult<MilestonePage> => ({
 
 describe('the contract list', () => {
   it('shows each contract with a status word, both parties, a Persian-digit amount and a link to it', () => {
-    render(<ContractsScreen demoMode="REAL" result={page([CONTRACT])} query={{}} />);
+    render(
+      <ContractsScreen
+        demoMode="REAL"
+        result={page([CONTRACT])}
+        query={{ context: TEST_CONTEXT }}
+      />,
+    );
 
     expect(screen.getByRole('link', { name: /CNT_1/ })).toHaveAttribute('href', '/contracts/CNT_1');
     expect(screen.getAllByText('امضاشده').length).toBeGreaterThan(0);
@@ -140,27 +148,41 @@ describe('the contract list', () => {
       <ContractsScreen
         demoMode="REAL"
         result={page([CONTRACT], 'c2')}
-        query={{ status: 'SIGNED' }}
+        query={{ context: TEST_CONTEXT, status: 'SIGNED' }}
       />,
     );
 
     expect(screen.getByRole('link', { name: 'امضاشده' })).toHaveAttribute('aria-current', 'page');
     expect(screen.getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      '/contracts?status=SIGNED&cursor=c2',
+      withContext(TEST_CONTEXT, '/contracts?status=SIGNED&cursor=c2'),
     );
   });
 
   it('says so when there are none, with and without a filter', () => {
-    const { rerender } = render(<ContractsScreen demoMode="REAL" result={page([])} query={{}} />);
+    const { rerender } = render(
+      <ContractsScreen demoMode="REAL" result={page([])} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(screen.getByText('این سازمان هنوز طرف هیچ قراردادی نیست.')).toBeInTheDocument();
 
-    rerender(<ContractsScreen demoMode="REAL" result={page([])} query={{ status: 'DRAFT' }} />);
+    rerender(
+      <ContractsScreen
+        demoMode="REAL"
+        result={page([])}
+        query={{ context: TEST_CONTEXT, status: 'DRAFT' }}
+      />,
+    );
     expect(screen.getByText('قراردادی در وضعیت «پیش‌نویس» نیست.')).toBeInTheDocument();
   });
 
   it('renders a refusal as no access, with fixed text', () => {
-    render(<ContractsScreen demoMode="REAL" result={{ kind: 'FORBIDDEN' }} query={{}} />);
+    render(
+      <ContractsScreen
+        demoMode="REAL"
+        result={{ kind: 'FORBIDDEN' }}
+        query={{ context: TEST_CONTEXT }}
+      />,
+    );
     expect(screen.getByText('فهرست قراردادهای این سازمان در اختیار شما نیست.')).toBeInTheDocument();
   });
 
@@ -170,7 +192,7 @@ describe('the contract list', () => {
   ] as const)(
     'renders a degraded read ($kind) with the correlation id and fixed text',
     (result) => {
-      render(<ContractsScreen demoMode="REAL" result={result} query={{}} />);
+      render(<ContractsScreen demoMode="REAL" result={result} query={{ context: TEST_CONTEXT }} />);
       expect(screen.getByText(/فهرست قراردادها خوانده نشد/)).toBeInTheDocument();
       expect(screen.getByText(/corr-1/)).toBeInTheDocument();
     },
@@ -186,7 +208,9 @@ describe('the contract list', () => {
     ['unavailable', { kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' }],
     ['malformed', { kind: 'MALFORMED', correlationId: 'corr-1' }],
   ])('has no accessibility violations (%s)', async (_name, result) => {
-    const { container } = render(<ContractsScreen demoMode="REAL" result={result} query={{}} />);
+    const { container } = render(
+      <ContractsScreen demoMode="REAL" result={result} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 });
@@ -195,6 +219,7 @@ describe('the contract detail', () => {
   it('shows status, parties, amounts, signature facts, amendments and milestones', () => {
     render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{ kind: 'OK', data: DETAIL }}
         amendments={amendmentPage([AMENDMENT])}
@@ -214,6 +239,7 @@ describe('the contract detail', () => {
   it('says a signature has not happened yet, and shows the authority-review note when flagged', () => {
     render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{
           kind: 'OK',
@@ -231,6 +257,7 @@ describe('the contract detail', () => {
   it('shows the cancellation reason on a cancelled contract', () => {
     render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{
           kind: 'OK',
@@ -253,6 +280,7 @@ describe('the contract detail', () => {
   it('says there are no amendments or milestones, each independently', () => {
     render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{ kind: 'OK', data: DETAIL }}
         amendments={amendmentPage([])}
@@ -269,6 +297,7 @@ describe('the contract detail', () => {
   it('links to the next page of amendments, under the contract, when the service says there is more', () => {
     render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{ kind: 'OK', data: DETAIL }}
         amendments={amendmentPage([AMENDMENT], 'a2')}
@@ -278,13 +307,14 @@ describe('the contract detail', () => {
 
     expect(screen.getByRole('link', { name: 'صفحهٔ بعدِ الحاقیه‌ها' })).toHaveAttribute(
       'href',
-      '/contracts/CNT_1?amendmentCursor=a2',
+      withContext(TEST_CONTEXT, '/contracts/CNT_1?amendmentCursor=a2'),
     );
   });
 
   it('shows no amendments pagination link when the service says there is no more', () => {
     render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{ kind: 'OK', data: DETAIL }}
         amendments={amendmentPage([AMENDMENT])}
@@ -298,6 +328,7 @@ describe('the contract detail', () => {
   it('keeps the contract when only the amendments or only the milestones could not be read', () => {
     render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{ kind: 'OK', data: DETAIL }}
         amendments={{ kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-a' }}
@@ -313,6 +344,7 @@ describe('the contract detail', () => {
   it('answers a contract the caller may not see exactly as one that does not exist', () => {
     const { container } = render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{ kind: 'NOT_FOUND' }}
         amendments={null}
@@ -328,6 +360,7 @@ describe('the contract detail', () => {
   it('renders refusal and degraded outcomes with fixed text', () => {
     const { rerender } = render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{ kind: 'FORBIDDEN' }}
         amendments={null}
@@ -338,6 +371,7 @@ describe('the contract detail', () => {
 
     rerender(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{ kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' }}
         amendments={null}
@@ -388,6 +422,7 @@ describe('the contract detail', () => {
   ])('has no accessibility violations (%s)', async (_name, result, amendments, milestones) => {
     const { container } = render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={result}
         amendments={amendments}
@@ -446,7 +481,9 @@ describe('a malformed timestamp, from the response to the page', () => {
       });
       const result = await fetchContracts(session);
 
-      const { container } = render(<ContractsScreen demoMode="REAL" result={result} query={{}} />);
+      const { container } = render(
+        <ContractsScreen demoMode="REAL" result={result} query={{ context: TEST_CONTEXT }} />,
+      );
       expect(screen.getByText(/فهرست قراردادها خوانده نشد/)).toBeInTheDocument();
       expect(screen.getByText(/corr-list/)).toBeInTheDocument();
       expect(container.textContent).not.toContain(UPSTREAM);
@@ -464,6 +501,7 @@ describe('a malformed timestamp, from the response to the page', () => {
 
       const { container } = render(
         <ContractDetailScreen
+          context={TEST_CONTEXT}
           demoMode="REAL"
           result={result}
           amendments={null}
@@ -485,6 +523,7 @@ describe('a malformed timestamp, from the response to the page', () => {
 
     const { container } = render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{ kind: 'OK', data: DETAIL }}
         amendments={result}
@@ -504,6 +543,7 @@ describe('a malformed timestamp, from the response to the page', () => {
 
     const { container } = render(
       <ContractDetailScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{ kind: 'OK', data: DETAIL }}
         amendments={amendmentPage([])}
@@ -532,7 +572,13 @@ describe('a malformed timestamp, from the response to the page', () => {
     const result = await fetchContract(session, 'CNT_1');
 
     render(
-      <ContractDetailScreen demoMode="REAL" result={result} amendments={null} milestones={null} />,
+      <ContractDetailScreen
+        context={TEST_CONTEXT}
+        demoMode="REAL"
+        result={result}
+        amendments={null}
+        milestones={null}
+      />,
     );
     expect(screen.getByText('شناسه')).toBeInTheDocument();
   });
@@ -642,12 +688,24 @@ describe('a response missing a required field, not merely an invalid one', () =>
 
 describe('the contract list: «حالت نمایشی» (Q-14)', () => {
   it('is drawn when the provider is simulated', () => {
-    render(<ContractsScreen result={page([CONTRACT])} query={{}} demoMode="SIMULATED" />);
+    render(
+      <ContractsScreen
+        result={page([CONTRACT])}
+        query={{ context: TEST_CONTEXT }}
+        demoMode="SIMULATED"
+      />,
+    );
     expect(screen.getByText('حالت نمایشی')).toBeInTheDocument();
   });
 
   it('is absent when it is not', () => {
-    render(<ContractsScreen result={page([CONTRACT])} query={{}} demoMode="REAL" />);
+    render(
+      <ContractsScreen
+        result={page([CONTRACT])}
+        query={{ context: TEST_CONTEXT }}
+        demoMode="REAL"
+      />,
+    );
     expect(screen.queryByText('حالت نمایشی')).toBeNull();
   });
 });

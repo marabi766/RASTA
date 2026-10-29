@@ -13,6 +13,7 @@ import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_LIFECYCLE_FORM } from './lifecycle-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The three lifecycle forms' write path. Mirrors `actions.spec.ts`: the order is
@@ -59,7 +60,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'manager',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

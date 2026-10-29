@@ -28,6 +28,12 @@ export type PlaceOrderFormState =
     }
   /** Nothing was sent: this browser could not keep a record of the order, so it could not be placed safely. */
   | { readonly kind: 'STORAGE_UNAVAILABLE' }
+  /**
+   * Nothing was sent: another order for this product, from this browser, is
+   * still unresolved, or an earlier request of this kind is held
+   * (`lib/unresolved-order.ts`). Its record is left exactly as it was.
+   */
+  | { readonly kind: 'HELD' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   /** The offer is gone, or not published — the service says 404 for both. */
   | {

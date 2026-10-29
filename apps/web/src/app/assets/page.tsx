@@ -9,6 +9,8 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 import { ASSET_STATUSES, ASSET_TYPES, oneOf } from '@/lib/asset-fields';
 import { AssetsScreen } from './AssetsScreen';
 import { RegisterAssetForm } from './RegisterAssetForm';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/assets` route.
@@ -38,7 +40,7 @@ export default async function AssetsPage({
   // token until it is refreshed.
   const roles = tokenWriteRoles(session.accessToken);
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   // `status` and `type` are strict enums on asset-service's side: a value
   // outside them (a stale bookmark, a hand-edited URL) is dropped here rather
   // than sent, where it would turn the whole list into an error page.
@@ -58,8 +60,9 @@ export default async function AssetsPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -72,7 +75,7 @@ export default async function AssetsPage({
     >
       <AssetsScreen
         result={result}
-        query={query}
+        query={{ ...query, context: pageContext(session) }}
         registerForm={
           manage ? (
             <RegisterAssetForm
