@@ -77,6 +77,7 @@ Envelope می‌آید تا یک Topic بتواند در طول یک Rollout ج�
   "traceparent": "00-4bf92f3577b34da6...-01", // W3C Trace Context
 
   "actor": { "type": "USER", "id": "USR_01JBQ8..." },
+  // یا، بی actor: "anonymous": true — درخواست احراز هویت‌نشده (ثبت‌نام عمومی)، نه کار پس‌زمینه (PR #483 r3 F1، docs/events)
 
   "payload": {}, // مطابق Schema این رویداد و این نسخه
 }

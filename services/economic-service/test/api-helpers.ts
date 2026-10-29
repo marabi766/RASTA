@@ -4,6 +4,7 @@ import {
   AUTH_OPTIONS,
   InternalTokenService,
   OutboxRelay,
+  installNestLogger,
   type AuthGuardOptions,
 } from '@rasta/nest-common';
 import { InMemoryEventPublisher } from '../src/outbox/kafka.publisher';
@@ -11,13 +12,14 @@ import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
 import { StatementSettlementConsumer } from '../src/consumers/statement-settlement.consumer';
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
-import { AppModule } from '../src/app.module';
-import { ENV, PAYMENT_PROVIDER } from '../src/tokens';
-import { loadEconomicEnv } from '../src/config/env';
+import { AppModule, economicLogger } from '../src/app.module';
+import { ENV, LOGGER, PAYMENT_PROVIDER } from '../src/tokens';
+import { loadEconomicEnv, type EconomicEnv } from '../src/config/env';
 import type { PaymentProvider } from '../src/payment/provider';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, PLATFORM_ORGANIZATION_ID } from './helpers';
 import { createHash, randomBytes } from 'node:crypto';
+import type { Writable } from 'node:stream';
 import { ulid } from 'ulid';
 
 /**
@@ -286,6 +288,14 @@ export interface StartApiOptions {
    * optional on the interface and a real provider may omit it.
    */
   paymentProvider?: PaymentProvider;
+  /**
+   * Where the service's own logger writes, for a suite that reads what the
+   * service logs. The logger is the one `LOGGER` builds (`economicLogger`),
+   * at the environment's `LOG_LEVEL`, with its redaction; and Nest's logger
+   * is installed over it as `main.ts` installs it, undoing `jest.setup.cjs`'s
+   * silence for this application only.
+   */
+  logDestination?: Writable;
 }
 
 export async function startApi(options: StartApiOptions = {}): Promise<ApiHarness> {
@@ -302,6 +312,13 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
   }
   if (options.paymentProvider) {
     builder = builder.overrideProvider(PAYMENT_PROVIDER).useValue(options.paymentProvider);
+  }
+  const logDestination = options.logDestination;
+  if (logDestination) {
+    builder = builder.overrideProvider(LOGGER).useFactory({
+      inject: [ENV],
+      factory: (env: EconomicEnv) => economicLogger(env, logDestination),
+    });
   }
 
   const moduleRef = await builder
@@ -354,6 +371,7 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
   // Same as main.ts: without it every `@Controller({ version: '1' })` route is
   // mounted at a path no client uses, and the whole suite would 404.
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
+  if (logDestination) installNestLogger(app);
   await app.init();
 
   return {

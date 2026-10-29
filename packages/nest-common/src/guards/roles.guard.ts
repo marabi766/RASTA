@@ -1,6 +1,7 @@
 import { Injectable, type CanActivate, type ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { RastaError } from '../errors/rasta-error';
+import { OVERSIGHT_ROLE, SUPER_ROLE, assertRolesAdmitted } from './role-admission';
 import { AUDITOR_SELF_SERVICE_KEY, IS_PUBLIC_KEY, REQUIRED_ROLES_KEY } from '../decorators';
 import { tryGetContext } from '../context/request-context';
 
@@ -28,14 +29,18 @@ import { tryGetContext } from '../context/request-context';
  * reach that organization's records through the other role, and the
  * separation the oversight role exists for would depend on nobody ever being
  * granted two roles.
+ *
+ * The rule itself is `assertRolesAdmitted` (`role-admission.ts`), the one
+ * predicate every role decision applies — this guard to the token's roles, a
+ * live decision to the database's.
  */
 @Injectable()
 export class RolesGuard implements CanActivate {
   /** Bypasses every role requirement. Deliberately a single, greppable name. */
-  static readonly SUPER_ROLE = 'SYSTEM_ADMIN';
+  static readonly SUPER_ROLE = SUPER_ROLE;
 
   /** Refused wherever it is not named. See the class comment. */
-  static readonly OVERSIGHT_ROLE = 'AUDITOR';
+  static readonly OVERSIGHT_ROLE = OVERSIGHT_ROLE;
 
   constructor(private readonly reflector: Reflector) {}
 
@@ -65,30 +70,17 @@ export class RolesGuard implements CanActivate {
       return true;
     }
 
-    if (context.roles.includes(RolesGuard.OVERSIGHT_ROLE)) {
-      const selfService = this.reflector.getAllAndOverride<{ allowed: boolean } | undefined>(
-        AUDITOR_SELF_SERVICE_KEY,
-        [execution.getHandler(), execution.getClass()],
-      );
-      const named = required?.includes(RolesGuard.OVERSIGHT_ROLE) ?? false;
-      if (!named && selfService?.allowed !== true) {
-        // A role refusal like any other, so every service's refusal capture
-        // records it as one. `required` names the roles that would have been
-        // admitted, and it is empty where the handler admits any role but this.
-        throw RastaError.insufficientRole(required ?? [], context.roles);
-      }
-    }
-
-    // No @Roles() means the endpoint is open to any authenticated caller.
-    // Authentication itself is already enforced by AuthGuard.
-    if (!required || required.length === 0) return true;
-
-    if (context.roles.includes(RolesGuard.SUPER_ROLE)) return true;
-
-    const granted = required.some((role) => context.roles.includes(role));
-    if (!granted) {
-      throw RastaError.insufficientRole(required, context.roles);
-    }
+    // The platform's one role predicate, the oversight denial first
+    // (`assertRolesAdmitted`). A live decision on the database's roles applies
+    // the same function, so the two cannot disagree (task 130).
+    assertRolesAdmitted(context.roles, {
+      required,
+      oversightSelfService:
+        this.reflector.getAllAndOverride<{ allowed: boolean } | undefined>(
+          AUDITOR_SELF_SERVICE_KEY,
+          [execution.getHandler(), execution.getClass()],
+        )?.allowed === true,
+    });
 
     return true;
   }

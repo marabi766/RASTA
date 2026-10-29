@@ -11,6 +11,7 @@ import {
   SCHEMA_DUMP_FLAGS,
   DUMP_RESTRICT_KEY,
   dumpSchema,
+  collectSchemaReference,
   checkSourceReference,
   schemaReferenceEvidence,
   INVENTORY_SQL,
@@ -35,10 +36,10 @@ const directory = mkdtempSync(join(tmpdir(), 'drill-sql-test-'));
 const dump = join(directory, 'database.dump');
 const suffix = randomBytes(8).toString('hex');
 const scratch = [`drill_ref_${suffix}`, `drill_fixed_${suffix}`];
-let reference;
 let referenceMilliseconds = 0;
 let created = false;
 let initialSnapshot;
+const initialRestores = [];
 let initialLedger;
 function command(name, args, input, privateOutput = false) {
   const result = spawnSync(name, args, { input, encoding: 'utf8', timeout: 60_000 });
@@ -56,55 +57,48 @@ const dumpFlags = [
     : []),
 ];
 let dumpMilliseconds = 0;
-function schemaDump(db = database) {
+// `claimed` is the database name written into the provenance; it equals the pg_dump -d target
+// except where a test deliberately simulates a scratch database from drifted bytes.
+function schemaDump(db = database, label = 'source', options, claimed = db) {
   const result = spawnSync('pg_dump', [...dumpFlags, '-d', db], { timeout: 60_000 });
   assert.equal(result.status, 0, 'schema dump command failed');
   return dumpSchema(
-    db,
-    db === scratch[0] ? 'reference' : db === scratch[1] ? 'fixed-point' : 'source',
+    claimed,
+    label,
     () => ({
       raw: result.stdout,
       version: dumpVersion,
     }),
-  ).evidence;
+    options,
+  );
 }
-function makeReference(source) {
+// The operator path's own sequence, over PostgreSQL: SOURCE bytes into REF, REF into the fixed point.
+async function collectReference(sourceDump, onRestore = () => {}) {
   const started = performance.now();
-  const separate = schemaDump();
-  assert.ok(source.content.equals(separate.content));
-  let ref, fixed;
   try {
-    for (const [index, name] of scratch.entries()) {
-      sql(`CREATE DATABASE "${name}" TEMPLATE template0`, 'postgres');
-      command(
-        'psql',
-        ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-d', name],
-        index === 0 ? separate.content : ref.content,
-        true,
-      );
-      const dumped = schemaDump(name);
-      if (index === 0) ref = dumped;
-      else fixed = dumped;
-    }
-    const proof = schemaReferenceEvidence(
-      source,
-      ref,
-      fixed,
-      checkSourceReference(source, ref, database),
-    );
-    referenceMilliseconds += performance.now() - started;
-    return proof;
+    return await collectSchemaReference({
+      database,
+      suffix,
+      sourceDump,
+      dump: (name, label, options) => schemaDump(name, label, options),
+      create: (name) => sql(`CREATE DATABASE "${name}" TEMPLATE template0`, 'postgres'),
+      restore: (name, input) => {
+        onRestore(name, input);
+        command('psql', ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-d', name], input.content, true);
+      },
+      drop: (name) => sql(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`, 'postgres'),
+    });
   } finally {
-    for (const name of scratch) sql(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`, 'postgres');
+    referenceMilliseconds += performance.now() - started;
   }
 }
-function snapshot() {
+// 'source' before a restore, 'restored' after it: the label is part of the dump's provenance.
+function snapshot(label = 'source') {
   const started = performance.now();
-  const schema = schemaDump();
+  const schema = schemaDump(database, label).evidence;
   dumpMilliseconds += performance.now() - started;
   return {
     schemaDump: schema,
-    reference,
     tables: Object.fromEntries(
       sql(INVENTORY_SQL)
         .split('\n')
@@ -124,9 +118,24 @@ function snapshot() {
     },
   };
 }
+// SOURCE with the REF built from this very dump (compareSnapshots binds it by identity).
+async function sourceSnapshot(onRestore) {
+  const state = snapshot('source');
+  state.reference = await collectReference(state.schemaDump, onRestore);
+  return state;
+}
+// One REF round trip serves every test that starts from the restored fixture and undoes its change:
+// each of those asserts the state returned to this baseline before it finishes.
+let baseline;
+const baselineSnapshot = async () => (baseline ??= await sourceSnapshot());
+const withoutReference = (state) => {
+  const rest = { ...state };
+  delete rest.reference;
+  return rest;
+};
 const ledger = () => JSON.parse(sql(LEDGER_SQL));
 
-before(() => {
+before(async () => {
   assert.ok(
     process.env.PGHOST && process.env.PGUSER,
     'Explicit disposable PGHOST and PGUSER required',
@@ -174,16 +183,12 @@ before(() => {
     GRANT SELECT ON drill_metadata.sample TO drill_metadata_reader;
     GRANT USAGE ON SEQUENCE drill_metadata.counter TO drill_metadata_reader;
     ALTER DEFAULT PRIVILEGES IN SCHEMA drill_metadata GRANT SELECT ON TABLES TO drill_metadata_reader;`);
-  const sourceSchema = schemaDump();
-  reference = makeReference(sourceSchema);
-  initialSnapshot = snapshot();
+  initialSnapshot = await sourceSnapshot((name, input) => initialRestores.push({ name, input }));
   initialLedger = ledger();
   command('pg_dump', ['-Fc', '-d', database, '-f', dump]);
   sql(`DROP DATABASE ${database}`, 'postgres');
   command('pg_restore', ['--create', '--exit-on-error', '-d', 'postgres', dump]);
-  // Subsequent mutant SOURCE snapshots are taken from the now-restored fixture.
-  // Keep the first SOURCE proof on initialSnapshot for the first-restore assertion.
-  reference = makeReference(schemaDump());
+  // Later tests take their own SOURCE (with its own REF) from the now-restored fixture.
 });
 after(() => {
   try {
@@ -203,21 +208,40 @@ after(() => {
 
 test('unchanged migrated fixture passes its first restore against REF, with real CHECK deparse drift', () => {
   assert.equal(initialSnapshot.reference.checkLinesDifferent, 1);
-  assert.equal(initialSnapshot.schemaDump.content.equals(reference.reference.content), false);
   assert.equal(
-    drillPassed([compareSnapshots(initialSnapshot, snapshot())], 1, initialLedger, ledger()),
+    initialSnapshot.schemaDump.content.equals(initialSnapshot.reference.reference.content),
+    false,
+  );
+  assert.equal(
+    drillPassed(
+      [compareSnapshots(initialSnapshot, snapshot('restored'))],
+      1,
+      initialLedger,
+      ledger(),
+    ),
     true,
   );
+  // The operator-path sequence over real PostgreSQL: SOURCE bytes into REF, then REF bytes into
+  // the fixed point. This fixture has real CHECK deparse drift, so a wrong input differs in bytes.
+  assert.deepEqual(
+    initialRestores.map(({ name }) => name),
+    scratch,
+  );
+  assert.ok(initialRestores[0].input.content.equals(initialSnapshot.schemaDump.content));
+  assert.equal(initialRestores[1].input, initialSnapshot.reference.reference);
+  assert.equal(initialRestores[1].input.content.equals(initialRestores[0].input.content), false);
+  // A database compared with itself is not a restore: the restored side needs its own provenance.
+  assert.throws(() => compareSnapshots(initialSnapshot, initialSnapshot));
 });
 
-test('real inventory separates extension rows and detects equal-count value changes', () => {
-  const before = snapshot();
+test('real inventory separates extension rows and detects equal-count value changes', async () => {
+  const before = await sourceSnapshot();
   const summary = summarizeTables(before.tables);
   assert.deepEqual(summary.extension, { tables: 1, nonEmptyTables: 1, rows: '8500' });
   assert.ok(BigInt(summary.application.rows) < 100n);
   sql(`UPDATE ledger_account SET account_code = 'CHANGED' WHERE id = 'ACC_DRILL_WALLET';`);
   try {
-    assert.equal(compareSnapshots(before, snapshot()).tablesEqual, false);
+    assert.equal(compareSnapshots(before, snapshot('restored')).tablesEqual, false);
   } finally {
     sql(`UPDATE ledger_account SET account_code = 'DRILL-WALLET' WHERE id = 'ACC_DRILL_WALLET';`);
   }
@@ -243,15 +267,15 @@ test('real ledger SQL returns exact amounts; unbalanced journal and wallet hold 
   }
 });
 
-test('--create restores database ACL, owner, per-role settings, digests and exact ledger amounts; ACL drift fails', () => {
+test('--create restores database ACL, owner, per-role settings, digests and exact ledger amounts; ACL drift fails', async () => {
   // pg_dump omits this redundant explicit owner ACL; restored NULL must normalize identically.
   sql('REVOKE ALL ON drill_metadata.owned_sample FROM PUBLIC;');
-  const before = snapshot();
+  const before = await sourceSnapshot();
   const beforeLedger = ledger();
   command('pg_dump', ['-Fc', '-d', database, '-f', dump]);
   sql(`DROP DATABASE ${database}`, 'postgres');
   command('pg_restore', ['--create', '--exit-on-error', '-d', 'postgres', dump]);
-  assert.deepEqual(compareSnapshots(before, snapshot()), {
+  assert.deepEqual(compareSnapshots(before, snapshot('restored')), {
     referenceChecked: true,
     fixedPointEqual: true,
     allowanceChecked: true,
@@ -272,7 +296,7 @@ test('--create restores database ACL, owner, per-role settings, digests and exac
     't',
   );
   try {
-    const comparison = compareSnapshots(before, snapshot());
+    const comparison = compareSnapshots(before, snapshot('restored'));
     assert.equal(comparison.databaseStateEqual, false);
     assert.equal(drillPassed([comparison], 1, beforeLedger, ledger()), false);
   } finally {
@@ -334,17 +358,17 @@ for (const [category, mutation, undo] of [
     "SELECT setval('drill_metadata.counter', 41, true)",
   ],
 ]) {
-  test(`restored ${category} mutant independently fails the acceptance gate`, () => {
-    const source = snapshot();
+  test(`restored ${category} mutant independently fails the acceptance gate`, async () => {
+    const source = await baselineSnapshot();
     const sourceLedger = ledger();
     // before() restored the archive; each mutant changes one category and undoes it below.
     assert.equal(
-      drillPassed([compareSnapshots(source, snapshot())], 1, sourceLedger, ledger()),
+      drillPassed([compareSnapshots(source, snapshot('restored'))], 1, sourceLedger, ledger()),
       true,
     );
     try {
       sql(`${mutation};`);
-      const restored = snapshot();
+      const restored = snapshot('restored');
       if (category === 'table owner') {
         assert.equal(
           restored.objectState.relations.find(
@@ -365,7 +389,7 @@ for (const [category, mutation, undo] of [
     } finally {
       sql(`${undo};`);
     }
-    assert.deepEqual(snapshot(), source);
+    assert.deepEqual(snapshot('restored'), withoutReference(source));
   });
 }
 
@@ -403,19 +427,19 @@ for (const [category, mutation, verify, baseline] of [
     '1',
   ],
 ]) {
-  test(`restored ${category} changes existing state and schema bytes; independent mutant fails drill`, () => {
-    const source = snapshot();
+  test(`restored ${category} changes existing state and schema bytes; independent mutant fails drill`, async () => {
+    const source = await baselineSnapshot();
     const sourceLedger = ledger();
     assert.equal(sql(verify), baseline);
     assert.equal(
-      drillPassed([compareSnapshots(source, snapshot())], 1, sourceLedger, ledger()),
+      drillPassed([compareSnapshots(source, snapshot('restored'))], 1, sourceLedger, ledger()),
       true,
     );
     command('pg_dump', ['-Fc', '-d', database, '-f', dump]);
     try {
       sql(mutation);
       assert.notEqual(sql(verify), baseline, 'mutation must change real state before drill');
-      const comparison = compareSnapshots(source, snapshot());
+      const comparison = compareSnapshots(source, snapshot('restored'));
       assert.equal(comparison.schemaDumpEqual, false);
       assert.equal(drillPassed([comparison], 1, sourceLedger, ledger()), false);
     } finally {
@@ -424,7 +448,7 @@ for (const [category, mutation, verify, baseline] of [
     }
     assert.equal(sql(verify), baseline);
     assert.equal(
-      drillPassed([compareSnapshots(source, snapshot())], 1, sourceLedger, ledger()),
+      drillPassed([compareSnapshots(source, snapshot('restored'))], 1, sourceLedger, ledger()),
       true,
     );
   });
@@ -467,17 +491,17 @@ for (const [category, mutation] of [
     'ALTER TABLE public.ledger_entry RENAME CONSTRAINT ck_ledger_entry_amount_positive TO drill_renamed_check',
   ],
 ]) {
-  test(`restored ${category} refuses REF equality then restored baseline passes`, () => {
-    const source = snapshot(),
+  test(`restored ${category} refuses REF equality then restored baseline passes`, async () => {
+    const source = await baselineSnapshot(),
       sourceLedger = ledger();
     command('pg_dump', ['-Fc', '-d', database, '-f', dump]);
     assert.equal(
-      drillPassed([compareSnapshots(source, snapshot())], 1, sourceLedger, ledger()),
+      drillPassed([compareSnapshots(source, snapshot('restored'))], 1, sourceLedger, ledger()),
       true,
     );
     try {
       sql(mutation);
-      const comparison = compareSnapshots(source, snapshot());
+      const comparison = compareSnapshots(source, snapshot('restored'));
       assert.equal(comparison.schemaDumpEqual, false);
       assert.equal(drillPassed([comparison], 1, sourceLedger, ledger()), false);
     } finally {
@@ -485,34 +509,46 @@ for (const [category, mutation] of [
       command('pg_restore', ['--create', '--exit-on-error', '-d', 'postgres', dump]);
     }
     assert.equal(
-      drillPassed([compareSnapshots(source, snapshot())], 1, sourceLedger, ledger()),
+      drillPassed([compareSnapshots(source, snapshot('restored'))], 1, sourceLedger, ledger()),
       true,
     );
   });
 }
 
-test('SOURCE default drift and unstable simulated REF refuse, then original reference passes', () => {
-  const source = snapshot(),
+test('SOURCE default drift and unstable simulated REF refuse at their own comparison, then original reference passes', async () => {
+  const source = await baselineSnapshot(),
     sourceLedger = ledger();
+  const ref = source.reference.reference;
   command('pg_dump', ['-Fc', '-d', database, '-f', dump]);
   try {
     sql('ALTER TABLE public.ledger_entry ALTER COLUMN amount_minor SET DEFAULT 1');
-    const changed = schemaDump();
-    assert.throws(() => checkSourceReference(changed, reference.reference, database));
-    assert.throws(() =>
-      schemaReferenceEvidence(
-        source.schemaDump,
-        reference.reference,
-        changed,
-        checkSourceReference(source.schemaDump, reference.reference, database),
-      ),
+    // The drifted SOURCE is a valid SOURCE dump; only the SOURCE/REF structural guard refuses it.
+    const changed = schemaDump(database, 'source').evidence;
+    assert.throws(() => checkSourceReference(changed, ref, database), /non-CHECK difference/);
+    // Simulated unstable REF: drifted bytes issued as the REF's fixed point with correct lineage and
+    // labels, so the refusal comes from the fixed-point byte comparison and nothing earlier.
+    const unstable = schemaDump(
+      database,
+      'fixed-point',
+      { restoredFrom: ref },
+      scratch[1],
+    ).evidence;
+    assert.throws(
+      () =>
+        schemaReferenceEvidence(
+          source.schemaDump,
+          ref,
+          unstable,
+          checkSourceReference(source.schemaDump, ref, database),
+        ),
+      /unstable REF fixed-point/,
     );
   } finally {
     sql(`DROP DATABASE ${database}`, 'postgres');
     command('pg_restore', ['--create', '--exit-on-error', '-d', 'postgres', dump]);
   }
   assert.equal(
-    drillPassed([compareSnapshots(source, snapshot())], 1, sourceLedger, ledger()),
+    drillPassed([compareSnapshots(source, snapshot('restored'))], 1, sourceLedger, ledger()),
     true,
   );
 });

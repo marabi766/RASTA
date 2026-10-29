@@ -3,7 +3,12 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import { isOptionalField, objectShapeOf, toJsonSchema } from '@rasta/nest-common';
+import {
+  isOptionalField,
+  objectShapeOf,
+  publishedApiErrorSchema,
+  toJsonSchema,
+} from '@rasta/nest-common';
 import { DashboardController } from '../maintenance/dashboard.controller';
 import { DashboardService } from '../maintenance/dashboard.service';
 import { fleetDashboardQuerySchema, fleetDashboardViewSchema } from '../maintenance/dto';
@@ -32,15 +37,6 @@ import { kpisQuerySchema, kpisViewSchema } from '../kpis/dto';
 
 /** Pinned so the committed document is deterministic. */
 export const ANALYTICS_VERSION = '0.1.0';
-
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
-  })
-  .strict();
 
 /** Success responses, each with the status the handler actually answers. */
 export const RESPONSE_BODIES: Record<string, { status: '200'; schema: z.ZodTypeAny }> = {
@@ -111,7 +107,7 @@ export async function buildDocumentationApp(): Promise<INestApplication> {
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
-  document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {

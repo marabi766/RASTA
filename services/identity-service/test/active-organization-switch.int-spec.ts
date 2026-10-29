@@ -5,7 +5,7 @@ import { IDENTITY_EVENTS } from '../src/identity/events';
 import type { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
 import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, id, newPrisma, tenants, newFences } from './helpers';
+import { asActor, id, newPrisma, tenants, newFences, ensureLiveMember } from './helpers';
 
 /**
  * The active-organization switch is audited (AGENTS.md S-06, global audit
@@ -198,10 +198,18 @@ describe('active organization switch audit (L7-14)', () => {
       )
     ).id;
 
-  const revokeAsAdmin = (membershipId: string) =>
-    asActor({ organizationId: org.b, userId: 'USR-SW-ADMIN', roles: ['ORGANIZATION_ADMIN'] }, () =>
-      service.revokeMembership(membershipId, { reason: 'left the organization' }),
+  const revokeAsAdmin = async (membershipId: string) => {
+    // A live administrator of the organization (task 117, F1).
+    await ensureLiveMember(prisma, {
+      userId: 'USR-SW-ADMIN',
+      organizationId: org.b,
+      roles: ['ORGANIZATION_ADMIN'],
+    });
+    return asActor(
+      { organizationId: org.b, userId: 'USR-SW-ADMIN', roles: ['ORGANIZATION_ADMIN'] },
+      () => service.revokeMembership(membershipId, { reason: 'left the organization' }),
     );
+  };
 
   /** Holds the first `enqueueEvent` of `eventName` until released. */
   function gateOn(eventName: string) {

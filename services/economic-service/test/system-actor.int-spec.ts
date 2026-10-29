@@ -11,6 +11,7 @@ import {
   testEnv,
   wire,
   type Wiring,
+  unanswered,
 } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaClient } from '../src/generated/prisma';
@@ -171,14 +172,17 @@ describe('a system actor', () => {
     expect(commission.status).toBe('ACTIVE');
 
     const rewardRule = await asSystem(() =>
-      wiring.rewards.createRule({
-        organizationId: org.a,
-        triggerEvent: 'USAGE_RECORDED',
-        points: 4,
-        // `rewardType` omitted too — points, never cashback, until the
-        // regulatory review concludes (docs/24 Q-07).
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      wiring.rewards.createRule(
+        {
+          organizationId: org.a,
+          triggerEvent: 'USAGE_RECORDED',
+          points: 4,
+          // `rewardType` omitted too — points, never cashback, until the
+          // regulatory review concludes (docs/24 Q-07).
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+        unanswered(),
+      ),
     );
     expect(rewardRule.rewardType).toBe('POINTS');
     expect(rewardRule.status).toBe('ACTIVE');

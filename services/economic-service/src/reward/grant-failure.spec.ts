@@ -14,7 +14,7 @@ describe('isPermanentGrantFailure', () => {
   it.each([
     RastaError.businessRule('A credit must be positive'),
     RastaError.validation([{ path: 'amountMinor', message: 'too large' }]),
-    RastaError.ledgerUnbalanced('JNL_1', '1'),
+    RastaError.ledgerUnbalanced('JNL_1', 'DEBITS_NOT_CREDITS'),
   ])('treats a verdict on the grant as permanent: %s', (error) => {
     expect(isPermanentGrantFailure(error)).toBe(true);
   });

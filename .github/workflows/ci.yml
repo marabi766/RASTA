@@ -345,6 +345,14 @@ jobs:
         # Static, the scanner's own form tests first.
         run: pnpm run test:url-parsing-guard
 
+      - name: Queued-event provenance is restored by the registration intake only (PR #483 r3 F2)
+        # An ordinary event's actor and correlation id are the verified
+        # request context's (`buildOutboxRow` takes no provenance). The one
+        # restoration path — restoreOutboxProvenance, buildRestoredOutboxRow,
+        # identity's enqueueRestoredEvent — may be named only by the files the
+        # guard allow-lists. Static.
+        run: pnpm run test:outbox-provenance-restoration-guard
+
       - name: Format check
         run: pnpm run format:check
 
@@ -363,8 +371,16 @@ jobs:
           path: ${{ runner.temp }}/temporal-test-server
           key: temporal-test-server-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
+      - name: Unit-step concurrency is bounded
+        # Static tripwire for accidental changes to the root bound or a second
+        # literal unbounded unit run. Workflow code review covers dynamic commands
+        # and shell behavior; this does not prove execution or failure propagation.
+        run: pnpm run test:unit-step-concurrency
+
       - name: Unit tests
-        run: pnpm run test:unit
+        # The root CI script limits Turbo package concurrency. Package-time sums
+        # decreased in the measured runs; step wall time was unchanged (~270 s).
+        run: pnpm run test:unit:ci
         env:
           TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
 
