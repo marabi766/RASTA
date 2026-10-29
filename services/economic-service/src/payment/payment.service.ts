@@ -1330,10 +1330,7 @@ export class PaymentService {
     intent: PaymentIntent,
     marker:
       typeof REFUND_UNKNOWN | typeof REFUNDED_NOT_REVERSED | typeof REFUND_DECLINED_RELEASE_PENDING,
-    reason:
-      | 'PROVIDER_OUTCOME_UNKNOWN'
-      | 'PROVIDER_DECLINED_RELEASE_PENDING'
-      | ReversalFailure,
+    reason: 'PROVIDER_OUTCOME_UNKNOWN' | 'PROVIDER_DECLINED_RELEASE_PENDING' | ReversalFailure,
   ): Promise<void> {
     try {
       const marked = await this.prisma.transaction(async (tx) => {
