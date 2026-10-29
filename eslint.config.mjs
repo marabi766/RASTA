@@ -111,6 +111,8 @@ const base = tseslint.config(
       '**/*.int-spec.ts',
       '**/*.e2e-spec.ts',
       '**/test/**',
+      // Test-only helpers too: child-process fixtures and fakes, never deployed.
+      '**/__tests__/**',
     ],
     plugins: { internal: { rules: { transport: internalTokenTransport } } },
     rules: { 'internal/transport': 'error' },

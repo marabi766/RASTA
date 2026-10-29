@@ -336,6 +336,14 @@ jobs:
         # Static, the scanner's own form tests first.
         run: pnpm run test:url-parsing-guard
 
+      - name: Credential transports refuse redirects (Q-155)
+        # The root scripts' credentialFetch over real HTTP: 301/302/303/307/308,
+        # same- and cross-origin, never followed (the target gets nothing) and
+        # nothing disclosed; every other status (304, a 201 Location) answered.
+        # It also pins the portal's copy, the E2E hand guard and nest-common's
+        # internalFetch to the same five statuses. Static, no build needed.
+        run: pnpm run test:credential-fetch
+
       - name: Format check
         run: pnpm run format:check
 

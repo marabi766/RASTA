@@ -3,6 +3,8 @@ import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey, type KeyLike } fro
 import { z } from 'zod';
 import { legacyParse } from '@rasta/contracts';
 
+import { CredentialRedirectRefusedError, credentialFetch } from './credential-fetch';
+
 /**
  * The four OIDC steps this portal needs, on the server (ADR-059 § 2).
  *
@@ -155,14 +157,29 @@ async function postForm(
 
   let response: Response;
   try {
-    response = await fetchImpl(endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-      body: new URLSearchParams(body).toString(),
-      cache: 'no-store',
-      signal,
-    });
-  } catch {
+    // Never follows a redirect: a 307/308 would resend this form — the code
+    // and its PKCE verifier, or the refresh token — to wherever the Location
+    // points, and a followed answer is not the provider's (Q-155).
+    response = await credentialFetch(
+      endpoint,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          accept: 'application/json',
+        },
+        body: new URLSearchParams(body).toString(),
+        cache: 'no-store',
+        signal,
+      },
+      fetchImpl,
+    );
+  } catch (error) {
+    // A redirect says nothing about the grant: never INVALID_GRANT, so a
+    // refresh it answers leaves the session as any unanswered one does.
+    if (error instanceof CredentialRedirectRefusedError) {
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider answered with a redirect');
+    }
     // The error object is not forwarded: it can carry the request body, and
     // the request body is a refresh token or an authorization code.
     throw new OidcError(

@@ -1,17 +1,50 @@
-/** Require the redirect-rejecting transport in modules that send internal credentials. */
+/**
+ * Header names and form fields that carry a credential, compared lower-cased:
+ * the internal token, a user's or client's authorization, a cookie, an API key,
+ * and the OAuth form fields that hold a secret or a grant (Q-155).
+ */
+const CREDENTIAL_NAMES = new Set([
+  'x-internal-token',
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'x-api-key',
+  'api-key',
+  'apikey',
+  'client_secret',
+  'client_assertion',
+  'refresh_token',
+  'code_verifier',
+  'access_token',
+  'subject_token',
+  'password',
+]);
+/** A header value that is itself a credential: `Bearer …`, `Basic …`. */
+const CREDENTIAL_SCHEME = /^(?:bearer|basic)\s/i;
+
+/**
+ * Require a redirect-refusing transport in modules that send credentials: the
+ * internal token (#423), and since Q-155 any authorization, cookie, API key or
+ * secret/grant form field. Syntactic, per module — not a token-source boundary.
+ */
 export default {
   meta: {
     type: 'problem',
     schema: [],
     messages: {
-      unsafe: 'Send internal credentials only through internalFetch from @rasta/nest-common.',
+      unsafe:
+        'Send credentials only through a redirect-refusing transport: internalFetch from @rasta/nest-common, or credentialFetch in apps/web and scripts.',
     },
   },
   create(context) {
     const source = context.sourceCode;
     // Examine the whole module: headers are often built separately from the exchange.
-    const sendsToken = /['"`]x-internal-token['"`]/i.test(source.text);
-    if (!sendsToken) return {};
+    let sendsCredential = /['"`]x-internal-token['"`]/i.test(source.text);
+    const credentialName = (value) =>
+      typeof value === 'string' && CREDENTIAL_NAMES.has(value.toLowerCase());
+    const credentialText = (value) =>
+      credentialName(value) || (typeof value === 'string' && CREDENTIAL_SCHEME.test(value));
+    const imports = [];
     const rawNames = new Set(['fetch', 'fetchImpl', 'request', 'axios']);
     const bindings = [];
     const calls = [];
@@ -38,8 +71,20 @@ export default {
         if (
           /^(?:node:)?(?:http|https)$|^(?:undici|axios|node-fetch)(?:\/|$)/.test(node.source.value)
         ) {
-          context.report({ node, messageId: 'unsafe' });
+          imports.push(node);
         }
+      },
+      // `{ authorization: … }`; a quoted key is a Literal, below.
+      Property(node) {
+        if (!node.computed && node.key.type === 'Identifier' && credentialName(node.key.name))
+          sendsCredential = true;
+      },
+      // `'x-api-key'`, `headers.set('Cookie', …)`, `form.append('client_secret', …)`, `'Basic …'`.
+      Literal(node) {
+        if (credentialText(node.value)) sendsCredential = true;
+      },
+      TemplateElement(node) {
+        if (credentialText(node.value.cooked)) sendsCredential = true;
       },
       VariableDeclarator(node) {
         bindings.push([node.id, node.init]);
@@ -51,6 +96,8 @@ export default {
         calls.push(node);
       },
       'Program:exit'() {
+        if (!sendsCredential) return;
+        for (const node of imports) context.report({ node, messageId: 'unsafe' });
         // Resolve aliases throughout the module, including constructors declared after methods.
         let changed;
         do {

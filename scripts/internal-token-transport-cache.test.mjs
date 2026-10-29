@@ -28,3 +28,27 @@ test('Turbo hashes the shared internal transport lint policy and the sending wor
     assert.equal(typeof task.inputs[file], 'string', `lint cache must hash ${file}`);
   }
 });
+
+test('Turbo hashes the shared rule for the portal lint too (Q-155)', () => {
+  const run = spawnSync(
+    'pnpm',
+    ['exec', 'turbo', 'run', 'lint', '--filter=@rasta/web', '--dry=json'],
+    {
+      cwd: ROOT,
+      encoding: 'utf8',
+      timeout: 60_000,
+      maxBuffer: 10 * 1024 * 1024,
+      env: { ...process.env, TURBO_TELEMETRY_DISABLED: '1' },
+    },
+  );
+  assert.equal(run.status, 0, run.stderr);
+  const task = JSON.parse(run.stdout).tasks.find((task) => task.taskId === '@rasta/web#lint');
+  assert.ok(task, 'web lint task must exist');
+  for (const file of [
+    'eslint.config.mjs',
+    '../../scripts/internal-token-transport-rule.mjs',
+    'src/server/credential-fetch.ts',
+  ]) {
+    assert.equal(typeof task.inputs[file], 'string', `lint cache must hash ${file}`);
+  }
+});

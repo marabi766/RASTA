@@ -5,6 +5,10 @@ import tseslint from 'typescript-eslint';
 // The services' rule itself, not a copy: zod 4's `.default()` skips parsing;
 // `.prefault()` is zod 3's (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F2).
 import noZodDefault from '../../scripts/no-zod-default-rule.mjs';
+// Also the services' rule, not a copy: a module that sends a bearer token,
+// cookie, API key or secret/grant form field must send it through
+// credentialFetch, which refuses redirects (Q-155).
+import credentialTransport from '../../scripts/internal-token-transport-rule.mjs';
 
 /**
  * The portal's lint rules.
@@ -30,6 +34,14 @@ export default tseslint.config(
   {
     plugins: { zod: { rules: { 'no-default': noZodDefault } } },
     rules: { 'zod/no-default': 'error' },
+  },
+  {
+    // Production source only, as in the services: specs and test helpers
+    // build credential sentinels against local fakes.
+    files: ['src/**/*.{ts,tsx}'],
+    ignores: ['**/*.spec.{ts,tsx}', 'src/test/**'],
+    plugins: { internal: { rules: { transport: credentialTransport } } },
+    rules: { 'internal/transport': 'error' },
   },
   {
     files: ['**/*.{ts,tsx}'],
