@@ -14,7 +14,8 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { MaintenanceFactsConsumer } from '../src/maintenance/maintenance-facts.consumer';
 import { databaseUrl } from './helpers';
 import type { Logger } from '@rasta/logging';
-import { LOGGER } from '../src/tokens';
+import { ENV, LOGGER } from '../src/tokens';
+import { loadAnalyticsEnv } from '../src/config/env';
 import { KPI_VALUE_READERS, type KpiValueReaders } from '../src/kpis/kpi.service';
 
 /**
@@ -125,6 +126,13 @@ export async function startApi(
   options: {
     kpiReaders?: KpiValueReaders;
     logger?: Logger;
+    /**
+     * Whether the deployment runs the maintenance projection (ANALYTICS_MAINTENANCE_FACTS_
+     * CONSUMER_ENABLED). Default true: a KPI count is NO_DATA without it (Q-154). The real env
+     * loader refuses `true` over an unauthenticated broker, which this harness has by design, so
+     * the flag is set on the loaded env instead; the consumer itself stays inert either way.
+     */
+    consumerEnabled?: boolean;
   } = {},
 ): Promise<ApiHarness> {
   applyEnvironment();
@@ -160,6 +168,12 @@ export async function startApi(
         } as unknown as TokenVerifier,
       }),
     });
+  builder.overrideProvider(ENV).useFactory({
+    factory: () => ({
+      ...loadAnalyticsEnv(),
+      ANALYTICS_MAINTENANCE_FACTS_CONSUMER_ENABLED: options.consumerEnabled ?? true,
+    }),
+  });
   if (options.kpiReaders) builder.overrideProvider(KPI_VALUE_READERS).useValue(options.kpiReaders);
   if (options.logger) builder.overrideProvider(LOGGER).useValue(options.logger);
   const moduleRef = await builder.compile();
