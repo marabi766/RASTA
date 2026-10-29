@@ -1,6 +1,10 @@
-import { eventEnvelopeSchema } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
-import { ISO_INSTANT_SHAPE, expectStoredMessageWithout } from '@rasta/testing';
+import {
+  ISO_INSTANT_SHAPE,
+  arrayOf,
+  envelopeShape,
+  expectStoredMessageWithout,
+} from '@rasta/testing';
 import { MaintenanceRepository } from '../src/maintenance/maintenance.repository';
 import { ScheduleService } from '../src/maintenance/schedule.service';
 import type { MaintenanceEnv } from '../src/config/env';
@@ -158,14 +162,29 @@ describe('schedule changes reach the audit trail', () => {
     expect(changedAt).toMatch(ISO_INSTANT_SHAPE);
     expect(new Date(changedAt as string).toISOString()).toBe(changedAt);
 
-    // The whole stored message, envelope included, key by key and value by value: the new values
-    // may be nowhere in it, as a key, a value or part of one. `intervalHours` may only be a NAME
-    // in `changedFields`, so it is refused as a key. Never as a substring of the payload's JSON
-    // alone: that text carries instants a short number can occur inside by chance.
+    // The whole stored message, envelope included, pinned and searched at every depth: the exact
+    // shape (an unknown key anywhere, `actor` too, is a failure; `changedAt` and `occurredAt` are
+    // the only fields exempt from the search, and must hold a strict instant), and the new values
+    // nowhere in it — as a key, a value, part of one, or a number written another way (`500`,
+    // `"500"`, `5e2`). `intervalHours` may only be a NAME in `changedFields`, so it is refused as
+    // a key. Never as a substring of the payload's JSON alone: that text carries instants a short
+    // number can occur inside by chance.
     expectStoredMessageWithout(events[1].envelope, {
       anywhere: ['500.00', '50.00'],
+      numbers: ['500.00', '50.00'],
       inKeys: ['intervalHours', 'leadHours', 'lastServicedHourMeter'],
-      topLevelKeys: Object.keys(eventEnvelopeSchema.shape),
+      shape: envelopeShape({
+        scheduleId: 'string',
+        assetId: 'string',
+        organizationId: 'string',
+        change: 'string',
+        status: 'string',
+        previousStatus: ['string', 'null'],
+        reason: ['string', 'null'],
+        changedFields: arrayOf('string'),
+        changedBy: 'string',
+        changedAt: 'instant',
+      }),
     });
     expect(JSON.stringify(events[1].envelope)).not.toContain('500.00');
   });

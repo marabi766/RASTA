@@ -1,6 +1,6 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { releaseWithin } from '@rasta/nest-common';
-import { ISO_INSTANT_SHAPE, expectStoredMessageWithout } from '@rasta/testing';
+import { ISO_INSTANT_SHAPE, envelopeShape, expectStoredMessageWithout } from '@rasta/testing';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { validateInventoryPayload, type InventoryEventName } from '../src/events/events';
 import { actor, client, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
@@ -111,26 +111,25 @@ describe('the transactional outbox', () => {
       createdAt: expect.stringMatching(ISO_INSTANT_SHAPE),
     });
 
-    // The whole stored message, envelope included, key by key and value by value: the name and
-    // both coordinates (as text or as numbers) may be nowhere in it, not as a value, not as part
-    // of one and not as a property NAME (envelope parsing strips an unknown key, so only the raw
-    // row shows it). Never as a substring of its JSON: that text carries ULIDs and instants, and
-    // a short coordinate such as "35.7" occurs inside "…:35.712Z" about one run in 600 (train run
-    // 40130819112); strict instants are not searched, and a full six-decimal coordinate is.
+    // The whole stored message, envelope included, pinned and searched at every depth: the exact
+    // shape (an unknown key anywhere, `actor` too, is a failure; only `occurredAt` and `createdAt`
+    // are exempt from the search, and must hold a strict instant), and the name and both
+    // coordinates nowhere in it — as a value, part of one, a property NAME, or a number written
+    // another way — and no number or decimal word within 0.5 of either coordinate, so a rounded
+    // one fails too. Envelope parsing strips an unknown key, so only the raw row shows it. Never
+    // as a substring of its JSON: that text carries ULIDs and instants, and a short coordinate
+    // such as "35.7" occurs inside "…:35.712Z" about one run in 600 (train run 40130819112).
     expectStoredMessageWithout(rows[0]?.payload, {
       anywhere: [name, String(location.latitude), String(location.longitude)],
-      topLevelKeys: Object.keys(eventEnvelopeSchema.shape),
+      numbers: [location.latitude, location.longitude],
+      near: { values: [location.latitude, location.longitude], within: 0.5 },
+      shape: envelopeShape({
+        warehouseId: 'string',
+        organizationId: 'string',
+        createdBy: 'string',
+        createdAt: 'instant',
+      }),
     });
-    // A coordinate rounded to a number in the same neighbourhood is also a disclosure.
-    const numbers: number[] = [];
-    JSON.stringify(rows[0]?.payload, (_key, value: unknown) => {
-      if (typeof value === 'number') numbers.push(value);
-      return value;
-    });
-    for (const value of numbers) {
-      expect(Math.abs(value - location.latitude)).toBeGreaterThan(0.5);
-      expect(Math.abs(value - location.longitude)).toBeGreaterThan(0.5);
-    }
   });
 
   it('writes nothing when a command is refused', async () => {
