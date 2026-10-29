@@ -6,6 +6,7 @@ import {
   organizationIdSchema,
 } from '@rasta/contracts';
 import { RULE_STATUSES } from '../commission/dto';
+import { canonicalDecimal, canonicalWithin, withCanonicalForm } from '../shared/canonical';
 import {
   PARTICIPATION_FACTS,
   PARTICIPATION_MAX_PER_WINDOW,
@@ -53,24 +54,68 @@ export const REWARD_TRIGGER_EVENTS = ['USAGE_RECORDED', 'MAINTENANCE_COMPLETED']
  * shape evaluates to **false** — a mistyped condition withholds a reward
  * rather than granting one to everybody.
  */
+/**
+ * The comparisons whose two sides are read as numbers (`conditionMet` in
+ * `rule-engine.ts`): only for these is `"7.50"` the same operand as `"7.5"`.
+ */
+export const NUMERIC_COMPARISONS = ['gt', 'gte', 'lt', 'lte'] as const;
+
+const conditionOperand = z.union([z.string(), z.number(), z.boolean()]);
+
 const conditionLeaf = z
   .object({
     field: z.string().trim().min(1).max(64),
-    op: z.enum(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'present', 'absent']),
-    value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    op: z.enum(['eq', 'neq', ...NUMERIC_COMPARISONS, 'present', 'absent']),
+    value: conditionOperand.optional(),
   })
   .strict();
 
 type ConditionNode =
   z.infer<typeof conditionLeaf> | { all: ConditionNode[] } | { any: ConditionNode[] };
 
-const conditionSchema: z.ZodType<ConditionNode> = z.lazy(() =>
-  z.union([
-    conditionLeaf,
-    z.object({ all: z.array(conditionSchema).min(1).max(10) }).strict(),
-    z.object({ any: z.array(conditionSchema).min(1).max(10) }).strict(),
-  ]),
+const conditionSchema: z.ZodType<ConditionNode> = withCanonicalForm(
+  z.lazy(() =>
+    z.union([
+      conditionLeaf,
+      z.object({ all: z.array(conditionSchema).min(1).max(10) }).strict(),
+      z.object({ any: z.array(conditionSchema).min(1).max(10) }).strict(),
+    ]),
+  ),
+  canonicalCondition,
 );
+
+/**
+ * A condition with the operand of every numeric comparison (`gt`, `gte`,
+ * `lt`, `lte`), at any depth under `all` / `any`, in its exact decimal form
+ * (`canonicalDecimal`), before the rule is validated, hashed and stored
+ * (Codex PR-480 r2, R2). Rewritten only where the operand as sent and its
+ * canonical form both pass the operand's own schema. A JSON number is a
+ * number, not a spelling, and is left as it is.
+ *
+ * `eq` and `neq` are left exactly as sent: they compare the operand as a
+ * string (`String(actual) === String(value)`), so `"7.50"` and `"7.5"` are two
+ * different rules there, and normalizing them would change which payloads
+ * match.
+ *
+ * Anything that is not a condition node is returned as it is, for the schema
+ * to refuse; the request's own objects are never modified.
+ */
+export function canonicalCondition(node: unknown): unknown {
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return node;
+  const copy: Record<string, unknown> = { ...(node as Record<string, unknown>) };
+  for (const branch of ['all', 'any'] as const) {
+    const children = copy[branch];
+    if (Array.isArray(children)) copy[branch] = children.map(canonicalCondition);
+  }
+  if (
+    typeof copy.op === 'string' &&
+    (NUMERIC_COMPARISONS as readonly string[]).includes(copy.op) &&
+    Object.prototype.hasOwnProperty.call(copy, 'value')
+  ) {
+    copy.value = canonicalWithin(conditionOperand, copy.value, canonicalDecimal);
+  }
+  return copy;
+}
 
 export const createRewardRuleSchema = z
   .object({

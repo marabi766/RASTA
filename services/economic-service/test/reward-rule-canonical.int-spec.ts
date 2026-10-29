@@ -54,7 +54,13 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
     runUnscoped('the suite reads the rules it created', () =>
       harness.prisma.client.rewardRule.findMany({
         where: { organizationId: org, label: { startsWith: marker } },
-        select: { id: true, label: true, creditPerPointMinor: true, validFrom: true },
+        select: {
+          id: true,
+          label: true,
+          creditPerPointMinor: true,
+          validFrom: true,
+          condition: true,
+        },
       }),
     );
 
@@ -170,6 +176,77 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
 
     expect(refused.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
     expect(await rulesOf(marker)).toHaveLength(1);
+  });
+
+  describe('the condition’s numeric operands (Codex PR-480 r2, R2)', () => {
+    const leaf = (op: string, value: string) => ({ field: 'hours', op, value });
+    const shapes: [string, (node: unknown) => unknown][] = [
+      ['at the top', (node) => node],
+      ['under all → any', (node) => ({ all: [{ field: 'x', op: 'present' }, { any: [node] }] })],
+      ['under any → all', (node) => ({ any: [{ all: [{ field: 'x', op: 'absent' }, node] }] })],
+    ];
+    const combos = (['gt', 'gte', 'lt', 'lte'] as const).flatMap((op) =>
+      shapes.map(([where, shape]) => [op, where, shape] as const),
+    );
+
+    it.each(combos)(
+      '%s %s: a retry with "7.5" replays the rule created with "07.50"; one rule, stored canonical',
+      async (op, _, shape) => {
+        const marker = `canon-cond-${ulid()}`;
+        const key = id('canon-cond');
+        const first = await createRule(
+          body(marker, { condition: shape(leaf(op, '07.50')) }),
+          key,
+        ).expect(201);
+        expect(first.body.condition).toEqual(shape(leaf(op, '7.5')));
+
+        const replay = await createRule(
+          body(marker, { condition: shape(leaf(op, '7.5')) }),
+          key,
+        ).expect(201);
+
+        expect(replay.body).toEqual(first.body);
+        const rules = await rulesOf(marker);
+        expect(rules).toHaveLength(1);
+        expect(rules[0]?.condition).toEqual(shape(leaf(op, '7.5')));
+      },
+    );
+
+    it.each(combos)(
+      '%s %s: 7.6 under the key of 7.5 is still 409, never a second rule',
+      async (op, _, shape) => {
+        const marker = `canon-cond-diff-${ulid()}`;
+        const key = id('canon-cond-diff');
+        await createRule(body(marker, { condition: shape(leaf(op, '7.50')) }), key).expect(201);
+
+        const refused = await createRule(
+          body(marker, { condition: shape(leaf(op, '7.6')) }),
+          key,
+        ).expect(409);
+
+        expect(refused.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+        expect(await rulesOf(marker)).toHaveLength(1);
+      },
+    );
+
+    it.each(['eq', 'neq'])(
+      '%s compares text: "7.5" under the key of "7.50" is 409, and "7.50" is stored as sent',
+      async (op) => {
+        const marker = `canon-cond-eq-${ulid()}`;
+        const key = id('canon-cond-eq');
+        const condition = { all: [{ any: [leaf(op, '7.50')] }] };
+        const first = await createRule(body(marker, { condition }), key).expect(201);
+        expect(first.body.condition).toEqual(condition);
+
+        const refused = await createRule(
+          body(marker, { condition: { all: [{ any: [leaf(op, '7.5')] }] } }),
+          key,
+        ).expect(409);
+
+        expect(refused.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+        expect(await rulesOf(marker)).toHaveLength(1);
+      },
+    );
   });
 
   describe('keys stored before this change (rollout)', () => {

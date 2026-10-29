@@ -4,13 +4,17 @@ import { zodPipe } from '@rasta/nest-common';
 import {
   canonicalAmountMinor,
   canonicalBody,
+  canonicalDecimal,
   canonicalFieldsOf,
   canonicalInstant,
   canonicalPipe,
   canonicalText,
+  canonicalWithin,
+  withCanonicalForm,
 } from './canonical';
 import { hashRequestBody } from './idempotency';
-import { createRewardRuleSchema } from '../reward/dto';
+import { NUMERIC_COMPARISONS, canonicalCondition, createRewardRuleSchema } from '../reward/dto';
+import { conditionMet } from '../reward/rule-engine';
 
 describe('canonical request values (checklist #16)', () => {
   /** What zod records for `isoDateTime()`: `Z` only, any fraction. */
@@ -72,6 +76,85 @@ describe('canonical request values (checklist #16)', () => {
     });
   });
 
+  describe('decimals (by exact value, no float)', () => {
+    it.each([
+      ['7.50', '7.5'],
+      ['007', '7'],
+      ['7.', '7'],
+      ['.5', '0.5'],
+      ['+7.5', '7.5'],
+      ['-07.50', '-7.5'],
+      ['-0', '0'],
+      ['-0.000', '0'],
+      ['000.000', '0'],
+      ['0.10', '0.1'],
+      ['7.5', '7.5'],
+      // Beyond a double's precision: kept exactly, never rounded.
+      ['0.12345678901234567890120', '0.1234567890123456789012'],
+      ['900719925474099312345.000', '900719925474099312345'],
+    ])('%s → %s', (sent, canonical) => {
+      expect(canonicalDecimal(sent)).toBe(canonical);
+    });
+
+    it('leaves anything that is not a plain decimal exactly as sent', () => {
+      for (const sent of [
+        '',
+        '.',
+        '-',
+        '+',
+        ' 7.5',
+        '7.5 ',
+        '7.5e0',
+        '1e3',
+        '0x10',
+        'Infinity',
+        'NaN',
+        '7,5',
+        '1.2.3',
+        '--1',
+        'abc',
+      ]) {
+        expect(canonicalDecimal(sent)).toBe(sent);
+      }
+      expect(canonicalDecimal(7.5)).toBe(7.5);
+      expect(canonicalDecimal(true)).toBe(true);
+      expect(canonicalDecimal(null)).toBeNull();
+    });
+
+    it('two spellings with one canonical form are one number to `Number()`', () => {
+      for (const [a, b] of [
+        ['7.50', '7.5'],
+        ['007', '7'],
+        ['-0.0', '0'],
+        ['.5', '0.5'],
+      ]) {
+        expect(canonicalDecimal(a)).toBe(canonicalDecimal(b));
+        // `-0` and `0` are one value to every comparison the evaluator makes.
+        expect(Number(a) === Number(b)).toBe(true);
+      }
+    });
+  });
+
+  describe('a rewrite within the value’s own schema', () => {
+    it('rewrites only where the value as sent and its canonical form both pass', () => {
+      const short = z.string().max(4);
+      expect(canonicalWithin(short, '7.50', canonicalDecimal)).toBe('7.5');
+      // The canonical form would pass, the value as sent does not: left for zod to refuse.
+      expect(canonicalWithin(short, '07.50', canonicalDecimal)).toBe('07.50');
+      // The value passes, its canonical form would not: not rewritten into a refusal.
+      const twoDecimals = z.string().regex(/^\d+\.\d{2}$/);
+      expect(canonicalWithin(twoDecimals, '7.50', canonicalDecimal)).toBe('7.50');
+    });
+
+    it('finds a declared form through the wrappers, like any other field', () => {
+      const form = (value: unknown) => value;
+      const declared = withCanonicalForm(z.object({ a: z.string() }), form);
+      expect(canonicalFieldsOf(z.object({ c: declared.optional().nullable() }))).toEqual({
+        c: { kind: 'form', canonicalize: form },
+      });
+    });
+  });
+
   describe('text', () => {
     it('makes every line ending LF', () => {
       expect(canonicalText('a\r\nb\rc\nd')).toBe('a\nb\nc\nd');
@@ -86,6 +169,7 @@ describe('canonical request values (checklist #16)', () => {
         validFrom: { kind: 'instant', options: ZULU },
         validTo: { kind: 'instant', options: ZULU },
         label: { kind: 'text' },
+        condition: { kind: 'form', canonicalize: canonicalCondition },
       });
     });
 
@@ -152,6 +236,82 @@ describe('canonical request values (checklist #16)', () => {
       const sent = { ...first, creditPerPointMinor: '01000' };
       parse(sent);
       expect(sent.creditPerPointMinor).toBe('01000');
+    });
+
+    describe('the condition’s operands (Codex PR-480 r2, R2)', () => {
+      const leaf = (op: string, value: unknown) => ({ field: 'hours', op, value });
+      const shapes: [string, (node: unknown) => unknown][] = [
+        ['at the top', (node) => node],
+        ['under all → any', (node) => ({ all: [{ field: 'x', op: 'present' }, { any: [node] }] })],
+        ['under any → all', (node) => ({ any: [{ all: [{ field: 'x', op: 'absent' }, node] }] })],
+      ];
+      const withCondition = (condition: unknown) => ({
+        triggerEvent: 'USAGE_RECORDED',
+        points: 1,
+        condition,
+      });
+      const hashOf = (condition: unknown) => hashRequestBody(parse(withCondition(condition)));
+
+      describe.each(shapes)('%s', (_, shape) => {
+        it.each([...NUMERIC_COMPARISONS])(
+          '%s: hashes "7.50" as "7.5", "007" as "7", and stores the canonical form',
+          (op) => {
+            expect(hashOf(shape(leaf(op, '7.50')))).toBe(hashOf(shape(leaf(op, '7.5'))));
+            expect(hashOf(shape(leaf(op, '007')))).toBe(hashOf(shape(leaf(op, '7'))));
+            expect(parse(withCondition(shape(leaf(op, '07.50'))))).toMatchObject({
+              condition: shape(leaf(op, '7.5')),
+            });
+          },
+        );
+
+        it.each([...NUMERIC_COMPARISONS])('%s: still tells 7.5 from 7.6', (op) => {
+          expect(hashOf(shape(leaf(op, '7.5')))).not.toBe(hashOf(shape(leaf(op, '7.6'))));
+          expect(hashOf(shape(leaf(op, '7.50')))).not.toBe(hashOf(shape(leaf(op, '-7.5'))));
+        });
+
+        it.each(['eq', 'neq'])('%s: compared as text, so "7.50" and "7.5" stay two rules', (op) => {
+          expect(hashOf(shape(leaf(op, '7.50')))).not.toBe(hashOf(shape(leaf(op, '7.5'))));
+          expect(parse(withCondition(shape(leaf(op, '007'))))).toMatchObject({
+            condition: shape(leaf(op, '007')),
+          });
+        });
+      });
+
+      it('leaves JSON numbers, booleans, non-decimals and malformed nodes as sent', () => {
+        for (const value of [7.5, true, ' 7.5', '1e3', '']) {
+          expect(canonicalCondition(leaf('gte', value))).toEqual(leaf('gte', value));
+        }
+        expect(canonicalCondition({ field: 'hours', op: 'gte' })).toEqual({
+          field: 'hours',
+          op: 'gte',
+        });
+        for (const node of [null, 'gte', 7, ['7.50'], { all: 'x' }]) {
+          expect(canonicalCondition(node)).toEqual(node);
+        }
+      });
+
+      it('leaves the request’s own condition as it was', () => {
+        const sent = { all: [{ any: [leaf('lt', '07.50')] }] };
+        canonicalCondition(sent);
+        expect(sent).toEqual({ all: [{ any: [leaf('lt', '07.50')] }] });
+      });
+
+      it('executes the canonical condition exactly as the condition sent', () => {
+        const payloads = ['7.4', '7.5', '7.50', '7.6', '-7.5', '0', '-0', 7.5, 'x', undefined].map(
+          (hours) => ({ hours, x: 1 }),
+        );
+        for (const op of [...NUMERIC_COMPARISONS, 'eq', 'neq']) {
+          for (const value of ['7.50', '007.5', '-07.50', '-0.0', '.5', '7.']) {
+            for (const [, shape] of shapes) {
+              const sent = shape(leaf(op, value));
+              const canonical = canonicalCondition(sent);
+              for (const payload of payloads) {
+                expect(conditionMet(canonical, payload)).toBe(conditionMet(sent, payload));
+              }
+            }
+          }
+        }
+      });
     });
 
     it('leaves a body that is not an object for the schema to refuse', () => {

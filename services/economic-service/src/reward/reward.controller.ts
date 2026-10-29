@@ -280,8 +280,9 @@ export class RewardController {
   })
   async createRule(
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    // Canonical first (the amount, the instants, the label's line endings), so
-    // a retry that says the same thing differently replays rather than 409s.
+    // Canonical first (the amount, the instants, the label's line endings, the
+    // condition's numeric operands), so a retry that says the same thing
+    // differently replays rather than 409s.
     @Body(canonicalPipe(createRewardRuleSchema), zodPipe(createRewardRuleSchema))
     dto: CreateRewardRuleDto,
   ) {

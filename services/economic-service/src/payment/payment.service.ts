@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
-import { ID_PREFIXES, MAX_AMOUNT_MINOR } from '@rasta/contracts';
+import { ERROR_CODES, ID_PREFIXES, MAX_AMOUNT_MINOR } from '@rasta/contracts';
 import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
@@ -919,25 +919,31 @@ export class PaymentService {
         await answer?.refuse(tx, refusal);
         return { row, next: 'RELEASED' as const, refusal };
       }
-      // No money leaves a frozen wallet (PM ruling, round 2 on #143). Refused
-      // before any hold or provider call; the intent stays refundable once the
-      // wallet is active again. Returning a declined refund's hold, above,
-      // moves money back *into* the wallet and is still allowed. A reversal
-      // still owed after the provider refunded waits too, with its amount
-      // held, so nothing can spend it meanwhile.
-      if (wallet.status !== 'ACTIVE') throw refundWalletNotActive(intentId, wallet);
       // Refunded at the provider by an earlier attempt that could not record
-      // it: the hold is still there, and only step 3 is retried.
-      if (row.failureReason === REFUNDED_NOT_REVERSED) return { row, next: 'RECORD' as const };
+      // it: the hold is still there, and only step 3 is retried — once the
+      // wallet is ACTIVE (PM ruling, round 2 on #143). Until then the caller
+      // is told the provider has refunded, not that nothing was sent (Codex
+      // PR-480 r2, N1).
+      if (row.failureReason === REFUNDED_NOT_REVERSED) {
+        if (wallet.status !== 'ACTIVE') throw refundReversalPending(intentId, wallet);
+        return { row, next: 'RECORD' as const };
+      }
       // Outcome unknown: an aged REFUND_REQUESTED or a REFUND_UNKNOWN keeps
       // its hold (money safe, never lost or credited twice) and every later
-      // refund is refused here. Each has an open reconciliation task (ADR-064
-      // step B1); the reconciler (step B2) asks the provider and resolves it
-      // under the intent and wallet locks, or escalates it to a person
+      // refund is refused here, whatever the wallet's status — the provider
+      // may have refunded, so this is not the refusal of a refund never
+      // sent. Each has an open reconciliation task (ADR-064 step B1); the
+      // reconciler (step B2) asks the provider and resolves it under the
+      // intent and wallet locks, or escalates it to a person
       // (docs/runbooks/payment-refund-stuck.md).
       if (row.failureReason === REFUND_REQUESTED || row.failureReason === REFUND_UNKNOWN) {
         throw refundUnresolved(intentId, row.failureReason);
       }
+      // No money leaves a frozen wallet (PM ruling, round 2 on #143). Refused
+      // before any hold or provider call; the intent stays refundable once the
+      // wallet is active again. Returning a declined refund's hold, above,
+      // moves money back *into* the wallet and is still allowed.
+      if (wallet.status !== 'ACTIVE') throw refundWalletNotActive(intentId, wallet);
       await this.wallets.placeHold(tx, {
         wallet,
         amountMinor: row.amountMinor,
@@ -1041,7 +1047,16 @@ export class PaymentService {
         return view;
       });
     } catch (error) {
-      await this.markRefundUnresolved(requested.row, REFUNDED_NOT_REVERSED, reversalFailure(error));
+      const failure = reversalFailure(error);
+      await this.markRefundUnresolved(requested.row, REFUNDED_NOT_REVERSED, failure);
+      // The provider has refunded and the recording transaction refused and
+      // rolled back: the reversal is pending, not refused before the provider
+      // was asked — which the plain wallet or balance refusal would say
+      // (Codex PR-480 r2, N1). Any other failure may not have rolled back
+      // (a COMMIT whose answer was lost) and is passed on as it is.
+      if (failure !== 'REVERSAL_FAILED') {
+        throw refundReversalPending(intentId, undefined, failure, error);
+      }
       throw error;
     }
   }
@@ -1062,7 +1077,9 @@ export class PaymentService {
    * reversed past (Codex PR-480 r1, R1). Refused, nothing in this transaction
    * is written: the hold stays and the intent keeps its marker, which the
    * request path turns into `REFUNDED_NOT_REVERSED` — the state the reconciler
-   * already waits on (`WALLET_NOT_ACTIVE`) until the wallet is active again.
+   * already waits on (`WALLET_NOT_ACTIVE`) until the wallet is active again,
+   * while its task is PENDING; past the age limit it is escalated to a person
+   * (docs/runbooks/payment-refund-stuck.md § 2).
    */
   async recordRefund(
     tx: ExtendedPrismaClient,
@@ -1570,7 +1587,9 @@ const WALLET_NOT_ACTIVE = 'WALLET_NOT_ACTIVE';
 /**
  * A refund refused because its wallet is not ACTIVE: no money leaves a frozen
  * or closed wallet (PM ruling, round 2 on #143). Raised by step 1 before any
- * hold, and by `recordRefund` under the recording transaction's wallet lock.
+ * hold, and by `recordRefund` under the recording transaction's wallet lock —
+ * where the provider has already refunded, so the request path answers that
+ * one as {@link refundReversalPending} instead.
  */
 function refundWalletNotActive(intentId: string, wallet: LockedWallet): RastaError {
   return RastaError.businessRule(
@@ -1582,6 +1601,44 @@ function refundWalletNotActive(intentId: string, wallet: LockedWallet): RastaErr
       outcome: WALLET_NOT_ACTIVE,
     },
   );
+}
+
+/**
+ * `details[].code` of a refund the provider has made and whose ledger
+ * reversal is still pending (docs/06 § 6.7, § 6.8; Codex PR-480 r2, N1).
+ */
+export const REFUND_REVERSAL_PENDING = 'REFUND_REVERSAL_PENDING';
+
+const REFUND_REVERSAL_PENDING_MESSAGE =
+  'The payment provider has refunded this payment; recording its reversal in the ledger is ' +
+  'pending — see the payment intent for its current state';
+
+/**
+ * The provider has refunded, and the ledger reversal waits — for the wallet
+ * to be ACTIVE again, or (the balance defence) for a person. Distinct from a
+ * refusal before the provider was asked: same 422 and top-level code as every
+ * refund refusal, its own closed reason in `details`, a fixed message. The
+ * amount stays held and the intent says `REFUNDED_NOT_REVERSED`. Raised by
+ * step 3's refusal and by every later attempt while the wallet is inactive.
+ */
+function refundReversalPending(
+  intentId: string,
+  wallet?: LockedWallet,
+  outcome: Exclude<ReversalFailure, 'REVERSAL_FAILED'> = WALLET_NOT_ACTIVE,
+  cause?: unknown,
+): RastaError {
+  return new RastaError(ERROR_CODES.BUSINESS_RULE_VIOLATION, REFUND_REVERSAL_PENDING_MESSAGE, {
+    details: [
+      { path: 'refund', code: REFUND_REVERSAL_PENDING, message: REFUND_REVERSAL_PENDING_MESSAGE },
+    ],
+    internalContext: {
+      paymentIntentId: intentId,
+      ...(wallet ? { walletId: wallet.id, walletStatus: wallet.status } : {}),
+      ...(cause instanceof RastaError ? cause.internalContext : {}),
+      outcome,
+    },
+    cause,
+  });
 }
 
 /** The reason step 3 failed, as `PAYMENT_REFUND_UNRECONCILED` names it. */

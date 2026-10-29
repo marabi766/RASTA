@@ -37,7 +37,9 @@ import type { RefundRequest } from '../src/payment/provider';
  *     `PAYMENT_REFUNDED`;
  *
  * and once the wallet is ACTIVE again, the reconciler (or the operator's
- * retry of the refund) reverses it exactly once.
+ * retry of the refund) reverses it exactly once — the reconciler only while
+ * the task is PENDING: past the age limit it is ESCALATED and the operator's
+ * retry is what reverses it (Codex PR-480 r2, N2).
  */
 describe('a refund whose wallet stops being ACTIVE while the provider is asked (real database)', () => {
   let prisma: PrismaService;
@@ -261,6 +263,7 @@ describe('a refund whose wallet stops being ACTIVE while the provider is asked (
       await expect(refundBy(made.organizationId, made.intentId)).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
         status: 422,
+        details: [{ path: 'refund', code: 'REFUND_REVERSAL_PENDING' }],
         internalContext: { walletStatus: status, outcome: 'WALLET_NOT_ACTIVE' },
       });
 
@@ -321,6 +324,7 @@ describe('a refund whose wallet stops being ACTIVE while the provider is asked (
       changeStatusBeforeTransaction(2, made.walletId, status);
       await expect(refundBy(made.organizationId, made.intentId)).rejects.toMatchObject({
         code: 'BUSINESS_RULE_VIOLATION',
+        details: [{ code: 'REFUND_REVERSAL_PENDING' }],
         internalContext: { walletStatus: status, outcome: 'WALLET_NOT_ACTIVE' },
       });
       jest.restoreAllMocks();
@@ -335,8 +339,10 @@ describe('a refund whose wallet stops being ACTIVE while the provider is asked (
         await eventsOf(made.organizationId, ECONOMIC_EVENTS.PAYMENT_REFUND_UNRECONCILED),
       ).toHaveLength(1);
 
-      // While it stays inactive, a plain retry is refused in step 1.
+      // While it stays inactive, a plain retry is refused in step 1 — and
+      // still told the provider has refunded (Codex PR-480 r2, N1).
       await expect(refundBy(made.organizationId, made.intentId)).rejects.toMatchObject({
+        details: [{ code: 'REFUND_REVERSAL_PENDING' }],
         internalContext: { walletStatus: status },
       });
       await expectHeldNotReversed(made, held);
@@ -349,6 +355,65 @@ describe('a refund whose wallet stops being ACTIVE while the provider is asked (
       expect(asked).not.toHaveBeenCalled();
       await expectNoSecondReversal(made);
     });
+  });
+
+  it('a refund whose provider outcome is unknown is refused as unfinished, not as never sent, on an inactive wallet', async () => {
+    const made = await topUp(`${org.c}-UNKNOWN-FROZEN`, 370n);
+    jest.spyOn(provider, 'refund').mockRejectedValueOnce(new Error('provider timeout'));
+    await expect(refundBy(made.organizationId, made.intentId)).rejects.toThrow('provider timeout');
+    expect((await intentOf(made.intentId)).failureReason).toBe('REFUND_UNKNOWN');
+    jest.restoreAllMocks();
+    await setStatus(made.walletId, 'FROZEN');
+    const held = await ledgerOf(made.organizationId, made.walletId);
+    const asked = jest.spyOn(provider, 'refund');
+
+    const refused = refundBy(made.organizationId, made.intentId);
+
+    await expect(refused).rejects.toMatchObject({
+      code: 'BUSINESS_RULE_VIOLATION',
+      message: expect.stringContaining('has not finished'),
+      internalContext: { outcome: 'REFUND_UNKNOWN' },
+    });
+    await expect(refused).rejects.toMatchObject({ details: undefined });
+    expect(asked).not.toHaveBeenCalled();
+    expect(await ledgerOf(made.organizationId, made.walletId)).toEqual(held);
+  });
+
+  it('a deferral past the age limit is escalated and not resumed by reactivation alone; the operator’s retry reverses it once', async () => {
+    const made = await topUp(`${org.c}-AGED`, 290n);
+    changeStatusDuringProviderCall(made.walletId, 'FROZEN');
+    await expect(refundBy(made.organizationId, made.intentId)).rejects.toMatchObject({
+      details: [{ code: 'REFUND_REVERSAL_PENDING' }],
+    });
+    jest.restoreAllMocks();
+    const held = await ledgerOf(made.organizationId, made.walletId);
+    await runUnscoped('the suite ages the task past the limit', () =>
+      prisma.client.$executeRawUnsafe(
+        `UPDATE payment_reconciliation_task
+            SET created_at = now() - make_interval(hours => $2::int + 1),
+                next_attempt_at = now() - interval '1 second'
+          WHERE payment_intent_id = $1`,
+        made.intentId,
+        env.ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS,
+      ),
+    );
+    await sweep();
+    expect(await tasksOf(made.intentId)).toEqual([
+      expect.objectContaining({ status: 'ESCALATED', lastOutcome: 'WALLET_NOT_ACTIVE' }),
+    ]);
+
+    // Active again: the reconciler no longer claims an ESCALATED task.
+    await setStatus(made.walletId, 'ACTIVE');
+    await makeDue(made.intentId);
+    await sweep();
+    await expectHeldNotReversed(made, held);
+
+    // The runbook's procedure (§ 2, § 3-a): the refund API, without the provider.
+    const asked = jest.spyOn(provider, 'refund');
+    await refundBy(made.organizationId, made.intentId);
+    await expectReversedOnce(made, held);
+    expect(asked).not.toHaveBeenCalled();
+    await expectNoSecondReversal(made);
   });
 
   it('a change during the provider call to a still-ACTIVE wallet reverses as before (the control)', async () => {

@@ -17,7 +17,10 @@ import { amountMinorSchema, legacyDatetimeRegex, type IsoDateTimeOptions } from 
  *   - an amount: digits only, no leading zeros (`"000"` → `"0"`);
  *   - an instant: `Date.prototype.toISOString` — UTC, `Z`, milliseconds —
  *     the precision the column stores and `new Date(…)` executes;
- *   - human text: CRLF and CR → LF.
+ *   - human text: CRLF and CR → LF;
+ *   - a form a schema declares itself ({@link withCanonicalForm}) — the reward
+ *     rule's condition puts the operand of each numeric comparison in its
+ *     exact decimal form (Codex PR-480 r2, R2).
  *
  * A value is rewritten only when it already passes the field's own pattern
  * and its canonical form does too, so what a schema accepts and refuses is
@@ -31,7 +34,10 @@ import { amountMinorSchema, legacyDatetimeRegex, type IsoDateTimeOptions } from 
  */
 
 export type CanonicalKind =
-  { kind: 'amountMinor' } | { kind: 'instant'; options: IsoDateTimeOptions } | { kind: 'text' };
+  | { kind: 'amountMinor' }
+  | { kind: 'instant'; options: IsoDateTimeOptions }
+  | { kind: 'text' }
+  | { kind: 'form'; canonicalize: (value: unknown) => unknown };
 
 export type CanonicalFields = Readonly<Record<string, CanonicalKind>>;
 
@@ -62,6 +68,63 @@ export function canonicalText(value: unknown): unknown {
   return typeof value === 'string' ? value.replace(/\r\n?/g, '\n') : value;
 }
 
+const DECIMAL = /^([+-]?)(\d*)(?:\.(\d*))?$/;
+
+/**
+ * A plain decimal string by its exact value — no float: no leading zeros in
+ * the whole part, no trailing zeros in the fraction, no `.` with nothing
+ * after it, no `+`, and one zero (`"-0.0"` → `"0"`); a negative value keeps
+ * its `-`. `"7.50"` → `"7.5"`, `"007"` → `"7"`, `".5"` → `"0.5"`. Two strings
+ * with the same canonical form have the same exact value, so `Number()` reads
+ * them as the same number. Anything that is not a plain decimal — an
+ * exponent, a space, hex, an empty string — is left exactly as sent.
+ */
+export function canonicalDecimal(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const match = DECIMAL.exec(value);
+  if (!match) return value;
+  const [, sign, whole = '', fraction = ''] = match;
+  if (whole === '' && fraction === '') return value;
+  const integer = whole.replace(/^0+/, '') || '0';
+  const decimals = fraction.replace(/0+$/, '');
+  const digits = decimals ? `${integer}.${decimals}` : integer;
+  return sign === '-' && digits !== '0' ? `-${digits}` : digits;
+}
+
+/**
+ * `canonicalize(value)` where both the value as sent and its canonical form
+ * pass `schema` — the value's own schema — and the value as sent otherwise, so
+ * what the schema accepts and refuses is unchanged.
+ */
+export function canonicalWithin(
+  schema: z.ZodType,
+  value: unknown,
+  canonicalize: (value: unknown) => unknown,
+): unknown {
+  const canonical = canonicalize(value);
+  if (canonical === value) return value;
+  return schema.safeParse(value).success && schema.safeParse(canonical).success
+    ? canonical
+    : value;
+}
+
+const DECLARED_FORMS = new WeakMap<z.ZodType, (value: unknown) => unknown>();
+
+/**
+ * Declares, on the schema itself, the canonical form of a value no field kind
+ * covers — a structured value whose meaning only its own module knows (the
+ * reward rule's condition). {@link canonicalFieldsOf} finds it through the
+ * same optional, nullable and defaulted wrappers as any other field, so a DTO
+ * that reuses the schema is normalized without remembering a list.
+ */
+export function withCanonicalForm<T extends z.ZodType>(
+  schema: T,
+  canonicalize: (value: unknown) => unknown,
+): T {
+  DECLARED_FORMS.set(schema, canonicalize);
+  return schema;
+}
+
 function canonicalValue(value: unknown, field: CanonicalKind): unknown {
   switch (field.kind) {
     case 'amountMinor':
@@ -70,6 +133,8 @@ function canonicalValue(value: unknown, field: CanonicalKind): unknown {
       return canonicalInstant(value, field.options);
     case 'text':
       return canonicalText(value);
+    case 'form':
+      return field.canonicalize(value);
   }
 }
 
@@ -92,9 +157,11 @@ export function canonicalBody(body: unknown, fields: CanonicalFields): unknown {
 /**
  * The fields of an object schema that have a canonical form, read from the
  * schema itself: {@link amountMinorSchema} is an amount, a string with an ISO
- * datetime check is an instant (with that check's zone options), and a string
- * with no format or pattern is human text. Optional, nullable and defaulted
- * wrappers are seen through. Nested objects are not walked.
+ * datetime check is an instant (with that check's zone options), a string
+ * with no format or pattern is human text, and a schema that declares its own
+ * form ({@link withCanonicalForm}) has that form. Optional, nullable and
+ * defaulted wrappers are seen through. Nested objects are not walked: a
+ * structured value declares its form.
  */
 export function canonicalFieldsOf(schema: z.ZodObject): CanonicalFields {
   const fields: Record<string, CanonicalKind> = {};
@@ -125,6 +192,8 @@ interface CheckDef {
 }
 
 function kindOf(schema: z.ZodType): CanonicalKind | null {
+  const declared = DECLARED_FORMS.get(schema);
+  if (declared) return { kind: 'form', canonicalize: declared };
   if (schema === amountMinorSchema) return { kind: 'amountMinor' };
   if (schema._zod.def.type !== 'string') return null;
   const checks = ((schema._zod.def as { checks?: { _zod: { def: CheckDef } }[] }).checks ?? []).map(
