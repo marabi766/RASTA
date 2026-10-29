@@ -354,8 +354,16 @@ jobs:
           path: ${{ runner.temp }}/temporal-test-server
           key: temporal-test-server-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
 
+      - name: Unit-step concurrency is bounded
+        # Static tripwire for accidental changes to the root bound or a second
+        # literal unbounded unit run. Workflow code review covers dynamic commands
+        # and shell behavior; this does not prove execution or failure propagation.
+        run: pnpm run test:unit-step-concurrency
+
       - name: Unit tests
-        run: pnpm run test:unit
+        # The root CI script limits Turbo package concurrency. Package-time sums
+        # decreased in the measured runs; step wall time was unchanged (~270 s).
+        run: pnpm run test:unit:ci
         env:
           TEMPORAL_TEST_SERVER_DIR: ${{ runner.temp }}/temporal-test-server
 
@@ -4713,3 +4721,6 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
+          # Time-boxed, per-CVE exceptions with a reason and an expiry date
+          # (.trivyignore.services); an expired entry fails the scan again.
+          trivyignores: .trivyignore.services

@@ -73,7 +73,7 @@ export async function submitUpdateDriver(
   const result = await updateDriver(session, driverId, parsed.request, submissionId);
 
   if (result.kind === 'CREATED') {
-    redirect(`/drivers/${encodeURIComponent(driverId)}?updated=1`);
+    redirect(`/drivers/${encodeURIComponent(driverId)}`);
   }
 
   switch (result.kind) {
@@ -132,7 +132,7 @@ export async function submitChangeStatus(
   const result = await changeDriverStatus(session, driverId, parsed.request, submissionId);
 
   if (result.kind === 'CREATED') {
-    redirect(`/drivers/${encodeURIComponent(driverId)}?statusChanged=1`);
+    redirect(`/drivers/${encodeURIComponent(driverId)}`);
   }
 
   switch (result.kind) {
@@ -188,7 +188,7 @@ export async function submitAssign(
   const result = await createAssignment(session, parsed.request, submissionId);
 
   if (result.kind === 'CREATED') {
-    redirect(`/drivers/${encodeURIComponent(driverId)}?assigned=1`);
+    redirect(`/drivers/${encodeURIComponent(driverId)}`);
   }
 
   switch (result.kind) {
@@ -248,7 +248,7 @@ export async function submitEndAssignment(
   const result = await endAssignment(session, assignmentId, parsed.request, submissionId);
 
   if (result.kind === 'CREATED') {
-    redirect(`/drivers/${encodeURIComponent(driverId)}?ended=1`);
+    redirect(`/drivers/${encodeURIComponent(driverId)}`);
   }
 
   switch (result.kind) {

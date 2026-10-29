@@ -74,7 +74,7 @@ describe('reward grant refusal (S-09)', () => {
           ruleId: 'RWR_A',
           error: RastaError.businessRule(`credit for ${SENTINEL} must be positive`),
         },
-        { ruleId: 'RWR_B', error: RastaError.ledgerUnbalanced('JNL_1', SENTINEL) },
+        { ruleId: 'RWR_B', error: RastaError.ledgerUnbalanced('JNL_1', 'DEBITS_NOT_CREDITS') },
       ],
     );
     // The control: the underlying errors carry the sentinel, in the typed

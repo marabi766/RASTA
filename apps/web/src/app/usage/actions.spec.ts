@@ -6,6 +6,8 @@ import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_USAGE_FORM } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
+import { landing } from '@/test/landing';
 
 /**
  * The write path, from a posted form to a call on the gateway.
@@ -58,7 +60,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'operator',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -225,7 +227,12 @@ describe('what reaches the service', () => {
 
   it('redirects after a successful write, so a refresh cannot resubmit it', async () => {
     await expect(submitUsage(IDLE_USAGE_FORM, formData(VALID))).rejects.toThrow(/NEXT_REDIRECT/);
-    expect(redirect).toHaveBeenCalledWith('/usage?created=USG_1');
+    expect(landing(redirect.mock.calls[0]![0] as string, SESSION, 'USG_1', ['created'])).toEqual({
+      path: '/usage',
+      query: { created: 'USG_1' },
+      bound: true,
+      confirmed: 'created',
+    });
   });
 
   it('sends one submission twice under one reference — the double-submit case', async () => {

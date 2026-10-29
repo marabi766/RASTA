@@ -11,6 +11,7 @@ import { TransactionRepository } from '../src/transaction/transaction.repository
 import { TransactionService } from '../src/transaction/transaction.service';
 import { CommissionService } from '../src/commission/commission.service';
 import { RewardService } from '../src/reward/reward.service';
+import { IdempotentAnswer } from '../src/shared/idempotency';
 import { SettlementService } from '../src/settlement/settlement.service';
 import { PaymentReconciliationRepository } from '../src/payment/payment-reconciliation.repository';
 import { loadEconomicEnv, type EconomicEnv } from '../src/config/env';
@@ -312,6 +313,19 @@ export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise
   };
 
   return runWithContext(context, async () => fn());
+}
+
+/**
+ * The answer a service-level call stores nowhere: for a suite that drives
+ * `RewardService.createRule` directly, with no request and no key. The route
+ * always passes a real one (`IdempotencyStore.run`), so this is a test-only
+ * way past the requirement, never a default the service has.
+ */
+export function unanswered<T>(): IdempotentAnswer<T> {
+  return new IdempotentAnswer<T>(
+    async () => undefined,
+    async () => undefined,
+  );
 }
 
 export function id(prefix: string): string {

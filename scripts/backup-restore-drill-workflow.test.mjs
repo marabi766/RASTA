@@ -12,6 +12,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -117,13 +118,14 @@ test('the drill step runs the existing CLI, keeps its status and sends its outpu
   assert.ok(names.indexOf(DRILL) < names.indexOf(SUMMARY));
   assert.ok(names.indexOf(SUMMARY) < names.indexOf(CLEANUP));
   const run = step(DRILL).run;
-  assert.match(run, /mktemp -d "\$\{RUNNER_TEMP\}\/backup-drill\.XXXXXX"/);
+  // Created private (0700) and exclusively: an existing directory fails the step.
+  assert.match(run, /mkdir -m 700 -- "\$\{dir\}"/);
   assert.match(
     run,
     /scripts\/backup-restore-drill --report "\$\{dir\}\/report\.json" \\\n\s+>"\$\{dir\}\/stdout\.json" 2>"\$\{dir\}\/stderr\.log" \|\| status=\$\?/,
   );
   assert.match(run, /exit "\$\{status\}"\s*$/);
-  // The only thing echoed is the status number.
+  // The only things echoed are the mask command and the status number.
   const echoes = run.split('\n').filter((line) => /^\s*echo /.test(line));
   assert.equal(echoes.length, 3);
   assert.ok(
@@ -131,7 +133,25 @@ test('the drill step runs the existing CLI, keeps its status and sends its outpu
   );
 });
 
-test('summary and cleanup always run, read only what they may, and delete the private directory', () => {
+test('the private path is never exported or put in a step header, and is masked before first use', () => {
+  const code = text.replace(/^\s*#.*$/gm, '');
+  // GITHUB_ENV, GITHUB_OUTPUT and GITHUB_PATH would print or carry it into every later step.
+  assert.doesNotMatch(code, /GITHUB_ENV|GITHUB_OUTPUT|GITHUB_PATH|GITHUB_STATE|BACKUP_DRILL_DIR/);
+  assert.equal(workflow.env.BACKUP_DRILL_DIR, undefined);
+  for (const candidate of job.steps) {
+    assert.doesNotMatch(JSON.stringify(candidate.env ?? {}), /backup-drill|RUNNER_TEMP|\/tmp/);
+    if (!candidate.run?.includes('${dir}')) continue;
+    const script = candidate.run;
+    assert.match(script, /^\s*dir="\$\{RUNNER_TEMP\}\/backup-drill"$/m, candidate.name);
+    assert.ok(
+      script.indexOf('echo "::add-mask::${dir}"') > -1 &&
+        script.indexOf('echo "::add-mask::${dir}"') < script.indexOf('"${dir}/'),
+      `${candidate.name}: masked before first use`,
+    );
+  }
+});
+
+test('summary and cleanup always run, read only what they may, and delete the directory only after a clean cleanup', () => {
   for (const name of [SUMMARY, CLEANUP]) {
     assert.match(step(name).if, /always\(\)/);
     assert.match(step(name).if, /steps\.drill\.conclusion != 'skipped'/);
@@ -142,18 +162,20 @@ test('summary and cleanup always run, read only what they may, and delete the pr
   assert.match(summary, /--exit-code "\$\{status\}"/);
   assert.match(summary, /tee -a "\$\{GITHUB_STEP_SUMMARY\}"\s*$/);
   for (const script of [summary, cleanup]) {
-    const files = [...script.matchAll(/\$\{BACKUP_DRILL_DIR\}\/([\w.-]+)/g)].map((m) => m[1]);
+    const files = [...script.matchAll(/\$\{dir\}\/([\w.-]+)/g)].map((m) => m[1]);
     for (const file of files)
       assert.ok(['exit-code', 'report.json', 'stderr.log'].includes(file), file);
     // Nothing reads a file to the log; the one cat is of the status number.
     for (const line of script.split('\n').filter((l) => /\b(cat|head|tail|jq|less|grep)\b/.test(l)))
-      assert.match(line, /cat "\$\{BACKUP_DRILL_DIR\}\/exit-code"/);
+      assert.match(line, /cat "\$\{dir\}\/exit-code"/);
   }
+  // Recovery is not conditional on the report existing: a missing record is the CLI's refusal.
+  assert.match(cleanup, /scripts\/backup-restore-drill --cleanup-from "\$\{dir\}\/report\.json"/);
+  assert.doesNotMatch(cleanup, /\[ -[a-z] /);
   assert.match(
     cleanup,
-    /scripts\/backup-restore-drill --cleanup-from "\$\{BACKUP_DRILL_DIR\}\/report\.json"/,
+    /if \[ "\$\{status\}" -eq 0 \]; then\n\s+rm -rf -- "\$\{dir:\?\}"\nelse|if \[ "\$\{status\}" -eq 0 \]; then\n\s+rm -rf -- "\$\{dir:\?\}"\n\s*else/,
   );
-  assert.match(cleanup, /rm -rf -- "\$\{BACKUP_DRILL_DIR:\?\}"/);
   assert.match(cleanup, /exit "\$\{status\}"\s*$/);
 });
 
@@ -168,9 +190,19 @@ function sandbox(drillBody) {
   const directory = mkdtempSync(join(tmpdir(), 'drill-workflow-'));
   const cwd = join(directory, 'repo');
   mkdirSync(join(cwd, 'scripts'), { recursive: true });
-  for (const file of ['backup-restore-drill-summary.mjs', 'backup-restore-drill-lib.mjs'])
+  for (const file of [
+    'backup-restore-drill-summary.mjs',
+    'backup-restore-drill-lib.mjs',
+    'infra-preflight-lib.mjs',
+    'check-kafka-credential-scope-lib.mjs',
+    'database-services.mjs',
+  ])
     cpSync(join(root, 'scripts', file), join(cwd, 'scripts', file));
-  // The summary imports nothing from node_modules; the stand-in needs none either.
+  // The summary reads the service registry, as it does in the checkout.
+  const role = 'infrastructure/docker/postgres/lib/role-passwords.bash';
+  mkdirSync(join(cwd, role, '..'), { recursive: true });
+  cpSync(join(root, role), join(cwd, role));
+  symlinkSync(join(root, 'node_modules'), join(cwd, 'node_modules'), 'dir');
   writeFileSync(join(cwd, 'scripts/backup-restore-drill'), drillBody);
   chmodSync(join(cwd, 'scripts/backup-restore-drill'), 0o755);
   const temp = join(directory, 'runner-temp');
@@ -184,15 +216,43 @@ function sandbox(drillBody) {
   };
   writeFileSync(env.GITHUB_ENV, '');
   writeFileSync(env.GITHUB_STEP_SUMMARY, '');
+  // What the runner would write to the job log for each step: the environment header (workflow,
+  // job, step `env:` and everything added through GITHUB_ENV), then the step's output with the
+  // `::add-mask::` commands applied (the command line itself is not printed).
+  const masks = new Set();
+  const log = [];
   const run = (name) => {
-    const dir = readFileSync(env.GITHUB_ENV, 'utf8').match(/^BACKUP_DRILL_DIR=(.*)$/m)?.[1];
-    return spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', extract(name)], {
-      cwd,
-      env: { ...env, ...(dir ? { BACKUP_DRILL_DIR: dir } : {}) },
-      encoding: 'utf8',
-    });
+    const declared = { ...workflow.env, ...job.env, ...step(name).env };
+    const exported = Object.fromEntries(
+      readFileSync(env.GITHUB_ENV, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+    );
+    const result = spawnSync(
+      'bash',
+      ['--noprofile', '--norc', '-eo', 'pipefail', '-c', extract(name)],
+      {
+        cwd,
+        env: { ...env, ...declared, ...exported },
+        encoding: 'utf8',
+      },
+    );
+    const header = Object.entries({ ...declared, ...exported })
+      .map(([key, value]) => `${key}: ${value}`)
+      .join('\n');
+    const output = [];
+    for (const line of `${result.stdout}${result.stderr}`.split('\n')) {
+      const mask = /^::add-mask::(.*)$/.exec(line);
+      if (mask) masks.add(mask[1]);
+      else output.push(line);
+    }
+    let printed = `${header}\n${output.join('\n')}`;
+    for (const mask of masks) printed = printed.split(mask).join('***');
+    log.push(printed);
+    return result;
   };
-  return { directory, cwd, temp, env, run };
+  return { directory, cwd, temp, env, run, log, dir: join(temp, 'backup-drill') };
 }
 
 // A stand-in for scripts/backup-restore-drill: `--report` writes a failing report, spews
@@ -232,11 +292,42 @@ test('workflow scripts: a failing drill fails the step with its status and leaks
     );
     const cleanup = box.run(CLEANUP);
     assert.equal(cleanup.status, 0);
-    assert.equal(readdirSync(box.temp).length, 0, 'private directory removed');
+    assert.equal(
+      readdirSync(box.temp).length,
+      0,
+      'private directory removed after a clean cleanup',
+    );
     assert.match(
       readFileSync(join(box.directory, 'cleanup-calls'), 'utf8'),
       /^cleanup-from .*report\.json\n$/,
     );
+  } finally {
+    rmSync(box.directory, { recursive: true, force: true });
+  }
+});
+
+test('runner log: the private path appears in no step header and no output, even when a command fails on it', () => {
+  const box = sandbox(STAND_IN);
+  try {
+    box.run(DRILL);
+    box.run(SUMMARY);
+    // A second drill step in the same job: mkdir fails on the existing directory and its own
+    // error message quotes the path. The runner masks it, so the log must not.
+    const again = box.run(DRILL);
+    assert.notEqual(again.status, 0);
+    assert.match(again.stderr, /File exists/);
+    assert.ok(again.stderr.includes(box.dir), 'the raw command output does quote the path');
+    box.run(CLEANUP);
+    assert.ok(box.log.length >= 4);
+    for (const entry of box.log) {
+      assert.ok(!entry.includes(box.dir), 'the private path reached the runner log');
+      assert.ok(!entry.includes(box.temp), 'the runner temp path reached the runner log');
+    }
+    assert.ok(
+      box.log.some((entry) => entry.includes('***')),
+      'it was masked, not just absent',
+    );
+    assert.equal(readFileSync(box.env.GITHUB_ENV, 'utf8'), '', 'nothing exported to later steps');
   } finally {
     rmSync(box.directory, { recursive: true, force: true });
   }
@@ -248,8 +339,7 @@ test('workflow scripts: a status of 0 with a report that is not a full pass stil
     box.run(DRILL);
     // As if the CLI had said 0 while its report is the failing one: the summary's own
     // recomputation from the evidence refuses.
-    const dir = readFileSync(box.env.GITHUB_ENV, 'utf8').match(/^BACKUP_DRILL_DIR=(.*)$/m)[1];
-    writeFileSync(join(dir, 'exit-code'), '0\n');
+    writeFileSync(join(box.dir, 'exit-code'), '0\n');
     const summary = box.run(SUMMARY);
     assert.equal(summary.status, 1);
     assert.match(summary.stdout, /FAILED/);
@@ -259,39 +349,36 @@ test('workflow scripts: a status of 0 with a report that is not a full pass stil
   }
 });
 
-test('workflow scripts: a drill with no status file (timeout or cancel) is reported, not hidden', () => {
-  const box = sandbox('#!/usr/bin/env bash\nexit 0\n');
+test('workflow scripts: a drill with no status file (timeout or cancel) is reported, and the missing record is refused, not skipped', () => {
+  // The stand-in refuses a report that is not there, as the real CLI does (exit 2).
+  const box = sandbox(
+    '#!/usr/bin/env bash\n[ "$1" = "--cleanup-from" ] && { [ -f "$2" ] || exit 2; echo called >> "$(dirname "$2")/../../cleanup-calls"; exit 0; }\nexit 0\n',
+  );
   try {
-    // The directory exists (the drill step started) but the step never wrote its status.
-    const dir = join(box.temp, 'backup-drill.ABCDEF');
-    mkdirSync(dir);
-    writeFileSync(box.env.GITHUB_ENV, `BACKUP_DRILL_DIR=${dir}\n`);
+    // The directory exists (the drill step started) but it never wrote a status or a report.
+    mkdirSync(box.dir, { mode: 0o700 });
     const summary = box.run(SUMMARY);
     assert.equal(summary.status, 1);
     assert.match(summary.stdout, /CLI exit code: n\/a/);
     assert.match(summary.stdout, /left no readable report/);
     const cleanup = box.run(CLEANUP);
-    assert.equal(cleanup.status, 0);
-    assert.equal(existsSync(dir), false);
-    assert.equal(
-      existsSync(join(box.directory, 'cleanup-calls')),
-      false,
-      'no report, no cleanup call',
-    );
+    assert.equal(cleanup.status, 2, 'a missing record fails the job; it is never "nothing to do"');
+    assert.equal(existsSync(box.dir), true, 'the directory is kept when cleanup did not succeed');
+    assert.match(cleanup.stdout, /Cleanup did not complete \(status 2\)/);
+    assert.ok(!box.log.at(-1).includes(box.dir), 'as the runner would print it');
   } finally {
     rmSync(box.directory, { recursive: true, force: true });
   }
 });
 
-test('workflow scripts: a cleanup that cannot remove the project fails the job, after deleting the directory', () => {
+test('workflow scripts: a cleanup that cannot remove the project fails the job and keeps the recovery record', () => {
   const box = sandbox(STAND_IN);
   try {
     box.run(DRILL);
-    const dir = readFileSync(box.env.GITHUB_ENV, 'utf8').match(/^BACKUP_DRILL_DIR=(.*)$/m)[1];
     writeFileSync(join(box.cwd, 'scripts/backup-restore-drill'), '#!/usr/bin/env bash\nexit 1\n');
     const cleanup = box.run(CLEANUP);
     assert.equal(cleanup.status, 1);
-    assert.equal(existsSync(dir), false);
+    assert.equal(existsSync(join(box.dir, 'report.json')), true, 'the record survives for a retry');
   } finally {
     rmSync(box.directory, { recursive: true, force: true });
   }

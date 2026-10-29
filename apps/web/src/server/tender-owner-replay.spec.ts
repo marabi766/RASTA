@@ -9,6 +9,7 @@ import {
 } from './tender-owner-replay';
 import { mintSubmissionId } from './submission';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /** The owner's replay stamp: what it binds a command to, and until when. */
 
@@ -24,7 +25,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'author',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: 1_900_000_600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

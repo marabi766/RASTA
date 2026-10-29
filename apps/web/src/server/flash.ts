@@ -1,5 +1,8 @@
 import { z } from 'zod';
 
+import { FLASH_PARAM } from '@/lib/form-fields';
+
+import { pageHref } from './page-context';
 import { signPayload, verifyPayload } from './signed-payload';
 import type { WebSession } from './session';
 
@@ -53,4 +56,20 @@ export function readFlash<A extends string>(
   const payload = verifyPayload(session, PURPOSE, token, flashSchema, now);
   if (!payload || payload.subject !== subject) return undefined;
   return actions.find((action) => action === payload.action);
+}
+
+/**
+ * Where a write's redirect lands: `path` with `params` and the flash for
+ * `action` on `subject`, bound to the organization the session acts for
+ * (`server/page-context.ts`) — the one boundary every confirmation goes
+ * through, so none is ever a flag somebody could type (PR 405 review 2, F2).
+ */
+export function flashHref(
+  session: WebSession,
+  path: string,
+  subject: string,
+  action: string,
+  params: Readonly<Record<string, string | undefined>> = {},
+): string {
+  return pageHref(session, path, { ...params, [FLASH_PARAM]: mintFlash(session, subject, action) });
 }

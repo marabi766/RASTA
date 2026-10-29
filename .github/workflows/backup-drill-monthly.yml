@@ -67,9 +67,12 @@ jobs:
         run: |
           # One private directory per run holds the report, the CLI's stdout (it carries
           # synthetic ledger amounts) and stderr. Nothing in it is printed or uploaded; the next
-          # step logs an allowlisted summary and the last step deletes it.
-          dir="$(mktemp -d "${RUNNER_TEMP}/backup-drill.XXXXXX")"
-          echo "BACKUP_DRILL_DIR=${dir}" >> "${GITHUB_ENV}"
+          # step logs an allowlisted summary and the last step deletes it. Its path is never
+          # exported (GITHUB_ENV or step env: would print it in the header of every later step);
+          # each step derives it from RUNNER_TEMP, and the runner masks it in the log.
+          dir="${RUNNER_TEMP}/backup-drill"
+          echo "::add-mask::${dir}"
+          mkdir -m 700 -- "${dir}"
           status=0
           scripts/backup-restore-drill --report "${dir}/report.json" \
             >"${dir}/stdout.json" 2>"${dir}/stderr.log" || status=$?
@@ -79,20 +82,28 @@ jobs:
       - name: Summary (allowlisted fields only)
         if: ${{ always() && steps.drill.conclusion != 'skipped' }}
         run: |
-          status="$(cat "${BACKUP_DRILL_DIR}/exit-code" 2>/dev/null || echo none)"
+          dir="${RUNNER_TEMP}/backup-drill"
+          echo "::add-mask::${dir}"
+          status="$(cat "${dir}/exit-code" 2>/dev/null || echo none)"
           node scripts/backup-restore-drill-summary.mjs \
-            --report "${BACKUP_DRILL_DIR}/report.json" \
+            --report "${dir}/report.json" \
             --exit-code "${status}" \
-            --progress "${BACKUP_DRILL_DIR}/stderr.log" | tee -a "${GITHUB_STEP_SUMMARY}"
+            --progress "${dir}/stderr.log" | tee -a "${GITHUB_STEP_SUMMARY}"
       - name: Remove anything the drill left
         # Also after a cancellation or a timeout, when the CLI may not have finished its own
-        # teardown: removes the project the report recorded (never another project's
-        # resources) and then the private directory.
+        # teardown. The CLI proves the report is the one this drill wrote (project, directory,
+        # compose definition, process groups) before it removes anything, and refuses a missing,
+        # unreadable or mismatched record with a non-zero status. The private directory (the
+        # recovery record included) is deleted only after a cleanup that succeeded.
         if: ${{ always() && steps.drill.conclusion != 'skipped' }}
         run: |
+          dir="${RUNNER_TEMP}/backup-drill"
+          echo "::add-mask::${dir}"
           status=0
-          if [ -f "${BACKUP_DRILL_DIR}/report.json" ]; then
-            scripts/backup-restore-drill --cleanup-from "${BACKUP_DRILL_DIR}/report.json" || status=$?
+          scripts/backup-restore-drill --cleanup-from "${dir}/report.json" || status=$?
+          if [ "${status}" -eq 0 ]; then
+            rm -rf -- "${dir:?}"
+          else
+            echo "Cleanup did not complete (status ${status}); the private directory is kept."
           fi
-          rm -rf -- "${BACKUP_DRILL_DIR:?}"
           exit "${status}"

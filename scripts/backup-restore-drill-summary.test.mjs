@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, symlinkSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -11,10 +11,16 @@ import {
   lastAllowedStage,
   renderDrillSummary,
   summarizeDrillReport,
+  summaryRegistry,
 } from './backup-restore-drill-lib.mjs';
+import { servicesFromLibrary } from './infra-preflight-lib.mjs';
 
 const summaryCli = new URL('./backup-restore-drill-summary.mjs', import.meta.url).pathname;
-const drillCli = new URL('./backup-restore-drill.mjs', import.meta.url).pathname;
+const scripts = new URL('.', import.meta.url).pathname;
+// The service registry the drill itself iterates; the summary CLI reads the same file.
+const REGISTRY = servicesFromLibrary();
+// The library tests use two of them: names come from the registry, not from the report.
+const SERVICES = ['economic', 'identity'];
 
 // Strings a public log must never carry: table names, amounts, paths, URLs, SQL, project names.
 const SENTINELS = [
@@ -63,7 +69,7 @@ function database(name) {
   };
 }
 
-function passingReport() {
+function passingReport(services = SERVICES) {
   return {
     version: 5,
     project: 'restore-drill-0123456789abcdef',
@@ -72,15 +78,16 @@ function passingReport() {
     finishedAt: '2026-11-01T03:29:30.000Z',
     passed: true,
     interrupted: false,
-    schemaServices: ['economic', 'identity'],
-    databases: [database('rasta_economic'), database('rasta_identity')],
+    schemaServices: services,
+    databases: services.map((service) => database(`rasta_${service}`)),
     sourceLedger: ledger(),
     restoredLedger: ledger(),
     cleanup: { passed: true },
   };
 }
 
-const summarize = (report, options = { exitCode: 0 }) => summarizeDrillReport(report, options);
+const summarize = (report, options = { exitCode: 0 }) =>
+  summarizeDrillReport(report, { services: SERVICES, ...options });
 const failedGates = (summary) => SUMMARY_GATES.filter((name) => summary.gates[name] !== true);
 const everyDatabase = (flag, value) => (report) => {
   for (const db of report.databases) db[flag] = value;
@@ -113,7 +120,13 @@ test('a passing report passes every gate and reports counts and durations only',
 
 test('every gate has a mutation that turns exactly it red, and the verdict with it', () => {
   const cases = [
-    ['database-coverage', (r) => r.schemaServices.push('third')],
+    ['database-coverage', (r) => r.databases.pop()],
+    // A database the registry does not know, in place of one it does; a duplicate of one.
+    ['database-coverage', (r) => (r.databases[1].database = 'rasta_9007199254740993')],
+    ['database-coverage', (r) => (r.databases[1].database = 'rasta_economic')],
+    ['database-coverage', (r) => r.databases.push(database('rasta_identity'))],
+    // The report's own list of services is not evidence of what should exist.
+    ['database-coverage', (r) => ((r.schemaServices = ['economic']), r.databases.pop())],
     ['rows-and-digests', oneDatabase('tablesEqual', false)],
     ['migrations', oneDatabase('migrationsEqual', false)],
     ['database-and-object-state', oneDatabase('databaseStateEqual', false)],
@@ -163,8 +176,7 @@ test('the per-gate split is the CLI predicate: all gates but cleanup green <=> d
   for (const flag of flags) variants.push((r) => (r.databases[1][flag] = false));
   variants.push(
     (r) => r.databases.pop(),
-    (r) => r.schemaServices.push('third'),
-    (r) => (r.schemaServices.length = 0),
+    (r) => (r.databases.length = 0),
     (r) => (r.restoredLedger.amountsByCurrency[0].total = '1'),
     (r) => (r.restoredLedger.walletMismatches = '1'),
     (r) => (r.sourceLedger.journalMismatches = '2'),
@@ -184,7 +196,7 @@ test('the per-gate split is the CLI predicate: all gates but cleanup green <=> d
     try {
       cli = drillPassed(
         report.databases,
-        report.schemaServices.length,
+        SERVICES.length,
         report.sourceLedger,
         report.restoredLedger,
       );
@@ -288,6 +300,7 @@ test('failure names the stage, the database and the command status the CLI recor
 });
 
 test('stage names are a closed list; progress lines outside it are ignored', () => {
+  const registry = summaryRegistry(SERVICES);
   for (const stage of [
     'preflight',
     'scratch drop',
@@ -295,22 +308,40 @@ test('stage names are a closed list; progress lines outside it are ignored', () 
     'migrate economic',
     'generate and demo seed identity',
     'dump rasta_economic',
-    'restore and compare rasta_audit',
+    'restore and compare rasta_economic',
     'cleanup owned containers, networks and volumes',
   ])
-    assert.equal(allowedStage(stage), stage);
-  for (const stage of ['', 'migrate', 'migrate x; rm', 'dump rasta_x\nY', null, 7, SENTINELS[3]])
-    assert.equal(allowedStage(stage), null, String(stage));
+    assert.equal(allowedStage(stage, registry), stage);
+  // Suffix patterns are gone: a service the registry does not list is not a stage, however
+  // plausible the name looks.
+  for (const stage of [
+    '',
+    'migrate',
+    'migrate x; rm',
+    'migrate 9007199254740993',
+    'migrate fleet',
+    'dump rasta_9007199254740993',
+    'dump rasta_x\nY',
+    'restore and compare rasta_audit',
+    null,
+    7,
+    {},
+    SENTINELS[3],
+  ])
+    assert.equal(allowedStage(stage, registry), null, String(stage));
+  assert.equal(allowedStage('preflight', undefined), null, 'no registry, no stage');
   const stderr = [
     '[backup-restore-drill] migrate economic',
     `[backup-restore-drill] rasta_economic: ${SENTINELS[3]}`,
     'unprefixed migrate identity',
-    '[backup-restore-drill] dump rasta_audit',
+    '[backup-restore-drill] dump rasta_economic',
+    '[backup-restore-drill] migrate 9007199254740993',
     '[backup-restore-drill] SELECT leak',
     '',
   ].join('\n');
-  assert.equal(lastAllowedStage(stderr), 'dump rasta_audit');
-  assert.equal(lastAllowedStage(''), null);
+  assert.equal(lastAllowedStage(stderr, registry), 'dump rasta_economic');
+  assert.equal(lastAllowedStage('', registry), null);
+  assert.equal(lastAllowedStage(stderr, undefined), null);
 });
 
 function runSummary(directory, report, exitCode, extra = []) {
@@ -326,17 +357,17 @@ function runSummary(directory, report, exitCode, extra = []) {
 test('summary CLI: exit 0 only for a passing run; stdout is the allowlisted markdown', () => {
   const directory = mkdtempSync(join(tmpdir(), 'drill-summary-cli-'));
   try {
-    const ok = runSummary(directory, passingReport(), '0');
+    const ok = runSummary(directory, passingReport(REGISTRY), '0');
     assert.equal(ok.status, 0);
     assert.match(ok.stdout, /PASSED/);
     assert.equal(ok.stderr, '');
     for (const sentinel of [...SENTINELS, '7777777', '18014398509487486', '9007199254740993'])
       assert.ok(!ok.stdout.includes(sentinel), sentinel);
-    const bad = runSummary(directory, passingReport(), '1');
+    const bad = runSummary(directory, passingReport(REGISTRY), '1');
     assert.equal(bad.status, 1);
     assert.match(bad.stdout, /FAILED/);
     for (const value of ['', 'abc', '-1', '1000', '0x1']) {
-      const refused = runSummary(directory, passingReport(), value);
+      const refused = runSummary(directory, passingReport(REGISTRY), value);
       assert.equal(refused.status, 1, value);
     }
     writeFileSync(join(directory, 'stderr.log'), '[backup-restore-drill] dump rasta_audit\n');
@@ -372,153 +403,148 @@ test('summary CLI: a bad command line is refused by position, never repeated', (
   }
 });
 
-// --- --cleanup-from -----------------------------------------------------------------------
-const PROJECT = 'restore-drill-0123456789abcdef';
+// --- F3: names come from the registry; every failure of the summary is sanitized ------------
+const HUGE = '9007199254740993';
 
-function fakeDocker(directory, { leftover = false } = {}) {
-  const log = join(directory, 'docker.log');
-  writeFileSync(
-    join(directory, 'docker'),
-    `#!/bin/sh
-printf '%s\\n' "$*" >> '${log}'
-case "$*" in
-  *'down --volumes'*) : ;;
-  'container ls -a '*) ${leftover ? 'echo owned-container' : ':'} ;;
-esac
-`,
-  );
-  chmodSync(join(directory, 'docker'), 0o700);
-  return log;
-}
+test('a name or stage that merely looks like one is never printed: rasta_<digits>, migrate <digits>', () => {
+  const report = passingReport();
+  report.passed = false;
+  report.databases[0].tablesEqual = false;
+  report.databases[0].database = `rasta_${HUGE}`;
+  report.error = {
+    stage: `migrate ${HUGE}`,
+    database: `rasta_${HUGE}`,
+    exitCode: 1,
+  };
+  const summary = summarize(report, { exitCode: 1, lastStage: `migrate ${HUGE}` });
+  const printed = `${JSON.stringify(summary)}\n${renderDrillSummary(summary)}`;
+  assert.ok(!printed.includes(HUGE), 'none of failingDatabases, failure.*, lastStage prints it');
+  assert.deepEqual(summary.failingDatabases, []);
+  assert.equal(summary.failure.stage, null);
+  assert.equal(summary.failure.database, null);
+  assert.equal(summary.lastStage, null);
+  // A real registry name is still named.
+  report.databases[0].database = 'rasta_economic';
+  report.error = { stage: 'migrate economic', database: 'rasta_economic', exitCode: 1 };
+  const named = renderDrillSummary(summarize(report, { exitCode: 1 }));
+  assert.match(named, /Failing databases: rasta_economic/);
+  assert.match(named, /Failed stage: migrate economic \(rasta_economic\)/);
+  // No registry at all: nothing is accepted, nothing is named.
+  const none = summarizeDrillReport(report, { exitCode: 0 });
+  assert.equal(none.passed, false);
+  assert.deepEqual(none.failingDatabases, []);
+});
 
-function recorded(directory, project = PROJECT) {
-  const temporary = join(directory, 'rasta-restore-drill-Ab12Cd');
-  mkdirSync(temporary, { mode: 0o700 });
-  writeFileSync(join(temporary, 'compose.json'), '{}');
-  writeFileSync(join(temporary, 'a.dump'), 'synthetic');
-  const report = join(directory, 'report.json');
-  writeFileSync(report, JSON.stringify({ project, temporary, passed: false }));
-  return { report, temporary };
-}
-
-function runCleanup(directory, report) {
-  return spawnSync(process.execPath, [drillCli, '--cleanup-from', report], {
-    encoding: 'utf8',
-    env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, TMPDIR: directory },
-  });
-}
-
-test('--cleanup-from removes exactly the recorded project and its private directory', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-cleanup-cli-'));
-  try {
-    const log = fakeDocker(directory);
-    const { report, temporary } = recorded(directory);
-    const result = runCleanup(directory, report);
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(existsSync(temporary), false);
-    const calls = (existsSync(log) ? readText(log) : '').trim().split('\n');
-    assert.match(
-      calls[0],
-      new RegExp(
-        `^compose --project-name ${PROJECT} --file ${temporary}/compose.json down --volumes`,
-      ),
+test('a report whose fields carry objects, getters or odd types cannot make the summary throw', () => {
+  for (const patch of [
+    { startedAt: { toString: null } },
+    { startedAt: { toString: () => '2026-11-01T03:17:00.000Z' } },
+    { finishedAt: { valueOf: () => 1 } },
+    { startedAt: [], finishedAt: [[]] },
+    { databases: [{ database: { toString: null }, before: { tables: 5, summary: [] } }] },
+    { error: { stage: { toString: null }, database: Symbol.iterator === 1, exitCode: 1e300 } },
+    { sourceLedger: { amountsByCurrency: { length: 2 } } },
+  ]) {
+    const report = { ...passingReport(), ...patch };
+    const summary = summarize(report);
+    renderDrillSummary(summary);
+    assert.equal(
+      summary.durations.totalSeconds === null || Number.isInteger(summary.durations.totalSeconds),
+      true,
     );
-    assert.deepEqual(
-      calls
-        .slice(1)
-        .map((line) => line.split(' ')[0])
-        .sort(),
-      ['container', 'network', 'volume'],
-    );
-    for (const line of calls.slice(1))
-      assert.ok(line.endsWith(`--filter label=com.docker.compose.project=${PROJECT}`), line);
-    // Idempotent: the directory and compose file are gone, the label check alone answers.
-    const again = runCleanup(directory, report);
-    assert.equal(again.status, 0, again.stderr);
-    assert.ok(!`${result.stdout}${result.stderr}`.includes(temporary));
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test('--cleanup-from fails (and keeps the directory) when an owned resource survives', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-cleanup-left-'));
-  try {
-    fakeDocker(directory, { leftover: true });
-    const { report, temporary } = recorded(directory);
-    const result = runCleanup(directory, report);
-    assert.equal(result.status, 1);
-    assert.equal(existsSync(temporary), true);
-    assert.ok(!`${result.stdout}${result.stderr}`.includes(temporary));
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
+function sandboxedSummary(directory, { without = [] } = {}) {
+  const copy = join(directory, 'scripts');
+  mkdirSync(copy, { recursive: true });
+  for (const name of [
+    'backup-restore-drill-summary.mjs',
+    'backup-restore-drill-lib.mjs',
+    'infra-preflight-lib.mjs',
+    'check-kafka-credential-scope-lib.mjs',
+    'database-services.mjs',
+  ])
+    if (!without.includes(name)) cpSync(join(scripts, name), join(copy, name));
+  const role = 'infrastructure/docker/postgres/lib/role-passwords.bash';
+  mkdirSync(join(directory, role, '..'), { recursive: true });
+  cpSync(join(scripts, '..', role), join(directory, role));
+  // The registry reader imports `yaml` through the shared libraries, as in the workflow's checkout.
+  symlinkSync(join(scripts, '..', 'node_modules'), join(directory, 'node_modules'), 'dir');
+  return join(copy, 'backup-restore-drill-summary.mjs');
+}
 
-test('--cleanup-from acts on nothing but a name and a directory the drill itself makes', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-cleanup-refuse-'));
+test('summary CLI: its own failures are one fixed message, never a stack, a path or report content', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-summary-fail-'));
   try {
-    const log = fakeDocker(directory);
-    const outside = mkdtempSync(join(tmpdir(), 'drill-cleanup-outside-'));
-    const cases = [
-      { project: 'other-project', temporary: join(directory, 'rasta-restore-drill-Ab12Cd') },
-      { project: `${PROJECT};x`, temporary: join(directory, 'rasta-restore-drill-Ab12Cd') },
-      { project: PROJECT, temporary: outside },
-      { project: PROJECT, temporary: join(directory, 'rasta-restore-drill-Ab12Cd', '..') },
-      { project: PROJECT, temporary: `${join(directory, 'rasta-restore-drill-Ab12Cd')}/nested` },
-      // Same length as the real directory, so the name check alone would pass it.
-      {
-        project: PROJECT,
-        temporary: join(
-          `${directory.slice(0, -1)}${directory.endsWith('X') ? 'Y' : 'X'}`,
-          'rasta-restore-drill-Ab12Cd',
-        ),
-      },
-      { project: PROJECT, temporary: 7 },
-      { project: 7, temporary: join(directory, 'rasta-restore-drill-Ab12Cd') },
-      { project: PROJECT },
-    ];
-    for (const entry of cases) {
-      writeFileSync(join(directory, 'report.json'), JSON.stringify(entry));
-      const result = runCleanup(directory, join(directory, 'report.json'));
-      assert.equal(result.status, 2, JSON.stringify(entry));
-      assert.equal(existsSync(outside), true);
-    }
-    assert.equal(existsSync(log), false, 'docker was never called');
-    rmSync(outside, { recursive: true, force: true });
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test('--cleanup-from with nothing recorded is a no-op, not a failure; usage stays closed', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-cleanup-none-'));
-  try {
-    const log = fakeDocker(directory);
-    const missing = runCleanup(directory, join(directory, 'absent.json'));
-    assert.equal(missing.status, 0);
-    writeFileSync(join(directory, 'empty.json'), '');
-    assert.equal(runCleanup(directory, join(directory, 'empty.json')).status, 0);
-    writeFileSync(join(directory, 'bare.json'), '{"passed":false}');
-    assert.equal(runCleanup(directory, join(directory, 'bare.json')).status, 0);
-    assert.equal(existsSync(log), false);
-    for (const argv of [
-      [],
-      ['--cleanup-from'],
-      ['--cleanup-from', 'a', 'b'],
-      ['--report', 'a', '--cleanup-from', 'b'],
+    const report = join(directory, 'report.json');
+    writeFileSync(report, JSON.stringify(passingReport(REGISTRY)));
+    for (const without of [
+      ['backup-restore-drill-lib.mjs'], // the import fails
+      ['infra-preflight-lib.mjs'], // the registry cannot be loaded
     ]) {
-      assert.equal(
-        spawnSync(process.execPath, [drillCli, ...argv], { encoding: 'utf8' }).status,
-        2,
-      );
+      const cli = sandboxedSummary(join(directory, without[0]), { without });
+      const result = spawnSync(process.execPath, [cli, '--report', report, '--exit-code', '0'], {
+        encoding: 'utf8',
+      });
+      const printed = `${result.stdout}${result.stderr}`;
+      assert.equal(result.status, 1, without[0]);
+      assert.match(result.stdout, /Monthly backup\/restore drill: FAILED/);
+      assert.match(result.stderr, /the summary could not be built/);
+      assert.doesNotMatch(printed, /\bat \w|node:internal|\.mjs|Error|ERR_|file:\/\/|\/tmp|\/home/);
+      assert.ok(!printed.includes(directory));
     }
+    // The same script with every module present prints the verdict instead.
+    const fine = sandboxedSummary(join(directory, 'fine'));
+    const ok = spawnSync(process.execPath, [fine, '--report', report, '--exit-code', '0'], {
+      encoding: 'utf8',
+    });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, /PASSED/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-import { readFileSync } from 'node:fs';
-function readText(path) {
-  return readFileSync(path, 'utf8');
-}
+test('summary CLI: a report that claims two databases is not a pass against the real registry; odd names are not printed', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-summary-registry-'));
+  try {
+    const report = join(directory, 'report.json');
+    writeFileSync(report, JSON.stringify(passingReport(SERVICES)));
+    const short = spawnSync(
+      process.execPath,
+      [summaryCli, '--report', report, '--exit-code', '0'],
+      {
+        encoding: 'utf8',
+      },
+    );
+    assert.equal(short.status, 1);
+    assert.match(short.stdout, new RegExp(`expectedDatabases \\| ${REGISTRY.length} \\|`));
+    const odd = passingReport(REGISTRY);
+    odd.passed = false;
+    odd.databases[0].database = `rasta_${HUGE}`;
+    odd.databases[0].tablesEqual = false;
+    odd.startedAt = { toString: null };
+    odd.error = { stage: `migrate ${HUGE}`, database: `rasta_${HUGE}` };
+    writeFileSync(report, JSON.stringify(odd));
+    writeFileSync(join(directory, 'stderr.log'), `[backup-restore-drill] migrate ${HUGE}\n`);
+    const result = spawnSync(
+      process.execPath,
+      [
+        summaryCli,
+        '--report',
+        report,
+        '--exit-code',
+        '1',
+        '--progress',
+        join(directory, 'stderr.log'),
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(result.status, 1);
+    assert.ok(!`${result.stdout}${result.stderr}`.includes(HUGE));
+    assert.doesNotMatch(result.stderr, /at |Error/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
