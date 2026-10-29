@@ -778,8 +778,9 @@ function unbounded(words, rootScripts, node = {}, context = {}) {
   if (program === 'npx') return unbounded(afterOptions(args, 'npx'), rootScripts, node, context);
   if (program === 'eval') {
     if (args[0] === '--') args = args.slice(1);
-    if (args.some((arg) => arg.includes('\0'))) return dynamicLiterals(args, rootScripts, context);
+    // Opaque expansions cannot erase an independently known invalid prefix.
     if (args[0]?.startsWith('-')) throw new Error(`unmodelled evaluation option: eval ${args[0]}`);
+    if (args.some((arg) => arg.includes('\0'))) return dynamicLiterals(args, rootScripts, context);
     return scanPayload(args.join(' '), rootScripts, context);
   }
   const sourcing = ['source', '.'].includes(program);
@@ -797,10 +798,11 @@ function unbounded(words, rootScripts, node = {}, context = {}) {
   }
   if (sourcing) {
     if (args[0] === '--') args = args.slice(1);
-    // Only the filename decides whether the source is literal, not its $@.
-    if (args[0]?.includes('\0')) return dynamicLiterals(args, rootScripts, context);
+    // Validate the known filename prefix before dispatching opaque expansions.
     if (args[0]?.startsWith('-'))
       throw new Error(`unmodelled evaluation option: ${program} ${args[0]}`);
+    // Only the filename decides whether the source is literal, not its $@.
+    if (args[0]?.includes('\0')) return dynamicLiterals(args, rootScripts, context);
     if (!args[0]) throw new Error('unsupported shell construct: missing source path');
     if (scanRepoScript(args[0], rootScripts, context)) return true;
   }

@@ -1018,8 +1018,6 @@ test('r6 command-context boundary probes', () => {
     'npx env FLAG=value eval "${x:-value}"',
     'eval "echo safe $x"',
     "bash -s <<< 'echo safe'",
-    'eval "--unknown $x"',
-    'source "-bad $x"',
     'eval "${x}" "source /outside.sh"',
     'source /outside.sh',
     '. "$x"',
@@ -1032,6 +1030,9 @@ test('r6 command-context boundary probes', () => {
   ])
     assert.deepEqual(probe(run), [], run);
   for (const [run, pattern] of [
+    // TASK 863: known invalid prefixes refuse before opaque expansion dispatch.
+    ['eval "--unknown $x"', /unmodelled evaluation option/],
+    ['source "-bad $x"', /unmodelled evaluation option/],
     // TASK 860: opaque expansions do not suppress literal interpreter/wrapper
     // input refusals. The old permissive expectations preceded this PM decision.
     ['eval "bash -c $x"', /missing shell command string/],
@@ -1630,4 +1631,77 @@ for (const [file, document] of scannedLocations) {
     refused(problems, /unreadable repo script/);
     refused(problems, /literal unbounded/);
   });
+}
+
+// TASK 863 / r9: validate known eval/source options before dynamic dispatch at
+// the shared classifier boundary. No expansion values or new shell grammar.
+const r9Reproductions = [
+  'eval --unknown "$x"',
+  'eval "--unknown $x"',
+  'builtin -- eval --unknown "$x"',
+  `eval 'eval --unknown "$x"'`,
+  'source "--unknown $x"',
+  '. "-bad $x"',
+];
+for (const run of r9Reproductions) {
+  test(`r9 reviewer REFUSED: ${run}`, () => refused(extraRun(run), /unmodelled evaluation option/));
+}
+test('r9 CLI refuses known prefixes directly and through all five repository entries', (t) => {
+  const fixture = cliFixture(t);
+  for (const [index, run] of r9Reproductions.entries()) {
+    const path = `./ci/options-${index}.sh`;
+    fixture.write(path, `# test:unit\n${run}`);
+    for (const entry of [run, ...r8Entries.map((site) => `${site} ${path}`)])
+      fixture.doc.jobs.quality.steps.push({ name: 'r9 prefix', run: entry });
+  }
+  fixture.workflow();
+  const result = fixture.run();
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(
+    [...result.stderr.matchAll(/unmodelled evaluation option/g)].length,
+    r9Reproductions.length * (1 + r8Entries.length),
+    result.stderr,
+  );
+});
+const r9Paths = [(run) => run, (run) => `builtin -- ${run}`, (run) => `eval ${r8Quote(run)}`];
+const r9Wrappers = ['', 'env FLAG=value', 'command --', 'pnpm exec', 'npx', 'timeout 1'];
+for (const [file, document] of scannedLocations) {
+  for (const newline of [null, '\n', '\r\n', '\r']) {
+    for (const program of ['eval', 'source', '.']) {
+      for (const args of ['--unknown "$x"', '"--unknown $x"', '"-bad${x}"', '"-${x:-safe}"']) {
+        for (const enter of r9Paths) {
+          for (const wrapper of r9Wrappers) {
+            const run = continued(`${wrapper} ${enter(`${program} ${args}`)}`.trim(), newline);
+            test(`r9 order REFUSED ${file} ${JSON.stringify(newline)}: ${run}`, () => {
+              refused(r7Problems(file, document, run), /unmodelled evaluation option/);
+              for (const site of r8Entries) {
+                // The existing token-bearing-script rule must reach this same
+                // boundary without an actual unbounded invocation in the file.
+                const reader = (path) => ({ path, text: `# test:unit\n${run}` });
+                refused(
+                  r7Problems(file, document, `${site} ./ci/options.sh`, reader),
+                  /unmodelled evaluation option/,
+                );
+              }
+            });
+          }
+        }
+      }
+    }
+  }
+  for (const run of [
+    'eval "$x--unknown"',
+    'eval "${x:---unknown}"',
+    'eval -- "echo safe $x"',
+    'eval "echo --unknown $x"',
+    'source "$x--unknown"',
+    '. "${x:--bad}"',
+    'source -- /outside.sh "$x"',
+    '. /outside.sh "-bad $x"',
+  ]) {
+    for (const enter of r9Paths) {
+      test(`r9 opaque ACCEPTED ${file}: ${enter(run)}`, () =>
+        assert.deepEqual(r7Problems(file, document, enter(run)), []));
+    }
+  }
 }
