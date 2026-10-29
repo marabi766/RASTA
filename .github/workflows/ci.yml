@@ -4713,3 +4713,6 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
+          # Time-boxed, per-CVE exceptions with a reason and an expiry date
+          # (.trivyignore.services); an expired entry fails the scan again.
+          trivyignores: .trivyignore.services

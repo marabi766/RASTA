@@ -1,4 +1,19 @@
 import { canonicalQuantity, type PlaceOrderFormValues } from './place-order-fields';
+import {
+  fencedSlot,
+  keysUnder,
+  locate,
+  ownedHere,
+  purgeForeign,
+  reduceToQuarantine,
+  storedKeyOf,
+  type AccountTags,
+  type AnswerOutcome,
+  type Binding,
+  type StartOutcome,
+} from './unresolved-tenancy';
+
+export type { AccountTags, AnswerOutcome, Binding, StartOutcome };
 
 /**
  * An order whose outcome is unknown, kept in `sessionStorage` so that a reload,
@@ -19,7 +34,19 @@ import { canonicalQuantity, type PlaceOrderFormValues } from './place-order-fiel
  * Only an *unresolved* submission is kept. It is dropped by the explicit "start
  * a new order" action and by a successful order response; a definite refusal
  * does not drop it, because a refusal of a retry says nothing about the first
- * request (`place-order-actions.ts`).
+ * request (`place-order-actions.ts`). Each of those names the submission it
+ * is about, and touches nothing else (`fencedSlot`, PR 405 review 3, R1): an
+ * answer that arrives after the person set its order aside and started
+ * another never writes over or removes the other — it is kept aside, a
+ * content-free record that holds the next fresh order and draws the warning.
+ *
+ * Nothing else removes one (PR 405 review 2, F1; `lib/unresolved-tenancy.ts`):
+ * a logout, another person's page and an expiry drop its content but leave a
+ * content-free marker in its place, and an entry this person cannot be shown
+ * — one from an organization their token no longer lists, another person's,
+ * one that does not read — stays as it is. Each of these holds every fresh
+ * order on this device until the person acknowledges the risk of a duplicate
+ * (`orderQuarantine`).
  *
  * Storage can be absent (private mode, a blocked cookie policy, a full quota).
  * Reads and removals swallow that. Saving does not: it reports whether the entry
@@ -50,12 +77,6 @@ export interface UnresolvedOrder {
   readonly savedAt: number;
 }
 
-/** The two tags the page computed for the current login; see `submissionBinding`. */
-export interface Binding {
-  readonly owner: string;
-  readonly session: string;
-}
-
 interface Stored extends UnresolvedOrder {
   readonly v: typeof VERSION;
   /** Saved before the action was sent; the outcome of the send is not known. */
@@ -67,7 +88,11 @@ interface Stored extends UnresolvedOrder {
 export type RestoredOrder =
   /** Same login: the stored id still verifies, so the retry button may be offered. */
   | { readonly kind: 'RETRYABLE'; readonly order: UnresolvedOrder }
-  /** Same person, another login: the id is refused by the server now; show it, never re-send it. */
+  /**
+   * Same person, another login — or an entry from before entries were kept per
+   * organization (`lib/unresolved-tenancy.ts`): the id is refused by the server
+   * now, or may be another organization's; show it, never re-send it.
+   */
   | { readonly kind: 'VIEW_ONLY'; readonly order: UnresolvedOrder };
 
 /** Set when a logout starts; this document writes no entry after it. Cleared by a page drawn for a login. */
@@ -87,10 +112,6 @@ function storage(): Storage | null {
   } catch {
     return null;
   }
-}
-
-function keyOf(productId: string): string {
-  return `${KEY_PREFIX}${productId}`;
 }
 
 function text(value: unknown, max = MAX_FIELD_LENGTH): value is string {
@@ -138,92 +159,149 @@ function parse(raw: string): Stored | null {
   };
 }
 
-/** Every key this module owns, in the order storage lists them. */
-function ownKeys(store: Storage): string[] {
-  const keys: string[] = [];
-  for (let index = 0; index < store.length; index += 1) {
-    const key = store.key(index);
-    if (key !== null && key.startsWith(KEY_PREFIX)) keys.push(key);
-  }
-  return keys;
-}
+/** `parse` for `lib/unresolved-tenancy.ts`, which hands the key too. */
+const parseEntry = (raw: string): Stored | null => parse(raw);
+
+/** The one slot per product, fenced to its submission (`lib/unresolved-tenancy.ts`). */
+const slot = fencedSlot(KEY_PREFIX, parseEntry, { closing: () => accountClosing });
+
+/** The quarantine of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
+export const orderQuarantine = slot.quarantine;
 
 /**
- * Account boundary, logout: nothing of an unresolved order outlives the person
- * who signed out, whatever product it was for. (A session that merely *expires*
- * is not a logout: the same person's next login keeps theirs, below.)
+ * Account boundary, logout: nothing of an unresolved order's content outlives
+ * the person who signed out, whatever product it was for — but the fact that
+ * an order's outcome is unknown does: each readable entry is reduced to a
+ * content-free marker, which holds the next fresh order on this device until
+ * acknowledged. A record that does not read is left as it is. (A session that
+ * merely *expires* is not a logout: the same person's next login keeps theirs,
+ * below.)
  */
-export function purgeAllUnresolvedOrders(): void {
+export function purgeAllUnresolvedOrders(now: number = Date.now()): void {
   markAccountClosing();
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) store.removeItem(key);
-  } catch {
-    // See above.
-  }
-}
-
-/**
- * Account boundary, a page for `owner`: entries of anyone else — and entries
- * that cannot be read as anyone's — are removed. The same person after a
- * re-login keeps theirs (view-only, `restoreUnresolvedOrder`).
- */
-export function purgeForeignUnresolvedOrders(owner: string): void {
-  try {
-    const store = storage();
-    if (!store) return;
-    for (const key of ownKeys(store)) {
+    for (const key of keysUnder(store, KEY_PREFIX)) {
+      // An entry from before entries were kept per organization stays as it is: whose it
+      // is cannot be told here, and it is never written over (PR 405 review 2, F1).
+      if (storedKeyOf(KEY_PREFIX, key)?.kind !== 'TENANT') continue;
       const raw = store.getItem(key);
-      const entry = raw === null ? null : parse(raw);
-      if (!entry || entry.owner !== owner) store.removeItem(key);
+      if (raw !== null && parse(raw) !== null) {
+        reduceToQuarantine(store, KEY_PREFIX, key, now);
+      }
     }
   } catch {
     // See above.
   }
 }
 
-/** True when the entry is stored. False: storage refused it, or a logout has started. */
-export function saveUnresolvedOrder(
-  productId: string,
-  order: Omit<UnresolvedOrder, 'savedAt'>,
-  binding: Binding,
-  now: number = Date.now(),
-): boolean {
-  if (accountClosing) return false;
+/**
+ * Account boundary, a page for this person: another person's entries are
+ * reduced to content-free markers; nothing is removed. The same person keeps
+ * theirs, for every organization (`lib/unresolved-tenancy.ts`), and after a
+ * re-login (view-only, `restoreUnresolvedOrder`).
+ */
+export function purgeForeignUnresolvedOrders(tags: AccountTags): void {
   try {
-    const stored: Stored = {
-      v: VERSION,
-      submissionId: order.submissionId,
-      values: { offerId: order.values.offerId, quantity: order.values.quantity },
-      correlationId: order.correlationId,
-      // Written before the send, when there is no correlation id yet.
-      ...(order.correlationId === null ? { pending: true as const } : {}),
-      savedAt: now,
-      owner: binding.owner,
-      session: binding.session,
-    };
     const store = storage();
-    if (!store) return false;
-    store.setItem(keyOf(productId), JSON.stringify(stored));
-    return true;
-  } catch {
-    // Unavailable or full: the caller decides what that means.
-    return false;
-  }
-}
-
-export function clearUnresolvedOrder(productId: string): void {
-  try {
-    storage()?.removeItem(keyOf(productId));
+    if (!store) return;
+    purgeForeign(store, KEY_PREFIX, tags, parseEntry);
   } catch {
     // See above.
   }
 }
 
+/** What is stored for `order`: the first send's values and time when the slot already keeps it. */
+function recordOf(
+  order: Omit<UnresolvedOrder, 'savedAt'>,
+  earlier: Stored | null,
+  binding: Binding,
+  now: number,
+): string {
+  const stored: Stored = {
+    v: VERSION,
+    submissionId: order.submissionId,
+    // The body is the first send's, whatever a later answer carries: the retry is the same request.
+    values: earlier
+      ? earlier.values
+      : { offerId: order.values.offerId, quantity: order.values.quantity },
+    correlationId: order.correlationId,
+    // Written before the send, when there is no correlation id yet.
+    ...(order.correlationId === null ? { pending: true as const } : {}),
+    savedAt: earlier ? earlier.savedAt : now,
+    owner: binding.owner,
+    session: binding.session,
+  };
+  return JSON.stringify(stored);
+}
+
 /**
- * The unresolved order for this product, if there is one this person may see.
- * An unreadable, aged-out or someone else's entry is removed and reads as none.
+ * Before the first send. `SAVED`: stored. `HELD`: another order's entry holds
+ * this product's slot, or a quarantined record holds this kind for this
+ * person (`orderQuarantine`) — nothing was written, and nothing may be sent.
+ * `UNAVAILABLE`: storage refused it, or a logout has started.
+ */
+export function saveUnresolvedOrder(
+  productId: string,
+  order: Omit<UnresolvedOrder, 'savedAt'>,
+  binding: Binding,
+  now: number = Date.now(),
+): StartOutcome {
+  return slot.start(binding, productId, order.submissionId, () =>
+    recordOf(order, null, binding, now),
+  );
+}
+
+/**
+ * An answer to `order.submissionId` that is still in doubt: its entry is
+ * updated while the slot holds it; otherwise the slot is left as it is and the
+ * answer is kept aside (`SET_ASIDE`; `lib/unresolved-tenancy.ts`).
+ */
+export function answerUnresolvedOrder(
+  productId: string,
+  order: Omit<UnresolvedOrder, 'savedAt'>,
+  binding: Binding,
+  now: number = Date.now(),
+): AnswerOutcome {
+  return slot.answer(
+    binding,
+    productId,
+    order.submissionId,
+    (earlier) => recordOf(order, earlier, binding, now),
+    now,
+  );
+}
+
+/** The order `submissionId` was placed or definitely refused: its entry, and only that one, is dropped. */
+export function settleUnresolvedOrder(
+  productId: string,
+  submissionId: string,
+  binding: Binding,
+): void {
+  slot.settle(binding, productId, submissionId);
+}
+
+/**
+ * The person's "start a new order": drops the entry the page showed —
+ * `submissionId`'s, this organization's or an old-format one of theirs — and
+ * nothing else. Another order's entry, another organization's, and anything
+ * that cannot be attributed (quarantined) stay.
+ */
+export function clearUnresolvedOrder(
+  productId: string,
+  submissionId: string,
+  binding: Binding,
+): void {
+  slot.release(binding, productId, submissionId);
+}
+
+/**
+ * The unresolved order for this product, if there is one this person may see
+ * here, for this organization. Another organization's is not read at all. An
+ * entry that does not read, or is not this person's, reads as none and stays
+ * as it is (quarantined); an expired one of theirs reads as none and is
+ * reduced to a content-free marker — never removed outright.
  */
 export function restoreUnresolvedOrder(
   productId: string,
@@ -233,19 +311,21 @@ export function restoreUnresolvedOrder(
 ): RestoredOrder | null {
   try {
     const store = storage();
-    const raw = store?.getItem(keyOf(productId));
-    if (!store || raw === null || raw === undefined) return null;
+    const found = store ? locate(store, KEY_PREFIX, binding, productId) : null;
+    if (!store || found === null) return null;
 
-    const entry = parse(raw);
-    const aged = entry !== null && now - entry.savedAt > maxAgeSeconds * 1000;
-    if (!entry || aged || entry.owner !== binding.owner) {
-      store.removeItem(keyOf(productId));
+    const entry = parse(found.raw);
+    if (!entry || !ownedHere(binding, found.legacy, entry.owner)) return null;
+    if (now - entry.savedAt > maxAgeSeconds * 1000) {
+      reduceToQuarantine(store, KEY_PREFIX, found.key, now);
       return null;
     }
 
     const { submissionId, values, correlationId, savedAt } = entry;
     const order: UnresolvedOrder = { submissionId, values, correlationId, savedAt };
-    return { kind: entry.session === binding.session ? 'RETRYABLE' : 'VIEW_ONLY', order };
+    // An old-format entry may have been sent for another organization: never re-sent.
+    const retryable = !found.legacy && entry.session === binding.session;
+    return { kind: retryable ? 'RETRYABLE' : 'VIEW_ONLY', order };
   } catch {
     return null;
   }

@@ -12,6 +12,8 @@ import {
 
 import { ProjectsScreen, formatEstimate } from './ProjectsScreen';
 import { ProjectDetailScreen } from './[id]/ProjectDetailScreen';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * What `/projects` and `/projects/[id]` render: every outcome the server read
@@ -65,7 +67,9 @@ const page = (
 
 describe('the project list', () => {
   it('shows each project with a status word, a Persian-digit estimate and a link to it', () => {
-    render(<ProjectsScreen demoMode="REAL" result={page([PROJECT])} query={{}} />);
+    render(
+      <ProjectsScreen demoMode="REAL" result={page([PROJECT])} query={{ context: TEST_CONTEXT }} />,
+    );
 
     expect(screen.getByRole('link', { name: PROJECT.title })).toHaveAttribute(
       'href',
@@ -88,27 +92,41 @@ describe('the project list', () => {
       <ProjectsScreen
         demoMode="REAL"
         result={page([PROJECT], 'c2')}
-        query={{ status: 'APPROVED' }}
+        query={{ context: TEST_CONTEXT, status: 'APPROVED' }}
       />,
     );
 
     expect(screen.getByRole('link', { name: 'تأییدشده' })).toHaveAttribute('aria-current', 'page');
     expect(screen.getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      '/projects?status=APPROVED&cursor=c2',
+      withContext(TEST_CONTEXT, '/projects?status=APPROVED&cursor=c2'),
     );
   });
 
   it('says so when there are none, with and without a filter', () => {
-    const { rerender } = render(<ProjectsScreen demoMode="REAL" result={page([])} query={{}} />);
+    const { rerender } = render(
+      <ProjectsScreen demoMode="REAL" result={page([])} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(screen.getByText('این سازمان هنوز پروژه‌ای ثبت نکرده است.')).toBeInTheDocument();
 
-    rerender(<ProjectsScreen demoMode="REAL" result={page([])} query={{ status: 'DRAFT' }} />);
+    rerender(
+      <ProjectsScreen
+        demoMode="REAL"
+        result={page([])}
+        query={{ context: TEST_CONTEXT, status: 'DRAFT' }}
+      />,
+    );
     expect(screen.getByText('پروژه‌ای در وضعیت «پیش‌نویس» نیست.')).toBeInTheDocument();
   });
 
   it('renders a refusal as no access', () => {
-    render(<ProjectsScreen demoMode="REAL" result={{ kind: 'FORBIDDEN' }} query={{}} />);
+    render(
+      <ProjectsScreen
+        demoMode="REAL"
+        result={{ kind: 'FORBIDDEN' }}
+        query={{ context: TEST_CONTEXT }}
+      />,
+    );
     expect(screen.getByText('فهرست پروژه‌های این سازمان در اختیار شما نیست.')).toBeInTheDocument();
   });
 
@@ -118,7 +136,7 @@ describe('the project list', () => {
   ] as const)(
     'renders a degraded read ($kind) with the correlation id and fixed text',
     (result) => {
-      render(<ProjectsScreen demoMode="REAL" result={result} query={{}} />);
+      render(<ProjectsScreen demoMode="REAL" result={result} query={{ context: TEST_CONTEXT }} />);
       expect(screen.getByText(/فهرست پروژه‌ها خوانده نشد/)).toBeInTheDocument();
       expect(screen.getByText(/corr-1/)).toBeInTheDocument();
     },
@@ -134,7 +152,9 @@ describe('the project list', () => {
     ['unavailable', { kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' } as const],
     ['malformed', { kind: 'MALFORMED', correlationId: 'corr-1' } as const],
   ])('has no accessibility violations (%s)', async (_name, result) => {
-    const { container } = render(<ProjectsScreen demoMode="REAL" result={result} query={{}} />);
+    const { container } = render(
+      <ProjectsScreen demoMode="REAL" result={result} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 });
@@ -251,7 +271,9 @@ describe('a malformed timestamp, from the response to the page', () => {
     });
     const result = await fetchProjects(session);
 
-    const { container } = render(<ProjectsScreen demoMode="REAL" result={result} query={{}} />);
+    const { container } = render(
+      <ProjectsScreen demoMode="REAL" result={result} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(screen.getByText(/فهرست پروژه‌ها خوانده نشد/)).toBeInTheDocument();
     expect(screen.getByText(/corr-list/)).toBeInTheDocument();
     expect(container.textContent).not.toContain(UPSTREAM);
@@ -293,7 +315,13 @@ describe('the project list and the project: «حالت نمایشی» over the e
     ['SIMULATED', LABEL],
     ['UNKNOWN', UNKNOWN],
   ] as const)('draws %s’s notice on both', (demoMode, text) => {
-    const list = render(<ProjectsScreen demoMode={demoMode} result={page([PROJECT])} query={{}} />);
+    const list = render(
+      <ProjectsScreen
+        demoMode={demoMode}
+        result={page([PROJECT])}
+        query={{ context: TEST_CONTEXT }}
+      />,
+    );
     expect(list.getByText(text)).toBeInTheDocument();
     list.unmount();
     render(<ProjectDetailScreen demoMode={demoMode} result={{ kind: 'OK', data: DETAIL }} />);
@@ -301,7 +329,9 @@ describe('the project list and the project: «حالت نمایشی» over the e
   });
 
   it('draws none on either once the provider is real', () => {
-    const list = render(<ProjectsScreen demoMode="REAL" result={page([PROJECT])} query={{}} />);
+    const list = render(
+      <ProjectsScreen demoMode="REAL" result={page([PROJECT])} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(list.queryByText(LABEL)).toBeNull();
     expect(list.queryByText(UNKNOWN)).toBeNull();
     list.unmount();

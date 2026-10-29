@@ -8,6 +8,8 @@ import type { Offer } from '@/server/marketplace';
 import { MemberRolesForm } from './organizations/MemberRolesForm';
 import { OrganizationProfileForm } from './organizations/OrganizationProfileForm';
 import { PlaceOrderForm } from './marketplace/[productId]/PlaceOrderForm';
+import { actingAccessToken } from '@/test/session-token';
+import { bindingOf } from '@/test/unresolved-binding';
 
 /**
  * Parser → action → rendered error, with the real parser and the real action:
@@ -67,7 +69,7 @@ const SESSION = {
   subject: 'USR_1',
   username: 'admin',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_1'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -184,7 +186,7 @@ describe('place order (parser → action → rendered)', () => {
         submissionId={SUBMISSION}
         newOrderHref="/marketplace/PRD_1"
         productId="PRD_1"
-        binding={{ owner: 'owner-tag', session: 'session-tag' }}
+        binding={bindingOf('owner-tag', 'session-tag')}
         sessionMaxAgeSeconds={3600}
       />,
     );

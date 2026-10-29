@@ -7,6 +7,7 @@ import { BIDI_CONTROL, DISPLAY_TIME_ZONE, normalizePersianText, toLatinDigits } 
 import {
   CHANGE_STATUS_FIELDS,
   CREATE_DRIVER_FIELDS,
+  NOT_A_MEMBER_TEXT,
   UPDATE_DRIVER_FIELDS,
   type ChangeStatusField,
   type ChangeStatusFormValues,
@@ -136,8 +137,9 @@ export const DRIVERS_PER_PAGE = 20;
 export function fetchDrivers(
   session: WebSession,
   query: DriverListQuery = {},
+  limit: number = DRIVERS_PER_PAGE,
 ): Promise<ReadResult<DriverPage>> {
-  const params = new URLSearchParams({ limit: String(DRIVERS_PER_PAGE) });
+  const params = new URLSearchParams({ limit: String(limit) });
   // Only what the caller actually set — an empty filter is a filter nobody
   // asked for.
   if (query.status) params.set('status', query.status);
@@ -347,6 +349,17 @@ function isCreateDriverField(value: string): value is CreateDriverField {
   return (CREATE_DRIVER_FIELDS as readonly string[]).includes(value);
 }
 
+/**
+ * fleet-service's refusal of a user who is not a live member of this
+ * organization (task 095): `422`, `details[].code` `USER_NOT_A_MEMBER` on
+ * `userId`. One sentence for every way of not being one — no such user, a
+ * member of another organization, a membership that ended — because the
+ * service gives one answer for all of them. Pinned to `membership.ts` by
+ * `drivers.contract.spec.ts`.
+ */
+export const NOT_A_MEMBER_CODE = 'USER_NOT_A_MEMBER';
+export { NOT_A_MEMBER_TEXT };
+
 export const CREATE_DRIVER_FIELD_MAPPING: FieldMapping<CreateDriverField> = {
   paths: {
     userId: 'userId',
@@ -358,7 +371,9 @@ export const CREATE_DRIVER_FIELD_MAPPING: FieldMapping<CreateDriverField> = {
   },
   messages: {
     'Driver already exists': 'این کاربر پیش‌تر در این سازمان به‌عنوان راننده ثبت شده است',
+    'The user is not a member of this organization': NOT_A_MEMBER_TEXT,
   },
+  byDetailCode: { [NOT_A_MEMBER_CODE]: NOT_A_MEMBER_TEXT },
 };
 
 export function createDriver(
@@ -531,7 +546,12 @@ export const CHANGE_STATUS_FIELD_MAPPING: FieldMapping<ChangeStatusField> = {
       'این رکورد را درخواستی دیگر تغییر داد؛ صفحه را تازه کنید و دوباره تلاش کنید',
     'A deactivated driver is terminal; register a new driver record instead':
       'راننده‌ای که از رده خارج شده نهایی است؛ به‌جای آن رانندهٔ تازه ثبت کنید',
+    'The user is not a member of this organization': NOT_A_MEMBER_TEXT,
   },
+  // Reactivating asks fleet-service the registration's question again (task
+  // 095); its refusal names `userId`, which this form has no field for, so it
+  // is shown above the form.
+  byDetailCode: { [NOT_A_MEMBER_CODE]: NOT_A_MEMBER_TEXT },
 };
 
 export function changeDriverStatus(

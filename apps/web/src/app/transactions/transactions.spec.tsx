@@ -7,6 +7,7 @@ import type { ReadResult, Transaction } from '@/server/transactions';
 import { TransactionDetailScreen } from './[id]/TransactionDetailScreen';
 import { DisputeCommandForm } from './[id]/DisputeCommandForm';
 import type { DisputeFormState } from './[id]/form-state';
+import { bindingOf } from '@/test/unresolved-binding';
 
 // Each test renders the transaction screen or a dispute form and runs jest-axe over it (40 scans;
 // the file took 56 s on main 61a13bbc). On a loaded CI runner the first test passed jest's 5 s
@@ -56,7 +57,7 @@ afterEach(() => {
 });
 
 const CSRF = 'csrf-token-for-this-session';
-const BINDING = { owner: 'owner-tag', session: 'session-tag' };
+const BINDING = bindingOf('owner-tag', 'session-tag');
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const STAMP = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };

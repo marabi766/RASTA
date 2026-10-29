@@ -27,6 +27,7 @@ import type { DocumentNotice } from '@/lib/asset-document-fields';
 import type { AvailabilityNotice } from '@/lib/fleet-availability-fields';
 import { DemoModeNotice } from '@/app/DemoModeNotice';
 import type { DemoMode } from '@/lib/demo-mode';
+import { contextHref } from '@/lib/page-context';
 
 /**
  * The electronic dossier (docs/16 § 16.6, `/assets/[id]`).
@@ -47,6 +48,8 @@ import type { DemoMode } from '@/lib/demo-mode';
  */
 
 export interface DossierScreenProps {
+  /** The organization tag this page's URLs carry (`server/page-context.ts`). */
+  readonly context: string;
   readonly result: ReadResult<AssetDossier>;
   readonly assetId: string;
   /**
@@ -203,6 +206,7 @@ function expiryWording(days: number): string {
 }
 
 export function DossierScreen({
+  context,
   result,
   assetId,
   editForm,
@@ -269,7 +273,7 @@ export function DossierScreen({
           // step with maintenance-service here.
           <ButtonLink
             tone="secondary"
-            href={`/maintenance?assetId=${encodeURIComponent(assetId)}#report-request`}
+            href={contextHref(context, '/maintenance#report-request', { assetId })}
           >
             ثبت درخواست نگهداری
           </ButtonLink>

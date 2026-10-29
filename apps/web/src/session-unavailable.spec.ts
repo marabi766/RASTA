@@ -2,6 +2,7 @@
  * @jest-environment node
  */
 import { NextRequest } from 'next/server';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * PR 319 review 3, finding 2, end to end in memory: the real middleware, the
@@ -98,7 +99,7 @@ function session(accessTokenExpiresAt: number) {
     subject: 'user-1',
     username: 'payer',
     organizationId: 'ORG-DEH-0001',
-    accessToken: 'access-token-value',
+    accessToken: actingAccessToken('ORG-DEH-0001'),
     accessTokenExpiresAt,
     refreshToken: 'refresh-token-value',
     csrfToken: 'csrf-token-for-this-session',

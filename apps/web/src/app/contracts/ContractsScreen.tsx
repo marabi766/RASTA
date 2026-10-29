@@ -24,6 +24,7 @@ import type {
   ContractSummary,
   ReadResult,
 } from '@/server/contracts';
+import { withContext, type InContext } from '@/lib/page-context';
 
 /**
  * The contract list (docs/16 § ۱۶٫۶, `/contracts`), read-only.
@@ -39,21 +40,24 @@ import type {
 
 export interface ContractsScreenProps {
   readonly result: ReadResult<ContractPage>;
-  readonly query: ContractListQuery;
+  readonly query: InContext<ContractListQuery>;
   /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
   readonly demoMode: DemoMode;
 }
 
-function hrefWith(query: ContractListQuery, changes: Partial<ContractListQuery>): string {
+function hrefWith(
+  query: InContext<ContractListQuery>,
+  changes: Partial<ContractListQuery>,
+): string {
   const merged = { ...query, ...changes };
   const params = new URLSearchParams();
   if (merged.status) params.set('status', merged.status);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const text = params.toString();
-  return text ? `/contracts?${text}` : '/contracts';
+  return withContext(query.context, text ? `/contracts?${text}` : '/contracts');
 }
 
-function StatusFilter({ query }: { query: ContractListQuery }) {
+function StatusFilter({ query }: { query: InContext<ContractListQuery> }) {
   const items: readonly (ContractStatus | undefined)[] = [undefined, ...CONTRACT_STATES];
   return (
     <nav aria-label="وضعیت قرارداد" className="flex flex-wrap gap-2">
