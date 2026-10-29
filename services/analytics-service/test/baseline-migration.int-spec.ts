@@ -57,6 +57,7 @@ describe('baseline migration reversibility on a non-empty isolated schema', () =
   const migrations = join(__dirname, '..', 'prisma', 'migrations');
   const initial = join(migrations, '20261017140000_init_analytics');
   const baseline = join(migrations, '20261024120000_baseline_metric');
+  const coverage = join(migrations, '20261029120000_projection_coverage');
 
   function apply(directory: string, file: string): void {
     applyMigration(ownerDatabaseUrl(), schema, join(directory, file));
@@ -69,6 +70,8 @@ describe('baseline migration reversibility on a non-empty isolated schema', () =
       'CREATE TABLE "_prisma_migrations" ("migration_name" text PRIMARY KEY)',
     );
     apply(baseline, 'migration.sql');
+    // `KpiRepository.read` also reads the projection's coverage start (Q-154).
+    apply(coverage, 'migration.sql');
   });
   afterEach(async () => {
     // Each case starts without another case's synthetic reference measurements.
