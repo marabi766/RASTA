@@ -3,6 +3,8 @@ import { ulid } from 'ulid';
 import { ERROR_CODES, ID_PREFIXES } from '@rasta/contracts';
 import {
   RastaError,
+  assertRolesAdmitted,
+  captureOutboxProvenance,
   createSystemContext,
   getContext,
   runUnscoped,
@@ -11,6 +13,12 @@ import {
 import { IdentityRepository, isRecordNotFound, isUniqueViolation } from './identity.repository';
 import { IDENTITY_EVENTS, validateIdentityPayload } from './events';
 import { isMembershipLive, liveMembershipWhere } from './membership-window';
+import {
+  MEMBERSHIP_ADMIN_ROLES,
+  PROFILE_ADMIN_ROLES,
+  REGISTRATION_REVIEW_ROLES,
+  liveAuthority,
+} from './live-authority';
 import {
   DEFAULT_ROLE_GRANT_POLICY,
   ROLE_GRANT_POLICY,
@@ -21,6 +29,16 @@ import {
   type RoleGrantPolicy,
 } from './role-grants';
 import {
+  assertSameProvisioning,
+  hashProvisioningRequest,
+  provisioningAccountNotHarmless,
+  provisioningAccountUnconfirmed,
+  provisioningIdempotencyKey,
+  replayedUserView,
+  type ProvisioningBinding,
+  type ProvisioningIntent,
+} from './provisioning-intent';
+import {
   DEFAULT_PROVISIONING_SCOPE_POLICY,
   PROVISIONING_SCOPE_POLICY,
   assertMayProvisionInto,
@@ -29,7 +47,12 @@ import {
 } from './provisioning-scope';
 import { IDENTITY_TOPIC, SERVICE_NAME } from '../config/env';
 import { APPROVAL_TRANSACTION_TIMEOUT_MS } from '../config/operation-budgets';
-import { KeycloakAdminClient, KeycloakCreateUnconfirmedError } from '../keycloak/keycloak.client';
+import {
+  KeycloakAdminClient,
+  KeycloakCreateUnconfirmedError,
+  type CreateKeycloakUserInput,
+  type KeycloakAccount,
+} from '../keycloak/keycloak.client';
 import { KeycloakProjector, USER_LOCK_TRANSACTION_OPTIONS } from '../keycloak/keycloak.projector';
 import {
   grantsAnything,
@@ -44,6 +67,7 @@ import type {
   CreateMembershipDto,
   CreateUserDto,
   CurrentUserView,
+  ListRegistrationRequestsQuery,
   ListUsersQuery,
   MembershipView,
   RegistrationRequestView,
@@ -65,13 +89,6 @@ import type {
  * what makes it impossible for the platform to believe a role was granted
  * while no consumer was ever told (ADR-021).
  */
-/**
- * Who may edit another person's profile. `SYSTEM_ADMIN` is listed for
- * clarity; `RolesGuard` already treats it as satisfying any role check, but
- * this check is made in the service, not by the guard.
- */
-const PROFILE_ADMIN_ROLES: readonly string[] = ['ORGANIZATION_ADMIN', 'SYSTEM_ADMIN'];
-
 /**
  * The services that may read which organizations a user belongs to
  * (`GET /v1/users/:id/organizations`): construction-service (CON-002 PR 8) and
@@ -229,18 +246,20 @@ export class IdentityService {
     // Object-level authorization: a user is visible only through a membership
     // in the requesting organization. Checking the membership rather than the
     // user is what keeps this from leaking across tenants.
-    const context = getContext();
-    if (id !== context.userId) {
-      // Fails closed. This used to run only `if (context.organizationId)`, so a
-      // token that resolved no organization skipped the check entirely and
-      // `findUserById` — which is unscoped — answered for anybody on the
-      // platform. That state is reachable: the guard falls back to the IdP
-      // subject for an account with no platform claims (ADR-060 § Context).
-      // With no organization there is nothing a non-self read can be scoped
-      // to, so the answer is the one a user in another tenant gets.
-      if (!context.organizationId) throw RastaError.notFound('User', id);
-      const membership = await this.repository.findMembership(id, context.organizationId);
-      if (!membership) throw RastaError.notFound('User', id);
+    //
+    // Fails closed with no acting organization. This used to run only
+    // `if (context.organizationId)`, so a token that resolved no organization
+    // skipped the check entirely and `findUserById` — which is unscoped —
+    // answered for anybody on the platform. That state is reachable: the guard
+    // falls back to the IdP subject for an account with no platform claims
+    // (ADR-060 § Context). And only a membership live now proves access (task
+    // 117, F3): one that expired, is suspended or has not begun used to be
+    // enough to read the person's email and phone long after they left.
+    //
+    // The predicate is `mayReadUser`, which a provisioning's replay applies
+    // too (task 130, R4).
+    if (!(await this.mayReadUser(id, this.repository.client))) {
+      throw RastaError.notFound('User', id);
     }
 
     const user = await this.repository.findUserById(id);
@@ -280,34 +299,70 @@ export class IdentityService {
   /**
    * Creates an already-approved user. Used by the platform operator; the
    * self-service path is {@link submitRegistration}.
+   *
+   * Requires an `Idempotency-Key` (task 117, F6): the request makes an
+   * identity-provider account before its transaction commits, so it is
+   * recorded first as an intent (`provisioning-intent.ts`) carrying the user id
+   * the account is made with. The same request again — same actor, key,
+   * acting organization and body — creates under that id, adopts the account
+   * an earlier attempt made (its `rasta_user_id` names exactly this user), or,
+   * once the user committed, replays the answer. Any other account under the
+   * username is somebody else's and is refused, 409, as it always was.
    */
-  async createUser(dto: CreateUserDto): Promise<UserView> {
+  async createUser(dto: CreateUserDto, idempotencyKey: unknown): Promise<UserView> {
     // Both before the lookup, so a caller who may not do this learns nothing
     // about whether the username they picked is taken — and, for the tenant
-    // check, nothing about the organization they named either.
+    // check, nothing about the organization they named either. On the token:
+    // the early refusal. The decisions that commit are made on the caller's
+    // live authority under the locks below (task 117, F1).
     assertMayProvisionInto(dto.organizationId, this.provisioningScope);
     assertMayGrantRoles(dto.roles, this.roleGrants);
+    const key = provisioningIdempotencyKey(idempotencyKey);
 
-    const existing = await this.repository.findUserByUsernameOrEmail(dto.username, dto.email);
-    if (existing) {
-      // Deliberately does not say *which* field collided. Telling an
-      // unauthenticated caller that an email is registered is an account
-      // enumeration oracle.
-      throw RastaError.alreadyExists('User');
-    }
+    const context = getContext();
+    const actor = context.userId ?? 'SYSTEM';
+    const binding: ProvisioningBinding = {
+      actorId: actor,
+      idempotencyKey: key,
+      actingOrganizationId: context.organizationId ?? null,
+      requestHash: hashProvisioningRequest(dto),
+    };
+    const authorizeLive = async (tx: ExtendedPrismaClient) => {
+      const { authority } = await this.authorizeUnderLock(tx, [], MEMBERSHIP_ADMIN_ROLES);
+      assertMayProvisionInto(dto.organizationId, this.provisioningScope, authority);
+      assertMayGrantRoles(dto.roles, this.roleGrants, authority);
+    };
 
-    const userId = `${ID_PREFIXES.user}_${ulid()}`;
-    const membershipId = `${ID_PREFIXES.membership}_${ulid()}`;
-    const actor = getContext().userId ?? 'SYSTEM';
+    // 1. The intent, committed before Keycloak hears of the user. Authorized
+    //    first, like everything after it, so no caller who may not make the
+    //    request leaves a row behind.
+    await this.repository.transaction(async (tx) => {
+      const claimed = await this.repository.claimProvisioningIntent(tx, {
+        ...binding,
+        userId: `${ID_PREFIXES.user}_${ulid()}`,
+        membershipId: `${ID_PREFIXES.membership}_${ulid()}`,
+      });
+      assertSameProvisioning(claimed, binding);
+      await authorizeLive(tx);
+    }, USER_LOCK_TRANSACTION_OPTIONS);
+
+    // 2. Reconciled under the intent's lock, before any refusal or Keycloak
+    //    call: finished → replayed; the username or email held → 409.
+    const reconciled = await this.repository.transaction(
+      (tx) => this.reconcileProvisioning(tx, binding, dto, authorizeLive),
+      USER_LOCK_TRANSACTION_OPTIONS,
+    );
+    if ('replay' in reconciled) return reconciled.replay;
+    const { userId, membershipId } = reconciled.intent;
 
     // Disabled, and carrying nothing but its provenance (D-069 addendum D):
     // no user row exists yet for a lock to cover, so until the row below has
     // committed the account must be harmless whatever happens next — a lost
     // answer, a crash, a transaction that rolls back. Its grants and its
     // enable are written after commit by the projector, each write fenced,
-    // like every other write of the account. Before, this created the account
-    // enabled and granting, ahead of a transaction that might not commit.
-    const keycloakId = await this.keycloak.createUser({
+    // like every other write of the account. Made with the intent's user id,
+    // so an account left behind by a failed attempt is this request's own.
+    const created = await this.createAccount({
       username: dto.username,
       email: dto.email,
       firstName: dto.firstName,
@@ -316,24 +371,43 @@ export class IdentityService {
     });
 
     const user = await this.repository.transaction(async (tx) => {
-      const created = await tx.user.create({
-        data: {
-          id: userId,
-          keycloakId,
-          username: dto.username,
-          email: dto.email,
-          firstName: dto.firstName,
-          lastName: dto.lastName,
-          phone: dto.phone ?? null,
-          status: 'ACTIVE',
-          activeOrganizationId: dto.organizationId,
-          // The projector writes the grants, enables the account and clears
-          // this, once (`activateOnce`; an operator's user has no request).
-          accountActivationPending: keycloakId !== null,
-          createdBy: actor,
-          updatedBy: actor,
-        },
-      });
+      // 3. Reconciled again under the intent's lock: a concurrent retry of the
+      //    same key waits here, then finds the answer this one committed.
+      const again = await this.reconcileProvisioning(tx, binding, dto, authorizeLive);
+      if ('replay' in again) return again.replay;
+
+      const keycloakId =
+        created.outcome === 'created'
+          ? created.keycloakId
+          : await this.adoptProvisionedAccount(dto.username, userId);
+
+      let row;
+      try {
+        row = await runUnscoped('user identity is not tenant-scoped', () =>
+          tx.user.create({
+            data: {
+              id: userId,
+              keycloakId,
+              username: dto.username,
+              email: dto.email,
+              firstName: dto.firstName,
+              lastName: dto.lastName,
+              phone: dto.phone ?? null,
+              status: 'ACTIVE',
+              activeOrganizationId: dto.organizationId,
+              // The projector writes the grants, enables the account and clears
+              // this, once (`activateOnce`; an operator's user has no request).
+              accountActivationPending: keycloakId !== null,
+              createdBy: actor,
+              updatedBy: actor,
+            },
+          }),
+        );
+      } catch (error) {
+        // Taken meanwhile — by a registration, or another provisioning.
+        if (isUniqueViolation(error)) throw RastaError.alreadyExists('User');
+        throw error;
+      }
 
       await this.createMembershipRow(tx, {
         membershipId,
@@ -370,16 +444,136 @@ export class IdentityService {
         }),
       });
 
-      return created;
-    });
+      const view = toUserView(row);
+      await this.repository.completeProvisioningIntent(tx, actor, key, view);
+      return view;
+      // It may read Keycloak under the intent's lock (adoption).
+    }, APPROVAL_TRANSACTION_OPTIONS);
 
     // The grants, then the account enabled — only now that the user has
     // committed. Never throws: USER_ACTIVATED and MEMBERSHIP_CREATED, committed
     // above, bring the projection back round if this fails, and until it
-    // lands the account stays disabled.
+    // lands the account stays disabled. A replay projects again, harmlessly:
+    // a projection rebuilds the committed state.
     await this.projector.projectAfterCommit(userId);
 
-    return toUserView(user);
+    return user;
+  }
+
+  /**
+   * One provisioning, reconciled under its intent's lock (task 130, PR #483
+   * r1 R3) — the step every decision after the intent's first commit goes
+   * through, before any refusal and before any further provisioning work:
+   *
+   * 1. the intent, locked `FOR UPDATE`, and bound to this request;
+   * 2. **finished** — a concurrent or earlier send of this very request
+   *    committed the user — the stored answer, through the one replay
+   *    boundary ({@link replayProvisioning});
+   * 3. otherwise the caller's live authority, then whether anybody holds the
+   *    username or the email: 409, without saying which. The user row of this
+   *    intent commits in the same transaction as its completion, so once (2)
+   *    has found it open, whoever holds the name is somebody else.
+   *
+   * Under the lock, so the order is decided: the r1 lookup ran after the
+   * first transaction and before this lock, and a retry that read the intent
+   * open, then lost the race to the send that finished it, found that send's
+   * user and answered 409 instead of the answer.
+   */
+  private async reconcileProvisioning(
+    tx: ExtendedPrismaClient,
+    binding: ProvisioningBinding,
+    dto: CreateUserDto,
+    authorizeLive: (tx: ExtendedPrismaClient) => Promise<void>,
+  ): Promise<{ replay: UserView } | { intent: ProvisioningIntent }> {
+    const intent = await this.repository.lockProvisioningIntent(
+      tx,
+      binding.actorId,
+      binding.idempotencyKey,
+    );
+    if (!intent) throw new Error('the provisioning intent is missing');
+    assertSameProvisioning(intent, binding);
+    if (intent.completedAt) {
+      return { replay: await this.replayProvisioning(tx, intent, binding, authorizeLive) };
+    }
+
+    await authorizeLive(tx);
+    if (await this.repository.findUserByUsernameOrEmail(dto.username, dto.email, tx)) {
+      // Deliberately does not say *which* field collided.
+      throw RastaError.alreadyExists('User');
+    }
+    return { intent };
+  }
+
+  /**
+   * The one replay boundary of `POST /v1/users` (task 130, PR #483 r1 R4;
+   * pre-review checklist B4). A finished provisioning's stored answer is
+   * returned only when, now:
+   *
+   * - the request is the intent's — same actor, key, acting organization and
+   *   body (`assertSameProvisioning`);
+   * - the caller still holds the live authority to make it (`authorizeLive`,
+   *   the provisioning's own decision);
+   * - the caller may **read** the user it made, by the predicate
+   *   `GET /v1/users/:id` applies ({@link mayReadUser}): a membership live now
+   *   in the organization the caller acts for.
+   *
+   * Otherwise the generic conflict a reused key gets — `409
+   * IDEMPOTENCY_KEY_REUSED`, nothing stored in it: a person whose membership
+   * was revoked or has expired since is no more readable through a replay
+   * than through `GET`.
+   */
+  private async replayProvisioning(
+    tx: ExtendedPrismaClient,
+    intent: ProvisioningIntent,
+    binding: ProvisioningBinding,
+    authorizeLive: (tx: ExtendedPrismaClient) => Promise<void>,
+  ): Promise<UserView> {
+    assertSameProvisioning(intent, binding);
+    await authorizeLive(tx);
+    if (!(await this.mayReadUser(intent.userId, tx))) throw RastaError.idempotencyKeyReused();
+    return replayedUserView(intent.responseBody);
+  }
+
+  /**
+   * Whether the caller may read `userId` now — the predicate of
+   * `GET /v1/users/:id` and of a provisioning's replay, in one place. Oneself;
+   * otherwise a user, not removed, with a membership live now — on the
+   * database's clock — in the organization the caller acts for (task 117,
+   * F3). A membership that ended, expired, is suspended or has not begun is
+   * history and proves nothing. No acting organization: nothing a non-self
+   * read can be scoped to, so no.
+   */
+  private async mayReadUser(userId: string, db: ExtendedPrismaClient): Promise<boolean> {
+    const context = getContext();
+    if (userId !== context.userId) {
+      if (!context.organizationId) return false;
+      const now = await this.repository.databaseNow(db);
+      if (!(await this.repository.findLiveMembership(userId, context.organizationId, now, db))) {
+        return false;
+      }
+    }
+    return (await this.repository.findUserById(userId, db)) !== null;
+  }
+
+  /**
+   * The account an earlier attempt of this provisioning made, when Keycloak
+   * answered this one's create with 409 or without an id: adopted only when
+   * its `rasta_user_id` names exactly this request's user (`findOwnAccount`,
+   * the rule approval applies) and it is still as every create leaves it —
+   * disabled and granting nothing. Nothing on the platform writes an account
+   * no user row names, so one that is not was changed in Keycloak directly,
+   * and is left to an operator rather than adopted.
+   */
+  private async adoptProvisionedAccount(username: string, userId: string): Promise<string> {
+    const found = await this.findOwnAccount(username, userId);
+    if (found === 'missing') throw provisioningAccountUnconfirmed();
+    if (found === 'foreign') throw RastaError.alreadyExists('User');
+    if (found.enabled || grantsAnything(found.attributes)) throw provisioningAccountNotHarmless();
+    this.logger.warn(
+      { userId, keycloakId: found.id },
+      'Provisioning adopted the Keycloak account an earlier attempt at it created',
+    );
+    return found.id;
   }
 
   async updateUser(id: string, dto: UpdateUserDto): Promise<UserView> {
@@ -401,20 +595,31 @@ export class IdentityService {
       // acting for another in which they are only a member. The membership
       // check below still confines them to users of the organization they act
       // for; ADR-060 makes the role itself mean "in this organization".
-      if (!context.roles.some((role) => PROFILE_ADMIN_ROLES.includes(role))) {
-        throw RastaError.insufficientRole(PROFILE_ADMIN_ROLES, context.roles);
-      }
-      const membership = await this.repository.findMembership(id, context.organizationId ?? '');
-      if (!membership) throw RastaError.notFound('User', id);
+      //
+      // The token's roles are the early refusal only. The decision that
+      // commits is made below, in the write's transaction (task 117, F1/F3).
+      // The platform's one role predicate, as everywhere (task 130).
+      assertRolesAdmitted(context.roles, { required: PROFILE_ADMIN_ROLES });
     }
-
-    const existing = await this.repository.findUserById(id);
-    if (!existing) throw RastaError.notFound('User', id);
 
     const changedFields = Object.keys(dto);
     const actor = context.userId ?? 'SYSTEM';
 
     const updated = await this.repository.transaction(async (tx) => {
+      if (!isSelf) {
+        // Decided on what holds now: the caller's live authority, and the
+        // person's live membership in the organization the caller acts for —
+        // both read under the locks, on the database's clock. A former member
+        // is not one of this organization's users, whatever their old row says.
+        const { now } = await this.authorizeUnderLock(tx, [id], PROFILE_ADMIN_ROLES);
+        const membership = context.organizationId
+          ? await this.repository.findLiveMembership(id, context.organizationId, now, tx)
+          : null;
+        if (!membership) throw RastaError.notFound('User', id);
+      }
+      const existing = await this.repository.findUserById(id, tx);
+      if (!existing) throw RastaError.notFound('User', id);
+
       const user = await runUnscoped('user identity is not tenant-scoped', () =>
         tx.user.update({
           where: { id },
@@ -441,7 +646,7 @@ export class IdentityService {
       });
 
       return user;
-    });
+    }, USER_LOCK_TRANSACTION_OPTIONS);
 
     return toUserView(updated);
   }
@@ -469,6 +674,22 @@ export class IdentityService {
     const actor = getContext().userId ?? 'SYSTEM';
 
     const membership = await this.repository.transaction(async (tx) => {
+      // The user's lock, like every other membership change of theirs (task
+      // 117): a creation and a role change of the same user now run one after
+      // the other. Then the caller's live authority, and every check above
+      // again on what holds under the lock.
+      const { authority, locked } = await this.authorizeUnderLock(
+        tx,
+        [userId],
+        MEMBERSHIP_ADMIN_ROLES,
+      );
+      assertMayProvisionInto(dto.organizationId, this.provisioningScope, authority);
+      assertMayGrantRoles(dto.roles, this.roleGrants, authority);
+      if (!locked.get(userId)) throw RastaError.notFound('User', userId);
+      if (await this.repository.findMembership(userId, dto.organizationId, tx)) {
+        throw RastaError.alreadyExists('Membership');
+      }
+
       const created = await this.createMembershipRow(tx, {
         membershipId,
         userId,
@@ -493,7 +714,7 @@ export class IdentityService {
       });
 
       return created;
-    });
+    }, USER_LOCK_TRANSACTION_OPTIONS);
 
     await this.projector.projectAfterCommit(userId);
 
@@ -514,8 +735,9 @@ export class IdentityService {
    * written ahead, the full new set after commit.
    *
    * Decided under the user lock, on the membership as read under it — its
-   * roles, and the caller's right to manage them — never on the read before
-   * the lock, which only picks the user to lock and refuses early. Sending the
+   * roles, and the caller's right to manage them, read from the caller's live
+   * membership (`live-authority.ts`) — never on the read before the lock or
+   * on the token, which only pick the user to lock and refuse early. Sending the
    * same roles again (an administrator who never saw the answer, or behind a
    * gateway timeout) answers the same and emits nothing: nothing was added or
    * removed.
@@ -548,20 +770,28 @@ export class IdentityService {
     const updated = await this.repository
       .transaction(async (tx) => {
         // Every Keycloak writer and every membership change for one user
-        // takes the same lock first (`KeycloakProjector`, D-064).
-        await this.repository.lockUserMemberships(tx, userId);
+        // takes the same lock before it reads a membership (`KeycloakProjector`,
+        // D-064) — here with the caller's own row beside it, in id order
+        // (`lockUsersInOrder`). Then the caller's authority as the database
+        // holds it now, never the token's (task 117, F1): a demoted
+        // administrator's old token cannot grant their role back. `now` is the
+        // database's clock, read after the locks (#402 r1 F3).
+        const { now, authority } = await this.authorizeUnderLock(
+          tx,
+          [userId],
+          MEMBERSHIP_ADMIN_ROLES,
+        );
 
         // What is decided on is what is changed: read again under the lock.
         const membership = await this.repository.findMembershipById(membershipId, tx);
         if (!membership) throw RastaError.notFound('Membership', membershipId);
-        assertMayManageMembershipRoles(membership.roles, this.roleGrants);
+        assertMayGrantRoles(dto.roles, this.roleGrants, authority);
+        assertMayManageMembershipRoles(membership.roles, this.roleGrants, authority);
 
         const previousRoles = membership.roles;
         const nextRoles: readonly string[] = dto.roles;
         const added = nextRoles.filter((role) => !previousRoles.includes(role));
         const removed = previousRoles.filter((role) => !nextRoles.includes(role));
-        // The database's clock, read after the lock (#402 r1 F3).
-        const now = await this.repository.databaseNow(tx);
         const before = removed.length > 0 ? await this.rowsGrant(tx, userId, now) : null;
 
         const result = await tx.membership.update({
@@ -650,19 +880,23 @@ export class IdentityService {
       .transaction(async (tx) => {
         // Before the membership is touched: a switch to this organization either
         // commits first and is then moved off below, or waits and is refused.
-        await this.repository.lockUserMemberships(tx, userId);
+        // The caller's row beside it, and their live authority decides (task
+        // 117, F1); `now` is the database's clock after the locks (#402 r1 F3).
+        const { now, authority } = await this.authorizeUnderLock(
+          tx,
+          [userId],
+          MEMBERSHIP_ADMIN_ROLES,
+        );
 
         const membership = await this.repository.findMembershipByIdIncludingRevoked(
           membershipId,
           tx,
         );
         if (!membership) throw RastaError.notFound('Membership', membershipId);
-        assertMayManageMembershipRoles(membership.roles, this.roleGrants);
+        assertMayManageMembershipRoles(membership.roles, this.roleGrants, authority);
         // Already ended — by this same request, sent again: nothing to do.
         if (membership.deletedAt) return;
 
-        // The database's clock, read after the lock (#402 r1 F3).
-        const now = await this.repository.databaseNow(tx);
         const before = await this.rowsGrant(tx, userId, now);
 
         // `deletedAt` is the end of the membership in every history read: the database's clock,
@@ -694,6 +928,40 @@ export class IdentityService {
       });
 
     await writeAhead.afterCommit();
+  }
+
+  /**
+   * The start of every identity-administration write's transaction (task 117,
+   * F1): the user locks — every user in `targets` `FOR UPDATE`, the caller
+   * `FOR KEY SHARE`, in id order (`lockUsersInOrder`) — then the database's
+   * clock, then the caller's live roles in the organization they act for,
+   * refused unless they include one of `required` (`liveAuthority`). Every
+   * decision after it measures `authority`, never the token.
+   */
+  private async authorizeUnderLock(
+    tx: ExtendedPrismaClient,
+    targets: readonly string[],
+    required: readonly string[],
+  ): Promise<{
+    now: Date;
+    authority: readonly string[];
+    locked: Map<string, { activeOrganizationId: string | null } | null>;
+  }> {
+    const context = getContext();
+    const locked = await this.repository.lockUsersInOrder(tx, targets, context.userId);
+    const now = await this.repository.databaseNow(tx);
+    try {
+      return { now, authority: await liveAuthority(this.repository, tx, now, required), locked };
+    } catch (error) {
+      // The token said yes and the database says no: a token minted before a
+      // demotion, a revocation or an expiry, still inside its lifetime
+      // (ADR-060 § 7). Worth seeing; ids only.
+      this.logger.warn(
+        { userId: context.userId, organizationId: context.organizationId },
+        "Identity administration refused: the caller's token outlived their authority",
+      );
+      throw error;
+    }
   }
 
   /**
@@ -803,67 +1071,209 @@ export class IdentityService {
   // -------------------------------------------------------------------------
 
   /**
-   * Records a request to join the platform.
+   * A request to join the platform, as the applicant is answered (task 117,
+   * F5; task 130, PR #483 r1 R5): one acknowledgement, the same bytes and the
+   * same work whatever becomes of it.
    *
-   * Creates the user in PENDING with no Keycloak account: the product document
-   * requires operator review before activation, so nothing here grants access.
+   * It used to answer `409 ALREADY_EXISTS` when the username or the email was
+   * taken and `201` with the new request's id otherwise. Task 117 made the
+   * answer the same bytes; the work behind it still differed — a fresh
+   * identity inserted and committed three rows, a held one rolled back at the
+   * user's unique index — so the time to the answer still said whether the
+   * guess had an account. Now every valid submission does exactly the same
+   * thing before it is answered: one intake row, committed
+   * ({@link receiveRegistration}). Whether the identity is held is decided
+   * afterwards, privately, by the registration worker
+   * ({@link processRegistrationIntake}).
    */
-  async submitRegistration(dto: SubmitRegistrationDto): Promise<{ registrationId: string }> {
-    // This endpoint is unauthenticated, so there is no ladder to measure the
-    // request against — but a role nobody can ever grant is one nobody can
-    // usefully ask for, and storing it would put attacker-chosen bait in front
-    // of a reviewer. The grant itself is still checked at approval.
+  async submitRegistration(dto: SubmitRegistrationDto): Promise<RegistrationAcknowledgement> {
+    await this.receiveRegistration(dto);
+    return { status: REGISTRATION_ACKNOWLEDGEMENT.status };
+  }
+
+  /**
+   * The uniform intake: the submission, as validated, written to
+   * `registration_intake` and committed — one statement, the same for every
+   * applicant, with nothing in it that reads or is constrained by who already
+   * has an account. Returns the intake's id, which is the id the request is
+   * recorded under if it is.
+   *
+   * Refuses only on the submission itself: a role nobody can ever grant is
+   * one nobody can usefully ask for, and storing it would put attacker-chosen
+   * bait in front of a reviewer — refused whoever the applicant is, so it says
+   * nothing about who has an account. The grant itself is still checked at
+   * approval.
+   *
+   * Stored with it, in their own columns: the request's provenance (PR #483
+   * r2 N1) — the verified principal the auth guard put in the request context
+   * (`ANONYMOUS`, with no id, for an unauthenticated submission — r3 F1) and
+   * the request's correlation id, by the same rule an event built inside the
+   * request applies (`captureOutboxProvenance`, which reads the ambient
+   * context and takes no argument). Never anything from the body: the
+   * submission is the applicant's claim, the provenance is the platform's.
+   */
+  async receiveRegistration(dto: SubmitRegistrationDto): Promise<string> {
     assertRolesMayBeRequested(dto.requestedRoles);
+    const intakeId = `REG_${ulid()}`;
+    await this.repository.receiveRegistration(intakeId, dto, captureOutboxProvenance());
+    return intakeId;
+  }
 
-    const existing = await this.repository.findUserByUsernameOrEmail(dto.username, dto.email);
-    if (existing) throw RastaError.alreadyExists('User');
-
+  /**
+   * Handles one received submission, after its applicant has been answered:
+   * the registration worker's step (`RegistrationIntakeWorker`).
+   *
+   * Records the user in PENDING with no Keycloak account — the product
+   * document requires operator review before activation, so nothing here
+   * grants access — the request under the intake's id, and its
+   * REGISTRATION_SUBMITTED event, and deletes the intake row, in one
+   * transaction. When the username or the email is already held — by any
+   * user, a pending applicant or a removed one included (both are globally
+   * unique, `schema.prisma`) — the unique indexes refuse the user, and the
+   * intake row is deleted with nothing recorded: `DUPLICATE`, logged without
+   * the username or the email (S-09). `GONE`: another worker has it, or it was
+   * handled already.
+   *
+   * Throws on anything else; the worker defers the row and tries it again.
+   */
+  async processRegistrationIntake(
+    intakeId: string,
+  ): Promise<{ outcome: 'RECORDED'; registrationId: string } | { outcome: 'DUPLICATE' | 'GONE' }> {
     const userId = `${ID_PREFIXES.user}_${ulid()}`;
-    const registrationId = `REG_${ulid()}`;
 
-    await this.repository.transaction(async (tx) => {
-      await tx.user.create({
-        data: {
-          id: userId,
-          username: dto.username,
-          email: dto.email,
-          firstName: dto.firstName,
-          lastName: dto.lastName,
-          phone: dto.phone ?? null,
-          status: 'PENDING',
-          createdBy: 'SELF_REGISTRATION',
-          updatedBy: 'SELF_REGISTRATION',
-        },
-      });
+    try {
+      const recorded = await this.repository.transaction(async (tx) => {
+        const intake = await this.repository.lockRegistrationIntake(tx, intakeId);
+        if (!intake) return false;
+        // Written by `receiveRegistration` from the validated body, and by
+        // nothing else.
+        const dto = intake.submission as SubmitRegistrationDto;
 
-      await tx.registrationRequest.create({
-        data: {
-          id: registrationId,
-          userId,
-          requestedOrganizationId: dto.requestedOrganizationId,
-          requestedRoles: dto.requestedRoles,
-          justification: dto.justification ?? null,
-          documentRefs: dto.documentRefs,
-          status: 'PENDING',
-        },
-      });
+        try {
+          await tx.user.create({
+            data: {
+              id: userId,
+              username: dto.username,
+              email: dto.email,
+              firstName: dto.firstName,
+              lastName: dto.lastName,
+              phone: dto.phone ?? null,
+              status: 'PENDING',
+              createdBy: 'SELF_REGISTRATION',
+              updatedBy: 'SELF_REGISTRATION',
+            },
+          });
+        } catch (error) {
+          // The id is fresh and `keycloak_id` null: a unique violation on
+          // this insert is the username or the email.
+          if (isUniqueViolation(error)) throw new RegistrationIdentityTaken();
+          throw error;
+        }
 
-      await this.repository.enqueueEvent(tx, {
-        aggregateType: 'RegistrationRequest',
-        aggregateId: registrationId,
-        eventName: IDENTITY_EVENTS.REGISTRATION_SUBMITTED,
-        topic: IDENTITY_TOPIC,
-        organizationId: dto.requestedOrganizationId,
-        payload: validateIdentityPayload(IDENTITY_EVENTS.REGISTRATION_SUBMITTED, {
-          registrationId,
-          userId,
-          requestedOrganizationId: dto.requestedOrganizationId,
-          requestedRoles: dto.requestedRoles,
-        }),
+        await tx.registrationRequest.create({
+          data: {
+            id: intakeId,
+            userId,
+            requestedOrganizationId: dto.requestedOrganizationId,
+            requestedRoles: dto.requestedRoles,
+            justification: dto.justification ?? null,
+            documentRefs: dto.documentRefs,
+            status: 'PENDING',
+            createdAt: intake.receivedAt,
+          },
+        });
+
+        // The submitting request's provenance, as received — this runs after
+        // it ended, and no ambient context may stand in for it (PR #483 r2 N1,
+        // r3 F2): the one restoration path, not the ordinary enqueue.
+        await this.repository.enqueueRestoredEvent(
+          tx,
+          {
+            aggregateType: 'RegistrationRequest',
+            aggregateId: intakeId,
+            eventName: IDENTITY_EVENTS.REGISTRATION_SUBMITTED,
+            topic: IDENTITY_TOPIC,
+            organizationId: dto.requestedOrganizationId,
+            payload: validateIdentityPayload(IDENTITY_EVENTS.REGISTRATION_SUBMITTED, {
+              registrationId: intakeId,
+              userId,
+              requestedOrganizationId: dto.requestedOrganizationId,
+              requestedRoles: dto.requestedRoles,
+            }),
+          },
+          intake.provenance,
+        );
+
+        await this.repository.deleteRegistrationIntake(tx, intakeId);
+        return true;
       });
+      return recorded ? { outcome: 'RECORDED', registrationId: intakeId } : { outcome: 'GONE' };
+    } catch (error) {
+      if (!(error instanceof RegistrationIdentityTaken)) throw error;
+    }
+
+    // The username or the email is held: the submission is dropped, and its
+    // applicant's details with it.
+    const discarded = await this.repository.transaction(async (tx) => {
+      const intake = await this.repository.lockRegistrationIntake(tx, intakeId);
+      if (!intake) return null;
+      await this.repository.deleteRegistrationIntake(tx, intakeId);
+      return intake.provenance;
     });
+    if (!discarded) return { outcome: 'GONE' };
+    this.logger.log(
+      // The submission's own trail: this line runs after its request ended.
+      { intakeId, correlationId: discarded.correlationId },
+      'Registration discarded without a record: the username or the email is already held',
+    );
+    return { outcome: 'DUPLICATE' };
+  }
 
-    return { registrationId };
+  /**
+   * The review queue (`GET /v1/registration-requests`): requests for the
+   * organizations this reviewer may provision into — every organization for a
+   * `crossOrgRoles` holder (Q-61), otherwise only the one they act for, the
+   * scope approve and reject apply — oldest id first, a page at a time.
+   *
+   * New with task 117: the public submission no longer answers with the
+   * request's id (F5), and before it nothing listed requests at all, so the id
+   * in that answer was the only way to one. A read, so decided on the token
+   * like every read; approving or rejecting is decided again, live, under the
+   * request's lock. Every filter is in the query, before the page is cut.
+   */
+  async listRegistrationRequests(query: ListRegistrationRequestsQuery): Promise<{
+    items: RegistrationRequestView[];
+    nextCursor: string | null;
+    hasMore: boolean;
+  }> {
+    const context = getContext();
+    const everywhere = this.provisioningScope.crossOrgRoles.some((role) =>
+      context.roles.includes(role),
+    );
+    if (context.authType !== 'USER' || (!everywhere && !context.organizationId)) {
+      return { items: [], nextCursor: null, hasMore: false };
+    }
+    const rows = await runUnscoped(
+      'the review queue spans the organizations the reviewer may provision into',
+      () =>
+        this.repository.client.registrationRequest.findMany({
+          where: {
+            ...(everywhere ? {} : { requestedOrganizationId: context.organizationId }),
+            ...(query.status ? { status: query.status } : {}),
+            ...(query.username ? { user: { is: { username: query.username } } } : {}),
+            ...(query.cursor ? { id: { gt: query.cursor } } : {}),
+          },
+          include: { user: true },
+          orderBy: { id: 'asc' },
+          take: query.limit + 1,
+        }),
+    );
+    const page = rows.slice(0, query.limit);
+    return {
+      items: page.map(toRegistrationView),
+      nextCursor: rows.length > query.limit ? (page.at(-1)?.id ?? null) : null,
+      hasMore: rows.length > query.limit,
+    };
   }
 
   async approveRegistration(
@@ -917,13 +1327,27 @@ export class IdentityService {
     const reviewer = getContext().userId ?? 'SYSTEM';
     const membershipId = `${ID_PREFIXES.membership}_${ulid()}`;
 
+    // The reviewer's live authority, before Keycloak is asked to create
+    // anything (task 117, F1): an early refusal on the database's answer, so
+    // a reviewer whose token outlived their role does not leave accounts
+    // behind. Not the decision — that is made again under the locks below.
+    await this.repository.transaction(async (tx) => {
+      await this.authorizeUnderLock(tx, [], REGISTRATION_REVIEW_ROLES);
+    }, USER_LOCK_TRANSACTION_OPTIONS);
+
     // Disabled, and carrying nothing but its provenance: until the database
     // has committed this approval the account must be harmless whatever
     // happens next — a lost response, a crash, a transaction that rolls back
     // (#219 r2). The projector writes its grants and enables it after commit.
     // An account that already exists, or a create Keycloak did not confirm,
     // is resolved below, under the request lock (#219 r3).
-    const created = await this.createApprovalAccount(request);
+    const created = await this.createAccount({
+      username: request.user.username,
+      email: request.user.email,
+      firstName: request.user.firstName,
+      lastName: request.user.lastName,
+      userId: request.userId,
+    });
     // Whether an adoption wrote to the account (D-069): its fenced writes
     // that landed are due at once, and the projection after this approval —
     // whichever way it ends — takes them over.
@@ -943,7 +1367,23 @@ export class IdentityService {
         }
         // The one lock of every Keycloak writer of the user (`KeycloakProjector`,
         // D-064), after the request lock: adopting an account may write to it.
-        await this.repository.lockUserMemberships(tx, request.userId);
+        // The reviewer's row beside it, in id order, and their live authority
+        // decides what is granted, and where (task 117, F1).
+        const { authority } = await this.authorizeUnderLock(
+          tx,
+          [request.userId],
+          REGISTRATION_REVIEW_ROLES,
+        );
+        if (
+          !isWithinProvisioningScope(
+            request.requestedOrganizationId,
+            this.provisioningScope,
+            authority,
+          )
+        ) {
+          throw RastaError.notFound('RegistrationRequest', registrationId);
+        }
+        assertMayGrantRoles(grantedRoles as readonly PlatformRole[], this.roleGrants, authority);
         const keycloakId =
           created.outcome === 'created'
             ? created.keycloakId
@@ -1063,31 +1503,25 @@ export class IdentityService {
   }
 
   /**
-   * Creates the account an approval links — disabled, carrying only
-   * `rasta_user_id` — or says why it could not tell (#219 r2, r3).
+   * Creates the account an approval or a direct provisioning links — disabled,
+   * carrying only `rasta_user_id` — or says why it could not tell (#219 r2,
+   * r3; task 117 F6).
    *
-   * Runs before the request lock: a new account grants nothing and cannot
-   * sign in, so whatever becomes of this approval it is harmless. Two answers
+   * Runs before the decision's lock: a new account grants nothing and cannot
+   * sign in, so whatever becomes of the request it is harmless. Two answers
    * leave an account that may exist and need resolving under the lock
-   * (`adoptApprovalAccount`): Keycloak's 409 — an earlier attempt's account,
-   * whether that attempt's transaction failed or Keycloak's answer to it was
-   * lost — and a success without a usable id, which says nothing about which
-   * account, if any, was made.
+   * (`adoptApprovalAccount`, `adoptProvisionedAccount`): Keycloak's 409 — an
+   * earlier attempt's account, whether that attempt's transaction failed or
+   * Keycloak's answer to it was lost — and a success without a usable id, or a
+   * redirect (F7), which says nothing about which account, if any, was made.
    */
-  private async createApprovalAccount(request: {
-    userId: string;
-    user: { username: string; email: string; firstName: string; lastName: string };
-  }): Promise<
+  private async createAccount(
+    input: CreateKeycloakUserInput,
+  ): Promise<
     { outcome: 'created'; keycloakId: string | null } | { outcome: 'exists' | 'unconfirmed' }
   > {
     try {
-      const keycloakId = await this.keycloak.createUser({
-        username: request.user.username,
-        email: request.user.email,
-        firstName: request.user.firstName,
-        lastName: request.user.lastName,
-        userId: request.userId,
-      });
+      const keycloakId = await this.keycloak.createUser(input);
       return { outcome: 'created', keycloakId };
     } catch (error) {
       if (error instanceof KeycloakCreateUnconfirmedError) return { outcome: 'unconfirmed' };
@@ -1126,12 +1560,9 @@ export class IdentityService {
     outcome: 'exists' | 'unconfirmed',
     wrote: () => void,
   ): Promise<string> {
-    const existing = await this.keycloak.findAccountByUsername(request.user.username);
-    if (!existing) throw registrationAccountUnconfirmed(registrationId);
-    const provenance = existing.attributes.rasta_user_id;
-    if (provenance.length !== 1 || provenance[0] !== request.userId) {
-      throw registrationAccountTaken(registrationId);
-    }
+    const existing = await this.findOwnAccount(request.user.username, request.userId);
+    if (existing === 'missing') throw registrationAccountUnconfirmed(registrationId);
+    if (existing === 'foreign') throw registrationAccountTaken(registrationId);
     if (existing.enabled || grantsAnything(existing.attributes)) {
       // Fenced, under the user lock this transaction holds (D-069): a late
       // disable or clear can then never land after the enable unseen.
@@ -1147,6 +1578,24 @@ export class IdentityService {
       'Approval adopted the Keycloak account an earlier attempt at it created',
     );
     return existing.id;
+  }
+
+  /**
+   * The account Keycloak holds under `username`, when its `rasta_user_id` — an
+   * admin-only attribute a user cannot write (`rasta-realm.json`) — names
+   * exactly `userId`: the one rule by which an approval or a provisioning
+   * adopts an account it did not see created. `'foreign'`: an account is there,
+   * and it is somebody else's. `'missing'`: none is.
+   */
+  private async findOwnAccount(
+    username: string,
+    userId: string,
+  ): Promise<KeycloakAccount | 'missing' | 'foreign'> {
+    const existing = await this.keycloak.findAccountByUsername(username);
+    if (!existing) return 'missing';
+    const provenance = existing.attributes.rasta_user_id;
+    if (provenance.length !== 1 || provenance[0] !== userId) return 'foreign';
+    return existing;
   }
 
   async rejectRegistration(
@@ -1189,6 +1638,18 @@ export class IdentityService {
       if (locked?.status !== 'PENDING') {
         throw registrationAlreadyDecided('REJECTED', locked?.status);
       }
+      // After the request lock, the reviewer's row and live authority (task
+      // 117, F1): the scope is measured on the roles the database holds now.
+      const { authority } = await this.authorizeUnderLock(tx, [], REGISTRATION_REVIEW_ROLES);
+      if (
+        !isWithinProvisioningScope(
+          request.requestedOrganizationId,
+          this.provisioningScope,
+          authority,
+        )
+      ) {
+        throw RastaError.notFound('RegistrationRequest', registrationId);
+      }
       const result = await tx.registrationRequest.update({
         where: { id: registrationId, status: 'PENDING' },
         data: {
@@ -1217,7 +1678,7 @@ export class IdentityService {
       });
 
       return result;
-    });
+    }, USER_LOCK_TRANSACTION_OPTIONS);
 
     return toRegistrationView(updated);
   }
@@ -1499,6 +1960,22 @@ function toRegistrationView(request: RegistrationRow): RegistrationRequestView {
     rejectionReason: request.rejectionReason,
     createdAt: request.createdAt.toISOString(),
   };
+}
+
+/**
+ * What a self-registration answers, recorded or not (task 117, F5). A
+ * constant, so the two outcomes cannot drift apart in what they say.
+ */
+export const REGISTRATION_ACKNOWLEDGEMENT = { status: 'RECEIVED' } as const;
+
+export type RegistrationAcknowledgement = { status: typeof REGISTRATION_ACKNOWLEDGEMENT.status };
+
+/** The username or the email of a registration is already held. Never leaves this file. */
+class RegistrationIdentityTaken extends Error {
+  constructor() {
+    super('registration identity already held');
+    this.name = 'RegistrationIdentityTaken';
+  }
 }
 
 /**

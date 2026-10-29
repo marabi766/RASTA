@@ -217,6 +217,9 @@ export async function startIdentityApi(
     KEYCLOAK_SYNC_ENABLED: options.keycloak ? 'true' : 'false',
     // With a Keycloak, no sweep on a timer writing to it behind the suite's back.
     ...(options.keycloak ? { MEMBERSHIP_EXPIRY_SCAN_ENABLED: 'false' } : {}),
+    // Suites drain the registration intake themselves (`processRegistrations`),
+    // so what they assert never races a pass on a timer (task 130).
+    REGISTRATION_INTAKE_INTERVAL_SECONDS: '3600',
     SECURITY_EVENT_CAPTURE_TIMEOUT_MS: String(options.captureTimeoutMs ?? 5000),
     SECURITY_EVENT_FLUSH_INTERVAL_MS: String(options.flushIntervalMs ?? 1000),
     AUDIT_SERVICE_URL: options.auditServiceUrl ?? 'http://127.0.0.1:9',

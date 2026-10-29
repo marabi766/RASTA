@@ -43,6 +43,21 @@ describe('routing table integrity', () => {
     expect(registration!.rateLimit!.limit).toBeLessThanOrEqual(10);
   });
 
+  it('names the operations of every rate-limit override (task 130, PR #483 r1 R6)', () => {
+    // The sweep: every prefix-scoped override and what it caps. The
+    // registration submission is the collection's POST only — the reviewer's
+    // queue and decisions share the prefix; document writes only; the product
+    // search cap is about read volume, so every request. A new override
+    // decides this deliberately and fails here first.
+    expect(
+      ROUTES.filter((r) => r.rateLimit).map((r) => [r.prefix, r.rateLimit!.appliesTo ?? 'all']),
+    ).toEqual([
+      ['registration-requests', 'collection-post'],
+      ['products', 'all'],
+      ['documents', 'unsafe-methods'],
+    ]);
+  });
+
   it('requires an idempotency key on every money-moving prefix', () => {
     // The failure this prevents is a retried POST charging twice.
     const financial = ['orders', 'wallets', 'transactions', 'settlements', 'purchase-orders'];
@@ -121,7 +136,11 @@ describe('routing table integrity', () => {
     // `docs/06` § 6.9: «آپلود سند — ۲۰ فایل — ۱ ساعت». The cap is on the
     // operations that put a file in the bucket, not on the prefix as a whole.
     const route = ROUTES.find((r) => r.prefix === 'documents');
-    expect(route?.rateLimit).toEqual({ limit: 20, windowSeconds: 3600, unsafeMethodsOnly: true });
+    expect(route?.rateLimit).toEqual({
+      limit: 20,
+      windowSeconds: 3600,
+      appliesTo: 'unsafe-methods',
+    });
   });
 
   it('does not let the document upload cap throttle reading documents', () => {
@@ -129,7 +148,7 @@ describe('routing table integrity', () => {
     // would lock a user out of their own document list after one screen, and
     // would look like an outage rather than a limit.
     const route = ROUTES.find((r) => r.prefix === 'documents');
-    expect(route?.rateLimit?.unsafeMethodsOnly).toBe(true);
+    expect(route?.rateLimit?.appliesTo).toBe('unsafe-methods');
   });
 
   it('does not require an idempotency key on documents', () => {

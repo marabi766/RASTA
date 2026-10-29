@@ -26,7 +26,10 @@ import {
  * - `nextPut('apply-then-drop')` — applied, and the answer is lost;
  * - `nextPut('hold')` — arrives, is neither answered nor applied, and is
  *   applied whenever the suite says (`releaseHeld`): a write that lands after
- *   the caller gave up on it, as an aborted request may.
+ *   the caller gave up on it, as an aborted request may;
+ * - `nextPut('redirect')` — not applied, answered `303` to `/login`, which
+ *   answers `200` to whatever follows it (`redirectTargetHits`): a proxy in
+ *   front of Keycloak sending the caller to a login page (task 117, F7).
  *
  * `onPut` runs when a `PUT` arrives, before it is applied — where a suite
  * looks at the database to see what had committed by the time Keycloak was
@@ -85,7 +88,8 @@ type PutMode =
   | { kind: 'hang' }
   | { kind: 'apply-then-drop' }
   | { kind: 'hold' }
-  | { kind: 'delay'; ms: number };
+  | { kind: 'delay'; ms: number }
+  | { kind: 'redirect' };
 
 const USER_PATH = /^\/admin\/realms\/[^/]+\/users\/([^/?#]+)$/;
 const USERS_PATH = /^\/admin\/realms\/[^/]+\/users$/;
@@ -96,6 +100,8 @@ export class KeycloakHttpStub {
   readonly requests: StubRequest[] = [];
   /** Runs when a PUT arrives, before it is applied or answered. */
   onPut: ((request: StubRequest) => Promise<void>) | null = null;
+  /** Every request that followed a redirect to `/login` — none, if nothing follows one. */
+  readonly redirectTargetHits: Array<{ method: string; authorization: string | null }> = [];
 
   private server: Server;
   private port = 0;
@@ -139,7 +145,7 @@ export class KeycloakHttpStub {
   }
 
   /** How the next PUT (any user) is treated; a queue, one entry per PUT. */
-  nextPut(kind: 'hang' | 'apply-then-drop' | 'hold'): void;
+  nextPut(kind: 'hang' | 'apply-then-drop' | 'hold' | 'redirect'): void;
   nextPut(kind: 'refuse', status: number): void;
   nextPut(kind: 'delay', ms: number): void;
   nextPut(kind: PutMode['kind'], value?: number): void {
@@ -258,6 +264,14 @@ export class KeycloakHttpStub {
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const raw = await readBody(request);
     const path = (request.url ?? '').split('?')[0] ?? '';
+    if (path === '/login') {
+      this.redirectTargetHits.push({
+        method: request.method ?? 'GET',
+        authorization: request.headers.authorization ?? null,
+      });
+      response.writeHead(200, { 'content-type': 'text/html' }).end('<html>login</html>');
+      return;
+    }
     if (path.endsWith('/protocol/openid-connect/token')) {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ access_token: 'stub-admin-token', expires_in: 300 }));
@@ -316,6 +330,9 @@ export class KeycloakHttpStub {
       case 'delay':
         await new Promise((resolve) => setTimeout(resolve, mode.ms));
         break;
+      case 'redirect':
+        response.writeHead(303, { location: `${this.url}/login` }).end();
+        return;
       default:
         break;
     }
