@@ -8,6 +8,7 @@ import {
   ERROR_DESCRIPTIONS,
   formatDocument,
 } from './document';
+import { errorEnvelopeProblems } from '@rasta/nest-common';
 
 /**
  * The committed contract is exactly what the generator produces.
@@ -111,5 +112,9 @@ describe('the committed OpenAPI document', () => {
         schema: expect.objectContaining({ maxLength: 64 }),
       }),
     ]);
+  });
+
+  it('accepts the error bodies the shared filter really sends (audit 10-26 F3)', () => {
+    expect(errorEnvelopeProblems(buildNotificationOpenApiDocument(app))).toEqual([]);
   });
 });
