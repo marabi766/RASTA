@@ -1,6 +1,9 @@
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
 import type { PrismaService } from '../src/prisma/prisma.service';
+import { RegistrationIntakeWorker } from '../src/identity/registration-intake.worker';
+import type { IdentityService } from '../src/identity/identity.service';
+import type { SubmitRegistrationDto } from '../src/identity/dto';
 import { userToken, type IdentityApiHarness } from './api-helpers';
 import { id } from './helpers';
 
@@ -165,3 +168,31 @@ export const registrationBody = (username: string, email: string, organizationId
   requestedOrganizationId: organizationId,
   requestedRoles: ['FLEET_MANAGER'],
 });
+
+/**
+ * Runs the registration worker's passes now, as its timer would, until one
+ * handles nothing (task 130): every received public registration recorded or
+ * discarded, however many other suites left behind on a shared database — a
+ * pass takes one batch. Resolves to how many it handled.
+ */
+export async function processRegistrations(harness: IdentityApiHarness): Promise<number> {
+  const worker = harness.moduleRef.get(RegistrationIntakeWorker);
+  let handled = 0;
+  for (let pass = await worker.drain(); pass > 0; pass = await worker.drain()) handled += pass;
+  return handled;
+}
+
+/**
+ * A registration received and recorded at once — the intake, then the
+ * worker's step for it: the request's id. For suites about what happens to a
+ * request after it exists.
+ */
+export async function recordRegistration(
+  service: IdentityService,
+  dto: SubmitRegistrationDto,
+): Promise<string> {
+  const intakeId = await service.receiveRegistration(dto);
+  const handled = await service.processRegistrationIntake(intakeId);
+  if (handled.outcome !== 'RECORDED') throw new Error(`registration ${handled.outcome}`);
+  return handled.registrationId;
+}

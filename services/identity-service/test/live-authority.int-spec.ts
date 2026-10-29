@@ -5,6 +5,7 @@ import {
   eventNames,
   http,
   membershipRow,
+  processRegistrations,
   registrationBody,
   seedPerson,
   type Person,
@@ -218,6 +219,7 @@ describe('identity administration decides on the caller’s live authority (task
     expect(
       (await api.register(registrationBody(username, `${username}@example.test`, org.a))).status,
     ).toBe(202);
+    await processRegistrations(harness);
     const listed = await api.listRegistrations(before, { username });
     expect(listed.status).toBe(200);
     const registrationId = (listed.body as { items: { id: string }[] }).items[0]!.id;
@@ -234,6 +236,124 @@ describe('identity administration decides on the caller’s live authority (task
     );
     expect(request.status).toBe('PENDING');
     expect(await eventNames(harness.prisma, registrationId)).toEqual(['REGISTRATION_SUBMITTED']);
+  });
+
+  describe('AUDITOR added beside the administrator’s role since the token (task 130, PR #483 r1 R1)', () => {
+    // `RolesGuard` refuses a fresh token holding AUDITOR and ORGANIZATION_ADMIN
+    // on every one of these routes: the oversight role's denial comes before
+    // any positive role. The live decision applies that same predicate
+    // (`assertRolesAdmitted`) to the live roles, so a token minted before
+    // AUDITOR was added cannot do what a token minted after it cannot.
+    const addAuditor = (person: Person, roles: string[]) =>
+      setMembership(person.membershipId, { roles: [...roles, 'AUDITOR'] });
+
+    it('the guard’s own answer, for comparison: a fresh token with both roles is refused at the route', async () => {
+      const org = tenants();
+      const a = await admin(org.a, 'LA-AUD-F');
+      const c = await member(org.a);
+
+      const response = await api.roles(
+        bearerOf(a, ['ORGANIZATION_ADMIN', 'AUDITOR']),
+        c.membershipId,
+        ['OPERATOR', 'DRIVER'],
+      );
+
+      expect([response.status, response.body.code]).toEqual([403, 'INSUFFICIENT_ROLE']);
+    });
+
+    it('every identity-administration write with the stale ORGANIZATION_ADMIN token: 403, nothing changed, no event', async () => {
+      const org = tenants();
+      const a = await admin(org.a, 'LA-AUD');
+      const b = await admin(org.a, 'LA-AUD-B');
+      const c = await member(org.a);
+      const outsider = await member(org.b, ['OPERATOR'], 'LA-AUD-OUT');
+      const before = adminToken(a);
+      await addAuditor(a, ['ORGANIZATION_ADMIN']);
+      const cBefore = await membershipRow(harness.prisma, c.membershipId);
+      const username = `la-aud-${id('U').slice(-10)}`.toLowerCase();
+
+      const refused = [
+        // The reviewer's trigger: a permanent administrator made with the old token.
+        await api.roles(before, c.membershipId, ['ORGANIZATION_ADMIN']),
+        await api.revoke(before, b.membershipId),
+        await api.addMembership(before, outsider.userId, org.a, ['OPERATOR']),
+        await api.createUser(before, `la-aud-${username}`, {
+          username,
+          email: `${username}@example.test`,
+          firstName: 'آزمون',
+          lastName: 'ناظر',
+          organizationId: org.a,
+          roles: ['OPERATOR'],
+        }),
+        await api.patchUser(before, c.userId, { firstName: 'دیگر' }),
+      ];
+
+      expect(refused.map((response) => [response.status, response.body.code])).toEqual(
+        Array(5).fill([403, 'INSUFFICIENT_ROLE']),
+      );
+      expect(await membershipRow(harness.prisma, c.membershipId)).toEqual(cBefore);
+      expect((await membershipRow(harness.prisma, b.membershipId))?.deletedAt).toBeNull();
+      for (const aggregate of [c.membershipId, b.membershipId, c.userId]) {
+        expect(await eventNames(harness.prisma, aggregate)).toEqual([]);
+      }
+      const made = await runUnscoped('test looks for what was not made', async () => ({
+        memberships: await harness.prisma.client.membership.count({
+          where: { userId: outsider.userId, organizationId: org.a },
+        }),
+        users: await harness.prisma.client.user.count({ where: { username } }),
+        intents: await harness.prisma.client.userProvisioningIntent.count({
+          where: { actorId: a.userId },
+        }),
+      }));
+      expect(made).toEqual({ memberships: 0, users: 0, intents: 0 });
+    });
+
+    it('approve and reject with the stale UNION_ADMIN token: 403, the request still pending', async () => {
+      const org = tenants();
+      const reviewer = await seedPerson(harness.prisma, 'LA-AUD-REV', {
+        organizationId: org.a,
+        roles: ['UNION_ADMIN'],
+      });
+      const before = bearerOf(reviewer, ['UNION_ADMIN']);
+      const username = `la-aud-reg-${id('R').slice(-10)}`.toLowerCase();
+      await api.register(registrationBody(username, `${username}@example.test`, org.a));
+      await processRegistrations(harness);
+      const listed = await api.listRegistrations(before, { username });
+      const registrationId = (listed.body as { items: { id: string }[] }).items[0]!.id;
+      await addAuditor(reviewer, ['UNION_ADMIN']);
+
+      const approved = await api.approve(before, registrationId);
+      const rejected = await api.reject(before, registrationId);
+
+      expect([approved.status, rejected.status]).toEqual([403, 403]);
+      expect([approved.body.code, rejected.body.code]).toEqual([
+        'INSUFFICIENT_ROLE',
+        'INSUFFICIENT_ROLE',
+      ]);
+      const request = await runUnscoped('test reads the request', () =>
+        harness.prisma.client.registrationRequest.findUniqueOrThrow({
+          where: { id: registrationId },
+        }),
+      );
+      expect(request.status).toBe('PENDING');
+      expect(await eventNames(harness.prisma, registrationId)).toEqual(['REGISTRATION_SUBMITTED']);
+    });
+
+    it('nor does SYSTEM_ADMIN rescue it, as the guard says: the realm role beside a live AUDITOR membership is refused', async () => {
+      const org = tenants();
+      const operator = await seedPerson(harness.prisma, 'LA-AUD-SYS', {
+        organizationId: org.a,
+        roles: ['OPERATOR'],
+      });
+      const c = await member(org.a);
+      const before = bearerOf(operator, ['SYSTEM_ADMIN']);
+      await setMembership(operator.membershipId, { roles: ['AUDITOR'] });
+
+      const response = await api.roles(before, c.membershipId, ['OPERATOR', 'FLEET_MANAGER']);
+
+      expect([response.status, response.body.code]).toEqual([403, 'INSUFFICIENT_ROLE']);
+      expect(await rolesOf(c.membershipId)).toEqual(['OPERATOR']);
+    });
   });
 
   it('SYSTEM_ADMIN is realm authority, not membership data: its token decides, with no membership', async () => {

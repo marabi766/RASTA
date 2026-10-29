@@ -1,7 +1,7 @@
 import {
   GLOBAL_ROLES,
   RastaError,
-  RolesGuard,
+  assertRolesAdmitted,
   getContext,
   type PlatformRole,
 } from '@rasta/nest-common';
@@ -62,13 +62,18 @@ export const REGISTRATION_REVIEW_ROLES = ['UNION_ADMIN'] as const;
 
 /**
  * Who may edit another person's profile. `SYSTEM_ADMIN` is listed for
- * clarity; it satisfies every role check here, as it does in `RolesGuard`.
+ * clarity; it satisfies every role check here, as it does in `RolesGuard` —
+ * unless `AUDITOR` is held too (`assertRolesAdmitted`).
  */
 export const PROFILE_ADMIN_ROLES = ['ORGANIZATION_ADMIN', 'SYSTEM_ADMIN'] as const;
 
 /**
- * The caller's live roles in the organization they act for, refused unless
- * they include one of `required` (or `SYSTEM_ADMIN`, as `RolesGuard` reads it).
+ * The caller's live roles in the organization they act for, refused unless the
+ * platform's role predicate admits them for `required` — `assertRolesAdmitted`,
+ * the very function `RolesGuard` applies to the token, so a live decision never
+ * admits what the guard would refuse in a fresh token: `AUDITOR` held beside
+ * an admin role refuses (the oversight role's denial comes first), then
+ * `SYSTEM_ADMIN` admits, then one of `required` (task 130, PR #483 r1 R1).
  *
  * Call it inside the write's transaction, after its locks — the caller's own
  * user row among them (`IdentityRepository.lockUsersInOrder`) — with `now` the
@@ -95,8 +100,9 @@ export async function liveAuthority(
     : null;
   const roles = [...new Set([...(held ?? []), ...global])];
 
-  if (!roles.includes(RolesGuard.SUPER_ROLE) && !required.some((role) => roles.includes(role))) {
-    throw RastaError.insufficientRole(required, roles);
-  }
+  // The predicate `RolesGuard` applies to the token, applied to the live
+  // roles: the oversight role's denial first — `AUDITOR` beside an admin role
+  // refuses — then `SYSTEM_ADMIN`, then the required roles (task 130, R1).
+  assertRolesAdmitted(roles, { required });
   return roles;
 }

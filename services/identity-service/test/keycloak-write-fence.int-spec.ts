@@ -41,6 +41,7 @@ import {
   ensureLiveMember,
 } from './helpers';
 import { KeycloakHttpStub, SLOW_ROUND_TRIP_MS, type StubRequest } from './keycloak-http-stub';
+import { recordRegistration } from './identity-fixtures';
 
 /**
  * D-069 (#402 r1 F1–F4, #381 r3 F1): the durable in-flight fence of every
@@ -911,7 +912,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
     it('an adoption whose disable outlives its approval: the next approval commits, but the enable waits until that disable can no longer land — then the sweep activates', async () => {
       const org = tenants();
       const username = `fn-reg-${ulid().slice(-10)}`.toLowerCase();
-      const { registrationId } = (await service.recordRegistration({
+      const registrationId = await recordRegistration(service, {
         username,
         email: `${username}@example.test`,
         firstName: 'متقاضی',
@@ -919,7 +920,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         requestedOrganizationId: org.a,
         requestedRoles: ['FLEET_MANAGER'],
         documentRefs: [],
-      } as never))!;
+      } as never);
       const request = await runUnscoped('the suite reads the request it filed', () =>
         prisma.client.registrationRequest.findUniqueOrThrow({ where: { id: registrationId } }),
       );

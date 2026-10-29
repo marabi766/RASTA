@@ -20,6 +20,7 @@ import { runProjectionCommand } from '../src/keycloak/projection.command';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, id, newFences, newPrisma, tenants } from './helpers';
 import type { KeycloakWriteOperation } from '../src/keycloak/keycloak-write-fence';
+import { recordRegistration } from './identity-fixtures';
 
 /**
  * Registration decisions against a real database, and the Keycloak account an
@@ -236,7 +237,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
 
   async function submit(): Promise<{ registrationId: string; userId: string; username: string }> {
     const username = `reg-${ulid().slice(-12)}`.toLowerCase();
-    const { registrationId } = (await service.recordRegistration({
+    const registrationId = await recordRegistration(service, {
       username,
       email: `${username}@example.test`,
       firstName: 'متقاضی',
@@ -244,7 +245,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
       requestedOrganizationId: org.a,
       requestedRoles: ['FLEET_MANAGER'],
       documentRefs: [],
-    } as never))!;
+    } as never);
     const request = await runUnscoped('the suite reads the request it filed', () =>
       prisma.client.registrationRequest.findUniqueOrThrow({ where: { id: registrationId } }),
     );

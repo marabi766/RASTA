@@ -324,6 +324,71 @@ export class IdentityRepository {
     if (count !== 1) throw new Error('the provisioning intent was not open to complete');
   }
 
+  /**
+   * A public registration as received (task 130, PR #483 r1 R5): one row,
+   * committed on its own — the same statement whoever the applicant is. No
+   * lookup and no unique index on the username or the email, so nothing here
+   * costs differently when an account already holds either.
+   */
+  async receiveRegistration(id: string, submission: object): Promise<void> {
+    await this.client.$executeRaw`
+      INSERT INTO registration_intake (id, submission)
+      VALUES (${id}, ${JSON.stringify(submission)}::jsonb)`;
+  }
+
+  /**
+   * Up to `limit` intake rows due now (`next_attempt_at` passed), oldest first:
+   * the registration worker's read. A deferred row is not due, so it never
+   * takes a pass's budget. Not locked — each is taken under its own lock by
+   * {@link lockRegistrationIntake}.
+   */
+  async findDueRegistrationIntakes(limit: number): Promise<string[]> {
+    const rows = await this.client.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM registration_intake
+       WHERE next_attempt_at <= (clock_timestamp() AT TIME ZONE 'UTC')
+       ORDER BY id
+       LIMIT ${limit}`;
+    return rows.map((row) => row.id);
+  }
+
+  /**
+   * One intake row, locked `FOR UPDATE SKIP LOCKED`: null when it is gone —
+   * handled already — or another worker holds it.
+   */
+  async lockRegistrationIntake(
+    tx: ExtendedPrismaClient,
+    id: string,
+  ): Promise<{ id: string; submission: unknown; receivedAt: Date } | null> {
+    const rows = await tx.$queryRaw<Array<{ id: string; submission: unknown; received_at: Date }>>`
+      SELECT id, submission, received_at FROM registration_intake
+       WHERE id = ${id}
+         FOR UPDATE SKIP LOCKED`;
+    const row = rows[0];
+    return row ? { id: row.id, submission: row.submission, receivedAt: row.received_at } : null;
+  }
+
+  /** Removes a handled intake row, in the transaction that handled it. */
+  async deleteRegistrationIntake(tx: ExtendedPrismaClient, id: string): Promise<void> {
+    await tx.$executeRaw`DELETE FROM registration_intake WHERE id = ${id}`;
+  }
+
+  /**
+   * An intake row whose handling failed waits before it is tried again: one
+   * interval, doubling per attempt, at most `maxIntervals` — so a failing
+   * submission never holds back those behind it. Bounded like
+   * {@link deferLapse}, so no attempt count overflows the arithmetic.
+   */
+  async deferRegistrationIntake(id: string, intervalSeconds: number, maxIntervals: number) {
+    await this.client.$executeRaw`
+      UPDATE registration_intake
+         SET attempts = LEAST(attempts, ${BACKOFF_FAILURES_CAP - 1}) + 1,
+             next_attempt_at = (clock_timestamp() AT TIME ZONE 'UTC')
+               + make_interval(secs => ${intervalSeconds}
+                   * LEAST(POWER(2, LEAST(attempts, ${BACKOFF_EXPONENT_CAP})),
+                           ${maxIntervals}))
+       WHERE id = ${id}`;
+  }
+
   /** The same lock, on every registration request of one user; their statuses. */
   async lockRegistrationRequestsOfUser(
     tx: ExtendedPrismaClient,

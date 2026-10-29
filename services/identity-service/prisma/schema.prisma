@@ -233,6 +233,24 @@ model RegistrationRequest {
   @@map("registration_request")
 }
 
+/// A public registration as received (task 130, PR #483 r1 R5): one row per
+/// valid submission, written and committed before anything that depends on
+/// whether the username or the email is held, so every submission costs the
+/// same. The registration worker turns it into a user and a
+/// `RegistrationRequest` (under this id) or discards it as a duplicate, and
+/// deletes it either way. Migration 20261029130000.
+model RegistrationIntake {
+  id            String   @id @db.VarChar(64)
+  /// The validated `SubmitRegistrationDto`: personal data, kept only until handled.
+  submission    Json
+  receivedAt    DateTime @default(now()) @map("received_at")
+  attempts      Int      @default(0)
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at")
+
+  @@index([nextAttemptAt, id], map: "ix_registration_intake_due")
+  @@map("registration_intake")
+}
+
 enum RegistrationStatus {
   PENDING
   APPROVED

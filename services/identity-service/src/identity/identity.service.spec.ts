@@ -453,10 +453,11 @@ describe('createUser', () => {
     ]);
     // The events go through the same transaction callback as the writes, which
     // is what the outbox guarantee rests on. The first transaction commits the
-    // provisioning's intent before Keycloak is called (task 117, F6); the third
-    // is the projection after commit, which writes the grants and enables the
+    // provisioning's intent before Keycloak is called (task 117, F6); the
+    // second reconciles it under its lock (task 130, R3); the fourth is the
+    // projection after commit, which writes the grants and enables the
     // account (D-069 addendum D).
-    expect(h.repository.transaction).toHaveBeenCalledTimes(3);
+    expect(h.repository.transaction).toHaveBeenCalledTimes(4);
     expect(h.enqueued).toHaveLength(2);
   });
 });
@@ -726,7 +727,8 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
     // committed rows.
     expect(h.keycloak.createUser).toHaveBeenCalledTimes(1);
     expect(
-      (h.repository.transaction as unknown as jest.Mock).mock.invocationCallOrder[1],
+      // The intent, its reconciliation, then the user's: after the create.
+      (h.repository.transaction as unknown as jest.Mock).mock.invocationCallOrder[2],
     ).toBeGreaterThan((h.keycloak.createUser as unknown as jest.Mock).mock.invocationCallOrder[0]!);
   });
 

@@ -90,6 +90,12 @@ export type {
 } from './guards/auth.guard';
 
 export { RolesGuard } from './guards/roles.guard';
+export {
+  OVERSIGHT_ROLE,
+  SUPER_ROLE,
+  assertRolesAdmitted,
+  type RoleAdmission,
+} from './guards/role-admission';
 
 // Request pipeline -----------------------------------------------------------
 export {

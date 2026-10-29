@@ -41,18 +41,33 @@ export interface RouteRule {
   /**
    * Overrides the default per-user rate limit for expensive endpoints.
    *
-   * `unsafeMethodsOnly` narrows the override to the methods that create work,
-   * leaving reads on the platform default. It exists because `docs/06` § 6.9
-   * limits *operations* — "۲۰ فایل در ساعت" is a cap on uploading documents —
-   * while this table matches on a path prefix, so without it an upload cap
-   * silently becomes a cap on listing and reading too. Twenty requests an hour
-   * would make a documents screen unusable after one page.
+   * `appliesTo` narrows the override to the operations it is about, leaving
+   * every other request under the prefix on the platform default. It exists
+   * because `docs/06` § 6.9 limits *operations* — "۲۰ فایل در ساعت" is a cap on
+   * uploading documents — while this table matches on a path prefix, so
+   * without it an upload cap silently becomes a cap on listing and reading
+   * too. Twenty requests an hour would make a documents screen unusable after
+   * one page.
    *
-   * Method-awareness is not new knowledge for the gateway: it already applies
-   * `requiresIdempotencyKey` to unsafe methods only. It still knows nothing
-   * about the domain — only that writes cost more than reads (ADR-009).
+   * - `'unsafe-methods'`: every method but `GET`, `HEAD` and `OPTIONS`.
+   * - `'collection-post'`: `POST` to the prefix itself (`/v1/<prefix>`), nothing
+   *   below it — the create of a collection whose other writes (a decision on
+   *   one item, `/v1/<prefix>/<id>/approve`) are a different operation.
+   * - omitted: every request under the prefix.
+   *
+   * The requests an override caps and the ones it does not count in separate
+   * buckets (`rateLimitFor`): one sliding window serving two rules would let
+   * either trim or fill the other.
+   *
+   * Method- and shape-awareness is not new knowledge for the gateway: it
+   * already applies `requiresIdempotencyKey` to unsafe methods only. It still
+   * knows nothing about the domain — only which requests create work (ADR-009).
    */
-  rateLimit?: { limit: number; windowSeconds: number; unsafeMethodsOnly?: boolean };
+  rateLimit?: {
+    limit: number;
+    windowSeconds: number;
+    appliesTo?: 'unsafe-methods' | 'collection-post';
+  };
 }
 
 export const SERVICE_NAMES = [
@@ -88,8 +103,14 @@ export const ROUTES: readonly RouteRule[] = [
     publicReason:
       'Self-registration must be reachable before the applicant has an account. It creates a PENDING user with no credentials and a reviewable request, so it cannot grant access.',
     // Tightly limited: this is the one unauthenticated write on the platform,
-    // so it is the obvious target for flooding the review queue.
-    rateLimit: { limit: 5, windowSeconds: 3600 },
+    // so it is the obvious target for flooding the review queue. The
+    // submission only — `POST /v1/registration-requests` — whoever sends it.
+    // The reviewer's queue reads and decisions under the same prefix
+    // (`GET /v1/registration-requests`, `POST …/:id/approve`, `…/reject`) are
+    // a different operation, on the platform default in a bucket of their own:
+    // five an hour shared with the submission locked a reviewer out of the
+    // queue after five page loads (task 130, PR #483 r1 R6).
+    rateLimit: { limit: 5, windowSeconds: 3600, appliesTo: 'collection-post' },
   },
   { prefix: 'users', service: 'identity' },
   { prefix: 'memberships', service: 'identity' },
@@ -214,11 +235,12 @@ export const ROUTES: readonly RouteRule[] = [
   // requesting an upload URL, registering the result, issuing a download URL
   // and deleting are the operations that cap; listing and reading metadata run
   // on the platform default, or a user would be locked out for an hour by one
-  // screen of documents.
+  // screen of documents. In separate buckets: sharing one, a read trimmed the
+  // window to its own minute and so wiped the hour of uploads (task 130).
   {
     prefix: 'documents',
     service: 'document',
-    rateLimit: { limit: 20, windowSeconds: 3600, unsafeMethodsOnly: true },
+    rateLimit: { limit: 20, windowSeconds: 3600, appliesTo: 'unsafe-methods' },
   },
   {
     prefix: 'audit-events',

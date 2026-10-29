@@ -3,6 +3,7 @@ import { ulid } from 'ulid';
 import { ERROR_CODES, ID_PREFIXES } from '@rasta/contracts';
 import {
   RastaError,
+  assertRolesAdmitted,
   createSystemContext,
   getContext,
   runUnscoped,
@@ -34,6 +35,7 @@ import {
   provisioningIdempotencyKey,
   replayedUserView,
   type ProvisioningBinding,
+  type ProvisioningIntent,
 } from './provisioning-intent';
 import {
   DEFAULT_PROVISIONING_SCOPE_POLICY,
@@ -243,23 +245,20 @@ export class IdentityService {
     // Object-level authorization: a user is visible only through a membership
     // in the requesting organization. Checking the membership rather than the
     // user is what keeps this from leaking across tenants.
-    const context = getContext();
-    if (id !== context.userId) {
-      // Fails closed. This used to run only `if (context.organizationId)`, so a
-      // token that resolved no organization skipped the check entirely and
-      // `findUserById` — which is unscoped — answered for anybody on the
-      // platform. That state is reachable: the guard falls back to the IdP
-      // subject for an account with no platform claims (ADR-060 § Context).
-      // With no organization there is nothing a non-self read can be scoped
-      // to, so the answer is the one a user in another tenant gets.
-      if (!context.organizationId) throw RastaError.notFound('User', id);
-      // A membership that is live now, on the database's clock (task 117, F3):
-      // one that expired, is suspended or has not begun is history, and proves
-      // nothing about access — it used to be enough to read the person's email
-      // and phone long after they left.
-      const now = await this.repository.databaseNow(this.repository.client);
-      const membership = await this.repository.findLiveMembership(id, context.organizationId, now);
-      if (!membership) throw RastaError.notFound('User', id);
+    //
+    // Fails closed with no acting organization. This used to run only
+    // `if (context.organizationId)`, so a token that resolved no organization
+    // skipped the check entirely and `findUserById` — which is unscoped —
+    // answered for anybody on the platform. That state is reachable: the guard
+    // falls back to the IdP subject for an account with no platform claims
+    // (ADR-060 § Context). And only a membership live now proves access (task
+    // 117, F3): one that expired, is suspended or has not begun used to be
+    // enough to read the person's email and phone long after they left.
+    //
+    // The predicate is `mayReadUser`, which a provisioning's replay applies
+    // too (task 130, R4).
+    if (!(await this.mayReadUser(id, this.repository.client))) {
+      throw RastaError.notFound('User', id);
     }
 
     const user = await this.repository.findUserById(id);
@@ -334,9 +333,9 @@ export class IdentityService {
     };
 
     // 1. The intent, committed before Keycloak hears of the user. Authorized
-    //    first, like everything after it, so a replay answers only a caller who
-    //    may still make the request (pre-review checklist B4).
-    const intent = await this.repository.transaction(async (tx) => {
+    //    first, like everything after it, so no caller who may not make the
+    //    request leaves a row behind.
+    await this.repository.transaction(async (tx) => {
       const claimed = await this.repository.claimProvisioningIntent(tx, {
         ...binding,
         userId: `${ID_PREFIXES.user}_${ulid()}`,
@@ -344,19 +343,16 @@ export class IdentityService {
       });
       assertSameProvisioning(claimed, binding);
       await authorizeLive(tx);
-      return claimed;
     }, USER_LOCK_TRANSACTION_OPTIONS);
-    if (intent.completedAt) return replayedUserView(intent.responseBody);
-    const { userId, membershipId } = intent;
 
-    const existing = await this.repository.findUserByUsernameOrEmail(dto.username, dto.email);
-    if (existing) {
-      // Deliberately does not say *which* field collided. Telling an
-      // unauthenticated caller that an email is registered is an account
-      // enumeration oracle. No user row of this intent exists until it
-      // completes, so whoever holds the name is somebody else.
-      throw RastaError.alreadyExists('User');
-    }
+    // 2. Reconciled under the intent's lock, before any refusal or Keycloak
+    //    call: finished → replayed; the username or email held → 409.
+    const reconciled = await this.repository.transaction(
+      (tx) => this.reconcileProvisioning(tx, binding, dto, authorizeLive),
+      USER_LOCK_TRANSACTION_OPTIONS,
+    );
+    if ('replay' in reconciled) return reconciled.replay;
+    const { userId, membershipId } = reconciled.intent;
 
     // Disabled, and carrying nothing but its provenance (D-069 addendum D):
     // no user row exists yet for a lock to cover, so until the row below has
@@ -374,13 +370,10 @@ export class IdentityService {
     });
 
     const user = await this.repository.transaction(async (tx) => {
-      // The intent's lock first: a concurrent retry of the same key waits here,
-      // then finds the answer this one committed.
-      const locked = await this.repository.lockProvisioningIntent(tx, actor, key);
-      if (!locked) throw new Error('the provisioning intent is missing');
-      assertSameProvisioning(locked, binding);
-      if (locked.completedAt) return replayedUserView(locked.responseBody);
-      await authorizeLive(tx);
+      // 3. Reconciled again under the intent's lock: a concurrent retry of the
+      //    same key waits here, then finds the answer this one committed.
+      const again = await this.reconcileProvisioning(tx, binding, dto, authorizeLive);
+      if ('replay' in again) return again.replay;
 
       const keycloakId =
         created.outcome === 'created'
@@ -467,6 +460,101 @@ export class IdentityService {
   }
 
   /**
+   * One provisioning, reconciled under its intent's lock (task 130, PR #483
+   * r1 R3) — the step every decision after the intent's first commit goes
+   * through, before any refusal and before any further provisioning work:
+   *
+   * 1. the intent, locked `FOR UPDATE`, and bound to this request;
+   * 2. **finished** — a concurrent or earlier send of this very request
+   *    committed the user — the stored answer, through the one replay
+   *    boundary ({@link replayProvisioning});
+   * 3. otherwise the caller's live authority, then whether anybody holds the
+   *    username or the email: 409, without saying which. The user row of this
+   *    intent commits in the same transaction as its completion, so once (2)
+   *    has found it open, whoever holds the name is somebody else.
+   *
+   * Under the lock, so the order is decided: the r1 lookup ran after the
+   * first transaction and before this lock, and a retry that read the intent
+   * open, then lost the race to the send that finished it, found that send's
+   * user and answered 409 instead of the answer.
+   */
+  private async reconcileProvisioning(
+    tx: ExtendedPrismaClient,
+    binding: ProvisioningBinding,
+    dto: CreateUserDto,
+    authorizeLive: (tx: ExtendedPrismaClient) => Promise<void>,
+  ): Promise<{ replay: UserView } | { intent: ProvisioningIntent }> {
+    const intent = await this.repository.lockProvisioningIntent(
+      tx,
+      binding.actorId,
+      binding.idempotencyKey,
+    );
+    if (!intent) throw new Error('the provisioning intent is missing');
+    assertSameProvisioning(intent, binding);
+    if (intent.completedAt) {
+      return { replay: await this.replayProvisioning(tx, intent, binding, authorizeLive) };
+    }
+
+    await authorizeLive(tx);
+    if (await this.repository.findUserByUsernameOrEmail(dto.username, dto.email, tx)) {
+      // Deliberately does not say *which* field collided.
+      throw RastaError.alreadyExists('User');
+    }
+    return { intent };
+  }
+
+  /**
+   * The one replay boundary of `POST /v1/users` (task 130, PR #483 r1 R4;
+   * pre-review checklist B4). A finished provisioning's stored answer is
+   * returned only when, now:
+   *
+   * - the request is the intent's — same actor, key, acting organization and
+   *   body (`assertSameProvisioning`);
+   * - the caller still holds the live authority to make it (`authorizeLive`,
+   *   the provisioning's own decision);
+   * - the caller may **read** the user it made, by the predicate
+   *   `GET /v1/users/:id` applies ({@link mayReadUser}): a membership live now
+   *   in the organization the caller acts for.
+   *
+   * Otherwise the generic conflict a reused key gets — `409
+   * IDEMPOTENCY_KEY_REUSED`, nothing stored in it: a person whose membership
+   * was revoked or has expired since is no more readable through a replay
+   * than through `GET`.
+   */
+  private async replayProvisioning(
+    tx: ExtendedPrismaClient,
+    intent: ProvisioningIntent,
+    binding: ProvisioningBinding,
+    authorizeLive: (tx: ExtendedPrismaClient) => Promise<void>,
+  ): Promise<UserView> {
+    assertSameProvisioning(intent, binding);
+    await authorizeLive(tx);
+    if (!(await this.mayReadUser(intent.userId, tx))) throw RastaError.idempotencyKeyReused();
+    return replayedUserView(intent.responseBody);
+  }
+
+  /**
+   * Whether the caller may read `userId` now — the predicate of
+   * `GET /v1/users/:id` and of a provisioning's replay, in one place. Oneself;
+   * otherwise a user, not removed, with a membership live now — on the
+   * database's clock — in the organization the caller acts for (task 117,
+   * F3). A membership that ended, expired, is suspended or has not begun is
+   * history and proves nothing. No acting organization: nothing a non-self
+   * read can be scoped to, so no.
+   */
+  private async mayReadUser(userId: string, db: ExtendedPrismaClient): Promise<boolean> {
+    const context = getContext();
+    if (userId !== context.userId) {
+      if (!context.organizationId) return false;
+      const now = await this.repository.databaseNow(db);
+      if (!(await this.repository.findLiveMembership(userId, context.organizationId, now, db))) {
+        return false;
+      }
+    }
+    return (await this.repository.findUserById(userId, db)) !== null;
+  }
+
+  /**
    * The account an earlier attempt of this provisioning made, when Keycloak
    * answered this one's create with 409 or without an id: adopted only when
    * its `rasta_user_id` names exactly this request's user (`findOwnAccount`,
@@ -509,11 +597,8 @@ export class IdentityService {
       //
       // The token's roles are the early refusal only. The decision that
       // commits is made below, in the write's transaction (task 117, F1/F3).
-      if (
-        !context.roles.some((role) => (PROFILE_ADMIN_ROLES as readonly string[]).includes(role))
-      ) {
-        throw RastaError.insufficientRole(PROFILE_ADMIN_ROLES, context.roles);
-      }
+      // The platform's one role predicate, as everywhere (task 130).
+      assertRolesAdmitted(context.roles, { required: PROFILE_ADMIN_ROLES });
     }
 
     const changedFields = Object.keys(dto);
@@ -986,51 +1071,75 @@ export class IdentityService {
 
   /**
    * A request to join the platform, as the applicant is answered (task 117,
-   * F5): one acknowledgement, the same bytes whatever became of it.
+   * F5; task 130, PR #483 r1 R5): one acknowledgement, the same bytes and the
+   * same work whatever becomes of it.
    *
    * It used to answer `409 ALREADY_EXISTS` when the username or the email was
-   * taken and `201` with the new request's id otherwise. Sent with one field
-   * fresh and the other a guess, that told an anonymous caller whether the
-   * guess had an account — on the one endpoint that needs no token. Now a
-   * request that collides is acknowledged exactly as a recorded one is, and
-   * the answer carries nothing that differs between them: no id, no status but
-   * the one. The collision is handled privately ({@link recordRegistration}).
+   * taken and `201` with the new request's id otherwise. Task 117 made the
+   * answer the same bytes; the work behind it still differed — a fresh
+   * identity inserted and committed three rows, a held one rolled back at the
+   * user's unique index — so the time to the answer still said whether the
+   * guess had an account. Now every valid submission does exactly the same
+   * thing before it is answered: one intake row, committed
+   * ({@link receiveRegistration}). Whether the identity is held is decided
+   * afterwards, privately, by the registration worker
+   * ({@link processRegistrationIntake}).
    */
   async submitRegistration(dto: SubmitRegistrationDto): Promise<RegistrationAcknowledgement> {
-    await this.recordRegistration(dto);
+    await this.receiveRegistration(dto);
     return { status: REGISTRATION_ACKNOWLEDGEMENT.status };
   }
 
   /**
-   * Records a request to join the platform: the request's id, or null when the
-   * username or the email is already held — by any user, a pending applicant
-   * or a removed one included (both are globally unique, `schema.prisma`).
+   * The uniform intake: the submission, as validated, written to
+   * `registration_intake` and committed — one statement, the same for every
+   * applicant, with nothing in it that reads or is constrained by who already
+   * has an account. Returns the intake's id, which is the id the request is
+   * recorded under if it is.
    *
-   * Creates the user in PENDING with no Keycloak account: the product document
-   * requires operator review before activation, so nothing here grants access.
-   *
-   * The database's unique indexes decide a collision, not a lookup before
-   * them: there is no read that answers early, so a collision does the same
-   * work as a new request up to the user's insert — the transaction, the
-   * insert and its index probes, which is the step that costs — and is then
-   * rolled back instead of committed. What it skips is the request's own
-   * insert, its outbox row and the commit (measured in
-   * `registration-acknowledgement.int-spec.ts`). Logged without the username
-   * or the email (S-09).
+   * Refuses only on the submission itself: a role nobody can ever grant is
+   * one nobody can usefully ask for, and storing it would put attacker-chosen
+   * bait in front of a reviewer — refused whoever the applicant is, so it says
+   * nothing about who has an account. The grant itself is still checked at
+   * approval.
    */
-  async recordRegistration(dto: SubmitRegistrationDto): Promise<{ registrationId: string } | null> {
-    // This endpoint is unauthenticated, so there is no ladder to measure the
-    // request against — but a role nobody can ever grant is one nobody can
-    // usefully ask for, and storing it would put attacker-chosen bait in front
-    // of a reviewer. The grant itself is still checked at approval. Refused
-    // whoever the applicant is, so it says nothing about who has an account.
+  async receiveRegistration(dto: SubmitRegistrationDto): Promise<string> {
     assertRolesMayBeRequested(dto.requestedRoles);
+    const intakeId = `REG_${ulid()}`;
+    await this.repository.receiveRegistration(intakeId, dto);
+    return intakeId;
+  }
 
+  /**
+   * Handles one received submission, after its applicant has been answered:
+   * the registration worker's step (`RegistrationIntakeWorker`).
+   *
+   * Records the user in PENDING with no Keycloak account — the product
+   * document requires operator review before activation, so nothing here
+   * grants access — the request under the intake's id, and its
+   * REGISTRATION_SUBMITTED event, and deletes the intake row, in one
+   * transaction. When the username or the email is already held — by any
+   * user, a pending applicant or a removed one included (both are globally
+   * unique, `schema.prisma`) — the unique indexes refuse the user, and the
+   * intake row is deleted with nothing recorded: `DUPLICATE`, logged without
+   * the username or the email (S-09). `GONE`: another worker has it, or it was
+   * handled already.
+   *
+   * Throws on anything else; the worker defers the row and tries it again.
+   */
+  async processRegistrationIntake(
+    intakeId: string,
+  ): Promise<{ outcome: 'RECORDED'; registrationId: string } | { outcome: 'DUPLICATE' | 'GONE' }> {
     const userId = `${ID_PREFIXES.user}_${ulid()}`;
-    const registrationId = `REG_${ulid()}`;
 
     try {
-      await this.repository.transaction(async (tx) => {
+      const recorded = await this.repository.transaction(async (tx) => {
+        const intake = await this.repository.lockRegistrationIntake(tx, intakeId);
+        if (!intake) return false;
+        // Written by `receiveRegistration` from the validated body, and by
+        // nothing else.
+        const dto = intake.submission as SubmitRegistrationDto;
+
         try {
           await tx.user.create({
             data: {
@@ -1054,40 +1163,53 @@ export class IdentityService {
 
         await tx.registrationRequest.create({
           data: {
-            id: registrationId,
+            id: intakeId,
             userId,
             requestedOrganizationId: dto.requestedOrganizationId,
             requestedRoles: dto.requestedRoles,
             justification: dto.justification ?? null,
             documentRefs: dto.documentRefs,
             status: 'PENDING',
+            createdAt: intake.receivedAt,
           },
         });
 
         await this.repository.enqueueEvent(tx, {
           aggregateType: 'RegistrationRequest',
-          aggregateId: registrationId,
+          aggregateId: intakeId,
           eventName: IDENTITY_EVENTS.REGISTRATION_SUBMITTED,
           topic: IDENTITY_TOPIC,
           organizationId: dto.requestedOrganizationId,
           payload: validateIdentityPayload(IDENTITY_EVENTS.REGISTRATION_SUBMITTED, {
-            registrationId,
+            registrationId: intakeId,
             userId,
             requestedOrganizationId: dto.requestedOrganizationId,
             requestedRoles: dto.requestedRoles,
           }),
         });
+
+        await this.repository.deleteRegistrationIntake(tx, intakeId);
+        return true;
       });
+      return recorded ? { outcome: 'RECORDED', registrationId: intakeId } : { outcome: 'GONE' };
     } catch (error) {
       if (!(error instanceof RegistrationIdentityTaken)) throw error;
-      this.logger.log(
-        { requestedOrganizationId: dto.requestedOrganizationId },
-        'Registration acknowledged without a record: the username or the email is already held',
-      );
-      return null;
     }
 
-    return { registrationId };
+    // The username or the email is held: the submission is dropped, and its
+    // applicant's details with it.
+    const discarded = await this.repository.transaction(async (tx) => {
+      const intake = await this.repository.lockRegistrationIntake(tx, intakeId);
+      if (!intake) return false;
+      await this.repository.deleteRegistrationIntake(tx, intakeId);
+      return true;
+    });
+    if (!discarded) return { outcome: 'GONE' };
+    this.logger.log(
+      { intakeId },
+      'Registration discarded without a record: the username or the email is already held',
+    );
+    return { outcome: 'DUPLICATE' };
   }
 
   /**

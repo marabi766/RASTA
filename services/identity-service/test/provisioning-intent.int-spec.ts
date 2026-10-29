@@ -1,4 +1,6 @@
-import { runUnscoped } from '@rasta/nest-common';
+import request from 'supertest';
+import { ulid } from 'ulid';
+import { getContext, runUnscoped } from '@rasta/nest-common';
 import { IdentityRepository } from '../src/identity/identity.repository';
 import { provenanceOnly } from '../src/keycloak/platform-attributes';
 import { startIdentityApi, type IdentityApiHarness } from './api-helpers';
@@ -255,5 +257,186 @@ describe('a failed provisioning is finished by the same request again (task 117,
 
     expect([response.status, response.body.code]).toEqual([400, 'VALIDATION_FAILED']);
     expect(createsOf(username)).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Task 130, PR #483 r1 R3 and R4: the order of two sends, forced
+  // -------------------------------------------------------------------------
+
+  /** A send of `POST /v1/users` this suite can single out: by its correlation id. */
+  const tagged = (bearer: string, key: string, body: Record<string, unknown>, tag: string) =>
+    request(harness.app.getHttpServer())
+      .post('/v1/users')
+      .set('authorization', bearer)
+      .set('idempotency-key', key)
+      .set('x-correlation-id', tag)
+      .send(body);
+
+  /**
+   * Holds the send tagged `tag` right after its `after`-th transaction has
+   * committed, until released — the injected point an interleaving needs. A
+   * barrier, not a race: the other send runs to the end while this one waits.
+   */
+  function holdAfterCommit(tag: string, after: number) {
+    let reached!: () => void;
+    let release!: () => void;
+    const atBarrier = new Promise<void>((resolve) => (reached = resolve));
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const original = repository.transaction.bind(repository);
+    let committed = 0;
+    jest.spyOn(repository, 'transaction').mockImplementation((async (
+      work: never,
+      options: never,
+    ) => {
+      const result = await original(work, options);
+      if (getContext().correlationId === tag && ++committed === after) {
+        reached();
+        await released;
+      }
+      return result;
+    }) as never);
+    return { atBarrier, release };
+  }
+
+  const usersNamed = (username: string) =>
+    runUnscoped('test counts the users', () =>
+      harness.prisma.client.user.count({ where: { username } }),
+    );
+
+  it('R3, the reviewer’s schedule: B reads the intent open, A finishes, then B — B replays A’s answer, never 409', async () => {
+    const { bearer, username, body } = await setUp();
+    const key = `pi-${username}`;
+    const tag = ulid();
+    // B's first transaction committed the intent (open); B stops there.
+    const hold = holdAfterCommit(tag, 1);
+
+    const b = tagged(bearer, key, body, tag).then((response) => response);
+    await hold.atBarrier;
+    const a = await api.createUser(bearer, key, body);
+    hold.release();
+    const bAnswer = await b;
+
+    expect(a.status).toBe(201);
+    expect([bAnswer.status, bAnswer.text]).toEqual([201, a.text]);
+    expect(await usersNamed(username)).toBe(1);
+    expect(accountsOf(username)).toHaveLength(1);
+    expect(createsOf(username)).toHaveLength(1);
+    expect(await eventNames(harness.prisma, a.body.id)).toEqual(['USER_ACTIVATED']);
+  });
+
+  it('R3, later: B reconciled the intent open and is about to ask Keycloak, A finishes — B still replays, under the lock', async () => {
+    const { bearer, username, body } = await setUp();
+    const key = `pi-${username}`;
+    const tag = ulid();
+    // B's second transaction (the reconciliation) committed; B stops before Keycloak.
+    const hold = holdAfterCommit(tag, 2);
+
+    const b = tagged(bearer, key, body, tag).then((response) => response);
+    await hold.atBarrier;
+    const a = await api.createUser(bearer, key, body);
+    hold.release();
+    const bAnswer = await b;
+
+    expect(a.status).toBe(201);
+    expect([bAnswer.status, bAnswer.text]).toEqual([201, a.text]);
+    expect(await usersNamed(username)).toBe(1);
+    // B's create met A's account (409 from Keycloak) and adopted nothing.
+    expect(accountsOf(username)).toHaveLength(1);
+    expect(await eventNames(harness.prisma, a.body.id)).toEqual(['USER_ACTIVATED']);
+  });
+
+  /** The provisioned person's membership, moved on as `data` says. */
+  const moveMembership = (userId: string, data: Record<string, unknown>) =>
+    runUnscoped('test moves the provisioned membership on', () =>
+      harness.prisma.client.membership.updateMany({ where: { userId }, data }),
+    );
+  /** Nothing of the stored answer — no id, username or email of the person — in a refusal. */
+  const expectNoUserView = (
+    response: { status: number; text: string; body: { code?: string } },
+    made: { id: string; username: string; email: string },
+  ) => {
+    expect([response.status, response.body.code]).toEqual([409, 'IDEMPOTENCY_KEY_REUSED']);
+    for (const value of [made.id, made.username, made.email]) {
+      expect(response.text).not.toContain(value);
+    }
+  };
+
+  it.each([
+    ['revoked', { status: 'REVOKED', deletedAt: new Date() }],
+    ['expired', { validUntil: new Date(Date.now() - 60_000) }],
+    ['suspended', { status: 'SUSPENDED' }],
+  ])(
+    'R4: the person’s membership %s since — GET /v1/users/:id says 404, and the replay returns no UserView: 409, nothing stored in it',
+    async (_label, change) => {
+      const { bearer, username, body } = await setUp();
+      const key = `pi-${username}`;
+      const first = await api.createUser(bearer, key, body);
+      expect(first.status).toBe(201);
+      // The control: while the membership is live, the replay answers.
+      expect((await api.createUser(bearer, key, body)).text).toBe(first.text);
+
+      await moveMembership(first.body.id, change);
+
+      expect((await api.getUser(bearer, first.body.id)).status).toBe(404);
+      expectNoUserView(await api.createUser(bearer, key, body), first.body);
+    },
+  );
+
+  it('R4 at the second replay: B past the reconciliation, A finishes, the person’s membership revoked — B gets no UserView either', async () => {
+    const { bearer, username, body } = await setUp();
+    const key = `pi-${username}`;
+    const tag = ulid();
+    const hold = holdAfterCommit(tag, 2);
+
+    const b = tagged(bearer, key, body, tag).then((response) => response);
+    await hold.atBarrier;
+    const a = await api.createUser(bearer, key, body);
+    expect(a.status).toBe(201);
+    await moveMembership(a.body.id, { status: 'REVOKED', deletedAt: new Date() });
+    hold.release();
+
+    expectNoUserView(await b, a.body);
+  });
+
+  it('R4: demoted while the retry waits past its first transaction — the replay boundary itself refuses, 403, nothing stored in it', async () => {
+    const { admin, bearer, username, body } = await setUp();
+    const key = `pi-${username}`;
+    const tag = ulid();
+    // B passed the intent's own authorization (its first transaction) and waits.
+    const hold = holdAfterCommit(tag, 1);
+
+    const b = tagged(bearer, key, body, tag).then((response) => response);
+    await hold.atBarrier;
+    const a = await api.createUser(bearer, key, body);
+    expect(a.status).toBe(201);
+    await runUnscoped('test demotes the administrator', () =>
+      harness.prisma.client.membership.update({
+        where: { id: admin.membershipId },
+        data: { roles: ['OPERATOR'] },
+      }),
+    );
+    hold.release();
+    const bAnswer = await b;
+
+    expect([bAnswer.status, bAnswer.body.code]).toEqual([403, 'INSUFFICIENT_ROLE']);
+    expect(bAnswer.text).not.toContain(a.body.id);
+  });
+
+  it('R4: the administrator demoted since — the replay is refused like any write of theirs, 403, nothing stored in it', async () => {
+    const { admin, bearer, username, body } = await setUp();
+    const key = `pi-${username}`;
+    const first = await api.createUser(bearer, key, body);
+    expect(first.status).toBe(201);
+    await runUnscoped('test demotes the administrator', () =>
+      harness.prisma.client.membership.update({
+        where: { id: admin.membershipId },
+        data: { roles: ['OPERATOR'] },
+      }),
+    );
+
+    const again = await api.createUser(bearer, key, body);
+
+    expect([again.status, again.body.code]).toEqual([403, 'INSUFFICIENT_ROLE']);
+    expect(again.text).not.toContain(first.body.id);
   });
 });
