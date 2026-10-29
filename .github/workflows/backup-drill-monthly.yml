@@ -84,6 +84,19 @@ jobs:
             --report "${BACKUP_DRILL_DIR}/report.json" \
             --exit-code "${status}" \
             --progress "${BACKUP_DRILL_DIR}/stderr.log" | tee -a "${GITHUB_STEP_SUMMARY}"
+      - name: Diagnose an early failure (temporary, removed once understood)
+        if: ${{ failure() }}
+        run: |
+          command -v pnpm node docker || true
+          pnpm --version
+          node --version
+          node --input-type=module <<'EOF'
+          import { readFileSync } from 'node:fs';
+          const r = JSON.parse(readFileSync(`${process.env.BACKUP_DRILL_DIR}/report.json`, 'utf8'));
+          if (r.error?.stage === 'build seed dependencies serially')
+            console.log(String(r.error.message).slice(0, 3000));
+          else console.log('not the build stage; nothing printed');
+          EOF
       - name: Remove anything the drill left
         # Also after a cancellation or a timeout, when the CLI may not have finished its own
         # teardown: removes the project the report recorded (never another project's
