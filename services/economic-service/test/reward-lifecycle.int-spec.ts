@@ -1,6 +1,15 @@
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
-import { asActor, cleanup, ITEST_ACTOR, newPrisma, tenants, wire, type Wiring } from './helpers';
+import {
+  asActor,
+  cleanup,
+  ITEST_ACTOR,
+  newPrisma,
+  tenants,
+  wire,
+  type Wiring,
+  unanswered,
+} from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 /**
@@ -121,6 +130,7 @@ describe('reward lifecycle', () => {
           points: 7,
           condition: { field: 'assetType', op: 'eq', value: 'GRADER' },
         }),
+        unanswered(),
       ),
     );
 
@@ -142,11 +152,15 @@ describe('reward lifecycle', () => {
     // Precedence exists for commission, where one rate must win; a reward
     // programme is additive by nature.
     await asAdmin(() =>
-      wiring.rewards.createRule(rule({ points: 2, triggerEvent: 'MAINTENANCE_COMPLETED' })),
+      wiring.rewards.createRule(
+        rule({ points: 2, triggerEvent: 'MAINTENANCE_COMPLETED' }),
+        unanswered(),
+      ),
     );
     await asAdmin(() =>
       wiring.rewards.createRule(
         rule({ organizationId: org.a, points: 3, triggerEvent: 'MAINTENANCE_COMPLETED' }),
+        unanswered(),
       ),
     );
 
@@ -180,6 +194,7 @@ describe('reward lifecycle', () => {
             validFrom: yesterday.toISOString(),
             validTo: closedAt.toISOString(),
           }),
+          unanswered(),
         ),
       org.b,
     );
@@ -206,6 +221,7 @@ describe('reward lifecycle', () => {
       () =>
         wiring.rewards.createRule(
           rule({ organizationId: org.c, points: 4, creditPerPointMinor: '2500' }),
+          unanswered(),
         ),
       org.c,
     );
@@ -267,6 +283,7 @@ describe('reward lifecycle', () => {
     await asAdmin(() =>
       wiring.rewards.createRule(
         rule({ organizationId: org.a, points: 1, triggerEvent: 'MAINTENANCE_COMPLETED' }),
+        unanswered(),
       ),
     );
 
@@ -342,7 +359,10 @@ describe('reward lifecycle', () => {
     // something it does not have (docs/24 Q-07).
     await expect(
       asAdmin(() =>
-        wiring.rewards.createRule(rule({ organizationId: org.a, rewardType: 'CASHBACK' })),
+        wiring.rewards.createRule(
+          rule({ organizationId: org.a, rewardType: 'CASHBACK' }),
+          unanswered(),
+        ),
       ),
     ).rejects.toThrow(expect.objectContaining({ code: 'BUSINESS_RULE_VIOLATION' }));
   });
@@ -351,6 +371,7 @@ describe('reward lifecycle', () => {
     await asAdmin(() =>
       wiring.rewards.createRule(
         rule({ organizationId: org.a, points: 6, triggerEvent: 'MAINTENANCE_COMPLETED' }),
+        unanswered(),
       ),
     );
     await asAdmin(() =>

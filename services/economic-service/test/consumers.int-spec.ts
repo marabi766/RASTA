@@ -23,6 +23,7 @@ import {
   tenants,
   wire,
   type Wiring,
+  unanswered,
 } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaClient } from '../src/generated/prisma';
@@ -517,18 +518,21 @@ describe('economic consumers', () => {
 
   async function createRule(points = 5, extra: Record<string, unknown> = {}) {
     return asActor({ organizationId: org.a, roles: ['SYSTEM_ADMIN'] }, () =>
-      wiring.rewards.createRule({
-        organizationId: org.a,
-        triggerEvent: 'USAGE_RECORDED',
-        rewardType: 'POINTS',
-        points,
-        status: 'ACTIVE',
-        ...extra,
-        // JUSTIFIED-ANY: the DTO is a Zod inference with several optional
-        // shapes; spelling it out here would restate the schema rather than
-        // test anything.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      wiring.rewards.createRule(
+        {
+          organizationId: org.a,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points,
+          status: 'ACTIVE',
+          ...extra,
+          // JUSTIFIED-ANY: the DTO is a Zod inference with several optional
+          // shapes; spelling it out here would restate the schema rather than
+          // test anything.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+        unanswered(),
+      ),
     );
   }
 
@@ -654,17 +658,20 @@ describe('economic consumers', () => {
   /** A monetised rule: every point also credits the organization's wallet. */
   const monetisedRuleIn = (organizationId: string, points: number) =>
     asActor({ organizationId, roles: ['SYSTEM_ADMIN'] }, () =>
-      wiring.rewards.createRule({
-        organizationId,
-        triggerEvent: 'USAGE_RECORDED',
-        rewardType: 'POINTS',
-        points,
-        creditPerPointMinor: '1000',
-        status: 'ACTIVE',
-        validFrom: new Date(Date.now() - 86_400_000).toISOString(),
-        // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      wiring.rewards.createRule(
+        {
+          organizationId,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points,
+          creditPerPointMinor: '1000',
+          status: 'ACTIVE',
+          validFrom: new Date(Date.now() - 86_400_000).toISOString(),
+          // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+        unanswered(),
+      ),
     );
 
   it('leaves a transiently failed grant unprocessed, and a redelivery pays it exactly once', async () => {
@@ -764,15 +771,18 @@ describe('economic consumers', () => {
 
   it('reads a completed repair as a reward trigger too, keyed on the request', async () => {
     await asActor({ organizationId: org.a, roles: ['SYSTEM_ADMIN'] }, () =>
-      wiring.rewards.createRule({
-        organizationId: org.a,
-        triggerEvent: 'MAINTENANCE_COMPLETED',
-        rewardType: 'POINTS',
-        points: 3,
-        status: 'ACTIVE',
-        // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      wiring.rewards.createRule(
+        {
+          organizationId: org.a,
+          triggerEvent: 'MAINTENANCE_COMPLETED',
+          rewardType: 'POINTS',
+          points: 3,
+          status: 'ACTIVE',
+          // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+        unanswered(),
+      ),
     );
 
     const payload = {
@@ -841,16 +851,19 @@ describe('economic consumers', () => {
     // A rule activated later, valid from a day before the fact.
     const ruleFor = (points: number) =>
       asActor({ organizationId: org.b, roles: ['SYSTEM_ADMIN'] }, () =>
-        wiring.rewards.createRule({
-          organizationId: org.b,
-          triggerEvent: 'USAGE_RECORDED',
-          rewardType: 'POINTS',
-          points,
-          status: 'ACTIVE',
-          validFrom: new Date(Date.now() - 86_400_000).toISOString(),
-          // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any),
+        wiring.rewards.createRule(
+          {
+            organizationId: org.b,
+            triggerEvent: 'USAGE_RECORDED',
+            rewardType: 'POINTS',
+            points,
+            status: 'ACTIVE',
+            validFrom: new Date(Date.now() - 86_400_000).toISOString(),
+            // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+          unanswered(),
+        ),
       );
     await ruleFor(4);
 
@@ -915,16 +928,19 @@ describe('economic consumers', () => {
 
   const ruleIn = (organizationId: string, points: number, validFrom?: Date) =>
     asActor({ organizationId, roles: ['SYSTEM_ADMIN'] }, () =>
-      wiring.rewards.createRule({
-        organizationId,
-        triggerEvent: 'USAGE_RECORDED',
-        rewardType: 'POINTS',
-        points,
-        status: 'ACTIVE',
-        validFrom: (validFrom ?? new Date(Date.now() - 86_400_000)).toISOString(),
-        // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      wiring.rewards.createRule(
+        {
+          organizationId,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points,
+          status: 'ACTIVE',
+          validFrom: (validFrom ?? new Date(Date.now() - 86_400_000)).toISOString(),
+          // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+        unanswered(),
+      ),
     );
 
   const evaluationFor = (sourceReference: string) =>

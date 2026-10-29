@@ -17,6 +17,7 @@ import {
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor, isStorableMinor, parseMinor } from '../shared/money';
 import { nextValidTo } from '../shared/rule-validity';
+import type { IdempotentAnswer } from '../shared/idempotency';
 import { rewardsGrantedTotal, rewardsSkippedTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
@@ -475,7 +476,13 @@ export class RewardService {
   // Configuration
   // ==========================================================================
 
-  async createRule(dto: CreateRewardRuleDto) {
+  /**
+   * Creates a reward rule, answering `answer` inside the transaction that
+   * writes it and its `REWARD_RULE_CHANGED` record: a retry whose first
+   * response was lost replays this rule, and never creates a second one that
+   * would pay for the same fact again (economic audit F1).
+   */
+  async createRule(dto: CreateRewardRuleDto, answer: IdempotentAnswer<RewardRuleRow>) {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     if (dto.rewardType === 'CASHBACK' && !this.env.ECONOMIC_REWARD_CASHBACK_ENABLED) {
@@ -530,6 +537,7 @@ export class RewardService {
         () => tx.rewardRule.create({ data }),
       );
       await this.recordRuleChange(tx, { rule: created, before: null, actor });
+      await answer.respond(tx, created);
       return created;
     });
   }
