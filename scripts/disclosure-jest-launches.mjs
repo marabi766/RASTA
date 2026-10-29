@@ -296,7 +296,7 @@ export function jestCommands(paths, read) {
     for (const [name, script] of Object.entries(pkg.scripts ?? {}))
       inspect(script, `${path} script ${name}`, directory);
   for (const path of paths.filter((path) =>
-    /^\.github\/(?:workflows\/.*\.ya?ml|actions\/.*\/action\.ya?ml)$/.test(path),
+    /^\.github\/(?:workflows\/.*\.ya?ml|actions\/(?:.*\/)?action\.ya?ml)$/.test(path),
   )) {
     const workflow = yaml.parse(read(path));
     const steps = (steps, label, directory) => {

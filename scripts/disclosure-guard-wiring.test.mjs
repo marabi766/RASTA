@@ -919,9 +919,11 @@ function launchControl(run, place = 'workflow', extra = {}) {
   const path =
     place === 'package'
       ? 'apps/web/package.json'
-      : place === 'composite'
-        ? '.github/actions/control/action.yml'
-        : '.github/workflows/control.yml';
+      : place === 'composite-root'
+        ? '.github/actions/action.yml'
+        : place === 'composite'
+          ? '.github/actions/control/action.yml'
+          : '.github/workflows/control.yml';
   const sources = {
     'apps/web/package.json': JSON.stringify({ name: '@rasta/web', scripts: { test: 'jest' } }),
     ...extra,
@@ -929,7 +931,7 @@ function launchControl(run, place = 'workflow', extra = {}) {
   sources[path] =
     place === 'package'
       ? JSON.stringify({ name: '@rasta/web', scripts: { test: 'jest', control: run } })
-      : place === 'composite'
+      : place.startsWith('composite')
         ? require('yaml').stringify({
             runs: { using: 'composite', steps: [{ run, shell: 'bash' }] },
           })
@@ -952,7 +954,7 @@ const selectionFlags = [
   '--root-dir',
 ];
 for (const flag of selectionFlags) {
-  for (const place of ['workflow', 'composite', 'package']) {
+  for (const place of ['workflow', 'composite', 'composite-root', 'package']) {
     for (const wrapped of [false, true]) {
       test(`R1 ${place} ${wrapped ? 'shell' : 'forwarded'} ${flag} reaches effective configuration`, async () => {
         const directory = mkdtempSync(join(tmpdir(), 'rasta-jest-selection-'));
@@ -993,8 +995,8 @@ for (const flag of selectionFlags) {
       });
     }
   }
-  test(`R1 opaque ${flag} refuses in all three sources and shell wrappers`, () => {
-    for (const place of ['workflow', 'composite', 'package']) {
+  test(`R1 opaque ${flag} refuses in all sources and shell wrappers`, () => {
+    for (const place of ['workflow', 'composite', 'composite-root', 'package']) {
       const prefix = place === 'package' ? 'pnpm test' : 'pnpm --filter @rasta/web test';
       const argument = flag.endsWith('=') ? `${flag}"$ALT"` : `${flag} "$ALT"`;
       for (const run of [`${prefix} -- ${argument}`, `bash -c '${prefix} -- ${argument}'`]) {
@@ -1006,7 +1008,7 @@ for (const flag of selectionFlags) {
   });
 }
 
-for (const place of ['workflow', 'composite', 'package']) {
+for (const place of ['workflow', 'composite', 'composite-root', 'package']) {
   for (const extension of ['sh', 'bash', 'mjs', 'cjs', 'js', 'ts']) {
     for (const launch of ['jest', 'pnpm test']) {
       test(`R1 ${place} unregistered .${extension} spawning ${launch} refuses`, () => {
