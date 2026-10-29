@@ -109,7 +109,8 @@ SELECT pi.id                 AS payment_intent_id,
   باشد (تلاش دوبارهٔ Top-up حلش می‌کند). علامتی بی تسک باز یک ناسازگاری است — دست نزن و گزارش کن.
 - رویدادهای مربوط: `PAYMENT_REFUND_UNRECONCILED` با همان `paymentIntentId` (در Outbox یا `audit-service`؛ ردیف Outbox فقط
   تا `OUTBOX_PURGE_RETENTION_HOURS` پس از انتشار می‌ماند، پیش‌فرض ۱۶۸ ساعت، D-052) دلیل (`reason`) را
-  می‌گوید: `PROVIDER_OUTCOME_UNKNOWN`، `PROVIDER_DECLINED_RELEASE_PENDING`، `REVERSAL_FAILED` یا `INSUFFICIENT_BALANCE`.
+  می‌گوید: `PROVIDER_OUTCOME_UNKNOWN`، `PROVIDER_DECLINED_RELEASE_PENDING`، `REVERSAL_FAILED`، `INSUFFICIENT_BALANCE` یا
+  `WALLET_NOT_ACTIVE` (§ ۲).
   `REFUND_REQUESTED` عمداً رویداد ندارد — یعنی ثبت خود نتیجه هم شکست خورد.
 
 ## ۲. کیف پول منجمد
@@ -117,6 +118,10 @@ SELECT pi.id                 AS payment_intent_id,
 اگر کیف پول `FROZEN` باشد، هیچ بازپرداختی (حتی § ۳-الف) اجرا نمی‌شود: از کیف پول منجمد پولی بیرون نمی‌رود. Hold سر جایش
 می‌ماند و این درست است. پس از فعال‌شدن دوبارهٔ کیف پول ادامه بده. فقط § ۳-ب (برگرداندن Hold به کیف پول) روی کیف پول منجمد هم
 مجاز است.
+
+کیف پولی که **در مدت فراخوانی Provider** منجمد یا بسته شد هم همین‌جاست: بازپرداخت با `422` تمام شد، ردیف
+`REFUNDED_NOT_REVERSED` با Hold فعال و تسک باز می‌ماند و رویداد دلیل `WALLET_NOT_ACTIVE` دارد. آشتی‌دهنده تا فعال‌شدن کیف
+پول صبر می‌کند (`last_outcome = WALLET_NOT_ACTIVE`، بی شمردن تلاش) و سپس یک بار معکوس می‌کند؛ کاری لازم نیست.
 
 ## ۳. نتیجهٔ Provider معلوم است — خودِ سرویس حلش می‌کند
 
