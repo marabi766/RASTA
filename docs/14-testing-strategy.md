@@ -1017,6 +1017,37 @@ Broker و — فقط جایی که Suiteهایش می‌خوانند — MinIO،
 test:ci-integration-split` (در Job کیفیت) رد می‌کند اگر Job ‏`integration-*`ی بیرون از آن بماند، گامی از کار قدیم در هیچ
 Jobی یا در دو Job اجرا شود، یا گامی بدون زیرساختی که می‌خواند اجرا شود.
 
+**ساخت و اسکن ایمیج سرویس‌ها فقط روی قطار ادغام و main (تصمیم مالک 2026-10-24).** ایمیج‌ها جایی ساخته و با Trivy اسکن می‌شوند که
+ادغام تصمیم‌گیری می‌شود، نه روی هر اجرای PR. قطار ادغام (`mq/train-N`، PR پیش‌نویس موقت میزبان) همان اجرای `pull_request` است و
+با **Head ref** همان PR در همین مخزن شناخته می‌شود، نه با Label. تصمیم را `node scripts/container-scope.mjs --run` از متغیر محیطی
+می‌گیرد (نام شاخه هرگز در متن Shell نمی‌آید) و منطقش یک جا، در `classifyRun` (`scripts/container-scope-lib.mjs`) است:
+
+| اجرا                                                                                 | ایمیج‌های ساخته و اسکن‌شده                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Push به `main`                                                                       | همهٔ ایمیج‌ها (هر `services/*/Dockerfile`)                                                                                                                                                 |
+| PR از `mq/train-N` (قطار)                                                            | ایمیج‌های **متأثر**، دقیقاً مثل PRهای پیشین؛ هر خطای طبقه‌بندی (Base نامعتبر، Git، YAML) ← **همه**؛ «هیچ» فقط وقتی همهٔ مسیرها زیر `docs/` یا `tests/` باشند (همان فهرست معاف بازبینی‌شده) |
+| هر PR دیگر                                                                           | هیچ؛ Check «Images built and scanned» موفق است و می‌نویسد ایمیج‌ها روی قطار و main ساخته می‌شوند                                                                                           |
+| رویداد یا شاخهٔ ناشناخته، فرادادهٔ ناقص، Fork، یا نام نادرست زیر فضای رزروشدهٔ `mq/` | **همه** (ناشناخته هرگز یعنی کمتر نه)                                                                                                                                                       |
+
+**Check یکپارچه: «Images built and scanned»** (Job ‏`images`، همیشه با `always()`). فقط وقتی `success` است که هر ایمیج انتخاب‌شده ساخته و
+اسکن شده باشد؛ Job ‏`containers` اگر Skip، لغو یا ناموفق باشد و ایمیجی انتخاب شده باشد، قرمز می‌شود، و «هیچ ایمیج» فقط برای قطار
+معاف‌شده (docs/tests) و PR عادی پذیرفته است. اسکریپت میزبان قطار باید همین Check را روی هر پیشوند قطار `SUCCESS` (نه Skip، لغو یا
+نبود) بخواهد. Job ‏`trivy-db` روی PR عادی Skip می‌شود (شرطش فقط رویداد است و به سمت اجرا خطا می‌کند).
+
+| Job                                                                                                         | PR عادی، پیش از این | PR عادی، اکنون                                | قطار (`mq/train-N`)                           | push به main                   |
+| ----------------------------------------------------------------------------------------------------------- | ------------------- | --------------------------------------------- | --------------------------------------------- | ------------------------------ |
+| `quality` (شامل `test:container-scope` و اثبات BuildKit روی Fixture) و سایر Jobهای کیفیت/امنیت/یکپارچگی/E2E | اجرا                | اجرا                                          | اجرا                                          | اجرا                           |
+| `container-scope` ‏«Images to build and scan» (Check الزامی Branch protection)                              | اجرا؛ انتخاب متأثر  | اجرا؛ انتخاب «هیچ»؛ اثبات محدودسازی می‌ماند   | اجرا؛ متأثر                                   | اجرا؛ همه                      |
+| `trivy-db`                                                                                                  | اجرا                | **Skip**                                      | اجرا                                          | اجرا                           |
+| `containers` ‏«Build and scan images (<service>)»                                                           | متأثر               | **Skip**                                      | متأثر                                         | همه                            |
+| `images` ‏«Images built and scanned»                                                                        | نبود                | **success** («images are built on the train») | success فقط با ساخت و اسکن همهٔ انتخاب‌شده‌ها | success فقط با ساخت و اسکن همه |
+
+**اجرای محلی `pnpm verify` به `docker buildx` نیاز دارد** (آزمون «BuildKit: !README.md re-includes only the context root» در
+`scripts/container-scope.test.mjs` یک Build روی Fixture موقت `FROM scratch` می‌زند و به شبکه نیاز ندارد). در CI نبود آن **شکست**
+است. محلی (`CI` تنظیم‌نشده) فقط وقتی آزمون Skip می‌شود که خودِ ابزار نباشد: باینری `docker` یا افزونهٔ buildx (`docker buildx version`
+می‌گوید `'buildx' is not a docker command`)؛ Daemon خاموش، دسترسی ممنوع، Timeout یا شکست Build همچنان شکست است
+(`scripts/container-scope-buildx.mjs`). پیام Skip نصب را می‌گوید.
+
 **Mailpit برای Suiteهای SMTP اعلان (از 2026-10-23).** `email-delivery.int-spec.ts` و `mail-channel.int-spec.ts` (notification-service) پیام را از API خود Mailpit می‌خوانند. `integration-suites` و `integration-coverage` آن را به‌صورت Service container با همان ایمیج و Digest فایل compose بالا می‌آورند (پورت‌های ۱۰۲۵ و ۸۰۲۵، Health check با `/mailpit readyz`) و گام‌های «Integration tests» و «Notification coverage gate» `REQUIRE_MAILPIT=1` دارند: در CI نبودن Mailpit در `beforeAll` **خطا** می‌دهد (`test/mailpit.ts`)، نه Skip؛ محلی و بدون این متغیر همان Skip + هشدار می‌ماند (`docker compose --profile tools up -d mailpit`). `test:ci-integration-split` گام بدون `REQUIRE_MAILPIT` یا بدون Service را رد می‌کند.
 
 **Pull ایمیج در CI و خطای گذرای Registry (از 2026-10-15).** `docker run` در گام «Start Keycloak with the platform realm»

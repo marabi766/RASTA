@@ -89,17 +89,45 @@ describe('the transactional outbox', () => {
   it('carries no warehouse name or location — identifiers, quantities and instants only', async () => {
     const a = org();
     const owner = client(api, orgAdmin(a));
-    await owner.createWarehouse({
-      name: 'Very identifiable name',
-      location: { latitude: 35.689197, longitude: 51.388974 },
+    const name = 'Very identifiable name';
+    const location = { latitude: 35.689197, longitude: 51.388974 };
+    const created = await owner.createWarehouse({ name, location });
+    expect(created.status).toBe(201);
+
+    // The one event this command wrote — never an empty list read as "nothing disclosed".
+    const rows = await outboxOf(a);
+    expect(rows.map((row) => row.eventName)).toEqual(['WAREHOUSE_CREATED']);
+    const envelope = eventEnvelopeSchema.parse(rows[0]?.payload);
+
+    // The exact allowed fields, with the values they must hold. Nothing else may be there, so no
+    // name, no coordinate, rounded or not, and no new field can pass unseen. The schema is strict
+    // too (events.ts warehouseCreatedPayload); this pins the contract independently of it.
+    expect(envelope.payload).toEqual({
+      warehouseId: created.body.id,
+      organizationId: a,
+      createdBy: expect.any(String),
+      createdAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/),
     });
-    const [row] = await outboxOf(a);
-    const text = JSON.stringify(row?.payload);
-    expect(text).not.toContain('Very identifiable name');
-    // Six decimals: an instant in the payload ("…:35.712Z") carries at most three after a dot,
-    // so the short "35.7" the old assertion looked for matched the clock one run in ~600.
-    expect(text).not.toContain('35.689197');
-    expect(text).not.toContain('51.388974');
+
+    // The whole stored message, envelope included, value by value. Never as a substring of its
+    // JSON: that text carries ULIDs and instants, and a short coordinate such as "35.7" occurs
+    // inside "…:35.712Z" about one run in 600 (train run 40130819112).
+    const values: unknown[] = [];
+    JSON.stringify(rows[0]?.payload, (_key, value: unknown) => {
+      values.push(value);
+      return value;
+    });
+    for (const value of values) {
+      if (typeof value === 'string') {
+        expect(value === name || value.includes(name)).toBe(false);
+        expect(value.includes('35.689197') || value.includes('51.388974')).toBe(false);
+      }
+      if (typeof value === 'number') {
+        expect(Math.abs(value - location.latitude)).toBeGreaterThan(0.5);
+        expect(Math.abs(value - location.longitude)).toBeGreaterThan(0.5);
+      }
+    }
+    expect(values.length).toBeGreaterThan(10);
   });
 
   it('writes nothing when a command is refused', async () => {

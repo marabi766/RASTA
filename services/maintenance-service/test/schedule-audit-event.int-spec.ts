@@ -139,7 +139,25 @@ describe('schedule changes reach the audit trail', () => {
 
     // The new interval is this service's data. It is not copied into a log
     // every service reads and retains — see the note on the payload schema.
-    expect(JSON.stringify(events[1].payload)).not.toContain('500.00');
+    // The exact allowed fields: one added to the payload (the interval, the
+    // lead time, in any form) fails here. The values are compared whole, never
+    // as a substring of the payload's JSON, which carries ULIDs and instants a
+    // short number can occur inside by chance.
+    expect(Object.keys(events[1].payload).sort()).toEqual([
+      'assetId',
+      'change',
+      'changedAt',
+      'changedBy',
+      'changedFields',
+      'organizationId',
+      'previousStatus',
+      'reason',
+      'scheduleId',
+      'status',
+    ]);
+    const held = Object.values(events[1].payload).flat();
+    for (const moved of ['500.00', '500', 500, '50.00', '50', 50])
+      expect(held).not.toContain(moved);
   });
 
   // The transition D-011 was actually written about.
