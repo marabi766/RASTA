@@ -34,7 +34,7 @@ import {
   publishSql,
   urlWithSchema,
 } from './outbox-b2-fixture.mjs';
-import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
+import { PRIVILEGED_CREDENTIAL_PATTERN, splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(REPO_ROOT, 'scripts', 'outbox-b2-backfill.mjs');
@@ -106,9 +106,16 @@ function cliUrl(service, schema) {
   return urlWithSchema(split ? process.env[key] : baseUrl(service), schema);
 }
 
-/** Owner credentials the CLI refuses outright: never passed to it unless a test means to. */
+/**
+ * Owner and superuser credentials the CLI refuses outright (#421 r1 F2: a
+ * superuser's PGPASSWORD too): never passed to it unless a test means to.
+ */
 const withoutOwnerCredentials = (env) =>
-  Object.fromEntries(Object.entries(env).filter(([key]) => !/_MIGRATOR$/.test(key)));
+  Object.fromEntries(
+    Object.entries(env).filter(
+      ([key]) => !/_MIGRATOR$/.test(key) && !PRIVILEGED_CREDENTIAL_PATTERN.test(key),
+    ),
+  );
 
 const admins = new Map();
 
@@ -1612,7 +1619,7 @@ test('a plan run through the CLI exits 0, emits a summary and writes nothing', a
 // D-045 (Codex on #178): the backfill writes only as the runtime role
 // ---------------------------------------------------------------------------
 
-test("--apply with a split service's migrator URL is refused before the first query, naming the role and never the URL", async () => {
+test("--apply with a split service's migrator URL as its runtime URL is a global refusal: the URL's user gives it away (#421 r1 F2)", async () => {
   await withOutbox('document', async ({ db, schema }) => {
     await db.execute(insertRowsSql({ prefix: 'O', topic: 't.o', partitionKey: 'K1', count: 4 }));
     const before = await fingerprint(db);
@@ -1621,18 +1628,39 @@ test("--apply with a split service's migrator URL is refused before the first qu
     const run = runCli(['--service', 'document', '--apply'], { DATABASE_URL_DOCUMENT: owner });
 
     assert.equal(run.status, 1, `${run.stdout}${run.stderr}`);
+    assert.equal(run.events.length, 1, run.stdout);
+    assert.equal(run.events[0].type, 'refused');
+    assert.equal(run.events[0].service, undefined);
+    assert.match(run.events[0].reason, /DATABASE_URL_DOCUMENT/);
+    assert.ok(!run.stdout.includes(owner), 'the URL was printed');
+    assert.ok(!run.stdout.includes(decodeURIComponent(new URL(owner).password)));
+    assert.equal(await fingerprint(db), before, 'the database changed');
+  });
+});
+
+test('--apply as the runtime role holding CREATE is refused by the per-service preflight before the first query, naming the role and never the URL', async () => {
+  await withOutbox('document', async ({ db, url, schema }) => {
+    await db.execute(insertRowsSql({ prefix: 'Q', topic: 't.q', partitionKey: 'K1', count: 4 }));
+    const before = await fingerprint(db);
+    // Only the catalogue shows it: the URL is the runtime role's own.
+    await admins.get('document').execute(`GRANT CREATE ON SCHEMA "${schema}" TO rasta_document`);
+
+    const run = runCli(['--service', 'document', '--apply'], { DATABASE_URL_DOCUMENT: url });
+
+    assert.equal(run.status, 1, `${run.stdout}${run.stderr}`);
     const [refusal] = run.of('refused');
     assert.equal(refusal?.service, 'document');
     assert.match(
       refusal.reason,
-      /document-service refuses to start: it is connected as rasta_document_migrator/,
+      new RegExp(
+        `document-service refuses to start: it is connected as rasta_document, which holds CREATE on schema ${schema}`,
+      ),
     );
     // Nothing was planned, let alone written.
     assert.deepEqual(run.of('plan'), []);
     assert.deepEqual(run.of('batch'), []);
     assert.deepEqual(tally(run), { ok: 0, incomplete: 0, refused: 1 });
-    assert.ok(!run.stdout.includes(owner), 'the URL was printed');
-    assert.ok(!run.stdout.includes(decodeURIComponent(new URL(owner).password)));
+    assert.ok(!run.stdout.includes(url), 'the URL was printed');
     assert.equal(await fingerprint(db), before, 'the database changed');
   });
 });
