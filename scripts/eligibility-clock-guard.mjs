@@ -249,11 +249,38 @@ export const REVIEWED_SITES = [
       'from/to are the utilization window: query input or new Date() (availability.service.ts:318-322)',
   },
   {
+    site: 'services/identity-service/src/identity/identity.repository.ts#countLapsedMemberships',
+    columns: ['valid_until'],
+    verdict: 'gated',
+    reason:
+      'now = databaseNow(tx), clock_timestamp() read in the same transaction (keycloak-fence-sampler.ts:140)',
+  },
+  {
+    site: 'services/identity-service/src/identity/identity.repository.ts#findLapsedMemberships',
+    columns: ['valid_until'],
+    verdict: 'not-db-clock',
+    reason:
+      'now = scan(now = new Date()) prefilter (membership-expiry.scanner.ts:230, :274); each lapse is re-decided against databaseNow under lock (identity.service.ts:1787)',
+  },
+  {
     site: 'services/identity-service/src/identity/identity.repository.ts#findOrganizationIdsSince',
     columns: ['valid_until', 'deleted_at'],
     verdict: 'not-db-clock',
     reason:
       'from is the history lower bound the caller passes (an earlier bid-opening instant); the upper bound t.now is classified as a DB-clock site',
+  },
+  {
+    site: 'services/identity-service/src/identity/identity.service.ts#expireLapsedMembership',
+    columns: ['valid_until'],
+    verdict: 'gated',
+    reason: 'now = databaseNow(tx) after the membership lock (identity.service.ts:1787)',
+  },
+  {
+    site: 'services/identity-service/src/keycloak/keycloak-write-fence.ts#ofUser',
+    columns: ['takeover_at'],
+    verdict: 'gated',
+    reason:
+      'now = databaseNow(tx) read after the user lock by both callers (keycloak.projector.ts:493, :852)',
   },
   {
     site: 'services/maintenance-service/src/maintenance/maintenance.repository.ts#listRequests',

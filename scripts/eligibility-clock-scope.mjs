@@ -271,6 +271,35 @@ function constantPath(node, path, ast, depth = 0) {
  */
 const REVIEWED_COMPUTED_IMPORTS = [
   {
+    file: 'tests/e2e/src/expect.test.ts',
+    argument: 'portal',
+    loads:
+      'apps/web/e2e/expect.ts under repositoryRoot(): the portal harness, an enforced E2E file itself; opens no database',
+  },
+  {
+    file: 'scripts/disclosure-guard-wiring.test.mjs',
+    argument: 'pathToFileURL(path).href',
+    loads:
+      'a tracked jest.config.* or a --config/-c file a package script names (jestConfigurations): configuration files, test entry points of this scope themselves; opens no database',
+  },
+  {
+    file: 'scripts/disclosure-guard-wiring.test.mjs',
+    argument: 'path',
+    loads:
+      'the same jest configurations as the line above, as CommonJS (loadConfig); opens no database',
+  },
+  {
+    file: 'packages/contracts/src/common/zod-compat-patch.spec.ts',
+    argument: 'materializeStockZod().cjs',
+    loads:
+      "index.cjs of a temporary copy of node_modules' zod (__tests__/zod-stock-oracle.ts:117-130): external package code; opens no database",
+  },
+  {
+    file: 'apps/web/src/app/organization-switch.spec.ts',
+    argument: 'path',
+    loads: "apps/web/src/app page modules ('./drivers/page', './page', …): production (apps/*/src)",
+  },
+  {
     file: 'scripts/outbox-b3-protocol.pg.test.mjs',
     argument: "join(serviceDir, 'src', 'generated', 'prisma')",
     loads: 'the generated Prisma client of a service (external, generated code)',

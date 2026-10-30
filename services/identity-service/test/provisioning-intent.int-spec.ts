@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { ulid } from 'ulid';
 import { getContext, runUnscoped } from '@rasta/nest-common';
+import { setEligibilityFixture } from '@rasta/testing';
 import { IdentityRepository } from '../src/identity/identity.repository';
 import { provenanceOnly } from '../src/keycloak/platform-attributes';
 import { startIdentityApi, type IdentityApiHarness } from './api-helpers';
@@ -350,6 +351,19 @@ describe('a failed provisioning is finished by the same request again (task 117,
     runUnscoped('test moves the provisioned membership on', () =>
       harness.prisma.client.membership.updateMany({ where: { userId }, data }),
     );
+  /** The provisioned person's membership, ended a minute ago by the database clock. */
+  const endMembership = async (userId: string) => {
+    const rows = await runUnscoped('test reads the provisioned membership', () =>
+      harness.prisma.client.membership.findMany({ where: { userId }, select: { id: true } }),
+    );
+    await runUnscoped('test ends the provisioned membership', () =>
+      setEligibilityFixture(
+        harness.prisma,
+        'membershipEndedMinuteAgo',
+        rows.map((row) => row.id),
+      ),
+    );
+  };
   /** Nothing of the stored answer — no id, username or email of the person — in a refusal. */
   const expectNoUserView = (
     response: { status: number; text: string; body: { code?: string } },
@@ -361,9 +375,10 @@ describe('a failed provisioning is finished by the same request again (task 117,
     }
   };
 
-  it.each([
+  it.each<[string, Record<string, unknown> | 'ended a minute ago']>([
     ['revoked', { status: 'REVOKED', deletedAt: new Date() }],
-    ['expired', { validUntil: new Date(Date.now() - 60_000) }],
+    // By the database clock that judges it, never this process's.
+    ['expired', 'ended a minute ago'],
     ['suspended', { status: 'SUSPENDED' }],
   ])(
     'R4: the person’s membership %s since — GET /v1/users/:id says 404, and the replay returns no UserView: 409, nothing stored in it',
@@ -375,7 +390,8 @@ describe('a failed provisioning is finished by the same request again (task 117,
       // The control: while the membership is live, the replay answers.
       expect((await api.createUser(bearer, key, body)).text).toBe(first.text);
 
-      await moveMembership(first.body.id, change);
+      if (change === 'ended a minute ago') await endMembership(first.body.id);
+      else await moveMembership(first.body.id, change);
 
       expect((await api.getUser(bearer, first.body.id)).status).toBe(404);
       expectNoUserView(await api.createUser(bearer, key, body), first.body);

@@ -1,6 +1,11 @@
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
-import { errorEnvelope, expectNotDisclosed } from '@rasta/testing';
+import {
+  eligibilityClockWrite,
+  errorEnvelope,
+  expectNotDisclosed,
+  setEligibilityFixture,
+} from '@rasta/testing';
 import { platformAttributesFor } from '../src/keycloak/platform-attributes';
 import { startIdentityApi, userToken, type IdentityApiHarness } from './api-helpers';
 import { ensureLiveMember, id, tenants } from './helpers';
@@ -60,11 +65,12 @@ describe('narrowing over HTTP (D-064)', () => {
           userId,
           organizationId: org.a,
           roles,
-          validFrom: new Date(Date.now() - 60_000),
           createdBy: 'ITEST',
           updatedBy: 'ITEST',
         },
       });
+      // Begun an hour ago, by the database clock that judges it.
+      await setEligibilityFixture(harness.prisma, 'membershipStartedHourAgo', [membershipId]);
     });
     stub.add({
       id: keycloakId,
@@ -184,7 +190,7 @@ describe('narrowing over HTTP (D-064)', () => {
     const s = await seed(['ORGANIZATION_ADMIN', 'OPERATOR']);
     // A write of this user another replica sent, whose answer never came:
     // its fence is live for the next two minutes.
-    await harness.prisma.client.$executeRaw`
+    await eligibilityClockWrite(harness.prisma.client)`
       INSERT INTO keycloak_write_attempt
              (attempt_id, user_id, keycloak_id, operation,
               started_at, deadline_at, takeover_at, next_reassert_at)

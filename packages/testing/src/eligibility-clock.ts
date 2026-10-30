@@ -589,6 +589,102 @@ const reviewedClockTemplates: readonly {
     template: '1e0735a8e6f85ebc5cd3c2962e0e78da378ddfc8fe4d81c9676433a3c0890b79',
     expressions: null,
   },
+  // dateMembershipWindow: a membership's validity window as offsets from the database's
+  // now(), one row by id, row count checked; never the process clock (#458/#483 fixtures).
+  {
+    file: 'services/identity-service/test/identity-fixtures.ts',
+    template: '74b7d82a7eb4b32b011369a9e7702c0de197ae3c48de1f1dbd45f366c7c7b8c2',
+    expressions: 'f728d2d7a4b9ff353e3abffc3e3b598d4aab369822ca737ee22e79946c1f707d',
+  },
+  // Fence timelines (holdLive, expire): takeover/reassert moved on clock_timestamp(),
+  // shifted together; ensureLiveMember: a membership valid from the constant 2000-01-01.
+  {
+    file: 'services/identity-service/test/helpers.ts',
+    template: '0e5fa47716444b9ca66eafe1c3d7c0ac9af5e446bcf050f78e7d6dc04938047e',
+    expressions: '7223377782b422b357997133d04c62ec99b12918953fccd2ce62f97ccce4602e',
+  },
+  {
+    file: 'services/identity-service/test/helpers.ts',
+    template: 'dbd926d095db625d8244ef4674da36a9e5d5adde4bd64bb10cc8d0bba8a7214b',
+    expressions: 'f53ce25ecc27f1830d8f6b9fcc08e254ee82c95e535ed889815a22fce06a36e9',
+  },
+  {
+    file: 'services/identity-service/test/helpers.ts',
+    template: 'e8304c3c58df0dfeea0258ff183ca93160a15007723d0f22d4578873ad37211e',
+    expressions: 'a2e3cbb1081d3e00f38b9a66b614c88b487c3fef46cc852e67b000c3930fe650',
+  },
+  // A fence in flight: its instants from now(), the database clock.
+  {
+    file: 'services/identity-service/test/api-write-ahead.int-spec.ts',
+    template: '0feffa70cd4d0d30298e5cf41c39f267a90b8e4d0b49437f3acd9dcc56be778a',
+    expressions: 'b3b05d4734a776cba0eb368dfbf9d41891aa7462f882faa03d94b7f22b406eff',
+  },
+  // An overdue fence: its instants from clock_timestamp(), the database clock.
+  {
+    file: 'services/identity-service/test/fence-sampler.int-spec.ts',
+    template: '0e1c7dc92dd4136dbe733147eb37a28ad07ba89402f9b111ede31b0427c42253',
+    expressions: '4ff2ac03ec5a08559847cdb56ebe0ffc06d425a420aaf661d744e4d56478162c',
+  },
+  // Migration probes on a scratch schema: an outstanding fence dated by now(), then a
+  // terminal one (takeover_at = started_at); no product sweeper runs there.
+  {
+    file: 'services/identity-service/test/keycloak-write-fence-migration.int-spec.ts',
+    template: '0a8b3cb96b93a70a2d0ecf1015b124c8c3efa0bf12f5e5414c744844c622f144',
+    expressions: null,
+  },
+  {
+    file: 'services/identity-service/test/keycloak-write-fence-migration.int-spec.ts',
+    template: 'cdfa2af86dbc1b6cf2468372b363be823f7eb1a86713c32cf9d28add54f64897',
+    expressions: null,
+  },
+  // Fences seeded due, live, retrying or terminal: every instant now()/clock_timestamp()
+  // plus a fixed or test-chosen offset; ids and offsets are bound parameters.
+  {
+    file: 'services/identity-service/test/keycloak-write-fence.int-spec.ts',
+    template: 'e3d53198209d072c6a8f6653acd943174fce4a960f023338905fbdb9d9a52815',
+    expressions: '62b24cb6f984c6c47a31c1ff67d12a34a967f36845bab0985571039a730397fc',
+  },
+  {
+    file: 'services/identity-service/test/keycloak-write-fence.int-spec.ts',
+    template: '3e7c0f1089a18fcb494b2110a51249455d3a121a08984099e61afc3cff5a9f07',
+    expressions: '62b24cb6f984c6c47a31c1ff67d12a34a967f36845bab0985571039a730397fc',
+  },
+  {
+    file: 'services/identity-service/test/keycloak-write-fence.int-spec.ts',
+    template: '41908dbfbec3e154870250ef90aa31c610b8b2c33d02a3508499b4008e040266',
+    expressions: '62b24cb6f984c6c47a31c1ff67d12a34a967f36845bab0985571039a730397fc',
+  },
+  {
+    file: 'services/identity-service/test/keycloak-write-fence.int-spec.ts',
+    template: '41908dbfbec3e154870250ef90aa31c610b8b2c33d02a3508499b4008e040266',
+    expressions: '7754c6b40dcacc32c8e4d7960577ce98618d54a35ba3f888aac48725c956a5c2',
+  },
+  {
+    file: 'services/identity-service/test/keycloak-write-fence.int-spec.ts',
+    template: '27fca5c25089d41d1e2bb457c67f378d6fa1f3f60940cae028a1f6e50308dfac',
+    expressions: '6eb01c9bb21ef0e6e8cf196a4c87d67c280babc96f5e62f49fda536239c980f9',
+  },
+  {
+    file: 'services/identity-service/test/keycloak-write-fence.int-spec.ts',
+    template: 'ff22912ecd92d492b4024738cea953c6856b82edfe3e6de9017b4572ab94bf24',
+    expressions: '3b52843f130495a8a89f01c76d1737d6a0328a77deb7fbeb6e7e7fe66293d1f7',
+  },
+  {
+    file: 'services/identity-service/test/keycloak-write-fence.int-spec.ts',
+    template: 'a9fab329f390428a3cf37caf03ec9ad2d23bd82affecb43d6e0d1d3a45bd9252',
+    expressions: '610581c783fbf7ead3c2e4f3c4ef02aeea69e59132e050506cfe28e60419fa3a',
+  },
+  // A due fence and its replacement: instants from clock_timestamp().
+  {
+    file: 'services/identity-service/test/late-sender.int-spec.ts',
+    template: '7d3fadfdfdfe595fae75cbce4fc2a613f601f85c50ffaf84b98349b138df1835',
+    expressions: 'e10233eeddf8530ff0fa51ef03c6f62e531487acd93db1182e24a281f7de3ec7',
+  },
+  {
+    file: 'services/identity-service/test/late-sender.int-spec.ts',
+    template: '303650e24179dbf3d882d64652b9abd7bfd4dcfa46821cb5eae3dfd83405b30f',
+    expressions: '1521911380422b398d5a7510863f3e0678fe65708788505f888e2ebee4d1f624',
+  },
   {
     file: 'services/inventory-service/test/outbox-purge.int-spec.ts',
     template: '987b8386fb52cd9e95015f92a4612940004ad543cbe9fe30116d8b62b400bf94',

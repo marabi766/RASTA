@@ -3,9 +3,9 @@
 // this repository; the rest pin each refusal on small fixtures, so a mutant
 // that disables a refusal branch fails here.
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import ts from 'typescript';
@@ -21,6 +21,116 @@ import {
   templateHash,
 } from './eligibility-clock-guard.mjs';
 import { stripComments } from './eligibility-clock-sql.mjs';
+
+// #452's clock rule (one reading per object literal), from main: the tests at the end use it.
+/**
+ * `new Date()`, `Date.now()`, `new Date(Date.now())` — or one of them as text or a number
+ * (`new Date().toISOString()`): a reading of the clock, nothing added.
+ */
+function isClockReading(node) {
+  while (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)) node = node.expression;
+  if (
+    ts.isCallExpression(node) &&
+    node.arguments.length === 0 &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    /^(?:toISOString|toJSON|getTime|valueOf)$/.test(node.expression.name.text) &&
+    ts.isNewExpression(node.expression.expression)
+  ) {
+    return isClockReading(node.expression.expression);
+  }
+  if (
+    ts.isNewExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'Date'
+  ) {
+    const args = node.arguments ?? [];
+    return args.length === 0 || (args.length === 1 && isClockReading(args[0]));
+  }
+  return (
+    ts.isCallExpression(node) &&
+    node.arguments.length === 0 &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    node.expression.getText() === 'Date.now'
+  );
+}
+
+/**
+ * One fixture, one instant (#452 Class 1). Two fields of one object literal
+ * each read the clock: a millisecond tick between the reads gives them
+ * different instants, and a constraint that orders them
+ * (ck_tender_timestamps_ordered) or an assertion that equates them fails by
+ * chance. Read the clock once (`const now = new Date()`) and use it for every
+ * field; a reading with an offset (`new Date(Date.now() - 1000)`) states its
+ * own distance and is not counted.
+ */
+function clockHazards(source, file = '') {
+  const errors = [];
+  const ast = ts.createSourceFile(
+    file,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    file.endsWith('x') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const visit = (node) => {
+    if (ts.isObjectLiteralExpression(node)) {
+      const reads = node.properties.filter(
+        (property) => ts.isPropertyAssignment(property) && isClockReading(property.initializer),
+      );
+      if (reads.length >= 2) {
+        const { line } = ast.getLineAndCharacterOfPosition(node.getStart(ast));
+        const fields = reads.map((property) => property.name.getText(ast)).join(', ');
+        errors.push(
+          `${file}:${line + 1}: ${fields} each read the clock: read it once (const now = new Date())`,
+        );
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return errors;
+}
+
+const SKIPPED_DIRECTORIES = new Set([
+  'node_modules',
+  'dist',
+  '.next',
+  '.turbo',
+  'coverage',
+  'playwright-report',
+  'test-results',
+]);
+
+function sourceFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    if (SKIPPED_DIRECTORIES.has(entry.name)) return [];
+    const path = join(dir, entry.name);
+    return entry.isDirectory() ? sourceFiles(path) : [path];
+  });
+}
+
+/**
+ * Test code wherever it lives: every TypeScript file under a `test/` or `e2e/`
+ * directory (helpers included) and every spec beside the source, in services,
+ * packages, the portal and tests/e2e.
+ */
+function testCodeFiles(repository) {
+  return ['services', 'packages', 'apps', 'tests']
+    .filter((top) => readdirSync(repository).includes(top))
+    .flatMap((top) => sourceFiles(join(repository, top)))
+    .map((path) => relative(repository, path))
+    .filter(
+      (path) =>
+        /\.tsx?$/.test(path) &&
+        (/(^|\/)(test|e2e)\//.test(path) || /\.(spec|int-spec|e2e-spec|test)\.tsx?$/.test(path)),
+    );
+}
+
+function testCodeClockHazards(repository) {
+  return testCodeFiles(repository).flatMap((path) =>
+    clockHazards(readFileSync(join(repository, path), 'utf8'), path),
+  );
+}
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 // The repository's own gate, derived once and only when a test needs it, so the
