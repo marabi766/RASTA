@@ -59,6 +59,8 @@
       "env": ["DATABASE_URL", "DATABASE_URL_*", "RASTA_ALLOW_DEMO_SEED"]
     },
     "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
+    // Every scripts/*-rule.mjs that an eslint.config.* imports is an input below;
+    // scripts/lint-scripts-registration.test.mjs (run by lint:scripts) fails the one that is not.
     "lint": {
       "dependsOn": ["^build"],
       "inputs": [
@@ -66,7 +68,8 @@
         "$TURBO_ROOT$/eslint.config.mjs",
         "$TURBO_ROOT$/scripts/internal-token-transport-rule.mjs",
         "$TURBO_ROOT$/scripts/raw-http-boundary-rule.mjs",
-        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs"
+        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs",
+        "$TURBO_ROOT$/scripts/no-zod-default-rule.mjs"
       ],
       "outputs": []
     },
