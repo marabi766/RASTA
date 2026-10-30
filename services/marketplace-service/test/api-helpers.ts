@@ -6,6 +6,7 @@ import {
   OutboxRelay,
   type AuthGuardOptions,
 } from '@rasta/nest-common';
+import { mintTestInternalToken } from '@rasta/testing';
 import { createHash, randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
@@ -187,7 +188,8 @@ export function internalToken(
   options: InternalTokenOptions = {},
 ): Promise<string> {
   const ttl = options.ttlSeconds ?? 300;
-  return new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', ttl).issue(
+  return mintTestInternalToken(
+    { secret: INTERNAL_SECRET, issuer: 'rasta-internal', ttlSeconds: ttl },
     callerService,
     options.targetService ?? SERVICE_NAME,
     options.purpose ?? 'SERVICE',

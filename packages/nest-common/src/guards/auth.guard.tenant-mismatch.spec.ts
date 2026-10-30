@@ -7,6 +7,7 @@ import type { Logger } from '@rasta/logging';
 import { AuthGuard, type AuthGuardOptions, type UserTenantMismatch } from './auth.guard';
 import { AllExceptionsFilter } from '../filters/exception.filter';
 import { InternalTokenService, type TokenVerifier, type UserClaims } from '../auth/token-verifier';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY } from '../decorators';
 import { runWithContext } from '../context/request-context';
 import { RequestContextMiddleware } from '../middleware/request-context.middleware';
@@ -39,6 +40,7 @@ const USER_ID = 'USR_01JBQ8Z4K7M2N5P8R1T3V6X9Y2';
 const SUBJECT = 'keycloak-subject';
 
 const internalTokens = new InternalTokenService(SECRET, ISSUER, 300);
+const tokenKey: TestInternalTokenKey = { secret: SECRET, issuer: ISSUER, ttlSeconds: 300 };
 
 interface Endpoint {
   publicReason?: string;
@@ -292,7 +294,12 @@ describe('AuthGuard — observing its own user-token tenant refusal', () => {
     it('a relayed anonymous request to a public endpoint with a mismatched header', async () => {
       const { seen, allowed } = await attempt(
         {
-          'x-internal-token': await internalTokens.issue('api-gateway', THIS_SERVICE, 'RELAY'),
+          'x-internal-token': await mintTestInternalToken(
+            tokenKey,
+            'api-gateway',
+            THIS_SERVICE,
+            'RELAY',
+          ),
           'x-organization-id': ORG_FOREIGN,
         },
         { endpoint: { publicReason: 'Self-registration' } },
@@ -305,7 +312,8 @@ describe('AuthGuard — observing its own user-token tenant refusal', () => {
     it("a service token's SERVICE_TENANT_CONTEXT_INVALID, which is the other tenant refusal", async () => {
       const { seen, error } = await attempt(
         {
-          'x-internal-token': await internalTokens.issue(
+          'x-internal-token': await mintTestInternalToken(
+            tokenKey,
             'fleet-service',
             THIS_SERVICE,
             'SERVICE',
@@ -324,7 +332,8 @@ describe('AuthGuard — observing its own user-token tenant refusal', () => {
     it('a service token refused with FORBIDDEN by @AllowService', async () => {
       const { seen, error } = await attempt(
         {
-          'x-internal-token': await internalTokens.issue(
+          'x-internal-token': await mintTestInternalToken(
+            tokenKey,
             'notification-service',
             THIS_SERVICE,
             'SERVICE',
@@ -342,7 +351,12 @@ describe('AuthGuard — observing its own user-token tenant refusal', () => {
     it('a user token accompanied by a relay token, accepted', async () => {
       const { seen, allowed } = await attempt({
         ...bearer,
-        'x-internal-token': await internalTokens.issue('api-gateway', THIS_SERVICE, 'RELAY'),
+        'x-internal-token': await mintTestInternalToken(
+          tokenKey,
+          'api-gateway',
+          THIS_SERVICE,
+          'RELAY',
+        ),
         'x-organization-id': ORG_B,
       });
 

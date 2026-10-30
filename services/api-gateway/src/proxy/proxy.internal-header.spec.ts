@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { InternalTokenService, runWithContext } from '@rasta/nest-common';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { ProxyService } from './proxy.service';
 import type { ServiceUrls } from '../config/routes';
 
@@ -11,11 +12,13 @@ import type { ServiceUrls } from '../config/routes';
  * nest-common sets it, after the gateway's forwardable headers).
  */
 
-const internalTokens = new InternalTokenService(
-  randomBytes(32).toString('hex'),
-  'rasta-internal',
-  300,
-);
+const SECRET = randomBytes(32).toString('hex');
+const internalTokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
+const tokenKey: TestInternalTokenKey = {
+  secret: SECRET,
+  issuer: 'rasta-internal',
+  ttlSeconds: 300,
+};
 const urls = { IDENTITY_SERVICE_URL: 'http://identity.test:3101' } as unknown as ServiceUrls;
 
 async function forwardWith(
@@ -81,7 +84,8 @@ describe('ProxyService — a caller-provided internal token never travels', () =
   });
 
   it('a minted token signed for another tenant, sent by the caller, is replaced too', async () => {
-    const stolen = await internalTokens.issue(
+    const stolen = await mintTestInternalToken(
+      tokenKey,
       'fleet-service',
       'identity-service',
       'SERVICE',
