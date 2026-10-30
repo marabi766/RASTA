@@ -24,6 +24,7 @@ import {
   type TokenVerifier,
   type UserClaims,
 } from '@rasta/nest-common';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { UserController } from './identity.controller';
 import { IdentityService } from './identity.service';
 
@@ -97,6 +98,7 @@ const tokenVerifier = {
 } as unknown as TokenVerifier;
 
 const internalTokens = new InternalTokenService(SECRET, ISSUER, 300);
+const tokenKey: TestInternalTokenKey = { secret: SECRET, issuer: ISSUER, ttlSeconds: 300 };
 
 @Module({
   controllers: [UserController],
@@ -168,7 +170,8 @@ describe('GET /v1/users service access (ADR-054 § 1)', () => {
   });
 
   it('accepts a SERVICE token from notification-service and scopes the call to its signed org_id', async () => {
-    const token = await internalTokens.issue(
+    const token = await mintTestInternalToken(
+      tokenKey,
       'notification-service',
       'identity-service',
       'SERVICE',
@@ -194,7 +197,13 @@ describe('GET /v1/users service access (ADR-054 § 1)', () => {
       'api-gateway',
       'notification-service-2',
     ]) {
-      const token = await internalTokens.issue(caller, 'identity-service', 'SERVICE', ORG_A);
+      const token = await mintTestInternalToken(
+        tokenKey,
+        caller,
+        'identity-service',
+        'SERVICE',
+        ORG_A,
+      );
       const response = await request(server()).get('/v1/users').set('x-internal-token', token);
       expect(response.status).toBe(403);
       expect(response.body.code).toBe('FORBIDDEN');
@@ -203,7 +212,8 @@ describe('GET /v1/users service access (ADR-054 § 1)', () => {
   });
 
   it('refuses a token minted for another target service', async () => {
-    const token = await internalTokens.issue(
+    const token = await mintTestInternalToken(
+      tokenKey,
       'notification-service',
       'economic-service',
       'SERVICE',
@@ -215,14 +225,19 @@ describe('GET /v1/users service access (ADR-054 § 1)', () => {
   });
 
   it('refuses a RELAY token: the gateway cannot mint service authority (D-007)', async () => {
-    const token = await internalTokens.issue('api-gateway', 'identity-service', 'RELAY');
+    const token = await mintTestInternalToken(tokenKey, 'api-gateway', 'identity-service', 'RELAY');
     const response = await request(server()).get('/v1/users').set('x-internal-token', token);
     expect(response.status).toBe(401);
     expect(recorded).toHaveLength(0);
   });
 
   it('refuses a SERVICE token without a signed org_id: a platform-wide listing is not on offer', async () => {
-    const token = await internalTokens.issue('notification-service', 'identity-service', 'SERVICE');
+    const token = await mintTestInternalToken(
+      tokenKey,
+      'notification-service',
+      'identity-service',
+      'SERVICE',
+    );
     const response = await request(server()).get('/v1/users').set('x-internal-token', token);
     expect(response.status).toBe(403);
     expect(response.body.code).toBe('SERVICE_TENANT_CONTEXT_INVALID');
@@ -230,7 +245,8 @@ describe('GET /v1/users service access (ADR-054 § 1)', () => {
   });
 
   it('refuses an X-Organization-Id header that disagrees with the signed claim (ADR-035)', async () => {
-    const token = await internalTokens.issue(
+    const token = await mintTestInternalToken(
+      tokenKey,
       'notification-service',
       'identity-service',
       'SERVICE',
@@ -254,7 +270,8 @@ describe('GET /v1/users service access (ADR-054 § 1)', () => {
   });
 
   it('refuses the notification-service token on every neighbouring endpoint', async () => {
-    const token = await internalTokens.issue(
+    const token = await mintTestInternalToken(
+      tokenKey,
       'notification-service',
       'identity-service',
       'SERVICE',
@@ -301,7 +318,7 @@ describe('GET /v1/users service access (ADR-054 § 1)', () => {
   });
 
   it('prefers the user token when both are present, so a relayed human is judged as a human', async () => {
-    const relay = await internalTokens.issue('api-gateway', 'identity-service', 'RELAY');
+    const relay = await mintTestInternalToken(tokenKey, 'api-gateway', 'identity-service', 'RELAY');
     const response = await request(server())
       .get('/v1/users')
       .set('x-internal-token', relay)

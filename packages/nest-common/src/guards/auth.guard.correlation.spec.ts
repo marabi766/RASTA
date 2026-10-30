@@ -3,6 +3,7 @@ import type { ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
 import { AuthGuard } from './auth.guard';
 import { InternalTokenService, type TokenVerifier, type UserClaims } from '../auth/token-verifier';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY } from '../decorators';
 import { tryGetContext } from '../context/request-context';
 import { RequestContextMiddleware } from '../middleware/request-context.middleware';
@@ -28,6 +29,11 @@ const ULID_SHAPE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const LABELLED_UUID = 'access_token_secret123-3f2b8c1e-9d4a-4e6b-8a7c-1f0e2d3c4b5a';
 
 const internalTokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
+const tokenKey: TestInternalTokenKey = {
+  secret: SECRET,
+  issuer: 'rasta-internal',
+  ttlSeconds: 300,
+};
 
 const claims: UserClaims = {
   sub: 'keycloak-subject',
@@ -106,8 +112,9 @@ async function carried(
   return outcome;
 }
 
-const serviceToken = () => internalTokens.issue('marketplace-service', THIS_SERVICE, 'SERVICE');
-const relayToken = () => internalTokens.issue('api-gateway', THIS_SERVICE, 'RELAY');
+const serviceToken = () =>
+  mintTestInternalToken(tokenKey, 'marketplace-service', THIS_SERVICE, 'SERVICE');
+const relayToken = () => mintTestInternalToken(tokenKey, 'api-gateway', THIS_SERVICE, 'RELAY');
 
 describe('AuthGuard, the correlation id a service call keeps', () => {
   it.each([
