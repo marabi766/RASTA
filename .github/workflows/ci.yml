@@ -350,6 +350,14 @@ jobs:
         # Static, the scanner's own form tests first.
         run: pnpm run test:url-parsing-guard
 
+      - name: Credential transports refuse redirects (Q-155)
+        # The root scripts' credentialFetch over real HTTP: 301/302/303/307/308,
+        # same- and cross-origin, never followed (the target gets nothing) and
+        # nothing disclosed; every other status (304, a 201 Location) answered.
+        # It also pins the portal's copy, the E2E hand guard and nest-common's
+        # internalFetch to the same five statuses. Static, no build needed.
+        run: pnpm run test:credential-fetch
+
       - name: Queued-event provenance is restored by the registration intake only (PR #483 r3 F2)
         # An ordinary event's actor and correlation id are the verified
         # request context's (`buildOutboxRow` takes no provenance). The one
@@ -769,6 +777,13 @@ jobs:
           --filter=@rasta/supplier-service...
           --filter=@rasta/audit-service...
 
+      - name: The portal build holds no test-only signer (@rasta/testing)
+        # The portal has no image in this repository; its deployable artifact
+        # is `.next`. Same check as the service images (job `containers`),
+        # on the build output itself; BUILD_ID must exist, so a missing
+        # build fails rather than passes (PR #514 r1 F1).
+        run: node scripts/testing-dev-only.mjs tree apps/web/.next BUILD_ID
+
       - name: Start MinIO and create the document bucket
         # EXP-002 slice 7: the portal attaches a file by having its server ask
         # document-service for a signed URL and put the bytes in object storage
@@ -859,14 +874,17 @@ jobs:
           # maintenance-service's usage projection start their consumers in
           # their own onModuleInit, which Nest runs before AppModule's. Started
           # with its owner's URL, each must be gone before a consumer joins, a
-          # USAGE_RECORDED queued for it neither consumed nor committed. Before
-          # either starts, so neither group has run; the positive controls
+          # USAGE_RECORDED queued for it neither consumed nor committed — refused
+          # by the environment guard (the URL's user, #421 r1 F2), and, with its
+          # runtime URL while the migrator lends it CREATE, by the preflight.
+          # Before either starts, so neither group has run; the positive controls
           # follow the start step. scripts/runtime-preflight.e2e.mjs.
           ( asset_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service asset-service)" && \
             fleet_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service fleet-service)" && \
             eval "${asset_credentials}" && eval "${fleet_credentials}" && \
             PORT=3103 PREFLIGHT_STATE_DIR=/tmp/rasta-web-e2e-logs \
             PREFLIGHT_OWNER_URL=postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public \
+            DATABASE_URL_ASSET=postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public \
             node scripts/runtime-preflight.e2e.mjs refused asset-service )
           ( maintenance_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service maintenance-service)" && \
             fleet_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service fleet-service)" && \
@@ -4069,7 +4087,9 @@ jobs:
           unset KAFKA_SECRETS_DIR
           mkdir -p /tmp/rasta-logs
 
-          # D-045 (Codex on #178): started with its owner's URL, a service is gone
+          # D-045 (Codex on #178): started with its owner's URL — refused by the
+          # environment guard (#421 r1 F2) — or with its runtime URL while the
+          # migrator lends it CREATE — refused by the preflight — a service is gone
           # before Nest builds a single provider. audit-service: a Kafka event
           # queued for its domain projector is neither consumed nor committed.
           # identity-service: its Keycloak re-projection consumer, which starts
@@ -4087,6 +4107,7 @@ jobs:
             eval "${identity_credentials}" && \
             PORT=3101 \
             PREFLIGHT_OWNER_URL=postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public \
+            DATABASE_URL_IDENTITY=postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public \
             node scripts/runtime-preflight.e2e.mjs refused identity-service )
 
           ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service identity-service)" && \
@@ -4768,6 +4789,19 @@ jobs:
           load: true
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: The image holds no test-only signer (@rasta/testing)
+        # PR #514 r1 F1: checked on what the image holds, not on how its
+        # Dockerfile is written. The final filesystem is exported and any
+        # @rasta/testing manifest or store entry, the minter's refusal text or
+        # its name outside TypeScript source fails the job; so does a docker
+        # or tar failure, or an export without the image's entry point. This
+        # job runs wherever an image is built (every image on main, the
+        # affected ones on a merge-train run), so the check holds for every
+        # image before it can be deployed. Node built-ins only: no install.
+        env:
+          IMAGE: rasta/${{ matrix.service }}:${{ github.sha }}
+        run: node scripts/testing-dev-only.mjs image "$IMAGE"
 
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6

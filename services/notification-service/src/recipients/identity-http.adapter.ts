@@ -84,7 +84,8 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
   constructor(
     private readonly options: IdentityHttpOptions,
     private readonly tokens: InternalTokenService,
-    private readonly fetchImpl: typeof fetch = fetch,
+    // Absent: internalFetch's own fetch, the only raw one (Q-155 boundary).
+    private readonly fetchImpl?: typeof fetch,
   ) {}
 
   async resolve(query: RecipientQuery): Promise<RecipientResolution> {

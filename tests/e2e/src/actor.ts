@@ -218,13 +218,14 @@ export class Actor {
   readonly username: E2eUser | (string & {});
   private readonly token: SessionToken;
   private readonly config: Pick<E2eConfig, 'gatewayUrl'>;
-  private readonly fetchImpl: Fetch;
+  /** Absent: send()'s own fetch, inside the audited transport (src/http.ts). */
+  private readonly fetchImpl?: Fetch;
 
   constructor(
     username: E2eUser | (string & {}),
     token: SessionToken,
     config: Pick<E2eConfig, 'gatewayUrl'>,
-    fetchImpl: Fetch = fetch,
+    fetchImpl?: Fetch,
   ) {
     this.username = username;
     this.token = token;

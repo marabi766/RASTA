@@ -73,10 +73,11 @@ export interface TransferRecordClientOptions {
  * proxy `404` — is no answer. Nothing from a failure goes into the error.
  */
 export class TransferRecordClient implements TransferRecordSource {
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
 
   constructor(private readonly options: TransferRecordClientOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
   }
 
   async resolve(organizationId: string, assetId: string, fenceId: string): Promise<TransferRecord> {
