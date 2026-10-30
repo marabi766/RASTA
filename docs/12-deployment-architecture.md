@@ -333,7 +333,8 @@ Consumer مشترک کرش می‌کند و تا ری‌استارت سرویس 
 
 Runbookها: [`runbooks/restore-database.md`](runbooks/restore-database.md) ·
 [`runbooks/disaster-recovery.md`](runbooks/disaster-recovery.md) ·
-[`runbooks/backup-restore-drill.md`](runbooks/backup-restore-drill.md) (تمرین محلی با گزارش JSON)
+[`runbooks/backup-restore-drill.md`](runbooks/backup-restore-drill.md) (تمرین محلی با گزارش JSON؛
+اجرای ماهانهٔ CI روی داده ساختگی، نه بازیابی production)
 
 ### سناریوهای فاجعه
 
