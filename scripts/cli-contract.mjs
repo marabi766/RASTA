@@ -428,6 +428,23 @@ export const CLI_CONTRACT = Object.freeze({
     positionals: ['script'],
     other: ['--depth', '--no-tags', '--quiet', '--verify'],
   },
+  'scripts/testing-dev-only.mjs': {
+    // `image <ref>` | `tree <dir> <entry>`: each checked against IMAGE_REF or
+    // REPO_PATH before any use.
+    positionals: ['enum', 'identifier', 'identifier'],
+    other: [
+      '--depth',
+      '--exclude',
+      '--json',
+      '--no-same-owner',
+      '--no-same-permissions',
+      '--output',
+      '--prod',
+      '--recursive',
+      '-C',
+      '-xf',
+    ],
+  },
   'scripts/test-phases-lib.mjs': {
     accepts: { '--calibrate': 'switch', '--pairs': 'integer' },
     other: ['--passWithNoTests', '--runInBand', '--selectProjects', '--testNamePattern'],

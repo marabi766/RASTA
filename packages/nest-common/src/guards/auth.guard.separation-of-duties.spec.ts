@@ -6,6 +6,7 @@ import { Reflector } from '@nestjs/core';
 import { SignJWT, exportJWK, generateKeyPair, type KeyLike } from 'jose';
 import { AuthGuard } from './auth.guard';
 import { InternalTokenService, TokenVerifier } from '../auth/token-verifier';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import {
   assertDistinctActors,
   compareActors,
@@ -96,11 +97,13 @@ const OPEN: Route = { cls: FourEyesController, handler: 'open' };
 const INTERNAL_APPROVE: Route = { cls: FourEyesController, handler: 'internalApprove' };
 const CLASS_LEVEL: Route = { cls: WholeControllerGuarded, handler: 'decide' };
 
-const internalTokens = new InternalTokenService(
-  randomBytes(32).toString('hex'),
-  'rasta-internal',
-  300,
-);
+const SECRET = randomBytes(32).toString('hex');
+const internalTokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
+const tokenKey: TestInternalTokenKey = {
+  secret: SECRET,
+  issuer: 'rasta-internal',
+  ttlSeconds: 300,
+};
 
 function guard(issuer = ISSUER): AuthGuard {
   return new AuthGuard(new Reflector(), {
@@ -309,13 +312,23 @@ describe('@RequirePlatformUserId()', () => {
 
   it('does not touch a service caller: @AllowService decides', async () => {
     const allowed = await through(INTERNAL_APPROVE, {
-      'x-internal-token': await internalTokens.issue('fleet-service', THIS_SERVICE, 'SERVICE'),
+      'x-internal-token': await mintTestInternalToken(
+        tokenKey,
+        'fleet-service',
+        THIS_SERVICE,
+        'SERVICE',
+      ),
     });
     expect(allowed.error).toBeUndefined();
     expect(allowed.context).toMatchObject({ authType: 'SERVICE', callerService: 'fleet-service' });
 
     const refused = await through(INTERNAL_APPROVE, {
-      'x-internal-token': await internalTokens.issue('asset-service', THIS_SERVICE, 'SERVICE'),
+      'x-internal-token': await mintTestInternalToken(
+        tokenKey,
+        'asset-service',
+        THIS_SERVICE,
+        'SERVICE',
+      ),
     });
     expect(refused.error).toMatchObject({ code: 'FORBIDDEN' });
   });
