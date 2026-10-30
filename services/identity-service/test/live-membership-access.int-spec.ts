@@ -7,6 +7,7 @@ import {
   bearerOf,
   eventNames,
   http,
+  membershipRow,
   seedPerson,
   type MembershipSpec,
   type Person,
@@ -42,13 +43,19 @@ describe('a membership proves access to a person only while it is live (task 117
   });
 
   const HOUR = 3_600_000;
+  /** A membership's stored window, read back. */
+  const windowOf = async (membershipId: string) => {
+    const row = await membershipRow(harness.prisma, membershipId);
+    if (!row) throw new Error(`no membership ${membershipId}`);
+    return { validFrom: row.validFrom, validUntil: row.validUntil! };
+  };
   const NOT_LIVE: Array<[string, (organizationId: string) => MembershipSpec]> = [
     [
       'expired',
       (organizationId) => ({
         organizationId,
         roles: ['OPERATOR'],
-        validUntil: new Date(Date.now() - HOUR),
+        window: { fromMs: -2 * HOUR, untilMs: -HOUR },
       }),
     ],
     [
@@ -56,7 +63,7 @@ describe('a membership proves access to a person only while it is live (task 117
       (organizationId) => ({
         organizationId,
         roles: ['OPERATOR'],
-        validFrom: new Date(Date.now() + HOUR),
+        window: { fromMs: HOUR, untilMs: null },
       }),
     ],
     [
@@ -136,7 +143,7 @@ describe('a membership proves access to a person only while it is live (task 117
     const self = await seedPerson(harness.prisma, 'LM-SELF', {
       organizationId: org.a,
       roles: ['OPERATOR'],
-      validUntil: new Date(Date.now() - HOUR),
+      window: { fromMs: -2 * HOUR, untilMs: -HOUR },
     });
     const bearer = bearerOf(self, ['OPERATOR']);
 
@@ -209,12 +216,13 @@ describe('a membership proves access to a person only while it is live (task 117
   describe('the window’s end is exclusive, on the clock the decision is made on', () => {
     it('at exactly validUntil the membership proves nothing; a millisecond before, it does', async () => {
       const org = tenants();
-      const validUntil = new Date(Date.now() + HOUR);
       const person = await seedPerson(harness.prisma, 'LM-EDGE', {
         organizationId: org.a,
         roles: ['ORGANIZATION_ADMIN'],
-        validUntil,
+        window: { fromMs: -HOUR, untilMs: HOUR },
       });
+      // The instant as stored: the window is dated by the database clock.
+      const { validUntil } = await windowOf(person.membershipId);
       const repository = harness.moduleRef.get(IdentityRepository);
       const before = new Date(validUntil.getTime() - 1);
 
@@ -235,12 +243,12 @@ describe('a membership proves access to a person only while it is live (task 117
 
     it('the same at validFrom: from that instant on, and not before', async () => {
       const org = tenants();
-      const validFrom = new Date(Date.now() + HOUR);
       const person = await seedPerson(harness.prisma, 'LM-EDGE', {
         organizationId: org.a,
         roles: ['OPERATOR'],
-        validFrom,
+        window: { fromMs: HOUR, untilMs: null },
       });
+      const { validFrom } = await windowOf(person.membershipId);
       // A second, live membership elsewhere does not lend the first anything.
       await addMembershipRow(harness.prisma, person.userId, {
         organizationId: org.b,

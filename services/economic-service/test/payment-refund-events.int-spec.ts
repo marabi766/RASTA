@@ -1,3 +1,4 @@
+import { setEligibilityFixture } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { asActor, cleanup, newPrisma, tenants, wire, type Wiring, testEnv } from './helpers';
@@ -134,13 +135,16 @@ describe('the refund outcome events (real database)', () => {
     );
 
   const makeDue = (paymentIntentId: string) =>
-    runUnscoped('the suite makes its task due', () =>
-      prisma.client.$executeRawUnsafe(
-        `UPDATE payment_reconciliation_task SET next_attempt_at = now() - interval '1 second'
-          WHERE payment_intent_id = $1 AND status = 'PENDING'`,
-        paymentIntentId,
-      ),
-    );
+    runUnscoped('the suite makes its task due', async () => {
+      const tasks = await prisma.client.paymentReconciliationTask.findMany({
+        where: { paymentIntentId },
+        select: { id: true, status: true },
+      });
+      const pending = tasks.filter((task) => task.status === 'PENDING').map((task) => task.id);
+      // After the filter: a fixture that matches nothing must not pass silently.
+      expect(pending.length).toBeGreaterThan(0);
+      await setEligibilityFixture(prisma, 'paymentPendingDue', pending);
+    });
 
   /**
    * Sweeps until this intent's task is no longer pending. One sweep claims a

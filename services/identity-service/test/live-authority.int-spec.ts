@@ -2,12 +2,14 @@ import { runUnscoped } from '@rasta/nest-common';
 import { startIdentityApi, type IdentityApiHarness } from './api-helpers';
 import {
   bearerOf,
+  dateMembershipWindow,
   eventNames,
   http,
   membershipRow,
   processRegistrations,
   registrationBody,
   seedPerson,
+  type MembershipWindow,
   type Person,
 } from './identity-fixtures';
 import { id, tenants } from './helpers';
@@ -152,18 +154,20 @@ describe('identity administration decides on the caller’s live authority (task
     expect(await eventNames(harness.prisma, a.membershipId)).toEqual(['MEMBERSHIP_REVOKED']);
   });
 
-  it.each([
-    ['expired', { validUntil: new Date(Date.now() - 60_000) }],
-    ['not yet valid', { validFrom: new Date(Date.now() + 3_600_000) }],
-    ['suspended', { status: 'SUSPENDED' }],
+  it.each<[string, Record<string, unknown>, MembershipWindow | undefined]>([
+    // The window moved by the database clock that judges it, never this process's.
+    ['expired', {}, { fromMs: -3_600_000, untilMs: -60_000 }],
+    ['not yet valid', {}, { fromMs: 3_600_000, untilMs: null }],
+    ['suspended', { status: 'SUSPENDED' }, undefined],
   ])(
     'a caller whose membership is %s: the token still names the role, and is refused',
-    async (_label, change) => {
+    async (_label, change, window) => {
       const org = tenants();
       const a = await admin(org.a, 'LA-A');
       const c = await member(org.a);
       const before = adminToken(a);
-      await setMembership(a.membershipId, change);
+      if (window) await dateMembershipWindow(harness.prisma, a.membershipId, window);
+      else await setMembership(a.membershipId, change);
 
       const regrant = await api.roles(before, a.membershipId, ['ORGANIZATION_ADMIN', 'DRIVER']);
       const promote = await api.roles(before, c.membershipId, ['ORGANIZATION_ADMIN']);
