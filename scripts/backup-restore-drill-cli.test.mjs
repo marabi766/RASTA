@@ -688,7 +688,8 @@ esac
     );
   } finally {
     await disposeOwned(directory);
-    if (pgid) assert.ok(!alive(pgid), 'orphan group stopped');
+    // A killed member can still answer `kill(-pgid, 0)` until this process reaps it: wait.
+    if (pgid) assert.ok(await waitGone(pgid), 'orphan group stopped');
   }
 });
 

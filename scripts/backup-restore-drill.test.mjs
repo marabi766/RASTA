@@ -46,12 +46,15 @@ import {
   KILL_CONFIRMATION_DEADLINE_MS,
 } from './backup-restore-drill-lib.mjs';
 import {
+  adoptGroup,
   adoptPid,
   disposeOwned,
   hasLiveProcesses,
   holdUntil,
   ownedDirectory,
   ownerSettings,
+  recordOwned,
+  runOwned,
   pollUntil,
   spawnOwned,
   stopOwned,
@@ -995,7 +998,9 @@ writeReportAtomically(path, ${JSON.stringify(complete)}, { fs: {
 } });
 `,
       );
-      const result = spawnSync(process.execPath, [join(directory, 'child.mjs'), path, stage]);
+      const result = spawnSync(process.execPath, [join(directory, 'child.mjs'), path, stage], {
+        timeout: 60_000, // the child kills itself with SIGKILL; the runner’s own bound ends with SIGTERM
+      });
       assert.equal(result.signal, 'SIGKILL', stage);
       const report = readReport(path);
       assert.deepEqual(report, expected, stage);
@@ -1269,10 +1274,11 @@ test('the fixture owner records a child at spawn and stops it, confirmed, before
   assert.equal(existsSync(directory), false);
 });
 
-test('the fixture owner also finds a group nobody registered: its environment names the directory', async () => {
+test('the fixture owner also finds a group nobody registered: it descends from a process the fixture owns', async () => {
   const directory = ownedDirectory('drill-owner-sweep-');
   const pidFile = join(directory, 'grandchild');
-  // The parent starts a child in a NEW session and group (what a drill-spawned stub is) and holds.
+  // The parent starts a child in a NEW session and group (what a drill-spawned stub is) and holds:
+  // walking parent pids from the registered parent finds it, and it is retained by identity.
   spawnOwned(
     directory,
     '/bin/bash',
@@ -1280,7 +1286,7 @@ test('the fixture owner also finds a group nobody registered: its environment na
       '-c',
       `setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; ${holdUntil(directory, join(directory, 'release'))}`,
     ],
-    { env: { ...process.env, PATH: `${directory}:${process.env.PATH}` }, stdio: 'ignore' },
+    { stdio: 'ignore' },
   );
   const grandchild = await waitForPid(pidFile);
   assert.equal(pidAlive(grandchild), true);
@@ -1288,18 +1294,22 @@ test('the fixture owner also finds a group nobody registered: its environment na
   await pollUntil(() => !pidAlive(grandchild), 'the unregistered member to be reaped', 5_000);
 });
 
-test('a group whose pid a test reads from a file is owned from then on, whatever it carries', async () => {
+test('a group whose pid a test reads from a file is owned from then on, even after its parent is gone', async () => {
   const directory = ownedDirectory('drill-owner-adopt-');
   const pidFile = join(directory, 'leader');
-  // The started shell names the directory in its command line, the group it starts does not: no
-  // environment variable, no argument. Only adopting the pid makes it the fixture's.
-  spawnOwned(
+  // The started shell holds; the group it starts carries nothing of the directory (no environment
+  // variable, no argument). Adopting the pid while the shell lives retains its identity; killing the
+  // shell then re-parents the group to init, where no parent pid leads back to the fixture.
+  const parent = spawnOwned(
     directory,
     '/bin/bash',
     ['-c', `setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; exec sleep 600`],
     { stdio: 'ignore' },
   );
   const leader = await waitForGroup(directory, pidFile);
+  const parentGone = new Promise((resolve) => parent.once('exit', resolve));
+  parent.kill('SIGKILL');
+  await parentGone;
   assert.equal(pidAlive(leader), true);
   await disposeOwned(directory);
   await pollUntil(() => !pidAlive(leader), 'the adopted group to be reaped', 5_000);
@@ -1324,6 +1334,264 @@ test('a fixture that cannot confirm its processes gone keeps its directory and f
   assert.equal(existsSync(directory), false);
 });
 
+test('a descendant that outlives the command that started it is still the fixture’s', async () => {
+  const directory = ownedDirectory('drill-run-orphan-');
+  try {
+    const pidFile = join(directory, 'descendant');
+    // The shell starts a descendant, lets the owner see it, and exits: from then on the descendant
+    // is re-parented to init and no parent pid leads back to the fixture. Only the identity the
+    // owner retained while the tree was alive can still show whose it is.
+    const result = await runOwned(
+      directory,
+      '/bin/bash',
+      ['-c', `sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; sleep 0.5`],
+      { timeoutMs: 30_000 },
+    );
+    assert.equal(result.status, 0);
+    const descendant = Number(readFileSync(pidFile, 'utf8'));
+    assert.equal(pidAlive(descendant), true);
+    assert.equal(
+      hasLiveProcesses(directory),
+      true,
+      'retained by identity while the tree was alive',
+    );
+    await disposeOwned(directory);
+    await pollUntil(() => !pidAlive(descendant), 'the descendant to be reaped');
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+// --- ownership is proven by retained identity, and inspection is alive / gone / unknown (r3).
+// --- Injected process tables: the kernel cannot be made to produce these states on demand.
+function fakeSystem(...rows) {
+  const table = new Map(rows.map(([pid, row]) => [pid, { state: 'S', ...row }]));
+  table.set(process.pid, { ppid: 1, pgrp: process.pid, start: '1' });
+  const system = {
+    table,
+    signals: [],
+    unreadable: new Set(),
+    garbage: new Set(),
+    asked: [],
+    listPids: () => [...table.keys()],
+    readProcFile(pid, name) {
+      system.asked.push([pid, name]);
+      const fail = (code) => Object.assign(new Error(code), { code });
+      if (system.unreadable.has(pid)) throw fail('EACCES');
+      const row = table.get(pid);
+      if (!row) throw fail('ENOENT');
+      if (name !== 'stat') return row.mentions ?? ''; // environ / cmdline: never evidence of ownership
+      if (system.garbage.has(pid)) return 'not a stat line';
+      return `${pid} (a b)) ${[row.state, row.ppid, row.pgrp, ...Array(16).fill(0), row.start].join(' ')} 0`;
+    },
+    signal(target, name) {
+      system.signals.push([target, name]);
+      for (const [pid, row] of [...table])
+        if (pid === target || (target < 0 && row.pgrp === -target && pid !== process.pid)) {
+          if (name === 'SIGKILL') table.delete(pid);
+          else if (name === 'SIGSTOP') row.state = 'T';
+        }
+    },
+  };
+  return system;
+}
+async function withSystem(system, body) {
+  const saved = { ...ownerSettings };
+  ownerSettings.system = system;
+  ownerSettings.stopBudgetMs = 400;
+  try {
+    return await body();
+  } finally {
+    Object.assign(ownerSettings, saved);
+  }
+}
+const killed = (system) =>
+  system.signals.filter(([, name]) => name === 'SIGKILL').map(([target]) => target);
+
+test('a foreign process that merely names the fixture is neither signalled nor counted as a leak', async () => {
+  const directory = ownedDirectory('drill-owner-foreign-');
+  // Another session runs `tail -f <directory>/report.json`: its command line AND its environment
+  // name the directory. Neither is evidence that this test started it.
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [
+      900,
+      {
+        ppid: 1,
+        pgrp: 900,
+        start: '90',
+        mentions: `tail\0-f\0${directory}/report.json\0PATH=${directory}:/bin\0`,
+      },
+    ],
+  );
+  await withSystem(system, async () => {
+    recordOwned(directory, 100);
+    system.table.delete(100); // the fixture's own process ended
+    assert.equal(hasLiveProcesses(directory), false, 'the foreigner is not a leak');
+    await disposeOwned(directory);
+    assert.deepEqual(system.signals, [], 'nothing was signalled');
+    assert.equal(system.table.has(900), true);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('a registration without a readable identity is refused, and the pid is never accepted later', async () => {
+  const directory = ownedDirectory('drill-owner-noidentity-');
+  const system = fakeSystem([77, { ppid: 1, pgrp: 77, start: '70' }]);
+  await withSystem(system, async () => {
+    system.unreadable.add(77);
+    assert.throws(() => recordOwned(directory, 77), /no readable identity \(unknown\)/);
+    system.garbage.add(77);
+    system.unreadable.delete(77);
+    assert.throws(() => recordOwned(directory, 77), /no readable identity \(unknown\)/);
+    assert.throws(() => recordOwned(directory, 78), /no readable identity \(gone\)/);
+    system.garbage.delete(77);
+    // The number now answers, as somebody else's process: it was never registered.
+    assert.equal(hasLiveProcesses(directory), false);
+    await disposeOwned(directory);
+    assert.deepEqual(system.signals, []);
+  });
+});
+
+test('a spawn whose identity cannot be read fails and the child it started is killed', async () => {
+  const directory = ownedDirectory('drill-owner-spawn-noidentity-');
+  const system = fakeSystem();
+  let asked;
+  await withSystem(system, async () => {
+    assert.throws(
+      () => spawnOwned(directory, 'sleep', ['600'], { stdio: 'ignore' }),
+      /no readable identity \(gone\)/,
+    );
+    asked = system.asked[0][0];
+  });
+  await pollUntil(() => !pidAlive(asked), 'the unregistered child to be killed through its handle');
+  await disposeOwned(directory);
+});
+
+test('a group is never signalled by its number once its registered leader is gone', async () => {
+  for (const leaderNow of [null, { state: 'S', ppid: 1, pgrp: 100, start: '99' }]) {
+    const directory = ownedDirectory('drill-owner-leadergone-');
+    const system = fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [120, { ppid: 100, pgrp: 100, start: '12' }],
+    );
+    await withSystem(system, async () => {
+      recordOwned(directory, 100, { leads: true });
+      recordOwned(directory, 120);
+      // The leader exits; the number is led by nobody, or by a different process (reused); other
+      // processes sit in a group of that number that this fixture never owned.
+      system.table.delete(100);
+      if (leaderNow) system.table.set(100, leaderNow);
+      system.table.set(150, { state: 'S', ppid: 1, pgrp: 100, start: '15' });
+      system.table.set(160, { state: 'S', ppid: 1, pgrp: 100, start: '16' });
+      await disposeOwned(directory);
+      assert.deepEqual(killed(system), [120], `only the registered member, by pid (${leaderNow})`);
+      assert.equal(
+        system.signals.some(([target]) => target < 0),
+        false,
+        'no group signal',
+      );
+      assert.deepEqual(
+        [...system.table.keys()].filter((pid) => pid > 100 && pid < 1000).sort(),
+        [150, 160],
+      );
+    });
+  }
+});
+
+test('a group whose registered leader is still there is signalled as a group', async () => {
+  const directory = ownedDirectory('drill-owner-leaderhere-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [120, { ppid: 100, pgrp: 100, start: '12' }], // found by walking parent pids, never registered
+  );
+  await withSystem(system, async () => {
+    recordOwned(directory, 100, { leads: true });
+    await disposeOwned(directory);
+    assert.deepEqual(killed(system), [-100]);
+    assert.equal(system.table.has(120), false);
+  });
+});
+
+test('what could still start a child is frozen before anything is killed', async () => {
+  const directory = ownedDirectory('drill-owner-freeze-');
+  const system = fakeSystem([100, { ppid: process.pid, pgrp: 100, start: '10' }]);
+  // A parent that gets one more child out between being looked at and being killed, unless it has
+  // been stopped first. The child is re-parented to init at once, so only a parent that was
+  // frozen while the owner still saw it can be kept from leaving one nobody can prove is ours.
+  const signal = system.signal;
+  system.signal = (target, name) => {
+    if (name !== 'SIGSTOP' && system.table.get(target)?.state !== 'T' && target === 100)
+      system.table.set(130, { state: 'S', ppid: 1, pgrp: 130, start: '13' });
+    signal(target, name);
+  };
+  await withSystem(system, async () => {
+    recordOwned(directory, 100);
+    await disposeOwned(directory);
+    assert.equal(system.signals[0][1], 'SIGSTOP');
+    assert.equal(system.table.has(130), false, 'no unproven child was left behind');
+  });
+});
+
+test('an unreadable /proc entry is unknown, not gone: ownership and directory are kept, then the stop fails', async () => {
+  const directory = ownedDirectory('drill-owner-unknown-');
+  const system = fakeSystem([200, { ppid: process.pid, pgrp: 200, start: '20' }]);
+  await withSystem(system, async () => {
+    recordOwned(directory, 200);
+    system.unreadable.add(200);
+    assert.equal(hasLiveProcesses(directory), true, 'not provably gone is not gone');
+    await assert.rejects(disposeOwned(directory), /state unknown: \[200 \(EACCES\)\]/);
+    assert.equal(existsSync(directory), true, 'the directory stays');
+    assert.deepEqual(system.signals, [], 'nothing can be signalled by identity while unreadable');
+    // A malformed stat is no better.
+    system.unreadable.delete(200);
+    system.garbage.add(200);
+    await assert.rejects(disposeOwned(directory), /state unknown: \[200 \(unreadable stat\)\]/);
+    assert.equal(existsSync(directory), true);
+    // Readable again within a retry: stopped by identity, then the directory goes.
+    system.garbage.delete(200);
+    await disposeOwned(directory);
+    assert.deepEqual(killed(system), [200]);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('an unreadable process table is unknown too: the stop retries within its budget, then fails', async () => {
+  const directory = ownedDirectory('drill-owner-table-');
+  const system = fakeSystem();
+  await withSystem(system, async () => {
+    const list = system.listPids;
+    system.listPids = () => {
+      throw Object.assign(new Error('EMFILE'), { code: 'EMFILE' });
+    };
+    await assert.rejects(disposeOwned(directory), /state unknown: \[0 \(process table: EMFILE\)\]/);
+    assert.equal(existsSync(directory), true);
+    system.listPids = list;
+    await disposeOwned(directory);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('a pid is adopted only if it descends from the fixture; otherwise it is refused and left alone', async () => {
+  const directory = ownedDirectory('drill-owner-adoption-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [110, { ppid: 105, pgrp: 100, start: '11' }],
+    [105, { ppid: 100, pgrp: 100, start: '10.5' }],
+    [500, { ppid: 1, pgrp: 500, start: '50' }],
+  );
+  await withSystem(system, async () => {
+    recordOwned(directory, 100);
+    adoptPid(directory, 110); // through an unregistered parent
+    assert.throws(() => adoptPid(directory, 500), /cannot be shown to descend from a process of/);
+    assert.throws(() => adoptGroup(directory, 500), /cannot be shown to descend/);
+    adoptPid(directory, 999); // not there: nothing to own, nothing to fail
+    await disposeOwned(directory);
+    assert.equal(killed(system).includes(500), false, 'the refused pid was never signalled');
+    assert.equal(killed(system).includes(110), true);
+  });
+});
+
 test('a directory the owner did not create cannot hold or start anything', () => {
   const stranger = mkdtempSync(join(tmpdir(), 'drill-owner-stranger-'));
   try {
@@ -1336,7 +1604,7 @@ test('a directory the owner did not create cannot hold or start anything', () =>
 });
 
 test('the after-hook fails a test that ends with a fixture process alive, and stops that process', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-hook-'));
+  const directory = ownedDirectory('drill-hook-');
   try {
     const support = new URL('./backup-restore-drill-test-support.mjs', import.meta.url).href;
     const pidFile = join(directory, 'pid');
@@ -1355,13 +1623,14 @@ test('leaks a held process', async () => {
 test('a test that disposes is not blamed', async () => {});
 `,
     );
-    const result = spawnSync(
+    // The nested runner goes through the owner like everything else: its tree is followed, and a
+    // timeout would stop it by identity and confirm it before the directory is touched.
+    const result = await runOwned(
+      directory,
       process.execPath,
       ['--test', '--test-reporter=tap', join(directory, 'leak.test.mjs')],
       {
-        encoding: 'utf8',
-        timeout: 60_000,
-        killSignal: 'SIGKILL',
+        timeoutMs: 60_000,
         // Inside a test run this variable makes a nested `node --test` skip its files.
         env: { ...process.env, NODE_TEST_CONTEXT: undefined },
       },
@@ -1374,7 +1643,35 @@ test('a test that disposes is not blamed', async () => {});
     assert.ok(leaked > 0);
     await pollUntil(() => !pidAlive(leaked), 'the leaked process to be reaped');
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    await disposeOwned(directory);
+  }
+});
+
+test('a command run through the owner that outlives its timeout is stopped with its whole tree, confirmed, before it rejects', async () => {
+  const directory = ownedDirectory('drill-run-timeout-');
+  try {
+    const pidFile = join(directory, 'descendant');
+    // The shell starts a descendant in its own session, then holds: killing the shell alone (what
+    // a synchronous runner's timeout does) would leave the descendant running.
+    await assert.rejects(
+      runOwned(
+        directory,
+        '/bin/bash',
+        [
+          '-c',
+          `setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; ${holdUntil(directory, join(directory, 'release'))}`,
+        ],
+        { timeoutMs: 1_500 },
+      ),
+      /timed out after 1500 ms; its processes were stopped/,
+    );
+    const descendant = Number(readFileSync(pidFile, 'utf8'));
+    assert.ok(descendant > 0);
+    // Confirmed by the owner, not merely signalled: only a zombie this process has yet to reap may remain.
+    assert.equal(hasLiveProcesses(directory), false);
+    await pollUntil(() => !pidAlive(descendant), 'the descendant to be reaped');
+  } finally {
+    await disposeOwned(directory);
   }
 });
 

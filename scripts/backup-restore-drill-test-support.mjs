@@ -84,19 +84,40 @@ export const waitForPid = (path, timeoutMs = POLL_TIMEOUT_MS) =>
 // records it the moment it exists) or reported by `adoptGroup`/`adoptPid` the moment a test learns
 // of it, and `disposeOwned` stops all of it and CONFIRMS it is gone before the directory is
 // removed. Stubs hold through `holdUntil`, whose loop polls a file inside that directory: removing
-// the directory first would strand them. On top of the records, a process is also the fixture's
-// when its environment or command line names the fixture's own unique directory (every stub the
-// drill starts inherits PATH=<directory>:...), so a group no test ever read a pid for is found too.
-// The proof is the directory, never a name pattern: nothing of another session can carry it.
+// the directory first would strand them.
+//
+// Ownership is PROVEN, never inferred. A process is the fixture's only when this module started it
+// (`spawnOwned`), or it descends, by walking parent pids, from a process that is (found while the
+// chain is alive and retained from then on), and it is remembered by its identity: pid AND the
+// start time /proc reports. A signal is sent only while that identity still matches. A directory
+// named in a command line or an environment proves nothing: another session may run
+// `tail -f <directory>/x` and it must be neither signalled nor blamed on the test. No identity
+// (unreadable at registration) means the registration fails; it never means "any pid will do".
+//
+// Inspection has three answers: alive, gone, unknown. Only "no such process" is gone; an unreadable
+// or malformed /proc entry is UNKNOWN, which keeps the ownership and the directory, is retried
+// until the stop budget is spent, and then fails the test loudly.
 
 /** How long a stop may take after SIGKILL before a process counts as having survived it. */
-export const ownerSettings = { stopBudgetMs: 15_000 };
+export const ownerSettings = {
+  stopBudgetMs: 15_000,
+  // The kernel's process table, replaceable by a test that needs to inject one.
+  system: {
+    listPids: () =>
+      readdirSync('/proc')
+        .filter((name) => /^\d+$/.test(name))
+        .map(Number),
+    readProcFile: (pid, name) => readFileSync(`/proc/${pid}/${name}`, 'latin1'),
+    signal: (target, name) => process.kill(target, name),
+  },
+};
 const scopes = new Map();
 
 /** A new private directory under the temp root, owned from this line on. */
 export function ownedDirectory(prefix) {
   const directory = mkdtempSync(join(tmpdir(), prefix));
-  scopes.set(directory, { groups: new Map(), pids: new Map() });
+  // pid -> { start, leads }: `start` is the identity, `leads` that the pid leads its own group.
+  scopes.set(directory, { procs: new Map() });
   return directory;
 }
 
@@ -109,20 +130,46 @@ const scopeOf = (directory) => {
   return scope;
 };
 
-/** What /proc says about a process, or null once it is gone. `start` tells a reused pid apart. */
-function procStat(pid) {
+/**
+ * What /proc says about one process: `gone` (there is no such process), `unknown` (the entry
+ * cannot be read or understood: NOT evidence of absence) or `alive`, with the fields that tell a
+ * process apart from a later one that reuses its number. A zombie is `dead`: it runs nothing.
+ */
+function inspect(pid) {
+  let text;
   try {
-    const text = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    // "pid (comm) state ppid pgrp ...": comm may hold spaces and parentheses, so cut after the last ')'.
-    const fields = text.slice(text.lastIndexOf(')') + 2).split(' ');
-    return { state: fields[0], pgrp: Number(fields[2]), start: fields[19] };
-  } catch {
-    return null;
+    text = ownerSettings.system.readProcFile(pid, 'stat');
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ESRCH') return { status: 'gone' };
+    return { status: 'unknown', reason: `${error?.code ?? error}` };
   }
+  // "pid (comm) state ppid pgrp ...": comm may hold spaces and parentheses, so cut after the last ')'.
+  const close = text.lastIndexOf(')');
+  const fields = close < 0 ? [] : text.slice(close + 2).split(' ');
+  const [state] = fields;
+  const ppid = Number(fields[1]);
+  const pgrp = Number(fields[2]);
+  const start = fields[19];
+  if (!state || !Number.isInteger(ppid) || !Number.isInteger(pgrp) || !start)
+    return { status: 'unknown', reason: 'unreadable stat' };
+  return { status: 'alive', dead: state === 'Z' || state === 'X', ppid, pgrp, start };
 }
 
-function register(kind, directory, id) {
-  scopeOf(directory)[kind].set(id, procStat(id)?.start ?? null);
+/** Whether the process now at `pid` is the one registered under `entry`, and runs. */
+function classify(pid, entry, info = inspect(pid)) {
+  if (info.status !== 'alive') return info.status;
+  return info.start === entry.start && !info.dead ? 'alive' : 'gone';
+}
+
+/**
+ * Records `pid` in the scope with the identity it has NOW. Fails when there is none: a process
+ * whose identity cannot be read cannot be told apart from a later one with the same number.
+ */
+export function recordOwned(directory, pid, { leads = false } = {}) {
+  const info = inspect(pid);
+  if (info.status !== 'alive')
+    throw new Error(`process ${pid} has no readable identity (${info.status}): not registered`);
+  scopeOf(directory).procs.set(pid, { start: info.start, leads });
 }
 
 /**
@@ -133,16 +180,54 @@ export function spawnOwned(directory, command, args, options = {}) {
   scopeOf(directory);
   const child = spawn(command, args, options);
   if (child.pid !== undefined) {
-    register('pids', directory, child.pid);
-    if (options.detached) register('groups', directory, child.pid);
+    try {
+      recordOwned(directory, child.pid, { leads: Boolean(options.detached) });
+    } catch (error) {
+      child.kill('SIGKILL'); // through the handle: this process started it, so the pid is surely its own
+      throw error;
+    }
   }
   return child;
 }
 
-/** A process group a test learned of (a stub wrote its `$$`): owned from now on. */
-export const adoptGroup = (directory, pgid) => register('groups', directory, pgid);
-/** A single process a test learned of (a pid a stub wrote): owned from now on. */
-export const adoptPid = (directory, pid) => register('pids', directory, pid);
+/** The pid is a descendant of a live process the scope owns (walking parent pids). */
+function descendsFromScope(scope, pid) {
+  let current = pid;
+  for (let hops = 0; hops < 64; hops++) {
+    const info = inspect(current);
+    if (info.status === 'unknown')
+      throw new Error(`process ${current} cannot be inspected (${info.reason}): not adopted`);
+    if (info.status !== 'alive' || info.dead) return false;
+    const parent = scope.procs.get(info.ppid);
+    if (parent && classify(info.ppid, parent) === 'alive') return true;
+    if (info.ppid <= 1) return false;
+    current = info.ppid;
+  }
+  return false;
+}
+
+function adopt(directory, pid, leads) {
+  const scope = scopeOf(directory);
+  const info = inspect(pid);
+  if (info.status === 'unknown')
+    throw new Error(`process ${pid} cannot be inspected (${info.reason}): not adopted`);
+  if (info.status === 'gone' || info.dead) return; // nothing alive to own
+  const known = scope.procs.get(pid);
+  if (known && known.start === info.start) {
+    known.leads ||= leads;
+    return;
+  }
+  assert.ok(
+    descendsFromScope(scope, pid),
+    `process ${pid} cannot be shown to descend from a process of ${directory}: it is not adopted, and will not be signalled`,
+  );
+  scope.procs.set(pid, { start: info.start, leads });
+}
+
+/** A process group a test learned of (a stub wrote its `$$`): owned from now on, if provably ours. */
+export const adoptGroup = (directory, pgid) => adopt(directory, pgid, true);
+/** A single process a test learned of (a pid a stub wrote): owned from now on, if provably ours. */
+export const adoptPid = (directory, pid) => adopt(directory, pid, false);
 
 /** The group a stub led (`echo $$ > file`), owned as soon as its whole pid line is readable. */
 export async function waitForGroup(directory, file) {
@@ -151,69 +236,120 @@ export async function waitForGroup(directory, file) {
   return pgid;
 }
 
-function ownsDirectory(pid, directory) {
+/**
+ * A fresh look at what the scope owns. Walks parent pids from every live owned process (and the
+ * group of every live owned leader) and RETAINS what it finds with its identity, so that a child
+ * whose parent later dies and is re-parented is still known. Returns the owned processes that are
+ * `alive` and the ones whose state is `unknown`; `gone` ones are neither.
+ */
+function look(scope) {
+  const { system } = ownerSettings;
+  let pids;
   try {
-    const environment = readFileSync(`/proc/${pid}/environ`, 'latin1').split('\0');
-    if (
-      environment.some(
-        (entry) => entry.startsWith(`PATH=${directory}:`) || entry === `TMPDIR=${directory}`,
-      )
-    )
-      return true;
-    return readFileSync(`/proc/${pid}/cmdline`, 'latin1').includes(`${directory}/`);
-  } catch {
-    return false; // gone, or not readable: not provably ours
+    pids = system.listPids();
+  } catch (error) {
+    return { alive: [], unknown: [{ pid: 0, reason: `process table: ${error?.code ?? error}` }] };
   }
-}
-
-/** Everything of the scope that is alive now, from a fresh look at /proc. */
-function liveTargets(directory, scope) {
   const table = new Map();
-  for (const name of readdirSync('/proc')) {
-    if (!/^\d+$/.test(name)) continue;
-    const stat = procStat(name);
-    if (stat && stat.state !== 'Z') table.set(Number(name), stat);
+  for (const pid of pids) {
+    const info = inspect(pid);
+    if (info.status === 'alive' && !info.dead) table.set(pid, info);
   }
-  const own = table.get(process.pid)?.pgrp;
-  const groups = new Set();
-  const pids = new Set();
-  for (const [pgid, start] of scope.groups) {
-    const leader = table.get(pgid);
-    if (leader && start && leader.start !== start) continue; // the number now belongs to another process
-    if (pgid !== own && [...table.values()].some((stat) => stat.pgrp === pgid)) groups.add(pgid);
+  const children = new Map();
+  for (const [pid, info] of table)
+    children.set(info.ppid, [...(children.get(info.ppid) ?? []), pid]);
+  const known = (pid) => scope.procs.get(pid)?.start === table.get(pid)?.start;
+  const retain = (pid) => {
+    const info = table.get(pid);
+    if (info && pid !== process.pid && !known(pid))
+      scope.procs.set(pid, { start: info.start, leads: false });
+  };
+  const frontier = [];
+  const unknown = [];
+  for (const [pid, entry] of scope.procs) {
+    const info = inspect(pid);
+    const state = classify(pid, entry, info);
+    if (state === 'unknown') unknown.push({ pid, reason: info.reason });
+    else if (state === 'alive') frontier.push(pid);
   }
-  for (const [pid, start] of scope.pids) {
-    const stat = table.get(pid);
-    if (stat && (!start || stat.start === start) && pid !== process.pid) pids.add(pid);
+  for (const pid of frontier) {
+    const entry = scope.procs.get(pid);
+    const leader = table.get(pid);
+    if (entry.leads && leader?.pgrp === pid)
+      for (const [member, info] of table) if (info.pgrp === pid) retain(member);
   }
-  for (const [pid, stat] of table)
-    if (pid !== process.pid && stat.pgrp !== own && ownsDirectory(pid, directory)) pids.add(pid);
-  return { groups, pids };
+  for (let next = 0; next < frontier.length; next++)
+    for (const child of children.get(frontier[next]) ?? []) {
+      if (known(child)) continue;
+      retain(child);
+      frontier.push(child);
+    }
+  const alive = [];
+  for (const [pid, entry] of scope.procs)
+    if (pid !== process.pid && classify(pid, entry) === 'alive') alive.push({ pid, ...entry });
+  return { alive, unknown };
 }
 
 const signalOnce = (target, name) => {
   try {
-    process.kill(target, name);
-  } catch {
-    /* gone already */
+    ownerSettings.system.signal(target, name);
+  } catch (error) {
+    if (error?.code !== 'ESRCH') throw error; // gone already is fine; anything else is not
   }
 };
 
+/** Signals one owned process, only while it still IS the registered one. */
+function signalOwned(entry, name) {
+  if (classify(entry.pid, entry) === 'alive') signalOnce(entry.pid, name);
+}
+
 /**
- * Kills what the scope owns and returns only once a fresh look finds none of it alive (a parent
- * killed in this round may have started one more child in the previous one). Throws, naming the
- * survivors, if that does not happen within the budget.
+ * Freezes everything owned (SIGSTOP, repeated until a look finds nothing new, so that nothing can
+ * start another child), then SIGKILLs it. A group is signalled as a group only while its
+ * registered leader is still there and still leads it; otherwise its registered members are
+ * signalled one by one, by identity: a group number is never signalled on its own authority.
+ */
+function sweep(scope) {
+  const frozen = new Set();
+  for (let round = 0; round < 8; round++) {
+    const fresh = look(scope).alive.filter((entry) => !frozen.has(entry.pid));
+    if (fresh.length === 0) break;
+    for (const entry of fresh) {
+      signalOwned(entry, 'SIGSTOP');
+      frozen.add(entry.pid);
+    }
+  }
+  const own = inspect(process.pid).pgrp;
+  const covered = new Set();
+  const { alive } = look(scope);
+  for (const entry of alive) {
+    const info = inspect(entry.pid);
+    if (entry.leads && info.status === 'alive' && info.pgrp === entry.pid && entry.pid !== own) {
+      covered.add(entry.pid);
+      signalOnce(-entry.pid, 'SIGKILL');
+    }
+  }
+  for (const entry of alive) {
+    const group = inspect(entry.pid).pgrp;
+    if (!covered.has(entry.pid) && !covered.has(group)) signalOwned(entry, 'SIGKILL');
+  }
+}
+
+/**
+ * Kills what the scope owns and returns only once a fresh look finds none of it alive and none of
+ * it unknown (a parent killed in this round may have started one more child in the previous one;
+ * an unreadable entry is retried, never taken for gone). Throws, naming the survivors, if that
+ * does not happen within the budget.
  */
 export async function stopOwned(directory, budgetMs = ownerSettings.stopBudgetMs) {
   const scope = scopeOf(directory);
-  let last;
+  let last = { alive: [], unknown: [] };
   try {
     await pollUntil(
       () => {
-        last = liveTargets(directory, scope);
-        if (last.groups.size === 0 && last.pids.size === 0) return true;
-        for (const pgid of last.groups) signalOnce(-pgid, 'SIGKILL');
-        for (const pid of last.pids) signalOnce(pid, 'SIGKILL');
+        last = look(scope);
+        if (last.alive.length === 0 && last.unknown.length === 0) return true;
+        if (last.alive.length > 0) sweep(scope);
         return false;
       },
       'the fixture’s processes to stop',
@@ -221,7 +357,7 @@ export async function stopOwned(directory, budgetMs = ownerSettings.stopBudgetMs
     );
   } catch (error) {
     throw new Error(
-      `${error.message}; still alive: groups [${[...last.groups]}], processes [${[...last.pids]}]`,
+      `${error.message}; still alive: [${last.alive.map((entry) => entry.pid)}], state unknown: [${last.unknown.map((entry) => `${entry.pid} (${entry.reason})`)}]`,
     );
   }
 }
@@ -229,7 +365,7 @@ export async function stopOwned(directory, budgetMs = ownerSettings.stopBudgetMs
 /**
  * Ends fixtures: stops everything every owned directory among `paths` owns and confirms that, and
  * only THEN removes all the paths (owned directories and plain ones such as a scratch TMPDIR). If
- * a process survives, nothing is removed and this throws.
+ * a process survives or cannot be inspected, nothing is removed and this throws.
  */
 export async function disposeOwned(...paths) {
   const owned = paths.filter((path) => scopes.has(path));
@@ -238,11 +374,52 @@ export async function disposeOwned(...paths) {
   for (const path of paths) rmSync(path, { recursive: true, force: true });
 }
 
-/** Whether anything of the fixture is alive right now (a read, no signal). */
+/** Whether anything of the fixture is alive, or not provably gone, right now (a read, no signal). */
 export const hasLiveProcesses = (directory) => {
-  const live = liveTargets(directory, scopeOf(directory));
-  return live.groups.size + live.pids.size > 0;
+  const seen = look(scopeOf(directory));
+  return seen.alive.length + seen.unknown.length > 0;
 };
+
+/**
+ * A command run to completion through the owner: started by `spawnOwned`, its tree followed while
+ * it runs, and when `timeoutMs` passes the whole tree is stopped by identity and confirmed gone
+ * before this rejects. (A synchronous runner killed at its timeout takes only its immediate child.)
+ * Resolves `{ status, signal, stdout, stderr }`. What a finished command left behind is the
+ * caller's `disposeOwned` to stop.
+ */
+export async function runOwned(directory, command, args, { timeoutMs = 60_000, ...options } = {}) {
+  const scope = scopeOf(directory);
+  const child = spawnOwned(directory, command, args, {
+    ...options,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => (stdout += chunk));
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  // Retain the tree while it exists: a descendant whose parent exits first is re-parented to init
+  // and could no longer be shown to be the fixture's.
+  const follow = setInterval(() => look(scope), 25);
+  let timer;
+  try {
+    const finished = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (status, signal) => resolve({ status, signal, stdout, stderr }));
+    });
+    const timedOut = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), timeoutMs);
+    });
+    const outcome = await Promise.race([finished, timedOut]);
+    if (outcome) return outcome;
+    await stopOwned(directory);
+    throw new Error(
+      `${command} ${args.join(' ')} timed out after ${timeoutMs} ms; its processes were stopped`,
+    );
+  } finally {
+    clearInterval(follow);
+    clearTimeout(timer);
+  }
+}
 
 // The after-hook every test file that imports this module gets: a test that ends with a fixture
 // not disposed, or with a registered process still alive, FAILS, after the leftovers are stopped

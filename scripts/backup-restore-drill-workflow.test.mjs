@@ -236,6 +236,8 @@ function sandbox(drillBody) {
         cwd,
         env: { ...env, ...declared, ...exported },
         encoding: 'utf8',
+        timeout: 120_000,
+        killSignal: 'SIGKILL',
       },
     );
     const header = Object.entries({ ...declared, ...exported })
