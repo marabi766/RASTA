@@ -7,6 +7,8 @@ import { parse as parseYaml } from 'yaml';
 import {
   AGGREGATE_JOB,
   ALLOWED_CONDITIONS,
+  JOB_FLOOR_MINUTES,
+  JOB_SETUP_MINUTES,
   SPLIT_STEPS,
   STEP_INVENTORY,
   checkIntegrationSplit,
@@ -241,17 +243,113 @@ test('a test step without its time limit, or above it, is refused', () => {
     fails(workflow, new RegExp(`"${escape(name)}" has no timeout-minutes`));
   }
   const raised = real();
-  stepNamed(raised, 'Construction coverage gate')['timeout-minutes'] = 9;
-  fails(raised, /"Construction coverage gate" has timeout-minutes 9, above its 8/);
+  stepNamed(raised, 'Construction coverage gate')['timeout-minutes'] = 12;
+  fails(raised, /"Construction coverage gate" has timeout-minutes 12, above its 11/);
+  const raisedOther = real();
+  stepNamed(raisedOther, 'Contract coverage gate')['timeout-minutes'] = 9;
+  fails(raisedOther, /"Contract coverage gate" has timeout-minutes 9, above its 8/);
   const expression = real();
   stepNamed(expression, 'Construction coverage gate')['timeout-minutes'] = '${{ 600 }}';
   fails(expression, /"Construction coverage gate" has no timeout-minutes/);
   const aboveJob = real();
   aboveJob.jobs['integration-suites']['timeout-minutes'] = 10;
-  fails(aboveJob, /"Integration tests" has timeout-minutes 16, above its job's 10/);
+  fails(aboveJob, /"Integration tests" has timeout-minutes 21, above its job's 10/);
   const tightened = real();
   stepNamed(tightened, 'Construction coverage gate')['timeout-minutes'] = 7;
   assert.deepEqual(checkIntegrationSplit(tightened), []);
+});
+
+const limitedSteps = (job) => job.steps.filter((step) => 'timeout-minutes' in step);
+const stepSum = (job) =>
+  limitedSteps(job).reduce((total, step) => total + step['timeout-minutes'], 0);
+
+test('every job holds its steps one after the other: step limits plus setup fit the job limit', () => {
+  const jobs = Object.entries(PARSED.jobs).filter(([, job]) => limitedSteps(job).length > 0);
+  assert.deepEqual(
+    jobs.map(([id]) => id).sort(),
+    Object.keys(JOB_SETUP_MINUTES).sort(),
+    'a job with step limits has a setup allowance, and an allowance belongs to such a job',
+  );
+  assert.deepEqual(
+    Object.fromEntries(jobs.map(([id, job]) => [id, stepSum(job) + JOB_SETUP_MINUTES[id]])),
+    {
+      'integration-suites': 70,
+      'integration-security': 37,
+      'integration-coverage-critical': 35,
+      'integration-coverage': 80,
+      'integration-backup-drill': 8,
+      'migration-reversibility-chain': 17,
+      'migration-guards': 18,
+      'trivy-db': 21,
+    },
+  );
+  for (const [id, job] of jobs) {
+    assert.ok(stepSum(job) + JOB_SETUP_MINUTES[id] <= job['timeout-minutes'], id);
+  }
+});
+
+test('a job whose step limits plus setup exceed its own limit is refused', () => {
+  for (const [id, job] of Object.entries(PARSED.jobs)) {
+    if (limitedSteps(job).length === 0) continue;
+    const needed = stepSum(job) + JOB_SETUP_MINUTES[id];
+    const message = new RegExp(
+      `^${id}: its steps' timeout-minutes sum to ${stepSum(job)} .* ${needed} in all, above the job's timeout-minutes ${needed - 1}$`,
+    );
+    const short = real();
+    short.jobs[id]['timeout-minutes'] = needed - 1;
+    fails(short, message);
+    const exact = real();
+    exact.jobs[id]['timeout-minutes'] = needed;
+    assert.deepEqual(checkIntegrationSplit(exact), [], id);
+    // One more minute on any step with a limit of its own overruns the job it has.
+    if (job['timeout-minutes'] === needed) {
+      const over = real();
+      limitedSteps(over.jobs[id]).at(-1)['timeout-minutes'] += 1;
+      fails(over, new RegExp(`^${id}: its steps' timeout-minutes sum to ${stepSum(job) + 1} `));
+    }
+  }
+  // The steps of a split job that are not in the inventory count as well.
+  const peak = real();
+  const connections = peak.jobs['integration-suites'].steps.find(
+    (step) => step.name === 'PostgreSQL connection ceiling',
+  );
+  connections['timeout-minutes'] += 1;
+  fails(peak, /^integration-suites: its steps' timeout-minutes sum to 63 .* 71 in all/);
+});
+
+test('a job outside the split is held to its cumulative budget too', () => {
+  const extra = real();
+  extra.jobs['some-new-job'] = {
+    'runs-on': 'ubuntu-latest',
+    'timeout-minutes': 10,
+    steps: [{ name: 'slow', run: 'true', 'timeout-minutes': 5 }],
+  };
+  fails(extra, /^some-new-job has step time limits \(5 minutes in all\) but no setup allowance/);
+  const unbounded = real();
+  delete unbounded.jobs['prometheus-rules']['timeout-minutes'];
+  fails(unbounded, /^prometheus-rules has no timeout-minutes/);
+  const unknown = real();
+  const [step] = limitedSteps(unknown.jobs['trivy-db']);
+  step['timeout-minutes'] = '${{ vars.MINUTES }}';
+  fails(unknown, /^trivy-db: ".*" has a timeout-minutes that is not a number of minutes/);
+  const gone = real();
+  delete gone.jobs['migration-guards'];
+  fails(gone, /^migration-guards has a declared time budget but is not a job/);
+});
+
+test('a job whose measured runtime needed its limit may not go back below it', () => {
+  assert.deepEqual(JOB_FLOOR_MINUTES, { quality: 37, 'web-browser': 37 });
+  for (const [id, floor] of Object.entries(JOB_FLOOR_MINUTES)) {
+    const back = real();
+    back.jobs[id]['timeout-minutes'] = floor - 1;
+    fails(back, new RegExp(`^${id} has timeout-minutes ${floor - 1}, below its ${floor}`));
+    const missing = real();
+    delete missing.jobs[id]['timeout-minutes'];
+    fails(missing, new RegExp(`^${id} has no timeout-minutes`));
+    const raised = real();
+    raised.jobs[id]['timeout-minutes'] = floor + 1;
+    assert.deepEqual(checkIntegrationSplit(raised), [], id);
+  }
 });
 
 test('a test step that loses a declared variable, or changes a pinned one, is refused', () => {
