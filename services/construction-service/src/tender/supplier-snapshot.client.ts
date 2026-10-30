@@ -1,6 +1,6 @@
 import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
+import { InternalTokenService, RastaError, getContext, upstreamExchange } from '@rasta/nest-common';
 import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
 import { ENV } from '../tokens';
@@ -125,53 +125,47 @@ export class SupplierSnapshotClient implements StandingSnapshotSource, StandingO
     const url = `${this.env.SUPPLIER_SERVICE_URL.replace(/\/+$/, '')}${path}`;
 
     const timeoutMs = this.env.CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await sender.send(url, {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          // A background call has no request; a fresh id still lets the callee's logs be joined.
-          'x-correlation-id': safeCorrelationId(),
-        },
-        signal: controller.signal,
-      });
-
-      if (response.status !== 200) {
-        await response.body?.cancel().catch(() => undefined);
-        this.logger.warn(
-          `supplier-service answered ${response.status} to the snapshot; will retry`,
-        );
-        throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
-      }
-      const text = await readCapped(response, MAX_SNAPSHOT_BYTES);
-      if (text === null) {
-        this.logger.warn('supplier-service answered a snapshot page over the size bound');
-        throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
-      }
-      let body: unknown;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        body = undefined;
-      }
-      const parsed = schema.safeParse(body);
-      if (!parsed.success) {
-        // The shape, never the content, is logged.
-        this.logger.warn('supplier-service answered a standing that is not the contract');
-        throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
-      }
-      return parsed.data;
-    } catch (error) {
-      if (error instanceof RastaError) throw error;
-      if (controller.signal.aborted) {
-        throw RastaError.upstreamTimeout(SUPPLIER_SERVICE, timeoutMs);
-      }
-      throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE, error);
-    } finally {
-      clearTimeout(timer);
-    }
+    return upstreamExchange(
+      SUPPLIER_SERVICE,
+      timeoutMs,
+      (signal) =>
+        sender.send(url, {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            // A background call has no request; a fresh id still lets the callee's logs be joined.
+            'x-correlation-id': safeCorrelationId(),
+          },
+          signal,
+        }),
+      async (response) => {
+        if (response.status !== 200) {
+          await response.body?.cancel().catch(() => undefined);
+          this.logger.warn(
+            `supplier-service answered ${response.status} to the snapshot; will retry`,
+          );
+          throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
+        }
+        const text = await readCapped(response, MAX_SNAPSHOT_BYTES);
+        if (text === null) {
+          this.logger.warn('supplier-service answered a snapshot page over the size bound');
+          throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
+        }
+        let body: unknown;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = undefined;
+        }
+        const parsed = schema.safeParse(body);
+        if (!parsed.success) {
+          // The shape, never the content, is logged.
+          this.logger.warn('supplier-service answered a standing that is not the contract');
+          throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
+        }
+        return parsed.data;
+      },
+    );
   }
 }
 

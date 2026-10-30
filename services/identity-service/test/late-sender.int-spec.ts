@@ -1,3 +1,4 @@
+import { eligibilityClockWrite } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { IdentityRepository } from '../src/identity/identity.repository';
 import { IdentityService } from '../src/identity/identity.service';
@@ -29,6 +30,7 @@ import {
   tenants,
   ensureLiveMember,
 } from './helpers';
+import { dateMembershipWindow } from './identity-fixtures';
 import { KeycloakHttpStub, SLOW_ROUND_TRIP_MS, type StubRequest } from './keycloak-http-stub';
 
 /**
@@ -128,14 +130,15 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
   }
 
   async function seed(
-    memberships: Array<{ in: 'a' | 'b'; roles: string[]; validUntil?: Date }>,
+    memberships: Array<{ in: 'a' | 'b'; roles: string[]; endsInMs?: number }>,
   ): Promise<Seeded> {
     const org = tenants();
     const userId = id('USR-LS');
     mine.add(userId);
     const keycloakId = `kc-${userId.slice(-16).toLowerCase()}`;
     const ids = memberships.map(() => id('MBR-LS'));
-    const validFrom = new Date(Date.now() - 3_600_000);
+    // Grants as of a minute after the first membership began (the stub's account).
+    let grantedAt = Date.now() - 3_540_000;
     const username = `ls-${userId.slice(-12)}`.toLowerCase();
     await runUnscoped('test fixture spans organizations', async () => {
       await prisma.client.user.create({
@@ -159,12 +162,17 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
             userId,
             organizationId: org[membership.in],
             roles: membership.roles,
-            validFrom: new Date(validFrom.getTime() + index),
-            validUntil: membership.validUntil ?? null,
             createdBy: 'ITEST',
             updatedBy: 'ITEST',
           },
         });
+        // Its window on the database clock that judges it: begun an hour ago (in
+        // order, a millisecond apart), ending `endsInMs` from now or open-ended.
+        const dated = await dateMembershipWindow(prisma, ids[index]!, {
+          fromMs: -3_600_000 + index,
+          untilMs: membership.endsInMs ?? null,
+        });
+        if (index === 0) grantedAt = dated.validFrom.getTime() + 60_000;
       }
     });
     stub.add({
@@ -174,7 +182,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       firstName: 'آزمون',
       lastName: 'دیرکرد',
       attributes: {
-        ...(await rowsGrant(userId, validFrom.getTime() + 60_000)),
+        ...(await rowsGrant(userId, grantedAt)),
         rasta_activation: ['REG_FIXTURE'],
       },
     });
@@ -558,7 +566,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
     it('the sweep’s lapse (its write-ahead)', async () => {
       const s = await seed([
         { in: 'a', roles: ['OPERATOR'] },
-        { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() - 1_000) },
+        { in: 'b', roles: ['DRIVER'], endsInMs: -1_000 },
       ]);
       const late = recordLateFences();
       const triggers = recordProjections();
@@ -576,7 +584,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
     it('the sweep’s re-assertion of a due fence', async () => {
       const s = await seed([{ in: 'a', roles: ['OPERATOR'] }]);
       // A write that timed out long ago and is past takeover: due.
-      await prisma.client.$executeRaw`
+      await eligibilityClockWrite(prisma.client)`
         INSERT INTO keycloak_write_attempt
                (attempt_id, user_id, keycloak_id, operation,
                 started_at, deadline_at, takeover_at, next_reassert_at)
@@ -636,7 +644,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       await prisma.client.$transaction([
         prisma.client
           .$executeRaw`DELETE FROM keycloak_write_attempt WHERE attempt_id = ${own!.attemptId}`,
-        prisma.client.$executeRaw`
+        eligibilityClockWrite(prisma.client)`
           INSERT INTO keycloak_write_attempt
                  (attempt_id, user_id, keycloak_id, operation,
                   started_at, deadline_at, takeover_at, next_reassert_at)
@@ -693,7 +701,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
     it('the resumed sender’s fresh fence is refused in its stopped scope, owed, and written by the stop’s flush outside it; the lapse rolls back with no event', async () => {
       const s = await seed([
         { in: 'a', roles: ['OPERATOR'] },
-        { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() - 1_000) },
+        { in: 'b', roles: ['DRIVER'], endsInMs: -1_000 },
       ]);
       const late = recordLateFences();
       const scanner = ownScanner();

@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runUnscoped } from '@rasta/nest-common';
@@ -681,11 +682,10 @@ describe('publishing a tender', () => {
     it('is required by the tender: a tender cannot be PUBLISHED without publication facts', async () => {
       const { tender } = await draft();
       await expect(
-        w.prisma.client.$executeRawUnsafe(
-          `UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'RFP', "visibility" = 'PUBLIC',
+        w.prisma.client
+          .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'RFP', "visibility" = 'PUBLIC',
              "bid_opening_at" = now(), "bid_closing_at" = now() + interval '1 day'
-           WHERE "id" = '${tender.id}'`,
-        ),
+           WHERE "id" = '${tender.id}'`),
       ).rejects.toThrow(/ck_tender_publication_complete/);
     });
   });

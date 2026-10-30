@@ -1,6 +1,6 @@
 import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable } from '@nestjs/common';
-import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
+import { InternalTokenService, RastaError, getContext, upstreamExchange } from '@rasta/nest-common';
 import { z } from 'zod';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type ConstructionEnv } from '../config/env';
@@ -37,36 +37,32 @@ export class ProcurementThresholdPolicy {
       organizationId,
     });
     const timeoutMs = this.env.CONSTRUCTION_ORGANIZATION_REQUEST_TIMEOUT_MS;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await sender.send(
-        `${this.env.ORGANIZATION_SERVICE_URL.replace(/\/+$/, '')}/v1/organizations/${encodeURIComponent(organizationId)}/procurement-thresholds`,
-        {
-          headers: {
-            accept: 'application/json',
-            'x-correlation-id': getContext().correlationId,
+    return upstreamExchange(
+      ORGANIZATION_SERVICE,
+      timeoutMs,
+      (signal) =>
+        sender.send(
+          `${this.env.ORGANIZATION_SERVICE_URL.replace(/\/+$/, '')}/v1/organizations/${encodeURIComponent(organizationId)}/procurement-thresholds`,
+          {
+            headers: {
+              accept: 'application/json',
+              'x-correlation-id': getContext().correlationId,
+            },
+            signal,
           },
-          signal: controller.signal,
-        },
-      );
-      if (response.status !== 200) {
-        await response.body?.cancel().catch(() => undefined);
-        throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
-      }
-      const text = await readCapped(response, MAX_POLICY_RESPONSE_BYTES);
-      const parsed = responseSchema.safeParse(text === null ? null : JSON.parse(text));
-      if (!parsed.success || parsed.data.organizationId !== organizationId) {
-        throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
-      }
-      return parsed.data.policy;
-    } catch (error) {
-      if (error instanceof RastaError) throw error;
-      if (controller.signal.aborted)
-        throw RastaError.upstreamTimeout(ORGANIZATION_SERVICE, timeoutMs);
-      throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
-    } finally {
-      clearTimeout(timer);
-    }
+        ),
+      async (response) => {
+        if (response.status !== 200) {
+          await response.body?.cancel().catch(() => undefined);
+          throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
+        }
+        const text = await readCapped(response, MAX_POLICY_RESPONSE_BYTES);
+        const parsed = responseSchema.safeParse(text === null ? null : JSON.parse(text));
+        if (!parsed.success || parsed.data.organizationId !== organizationId) {
+          throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
+        }
+        return parsed.data.policy;
+      },
+    );
   }
 }

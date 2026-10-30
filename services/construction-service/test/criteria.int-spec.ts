@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { ulid } from 'ulid';
 import { EventPublisher } from '../src/events/publisher';
@@ -408,12 +409,11 @@ describe('evaluation criteria', () => {
   describe('the freeze after publication (threat C3), whatever the write path', () => {
     /** Publishing arrives in PR 4b; this moves a tender past DRAFT the way it will, with the row complete. */
     async function publishRaw(tenderId: string) {
-      await w.prisma.client.$executeRawUnsafe(
-        `UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
+      await w.prisma.client
+        .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
            "visibility" = 'PUBLIC', "bid_opening_at" = '2026-11-01T08:00:00Z',
            "bid_closing_at" = '2026-11-30T20:30:00Z', "published_at" = now(), "published_by" = 'USR_1'
-         WHERE "id" = '${tenderId}'`,
-      );
+         WHERE "id" = '${tenderId}'`);
     }
     it('refuses an insert, an update and a delete on a published tender’s criteria', async () => {
       const { a, tender } = await withTender();
@@ -464,7 +464,7 @@ describe('evaluation criteria', () => {
 
   describe('the database judges both tenders a criteria write touches, and waits for a publication', () => {
     const publishSql = (tenderId: string) =>
-      `UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
+      eligibilityClockSql`UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
          "visibility" = 'PUBLIC', "bid_opening_at" = '2026-11-01T08:00:00Z',
          "bid_closing_at" = '2026-11-30T20:30:00Z', "published_at" = now(), "published_by" = 'USR_1'
        WHERE "id" = '${tenderId}'`;
@@ -541,7 +541,7 @@ describe('evaluation criteria', () => {
 
   describe('the database allows only the documented tender status edges', () => {
     const publishSql = (tenderId: string) =>
-      `UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
+      eligibilityClockSql`UPDATE "tender" SET "status" = 'PUBLISHED', "procurement_nature" = 'FORMAL_TENDER',
          "visibility" = 'PUBLIC', "bid_opening_at" = '2026-11-01T08:00:00Z',
          "bid_closing_at" = '2026-11-30T20:30:00Z', "published_at" = now(), "published_by" = 'USR_1'
        WHERE "id" = '${tenderId}'`;

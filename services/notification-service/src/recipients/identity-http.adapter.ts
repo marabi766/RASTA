@@ -1,4 +1,4 @@
-import { InternalHttpClient, type InternalSender } from '@rasta/nest-common';
+import { InternalHttpClient, exchangeWithDeadline, type InternalSender } from '@rasta/nest-common';
 import { z } from 'zod';
 import { readUrl } from '@rasta/config';
 import type { InternalTokenService } from '@rasta/nest-common';
@@ -145,19 +145,30 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
     url.searchParams.set('limit', String(PAGE_SIZE));
     if (cursor) url.searchParams.set('cursor', cursor);
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-
-    let response: Response;
+    // One deadline for the whole exchange, body included: identity answering
+    // `200` and then stalling would otherwise hold this batch — and, with it,
+    // every later tick of the worker, which skips while a batch is in flight.
+    let answer: { ok: boolean; status: number; text: string | undefined };
     try {
-      response = await sender.send(url, {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          'x-correlation-id': correlationId,
-        },
-        signal: controller.signal,
-      });
+      answer = await exchangeWithDeadline(
+        this.options.timeoutMs,
+        (signal) =>
+          sender.send(url, {
+            method: 'GET',
+            headers: {
+              accept: 'application/json',
+              'x-correlation-id': correlationId,
+            },
+            signal,
+          }),
+        // A refusal's body is not read: the status is the only detail kept, and
+        // the boundary cancels the body it finds unread.
+        async (response) => ({
+          ok: response.ok,
+          status: response.status,
+          text: response.ok ? await response.text() : undefined,
+        }),
+      );
     } catch (error) {
       // The error object is not forwarded: depending on the runtime it can
       // carry the request URL and headers, and the header is the token.
@@ -166,23 +177,21 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
           ? RESOLUTION_FAILURE_REASONS.TIMEOUT
           : RESOLUTION_FAILURE_REASONS.UNREACHABLE;
       throw new RecipientResolutionError(reason, `identity-service GET /v1/users did not complete`);
-    } finally {
-      clearTimeout(timer);
     }
 
-    if (!response.ok) {
+    if (!answer.ok) {
       // 401/403 (the token or the allowlist), 404 (a route that moved), 5xx
       // — all retryable from this side, all the same class: identity refused
       // to answer. The status is the only detail kept; the body is not read.
       throw new RecipientResolutionError(
         RESOLUTION_FAILURE_REASONS.REFUSED,
-        `identity-service answered ${response.status}`,
+        `identity-service answered ${answer.status}`,
       );
     }
 
     let parsed: unknown;
     try {
-      parsed = await response.json();
+      parsed = JSON.parse(answer.text ?? '');
     } catch {
       throw new RecipientResolutionError(
         RESOLUTION_FAILURE_REASONS.MALFORMED_RESPONSE,

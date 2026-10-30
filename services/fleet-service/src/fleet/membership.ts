@@ -5,6 +5,7 @@ import {
   tryGetContext,
   type InternalTokenService,
   InternalHttpClient,
+  exchangeWithDeadline,
 } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
@@ -121,27 +122,24 @@ export class LiveMembershipClient implements MembershipSource {
       headers['x-correlation-id'] = context.correlationId;
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    timer.unref?.();
     let text: string | null;
     try {
-      const response = await sender.send(
-        `${this.options.baseUrl.replace(/\/+$/, '')}/v1/users/` +
-          `${encodeURIComponent(userId)}/live-membership`,
-        { method: 'GET', headers, signal: controller.signal },
+      text = await exchangeWithDeadline(
+        this.options.timeoutMs,
+        (signal) =>
+          sender.send(
+            `${this.options.baseUrl.replace(/\/+$/, '')}/v1/users/` +
+              `${encodeURIComponent(userId)}/live-membership`,
+            { method: 'GET', headers, signal },
+          ),
+        (response) =>
+          // Anything but a plain 200 is refused unread: the boundary cancels the body.
+          response.status === 200 && !response.redirected
+            ? readCapped(response, MAX_MEMBERSHIP_ANSWER_BYTES)
+            : null,
       );
-      if (response.status === 200 && !response.redirected) {
-        text = await readCapped(response, MAX_MEMBERSHIP_ANSWER_BYTES);
-      } else {
-        await response.body?.cancel().catch(() => undefined);
-        text = null;
-      }
-      if (controller.signal.aborted) throw new Error('deadline passed');
     } catch {
       throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
-    } finally {
-      clearTimeout(timer);
     }
     if (text === null) throw RastaError.upstreamUnavailable(IDENTITY_SERVICE);
 
