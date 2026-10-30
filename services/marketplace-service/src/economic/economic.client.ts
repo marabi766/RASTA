@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError } from '@rasta/nest-common';
 import { ERROR_CODES, type ApiError, type ErrorCode } from '@rasta/contracts';
@@ -519,12 +519,12 @@ export class EconomicClient {
       body?: unknown;
     },
   ): Promise<T> {
-    const token = await this.tokens.issue(
-      SERVICE_NAME,
-      ECONOMIC_SERVICE,
-      'SERVICE',
-      request.organizationId,
-    );
+    const sender = await new InternalHttpClient(this.tokens).authorize({
+      from: SERVICE_NAME,
+      to: ECONOMIC_SERVICE,
+      purpose: 'SERVICE',
+      organizationId: request.organizationId,
+    });
 
     const url = `${this.env.ECONOMIC_SERVICE_URL}${request.path}`;
     const stop = economicCallDuration.startTimer({ service: SERVICE_NAME, operation });
@@ -534,11 +534,10 @@ export class EconomicClient {
 
     let response: Response;
     try {
-      response = await internalFetch(url, {
+      response = await sender.send(url, {
         method: request.method,
         headers: {
           'content-type': 'application/json',
-          'x-internal-token': token,
           'x-correlation-id': request.correlationId,
           ...(request.idempotencyKey ? { 'idempotency-key': request.idempotencyKey } : {}),
         },
