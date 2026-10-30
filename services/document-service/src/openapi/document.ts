@@ -1,6 +1,6 @@
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { z } from 'zod';
-import { toJsonSchema } from '@rasta/nest-common';
+import { publishedApiErrorSchema, toJsonSchema } from '@rasta/nest-common';
 import {
   deleteDocumentSchema,
   documentViewSchema,
@@ -17,15 +17,6 @@ import {
  * schemas the service validates with. One definition rather than a decorated
  * class and a hand-written document that drift.
  */
-
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
-  })
-  .strict();
 
 /**
  * Which endpoints return a document, and in what shape.
@@ -90,7 +81,7 @@ export function enrichOpenApiDocument(
 ): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
-  document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {

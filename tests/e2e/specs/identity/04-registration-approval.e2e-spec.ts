@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { test, expect, Actor, SessionToken } from '../../src/api';
+import { test, expect, Actor, SessionToken, until } from '../../src/api';
 import { ORG } from '../../src/env';
 import {
   enableSignIn,
@@ -20,17 +20,34 @@ import {
  * Keycloak drops it), and that an administrator's later disable survives a
  * projection.
  *
- * Gateway budget: the `registration-requests` prefix allows 5 calls per caller
- * per hour (`services/api-gateway/src/config/routes.ts`). This file makes one
- * anonymous call (the submission) and one as `system.admin` (the approval);
- * no other scenario uses either budget on that prefix.
+ * The submission's answer carries no id (task 117, F5: it is the same
+ * acknowledgement whether or not the username or email was already held), so
+ * the reviewer finds the request in the review queue,
+ * `GET /v1/registration-requests`, by the applicant's username — once the
+ * registration worker has recorded it: the submission only writes an intake
+ * row (task 130, R5), and the worker runs every
+ * `REGISTRATION_INTAKE_INTERVAL_SECONDS` (default 5), so the queue is polled.
+ *
+ * Gateway budget: the submission, `POST /v1/registration-requests`, allows 5
+ * calls per caller per hour (`services/api-gateway/src/config/routes.ts`);
+ * this file makes one, anonymously. The queue reads and the approval are on
+ * the platform default, in a bucket of their own (task 130, R6).
+ *
+ * The submission's audit record (`GET /v1/audit-events`, path A) is
+ * `ANONYMOUS` with no id: an unauthenticated request, recorded as such, not as
+ * `SYSTEM / identity-service` background work (PR #483 r3 F1).
  */
+/** Several registration worker intervals (default 5 s): the queue is polled until then. */
+const QUEUE_WAIT_MS = 30_000;
+
 test.describe.serial('Self-registration approved through the gateway (#219)', () => {
   const username = `e2e.registration.${randomUUID().slice(0, 8)}`;
   let registrationId = '';
   let userId = '';
+  /** The correlation id the submission was answered under (the gateway echoes it). */
+  let submittedCorrelationId = '';
 
-  test('an anonymous submission is accepted and creates no account', async ({
+  test('an anonymous submission is acknowledged, and creates no account', async ({
     request,
     config,
   }) => {
@@ -51,12 +68,78 @@ test.describe.serial('Self-registration approved through the gateway (#219)', ()
       },
       failOnStatusCode: false,
     });
-    expect(submitted.status()).toBe(201);
-    registrationId = ((await submitted.json()) as { registrationId: string }).registrationId;
-    expect(registrationId).not.toBe('');
+    // The one acknowledgement every valid submission gets, byte for byte.
+    expect(submitted.status()).toBe(202);
+    expect(await submitted.text()).toBe('{"status":"RECEIVED"}');
+    submittedCorrelationId = submitted.headers()['x-correlation-id'] ?? '';
+    expect(submittedCorrelationId).not.toBe('');
 
     // Nothing in Keycloak until a reviewer decides.
     await expect(readAccount(username)).rejects.toThrow(/No Keycloak account/);
+  });
+
+  test('the reviewer finds it in the review queue, once the worker has recorded it', async ({
+    systemAdmin,
+  }) => {
+    type Item = { id: string; username: string; status: string };
+    const items = await until(
+      'the registration in the review queue',
+      async () => {
+        const queue = await systemAdmin.get(
+          `/v1/registration-requests?status=PENDING&username=${encodeURIComponent(username)}`,
+        );
+        expect(queue.status).toBe(200);
+        const found = (queue.body as { items: Item[] }).items;
+        return found.length > 0 ? found : undefined;
+      },
+      QUEUE_WAIT_MS,
+    );
+    expect(items).toEqual([expect.objectContaining({ username, status: 'PENDING' })]);
+    registrationId = items[0]!.id;
+  });
+
+  test('its audit record says the submission was anonymous — not the service’s own work (PR #483 r3 F1)', async ({
+    systemAdmin,
+  }) => {
+    // REGISTRATION_SUBMITTED, built by the worker after the request ended,
+    // relayed to rasta.identity.v1 and projected by audit-service (path A).
+    // Without an explicit anonymous origin it read as SYSTEM / identity-service.
+    type AuditRow = {
+      actorType: string;
+      actorId: string | null;
+      sourceService: string;
+      sourceTopic: string;
+      correlationId: string;
+    };
+    const to = new Date(Date.now() + 60_000);
+    const parameters = new URLSearchParams({
+      from: new Date(to.getTime() - 24 * 60 * 60 * 1000).toISOString(),
+      to: to.toISOString(),
+      organizationId: ORG.a,
+      resourceType: 'RegistrationRequest',
+      resourceId: registrationId,
+      limit: '10',
+    }).toString();
+    const records = await until(
+      `the audit record of registration ${registrationId}`,
+      async () => {
+        const page = await systemAdmin.get(`/v1/audit-events?${parameters}`);
+        expect(page.status).toBe(200);
+        const items = (page.body as { items: AuditRow[] }).items;
+        return items.length > 0 ? items : undefined;
+      },
+      // The relay's poll, then audit-service's consumer transaction.
+      QUEUE_WAIT_MS + 60_000,
+    );
+    expect(records).toEqual([
+      expect.objectContaining({
+        actorType: 'ANONYMOUS',
+        actorId: null,
+        sourceService: 'identity-service',
+        sourceTopic: 'rasta.identity.v1',
+        correlationId: submittedCorrelationId,
+      }),
+    ]);
   });
 
   test('the approval commits, then enables the account once, marked with the request', async ({

@@ -172,6 +172,26 @@ describe('mapping an envelope to an audit record', () => {
       expect(record.actorId).toBe('asset-service');
     });
 
+    it('records an unauthenticated request origin as ANONYMOUS with no id — never the producer as SYSTEM (PR #483 r3 F1)', () => {
+      const record = toAuditEventRecord(
+        envelope({ producer: 'identity-service', anonymous: true }),
+        delivery('rasta.identity.v1'),
+      );
+
+      expect(record.actorType).toBe('ANONYMOUS');
+      expect(record.actorId).toBeNull();
+    });
+
+    it('a named actor wins over the anonymous flag: never a sender-chosen id under ANONYMOUS', () => {
+      const record = toAuditEventRecord(
+        envelope({ actor: { type: 'USER', id: 'USR-77' }, anonymous: true }),
+        delivery(),
+      );
+
+      expect(record.actorType).toBe('USER');
+      expect(record.actorId).toBe('USR-77');
+    });
+
     it('records roles as an empty array, never null', () => {
       // Null would mean "unknown". Path A knows they are unavailable, which is
       // a different and more useful statement.

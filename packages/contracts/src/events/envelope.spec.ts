@@ -254,3 +254,43 @@ describe('producer is a bounded, printable service name', () => {
     expect(JSON.stringify(result.error?.issues)).not.toContain('SECRET');
   });
 });
+
+// ---------------------------------------------------------------------------
+// An anonymous request origin (PR #483 r3 F1)
+// ---------------------------------------------------------------------------
+
+describe('anonymous: an unauthenticated request origin, apart from background work', () => {
+  it('accepts `anonymous: true` without an actor, and keeps it through parseEnvelope', () => {
+    const envelope = parseEnvelope({ ...base, anonymous: true }, payloadSchema);
+    expect(envelope.anonymous).toBe(true);
+    expect(envelope.actor).toBeUndefined();
+  });
+
+  it('is optional: an envelope without it parses as before (background work)', () => {
+    expect(eventEnvelopeSchema.parse(base).anonymous).toBeUndefined();
+  });
+
+  it.each([false, 'true', 1, null, 'ANONYMOUS'])(
+    'refuses anonymous=%p: only the literal true',
+    (value) => {
+      expect(eventEnvelopeSchema.safeParse({ ...base, anonymous: value }).success).toBe(false);
+    },
+  );
+
+  it('is additive: a consumer on the previous schema still reads the event, as before', () => {
+    // The schema as it was before the flag existed.
+    const previous = eventEnvelopeSchema.omit({ anonymous: true });
+    const parsed = previous.parse({ ...base, anonymous: true });
+    expect(parsed).not.toHaveProperty('anonymous');
+    expect(parsed).toMatchObject({ eventId: base.eventId, correlationId: base.correlationId });
+  });
+
+  it('is not an actor type: `actor: { type: "ANONYMOUS" }` stays refused, as the previous schema refuses it', () => {
+    expect(eventEnvelopeSchema.safeParse({ ...base, actor: { type: 'ANONYMOUS' } }).success).toBe(
+      false,
+    );
+    expect(
+      eventEnvelopeSchema.safeParse({ ...base, actor: { type: 'ANONYMOUS', id: 'x' } }).success,
+    ).toBe(false);
+  });
+});

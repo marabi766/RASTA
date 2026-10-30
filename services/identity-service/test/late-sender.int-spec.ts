@@ -20,7 +20,15 @@ import {
   keycloakWriteFenceEventsTotal,
 } from '../src/observability/keycloak-projection.metrics';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { FenceTestTimeline, asActor, databaseUrl, id, newPrisma, tenants } from './helpers';
+import {
+  FenceTestTimeline,
+  asActor,
+  databaseUrl,
+  id,
+  newPrisma,
+  tenants,
+  ensureLiveMember,
+} from './helpers';
 import { KeycloakHttpStub, SLOW_ROUND_TRIP_MS, type StubRequest } from './keycloak-http-stub';
 
 /**
@@ -331,8 +339,16 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       prisma.client.membership.update({ where: { id: membershipId }, data: { roles } }),
     );
 
-  const asAdmin = <T>(organizationId: string, fn: () => Promise<T>) =>
-    asActor({ organizationId, userId: 'USR-LS-ADMIN', roles: ['ORGANIZATION_ADMIN'] }, fn);
+  // A live administrator of the organization, in the database: the authority
+  // a membership change re-reads under its locks (task 117, F1).
+  const asAdmin = async <T>(organizationId: string, fn: () => Promise<T>) => {
+    await ensureLiveMember(prisma, {
+      userId: 'USR-LS-ADMIN',
+      organizationId,
+      roles: ['ORGANIZATION_ADMIN'],
+    });
+    return asActor({ organizationId, userId: 'USR-LS-ADMIN', roles: ['ORGANIZATION_ADMIN'] }, fn);
+  };
 
   // -------------------------------------------------------------------------
   // The outcome, whatever it is

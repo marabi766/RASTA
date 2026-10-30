@@ -21,7 +21,9 @@ export class KpiController {
       'latest = highest database identity (version), not commit order; a future writer (Q-142) ' +
       'must serialize writes per (org, key, scope, unit, currency, period). ' +
       'Missing or mismatched baseline: INSUFFICIENT_BASELINE with value null, never ' +
-      'zero or an estimate. AVAILABLE values are exact decimal strings. No parameter selects ' +
+      'zero or an estimate. The count is AVAILABLE only when the maintenance projection covers ' +
+      'the whole window; otherwise NO_DATA with no value field (D-082): analytics cannot vouch ' +
+      'for the window, which is not zero. AVAILABLE values are exact decimal strings. No parameter selects ' +
       'organization, subtree or scope. No baseline writer or seed (Q-142 (1)).',
   })
   async list(@Query(zodPipe(kpisQuerySchema)) query: KpisQuery): Promise<KpisView> {

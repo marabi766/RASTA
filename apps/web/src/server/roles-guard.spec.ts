@@ -22,21 +22,27 @@ import { OVERSIGHT_ROLE, rolesGuardAdmits, SUPER_ROLE } from './roles-guard';
  */
 
 const guard = squash(readSource('packages', 'nest-common', 'src', 'guards', 'roles.guard.ts'))!;
+/** The rule itself (task 130): the one predicate `RolesGuard` and identity's live check apply. */
+const rule = squash(readSource('packages', 'nest-common', 'src', 'guards', 'role-admission.ts'))!;
 
 describe('the mirror is the guard', () => {
   it('names the same two roles', () => {
-    expect(guard).toContain(`staticreadonlySUPER_ROLE='${SUPER_ROLE}';`);
-    expect(guard).toContain(`staticreadonlyOVERSIGHT_ROLE='${OVERSIGHT_ROLE}';`);
+    expect(rule).toContain(`exportconstSUPER_ROLE='${SUPER_ROLE}';`);
+    expect(rule).toContain(`exportconstOVERSIGHT_ROLE='${OVERSIGHT_ROLE}';`);
+  });
+
+  it('the guard decides by that rule', () => {
+    expect(guard).toContain('assertRolesAdmitted(context.roles,{required,');
   });
 
   it('refuses the oversight role before it admits the administrator, unless the route names it', () => {
-    const oversight = guard.indexOf('if(context.roles.includes(RolesGuard.OVERSIGHT_ROLE))');
-    const named = guard.indexOf('constnamed=required?.includes(RolesGuard.OVERSIGHT_ROLE)??false;');
-    const admin = guard.indexOf('if(context.roles.includes(RolesGuard.SUPER_ROLE))returntrue;');
+    const oversight = rule.indexOf('if(held.includes(OVERSIGHT_ROLE)){');
+    const named = rule.indexOf('constnamed=required.includes(OVERSIGHT_ROLE);');
+    const admin = rule.indexOf('if(held.includes(SUPER_ROLE))return;');
     expect(oversight).toBeGreaterThan(-1);
     expect(named).toBeGreaterThan(oversight);
     expect(admin).toBeGreaterThan(named);
-    expect(guard).toContain('constgranted=required.some((role)=>context.roles.includes(role));');
+    expect(rule).toContain('if(!required.some((role)=>held.includes(role))){');
   });
 });
 
