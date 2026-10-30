@@ -24,16 +24,26 @@
 // — go through the standalone upgrade exactly as an operator runs it, and
 // every invariant must hold afterwards.
 //
-// The roles are throwaway too (`rasta_d045t<pid>` and its migrator, and the
-// legacy fixture's `rasta_d045l<pid>` and `rasta_d045a<pid>` pairs), so the
-// test never touches a real service's roles. Needs `psql` and a superuser:
-// PGHOST, PGPORT, PGUSER, PGPASSWORD.
+// The roles are throwaway too (`rasta_d045t<pid>` and its migrator, the
+// legacy fixture's `rasta_d045l<pid>` and `rasta_d045a<pid>` pairs, and every
+// later fixture's `rasta_d…<pid>` pair — the economic and procurement repair
+// included, whose migrations are applied with their runtime role renamed), so
+// the test never touches a real service's roles, and checks that it did not.
+// Needs `psql` and a superuser: PGHOST, PGPORT, PGUSER, PGPASSWORD.
 // -----------------------------------------------------------------------------
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,10 +51,10 @@ import { createRequire } from 'node:module';
 import {
   classifyServices,
   FINDINGS_SQL,
+  findingsSql,
   requiredRuntimeFunctions,
 } from './check-db-runtime-privileges-lib.mjs';
 import { ledgerRevoke } from './prisma-lib.mjs';
-import { libpqInvocation } from './verify-migration-reversible-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPLIT = join(ROOT, 'infrastructure/docker/postgres/lib/service-privilege-split.bash');
@@ -707,6 +717,185 @@ test('a legacy cluster — public owned by the superuser, the runtime role ownin
   }
 });
 
+/** `split_service_privileges <svc> <db> <mode>` with `lib`'s splitter; the run, not asserted. */
+function splitRun(svc, db, mode, migrator, lib = dirname(SPLIT)) {
+  return spawnSync(
+    'bash',
+    [
+      '-eu',
+      '-c',
+      `source "${join(lib, 'service-privilege-split.bash')}"
+       declare -gA ROLE_PASSWORDS=([${migrator}]=${PASSWORD[migrator]})
+       split_service_privileges ${svc} ${db} ${mode}`,
+    ],
+    { env: { ...process.env, POSTGRES_USER: process.env.PGUSER }, encoding: 'utf8' },
+  );
+}
+
+/** Every ACL in `db` the split could touch, as text: equal before and after a no-op rerun. */
+const ACLS_SQL = `
+  SELECT string_agg(x, E'\n' ORDER BY x) FROM (
+    SELECT 'db ' || datacl::text AS x FROM pg_database WHERE datname = current_database()
+    UNION ALL SELECT 'ns ' || nspname || ' ' || coalesce(nspacl::text, '') FROM pg_namespace
+    UNION ALL SELECT 'rel ' || oid::regclass || ' ' || coalesce(relacl::text, '') FROM pg_class
+      WHERE relnamespace = 'public'::regnamespace
+    UNION ALL SELECT 'col ' || attrelid::regclass || '.' || attname || ' ' || attacl::text
+      FROM pg_attribute WHERE attacl IS NOT NULL
+    UNION ALL SELECT 'fn ' || oid::regprocedure || ' ' || coalesce(proacl::text, '') FROM pg_proc
+      WHERE pronamespace = 'public'::regnamespace
+    UNION ALL SELECT 'def ' || defaclrole::regrole || ' ' || defaclnamespace || ' ' || defaclobjtype::text
+      || ' ' || defaclacl::text FROM pg_default_acl) acls`;
+
+// ---------------------------------------------------------------------------
+// #421 r1 F1: a grant chain through a role of the runtime role's closure. The
+// cleanup used to revoke from a list read once: a CASCADE could take an entry a
+// later REVOKE named, whose grantor then held nothing on the object, and PG16
+// refused it — the split stopped before the function repair, every run alike
+// (reproduced: the grantor sorting after the migrator, for a function's
+// EXECUTE, a table's TRUNCATE and a column's REFERENCES). And PG16 keeps a
+// column grant made under a TABLE-level grant option when that option is
+// revoked: an orphan its grantor can no longer revoke. With the grantor's name
+// on either side of the migrator's, and an orphan already there, the split
+// converges, the check finds nothing, and a second split changes nothing.
+// ---------------------------------------------------------------------------
+for (const order of ['a', 'z']) {
+  test(`a grant chain through a closure role converges whatever the order, an orphaned column grant included (#421 r1 F1, grantor sorting ${order === 'a' ? 'before' : 'after'} the migrator)`, () => {
+    const svc = `d138${order}${process.pid}`;
+    const runtime = `rasta_${svc}`;
+    const migrator = `${runtime}_migrator`;
+    const db = runtime;
+    // "a_…" sorts before "rasta_…", "z_…" after it.
+    const grantor = `${order}_d138g${process.pid}`;
+    const orphaner = `${order}_d138o${process.pid}`;
+    PASSWORD[runtime] = `rt_${randomBytes(12).toString('hex')}`;
+    PASSWORD[migrator] = `mg_${randomBytes(12).toString('hex')}`;
+    const run = (sql, role) => ok(sql, { database: db, role });
+    const inspect = () =>
+      run(FINDINGS_SQL.replaceAll(":'runtime'", `'${runtime}'`))
+        .split('\n')
+        .filter(Boolean);
+    const split = () => {
+      const result = splitRun(svc, db, 'default', migrator);
+      assert.equal(result.status, 0, result.stderr);
+    };
+    const holds = (sql) => run(`SELECT ${sql}`) === 't';
+    try {
+      ok(
+        `CREATE ROLE ${runtime} LOGIN PASSWORD '${PASSWORD[runtime]}';
+         CREATE ROLE ${grantor}; CREATE ROLE ${orphaner};`,
+        { database: 'postgres' },
+      );
+      ok(`CREATE DATABASE ${db} TEMPLATE template0 OWNER ${runtime}`, { database: 'postgres' });
+      split();
+      run(
+        `CREATE TABLE chained (id integer, v integer);
+         CREATE VIEW chained_view AS SELECT id FROM chained;
+         CREATE SEQUENCE chained_seq;
+         CREATE FUNCTION chained_definer() RETURNS integer LANGUAGE sql SECURITY DEFINER AS 'SELECT 1';
+         CREATE PROCEDURE chained_procedure() LANGUAGE sql SECURITY DEFINER AS 'SELECT 1';
+         GRANT USAGE ON SCHEMA public TO ${grantor}, ${orphaner};
+         GRANT EXECUTE ON ROUTINE chained_definer(), chained_procedure() TO ${grantor} WITH GRANT OPTION;
+         GRANT TRUNCATE, REFERENCES, TRIGGER ON chained, chained_view TO ${grantor} WITH GRANT OPTION;
+         GRANT UPDATE ON SEQUENCE chained_seq TO ${grantor} WITH GRANT OPTION;
+         GRANT REFERENCES (v) ON chained TO ${grantor} WITH GRANT OPTION;
+         GRANT REFERENCES ON chained TO ${orphaner} WITH GRANT OPTION;`,
+        migrator,
+      );
+      run(
+        `SET ROLE ${grantor};
+         GRANT EXECUTE ON ROUTINE chained_definer(), chained_procedure() TO ${runtime};
+         GRANT TRUNCATE, REFERENCES, TRIGGER ON chained, chained_view TO ${runtime};
+         GRANT UPDATE ON SEQUENCE chained_seq TO ${runtime};
+         GRANT REFERENCES (id), REFERENCES (v) ON chained TO ${runtime};
+         SET ROLE ${orphaner};
+         GRANT REFERENCES (v) ON chained TO ${runtime};
+         RESET ROLE;`,
+      );
+      // The orphan: its grantor's table-level option revoked, the column grant kept.
+      run(`REVOKE REFERENCES ON chained FROM ${orphaner} CASCADE`, migrator);
+      assert.ok(!holds(`has_column_privilege('${orphaner}', 'chained', 'v', 'REFERENCES')`));
+      assert.match(
+        run(
+          `SELECT attacl::text FROM pg_attribute WHERE attrelid = 'chained'::regclass AND attname = 'v'`,
+        ),
+        new RegExp(`${runtime}=x/${orphaner}`),
+        'PG no longer keeps the orphan: the fixture proves nothing',
+      );
+      run(`GRANT ${grantor} TO ${runtime}`);
+      const found = inspect();
+      for (const expected of [
+        'reachable EXECUTE on definer/trigger function chained_definer()',
+        'reachable EXECUTE on definer/trigger function chained_procedure()',
+        'TRUNCATE on public.chained',
+        'REFERENCES on public.chained',
+        'TRIGGER on public.chained',
+        'TRIGGER on public.chained_view',
+        'UPDATE on sequence public.chained_seq',
+      ]) {
+        assert.ok(found.includes(expected), `missing "${expected}" in:\n${found.join('\n')}`);
+      }
+
+      split();
+      assert.deepEqual(inspect(), []);
+      for (const role of [runtime, grantor]) {
+        assert.ok(
+          !holds(`has_function_privilege('${role}', 'chained_definer()', 'EXECUTE')
+              OR has_function_privilege('${role}', 'chained_procedure()', 'EXECUTE')
+              OR has_table_privilege('${role}', 'chained', 'TRUNCATE, REFERENCES, TRIGGER')
+              OR has_any_column_privilege('${role}', 'chained', 'REFERENCES')
+              OR has_table_privilege('${role}', 'chained_view', 'TRUNCATE, REFERENCES, TRIGGER')
+              OR has_sequence_privilege('${role}', 'chained_seq', 'UPDATE')`),
+          `${role} still holds a right of the chain`,
+        );
+      }
+      // The orphan's grantor was lent its option and has nothing again; the
+      // runtime role keeps its DML and its sequence.
+      assert.equal(
+        run(`SELECT count(*) FROM pg_class c, aclexplode(c.relacl) a
+              WHERE c.oid = 'chained'::regclass AND a.grantee = '${orphaner}'::regrole`),
+        '0',
+      );
+      assert.equal(
+        run(`SELECT count(*) FROM pg_attribute, aclexplode(attacl)
+              WHERE attrelid = 'chained'::regclass AND attname = 'v'`),
+        '0',
+      );
+      assert.ok(
+        holds(`has_table_privilege('${runtime}', 'chained', 'SELECT, INSERT, UPDATE, DELETE')
+           AND has_sequence_privilege('${runtime}', 'chained_seq', 'USAGE, SELECT')`),
+      );
+
+      // Converged: a second split changes no ACL at all.
+      const repaired = run(ACLS_SQL);
+      split();
+      assert.equal(run(ACLS_SQL), repaired);
+      assert.deepEqual(inspect(), []);
+
+      // A right no REVOKE can remove fails the split closed, naming it — as
+      // it fails the check — instead of ending as if it had converged.
+      run(`GRANT pg_read_all_data TO ${grantor}`);
+      const refused = splitRun(svc, db, 'default', migrator);
+      assert.notEqual(refused.status, 0);
+      assert.match(
+        refused.stderr,
+        new RegExp(
+          `the split did not converge: ${runtime} still holds a right on public\\._prisma_migrations`,
+        ),
+      );
+      assert.ok(inspect().includes('member of predefined role pg_read_all_data'));
+      run(`REVOKE pg_read_all_data FROM ${grantor}`);
+      split();
+      assert.deepEqual(inspect(), []);
+    } finally {
+      psql(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`, { database: 'postgres' });
+      for (const role of [runtime, migrator, grantor, orphaner]) {
+        const result = psql(`DROP ROLE IF EXISTS ${role}`, { database: 'postgres' });
+        assert.equal(result.status, 0, result.stderr);
+      }
+    }
+  });
+}
+
 // Every configured service, including audit's separate path, in both bootstrap
 // orders. Synthetic roles/databases keep this safe beside the real CI services.
 const extensionModes = spawnSync(
@@ -868,7 +1057,11 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
         assert.match(inspect(), /reachable EXECUTE on definer\/trigger function/);
         run(`GRANT EXECUTE ON FUNCTION ${schema}.app_ungranted_probe() TO PUBLIC`, migrator);
         assert.match(inspect(), /PUBLIC EXECUTE on migrator function/);
-        if ((service === 'economic' || mode === 'audit') && history === 'upgraded') {
+        // One service per grants mode: default, migration and audit.
+        const deep =
+          history === 'upgraded' &&
+          (service === 'economic' || service === 'supplier' || mode === 'audit');
+        if (deep) {
           run(`GRANT ${reader} TO ${runtime} WITH INHERIT FALSE, SET TRUE;
              GRANT USAGE ON SCHEMA ${schema}, public TO ${grantor};
              GRANT EXECUTE ON FUNCTION ${schema}.app_definer_probe() TO ${grantor} WITH GRANT OPTION;
@@ -939,9 +1132,65 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
             migrator,
           );
         }
+        const created = (suffix) =>
+          run(
+            `CREATE TABLE ${schema}.made_${suffix} (id int);
+             CREATE SEQUENCE ${schema}.made_${suffix}_seq;
+             CREATE FUNCTION ${schema}.made_${suffix}_definer() RETURNS int
+               LANGUAGE sql SECURITY DEFINER AS 'SELECT 42';
+             CREATE SCHEMA made_${suffix}_schema;`,
+            migrator,
+          );
+        // regprocedure leaves out a schema on the search path.
+        const fn = (name) => (schema === 'public' ? name : `${schema}.${name}`);
+        if (deep) {
+          // #421 r1 F3: the rules the split revoked by and the check did not
+          // read — TEMPORARY, a view's TRIGGER, a sequence's UPDATE — and
+          // default privileges, planted and then inherited by objects made
+          // afterwards. Found without a rerun; gone after it, and from what is
+          // created later too.
+          run(`GRANT TEMPORARY ON DATABASE ${db} TO ${reader};
+             CREATE VIEW ${schema}.app_view AS SELECT id FROM ${schema}.app_probe;
+             CREATE SEQUENCE ${schema}.app_seq;
+             GRANT TRIGGER ON ${schema}.app_view TO ${reader};
+             GRANT UPDATE ON SEQUENCE ${schema}.app_seq TO ${reader};
+             ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} IN SCHEMA ${schema}
+               GRANT TRUNCATE, REFERENCES, TRIGGER ON TABLES TO ${reader};
+             ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} GRANT UPDATE ON SEQUENCES TO ${runtime};
+             ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
+             ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} GRANT CREATE ON SCHEMAS TO ${reader};`);
+          created('before');
+          const planted = inspect();
+          for (const expected of [
+            `TEMPORARY on database ${db}`,
+            `TRIGGER on ${schema}.app_view`,
+            `UPDATE on sequence ${schema}.app_seq`,
+            `default TRUNCATE on new tables of ${migrator} in schema ${schema}`,
+            `default UPDATE on new sequences of ${migrator}`,
+            `default EXECUTE on new functions of ${migrator}`,
+            `default CREATE on new schemas of ${migrator}`,
+            `TRUNCATE on ${schema}.made_before`,
+            `UPDATE on sequence ${schema}.made_before_seq`,
+            `reachable EXECUTE on definer/trigger function ${fn('made_before_definer()')}`,
+            'CREATE on schema made_before_schema',
+          ]) {
+            assert.ok(planted.includes(expected), `missing "${expected}" in:\n${planted}`);
+          }
+        }
         doSplit();
-        if ((service === 'economic' || mode === 'audit') && history === 'upgraded') {
+        if (deep) {
           assert.equal(run(`SELECT ${schema}.extension_definer_probe()`, runtime), '42');
+          assert.equal(inspect(), '');
+          created('after');
+          assert.equal(inspect(), '', 'an object made after the repair inherits a forbidden right');
+          assert.equal(
+            run(`SELECT has_table_privilege('${runtime}', '${schema}.made_after', 'TRUNCATE, REFERENCES, TRIGGER')
+                     OR has_sequence_privilege('${runtime}', '${schema}.made_after_seq', 'UPDATE')
+                     OR has_function_privilege('${runtime}', '${schema}.made_after_definer()', 'EXECUTE')
+                     OR has_schema_privilege('${runtime}', 'made_after_schema', 'CREATE')
+                     OR has_database_privilege('${runtime}', '${db}', 'TEMPORARY')`),
+            'f',
+          );
         }
         assertExtension();
         for (let rerun = 0; rerun < 2; rerun += 1) {
@@ -988,69 +1237,119 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
   }
 }
 
+/** The real service roles' attributes, password, memberships and settings: never touched here. */
+const SHARED_ROLES_SQL = `
+  SELECT coalesce(json_agg(row_to_json(r) ORDER BY r.rolname), '[]') FROM (
+    SELECT a.rolname, a.rolsuper, a.rolinherit, a.rolcreaterole, a.rolcreatedb, a.rolcanlogin,
+      a.rolbypassrls, a.rolconnlimit, a.rolpassword, a.rolvaliduntil,
+      ARRAY(SELECT m.roleid::regrole || ' ' || m.admin_option || m.inherit_option || m.set_option
+              || ' by ' || m.grantor::regrole FROM pg_auth_members m
+             WHERE m.member = a.oid OR m.roleid = a.oid ORDER BY 1) AS memberships,
+      ARRAY(SELECT s.setdatabase || ' ' || array_to_string(s.setconfig, ',')
+              FROM pg_db_role_setting s WHERE s.setrole = a.oid ORDER BY 1) AS settings
+    FROM pg_authid a
+    WHERE a.rolname IN ('rasta_economic', 'rasta_economic_migrator',
+                        'rasta_procurement', 'rasta_procurement_migrator')) r`;
+
+/** The digest's own trigger path (tg_demand_aggregation_guard), as the sweeper drives it. */
+const DIGEST_BY_TRIGGER = `
+  BEGIN;
+  INSERT INTO demand_aggregation (id, organization_id, product_id, status, opened_at, closes_at,
+    window_hours, min_quantity, shortfall_policy, total_quantity, demand_count, extension_count,
+    created_at, updated_at)
+  VALUES ('AGG-D138', 'ORG-D138', 'PRD_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'OPEN',
+    now() - interval '2 hours', now() - interval '1 hour', 1, 1, 'CLOSE', 0, 0, 0,
+    now() - interval '2 hours', now() - interval '2 hours');
+  -- The window's end begins the digest from nothing…
+  UPDATE demand_aggregation SET status = 'LAPSED', closed_at = now(), updated_at = now(),
+    version = version + 1, end_digest_counted = 0,
+    end_digest_state = '\\x6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd190000000000000000'
+   WHERE id = 'AGG-D138';
+  -- …and the batch that writes it is checked by the trigger, which reads the
+  -- window's demands through demand_aggregation_digest_range.
+  UPDATE demand_aggregation SET end_digest_state = NULL,
+    demand_ids_sha256 = encode(sha256(''::bytea), 'hex')
+   WHERE id = 'AGG-D138';
+  SELECT status FROM demand_aggregation WHERE id = 'AGG-D138';
+  ROLLBACK;`;
+
 // Original migrations are already applied on a damaged cluster. Exercise the
-// declared repair list with real service signatures and real runtime logins.
+// declared repair list with real service signatures and real runtime logins —
+// on a PID-scoped role pair (#421 r1 F6): the service's own migrations, through
+// Prisma, with its runtime role renamed, and the list remapped to that pair in
+// a copy of lib/. The real rasta_<svc> roles are never touched, and the test
+// proves it.
 for (const service of ['economic', 'procurement']) {
-  test(`${service}: old splitter damage is detected and repaired; healthy and damaged EXECUTE ACLs converge`, () => {
-    const runtime = `rasta_${service}`;
+  test(`${service}: old splitter damage is detected and repaired; healthy and damaged EXECUTE ACLs converge; a missing helper refuses only once its migration is recorded`, () => {
+    const svc = `d825${service[0]}${process.pid}`;
+    const runtime = `rasta_${svc}`;
     const migrator = `${runtime}_migrator`;
-    const db = `d825_${service}_${process.pid}`;
-    const created = [];
+    const db = runtime;
+    PASSWORD[runtime] = `rt_${randomBytes(12).toString('hex')}`;
+    PASSWORD[migrator] = `mg_${randomBytes(12).toString('hex')}`;
+    const shared = ok(SHARED_ROLES_SQL, { database: 'postgres' });
     const run = (sql, role) => ok(sql, { database: db, role });
-    const inspect = () => run(FINDINGS_SQL.replaceAll(":'runtime'", `'${runtime}'`));
-    const signatures = requiredRuntimeFunctions
-      .filter(([svc]) => svc === service)
-      .map(([, sig]) => sig);
+    const list = requiredRuntimeFunctions
+      .filter(([listed]) => listed === service)
+      .map(([, signature, migration]) => [svc, signature, migration]);
+    const signatures = list.map(([, signature]) => signature);
+    const inspect = () => run(findingsSql(list).replaceAll(":'runtime'", `'${runtime}'`));
     const acl = () =>
       run(`SELECT p.oid::regprocedure::text, p.proacl::text FROM pg_proc p
       WHERE p.oid IN (${signatures.map((sig) => `'${sig}'::regprocedure`).join(',')}) ORDER BY 1`);
-    const repair = (shouldSucceed = true) => {
-      const result = spawnSync(
-        'bash',
-        [
-          '-eu',
-          '-c',
-          `
-        source "${SPLIT}"
-        declare -gA ROLE_PASSWORDS=([${migrator}]=${PASSWORD[migrator]})
-        split_service_privileges ${service} ${db} default || exit 1
-      `,
-        ],
-        { env: { ...process.env, POSTGRES_USER: process.env.PGUSER }, encoding: 'utf8' },
-      );
-      if (shouldSucceed) assert.equal(result.status, 0, result.stderr);
+    const lib = mkdtempSync(join(tmpdir(), 'd825-lib-'));
+    const grants = join(lib, 'runtime-function-grants.txt');
+    // No newline after the last line: the split must read it all the same (F5).
+    const writeList = (lines) =>
+      writeFileSync(grants, lines.map((line) => line.join('|')).join('\n'));
+    const repair = (refusal) => {
+      const result = splitRun(svc, db, 'default', migrator, lib);
+      if (!refusal) assert.equal(result.status, 0, result.stderr);
       else {
-        assert.notEqual(result.status, 0, 'unsafe required helper must refuse repair');
-        assert.match(result.stderr, /required runtime function has unsafe ownership or definition/);
+        assert.notEqual(result.status, 0, `the repair did not refuse: ${refusal}`);
+        assert.match(result.stderr, refusal);
       }
     };
+    const project = prismaProject(
+      Object.fromEntries(
+        readdirSync(join(ROOT, 'services', `${service}-service`, 'prisma', 'migrations'))
+          .filter((name) => /^\d/.test(name))
+          .map((name) => [
+            name,
+            readFileSync(
+              join(
+                ROOT,
+                'services',
+                `${service}-service`,
+                'prisma',
+                'migrations',
+                name,
+                'migration.sql',
+              ),
+              'utf8',
+            ).replace(new RegExp(`\\brasta_${service}\\b`, 'g'), runtime),
+          ]),
+      ),
+    );
+    const prisma = (...args) =>
+      spawnSync(PRISMA, [...args, '--schema', join(project, 'schema.prisma')], {
+        cwd: project,
+        env: {
+          ...process.env,
+          DATABASE_URL: `postgresql://${migrator}:${PASSWORD[migrator]}@${process.env.PGHOST ?? '127.0.0.1'}:${process.env.PGPORT ?? '5432'}/${db}?schema=public`,
+          PRISMA_HIDE_UPDATE_MESSAGE: '1',
+        },
+        encoding: 'utf8',
+      });
     try {
-      for (const role of [runtime, migrator]) {
-        const key = `DATABASE_URL_${role.replace(/^rasta_/, '').toUpperCase()}`;
-        PASSWORD[role] = process.env[key]
-          ? libpqInvocation(process.env[key]).env.PGPASSWORD
-          : `${role}_dev_password`;
-        if (
-          ok(`SELECT count(*) FROM pg_roles WHERE rolname='${role}'`, { database: 'postgres' }) ===
-          '0'
-        ) {
-          ok(`CREATE ROLE ${role} LOGIN PASSWORD '${PASSWORD[role]}'`, { database: 'postgres' });
-          created.push(role);
-        }
-      }
+      cpSync(dirname(SPLIT), lib, { recursive: true });
+      writeList(list);
+      ok(`CREATE ROLE ${runtime} LOGIN PASSWORD '${PASSWORD[runtime]}'`, { database: 'postgres' });
       ok(`CREATE DATABASE ${db} TEMPLATE template0 OWNER ${runtime}`, { database: 'postgres' });
+      // Bootstrap: before any migration, no helper and nothing recorded — skipped.
       repair();
-      const migrations = join(ROOT, 'services', `${service}-service`, 'prisma', 'migrations');
-      for (const name of readdirSync(migrations)
-        .filter((name) => /^\d/.test(name))
-        .sort()) {
-        const sql = readFileSync(join(migrations, name, 'migration.sql'), 'utf8');
-        // Match Prisma's standalone concurrent-index path; all other files are atomic.
-        const concurrent = /CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY/i.test(
-          sql.replace(/--[^\n]*/g, ''),
-        );
-        run(concurrent ? sql : `BEGIN;\n${sql}\nCOMMIT;`, migrator);
-      }
+      const deployed = prisma('migrate', 'deploy');
+      assert.equal(deployed.status, 0, deployed.stdout + deployed.stderr);
       assert.equal(inspect(), '');
       const healthy = acl();
       repair();
@@ -1078,6 +1377,12 @@ for (const service of ['economic', 'procurement']) {
           }).stderr,
           /permission denied/,
         );
+      } else {
+        // The digest's trigger path needs the helper too (addendum H).
+        assert.match(
+          psql(DIGEST_BY_TRIGGER, { database: db, role: runtime }).stderr,
+          /permission denied for function demand_aggregation_digest_range/,
+        );
       }
       repair();
       assert.equal(acl(), healthy, 'damaged cluster must restore the exact healthy helper ACLs');
@@ -1093,12 +1398,13 @@ for (const service of ['economic', 'procurement']) {
           `SELECT * FROM demand_aggregation_digest_range('repair', 'repair', NULL, NULL, 1)`,
           runtime,
         );
+        assert.equal(run(DIGEST_BY_TRIGGER, runtime).split('\n').at(-1), 'LAPSED');
       }
       repair();
       assert.equal(acl(), healthy, 'repair is idempotent');
       run(`ALTER FUNCTION ${signatures[0]} SECURITY DEFINER`, migrator);
       assert.match(inspect(), /reachable EXECUTE on definer\/trigger function/);
-      repair(false);
+      repair(/required runtime function has unsafe ownership or definition/);
       assert.equal(
         run(`SELECT has_function_privilege('${runtime}', '${signatures[0]}', 'EXECUTE')`),
         'f',
@@ -1107,12 +1413,75 @@ for (const service of ['economic', 'procurement']) {
       repair();
       assert.equal(acl(), healthy, 'safe definition restored without changing the original grants');
       assert.equal(inspect(), '');
+
+      // #421 r1 F5: a listed helper that does not exist. Prisma's own ledger
+      // row says whether its migration ran: recorded as applied, the repair
+      // refuses (and the check reports it); failed, rolled back or not yet
+      // applied, it is skipped — the migration grants EXECUTE when it runs.
+      const [, signature, migration] = list[0];
+      const name = signature.slice(signature.indexOf('.') + 1, signature.indexOf('('));
+      run(`ALTER FUNCTION ${signature} RENAME TO ${name}_moved`, migrator);
+      assert.ok(inspect().includes(`missing required runtime EXECUTE on ${signature}`));
+      const missing = new RegExp(
+        `required runtime function ${signature.replace(/[.()"]/g, '\\$&')} is missing, yet migration ${migration} is recorded as applied`,
+      );
+      assert.equal(
+        run(`SELECT count(*) FROM _prisma_migrations WHERE migration_name = '${migration}'
+               AND finished_at IS NOT NULL AND rolled_back_at IS NULL`),
+        '1',
+      );
+      repair(missing);
+      // Failed half-way, as Prisma records a failure: not finished.
+      run(
+        `UPDATE _prisma_migrations SET finished_at = NULL, logs = 'failed half-way'
+          WHERE migration_name = '${migration}'`,
+        migrator,
+      );
+      repair();
+      // Rolled back, by Prisma itself.
+      const resolved = prisma('migrate', 'resolve', '--rolled-back', migration);
+      assert.equal(resolved.status, 0, resolved.stdout + resolved.stderr);
+      assert.equal(
+        run(`SELECT count(*) FROM _prisma_migrations WHERE migration_name = '${migration}'
+               AND rolled_back_at IS NOT NULL`),
+        '1',
+      );
+      repair();
+      // Not yet applied at all.
+      run(`DELETE FROM _prisma_migrations WHERE migration_name = '${migration}'`, migrator);
+      repair();
+      // Recorded once more: refused again.
+      run(
+        `INSERT INTO _prisma_migrations (id, checksum, migration_name, finished_at, applied_steps_count)
+         VALUES ('d825-${service}', 'x', '${migration}', now(), 1)`,
+        migrator,
+      );
+      repair(missing);
+      run(
+        `ALTER FUNCTION ${name}_moved(${signature.slice(signature.indexOf('(') + 1)} RENAME TO ${name}`,
+        migrator,
+      );
+      repair();
+      assert.equal(acl(), healthy);
+
+      // A malformed list refuses before it restores anything.
+      writeList([...list, [svc, 'public.f(text);DROP TABLE x', migration]]);
+      repair(/runtime-function-grants\.txt: malformed line/);
+      writeList([...list, [svc, signature]]);
+      repair(/runtime-function-grants\.txt: malformed line/);
     } finally {
+      rmSync(lib, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
       psql(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`, { database: 'postgres' });
-      for (const role of created.reverse()) {
-        const result = psql(`DROP ROLE ${role}`, { database: 'postgres' });
+      for (const role of [runtime, migrator]) {
+        const result = psql(`DROP ROLE IF EXISTS ${role}`, { database: 'postgres' });
         assert.equal(result.status, 0, result.stderr);
       }
+      assert.equal(
+        ok(SHARED_ROLES_SQL, { database: 'postgres' }),
+        shared,
+        'the real service roles changed',
+      );
     }
   });
 }
