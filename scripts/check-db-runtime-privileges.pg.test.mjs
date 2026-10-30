@@ -55,6 +55,7 @@ import {
   requiredRuntimeFunctions,
 } from './check-db-runtime-privileges-lib.mjs';
 import { ledgerRevoke } from './prisma-lib.mjs';
+import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPLIT = join(ROOT, 'infrastructure/docker/postgres/lib/service-privilege-split.bash');
@@ -1251,8 +1252,12 @@ const SHARED_ROLES_SQL = `
     WHERE a.rolname IN ('rasta_economic', 'rasta_economic_migrator',
                         'rasta_procurement', 'rasta_procurement_migrator')) r`;
 
-/** The digest's own trigger path (tg_demand_aggregation_guard), as the sweeper drives it. */
-const DIGEST_BY_TRIGGER = `
+/**
+ * The digest's own trigger path (tg_demand_aggregation_guard), as the sweeper
+ * drives it. A reviewed probe (packages/testing reviewedClockTemplates): its
+ * window closed an hour ago by the database clock, nowhere near a boundary.
+ */
+const DIGEST_BY_TRIGGER = eligibilityClockSql`
   BEGIN;
   INSERT INTO demand_aggregation (id, organization_id, product_id, status, opened_at, closes_at,
     window_hours, min_quantity, shortfall_policy, total_quantity, demand_count, extension_count,
