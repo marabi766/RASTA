@@ -1848,9 +1848,20 @@ test('the leader of a group is signalled as a group only while it is the process
   assert.ok(readsBeforeKill >= 2, 'the leader is read again before the group is signalled');
   // The same run, but the process at the leader's number is a different one by the time of that
   // re-read: other start time, same group number, running.
-  for (const foreign of [
-    { state: 'S', ppid: 1, pgrp: 100, start: '99' },
-    { state: 'Z', ppid: 1, pgrp: 100, start: '10' }, // the registered process, now a zombie
+  for (const [what, replacement, expected] of [
+    ['a stranger at the number', { state: 'S', ppid: 1, pgrp: 100, start: '99' }, [120]],
+    [
+      'the registered process, now a zombie',
+      { state: 'Z', ppid: 1, pgrp: 100, start: '10' },
+      [120],
+    ],
+    // Still the registered process, but it no longer leads the group: it is signalled for what it
+    // is, a process, and the group of that number is not its own to take down.
+    [
+      'the registered process, out of its group',
+      { state: 'S', ppid: 1, pgrp: 555, start: '10' },
+      [100, 120],
+    ],
   ]) {
     const directory = ownedDirectory('drill-owner-leaderswap-');
     const system = fakeSystem(...rows());
@@ -1858,16 +1869,20 @@ test('the leader of a group is signalled as a group only while it is the process
       recordOwned(directory, 100, { leads: true });
       system.reads.clear();
       system.afterRead = (pid, count) => {
-        if (pid === 100 && count === readsBeforeKill - 1) system.table.set(100, { ...foreign });
+        if (pid === 100 && count === readsBeforeKill - 1) system.table.set(100, { ...replacement });
       };
       await disposeOwned(directory);
-      assert.deepEqual(killed(system), [120], `members by identity only (${foreign.start})`);
+      assert.deepEqual(killed(system), expected, `members by identity only (${what})`);
       assert.equal(
-        system.signals.some(([target, name]) => name === 'SIGKILL' && Math.abs(target) === 100),
+        system.signals.some(([target]) => target < 0),
         false,
-        'neither the group nor the pid of a process that was not registered is killed',
+        `${what}: no group is signalled`,
       );
-      assert.equal(system.table.get(100)?.start, foreign.start, 'the stranger is still there');
+      assert.equal(
+        system.table.has(100),
+        expected.includes(100) ? false : true,
+        `${what}: a process that was not registered is left alone`,
+      );
     });
   }
 });
