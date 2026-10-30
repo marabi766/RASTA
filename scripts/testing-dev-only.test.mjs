@@ -25,10 +25,16 @@ import { isTestOnlyPath, sourceProblems } from './testing-dev-only-source.mjs';
  * `containers` job; its scanner is tested here on fixture trees).
  */
 
+/** Writes `files`; `{ link: 'a/b' }` makes a symbolic link to root-relative `a/b`. */
 const write = (root, files) => {
   for (const [path, content] of Object.entries(files)) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
-    writeFileSync(join(root, path), content);
+    if (typeof content === 'string') {
+      writeFileSync(join(root, path), content);
+    } else {
+      rmSync(join(root, path), { recursive: true, force: true });
+      symlinkSync(join(root, content.link), join(root, path));
+    }
   }
 };
 const scratch = (t) => {
@@ -82,6 +88,44 @@ const BASE = {
     '',
   ].join('\n'),
   'services/svc/src/a.ts': 'export const a = 1;\n',
+  // Packages: one installed by pnpm (its store is a leaf, not followed), one
+  // whose main is build output not built yet (resolved to the source its
+  // tsconfig compiles), one without exports.
+  'services/svc/src/deps.ts': [
+    "import { lib } from 'lib';",
+    "import { built } from '@rasta/built';",
+    "import { plain } from '@rasta/plain';",
+    'export const deps = [lib, built, plain];',
+    '',
+  ].join('\n'),
+  'node_modules/.pnpm/lib@1.0.0/node_modules/lib/package.json': '{"name":"lib","main":"index.js"}',
+  'node_modules/.pnpm/lib@1.0.0/node_modules/lib/index.js':
+    "module.exports = require(process.env.ANYTHING) && require('lib-internal');\n",
+  'packages/built/package.json':
+    '{"name":"@rasta/built","main":"./dist/index.js","types":"./dist/index.d.ts"}',
+  'packages/built/tsconfig.json': JSON.stringify({
+    compilerOptions: { rootDir: './src', outDir: './dist', module: 'commonjs' },
+    include: ['src/**/*'],
+  }),
+  'packages/built/src/index.ts': 'export const built = 1;\n',
+  'packages/plain/package.json': '{"name":"@rasta/plain","main":"src/index.cjs"}',
+  'packages/plain/src/index.cjs': 'module.exports = { plain: 1 };\n',
+  // Names that are refused elsewhere, used harmlessly.
+  'services/svc/src/benign.mts': [
+    "import { fileURLToPath } from 'node:url';",
+    'const __filename = fileURLToPath(import.meta.url);',
+    'const redis = { eval: (script: string) => script };',
+    "const { a, 'b': b } = { a: 1, b: 2 };",
+    'export const benign = [',
+    '  __filename,',
+    "  redis.eval('return 1'),",
+    '  a + b,',
+    '  (redis.constructor as { name?: string }).name,',
+    '  redis.constructor === Object,',
+    '  redis.eval instanceof Function,',
+    '];',
+    '',
+  ].join('\n'),
   'services/svc/src/data.json': '{}',
   'services/svc/src/limit.cjs': 'module.exports = { limit: 1 };\n',
   'services/svc/src/scope.cjs':
@@ -160,6 +204,9 @@ const fixture = (t, files = {}) => {
     ['services/svc/node_modules/signing', 'packages/testing'],
     ['apps/web/node_modules/@rasta/testing', 'packages/testing'],
     ['services/svc/node_modules/@rasta/helper', 'packages/helper'],
+    ['services/svc/node_modules/@rasta/built', 'packages/built'],
+    ['services/svc/node_modules/@rasta/plain', 'packages/plain'],
+    ['services/svc/node_modules/lib', 'node_modules/.pnpm/lib@1.0.0/node_modules/lib'],
   ]) {
     mkdirSync(dirname(join(root, link)), { recursive: true });
     symlinkSync(join(root, target), join(root, link), 'dir');
@@ -595,6 +642,308 @@ const escapes = [
     'a file that does not parse',
     { [`${SVC}/main.ts`]: 'export const = ;\n' },
     /main\.ts:1 does not parse/,
+  ], // Symbolic links (#514 r3): followed where they point, each real directory once per path.
+  [
+    'the review trigger: a production entry that is a link to root tooling',
+    {
+      'scripts/signing-tool.ts': "import '@rasta/testing';\nexport {};\n",
+      [`${SVC}/main.ts`]: { link: 'scripts/signing-tool.ts' },
+    },
+    /services\/svc\/src\/main\.ts:1 imports @rasta\/testing/,
+  ],
+  [
+    'a linked directory in a workspace',
+    {
+      'vendor/kit/x.ts': "import 'signing';\nexport {};\n",
+      [`${SVC}/kit`]: { link: 'vendor/kit' },
+    },
+    /services\/svc\/src\/kit\/x\.ts:1 signing reaches packages\/testing/,
+  ],
+  [
+    'a linked workspace',
+    {
+      'elsewhere/svc2/package.json': '{"name":"@rasta/svc2"}',
+      'elsewhere/svc2/src/main.ts': "import '@rasta/testing';\n",
+      'services/svc2': { link: 'elsewhere/svc2' },
+    },
+    /services\/svc2\/src\/main\.ts:1 imports @rasta\/testing/,
+  ],
+  [
+    'a linked ESM file, resolved from where it points (as Node loads it)',
+    {
+      'vendor/entry.mjs': "import './helper.mjs';\n",
+      'vendor/helper.mjs': "import '../packages/testing/src/index.ts';\n",
+      [`${SVC}/helper.mjs`]: 'export {};\n',
+      [`${SVC}/main.mjs`]: { link: 'vendor/entry.mjs' },
+    },
+    /services\/svc\/src\/main\.mjs → vendor\/helper\.mjs:1 .* reaches packages\/testing/,
+  ],
+  [
+    'a link cycle (the sweep ends and still checks the rest)',
+    { [`${SVC}/loop`]: { link: SVC }, [`${SVC}/late.ts`]: "import '@rasta/testing';\n" },
+    /services\/svc\/src\/late\.ts:1 imports @rasta\/testing/,
+  ],
+  [
+    'a link to nothing',
+    { [`${SVC}/gone.ts`]: { link: 'nowhere/gone.ts' } },
+    /services\/svc\/src\/gone\.ts: a symbolic link to nothing/,
+  ],
+  // A build directory, or a node_modules pnpm's store did not fill, is followed once reached.
+  ...['dist', 'coverage', '.next', 'node_modules'].map((dir) => [
+    `production reaching the workspace's ${dir}/`,
+    {
+      [`${SVC}/main.ts`]: `export const h = require('../${dir}/hidden.cjs');\n`,
+      [`services/svc/${dir}/hidden.cjs`]: "module.exports = require('signing');\n",
+    },
+    new RegExp(
+      `src/main\\.ts → services/svc/${dir.replace('.', '\\.')}/hidden\\.cjs:1 signing reaches packages/testing`,
+    ),
+  ]),
+  [
+    "production reaching the repository root's node_modules",
+    {
+      [`${SVC}/main.ts`]: "export const h = require('../../../node_modules/hidden.cjs');\n",
+      'node_modules/hidden.cjs': "module.exports = require('../packages/testing/src/index.ts');\n",
+    },
+    /src\/main\.ts → node_modules\/hidden\.cjs:1 .* reaches packages\/testing/,
+  ],
+  [
+    "a package in node_modules that pnpm's store did not install",
+    {
+      'services/svc/node_modules/fake/package.json': '{"name":"fake","main":"index.js"}',
+      'services/svc/node_modules/fake/index.js': "require('signing');\n",
+      [`${SVC}/main.ts`]: "export const f = require('fake');\n",
+    },
+    /services\/svc\/node_modules\/fake\/index\.js:1 signing reaches packages\/testing/,
+  ],
+  // Loaders (#514 r3): getBuiltinModule, keys spelled any way, __filename that is not this file.
+  [
+    'the review trigger: createRequire from process.getBuiltinModule',
+    {
+      [`${SVC}/main.ts`]:
+        "const { createRequire: cr } = process.getBuiltinModule('module');\nconst load = cr(__filename);\nload('@rasta/testing');\n",
+    },
+    /main\.ts:1 process\.getBuiltinModule: a loader reached through a property/,
+  ],
+  [
+    'process.getBuiltinModule for another code loader',
+    {
+      [`${SVC}/main.ts`]:
+        "export const r = process.getBuiltinModule('node:vm').runInThisContext('1');\n",
+    },
+    /process\.getBuiltinModule: a loader reached through a property/,
+  ],
+  [
+    "process['getBuiltinModule']",
+    { [`${SVC}/main.ts`]: "export const m = process['getBuiltinModule']('module');\n" },
+    /getBuiltinModule'\]: a loader reached through a property/,
+  ],
+  [
+    'getBuiltinModule destructured from process',
+    {
+      [`${SVC}/main.ts`]:
+        "const { getBuiltinModule: g } = process;\nexport const m = g('module');\n",
+    },
+    /destructuring getBuiltinModule/,
+  ],
+  [
+    'createRequire destructured from what getBuiltinModule returned',
+    {
+      [`${SVC}/main.ts`]:
+        "const m = process.getBuiltinModule('module');\nconst { createRequire: cr } = m;\nexport const load = cr(__filename);\n",
+    },
+    /destructuring createRequire/,
+  ],
+  [
+    'mainModule destructured from process',
+    { [`${SVC}/main.ts`]: 'const { mainModule } = process;\nexport const m = mainModule;\n' },
+    /destructuring mainModule/,
+  ],
+  [
+    'mainModule taken by a destructuring assignment',
+    { [`${SVC}/main.ts`]: 'let m;\n({ mainModule: m } = process);\nexport { m };\n' },
+    /destructuring mainModule/,
+  ],
+  [
+    'destructuring by a computed key',
+    { [`${SVC}/main.ts`]: 'const { [String(process.env.K)]: f } = process;\nexport { f };\n' },
+    /destructuring by a computed key/,
+  ],
+  ...[
+    ['a quoted key', "'createRequire'"],
+    ['a computed literal key', "['createRequire']"],
+  ].map(([how, key]) => [
+    `createRequire destructured by ${how} is traced`,
+    {
+      [`${SVC}/main.cjs`]: `const { ${key}: cr } = require('node:module');\nmodule.exports = cr(__filename)('signing');\n`,
+    },
+    /main\.cjs:2 signing reaches packages\/testing/,
+  ]),
+  [
+    'createRequire destructured beside a rest element',
+    {
+      [`${SVC}/main.cjs`]:
+        "const { createRequire, ...rest } = require('node:module');\nmodule.exports = rest;\n",
+    },
+    /only createRequire may be taken from node:module/,
+  ],
+  [
+    'createRequire from a shadowed __filename',
+    {
+      [`${SVC}/config.mjs`]:
+        "import { createRequire } from 'node:module';\nconst __filename = '/elsewhere/x.js';\nexport const m = createRequire(__filename)('./a');\n",
+    },
+    /config\.mjs:3 createRequire for another location/,
+  ],
+  [
+    'createRequire from a reassigned __filename',
+    {
+      [`${SVC}/main.cjs`]:
+        "const { createRequire } = require('node:module');\n__filename = '/elsewhere/x.js';\nmodule.exports = createRequire(__filename)('./a');\n",
+    },
+    /main\.cjs:3 createRequire for another location/,
+  ],
+  [
+    'createRequire from __dirname (the directory, not this file)',
+    {
+      [`${SVC}/main.cjs`]:
+        "const { createRequire } = require('node:module');\nmodule.exports = createRequire(__dirname)('./a');\n",
+    },
+    /createRequire for another location/,
+  ],
+  // Dynamic code: Function reached without its name.
+  [
+    "a function's constructor",
+    {
+      [`${SVC}/main.ts`]:
+        'export const f = (function () {}).constructor(\'return import("@rasta/testing")\')();\n',
+    },
+    /constructor can be Function/,
+  ],
+  [
+    'the async function constructor',
+    {
+      [`${SVC}/main.ts`]:
+        'export const A = Object.getPrototypeOf(async function () {}).constructor;\n',
+    },
+    /constructor can be Function/,
+  ],
+  [
+    'Function handed on',
+    { [`${SVC}/main.ts`]: "const F = Function;\nexport const f = new F('return 1');\n" },
+    /main\.ts:1 the Function constructor/,
+  ],
+  [
+    'globalThis.eval',
+    { [`${SVC}/main.ts`]: "export const r = globalThis.eval('1');\n" },
+    /globalThis\.eval: a code loader/,
+  ],
+  [
+    "the global object's Function by a literal key",
+    { [`${SVC}/main.ts`]: "export const r = (globalThis as any)['Function']('return 1');\n" },
+    /\['Function'\]: a code loader/,
+  ],
+  [
+    'globalThis[name]',
+    { [`${SVC}/main.ts`]: "export const r = globalThis[process.env.K as 'x'];\n" },
+    /computed member access on globalThis/,
+  ],
+  // ESM conditional exports (#514 r3): every condition's target, not only types.
+  ...[
+    ['import', { import: './src/test/runtime.mjs' }],
+    ['node → import', { node: { import: './src/test/runtime.mjs', require: './src/index.cjs' } }],
+    ['default', { default: './src/test/runtime.mjs' }],
+  ].map(([condition, runtime]) => [
+    `the review trigger: an export whose ${condition} condition is a test file`,
+    {
+      'packages/helper/package.json': JSON.stringify({
+        name: '@rasta/helper',
+        exports: { '.': { types: './src/index.ts', ...runtime } },
+      }),
+      'packages/helper/src/test/runtime.mjs': "import '@rasta/testing';\n",
+      [`${SVC}/main.mjs`]: "export * from '@rasta/helper';\n",
+    },
+    /main\.mjs:1 @rasta\/helper reaches test-only packages\/helper\/src\/test\/runtime\.mjs/,
+  ]),
+  [
+    'a subpath pattern export',
+    {
+      'packages/helper/package.json': JSON.stringify({
+        name: '@rasta/helper',
+        exports: {
+          '.': './src/index.cjs',
+          './features/*': { types: './src/*.ts', import: './src/test/*.mjs' },
+        },
+      }),
+      'packages/helper/src/test/x.mjs': 'export {};\n',
+      'packages/helper/src/x.ts': 'export {};\n',
+      [`${SVC}/main.mjs`]: "import '@rasta/helper/features/x';\n",
+    },
+    /@rasta\/helper\/features\/x reaches test-only packages\/helper\/src\/test\/x\.mjs/,
+  ],
+  [
+    'an export target not built yet, under test/',
+    {
+      'packages/helper/package.json': JSON.stringify({
+        name: '@rasta/helper',
+        exports: { '.': { types: './src/index.ts', import: './dist/test/runtime.mjs' } },
+      }),
+      [`${SVC}/main.mjs`]: "import '@rasta/helper';\n",
+    },
+    /reaches test-only packages\/helper\/dist\/test\/runtime\.mjs/,
+  ],
+  [
+    'a package naming itself',
+    {
+      'packages/helper/package.json': JSON.stringify({
+        name: '@rasta/helper',
+        exports: { '.': { types: './src/index.ts', import: './src/test/runtime.mjs' } },
+      }),
+      'packages/helper/src/test/runtime.mjs': 'export {};\n',
+      'packages/helper/src/self.mjs': "import '@rasta/helper';\n",
+    },
+    /packages\/helper\/src\/self\.mjs:1 @rasta\/helper reaches test-only/,
+  ],
+  [
+    '#imports whose import condition is a test file',
+    {
+      'services/svc/package.json': JSON.stringify({
+        name: '@rasta/svc',
+        imports: { '#rt': { types: './src/a.ts', import: './test/rt.mjs' } },
+      }),
+      'services/svc/test/rt.mjs': 'export {};\n',
+      [`${SVC}/main.mjs`]: "import '#rt';\n",
+    },
+    /#rt reaches test-only services\/svc\/test\/rt\.mjs/,
+  ],
+  // A real file, not a package that exists (#514 r3 F2).
+  [
+    'the review trigger: a subpath an installed package does not export',
+    { [`${SVC}/main.ts`]: "export const n = require('@rasta/helper/not-exist');\n" },
+    /@rasta\/helper\/not-exist: an unresolvable package/,
+  ],
+  [
+    'a missing file in a package without exports',
+    { [`${SVC}/main.ts`]: "export const n = require('@rasta/plain/missing.js');\n" },
+    /@rasta\/plain\/missing\.js: an unresolvable package/,
+  ],
+  [
+    'build output no tsconfig compiles',
+    { [`${SVC}/main.ts`]: "export const n = require('@rasta/built/dist/missing.js');\n" },
+    /@rasta\/built\/dist\/missing\.js: an unresolvable package/,
+  ],
+  [
+    'a package.json that does not parse, in the scope',
+    { 'services/svc/src/sub/package.json': '{', 'services/svc/src/sub/x.ts': "import '../a';\n" },
+    /sub\/x\.ts:1 \.\.\/a: .*sub\/package\.json does not parse/,
+  ],
+  [
+    "a dependency's package.json that does not parse",
+    {
+      'services/svc/node_modules/broken/package.json': '{',
+      [`${SVC}/main.ts`]: "import 'broken';\n",
+    },
+    /broken: .*broken\/package\.json does not parse/,
   ],
 ];
 
@@ -607,6 +956,18 @@ for (const [name, files, expected] of escapes) {
     );
   });
 }
+
+test('a link cycle is entered once and adds no problem', (t) => {
+  // Without cycle detection the walk would recurse until the kernel's ELOOP.
+  const { problems } = sourceProblems(fixture(t, { [`${SVC}/loop`]: { link: SVC } }));
+  assert.deepEqual(problems, []);
+});
+
+test('a tsconfig that does not parse is refused, not recovered', (t) => {
+  // TypeScript recovers a config from `{` and reports the syntax error beside its errors.
+  const root = fixture(t, { 'services/svc/tsconfig.extra.json': '{' });
+  assert.throws(() => sourceProblems(root), /tsconfig\.extra\.json/);
+});
 
 test('test-only paths', () => {
   for (const path of [
