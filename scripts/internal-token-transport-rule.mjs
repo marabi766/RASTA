@@ -1,24 +1,29 @@
 /**
  * Header names and form fields that carry a credential, compared lower-cased:
  * the internal token, a user's or client's authorization, a cookie, an API key,
- * and the OAuth form fields that hold a secret or a grant (Q-155).
+ * and the OAuth form fields that hold a secret or a grant (Q-155). A function,
+ * so that internal/token-source can allow this one list to name the internal
+ * token header (eslint.config.mjs).
  */
-const CREDENTIAL_NAMES = new Set([
-  'x-internal-token',
-  'authorization',
-  'proxy-authorization',
-  'cookie',
-  'x-api-key',
-  'api-key',
-  'apikey',
-  'client_secret',
-  'client_assertion',
-  'refresh_token',
-  'code_verifier',
-  'access_token',
-  'subject_token',
-  'password',
-]);
+function credentialNames() {
+  return [
+    'x-internal-token',
+    'authorization',
+    'proxy-authorization',
+    'cookie',
+    'x-api-key',
+    'api-key',
+    'apikey',
+    'client_secret',
+    'client_assertion',
+    'refresh_token',
+    'code_verifier',
+    'access_token',
+    'subject_token',
+    'password',
+  ];
+}
+const CREDENTIAL_NAMES = new Set(credentialNames());
 /** A header value that is itself a credential: `Bearer …`, `Basic …`. */
 const CREDENTIAL_SCHEME = /^(?:bearer|basic)\s/i;
 

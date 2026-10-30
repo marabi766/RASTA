@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isTestOnlyPath } from './testing-dev-only.mjs';
+import { isTestOnlyPath } from './test-only-path.mjs';
+import { sourceProblems } from './testing-dev-only-source.mjs';
 
 /**
  * The internal-token source boundary's lint layer in real workspaces (PR #423
@@ -638,28 +639,33 @@ test('coverage: the exemptions are test-only code, and the rest is held to the r
   // At #503 r2: 1435 on, the rest exempt (specs, test trees) or unreached.
   assert.ok(on.size > 1200, `only ${on.size} files linted with the rule`);
   assert.ok(
-    unlinted.includes('apps/web/e2e/live-session.ts'),
-    'apps/web/e2e is reached by no lint script',
+    unlinted.includes('eslint.config.mjs'),
+    'root config files are reached by no lint script',
   );
 
   // Review F4: an exempt file must not be importable from production. Every
-  // one is test-only by scripts/testing-dev-only.mjs, whose testing/dev-only
-  // sweep refuses any production import of a test-only file.
+  // one is test-only (scripts/test-only-path.mjs), and the source sweep
+  // (scripts/testing-dev-only-source.mjs) refuses any production import of a
+  // test-only file.
   assert.deepEqual(
     [...off].filter((file) => !isTestOnlyPath(file)),
     [],
     'a file exempt from the rule that production code could import',
   );
-  // …and so is every function the rule's allow-list names.
+  // …and every function the rule's allow-list names is test-only too, or a
+  // lint rule in root tooling (scripts/) that only names what it checks.
   const { INTERNAL_TOKEN_SOURCE } = await import(path.join(ROOT, 'eslint.config.mjs'));
   const allow = INTERNAL_TOKEN_SOURCE.flatMap((block) => block.rules?.[RULE]?.[1]?.allow ?? []);
-  assert.ok(allow.length >= 5, 'the allow-list was read');
+  assert.ok(allow.length >= 6, 'the allow-list was read');
   for (const { file } of allow) {
     assert.ok(tracked.includes(file), `${file} is allowed but does not exist`);
-    assert.ok(isTestOnlyPath(file), `${file}: an allowance in production code`);
+    assert.ok(
+      isTestOnlyPath(file) || /^scripts\/[\w-]+-rule\.mjs$/.test(file),
+      `${file}: an allowance in production code`,
+    );
   }
 
-  // Files no lint script reaches (config files, apps/web/e2e, anything an
+  // Files no lint script reaches (root config files, anything an
   // ignore pattern removes) are linted here with the rule itself, without
   // types: fail closed, not a spelling scan.
   const script = `
@@ -690,7 +696,7 @@ test('coverage: the exemptions are test-only code, and the rest is held to the r
   assert.deepEqual(JSON.parse(result.stdout), [], 'move this into a linted path or remove it');
 });
 
-test('review F4: production importing an exempt helper is refused by testing/dev-only', async () => {
+test('review F4: production importing an exempt helper is refused by the source sweep', (t) => {
   // The review's example: a test file exports a minting helper; the rule is
   // off there, and a production caller keeps the type, so the call passes the
   // rule. The import itself is what is refused.
@@ -701,27 +707,29 @@ test('review F4: production importing an exempt helper is refused by testing/dev
       'export const go = (t: InternalTokenService) => mintVia(t);\n',
   };
   lintMarked('services/economic-service', files);
-  const { ESLint } = await import(path.join(ROOT, 'node_modules/eslint/lib/api.js'));
-  const tseslint = (await import(path.join(ROOT, 'node_modules/typescript-eslint/dist/index.js')))
-    .default;
-  const { devOnlyRule } = await import('./testing-dev-only.mjs');
-  const cwd = path.join(ROOT, 'services/economic-service');
-  const results = await new ESLint({
-    cwd,
-    overrideConfigFile: true,
-    overrideConfig: [
-      {
-        files: ['**/*.ts'],
-        languageOptions: { parser: tseslint.parser },
-        plugins: { testing: { rules: { 'dev-only': devOnlyRule } } },
-        rules: { 'testing/dev-only': 'error' },
-      },
-    ],
-  }).lintText(files[`${S}/use.ts`], { filePath: path.join(cwd, `${S}/use.ts`) });
-  assert.deepEqual(
-    results[0].messages.map((message) => [message.ruleId, message.line]),
-    [['testing/dev-only', 2]],
+  // The same two files in a service of a repository in miniature, swept by
+  // scripts/testing-dev-only-source.mjs as CI sweeps this one.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'token-source-f4-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const service = path.join(root, 'services/svc');
+  fs.mkdirSync(path.join(service, S), { recursive: true });
+  fs.writeFileSync(path.join(root, 'package.json'), '{"name":"root","private":true}');
+  fs.writeFileSync(path.join(service, 'package.json'), '{"name":"@rasta/svc"}');
+  fs.writeFileSync(
+    path.join(service, 'tsconfig.json'),
+    JSON.stringify({
+      compilerOptions: { module: 'commonjs', moduleResolution: 'node', noEmit: true },
+      include: ['src/**/*'],
+      exclude: ['**/*.spec.ts', '**/*.test.ts'],
+    }),
   );
+  for (const [file, text] of Object.entries(files)) {
+    fs.writeFileSync(path.join(service, file), text.replace(ISSUER, ''));
+  }
+  const { problems } = sourceProblems(root);
+  assert.deepEqual(problems, [
+    `services/svc/${S}/use.ts:1 ./mint.test reaches test-only services/svc/${S}/mint.test.ts`,
+  ]);
 });
 
 test('lint:scripts runs this file on its own, after every other script test', () => {

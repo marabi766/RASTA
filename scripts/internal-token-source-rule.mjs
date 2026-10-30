@@ -1,6 +1,7 @@
 import path from 'node:path';
 import ts from 'typescript';
-import { isTestOnlyPath, REPO_ROOT } from './testing-dev-only.mjs';
+import { isTestOnlyPath } from './test-only-path.mjs';
+import { REPO_ROOT } from './testing-dev-only.mjs';
 
 /**
  * The internal-token source boundary, lint layer (PR #423 follow-up 1; #503 r2).
@@ -36,17 +37,21 @@ import { isTestOnlyPath, REPO_ROOT } from './testing-dev-only.mjs';
  *
  * Fail closed: without a program (JavaScript, a file no project includes) or
  * on an `any`, an `issue` and a computed key on the issuer or on a value
- * holding the secret are reported. In production code — every path
- * `isTestOnlyPath` (scripts/testing-dev-only.mjs) does not name — so is
+ * holding the secret are reported. In production code — every path that is
+ * neither test-only (`isTestOnlyPath`, scripts/test-only-path.mjs) nor root
+ * tooling (`scripts/`) — so is
  * everything else that would need a type to be cleared: any import of
  * nest-common or of TypeScript source without types, any module loader
  * (`require`, `module.require`, `createRequire`, `import()`) whose specifier
  * is not a constant or that is used other than by calling it, code generation
  * (`eval`, `Function`, `vm`, a `.constructor(…)` call, string timers, any
  * alias of them) and, without types, a method called by a computed name or
- * through `Reflect`. Test-only code (root scripts/, tests/, test trees,
- * packages/testing) is never in an image and no production file may import
- * it (testing/dev-only); there the run-time boundary alone answers loaders.
+ * through `Reflect`. Test-only code (tests/, test trees, packages/testing,
+ * test-runner files) is never in an image and no production file may import
+ * it (scripts/testing-dev-only-source.mjs). Root tooling (`scripts/`) is CI
+ * and operator code, never copied into an image; a production file that
+ * imports one makes it production for that sweep, which then follows it and
+ * refuses its loaders. In both, the run-time boundary alone answers loaders.
  */
 
 const CLIENT_FILE = /(?:^|\/)packages\/nest-common\/src\/http\/internal-http-client\.ts$/;
@@ -54,6 +59,8 @@ const CLIENT_FILE = /(?:^|\/)packages\/nest-common\/src\/http\/internal-http-cli
 const ISSUER_FILE =
   /(?:^|\/)packages\/nest-common\/(?:src\/http\/internal-http-client\.ts|dist\/http\/internal-http-client\.d\.ts)$/;
 const HEADER = 'x-internal-token';
+/** Root CI and operator tooling: neither test-only nor in an image (see above). */
+const ROOT_TOOLING = /^scripts\//;
 const SECRET = secretName();
 const SIGNERS = new Set(['SignJWT', 'CompactSign', 'FlattenedSign', 'GeneralSign']);
 const ISSUANCE_MODULE = /^@rasta\/nest-common(?:\/|$)|(?:^|\/)packages\/nest-common(?:\/|$)/;
@@ -162,7 +169,8 @@ export default {
     const production =
       relativePath.startsWith('..') || path.isAbsolute(relativePath)
         ? true
-        : !isTestOnlyPath(relativePath);
+        : !isTestOnlyPath(relativePath) &&
+          !ROOT_TOOLING.test(relativePath.split(path.sep).join('/'));
     /** Loaders and code generation: refused in production code (see above). */
     const failClosed = (node, what) => {
       if (production) unresolved(node, what);

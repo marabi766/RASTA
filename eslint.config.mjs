@@ -72,6 +72,13 @@ export const INTERNAL_TOKEN_SOURCE = [
               function: 'secretName',
               kinds: ['signer'],
             },
+            // The transport rule lists the header among the credentials it
+            // holds to a redirect-refusing transport (Q-155).
+            {
+              file: 'scripts/internal-token-transport-rule.mjs',
+              function: 'credentialNames',
+              kinds: ['header'],
+            },
           ],
         },
       ],

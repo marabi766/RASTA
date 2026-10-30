@@ -117,8 +117,9 @@ through TypeScript symbols and types, not spelling:
 - **fail closed**: without type information (JavaScript, a file no project
   includes, text that differs from the file on disk), `issue` and a computed
   key on the issuer or on a value holding the secret are refused. In
-  production code (every path `isTestOnlyPath` in
-  `scripts/testing-dev-only.mjs` does not name) the rule also refuses:
+  production code (every path that is neither test-only by `isTestOnlyPath`,
+  `scripts/test-only-path.mjs`, nor root tooling in `scripts/`) the rule also
+  refuses:
   - nest-common or TypeScript source imported without types;
   - any module loader (`require`, `module.require`, `createRequire(…)`, any
     `const` alias of them, `import()`) whose specifier is not a constant. A
@@ -131,9 +132,16 @@ through TypeScript symbols and types, not spelling:
     `.constructor(…)` call, a string timer;
   - without types, a method called by a computed name or through `Reflect`.
 
-  Test-only code (root `scripts/`, `tests/`, test trees, `packages/testing`)
-  is never in an image, and no production file may import it (`testing/dev-only`,
-  PR #514). There the run-time boundary alone answers loaders.
+  Test-only code (`tests/`, test trees, `packages/testing`, test-runner files)
+  is never in an image, and no production file may import it (the source sweep
+  in `scripts/testing-dev-only-source.mjs`, PR #514). Root tooling (`scripts/`)
+  is CI and operator code, not copied into an image: a production file that
+  imports one makes it production for that sweep, which follows it and refuses
+  its loaders. Today the root tooling it follows is the lint configs and their
+  rule modules. In both, the run-time boundary alone answers loaders.
+  `isTestOnlyPath` has one definition, in a module with no loader
+  (`scripts/test-only-path.mjs`), because the lint configs the sweep follows
+  import it through this rule.
 
 Types come from the linted file's own workspace project
 (`scripts/internal-token-parser.mjs`): `tsconfig.test.json` where one exists
@@ -148,16 +156,17 @@ in the E2E workspace's root files, and in root `scripts/`.
 
 ### Every exemption, with its reason
 
-| Config                            | Exemption                                                                                                  | Reason                                                                                       | Why production cannot reach it                                                                                                                 |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| root `INTERNAL_TOKEN_SOURCE`, web | rule `off` for `*.spec.*`, `*.int-spec.ts`, `*.e2e-spec.ts`, `*.test.*`, `test/**`                         | test token factories exercise the services' guards                                           | test-only by `isTestOnlyPath`; `testing/dev-only` refuses any production import of a test-only file, extensionless TypeScript imports included |
-| root, allow `header`              | `send()` in `tests/e2e/src/http.ts`                                                                        | the E2E transport (no nest-common dependency) sets the header behind its redirect hand guard | `tests/` is test-only                                                                                                                          |
-| root, allow `signer`              | `mintInternalToken()` in `tests/e2e/src/internal.ts`                                                       | the E2E harness signs the wire format itself                                                 | `tests/` is test-only                                                                                                                          |
-| root, allow `signer`              | `e2eConfig()` in `tests/e2e/src/env.ts`                                                                    | the harness reads the secret by name from its environment                                    | `tests/` is test-only                                                                                                                          |
-| root, allow `signer`              | `mintTestInternalToken()` in `packages/testing/src/internal-token.ts`                                      | the services' test factories mint here (PR #514)                                             | devDependency only; checked in source, in the production dependency graph and in images (`scripts/testing-dev-only.mjs`)                       |
-| root, allow `signer`              | `secretName()` in `scripts/internal-token-source-rule.mjs`                                                 | the rule names the secret it refuses                                                         | root `scripts/` is test-only                                                                                                                   |
-| root, web, e2e                    | global ignores (`node_modules`, `dist`, `.next`, `.turbo`, `coverage`, `src/generated`, Playwright output) | build output and generated code                                                              | linted by the coverage test below when tracked                                                                                                 |
-| nest-common                       | the client file itself (`internal-http-client.ts`)                                                         | holds the issuer, `mint()` and the header                                                    | it is the boundary                                                                                                                             |
+| Config                            | Exemption                                                                                                  | Reason                                                                                       | Why production cannot reach it                                                                                                                             |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| root `INTERNAL_TOKEN_SOURCE`, web | rule `off` for `*.spec.*`, `*.int-spec.ts`, `*.e2e-spec.ts`, `*.test.*`, `test/**`                         | test token factories exercise the services' guards                                           | test-only by `isTestOnlyPath`; the source sweep refuses any production import of a test-only file, by its resolved target (extensionless imports included) |
+| root, allow `header`              | `send()` in `tests/e2e/src/http.ts`                                                                        | the E2E transport (no nest-common dependency) sets the header behind its redirect hand guard | `tests/` is test-only                                                                                                                                      |
+| root, allow `signer`              | `mintInternalToken()` in `tests/e2e/src/internal.ts`                                                       | the E2E harness signs the wire format itself                                                 | `tests/` is test-only                                                                                                                                      |
+| root, allow `signer`              | `e2eConfig()` in `tests/e2e/src/env.ts`                                                                    | the harness reads the secret by name from its environment                                    | `tests/` is test-only                                                                                                                                      |
+| root, allow `signer`              | `mintTestInternalToken()` in `packages/testing/src/internal-token.ts`                                      | the services' test factories mint here (PR #514)                                             | devDependency only; checked in source, in the production dependency graph and in images (`scripts/testing-dev-only.mjs`)                                   |
+| root, allow `signer`              | `secretName()` in `scripts/internal-token-source-rule.mjs`                                                 | the rule names the secret it refuses                                                         | root tooling; it returns a name, not a capability                                                                                                          |
+| root, allow `header`              | `credentialNames()` in `scripts/internal-token-transport-rule.mjs`                                         | the transport rule lists the header among the credentials it checks (Q-155)                  | root tooling; it returns a name, not a capability                                                                                                          |
+| root, web, e2e                    | global ignores (`node_modules`, `dist`, `.next`, `.turbo`, `coverage`, `src/generated`, Playwright output) | build output and generated code                                                              | linted by the coverage test below when tracked                                                                                                             |
+| nest-common                       | the client file itself (`internal-http-client.ts`)                                                         | holds the issuer, `mint()` and the header                                                    | it is the boundary                                                                                                                                         |
 
 The coverage tests in `scripts/internal-token-source-workspace.test.mjs` derive
 this from ESLint itself, not from directory prefixes. For every tracked JS/TS
@@ -165,10 +174,11 @@ file they ask each lint script's ESLint whether it lints the file, and at which
 level:
 
 - every file linted with the rule off must be test-only;
-- every allowance must name a test-only file;
+- every allowance must name a test-only file or a root lint rule;
 - every file no lint script reaches is linted there with the rule itself,
-  without types and with inline configuration off. These are config files,
-  `apps/web/e2e/**` and ignored paths. This replaces r1's spelling scan, which
+  without types and with inline configuration off. These are root config
+  files and ignored paths (`apps/web/e2e/**` is linted by the portal since
+  PR #492). This replaces r1's spelling scan, which
   the review's generic `mint<T>` helper passed;
 - no production file may hold an inline directive that switches an `internal/`
   rule off, or a blanket `eslint-disable`.
@@ -189,7 +199,7 @@ another.
 | r2 F2: secret by `Reflect.get`, joined, folded, cased or computed name                                                                                                             | D-086: process boundary                        | `r2-f2-secret.ts`; E2E `env.ts` widened                                                         |
 | r2 F2: header by `join`, `toLowerCase`, entries                                                                                                                                    | the client replaces the header (run-time spec) | `r2-f2-header.ts`                                                                               |
 | r2 F3: untyped computed `issue`, split module names, `require`/`eval`/`Function` aliases, `module.require`, `createRequire`, `globalThis.eval`, helper-built specifiers            | `issue()` throws                               | `r2-f3.mjs` (production JavaScript); root scripts keep issuance, header and secret              |
-| r2 F4: exempt helper imported by production; unlinted generic wrapper; ignored paths                                                                                               | `issue()` throws                               | "review F4…" (refused by `testing/dev-only`), both coverage tests                               |
+| r2 F4: exempt helper imported by production; unlinted generic wrapper; ignored paths                                                                                               | `issue()` throws                               | "review F4…" (refused by the source sweep), both coverage tests                                 |
 
 ## Limits
 

@@ -793,3 +793,21 @@ test('a build-output directory is checked the same way, and must hold its entry 
   write(root, { 'server/chunks/1.js': `e("${SIGNER_MARKER}")` });
   assert.deepEqual(checkTree(root, 'BUILD_ID'), ['server/chunks/1.js: contains the test signer']);
 });
+
+test('importing the checker runs no command, whatever argv[1] is; running it does', () => {
+  const url = pathToFileURL(join(REPO_ROOT, 'scripts/testing-dev-only.mjs')).href;
+  // `node -e <script> <argument>`: argv[1] is the argument, not a path. The
+  // token-source lint rule imports this module that way in its coverage test.
+  const imported = spawnSync(
+    process.execPath,
+    ['--input-type=module', '-e', `await import(${JSON.stringify(url)})`, '["not a path"]'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(imported.status, 0, imported.stderr);
+  assert.equal(imported.stderr, '');
+  const run = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts/testing-dev-only.mjs')], {
+    encoding: 'utf8',
+  });
+  assert.equal(run.status, 2);
+  assert.match(run.stderr, /^usage: node scripts\/testing-dev-only\.mjs/);
+});
