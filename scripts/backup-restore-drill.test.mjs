@@ -1473,30 +1473,34 @@ test('a fixture that cannot confirm its processes gone keeps its directory and f
 });
 
 test('a descendant that outlives the command that started it is still the fixture’s', async () => {
-  const directory = ownedDirectory('drill-run-orphan-');
-  try {
-    const pidFile = join(directory, 'descendant');
-    // The shell starts a descendant, lets the owner see it, and exits: from then on the descendant
-    // is re-parented to init and no parent pid leads back to the fixture. Only the identity the
-    // owner retained while the tree was alive can still show whose it is.
-    const result = await runOwned(
-      directory,
-      '/bin/bash',
-      ['-c', `sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; sleep 0.5`],
-      { timeoutMs: 30_000 },
-    );
-    assert.equal(result.status, 0);
-    const descendant = Number(readFileSync(pidFile, 'utf8'));
-    assert.equal(pidAlive(descendant), true);
-    assert.equal(
-      hasLiveProcesses(directory),
-      true,
-      'retained by identity while the tree was alive',
-    );
-    await disposeOwned(directory);
-    await pollUntil(() => !pidAlive(descendant), 'the descendant to be reaped');
-  } finally {
-    await disposeOwned(directory);
+  // In the command's group (found there while it leads it), and in a group of its own (found only
+  // by walking parent pids while the parent lives): either way it is retained by identity.
+  for (const detach of ['', 'setsid ']) {
+    const directory = ownedDirectory('drill-run-orphan-');
+    try {
+      const pidFile = join(directory, 'descendant');
+      // The shell starts a descendant, lets the owner see it, and exits: from then on the descendant
+      // is re-parented to init and no parent pid leads back to the fixture. Only the identity the
+      // owner retained while the tree was alive can still show whose it is.
+      const result = await runOwned(
+        directory,
+        '/bin/bash',
+        ['-c', `${detach}sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; sleep 0.5`],
+        { timeoutMs: 30_000 },
+      );
+      assert.equal(result.status, 0);
+      const descendant = Number(readFileSync(pidFile, 'utf8'));
+      assert.equal(pidAlive(descendant), true);
+      assert.equal(
+        hasLiveProcesses(directory),
+        true,
+        `retained by identity while the tree was alive (${detach || 'same group'})`,
+      );
+      await disposeOwned(directory);
+      await pollUntil(() => !pidAlive(descendant), 'the descendant to be reaped');
+    } finally {
+      await disposeOwned(directory);
+    }
   }
 });
 
@@ -1931,6 +1935,16 @@ test('an unreadable row nobody registered is unknown when it could descend from 
       expect: /state unknown: \[[^\]]*300 \(unreadable row: EACCES\)/,
     },
     {
+      what: 'its parent is a process of the fixture that outlives every signal',
+      unknown: 300,
+      arrange: (system) => {
+        const signal = system.signal;
+        system.signal = () => {};
+        system.restore = () => (system.signal = signal);
+      },
+      expect: /state unknown: \[300 \(unreadable row: EACCES\)\]/,
+    },
+    {
       what: 'it belongs to a stranger (status says init)',
       unknown: undefined,
       arrange: (system) => (system.table.get(300).ppid = 1),
@@ -1977,6 +1991,7 @@ test('an unreadable row nobody registered is unknown when it could descend from 
         `${what}: what cannot be identified is not signalled`,
       );
       // The row ends (nothing is unreadable any more): the stop completes.
+      system.restore?.();
       system.table.delete(300);
       system.unreadable.delete(300);
       system.unreadable.delete(100);

@@ -424,8 +424,7 @@ function sweep(scope) {
     }
   }
   for (const entry of alive) {
-    const info = inspect(entry.pid);
-    const group = classify(entry.pid, entry, info) === 'alive' ? info.pgrp : undefined;
+    const group = inspect(entry.pid).pgrp;
     if (!covered.has(entry.pid) && !covered.has(group)) signalOwned(entry, 'SIGKILL');
   }
 }
