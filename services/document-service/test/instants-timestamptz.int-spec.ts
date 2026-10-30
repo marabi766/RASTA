@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { execFile, spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
@@ -60,7 +61,7 @@ const INSTANTS: Record<string, readonly string[]> = {
 const TEHRAN = 'Asia/Tehran';
 
 /** Rows as the service before the conversion wrote them: UTC wall times, plus the database clock. */
-const SEED = `
+const SEED = eligibilityClockSql`
 INSERT INTO upload_intent (id, organization_id, object_key, document_class, declared_content_type,
                            declared_size_bytes, declared_filename, state, expires_at, consumed_at,
                            consumed_document_id, created_at, created_by)
@@ -292,7 +293,7 @@ describe(`${CONVERSION}: instants survive the conversion, and a non-UTC session 
     );
     const drift = (doc.scanLeaseExpiresAt!.getTime() - (Date.now() + 60_000)) / 1000;
     await utc.client.$executeRawUnsafe(
-      `UPDATE document SET scan_lease_owner = NULL, scan_lease_expires_at = NULL WHERE id = 'DOC_C'`,
+      eligibilityClockSql`UPDATE document SET scan_lease_owner = NULL, scan_lease_expires_at = NULL WHERE id = 'DOC_C'`,
     );
     return drift;
   };

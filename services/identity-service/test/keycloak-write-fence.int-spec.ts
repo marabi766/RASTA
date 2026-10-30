@@ -1,3 +1,4 @@
+import { eligibilityClockWrite } from '@rasta/testing';
 import { writeFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { withDatabasePool } from '@rasta/config';
@@ -41,7 +42,7 @@ import {
   ensureLiveMember,
 } from './helpers';
 import { KeycloakHttpStub, SLOW_ROUND_TRIP_MS, type StubRequest } from './keycloak-http-stub';
-import { recordRegistration } from './identity-fixtures';
+import { dateMembershipWindow, recordRegistration } from './identity-fixtures';
 
 /**
  * D-069 (#402 r1 F1–F4, #381 r3 F1): the durable in-flight fence of every
@@ -157,7 +158,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
   }
 
   async function seed(spec: {
-    memberships: Array<{ in: 'a' | 'b'; roles: string[]; validUntil?: Date }>;
+    memberships: Array<{ in: 'a' | 'b'; roles: string[]; endsInMs?: number }>;
     account?: 'linked' | 'missing-in-keycloak';
   }): Promise<Seeded> {
     const org = tenants();
@@ -165,7 +166,8 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
     mine.add(userId);
     const keycloakId = `kc-${userId.slice(-16).toLowerCase()}`;
     const memberships = spec.memberships.map(() => id('MBR-FN'));
-    const validFrom = new Date(Date.now() - 3_600_000);
+    // Grants as of a minute after the first membership began (the stub's account).
+    let grantedAt = Date.now() - 3_540_000;
     await runUnscoped('test fixture spans organizations', async () => {
       await prisma.client.user.create({
         data: {
@@ -188,12 +190,17 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
             userId,
             organizationId: org[membership.in],
             roles: membership.roles,
-            validFrom: new Date(validFrom.getTime() + index),
-            validUntil: membership.validUntil ?? null,
             createdBy: 'ITEST',
             updatedBy: 'ITEST',
           },
         });
+        // Its window on the database clock that judges it: begun an hour ago (in
+        // order, a millisecond apart), ending `endsInMs` from now or open-ended.
+        const dated = await dateMembershipWindow(prisma, memberships[index]!, {
+          fromMs: -3_600_000 + index,
+          untilMs: membership.endsInMs ?? null,
+        });
+        if (index === 0) grantedAt = dated.validFrom.getTime() + 60_000;
       }
     });
     if (spec.account !== 'missing-in-keycloak') {
@@ -204,7 +211,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         firstName: 'آزمون',
         lastName: 'حصار',
         attributes: {
-          ...(await rowsGrant(userId, validFrom.getTime() + 60_000)),
+          ...(await rowsGrant(userId, grantedAt)),
           rasta_activation: ['REG_FIXTURE'],
         },
       });
@@ -801,7 +808,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         // As the fence pool runs it: its own short transaction, bounded.
         const started = performance.now();
         await fencing.pool.transaction(
-          (fence) => fence.$executeRaw`
+          (fence) => eligibilityClockWrite(fence)`
             INSERT INTO keycloak_write_attempt
                    (attempt_id, user_id, keycloak_id, operation,
                     started_at, deadline_at, takeover_at, next_reassert_at)
@@ -994,9 +1001,9 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const s = await seed({
         memberships: [
           // M1, in b: lapsed before the scan.
-          { in: 'b', roles: ['FLEET_MANAGER'], validUntil: new Date(Date.now() - 60_000) },
+          { in: 'b', roles: ['FLEET_MANAGER'], endsInMs: -60_000 },
           // M2, in a: lapses after the scan began, before the delayed pass writes.
-          { in: 'a', roles: ['ORGANIZATION_ADMIN'], validUntil: new Date(Date.now() + 800) },
+          { in: 'a', roles: ['ORGANIZATION_ADMIN'], endsInMs: 800 },
         ],
       });
       const scanBegan = new Date();
@@ -1019,7 +1026,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const s = await seed({
         memberships: [
           { in: 'a', roles: ['OPERATOR'] },
-          { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() + 700) },
+          { in: 'b', roles: ['DRIVER'], endsInMs: 700 },
         ],
       });
       const lock = holdUserLock(s.userId);
@@ -1044,12 +1051,13 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
 
   describe('fair progress across passes, in the database (#402 r1 F2)', () => {
     it('a failing lapse is deferred in its row: a restarted scanner and another replica wait too, and reach the healthy lapse behind it', async () => {
-      const lapsedAt = new Date(Date.now() - 5_000);
+      // Lapsed five seconds ago by the database clock; `healthy` dated by a later
+      // statement, so it lapsed strictly after `stuck`.
       const stuck = await seed({
-        memberships: [{ in: 'a', roles: ['OPERATOR'], validUntil: lapsedAt }],
+        memberships: [{ in: 'a', roles: ['OPERATOR'], endsInMs: -5_000 }],
       });
       const healthy = await seed({
-        memberships: [{ in: 'a', roles: ['DRIVER'], validUntil: new Date(lapsedAt.getTime() + 1) }],
+        memberships: [{ in: 'a', roles: ['DRIVER'], endsInMs: -4_999 }],
       });
       stub.refuseFor(stuck.keycloakId, 403);
       const these = new Set([stuck.userId, healthy.userId]);
@@ -1089,7 +1097,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const failing = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
       const ok = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
       for (const s of [failing, ok]) {
-        await prisma.client.$executeRaw`
+        await eligibilityClockWrite(prisma.client)`
           INSERT INTO keycloak_write_attempt
                  (attempt_id, user_id, keycloak_id, operation,
                   started_at, deadline_at, takeover_at, next_reassert_at)
@@ -1116,7 +1124,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         memberships: [{ in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] }],
         account: 'missing-in-keycloak',
       });
-      await prisma.client.$executeRaw`
+      await eligibilityClockWrite(prisma.client)`
         INSERT INTO keycloak_write_attempt
                (attempt_id, user_id, keycloak_id, operation,
                 started_at, deadline_at, takeover_at, next_reassert_at)
@@ -1163,7 +1171,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const s = await seed({
         memberships: [
           { in: 'a', roles: ['OPERATOR'] },
-          { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() - 1000) },
+          { in: 'b', roles: ['DRIVER'], endsInMs: -1000 },
         ],
       });
       const own = await newFences();
@@ -1222,7 +1230,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const s = await seed({
         memberships: [
           { in: 'a', roles: ['OPERATOR'] },
-          { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() - 1000) },
+          { in: 'b', roles: ['DRIVER'], endsInMs: -1000 },
         ],
       });
       const slow = stub.client(10_000);
@@ -1582,7 +1590,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
     }
 
     async function dueFence(userId: string, keycloakId: string) {
-      await prisma.client.$executeRaw`
+      await eligibilityClockWrite(prisma.client)`
         INSERT INTO keycloak_write_attempt
                (attempt_id, user_id, keycloak_id, operation,
                 started_at, deadline_at, takeover_at, next_reassert_at)
@@ -1691,7 +1699,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const s = await seed({
         memberships: [
           { in: 'a', roles: ['OPERATOR'] },
-          { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() - 1000) },
+          { in: 'b', roles: ['DRIVER'], endsInMs: -1000 },
         ],
       });
       const stack = await recordedStack();
@@ -1843,7 +1851,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       const s = await seed({
         memberships: [
           { in: 'a', roles: ['OPERATOR'] },
-          { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() - 1000) },
+          { in: 'b', roles: ['DRIVER'], endsInMs: -1000 },
         ],
       });
       const lapsed = s.memberships[1]!;
@@ -2011,7 +2019,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
 
   describe('the backfill drains every fence, linked or not (#402 r2 F3)', () => {
     async function fence(userId: string, keycloakId: string, state: 'due' | 'retry' | 'terminal') {
-      await prisma.client.$executeRaw`
+      await eligibilityClockWrite(prisma.client)`
         INSERT INTO keycloak_write_attempt
                (attempt_id, user_id, keycloak_id, operation,
                 started_at, deadline_at, takeover_at, next_reassert_at,
@@ -2151,7 +2159,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       'a re-assertion counter of %i: deferred by the capped interval, the counter capped',
       async (failures) => {
         const s = await seed({ memberships: [{ in: 'a', roles: ['OPERATOR'] }] });
-        await prisma.client.$executeRaw`
+        await eligibilityClockWrite(prisma.client)`
           INSERT INTO keycloak_write_attempt
                  (attempt_id, user_id, keycloak_id, operation,
                   started_at, deadline_at, takeover_at, next_reassert_at, reassert_failures)
@@ -2170,7 +2178,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
       'a lapse counter of %i: deferred by the capped interval, the counter capped',
       async (failures) => {
         const s = await seed({
-          memberships: [{ in: 'a', roles: ['OPERATOR'], validUntil: new Date(Date.now() - 1000) }],
+          memberships: [{ in: 'a', roles: ['OPERATOR'], endsInMs: -1000 }],
         });
         const membershipId = s.memberships[0]!;
         await runUnscoped(
@@ -2207,7 +2215,7 @@ describe('D-069: every Keycloak write is fenced before it is sent', () => {
         [10, 60],
         [100, -30],
       ] as const) {
-        await prisma.client.$executeRaw`
+        await eligibilityClockWrite(prisma.client)`
           INSERT INTO keycloak_write_attempt
                  (attempt_id, user_id, keycloak_id, operation,
                   started_at, deadline_at, takeover_at, next_reassert_at)
