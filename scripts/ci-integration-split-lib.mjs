@@ -42,7 +42,15 @@
  *     instead of skipping) in a job without a mailpit service container, or a
  *     mailpit container no step of the job reads;
  *   - a test run outside turbo with nothing having built the packages its
- *     suites resolve to their dist.
+ *     suites resolve to their dist;
+ *   - any job, split or not, whose steps' time limits cannot all be spent: the
+ *     limits of its steps that have one, plus the setup allowance for the
+ *     steps that have none (JOB_SETUP_MINUTES), must fit inside the job's own
+ *     `timeout-minutes`, or the job deadline cancels a later step that is
+ *     still within its own limit. A step limit that is not a number of
+ *     minutes, a job with step limits and no declared allowance, and a job
+ *     with no `timeout-minutes` are refused too; and a job whose measured
+ *     runtime needed more than it had (JOB_FLOOR_MINUTES) may not go back.
  *
  * Workflow text (or its parsed object) in, problems out. The one side effect
  * is running the verdict script under bash from a temporary file, memoised per
@@ -105,10 +113,10 @@ const withKafka = (principal, ...commands) => [
   'eval "${kafka_credentials}"',
   ...commands,
 ];
-const coverageGate = (service, env = {}) => ({
+const coverageGate = (service, env = {}, timeout = 8) => ({
   run: withKafka('tests', `pnpm --filter @rasta/${service}-service run test:coverage`),
   env: { ...KAFKA_TESTS, ...databases(service.toUpperCase()), ...env },
-  timeout: 8,
+  timeout,
 });
 const postgresGuard = (command) => ({ run: [command], env: POSTGRES, timeout: 5 });
 
@@ -129,7 +137,8 @@ export const STEP_INVENTORY = Object.freeze({
       ...MAILPIT,
     },
     // Stopgap until the integration step is sharded (owner, 2026-10-24); back to 12 then.
-    timeout: 16,
+    // 21 = ceil(806 s x 1.5 / 60): the slowest of the last 20 green runs took 806 s.
+    timeout: 21,
   },
   'Backup restore SQL on a disposable database': postgresGuard(
     'pnpm run test:backup-restore-drill-pg',
@@ -138,7 +147,8 @@ export const STEP_INVENTORY = Object.freeze({
   'Marketplace coverage gate': coverageGate('marketplace'),
   'Document coverage gate': coverageGate('document', { ...BUCKET, ...SCANNER }),
   'Supplier coverage gate': coverageGate('supplier'),
-  'Construction coverage gate': coverageGate('construction'),
+  // 11 = ceil(429 s x 1.5 / 60): the slowest of the last 20 green runs took 429 s.
+  'Construction coverage gate': coverageGate('construction', {}, 11),
   'Contract coverage gate': coverageGate('contract'),
   'Inventory coverage gate': coverageGate('inventory'),
   'Audit coverage gate': coverageGate('audit'),
@@ -215,6 +225,37 @@ export const ALLOWED_CONDITIONS = Object.freeze([
   },
 ]);
 
+/**
+ * Minutes a job needs for its steps that carry no `timeout-minutes` of their
+ * own (checkout, install, build, migrations, broker start-up, the runner's
+ * set-up and completion): ceil(max x 1.5 / 60), where max is the most any run
+ * of the job took in those steps over the last 20 green CI runs on main and
+ * `mq/train-*` (2026-10-29, GitHub job listings). A job that has step limits
+ * is refused here without an entry, rather than assumed to need no setup.
+ * Measured maxima, in seconds: suites 298, security 309, critical 281,
+ * coverage 310, backup drill 92, migration chain 135 (per shard), migration
+ * guards 253, trivy-db 5.
+ */
+export const JOB_SETUP_MINUTES = Object.freeze({
+  'integration-suites': 8,
+  'integration-security': 8,
+  'integration-coverage-critical': 8,
+  'integration-coverage': 8,
+  'integration-backup-drill': 3,
+  'migration-reversibility-chain': 4,
+  'migration-guards': 7,
+  'trivy-db': 1,
+});
+
+/**
+ * The least `timeout-minutes` a job may have where the runtime itself, not
+ * the sum of its step limits, set it: the slowest of the last 20 green runs
+ * took more than 80 % of the old limit, so the new one is ceil(max x 1.5 / 60).
+ * `quality` took up to 1446 s (old limit 25, 96 %) and cancelled train run
+ * 40936057488; `web-browser` took up to 1462 s (old limit 30, 81 %).
+ */
+export const JOB_FLOOR_MINUTES = Object.freeze({ quality: 37, 'web-browser': 37 });
+
 /** The keys a test step may have: nothing that skips it, forgives it or changes its shell. */
 const STEP_KEYS = new Set(['name', 'run', 'env', 'timeout-minutes']);
 /** The verdict's, which must also name the shell it is run with here. */
@@ -263,6 +304,12 @@ const commandLines = (run) =>
     .map((line) => line.trim())
     .filter((line) => line !== '' && !line.startsWith('#'));
 const isMinutes = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0;
+/**
+ * A budget table's entry for a job id, from the workflow. Only an own entry
+ * counts: `table['constructor']` or `table['__proto__']` is a function or an
+ * object, which makes `sum + setup > limit` false and so accepts the overrun.
+ */
+const budgetEntry = (table, id) => (Object.hasOwn(table, id) ? table[id] : undefined);
 
 export function checkIntegrationSplitText(text) {
   let workflow;
@@ -410,9 +457,71 @@ export function checkIntegrationSplit(workflow) {
     unused('redis' in services, 'REDIS_URL', 'Redis');
     unused('mailpit' in services, 'REQUIRE_MAILPIT', 'Mailpit');
   }
+  problems.push(...jobBudgetProblems(jobs, splitIds));
   for (const [name, where] of seen) {
     if (where.length === 0) problems.push(`no ${SPLIT_PREFIX}* job runs "${name}"`);
     if (where.length > 1) problems.push(`"${name}" runs in more than one job: ${where.join(', ')}`);
+  }
+  return problems;
+}
+
+/**
+ * Every job's cumulative time budget. A step's own `timeout-minutes` only
+ * bounds that step: the steps run one after the other under the job's, so
+ * limits that sum to more than the job's leave a later step cancelled by the
+ * job deadline while it is still within its own limit. The sum of the step
+ * limits plus the setup allowance for the steps without one must fit.
+ */
+export function jobBudgetProblems(
+  jobs,
+  splitIds,
+  setupMinutes = JOB_SETUP_MINUTES,
+  floorMinutes = JOB_FLOOR_MINUTES,
+) {
+  const problems = [];
+  for (const [id, job] of Object.entries(jobs)) {
+    if (!isMapping(job)) continue;
+    const limit = job['timeout-minutes'];
+    // The split jobs and the aggregate are refused by jobLevel() already.
+    if (!isMinutes(limit) && !splitIds.includes(id) && id !== AGGREGATE_JOB) {
+      problems.push(`${id} has no timeout-minutes (a positive number)`);
+    }
+    const floor = budgetEntry(floorMinutes, id);
+    if (floor !== undefined && !isMinutes(floor)) {
+      problems.push(`${id} has a floor in JOB_FLOOR_MINUTES that is not a number of minutes`);
+    } else if (floor !== undefined && isMinutes(limit) && limit < floor) {
+      problems.push(
+        `${id} has timeout-minutes ${limit}, below its ${floor}: its slowest green runs needed it`,
+      );
+    }
+    const steps = Array.isArray(job.steps) ? job.steps.filter(isMapping) : [];
+    const limited = steps.filter((step) => 'timeout-minutes' in step);
+    if (limited.length === 0) continue;
+    const unknown = limited.filter((step) => !isMinutes(step['timeout-minutes']));
+    for (const step of unknown) {
+      problems.push(
+        `${id}: "${step.name ?? step.uses ?? step.run}" has a timeout-minutes that is not a number of minutes, so its share of the job's budget is unknown`,
+      );
+    }
+    if (unknown.length > 0) continue;
+    const sum = limited.reduce((total, step) => total + step['timeout-minutes'], 0);
+    const setup = budgetEntry(setupMinutes, id);
+    if (setup === undefined) {
+      problems.push(
+        `${id} has step time limits (${sum} minutes in all) but no setup allowance in JOB_SETUP_MINUTES`,
+      );
+    } else if (!isMinutes(setup)) {
+      problems.push(
+        `${id} has a setup allowance in JOB_SETUP_MINUTES that is not a number of minutes`,
+      );
+    } else if (isMinutes(limit) && sum + setup > limit) {
+      problems.push(
+        `${id}: its steps' timeout-minutes sum to ${sum} and the steps without one need ${setup} more, ${sum + setup} in all, above the job's timeout-minutes ${limit}`,
+      );
+    }
+  }
+  for (const id of Object.keys({ ...setupMinutes, ...floorMinutes })) {
+    if (!isMapping(jobs[id])) problems.push(`${id} has a declared time budget but is not a job`);
   }
   return problems;
 }
