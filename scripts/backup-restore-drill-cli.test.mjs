@@ -452,7 +452,7 @@ case "$*" in
       *'WITH namespaces AS'*) echo '{"schemas":[{"name":"public","owner":"rasta"}],"relations":[{"name":"public.fixture","owner":"rasta"}],"defaultPrivileges":[]}' ;;
       *'row_to_json(t)'*) echo '{"name":"public.fixture","rows":"1","kind":"application","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' ;;
     esac ;;
-  *'down --volumes'*) ${mode === 'cleanup-write-fails' ? `chmod 755 '${directory}'; ` : ''}touch '${directory}/cleaned' ;;
+  *'down --volumes'*) ${mode === 'cleanup-write-fails' ? `sleep 0.3; chmod 755 '${directory}'; ` : ''}touch '${directory}/cleaned' ;;
 esac
 `,
     { mode: 0o700 },
