@@ -3,6 +3,7 @@ import type { ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
 import { AuthGuard, type AuthGuardOptions } from './auth.guard';
 import { InternalTokenService, type TokenVerifier, type UserClaims } from '../auth/token-verifier';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY } from '../decorators';
 import { runWithContext, tryGetContext } from '../context/request-context';
 import { RastaError } from '../errors/rasta-error';
@@ -76,6 +77,7 @@ function verifierAccepting(token: string): TokenVerifier {
 }
 
 const internalTokens = new InternalTokenService(SECRET, ISSUER, 300);
+const tokenKey: TestInternalTokenKey = { secret: SECRET, issuer: ISSUER, ttlSeconds: 300 };
 
 function guardFor(endpoint: Endpoint, tokenVerifier: TokenVerifier): AuthGuard {
   const options: AuthGuardOptions = {
@@ -127,11 +129,11 @@ const INTERNAL_ENDPOINT: Endpoint = { allowService: ['fleet-service'] };
 const INTERNAL_ENDPOINT_ANY_SERVICE: Endpoint = { allowService: [] };
 
 function relayToken(target = THIS_SERVICE): Promise<string> {
-  return internalTokens.issue('api-gateway', target, 'RELAY');
+  return mintTestInternalToken(tokenKey, 'api-gateway', target, 'RELAY');
 }
 
 function serviceToken(caller = 'fleet-service', target = THIS_SERVICE): Promise<string> {
-  return internalTokens.issue(caller, target, 'SERVICE');
+  return mintTestInternalToken(tokenKey, caller, target, 'SERVICE');
 }
 
 /** A service token bound to one organization by its signed `org_id` claim. */
@@ -140,7 +142,7 @@ function tenantToken(
   caller = 'fleet-service',
   target = THIS_SERVICE,
 ): Promise<string> {
-  return internalTokens.issue(caller, target, 'SERVICE', organizationId);
+  return mintTestInternalToken(tokenKey, caller, target, 'SERVICE', organizationId);
 }
 
 const ORG_A = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YA';
@@ -220,10 +222,19 @@ describe('AuthGuard — service-to-service authentication (ADR-020)', () => {
   });
 
   it('refuses a forged internal token', async () => {
-    const forged = new InternalTokenService(randomBytes(32).toString('hex'), ISSUER, 300);
+    const forgedKey: TestInternalTokenKey = {
+      secret: randomBytes(32).toString('hex'),
+      issuer: ISSUER,
+      ttlSeconds: 300,
+    };
     await expect(
       activate(INTERNAL_ENDPOINT, {
-        'x-internal-token': await forged.issue('fleet-service', THIS_SERVICE, 'SERVICE'),
+        'x-internal-token': await mintTestInternalToken(
+          forgedKey,
+          'fleet-service',
+          THIS_SERVICE,
+          'SERVICE',
+        ),
       }),
     ).rejects.toMatchObject({ code: 'TOKEN_INVALID' });
   });
@@ -245,7 +256,7 @@ describe('AuthGuard — service-to-service authentication (ADR-020)', () => {
   it('reads a token minted before the purpose claim existed as a service call', async () => {
     // Backwards compatibility must fail closed: an absent claim means SERVICE,
     // which still requires @AllowService — not RELAY, which would not.
-    const legacy = await internalTokens.issue('fleet-service', THIS_SERVICE);
+    const legacy = await mintTestInternalToken(tokenKey, 'fleet-service', THIS_SERVICE);
     const claims = await internalTokens.verify(legacy, THIS_SERVICE);
 
     expect(claims.purpose).toBe('SERVICE');
@@ -375,7 +386,13 @@ describe('AuthGuard — signed tenant context for service calls (ADR-035)', () =
     // A relay names a hop, not an actor, so it names no tenant. Honouring one
     // would let the gateway — the component exposed to outside traffic —
     // choose a tenant for a request it is only forwarding.
-    const forged = await internalTokens.issue('api-gateway', THIS_SERVICE, 'RELAY', ORG_B);
+    const forged = await mintTestInternalToken(
+      tokenKey,
+      'api-gateway',
+      THIS_SERVICE,
+      'RELAY',
+      ORG_B,
+    );
 
     const result = await activate(PUBLIC_ENDPOINT, { 'x-internal-token': forged });
 
@@ -385,7 +402,13 @@ describe('AuthGuard — signed tenant context for service calls (ADR-035)', () =
   });
 
   it('still refuses a relay token on an @AllowService endpoint, tenant or not', async () => {
-    const forged = await internalTokens.issue('api-gateway', THIS_SERVICE, 'RELAY', ORG_A);
+    const forged = await mintTestInternalToken(
+      tokenKey,
+      'api-gateway',
+      THIS_SERVICE,
+      'RELAY',
+      ORG_A,
+    );
 
     await expect(activate(INTERNAL_ENDPOINT, { 'x-internal-token': forged })).rejects.toThrow(
       expect.objectContaining({ code: 'UNAUTHENTICATED' }),
@@ -409,8 +432,14 @@ describe('AuthGuard — signed tenant context for service calls (ADR-035)', () =
   });
 
   it('refuses an expired tenant token', async () => {
-    const shortLived = new InternalTokenService(SECRET, ISSUER, 30);
-    const token = await shortLived.issue('fleet-service', THIS_SERVICE, 'SERVICE', ORG_A);
+    const shortLivedKey: TestInternalTokenKey = { secret: SECRET, issuer: ISSUER, ttlSeconds: 30 };
+    const token = await mintTestInternalToken(
+      shortLivedKey,
+      'fleet-service',
+      THIS_SERVICE,
+      'SERVICE',
+      ORG_A,
+    );
 
     // The system clock is moved past the lifetime rather than waited out.
     // `jest.setSystemTime` rather than stubbing `Date.now`: jose reads the

@@ -8,6 +8,7 @@ import {
   type AuthGuardOptions,
   type TokenVerifier,
 } from '@rasta/nest-common';
+import { mintTestInternalToken } from '@rasta/testing';
 import { randomBytes } from 'node:crypto';
 import request from 'supertest';
 import { ulid } from 'ulid';
@@ -52,7 +53,8 @@ const bearer = (claims: TestClaims) =>
   `test.${Buffer.from(JSON.stringify(claims), 'utf8').toString('base64url')}`;
 
 function serviceToken(callerService: string, organizationId: string): Promise<string> {
-  return new InternalTokenService(SECRET, 'rasta-internal', 300).issue(
+  return mintTestInternalToken(
+    { secret: SECRET, issuer: 'rasta-internal', ttlSeconds: 300 },
     callerService,
     SERVICE_NAME,
     'SERVICE',

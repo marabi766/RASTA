@@ -61,6 +61,9 @@ export {
   eligibilityClockTag,
 } from './eligibility-clock';
 
+export { mintTestInternalToken } from './internal-token';
+export type { TestInternalTokenKey } from './internal-token';
+
 export { withRedirectProbe, REDIRECT_CASES } from './redirect-probe';
 export type { RedirectProbe } from './redirect-probe';
 
