@@ -769,6 +769,13 @@ jobs:
           --filter=@rasta/supplier-service...
           --filter=@rasta/audit-service...
 
+      - name: The portal build holds no test-only signer (@rasta/testing)
+        # The portal has no image in this repository; its deployable artifact
+        # is `.next`. Same check as the service images (job `containers`),
+        # on the build output itself; BUILD_ID must exist, so a missing
+        # build fails rather than passes (PR #514 r1 F1).
+        run: node scripts/testing-dev-only.mjs tree apps/web/.next BUILD_ID
+
       - name: Start MinIO and create the document bucket
         # EXP-002 slice 7: the portal attaches a file by having its server ask
         # document-service for a signed URL and put the bytes in object storage
@@ -4768,6 +4775,19 @@ jobs:
           load: true
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: The image holds no test-only signer (@rasta/testing)
+        # PR #514 r1 F1: checked on what the image holds, not on how its
+        # Dockerfile is written. The final filesystem is exported and any
+        # @rasta/testing manifest or store entry, the minter's refusal text or
+        # its name outside TypeScript source fails the job; so does a docker
+        # or tar failure, or an export without the image's entry point. This
+        # job runs wherever an image is built (every image on main, the
+        # affected ones on a merge-train run), so the check holds for every
+        # image before it can be deployed. Node built-ins only: no install.
+        env:
+          IMAGE: rasta/${{ matrix.service }}:${{ github.sha }}
+        run: node scripts/testing-dev-only.mjs image "$IMAGE"
 
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6

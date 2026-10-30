@@ -9,6 +9,7 @@ import {
   type AuthGuardOptions,
   type TokenVerifier,
 } from '@rasta/nest-common';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { AppModule } from '../src/app.module';
 import { ENV } from '../src/tokens';
 import { loadMaintenanceEnv, SERVICE_NAME } from '../src/config/env';
@@ -37,6 +38,11 @@ describe('transfer clearance over HTTP: the bound runs from arrival', () => {
   const org = tenants();
   const secret = `itest-${'x'.repeat(40)}`;
   const tokens = new InternalTokenService(secret, 'rasta-internal', 300);
+  const tokenKey: TestInternalTokenKey = {
+    secret,
+    issuer: 'rasta-internal',
+    ttlSeconds: 300,
+  };
   let app: INestApplication;
   let prisma: PrismaService;
   let now = 0;
@@ -122,7 +128,13 @@ describe('transfer clearance over HTTP: the bound runs from arrival', () => {
     )[0]!.n;
 
   async function clear(assetId: string) {
-    const token = await tokens.issue(CLEARANCE_CALLER, SERVICE_NAME, 'SERVICE', org.a);
+    const token = await mintTestInternalToken(
+      tokenKey,
+      CLEARANCE_CALLER,
+      SERVICE_NAME,
+      'SERVICE',
+      org.a,
+    );
     return request(app.getHttpServer())
       .post(`/v1/internal/assets/${assetId}/transfer-clearance`)
       .set('x-internal-token', token)

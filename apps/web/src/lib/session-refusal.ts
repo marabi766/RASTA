@@ -46,7 +46,8 @@ export const SESSION_PROBE_DEADLINE_MS = 5_000;
  *
  * Bounded: the timer is cleared on every path, the request is aborted at the
  * deadline, and an answer that arrives after it — even from a `fetch` that
- * ignores the abort — is ignored. It never rejects.
+ * ignores the abort — is ignored. The answer's body is never read and is
+ * cancelled on every path. It never rejects.
  */
 export function sessionHasEnded(deadlineMs: number = SESSION_PROBE_DEADLINE_MS): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
@@ -71,7 +72,13 @@ export function sessionHasEnded(deadlineMs: number = SESSION_PROBE_DEADLINE_MS):
           signal: controller.signal,
         }),
       ).then(
-        (response) => finish(response.status === 401),
+        (response) => {
+          // Only the status is read. The body is given up here, on every path
+          // — an answer after the deadline too — so a portal that stalls or
+          // trickles it holds no connection once the timer is cleared (#507 r1 F1).
+          void response.body?.cancel().catch(() => undefined);
+          finish(response.status === 401);
+        },
         () => finish(false),
       );
     } catch {

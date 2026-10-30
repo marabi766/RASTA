@@ -2,6 +2,7 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
+import exchangeDeadline from './scripts/exchange-deadline-rule.mjs';
 import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
 import internalTokenSource from './scripts/internal-token-source-rule.mjs';
 import { typedOrUntypedParser } from './scripts/internal-token-parser.mjs';
@@ -20,9 +21,13 @@ const NO_ZOD_COERCE = [
   },
 ];
 
-/** Both internal-token rules, one plugin object: flat config refuses two under one name. */
+/** The internal rules, one plugin object: flat config refuses two under one name. */
 const internal = {
-  rules: { transport: internalTokenTransport, 'token-source': internalTokenSource },
+  rules: {
+    transport: internalTokenTransport,
+    'token-source': internalTokenSource,
+    'exchange-deadline': exchangeDeadline,
+  },
 };
 
 /**
@@ -160,7 +165,13 @@ const base = tseslint.config(
       '**/test/**',
     ],
     plugins: { internal },
-    rules: { 'internal/transport': 'error' },
+    rules: { 'internal/transport': 'error', 'internal/exchange-deadline': 'error' },
+  },
+  {
+    // The shared boundary is where the timer lives: it is the one place an
+    // abort timer is written, so that no caller has to (PR #507 r1 F2).
+    files: ['**/http/exchange-deadline.ts'],
+    rules: { 'internal/exchange-deadline': 'off' },
   },
   ...INTERNAL_TOKEN_SOURCE,
   {

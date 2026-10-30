@@ -1,3 +1,4 @@
+import { registry } from '@rasta/observability';
 import { withRedirectProbe } from '@rasta/testing';
 import { AllExceptionsFilter, RastaError, isRastaError } from '@rasta/nest-common';
 import {
@@ -288,6 +289,99 @@ describe('a refusal keeps economic-service’s own error code', () => {
     }
   });
 });
+
+describe('one deadline covers the response body too (#502 r1 F1)', () => {
+  const original = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  const TIMEOUT_ENV = { ...ENV, ECONOMIC_REQUEST_TIMEOUT_MS: 30 } as MarketplaceEnv;
+  const refundInput = {
+    orderId: 'ORD_1',
+    transactionId: 'TXN_1',
+    buyerOrganizationId: 'ORG-BUYER',
+    reason: 'cancelled',
+    correlationId: 'corr-1',
+  };
+
+  /** Success headers at once; then part of a body, and the rest never comes. */
+  const stalledBody = (): Response =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"id":'));
+        },
+      }),
+      { status: 200 },
+    );
+
+  it('fails a stalled body as an unavailable service within the deadline, with the signal aborted', async () => {
+    const signals: AbortSignal[] = [];
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      signals.push(init.signal!);
+      // Not wired to the signal, like a transport that ignores the abort.
+      return stalledBody();
+    }) as unknown as typeof fetch;
+    const client = new EconomicClient(TIMEOUT_ENV, recordingTokens().service as never);
+    const started = Date.now();
+
+    await expect(client.refund(refundInput)).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(true);
+  });
+
+  it('keeps the write unresolved: nothing is sent again, and a retry carries the same idempotency key', async () => {
+    const sent: { key?: string }[] = [];
+    let call = 0;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      call += 1;
+      sent.push({ key: (init.headers as Record<string, string>)['idempotency-key'] });
+      return call === 1
+        ? stalledBody()
+        : new Response(JSON.stringify({ id: 'TXN_1', status: 'REFUNDED' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = new EconomicClient(TIMEOUT_ENV, recordingTokens().service as never);
+
+    await expect(client.refund(refundInput)).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+    // The failed attempt was the only request: the client does not retry by itself.
+    expect(sent).toHaveLength(1);
+
+    await expect(client.refund(refundInput)).resolves.toMatchObject({ id: 'TXN_1' });
+    expect(sent).toHaveLength(2);
+    expect(sent[0]!.key).toBeDefined();
+    expect(sent[1]!.key).toBe(sent[0]!.key);
+  });
+
+  it('counts a stalled body as an unreachable call, and still reads a body that ends in time', async () => {
+    const before = await outcomeCount('UNREACHABLE');
+    globalThis.fetch = (async () => stalledBody()) as unknown as typeof fetch;
+    const client = new EconomicClient(TIMEOUT_ENV, recordingTokens().service as never);
+    await expect(client.refund(refundInput)).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+    expect(await outcomeCount('UNREACHABLE')).toBe(before + 1);
+
+    const { impl } = stubFetch({ status: 200, body: { id: 'TXN_1' } });
+    globalThis.fetch = impl as typeof fetch;
+    await expect(client.refund(refundInput)).resolves.toEqual({ id: 'TXN_1' });
+  });
+});
+
+async function outcomeCount(outcome: string): Promise<number> {
+  const metric = await registry.getSingleMetric('rasta_marketplace_economic_calls_total')?.get();
+  return (
+    metric?.values
+      .filter((value) => value.labels.outcome === outcome)
+      .reduce((sum, value) => sum + value.value, 0) ?? 0
+  );
+}
 
 describe('each command reaches the endpoint it names', () => {
   const original = globalThis.fetch;

@@ -6,6 +6,7 @@ import type { Reflector } from '@nestjs/core';
 import { SignJWT } from 'jose';
 import { AuthGuard, type AuthGuardOptions, type ServiceAuthorizationRefusal } from './auth.guard';
 import { InternalTokenService, type TokenVerifier, type UserClaims } from '../auth/token-verifier';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY } from '../decorators';
 import { runWithContext } from '../context/request-context';
 import { RastaError } from '../errors/rasta-error';
@@ -36,8 +37,13 @@ const ORG_HEADER = 'ORG_UNSIGNED_HEADER_SENTINEL';
 const CALLER = 'fleet-service';
 
 const internalTokens = new InternalTokenService(SECRET, ISSUER, 300);
+const tokenKey: TestInternalTokenKey = { secret: SECRET, issuer: ISSUER, ttlSeconds: 300 };
 /** Same issuer and audience, a different key: a forged token. */
-const forger = new InternalTokenService(randomBytes(32).toString('hex'), ISSUER, 300);
+const forgerKey: TestInternalTokenKey = {
+  secret: randomBytes(32).toString('hex'),
+  issuer: ISSUER,
+  ttlSeconds: 300,
+};
 
 interface Endpoint {
   publicReason?: string;
@@ -147,7 +153,8 @@ const serviceHeaders = async (
   organizationId: string | null = ORG_SIGNED,
   extra: Record<string, string> = {},
 ): Promise<Record<string, string>> => ({
-  'x-internal-token': await internalTokens.issue(
+  'x-internal-token': await mintTestInternalToken(
+    tokenKey,
     caller,
     THIS_SERVICE,
     'SERVICE',
@@ -231,7 +238,15 @@ describe('AuthGuard — observing its verified service authorization refusals', 
 
     it('a forged internal token', async () => {
       const { seen, error } = await attempt(
-        { 'x-internal-token': await forger.issue(CALLER, THIS_SERVICE, 'SERVICE', ORG_SIGNED) },
+        {
+          'x-internal-token': await mintTestInternalToken(
+            forgerKey,
+            CALLER,
+            THIS_SERVICE,
+            'SERVICE',
+            ORG_SIGNED,
+          ),
+        },
         { endpoint: {} },
       );
 
@@ -260,7 +275,12 @@ describe('AuthGuard — observing its verified service authorization refusals', 
 
     it('a token minted for another service', async () => {
       const { seen, error } = await attempt({
-        'x-internal-token': await internalTokens.issue(CALLER, 'asset-service', 'SERVICE'),
+        'x-internal-token': await mintTestInternalToken(
+          tokenKey,
+          CALLER,
+          'asset-service',
+          'SERVICE',
+        ),
       });
 
       expect((error as RastaError).status).toBe(401);
@@ -269,7 +289,12 @@ describe('AuthGuard — observing its verified service authorization refusals', 
 
     it('a RELAY token to a non-public endpoint', async () => {
       const { seen, error } = await attempt({
-        'x-internal-token': await internalTokens.issue('api-gateway', THIS_SERVICE, 'RELAY'),
+        'x-internal-token': await mintTestInternalToken(
+          tokenKey,
+          'api-gateway',
+          THIS_SERVICE,
+          'RELAY',
+        ),
       });
 
       expect((error as RastaError).status).toBe(401);
@@ -278,7 +303,14 @@ describe('AuthGuard — observing its verified service authorization refusals', 
 
     it('a RELAY token to a public endpoint', async () => {
       const { seen, allowed } = await attempt(
-        { 'x-internal-token': await internalTokens.issue('api-gateway', THIS_SERVICE, 'RELAY') },
+        {
+          'x-internal-token': await mintTestInternalToken(
+            tokenKey,
+            'api-gateway',
+            THIS_SERVICE,
+            'RELAY',
+          ),
+        },
         { endpoint: { publicReason: 'Self-registration' } },
       );
 

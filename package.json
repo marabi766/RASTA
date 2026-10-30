@@ -6,14 +6,14 @@
   "license": "UNLICENSED",
   "packageManager": "pnpm@11.22.0",
   "engines": {
-    "node": ">=22.0.0",
+    "node": ">=22.18.0",
     "pnpm": ">=10.0.0"
   },
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
     "lint": "turbo run lint && pnpm run lint:scripts",
-    "lint:scripts": "eslint scripts && node --test scripts/internal-token-transport-rule.test.mjs scripts/internal-token-transport-cache.test.mjs scripts/internal-token-transport-workspace.test.mjs scripts/internal-token-source-workspace.test.mjs scripts/no-zod-default-rule.test.mjs",
+    "lint:scripts": "eslint scripts && node --test scripts/internal-token-transport-rule.test.mjs scripts/internal-token-transport-cache.test.mjs scripts/internal-token-transport-workspace.test.mjs scripts/internal-token-source-workspace.test.mjs scripts/no-zod-default-rule.test.mjs scripts/exchange-deadline-rule.test.mjs scripts/testing-dev-only.test.mjs",
     "lint:fix": "turbo run lint -- --fix && eslint scripts --fix",
     "typecheck": "turbo run typecheck",
     "test": "node scripts/run-test-phases.mjs test",
