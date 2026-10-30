@@ -118,10 +118,11 @@ export interface ReturnGoodsClientOptions {
 
 export class ReturnGoodsClient implements ReturnGoodsOwner {
   private readonly logger = new Logger(ReturnGoodsClient.name);
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
 
   constructor(private readonly options: ReturnGoodsClientOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
   }
 
   async shipmentOf(supplierOrganizationId: string, returnRequestId: string) {

@@ -108,3 +108,13 @@ export type {
   MetadataExpectation,
   MetadataMatcher,
 } from './disclosure';
+
+export {
+  globalFetchStub,
+  guardedFetch,
+  guardFetch,
+  guardRequestContext,
+  RedirectRefusedError,
+  REFUSED_REDIRECT_STATUSES,
+} from './guarded-http';
+export type { GuardableRequestContext, GuardedFetch } from './guarded-http';

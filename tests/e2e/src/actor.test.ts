@@ -6,6 +6,7 @@ import { describe, it } from 'node:test';
 import { inspect } from 'node:util';
 import { Actor, SessionToken, until } from './actor.ts';
 import { failureMessage, TransportError, type Fetch } from './http.ts';
+import { keycloakRequest } from './keycloak-transport.ts';
 import { CHECK_STILL_RUNNING, waitFor } from './poll.ts';
 
 /**
@@ -306,54 +307,80 @@ describe('failureMessage', () => {
   });
 });
 
-describe('internal-token redirect rejection', () => {
-  for (const status of [301, 302, 303, 307, 308])
-    for (const sameOrigin of [false, true])
-      for (const method of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const) {
-        it(`${method} ${status} sameOrigin=${sameOrigin} sends one exchange and never forwards credentials`, async () => {
-          let sent = 0;
-          const reached: unknown[] = [];
-          const target = createHttpServer((req, res) => {
-            reached.push(req.headers['x-internal-token']);
-            res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
-          });
-          await new Promise<void>((resolve) => target.listen(0, '127.0.0.1', resolve));
-          const targetUrl = `http://127.0.0.1:${(target.address() as AddressInfo).port}`;
-          const source = createHttpServer((req, res) => {
-            req.resume();
-            if (req.url === '/redirect-target') {
-              reached.push(req.headers['x-internal-token']);
+/**
+ * Q-155: every request `send` carries holds a credential, so none follows a redirect — the
+ * internal token (#423), a user's bearer token, and a Keycloak form grant (a password here).
+ */
+const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
+const SENDERS = {
+  'internal token': (baseUrl: string, method: (typeof METHODS)[number]) =>
+    actor(undefined, baseUrl).call(method, '/v1/internal/x', { internalToken: INTERNAL_TOKEN }),
+  'bearer token': (baseUrl: string, method: (typeof METHODS)[number]) =>
+    actor(undefined, baseUrl).call(method, '/v1/x', {
+      body: method === 'GET' ? undefined : { a: 1 },
+    }),
+  'Keycloak form grant': (baseUrl: string, method: (typeof METHODS)[number]) =>
+    keycloakRequest(
+      { keycloakUrl: baseUrl },
+      {
+        method,
+        path: '/realms/rasta/protocol/openid-connect/token',
+        form: method === 'GET' ? undefined : { grant_type: 'password', password: TOKEN },
+      },
+    ),
+};
+describe('credential redirect rejection', () => {
+  for (const [kind, sender] of Object.entries(SENDERS))
+    for (const status of [301, 302, 303, 307, 308])
+      for (const sameOrigin of [false, true])
+        for (const method of METHODS) {
+          it(`${kind}: ${method} ${status} sameOrigin=${sameOrigin} sends one exchange and never forwards credentials`, async () => {
+            let sent = 0;
+            const reached: unknown[] = [];
+            const target = createHttpServer((req, res) => {
+              reached.push(req.headers);
               res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
-              return;
+            });
+            await new Promise<void>((resolve) => target.listen(0, '127.0.0.1', resolve));
+            const targetUrl = `http://127.0.0.1:${(target.address() as AddressInfo).port}`;
+            const source = createHttpServer((req, res) => {
+              req.resume();
+              if (req.url === '/redirect-target') {
+                reached.push(req.headers);
+                res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
+                return;
+              }
+              sent += 1;
+              assert.equal(req.method, method);
+              if (kind === 'internal token')
+                assert.equal(req.headers['x-internal-token'], INTERNAL_TOKEN);
+              if (kind === 'bearer token')
+                assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
+              res
+                .writeHead(status, {
+                  location: sameOrigin ? '/redirect-target' : `${targetUrl}/redirect-target`,
+                })
+                .end('untrusted');
+            });
+            await new Promise<void>((resolve) => source.listen(0, '127.0.0.1', resolve));
+            try {
+              const baseUrl = `http://127.0.0.1:${(source.address() as AddressInfo).port}`;
+              const error = await sender(baseUrl, method).catch((error: unknown) => error);
+              assert.ok(error instanceof TransportError);
+              assert.equal(error.causeCode, 'REDIRECT');
+              assertNoCredential(everything(error));
+              assert.ok(!everything(error).includes('redirect-target'));
+              assert.ok(!everything(error).includes('untrusted'));
+              assert.equal(sent, 1);
+              assert.deepEqual(reached, []);
+            } finally {
+              for (const server of [source, target]) {
+                server.closeAllConnections();
+                await new Promise<void>((resolve) => server.close(() => resolve()));
+              }
             }
-            sent += 1;
-            assert.equal(req.method, method);
-            assert.equal(req.headers['x-internal-token'], INTERNAL_TOKEN);
-            res
-              .writeHead(status, {
-                location: sameOrigin ? '/redirect-target' : `${targetUrl}/redirect-target`,
-              })
-              .end('untrusted');
           });
-          await new Promise<void>((resolve) => source.listen(0, '127.0.0.1', resolve));
-          try {
-            const baseUrl = `http://127.0.0.1:${(source.address() as AddressInfo).port}`;
-            const error = await actor(undefined, baseUrl)
-              .call(method, '/v1/internal/x', { internalToken: INTERNAL_TOKEN })
-              .catch((error: unknown) => error);
-            assert.ok(error instanceof TransportError);
-            assert.equal(error.causeCode, 'REDIRECT');
-            assertNoCredential(everything(error));
-            assert.equal(sent, 1);
-            assert.deepEqual(reached, []);
-          } finally {
-            for (const server of [source, target]) {
-              server.closeAllConnections();
-              await new Promise<void>((resolve) => server.close(() => resolve()));
-            }
-          }
-        });
-      }
+        }
 });
 
 describe('internal-token non-redirect statuses', () => {
@@ -368,6 +395,22 @@ describe('internal-token non-redirect statuses', () => {
       });
       assert.equal(answer.status, status);
       assert.equal(answer.headers.etag, '"unchanged"');
+    });
+  }
+});
+
+describe('bearer non-redirect statuses', () => {
+  for (const status of [201, 300, 304, 305, 399]) {
+    it(`preserves ${status}, its Location and the request, with redirects manual`, async () => {
+      const transport: Fetch = async (_url, init) => {
+        assert.equal(init?.redirect, 'manual');
+        assert.equal((init?.headers as Record<string, string>).authorization, `Bearer ${TOKEN}`);
+        return new Response(null, { status, headers: { location: '/v1/x/1', etag: '"v1"' } });
+      };
+      const answer = await actor(transport).call('POST', '/v1/x', { body: { a: 1 } });
+      assert.equal(answer.status, status);
+      assert.equal(answer.headers.location, '/v1/x/1');
+      assert.equal(answer.headers.etag, '"v1"');
     });
   }
 });

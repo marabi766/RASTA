@@ -108,6 +108,9 @@ test.describe('a usage write through the live stack', () => {
     const replayStatuses = await usageForm.evaluate(async (element) => {
       const form = element as HTMLFormElement;
       const submit = async (): Promise<number> => {
+        // In the page, not the runner: the browser's own same-origin form post, a browser
+        // flow outside the API transport (Q-155). The one pinned disable (raw-http tests).
+        // eslint-disable-next-line internal/raw-http, internal/transport -- browser form replay
         const response = await fetch(form.action, {
           method: 'POST',
           body: new FormData(form),
