@@ -1,4 +1,4 @@
-import { migratorCredentialsIn, withUtcSession } from '@rasta/config';
+import { migratorCredentialsIn, privilegedDatabaseUrlsIn, withUtcSession } from '@rasta/config';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl } from './helpers';
 
@@ -40,9 +40,11 @@ describe('document-service starts only as its runtime role (D-045)', () => {
   });
 
   it('refuses a DATABASE_URL that names the migrator, which no *_MIGRATOR variable reveals', async () => {
-    // The environment guard has nothing to see: only DATABASE_URL is set…
+    // No variable's name gives it away; the environment guard reads the
+    // URL's user and refuses it first (#421 r1 F2)…
     expect(migratorCredentialsIn({ DATABASE_URL: migratorUrl() })).toEqual([]);
-    // …so the connected role is what stops it, by name and by what it owns.
+    expect(privilegedDatabaseUrlsIn({ DATABASE_URL: migratorUrl() })).toEqual(['DATABASE_URL']);
+    // …and the connected role stops it too, by name and by what it owns.
     await expect(open(migratorUrl()).assertRuntimeRole()).rejects.toThrow(
       /document-service refuses to start: it is connected as rasta_document_migrator, which is a migrator role \(rasta_document_migrator\).*can act as the owner of database rasta_document/,
     );
