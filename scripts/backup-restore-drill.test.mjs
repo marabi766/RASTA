@@ -1367,6 +1367,8 @@ test('the existence probe reads only ESRCH as gone: a process it may not signal 
   assert.equal(signalProbe(process.pid), true);
   // Init exists whoever asks: permitted or EPERM, never "gone".
   assert.equal(signalProbe(1), true);
+  // Anything but ESRCH/EPERM is not an answer about the process: it throws, it is not "gone".
+  assert.throws(() => signalProbe('not a pid'), TypeError);
   // A child that has exited and been reaped is gone.
   assert.equal(signalProbe(spawnSync(process.execPath, ['-e', '']).pid), false);
 });
