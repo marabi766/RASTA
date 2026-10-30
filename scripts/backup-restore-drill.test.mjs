@@ -11,6 +11,7 @@ import {
   symlinkSync,
 } from 'node:fs';
 import * as realFs from 'node:fs';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
@@ -62,7 +63,12 @@ import {
   waitForGroup,
   waitForPid,
 } from './backup-restore-drill-test-support.mjs';
-import { shellLoops, spawnViolations, waitViolations } from './backup-restore-drill-test-shell.mjs';
+import {
+  shellLoops,
+  spawnViolations,
+  stringValues,
+  waitViolations,
+} from './backup-restore-drill-test-shell.mjs';
 
 const SUFFIX = '0123456789abcdef';
 const REF_DB = `drill_ref_${SUFFIX}`;
@@ -1073,6 +1079,137 @@ test('no fixture source polls with a forking shell loop, and none starts a child
   }
 });
 
+// --- the second accepted residual of the owner (header of backup-restore-drill-test-support.mjs):
+// --- a grandchild forked into the background whose parent exits before the owner has looked is not
+// --- provably the fixture's. Nothing here prevents that; it makes the day a fixture does it a
+// --- failing test instead of a silent change.
+//
+// A fixture text is a decoded string value (the guard's own reading) that starts a background
+// command (`&`) or detaches one (the three shell words spelled in DETACH). It must keep its parent
+// alive after that: `exec`, `wait`, a `sleep` of half a second or more, or holdUntil (a bare
+// substitution as the last command: the one wait the guard allows). Detaching and exiting is
+// refused outright. A text that forks and exits is allowed only if acknowledged below by id: each
+// is a stub (or an input to the guard) that the DRILL under test runs in a process group of its
+// own, which the drill reaps and its test asserts, not one the owner starts.
+const DETACH = /\b(?:setsid|nohup|disown)\b/;
+// `setsid -f` forks by itself: what it detaches is the command up to the next separator.
+const SETSID_FORKS = /\bsetsid\s+(?:-[a-z]*f[a-z]*|--fork)\b[^;\n]*/;
+const joinedLines = (text) => text.replace(/\\\r?\n/g, '');
+function forkFindings(text) {
+  const joined = joinedLines(text);
+  let end = -1;
+  // a word, then `&`, but not `&&`, `>&`, `&>`, `|&`, `<&`
+  for (const match of joined.matchAll(/[^\s&>|<]\s*&(?![&>])/g))
+    end = match.index + match[0].length;
+  const forking = SETSID_FORKS.exec(joined);
+  if (forking) end = Math.max(end, forking.index + forking[0].length);
+  const detaches = DETACH.test(joined);
+  // Detached but in the foreground (`nohup cmd`): the parent waits for it.
+  if (end < 0) return detaches ? { detaches, forksAndExits: false } : null;
+  const rest = joined.slice(end);
+  const holds =
+    /\b(?:exec|wait)\b/.test(rest) ||
+    /;\s*\$\{\}\s*$/.test(rest) ||
+    [...rest.matchAll(/\bsleep\s+(\d+(?:\.\d+)?|\$\{\})/g)].some(
+      (match) => match[1] === '${}' || Number(match[1]) >= 0.5,
+    );
+  return { detaches, forksAndExits: !holds };
+}
+const textId = (text) => createHash('sha1').update(joinedLines(text)).digest('hex').slice(0, 10);
+const FORK_AND_EXIT = new Map([
+  [
+    '05d50245fb',
+    'cli docker stub of drill-orphan-test: the drill reaps the group; waitGone(pgid), kill(orphan, 0) ESRCH',
+  ],
+  [
+    '626385143c',
+    'cli docker stub of the parallel resource checks: reapedProcessGroups recorded; descendants polled gone',
+  ],
+  [
+    '5c816d760d',
+    'cli docker stub of --cleanup-from settles every check: descendants polled gone before the exit',
+  ],
+  ['37d527f709', 'an input to waitViolations (what stays allowed); never run'],
+  ['8385c60a4c', 'the runner test: reapedProcessGroups.length 1, becomesGone(descendant)'],
+]);
+function forkingFixtures() {
+  const found = [];
+  const directory = new URL('.', import.meta.url);
+  for (const name of readdirSync(directory).filter((file) => FIXTURE_SOURCE.test(file)))
+    for (const value of stringValues(readFileSync(new URL(`./${name}`, directory), 'utf8'))) {
+      const findings = forkFindings(value);
+      if (findings) found.push({ name, id: textId(value), value, ...findings });
+    }
+  return found;
+}
+
+test('what counts as a fixture that forks into the background, detaches, or exits after doing so', () => {
+  // Built from pieces: this file is a fixture source and is read by the check itself.
+  const amp = '&';
+  const word = (text) => text.replaceAll('·', '');
+  const cases = [
+    [['sleep 600', amp, 'echo $! > f'], { detaches: false, forksAndExits: true }],
+    [['sleep 600', amp, 'echo $! > f; sleep 0.5'], { detaches: false, forksAndExits: false }],
+    [['sleep 600', amp, 'echo $! > f; sleep 0.1'], { detaches: false, forksAndExits: true }],
+    [['sleep 600', amp, 'echo $! > f; exec sleep 9'], { detaches: false, forksAndExits: false }],
+    [['sleep 600', amp, 'wait'], { detaches: false, forksAndExits: false }],
+    [['sleep 600', amp, 'echo $! > f; ${}'], { detaches: false, forksAndExits: false }],
+    [['sleep 600', amp, "echo '${}'"], { detaches: false, forksAndExits: true }],
+    [
+      [word('se·tsid sleep 600 </dev/null >/dev/null 2>'), `1 ${amp} echo 1`],
+      { detaches: true, forksAndExits: true },
+    ],
+    [
+      [word('se·tsid sleep 600 >/dev/null 2>'), `1 ${amp} echo 1; exec sleep 9`],
+      { detaches: true, forksAndExits: false },
+    ],
+    [[word('no·hup sleep 600'), amp], { detaches: true, forksAndExits: true }],
+    [[word('no·hup sleep 600')], { detaches: true, forksAndExits: false }],
+    [[word('se·tsid -f sleep 600; echo done')], { detaches: true, forksAndExits: true }],
+    [[word('se·tsid --fork sleep 600; sleep 5')], { detaches: true, forksAndExits: false }],
+  ];
+  for (const [pieces, expected] of cases)
+    assert.deepEqual(forkFindings(pieces.join(' ')), expected, pieces.join(' '));
+  for (const none of [
+    'a && b',
+    'cmd 2>&1',
+    'cmd &> out',
+    'cmd >&2',
+    'sleep 1; touch done',
+    'exec sleep 30',
+    'waiting for the record to name the group',
+  ])
+    assert.equal(forkFindings(none), null, none);
+  // a continued line is one line to the shell
+  assert.deepEqual(forkFindings('sleep 9 \\\n' + amp + ' echo 1'), {
+    detaches: false,
+    forksAndExits: true,
+  });
+});
+
+test('no drill fixture detaches a descendant and lets its parent go; those that fork and exit are the drill’s own stubs', () => {
+  const found = forkingFixtures();
+  assert.ok(found.length >= 10, `the scan finds the known fixtures (${found.length})`);
+  const detachedAndGone = found.filter((fixture) => fixture.detaches && fixture.forksAndExits);
+  assert.deepEqual(
+    detachedAndGone.map(({ name, id }) => `${name} ${id}`),
+    [],
+    'a fixture that detaches a process and exits leaves nothing the owner could prove is ours',
+  );
+  const unacknowledged = found.filter(
+    (fixture) => fixture.forksAndExits && !FORK_AND_EXIT.has(fixture.id),
+  );
+  assert.deepEqual(
+    unacknowledged.map(({ name, id, value }) => `${name} ${id}: ${JSON.stringify(value)}`),
+    [],
+    'a fixture forks into the background and exits: hold its parent (holdUntil, wait, exec) or acknowledge it in FORK_AND_EXIT with the test that proves its descendant gone',
+  );
+  const stale = [...FORK_AND_EXIT.keys()].filter(
+    (id) => !found.some((fixture) => fixture.id === id && fixture.forksAndExits),
+  );
+  assert.deepEqual(stale, [], 'an acknowledged fixture no longer exists (or no longer exits)');
+});
+
 test('the shell-loop guard reads what the shell would run, not how the text is spelled', async () => {
   // The same shell text written into JS source three ways: a quoted string (escapes written out),
   // a template with raw line breaks, and a template with a substitution after it.
@@ -1377,26 +1514,45 @@ test('the existence probe reads only ESRCH as gone: a process it may not signal 
 // --- Injected process tables: the kernel cannot be made to produce these states on demand.
 function fakeSystem(...rows) {
   const table = new Map(rows.map(([pid, row]) => [pid, { state: 'S', ...row }]));
-  table.set(process.pid, { ppid: 1, pgrp: process.pid, start: '1' });
+  table.set(process.pid, { state: 'S', ppid: 1, pgrp: process.pid, start: '1' });
   const system = {
     table,
     signals: [],
-    unreadable: new Set(),
+    unreadable: new Set(), // stat (and status, unless listed below) answers EACCES
+    statusReadable: new Set(), // ... but these still say who their parent is
     garbage: new Set(),
+    failFrom: new Map(), // pid -> the stat read (1-based, counted in `reads`) from which it answers EACCES
+    reads: new Map(), // pid -> stat reads so far
+    afterRead: undefined, // (pid, n) called after the n-th stat read of pid was answered
+    real: new Set(), // pids whose group a signal also reaches for real (a real child among fake rows)
     asked: [],
     listPids: () => [...table.keys()],
     readProcFile(pid, name) {
       system.asked.push([pid, name]);
       const fail = (code) => Object.assign(new Error(code), { code });
-      if (system.unreadable.has(pid)) throw fail('EACCES');
+      if (name === 'status') {
+        if (system.unreadable.has(pid) && !system.statusReadable.has(pid)) throw fail('EACCES');
+        const row = table.get(pid);
+        if (!row) throw fail('ENOENT');
+        return `Name:\tx\nPPid:\t${row.ppid}\n`;
+      }
+      if (name === 'stat') {
+        const count = (system.reads.get(pid) ?? 0) + 1;
+        system.reads.set(pid, count);
+        if (system.unreadable.has(pid) || count >= (system.failFrom.get(pid) ?? Infinity))
+          throw fail('EACCES');
+      }
       const row = table.get(pid);
       if (!row) throw fail('ENOENT');
       if (name !== 'stat') return row.mentions ?? ''; // environ / cmdline: never evidence of ownership
       if (system.garbage.has(pid)) return 'not a stat line';
-      return `${pid} (a b)) ${[row.state, row.ppid, row.pgrp, ...Array(16).fill(0), row.start].join(' ')} 0`;
+      const text = `${pid} (a b)) ${[row.state, row.ppid, row.pgrp, ...Array(16).fill(0), row.start].join(' ')} 0`;
+      system.afterRead?.(pid, system.reads.get(pid));
+      return text;
     },
     signal(target, name) {
       system.signals.push([target, name]);
+      if (system.real.has(-target)) process.kill(target, name);
       for (const [pid, row] of [...table])
         if (pid === target || (target < 0 && row.pgrp === -target && pid !== process.pid)) {
           if (name === 'SIGKILL') table.delete(pid);
@@ -1464,19 +1620,102 @@ test('a registration without a readable identity is refused, and the pid is neve
   });
 });
 
-test('a spawn whose identity cannot be read fails and the child it started is killed', async () => {
-  const directory = ownedDirectory('drill-owner-spawn-noidentity-');
+// A real child among fake rows: the first stat read of a pid the fake table does not know is the
+// owner asking about the child it just spawned. The read waits (synchronously: nothing else of this
+// process runs, the child does) until the child has started a descendant of its group, then answers
+// "no such process", so the registration fails with that descendant already running.
+function waitSync(file, what) {
+  const cell = new Int32Array(new SharedArrayBuffer(4));
+  for (let waited = 0; !/^\d+\n$/.test(readFileOrEmpty(file)); waited += 20) {
+    assert.ok(waited < 20_000, `${what} never appeared`);
+    Atomics.wait(cell, 0, 0, 20);
+  }
+}
+const readFileOrEmpty = (file) => (existsSync(file) ? readFileSync(file, 'utf8') : '');
+function failingRegistration(directory, { reach, seconds }) {
+  const descendantFile = join(directory, 'descendant');
   const system = fakeSystem();
-  let asked;
-  await withSystem(system, async () => {
-    assert.throws(
-      () => spawnOwned(directory, 'sleep', ['600'], { stdio: 'ignore' }),
-      /no readable identity \(gone\)/,
+  const read = system.readProcFile;
+  system.readProcFile = (pid, name) => {
+    if (name === 'stat' && !system.table.has(pid)) {
+      system.child = pid;
+      if (reach) system.real.add(pid);
+      waitSync(descendantFile, 'the descendant');
+    }
+    return read(pid, name);
+  };
+  // The child starts a descendant in its own group, then holds for a while on its own: whatever a
+  // failed test leaves of either ends by itself.
+  const start = () =>
+    spawnOwned(
+      directory,
+      '/bin/bash',
+      [
+        '-c',
+        `sleep ${seconds} </dev/null >/dev/null 2>&1 & echo $! > '${descendantFile}'; sleep ${seconds}`,
+      ],
+      { stdio: 'ignore' },
     );
-    asked = system.asked[0][0];
+  return { system, start, descendantFile };
+}
+
+test('a spawn whose identity cannot be read fails, and the whole group of the child it started is killed and confirmed empty', async () => {
+  const directory = ownedDirectory('drill-owner-spawn-noidentity-');
+  const { system, start, descendantFile } = failingRegistration(directory, {
+    reach: true,
+    seconds: 30,
   });
-  await pollUntil(() => !pidAlive(asked), 'the unregistered child to be killed through its handle');
+  await withSystem(system, async () => {
+    assert.throws(start, /no readable identity \(gone\)/);
+    // The group was signalled as a group, by the number of the child the owner holds the handle of.
+    assert.deepEqual(system.signals, [[-system.child, 'SIGKILL']]);
+    // Registration failed, so the child has no identity; the group stays on the books until empty.
+    assert.equal(hasLiveProcesses(directory), true, 'a killed group is not yet a confirmed one');
+  });
+  const descendant = Number(readFileSync(descendantFile, 'utf8'));
+  await pollUntil(
+    () => !pidAlive(descendant),
+    'the descendant of the failed registration to die',
+    10_000,
+  );
+  await disposeOwned(directory); // returns only once the group is seen empty
+  assert.equal(existsSync(directory), false);
+});
+
+test('a group killed after a failed registration keeps the stop from confirming until it is empty', async () => {
+  const directory = ownedDirectory('drill-owner-spawn-condemned-');
+  // Nothing reaches the kernel here: the group survives its "kill" and ends on its own, after the
+  // verdict has been read while it was still there.
+  const { system, start, descendantFile } = failingRegistration(directory, {
+    reach: false,
+    seconds: 3,
+  });
+  await withSystem(system, async () => {
+    assert.throws(start, /no readable identity \(gone\)/);
+    await assert.rejects(
+      stopOwned(directory, 300),
+      new RegExp(`groups of a failed registration not yet empty: \\[${system.child}\\]`),
+    );
+    assert.equal(existsSync(directory), true);
+  });
+  // Nothing is signalled to end it: the stub's own sleeps do, and the owner sees it empty.
+  const descendant = Number(readFileSync(descendantFile, 'utf8'));
+  await pollUntil(() => !pidAlive(descendant), 'the survivor to end', 20_000);
+  await pollUntil(() => !hasLiveProcesses(directory), 'the group to be empty', 20_000);
   await disposeOwned(directory);
+});
+
+test('every child the owner starts leads a process group of its own, whatever options were passed', async () => {
+  const directory = ownedDirectory('drill-owner-leads-');
+  try {
+    const child = spawnOwned(directory, 'sleep', ['60'], { stdio: 'ignore' });
+    // A number names a group only if some process has it as its group id: only the child can.
+    assert.equal(groupExists(child.pid), true, 'the child leads its own group');
+    const hidden = spawnOwned(directory, 'sleep', ['60'], { stdio: 'ignore', detached: false });
+    assert.equal(groupExists(hidden.pid), true, 'an explicit detached: false is not honoured');
+  } finally {
+    await disposeOwned(directory);
+  }
 });
 
 test('a group is never signalled by its number once its registered leader is gone', async () => {
@@ -1581,6 +1820,201 @@ test('an unreadable process table is unknown too: the stop retries within its bu
     await disposeOwned(directory);
   });
   assert.equal(existsSync(directory), false);
+});
+
+test('the leader of a group is signalled as a group only while it is the process that was registered', async () => {
+  const rows = () => [
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [120, { ppid: 100, pgrp: 100, start: '12' }], // found by walking parent pids
+  ];
+  // Control run: how many stat reads of the leader precede the first SIGKILL. The last of them is
+  // the re-read that decides between a group signal and signalling members one by one.
+  let readsBeforeKill;
+  {
+    const directory = ownedDirectory('drill-owner-leaderswap-control-');
+    const system = fakeSystem(...rows());
+    const signal = system.signal;
+    system.signal = (target, name) => {
+      if (name === 'SIGKILL') readsBeforeKill ??= system.reads.get(100);
+      signal(target, name);
+    };
+    await withSystem(system, async () => {
+      recordOwned(directory, 100, { leads: true });
+      system.reads.clear();
+      await disposeOwned(directory);
+      assert.deepEqual(killed(system), [-100]);
+    });
+  }
+  assert.ok(readsBeforeKill >= 2, 'the leader is read again before the group is signalled');
+  // The same run, but the process at the leader's number is a different one by the time of that
+  // re-read: other start time, same group number, running.
+  for (const foreign of [
+    { state: 'S', ppid: 1, pgrp: 100, start: '99' },
+    { state: 'Z', ppid: 1, pgrp: 100, start: '10' }, // the registered process, now a zombie
+  ]) {
+    const directory = ownedDirectory('drill-owner-leaderswap-');
+    const system = fakeSystem(...rows());
+    await withSystem(system, async () => {
+      recordOwned(directory, 100, { leads: true });
+      system.reads.clear();
+      system.afterRead = (pid, count) => {
+        if (pid === 100 && count === readsBeforeKill - 1) system.table.set(100, { ...foreign });
+      };
+      await disposeOwned(directory);
+      assert.deepEqual(killed(system), [120], `members by identity only (${foreign.start})`);
+      assert.equal(
+        system.signals.some(([target, name]) => name === 'SIGKILL' && Math.abs(target) === 100),
+        false,
+        'neither the group nor the pid of a process that was not registered is killed',
+      );
+      assert.equal(system.table.get(100)?.start, foreign.start, 'the stranger is still there');
+    });
+  }
+});
+
+test('a registered pid that turns unreadable only on the last look is unknown: kept, retried, then named', async () => {
+  const directory = ownedDirectory('drill-owner-latelook-');
+  const system = fakeSystem([200, { ppid: process.pid, pgrp: 200, start: '20' }]);
+  await withSystem(system, async () => {
+    recordOwned(directory, 200);
+    system.reads.clear();
+    // Readable for the two reads the look makes first (the table, the walk), unreadable for the
+    // one that decides what it reports: a verdict reached before the walk ended is not final.
+    system.failFrom.set(200, 3);
+    await assert.rejects(disposeOwned(directory), /state unknown: \[200 \(EACCES\)\]/);
+    assert.equal(existsSync(directory), true, 'the directory stays');
+    assert.deepEqual(system.signals, [], 'nothing is signalled on an identity it cannot confirm');
+    system.failFrom.clear();
+    await disposeOwned(directory);
+    assert.deepEqual(killed(system), [200]);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('an unreadable row nobody registered is unknown when it could descend from the fixture, and only then', async () => {
+  const fixture = () => [
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }], // registered, readable
+    [300, { ppid: 100, pgrp: 300, start: '30' }], // its child, in a group of its own: not registered
+  ];
+  const cases = [
+    { what: 'its status names a parent the fixture owns', unknown: 300 },
+    {
+      what: 'its status cannot be read either',
+      unknown: 300,
+      arrange: (system) => system.statusReadable.delete(300),
+    },
+    {
+      what: 'its parent chain goes through a row the fixture does not own, to a process it does',
+      unknown: 300,
+      arrange: (system) => {
+        // 335 is only a name in the chain: its own parent (100) is unreadable, so nothing walks to it.
+        system.table.set(335, { state: 'S', ppid: 100, pgrp: 335, start: '33' });
+        system.table.get(300).ppid = 335;
+        system.unreadable.add(100);
+        system.statusReadable.add(100);
+      },
+      expect: /state unknown: \[[^\]]*300 \(unreadable row: EACCES\)/,
+    },
+    {
+      what: 'it belongs to a stranger (status says init)',
+      unknown: undefined,
+      arrange: (system) => (system.table.get(300).ppid = 1),
+    },
+    {
+      what: 'it belongs to a stranger (the chain reaches init through rows nobody here owns)',
+      unknown: undefined,
+      arrange: (system) => {
+        system.table.set(900, { state: 'S', ppid: 901, pgrp: 900, start: '90' });
+        system.table.set(901, { state: 'S', ppid: 1, pgrp: 901, start: '91' });
+        system.table.get(300).ppid = 900;
+      },
+    },
+  ];
+  for (const { what, unknown, arrange, expect } of cases) {
+    const directory = ownedDirectory('drill-owner-rowunknown-');
+    const system = fakeSystem(...fixture());
+    system.unreadable.add(300);
+    system.statusReadable.add(300);
+    await withSystem(system, async () => {
+      recordOwned(directory, 100);
+      arrange?.(system);
+      if (unknown === undefined) {
+        // Not ours: it neither blocks the stop nor is signalled, and the fixture's own is stopped.
+        assert.equal(hasLiveProcesses(directory), true, `${what}: the registered one is alive`);
+        await disposeOwned(directory);
+        assert.equal(system.table.has(300), true, `${what}: left alone`);
+        assert.equal(
+          system.signals.some(([target]) => target === 300 || target === -300),
+          false,
+          what,
+        );
+        return;
+      }
+      await assert.rejects(
+        disposeOwned(directory),
+        expect ?? new RegExp(`state unknown: \\[${unknown} \\(unreadable row: EACCES\\)\\]`),
+        what,
+      );
+      assert.equal(existsSync(directory), true, `${what}: the directory stays`);
+      assert.equal(
+        system.signals.some(([target]) => target === 300 || target === -300),
+        false,
+        `${what}: what cannot be identified is not signalled`,
+      );
+      // The row ends (nothing is unreadable any more): the stop completes.
+      system.table.delete(300);
+      system.unreadable.delete(300);
+      system.unreadable.delete(100);
+      await disposeOwned(directory);
+    });
+    assert.equal(existsSync(directory), false, what);
+  }
+});
+
+test('while anything of the fixture is unknown no group is signalled: only confirmed members, one by one', async () => {
+  for (const [unknownPid, make] of [
+    // a registered member that cannot be read
+    [120, (system) => system.unreadable.add(120)],
+    // a row nobody registered that could descend from the fixture
+    [
+      300,
+      (system) => {
+        system.table.set(300, { state: 'S', ppid: 100, pgrp: 300, start: '30' });
+        system.unreadable.add(300);
+        system.statusReadable.add(300);
+      },
+    ],
+  ]) {
+    const directory = ownedDirectory('drill-owner-unknowngroup-');
+    const system = fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [120, { ppid: 100, pgrp: 100, start: '12' }],
+    );
+    await withSystem(system, async () => {
+      recordOwned(directory, 100, { leads: true });
+      recordOwned(directory, 120);
+      make(system);
+      await assert.rejects(disposeOwned(directory), new RegExp(`state unknown: \\[${unknownPid} `));
+      assert.equal(existsSync(directory), true);
+      assert.equal(
+        system.signals.some(([target]) => target < 0),
+        false,
+        'no group signal while a member of the group cannot be told from a stranger',
+      );
+      assert.equal(killed(system).includes(100), true, 'the confirmed leader, by its pid');
+      assert.equal(system.table.has(100), false);
+      assert.equal(
+        system.signals.some(([target]) => target === unknownPid),
+        false,
+        'the unknown one is not signalled',
+      );
+      // Readable again: stopped by identity, the directory goes.
+      system.unreadable.clear();
+      system.table.delete(300);
+      await disposeOwned(directory);
+      assert.equal(existsSync(directory), false);
+    });
+  }
 });
 
 test('a pid is adopted only if it descends from the fixture; otherwise it is refused and left alone', async () => {

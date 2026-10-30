@@ -112,7 +112,23 @@ export function signalProbe(target) {
 //
 // Inspection has three answers: alive, gone, unknown. Only "no such process" is gone; an unreadable
 // or malformed /proc entry is UNKNOWN, which keeps the ownership and the directory, is retried
-// until the stop budget is spent, and then fails the test loudly.
+// until the stop budget is spent, and then fails the test loudly. Unknown also holds for a row of
+// the process table that nobody registered but that could descend from the fixture (its parent
+// chain is unreadable or leads into what the fixture owns), and it holds back every group signal:
+// a group is never signalled while anything of the fixture cannot be told apart from a stranger.
+//
+// Every child is started as the leader of its own process group, so the owner holds one handle and
+// one group for it. If registering it fails, the group is killed through that handle (the child
+// has not been reaped, so its pid is still its own) and stays on the books until `stopOwned`
+// has seen the group empty.
+//
+// ACCEPTED RESIDUALS (decision D-089, 2026-10-30: this is test-support code on a dedicated host;
+// pidfd / supervisor / cgroup containment is out of scope and nothing here pretends to be it):
+//   (a) PID reuse in the microseconds between the /proc identity re-read and the kill() that
+//       follows it. Node has no pidfd, and pid_max is 4194304.
+//   (b) A detached grandchild that forks and whose parent exits before the first 25 ms sample.
+//       The fixture commands are our own scripts and none does this; a test over their source
+//       ("no fixture detaches", backup-restore-drill.test.mjs) fails if one starts to.
 
 /** How long a stop may take after SIGKILL before a process counts as having survived it. */
 export const ownerSettings = {
@@ -133,7 +149,8 @@ const scopes = new Map();
 export function ownedDirectory(prefix) {
   const directory = mkdtempSync(join(tmpdir(), prefix));
   // pid -> { start, leads }: `start` is the identity, `leads` that the pid leads its own group.
-  scopes.set(directory, { procs: new Map() });
+  // `condemned`: groups killed after their leader could not be registered, until seen empty.
+  scopes.set(directory, { procs: new Map(), condemned: [] });
   return directory;
 }
 
@@ -190,16 +207,22 @@ export function recordOwned(directory, pid, { leads = false } = {}) {
 
 /**
  * `child_process.spawn`, with the child recorded in `directory`'s scope before this returns (and
- * so before it can fail, exit or start anything of its own). A detached child leads its own group.
+ * so before it can fail, exit or start anything of its own). The child always leads a process
+ * group of its own, which is what lets the owner end it, and whatever it has started in that group
+ * by then, through the one handle it holds.
  */
 export function spawnOwned(directory, command, args, options = {}) {
-  scopeOf(directory);
-  const child = spawn(command, args, options);
+  const scope = scopeOf(directory);
+  const child = spawn(command, args, { ...options, detached: true });
   if (child.pid !== undefined) {
     try {
-      recordOwned(directory, child.pid, { leads: Boolean(options.detached) });
+      recordOwned(directory, child.pid, { leads: true });
     } catch (error) {
-      child.kill('SIGKILL'); // through the handle: this process started it, so the pid is surely its own
+      // The event loop has not turned since the spawn, so the child is not reaped and its pid, and
+      // the group it leads, are surely its own: signal the GROUP, through the handle, while the
+      // handle says so. `stopOwned` confirms the group empty before the directory may go.
+      scope.condemned.push(child.pid);
+      if (child.exitCode === null && child.signalCode === null) signalOnce(-child.pid, 'SIGKILL');
       throw error;
     }
   }
@@ -264,12 +287,18 @@ function look(scope) {
   try {
     pids = system.listPids();
   } catch (error) {
-    return { alive: [], unknown: [{ pid: 0, reason: `process table: ${error?.code ?? error}` }] };
+    return {
+      alive: [],
+      unknown: [{ pid: 0, reason: `process table: ${error?.code ?? error}` }],
+      condemned: scope.condemned,
+    };
   }
   const table = new Map();
+  const unreadable = new Map();
   for (const pid of pids) {
     const info = inspect(pid);
     if (info.status === 'alive' && !info.dead) table.set(pid, info);
+    else if (info.status === 'unknown' && pid !== process.pid) unreadable.set(pid, info.reason);
   }
   const children = new Map();
   for (const [pid, info] of table)
@@ -281,13 +310,7 @@ function look(scope) {
       scope.procs.set(pid, { start: info.start, leads: false });
   };
   const frontier = [];
-  const unknown = [];
-  for (const [pid, entry] of scope.procs) {
-    const info = inspect(pid);
-    const state = classify(pid, entry, info);
-    if (state === 'unknown') unknown.push({ pid, reason: info.reason });
-    else if (state === 'alive') frontier.push(pid);
-  }
+  for (const [pid, entry] of scope.procs) if (classify(pid, entry) === 'alive') frontier.push(pid);
   for (const pid of frontier) {
     const entry = scope.procs.get(pid);
     const leader = table.get(pid);
@@ -300,10 +323,54 @@ function look(scope) {
       retain(child);
       frontier.push(child);
     }
+  // The verdict is a fresh one, taken after everything above: what was readable a moment ago and
+  // is not now is unknown, not absent.
   const alive = [];
-  for (const [pid, entry] of scope.procs)
-    if (pid !== process.pid && classify(pid, entry) === 'alive') alive.push({ pid, ...entry });
-  return { alive, unknown };
+  const unknown = [];
+  for (const [pid, entry] of scope.procs) {
+    if (pid === process.pid) continue;
+    const info = inspect(pid);
+    const state = classify(pid, entry, info);
+    if (state === 'alive') alive.push({ pid, ...entry });
+    else if (state === 'unknown') unknown.push({ pid, reason: info.reason });
+  }
+  for (const [pid, reason] of unreadable)
+    if (!scope.procs.has(pid) && couldBeOurs(scope, pid, table, unreadable))
+      unknown.push({ pid, reason: `unreadable row: ${reason}` });
+  // A group killed after its leader could not be registered: present until the kernel says it is not
+  // (a member keeps its number from being reused, so asking is safe; only ESRCH ends the question).
+  scope.condemned = scope.condemned.filter((pgid) => signalProbe(-pgid));
+  return { alive, unknown, condemned: scope.condemned };
+}
+
+/** The parent pid /proc/<pid>/status names, or undefined when that cannot be read either. */
+function statusParent(pid) {
+  try {
+    const parent = /^PPid:\s*(\d+)$/m.exec(ownerSettings.system.readProcFile(pid, 'status'))?.[1];
+    return parent === undefined ? undefined : Number(parent);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether a process-table row nobody registered, and whose stat cannot be read, may descend from
+ * the fixture. Its parent chain decides: unreadable at any hop, or reaching something the fixture
+ * owns (or another unreadable row), means it may; only a chain that is read all the way up to init
+ * through rows the fixture does not own shows it is somebody else's.
+ */
+function couldBeOurs(scope, row, table, unreadable) {
+  let current = row;
+  for (let hops = 0; hops < 64; hops++) {
+    const parent = current === row ? statusParent(current) : table.get(current)?.ppid;
+    if (parent === undefined) return true;
+    if (parent <= 1) return false;
+    const owned = scope.procs.get(parent);
+    if ((owned && classify(parent, owned) !== 'gone') || unreadable.has(parent)) return true;
+    if (!table.has(parent)) return true; // not in the snapshot: cannot be told this round
+    current = parent;
+  }
+  return true;
 }
 
 const signalOnce = (target, name) => {
@@ -322,8 +389,9 @@ function signalOwned(entry, name) {
 /**
  * Freezes everything owned (SIGSTOP, repeated until a look finds nothing new, so that nothing can
  * start another child), then SIGKILLs it. A group is signalled as a group only while its
- * registered leader is still there and still leads it; otherwise its registered members are
- * signalled one by one, by identity: a group number is never signalled on its own authority.
+ * registered leader is still there (same identity, running) and still leads it, and nothing of the
+ * fixture is unknown; otherwise its registered members are signalled one by one, by identity: a
+ * group number is never signalled on its own authority.
  */
 function sweep(scope) {
   const frozen = new Set();
@@ -337,16 +405,27 @@ function sweep(scope) {
   }
   const own = inspect(process.pid).pgrp;
   const covered = new Set();
-  const { alive } = look(scope);
+  const { alive, unknown } = look(scope);
+  // Something of the fixture cannot be told from a stranger right now: a group signal would reach
+  // it unverified, so only the members whose identity is confirmed are signalled, one by one.
+  const groupsAllowed = unknown.length === 0;
   for (const entry of alive) {
     const info = inspect(entry.pid);
-    if (entry.leads && info.status === 'alive' && info.pgrp === entry.pid && entry.pid !== own) {
+    // The identity the snapshot had (start time, still running) AND still leading that group.
+    if (
+      groupsAllowed &&
+      entry.leads &&
+      classify(entry.pid, entry, info) === 'alive' &&
+      info.pgrp === entry.pid &&
+      entry.pid !== own
+    ) {
       covered.add(entry.pid);
       signalOnce(-entry.pid, 'SIGKILL');
     }
   }
   for (const entry of alive) {
-    const group = inspect(entry.pid).pgrp;
+    const info = inspect(entry.pid);
+    const group = classify(entry.pid, entry, info) === 'alive' ? info.pgrp : undefined;
     if (!covered.has(entry.pid) && !covered.has(group)) signalOwned(entry, 'SIGKILL');
   }
 }
@@ -354,17 +433,17 @@ function sweep(scope) {
 /**
  * Kills what the scope owns and returns only once a fresh look finds none of it alive and none of
  * it unknown (a parent killed in this round may have started one more child in the previous one;
- * an unreadable entry is retried, never taken for gone). Throws, naming the survivors, if that
- * does not happen within the budget.
+ * an unreadable entry is retried, never taken for gone), and every group killed at a failed
+ * registration is empty. Throws, naming the survivors, if that does not happen within the budget.
  */
 export async function stopOwned(directory, budgetMs = ownerSettings.stopBudgetMs) {
   const scope = scopeOf(directory);
-  let last = { alive: [], unknown: [] };
+  let last = { alive: [], unknown: [], condemned: [] };
   try {
     await pollUntil(
       () => {
         last = look(scope);
-        if (last.alive.length === 0 && last.unknown.length === 0) return true;
+        if (last.alive.length + last.unknown.length + last.condemned.length === 0) return true;
         if (last.alive.length > 0) sweep(scope);
         return false;
       },
@@ -373,7 +452,7 @@ export async function stopOwned(directory, budgetMs = ownerSettings.stopBudgetMs
     );
   } catch (error) {
     throw new Error(
-      `${error.message}; still alive: [${last.alive.map((entry) => entry.pid)}], state unknown: [${last.unknown.map((entry) => `${entry.pid} (${entry.reason})`)}]`,
+      `${error.message}; still alive: [${last.alive.map((entry) => entry.pid)}], state unknown: [${last.unknown.map((entry) => `${entry.pid} (${entry.reason})`)}], groups of a failed registration not yet empty: [${last.condemned}]`,
     );
   }
 }
@@ -393,7 +472,7 @@ export async function disposeOwned(...paths) {
 /** Whether anything of the fixture is alive, or not provably gone, right now (a read, no signal). */
 export const hasLiveProcesses = (directory) => {
   const seen = look(scopeOf(directory));
-  return seen.alive.length + seen.unknown.length > 0;
+  return seen.alive.length + seen.unknown.length + seen.condemned.length > 0;
 };
 
 /**
