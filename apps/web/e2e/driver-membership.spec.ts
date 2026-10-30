@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import AxeBuilder from '@axe-core/playwright';
+import { guardedFetch } from '@rasta/testing';
 import { expect, test, type Browser, type Page } from './expect';
 
 import { NOT_A_MEMBER_TEXT } from '../src/lib/driver-fields';
@@ -55,9 +56,12 @@ function gatewayUrl(path: string): string {
 
 /** fleet-service's own answer, through the gateway as ORG-DEH-0001's administrator. */
 async function driverRowsOf(userId: string): Promise<{ id: string; userId: string }[]> {
-  const response = await fetch(gatewayUrl(`/v1/drivers?userId=${encodeURIComponent(userId)}`), {
-    headers: { authorization: `Bearer ${await liveAccessToken('orgAdmin')}` },
-  });
+  const response = await guardedFetch(
+    gatewayUrl(`/v1/drivers?userId=${encodeURIComponent(userId)}`),
+    {
+      headers: { authorization: `Bearer ${await liveAccessToken('orgAdmin')}` },
+    },
+  );
   expect(response.status).toBe(200);
   return ((await response.json()) as { items: { id: string; userId: string }[] }).items;
 }

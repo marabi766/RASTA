@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { globalFetchStub } from '@rasta/testing';
 import { KeycloakAdminClient } from '../../src/keycloak/keycloak.client';
 import type { KeycloakWriteFence } from '../../src/keycloak/keycloak-write-fence';
 import type { PlatformAttributes } from '../../src/keycloak/platform-attributes';
@@ -19,7 +20,9 @@ import { assertDisposableTarget } from './live-target-guard';
  * projection's `PUT` is held on a gate **after** its `GET` has returned. While
  * it is held, an administrator — the same Admin API the console uses, on a
  * `fetch` the gate never sees — makes the concurrent change. Then the gate
- * opens and the assertion is on what Keycloak holds.
+ * opens and the assertion is on what Keycloak holds. Both senders refuse every
+ * redirect (Q-155, PR #492 r2 F2): `KEYCLOAK_URL` comes from the environment,
+ * and the admin password grant and bearer must never follow a 307/308.
  *
  * Run by the `e2e` CI job, which has the Keycloak (`pnpm --filter
  * @rasta/identity-service test:keycloak-live`, with
@@ -30,7 +33,11 @@ import { assertDisposableTarget } from './live-target-guard';
  * authentication and one realm read. No user is touched before all pass.
  */
 
-const realFetch = globalThis.fetch;
+/**
+ * The global `fetch` as the suite found it, guarded: the administrator's
+ * requests go out on `fetchStub.send`, never through the gate.
+ */
+const fetchStub = globalFetchStub();
 
 function required(name: string, fallback?: string): string {
   const value = process.env[name]?.trim() || fallback;
@@ -62,23 +69,26 @@ interface KeycloakUser {
 let adminToken: { value: string; expiresAt: number } | undefined;
 
 /** The concurrent writer: the realm administrator, on a `fetch` the gate never holds. */
-async function admin(path: string, init: RequestInit = {}): Promise<Response> {
+async function admin(path: string, init: Omit<RequestInit, 'redirect'> = {}): Promise<Response> {
   if (!adminToken || adminToken.expiresAt < Date.now() + 10_000) {
-    const response = await realFetch(`${config.url}/realms/master/protocol/openid-connect/token`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'password',
-        client_id: 'admin-cli',
-        username: config.admin,
-        password: config.adminPassword,
-      }),
-    });
+    const response = await fetchStub.send(
+      `${config.url}/realms/master/protocol/openid-connect/token`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'password',
+          client_id: 'admin-cli',
+          username: config.admin,
+          password: config.adminPassword,
+        }),
+      },
+    );
     if (!response.ok) throw new Error(`Keycloak refused an admin token: ${response.status}`);
     const body = (await response.json()) as { access_token: string; expires_in: number };
     adminToken = { value: body.access_token, expiresAt: Date.now() + body.expires_in * 1000 };
   }
-  const response = await realFetch(`${config.url}/admin/realms/${config.realm}${path}`, {
+  const response = await fetchStub.send(`${config.url}/admin/realms/${config.realm}${path}`, {
     ...init,
     headers: {
       ...init.headers,
@@ -130,15 +140,15 @@ function holdNextWrite(keycloakId: string) {
   const open = new Promise<void>((resolve) => (release = resolve));
   const parked = new Promise<void>((resolve) => (reached = resolve));
   let held = false;
-  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+  fetchStub.replace(async (input, init) => {
     const url = String(input);
     if (!held && init?.method === 'PUT' && url.endsWith(`/users/${keycloakId}`)) {
       held = true;
       reached();
       await open;
     }
-    return realFetch(input, init);
-  }) as typeof fetch;
+    return fetchStub.send(input, init);
+  });
   return { reached: parked, release };
 }
 
@@ -212,12 +222,12 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
       gate.release();
       await projection;
     } finally {
-      globalThis.fetch = realFetch;
+      fetchStub.restore();
     }
   }
 
   afterEach(() => {
-    globalThis.fetch = realFetch;
+    fetchStub.restore();
   });
 
   afterAll(async () => {

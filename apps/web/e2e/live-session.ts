@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 
 import type { BrowserContext } from './expect';
 import { decodeJwt } from 'jose';
+import { guardedFetch } from '@rasta/testing';
 import { z } from 'zod';
 
 import { SESSION_COOKIE, newCsrfToken, sealSession } from '../src/server/session';
@@ -166,7 +167,7 @@ async function tokensFor(fixture: Fixture): Promise<z.infer<typeof tokenResponse
 
   let refusal = '';
   for (let attempt = 1; attempt <= TOKEN_ATTEMPTS; attempt += 1) {
-    const response = await fetch(`${issuer}/protocol/openid-connect/token`, {
+    const response = await guardedFetch(`${issuer}/protocol/openid-connect/token`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body,
@@ -197,7 +198,7 @@ async function tokensFor(fixture: Fixture): Promise<z.infer<typeof tokenResponse
  */
 async function requireSeededPlatformUser(fixture: Fixture, accessToken: string): Promise<void> {
   const gateway = requiredEnv('API_GATEWAY_URL').replace(/\/+$/, '');
-  const response = await fetch(`${gateway}/v1/users/me`, {
+  const response = await guardedFetch(`${gateway}/v1/users/me`, {
     headers: { authorization: `Bearer ${accessToken}` },
   });
   if (!response.ok) {

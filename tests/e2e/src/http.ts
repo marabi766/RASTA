@@ -20,6 +20,9 @@
  * - **Every request has a deadline it keeps** (Codex r6 on #241). The timeout aborts the
  *   request, and `send` also stops waiting at it, so a transport that ignores the abort cannot
  *   hold a caller — a token grant included — past it.
+ * - **No request follows a redirect** (Q-155). 301/302/303/307/308 is a `TransportError` with
+ *   cause `REDIRECT`, before the body is read, whatever credential the request carries — not
+ *   only an internal token. Every other status (304 included) is an answer as before.
  *
  * Keycloak's calls go through it too (`keycloak-transport.ts`): they carry a password, an admin
  * token or a bearer token, and a misconfigured `KEYCLOAK_URL` would otherwise reach a report.
@@ -201,7 +204,6 @@ export async function send(
   fetchImpl: Fetch = fetch,
   timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<HttpAnswer> {
-  const internal = new Headers(request.headers).has('x-internal-token');
   const deadline = Date.now() + timeoutMs;
   const body =
     request.form !== undefined
@@ -214,7 +216,9 @@ export async function send(
     response = await beforeDeadline(
       fetchImpl(`${request.baseUrl}${request.path}`, {
         method: request.method,
-        ...(internal ? { redirect: 'manual' as const } : {}),
+        // Every request here carries a credential — a bearer or internal token, a password or
+        // client grant, the admin token — so none follows a redirect (Q-155).
+        redirect: 'manual',
         headers: {
           ...request.headers,
           ...(request.form !== undefined
@@ -230,7 +234,7 @@ export async function send(
     throw new TransportError(request, undefined, causeCodeOf(error));
   }
   if (response === DEADLINE_PASSED) throw new TransportError(request, undefined, 'TIMEOUT');
-  if (internal && [301, 302, 303, 307, 308].includes(response.status)) {
+  if ([301, 302, 303, 307, 308].includes(response.status)) {
     void response.body?.cancel().catch(() => undefined);
     throw new TransportError(request, response.status, 'REDIRECT');
   }
