@@ -1,7 +1,12 @@
 import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
-import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  RastaError,
+  tryGetContext,
+  upstreamExchange,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -98,43 +103,25 @@ export class AuditLookupClient {
       }
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    timer.unref?.();
+    // One deadline for the whole exchange, body included; a status that is no
+    // answer is refused at once and its body cancelled, not awaited.
+    return upstreamExchange(
+      AUDIT_SERVICE,
+      this.options.timeoutMs,
+      (signal) => sender.send(url, { method: 'GET', headers, signal }),
+      async (response) => {
+        if (response.status === 404) return null;
+        if (response.status !== 200) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
 
-    try {
-      let response: Response;
-      try {
-        response = await sender.send(url, { method: 'GET', headers, signal: controller.signal });
-      } catch {
-        // No cause attached: a runtime's transport error can quote the URL.
-        throw controller.signal.aborted
-          ? RastaError.upstreamTimeout(AUDIT_SERVICE, this.options.timeoutMs)
-          : RastaError.upstreamUnavailable(AUDIT_SERVICE);
-      }
+        const parsed = auditTargetSchema.safeParse(await response.json());
+        if (!parsed.success) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
 
-      if (response.status === 404) return null;
-      if (response.status !== 200) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
+        // Exactly the record named, or no record at all.
+        const answeredAt = new Date(parsed.data.occurredAt);
+        if (parsed.data.id !== id || answeredAt.getTime() !== occurredAt.getTime()) return null;
 
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch {
-        throw controller.signal.aborted
-          ? RastaError.upstreamTimeout(AUDIT_SERVICE, this.options.timeoutMs)
-          : RastaError.upstreamUnavailable(AUDIT_SERVICE);
-      }
-
-      const parsed = auditTargetSchema.safeParse(body);
-      if (!parsed.success) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
-
-      // Exactly the record named, or no record at all.
-      const answeredAt = new Date(parsed.data.occurredAt);
-      if (parsed.data.id !== id || answeredAt.getTime() !== occurredAt.getTime()) return null;
-
-      return { id: parsed.data.id, organizationId: parsed.data.organizationId, occurredAt };
-    } finally {
-      clearTimeout(timer);
-    }
+        return { id: parsed.data.id, organizationId: parsed.data.organizationId, occurredAt };
+      },
+    );
   }
 }

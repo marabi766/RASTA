@@ -91,3 +91,39 @@ it('a 401 after the deadline, from a fetch that ignores the abort, is ignored', 
   late.resolve({ status: 401 });
   await expect(answer).resolves.toBe(false);
 });
+
+/** Headers now and a body that never ends (jsdom has no `Response`); `cancelled()` says whether it was given up. */
+function stalledAnswer(status: number) {
+  let cancelled = false;
+  const response = {
+    status,
+    body: {
+      cancel: async () => {
+        cancelled = true;
+      },
+    },
+  };
+  return { response, cancelled: () => cancelled };
+}
+
+it.each([401, 204, 503])(
+  'a %s whose body stalls: the answer is judged on its status and the body is cancelled',
+  async (status) => {
+    const watched = stalledAnswer(status);
+    scripted(async () => watched.response);
+    await expect(sessionHasEnded()).resolves.toBe(status === 401);
+    expect(watched.cancelled()).toBe(true);
+  },
+);
+
+it('an answer after the deadline has its body cancelled too', async () => {
+  const watched = stalledAnswer(401);
+  const late = deferred<unknown>();
+  scripted(() => late.promise);
+  const answer = sessionHasEnded();
+  await jest.advanceTimersByTimeAsync(SESSION_PROBE_DEADLINE_MS);
+  late.resolve(watched.response);
+  await expect(answer).resolves.toBe(false);
+  await jest.advanceTimersByTimeAsync(0);
+  expect(watched.cancelled()).toBe(true);
+});

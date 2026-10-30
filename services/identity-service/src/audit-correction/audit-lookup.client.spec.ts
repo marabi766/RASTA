@@ -185,6 +185,66 @@ describe('AuditLookupClient', () => {
     expect(`${error.message} ${JSON.stringify(error)}`).not.toContain(TOKEN);
   });
 
+  // #507 r1 F1: a refusal's body is never awaited, and never left to a peer that stalls.
+  describe('a response is released with its deadline (#507 r1 F1)', () => {
+    /** Headers now, one chunk, and the rest never comes; `cancelled()` says whether it was given up. */
+    function stalled(status: number) {
+      let cancelled = false;
+      const response = new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"id":'));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { status },
+      );
+      return { response, cancelled: () => cancelled };
+    }
+
+    it('a 404 with a stalled body is "no such record" at once, and its body is cancelled', async () => {
+      const watched = stalled(404);
+      const { client, calls } = clientWith(async () => watched.response, 30_000);
+
+      const started = Date.now();
+      await expect(inContext(() => client.findTarget(ID, AT))).resolves.toBeNull();
+
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(watched.cancelled()).toBe(true);
+      expect(calls[0]!.init.signal?.aborted).toBe(true);
+    });
+
+    it.each([500, 503, 401, 403, 302])(
+      'a %s with a stalled body is UPSTREAM_UNAVAILABLE at once, cancelled on every retry',
+      async (status) => {
+        const watched = Array.from({ length: 3 }, () => stalled(status));
+        let next = 0;
+        const { client, calls } = clientWith(async () => watched[next++]!.response, 30_000);
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const started = Date.now();
+          const error = await failure(inContext(() => client.findTarget(ID, AT)));
+          expect(error.code).toBe('UPSTREAM_UNAVAILABLE');
+          expect(Date.now() - started).toBeLessThan(5_000);
+          expect(watched[attempt]!.cancelled()).toBe(true);
+          expect(calls[attempt]!.init.signal?.aborted).toBe(true);
+        }
+      },
+    );
+
+    it('a 200 whose body stalls is a timeout and its request is aborted', async () => {
+      const watched = stalled(200);
+      const { client, calls } = clientWith(async () => watched.response, 30);
+
+      const error = await failure(inContext(() => client.findTarget(ID, AT)));
+
+      expect(error.code).toBe('UPSTREAM_TIMEOUT');
+      expect(calls[0]!.init.signal?.aborted).toBe(true);
+    });
+  });
+
   it('forwards no correlation id or trace it cannot vouch for', async () => {
     const { client, calls } = clientWith(async () => json(404, {}));
 
