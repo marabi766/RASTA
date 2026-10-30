@@ -2224,6 +2224,13 @@ while [ ! -f '${directory}/release' ]; do sleep 0.05; done
     const reportPath = join(directory, 'report.json');
     live = invoke(directory, root, '--report', reportPath);
     await waitFor(join(directory, 'blocked-pgid'));
+    // The run still records its progress for a moment after its child started: snapshot the
+    // directory only once two reads 150 ms apart agree and no write sibling is in flight.
+    for (let last; ; await new Promise((resolve) => setTimeout(resolve, 150))) {
+      const now = readdirSync(directory).sort().join('\n');
+      if (now === last && !/\.tmp$/m.test(now)) break;
+      last = now;
+    }
     const journal = `${reportPath}.recovery-journal.json`;
     const reserved = readFileSync(journal);
     const reportBytes = readFileSync(reportPath);
@@ -2254,6 +2261,9 @@ while [ ! -f '${directory}/release' ]; do sleep 0.05; done
     assert.equal(report.cleanup.passed, true);
   } finally {
     writeFileSync(join(directory, 'release'), '');
+    // The stub polls for `release` inside the directory: let the live run end before it is removed,
+    // or a failed assertion above strands the run and the test process never exits.
+    await live?.done;
     rmSync(directory, { recursive: true, force: true });
   }
 });
