@@ -22,8 +22,11 @@ export interface TestInternalTokenKey {
  * `iat`, `exp` — is the issuer's, held identical by
  * packages/nest-common/src/auth/test-token-parity.spec.ts.
  *
- * This package is a devDependency only (scripts/testing-dev-only.test.mjs),
- * so this signer is absent from every production image.
+ * Production never reaches it (scripts/testing-dev-only.mjs): no production
+ * source imports this package, no production dependency graph resolves to
+ * it, and every image CI builds is checked for it. The refusal text below
+ * carries `SIGNER_MARKER`, which is how that image check recognises a copy of
+ * this function however it was packaged.
  */
 export async function mintTestInternalToken(
   key: TestInternalTokenKey,
@@ -33,7 +36,9 @@ export async function mintTestInternalToken(
   organizationId?: string,
 ): Promise<string> {
   if (key.secret.length < 32) {
-    throw new Error('INTERNAL_TOKEN_SECRET must be at least 32 characters');
+    throw new Error(
+      'INTERNAL_TOKEN_SECRET must be at least 32 characters (rasta test-only internal-token signer)',
+    );
   }
   return new SignJWT({
     svc: callerService,
