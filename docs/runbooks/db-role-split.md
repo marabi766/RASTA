@@ -86,10 +86,30 @@ MEMBER too. Predefined `pg_write_all_data`, `pg_read_all_data`, server-file and 
 roles are explicitly refused; their implicit rights cannot be removed by object REVOKE. Remove
 those memberships administratively, then rerun the checker.
 
+**One rule set (#421 r1 F3).** What the closure may never hold is one declarative file,
+`lib/runtime-forbidden.sql`, read by both sides: the split revokes every ACL entry it lists, the
+checker reports every right it lists that the closure effectively holds. CREATE and TEMPORARY on the
+database; CREATE on a schema; TRUNCATE, REFERENCES (a column's too) and TRIGGER on tables, views,
+materialized views and foreign tables; UPDATE (`setval`) on sequences; any right on the ledger;
+EXECUTE on definer/trigger functions; PUBLIC EXECUTE on migrator functions; default privileges
+(`pg_default_acl`, and the migrator's built-in function default) that would grant any of these to an
+object created later; extension writes. Role attributes, ownership, membership, predefined roles
+and the required runtime EXECUTE list stay the checker's own: no ACL REVOKE repairs them.
+Migration-mode table DML (analytics' read-only baseline, supplier's append-only and audit's
+insert-only tables, reached through a closure role) is not yet in the file: follow-up F3b.
+
 The split revokes each actual ACL entry while temporarily acting as its recorded grantor
 (`SET LOCAL ROLE <grantor>; REVOKE ... CASCADE; RESET ROLE`). PG16 object `GRANTED BY` cannot
-name another current user. This covers table, column, sequence and function grants from third-party
-grant-option holders, across the same MEMBER/PUBLIC holder set. Extension functions remain excluded.
+name another current user. This covers table, column, sequence and routine (`ROUTINE`: functions,
+procedures, aggregates) grants from third-party grant-option holders, across the same MEMBER/PUBLIC
+holder set. Extension functions remain excluded. **It runs to a fixed point (#421 r1 F1):** a CASCADE
+can remove an entry a later REVOKE names, whose grantor then holds nothing and is refused. So the
+live ACL is read again before every REVOKE, one entry at a time, leaves of a grant chain first. PG16
+keeps a column grant made under a table-level grant option when that option is revoked; its grantor
+can no longer revoke it, so the object's owner lends the option for that one REVOKE and takes it back
+in the same transaction. Each REVOKE must remove its own entry, so the loop is bounded by the entries
+found; it fails closed otherwise. Done means the closure holds nothing the file lists, not merely that
+the loop ended: a right only a predefined role gives fails the split, naming it, as it fails the check.
 
 **Extension relations, all services.** The privileged splitter removes writes after application
 grants, including column, PUBLIC and MEMBER-holder grants. Existing SELECT stays for PostGIS reads.
@@ -104,16 +124,21 @@ user definer/trigger/event-trigger function, even if a CREATE OR REPLACE introdu
 and distinct exported runtime/migrator passwords described in § 5. Already-applied migrations do not
 repair lost ACLs by themselves. The declared source of truth is `lib/runtime-function-grants.txt`:
 
-- Economic: `commission_rule_scope_key(text,"BusinessLine","TransactionType")`,
-  `commission_rule_scope_change(text,"BusinessLine","TransactionType")`,
-  `commission_pricing_scope_lock(text,"BusinessLine","TransactionType")` (20261016120000:208-210).
-- Procurement: `demand_aggregation_digest_range(text,text,text,text,integer)` (20261017120000:120).
+- Economic: `commission_rule_scope_key(text,public."BusinessLine",public."TransactionType")`,
+  `commission_rule_scope_change(…)`, `commission_pricing_scope_lock(…)`, same types
+  (migration `20261016120000_commission_business_lines`, lines 208-210).
+- Procurement: `demand_aggregation_digest_range(text,text,text,text,integer)`
+  (migration `20261017120000_aggregation_window_sweep`, line 120).
 
-All are in `public`. The splitter idempotently restores these existing migration grants on every run,
-only after verifying migrator ownership and SECURITY INVOKER/non-trigger/non-extension definition.
-Missing signatures during pre-migration bootstrap are skipped; the post-migration checker requires
-every signature and effective runtime EXECUTE. Unsafe definitions refuse repair and require operator
-investigation. Run the checker before/after repair, then exercise commission pricing **and rule changes**
+All are in `public`; each line names its creating migration, and types are schema-qualified so the
+DBA's `search_path` decides nothing. The splitter reads every line (the last one too) and refuses a
+malformed one; it idempotently restores these existing migration grants on every run (`GRANT EXECUTE
+ON ROUTINE`), only after verifying migrator ownership and SECURITY INVOKER/non-trigger/non-extension
+definition. A missing signature is skipped only while its creating migration is not recorded as
+applied in `public._prisma_migrations` (pre-migration bootstrap, or a pending, failed or rolled-back
+one: the migration grants EXECUTE itself). Recorded as applied, it refuses repair (#421 r1 F5);
+the post-migration checker requires every signature and effective runtime EXECUTE. Unsafe
+definitions refuse repair and require operator investigation. Run the checker before/after repair, then exercise commission pricing **and rule changes**
 and procurement trigger-driven digest work with the real runtime logins before restarting services.
 
 Why the allowed declared-list path instead of a new grant migration: docs/23 D-045 already uses a
@@ -148,21 +173,29 @@ Default Privileges حق DML نقش اجرا را به ارث می‌برد — �
 
 ## ۳. اعتبار مهاجر کجاست — هرگز در محیط سرویس
 
-اعتبار مهاجر (`DATABASE_URL_<SVC>_MIGRATOR`، `POSTGRES_PASSWORD_<SVC>_MIGRATOR`) **در `.env` نیست**: در
+اعتبار مهاجر (`DATABASE_URL_<SVC>_MIGRATOR`، `POSTGRES_PASSWORD_<SVC>_MIGRATOR`) و رمز Superuser
+(`POSTGRES_SUPERUSER_PASSWORD`؛ پیش‌فرضش در `docker-compose.yml` است و مقدار دیگر را در Shellِ `pnpm infra:up`
+export کن) **در `.env` نیستند**؛ اعتبار مهاجر در
 `.env.migrator.example` است (کپی محلی: `.env.migrator`، git-ignored). `.env` را `start` و `dev` همهٔ سرویس‌ها بار
 می‌کنند؛ `.env.migrator` را فقط ابزار Migration (`db:migrate`/`db:migrate:dev` → `scripts/prisma.mjs`)، کانتینر postgres
 در Compose (`env_file`) و Suiteهای یکپارچگی (برای پاک‌سازی با اتصال مالک) می‌خوانند. هر سرویس در `main.ts`، پیش از بارکردن
-هر چیز، `assertNoMigratorCredentials` (`@rasta/config`) را صدا می‌زند و اگر **هر** متغیر `*_MIGRATOR` در محیطش باشد بالا
-نمی‌آید (فقط نام متغیر را می‌گوید، هرگز مقدار را؛ آزمون: `pnpm test:boot-guard` روی `dist/main.js` هر سرویس).
+هر چیز، `assertNoMigratorCredentials` (`@rasta/config`) را صدا می‌زند و بالا نمی‌آید اگر در محیطش (۱) **مقدار** هر
+متغیری، با هر نامی، یک URL ‏`postgres://`/`postgresql://` باشد که کاربرش یکی از نقش‌های اجرای سرویس‌ها (`rasta_<svc>`) نیست —
+URL مهاجر، Superuser، `TEST_ANALYTICS_ADMIN_URL` و حتی `DATABASE_URL`ی که مهاجر را نام ببرد؛ URL ناخوانا یا بی‌کاربر هم رد
+می‌شود — یا (۲) **نام** متغیر اعتباری بی‌URL را برساند: `*_MIGRATOR`، `POSTGRES_SUPERUSER_PASSWORD`، `POSTGRES_PASSWORD`،
+`PGPASSWORD`، `TEST_*_ADMIN_URL`، `DATABASE_URL_*_{ADMIN,OWNER,DBA,ROOT,SUPERUSER}` (#421 r1 F2). فقط نام‌های فهرست‌شده را
+می‌گوید و بقیه را می‌شمارد، هرگز مقدار را؛ آزمون: `pnpm test:boot-guard` روی `dist/main.js` هر سرویس، که `.env.example` و
+محیط هر گام CI که سرویسی را بالا می‌آورد را هم می‌پذیرد.
 `scripts/prisma.mjs` برای سرویس تقسیم‌شده بی URL مهاجر رد می‌کند و به URL اجرا برنمی‌گردد. `pnpm infra:up` اگر `.env`ِ
 قدیمی هنوز اعتبار مهاجر داشته باشد هشدار می‌دهد: آن‌ها را به `.env.migrator` ببر و از `.env` پاک کن.
 
-**نقشی که واقعاً وصل شده.** `DATABASE_URL`ی که خودش مهاجر را نام ببرد هیچ متغیر `*_MIGRATOR`ی ندارد. پس هر سرویس تقسیم‌شده
+**نقشی که واقعاً وصل شده.** نقشی که نامش نقش اجراست ولی مالک است یا `CREATE` دارد در هیچ URLی پیدا نیست. پس هر سرویس تقسیم‌شده
 (و audit) نخستین کارِ `AppModule.onModuleInit` را `PrismaService.assertRuntimeRole()` می‌کند — بررسی مشترک
 `@rasta/nest-common` (`runtime-role.ts`) که از Catalogue می‌پرسد و بالا نمی‌آید اگر نقش وصل‌شده (مستقیم یا با عضویت)
 Superuser باشد، نامش (`current_user` یا `session_user`) به `_migrator` ختم شود، مالک پایگاه داده، Schemaی غیرسیستمی یا
 هر Relationی باشد، روی پایگاه داده یا Schemaی `CREATE` داشته باشد، یا `CREATEDB`/`CREATEROLE`/`BYPASSRLS` داشته باشد.
-آزمون زنده: `test/startup-role.int-spec.ts` هر سرویس (URL مهاجر در جای `DATABASE_URL` → رد).
+آزمون زنده: `test/startup-role.int-spec.ts` هر سرویس (URL مهاجر در جای `DATABASE_URL` → رد)، و در CI
+`scripts/runtime-preflight.e2e.mjs`: URL مهاجر → ردِ نگهبان محیط؛ نقش اجرا با `CREATE` روی Schemaاش → ردِ Preflight.
 
 **پیش از Nest.** Nest هوک `onModuleInit` هر Provider را پیش از `AppModule` اجرا می‌کند و Consumer یا Timer در هوک خودش
 شروع می‌شود؛ پس بررسی در `AppModule` به‌تنهایی دیر است — Consumer می‌توانست با اتصال مالک به گروهش بپیوندد و کار Commit
