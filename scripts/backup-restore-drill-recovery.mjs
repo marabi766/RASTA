@@ -857,10 +857,13 @@ export function reserveRunArtifacts(reportPath, { id }, { fs = {} } = {}) {
       /* never created */
     }
   };
-  // Exclusive: a path somebody else holds fails here and is left alone; a path this call created
-  // and could not finish is removed again.
+  // Exclusive: a path somebody else holds fails at the open and is left alone (nothing of ours
+  // exists yet). From the open on, the path is this call's: the write, the fsync and the close are
+  // all inside one rollback boundary, so any failure (a close that reports EIO included) removes
+  // what this call created. A failed close is not retried; every other failure closes once more.
   const create = (path, contents) => {
     const fd = open(path, 'wx', 0o600);
+    let closing = false;
     try {
       if (contents) {
         const bytes = Buffer.from(contents);
@@ -871,11 +874,17 @@ export function reserveRunArtifacts(reportPath, { id }, { fs = {} } = {}) {
         }
         sync(fd);
       }
+      closing = true;
+      close(fd);
     } catch (error) {
+      if (!closing)
+        try {
+          close(fd);
+        } catch {
+          /* the error that started the rollback is the one to report */
+        }
       remove(path);
       throw error;
-    } finally {
-      close(fd);
     }
   };
   try {

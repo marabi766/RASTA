@@ -1166,3 +1166,124 @@ test('reserving: two contenders for one journal path, whoever is second is refus
     );
     assert.deepEqual(readdirSync(root), []);
   }));
+
+// Descriptors the reservation opens: the real calls, recorded, so a test can fail any one close
+// (after really releasing the descriptor, as the kernel does on EIO) and prove none is left open
+// and none is closed twice.
+function trackedReservationFs({ failClose = () => false } = {}) {
+  const held = new Map();
+  const closes = [];
+  return {
+    closes,
+    held,
+    fs: {
+      open: (path, flags, mode) => {
+        const fd = openSync(path, flags, mode);
+        held.set(fd, path);
+        return fd;
+      },
+      close: (fd) => {
+        const path = held.get(fd);
+        closes.push(path);
+        held.delete(fd);
+        closeSync(fd);
+        if (failClose(path)) throw Object.assign(new Error('close failed'), { code: 'EIO' });
+      },
+    },
+  };
+}
+
+test('reserving: a failed close of the report or the journal rolls back what this call created, and the next run starts', () =>
+  withRoot((root) => {
+    const report = join(root, 'report.json');
+    const journal = recoveryJournalPath(report);
+    for (const [failing, reason] of [
+      [report, 'report'],
+      [journal, 'journal'],
+    ]) {
+      const tracked = trackedReservationFs({ failClose: (path) => path === failing });
+      artifactRefused(
+        () => reserveRunArtifacts(report, { id: newRecoveryId() }, { fs: tracked.fs }),
+        reason,
+      );
+      assert.deepEqual(readdirSync(root), [], `${reason}: neither artifact is left`);
+      assert.equal(tracked.held.size, 0, `${reason}: no descriptor left open`);
+      assert.deepEqual(
+        tracked.closes,
+        reason === 'report' ? [report] : [report, journal],
+        `${reason}: each descriptor closed exactly once`,
+      );
+      // The next normal run is not blocked by a leftover.
+      reserveRunArtifacts(report, { id: newRecoveryId() });
+      assert.deepEqual(readdirSync(root).sort(), [
+        'report.json',
+        'report.json.recovery-journal.json',
+      ]);
+      rmSync(report);
+      rmSync(journal);
+    }
+  }));
+
+test('reserving: a failure before the close also closes once and removes only what this call created', () =>
+  withRoot((root) => {
+    const report = join(root, 'report.json');
+    const journal = recoveryJournalPath(report);
+    for (const step of ['write', 'sync']) {
+      const tracked = trackedReservationFs();
+      const broken = () => {
+        throw new Error(`${step} failed`);
+      };
+      artifactRefused(
+        () =>
+          reserveRunArtifacts(
+            report,
+            { id: newRecoveryId() },
+            { fs: { ...tracked.fs, [step]: broken } },
+          ),
+        'journal',
+      );
+      assert.deepEqual(readdirSync(root), [], step);
+      assert.equal(tracked.held.size, 0, `${step}: no descriptor left open`);
+      assert.deepEqual(tracked.closes, [report, journal], `${step}: each closed exactly once`);
+    }
+  }));
+
+test('reserving: a close failure never removes an artifact that was already there', () =>
+  withRoot((root) => {
+    const report = join(root, 'report.json');
+    const journal = recoveryJournalPath(report);
+    const alwaysFail = () => true;
+    // A report that exists: the exclusive open refuses it, nothing of ours exists, nothing is removed.
+    writeFileSync(report, 'x');
+    let tracked = trackedReservationFs({ failClose: alwaysFail });
+    artifactRefused(
+      () => reserveRunArtifacts(report, { id: newRecoveryId() }, { fs: tracked.fs }),
+      'report',
+    );
+    assert.deepEqual([readFileSync(report, 'utf8'), existsSync(journal)], ['x', false]);
+    assert.deepEqual(tracked.closes, [], 'no descriptor was opened');
+    rmSync(report);
+    // A journal that exists (any kind) is refused before the report is even created.
+    writeFileSync(journal, 'theirs', { mode: 0o600 });
+    tracked = trackedReservationFs({ failClose: alwaysFail });
+    artifactRefused(
+      () => reserveRunArtifacts(report, { id: newRecoveryId() }, { fs: tracked.fs }),
+      'journal',
+    );
+    assert.deepEqual([readFileSync(journal, 'utf8'), existsSync(report)], ['theirs', false]);
+    assert.deepEqual(tracked.closes, []);
+    rmSync(journal);
+    // A journal that appears between the check and our exclusive open (the race): ours is the
+    // report, whose close succeeds here; theirs is left, ours is taken back.
+    tracked = trackedReservationFs();
+    const open = (path, flags, mode) => {
+      if (path === journal) writeFileSync(journal, 'theirs', { mode: 0o600 });
+      return tracked.fs.open(path, flags, mode);
+    };
+    artifactRefused(
+      () => reserveRunArtifacts(report, { id: newRecoveryId() }, { fs: { ...tracked.fs, open } }),
+      'journal',
+    );
+    assert.deepEqual([readFileSync(journal, 'utf8'), existsSync(report)], ['theirs', false]);
+    assert.equal(tracked.held.size, 0);
+  }));
