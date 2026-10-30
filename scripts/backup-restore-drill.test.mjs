@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
@@ -11,7 +12,7 @@ import {
 } from 'node:fs';
 import * as realFs from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,7 +45,20 @@ import {
   verifyResourceKinds,
   KILL_CONFIRMATION_DEADLINE_MS,
 } from './backup-restore-drill-lib.mjs';
-import { holdUntil, pollUntil, waitForPid } from './backup-restore-drill-test-support.mjs';
+import {
+  adoptPid,
+  disposeOwned,
+  hasLiveProcesses,
+  holdUntil,
+  ownedDirectory,
+  ownerSettings,
+  pollUntil,
+  spawnOwned,
+  stopOwned,
+  waitForGroup,
+  waitForPid,
+} from './backup-restore-drill-test-support.mjs';
+import { shellLoops, spawnViolations, waitViolations } from './backup-restore-drill-test-shell.mjs';
 
 const SUFFIX = '0123456789abcdef';
 const REF_DB = `drill_ref_${SUFFIX}`;
@@ -1025,16 +1039,126 @@ test('process groups: nothing left is gone; members are killed and confirmed; su
 // and a recovery inspecting that group can catch the child mid-exec (its environment reads empty),
 // call the group unproven and refuse it: a failure of the stub, not of the drill (#478 follow-up,
 // task 278). holdUntil (backup-restore-drill-test-support.mjs) is the one wait that stays a
-// single process.
-test('no drill test stub polls with a forking sleep: holdUntil is the one wait', () => {
-  const files = readdirSync(new URL('.', import.meta.url)).filter((name) =>
-    /^backup-restore-drill.*\.test\.mjs$/.test(name),
+// single process, and the boundary is the BEHAVIOUR: every fixture source (the test files, the
+// support module and the guard itself) is read through its decoded string values, so no spelling
+// of a forking poll gets past it.
+const FIXTURE_SOURCE = /^backup-restore-drill(?:.*\.test|-test-[a-z]+)\.mjs$/;
+const HOLDER_FILE = 'backup-restore-drill-test-support.mjs';
+
+test('no fixture source polls with a forking shell loop, and none starts a child except through the owner', () => {
+  const names = readdirSync(new URL('.', import.meta.url)).filter((name) =>
+    FIXTURE_SOURCE.test(name),
   );
-  assert.ok(files.length >= 5, `the drill test files were found (${files.join(', ')})`);
-  for (const name of files) {
+  for (const expected of [
+    'backup-restore-drill.test.mjs',
+    'backup-restore-drill-cli.test.mjs',
+    'backup-restore-drill-recovery.test.mjs',
+    'backup-restore-drill-summary.test.mjs',
+    'backup-restore-drill-workflow.test.mjs',
+    'backup-restore-drill.pg.test.mjs',
+    HOLDER_FILE,
+    'backup-restore-drill-test-shell.mjs',
+  ])
+    assert.ok(names.includes(expected), `${expected} is read (${names.join(', ')})`);
+  for (const name of names) {
     const source = readFileSync(new URL(`./${name}`, import.meta.url), 'utf8');
-    assert.doesNotMatch(source, /\bdo\s+sleep\b/, `${name}: a stub polls with a forked sleep`);
+    assert.deepEqual(waitViolations(source, { holder: name === HOLDER_FILE }), [], name);
+    assert.deepEqual(spawnViolations(source, { owner: name === HOLDER_FILE }), [], name);
   }
+});
+
+test('the shell-loop guard reads what the shell would run, not how the text is spelled', async () => {
+  // The same shell text written into JS source three ways: a quoted string (escapes written out),
+  // a template with raw line breaks, and a template with a substitution after it.
+  // This file is itself a fixture source and is read by the guard: the loops it must refuse are
+  // spelled with a marker inside `do`, which is taken out here, so that no string of this file is
+  // a loop.
+  const unmark = (text) => text.replaceAll('·', '');
+  const spellings = (text) => [
+    `const stub = ${JSON.stringify(text)};`,
+    'const stub = `' + text.replace(/[\\`]|\$\{/g, (m) => `\\${m}`) + '`;',
+    'const stub = `#!/bin/sh\n' + text.replace(/[\\`]|\$\{/g, (m) => `\\${m}`) + '\n${extra}`;',
+  ];
+  const forms = {
+    'the original polling loop': 'while [ ! -f f ]; d·o sleep 0.05; d·one',
+    'a no-op before the sleep': 'while [ ! -f f ]; d·o :; sleep 0.05; d·one',
+    'a line break after do': 'while [ ! -f f ]; d·o\n  sleep 0.05\ndone',
+    'a continued line': 'while [ ! -f f ]; d·o \\\n sleep 0.05; d·one',
+    until: 'until [ -f f ]; d·o sleep 1; d·one',
+    'a for loop': 'for i in 1 2 3; d·o sleep 1; d·one',
+    'another binary': 'while ! test -f f; d·o ls /; d·one',
+    'a command substitution': 'while [ ! -f f ]; d·o read -t 1 $(sleep 1); d·one',
+    'a loop in a nested shell': "sh -c 'while true; d·o sleep 1; d·one'",
+    'a loop in eval': 'eval "until [ -f f ]; d·o :; sleep 1; d·one"',
+    'a loop after then': 'if true; then while [ ! -f f ]; d·o sleep 1; d·one; fi',
+    'a loop in a group': '{ while [ ! -f f ]; d·o sleep 1; d·one; }',
+  };
+  for (const [name, marked] of Object.entries(forms))
+    for (const source of spellings(unmark(marked))) {
+      assert.ok(waitViolations(source).length > 0, `${name}: refused in a test file (${source})`);
+      assert.ok(
+        waitViolations(source, { holder: true }).some((message) => /forks/.test(message)),
+        `${name}: refused even in the holder, whose loop may only run builtins (${source})`,
+      );
+    }
+  // The shell joins a continued line INSIDE a word: a builtin split that way is still the builtin,
+  // and a binary split that way is still the binary.
+  const continued = (command) => `while [ ! -f f ]; d·o ${command}; d·one`;
+  const split = (word) => `${word.slice(0, 2)}\\\n${word.slice(2)}`;
+  assert.deepEqual(
+    waitViolations(spellings(unmark(continued(`${split('read')} -t 0.05 -u 9 _ || :`)))[0], {
+      holder: true,
+    }),
+    [],
+  );
+  assert.match(
+    waitViolations(spellings(unmark(continued(`${split('sleep')} 1`)))[0], { holder: true }).join(),
+    /runs sleep,/,
+  );
+  // What stays allowed: single waits that are not loops, and holdUntil's own text.
+  for (const fine of [
+    'exec sleep 30',
+    'sleep 60 & echo $! > pid',
+    'sleep 1; touch done',
+    'waiting for the record to name the group',
+  ])
+    for (const source of spellings(fine)) assert.deepEqual(waitViolations(source), [], fine);
+  const directory = ownedDirectory('drill-guard-holder-');
+  try {
+    const held = holdUntil(directory, join(directory, 'release'));
+    for (const source of spellings(held)) {
+      assert.deepEqual(waitViolations(source, { holder: true }), [], source);
+      assert.equal(waitViolations(source).length, 1, 'a test file may not spell it out itself');
+    }
+    assert.equal(shellLoops(held).length, 1);
+    assert.deepEqual(shellLoops(held)[0].commands.sort(), [':', '[', 'read']);
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('the spawn guard refuses every route to an asynchronous child that skips the owner', () => {
+  for (const source of [
+    "import { spawn } from 'node:child_process';",
+    "import { exec, execFileSync } from 'child_process';",
+    "import { spawn as launch } from 'node:child_process';",
+    "import { fork } from 'node:child_process';",
+    "import * as cp from 'node:child_process';",
+    "import cp from 'node:child_process';",
+    "const cp = await import('node:child_process');",
+    "const cp = createRequire(import.meta.url)('child_process');",
+  ])
+    assert.ok(spawnViolations(source).length > 0, source);
+  for (const source of [
+    "import { execFileSync, spawnSync } from 'node:child_process';",
+    "import { spawnSync as run } from 'node:child_process';",
+    "const name = 'node:child_process';",
+  ])
+    assert.deepEqual(spawnViolations(source), [], source);
+  assert.deepEqual(
+    spawnViolations("import { spawn } from 'node:child_process';", { owner: true }),
+    [],
+  );
 });
 
 test('waitForPid returns only a whole pid line; an empty or partial file is not a pid', async () => {
@@ -1058,15 +1182,14 @@ test('waitForPid returns only a whole pid line; an empty or partial file is not 
 });
 
 test('holdUntil keeps its process group at ONE process while it waits, then exits 0 when the file appears', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-support-hold-'));
-  let holder;
+  const directory = ownedDirectory('drill-support-hold-');
   try {
     const release = join(directory, 'release');
     const members = (pgid) =>
       spawnSync('ps', ['-eo', 'pid=,pgid='], { encoding: 'utf8' })
         .stdout.split('\n')
         .filter((line) => Number(line.trim().split(/\s+/)[1]) === pgid).length;
-    holder = spawn('/bin/bash', ['-c', holdUntil(directory, release)], {
+    const holder = spawnOwned(directory, '/bin/bash', ['-c', holdUntil(directory, release)], {
       detached: true,
       stdio: 'ignore',
     });
@@ -1083,7 +1206,174 @@ test('holdUntil keeps its process group at ONE process while it waits, then exit
     writeFileSync(release, '');
     assert.equal(await exited, 0, 'the status of the last timed-out read is not the stub’s status');
   } finally {
-    if (holder && pidAlive(holder.pid)) process.kill(-holder.pid, 'SIGKILL');
+    await disposeOwned(directory);
+  }
+});
+
+test('pollUntil accepts a condition only if it is seen within the budget (monotonic deadline)', async () => {
+  // Driven clock: the first reading fixes the deadline (0 + 5), the second follows the check.
+  const clock =
+    (...readings) =>
+    () =>
+      readings.shift();
+  assert.equal(await pollUntil(() => 'seen', 'x', 5, clock(0, 4)), 'seen');
+  await assert.rejects(
+    pollUntil(() => 'seen', 'a late condition', 5, clock(0, 6)),
+    /timed out after 5 ms waiting for a late condition \(seen only after the deadline\)/,
+    'true on the first check, but observed after the deadline',
+  );
+  await assert.rejects(
+    pollUntil(() => 'seen', 'x', 5, clock(0, 5)),
+    /timed out/,
+    'the deadline itself is already late',
+  );
+  // The reviewed case on the real clock: false at first, true at the next check, which comes one
+  // 25 ms tick later, past a 5 ms budget.
+  let checks = 0;
+  await assert.rejects(
+    pollUntil(() => ++checks === 2, 'a second look', 5),
+    /timed out after 5 ms waiting for a second look \(seen only after the deadline\)/,
+  );
+  assert.equal(checks, 2);
+  // Never true: the budget message without the late-observation suffix.
+  await assert.rejects(
+    pollUntil(() => false, 'nothing', 30),
+    /waiting for nothing$/,
+  );
+  // A check that throws is not swallowed.
+  await assert.rejects(
+    pollUntil(() => {
+      throw new RangeError('boom');
+    }, 'x'),
+    RangeError,
+  );
+  assert.equal(await pollUntil(() => 7, 'x'), 7, 'the default budget accepts a prompt answer');
+});
+
+// --- the fixture owner (task 283: every process a fixture starts, stopped and confirmed gone
+// --- BEFORE its directory is removed) --------------------------------------------------------
+test('the fixture owner records a child at spawn and stops it, confirmed, before the directory goes', async () => {
+  const directory = ownedDirectory('drill-owner-spawn-');
+  // Nothing about this process names the directory: only the registration made by the spawn can
+  // tell the owner it is the fixture's.
+  const child = spawnOwned(directory, 'sleep', ['60'], { detached: true, stdio: 'ignore' });
+  const pgid = child.pid;
+  assert.equal(
+    hasLiveProcesses(directory),
+    true,
+    'registered by the spawn, before anything awaited',
+  );
+  await disposeOwned(directory);
+  // Nothing of it runs when dispose returns; the zombie this process has yet to reap is not it.
+  await pollUntil(() => !groupExists(pgid), 'the group to be reaped');
+  assert.equal(existsSync(directory), false);
+});
+
+test('the fixture owner also finds a group nobody registered: its environment names the directory', async () => {
+  const directory = ownedDirectory('drill-owner-sweep-');
+  const pidFile = join(directory, 'grandchild');
+  // The parent starts a child in a NEW session and group (what a drill-spawned stub is) and holds.
+  spawnOwned(
+    directory,
+    '/bin/bash',
+    [
+      '-c',
+      `setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; ${holdUntil(directory, join(directory, 'release'))}`,
+    ],
+    { env: { ...process.env, PATH: `${directory}:${process.env.PATH}` }, stdio: 'ignore' },
+  );
+  const grandchild = await waitForPid(pidFile);
+  assert.equal(pidAlive(grandchild), true);
+  await disposeOwned(directory);
+  await pollUntil(() => !pidAlive(grandchild), 'the unregistered member to be reaped', 5_000);
+});
+
+test('a group whose pid a test reads from a file is owned from then on, whatever it carries', async () => {
+  const directory = ownedDirectory('drill-owner-adopt-');
+  const pidFile = join(directory, 'leader');
+  // The started shell names the directory in its command line, the group it starts does not: no
+  // environment variable, no argument. Only adopting the pid makes it the fixture's.
+  spawnOwned(
+    directory,
+    '/bin/bash',
+    ['-c', `setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; exec sleep 600`],
+    { stdio: 'ignore' },
+  );
+  const leader = await waitForGroup(directory, pidFile);
+  assert.equal(pidAlive(leader), true);
+  await disposeOwned(directory);
+  await pollUntil(() => !pidAlive(leader), 'the adopted group to be reaped', 5_000);
+});
+
+test('a fixture that cannot confirm its processes gone keeps its directory and fails', async () => {
+  const directory = ownedDirectory('drill-owner-survivor-');
+  spawnOwned(directory, '/bin/bash', ['-c', holdUntil(directory, join(directory, 'release'))], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  const budget = ownerSettings.stopBudgetMs;
+  try {
+    // No time to confirm anything: the stop is reported unconfirmed and nothing is removed.
+    ownerSettings.stopBudgetMs = 0;
+    await assert.rejects(disposeOwned(directory), /timed out after 0 ms waiting for the fixture/);
+    assert.equal(existsSync(directory), true, 'the directory stays while a process is unconfirmed');
+  } finally {
+    ownerSettings.stopBudgetMs = budget;
+    await disposeOwned(directory);
+  }
+  assert.equal(existsSync(directory), false);
+});
+
+test('a directory the owner did not create cannot hold or start anything', () => {
+  const stranger = mkdtempSync(join(tmpdir(), 'drill-owner-stranger-'));
+  try {
+    assert.throws(() => holdUntil(stranger, join(stranger, 'r')), /not created by ownedDirectory/);
+    assert.throws(() => spawnOwned(stranger, 'true', []), /not created by ownedDirectory/);
+    return assert.rejects(stopOwned(stranger), /not created by ownedDirectory/);
+  } finally {
+    rmSync(stranger, { recursive: true, force: true });
+  }
+});
+
+test('the after-hook fails a test that ends with a fixture process alive, and stops that process', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-hook-'));
+  try {
+    const support = new URL('./backup-restore-drill-test-support.mjs', import.meta.url).href;
+    const pidFile = join(directory, 'pid');
+    writeFileSync(
+      join(directory, 'leak.test.mjs'),
+      `import { test } from 'node:test';
+import { holdUntil, ownedDirectory, spawnOwned, waitForPid } from ${JSON.stringify(support)};
+test('leaks a held process', async () => {
+  const fixture = ownedDirectory('drill-hook-leak-');
+  spawnOwned(fixture, '/bin/bash', ['-c', "echo $$ > '${pidFile}'; " + holdUntil(fixture, fixture + '/release')], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  await waitForPid(${JSON.stringify(pidFile)});
+});
+test('a test that disposes is not blamed', async () => {});
+`,
+    );
+    const result = spawnSync(
+      process.execPath,
+      ['--test', '--test-reporter=tap', join(directory, 'leak.test.mjs')],
+      {
+        encoding: 'utf8',
+        timeout: 60_000,
+        killSignal: 'SIGKILL',
+        // Inside a test run this variable makes a nested `node --test` skip its files.
+        env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+      },
+    );
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /not ok 1 - leaks a held process/);
+    assert.match(result.stdout, /the test left processes of its fixture running/);
+    assert.match(result.stdout, /\nok 2 - a test that disposes is not blamed/);
+    const leaked = Number(readFileSync(pidFile, 'utf8'));
+    assert.ok(leaked > 0);
+    await pollUntil(() => !pidAlive(leaked), 'the leaked process to be reaped');
+  } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -1091,6 +1381,14 @@ test('holdUntil keeps its process group at ONE process while it waits, then exit
 // The process lifecycle boundary: real children for what the kernel decides, a fake spawn for
 // the orderings a real child cannot be forced into.
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const groupExists = (pgid) => {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 const pidAlive = (pid) => {
   try {
     process.kill(pid, 0);
@@ -1119,29 +1417,32 @@ function fakeChild(pid) {
   };
   return child;
 }
-const realRunner = (overrides = {}) =>
+// Real children are started through the fixture owner of `directory`, so a test that fails before
+// its own cleanup leaves nothing running.
+const realRunner = (directory, overrides = {}) =>
   createProcessRunner({
     report: {},
     persist: () => {},
     cwd: tmpdir(),
     env: { PATH: process.env.PATH },
     drainMilliseconds: 200,
+    spawn: (command, args, options) => spawnOwned(directory, command, args, options),
     ...overrides,
   });
 
 test('a leader that exits 0 while a descendant holds stdout/stderr is reaped long before the timeout and recorded', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-runner-'));
-  let descendant;
+  const directory = ownedDirectory('drill-runner-');
   try {
     const report = {};
-    const runner = realRunner({ report });
+    const runner = realRunner(directory, { report });
     const started = Date.now();
     const output = await runner.run(
       '/bin/sh',
       ['-c', `sleep 60 & echo $! > '${directory}/pid'; echo leader-output`],
       { timeout: 60_000 },
     );
-    descendant = Number(readFileSync(join(directory, 'pid'), 'utf8'));
+    const descendant = Number(readFileSync(join(directory, 'pid'), 'utf8'));
+    adoptPid(directory, descendant);
     assert.equal(output, 'leader-output');
     // The drain bound is 200 ms and the timeout a minute: half the timeout still tells them apart
     // by two orders of magnitude, so a loaded machine cannot turn a pass into a failure.
@@ -1151,8 +1452,7 @@ test('a leader that exits 0 while a descendant holds stdout/stderr is reaped lon
     assert.deepEqual(report.processGroups, []);
     assert.ok(await becomesGone(descendant), 'the descendant holding the pipes is gone');
   } finally {
-    if (descendant && pidAlive(descendant)) process.kill(descendant, 'SIGKILL');
-    rmSync(directory, { recursive: true, force: true });
+    await disposeOwned(directory);
   }
 });
 
@@ -1193,31 +1493,36 @@ test('a timeout is a failure whatever exit code follows the kill', async () => {
 });
 
 test('a persist failure right after spawn still reaps the group and confirms it is gone', async () => {
-  const reaped = [];
-  const failed = [];
-  const report = {};
-  const runner = realRunner({
-    report,
-    persist: () => {
-      throw new Error('Could not write report (ENOSPC)');
-    },
-    persistFailed: (stage) => failed.push(stage),
-    currentStage: () => 'migrate identity',
-    reap: (pgid) => {
-      reaped.push(pgid);
-      return reapProcessGroup(pgid);
-    },
-  });
-  await assert.rejects(
-    runner.run('/bin/sh', ['-c', 'sleep 60 & wait']),
-    /Could not record process group/,
-  );
-  assert.equal(reaped.length, 1, 'the group went through the reap, not a single kill');
-  assert.deepEqual(failed, ['migrate identity']);
-  assert.equal(runner.groups.size, 0);
-  assert.deepEqual(report.processGroups, []);
-  // The group, whatever it had forked by then, is confirmed gone.
-  assert.throws(() => process.kill(-reaped[0], 0), /ESRCH/);
+  const directory = ownedDirectory('drill-runner-persist-');
+  try {
+    const reaped = [];
+    const failed = [];
+    const report = {};
+    const runner = realRunner(directory, {
+      report,
+      persist: () => {
+        throw new Error('Could not write report (ENOSPC)');
+      },
+      persistFailed: (stage) => failed.push(stage),
+      currentStage: () => 'migrate identity',
+      reap: (pgid) => {
+        reaped.push(pgid);
+        return reapProcessGroup(pgid);
+      },
+    });
+    await assert.rejects(
+      runner.run('/bin/sh', ['-c', 'sleep 60 & wait']),
+      /Could not record process group/,
+    );
+    assert.equal(reaped.length, 1, 'the group went through the reap, not a single kill');
+    assert.deepEqual(failed, ['migrate identity']);
+    assert.equal(runner.groups.size, 0);
+    assert.deepEqual(report.processGroups, []);
+    // The group, whatever it had forked by then, is confirmed gone.
+    assert.throws(() => process.kill(-reaped[0], 0), /ESRCH/);
+  } finally {
+    await disposeOwned(directory);
+  }
 });
 
 test('a group that survives the kill after a persist failure stays owned and is reported', async () => {
