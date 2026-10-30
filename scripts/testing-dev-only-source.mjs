@@ -155,8 +155,8 @@ const inFunctionWithArguments = (node) => {
  * Every module reference in `sourceFile` and every loader use that cannot
  * be traced to a literal. A reference is `{ specifier, kind, node }`, kind
  * `import` (static, in the file's own module format), `require`, `dynamic`
- * (`import()`), `type` (`import()` type), `path` (`/// <reference path>`) or
- * `types` (`/// <reference types>`).
+ * (`import()`), `type` (`import()` type), `url` (`new URL(…, import.meta.url)`),
+ * `path` (`/// <reference path>`) or `types` (`/// <reference types>`).
  */
 export function moduleReferences(sourceFile) {
   const references = [];
@@ -294,7 +294,7 @@ export function moduleReferences(sourceFile) {
       // `new URL('./x', import.meta.url)`: a bundler emits (or starts a worker from) it.
       const specifier = literal(node.arguments[0]);
       if (specifier === undefined) refuse(node, 'new URL(…, import.meta.url) with a non-literal');
-      else refer(specifier, 'dynamic', node);
+      else refer(specifier, 'url', node);
     } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
       const specifier = literal(node.arguments[0]);
       if (specifier === undefined) {
@@ -670,7 +670,9 @@ export function sourceProblems(root = REPO_ROOT) {
     const ws = wsList.find((w) => inside(w, real));
     const top = ws && relative(ws, real).split(sep)[0];
     if (top === 'node_modules') return { leaf: true };
-    if (isTestOnlyPath(rel)) return { problem: `test-only ${rel}` };
+    // A directory (`new URL('../test/', import.meta.url)`) by what it holds.
+    const dir = existsSync(real) && statSync(real).isDirectory();
+    if (isTestOnlyPath(dir ? `${rel}/` : rel)) return { problem: `test-only ${rel}` };
     if (ws) {
       // A workspace's build output: compiled from its own sources, which are swept.
       if (BUILD_DIRS.has(top) && !workspaceOf.has(real)) return { leaf: true };
@@ -686,6 +688,11 @@ export function sourceProblems(root = REPO_ROOT) {
     if (kind === 'path') {
       // A reference that names no file compiles nothing in: the name is classified.
       return [resolve(dirname(file), specifier)];
+    }
+    if (kind === 'url') {
+      // A file or a directory, exactly as the URL names it.
+      const path = fileURLToPath(new URL(specifier, pathToFileURL(file)));
+      return existsSync(path) ? [path] : [];
     }
     let spec = specifier;
     if (/^file:/i.test(spec)) spec = fileURLToPath(spec);
