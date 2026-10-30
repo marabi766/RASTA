@@ -1,7 +1,6 @@
 import { inspect } from 'node:util';
-import { InternalTokenService } from '../auth/token-verifier';
 import { RedirectRefusedError } from './internal-fetch';
-import { InternalHttpClient } from './internal-http-client';
+import { InternalHttpClient, InternalTokenService } from './internal-http-client';
 
 const SECRET = 'internal-http-client-spec-secret-0123456789';
 

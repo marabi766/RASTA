@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { decodeJwt, decodeProtectedHeader, SignJWT } from 'jose';
 import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
-import { InternalTokenService } from './token-verifier';
+import { InternalTokenService } from '../http/internal-http-client';
 import { InternalHttpClient, type InternalGrant } from '../http/internal-http-client';
 
 /**
