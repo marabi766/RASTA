@@ -1477,19 +1477,32 @@ test('a descendant that outlives the command that started it is still the fixtur
   // by walking parent pids while the parent lives): either way it is retained by identity.
   for (const detach of ['', 'setsid ']) {
     const directory = ownedDirectory('drill-run-orphan-');
+    const system = ownerSettings.system;
+    let looks = 0;
     try {
       const pidFile = join(directory, 'descendant');
-      // The shell starts a descendant, lets the owner see it, and exits: from then on the descendant
-      // is re-parented to init and no parent pid leads back to the fixture. Only the identity the
-      // owner retained while the tree was alive can still show whose it is.
-      const result = await runOwned(
+      const release = join(directory, 'release');
+      // The shell starts a descendant and holds until the test lets it go; the test lets it go only
+      // after the owner has completed two looks that began once the descendant existed (a counted
+      // process-table read each), however long a loaded machine takes to make them. Then the shell
+      // exits: the descendant is re-parented to init and no parent pid leads back to the fixture.
+      // Only the identity the owner retained while the tree was alive can still show whose it is.
+      ownerSettings.system = { ...system, listPids: () => (looks++, system.listPids()) };
+      const running = runOwned(
         directory,
         '/bin/bash',
-        ['-c', `${detach}sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; sleep 0.5`],
-        { timeoutMs: 30_000 },
+        [
+          '-c',
+          `${detach}sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; ${holdUntil(directory, release)}`,
+        ],
+        { timeoutMs: 60_000 },
       );
+      const descendant = await waitForPid(pidFile);
+      const seen = looks;
+      await pollUntil(() => looks >= seen + 3, 'the owner to look at the tree again');
+      writeFileSync(release, '');
+      const result = await running;
       assert.equal(result.status, 0);
-      const descendant = Number(readFileSync(pidFile, 'utf8'));
       assert.equal(pidAlive(descendant), true);
       assert.equal(
         hasLiveProcesses(directory),
@@ -1499,6 +1512,7 @@ test('a descendant that outlives the command that started it is still the fixtur
       await disposeOwned(directory);
       await pollUntil(() => !pidAlive(descendant), 'the descendant to be reaped');
     } finally {
+      ownerSettings.system = system;
       await disposeOwned(directory);
     }
   }
@@ -1692,7 +1706,7 @@ test('a group killed after a failed registration keeps the stop from confirming 
   // verdict has been read while it was still there.
   const { system, start, descendantFile } = failingRegistration(directory, {
     reach: false,
-    seconds: 3,
+    seconds: 8,
   });
   await withSystem(system, async () => {
     assert.throws(start, /no readable identity \(gone\)/);
