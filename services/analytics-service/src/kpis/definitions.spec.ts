@@ -34,7 +34,7 @@ describe('registered KPI definitions and closed statuses (ADR-071 § 6)', () => 
       status: 'AVAILABLE',
       value: '9223372036854775807',
     });
-    expect(kpiStatusSchema.options).toEqual(['AVAILABLE', 'INSUFFICIENT_BASELINE']);
+    expect(kpiStatusSchema.options).toEqual(['AVAILABLE', 'INSUFFICIENT_BASELINE', 'NO_DATA']);
     expect(kpiStatusSchema.safeParse('UNKNOWN').success).toBe(false);
   });
 
@@ -43,6 +43,10 @@ describe('registered KPI definitions and closed statuses (ADR-071 § 6)', () => 
     { status: 'INSUFFICIENT_BASELINE', value: '0' },
     { status: 'INSUFFICIENT_BASELINE', value: 0 },
     { status: 'SUPPRESSED', value: null },
+    // NO_DATA has no value field at all: null, a count and a zero are all refused.
+    { status: 'NO_DATA', value: null },
+    { status: 'NO_DATA', value: '0' },
+    { status: 'NO_DATA', value: 0 },
   ])('refuses an inconsistent status/value contract: %j', (value) => {
     expect(
       kpisViewSchema.safeParse({
@@ -53,6 +57,22 @@ describe('registered KPI definitions and closed statuses (ADR-071 § 6)', () => 
         kpis: [{ key: KPI_DEFINITIONS[1].key, unit: 'MINUTES', dependsOnBaseline: true, ...value }],
       }).success,
     ).toBe(false);
+  });
+
+  it('accepts NO_DATA only without a value, on either KPI shape, and refuses extra keys', () => {
+    const view = (kpi: object) =>
+      kpisViewSchema.safeParse({
+        organizationId: 'ORG-A',
+        from: '2026-07-01T00:00:00Z',
+        to: '2026-08-01T00:00:00Z',
+        earliestCompletionAt: null,
+        kpis: [kpi],
+      }).success;
+    const count = { key: KPI_DEFINITIONS[0].key, unit: 'COUNT', dependsOnBaseline: false };
+    expect(view({ ...count, status: 'NO_DATA' })).toBe(true);
+    expect(view({ ...count, status: 'NO_DATA', estimate: '3' })).toBe(false);
+    expect(view({ ...count, status: 'AVAILABLE' })).toBe(false);
+    expect(view({ ...count, status: 'AVAILABLE', value: '0' })).toBe(true);
   });
 
   it('reuses strict explicit windows, including equivalent offset instants', () => {

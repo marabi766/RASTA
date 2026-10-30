@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { ulid } from 'ulid';
 import { runUnscoped, runWithContext } from '@rasta/nest-common';
+import { eligibilityClockWrite } from '@rasta/testing';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { RegistrationIntakeWorker } from '../src/identity/registration-intake.worker';
 import type { IdentityService } from '../src/identity/identity.service';
@@ -26,8 +27,8 @@ export interface MembershipSpec {
   organizationId: string;
   roles: string[];
   status?: 'ACTIVE' | 'SUSPENDED' | 'REVOKED';
-  validFrom?: Date;
-  validUntil?: Date | null;
+  /** Default: began an hour ago, open-ended, by the database clock (`dateMembershipWindow`). */
+  window?: MembershipWindow;
   /** Revoked: `deletedAt` set too, as a revocation leaves it. */
   deletedAt?: Date | null;
 }
@@ -82,15 +83,54 @@ export async function addMembershipRow(
         organizationId: membership.organizationId,
         roles: membership.roles,
         status: membership.status ?? 'ACTIVE',
-        validFrom: membership.validFrom ?? new Date(Date.now() - 3_600_000),
-        validUntil: membership.validUntil ?? null,
         deletedAt: membership.deletedAt ?? null,
         createdBy: 'ITEST',
         updatedBy: 'ITEST',
       },
     }),
   );
+  await dateMembershipWindow(
+    prisma,
+    membershipId,
+    membership.window ?? { fromMs: -3_600_000, untilMs: null },
+  );
   return membershipId;
+}
+
+/** Offsets in milliseconds from the database's now(); `untilMs: null` is open-ended. */
+export interface MembershipWindow {
+  fromMs: number;
+  untilMs: number | null;
+}
+
+/**
+ * Dates one membership's validity window on the database clock, the clock the
+ * product judges it on (`findLiveMemberships` and the lapse sweep compare it
+ * with the database's): never with this process's clock (eligibility-clock
+ * guard). Returns the stored instants, for a test that needs them exactly.
+ */
+export async function dateMembershipWindow(
+  prisma: PrismaService,
+  membershipId: string,
+  window: MembershipWindow,
+): Promise<{ validFrom: Date; validUntil: Date | null }> {
+  const finite = (ms: number | null) => ms === null || Number.isFinite(ms);
+  if (!Number.isFinite(window.fromMs) || !finite(window.untilMs))
+    throw new Error(`dateMembershipWindow needs finite offsets: ${JSON.stringify(window)}`);
+  const updated = await runUnscoped(
+    'test fixture dates a membership window',
+    () =>
+      eligibilityClockWrite(prisma.client)`
+      UPDATE membership
+         SET valid_from = now() + make_interval(secs => ${window.fromMs / 1000}::float8),
+             valid_until = now() + make_interval(secs => ${window.untilMs === null ? null : window.untilMs / 1000}::float8)
+       WHERE id = ${membershipId}`,
+  );
+  if (updated !== 1) throw new Error(`dateMembershipWindow updated ${updated} rows`);
+  const row = await runUnscoped('test reads its own fixture', () =>
+    prisma.client.membership.findUniqueOrThrow({ where: { id: membershipId } }),
+  );
+  return { validFrom: row.validFrom, validUntil: row.validUntil };
 }
 
 /** A committed membership row, outside any transaction. */

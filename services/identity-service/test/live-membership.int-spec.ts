@@ -3,6 +3,7 @@ import { IdentityRepository } from '../src/identity/identity.repository';
 import { IdentityService } from '../src/identity/identity.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { id, newPrisma, tenants } from './helpers';
+import { dateMembershipWindow, type MembershipWindow } from './identity-fixtures';
 
 /**
  * `GET /v1/users/:id/live-membership` — fleet-service's one-bit question before it
@@ -55,8 +56,17 @@ describe('is this user a live member of the organization fleet acts for (task 09
     return userId;
   };
 
-  const member = (userId: string, organizationId: string, extra: Record<string, unknown> = {}) =>
-    runUnscoped('test fixture spans organizations', () =>
+  /**
+   * A membership; its validity window, when not the default (from the
+   * database's now(), open-ended), dated by the database clock that judges it.
+   */
+  const member = async (
+    userId: string,
+    organizationId: string,
+    extra: Record<string, unknown> = {},
+    window?: MembershipWindow,
+  ) => {
+    const created = await runUnscoped('test fixture spans organizations', () =>
       prisma.client.membership.create({
         data: {
           id: id('MBR-LM'),
@@ -69,6 +79,9 @@ describe('is this user a live member of the organization fleet acts for (task 09
         },
       }),
     );
+    if (window) await dateMembershipWindow(prisma, created.id, window);
+    return created;
+  };
 
   const ask = (organizationId: string, userId: string) =>
     asFleet(organizationId, () => service.getLiveMembership(userId));
@@ -116,15 +129,15 @@ describe('is this user a live member of the organization fleet acts for (task 09
     expect(b).toMatchObject({ userId: elsewhere, organizationId: org.a, live: false });
   });
 
-  it.each([
-    ['revoked', { status: 'REVOKED', deletedAt: new Date() }],
-    ['suspended', { status: 'SUSPENDED' }],
-    ['not yet valid', { validFrom: new Date(Date.now() + 3_600_000) }],
-    ['lapsed', { validUntil: new Date(Date.now() - 60_000) }],
-    ['deleted but still marked ACTIVE', { deletedAt: new Date() }],
-  ])('answers live: false for a %s membership', async (_label, extra) => {
+  it.each<[string, Record<string, unknown>, MembershipWindow | undefined]>([
+    ['revoked', { status: 'REVOKED', deletedAt: new Date() }, undefined],
+    ['suspended', { status: 'SUSPENDED' }, undefined],
+    ['not yet valid', {}, { fromMs: 3_600_000, untilMs: null }],
+    ['lapsed', {}, { fromMs: -3_600_000, untilMs: -60_000 }],
+    ['deleted but still marked ACTIVE', { deletedAt: new Date() }, undefined],
+  ])('answers live: false for a %s membership', async (_label, extra, window) => {
     const userId = await user();
-    await member(userId, org.a, extra);
+    await member(userId, org.a, extra, window);
     expect(await ask(org.a, userId)).toMatchObject({ live: false });
   });
 
@@ -170,7 +183,7 @@ describe('is this user a live member of the organization fleet acts for (task 09
   it('judges the end of a window on the database clock: lapsed a moment ago is lapsed', async () => {
     const userId = await user();
     // An application clock an hour ahead would still call this live; the database does not.
-    await member(userId, org.a, { validUntil: new Date(Date.now() - 1_000) });
+    await member(userId, org.a, {}, { fromMs: -3_600_000, untilMs: -1_000 });
     expect(await ask(org.a, userId)).toMatchObject({ live: false });
   });
 });

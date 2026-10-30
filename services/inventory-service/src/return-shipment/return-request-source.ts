@@ -1,6 +1,11 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
-import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  RastaError,
+  tryGetContext,
+  upstreamExchange,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -139,82 +144,54 @@ export class ReturnRequestSourceClient implements ReturnRequestSource {
     returnRequestId: string,
     suffix: string,
   ): Promise<{ status: 200 | 404 | 422; fact: ReturnRequestFact | null }> {
-    const token = await this.options.tokens.issue(
-      SERVICE_NAME,
-      MARKETPLACE_SERVICE,
-      'SERVICE',
+    const sender = await new InternalHttpClient(this.options.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: MARKETPLACE_SERVICE,
+      purpose: 'SERVICE',
       organizationId,
-    );
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'x-internal-token': token,
-    };
+    });
+    const headers: Record<string, string> = { accept: 'application/json' };
     const context = tryGetContext();
     if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
       headers['x-correlation-id'] = context.correlationId;
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    timer.unref?.();
-    const failed = () =>
-      controller.signal.aborted
-        ? RastaError.upstreamTimeout(MARKETPLACE_SERVICE, this.options.timeoutMs)
-        : RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
-
-    try {
-      let response: Response;
-      try {
-        response = await internalFetch(
+    return upstreamExchange(
+      MARKETPLACE_SERVICE,
+      this.options.timeoutMs,
+      (signal) =>
+        sender.send(
           `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/returns/${encodeURIComponent(returnRequestId)}${suffix}`,
-          { method, headers, signal: controller.signal },
-          this.fetchImpl,
-        );
-      } catch {
-        // No cause attached: a runtime's transport error can quote the URL.
-        throw failed();
-      }
+          { method, headers, signal },
+        ),
+      async (response) => {
+        const status = response.status;
+        if (status !== 200 && status !== 404 && status !== 422) {
+          throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
+        }
 
-      const status = response.status;
-      if (status !== 200 && status !== 404 && status !== 422) {
-        await response.body?.cancel().catch(() => undefined);
-        throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
-      }
+        const text = await readCapped(response, MAX_RETURN_REQUEST_BYTES);
+        if (text === null) throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
+        const body: unknown = JSON.parse(text);
 
-      let text: string | null;
-      try {
-        text = await readCapped(response, MAX_RETURN_REQUEST_BYTES);
-      } catch {
-        throw failed();
-      }
-      if (text === null) throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
+        if (status === 404) {
+          // Absence only when the owner's own handler said so, about a return request.
+          if (isReturnRequestNotFound(body)) return { status, fact: null };
+          throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
+        }
+        if (status === 422) {
+          if (isBusinessRuleRefusal(body)) return { status, fact: null };
+          throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
+        }
 
-      let body: unknown;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        throw failed();
-      }
-
-      if (status === 404) {
-        // Absence only when the owner's own handler said so, about a return request.
-        if (isReturnRequestNotFound(body)) return { status, fact: null };
-        throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
-      }
-      if (status === 422) {
-        if (isBusinessRuleRefusal(body)) return { status, fact: null };
-        throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
-      }
-
-      const parsed = returnRequestFactSchema.safeParse(body);
-      // An answer about another request is no answer about this one.
-      if (!parsed.success || parsed.data.returnRequestId !== returnRequestId) {
-        throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
-      }
-      return { status, fact: parsed.data };
-    } finally {
-      clearTimeout(timer);
-    }
+        const parsed = returnRequestFactSchema.safeParse(body);
+        // An answer about another request is no answer about this one.
+        if (!parsed.success || parsed.data.returnRequestId !== returnRequestId) {
+          throw RastaError.upstreamUnavailable(MARKETPLACE_SERVICE);
+        }
+        return { status, fact: parsed.data };
+      },
+    );
   }
 }
 

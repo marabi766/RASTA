@@ -1,6 +1,11 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
-import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  RastaError,
+  tryGetContext,
+  upstreamExchange,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 import { transferFenceResolutionsTotal } from '../observability/metrics';
 
@@ -76,44 +81,29 @@ export class TransferRecordClient implements TransferRecordSource {
   }
 
   async resolve(organizationId: string, assetId: string, fenceId: string): Promise<TransferRecord> {
-    const token = await this.options.tokens.issue(
-      SERVICE_NAME,
-      ASSET_SERVICE,
-      'SERVICE',
+    const sender = await new InternalHttpClient(this.options.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: ASSET_SERVICE,
+      purpose: 'SERVICE',
       organizationId,
-    );
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'x-internal-token': token,
-    };
+    });
+    const headers: Record<string, string> = { accept: 'application/json' };
     const context = tryGetContext();
     if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
       headers['x-correlation-id'] = context.correlationId;
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    timer.unref?.();
-    let status: number;
-    let text: string;
-    try {
-      const response = await internalFetch(
-        `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/assets/` +
-          `${encodeURIComponent(assetId)}/transfers/${encodeURIComponent(fenceId)}`,
-        { method: 'GET', headers, signal: controller.signal },
-        this.fetchImpl,
-      );
-      text = await response.text();
-      if (controller.signal.aborted) throw new Error('deadline passed');
-      status = response.status;
-    } catch {
-      // No cause attached: a runtime's transport error can quote the URL.
-      throw controller.signal.aborted
-        ? RastaError.upstreamTimeout(ASSET_SERVICE, this.options.timeoutMs)
-        : RastaError.upstreamUnavailable(ASSET_SERVICE);
-    } finally {
-      clearTimeout(timer);
-    }
+    const { status, text } = await upstreamExchange(
+      ASSET_SERVICE,
+      this.options.timeoutMs,
+      (signal) =>
+        sender.send(
+          `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/assets/` +
+            `${encodeURIComponent(assetId)}/transfers/${encodeURIComponent(fenceId)}`,
+          { method: 'GET', headers, signal },
+        ),
+      async (response) => ({ status: response.status, text: await response.text() }),
+    );
 
     const body = parseJson(text);
     if (status === 200) {

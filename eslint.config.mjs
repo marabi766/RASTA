@@ -2,6 +2,7 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
+import exchangeDeadline from './scripts/exchange-deadline-rule.mjs';
 import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
 import rawHttpBoundary from './scripts/raw-http-boundary-rule.mjs';
 import noZodDefault from './scripts/no-zod-default-rule.mjs';
@@ -11,7 +12,11 @@ import noZodDefault from './scripts/no-zod-default-rule.mjs';
  * (flat config refuses a plugin name defined twice with different objects).
  */
 export const internalPlugin = {
-  rules: { transport: internalTokenTransport, 'raw-http': rawHttpBoundary },
+  rules: {
+    transport: internalTokenTransport,
+    'raw-http': rawHttpBoundary,
+    'exchange-deadline': exchangeDeadline,
+  },
 };
 
 const NO_ZOD_COERCE = [
@@ -133,7 +138,18 @@ const base = tseslint.config(
     // transports (AUDITED_TRANSPORTS in the rule) no raw HTTP primitive at all,
     // however it is reached. `transport` is the second layer: a module that
     // spells a credential must name the redirect-refusing transport.
-    rules: { 'internal/transport': 'error', 'internal/raw-http': 'error' },
+    // `exchange-deadline` keeps the abort timer in the shared boundary (#507).
+    rules: {
+      'internal/transport': 'error',
+      'internal/raw-http': 'error',
+      'internal/exchange-deadline': 'error',
+    },
+  },
+  {
+    // The shared boundary is where the timer lives: it is the one place an
+    // abort timer is written, so that no caller has to (PR #507 r1 F2).
+    files: ['**/http/exchange-deadline.ts'],
+    rules: { 'internal/exchange-deadline': 'off' },
   },
   {
     // Live suites aim at an endpoint the environment names (KEYCLOAK_URL), with

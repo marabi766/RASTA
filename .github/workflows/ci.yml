@@ -1,3 +1,12 @@
+# Where service images are built and scanned (owner decision 2026-10-24):
+# on pushes to main (every image) and on merge-train runs, pull requests from
+# `mq/train-N` (the affected images); NOT on ordinary pull requests, which
+# still run the cheap early checks (scope-rule tests, Dockerfile pins, the
+# narrowing proof). The check "Images built and scanned" reports it. On an
+# ordinary pull request it passes WITHOUT scanning (by design): the merge host
+# must require it on the train pull request, not rely on it elsewhere. See the
+# contract above `container-scope` and docs/14-testing-strategy.md § 14.11.
+
 name: CI
 
 on:
@@ -42,7 +51,12 @@ jobs:
     # 25, stopgap (2026-10-27): green runs take 14-19 min and slow runners hit
     # 20 (main 33c5f29 and train runs cancelled at 1208-1218 s). #450 bounds
     # the unit step's parallelism; return this to 20 once it has merged.
-    timeout-minutes: 25
+    # 37 minutes (headroom measurement, last 20 green CI runs on main and
+    # merge-train branches): the job took up to 1446 s (p50 1259 s), 96 % of
+    # 25, and train run 40936057488 was cancelled at the limit. Every
+    # integration job needs this one, so no limit downstream can save a
+    # cancelled train. 37 is ceil(1446 s x 1.5 / 60).
+    timeout-minutes: 37
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -520,7 +534,10 @@ jobs:
   web-browser:
     name: Portal in a browser
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 37 minutes (headroom measurement, last 20 green CI runs on main and
+    # merge-train branches): the job took up to 1462 s (p50 946 s), 81 % of
+    # 30. 37 is ceil(1462 s x 1.5 / 60).
+    timeout-minutes: 37
     needs: quality
     permissions:
       contents: read
@@ -1303,10 +1320,19 @@ jobs:
     name: Integration tests and database guards
     runs-on: ubuntu-latest
     # About 11.5 minutes on main run 38600385830 (setup ~4m, the suites 428 s,
-    # the guards 28 s). 25 is twice that, and the suites carry their own 12.
+    # the guards 28 s), when the suites carried their own 12.
     # History of the single job's limit: 60 (#197), 35 once reversibility
     # moved out (#198), 50 as #273's stopgap until this split.
-    timeout-minutes: 25
+    # 70 minutes: the job must hold every step at its own limit, one after
+    # the other (scripts/ci-integration-split-lib.mjs, JOB_SETUP_MINUTES):
+    # the steps' limits sum to 62 (Integration tests 21, the seven 5-minute
+    # guards 35, the three 2-minute PostgreSQL connection steps 6) and the
+    # steps without a limit of their own took up to 298 s over the last 20
+    # green runs, which is 8 minutes at x 1.5. The job itself took up to
+    # 1359 s (p50 1210 s), so 70 is a ceiling that no healthy run comes near;
+    # the sharding PR returns the Integration tests step, and with it this
+    # job, to its smaller size.
+    timeout-minutes: 70
     needs: quality
 
     services:
@@ -1669,9 +1695,11 @@ jobs:
         # PostgreSQL they measured shared WAL load, not the upsert (docs/14
         # § 14.3). Never `turbo run test:integration` directly — that runs
         # the workspace phase only; `check:test-phases` enforces it.
-        # 16 is a STOPGAP (owner decision 2026-10-24): main measured 7m26s to
-        # 11m29s against the old 12. The sharding PR returns it to 12.
-        timeout-minutes: 16
+        # 21 minutes: the slowest of the last 20 green CI runs on main and
+        # merge-train branches took 806 s (p50 704 s), 84 % of the 16 this
+        # step carried (the owner's 2026-10-24 stopgap, up from 12). The limit
+        # is ceil(806 s x 1.5 / 60); the sharding PR returns it to 12.
+        timeout-minutes: 21
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
@@ -1876,7 +1904,11 @@ jobs:
     # About 9.5 minutes on main run 38600385830 (setup ~4m, independence 57 s,
     # tenant isolation 253 s, retry replay 22 s). Tenant isolation keeps its
     # own 10.
-    timeout-minutes: 25
+    # 37 minutes: the steps' limits sum to 29 (independence 8, tenant
+    # isolation 10, retry replay 5, three PostgreSQL connection steps of 2)
+    # and the steps without a limit took up to 309 s over the last 20 green
+    # runs (8 minutes at x 1.5); the job itself took up to 872 s.
+    timeout-minutes: 37
     needs: quality
 
     services:
@@ -2314,8 +2346,12 @@ jobs:
     name: Coverage gates (construction, contract, inventory)
     runs-on: ubuntu-latest
     # About 11.5 minutes on main run 38600385830 (setup ~3.5m, construction
-    # 325 s, contract 105 s, inventory 54 s). Each gate keeps its own 8.
-    timeout-minutes: 25
+    # 325 s, contract 105 s, inventory 54 s). Each gate keeps its own limit
+    # (construction 11, the others 8).
+    # 35 minutes: the gates' limits sum to 27 and the steps without a limit
+    # took up to 281 s over the last 20 green runs (8 minutes at x 1.5); the
+    # job itself took up to 1041 s.
+    timeout-minutes: 35
     needs: quality
 
     services:
@@ -2434,7 +2470,10 @@ jobs:
         # that serialises need and project commands, the tenant-bound foreign
         # key, the PostGIS validity check, the outbox coupling and the HTTP
         # surface exist only against a real database and broker.
-        timeout-minutes: 8
+        # 11 minutes: the slowest of the last 20 green CI runs took 429 s (p50
+        # 412 s), 89 % of the 8 it had, and run 40890559589 attempt 1 timed
+        # out. The limit is ceil(429 s x 1.5 / 60).
+        timeout-minutes: 11
         run: |
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh tests)"
           eval "${kafka_credentials}"
@@ -2490,7 +2529,12 @@ jobs:
     runs-on: ubuntu-latest
     # About 10.5 minutes on main run 38600385830 (setup ~4m, the seven gates
     # 399 s together, economic the longest at 115 s). Each keeps its own 8.
-    timeout-minutes: 25
+    # 80 minutes: nine gates at 8 minutes each is 72, and the steps without a
+    # limit took up to 310 s over the last 20 green runs (8 minutes at
+    # x 1.5). The job itself took up to 1326 s (p50 1224 s) and the slowest
+    # gate, economic, 285 s, so 80 is a ceiling that no healthy run comes
+    # near; the gates' own limits are what catch a hang.
+    timeout-minutes: 80
     needs: quality
 
     services:
@@ -4379,7 +4423,13 @@ jobs:
   trivy-db:
     name: Trivy vulnerability DB (downloaded once)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 21: the seven steps' limits sum to 20 and the runner's own set-up and
+    # completion took up to 5 s (1 minute at x 1.5).
+    timeout-minutes: 21
+    # Every run downloads the DB, ordinary pull requests included: the required
+    # ClamAV image scan (`clamav-signatures`) reads it too, so skipping this job
+    # on a PR that builds no service image broke that check. No `if`, and no
+    # `needs`: it starts with the fastest jobs.
     outputs:
       key: ${{ steps.fetch.outputs.key }}
     steps:
@@ -4578,7 +4628,40 @@ jobs:
           grep -Eq 'is up-to-date|updated \(version' /tmp/freshclam.log
 
   # ---------------------------------------------------------------------------
-  # Container build and image scan: affected images on PRs, every image on main.
+  # Container build and image scan. Owner decision 2026-10-24: service images
+  # are built and Trivy-scanned where the merge is decided, not on every pull
+  # request run.
+  #
+  #   run                                   images built and scanned
+  #   ------------------------------------  -------------------------------------
+  #   push to main                          every image (container-scope --all)
+  #   pull request from mq/train-N          the affected images, as a PR used to
+  #     (the PM merge train)                  (ALL on any classification error;
+  #                                           none only for docs/ and tests/)
+  #   any other pull request                none: "Images built and scanned"
+  #                                           reports success and says so
+  #   anything unrecognised (event, branch, missing or malformed metadata,
+  #   a fork or malformed name under mq/)   every image
+  #
+  # The train is detected from the pull request's head ref in this repository,
+  # never from a label (scripts/container-scope-lib.mjs `classifyRun`). Cheap
+  # early checks stay on every pull request: the quality job's scope-rule
+  # tests (with their BuildKit .dockerignore proof on a scratch fixture), the
+  # Dockerfile pin checks, and the filtered-install narrowing proof below.
+  #
+  # Contract of the check named "Images built and scanned" (job `images`):
+  #   - On an ordinary pull request it PASSES WITHOUT scanning, by design.
+  #     A green aggregate there is not scan evidence.
+  #   - The scan evidence is the aggregate on the mq/train-N pull request (the
+  #     tested prefix) and the push run on main. On those it is success only
+  #     when every selected image was built and scanned (a skipped, cancelled
+  #     or failed image job fails it), or when a train selected none for
+  #     docs/tests only.
+  #   - So the merge host must require the aggregate to PASS (present, not
+  #     skipped) on the train pull request, and must not merge ordinary pull
+  #     requests outside the train. This file cannot enforce that: it is host
+  #     configuration outside the repository, and nothing here states what the
+  #     host does today. Docs/14 § 14.11 has the table.
   # ---------------------------------------------------------------------------
   container-scope:
     name: Images to build and scan
@@ -4586,14 +4669,15 @@ jobs:
     timeout-minutes: 5
     outputs:
       services: ${{ steps.scope.outputs.services }}
+      mode: ${{ steps.scope.outputs.mode }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # The pull request's base must be present to diff against.
           fetch-depth: 0
 
-      # Reuse the existing root YAML parser only for PR analysis. --all on a
-      # main push still runs directly, without installing dependencies.
+      # Reuse the existing root YAML parser only for PR analysis. A push to
+      # main (--all) still runs directly, without installing dependencies.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         if: github.event_name == 'pull_request'
         with:
@@ -4613,21 +4697,22 @@ jobs:
         if: github.event_name == 'pull_request'
         run: node scripts/container-scope-proof.mjs
 
-      - name: Decide which images this change affects
+      - name: Decide which images this run builds and scans
         id: scope
-        # L7-35: images were built and scanned only after merge, so a broken
-        # or vulnerable image was found on main. A pull request now builds the
-        # images it can affect (scripts/container-scope-lib.mjs explains the
-        # rule); a push to main still builds all of them.
+        # L7-35 and the 2026-10-24 decision (see the header above). The event
+        # reaches the script only through env: a branch name is untrusted text
+        # and is never interpolated into the shell. Any failure here fails the
+        # job, so the aggregate check cannot be satisfied by a missing answer.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            services="$(node scripts/container-scope.mjs --base "${{ github.event.pull_request.base.sha }}")"
-          else
-            services="$(node scripts/container-scope.mjs --all)"
-          fi
-          echo "Images to build: ${services}"
-          echo "services=${services}" >> "$GITHUB_OUTPUT"
+          node scripts/container-scope.mjs --run
 
   containers:
     name: Build and scan images
@@ -4635,8 +4720,10 @@ jobs:
     timeout-minutes: 30
     # E2E joins the list: main must stay deployable, and an image built from a
     # commit whose critical financial path was never exercised is not something
-    # to publish (AGENTS.md § 6, § 7). The same gates hold on a pull request,
-    # which now builds and scans the images it touches before merge (L7-35).
+    # to publish (AGENTS.md § 6, § 7). The same gates hold on a merge-train
+    # run, which builds and scans the images it touches before merge (L7-35);
+    # an ordinary pull request selects none, so this job is skipped there and
+    # the "Images built and scanned" check below says why.
     # `trivy-db` is needed for its output, not as a gate: a failed download
     # must fail the scans, not skip them (a required check counts "skipped"
     # as passing), so the condition names every other job's result and leaves
@@ -4656,8 +4743,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every service with a Dockerfile on a push to main; on a pull request,
-        # the ones the change can affect. Derived from the repository rather
+        # Every service with a Dockerfile on a push to main; on a merge-train
+        # run, the ones the change can affect; on an ordinary pull request,
+        # none (the job is skipped). Derived from the repository rather
         # than listed here: asset-service, fleet-service and document-service
         # were each absent from a hand-kept list for one or more releases, so
         # their images went unbuilt and unscanned (PROJECT_MEMORY § 22).
@@ -4740,3 +4828,32 @@ jobs:
           # Time-boxed, per-CVE exceptions with a reason and an expiry date
           # (.trivyignore.services); an expired entry fails the scan again.
           trivyignores: .trivyignore.services
+
+  # The check the merge train and branch protection can require by this name.
+  # always(): a job skipped because a job it needs failed reports "skipped",
+  # which a required check counts as passing, so this decides itself from the
+  # results (scripts/container-scope-lib.mjs `imagesGateVerdict`):
+  #   - ordinary pull request: success, "images are built on the train";
+  #   - main or a train run: success only when `containers` succeeded for
+  #     every selected image, so a skipped, cancelled or failed image job (or
+  #     a missing one) is red; a train that selected none (docs/tests only)
+  #     is the single skipped case allowed.
+  images:
+    name: Images built and scanned
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [container-scope, containers]
+    if: ${{ always() }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: |
+            scripts/container-scope-gate.mjs
+            scripts/container-scope-lib.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Every selected image was built and scanned
+        shell: bash
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/container-scope-gate.mjs

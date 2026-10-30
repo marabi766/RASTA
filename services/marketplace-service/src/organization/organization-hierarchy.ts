@@ -1,6 +1,11 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
-import { RastaError, getContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  RastaError,
+  getContext,
+  type InternalTokenService,
+  upstreamExchange,
+} from '@rasta/nest-common';
 import { z } from 'zod';
 import { SERVICE_NAME } from '../config/env';
 
@@ -69,74 +74,71 @@ export class OrganizationHierarchy implements HierarchyQuestion {
     scopeOrganizationId: string,
     organizationId: string,
   ): Promise<WithinAnswer | null> {
-    const token = await this.options.tokens.issue(
-      SERVICE_NAME,
-      ORGANIZATION_SERVICE,
-      'SERVICE',
-      scopeOrganizationId,
-    );
+    const sender = await new InternalHttpClient(this.options.tokens).authorize({
+      from: SERVICE_NAME,
+      to: ORGANIZATION_SERVICE,
+      purpose: 'SERVICE',
+      organizationId: scopeOrganizationId,
+    });
     const url =
       `${this.options.baseUrl.replace(/\/+$/, '')}` +
       `/v1/organizations/${encodeURIComponent(organizationId)}`;
 
     const timeoutMs = this.options.timeoutMs;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     // One deadline for the whole exchange: headers, body and parse. A server that answers 200 and
     // then stalls its body is a timeout, not a hang inside a transaction holding a row lock.
-    try {
-      const response = await internalFetch(url, {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          'x-internal-token': token,
-          'x-correlation-id': getContext().correlationId,
-        },
-        signal: controller.signal,
-      });
+    return upstreamExchange(
+      ORGANIZATION_SERVICE,
+      timeoutMs,
+      (signal) =>
+        sender.send(url, {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            'x-correlation-id': getContext().correlationId,
+          },
+          signal,
+        }),
+      async (response) => {
+        if (response.status === 404) {
+          // "Not within" only when organization-service's own handler said so. Any other 404 — a
+          // proxy's page, an empty body, a route missing during a deploy — proves nothing.
+          const text = await readCapped(response, MAX_RESPONSE_BYTES);
+          if (text !== null && isOrganizationNotFound(parseJson(text))) return null;
+          this.logger.warn('organization-service answered a 404 that is not its own; refusing');
+          throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
+        }
+        if (response.status !== 200) {
+          await response.body?.cancel().catch(() => undefined);
+          this.logger.warn(
+            `organization-service answered ${response.status}; refusing (fail closed)`,
+          );
+          throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
+        }
 
-      if (response.status === 404) {
-        // "Not within" only when organization-service's own handler said so. Any other 404 — a
-        // proxy's page, an empty body, a route missing during a deploy — proves nothing.
         const text = await readCapped(response, MAX_RESPONSE_BYTES);
-        if (text !== null && isOrganizationNotFound(parseJson(text))) return null;
-        this.logger.warn('organization-service answered a 404 that is not its own; refusing');
-        throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
-      }
-      if (response.status !== 200) {
-        await response.body?.cancel().catch(() => undefined);
-        this.logger.warn(
-          `organization-service answered ${response.status}; refusing (fail closed)`,
-        );
-        throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
-      }
-
-      const text = await readCapped(response, MAX_RESPONSE_BYTES);
-      if (text === null) {
-        this.logger.warn('organization-service answered a body larger than { id }; refusing');
-        throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
-      }
-      const body = parseJson(text) as { id?: unknown; hierarchyVersion?: unknown } | null;
-      if (body?.id !== organizationId) {
-        this.logger.warn('organization-service answered 200 without naming the organization asked');
-        throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
-      }
-      const version = body.hierarchyVersion;
-      if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
-        // "Within" without its version is not evidence a command can be ordered against (D-050).
-        this.logger.warn('organization-service answered 200 without a hierarchy version; refusing');
-        throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
-      }
-      return { hierarchyVersion: version };
-    } catch (error) {
-      if (error instanceof RastaError) throw error;
-      if (controller.signal.aborted) {
-        throw RastaError.upstreamTimeout(ORGANIZATION_SERVICE, timeoutMs);
-      }
-      throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE, error);
-    } finally {
-      clearTimeout(timer);
-    }
+        if (text === null) {
+          this.logger.warn('organization-service answered a body larger than { id }; refusing');
+          throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
+        }
+        const body = parseJson(text) as { id?: unknown; hierarchyVersion?: unknown } | null;
+        if (body?.id !== organizationId) {
+          this.logger.warn(
+            'organization-service answered 200 without naming the organization asked',
+          );
+          throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
+        }
+        const version = body.hierarchyVersion;
+        if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
+          // "Within" without its version is not evidence a command can be ordered against (D-050).
+          this.logger.warn(
+            'organization-service answered 200 without a hierarchy version; refusing',
+          );
+          throw RastaError.upstreamUnavailable(ORGANIZATION_SERVICE);
+        }
+        return { hierarchyVersion: version };
+      },
+    );
   }
 }
 

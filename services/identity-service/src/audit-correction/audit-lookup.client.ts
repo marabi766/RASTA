@@ -1,7 +1,12 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
-import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  RastaError,
+  tryGetContext,
+  upstreamExchange,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -78,16 +83,17 @@ export class AuditLookupClient {
 
   /** The target, or `null` when it does not exist exactly as named. */
   async findTarget(id: string, occurredAt: Date): Promise<AuditTarget | null> {
-    const token = await this.options.tokens.issue(SERVICE_NAME, AUDIT_SERVICE, 'SERVICE');
+    const sender = await new InternalHttpClient(this.options.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: AUDIT_SERVICE,
+      purpose: 'SERVICE',
+    });
 
     const url =
       `${this.baseUrl}/v1/internal/audit-events/${encodeURIComponent(id)}` +
       `?occurredAt=${encodeURIComponent(occurredAt.toISOString())}`;
 
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'x-internal-token': token,
-    };
+    const headers: Record<string, string> = { accept: 'application/json' };
     const context = tryGetContext();
     if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
       headers['x-correlation-id'] = context.correlationId;
@@ -98,47 +104,25 @@ export class AuditLookupClient {
       }
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    timer.unref?.();
+    // One deadline for the whole exchange, body included; a status that is no
+    // answer is refused at once and its body cancelled, not awaited.
+    return upstreamExchange(
+      AUDIT_SERVICE,
+      this.options.timeoutMs,
+      (signal) => sender.send(url, { method: 'GET', headers, signal }),
+      async (response) => {
+        if (response.status === 404) return null;
+        if (response.status !== 200) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
 
-    try {
-      let response: Response;
-      try {
-        response = await internalFetch(
-          url,
-          { method: 'GET', headers, signal: controller.signal },
-          this.fetchImpl,
-        );
-      } catch {
-        // No cause attached: a runtime's transport error can quote the URL.
-        throw controller.signal.aborted
-          ? RastaError.upstreamTimeout(AUDIT_SERVICE, this.options.timeoutMs)
-          : RastaError.upstreamUnavailable(AUDIT_SERVICE);
-      }
+        const parsed = auditTargetSchema.safeParse(await response.json());
+        if (!parsed.success) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
 
-      if (response.status === 404) return null;
-      if (response.status !== 200) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
+        // Exactly the record named, or no record at all.
+        const answeredAt = new Date(parsed.data.occurredAt);
+        if (parsed.data.id !== id || answeredAt.getTime() !== occurredAt.getTime()) return null;
 
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch {
-        throw controller.signal.aborted
-          ? RastaError.upstreamTimeout(AUDIT_SERVICE, this.options.timeoutMs)
-          : RastaError.upstreamUnavailable(AUDIT_SERVICE);
-      }
-
-      const parsed = auditTargetSchema.safeParse(body);
-      if (!parsed.success) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
-
-      // Exactly the record named, or no record at all.
-      const answeredAt = new Date(parsed.data.occurredAt);
-      if (parsed.data.id !== id || answeredAt.getTime() !== occurredAt.getTime()) return null;
-
-      return { id: parsed.data.id, organizationId: parsed.data.organizationId, occurredAt };
-    } finally {
-      clearTimeout(timer);
-    }
+        return { id: parsed.data.id, organizationId: parsed.data.organizationId, occurredAt };
+      },
+    );
   }
 }

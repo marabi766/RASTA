@@ -481,10 +481,12 @@ describe('idempotency and outbox (real database)', () => {
           owner: 'mkt-int-spec',
           leaseSeconds: 60,
         });
-        await expireClaim(
-          prisma,
-          claimed.rows.map((row) => row.id),
-        );
+        // A claim may take nothing; the helper refuses an empty list.
+        if (claimed.rows.length > 0)
+          await expireClaim(
+            prisma,
+            claimed.rows.map((row) => row.id),
+          );
         return claimed;
       };
       const backoff = { baseSeconds: 5, maxSeconds: 60 };

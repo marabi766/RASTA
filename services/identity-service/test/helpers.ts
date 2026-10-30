@@ -1,3 +1,4 @@
+import { eligibilityClockWrite } from '@rasta/testing';
 import { withUtcSession } from '@rasta/config';
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -136,7 +137,7 @@ export class FenceTestTimeline {
 
   /** Refusal is about a live row: hold it live well beyond the 60 s harness bound. */
   async holdLive(prisma: PrismaService, userId: string): Promise<void> {
-    await prisma.client.$executeRaw`
+    await eligibilityClockWrite(prisma.client)`
       UPDATE keycloak_write_attempt
          SET takeover_at = GREATEST(takeover_at,
                (clock_timestamp() AT TIME ZONE 'UTC') + interval '2 hours'),
@@ -148,7 +149,7 @@ export class FenceTestTimeline {
   async expire(prisma: PrismaService, userId: string): Promise<void> {
     // Shift all four instants together: keep each row's deadline/settle windows
     // and ordering, and satisfy the schema's started <= deadline <= takeover.
-    await prisma.client.$executeRaw`
+    await eligibilityClockWrite(prisma.client)`
       WITH shift AS (
         SELECT max(takeover_at) - (clock_timestamp() AT TIME ZONE 'UTC')
                  + interval '2 hours' AS delta
@@ -345,7 +346,7 @@ export async function ensureLiveMember(
     VALUES (${member.userId}, ${handle}, ${`${handle}@example.test`}, 'آزمون', 'مدیر', 'ACTIVE',
             'ITEST', 'ITEST', now())
     ON CONFLICT DO NOTHING`;
-  await prisma.client.$executeRaw`
+  await eligibilityClockWrite(prisma.client)`
     INSERT INTO membership (id, user_id, organization_id, roles, status, valid_from, created_by, updated_by, updated_at)
     VALUES (${`MBR_ITEST_${ulid()}`}, ${member.userId}, ${member.organizationId}, ${member.roles}::text[],
             'ACTIVE', TIMESTAMP '2000-01-01 00:00:00', 'ITEST', 'ITEST', now())

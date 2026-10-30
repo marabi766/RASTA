@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import request from 'supertest';
 import { runUnscoped, runWithContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -148,10 +149,9 @@ describe('stable actor identity (#188) through the API', () => {
       bidIds.push(view.bidId);
     }
     await runUnscoped('the suite lets the deadline pass', () =>
-      w.prisma.client.$executeRawUnsafe(
-        `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-           "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tender.id}'`,
-      ),
+      w.prisma.client
+        .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+           "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tender.id}'`),
     );
     await w.tenderClose.close({ organizationId: ownerOrg, tenderId: tender.id });
     return { owner: ownerOrg, tenderId: tender.id, bidIds };

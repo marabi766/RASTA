@@ -6,14 +6,14 @@
   "license": "UNLICENSED",
   "packageManager": "pnpm@11.22.0",
   "engines": {
-    "node": ">=22.0.0",
+    "node": ">=22.18.0",
     "pnpm": ">=10.0.0"
   },
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
     "lint": "turbo run lint && pnpm run lint:scripts",
-    "lint:scripts": "eslint scripts && node --test scripts/internal-token-transport-rule.test.mjs scripts/internal-token-transport-cache.test.mjs scripts/internal-token-transport-workspace.test.mjs scripts/raw-http-boundary-rule.test.mjs scripts/no-zod-default-rule.test.mjs",
+    "lint:scripts": "eslint scripts && node --test scripts/internal-token-transport-rule.test.mjs scripts/internal-token-transport-cache.test.mjs scripts/internal-token-transport-workspace.test.mjs scripts/raw-http-boundary-rule.test.mjs scripts/no-zod-default-rule.test.mjs scripts/exchange-deadline-rule.test.mjs",
     "lint:fix": "turbo run lint -- --fix && eslint scripts --fix",
     "typecheck": "turbo run typecheck",
     "test": "node scripts/run-test-phases.mjs test",
@@ -56,7 +56,7 @@
     "test:local-postgres-config": "node --test scripts/check-local-postgres-config.test.mjs",
     "check:local-postgres-config": "node scripts/check-local-postgres-config.mjs",
     "test:compose-ports": "node --test scripts/check-compose-ports.test.mjs",
-    "test:backup-restore-drill-lib": "node --test scripts/backup-restore-drill.test.mjs scripts/backup-restore-drill-cli.test.mjs",
+    "test:backup-restore-drill-lib": "node --test scripts/backup-restore-drill.test.mjs scripts/backup-restore-drill-cli.test.mjs scripts/backup-restore-drill-recovery.test.mjs scripts/backup-restore-drill-summary.test.mjs scripts/backup-restore-drill-workflow.test.mjs",
     "test:backup-restore-drill-pg": "node --test scripts/backup-restore-drill.pg.test.mjs",
     "test:infra-preflight": "node --test scripts/infra-preflight.test.mjs",
     "check:compose-ports": "node scripts/check-compose-ports.mjs",

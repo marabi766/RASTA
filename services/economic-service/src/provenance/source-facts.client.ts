@@ -1,7 +1,12 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
 import { digitsToBigInt, isoDateTime, MAX_AMOUNT_MINOR } from '@rasta/contracts';
-import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  RastaError,
+  tryGetContext,
+  upstreamExchange,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -219,12 +224,14 @@ export class SourceFactsClient implements SourceFacts {
     schema: z.ZodType<T>,
     idOf: (fact: T) => string,
   ): Promise<T | null> {
-    const token = await this.options.tokens.issue(SERVICE_NAME, service, 'SERVICE', organizationId);
+    const sender = await new InternalHttpClient(this.options.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: service,
+      purpose: 'SERVICE',
+      organizationId,
+    });
 
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'x-internal-token': token,
-    };
+    const headers: Record<string, string> = { accept: 'application/json' };
     const context = tryGetContext();
     if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
       headers['x-correlation-id'] = context.correlationId;
@@ -235,64 +242,32 @@ export class SourceFactsClient implements SourceFacts {
       }
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    timer.unref?.();
-
-    const failed = () =>
-      controller.signal.aborted
-        ? RastaError.upstreamTimeout(service, this.options.timeoutMs)
-        : RastaError.upstreamUnavailable(service);
-
-    try {
-      let response: Response;
-      try {
-        response = await internalFetch(
-          `${baseUrl.replace(/\/+$/, '')}${path}`,
-          {
-            method: 'GET',
-            headers,
-            signal: controller.signal,
-          },
-          this.fetchImpl,
-        );
-      } catch {
-        // No cause attached: a runtime's transport error can quote the URL.
-        throw failed();
-      }
-
-      if (response.status === 404) {
-        // Absence only when the owner's own handler said so, about this kind
-        // of record. Unavailable otherwise: retried, never taken as "no".
-        let body: unknown;
-        try {
-          body = await response.json();
-        } catch {
-          throw failed();
+    // One deadline for the whole exchange, body included; a status that is no
+    // answer is refused at once and its body cancelled, not awaited.
+    return upstreamExchange(
+      service,
+      this.options.timeoutMs,
+      (signal) =>
+        sender.send(`${baseUrl.replace(/\/+$/, '')}${path}`, { method: 'GET', headers, signal }),
+      async (response) => {
+        if (response.status === 404) {
+          // Absence only when the owner's own handler said so, about this kind
+          // of record. Unavailable otherwise: retried, never taken as "no".
+          if (isRecordNotFound(await response.json(), resourceType)) return null;
+          throw RastaError.upstreamUnavailable(service);
         }
-        if (isRecordNotFound(body, resourceType)) return null;
-        throw RastaError.upstreamUnavailable(service);
-      }
-      if (response.status !== 200) throw RastaError.upstreamUnavailable(service);
+        if (response.status !== 200) throw RastaError.upstreamUnavailable(service);
 
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch {
-        throw failed();
-      }
+        const parsed = schema.safeParse(await response.json());
+        if (!parsed.success) throw RastaError.upstreamUnavailable(service);
 
-      const parsed = schema.safeParse(body);
-      if (!parsed.success) throw RastaError.upstreamUnavailable(service);
+        // An answer about another record is not an answer. The organization is
+        // compared by the consumer, which reports it as its own mismatch.
+        if (idOf(parsed.data) !== id) throw RastaError.upstreamUnavailable(service);
 
-      // An answer about another record is not an answer. The organization is
-      // compared by the consumer, which reports it as its own mismatch.
-      if (idOf(parsed.data) !== id) throw RastaError.upstreamUnavailable(service);
-
-      return parsed.data;
-    } finally {
-      clearTimeout(timer);
-    }
+        return parsed.data;
+      },
+    );
   }
 }
 

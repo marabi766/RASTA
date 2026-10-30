@@ -50,7 +50,16 @@ export type { ParticipantStop, ShutdownFactoryProvider } from './outbox-shutdown
 export { SAGA_DISPUTE_RECOVERY } from './saga-dispute-recovery';
 export type { SagaDisputeRecoveryRow } from './saga-dispute-recovery';
 
-export { expireClaim, makeDue } from './eligibility-clock';
+export {
+  expireClaim,
+  makeDue,
+  setEligibilityFixture,
+  setTenantEligibilityFixture,
+  insertTransferFixture,
+  eligibilityClockSql,
+  eligibilityClockWrite,
+  eligibilityClockTag,
+} from './eligibility-clock';
 
 export { withRedirectProbe, REDIRECT_CASES } from './redirect-probe';
 export type { RedirectProbe } from './redirect-probe';
@@ -67,6 +76,27 @@ export {
   thisRun,
 } from './disclosure';
 export { absenceRefusal, guardedAbsenceMatchers } from './absence-guard';
+export {
+  ISO_INSTANT_SHAPE,
+  SEMVER_SHAPE,
+  TRACEPARENT_SHAPE,
+  ULID_SHAPE,
+  arrayOf,
+  envelopeShape,
+  exactly,
+  expectStoredMessageWithout,
+  optional,
+  storedMessageProblems,
+  wholly,
+} from './stored-message';
+export type {
+  EnvelopePins,
+  Leaf,
+  ObjectShape,
+  Pin,
+  Shape,
+  StoredMessageRules,
+} from './stored-message';
 export type { AbsenceMatcherResult } from './absence-guard';
 export type {
   DisclosureOptions,
