@@ -5,6 +5,7 @@ import {
   constants,
   fstatSync,
   fsyncSync,
+  lstatSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -828,7 +829,87 @@ VALUES ('HLD_DRILL', 'ORG-RESTORE-DRILL', 'WLT_DRILL', 2500, 'IRR', 'DRILL', 'RE
 COMMIT;
 `;
 
-const reportFs = { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync };
+const reportFs = {
+  openSync,
+  writeSync,
+  fsyncSync,
+  closeSync,
+  renameSync,
+  unlinkSync,
+  fstatSync,
+  lstatSync,
+};
+
+/**
+ * Ownership of a path is established ONCE, by the descriptor that created it (`identityOf` of a
+ * bigint fstat), and every later removal or publication of that path proves it still names the
+ * same object (`assertSameObject`, `removeIdentified`): a pathname is not an identity. The first
+ * line of defence is the directory (assertPrivateDirectory in recovery.mjs: nobody else can
+ * replace a name in it); this is the second, for the window between a check and the call that
+ * follows it. Device and inode alone are not enough: a deleted file's inode number is handed to
+ * the next file created (ext4 and tmpfs do it at once), so the object's kind and its birth time
+ * (statx btime, constant for the life of the inode, 0 where a file system has none) belong to it.
+ */
+export const identityOf = (stat) => ({
+  dev: stat.dev,
+  ino: stat.ino,
+  kind: stat.isDirectory() ? 'directory' : stat.isSymbolicLink() ? 'link' : 'file',
+  birth: stat.birthtimeNs,
+});
+/** The identity of what `path` names right now (no link followed). */
+export const identityAt = (path) => identityOf(lstatSync(path, { bigint: true }));
+
+/** The object at a path is not the one this drill created: it is left in place and reported. */
+export class ForeignArtifact extends Error {
+  constructor(
+    message = 'an artifact of the drill was replaced by another actor and was left in place',
+  ) {
+    super(message);
+    this.name = 'ForeignArtifact';
+  }
+}
+
+/**
+ * 'present' when `path` still names the object `identity` was taken from, 'gone' when nothing is
+ * there, ForeignArtifact otherwise (another object, or a path that cannot be inspected). No
+ * identity, no proof: it never answers 'present' for an object this drill did not create.
+ * `lstat(path, { bigint: true })` may be replaced (tests).
+ */
+export function assertSameObject(path, identity, { lstat = lstatSync, message } = {}) {
+  if (!identity) throw new ForeignArtifact(message);
+  let now;
+  try {
+    now = identityOf(lstat(path, { bigint: true }));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return 'gone';
+    throw new ForeignArtifact(message);
+  }
+  if (!isDeepStrictEqual(now, identity)) throw new ForeignArtifact(message);
+  return 'present';
+}
+
+/**
+ * Unlinks `path` only when it is still the object `identity` was taken from (the descriptor that
+ * created it, or the one that read the file a decision was made on). Returns 'removed' or 'gone';
+ * an `undefined` identity means nothing was created (the exclusive open itself failed: whatever
+ * is there belongs to somebody else) and nothing is touched; a replaced path throws
+ * ForeignArtifact and is left alone. A failing unlink of our own object is not an
+ * error here (the caller reports the failure that started the rollback).
+ */
+export function removeIdentified(
+  path,
+  identity,
+  { lstat = lstatSync, unlink = unlinkSync, message } = {},
+) {
+  if (identity === undefined) return 'gone';
+  if (assertSameObject(path, identity, { lstat, message }) === 'gone') return 'gone';
+  try {
+    unlink(path);
+  } catch {
+    /* already gone, or not removable: the caller reports its own failure */
+  }
+  return 'removed';
+}
 
 /**
  * The sibling an atomic write goes through, and the one pattern that recognises it: both live here,
@@ -840,18 +921,31 @@ export const atomicTempPath = (path) => `${path}.${randomBytes(8).toString('hex'
 /**
  * Replace the report in one step: a random sibling is created exclusively (never through a
  * symlink) with mode 0600, written, fsynced and renamed over the destination, so a kill at any
- * point leaves the previous complete report or the new one. A failure removes the sibling and
- * keeps the previous report. `durable` additionally fsyncs the parent directory. The result is
- * true only when that fsync succeeded: only then may a caller claim the rename survives power
- * loss. A failed directory fsync leaves the complete new report in place and returns false.
- * Errors never quote the path.
+ * point leaves the previous complete report or the new one. A failure removes the sibling, but
+ * only when it is still the object this call created (its identity was taken from the descriptor)
+ * and keeps the previous report: a sibling somebody replaced is neither renamed nor removed, and
+ * the failure is a ForeignArtifact. A sibling whose exclusive creation failed was never ours and
+ * is never touched. `onCreated(identity)` receives the created object's identity (it survives
+ * the rename), for callers that remove the published file later. `durable` additionally fsyncs the
+ * parent directory. The result is true only when that fsync succeeded: only then may a caller
+ * claim the rename survives power loss. A failed directory fsync leaves the complete new report
+ * in place and returns false. Errors never quote the path.
  */
-export function writeReportAtomically(path, report, { durable = false, fs = reportFs } = {}) {
+export function writeReportAtomically(
+  path,
+  report,
+  { durable = false, fs: injected, onCreated } = {},
+) {
+  const fs = { ...reportFs, ...injected };
   const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
   const sibling = atomicTempPath(path);
+  const foreign = 'Could not write report (foreign artifact left in place)';
   let fd;
+  let identity;
   try {
     fd = fs.openSync(sibling, 'wx', 0o600);
+    identity = identityOf(fs.fstatSync(fd, { bigint: true }));
+    onCreated?.(identity);
     for (let offset = 0; offset < bytes.length;) {
       const written = fs.writeSync(fd, bytes, offset, bytes.length - offset, offset);
       if (!written) throw new Error('Could not write report');
@@ -861,6 +955,8 @@ export function writeReportAtomically(path, report, { durable = false, fs = repo
     const closing = fd;
     fd = undefined;
     fs.closeSync(closing);
+    // Never publish what somebody swapped in for the sibling.
+    assertSameObject(sibling, identity, { lstat: fs.lstatSync, message: foreign });
     fs.renameSync(sibling, path);
   } catch (error) {
     if (fd !== undefined)
@@ -869,11 +965,12 @@ export function writeReportAtomically(path, report, { durable = false, fs = repo
       } catch {
         /* the write error is the one to report */
       }
-    try {
-      fs.unlinkSync(sibling);
-    } catch {
-      /* never created, or already renamed */
-    }
+    removeIdentified(sibling, identity, {
+      lstat: fs.lstatSync,
+      unlink: fs.unlinkSync,
+      message: foreign,
+    });
+    if (error instanceof ForeignArtifact) throw error;
     throw new Error(`Could not write report (${error?.code ?? 'failed'})`);
   }
   if (!durable) return false;
@@ -913,7 +1010,8 @@ export class InputFileError extends Error {
  * The open never blocks (`O_NONBLOCK`: a FIFO has no writer to wait for) and, when asked, never
  * follows a link; the kind is checked on the DESCRIPTOR, so only a regular file is read, and the
  * read is bounded by `maxBytes` whatever the file claims or grows to. `inspect(stat)` may refuse
- * further (owner, mode); whatever it throws propagates. Throws InputFileError otherwise:
+ * further (owner, mode) and receives the descriptor's identity as its second argument (identityOf);
+ * whatever it throws propagates. Throws InputFileError otherwise:
  * `missing`, `open`, `not-file`, `too-large`, `read`.
  */
 export function readRegularFile(path, { maxBytes, noFollow = false, inspect } = {}) {
@@ -934,7 +1032,7 @@ export function readRegularFile(path, { maxBytes, noFollow = false, inspect } = 
       throw new InputFileError('read');
     }
     if (!stat.isFile()) throw new InputFileError('not-file');
-    inspect?.(stat);
+    inspect?.(stat, identityOf(fstatSync(fd, { bigint: true })));
     // The buffer holds one byte more than the cap (or than the file): a file over the cap, or one
     // that grew while being read, fills it and is refused.
     const buffer = Buffer.allocUnsafe(Math.min(stat.size, maxBytes) + 1);

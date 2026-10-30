@@ -16,6 +16,11 @@
 //                   the process SIGKILLs itself instead: when the removal is asked for, after
 //                   deleting the directory's marker and compose.json only (mid), or after the
 //                   whole directory is gone (after).
+//   swapDirectory:  { parent }
+//                   right after the first rename that publishes a recovery journal, the drill
+//                   directory found in `parent` is moved aside and another directory (holding
+//                   `theirs`) takes its name, as an actor with write access to `parent` could do
+//                   while the checkpoint is being published.
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 
@@ -38,6 +43,25 @@ if (fault.rename) {
       else if (remaining(spec)) throw eio();
     }
     return original(from, to);
+  };
+}
+if (fault.swapDirectory) {
+  const original = fs.renameSync;
+  let swapped = false;
+  fs.renameSync = (from, to) => {
+    const result = original(from, to);
+    if (!swapped && String(to).endsWith('.recovery-journal.json')) {
+      swapped = true;
+      const { parent } = fault.swapDirectory;
+      for (const name of fs.readdirSync(parent)) {
+        if (!/^rasta-restore-drill-[A-Za-z0-9]{6}$/.test(name)) continue;
+        const path = `${parent}/${name}`;
+        original(path, `${path}.moved`);
+        fs.mkdirSync(path, { mode: 0o700 });
+        fs.writeFileSync(`${path}/theirs`, 'precious');
+      }
+    }
+    return result;
   };
 }
 if (fault.fsyncDirectory) {

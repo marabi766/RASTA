@@ -21,11 +21,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { atomicTempPath } from './backup-restore-drill-lib.mjs';
+import { ForeignArtifact, atomicTempPath, identityAt } from './backup-restore-drill-lib.mjs';
 import {
   RECOVERY_ENV,
   RECOVERY_MARKER,
   ArtifactRefused,
+  DirectoryRefused,
   LockRefused,
   acquireDrillLock,
   assertReportName,
@@ -36,11 +37,13 @@ import {
   recoveryJournalPath,
   RecoveryRefused,
   assertOwnedCompose,
+  assertPrivateDirectory,
   inspectProcessGroup,
   loadRecoveryRecord,
   newRecoveryId,
   recoverProcessGroups,
   removeOwnedDirectory,
+  resolveTemporaryRoot,
   validateComposeDefinition,
   writeRecoveryJournal,
   writeRecoveryMarker,
@@ -91,7 +94,14 @@ export function makeRecord(root, overrides = {}) {
     ...overrides.report,
   };
   writeFileSync(reportPath, JSON.stringify(report), { mode: 0o600 });
-  return { project, id, temporary, reportPath, report };
+  return {
+    project,
+    id,
+    temporary,
+    identity: identityAt(temporary),
+    reportPath,
+    report,
+  };
 }
 const rewrite = (record, change) => {
   writeFileSync(record.reportPath, JSON.stringify({ ...record.report, ...change }), {
@@ -724,6 +734,7 @@ test('removeOwnedDirectory: the removal runs only between two durable checkpoint
       project: record.project,
       id: record.id,
       temporary: record.temporary,
+      identity: record.identity,
     });
     const checkpoint = (owner) => JSON.parse(readFileSync(owner.journalPath, 'utf8')).checkpoint;
     const real = { openSync, writeSync, fsyncSync, closeSync, unlinkSync, renameSync };
@@ -1286,4 +1297,365 @@ test('reserving: a close failure never removes an artifact that was already ther
     );
     assert.deepEqual([readFileSync(journal, 'utf8'), existsSync(report)], ['theirs', false]);
     assert.equal(tracked.held.size, 0);
+  }));
+
+// --- the trust boundary is the directory (#512 r1 F1) --------------------------------------------
+// The kernel stamps inodes with a coarse clock (a few milliseconds): a replacement made within the
+// same tick as the original, with a recycled inode number, would carry the same birth time. A real
+// replacement happens later; the tests wait that long so they model one.
+const tick = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
+const uid = process.getuid();
+const mode = (path, bits) => {
+  chmodSync(path, bits);
+  return path;
+};
+const directoryRefused = (action) =>
+  assert.throws(action, (error) => {
+    assert.ok(error instanceof DirectoryRefused, String(error));
+    assert.doesNotMatch(error.message, /\/tmp|drill-recovery/, 'a fixed phrase, no path');
+    return true;
+  });
+
+test('assertPrivateDirectory: only a real directory of this user (or root) that group and others cannot write', () =>
+  withRoot((root) => {
+    const dir = (name, bits) => {
+      const path = join(root, name);
+      mkdirSync(path);
+      return mode(path, bits);
+    };
+    for (const bits of [0o700, 0o750, 0o755, 0o500])
+      assert.equal(
+        assertPrivateDirectory(dir(`ok-${bits}`, bits), { what: 'report' }),
+        join(root, `ok-${bits}`),
+      );
+    for (const bits of [0o770, 0o720, 0o707, 0o702, 0o777, 0o1777, 0o1770, 0o2775])
+      directoryRefused(() => assertPrivateDirectory(dir(`bad-${bits}`, bits), { what: 'report' }));
+    // Not a directory, missing, or a link to a directory somebody else can write.
+    const file = join(root, 'file');
+    writeFileSync(file, 'x');
+    directoryRefused(() => assertPrivateDirectory(file, { what: 'report' }));
+    directoryRefused(() => assertPrivateDirectory(join(root, 'absent'), { what: 'report' }));
+    const shared = dir('shared', 0o777);
+    symlinkSync(shared, join(root, 'link-to-shared'));
+    directoryRefused(() =>
+      assertPrivateDirectory(join(root, 'link-to-shared'), { what: 'report' }),
+    );
+    // A link to a private directory is resolved: the caller works on the real name.
+    const own = dir('own', 0o700);
+    symlinkSync(own, join(root, 'link-to-own'));
+    assert.equal(assertPrivateDirectory(join(root, 'link-to-own'), { what: 'report' }), own);
+    // Another owner is refused (root excepted: it can do anything anyway);
+    directoryRefused(() => assertPrivateDirectory(own, { what: 'report', uid: uid + 1 }));
+    assert.equal(assertPrivateDirectory('/', { what: 'report', uid: uid + 1 }), '/');
+  }));
+
+test('resolveTemporaryRoot: a private root is used as is; a sticky shared one gets a private subdirectory; anything else is refused', () =>
+  withRoot((root) => {
+    const fresh = (name, bits) => {
+      const path = join(root, name);
+      mkdirSync(path);
+      return mode(path, bits);
+    };
+    const privateRoot = fresh('private', 0o700);
+    assert.equal(resolveTemporaryRoot({ tmpRoot: privateRoot, create: true }), privateRoot);
+    assert.deepEqual(readdirSync(privateRoot), [], 'nothing was created in a private root');
+
+    const sticky = fresh('sticky', 0o1777);
+    const own = join(sticky, `rasta-restore-drill-root-${uid}`);
+    // A recovery starts nothing: with no subdirectory yet it only says where it would be.
+    assert.equal(resolveTemporaryRoot({ tmpRoot: sticky }), own);
+    assert.deepEqual(readdirSync(sticky), []);
+    assert.equal(resolveTemporaryRoot({ tmpRoot: sticky, create: true }), own);
+    assert.equal(statSync(own).mode & 0o777, 0o700);
+    assert.equal(resolveTemporaryRoot({ tmpRoot: sticky, create: true }), own, 'reused');
+    assert.equal(resolveTemporaryRoot({ tmpRoot: sticky }), own);
+
+    // Somebody made the name first (wrong mode, a link, not a directory): refused, never adopted.
+    for (const [name, make] of [
+      ['wide', (path) => mode(path, 0o755)],
+      ['link', (path) => symlinkSync(join(root, 'private'), path)],
+      ['file', (path) => writeFileSync(path, 'x')],
+    ]) {
+      const other = fresh(`sticky-${name}`, 0o1777);
+      const path = join(other, `rasta-restore-drill-root-${uid}`);
+      if (name === 'wide') mkdirSync(path);
+      make(path);
+      for (const create of [true, false])
+        directoryRefused(() => resolveTemporaryRoot({ tmpRoot: other, create }));
+    }
+    // Shared but not sticky (others could rename our subdirectory away), unwritable owner, missing.
+    directoryRefused(() => resolveTemporaryRoot({ tmpRoot: fresh('open', 0o777), create: true }));
+    directoryRefused(() => resolveTemporaryRoot({ tmpRoot: fresh('group', 0o770), create: true }));
+    directoryRefused(() =>
+      resolveTemporaryRoot({ tmpRoot: privateRoot, uid: uid + 1, create: true }),
+    );
+    directoryRefused(() => resolveTemporaryRoot({ tmpRoot: join(root, 'absent'), create: true }));
+    assert.deepEqual(readdirSync(join(root, 'open')), [], 'nothing was created in a refused root');
+  }));
+
+test('a record is bound to the temporary root the caller resolved: there is no unchecked default', () =>
+  withRoot((root) => {
+    const record = makeRecord(root);
+    refused(() => loadRecoveryRecord(record.reportPath), /no temporary root/);
+    const loaded = loadRecoveryRecord(record.reportPath, { tmpRoot: root });
+    assert.deepEqual(
+      loaded.directoryIdentity,
+      record.identity,
+      'the identity of the directory proven',
+    );
+  }));
+
+// --- replacement before every unlink / rm (#512 r1 F1) --------------------------------------------
+/** What another actor with write access to the directory does to a path: delete it, put theirs. */
+const swap = (path, text = 'theirs') => {
+  tick();
+  rmSync(path, { recursive: true, force: true });
+  writeFileSync(path, text, { mode: 0o600 });
+};
+const foreign = (action, what) =>
+  assert.rejects(Promise.resolve().then(action), (error) => {
+    assert.ok(error instanceof ForeignArtifact, String(error));
+    assert.match(error.message, what);
+    assert.doesNotMatch(error.message, /\/tmp|drill-recovery/, 'a fixed phrase, no path');
+    return true;
+  });
+
+test('lock: a claim replaced before release, backoff, an error exit or a stale takeover is left alone and reported', () =>
+  withRoot(async (root) => {
+    const report = join(root, 'report.json');
+    const mineOf = (holder) => lockFiles(root).filter((name) => name !== holder);
+    const path = (name) => join(root, name);
+
+    // release()
+    let lock = await acquireDrillLock(report, quick);
+    const [released] = lockFiles(root);
+    swap(path(released));
+    await foreign(() => lock.release(), /lock file .* replaced/);
+    assert.equal(readFileSync(path(released), 'utf8'), 'theirs', 'release');
+    rmSync(path(released));
+
+    // The backoff of a contender that finds a live holder.
+    lock = await acquireDrillLock(report, {
+      ...quick,
+      owner: claim({ pid: 11 }),
+      inspect: () => 'alive',
+    });
+    const [holder] = lockFiles(root);
+    let theirs;
+    await foreign(
+      () =>
+        acquireDrillLock(report, {
+          ...quick,
+          waitMilliseconds: 1000,
+          owner: claim({ pid: 22 }),
+          inspect: () => {
+            [theirs] = mineOf(holder);
+            swap(path(theirs));
+            return 'alive';
+          },
+        }),
+      /lock file .* replaced/,
+    );
+    assert.equal(readFileSync(path(theirs), 'utf8'), 'theirs', 'backoff');
+    lock.release();
+    rmSync(path(theirs));
+    assert.deepEqual(lockFiles(root), []);
+
+    // The error exit (an owner that cannot be proven) is the foreign file, not a plain refusal.
+    lock = await acquireDrillLock(report, {
+      ...quick,
+      owner: claim({ pid: 11 }),
+      inspect: () => 'alive',
+    });
+    const [other] = lockFiles(root);
+    await foreign(
+      () =>
+        acquireDrillLock(report, {
+          ...quick,
+          owner: claim({ pid: 22 }),
+          inspect: () => {
+            [theirs] = mineOf(other);
+            swap(path(theirs));
+            return 'unknown';
+          },
+        }),
+      /lock file .* replaced/,
+    );
+    assert.equal(readFileSync(path(theirs), 'utf8'), 'theirs', 'error exit');
+    lock.release();
+    rmSync(path(theirs));
+
+    // A stale claim replaced between the read that proved its owner gone and the removal.
+    const stale = join(root, 'report.json.lock.0123456789abcdef');
+    const dead = spawnSync(process.execPath, ['-e', '']).pid;
+    writeFileSync(stale, JSON.stringify({ ...currentLockOwner(), pid: dead }), { mode: 0o600 });
+    await foreign(
+      () =>
+        acquireDrillLock(report, {
+          ...quick,
+          inspect: () => {
+            swap(stale);
+            return 'gone';
+          },
+        }),
+      /lock file .* replaced/,
+    );
+    assert.deepEqual(
+      lockFiles(root),
+      ['report.json.lock.0123456789abcdef'],
+      'our own claim is released',
+    );
+    assert.equal(readFileSync(stale, 'utf8'), 'theirs', 'stale takeover');
+  }));
+
+test('lock: an unreplaced claim is still released and a claim already gone is no error', () =>
+  withRoot(async (root) => {
+    const report = join(root, 'report.json');
+    const lock = await acquireDrillLock(report, quick);
+    rmSync(join(root, lockFiles(root)[0]));
+    lock.release();
+    const again = await acquireDrillLock(report, quick);
+    again.release();
+    assert.deepEqual(lockFiles(root), []);
+  }));
+
+test('reserving: an artifact replaced before its rollback is left alone and the refusal is foreign', () =>
+  withRoot((root) => {
+    const report = join(root, 'report.json');
+    const journal = recoveryJournalPath(report);
+    const closeThenSwap = (path) => (fd) => {
+      closeSync(fd);
+      swap(path);
+      throw errno('EIO');
+    };
+    // The report's own rollback (the close reports EIO after the path was replaced).
+    const pathOf = new Map();
+    const tracking = (extra) => ({
+      open: (path, flags, mode) => {
+        const fd = openSync(path, flags, mode);
+        pathOf.set(fd, path);
+        return fd;
+      },
+      ...extra,
+    });
+    artifactRefused(
+      () =>
+        reserveRunArtifacts(
+          report,
+          { id: newRecoveryId() },
+          { fs: tracking({ close: (fd) => closeThenSwap(pathOf.get(fd))(fd) }) },
+        ),
+      'foreign',
+    );
+    assert.equal(readFileSync(report, 'utf8'), 'theirs', 'report');
+    assert.equal(existsSync(journal), false);
+    rmSync(report);
+
+    // The journal's rollback: theirs survives, our report is taken back.
+    artifactRefused(
+      () =>
+        reserveRunArtifacts(
+          report,
+          { id: newRecoveryId() },
+          {
+            fs: tracking({
+              close: (fd) =>
+                pathOf.get(fd) === journal ? closeThenSwap(journal)(fd) : closeSync(fd),
+            }),
+          },
+        ),
+      'foreign',
+    );
+    assert.equal(readFileSync(journal, 'utf8'), 'theirs', 'journal');
+    assert.equal(existsSync(report), false, 'our report is taken back');
+    rmSync(journal);
+
+    // The outer handler: the journal fails for another reason after the report was replaced.
+    artifactRefused(
+      () =>
+        reserveRunArtifacts(
+          report,
+          { id: newRecoveryId() },
+          {
+            fs: tracking({
+              write: () => {
+                swap(report);
+                throw errno('ENOSPC');
+              },
+            }),
+          },
+        ),
+      'foreign',
+    );
+    assert.equal(readFileSync(report, 'utf8'), 'theirs', 'outer handler');
+    assert.equal(existsSync(journal), false, 'our journal is taken back');
+  }));
+
+test('removeOwnedDirectory: a directory replaced after it was proven is never removed, at either boundary', () =>
+  withRoot((root) => {
+    const ownerOf = (record) => ({
+      journalPath: recoveryJournalPath(record.reportPath),
+      project: record.project,
+      id: record.id,
+      temporary: record.temporary,
+      identity: record.identity,
+    });
+    const replace = (temporary) => {
+      tick();
+      rmSync(temporary, { recursive: true });
+      mkdirSync(temporary, { mode: 0o700 });
+      writeFileSync(join(temporary, 'theirs'), 'precious');
+    };
+    const survives = (record) =>
+      assert.equal(readFileSync(join(record.temporary, 'theirs'), 'utf8'), 'precious');
+
+    // Before the first checkpoint: nothing is published either.
+    let record = makeRecord(root);
+    replace(record.temporary);
+    assert.throws(
+      () => removeOwnedDirectory({ ...ownerOf(record), remove: () => assert.fail('removed') }),
+      (error) => error instanceof ForeignArtifact && /replaced/.test(error.message),
+    );
+    survives(record);
+    assert.equal(existsSync(recoveryJournalPath(record.reportPath)), false);
+
+    // During the checkpoint publication (its rename): the check right before the removal catches it.
+    record = makeRecord(root);
+    let swapped = false;
+    const fs = {
+      renameSync: (from, to) => {
+        renameSync(from, to);
+        if (!swapped) replace(record.temporary);
+        swapped = true;
+      },
+    };
+    assert.throws(
+      () => removeOwnedDirectory({ ...ownerOf(record), fs, remove: () => assert.fail('removed') }),
+      ForeignArtifact,
+    );
+    assert.equal(swapped, true);
+    survives(record);
+
+    // The default removal itself, with the real rmSync, on a replaced directory.
+    record = makeRecord(root);
+    replace(record.temporary);
+    assert.throws(() => removeOwnedDirectory(ownerOf(record)), ForeignArtifact);
+    survives(record);
+
+    // No identity, no proof: nothing is removed.
+    record = makeRecord(root);
+    assert.throws(
+      () => removeOwnedDirectory({ ...ownerOf(record), identity: undefined }),
+      ForeignArtifact,
+    );
+    assert.equal(existsSync(join(record.temporary, RECOVERY_MARKER)), true);
+
+    // A symlink put in the directory's place is not the directory either.
+    record = makeRecord(root);
+    const target = mkdtempSync(join(root, 'target-'));
+    writeFileSync(join(target, 'theirs'), 'precious');
+    rmSync(record.temporary, { recursive: true });
+    symlinkSync(target, record.temporary);
+    assert.throws(() => removeOwnedDirectory(ownerOf(record)), ForeignArtifact);
+    assert.equal(readFileSync(join(target, 'theirs'), 'utf8'), 'precious');
   }));

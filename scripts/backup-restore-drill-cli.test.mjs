@@ -67,10 +67,14 @@ function start(directory, root, extra = {}, executable = cli.pathname) {
   return child;
 }
 
-test('early mkdtemp failure writes a nonempty failure report', async () => {
+test('early mkdtemp failure writes a nonempty failure report', async (t) => {
+  // A private root the user cannot write: the startup checks pass, the directory cannot be made.
+  if (process.getuid() === 0) return t.skip('root can write anywhere');
   const directory = mkdtempSync(join(tmpdir(), 'drill-early-test-'));
   try {
-    const child = start(directory, fixture(directory), { TMPDIR: join(directory, 'missing') });
+    const unwritable = join(directory, 'unwritable');
+    mkdirSync(unwritable, { mode: 0o500 });
+    const child = start(directory, fixture(directory), { TMPDIR: unwritable });
     const [code] = await once(child, 'exit');
     assert.equal(code, 1);
     const evidence = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
@@ -2288,5 +2292,192 @@ test('overlapping names, the journal’s name taken first: the run is refused an
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// --- the trust boundary is the directory; a replaced artifact is never removed (#512 r1 F1) --------
+const withDirectory = async (prefix, body) => {
+  const directory = mkdtempSync(join(tmpdir(), prefix));
+  try {
+    return await body(directory);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+};
+const DIRECTORY_LINE =
+  /^\[backup-restore-drill\] the (report|temporary) directory must be private \(a real directory owned by the current user or root that group and others cannot write\); nothing was done\n$/;
+function runCli(directory, root, args, extra = {}) {
+  const child = spawn(process.execPath, [cli.pathname, ...args], {
+    env: {
+      ...process.env,
+      PATH: `${directory}:${process.env.PATH}`,
+      TMPDIR: directory,
+      RASTA_DRILL_ROOT: root,
+      ...extra,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => (stdout += chunk));
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  return once(child, 'close').then(([code]) => ({ code, stdout, stderr }));
+}
+
+test('a report directory that group or others can write is refused (exit 2, one fixed line) before any artifact exists', async () => {
+  await withDirectory('drill-dir-refused-', async (directory) => {
+    const root = fixture(directory);
+    const scratch = join(directory, 'tmp');
+    mkdirSync(scratch, { mode: 0o700 });
+    for (const bits of [0o770, 0o707, 0o777, 0o1777]) {
+      const shared = join(directory, `shared-${bits}`);
+      mkdirSync(shared);
+      chmodSync(shared, bits);
+      for (const args of [
+        ['--report', join(shared, 'report.json')],
+        ['--cleanup-from', join(shared, 'report.json')],
+      ]) {
+        const result = await runCli(directory, root, args, { TMPDIR: scratch });
+        const label = `${bits.toString(8)} ${args[0]}`;
+        assert.equal(result.code, 2, label);
+        assert.match(result.stderr, DIRECTORY_LINE, label);
+        assert.equal(result.stdout, '', label);
+        assert.deepEqual(readdirSync(shared), [], `${label}: no artifact, no lock, no report`);
+        assert.deepEqual(readdirSync(scratch), [], `${label}: no temporary directory`);
+        assert.ok(!result.stderr.includes(directory), `${label}: no path`);
+      }
+    }
+    // A link to such a directory is resolved, so it is refused as well.
+    const link = join(directory, 'link');
+    symlinkSync(join(directory, 'shared-511'), link);
+    chmodSync(join(directory, 'shared-511'), 0o777);
+    const viaLink = await runCli(directory, root, ['--report', join(link, 'report.json')], {
+      TMPDIR: scratch,
+    });
+    assert.equal(viaLink.code, 2);
+    assert.match(viaLink.stderr, DIRECTORY_LINE);
+    assert.deepEqual(readdirSync(join(directory, 'shared-511')), []);
+  });
+});
+
+test('a temporary-directory parent that others can write is refused before anything exists; a sticky /tmp gets a private subdirectory', async () => {
+  await withDirectory('drill-tmp-refused-', async (directory) => {
+    const root = fixture(directory);
+    const reports = join(directory, 'reports');
+    mkdirSync(reports, { mode: 0o700 });
+    // Writable by others and NOT sticky: a private subdirectory there could be renamed away.
+    const open = join(directory, 'open-tmp');
+    mkdirSync(open);
+    chmodSync(open, 0o777);
+    for (const args of [
+      ['--report', join(reports, 'report.json')],
+      ['--cleanup-from', join(reports, 'report.json')],
+    ]) {
+      const result = await runCli(directory, root, args, { TMPDIR: open });
+      assert.equal(result.code, 2, args[0]);
+      assert.match(result.stderr, DIRECTORY_LINE);
+      assert.match(result.stderr, /the temporary directory/);
+      assert.deepEqual(readdirSync(reports), [], 'no artifact');
+      assert.deepEqual(readdirSync(open), [], 'nothing made in the refused parent');
+    }
+    // Sticky and world-writable (/tmp): the run works in a private subdirectory of it.
+    const sticky = join(directory, 'sticky-tmp');
+    mkdirSync(sticky);
+    chmodSync(sticky, 0o1777);
+    writeFileSync(join(root, '.env'), 'SYNTHETIC_TEST=true\n');
+    const run = await runCli(directory, root, ['--report', join(reports, 'report.json')], {
+      TMPDIR: sticky,
+    });
+    assert.equal(run.code, 1, run.stderr);
+    const report = JSON.parse(readFileSync(join(reports, 'report.json'), 'utf8'));
+    const own = join(sticky, `rasta-restore-drill-root-${process.getuid()}`);
+    assert.deepEqual(readdirSync(sticky), [`rasta-restore-drill-root-${process.getuid()}`]);
+    assert.equal(statSync(own).mode & 0o777, 0o700);
+    assert.equal(report.temporary.startsWith(`${own}/`), true, 'the directory is inside it');
+    assert.equal(report.cleanup.passed, true);
+    assert.deepEqual(readdirSync(own), [], 'and removed from it');
+    // Somebody else made the name first with a wide mode: refused, not adopted.
+    rmSync(own, { recursive: true });
+    mkdirSync(own, { mode: 0o755 });
+    chmodSync(own, 0o755);
+    rmSync(join(reports, 'report.json'));
+    rmSync(join(reports, 'report.json.recovery-journal.json'));
+    const taken = await runCli(directory, root, ['--report', join(reports, 'report.json')], {
+      TMPDIR: sticky,
+    });
+    assert.equal(taken.code, 2);
+    assert.match(taken.stderr, DIRECTORY_LINE);
+    assert.deepEqual(readdirSync(reports), []);
+  });
+});
+
+test('a directory replaced while the checkpoint is published is not removed: the run reports it and fails', async () => {
+  await withDirectory('drill-swap-run-', async (directory) => {
+    const root = fixture(directory);
+    const run = await ordinaryRun(
+      directory,
+      root,
+      faultEnv({ swapDirectory: { parent: directory } }),
+    );
+    assert.equal(run.code, 1);
+    assert.match(run.report.temporary, /rasta-restore-drill-/);
+    assert.equal(
+      readFileSync(join(run.report.temporary, 'theirs'), 'utf8'),
+      'precious',
+      'the replacement survives',
+    );
+    assert.equal(existsSync(`${run.report.temporary}.moved`), true, 'the original was not touched');
+    assert.equal(run.report.cleanup.passed, false);
+    assert.equal(run.report.cleanup.foreign, true);
+    assert.equal(run.report.passed, false);
+  });
+});
+
+test('a recovery whose directory is replaced while the checkpoint is published removes nothing and exits non-zero', async () => {
+  const context = await recoverable('drill-swap-recovery-');
+  try {
+    const { directory, root, run } = context;
+    const result = await recover(
+      directory,
+      root,
+      run.reportPath,
+      faultEnv({ swapDirectory: { parent: directory } }),
+    );
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(
+      result.stderr,
+      /\[backup-restore-drill\] the temporary directory was replaced by another actor and was left in place/,
+    );
+    assert.equal(readFileSync(join(run.report.temporary, 'theirs'), 'utf8'), 'precious');
+    assert.ok(!result.stderr.includes(directory), 'no path');
+  } finally {
+    rmSync(context.directory, { recursive: true, force: true });
+  }
+});
+
+test('a lock claim replaced while the recovery runs is left in place, reported, and the exit is not 0', async () => {
+  const context = await recoverable('drill-swap-lock-');
+  try {
+    const { directory, root, run } = context;
+    // The Docker stand-in is another actor with write access to the report's directory.
+    recordingDocker(
+      directory,
+      `case "$*" in
+  *'down --volumes'*)
+    sleep 0.1
+    for claim in '${directory}'/report.json.lock.*; do rm -f "$claim"; echo theirs > "$claim"; done ;;
+esac`,
+    );
+    const result = await recover(directory, root, run.reportPath);
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(
+      result.stderr,
+      /\[backup-restore-drill\] a lock file next to the report was replaced by another actor and was left in place/,
+    );
+    assert.ok(!result.stderr.includes(directory), 'no path');
+    const [claim] = readdirSync(directory).filter((name) => name.includes('.lock.'));
+    assert.equal(readFileSync(join(directory, claim), 'utf8'), 'theirs\n');
+  } finally {
+    rmSync(context.directory, { recursive: true, force: true });
   }
 });

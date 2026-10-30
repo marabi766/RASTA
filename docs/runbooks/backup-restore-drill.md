@@ -18,10 +18,22 @@
 `unix:///var/run/docker.sock` محدود است. در یک worktree تمیز اجرا کنید. فایل‌های `.env` و `.env.migrator` محلی نباید در ریشه
 یا مسیر سرویس‌ها وجود داشته باشند؛ تمرین با دیدن آن‌ها متوقف می‌شود. فقط مقدارهای
 توسعه در فایل‌های `.example` خوانده می‌شوند. مسیر گزارش باید تازه و پوشه آن موجود باشد.
+**پوشه‌های تمرین باید خصوصی باشند** (مرز اعتماد، مانند `~/.ssh` برای ssh): پوشه‌ای که گزارش در آن است
+(گزارش، دفترچه، فایل‌های قفل و فایل‌های خواهر همه همان‌جا ساخته می‌شوند) و پوشه‌ای که پوشه موقت در آن ساخته می‌شود
+باید پوشه واقعی (symlink به پوشه واقعی پذیرفته و حل می‌شود) و متعلق به همان کاربر یا root باشد و گروه و دیگران حق
+نوشتن در آن نداشته باشند (`0700` یا `0755`). `--report` و `--cleanup-from` هر دو، پیش از ساخت هر فایل، قفل یا پوشه،
+اگر چنین نباشد با کد ۲ و یک خط ثابت (بدون مسیر) رد می‌کنند. پوشه‌های مشترک مانند `/tmp` (sticky و قابل‌نوشتن برای همه)
+برای گزارش رد می‌شوند؛ برای پوشه موقت، تمرین در `TMPDIR` مشترک و sticky یک زیرپوشه خصوصی
+`rasta-restore-drill-root-<uid>` با مجوز `0700` می‌سازد و پوشه موقت را در آن می‌گذارد (زیرپوشه‌ای که پیش‌تر کس
+دیگری ساخته یا مجوزش گشاده است رد می‌شود، نه اینکه پذیرفته شود). پوشه مشترک بدون sticky همیشه رد می‌شود. گزارش‌های
+اجراهای قدیمی‌تر که پوشه موقتشان مستقیم زیر `/tmp` بود با `--cleanup-from` پذیرفته نمی‌شوند؛ پوشه را دستی بررسی و حذف کنید.
+بدون این مرز، کسی که در پوشه نوشتن دارد می‌تواند نام یک فایل را پس از ساخته‌شدنش عوض کند؛ با آن، فقط خود اپراتور
+(یا root) می‌تواند. پوشه‌های والد بالاتر بررسی نمی‌شوند (همان مدل ssh برای پوشه خانه).
 
 ```bash
 pnpm install --frozen-lockfile
-scripts/backup-restore-drill --report /tmp/restore-drill-$(date -u +%Y%m%dT%H%M%SZ).json
+report_dir="$(mktemp -d)"   # خصوصی (0700) و متعلق به شما
+scripts/backup-restore-drill --report "${report_dir}/restore-drill-$(date -u +%Y%m%dT%H%M%SZ).json"
 ```
 
 وابستگی‌های seed به ترتیب ساخته می‌شوند. سپس برای هر سرویس migration موجود اجرا
@@ -192,6 +204,17 @@ fsync یا rename گزارش قبلی را نگه می‌دارد، فایل خ�
 هشدار روی stderr چاپ می‌شود. اگر قطع یا شکست میانه نوشتن رخ دهد، فایل خواهر
 `<report>.<hex>.tmp` با مجوز `0600` ممکن است بماند؛ پس از بررسی حذفش کنید.
 
+مالکیت هر فایل یا پوشه‌ای که تمرین می‌سازد (فایل خواهر، گزارش و دفترچه رزروشده، ادعای قفل، پوشه موقت) با هویت
+شیء ثابت می‌شود، نه با نام: همان توصیفگری که شیء را ساخت، `dev` و `ino` و نوع و زمان تولد آن را نگه می‌دارد
+(شماره inode یک فایل حذف‌شده فوراً به فایل بعدی می‌رسد، پس به‌تنهایی کافی نیست). پیش از **هر** حذف
+(`unlink` و حذف بازگشتی پوشه موقت) و پیش از rename فایل خواهر روی گزارش، `lstat` مسیر با آن هویت مقایسه می‌شود. اگر
+مسیر اکنون شیء دیگری را نشان دهد، چیزی حذف یا منتشر **نمی‌شود**، همان شیء جایگزین سر جایش می‌ماند، یک خط ثابت (بدون مسیر)
+«… replaced by another actor and was left in place» روی stderr چاپ می‌شود، `cleanup.foreign: true` در گزارش اجرا
+می‌آید و کد خروج غیرصفر است. بازشدن انحصاری که خودش شکست بخورد (`EEXIST`) چیزی نساخته است و هیچ فایلی حذف نمی‌شود.
+این لایه دوم است؛ لایه اول خصوصی‌بودن پوشه است (بالا). فاصله میان مقایسه و حذف را فقط پوشه خصوصی می‌بندد (قفل‌گذاری
+فضای نام ساخته نشده است)، و ساعت هسته درشت‌دانه است: جایگزینی که در همان چند میلی‌ثانیه با inode بازیافت‌شده ساخته شود
+از نظر هویت متمایز نیست.
+
 هر فرزند در گروه فرایند جدا (`detached`) اجرا می‌شود، پس SIGKILL تمرین فرزندان را نمی‌کشد:
 `docker compose up --wait`، `pg_dump` یا `pnpm db:migrate` ممکن است همچنان منابع بگیرند.
 شناسه گروه (PGID) هر فرزند پیش از انتظار برای آن در `processGroups` گزارش نوشته می‌شود (گروه‌های
@@ -325,6 +348,32 @@ or `gh workflow run backup-drill-monthly.yml`), and on a pull request that chang
 or `scripts/backup-restore-drill*` (so the change itself proves the job still runs).
 Runs of one ref do not overlap and a running drill is never cancelled (GitHub keeps one pending
 run per group, so a newer pending run replaces an older pending one).
+
+**Directories must be private (the trust boundary).** Everything the drill writes next to the
+report (the report, its journal, lock claims and atomic siblings) lives in the report's directory,
+and the temporary directory is made in `TMPDIR`. Both directories must be real directories owned by
+the current user or root that group and others cannot write (a link to such a directory is
+resolved and accepted). `--report` and `--cleanup-from` check this at startup, before a lock, a
+file or a directory exists, and refuse with exit 2 and one fixed line (no path). This is the model
+ssh uses for `~/.ssh`: nobody but the operator can replace a name in such a directory, so "the path
+still is what I created" holds. A sticky world-writable directory such as `/tmp` is refused for the
+report. For the temporary directory a sticky `TMPDIR` is allowed only through a private
+subdirectory the drill creates, `rasta-restore-drill-root-<uid>` (mode 0700, owned by the user);
+one that somebody else made first, or with a wider mode, is refused, and so is a shared
+directory that is not sticky. The directories above these two are not checked (as with ssh and the
+home directory). A report written by an older version whose temporary directory sits directly
+under a shared `/tmp` is refused by `--cleanup-from`: inspect and delete that directory by hand.
+Inside the boundary every removal also proves identity: the object a descriptor created (or a
+claim file whose content a decision was made on) is remembered by device, inode, kind and birth
+time, and an `unlink`, a recursive removal of the temporary directory or the publication of an
+atomic write happens only while `lstat` of the path shows that object. A replaced path is left in
+place, the CLI prints one fixed line ("... was replaced by another actor and was left in place"),
+the run report gets `cleanup.foreign: true` and the exit status is non-zero. An exclusive open that
+fails with `EEXIST` created nothing, so nothing is unlinked. This second layer is best effort,
+not locking: the check and the removal are two system calls, and the kernel's coarse inode
+timestamps cannot tell a replacement created within the same few milliseconds with a recycled inode
+number; the private directory is what closes that window. The runner's drill directory
+(`RUNNER_TEMP/backup-drill`, mode 0700) already satisfies this.
 
 **What it runs.** The same command as an operator, `scripts/backup-restore-drill --report <new
 file>`, on an `ubuntu-latest` runner after `pnpm install --frozen-lockfile`. The CLI owns its two

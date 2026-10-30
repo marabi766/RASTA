@@ -35,6 +35,7 @@ import {
   compareLedgers,
   checkDatabaseCoverage,
   summarizeTables,
+  ForeignArtifact,
   InputFileError,
   readRegularFile,
   writeReportAtomically,
@@ -924,6 +925,151 @@ test('open, write, fsync and rename failures keep the previous report and never 
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  }
+});
+
+// --- ownership is an identity, not a pathname (#512 r1 F1) -------------------------------------
+// The kernel stamps inodes with a coarse clock (a few milliseconds): a replacement made within the
+// same tick as the original, with a recycled inode number, would carry the same birth time. A real
+// replacement happens later; the tests wait that long so they model one.
+const tick = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
+/** Replaces whatever is at `path` with a different file, as another actor with directory access. */
+const replaceFile = (path, text = 'theirs') => {
+  tick();
+  rmSync(path);
+  writeFileSync(path, text, { mode: 0o600 });
+};
+const siblingsOf = (directory) => readdirSync(directory).filter((name) => name.endsWith('.tmp'));
+
+test('an exclusive open that fails because the sibling exists unlinks nothing (the file is not ours)', () => {
+  const { directory, path } = reportPaths();
+  try {
+    writeReportAtomically(path, provisional);
+    const unlinked = [];
+    const fs = {
+      ...realFs,
+      // Somebody else holds the name we were about to create exclusively.
+      openSync: (name, ...rest) => {
+        if (rest[0] === 'wx') {
+          writeFileSync(name, 'theirs', { mode: 0o600 });
+          throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+        }
+        return realFs.openSync(name, ...rest);
+      },
+      unlinkSync: (name) => {
+        unlinked.push(name);
+        return realFs.unlinkSync(name);
+      },
+    };
+    assert.throws(
+      () => writeReportAtomically(path, complete, { fs }),
+      /^Error: Could not write report \(EEXIST\)$/,
+    );
+    assert.deepEqual(unlinked, [], 'nothing was unlinked');
+    const [theirs] = siblingsOf(directory);
+    assert.equal(readFileSync(join(directory, theirs), 'utf8'), 'theirs');
+    assert.deepEqual(readReport(path), provisional);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a sibling replaced after it was created is neither published nor removed: the failure is foreign', () => {
+  // Each stage is a different boundary between the open and the unlink/rename that follows it.
+  for (const stage of ['close', 'fsync', 'before-rename']) {
+    const { directory, path } = reportPaths();
+    try {
+      writeReportAtomically(path, provisional);
+      let sibling;
+      const swap = () => replaceFile(sibling);
+      const fs = {
+        ...realFs,
+        openSync: (name, ...rest) => {
+          const fd = realFs.openSync(name, ...rest);
+          if (rest[0] === 'wx') sibling = name;
+          return fd;
+        },
+        fsyncSync: (fd) => {
+          realFs.fsyncSync(fd);
+          if (stage === 'fsync') {
+            swap();
+            throw Object.assign(new Error('fsync'), { code: 'EIO' });
+          }
+        },
+        closeSync: (fd) => {
+          realFs.closeSync(fd);
+          if (stage === 'close') {
+            swap();
+            throw Object.assign(new Error('close'), { code: 'EIO' });
+          }
+          if (stage === 'before-rename') swap();
+        },
+      };
+      assert.throws(
+        () => writeReportAtomically(path, complete, { fs }),
+        (error) =>
+          error instanceof ForeignArtifact &&
+          /foreign artifact left in place/.test(error.message) &&
+          !error.message.includes(directory),
+        stage,
+      );
+      assert.equal(readFileSync(sibling, 'utf8'), 'theirs', `${stage}: the replacement survives`);
+      assert.deepEqual(readReport(path), provisional, `${stage}: the previous report is kept`);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a sibling replaced by a symlink is left alone too', () => {
+  const { directory, path } = reportPaths();
+  try {
+    const target = join(directory, 'target');
+    writeFileSync(target, 'precious');
+    let sibling;
+    const fs = {
+      ...realFs,
+      openSync: (name, ...rest) => {
+        sibling = name;
+        return realFs.openSync(name, ...rest);
+      },
+      closeSync: (fd) => {
+        realFs.closeSync(fd);
+        rmSync(sibling);
+        symlinkSync(target, sibling);
+        throw Object.assign(new Error('close'), { code: 'EIO' });
+      },
+    };
+    assert.throws(() => writeReportAtomically(path, complete, { fs }), ForeignArtifact);
+    assert.equal(realFs.lstatSync(sibling).isSymbolicLink(), true);
+    assert.equal(readFileSync(target, 'utf8'), 'precious');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a failure with the sibling still ours removes it and reports the plain error; onCreated sees the identity', () => {
+  const { directory, path } = reportPaths();
+  try {
+    let created;
+    assert.throws(
+      () =>
+        writeReportAtomically(path, complete, {
+          fs: faulty('fsync'),
+          onCreated: (identity) => (created = identity),
+        }),
+      /^Error: Could not write report \(EIO\)$/,
+    );
+    assert.equal(typeof created.ino, 'bigint');
+    assert.deepEqual(siblingsOf(directory), []);
+    writeReportAtomically(path, complete, { onCreated: (identity) => (created = identity) });
+    assert.equal(
+      statSync(path, { bigint: true }).ino,
+      created.ino,
+      'the published file is the created one',
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

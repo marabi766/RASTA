@@ -7,8 +7,7 @@
 // unrecorded. Reserving before the spawn is impossible: the group id is the child's pid.
 import { randomBytes } from 'node:crypto';
 import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import {
@@ -22,6 +21,8 @@ import {
   collectSchemaReference,
   schemaDiffSummary,
   checkServiceCoverage,
+  ForeignArtifact,
+  identityAt,
   OBJECT_STATE_SQL,
   SEQUENCES_SQL,
   compareSnapshots,
@@ -43,12 +44,14 @@ import {
 } from './backup-restore-drill-lib.mjs';
 import {
   ArtifactRefused,
+  DirectoryRefused,
   LOCK_WAIT_MILLISECONDS,
   LockRefused,
   RECOVERY_ENV,
   RecoveryRefused,
   acquireDrillLock,
   assertOwnedCompose,
+  assertPrivateDirectory,
   assertReportName,
   loadRecoveryRecord,
   newRecoveryId,
@@ -56,6 +59,7 @@ import {
   recoverProcessGroups,
   recoveryJournalPath,
   reserveRunArtifacts,
+  resolveTemporaryRoot,
   writeRecoveryJournal,
   writeRecoveryMarker,
 } from './backup-restore-drill-recovery.mjs';
@@ -75,15 +79,41 @@ if (!cleanupOnly && (args.length !== 2 || args[0] !== '--report')) {
   );
   process.exit(2);
 }
-const reportPath = resolve(args[1]);
+const requestedPath = resolve(args[1]);
 // The report's artifacts (journal, lock claims, atomic siblings) are all `<report>` plus a suffix:
 // a report path that is itself such a name could be another report's artifact. Refused first,
 // before the lock or any file next to it exists, for a run and a recovery alike.
 try {
-  assertReportName(reportPath);
+  assertReportName(requestedPath);
 } catch (error) {
   console.error(`[backup-restore-drill] ${error.message}`);
   process.exit(2);
+}
+// THE TRUST BOUNDARY IS THE DIRECTORY (see backup-restore-drill-recovery.mjs): the report's
+// directory and the one the temporary directory is made in must be private (owned by this user or
+// root, not writable by group or others; a sticky /tmp gets a private subdirectory instead).
+// Refused here, before the lock, the report, the journal or any directory exists, for a run and a
+// recovery alike. Everything below works on the resolved names.
+let reportPath;
+let temporaryRoot;
+try {
+  const directory = assertPrivateDirectory(dirname(requestedPath), { what: 'report' });
+  reportPath = join(directory, basename(requestedPath));
+  temporaryRoot = resolveTemporaryRoot({ create: args[0] === '--report' });
+} catch (error) {
+  console.error(
+    `[backup-restore-drill] ${error instanceof DirectoryRefused ? error.message : 'a directory of the drill could not be checked; nothing was done'}`,
+  );
+  process.exit(2);
+}
+// An artifact this invocation created was replaced by another actor: it was NOT removed, and the
+// invocation cannot succeed (a fixed line, never a path).
+let foreignFound = false;
+function noteForeign(error) {
+  if (!(error instanceof ForeignArtifact)) return;
+  foreignFound = true;
+  console.error(`[backup-restore-drill] ${error.message}`);
+  process.exitCode ||= 1;
 }
 // One owner at a time: a run and a recovery of the same report hold this lock for their whole
 // lifetime (released when the process exits; a killed owner leaves a claim that a later one takes
@@ -98,11 +128,17 @@ try {
 } catch (error) {
   // Fixed phrases only: never the path, a pid or anything read from a claim.
   console.error(
-    `[backup-restore-drill] ${error instanceof LockRefused ? error.message : 'the lock next to the report could not be taken; nothing was done'}`,
+    `[backup-restore-drill] ${error instanceof LockRefused || error instanceof ForeignArtifact ? error.message : 'the lock next to the report could not be taken; nothing was done'}`,
   );
   process.exit(2);
 }
-process.on('exit', () => drillLock.release());
+process.on('exit', () => {
+  try {
+    drillLock.release();
+  } catch (error) {
+    noteForeign(error);
+  }
+});
 // The whole artifact namespace is reserved before anything is allocated: the report (exclusive
 // creation avoids overwriting an operator's file, including through a symlink) and the recovery
 // journal path (refused when it exists: it is an earlier run's or another report's). Later writes
@@ -189,6 +225,9 @@ function writeReport({ durable = false, final = false } = {}) {
 // recovery sees them gone. A write that fails is STICKY (`publicationFailed`): nothing that
 // happens afterwards makes this invocation a success.
 let journalOwner;
+// Device and inode of the temporary directory as this invocation created or proved it: its removal
+// is held to that object.
+let temporaryIdentity;
 let carried = [];
 let publicationFailed = false;
 /**
@@ -196,15 +235,22 @@ let publicationFailed = false;
  * earlier recovery's checkpoint): see removeOwnedDirectory. A checkpoint write that fails is
  * sticky here as everywhere else.
  */
-const deleteTemporary = (directoryPresent = true) =>
-  removeOwnedDirectory({
-    journalPath: recoveryJournalPath(reportPath),
-    ...journalOwner,
-    directoryPresent,
-    onFailure: () => {
-      publicationFailed = true;
-    },
-  });
+const deleteTemporary = (directoryPresent = true) => {
+  try {
+    removeOwnedDirectory({
+      journalPath: recoveryJournalPath(reportPath),
+      ...journalOwner,
+      identity: temporaryIdentity,
+      directoryPresent,
+      onFailure: () => {
+        publicationFailed = true;
+      },
+    });
+  } catch (error) {
+    noteForeign(error);
+    throw error;
+  }
+};
 function writeJournal(extra = {}) {
   if (!journalOwner) return;
   const groups = [
@@ -449,7 +495,7 @@ async function ownedTeardown() {
 async function recoverRecorded() {
   let record;
   try {
-    record = loadRecoveryRecord(reportPath);
+    record = loadRecoveryRecord(reportPath, { tmpRoot: temporaryRoot });
   } catch (error) {
     // A fixed phrase: never the record, a path or a name taken from it.
     console.error(
@@ -459,6 +505,7 @@ async function recoverRecorded() {
   }
   project = record.project;
   temporary = record.temporary;
+  temporaryIdentity = record.directoryIdentity;
   journalOwner = { temporary, project, id: record.id };
   if (record.checkpoint) return finishFromCheckpoint(record);
   composeFile = record.composeFile ?? undefined;
@@ -527,6 +574,7 @@ const failedCleanup = ({ leftovers = [], unverified = [] } = {}) => ({
   passed: false,
   project,
   temporary,
+  ...(foreignFound && { foreign: true }),
   // Resource kinds only (no ids): what still exists, and what could not be checked.
   ...(leftovers.length && { leftovers }),
   ...(unverified.length && { unverified }),
@@ -548,7 +596,8 @@ try {
   const { default: YAML } = await import('yaml');
   const { readUrl } = await import('../packages/config/src/url-reader.js');
   const { servicesFromLibrary } = await import('./infra-preflight-lib.mjs');
-  temporary = mkdtempSync(join(tmpdir(), 'rasta-restore-drill-'));
+  temporary = mkdtempSync(join(temporaryRoot, 'rasta-restore-drill-'));
+  temporaryIdentity = identityAt(temporary);
   project = `restore-drill-${randomBytes(8).toString('hex')}`;
   // The directory's own marker comes first, so a report that names it can be checked against it.
   writeRecoveryMarker(temporary, { project, id: recoveryId });
