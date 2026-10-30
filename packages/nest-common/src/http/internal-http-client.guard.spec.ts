@@ -3,6 +3,7 @@ import type { ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
 import { AuthGuard } from '../guards/auth.guard';
 import { InternalTokenService, type TokenVerifier } from '../auth/token-verifier';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { ALLOW_SERVICE_KEY, IS_PUBLIC_KEY } from '../decorators';
 import { runWithContext, tryGetContext } from '../context/request-context';
 import { InternalHttpClient, type InternalGrant } from './internal-http-client';
@@ -17,6 +18,11 @@ import { InternalHttpClient, type InternalGrant } from './internal-http-client';
 
 const SECRET = randomBytes(32).toString('hex');
 const tokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
+const tokenKey: TestInternalTokenKey = {
+  secret: SECRET,
+  issuer: 'rasta-internal',
+  ttlSeconds: 300,
+};
 const ORG_A = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YA';
 const ORG_B = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YB';
 const INTERNAL = { allowService: ['fleet-service'] };
@@ -143,7 +149,13 @@ describe('InternalHttpClient — what the receiving guard accepts', () => {
   });
 
   it('a caller-provided internal header never reaches the guard in place of the minted one', async () => {
-    const forged = await tokens.issue('fleet-service', 'identity-service', 'SERVICE', ORG_B);
+    const forged = await mintTestInternalToken(
+      tokenKey,
+      'fleet-service',
+      'identity-service',
+      'SERVICE',
+      ORG_B,
+    );
     const headers = await sentHeaders(
       { from: 'fleet-service', to: 'identity-service', purpose: 'SERVICE', organizationId: ORG_A },
       { 'X-Internal-Token': forged },

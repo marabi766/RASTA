@@ -14,6 +14,7 @@ import {
   type ServiceAuthorizationRefusal,
   type UserTenantMismatch,
 } from '@rasta/nest-common';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import type { Logger } from '@rasta/logging';
 import {
   markAuthGuardServiceForbidden,
@@ -100,6 +101,11 @@ function executionFor(headers: Record<string, string | undefined>): ExecutionCon
 }
 
 const internalTokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
+const tokenKey: TestInternalTokenKey = {
+  secret: SECRET,
+  issuer: 'rasta-internal',
+  ttlSeconds: 300,
+};
 
 /** A reflector for an endpoint with the given `@AllowService` metadata, or none. */
 const reflectorAllowing = (allowService: string[] | undefined): Reflector =>
@@ -599,7 +605,13 @@ describe('markAuthGuardServiceForbidden (Phase C11)', () => {
 
 describe('the configured guard, against the bare platform guard, for a verified service caller', () => {
   const serviceHeaders = async (organizationId?: string, caller = CALLER_SERVICE) => ({
-    'x-internal-token': await internalTokens.issue(caller, THIS_SERVICE, 'SERVICE', organizationId),
+    'x-internal-token': await mintTestInternalToken(
+      tokenKey,
+      caller,
+      THIS_SERVICE,
+      'SERVICE',
+      organizationId,
+    ),
     // Unsigned, and never attribution: the FORBIDDEN is decided before it is
     // even compared with the signed claim.
     'x-organization-id': ORG_HEADER_SENTINEL,
@@ -666,7 +678,14 @@ describe('the configured guard, against the bare platform guard, for a verified 
     const configured = withAuthGuardRefusalAudit(platformOptions(claimsFor()));
     const accepted = await attempt(
       configured,
-      { 'x-internal-token': await internalTokens.issue(CALLER_SERVICE, THIS_SERVICE, 'SERVICE') },
+      {
+        'x-internal-token': await mintTestInternalToken(
+          tokenKey,
+          CALLER_SERVICE,
+          THIS_SERVICE,
+          'SERVICE',
+        ),
+      },
       reflectorAllowing([CALLER_SERVICE]),
     );
     const tenantRefused = await attempt(
@@ -682,12 +701,27 @@ describe('the configured guard, against the bare platform guard, for a verified 
 
   it('marks nothing for a forged service token or a relay token', async () => {
     const configured = withAuthGuardRefusalAudit(platformOptions(claimsFor()));
-    const forger = new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300);
+    const forgerKey: TestInternalTokenKey = {
+      secret: randomBytes(32).toString('hex'),
+      issuer: 'rasta-internal',
+      ttlSeconds: 300,
+    };
     const forged = await attempt(configured, {
-      'x-internal-token': await forger.issue(CALLER_SERVICE, THIS_SERVICE, 'SERVICE', ORG_ACTIVE),
+      'x-internal-token': await mintTestInternalToken(
+        forgerKey,
+        CALLER_SERVICE,
+        THIS_SERVICE,
+        'SERVICE',
+        ORG_ACTIVE,
+      ),
     });
     const relayed = await attempt(configured, {
-      'x-internal-token': await internalTokens.issue('api-gateway', THIS_SERVICE, 'RELAY'),
+      'x-internal-token': await mintTestInternalToken(
+        tokenKey,
+        'api-gateway',
+        THIS_SERVICE,
+        'RELAY',
+      ),
     });
 
     expect((forged.error as RastaError).status).toBe(401);

@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { inspect } from 'node:util';
 import { SignJWT, exportJWK, generateKeyPair, type KeyLike } from 'jose';
 import { InternalTokenService, TokenVerifier } from './token-verifier';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { RastaError } from '../errors/rasta-error';
 
 /**
@@ -82,9 +83,14 @@ describe('internal service tokens', () => {
   // scanner exists to refuse, and it cannot tell a fixture from a leak.
   const SECRET = randomBytes(32).toString('base64url');
   const tokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
+  const tokenKey: TestInternalTokenKey = {
+    secret: SECRET,
+    issuer: 'rasta-internal',
+    ttlSeconds: 300,
+  };
 
-  it('accepts a token minted by `issue`, which always sets an expiry', async () => {
-    const token = await tokens.issue('notification-service', 'identity-service');
+  it('accepts a token in the issuer’s layout, which always sets an expiry', async () => {
+    const token = await mintTestInternalToken(tokenKey, 'notification-service', 'identity-service');
     const claims = await tokens.verify(token, 'identity-service');
     expect(claims.callerService).toBe('notification-service');
     expect(claims.expiresAt).toBeGreaterThan(Date.now());

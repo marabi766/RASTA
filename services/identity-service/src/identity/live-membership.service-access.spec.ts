@@ -22,6 +22,7 @@ import {
   type TokenVerifier,
   type UserClaims,
 } from '@rasta/nest-common';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { SwaggerModule } from '@nestjs/swagger';
 import { identityDocumentConfig } from '../openapi-config';
 import { INTERNAL_TOKEN_SCHEME, UserController } from './identity.controller';
@@ -86,6 +87,7 @@ const tokenVerifier = {
 } as unknown as TokenVerifier;
 
 const internalTokens = new InternalTokenService(SECRET, ISSUER, 300);
+const tokenKey: TestInternalTokenKey = { secret: SECRET, issuer: ISSUER, ttlSeconds: 300 };
 
 @Module({
   controllers: [UserController],
@@ -143,7 +145,7 @@ describe('GET /v1/users/:id/live-membership service access (task 095)', () => {
 
   const path = '/v1/users/USR_1/live-membership';
   const service = (caller: string, organizationId?: string, audience = 'identity-service') =>
-    internalTokens.issue(caller, audience, 'SERVICE', organizationId);
+    mintTestInternalToken(tokenKey, caller, audience, 'SERVICE', organizationId);
   const ask = async (token: string, target = path) =>
     request(app.getHttpServer()).get(target).set('x-internal-token', token);
 
@@ -227,7 +229,7 @@ describe('GET /v1/users/:id/live-membership service access (task 095)', () => {
       .get(path)
       .set(
         'x-internal-token',
-        await internalTokens.issue('api-gateway', 'identity-service', 'RELAY'),
+        await mintTestInternalToken(tokenKey, 'api-gateway', 'identity-service', 'RELAY'),
       )
       .set('authorization', `Bearer ${userToken('relayed', ['FLEET_MANAGER'])}`);
     expect(relayed.status).toBe(403);
@@ -237,7 +239,8 @@ describe('GET /v1/users/:id/live-membership service access (task 095)', () => {
   it('refuses no token, a relay token alone, and a fleet-service token minted for another service: 401', async () => {
     expect((await request(app.getHttpServer()).get(path)).status).toBe(401);
     expect(
-      (await ask(await internalTokens.issue('api-gateway', 'identity-service', 'RELAY'))).status,
+      (await ask(await mintTestInternalToken(tokenKey, 'api-gateway', 'identity-service', 'RELAY')))
+        .status,
     ).toBe(401);
     expect((await ask(await service('fleet-service', ORG_A, 'asset-service'))).status).toBe(401);
     expect(asked).toHaveLength(0);
