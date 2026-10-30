@@ -23,6 +23,7 @@ import {
   checkServiceCoverage,
   ForeignArtifact,
   identityAt,
+  serializeIdentity,
   OBJECT_STATE_SQL,
   SEQUENCES_SQL,
   compareSnapshots,
@@ -107,7 +108,10 @@ try {
   process.exit(2);
 }
 // An artifact this invocation created was replaced by another actor: it was NOT removed, and the
-// invocation cannot succeed (a fixed line, never a path).
+// invocation cannot succeed (a fixed line, never a path). THE one classification: every place that
+// can meet a ForeignArtifact (a report or journal publication, the directory removal, the lock's
+// release, the run's own failure handler) reports it here, and it is sticky: the final report and
+// the summary on stdout say `cleanup.foreign` and `passed: false` whatever happens afterwards.
 let foreignFound = false;
 function noteForeign(error) {
   if (!(error instanceof ForeignArtifact)) return;
@@ -132,13 +136,17 @@ try {
   );
   process.exit(2);
 }
-process.on('exit', () => {
+// Released BEFORE the final status is published (releaseLock below), so a claim that was replaced
+// meanwhile is part of what the report says; the exit hook is only the safety net for the early
+// exits (release is idempotent).
+function releaseLock() {
   try {
     drillLock.release();
   } catch (error) {
     noteForeign(error);
   }
-});
+}
+process.on('exit', releaseLock);
 // The whole artifact namespace is reserved before anything is allocated: the report (exclusive
 // creation avoids overwriting an operator's file, including through a symlink) and the recovery
 // journal path (refused when it exists: it is an earlier run's or another report's). Later writes
@@ -210,9 +218,15 @@ function writeReport({ durable = false, final = false } = {}) {
     writeJournal();
     return;
   }
-  const synced = writeReportAtomically(reportPath, final ? report : { ...report, passed: false }, {
-    durable,
-  });
+  let synced;
+  try {
+    synced = writeReportAtomically(reportPath, final ? report : { ...report, passed: false }, {
+      durable,
+    });
+  } catch (error) {
+    noteForeign(error);
+    throw error;
+  }
   if (durable && !synced)
     process.stderr.write(
       '[backup-restore-drill] the report directory could not be synced; the report is written but power-loss durability is not confirmed\n',
@@ -225,8 +239,9 @@ function writeReport({ durable = false, final = false } = {}) {
 // recovery sees them gone. A write that fails is STICKY (`publicationFailed`): nothing that
 // happens afterwards makes this invocation a success.
 let journalOwner;
-// Device and inode of the temporary directory as this invocation created or proved it: its removal
-// is held to that object.
+// The identity of the temporary directory as this invocation created it (a run) or as the report
+// and journal persisted it (a recovery): its removal is held to that object. It rides in
+// `journalOwner`, so every journal write carries it.
 let temporaryIdentity;
 let carried = [];
 let publicationFailed = false;
@@ -240,7 +255,6 @@ const deleteTemporary = (directoryPresent = true) => {
     removeOwnedDirectory({
       journalPath: recoveryJournalPath(reportPath),
       ...journalOwner,
-      identity: temporaryIdentity,
       directoryPresent,
       onFailure: () => {
         publicationFailed = true;
@@ -263,6 +277,7 @@ function writeJournal(extra = {}) {
     writeRecoveryJournal(recoveryJournalPath(reportPath), { ...journalOwner, groups, ...extra });
   } catch (error) {
     publicationFailed = true;
+    noteForeign(error);
     throw error;
   }
 }
@@ -497,6 +512,11 @@ async function recoverRecorded() {
   try {
     record = loadRecoveryRecord(reportPath, { tmpRoot: temporaryRoot });
   } catch (error) {
+    // The directory is not the object the run proved: left in place, reported, never adopted.
+    if (error instanceof ForeignArtifact) {
+      noteForeign(error);
+      return 1;
+    }
     // A fixed phrase: never the record, a path or a name taken from it.
     console.error(
       `[backup-restore-drill] ${error instanceof RecoveryRefused ? error.message : 'recovery refused: the record could not be checked'}`,
@@ -505,8 +525,8 @@ async function recoverRecorded() {
   }
   project = record.project;
   temporary = record.temporary;
-  temporaryIdentity = record.directoryIdentity;
-  journalOwner = { temporary, project, id: record.id };
+  temporaryIdentity = record.identity;
+  journalOwner = { temporary, project, id: record.id, identity: temporaryIdentity };
   if (record.checkpoint) return finishFromCheckpoint(record);
   composeFile = record.composeFile ?? undefined;
   composeReady = record.composeFile !== null;
@@ -583,13 +603,17 @@ const failedCleanup = ({ leftovers = [], unverified = [] } = {}) => ({
 
 // Recovery's output goes to the CI job log, unlike a run's (private files): an unexpected
 // failure there is one fixed line, never a stack trace with source paths.
-if (cleanupOnly)
-  process.exit(
-    await recoverRecorded().catch(() => {
-      console.error('[backup-restore-drill] recovery failed unexpectedly; nothing was reported');
-      return 1;
-    }),
-  );
+if (cleanupOnly) {
+  const status = await recoverRecorded().catch((error) => {
+    // A foreign artifact met anywhere on the way is classified, not "unexpected".
+    if (error instanceof ForeignArtifact) noteForeign(error);
+    else console.error('[backup-restore-drill] recovery failed unexpectedly; nothing was reported');
+    return 1;
+  });
+  // The lock is released before the status is final: a claim replaced meanwhile fails the recovery.
+  releaseLock();
+  process.exit(foreignFound ? status || 1 : status);
+}
 
 try {
   // Only a normal run needs these (a failure to load one is a failed run with a private report).
@@ -604,6 +628,8 @@ try {
   report.project = project;
   report.temporary = temporary;
   report.recoveryId = recoveryId;
+  // Outside the tree it guards: a later --cleanup-from holds the directory to this object.
+  report.temporaryIdentity = serializeIdentity(temporaryIdentity);
   writeReport({ durable: true });
   composeFile = join(temporary, 'compose.json');
   services = servicesFromLibrary(
@@ -799,6 +825,8 @@ try {
     report.restoredLedger,
   );
 } catch (error) {
+  // A foreign artifact met here (the marker's publication, say) is classified, not just a message.
+  noteForeign(error);
   // Command failures retain bounded diagnostics with database URLs redacted.
   report.error = error.privateFailure ?? { stage, message: error.message };
   report.passed = false;
@@ -815,7 +843,7 @@ try {
   });
   let removed = verdict.passed;
   if (removed && temporary) {
-    journalOwner = { temporary, project, id: recoveryId };
+    journalOwner = { temporary, project, id: recoveryId, identity: temporaryIdentity };
     try {
       deleteTemporary();
     } catch {
@@ -832,11 +860,37 @@ try {
   report.interrupted = interrupted;
   // A report write that failed at any point (cleanup included) is never forgotten.
   if (interrupted || report.reportWriteFailures?.length) report.passed = false;
-  try {
-    writeReport({ durable: true, final: true });
-  } catch {
+  // The lock goes first: a claim replaced meanwhile is a foreign artifact like any other, and the
+  // status published below has to say so. Nothing is left to protect (every child has settled and
+  // the directory is gone or kept); the final write is one atomic rename.
+  releaseLock();
+  // Sticky: a foreign artifact noted at any point before (cleanup, publication, the lock) is part of
+  // the final status, whichever path found it.
+  const sealForeign = () => {
+    if (!foreignFound) return;
+    report.passed = false;
+    report.cleanup = { ...report.cleanup, passed: false, foreign: true };
+  };
+  sealForeign();
+  const published = () => {
+    try {
+      writeReport({ durable: true, final: true });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const knew = foreignFound;
+  let written = published();
+  if (!written && foreignFound && !knew) {
+    // The final write itself met a replaced file: the provisional report cannot say so, so say it once more.
+    sealForeign();
+    written = published();
+  }
+  if (!written) {
     // The provisional report stays: it still names the project, temporary directory and groups.
     // A complete cleanup is then reported only on stderr, never as a passing report.
+    sealForeign();
     report.passed = false;
     process.stderr.write(
       '[backup-restore-drill] the final report could not be written; the previous report remains\n',

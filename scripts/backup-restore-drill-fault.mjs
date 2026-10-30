@@ -16,6 +16,10 @@
 //                   the process SIGKILLs itself instead: when the removal is asked for, after
 //                   deleting the directory's marker and compose.json only (mid), or after the
 //                   whole directory is gone (after).
+//   swapSibling:    { contains, skip = 0, times = 1 }
+//                   the write sibling (`*.tmp`) of an atomic write whose bytes contain `contains`
+//                   is replaced by another file right after it is closed, as an actor with write
+//                   access to the directory could do before the write is published;
 //   swapDirectory:  { parent }
 //                   right after the first rename that publishes a recovery journal, the drill
 //                   directory found in `parent` is moved aside and another directory (holding
@@ -59,6 +63,36 @@ if (fault.swapDirectory) {
         original(path, `${path}.moved`);
         fs.mkdirSync(path, { mode: 0o700 });
         fs.writeFileSync(`${path}/theirs`, 'precious');
+      }
+    }
+    return result;
+  };
+}
+if (fault.swapSibling) {
+  const { open, close } = { open: fs.openSync, close: fs.closeSync };
+  const write = fs.writeSync;
+  const spec = fault.swapSibling;
+  const siblings = new Map();
+  const marked = new Set();
+  fs.openSync = (path, ...rest) => {
+    const fd = open(path, ...rest);
+    if (String(path).endsWith('.tmp')) siblings.set(fd, String(path));
+    return fd;
+  };
+  fs.writeSync = (fd, ...rest) => {
+    if (siblings.has(fd) && Buffer.isBuffer(rest[0]) && rest[0].includes(spec.contains))
+      marked.add(fd);
+    return write(fd, ...rest);
+  };
+  fs.closeSync = (fd) => {
+    const result = close(fd);
+    const path = siblings.get(fd);
+    siblings.delete(fd);
+    if (marked.delete(fd)) {
+      if ((spec.skip ?? 0) > 0) spec.skip -= 1;
+      else if (remaining(spec)) {
+        fs.unlinkSync(path);
+        fs.writeFileSync(path, 'theirs\n');
       }
     }
     return result;

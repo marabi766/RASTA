@@ -215,6 +215,14 @@ fsync یا rename گزارش قبلی را نگه می‌دارد، فایل خ�
 فضای نام ساخته نشده است)، و ساعت هسته درشت‌دانه است: جایگزینی که در همان چند میلی‌ثانیه با inode بازیافت‌شده ساخته شود
 از نظر هویت متمایز نیست.
 
+این هویت فقط در حافظه نمی‌ماند: هویتی که اجرا برای پوشه موقت ثابت کرده (`dev`، `ino`، نوع و زمان تولد) بیرون از همان
+پوشه، در گزارش (`temporaryIdentity`) و در **هر** نوشتن دفترچه ذخیره می‌شود، و هر `--cleanup-from` (حتی نوبت دوم، پس
+از شکست، قطع اجرا یا حذف نیمه‌کاره) پوشه را به همان شیء مقید می‌کند. آنچه اکنون زیر نام ثبت‌شده هست هرگز مالکیت را ثابت
+نمی‌کند: شیء دیگر یعنی همان خط «… replaced by another actor …»، چیزی حذف نمی‌شود و کد خروج `1` است. گزارش قدیمی
+بدون هویت فقط با نشانگر داخل پوشه پذیرفته می‌شود و هویت اثبات‌شده از آن پس در هر نوشتن دفترچه می‌آید؛ نقطه بازیابی
+(checkpoint) بدون هویت رد می‌شود. وضعیت نهایی (فایل گزارش و خلاصه روی stdout) هر شیء جایگزین‌شده را می‌گوید، ادعای
+قفل و خطای انتشار گزارش یا دفترچه هم: قفل پیش از انتشار وضعیت نهایی آزاد می‌شود تا همین بررسی در آن بیاید.
+
 هر فرزند در گروه فرایند جدا (`detached`) اجرا می‌شود، پس SIGKILL تمرین فرزندان را نمی‌کشد:
 `docker compose up --wait`، `pg_dump` یا `pnpm db:migrate` ممکن است همچنان منابع بگیرند.
 شناسه گروه (PGID) هر فرزند پیش از انتظار برای آن در `processGroups` گزارش نوشته می‌شود (گروه‌های
@@ -374,6 +382,17 @@ not locking: the check and the removal are two system calls, and the kernel's co
 timestamps cannot tell a replacement created within the same few milliseconds with a recycled inode
 number; the private directory is what closes that window. The runner's drill directory
 (`RUNNER_TEMP/backup-drill`, mode 0700) already satisfies this.
+
+Ownership survives a retry. The identity the run proved for its temporary directory is persisted
+outside that directory, in the report (`temporaryIdentity`) and in every journal write, and every
+`--cleanup-from` holds the directory to it, also the second one after a failed, killed or half-done
+removal: what currently occupies a checkpointed name never establishes ownership. Another object
+there (of any kind) is left in place, the CLI prints the fixed "replaced by another actor" line and
+exits 1. A report of an older version has no identity: its directory is accepted only through its
+marker (project, id, name) and the proven identity rides in every journal write from then on; a checkpoint with no
+identity anywhere is refused (exit 2). The final status says every replaced artifact (the report
+file and the summary on stdout: `passed: false`, `cleanup.foreign: true`), a lock claim and a
+failed report or journal publication included: the lock is released before the status is published.
 
 **What it runs.** The same command as an operator, `scripts/backup-restore-drill --report <new
 file>`, on an `ubuntu-latest` runner after `pnpm install --frozen-lockfile`. The CLI owns its two

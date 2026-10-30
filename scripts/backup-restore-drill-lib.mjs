@@ -856,6 +856,37 @@ export const identityOf = (stat) => ({
   kind: stat.isDirectory() ? 'directory' : stat.isSymbolicLink() ? 'link' : 'file',
   birth: stat.birthtimeNs,
 });
+/**
+ * An identity as it is persisted (the report and the recovery journal, both outside the tree they
+ * guard): every number a decimal string, because JSON has no bigint. `parseIdentity` is the strict
+ * inverse: anything but exactly these four fields, in these shapes, is `null` (malformed).
+ */
+export const serializeIdentity = (identity) => ({
+  dev: String(identity.dev),
+  ino: String(identity.ino),
+  kind: identity.kind,
+  birth: String(identity.birth),
+});
+const IDENTITY_NUMBER = /^\d{1,20}$/;
+export function parseIdentity(value) {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    !isDeepStrictEqual(Object.keys(value).sort(), ['birth', 'dev', 'ino', 'kind']) ||
+    !['directory', 'file', 'link'].includes(value.kind) ||
+    ![value.dev, value.ino, value.birth].every(
+      (field) => typeof field === 'string' && IDENTITY_NUMBER.test(field),
+    )
+  )
+    return null;
+  return {
+    dev: BigInt(value.dev),
+    ino: BigInt(value.ino),
+    kind: value.kind,
+    birth: BigInt(value.birth),
+  };
+}
 /** The identity of what `path` names right now (no link followed). */
 export const identityAt = (path) => identityOf(lstatSync(path, { bigint: true }));
 

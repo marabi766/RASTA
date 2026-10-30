@@ -25,9 +25,11 @@ import {
   assertSameObject,
   groupAlive,
   identityOf,
+  parseIdentity,
   readRegularFile,
   reapProcessGroup,
   removeIdentified,
+  serializeIdentity,
   writeReportAtomically,
 } from './backup-restore-drill-lib.mjs';
 
@@ -80,6 +82,13 @@ import {
 //     (identityOf) and removed only while lstat(path) shows the same object. A mismatch removes
 //     nothing, is reported as a ForeignArtifact (a fixed line) and fails the invocation. The same
 //     holds for the temporary directory's recursive removal and the publication of an atomic write.
+//   * OWNERSHIP SURVIVES A RETRY: the identity the run proved for its temporary directory (device,
+//     inode, kind, birth time) is persisted OUTSIDE the tree it guards, in the report
+//     (`temporaryIdentity`) and in every journal write, and every recovery holds the directory to
+//     it. What currently occupies a checkpointed name never establishes ownership: a different
+//     object there is a ForeignArtifact (left in place, the invocation fails), and no durable
+//     identity at all is accepted only when the directory's own marker proves the run's project
+//     and id (a legacy report), never for a checkpoint, whose removal may have taken the marker.
 //   * A journal or report write that fails is STICKY: the invocation can no longer report success,
 //     whatever later writes do, and nothing is removed after it.
 // RESIDUAL (stated, accepted by the project manager, not engineered around): between a child's
@@ -260,9 +269,12 @@ export function resolveTemporaryRoot({
 
 /**
  * `{ present: false }`, or `{ present: true, identity }` for a real private directory of this user
- * nobody else can enter; the identity (device and inode) is what its removal is later held to.
+ * nobody else can enter; the identity is what its removal is later held to. When the run's proven
+ * identity is known (`expected`), the object at the path must BE that object before anything else
+ * is looked at: another object (of any kind) is a ForeignArtifact, never adopted and never
+ * refused as a mere "not private" or "not a directory".
  */
-function inspectDirectory(path, uid) {
+function inspectDirectory(path, uid, expected) {
   let stat;
   try {
     stat = lstatSync(path, { bigint: true });
@@ -270,6 +282,8 @@ function inspectDirectory(path, uid) {
     if (error?.code === 'ENOENT') return { present: false };
     return refuse('the temporary directory cannot be inspected');
   }
+  if (expected && !isDeepStrictEqual(identityOf(stat), expected))
+    throw new ForeignArtifact(DIRECTORY_REPLACED);
   if (!stat.isDirectory()) refuse('the temporary directory is not a real directory');
   if (uid !== undefined && Number(stat.uid) !== uid)
     refuse('the temporary directory belongs to another user');
@@ -397,7 +411,7 @@ function recordedGroups(record) {
  */
 export function writeRecoveryJournal(
   journalPath,
-  { project, id, temporary, groups = [], checkpoint },
+  { project, id, temporary, identity, groups = [], checkpoint },
   { fs } = {},
 ) {
   const synced = writeReportAtomically(
@@ -407,6 +421,8 @@ export function writeRecoveryJournal(
       id,
       project,
       directory: basename(temporary),
+      // The proven object the directory is held to: carried by EVERY write that knows it.
+      ...(identity && { identity: serializeIdentity(identity) }),
       groups: [...new Set(groups)],
       ...(checkpoint && { checkpoint }),
     },
@@ -414,6 +430,9 @@ export function writeRecoveryJournal(
   );
   if (!synced) throw new Error('the recovery journal could not be made durable');
 }
+
+export const DIRECTORY_REPLACED =
+  'the temporary directory was replaced by another actor and was left in place';
 
 /**
  * THE deletion boundary of the drill's temporary directory: the end of a normal run, a recovery
@@ -442,12 +461,16 @@ export function removeOwnedDirectory({
   onFailure = () => {},
   fs,
 }) {
-  const replaced = 'the temporary directory was replaced by another actor and was left in place';
+  const replaced = DIRECTORY_REPLACED;
   // 'present' (ours), 'gone', or ForeignArtifact.
   const prove = () => assertSameObject(temporary, identity, { message: replaced });
   const publish = (checkpoint) => {
     try {
-      writeRecoveryJournal(journalPath, { project, id, temporary, groups: [], checkpoint }, { fs });
+      writeRecoveryJournal(
+        journalPath,
+        { project, id, temporary, identity, groups: [], checkpoint },
+        { fs },
+      );
     } catch (error) {
       onFailure(error);
       throw error;
@@ -467,13 +490,14 @@ function loadRecoveryJournal(journalPath, { id, project, temporary, uid }) {
     uid,
     allowMissing: true,
   });
-  if (text === undefined) return { groups: [], checkpoint: undefined };
+  if (text === undefined) return { groups: [], checkpoint: undefined, identity: undefined };
   const journal = parseJson(text, 'the recovery journal');
   if (!isObject(journal)) refuse('the recovery journal is not an object');
   // A run's reservation (reserveRunArtifacts): its id and nothing else, so no groups and no checkpoint.
   if (isDeepStrictEqual(journal, { version: RECOVERY_VERSION, id, reservation: true }))
-    return { groups: [], checkpoint: undefined };
-  const { groups, checkpoint, ...bound } = journal;
+    return { groups: [], checkpoint: undefined, identity: undefined };
+  const { groups, checkpoint, identity: persisted, ...bound } = journal;
+  const identity = persisted === undefined ? undefined : parseIdentity(persisted);
   if (
     !isDeepStrictEqual(bound, {
       version: RECOVERY_VERSION,
@@ -482,10 +506,11 @@ function loadRecoveryJournal(journalPath, { id, project, temporary, uid }) {
       directory: basename(temporary),
     }) ||
     (checkpoint !== undefined && !CHECKPOINTS.has(checkpoint)) ||
+    identity === null ||
     !Array.isArray(groups)
   )
     refuse('the recovery journal does not match the directory it is for');
-  return { groups: validGroups(groups), checkpoint };
+  return { groups: validGroups(groups), checkpoint, identity };
 }
 
 /**
@@ -495,8 +520,10 @@ function loadRecoveryJournal(journalPath, { id, project, temporary, uid }) {
  * the project label alone is checked); `checkpoint` is what an earlier recovery's journal says
  * ('recovered': everything owned was gone and the directory removal had started; 'removed': it
  * finished), the evidence a retry needs when the removal took the marker, or the whole directory,
- * with it. `directoryIdentity` is the device and inode of the directory as it was inspected here:
- * its removal is held to that object.
+ * with it. `directoryIdentity` is the identity of the directory as it was inspected here; `identity`
+ * is the durable one its removal is held to (the journal's, else the report's, else, for a legacy
+ * report whose marker proved the run, `identityAdopted`, the inspected one). A directory that is
+ * another object than the durable identity is a ForeignArtifact, not a refusal.
  */
 export function loadRecoveryRecord(reportPath, { tmpRoot, uid = process.getuid?.() } = {}) {
   // The directory the report may name is the caller's to resolve (resolveTemporaryRoot): no default
@@ -526,6 +553,14 @@ export function loadRecoveryRecord(reportPath, { tmpRoot, uid = process.getuid?.
     temporary,
     uid,
   });
+  // The identity the run proved when it created the directory, persisted outside the directory:
+  // by the report, and by every journal write since. Two copies that disagree prove nothing.
+  const reported =
+    record.temporaryIdentity === undefined ? undefined : parseIdentity(record.temporaryIdentity);
+  if (reported === null) refuse('the report carries a malformed directory identity');
+  if (reported && journal.identity && !isDeepStrictEqual(reported, journal.identity))
+    refuse('the recovery journal does not match the directory it is for');
+  const durable = journal.identity ?? reported;
   // A checkpoint was written after everything owned was gone: nothing is left to reap or ask
   // Docker; only the directory (if still there) remains.
   const finished = (directoryPresent, directoryIdentity) => ({
@@ -538,9 +573,11 @@ export function loadRecoveryRecord(reportPath, { tmpRoot, uid = process.getuid?.
     checkpoint: journal.checkpoint,
     directoryPresent,
     directoryIdentity,
+    identity: durable ?? directoryIdentity,
+    identityAdopted: false,
   });
 
-  const directory = inspectDirectory(temporary, uid);
+  const directory = inspectDirectory(temporary, uid, durable);
   if (!directory.present) {
     if (journal.checkpoint) return finished(false);
     // Nothing to bind the project to: acceptable only when the run itself finished its cleanup.
@@ -556,10 +593,17 @@ export function loadRecoveryRecord(reportPath, { tmpRoot, uid = process.getuid?.
       checkpoint: undefined,
       directoryPresent: false,
       directoryIdentity: undefined,
+      identity: durable,
+      identityAdopted: false,
     };
   }
-  // A removal cut short may have taken the marker with it: the checkpoint stands on its own.
-  if (journal.checkpoint === 'recovered') return finished(true, directory.identity);
+  // The directory is the very object the run proved (or, with no durable identity, only the marker
+  // can speak for it). A removal cut short may have taken the marker with it: a checkpoint then
+  // stands on the persisted identity alone, and WITHOUT one it licenses nothing.
+  if (journal.checkpoint === 'recovered') {
+    if (!durable) refuse('the checkpoint has no directory identity to hold the directory to');
+    return finished(true, directory.identity);
+  }
   if (journal.checkpoint === 'removed')
     refuse('the temporary directory reappeared after it was removed');
   const marker = parseJson(
@@ -597,6 +641,10 @@ export function loadRecoveryRecord(reportPath, { tmpRoot, uid = process.getuid?.
     checkpoint: undefined,
     directoryPresent: true,
     directoryIdentity: directory.identity,
+    // Marker-proven only when nothing durable named the object (a legacy report): it rides in
+    // every journal write from then on, so the retries that follow are bound to it.
+    identity: durable ?? directory.identity,
+    identityAdopted: durable === undefined,
   };
 }
 
@@ -920,7 +968,15 @@ export async function acquireDrillLock(
         }
         throw error;
       }
-      return { release: () => remove(mine, identity) };
+      // Once: the final status releases it explicitly, the exit hook is only the safety net.
+      let released = false;
+      return {
+        release: () => {
+          if (released) return;
+          released = true;
+          remove(mine, identity);
+        },
+      };
     }
     remove(mine, identity);
     if (now() >= deadline) throw new LockRefused('busy');

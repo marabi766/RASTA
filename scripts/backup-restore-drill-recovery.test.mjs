@@ -21,7 +21,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ForeignArtifact, atomicTempPath, identityAt } from './backup-restore-drill-lib.mjs';
+import {
+  ForeignArtifact,
+  atomicTempPath,
+  identityAt,
+  parseIdentity,
+  serializeIdentity,
+} from './backup-restore-drill-lib.mjs';
 import {
   RECOVERY_ENV,
   RECOVERY_MARKER,
@@ -85,10 +91,12 @@ export function makeRecord(root, overrides = {}) {
     mode: 0o600,
   });
   const reportPath = join(root, `report-${id.slice(0, 6)}.json`);
+  // What the run persists outside the tree (`legacy: true`: a report from before it did).
   const report = {
     project,
     temporary,
     recoveryId: id,
+    ...(overrides.legacy ? {} : { temporaryIdentity: serializeIdentity(identityAt(temporary)) }),
     processGroups: [],
     cleanup: { passed: false },
     ...overrides.report,
@@ -188,8 +196,9 @@ test('a project and a directory that do not have the shapes the CLI creates are 
 
 test('a mixed record (project A with the directory of project B) is refused', () =>
   withRoot((root) => {
-    const a = makeRecord(root);
-    const b = makeRecord(root);
+    // Older reports (no persisted identity): the marker is what tells the two apart.
+    const a = makeRecord(root, { legacy: true });
+    const b = makeRecord(root, { legacy: true });
     // Same id, other project; same project, other id; the other run's directory entirely.
     rewrite(a, { temporary: b.temporary });
     refused(
@@ -211,6 +220,15 @@ test('a mixed record (project A with the directory of project B) is refused', ()
     assert.equal(loadRecoveryRecord(a.reportPath, { tmpRoot: root }).project, a.project);
   }));
 
+test("a record that persisted its identity meets another run's directory as a foreign object", () =>
+  withRoot((root) => {
+    const a = makeRecord(root);
+    const b = makeRecord(root);
+    rewrite(a, { temporary: b.temporary });
+    assert.throws(() => loadRecoveryRecord(a.reportPath, { tmpRoot: root }), ForeignArtifact);
+    assert.equal(existsSync(join(b.temporary, RECOVERY_MARKER)), true);
+  }));
+
 test('a marker that is missing, altered or not private is refused', () =>
   withRoot((root) => {
     const record = makeRecord(root);
@@ -227,7 +245,7 @@ test('a marker that is missing, altered or not private is refused', () =>
 
 test('a symlinked temporary directory, marker or compose.json is refused', () =>
   withRoot((root) => {
-    const record = makeRecord(root);
+    const record = makeRecord(root, { legacy: true });
     // The directory itself replaced by a link to a real one holding a valid marker.
     const real = join(root, 'elsewhere');
     renameSync(record.temporary, real);
@@ -591,11 +609,12 @@ test('the journal is bound to the record, optional, and read like every other in
     refused(load, /cannot be opened safely/);
   }));
 
-const checkpointFor = (record, checkpoint, groups = []) =>
+const checkpointFor = (record, checkpoint, groups = [], identity = record.identity) =>
   writeRecoveryJournal(recoveryJournalPath(record.reportPath), {
     project: record.project,
     id: record.id,
     temporary: record.temporary,
+    identity,
     groups,
     checkpoint,
   });
@@ -1519,6 +1538,18 @@ test('lock: an unreplaced claim is still released and a claim already gone is no
     assert.deepEqual(lockFiles(root), []);
   }));
 
+test('lock: release happens once; a second one (the exit hook after the explicit release) looks at nothing', () =>
+  withRoot(async (root) => {
+    const lock = await acquireDrillLock(join(root, 'report.json'), quick);
+    const [name] = lockFiles(root);
+    lock.release();
+    assert.deepEqual(lockFiles(root), []);
+    // Another actor now holds the claim's name: the second release neither fails nor touches it.
+    writeFileSync(join(root, name), 'theirs\n');
+    lock.release();
+    assert.equal(readFileSync(join(root, name), 'utf8'), 'theirs\n');
+  }));
+
 test('reserving: an artifact replaced before its rollback is left alone and the refusal is foreign', () =>
   withRoot((root) => {
     const report = join(root, 'report.json');
@@ -1658,4 +1689,206 @@ test('removeOwnedDirectory: a directory replaced after it was proven is never re
     symlinkSync(target, record.temporary);
     assert.throws(() => removeOwnedDirectory(ownerOf(record)), ForeignArtifact);
     assert.equal(readFileSync(join(target, 'theirs'), 'utf8'), 'precious');
+  }));
+
+// --- ownership survives a retry (#512 r3 F1) --------------------------------------------------------
+// The identity the run proved is persisted outside the tree (the report, and every journal write)
+// and every recovery holds the directory to it: what occupies a checkpointed name never decides.
+const identityEncoding = {
+  dev: '2049',
+  ino: '12345',
+  kind: 'directory',
+  birth: '1761852000123456789',
+};
+
+test('a persisted identity round-trips exactly and anything else is malformed', () => {
+  const identity = identityAt(mkdtempSync(join(tmpdir(), 'drill-identity-')));
+  assert.deepEqual(parseIdentity(serializeIdentity(identity)), identity);
+  assert.deepEqual(parseIdentity(identityEncoding), {
+    dev: 2049n,
+    ino: 12345n,
+    kind: 'directory',
+    birth: 1761852000123456789n,
+  });
+  for (const bad of [
+    null,
+    '1',
+    [],
+    {},
+    { ...identityEncoding, extra: '1' },
+    { dev: '1', ino: '2', kind: 'directory' },
+    { ...identityEncoding, kind: 'socket' },
+    { ...identityEncoding, ino: 12345 },
+    { ...identityEncoding, birth: '-1' },
+    { ...identityEncoding, dev: '1e3' },
+    { ...identityEncoding, ino: '1'.repeat(21) },
+  ])
+    assert.equal(parseIdentity(bad), null, JSON.stringify(bad));
+});
+
+/** Another actor puts its own object under the directory's name (the original is moved aside). */
+const REPLACEMENTS = {
+  'a directory with a forged marker and compose.json': (record) => {
+    mkdirSync(record.temporary, { mode: 0o700 });
+    writeRecoveryMarker(record.temporary, { project: record.project, id: record.id });
+    writeFileSync(
+      join(record.temporary, 'compose.json'),
+      JSON.stringify(composeFor(record.project)),
+      {
+        mode: 0o600,
+      },
+    );
+    writeFileSync(join(record.temporary, 'theirs'), 'precious');
+  },
+  'an empty private directory': (record) => {
+    mkdirSync(record.temporary, { mode: 0o700 });
+    writeFileSync(join(record.temporary, 'theirs'), 'precious');
+  },
+  'a regular file': (record) => writeFileSync(record.temporary, 'precious', { mode: 0o600 }),
+  'a link to the original': (record) => symlinkSync(`${record.temporary}.moved`, record.temporary),
+};
+const replaceWith = (record, how) => {
+  tick();
+  renameSync(record.temporary, `${record.temporary}.moved`);
+  REPLACEMENTS[how](record);
+};
+const untouched = (record, how) => {
+  if (how.includes('file')) assert.equal(readFileSync(record.temporary, 'utf8'), 'precious');
+  else if (!how.includes('link'))
+    assert.equal(readFileSync(join(record.temporary, 'theirs'), 'utf8'), 'precious');
+  assert.equal(existsSync(`${record.temporary}.moved`), true, 'the original was not touched');
+};
+
+test('a replacement under the name is never adopted, whatever an earlier invocation left (no checkpoint, "recovered", "removed", group-only journal)', () =>
+  withRoot((root) => {
+    const states = {
+      'the run reserved only a journal': () => {},
+      'a journal of recovery children, no checkpoint': (record) =>
+        checkpointFor(record, undefined, [4242]),
+      'the "recovered" checkpoint': (record) => checkpointFor(record, 'recovered'),
+      'the "recovered" checkpoint, report of an older run (journal-only identity)': (record) =>
+        checkpointFor(record, 'recovered'),
+      'the "removed" checkpoint': (record) => checkpointFor(record, 'removed'),
+    };
+    for (const [state, prepare] of Object.entries(states)) {
+      for (const how of Object.keys(REPLACEMENTS)) {
+        const record = makeRecord(root, { legacy: state.includes('older run') });
+        prepare(record);
+        const path = recoveryJournalPath(record.reportPath);
+        const before = existsSync(path) ? readFileSync(path) : null;
+        // The directory was cleaned and removed, or half removed: either way it was ours once.
+        if (state.includes('"recovered"')) rmSync(join(record.temporary, RECOVERY_MARKER));
+        replaceWith(record, how);
+        const label = `${state}: ${how}`;
+        assert.throws(
+          () => loadRecoveryRecord(record.reportPath, { tmpRoot: root }),
+          (error) =>
+            error instanceof ForeignArtifact && /replaced by another actor/.test(error.message),
+          label,
+        );
+        untouched(record, how);
+        assert.deepEqual(
+          existsSync(path) ? readFileSync(path) : null,
+          before,
+          `${label}: no write`,
+        );
+      }
+    }
+  }));
+
+test('a directory that is gone is no foreign object; the same name re-made later is', () =>
+  withRoot((root) => {
+    const record = makeRecord(root, { report: { cleanup: { passed: true } } });
+    checkpointFor(record, 'removed');
+    rmSync(record.temporary, { recursive: true });
+    assert.equal(loadRecoveryRecord(record.reportPath, { tmpRoot: root }).directoryPresent, false);
+    tick();
+    mkdirSync(record.temporary, { mode: 0o700 });
+    assert.throws(() => loadRecoveryRecord(record.reportPath, { tmpRoot: root }), ForeignArtifact);
+  }));
+
+test('the very object the run proved is accepted on every retry, and carries its identity on', () =>
+  withRoot((root) => {
+    const record = makeRecord(root);
+    const load = () => loadRecoveryRecord(record.reportPath, { tmpRoot: root });
+    assert.deepEqual(load().identity, record.identity);
+    assert.equal(load().identityAdopted, false);
+    checkpointFor(record, 'recovered');
+    rmSync(join(record.temporary, RECOVERY_MARKER));
+    const loaded = load();
+    assert.deepEqual([loaded.checkpoint, loaded.identity], ['recovered', record.identity]);
+    assert.deepEqual(loaded.directoryIdentity, record.identity);
+  }));
+
+test('without a durable identity only the marker can speak for a directory, and never for a checkpoint', () =>
+  withRoot((root) => {
+    // An older run's report: no identity anywhere. The marker proves project, id and name.
+    let record = makeRecord(root, { legacy: true });
+    let loaded = loadRecoveryRecord(record.reportPath, { tmpRoot: root });
+    assert.deepEqual([loaded.identity, loaded.identityAdopted], [record.identity, true]);
+    // The marker gone: nothing proves the directory ours (and a checkpoint cannot, either).
+    rmSync(join(record.temporary, RECOVERY_MARKER));
+    refused(() => loadRecoveryRecord(record.reportPath, { tmpRoot: root }), /directory marker/);
+    checkpointFor(record, 'recovered', [], null);
+    refused(
+      () => loadRecoveryRecord(record.reportPath, { tmpRoot: root }),
+      /no directory identity to hold the directory to/,
+    );
+    // A checkpoint with the directory gone asks nothing of it.
+    rmSync(record.temporary, { recursive: true });
+    assert.equal(loadRecoveryRecord(record.reportPath, { tmpRoot: root }).directoryPresent, false);
+    // The journal alone may carry the identity (the report predates it).
+    record = makeRecord(root, { legacy: true });
+    checkpointFor(record, 'recovered');
+    rmSync(join(record.temporary, RECOVERY_MARKER));
+    loaded = loadRecoveryRecord(record.reportPath, { tmpRoot: root });
+    assert.deepEqual([loaded.identity, loaded.identityAdopted], [record.identity, false]);
+  }));
+
+test('two copies of the identity that disagree, or one that is malformed, prove nothing', () =>
+  withRoot((root) => {
+    const record = makeRecord(root);
+    const load = () => loadRecoveryRecord(record.reportPath, { tmpRoot: root });
+    const other = makeRecord(root);
+    checkpointFor(record, undefined, [], other.identity);
+    refused(load, /recovery journal does not match/);
+    rmSync(recoveryJournalPath(record.reportPath));
+    for (const bad of [
+      'x',
+      { ...identityEncoding, extra: 1 },
+      { ...identityEncoding, ino: 5 },
+      { dev: '1', ino: '2' },
+    ]) {
+      rewrite(record, { temporaryIdentity: bad });
+      refused(load, /malformed directory identity/);
+    }
+    rewrite(record, {});
+    const path = recoveryJournalPath(record.reportPath);
+    checkpointFor(record, 'recovered');
+    const good = JSON.parse(readFileSync(path, 'utf8'));
+    for (const bad of ['x', { ...identityEncoding, extra: 1 }, { dev: '1', ino: '2' }]) {
+      writeFileSync(path, JSON.stringify({ ...good, identity: bad }), { mode: 0o600 });
+      refused(load, /recovery journal does not match/);
+    }
+  }));
+
+test('every journal write carries the identity it was given, checkpoints included', () =>
+  withRoot((root) => {
+    const record = makeRecord(root);
+    const path = recoveryJournalPath(record.reportPath);
+    const identityOnDisk = () => JSON.parse(readFileSync(path, 'utf8')).identity;
+    const expected = serializeIdentity(record.identity);
+    checkpointFor(record, undefined, [4242]);
+    assert.deepEqual(identityOnDisk(), expected);
+    const seen = [];
+    removeOwnedDirectory({
+      journalPath: path,
+      project: record.project,
+      id: record.id,
+      temporary: record.temporary,
+      identity: record.identity,
+      remove: () => seen.push(identityOnDisk()),
+    });
+    assert.deepEqual(seen, [expected], 'the "recovered" write');
+    assert.deepEqual(identityOnDisk(), expected, 'the "removed" write');
   }));
