@@ -4,6 +4,7 @@ import { startIdentityApi, type IdentityApiHarness } from './api-helpers';
 import {
   asAnonymousRequest,
   http,
+  observeDatabaseWork,
   processRegistrations,
   registrationBody,
   seedPerson,
@@ -244,27 +245,173 @@ describe('public registration answers the same, and does the same, whoever alrea
   });
 
   /**
-   * The timing assertion. Byte equality says nothing about time; the test
-   * above proves the request path writes the same rows either way. This one
-   * measures the time to the answer for a fresh identity and for one whose
-   * email or username is held, interleaved — the order alternating each
-   * round, so drift and warm-up fall on both alike — after a warm-up, and
-   * asserts their medians agree within ±25 %.
+   * The timing property, proved on its cause rather than on a clock. Byte
+   * equality says nothing about time, and a wall-clock comparison of fresh and
+   * held submissions can only estimate it: a median of 40 interleaved pairs
+   * agreed within ±25 % on a quiet machine and read 1.48 on a loaded CI runner
+   * (main CI 41028991378, attempt 1) with the product unchanged — a bound wide
+   * enough not to flake on every runner is too wide to see a smaller gap, and
+   * a tight one fails a correct service. The product has no padding or
+   * deadline to measure: it equalises by doing the same thing. A submission is
+   * one `INSERT` into `registration_intake`, with nothing in it, before it, or
+   * under it (the table's indexes, constraints and triggers, next test) that
+   * reads or is constrained by who holds a username or an email. So the time to
+   * the answer cannot depend on that, whatever the machine is doing.
    *
-   * Asserted at the service boundary (`submitRegistration`, everything the
-   * handler runs but the HTTP and Nest pipeline): that pipeline costs the same
-   * for every request and only dilutes a gap — measured locally, the defect
-   * this guards (a held identity skipping its intake) showed as 0.76–0.83 over
-   * HTTP but well outside the bound here. The HTTP medians are measured and
-   * reported too, not asserted, for that reason.
-   *
-   * Its limits, honestly: the test database on this machine, not a network;
-   * a median over 40 pairs bounds a systematic gap, not a single request's;
-   * and the bound is generous enough not to flake on a loaded runner, so a
-   * gap smaller than ±25 % is not caught here — the row-count test above,
-   * which is exact, is what says the work is the same.
+   * Asserted on exactly that, for the five ways an identity can be held or
+   * not — fresh; email held; username held; email, and username, held by a
+   * removed user — through both entry points: the service call, and the HTTP
+   * route with its whole Nest pipeline (guards, pipes, interceptors, filters).
+   * Every operation the request makes on the service's database client is
+   * listed by shape (statement text with `?` for the parameters, and each
+   * parameter's kind); each held case must list what a fresh one lists, and
+   * that must be the single intake insert. A held identity that skips its
+   * insert, a lookup that runs only for a fresh one or only for a held one,
+   * or a query of the user table added to the path at all, fails here on every
+   * run, not on one in several.
    */
-  it('the time to the answer does not say whether the identity is held: medians within ±25 % over 40 interleaved pairs', async () => {
+  it('every valid submission asks the database for exactly the same thing before its answer — fresh or held, at the service and over HTTP', async () => {
+    const org = tenants();
+    const holder = await seedPerson(harness.prisma, 'RA-ASK', {
+      organizationId: org.a,
+      roles: ['OPERATOR'],
+    });
+    const removed = await seedPerson(harness.prisma, 'RA-ASKDEL', {
+      organizationId: org.a,
+      roles: ['OPERATOR'],
+    });
+    await runUnscoped('test removes the user', () =>
+      harness.prisma.client.user.update({
+        where: { id: removed.userId },
+        data: { deletedAt: new Date() },
+      }),
+    );
+    const service = harness.moduleRef.get(IdentityService);
+    const identities = {
+      fresh: () => ({ ...fresh('rt') }),
+      'email held': () => ({ username: fresh('rt').username, email: holder.email }),
+      'username held': () => ({ username: holder.username, email: fresh('rt').email }),
+      'email held by a removed user': () => ({
+        username: fresh('rt').username,
+        email: removed.email,
+      }),
+      'username held by a removed user': () => ({
+        username: removed.username,
+        email: fresh('rt').email,
+      }),
+    };
+    const entryPoints = {
+      service: (body: Record<string, unknown>, correlationId: string) => {
+        const dto = { ...body, documentRefs: [] } as unknown as SubmitRegistrationDto;
+        return asAnonymousRequest(() => service.submitRegistration(dto), correlationId);
+      },
+      http: async (body: Record<string, unknown>, correlationId: string) => {
+        expect((await api.register(body, correlationId)).status).toBe(202);
+      },
+    };
+    const intakeInsert = {
+      operation: '$executeRaw',
+      statement:
+        'INSERT INTO registration_intake (id, submission, actor_type, actor_id, correlation_id) ' +
+        'VALUES (?, ?::jsonb, ?, ?, ?)',
+      shape: ['string', 'string', 'string', 'null', 'string'],
+    };
+
+    const work = observeDatabaseWork(harness.prisma);
+    try {
+      for (const [entryPoint, submit] of Object.entries(entryPoints)) {
+        for (const [held, identity] of Object.entries(identities)) {
+          const { username, email } = identity();
+          const asked = await work.during((correlationId) =>
+            submit(registrationBody(username, email, org.a), correlationId),
+          );
+          // One expectation per case, so a failure names the entry point and the case.
+          expect({ entryPoint, held, asked }).toEqual({ entryPoint, held, asked: [intakeInsert] });
+        }
+      }
+    } finally {
+      work.stop();
+    }
+    await processRegistrations(harness);
+  });
+
+  /**
+   * The other half of the same argument: the insert above is the same
+   * statement, but the database could still treat it differently if the table
+   * looked something up for it — a unique index or exclusion constraint on what
+   * the submission holds, a foreign key into `user`, a trigger, a rule, a row
+   * security policy. The table has none; this fails if one is added, with the
+   * catalogue as it is in the message.
+   */
+  it('the intake table has no unique index, foreign key, exclusion constraint, trigger, rule or row security that could depend on who holds what', async () => {
+    const catalogue = await runUnscoped(
+      'test reads the intake table definition',
+      () =>
+        harness.prisma.client.$queryRaw<Array<{ kind: string; name: string; detail: string }>>`
+        SELECT 'index' AS kind, c.relname AS name,
+               CASE WHEN i.indisunique THEN 'unique' ELSE 'plain' END AS detail
+          FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+         WHERE i.indrelid = 'registration_intake'::regclass
+        UNION ALL
+        SELECT 'constraint', conname::text,
+               CASE contype WHEN 'p' THEN 'primary key' WHEN 'c' THEN 'check'
+                            WHEN 'f' THEN 'foreign key' WHEN 'u' THEN 'unique'
+                            WHEN 'x' THEN 'exclusion' ELSE contype::text END
+          FROM pg_constraint WHERE conrelid = 'registration_intake'::regclass
+        UNION ALL
+        SELECT 'trigger', tgname::text, 'trigger'
+          FROM pg_trigger WHERE tgrelid = 'registration_intake'::regclass AND NOT tgisinternal
+        UNION ALL
+        SELECT 'rule', rulename::text, 'rule'
+          FROM pg_rules WHERE tablename = 'registration_intake'
+        UNION ALL
+        SELECT 'row security', polname::text, 'policy'
+          FROM pg_policy WHERE polrelid = 'registration_intake'::regclass
+        UNION ALL
+        SELECT 'row security', relname::text, 'enabled'
+          FROM pg_class WHERE oid = 'registration_intake'::regclass AND relrowsecurity
+         ORDER BY 1, 2`,
+    );
+
+    // The query sees the table (not vacuous): its key and its two CHECKs are there.
+    expect(catalogue).toEqual(
+      expect.arrayContaining([
+        { kind: 'constraint', name: 'registration_intake_pkey', detail: 'primary key' },
+        { kind: 'constraint', name: 'ck_registration_intake_actor', detail: 'check' },
+      ]),
+    );
+    const lookups = catalogue.filter((row) =>
+      row.kind === 'index'
+        ? row.detail === 'unique' && row.name !== 'registration_intake_pkey'
+        : row.kind === 'constraint'
+          ? ['unique', 'foreign key', 'exclusion'].includes(row.detail)
+          : true,
+    );
+    expect(lookups).toEqual([]);
+  });
+
+  /**
+   * The one wall-clock check left, and what it is for. The two tests above
+   * prove the work in the database is the same; neither would see a delay in
+   * the process itself that only a held identity gets (a sleep, a padding
+   * routine pointed the wrong way, a hash computed for one and not the other),
+   * because that is not a database operation. So this measures the time to the
+   * answer at the service, fresh and held interleaved, and asserts only that
+   * the medians do not differ by 50 ms.
+   *
+   * Why that bound and not a ratio: the answer takes a few milliseconds, so a
+   * ratio of two medians is dominated by scheduling noise on a loaded runner
+   * (1.48, with the product unchanged, in main CI 41028991378 attempt 1)
+   * while the difference of two medians of 20 interleaved pairs is
+   * milliseconds: in 30 runs with eight busy loops added to a host at load
+   * average 30–60 on 8 cores, the largest difference was 2.2 ms. It takes a
+   * systematic delay on more than half of the held answers to move a median at
+   * all. 50 ms is twenty times that noise and below any delay a person would add
+   * on purpose. It is not a precision claim: a gap of a few milliseconds is
+   * not caught here, and cannot be by any clock on a shared runner; the exact
+   * statement is the two tests above.
+   */
+  it('the time to the answer does not say whether the identity is held: no in-process delay for one — medians of 20 interleaved pairs within 50 ms', async () => {
     const org = tenants();
     const holder = await seedPerson(harness.prisma, 'RA-TIME', {
       organizationId: org.a,
@@ -276,62 +423,42 @@ describe('public registration answers the same, and does the same, whoever alrea
       const middle = sorted.length >> 1;
       return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
     };
-    const asNew = () => {
-      const identity = fresh('rt');
-      return registrationBody(identity.username, identity.email, org.a);
-    };
-    const held = (round: number) =>
-      round % 4 < 2
-        ? registrationBody(fresh('rt').username, holder.email, org.a)
-        : registrationBody(holder.username, fresh('rt').email, org.a);
-
-    /** Medians of `ROUNDS` interleaved pairs, timed by `timed`: [new, held]. */
-    const measure = async (timed: (body: Record<string, unknown>) => Promise<number>) => {
-      const ROUNDS = 40;
-      const WARM_UP = 6;
-      const newTimes: number[] = [];
-      const heldTimes: number[] = [];
-      for (let round = 0; round < ROUNDS + WARM_UP; round += 1) {
-        let fresh: number;
-        let taken: number;
-        if (round % 2 === 0) {
-          fresh = await timed(asNew());
-          taken = await timed(held(round));
-        } else {
-          taken = await timed(held(round));
-          fresh = await timed(asNew());
-        }
-        if (round < WARM_UP) continue;
-        newTimes.push(fresh);
-        heldTimes.push(taken);
-      }
-      return { asNew: median(newTimes), held: median(heldTimes) };
-    };
-
-    const atService = await measure(async (body) => {
-      const dto = { ...body, documentRefs: [] } as unknown as SubmitRegistrationDto;
+    const timed = async (identity: { username: string; email: string }) => {
+      const dto = {
+        ...registrationBody(identity.username, identity.email, org.a),
+        documentRefs: [],
+      } as unknown as SubmitRegistrationDto;
       const started = performance.now();
       await asAnonymousRequest(() => service.submitRegistration(dto));
       return performance.now() - started;
-    });
-    const overHttp = await measure(async (body) => {
-      const started = performance.now();
-      const response = await api.register(body);
-      const elapsed = performance.now() - started;
-      expect(response.status).toBe(202);
-      return elapsed;
-    });
+    };
+    const held = (round: number) =>
+      round % 4 < 2
+        ? { username: fresh('rt').username, email: holder.email }
+        : { username: holder.username, email: fresh('rt').email };
+    const ROUNDS = 20;
+    const WARM_UP = 4;
+    const freshTimes: number[] = [];
+    const heldTimes: number[] = [];
+    for (let round = 0; round < ROUNDS + WARM_UP; round += 1) {
+      // Alternating which goes first, so drift and warm-up fall on both alike.
+      const order = round % 2 === 0 ? (['fresh', 'held'] as const) : (['held', 'fresh'] as const);
+      const took: Record<'fresh' | 'held', number> = { fresh: 0, held: 0 };
+      for (const kind of order)
+        took[kind] = await timed(kind === 'fresh' ? fresh('rt') : held(round));
+      if (round < WARM_UP) continue;
+      freshTimes.push(took.fresh);
+      heldTimes.push(took.held);
+    }
     await processRegistrations(harness);
 
-    const ratio = atService.held / atService.asNew;
+    const gap = median(heldTimes) - median(freshTimes);
     // eslint-disable-next-line no-console
     console.info(
-      `registration acknowledgement, median of 40 interleaved pairs: at the service new ` +
-        `${atService.asNew.toFixed(2)} ms, held ${atService.held.toFixed(2)} ms, ratio ${ratio.toFixed(3)}; ` +
-        `over HTTP new ${overHttp.asNew.toFixed(2)} ms, held ${overHttp.held.toFixed(2)} ms, ratio ` +
-        `${(overHttp.held / overHttp.asNew).toFixed(3)} (reported)`,
+      `registration acknowledgement at the service, median of ${ROUNDS} interleaved pairs: ` +
+        `fresh ${median(freshTimes).toFixed(2)} ms, held ${median(heldTimes).toFixed(2)} ms, ` +
+        `held minus fresh ${gap.toFixed(2)} ms`,
     );
-    expect(ratio).toBeGreaterThan(0.8);
-    expect(ratio).toBeLessThan(1.25);
+    expect(Math.abs(gap)).toBeLessThan(50);
   });
 });
