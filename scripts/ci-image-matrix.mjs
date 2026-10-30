@@ -32,12 +32,19 @@ let matrixServices;
 try {
   dockerfileServices = discoverDockerfileServices(root);
   // The real scope script, exactly as the container-scope job runs it on main.
-  matrixServices = resolveMatrixServices(workflow, () =>
-    JSON.parse(
-      execFileSync(process.execPath, [path.join(root, 'scripts', 'container-scope.mjs'), '--all'], {
-        encoding: 'utf8',
-      }),
-    ),
+  matrixServices = resolveMatrixServices(
+    workflow,
+    () =>
+      JSON.parse(
+        execFileSync(
+          process.execPath,
+          [path.join(root, 'scripts', 'container-scope.mjs'), '--run'],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, EVENT_NAME: 'push', REF: 'refs/heads/main' },
+          },
+        ),
+      ).services,
   );
 } catch (error) {
   process.stderr.write(
