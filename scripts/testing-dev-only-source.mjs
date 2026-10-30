@@ -36,7 +36,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createRequire, isBuiltin } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { REPO_ROOT, TESTING } from './testing-dev-only.mjs';
 
@@ -470,6 +470,18 @@ const isFile = (path) => {
   }
 };
 
+/**
+ * The file a relative or absolute URL specifier names from `file`, as Node's
+ * ESM loader reads it: without its query or fragment, percent-decoded.
+ */
+const urlPath = (specifier, file) => {
+  try {
+    return resolve(dirname(file), decodeURIComponent(specifier.replace(/[?#].*$/s, '')));
+  } catch {
+    return undefined;
+  }
+};
+
 /** The installed package directory a bare specifier names, by Node's lookup. */
 function packageDirectory(specifier, from) {
   const parts = specifier.split('/');
@@ -691,8 +703,8 @@ export function sourceProblems(root = REPO_ROOT) {
     }
     if (kind === 'url') {
       // A file or a directory, exactly as the URL names it.
-      const path = fileURLToPath(new URL(specifier, pathToFileURL(file)));
-      return existsSync(path) ? [path] : [];
+      const path = urlPath(specifier, file);
+      return path && existsSync(path) ? [path] : [];
     }
     let spec = specifier;
     if (/^file:/i.test(spec)) spec = fileURLToPath(spec);
@@ -726,11 +738,8 @@ export function sourceProblems(root = REPO_ROOT) {
     if (spec.startsWith('.') || isAbsolute(spec)) {
       // A file named exactly: an asset the bundler loads (`./x.css`), or what
       // Node's ESM loader reads for a URL with a query (`./x.wasm?module`).
-      for (const path of [
-        resolve(dirname(file), spec),
-        fileURLToPath(new URL(spec, pathToFileURL(file))),
-      ]) {
-        if (isFile(path)) targets.add(path);
+      for (const path of [resolve(dirname(file), spec), urlPath(spec, file)]) {
+        if (path && isFile(path)) targets.add(path);
       }
     } else if (!spec.startsWith('#')) {
       // The installed package itself, built or not (`dist/` may not exist yet).
