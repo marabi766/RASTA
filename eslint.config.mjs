@@ -51,6 +51,22 @@ export const INTERNAL_TOKEN_SOURCE = [
             // token factory signs the wire format itself (src/internal.ts).
             { file: 'tests/e2e/src/http.ts', function: 'send', kinds: ['header'] },
             { file: 'tests/e2e/src/internal.ts', function: 'mintInternalToken', kinds: ['signer'] },
+            // …and reads the secret by name from its environment (src/env.ts).
+            { file: 'tests/e2e/src/env.ts', function: 'e2eConfig', kinds: ['signer'] },
+            // The test-only signer the services' test factories use (PR #514); its
+            // package is a devDependency only, which scripts/testing-dev-only.mjs
+            // enforces in source, in the production dependency graph and in images.
+            {
+              file: 'packages/testing/src/internal-token.ts',
+              function: 'mintTestInternalToken',
+              kinds: ['signer'],
+            },
+            // The rule names the secret it refuses.
+            {
+              file: 'scripts/internal-token-source-rule.mjs',
+              function: 'secretName',
+              kinds: ['signer'],
+            },
           ],
         },
       ],

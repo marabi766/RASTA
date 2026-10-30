@@ -97,16 +97,22 @@ export function testOnlyTarget(specifier, filename) {
   const target = resolve(dirname(filename), specifier);
   if (insideTesting(target)) return 'packages/testing';
   const rel = relative(REPO_ROOT, target);
+  // TypeScript imports name no extension (`./helpers.spec`): the file is the
+  // one any extension resolves to, so test every one (#503 r2).
+  const resolvable = [rel, ...RESOLVED_EXTENSIONS.map((extension) => `${rel}${extension}`)];
   if (
     !rel.startsWith('..') &&
     !isAbsolute(rel) &&
     !/^scripts\//.test(toPosix(rel)) &&
-    isTestOnlyPath(rel)
+    resolvable.some(isTestOnlyPath)
   ) {
     return `test-only ${toPosix(rel)}`;
   }
   return undefined;
 }
+
+/** The extensions a TypeScript or Node import of an extensionless path can resolve to. */
+const RESOLVED_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 
 const literal = (node) => {
   if (node?.type === 'Literal' && typeof node.value === 'string') return node.value;
@@ -352,7 +358,17 @@ const IMAGE_REF = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?$/;
 /** A repository-relative directory or file name: no `..`, no leading `/`. */
 const REPO_PATH = /^(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._-][A-Za-z0-9._/-]*$/;
 
-if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/** Run as a script, not imported (the token-source lint rule imports this module). */
+function invokedAsScript() {
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    // No argv[1], or one that is no path (`node -e <script> <argument>`).
+    return false;
+  }
+}
+
+if (invokedAsScript()) {
   const [command, target, entry, ...rest] = process.argv.slice(2);
   const valid =
     rest.length === 0 &&
