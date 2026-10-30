@@ -23,6 +23,7 @@ test('Turbo hashes the shared internal transport lint policy and the sending wor
   for (const file of [
     '../../eslint.config.mjs',
     '../../scripts/internal-token-transport-rule.mjs',
+    '../../scripts/exchange-deadline-rule.mjs',
     'src/fleet/transfer-record.ts',
   ]) {
     assert.equal(typeof task.inputs[file], 'string', `lint cache must hash ${file}`);

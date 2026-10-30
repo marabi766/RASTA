@@ -1,6 +1,12 @@
 import { InternalHttpClient } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
-import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  ExchangeDeadlineError,
+  RastaError,
+  exchangeWithDeadline,
+  tryGetContext,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
 import { SERVICE_NAME } from '../config/env';
@@ -177,39 +183,37 @@ export class ReturnGoodsClient implements ReturnGoodsOwner {
       headers['x-correlation-id'] = context.correlationId;
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    timer.unref?.();
     try {
-      const response = await sender.send(
-        `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/return-requests/${path}`,
-        {
-          method,
-          headers,
-          signal: controller.signal,
-          ...(payload ? { body: JSON.stringify(payload) } : {}),
+      return await exchangeWithDeadline(
+        this.options.timeoutMs,
+        (signal) =>
+          sender.send(
+            `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/return-requests/${path}`,
+            {
+              method,
+              headers,
+              signal,
+              ...(payload ? { body: JSON.stringify(payload) } : {}),
+            },
+          ),
+        async (response) => {
+          if (response.status !== 200) throw this.refused(`status ${response.status}`);
+          const text = await readCapped(response, MAX_GOODS_ANSWER_BYTES);
+          if (text === null) throw this.refused('a body larger than the contract');
+          try {
+            return JSON.parse(text) as unknown;
+          } catch {
+            throw this.refused('a body that is not JSON');
+          }
         },
       );
-      if (response.status !== 200) {
-        await response.body?.cancel().catch(() => undefined);
-        throw this.refused(`status ${response.status}`);
-      }
-      const text = await readCapped(response, MAX_GOODS_ANSWER_BYTES);
-      if (text === null) throw this.refused('a body larger than the contract');
-      try {
-        return JSON.parse(text) as unknown;
-      } catch {
-        throw this.refused('a body that is not JSON');
-      }
     } catch (error) {
-      if (controller.signal.aborted) {
+      if (error instanceof ExchangeDeadlineError) {
         throw RastaError.upstreamTimeout(INVENTORY_SERVICE, this.options.timeoutMs);
       }
       if (error instanceof RastaError) throw error;
       // No cause attached: a runtime's transport error can quote the URL.
       throw this.refused('no answer');
-    } finally {
-      clearTimeout(timer);
     }
   }
 
