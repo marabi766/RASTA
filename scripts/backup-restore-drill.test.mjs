@@ -56,6 +56,7 @@ import {
   recordOwned,
   runOwned,
   pollUntil,
+  signalProbe,
   spawnOwned,
   stopOwned,
   waitForGroup,
@@ -1362,6 +1363,14 @@ test('a descendant that outlives the command that started it is still the fixtur
   }
 });
 
+test('the existence probe reads only ESRCH as gone: a process it may not signal exists', () => {
+  assert.equal(signalProbe(process.pid), true);
+  // Init exists whoever asks: permitted or EPERM, never "gone".
+  assert.equal(signalProbe(1), true);
+  // A child that has exited and been reaped is gone.
+  assert.equal(signalProbe(spawnSync(process.execPath, ['-e', '']).pid), false);
+});
+
 // --- ownership is proven by retained identity, and inspection is alive / gone / unknown (r3).
 // --- Injected process tables: the kernel cannot be made to produce these states on demand.
 function fakeSystem(...rows) {
@@ -1678,22 +1687,8 @@ test('a command run through the owner that outlives its timeout is stopped with 
 // The process lifecycle boundary: real children for what the kernel decides, a fake spawn for
 // the orderings a real child cannot be forced into.
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const groupExists = (pgid) => {
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-const pidAlive = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
+const groupExists = (pgid) => signalProbe(-pgid);
+const pidAlive = (pid) => signalProbe(pid);
 async function becomesGone(pid) {
   await pollUntil(() => !pidAlive(pid), `process ${pid} to exit`);
   return true;

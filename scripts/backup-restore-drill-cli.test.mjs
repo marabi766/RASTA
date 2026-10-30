@@ -26,6 +26,7 @@ import {
   ownedDirectory,
   pollUntil,
   spawnOwned,
+  signalProbe,
   stopOwned,
   waitForFile as waitFor,
   waitForGroup,
@@ -607,22 +608,8 @@ for (const mode of [
   });
 }
 
-const alive = (pgid) => {
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-const pidExists = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
+const alive = (pgid) => signalProbe(-pgid);
+const pidExists = (pid) => signalProbe(pid);
 async function waitGone(pgid) {
   await pollUntil(() => !alive(pgid), `process group ${pgid} to stop`);
   return true;
@@ -1482,14 +1469,6 @@ const blockingFirstDown = (directory) =>
     fi ;;
 esac`,
   );
-const kill = (pgid) => {
-  try {
-    process.kill(-pgid, 'SIGKILL');
-  } catch {
-    /* gone */
-  }
-};
-
 test('a recovery killed mid-command is itself recovered: the next one reaps its blocked child and never reports success while it lives', async () => {
   const directory = ownedDirectory('drill-recover-twice-');
   try {
@@ -1729,7 +1708,7 @@ test('a recovery of a drill whose directory is already gone is journaled too: ki
   try {
     const root = fixture(directory);
     const run = await crashedRun(directory, root);
-    kill(run.pgid);
+    await stopOwned(directory);
     // What an ordinary successful drill leaves: its directory is gone and its record says so.
     rmSync(run.report.temporary, { recursive: true, force: true });
     writeFileSync(
@@ -1992,7 +1971,7 @@ test('a checkpoint read back from disk is made durable again before it licenses 
 test('without any checkpoint a vanished directory is still refused, touching nothing', async () => {
   const context = await recoverable('drill-recover-no-evidence-');
   try {
-    kill(context.run.pgid);
+    await stopOwned(context.directory);
     rmSync(context.run.report.temporary, { recursive: true, force: true });
     const result = await recover(context.directory, context.root, context.run.reportPath);
     assert.equal(result.code, 2, result.stderr);

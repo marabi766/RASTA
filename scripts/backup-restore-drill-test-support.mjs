@@ -78,6 +78,22 @@ export const waitForPid = (path, timeoutMs = POLL_TIMEOUT_MS) =>
     timeoutMs,
   );
 
+/**
+ * Whether `kill(target, 0)` finds the process (a negative `target` is a group). Only ESRCH means
+ * gone: EPERM is a process that exists and cannot be signalled, and anything else is not an
+ * answer, so neither may read as "gone". A killed child its parent has not reaped still answers.
+ */
+export function signalProbe(target) {
+  try {
+    process.kill(target, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    if (error?.code === 'EPERM') return true;
+    throw error;
+  }
+}
+
 // --- the one owner of every process a fixture starts ---------------------------------------------
 //
 // A fixture directory is created by `ownedDirectory`, every child is started by `spawnOwned` (which
