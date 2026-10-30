@@ -1,3 +1,4 @@
+import { setEligibilityFixture } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { IdentityRepository } from '../src/identity/identity.repository';
 import { IdentityService } from '../src/identity/identity.service';
@@ -64,17 +65,21 @@ describe('active organization switch audit (L7-14)', () => {
           updatedBy: 'ITEST',
         },
       });
-      await prisma.client.membership.createMany({
-        data: [org.a, org.b].map((organizationId) => ({
-          id: id('MBR-SW'),
-          userId,
-          organizationId,
-          roles: ['OPERATOR'],
-          validFrom: new Date(Date.now() - 3600_000),
-          createdBy: 'ITEST',
-          updatedBy: 'ITEST',
-        })),
-      });
+      const memberships = [org.a, org.b].map((organizationId) => ({
+        id: id('MBR-SW'),
+        userId,
+        organizationId,
+        roles: ['OPERATOR'],
+        createdBy: 'ITEST',
+        updatedBy: 'ITEST',
+      }));
+      await prisma.client.membership.createMany({ data: memberships });
+      // Both began an hour ago by the database clock the switch judges them on.
+      await setEligibilityFixture(
+        prisma,
+        'membershipStartedHourAgo',
+        memberships.map((membership) => membership.id),
+      );
     });
     return userId;
   }

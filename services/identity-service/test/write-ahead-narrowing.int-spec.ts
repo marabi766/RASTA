@@ -1,4 +1,5 @@
 import { RastaError, runUnscoped } from '@rasta/nest-common';
+import { setEligibilityFixture } from '@rasta/testing';
 import { IdentityRepository } from '../src/identity/identity.repository';
 import { IdentityService } from '../src/identity/identity.service';
 import { MembershipExpiryScanner } from '../src/identity/membership-expiry.scanner';
@@ -24,6 +25,7 @@ import {
   waitFor,
   ensureLiveMember,
 } from './helpers';
+import { dateMembershipWindow } from './identity-fixtures';
 import { KeycloakHttpStub, type StubRequest } from './keycloak-http-stub';
 
 /**
@@ -138,7 +140,7 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
    * attributes the platform does not own (`locale`, the activation marker).
    */
   async function seed(spec: {
-    memberships: Array<{ in: 'a' | 'b'; roles: string[]; validUntil?: Date }>;
+    memberships: Array<{ in: 'a' | 'b'; roles: string[]; endsInMs?: number }>;
     active?: 'a' | 'b' | null;
     account?: 'linked' | 'none' | 'missing-in-keycloak';
   }): Promise<Seeded> {
@@ -148,7 +150,8 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
     const linked = spec.account !== 'none';
     const active = spec.active === undefined ? org.a : spec.active ? org[spec.active] : null;
     const memberships = spec.memberships.map(() => id('MBR-WA'));
-    const validFrom = new Date(Date.now() - 3_600_000);
+    // Grants as of a minute after the first membership began (the stub's account).
+    let grantedAt = Date.now() - 3_540_000;
 
     await runUnscoped('test fixture spans organizations', async () => {
       await prisma.client.user.create({
@@ -172,12 +175,17 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
             userId,
             organizationId: org[membership.in],
             roles: membership.roles,
-            validFrom: new Date(validFrom.getTime() + index),
-            validUntil: membership.validUntil ?? null,
             createdBy: 'ITEST',
             updatedBy: 'ITEST',
           },
         });
+        // Its window on the database clock that judges it: begun an hour ago (in
+        // order, a millisecond apart), ending `endsInMs` from now or open-ended.
+        const dated = await dateMembershipWindow(prisma, memberships[index]!, {
+          fromMs: -3_600_000 + index,
+          untilMs: membership.endsInMs ?? null,
+        });
+        if (index === 0) grantedAt = dated.validFrom.getTime() + 60_000;
       }
     });
 
@@ -189,7 +197,7 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
         firstName: 'آزمون',
         lastName: 'پیش‌نویس',
         attributes: {
-          ...(await rowsGrant(userId, validFrom.getTime() + 60_000)),
+          ...(await rowsGrant(userId, grantedAt)),
           locale: ['fa'],
           rasta_activation: ['REG_FIXTURE'],
         },
@@ -688,7 +696,7 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       const s = await seed({
         memberships: [
           { in: 'a', roles: ['OPERATOR'] },
-          { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() - 1000) },
+          { in: 'b', roles: ['DRIVER'], endsInMs: -1000 },
         ],
         active: 'b',
       });
@@ -725,12 +733,13 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
     });
 
     it('a lapse whose user cannot be written never starves the lapse behind it', async () => {
-      const lapsedAt = new Date(Date.now() - 5_000);
+      // Lapsed five seconds ago by the database clock; `healthy` dated by a later
+      // statement, so it lapsed strictly after `stuck`.
       const stuck = await seed({
-        memberships: [{ in: 'a', roles: ['OPERATOR'], validUntil: lapsedAt }],
+        memberships: [{ in: 'a', roles: ['OPERATOR'], endsInMs: -5_000 }],
       });
       const behind = await seed({
-        memberships: [{ in: 'a', roles: ['DRIVER'], validUntil: new Date(lapsedAt.getTime() + 1) }],
+        memberships: [{ in: 'a', roles: ['DRIVER'], endsInMs: -4_999 }],
       });
       const own = new MembershipExpiryScanner(
         repository,
@@ -877,7 +886,7 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
           { in: 'a', roles: ['ORGANIZATION_ADMIN', 'OPERATOR'] },
           // Valid through the held write and its recovery; lapsed — by the
           // test, below — before it lands.
-          { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() + 3_600_000) },
+          { in: 'b', roles: ['DRIVER'], endsInMs: 3_600_000 },
         ],
       });
       const wide = await rowsGrant(s.userId);
@@ -916,13 +925,8 @@ describe('narrowing changes write Keycloak before they commit (D-064)', () => {
       // the recovery read it, never when a window of real time a loaded
       // runner can overrun runs out; then Keycloak finally applies the old
       // write: wider than the rows, which no longer grant b.
-      await prisma.transaction((tx) =>
-        runUnscoped('test lapses membership b', () =>
-          tx.membership.update({
-            where: { id: s.memberships[1]! },
-            data: { validUntil: new Date(Date.now() - 1_000), updatedBy: 'ITEST' },
-          }),
-        ),
+      await runUnscoped('test lapses membership b', () =>
+        setEligibilityFixture(prisma, 'membershipEndedMinuteAgo', [s.memberships[1]!]),
       );
       stub.releaseHeld();
       expect(stub.platform(s.keycloakId)).toEqual(wide);

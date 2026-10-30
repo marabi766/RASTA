@@ -1,3 +1,5 @@
+import { eligibilityClockWrite } from '@rasta/testing';
+import { eligibilityClockSql } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { PrismaClient, type Prisma } from '../src/generated/prisma';
 import { ResumableSha256 } from '../src/shared/resumable-sha256';
@@ -53,7 +55,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
     hours = 10,
   ): Promise<{ id: string; productId: string }> {
     const id = `AGG_${ulid()}`;
-    await db.$executeRaw`
+    await eligibilityClockWrite(db)`
       INSERT INTO demand_aggregation
         (id, organization_id, product_id, status, opened_at, closes_at, window_hours, min_quantity,
          shortfall_policy, total_quantity, demand_count, extension_count, created_at, updated_at)
@@ -149,7 +151,9 @@ describe('the database keeps the demand and aggregation invariants', () => {
       /ck_demand_request_joins_open_window|ck_demand_aggregation/,
     );
     await refusedWith(
-      db.$executeRaw`UPDATE demand_aggregation SET closes_at = closes_at + interval '1 hour',
+      eligibilityClockWrite(
+        db,
+      )`UPDATE demand_aggregation SET closes_at = closes_at + interval '1 hour',
                        extension_count = 1, version = version + 1 WHERE id = ${agg.id}`,
       /ck_demand_aggregation_transition/,
     );
@@ -177,7 +181,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
       /ck_demand_aggregation_transition/,
     );
     await refusedWith(
-      db.$executeRaw`
+      eligibilityClockWrite(db)`
         INSERT INTO demand_aggregation
           (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
            min_quantity, shortfall_policy, total_quantity, demand_count, extension_count,
@@ -267,7 +271,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
     const agg = await window(a);
     await refusedWith(join(a, agg, T0, 0), /ck_demand_request_quantity_positive/);
     await refusedWith(
-      db.$executeRaw`
+      eligibilityClockWrite(db)`
         INSERT INTO demand_aggregation
           (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
            min_quantity, shortfall_policy, total_quantity, demand_count, extension_count,
@@ -277,7 +281,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
       /ck_demand_aggregation_identifiers/,
     );
     await refusedWith(
-      db.$executeRaw`
+      eligibilityClockWrite(db)`
         INSERT INTO demand_aggregation
           (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
            min_quantity, shortfall_policy, total_quantity, demand_count, extension_count,
@@ -301,17 +305,17 @@ describe('the database keeps the demand and aggregation invariants', () => {
     it('lets a claim, its release and a failed attempt through without a version — on an ended window too', async () => {
       const a = org();
       const agg = await referredWithOneToFollow(a);
-      await db.$executeRaw`
+      await eligibilityClockWrite(db)`
         UPDATE demand_aggregation
            SET sweep_lease_until = ${T0}, sweep_fence = 'F1', sweep_attempts = 2,
                sweep_next_attempt_at = ${T0}
          WHERE id = ${agg.id}`;
-      await db.$executeRaw`
+      await eligibilityClockWrite(db)`
         UPDATE demand_aggregation SET sweep_lease_until = NULL, sweep_fence = NULL
          WHERE id = ${agg.id}`;
       // Anything else changed beside it is no longer bookkeeping: the ended window is history.
       await refusedWith(
-        db.$executeRaw`UPDATE demand_aggregation SET sweep_fence = 'F2',
+        eligibilityClockWrite(db)`UPDATE demand_aggregation SET sweep_fence = 'F2',
                          sweep_lease_until = ${T0}, updated_at = ${new Date(T0.getTime() + 1)}
                         WHERE id = ${agg.id}`,
         /ck_demand_aggregation_transition/,
@@ -484,7 +488,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
         // Born with a count — or a state — is the CHECK's: an OPEN row holds none, whatever wrote it.
         const born = (column: 'end_digest_counted' | 'end_digest_state', value: number | Buffer) =>
           db.$executeRawUnsafe(
-            `INSERT INTO demand_aggregation
+            eligibilityClockSql`INSERT INTO demand_aggregation
                (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
                 min_quantity, shortfall_policy, total_quantity, demand_count, extension_count,
                 created_at, updated_at, ${column})
@@ -515,7 +519,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
         const born = (status: string, extra: Record<string, unknown>) => {
           const columns = Object.keys(extra);
           return db.$executeRawUnsafe(
-            `INSERT INTO demand_aggregation
+            eligibilityClockSql`INSERT INTO demand_aggregation
                (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
                 min_quantity, shortfall_policy, total_quantity, demand_count, extension_count,
                 closed_at, created_at, updated_at${columns.map((column) => `, ${column}`).join('')})
@@ -541,9 +545,22 @@ describe('the database keeps the demand and aggregation invariants', () => {
         for (const status of ['READY', 'REFERRED', 'LAPSED', 'RFQ_ISSUED', 'CANCELLED']) {
           await refusedWith(born(status, {}), /ck_demand_aggregation_born_open/);
         }
-        // Born OPEN, it carries no sweep and no cancellation either.
+        // Born OPEN, it carries no sweep and no cancellation either. The swept birth is
+        // its own static probe: sweep_lease_until is compared with the database clock, so
+        // the generic `born` never names it (eligibility-clock guard, F4).
         await refusedWith(
-          born('OPEN', { sweep_lease_until: T0, sweep_fence: 'FENCE' }),
+          db.$executeRawUnsafe(
+            eligibilityClockSql`INSERT INTO demand_aggregation
+               (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
+                min_quantity, shortfall_policy, total_quantity, demand_count, extension_count,
+                closed_at, created_at, updated_at, sweep_lease_until, sweep_fence)
+             VALUES ($1, $2, $3, 'OPEN', $4, $5, 10, 0, 'EXTEND', 0, 0, 0, NULL, $4, $4, $4, 'FENCE')`,
+            `AGG_${ulid()}`,
+            a,
+            productId,
+            T0,
+            new Date(T0.getTime() + 10 * HOUR),
+          ),
           /ck_demand_aggregation_born_open/,
         );
         await refusedWith(born('OPEN', { sweep_attempts: 1 }), /ck_demand_aggregation_born_open/);
@@ -605,7 +622,7 @@ describe('the database keeps the demand and aggregation invariants', () => {
         await refusedWith(batch(two, 3, ids[1] as string), FORWARD);
         await refusedWith(batch(flipped(two, 0), 2, ids[1] as string), FORWARD);
         // A claim beside it is still bookkeeping.
-        await db.$executeRaw`UPDATE demand_aggregation SET sweep_lease_until = ${T0},
+        await eligibilityClockWrite(db)`UPDATE demand_aggregation SET sweep_lease_until = ${T0},
                                sweep_fence = 'F1' WHERE id = ${agg.id}`;
         expect(await rowOf(agg.id)).toEqual({ counted: 2, cursor: ids[1], version: 5 });
       });

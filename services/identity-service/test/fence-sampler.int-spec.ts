@@ -1,3 +1,4 @@
+import { eligibilityClockWrite, setEligibilityFixture } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { IdentityRepository } from '../src/identity/identity.repository';
 import type { IdentityService } from '../src/identity/identity.service';
@@ -87,7 +88,7 @@ describe('R3-2: the fence sampler on a real database', () => {
   async function overdueFence(): Promise<string> {
     const attemptId = `KWA_${id('OVD')}`;
     inserted.push(attemptId);
-    await prisma.client.$executeRaw`
+    await eligibilityClockWrite(prisma.client)`
       INSERT INTO keycloak_write_attempt
              (attempt_id, user_id, keycloak_id, operation,
               started_at, deadline_at, takeover_at, next_reassert_at)
@@ -187,12 +188,13 @@ describe('R3-2: the fence sampler on a real database', () => {
           userId: lapsedUser,
           organizationId: org.a,
           roles: ['OPERATOR'],
-          validFrom: new Date(Date.now() - 3_600_000),
-          validUntil: new Date(Date.now() - 1_000),
           createdBy: 'ITEST',
           updatedBy: 'ITEST',
         },
       });
+      // Begun an hour ago and lapsed a minute ago, by the database clock that judges it.
+      await setEligibilityFixture(prisma, 'membershipStartedHourAgo', [membershipId]);
+      await setEligibilityFixture(prisma, 'membershipEndedMinuteAgo', [membershipId]);
     });
     const scopedRepository = Object.create(repository) as IdentityRepository;
     scopedRepository.findLapsedMemberships = async (at, take, after, until) =>

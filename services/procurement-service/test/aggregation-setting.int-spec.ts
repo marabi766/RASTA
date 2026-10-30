@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { runUnscoped } from '@rasta/nest-common';
 import { AggregationSettingRepository } from '../src/setting/setting.repository';
@@ -545,7 +546,7 @@ describe('aggregation settings (plan PR 3)', () => {
       await insert(a, 1);
       const open = (organizationId: string, version: number, windowHours: number) =>
         raw().$executeRawUnsafe(
-          `INSERT INTO demand_aggregation
+          eligibilityClockSql`INSERT INTO demand_aggregation
              (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
               min_quantity, shortfall_policy, setting_version, total_quantity, demand_count,
               extension_count, created_at, updated_at)
