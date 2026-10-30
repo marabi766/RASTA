@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import {
   RastaError,
@@ -210,11 +210,11 @@ export class ProxyService {
     // `@Public`) from a genuine service-to-service call (judged by
     // `@AllowService`), without loosening either. It also means a token minted
     // here can never satisfy `@AllowService` on any service (ADR-020, D-007).
-    const internalToken = await this.internalTokens.issue(
-      'api-gateway',
-      `${request.service}-service`,
-      'RELAY',
-    );
+    const sender = await new InternalHttpClient(this.internalTokens).authorize({
+      from: 'api-gateway',
+      to: `${request.service}-service`,
+      purpose: 'RELAY',
+    });
     // Gone while the token was minted: nothing has been sent, nothing is.
     if (cancelled?.aborted) throw new ClientCancelledError(request.service);
 
@@ -230,12 +230,12 @@ export class ProxyService {
       //
       //   x-internal-token proof that this hop came from the gateway, scoped
       //                    to this one service so it cannot be replayed
-      //                    against another.
+      //                    against another. The sender sets it, replacing
+      //                    any the caller sent in whatever letter case.
       //
       // An earlier version replaced the caller's token with the internal one.
       // The downstream then tried to verify an HS256 service token as an RS256
       // user token and rejected every request with ERR_JOSE_ALG_NOT_ALLOWED.
-      'x-internal-token': internalToken,
       'x-correlation-id': context.correlationId,
       'x-request-id': context.requestId,
       // The tenant was resolved and verified at the edge. The service still
@@ -267,7 +267,7 @@ export class ProxyService {
       // From here the service may receive it: a caller leaving is no longer a
       // `release` (nothing reached the service) but `abandoned`.
       this.circuits.dispatched(permit, timeoutMs);
-      const response = await internalFetch(target, {
+      const response = await sender.send(target, {
         method: request.method,
         headers,
         body: this.bodyFor(request.method, request.body),

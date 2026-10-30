@@ -1,4 +1,4 @@
-import { internalFetch } from '../http/internal-fetch';
+import { InternalHttpClient } from '../http/internal-http-client';
 import { tryGetContext } from '../context/request-context';
 import { RastaError } from '../errors/rasta-error';
 import type { InternalTokenService } from './token-verifier';
@@ -40,30 +40,27 @@ export async function internalGet(
   path: string,
   organizationId: string,
 ): Promise<InternalGetResult> {
-  const token = await options.tokens.issue(options.from, options.to, 'SERVICE', organizationId);
-  const headers: Record<string, string> = {
-    accept: 'application/json',
-    'x-internal-token': token,
-  };
+  const sender = await new InternalHttpClient(options.tokens, options.fetch).authorize({
+    from: options.from,
+    to: options.to,
+    purpose: 'SERVICE',
+    organizationId,
+  });
+  const headers: Record<string, string> = { accept: 'application/json' };
   const context = tryGetContext();
   if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
     headers['x-correlation-id'] = context.correlationId;
   }
 
-  const fetchImpl = options.fetch ?? fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs);
   timer.unref?.();
   try {
-    const response = await internalFetch(
-      `${options.baseUrl.replace(/\/+$/, '')}${path}`,
-      {
-        method: 'GET',
-        headers,
-        signal: controller.signal,
-      },
-      fetchImpl,
-    );
+    const response = await sender.send(`${options.baseUrl.replace(/\/+$/, '')}${path}`, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
     const text = await response.text();
     if (controller.signal.aborted) throw new Error('deadline passed');
     return { status: response.status, body: parseJson(text) };
