@@ -162,7 +162,7 @@ logic. The repository enforces service boundaries in its quality gates.
 
 ### Prerequisites
 
-- Node.js 22 or newer
+- Node.js 22.18 or newer
 - pnpm 10
 - Docker Engine with Docker Compose v2
 - Git 2.40 or newer
