@@ -6,7 +6,21 @@ import exchangeDeadline from './scripts/exchange-deadline-rule.mjs';
 import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
 import internalTokenSource from './scripts/internal-token-source-rule.mjs';
 import { typedOrUntypedParser } from './scripts/internal-token-parser.mjs';
+import rawHttpBoundary from './scripts/raw-http-boundary-rule.mjs';
 import noZodDefault from './scripts/no-zod-default-rule.mjs';
+
+/**
+ * The internal rules, one plugin object for every block that turns them on
+ * (flat config refuses a plugin name defined twice with different objects).
+ */
+export const internalPlugin = {
+  rules: {
+    transport: internalTokenTransport,
+    'raw-http': rawHttpBoundary,
+    'token-source': internalTokenSource,
+    'exchange-deadline': exchangeDeadline,
+  },
+};
 
 const NO_ZOD_COERCE = [
   {
@@ -21,15 +35,6 @@ const NO_ZOD_COERCE = [
   },
 ];
 
-/** The internal rules, one plugin object: flat config refuses two under one name. */
-const internal = {
-  rules: {
-    transport: internalTokenTransport,
-    'token-source': internalTokenSource,
-    'exchange-deadline': exchangeDeadline,
-  },
-};
-
 /**
  * The internal-token source boundary (PR #423 follow-up 1): on every file ESLint
  * lints, typed through the file's own workspace project where one covers it.
@@ -40,7 +45,7 @@ export const INTERNAL_TOKEN_SOURCE = [
   {
     files: ['**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
     languageOptions: { parser: typedOrUntypedParser(tseslint.parser) },
-    plugins: { internal },
+    plugins: { internal: internalPlugin },
     rules: {
       'internal/token-source': [
         'error',
@@ -171,7 +176,12 @@ const base = tseslint.config(
   },
   {
     // Workspaces re-export this config, so paths must match from their cwd too.
-    files: ['**/src/**/*.ts', '**/dev/**/*.ts', '**/prisma/**/*.ts', 'scripts/**/*.{js,mjs,cjs}'],
+    files: [
+      '**/src/**/*.{ts,js,mjs,cjs}',
+      '**/dev/**/*.{ts,js,mjs,cjs}',
+      '**/prisma/**/*.{ts,js,mjs,cjs}',
+      'scripts/**/*.{js,mjs,cjs}',
+    ],
     ignores: [
       '**/*.spec.ts',
       '**/*.test.ts',
@@ -179,9 +189,20 @@ const base = tseslint.config(
       '**/*.int-spec.ts',
       '**/*.e2e-spec.ts',
       '**/test/**',
+      // Test-only helpers too: child-process fixtures and fakes, never deployed.
+      '**/__tests__/**',
     ],
-    plugins: { internal },
-    rules: { 'internal/transport': 'error', 'internal/exchange-deadline': 'error' },
+    plugins: { internal: internalPlugin },
+    // Two layers (Q-155). `raw-http` is the boundary: outside the audited
+    // transports (AUDITED_TRANSPORTS in the rule) no raw HTTP primitive at all,
+    // however it is reached. `transport` is the second layer: a module that
+    // spells a credential must name the redirect-refusing transport.
+    // `exchange-deadline` keeps the abort timer in the shared boundary (#507).
+    rules: {
+      'internal/transport': 'error',
+      'internal/raw-http': 'error',
+      'internal/exchange-deadline': 'error',
+    },
   },
   {
     // The shared boundary is where the timer lives: it is the one place an
@@ -190,6 +211,15 @@ const base = tseslint.config(
     rules: { 'internal/exchange-deadline': 'off' },
   },
   ...INTERNAL_TOKEN_SOURCE,
+  {
+    // Live suites aim at an endpoint the environment names (KEYCLOAK_URL), with
+    // real credentials — an admin password grant, an admin bearer — so they get
+    // the boundary too (PR #492 r2 F2): they send through guardedFetch, or
+    // globalFetchStub when they replace the global (@rasta/testing).
+    files: ['**/*.live-spec.ts'],
+    plugins: { internal: internalPlugin },
+    rules: { 'internal/raw-http': 'error' },
+  },
   {
     // @rasta/config's URL reader is plain CommonJS so the scripts can import
     // it before any build (url-reader.js); Node's CommonJS globals apply.

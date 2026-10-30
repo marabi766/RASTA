@@ -2,19 +2,18 @@
  * @rasta/testing holds a test-only internal-token signer
  * (packages/testing/src/internal-token.ts, `mintTestInternalToken`). It must
  * never reach production. Three layers hold that, each checking an outcome
- * rather than how a file is spelled (PR #514 r1 F1):
+ * rather than how a file is spelled (PR #514 r1 and r2 F1):
  *
- * 1. **Source** — ESLint rule `testing/dev-only`: no production file imports
- *    the package, by name or by path, in any module form (static import,
- *    `export … from`, `import()`, `require`, `require.resolve`,
- *    `import x = require()`, `import('…')` types), and no production file
- *    imports a test-only file that could. Which files are production is
- *    decided here, by repository path (`isTestOnlyPath`), so a file kind
- *    nobody listed is production: fail closed. A dynamic `import()` or
- *    `require()` whose specifier is not a literal cannot be checked and is
- *    refused in production files. Root and web lint configs load the rule;
- *    scripts/testing-dev-only.test.mjs also runs it over every source file
- *    in apps/, services/ and packages/, including files no lint script names.
+ * 1. **Source** — scripts/testing-dev-only-source.mjs: every module
+ *    reference in production source is resolved with TypeScript's resolver
+ *    under the workspace's tsconfigs and with Node's rules, and the real
+ *    target is classified: no production file reaches packages/testing or a
+ *    test-only file, directly or through tooling it imports (root
+ *    `scripts/`). Loader bindings (`require`, `module.require`,
+ *    `createRequire`) are traced; what cannot be traced to a literal, and
+ *    what cannot be resolved, is refused. scripts/testing-dev-only.test.mjs
+ *    runs it over every source file in apps/, services/ and packages/
+ *    (PR #514 r2 F1).
  * 2. **Dependencies** — `prodGraphProblems`: pnpm's own resolved production
  *    graph (`pnpm list --prod --recursive --depth Infinity`), so a package is
  *    identified by where it resolves and the name in its manifest, never by
@@ -48,7 +47,7 @@ import {
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url));
@@ -58,120 +57,10 @@ export const TESTING_DIR = join(REPO_ROOT, 'packages', 'testing');
 export const SIGNER_MARKER = 'rasta test-only internal-token signer';
 export const MINTER_NAME = 'mintTestInternalToken';
 
-// ---------------------------------------------------------------------------
-// 1. Source
-// ---------------------------------------------------------------------------
+// 1. Source: scripts/testing-dev-only-source.mjs, apart because it needs
+// TypeScript and this file runs where nothing is installed.
 
 const toPosix = (path) => path.split(sep).join('/');
-
-/**
- * Whether a repository-relative path is test-only code that no image runs.
- * Everything else — `src/**`, `dev/**`, `prisma/**`, a new directory — is
- * production. Root `scripts/` is CI and operator tooling, never copied into
- * an image (layer 3 would see it if it were).
- */
-export function isTestOnlyPath(relPath) {
-  const rel = toPosix(relPath);
-  if (/^(tests|scripts|packages\/testing)\//.test(rel)) return true;
-  if (/(^|\/)(test|__tests__|e2e)\//.test(rel)) return true;
-  return /\.(spec|test|int-spec|e2e-spec)\.[cm]?[jt]sx?$/.test(rel);
-}
-
-/** True when `target` (absolute) is the testing package or inside it. */
-const insideTesting = (target) => {
-  const rel = relative(TESTING_DIR, target);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-};
-
-/**
- * Why `specifier`, imported from `filename`, reaches test-only code, or
- * `undefined`. By name: `@rasta/testing` and its subpaths, or a path through
- * a `@rasta/testing` / `@rasta+testing` directory. By path: a relative or
- * absolute specifier resolving into packages/testing or into a test-only file
- * (root `scripts/` excepted: lint configs load their rules from there).
- */
-export function testOnlyTarget(specifier, filename) {
-  if (specifier === TESTING || specifier.startsWith(`${TESTING}/`)) return TESTING;
-  if (/(^|\/)@rasta[/+]testing([/@]|$)/.test(specifier)) return TESTING;
-  if (!specifier.startsWith('.') && !isAbsolute(specifier)) return undefined;
-  const target = resolve(dirname(filename), specifier);
-  if (insideTesting(target)) return 'packages/testing';
-  const rel = relative(REPO_ROOT, target);
-  // TypeScript imports name no extension (`./helpers.spec`): the file is the
-  // one any extension resolves to, so test every one (#503 r2).
-  const resolvable = [rel, ...RESOLVED_EXTENSIONS.map((extension) => `${rel}${extension}`)];
-  if (
-    !rel.startsWith('..') &&
-    !isAbsolute(rel) &&
-    !/^scripts\//.test(toPosix(rel)) &&
-    resolvable.some(isTestOnlyPath)
-  ) {
-    return `test-only ${toPosix(rel)}`;
-  }
-  return undefined;
-}
-
-/** The extensions a TypeScript or Node import of an extensionless path can resolve to. */
-const RESOLVED_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
-
-const literal = (node) => {
-  if (node?.type === 'Literal' && typeof node.value === 'string') return node.value;
-  if (node?.type === 'TemplateLiteral' && node.expressions.length === 0) {
-    return node.quasis[0].value.cooked;
-  }
-  return undefined;
-};
-
-/** ESLint rule `testing/dev-only` (see layer 1 above). */
-export const devOnlyRule = {
-  meta: {
-    type: 'problem',
-    schema: [],
-    messages: {
-      reaches:
-        '{{target}} is test-only code (it holds a test signer) and must not be reachable from production source.',
-      dynamic:
-        'A non-literal module specifier cannot be checked against test-only code; use a literal in production source.',
-    },
-  },
-  create(context) {
-    const filename = context.filename;
-    const rel = relative(REPO_ROOT, filename);
-    if (rel.startsWith('..') || isAbsolute(rel) || isTestOnlyPath(rel)) return {};
-
-    const check = (node, source, { dynamic = false } = {}) => {
-      const specifier = literal(source);
-      if (specifier === undefined) {
-        if (dynamic) context.report({ node, messageId: 'dynamic' });
-        return;
-      }
-      const target = testOnlyTarget(specifier, filename);
-      if (target) context.report({ node, messageId: 'reaches', data: { target } });
-    };
-    const isRequire = (callee) =>
-      (callee.type === 'Identifier' && callee.name === 'require') ||
-      (callee.type === 'MemberExpression' &&
-        !callee.computed &&
-        ((callee.object.type === 'Identifier' &&
-          callee.object.name === 'require' &&
-          callee.property.name === 'resolve') ||
-          (callee.object.type === 'Identifier' &&
-            callee.object.name === 'module' &&
-            callee.property.name === 'require')));
-
-    return {
-      ImportDeclaration: (node) => check(node, node.source),
-      ExportNamedDeclaration: (node) => node.source && check(node, node.source),
-      ExportAllDeclaration: (node) => check(node, node.source),
-      ImportExpression: (node) => check(node, node.source, { dynamic: true }),
-      TSImportType: (node) => check(node, node.argument?.literal ?? node.argument),
-      TSExternalModuleReference: (node) => check(node, node.expression),
-      CallExpression(node) {
-        if (isRequire(node.callee)) check(node, node.arguments[0], { dynamic: true });
-      },
-    };
-  },
-};
 
 // ---------------------------------------------------------------------------
 // 2. Dependencies

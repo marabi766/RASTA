@@ -129,6 +129,12 @@ export default defineConfig({
       // and correlation id (CON-001).
     },
     {
+      name: 'harness',
+      testDir: './specs/harness',
+      // The harness's own transport guarantees (Q-155): its Playwright API
+      // contexts refuse redirects. Loopback servers only, no dependency.
+    },
+    {
       name: 'contract-api',
       testDir: './specs/contract',
       // After the construction project: a contract exists only because a tender

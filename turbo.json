@@ -65,6 +65,7 @@
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/eslint.config.mjs",
         "$TURBO_ROOT$/scripts/internal-token-transport-rule.mjs",
+        "$TURBO_ROOT$/scripts/raw-http-boundary-rule.mjs",
         "$TURBO_ROOT$/scripts/internal-token-source-rule.mjs",
         "$TURBO_ROOT$/scripts/internal-token-parser.mjs",
         "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs"
