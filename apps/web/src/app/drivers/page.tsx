@@ -1,12 +1,16 @@
 import { redirect } from 'next/navigation';
-import { AppShell, Button, PageHeader, Section, TopBar } from '@/ui';
+import { AppShell, Button, EmptyState, PageHeader, Section, TopBar } from '@/ui';
+import type { DriverPicker } from '@/lib/driver-fields';
 import { currentSession } from '@/server/current-session';
 import { canManageDrivers, fetchDrivers, type DriverListQuery } from '@/server/drivers';
+import { loadDriverRoster, type DriverRoster } from '@/server/driver-roster';
 import { tokenWriteRoles } from '@/server/realm-roles';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriversScreen } from './DriversScreen';
 import { NewDriverForm } from './NewDriverForm';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/drivers` route — راننده و تخصیص (docs/16 § ۱۶٫۶, role `FLEET_MANAGER`).
@@ -44,23 +48,35 @@ export default async function DriversPage({
   // token until it is refreshed.
   const roles = tokenWriteRoles(session.accessToken);
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const query: DriverListQuery = {
     status: one(params.status),
     q: one(params.q),
     cursor: one(params.cursor),
   };
 
-  const result = await fetchDrivers(session, query);
-
   // A token whose roles cannot be read shows no registration form rather than one that
   // might not work — the same fail-closed default `canManageDrivers` documents.
   const manage = roles !== null && canManageDrivers(roles);
 
+  // Who the form may offer, and the names the list may show (task 095): read
+  // only for somebody who may list the members, and only whole.
+  const [result, roster] = await Promise.all([
+    fetchDrivers(session, query),
+    manage ? loadDriverRoster(session, roles) : Promise.resolve<DriverRoster | null>(null),
+  ]);
+  const picker: DriverPicker | null =
+    roster === null
+      ? null
+      : roster.kind === 'LISTED'
+        ? { kind: 'PICK', candidates: roster.candidates }
+        : { kind: 'ID', reason: roster.reason };
+
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -76,14 +92,30 @@ export default async function DriversPage({
         description="رانندگان این سازمان، شمارهٔ گواهینامه و اعتبار آن، و ثبت راننده تازه."
       />
 
-      {manage ? (
+      {picker ? (
         <Section headingId="new-driver" title="ثبت راننده" className="mt-4">
-          <NewDriverForm csrfToken={session.csrfToken} submissionId={mintSubmissionId(session)} />
+          {picker.kind === 'PICK' && picker.candidates.length === 0 ? (
+            // The whole member list was read: nobody is left to register.
+            <EmptyState
+              title="عضوی که هنوز راننده نباشد در این سازمان نیست"
+              description="هر عضو این سازمان پیش‌تر راننده ثبت شده است. برای ثبت راننده تازه، نخست او را در «سازمان و اعضا» عضو کنید."
+            />
+          ) : (
+            <NewDriverForm
+              csrfToken={session.csrfToken}
+              submissionId={mintSubmissionId(session)}
+              picker={picker}
+            />
+          )}
         </Section>
       ) : null}
 
       <div className="mt-4 flex flex-col gap-4">
-        <DriversScreen result={result} query={query} />
+        <DriversScreen
+          result={result}
+          query={{ ...query, context: pageContext(session) }}
+          names={roster?.names ?? null}
+        />
       </div>
     </AppShell>
   );

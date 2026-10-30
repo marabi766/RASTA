@@ -296,7 +296,9 @@ describe('recipient resolution failure and recovery', () => {
     // to give, which is the stronger property.
     expect(logger.lines.length).toBeGreaterThan(0);
     for (const line of logger.lines) {
-      expect(line).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+      // Not even an '@', which every address needs and no generated id or instant can hold: the
+      // run's ids cannot decide this check, as they could an address-shaped pattern's (#452).
+      expect(line).not.toContain('@');
     }
   });
 });

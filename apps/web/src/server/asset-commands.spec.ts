@@ -20,6 +20,7 @@ import {
 import { EMPTY_REGISTER_ASSET_FORM, EMPTY_UPDATE_ASSET_FORM } from '@/lib/asset-form-fields';
 import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * Parsing and writing an asset registration and an asset edit.
@@ -35,7 +36,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_1'),
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -521,7 +522,16 @@ describe('writing', () => {
     return { impl, calls };
   }
 
-  const REGISTER = { name: 'لودر', type: 'LOADER' as const };
+  // zod 4 infers a field whose transform may return undefined as present-but-undefined (zod 3: optional).
+  const REGISTER = {
+    name: 'لودر',
+    type: 'LOADER' as const,
+    assetTag: undefined,
+    manufacturer: undefined,
+    model: undefined,
+    serialNumber: undefined,
+    manufactureYear: undefined,
+  };
   const UPDATE = { assetTag: null, name: 'لودر' };
 
   it('registers with a POST, the submission id in the Idempotency-Key header, and keeps only the id', async () => {
@@ -535,7 +545,7 @@ describe('writing', () => {
     expect(calls[0].url).toBe('http://gateway.test:3000/v1/assets');
     expect(calls[0].method).toBe('POST');
     expect(calls[0].headers['idempotency-key']).toBe('sub_abc');
-    expect(calls[0].headers['authorization']).toBe('Bearer access-token-value');
+    expect(calls[0].headers['authorization']).toBe(`Bearer ${SESSION.accessToken}`);
     expect(calls[0].body).toEqual(REGISTER);
   });
 

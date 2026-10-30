@@ -3139,16 +3139,31 @@ export const EXPECTED = {
     // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is created —
     // and migrated — as the migrator, which owns rasta_analytics.
     connectAs: 'migrator',
-    tables: ['fact_maintenance', 'processed_event'],
+    tables: ['fact_maintenance', 'processed_event', 'projection_coverage'],
     types: [],
     triggers: [
       'tg_fact_maintenance_append_only',
       'tg_fact_maintenance_no_truncate',
       'tg_fact_maintenance_recorded_at',
+      // Q-154: the projection's coverage start is stamped by the database and never moved.
+      'tg_projection_coverage_append_only',
+      'tg_projection_coverage_no_truncate',
+      'tg_projection_coverage_started_at',
     ],
-    functions: ['fact_maintenance_append_only', 'fact_recorded_at_now'],
-    indexes: ['fact_maintenance_pkey', 'ix_fact_maintenance_org_completed', 'processed_event_pkey'],
+    functions: [
+      'fact_maintenance_append_only',
+      'fact_recorded_at_now',
+      'projection_coverage_append_only',
+      'projection_coverage_started_now',
+    ],
+    indexes: [
+      'fact_maintenance_pkey',
+      'ix_fact_maintenance_org_completed',
+      'processed_event_pkey',
+      'projection_coverage_pkey',
+    ],
     constraints: [
+      'ck_projection_coverage_name',
       'ck_processed_event_ids',
       'ck_fact_maintenance_ids',
       'ck_fact_maintenance_type',

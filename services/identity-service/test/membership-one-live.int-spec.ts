@@ -6,7 +6,7 @@ import { IDENTITY_EVENTS } from '../src/identity/events';
 import type { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
 import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, id, newPrisma, tenants } from './helpers';
+import { asActor, id, newPrisma, tenants, newFences } from './helpers';
 
 /**
  * One live membership per (user, organization), against a real database.
@@ -22,6 +22,7 @@ import { asActor, id, newPrisma, tenants } from './helpers';
 describe('one live membership per user and organization', () => {
   const org = tenants();
   let prisma: PrismaService;
+  let fencing: Awaited<ReturnType<typeof newFences>> | undefined;
   let service: IdentityService;
   const users: string[] = [];
 
@@ -38,7 +39,7 @@ describe('one live membership per user and organization', () => {
     service = new IdentityService(
       repository,
       keycloak,
-      new KeycloakProjector(repository, keycloak),
+      new KeycloakProjector(repository, keycloak, (fencing = await newFences()).fences),
     );
   });
 
@@ -50,7 +51,8 @@ describe('one live membership per user and organization', () => {
       await prisma.client.membership.deleteMany({ where: { userId: { in: users } } });
       await prisma.client.user.deleteMany({ where: { id: { in: users } } });
     });
-    await prisma.onModuleDestroy();
+    await fencing?.pool.stop();
+    await prisma.stop();
   });
 
   async function newUser(): Promise<string> {

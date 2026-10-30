@@ -6,16 +6,21 @@ import { IdentityService, REGISTRATION_APPROVAL_CODES } from '../src/identity/id
 import { IDENTITY_EVENTS } from '../src/identity/events';
 import {
   KeycloakCreateUnconfirmedError,
+  KeycloakWriteUnconfirmedError,
   type KeycloakAdminClient,
+  type KeycloakWriteContext,
 } from '../src/keycloak/keycloak.client';
 import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import {
+  provenanceOnly,
   readPlatformAttributes,
   type PlatformAttributes,
 } from '../src/keycloak/platform-attributes';
 import { runProjectionCommand } from '../src/keycloak/projection.command';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, id, newPrisma, tenants } from './helpers';
+import { asActor, id, newFences, newPrisma, tenants } from './helpers';
+import type { KeycloakWriteOperation } from '../src/keycloak/keycloak-write-fence';
+import { recordRegistration } from './identity-fixtures';
 
 /**
  * Registration decisions against a real database, and the Keycloak account an
@@ -67,11 +72,8 @@ class FakeKeycloak {
   /** Every write after a create, in order: what the service asked of Keycloak. */
   readonly writes: string[] = [];
 
-  async createUser(input: {
-    username: string;
-    attributes: PlatformAttributes;
-    enabled: boolean;
-  }): Promise<string> {
+  /** As the real client: always disabled, its provenance alone (D-069 addendum D). */
+  async createUser(input: { username: string; userId: string }): Promise<string> {
     this.fail('create');
     await new Promise((resolve) => setImmediate(resolve));
     if (this.createWithoutId === 'not_made') {
@@ -85,8 +87,8 @@ class FakeKeycloak {
     this.accounts.set(accountId, {
       id: accountId,
       username: input.username,
-      enabled: input.enabled,
-      attributes: input.attributes,
+      enabled: false,
+      attributes: provenanceOnly(input.userId),
       activation: null,
     });
     if (this.createWithoutId === 'made') {
@@ -116,18 +118,30 @@ class FakeKeycloak {
   }
 
   /** `enabled: true` and the marker, applied together as one representation update. */
-  async activateAccount(accountId: string, registrationId: string) {
+  async activateAccount(accountId: string, registrationId: string, context: KeycloakWriteContext) {
     this.fail('activate');
     const found = this.accounts.get(accountId);
     if (!found) throw RastaError.notFound('KeycloakUser', accountId);
+    await this.dispatch(context, 'activate');
     found.enabled = true;
     found.activation = registrationId;
     this.writes.push(`activate:${accountId}`);
     if (this.dropActivateResponse) {
       this.dropActivateResponse = false;
-      throw RastaError.upstreamUnavailable('keycloak', { operation: 'activateAccount' });
+      // Applied, and the answer lost: what the real client reports as unknown.
+      throw new KeycloakWriteUnconfirmedError('activateAccount', 'connection');
     }
   }
+
+  /** What the real client does before every PUT: the fence first, then the deadline (D-069). */
+  private async dispatch(context: KeycloakWriteContext, operation: KeycloakWriteOperation) {
+    const attempt = await context.fence(operation);
+    attempt.assertDispatchable();
+    this.fenced.push(`${operation}:${attempt.id}`);
+  }
+
+  /** Every attempt a fence was opened for, in order. */
+  readonly fenced: string[] = [];
 
   private view(found: FakeAccount) {
     return {
@@ -145,20 +159,30 @@ class FakeKeycloak {
     return readPlatformAttributes(found.attributes);
   }
 
-  async replacePlatformAttributes(accountId: string, attributes: PlatformAttributes) {
+  async replacePlatformAttributes(
+    accountId: string,
+    attributes: PlatformAttributes,
+    context: KeycloakWriteContext,
+  ) {
     this.fail('write');
     const found = this.accounts.get(accountId);
     if (!found) throw RastaError.notFound('KeycloakUser', accountId);
+    await this.dispatch(context, 'replace_attributes');
     found.attributes = attributes;
     this.writes.push(`attributes:${accountId}`);
   }
 
-  async setEnabled(accountId: string | null, enabled: boolean) {
+  async disable(accountId: string, context: KeycloakWriteContext) {
     this.fail('write');
-    const found = this.accounts.get(accountId!);
-    if (!found) throw RastaError.notFound('KeycloakUser', accountId ?? '');
-    found.enabled = enabled;
-    this.writes.push(`${enabled ? 'enable' : 'disable'}:${accountId}`);
+    const found = this.accounts.get(accountId);
+    if (!found) throw RastaError.notFound('KeycloakUser', accountId);
+    await this.dispatch(context, 'disable');
+    found.enabled = false;
+    this.writes.push(`disable:${accountId}`);
+  }
+
+  get requestTimeoutMs(): number {
+    return 10_000;
   }
 
   private fail(step: Step): void {
@@ -178,17 +202,19 @@ describe('registration decisions and the Keycloak account an approval creates', 
   let projector: KeycloakProjector;
   let service: IdentityService;
   const users: string[] = [];
+  let fencing: Awaited<ReturnType<typeof newFences>>;
 
   beforeAll(async () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new IdentityRepository(prisma);
+    fencing = await newFences();
   });
 
   beforeEach(() => {
     keycloak = new FakeKeycloak();
     const client = keycloak as unknown as KeycloakAdminClient;
-    projector = new KeycloakProjector(repository, client);
+    projector = new KeycloakProjector(repository, client, fencing.fences);
     service = new IdentityService(repository, client, projector);
   });
 
@@ -205,12 +231,13 @@ describe('registration decisions and the Keycloak account an approval creates', 
       await prisma.client.registrationRequest.deleteMany({ where: { userId: { in: users } } });
       await prisma.client.user.deleteMany({ where: { id: { in: users } } });
     });
-    await prisma.onModuleDestroy();
+    await fencing.pool.stop();
+    await prisma.stop();
   });
 
   async function submit(): Promise<{ registrationId: string; userId: string; username: string }> {
     const username = `reg-${ulid().slice(-12)}`.toLowerCase();
-    const { registrationId } = await service.submitRegistration({
+    const registrationId = await recordRegistration(service, {
       username,
       email: `${username}@example.test`,
       firstName: 'متقاضی',
@@ -485,11 +512,16 @@ describe('registration decisions and the Keycloak account an approval creates', 
 
     it('A’s transaction fails for its own reason after B committed: nothing is disabled or cleared', async () => {
       const { registrationId, userId, username } = await submit();
-      // A's transaction is the first one; B runs inside it, then A fails.
-      jest.spyOn(repository, 'transaction').mockImplementationOnce(async () => {
-        await approve(registrationId);
-        throw new Error('the database went away under A');
-      });
+      // A's decision transaction is its second — the first is its reviewer's
+      // early live check (task 117, F1); B runs inside it, then A fails.
+      const transaction = repository.transaction.bind(repository);
+      jest
+        .spyOn(repository, 'transaction')
+        .mockImplementationOnce(transaction)
+        .mockImplementationOnce(async () => {
+          await approve(registrationId);
+          throw new Error('the database went away under A');
+        });
 
       await expect(approve(registrationId)).rejects.toThrow('the database went away under A');
       expectActivated(username, userId);
@@ -569,6 +601,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
         repository,
         projector,
         keycloak,
+        fences: fencing.fences,
       });
       expect(reconciled.activationPending).toContain(userId);
 
@@ -576,12 +609,18 @@ describe('registration decisions and the Keycloak account an approval creates', 
         repository,
         projector,
         keycloak,
+        fences: fencing.fences,
       });
       expect(backfilled.failed).not.toContain(userId);
       expectActivated(username, userId);
       expect(await state(registrationId, userId)).toEqual(APPROVED_STATE(account!.id));
 
-      const again = await runProjectionCommand('reconcile', { repository, projector, keycloak });
+      const again = await runProjectionCommand('reconcile', {
+        repository,
+        projector,
+        keycloak,
+        fences: fencing.fences,
+      });
       expect(again.activationPending).not.toContain(userId);
     });
 
@@ -620,6 +659,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
         repository,
         projector,
         keycloak,
+        fences: fencing.fences,
       });
       expect(reconciled.orphans).toContainEqual(
         expect.objectContaining({ userId, enabled: true, grants: true, repaired: false }),
@@ -629,6 +669,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
         repository,
         projector,
         keycloak,
+        fences: fencing.fences,
       });
       expect(backfilled.orphans).toContainEqual(
         expect.objectContaining({ userId, repaired: true }),
@@ -645,7 +686,12 @@ describe('registration decisions and the Keycloak account an approval creates', 
       await reject(registrationId);
       plantOrphan(username, userId);
 
-      await runProjectionCommand('backfill', { repository, projector, keycloak });
+      await runProjectionCommand('backfill', {
+        repository,
+        projector,
+        keycloak,
+        fences: fencing.fences,
+      });
       expectHarmless(username, userId);
     });
 
@@ -662,14 +708,18 @@ describe('registration decisions and the Keycloak account an approval creates', 
       // The approval is inside its transaction, holding the request lock,
       // when the repair starts; the repair can only decide after it commits.
       const transaction = repository.transaction.bind(repository);
-      jest.spyOn(repository, 'transaction').mockImplementationOnce(async (fn, options) =>
-        transaction(async (tx) => {
-          const result = await fn(tx);
-          repair = projector.repairOrphan(userId, username);
-          await new Promise((resolve) => setTimeout(resolve, 200));
-          return result;
-        }, options),
-      );
+      jest
+        .spyOn(repository, 'transaction')
+        // The reviewer's early live check (task 117, F1), before Keycloak.
+        .mockImplementationOnce(transaction)
+        .mockImplementationOnce(async (fn, options) =>
+          transaction(async (tx) => {
+            const result = await fn(tx);
+            repair = projector.repairOrphan(userId, username);
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            return result;
+          }, options),
+        );
 
       await approve(registrationId);
       await expect(repair).resolves.toBe('owned');
@@ -685,6 +735,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
         repository,
         projector,
         keycloak,
+        fences: fencing.fences,
       });
       expect(backfilled.failed).toContain(userId);
       expect(accountsOf(username)[0]).toMatchObject({ enabled: true });
@@ -692,8 +743,15 @@ describe('registration decisions and the Keycloak account an approval creates', 
   });
 
   describe('round 3: one-shot activation, harmless adoption, and an unconfirmed create', () => {
-    const reconcile = () => runProjectionCommand('reconcile', { repository, projector, keycloak });
-    const backfill = () => runProjectionCommand('backfill', { repository, projector, keycloak });
+    const reconcile = () =>
+      runProjectionCommand('reconcile', {
+        repository,
+        projector,
+        keycloak,
+        fences: fencing.fences,
+      });
+    const backfill = () =>
+      runProjectionCommand('backfill', { repository, projector, keycloak, fences: fencing.fences });
 
     it('HIGH 1: an activation whose answer was lost is never repeated — an account an administrator disabled since stays disabled', async () => {
       const { registrationId, userId, username } = await submit();
@@ -880,8 +938,15 @@ describe('registration decisions and the Keycloak account an approval creates', 
   });
 
   describe('round 4: the platform status is the authority on enabling (HIGH 1, D-049)', () => {
-    const reconcile = () => runProjectionCommand('reconcile', { repository, projector, keycloak });
-    const backfill = () => runProjectionCommand('backfill', { repository, projector, keycloak });
+    const reconcile = () =>
+      runProjectionCommand('reconcile', {
+        repository,
+        projector,
+        keycloak,
+        fences: fencing.fences,
+      });
+    const backfill = () =>
+      runProjectionCommand('backfill', { repository, projector, keycloak, fences: fencing.fences });
 
     /**
      * A platform disable as any suspend or deactivate path must make one —

@@ -36,19 +36,19 @@ export const gatewayEnvSchema = baseEnvSchema
   .merge(authEnvSchema)
   .merge(serviceUrlEnvSchema)
   .extend({
-    GATEWAY_CORS_ORIGINS: z.string().default(''),
+    GATEWAY_CORS_ORIGINS: z.string().prefault(''),
 
     /** Default per-user allowance. Individual routes may tighten this. */
-    GATEWAY_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(300),
-    GATEWAY_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).default(60_000),
+    GATEWAY_RATE_LIMIT_MAX: z.coerce.number().int().min(1).prefault(300),
+    GATEWAY_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).prefault(60_000),
 
     /** Tenant-wide ceiling, so one busy organization cannot starve the rest. */
-    GATEWAY_TENANT_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(3000),
+    GATEWAY_TENANT_RATE_LIMIT_MAX: z.coerce.number().int().min(1).prefault(3000),
 
     /** Anonymous callers get far less: only registration is reachable. */
-    GATEWAY_ANON_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(60),
+    GATEWAY_ANON_RATE_LIMIT_MAX: z.coerce.number().int().min(1).prefault(60),
 
-    GATEWAY_UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(100).default(3000),
+    GATEWAY_UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(100).prefault(3000),
 
     /**
      * The upstream deadline of the two routes that open a tender's bids and read every opened
@@ -69,9 +69,9 @@ export const gatewayEnvSchema = baseEnvSchema
       .int()
       .min(TENDER_OPEN_DEADLINE_MIN_MS)
       .max(TENDER_OPEN_DEADLINE_MAX_MS)
-      .default(TENDER_OPEN_DEADLINE_DEFAULT_MS),
-    GATEWAY_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).default(5),
-    GATEWAY_CIRCUIT_RESET_MS: z.coerce.number().int().min(1000).default(30_000),
+      .prefault(TENDER_OPEN_DEADLINE_DEFAULT_MS),
+    GATEWAY_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).prefault(5),
+    GATEWAY_CIRCUIT_RESET_MS: z.coerce.number().int().min(1000).prefault(30_000),
 
     /**
      * Allow traffic when Redis is unreachable.

@@ -1,5 +1,5 @@
 import { Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   createSystemContext,
   invalidPayloadError,
@@ -141,9 +141,9 @@ export class SettlementAuthorityConsumer implements OnModuleInit, OnApplicationS
     // processed marker, so a corrected replay with the same id still applies
     // (L7-26). The message names field paths and zod codes only — never zod's
     // own text, which can quote the value received (S-09).
-    const parsed = maintenanceApprovedSchema.safeParse(envelope.payload);
+    const parsed = legacyParse(maintenanceApprovedSchema, envelope.payload);
     if (!parsed.success) {
-      throw invalidPayloadError(envelope, parsed.error, MAINTENANCE_APPROVED_FIELDS);
+      throw invalidPayloadError(envelope, parsed.refusal, MAINTENANCE_APPROVED_FIELDS);
     }
     const payload = parsed.data;
 

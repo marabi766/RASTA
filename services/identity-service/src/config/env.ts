@@ -4,6 +4,7 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  EnvValidationError,
   fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
@@ -51,7 +52,7 @@ function roleListEnv(
 ) {
   return z
     .string()
-    .default(fallback.join(','))
+    .prefault(fallback.join(','))
     .transform((value, ctx): readonly PlatformRole[] => {
       const entries = value
         .split(',')
@@ -98,11 +99,32 @@ export const identityEnvSchema = baseEnvSchema
      * When false, account provisioning is recorded locally and the Keycloak
      * call is skipped. That is for isolated unit and API test environments
      * that have no identity provider. A deployed environment must never
-     * disable synchronisation — hence the default of true.
+     * disable synchronisation — hence the default of true, and `false` is
+     * refused at boot unless `NODE_ENV` is set explicitly to `development` or
+     * `test` (`assertNarrowingEnforced`): with it off, a demotion or a
+     * revocation commits without ever reaching a token (D-064).
      */
     KEYCLOAK_SYNC_ENABLED: booleanEnv(true),
 
-    CORS_ORIGINS: z.string().default(''),
+    /**
+     * ADR-060, write-ahead addendum (D-064, D-069) — how long after its
+     * deadline a Keycloak write whose answer never came (the deadline passed,
+     * the connection broke, a 5xx) may still be applied. An aborted request is
+     * not a cancelled one, so for this long an older write could land after a
+     * newer one. Every write's fence (`keycloak_write_attempt`) stays live
+     * until `deadline + this`: meanwhile a narrowing change of that user is
+     * refused (503 `KEYCLOAK_WRITE_SETTLING`); after it, the sweep re-asserts
+     * the user and clears the fence.
+     *
+     * An assumption about the deployment, stated in the ADR's D-069 residual:
+     * Keycloak applies an admin write within this long of the sender's
+     * deadline, or never. The floor is above the client's own 10 s deadline;
+     * the ceiling bounds how long one lost answer can hold demotions of that
+     * user back.
+     */
+    KEYCLOAK_WRITE_SETTLE_SECONDS: z.coerce.number().int().min(15).max(900).prefault(120),
+
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * ADR-053 § 4 — how long a refusal may wait for its `security_event_outbox`
@@ -114,13 +136,13 @@ export const identityEnvSchema = baseEnvSchema
      * best-effort, and the refusal itself never waits on audit for long. The
      * ceiling keeps a misconfiguration from turning every `403` into a stall.
      */
-    SECURITY_EVENT_CAPTURE_TIMEOUT_MS: z.coerce.number().int().min(10).max(5000).default(250),
+    SECURITY_EVENT_CAPTURE_TIMEOUT_MS: z.coerce.number().int().min(10).max(5000).prefault(250),
 
     /** How often the refusal relay polls `security_event_outbox`. */
-    SECURITY_EVENT_FLUSH_INTERVAL_MS: z.coerce.number().int().min(50).max(60_000).default(1000),
+    SECURITY_EVENT_FLUSH_INTERVAL_MS: z.coerce.number().int().min(50).max(60_000).prefault(1000),
 
     /** Rows one refusal-relay claim may take. */
-    SECURITY_EVENT_FLUSH_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
+    SECURITY_EVENT_FLUSH_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(100),
 
     /**
      * ADR-053 § 4 — the UTC window matching refusals are counted over (AUD-004
@@ -139,7 +161,7 @@ export const identityEnvSchema = baseEnvSchema
       .int()
       .min(AGGREGATION_WINDOW_SECONDS.MIN)
       .max(AGGREGATION_WINDOW_SECONDS.MAX)
-      .default(AGGREGATION_WINDOW_SECONDS.DEFAULT),
+      .prefault(AGGREGATION_WINDOW_SECONDS.DEFAULT),
 
     /**
      * audit-service's base URL, for the one question the audit correction
@@ -153,7 +175,7 @@ export const identityEnvSchema = baseEnvSchema
      * The whole correction-target lookup, body included. Finite, so a slow
      * audit-service turns into a bounded `504`, never a hung command.
      */
-    AUDIT_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+    AUDIT_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).prefault(3000),
 
     /**
      * The grant ladder — which roles each acting role may hand out
@@ -181,9 +203,20 @@ export const identityEnvSchema = baseEnvSchema
      * else re-projects them. The interval is the latency bound on top of
      * ADR-060 § 7's 905 s, so its ceiling is kept at an hour.
      */
+    // Off is refused outside an explicit development or test environment
+    // (`assertNarrowingEnforced`): the sweep is the only path that takes a
+    // lapsed membership out of Keycloak, and it re-asserts users whose
+    // Keycloak write was left unconfirmed (D-064).
     MEMBERSHIP_EXPIRY_SCAN_ENABLED: booleanEnv(true),
-    MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS: z.coerce.number().int().min(5).max(3600).default(60),
-    MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(200),
+    MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS: z.coerce.number().int().min(5).max(3600).prefault(60),
+    MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(200),
+
+    // The registration worker (`RegistrationIntakeWorker`, task 130): how
+    // often it turns received public registrations into review requests, and
+    // how many a pass. No switch to turn it off — nothing else would ever
+    // record a registration.
+    REGISTRATION_INTAKE_INTERVAL_SECONDS: z.coerce.number().int().min(1).max(3600).prefault(5),
+    REGISTRATION_INTAKE_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(50),
 
     /**
      * Which roles may provision a user into an organization other than the one
@@ -213,7 +246,7 @@ export function loadIdentityEnv(source: NodeJS.ProcessEnv = process.env): Identi
   // Each service reads its own DATABASE_URL_* variable, so a single .env can
   // describe every service without any of them being able to open another
   // service's database by accident (ADR-005).
-  return loadEnv(
+  const env = loadEnv(
     identityEnvSchema,
     {
       ...source,
@@ -226,6 +259,42 @@ export function loadIdentityEnv(source: NodeJS.ProcessEnv = process.env): Identi
     },
     { operationBudgets: identityOperationBudgets, fixedMessages: IDENTITY_ENV_MESSAGES },
   );
+  assertNarrowingEnforced(source, env);
+  return env;
+}
+
+/** Where a narrowing path may be switched off: named explicitly, never by an unset `NODE_ENV`. */
+export const NARROWING_OPT_OUT_ENVIRONMENTS = ['development', 'test'] as const;
+
+/**
+ * The two switches that would let a narrowing change — a role removed, a
+ * membership revoked or lapsed — commit without ever reaching Keycloak, and so
+ * a token (ADR-060, write-ahead addendum, D-064):
+ *
+ * - `KEYCLOAK_SYNC_ENABLED=false`: every Keycloak write is skipped, the
+ *   write-ahead included, and the change commits;
+ * - `MEMBERSHIP_EXPIRY_SCAN_ENABLED=false`: a lapsed membership is never taken
+ *   out of Keycloak, and a user whose write was left unconfirmed is never
+ *   re-asserted.
+ *
+ * Either is honoured only with `NODE_ENV` set explicitly to `development` or
+ * `test`, as `KAFKA_ALLOW_PLAINTEXT` is: an unset `NODE_ENV`, which the schema
+ * would default to `development`, does not count. Anywhere else the service
+ * refuses to start rather than silently skip.
+ */
+function assertNarrowingEnforced(source: NodeJS.ProcessEnv, env: IdentityEnv): void {
+  const given = source.NODE_ENV?.trim();
+  if (given && (NARROWING_OPT_OUT_ENVIRONMENTS as readonly string[]).includes(given)) return;
+  const message =
+    `may be false only with NODE_ENV set explicitly to ${NARROWING_OPT_OUT_ENVIRONMENTS.join(' or ')}: ` +
+    'with it off a demotion, a revocation or a lapse can commit without reaching Keycloak (D-064)';
+  const issues = [
+    ...(env.KEYCLOAK_SYNC_ENABLED ? [] : [{ path: 'KEYCLOAK_SYNC_ENABLED', message }]),
+    ...(env.MEMBERSHIP_EXPIRY_SCAN_ENABLED
+      ? []
+      : [{ path: 'MEMBERSHIP_EXPIRY_SCAN_ENABLED', message }]),
+  ];
+  if (issues.length > 0) throw new EnvValidationError(issues);
 }
 
 export function corsOrigins(env: IdentityEnv): string[] {

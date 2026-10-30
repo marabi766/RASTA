@@ -304,7 +304,8 @@ const EXPECTED: { [N in MarketplaceEventName]: { scope: PartitionScope; key: str
 const NAMES = Object.values(MARKETPLACE_EVENTS);
 
 function resolve<N extends MarketplaceEventName>(name: N) {
-  return resolvePartitionKey(name, PAYLOADS[name]);
+  // zod 4's output types do not correlate PAYLOADS[N] with N; each entry is checked where it is written.
+  return resolvePartitionKey(name, PAYLOADS[name] as never);
 }
 
 describe('every published marketplace event has a partition decision', () => {

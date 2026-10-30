@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Browser, type Locator, type Page } from '@playwright/test';
+import { test, type Browser, type Locator, type Page } from './expect';
+import { expect } from './expect';
 
 import { toLatinDigits, toPersianDigits } from '../src/lib/format';
 import {
@@ -14,9 +15,11 @@ import {
   installProvisionedSession,
   liveAccessToken,
   type LivePersona,
+  type LiveSession,
   type ProvisionedPerson,
 } from './live-session';
 import { provisionPerson } from './provisioned-people';
+import { withContext } from '../src/lib/page-context';
 
 /**
  * Returns through the real stack (EXP-003, RUN-005): the portal, the real
@@ -96,12 +99,14 @@ async function availableOn(input: Locator): Promise<number> {
 async function as(
   browser: Browser,
   who: LivePersona | ProvisionedPerson,
-): Promise<{ page: Page; close: () => Promise<void> }> {
+): Promise<{ page: Page; session: LiveSession; close: () => Promise<void> }> {
   const context = await browser.newContext({ locale: 'fa-IR', timezoneId: 'Asia/Tehran' });
-  if (typeof who === 'string') await installLiveSession(context, who);
-  else await installProvisionedSession(context, who);
+  const session =
+    typeof who === 'string'
+      ? await installLiveSession(context, who)
+      : await installProvisionedSession(context, who);
   const page = await context.newPage();
-  return { page, close: () => context.close() };
+  return { page, session, close: () => context.close() };
 }
 
 function gatewayUrl(path: string): string {
@@ -253,9 +258,9 @@ test.describe.serial('returns, live (EXP-003)', () => {
     const stale = buyer.page.getByRole('form', { name: 'لغو درخواست بازگشت' });
     await expect(stale).toBeVisible();
 
-    const { page, close } = await as(browser, 'orgAdminB');
+    const { page, session, close } = await as(browser, 'orgAdminB');
     try {
-      await page.goto('/returns?role=SUPPLIER');
+      await page.goto(withContext(session.context, '/returns?role=SUPPLIER'));
       const row = page
         .getByRole('listitem')
         .filter({ has: page.locator(`a[href="${returnPath}"]`) });
@@ -432,7 +437,7 @@ test.describe.serial('returns, live (EXP-003)', () => {
     browser,
   }) => {
     expect(returnPath).not.toBe('');
-    const { page, close } = await as(browser, outsider);
+    const { page, session, close } = await as(browser, outsider);
     try {
       await page.goto(returnPath);
       await expect(page.getByText('این درخواست بازگشت پیدا نشد')).toBeVisible();
@@ -446,7 +451,7 @@ test.describe.serial('returns, live (EXP-003)', () => {
       await expect(page.getByText('سفارشی با این شناسه یافت نشد')).toBeVisible();
       await expect(page.getByRole('form', { name: 'درخواست بازگشت کالا' })).toHaveCount(0);
 
-      await page.goto('/returns?role=BUYER');
+      await page.goto(withContext(session.context, '/returns?role=BUYER'));
       expect(await mainText(page)).not.toContain(returnPath.split('/').pop()!);
     } finally {
       await close();

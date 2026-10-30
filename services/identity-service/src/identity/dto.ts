@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import {
   cursorPaginationSchema,
-  seedIdSchema,
   ID_PREFIXES,
+  isoDateTime,
   plainText,
   referenceId,
+  seedIdSchema,
 } from '@rasta/contracts';
 
 /**
@@ -128,7 +129,7 @@ export type ListUsersQuery = z.infer<typeof listUsersQuerySchema>;
  * `from` and the database's clock as the query ran.
  */
 export const membershipWindowQuerySchema = z
-  .object({ from: z.string().datetime().optional() })
+  .object({ from: z.string().check(isoDateTime()).optional() })
   .strict();
 
 export type MembershipWindowQuery = z.infer<typeof membershipWindowQuerySchema>;
@@ -141,7 +142,7 @@ export const createMembershipSchema = z
   .object({
     organizationId,
     roles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length),
-    validUntil: z.string().datetime().optional(),
+    validUntil: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -168,14 +169,16 @@ export type SwitchOrganizationDto = z.infer<typeof switchOrganizationSchema>;
 // Registration
 // ---------------------------------------------------------------------------
 
+const registrationUsername = z
+  .string()
+  .trim()
+  .min(3)
+  .max(64)
+  .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/);
+
 export const submitRegistrationSchema = z
   .object({
-    username: z
-      .string()
-      .trim()
-      .min(3)
-      .max(64)
-      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    username: registrationUsername,
     email: z.string().trim().toLowerCase().email().max(255),
     firstName: personName,
     lastName: personName,
@@ -191,7 +194,7 @@ export const submitRegistrationSchema = z
      * Document ids from document-service. Never file contents. Stored as
      * given, so no control or format character, bidi controls included (#209).
      */
-    documentRefs: z.array(referenceId().min(1)).max(10).default([]),
+    documentRefs: z.array(referenceId().min(1)).max(10).prefault([]),
   })
   .strict();
 
@@ -203,6 +206,22 @@ export const approveRegistrationSchema = z
     roles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length).optional(),
   })
   .strict();
+
+export const REGISTRATION_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'] as const;
+
+/**
+ * `GET /v1/registration-requests`: the review queue. The public submission no
+ * longer answers with the request's id (task 117, F5), so this is where a
+ * reviewer finds a request — by status, or by the applicant's exact username.
+ */
+export const listRegistrationRequestsQuerySchema = cursorPaginationSchema
+  .extend({
+    status: z.enum(REGISTRATION_STATUSES).optional(),
+    username: registrationUsername.optional(),
+  })
+  .strict();
+
+export type ListRegistrationRequestsQuery = z.infer<typeof listRegistrationRequestsQuerySchema>;
 
 export type ApproveRegistrationDto = z.infer<typeof approveRegistrationSchema>;
 

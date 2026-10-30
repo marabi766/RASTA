@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import {
   RastaError,
@@ -7,7 +7,7 @@ import {
   requestPath,
   type InternalTokenService,
 } from '@rasta/nest-common';
-import { ERROR_CODES, apiErrorSchema, type ApiError } from '@rasta/contracts';
+import { apiErrorSchema, type ApiError } from '@rasta/contracts';
 import type { GatewayEnv } from '../config/env';
 import {
   TENDER_OPENING_ROUTES,
@@ -17,6 +17,14 @@ import {
   type ServiceUrls,
   type UpstreamDeadlineRoute,
 } from '../config/routes';
+import {
+  CircuitBreakers,
+  type CircuitOutcome,
+  type CircuitPermit,
+  type CircuitStateView,
+} from './circuit-breaker';
+
+export { circuitRetryAfterSeconds } from './circuit-breaker';
 
 /**
  * Forwards a request to the owning service.
@@ -34,13 +42,10 @@ import {
  *
  *  - **Circuit breaking.** A downstream that is down should fail fast rather
  *    than hold connections until every gateway worker is blocked — that is how
- *    one sick service takes the whole platform with it.
+ *    one sick service takes the whole platform with it. The state machine is
+ *    `CircuitBreakers` (circuit-breaker.ts); what each request proved is
+ *    decided here, once, when it is over.
  */
-
-interface CircuitState {
-  failures: number;
-  openedAt: number | null;
-}
 
 export interface ProxyRequest {
   service: ServiceName;
@@ -49,6 +54,16 @@ export interface ProxyRequest {
   query: string;
   headers: Record<string, string | string[] | undefined>;
   body: unknown;
+  /**
+   * Aborted when the caller has gone away. Cancels the upstream call wherever
+   * it is — before it is sent, waiting for headers, reading the body — and the
+   * request then proves nothing about the service (#381 r4 F2), except that a
+   * 5xx status already received is a failure. Once sent, the service may still
+   * be acting on it: a probe abandoned then keeps the probe slot until its
+   * deadline (#460 r1 F1). Without a signal, the call runs to its deadline, as
+   * before.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ProxyResponse {
@@ -74,14 +89,6 @@ const HOP_BY_HOP = new Set([
 /** Response headers that belong to the gateway's CORS policy, never an upstream's. */
 const CORS_HEADER_PREFIX = 'access-control-';
 
-/**
- * `Retry-After` for a request refused by an open circuit: the breaker's
- * remaining open time, rounded up to whole seconds and clamped to 1..3600.
- */
-export function circuitRetryAfterSeconds(remainingMs: number): number {
-  return Math.min(3600, Math.max(1, Math.ceil(remainingMs / 1000)));
-}
-
 export interface ProxyOptions {
   timeoutMs: number;
   failureThreshold: number;
@@ -91,6 +98,19 @@ export interface ProxyOptions {
    * own deadline (Codex r2 on #250, G1). The first match wins; anything else gets `timeoutMs`.
    */
   routeDeadlines?: readonly (UpstreamDeadlineRoute & { timeoutMs: number })[];
+  /** The breaker's clock, in milliseconds. Monotonic (`performance.now`) unless a test sets it. */
+  now?: () => number;
+}
+
+/**
+ * Raised by `forward` when the caller went away before the exchange was over.
+ * Not an upstream failure and not an answer: there is nobody left to answer.
+ */
+export class ClientCancelledError extends Error {
+  constructor(readonly service: ServiceName) {
+    super(`The caller went away before ${service} answered`);
+    this.name = 'ClientCancelledError';
+  }
 }
 
 /**
@@ -112,13 +132,19 @@ export function proxyOptionsOf(env: GatewayEnv): ProxyOptions {
 @Injectable()
 export class ProxyService {
   private readonly logger = new Logger(ProxyService.name);
-  private readonly circuits = new Map<ServiceName, CircuitState>();
+  private readonly circuits: CircuitBreakers;
 
   constructor(
     private readonly urls: ServiceUrls,
     private readonly internalTokens: InternalTokenService,
     private readonly options: ProxyOptions,
-  ) {}
+  ) {
+    this.circuits = new CircuitBreakers({
+      failureThreshold: options.failureThreshold,
+      resetAfterMs: options.resetAfterMs,
+      now: options.now ?? (() => performance.now()),
+    });
+  }
 
   /** How long this request may wait for its upstream. */
   deadlineFor(request: Pick<ProxyRequest, 'service' | 'method' | 'path'>): number {
@@ -133,7 +159,45 @@ export class ProxyService {
   }
 
   async forward(request: ProxyRequest): Promise<ProxyResponse> {
-    this.assertCircuitClosed(request.service);
+    // Refused here, before anything is sent, when the circuit is OPEN or its
+    // HALF_OPEN probe is taken. Otherwise this request holds a permit, and the
+    // `finally` below settles it on every exit — the probe slot is never
+    // left taken.
+    const permit = this.circuits.admit(request.service);
+    // What this request proved about the service, decided exactly once. Until
+    // an answer is complete it proved nothing: a gateway-local fault (token
+    // issuance) or a caller gone away before anything was sent is a `release`.
+    let outcome: CircuitOutcome = 'release';
+    try {
+      const exchanged = await this.exchange(request, permit);
+      outcome = exchanged.outcome;
+      return exchanged.response;
+    } catch (error) {
+      if (error instanceof UpstreamFailure) {
+        outcome = 'failure';
+        throw error.reported;
+      }
+      if (error instanceof CallerGoneAfterSending) {
+        outcome = error.outcome;
+        throw error.reported;
+      }
+      throw error;
+    } finally {
+      this.circuits.settle(permit, outcome);
+    }
+  }
+
+  /**
+   * One exchange with the owning service. Resolves with the response and what
+   * it proved; rejects with an `UpstreamFailure` when the service failed, or
+   * with anything else when it proved nothing.
+   */
+  private async exchange(
+    request: ProxyRequest,
+    permit: CircuitPermit,
+  ): Promise<{ response: ProxyResponse; outcome: CircuitOutcome }> {
+    const cancelled = request.signal;
+    if (cancelled?.aborted) throw new ClientCancelledError(request.service);
 
     const context = getContext();
     const target = `${serviceUrl(this.urls, request.service)}${request.path}${request.query}`;
@@ -146,11 +210,13 @@ export class ProxyService {
     // `@Public`) from a genuine service-to-service call (judged by
     // `@AllowService`), without loosening either. It also means a token minted
     // here can never satisfy `@AllowService` on any service (ADR-020, D-007).
-    const internalToken = await this.internalTokens.issue(
-      'api-gateway',
-      `${request.service}-service`,
-      'RELAY',
-    );
+    const sender = await new InternalHttpClient(this.internalTokens).authorize({
+      from: 'api-gateway',
+      to: `${request.service}-service`,
+      purpose: 'RELAY',
+    });
+    // Gone while the token was minted: nothing has been sent, nothing is.
+    if (cancelled?.aborted) throw new ClientCancelledError(request.service);
 
     const headers: Record<string, string> = {
       ...this.forwardableHeaders(request.headers),
@@ -164,12 +230,12 @@ export class ProxyService {
       //
       //   x-internal-token proof that this hop came from the gateway, scoped
       //                    to this one service so it cannot be replayed
-      //                    against another.
+      //                    against another. The sender sets it, replacing
+      //                    any the caller sent in whatever letter case.
       //
       // An earlier version replaced the caller's token with the internal one.
       // The downstream then tried to verify an HS256 service token as an RS256
       // user token and rejected every request with ERR_JOSE_ALG_NOT_ALLOWED.
-      'x-internal-token': internalToken,
       'x-correlation-id': context.correlationId,
       'x-request-id': context.requestId,
       // The tenant was resolved and verified at the edge. The service still
@@ -179,34 +245,45 @@ export class ProxyService {
       ...(context.roles.length > 0 ? { 'x-user-roles': context.roles.join(',') } : {}),
     };
 
+    // One abort for the whole exchange — headers and body alike — fired by
+    // whichever comes first: the deadline (an upstream failure) or the caller
+    // leaving (no verdict). Both are removed on every exit.
     const controller = new AbortController();
+    let abortedBy: 'deadline' | 'caller' | undefined;
     const timeoutMs = this.deadlineFor(request);
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    // Each upstream response counts toward the circuit exactly once, whichever
-    // way it fails afterwards: a 5xx is counted when its status arrives, and a
-    // body that then fails to read (truncated, reset) must not count it again.
-    let failureRecorded = false;
+    const timeout = setTimeout(() => {
+      abortedBy ??= 'deadline';
+      controller.abort();
+    }, timeoutMs);
+    const onCancelled = () => {
+      abortedBy ??= 'caller';
+      controller.abort();
+    };
+    cancelled?.addEventListener('abort', onCancelled, { once: true });
+    // The status line, once it has arrived: a 5xx is evidence even if its body never is.
+    let status: number | undefined;
 
     try {
-      const response = await internalFetch(target, {
+      // From here the service may receive it: a caller leaving is no longer a
+      // `release` (nothing reached the service) but `abandoned`.
+      this.circuits.dispatched(permit, timeoutMs);
+      const response = await sender.send(target, {
         method: request.method,
         headers,
         body: this.bodyFor(request.method, request.body),
         signal: controller.signal,
       });
 
-      // 5xx counts toward the circuit; 4xx does not. A client sending bad
-      // requests is not evidence that the downstream is unhealthy.
-      if (response.status >= 500) {
-        this.recordFailure(request.service);
-        failureRecorded = true;
-      } else {
-        this.recordSuccess(request.service);
-      }
-
+      status = response.status;
+      // Nothing is decided on the status line: a 200 whose body then stalls or
+      // is cut off is a failure, and a 5xx is judged once its body is in.
       const text = await response.text();
 
       if (response.status >= 500) {
+        // A 5xx counts toward the circuit, once. (#381's expected identity
+        // refusals would be the one exception: `release`, never `success` —
+        // and only with the body complete; see the caller-gone branch below.)
+        //
         // Parsed once, and only the parsed, allow-listed fields travel. The
         // schema accepting a body says nothing about what else the body held:
         // a `stack` or an internal field beside a valid envelope would reach
@@ -214,9 +291,12 @@ export class ProxyService {
         const envelope = platformErrorEnvelope(response.status, text, request);
         if (envelope) {
           return {
-            status: response.status,
-            headers: this.responseHeaders(response),
-            body: envelope,
+            outcome: 'failure',
+            response: {
+              status: response.status,
+              headers: this.responseHeaders(response),
+              body: envelope,
+            },
           };
         }
         // L1-06. A 5xx that is not the platform's own error envelope is a
@@ -228,109 +308,74 @@ export class ProxyService {
           `${request.service} answered ${response.status} without a platform error body ` +
             `(content-type ${response.headers.get('content-type') ?? 'none'}, ${text.length} chars)`,
         );
-        throw new UpstreamMalformedError(request.service, response.status);
+        throw new UpstreamFailure(
+          RastaError.upstreamUnavailable(request.service, {
+            upstreamStatus: response.status,
+            reason: 'malformed-error-body',
+          }),
+        );
       }
 
+      // 4xx does not count against the circuit: a client sending bad requests
+      // is not evidence that the downstream is unhealthy — it answered.
       if (response.status >= 400) {
         return {
-          status: response.status,
-          headers: this.responseHeaders(response),
-          body: this.relayedClientError(request, response, text),
+          outcome: 'success',
+          response: {
+            status: response.status,
+            headers: this.responseHeaders(response),
+            body: this.relayedClientError(request, response, text),
+          },
         };
       }
 
       return {
-        status: response.status,
-        headers: this.responseHeaders(response),
-        body: text.length > 0 ? this.parseJson(text) : undefined,
+        outcome: 'success',
+        response: {
+          status: response.status,
+          headers: this.responseHeaders(response),
+          body: text.length > 0 ? this.parseJson(text) : undefined,
+        },
       };
     } catch (error) {
-      // Not recorded twice: a 5xx already counted when its status arrived. A
-      // second recordFailure() for the same response — a malformed body, or
-      // one whose read failed — would open the breaker at half its threshold.
-      if (!failureRecorded) this.recordFailure(request.service);
+      if (error instanceof UpstreamFailure) throw error;
 
-      if (error instanceof UpstreamMalformedError) {
-        throw RastaError.upstreamUnavailable(request.service, {
-          upstreamStatus: error.upstreamStatus,
-          reason: 'malformed-error-body',
-        });
+      // The caller left: the upstream call was cancelled with it. Cancelling
+      // the transport does not stop the service — it may still be acting on
+      // it, so this is `abandoned`, never `release`, and nothing here resends
+      // it or tells anyone it did not happen. A 5xx status line already
+      // received is a `failure`: without its complete body no exemption
+      // (#381) can be proven, so none is applied — fail closed.
+      if (abortedBy === 'caller') {
+        throw new CallerGoneAfterSending(
+          status !== undefined && status >= 500 ? 'failure' : 'abandoned',
+          new ClientCancelledError(request.service),
+        );
       }
 
-      if ((error as Error).name === 'AbortError') {
-        throw new RastaError('UPSTREAM_TIMEOUT', 'The upstream service did not respond in time', {
-          internalContext: { service: request.service, timeoutMs },
-        });
+      if (abortedBy === 'deadline') {
+        throw new UpstreamFailure(
+          new RastaError('UPSTREAM_TIMEOUT', 'The upstream service did not respond in time', {
+            internalContext: { service: request.service, timeoutMs },
+          }),
+        );
       }
 
-      throw RastaError.upstreamUnavailable(request.service, {
-        message: (error as Error).message,
-      });
+      // Refused, reset or cut off mid-body: the service failed.
+      throw new UpstreamFailure(
+        RastaError.upstreamUnavailable(request.service, {
+          message: (error as Error).message,
+        }),
+      );
     } finally {
       clearTimeout(timeout);
+      cancelled?.removeEventListener('abort', onCancelled);
     }
-  }
-
-  // -------------------------------------------------------------------------
-  // Circuit breaker
-  // -------------------------------------------------------------------------
-
-  private assertCircuitClosed(service: ServiceName): void {
-    const circuit = this.circuits.get(service);
-    if (!circuit?.openedAt) return;
-
-    const elapsed = Date.now() - circuit.openedAt;
-    if (elapsed < this.options.resetAfterMs) {
-      const remainingMs = this.options.resetAfterMs - elapsed;
-      // The wait is the typed field the exception filter sends as
-      // `Retry-After`, never read back out of `internalContext`.
-      throw new RastaError(
-        ERROR_CODES.UPSTREAM_UNAVAILABLE,
-        'A required service is temporarily unavailable',
-        {
-          internalContext: { service },
-          cause: { reason: 'circuit-open', retryInMs: remainingMs },
-          retryAfterSeconds: circuitRetryAfterSeconds(remainingMs),
-        },
-      );
-    }
-
-    // Half-open: let one request through to test whether it has recovered.
-    circuit.openedAt = null;
-    circuit.failures = this.options.failureThreshold - 1;
-    this.logger.log(`Circuit for ${service} is half-open; probing`);
-  }
-
-  private recordFailure(service: ServiceName): void {
-    const circuit = this.circuits.get(service) ?? { failures: 0, openedAt: null };
-    circuit.failures += 1;
-
-    if (circuit.failures >= this.options.failureThreshold && !circuit.openedAt) {
-      circuit.openedAt = Date.now();
-      this.logger.error(
-        `Circuit for ${service} opened after ${circuit.failures} consecutive failures`,
-      );
-    }
-
-    this.circuits.set(service, circuit);
-  }
-
-  private recordSuccess(service: ServiceName): void {
-    const circuit = this.circuits.get(service);
-    if (!circuit) return;
-    if (circuit.failures > 0 || circuit.openedAt) {
-      this.logger.log(`Circuit for ${service} closed`);
-    }
-    this.circuits.set(service, { failures: 0, openedAt: null });
   }
 
   /** Current breaker state, surfaced on the gateway's own health endpoint. */
-  circuitStates(): Record<string, { failures: number; open: boolean }> {
-    const result: Record<string, { failures: number; open: boolean }> = {};
-    for (const [service, circuit] of this.circuits) {
-      result[service] = { failures: circuit.failures, open: circuit.openedAt !== null };
-    }
-    return result;
+  circuitStates(): Record<string, CircuitStateView> {
+    return this.circuits.states();
   }
 
   // -------------------------------------------------------------------------
@@ -453,13 +498,20 @@ export class ProxyService {
   }
 }
 
-/** Raised inside `forward` so the catch block can tell it from a network fault. */
-class UpstreamMalformedError extends Error {
+/** Raised inside `exchange` for a failure of the service, carrying what the caller is told. */
+class UpstreamFailure extends Error {
+  constructor(readonly reported: RastaError) {
+    super(reported.message);
+  }
+}
+
+/** Raised inside `exchange` when the caller left after the request was sent. */
+class CallerGoneAfterSending extends Error {
   constructor(
-    readonly service: ServiceName,
-    readonly upstreamStatus: number,
+    readonly outcome: 'abandoned' | 'failure',
+    readonly reported: ClientCancelledError,
   ) {
-    super(`${service} returned a malformed ${upstreamStatus}`);
+    super(reported.message);
   }
 }
 

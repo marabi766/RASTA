@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
@@ -138,16 +138,13 @@ export class ReturnRequestSourceClient implements ReturnRequestSource {
     returnRequestId: string,
     suffix: string,
   ): Promise<{ status: 200 | 404 | 422; fact: ReturnRequestFact | null }> {
-    const token = await this.options.tokens.issue(
-      SERVICE_NAME,
-      MARKETPLACE_SERVICE,
-      'SERVICE',
+    const sender = await new InternalHttpClient(this.options.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: MARKETPLACE_SERVICE,
+      purpose: 'SERVICE',
       organizationId,
-    );
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'x-internal-token': token,
-    };
+    });
+    const headers: Record<string, string> = { accept: 'application/json' };
     const context = tryGetContext();
     if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
       headers['x-correlation-id'] = context.correlationId;
@@ -164,10 +161,9 @@ export class ReturnRequestSourceClient implements ReturnRequestSource {
     try {
       let response: Response;
       try {
-        response = await internalFetch(
+        response = await sender.send(
           `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/returns/${encodeURIComponent(returnRequestId)}${suffix}`,
           { method, headers, signal: controller.signal },
-          this.fetchImpl,
         );
       } catch {
         // No cause attached: a runtime's transport error can quote the URL.

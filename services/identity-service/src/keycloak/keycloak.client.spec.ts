@@ -1,12 +1,53 @@
+import { readFileSync } from 'node:fs';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { Logger } from '@nestjs/common';
 import {
   ACTIVATION_ATTRIBUTE,
   KeycloakAdminClient,
   KeycloakCreateUnconfirmedError,
+  KeycloakRedirectError,
+  KeycloakWriteUnconfirmedError,
 } from './keycloak.client';
+import { writeNotSent, type KeycloakWriteFence } from './keycloak-write-fence';
 import { provenanceOnly } from './platform-attributes';
+import { SUCCESS_REQUEST_BUDGET_MS } from '../../test/keycloak-http-stub';
+
+/**
+ * A fence that commits nothing, for the client alone: records each attempt
+ * the client opens before a PUT (D-069), with the attempt's deadline as the
+ * request's signal. `expired` makes the deadline pass before dispatch.
+ */
+function testFence(
+  timeoutMs = 10_000,
+  options: {
+    expired?: boolean;
+    onObserve?: (dispatched: boolean) => void;
+    /** The attempt's deadline, ended by the test (#912) instead of a real timer. */
+    signal?: AbortSignal;
+  } = {},
+) {
+  const opened: string[] = [];
+  const fence: KeycloakWriteFence = async (operation) => {
+    opened.push(operation);
+    const signal = options.signal ?? AbortSignal.timeout(timeoutMs);
+    let dispatched = false;
+    return {
+      id: `KWA_TEST_${opened.length}`,
+      signal,
+      assertDispatchable() {
+        if (options.expired) throw writeNotSent(operation, 'deadline');
+        dispatched = true;
+      },
+      observeReply() {
+        options.onObserve?.(dispatched);
+        return false;
+      },
+    };
+  };
+  return { fence, opened };
+}
 
 /**
  * The one Keycloak write the platform attributes go through.
@@ -74,12 +115,16 @@ describe('KeycloakAdminClient.replacePlatformAttributes', () => {
     });
 
   it('writes the profile fields, the attributes it does not own, and every platform attribute', async () => {
-    await client().replacePlatformAttributes('kc-1', {
-      rasta_user_id: ['USR_1'],
-      organization_ids: ['ORG-A'],
-      organization_roles: ['ORG-A:DRIVER'],
-      active_organization_id: [],
-    });
+    await client().replacePlatformAttributes(
+      'kc-1',
+      {
+        rasta_user_id: ['USR_1'],
+        organization_ids: ['ORG-A'],
+        organization_roles: ['ORG-A:DRIVER'],
+        active_organization_id: [],
+      },
+      { fence: testFence().fence },
+    );
 
     const put = calls.find((call) => call.method === 'PUT');
     expect(put?.url).toBe('http://keycloak.test/admin/realms/rasta/users/kc-1');
@@ -101,12 +146,16 @@ describe('KeycloakAdminClient.replacePlatformAttributes', () => {
   });
 
   it('never sends a field it does not own, whatever the read returned', async () => {
-    await client().replacePlatformAttributes('kc-1', {
-      rasta_user_id: ['USR_1'],
-      organization_ids: [],
-      organization_roles: [],
-      active_organization_id: [],
-    });
+    await client().replacePlatformAttributes(
+      'kc-1',
+      {
+        rasta_user_id: ['USR_1'],
+        organization_ids: [],
+        organization_roles: [],
+        active_organization_id: [],
+      },
+      { fence: testFence().fence },
+    );
 
     const body = calls.find((call) => call.method === 'PUT')?.body as Record<string, unknown>;
     expect(Object.keys(body).sort()).toEqual(['attributes', 'email', 'firstName', 'lastName']);
@@ -120,24 +169,32 @@ describe('KeycloakAdminClient.replacePlatformAttributes', () => {
         ? new Response(JSON.stringify(withoutEmail))
         : originalGet(input, init)) as typeof fetch;
 
-    await client().replacePlatformAttributes('kc-1', {
-      rasta_user_id: ['USR_1'],
-      organization_ids: [],
-      organization_roles: [],
-      active_organization_id: [],
-    });
+    await client().replacePlatformAttributes(
+      'kc-1',
+      {
+        rasta_user_id: ['USR_1'],
+        organization_ids: [],
+        organization_roles: [],
+        active_organization_id: [],
+      },
+      { fence: testFence().fence },
+    );
 
     const body = calls.find((call) => call.method === 'PUT')?.body as Record<string, unknown>;
     expect(body).not.toHaveProperty('email');
   });
 
   it('makes exactly one write', async () => {
-    await client().replacePlatformAttributes('kc-1', {
-      rasta_user_id: ['USR_1'],
-      organization_ids: [],
-      organization_roles: [],
-      active_organization_id: [],
-    });
+    await client().replacePlatformAttributes(
+      'kc-1',
+      {
+        rasta_user_id: ['USR_1'],
+        organization_ids: [],
+        organization_roles: [],
+        active_organization_id: [],
+      },
+      { fence: testFence().fence },
+    );
     expect(calls.filter((call) => call.method === 'PUT')).toHaveLength(1);
   });
 });
@@ -266,9 +323,23 @@ describe('KeycloakAdminClient: unconfirmed create and one-shot activation (#219 
     email: 'applicant@example.test',
     firstName: 'A',
     lastName: 'B',
-    attributes: provenanceOnly('USR_1'),
-    enabled: false,
+    userId: 'USR_1',
   };
+
+  it('creates every account disabled and granting nothing but its provenance (D-069 addendum D)', async () => {
+    answers = [
+      new Response(null, {
+        status: 201,
+        headers: { location: 'http://keycloak.test/admin/realms/rasta/users/0b5c-11ef' },
+      }),
+    ];
+    await client().createUser(input);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      method: 'POST',
+      body: { enabled: false, attributes: provenanceOnly('USR_1') },
+    });
+  });
 
   it("returns the id a create's Location names", async () => {
     answers = [
@@ -304,7 +375,7 @@ describe('KeycloakAdminClient: unconfirmed create and one-shot activation (#219 
       ),
       new Response(null, { status: 204 }),
     ];
-    await client().activateAccount('kc-1', 'REG_1');
+    await client().activateAccount('kc-1', 'REG_1', { fence: testFence().fence });
     expect(calls.map((call) => call.method)).toEqual(['GET', 'PUT']);
     expect(calls[1]?.body).toEqual({
       email: 'applicant@example.test',
@@ -325,7 +396,9 @@ describe('KeycloakAdminClient: unconfirmed create and one-shot activation (#219 
       new Response(JSON.stringify({ id: 'kc-1', attributes: {} })),
       new Response(null, { status: 500 }),
     ];
-    await expect(client().activateAccount('kc-1', 'REG_1')).rejects.toMatchObject({
+    await expect(
+      client().activateAccount('kc-1', 'REG_1', { fence: testFence().fence }),
+    ).rejects.toMatchObject({
       code: 'UPSTREAM_UNAVAILABLE',
     });
   });
@@ -431,6 +504,307 @@ describe('KeycloakAdminClient: a deadline on every call, the token request inclu
   });
 });
 
+/**
+ * D-064: a write that may have reached Keycloak is told apart from one that
+ * provably did not. An aborted request is not a cancelled one, so a write past
+ * its deadline, cut off mid-answer, or answered 5xx "may land"
+ * (`KeycloakWriteUnconfirmedError`); a refused connection, a failure before
+ * the write was sent, or a 4xx did not. A real socket, so what is classified
+ * is what `fetch` itself reports.
+ */
+describe('KeycloakAdminClient: whether a write may have landed (D-064)', () => {
+  let server: Server;
+  let baseUrl = '';
+  /** What the server does with the next PUT. */
+  let onPut: 'hang' | 'reset' | 'reset-after-body' | number = 204;
+  /** What it does with the GET before it. */
+  let onGet: 'ok' | 404 | 503 = 'ok';
+  const puts: string[] = [];
+  const held: ServerResponse[] = [];
+  /** Called once the server has the next PUT's whole body: it was dispatched. */
+  let onPutReceived: (() => void) | undefined;
+
+  beforeAll(async () => {
+    server = createServer((request, response) => {
+      if (request.url?.endsWith('/token')) {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ access_token: 'admin-token', expires_in: 300 }));
+        return;
+      }
+      if (request.method === 'GET') {
+        if (onGet !== 'ok') {
+          response.writeHead(onGet).end();
+          return;
+        }
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ id: 'kc-1', email: 'a@example.test', attributes: {} }));
+        return;
+      }
+      let body = '';
+      request.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      request.on('end', () => {
+        puts.push(body);
+        onPutReceived?.();
+        if (onPut === 'hang') held.push(response);
+        else if (onPut === 'reset' || onPut === 'reset-after-body') response.socket?.destroy();
+        else response.writeHead(onPut).end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    for (const response of held) response.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  beforeEach(() => {
+    puts.length = 0;
+    onPut = 204;
+    onGet = 'ok';
+    onPutReceived = undefined;
+  });
+
+  const client = (url = baseUrl) =>
+    new KeycloakAdminClient({
+      baseUrl: url,
+      realm: 'rasta',
+      clientId: 'rasta-backend',
+      clientSecret: 'client-secret-for-tests',
+      enabled: true,
+      requestTimeoutMs: 300,
+    });
+  const write = (url?: string) =>
+    client(url).replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), {
+      fence: testFence(300).fence,
+    });
+
+  it.each([
+    ['its deadline passes', 'hang' as const, 'deadline'],
+    ['the connection breaks after it was sent', 'reset' as const, 'connection'],
+    ['Keycloak, or a proxy before it, answers 500', 500, 'server_error'],
+    ['a proxy answers 502', 502, 'server_error'],
+    ['a proxy answers 504', 504, 'server_error'],
+  ])('unconfirmed when %s: it reached Keycloak and may land', async (_label, mode, reason) => {
+    onPut = mode;
+    const error = await write().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(error).toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+      internalContext: { service: 'keycloak', reason, unconfirmed: true },
+    });
+    expect(puts).toHaveLength(1);
+  });
+
+  it.each([400, 403, 409])('a %s refuses the write: confirmed, not applied', async (status) => {
+    onPut = status;
+    const error = await write().catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(error).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+  });
+
+  it('a refused connection is confirmed: nothing was sent', async () => {
+    const closed = createServer();
+    await new Promise<void>((resolve) => closed.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${(closed.address() as AddressInfo).port}`;
+    await new Promise<void>((resolve) => closed.close(() => resolve()));
+
+    const error = await write(url).catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(error).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+  });
+
+  it('a read that fails before the write is confirmed: nothing was sent', async () => {
+    onGet = 503;
+    const error = await write().catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(puts).toHaveLength(0);
+  });
+
+  it('a 404 is "no such account", read or write', async () => {
+    onGet = 404;
+    await expect(write()).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    onGet = 'ok';
+    onPut = 404;
+    await expect(write()).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('disable keeps answering a 404 as upstream unavailable, as it always did', async () => {
+    onPut = 404;
+    await expect(client().disable('kc-1', { fence: testFence(300).fence })).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+  });
+
+  it.each([
+    ['disable', (c: KeycloakAdminClient) => c.disable('kc-1', { fence: testFence(300).fence })],
+    [
+      'activateAccount',
+      (c: KeycloakAdminClient) =>
+        c.activateAccount('kc-1', 'REG_1', { fence: testFence(300).fence }),
+    ],
+  ])('%s is classified the same way', async (_name, call) => {
+    onPut = 'hang';
+    await expect(call(client())).rejects.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    onPut = 400;
+    const refused = await call(client()).catch((caught: unknown) => caught);
+    expect(refused).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+  });
+
+  it('opens the fence after the read and before the PUT; a read that fails opens none (D-069)', async () => {
+    const order: string[] = [];
+    const recorded = testFence(300);
+    const fence: KeycloakWriteFence = async (operation) => {
+      order.push(`fence:${operation}:puts=${puts.length}`);
+      return recorded.fence(operation);
+    };
+    await client().replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence });
+    expect(order).toEqual(['fence:replace_attributes:puts=0']);
+    expect(puts).toHaveLength(1);
+
+    onGet = 503;
+    order.length = 0;
+    await expect(
+      client().replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence }),
+    ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+    expect(order).toEqual([]);
+  });
+
+  it('a deadline that passed before dispatch sends nothing, and is confirmed not applied (D-069)', async () => {
+    const error = await client()
+      .replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), {
+        fence: testFence(300, { expired: true }).fence,
+      })
+      .catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(error).toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+      internalContext: { reason: 'deadline_before_dispatch' },
+    });
+    expect(puts).toHaveLength(0);
+  });
+
+  it('a fence that cannot be committed sends nothing (D-069)', async () => {
+    const fence: KeycloakWriteFence = async () => {
+      throw new Error('fence pool unavailable');
+    };
+    await expect(
+      client().replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence }),
+    ).rejects.toThrow('fence pool unavailable');
+    expect(puts).toHaveLength(0);
+  });
+
+  it('the caller cancelling mid-flight leaves the write unconfirmed (D-069: its fence stays)', async () => {
+    onPut = 'hang';
+    const cancel = new AbortController();
+    const recorded = testFence(5_000);
+    const fence: KeycloakWriteFence = async (operation) => {
+      const attempt = await recorded.fence(operation);
+      return { ...attempt, signal: AbortSignal.any([attempt.signal, cancel.signal]) };
+    };
+    const pending = client()
+      .replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence, cancel: cancel.signal })
+      .catch((caught: unknown) => caught);
+    // Mid-flight: once the PUT has reached the server, not after a guessed
+    // delay — under load a fixed sleep could cancel before dispatch, which is
+    // the other (confirmed not-sent) case.
+    for (let waited = 0; puts.length === 0 && waited < 4_000; waited += 5) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(puts).toHaveLength(1);
+    cancel.abort();
+    expect(await pending).toBeInstanceOf(KeycloakWriteUnconfirmedError);
+    expect(puts).toHaveLength(1);
+  });
+
+  // D-070 option D: whether a sender is late is read on its clock after the
+  // reply — so the client must hand the attempt that instant, in every outcome
+  // after dispatch, and only after the request reached Keycloak.
+  //
+  // On no runner's speed (#912): the client's own budget for the token and
+  // the read is the success one, so a slow GET never ends the write before
+  // its PUT; and "its deadline" is the attempt's signal, aborted by the test
+  // once the server has the PUT — dispatched, by construction — never a real
+  // 300 ms racing it. Each outcome is asserted too, so a failure before
+  // dispatch is never swallowed as one of these.
+  const patient = () =>
+    new KeycloakAdminClient({
+      baseUrl,
+      realm: 'rasta',
+      clientId: 'rasta-backend',
+      clientSecret: 'client-secret-for-tests',
+      enabled: true,
+      requestTimeoutMs: SUCCESS_REQUEST_BUDGET_MS,
+    });
+
+  it.each([
+    ['an answer 204', 204 as const, undefined],
+    ['a refusal 403', 403 as const, { code: 'UPSTREAM_UNAVAILABLE', unconfirmed: false }],
+    ['a 500', 500 as const, { code: 'UPSTREAM_UNAVAILABLE', unconfirmed: true }],
+    ['a 404', 404 as const, { code: 'NOT_FOUND', unconfirmed: false }],
+    ['its deadline', 'hang' as const, { code: 'UPSTREAM_UNAVAILABLE', unconfirmed: true }],
+    ['a broken connection', 'reset' as const, { code: 'UPSTREAM_UNAVAILABLE', unconfirmed: true }],
+  ])('reads the clock after the reply, on %s (D-070 D)', async (_label, mode, failure) => {
+    onPut = mode;
+    const observed: Array<{ dispatched: boolean; puts: number }> = [];
+    const deadline = new AbortController();
+    const received = new Promise<void>((resolve) => (onPutReceived = resolve));
+    const recorded = testFence(SUCCESS_REQUEST_BUDGET_MS, {
+      signal: deadline.signal,
+      onObserve: (dispatched) => observed.push({ dispatched, puts: puts.length }),
+    });
+    const writing = patient()
+      .replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence: recorded.fence })
+      .then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+    if (mode === 'hang') {
+      await received;
+      // What `AbortSignal.timeout` aborts with.
+      deadline.abort(new DOMException('The operation timed out.', 'TimeoutError'));
+    }
+    const outcome = await writing;
+
+    if (failure === undefined) expect(outcome).toBeUndefined();
+    else {
+      expect(outcome).toMatchObject({ code: failure.code });
+      expect(outcome instanceof KeycloakWriteUnconfirmedError).toBe(failure.unconfirmed);
+    }
+    if (mode === 'hang') {
+      expect(outcome).toMatchObject({ internalContext: { reason: 'deadline' } });
+    }
+    // Read once, after the PUT reached the server.
+    expect(observed).toEqual([{ dispatched: true, puts: 1 }]);
+  });
+
+  it('a request never dispatched is never a late reply (D-070 D)', async () => {
+    const observed: boolean[] = [];
+    const error = await patient()
+      .replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), {
+        fence: testFence(SUCCESS_REQUEST_BUDGET_MS, {
+          expired: true,
+          onObserve: (d) => observed.push(d),
+        }).fence,
+      })
+      .catch((caught: unknown) => caught);
+    // Refused at dispatch — not earlier, by a slow token or read.
+    expect(error).toMatchObject({ internalContext: { reason: 'deadline_before_dispatch' } });
+    // Read once, and not dispatched.
+    expect(observed).toEqual([false]);
+    expect(puts).toHaveLength(0);
+  });
+
+  it('the secret never reaches an unconfirmed error', async () => {
+    onPut = 'hang';
+    const error = await write().catch((caught: unknown) => caught);
+    expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain(
+      'client-secret-for-tests',
+    );
+  });
+});
+
 describe('KeycloakAdminClient with sync disabled', () => {
   it('skips a create without logging the username, which is personal data (S-09)', async () => {
     const lines: string[] = [];
@@ -451,13 +825,183 @@ describe('KeycloakAdminClient with sync disabled', () => {
           email: 'applicant@example.test',
           firstName: 'A',
           lastName: 'B',
-          attributes: provenanceOnly('USR_1'),
-          enabled: false,
+          userId: 'USR_1',
         }),
       ).resolves.toBeNull();
     } finally {
       debug.mockRestore();
     }
     expect(lines).toEqual(['Keycloak sync disabled; skipping createUser']);
+  });
+});
+
+/**
+ * Task 117, F7: no Keycloak exchange follows a redirect.
+ *
+ * A real socket, so what is exercised is native `fetch` and its redirect
+ * handling, not a mocked `Response`: each of the client's three fetch sites —
+ * the token request, every admin call (the reads and the account create), and
+ * the PUT — is answered with a redirect to `/login`, which answers `200` to
+ * whatever follows it. Followed, the token request would hand the client
+ * secret to the login page, an admin call its bearer token, and a PUT would
+ * read the login page's `200` as Keycloak applying it.
+ */
+describe('KeycloakAdminClient: a redirect is never followed, and never an answer (task 117, F7)', () => {
+  let server: Server;
+  let baseUrl = '';
+  /** Which exchange is redirected, and with what status. */
+  let redirect: { site: 'token' | 'get' | 'post' | 'put'; status: number } | null = null;
+  /** Every request that reached the redirect target. Followed, this fills. */
+  const loginHits: Array<{ method: string; authorization?: string; body: string }> = [];
+  const puts: string[] = [];
+
+  beforeAll(async () => {
+    server = createServer((request, response) => {
+      let body = '';
+      request.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      request.on('end', () => {
+        const method = request.method ?? 'GET';
+        if (request.url === '/login') {
+          loginHits.push({ method, authorization: request.headers.authorization, body });
+          response.writeHead(200, { 'content-type': 'text/html' }).end('<html>login</html>');
+          return;
+        }
+        const site = request.url?.endsWith('/token')
+          ? 'token'
+          : method === 'GET'
+            ? 'get'
+            : method === 'POST'
+              ? 'post'
+              : 'put';
+        if (redirect?.site === site) {
+          response.writeHead(redirect.status, { location: `${baseUrl}/login` }).end();
+          return;
+        }
+        if (site === 'token') {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ access_token: 'admin-token', expires_in: 300 }));
+          return;
+        }
+        if (site === 'get') {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ id: 'kc-1', email: 'a@example.test', attributes: {} }));
+          return;
+        }
+        if (site === 'post') {
+          response.writeHead(201, { location: `${baseUrl}/admin/realms/rasta/users/kc-2` }).end();
+          return;
+        }
+        puts.push(body);
+        response.writeHead(204).end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  beforeEach(() => {
+    redirect = null;
+    loginHits.length = 0;
+    puts.length = 0;
+  });
+
+  const client = () =>
+    new KeycloakAdminClient({
+      baseUrl,
+      realm: 'rasta',
+      clientId: 'rasta-backend',
+      clientSecret: 'client-secret-for-redirect-tests',
+      enabled: true,
+      requestTimeoutMs: SUCCESS_REQUEST_BUDGET_MS,
+    });
+  const create = () =>
+    client().createUser({
+      username: 'redirected',
+      email: 'redirected@example.test',
+      firstName: 'آزمون',
+      lastName: 'هدایت',
+      userId: 'USR_1',
+    });
+  const write = (fence = testFence().fence) =>
+    client().replacePlatformAttributes('kc-1', provenanceOnly('USR_1'), { fence });
+
+  /** The statuses `fetch` follows by default: each one, at each site. */
+  const FOLLOWED = [301, 302, 303, 307, 308];
+
+  it('without a redirect, every site answers as Keycloak does (the control)', async () => {
+    await expect(client().getAccount('kc-1')).resolves.toMatchObject({ id: 'kc-1' });
+    await expect(create()).resolves.toBe('kc-2');
+    await expect(write()).resolves.toBeUndefined();
+    expect(puts).toHaveLength(1);
+    expect(loginHits).toEqual([]);
+  });
+
+  it.each(FOLLOWED)(
+    'the token request answered %i: refused, and the client secret never reaches the target',
+    async (status) => {
+      redirect = { site: 'token', status };
+      const error = await client()
+        .getAccount('kc-1')
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(KeycloakRedirectError);
+      expect(error).toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+        internalContext: { operation: 'client_credentials', reason: 'redirect' },
+      });
+      expect(loginHits).toEqual([]);
+    },
+  );
+
+  it.each(FOLLOWED)(
+    'an admin read answered %i: refused, and its bearer token never reaches the target',
+    async (status) => {
+      redirect = { site: 'get', status };
+      const error = await client()
+        .getAccount('kc-1')
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(KeycloakRedirectError);
+      expect(error).toMatchObject({ internalContext: { operation: 'admin', reason: 'redirect' } });
+      expect(loginHits).toEqual([]);
+    },
+  );
+
+  it.each([...FOLLOWED, 300, 304])(
+    'an account create answered %i: unconfirmed — it was sent, and may have been made',
+    async (status) => {
+      redirect = { site: 'post', status };
+      const error = await create().catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(KeycloakCreateUnconfirmedError);
+      expect(error).toMatchObject({ internalContext: { reason: 'redirect' } });
+      expect(loginHits).toEqual([]);
+    },
+  );
+
+  it.each([...FOLLOWED, 300, 304])(
+    'a PUT answered %i: unconfirmed, never "ok" — it may have been applied, and its fence must stay',
+    async (status) => {
+      redirect = { site: 'put', status };
+      const { fence, opened } = testFence();
+      const error = await write(fence).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(KeycloakWriteUnconfirmedError);
+      expect(error).toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+        internalContext: { reason: 'redirect', unconfirmed: true },
+      });
+      // Fenced before it was sent, and the redirect target saw nothing.
+      expect(opened).toEqual(['replace_attributes']);
+      expect(loginHits).toEqual([]);
+    },
+  );
+
+  it('has one fetch site, through internalFetch: no other call can follow a redirect', () => {
+    const source = readFileSync(join(__dirname, 'keycloak.client.ts'), 'utf8');
+    // Every `fetch(` in the client is `internalFetch(`, which sets
+    // `redirect: 'manual'` whatever it is passed.
+    expect(source.match(/(?<![A-Za-z_$.])fetch\(/g) ?? []).toEqual([]);
+    expect(source.match(/internalFetch\(/g)).toHaveLength(1);
   });
 });

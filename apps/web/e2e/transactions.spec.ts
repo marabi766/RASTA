@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { test, type APIRequestContext, type Page } from './expect';
+import { expect } from './expect';
 
 import { installLiveSession } from './live-session';
+import { withContext } from '../src/lib/page-context';
 
 /**
  * `/transactions/[id]` and its dispute through the real stack: a real token,
@@ -179,7 +181,8 @@ test.describe('transaction disputes through the live stack', () => {
     await page.reload();
     await expect(page.getByText(REASON)).toBeVisible();
     await expect(page.getByText(/اعتراض شما ثبت شد/)).toHaveCount(0);
-    await page.goto(`/transactions/${ownId}?flash=DISPUTE`);
+    // Bound to this session's organization, so it is the flash itself that is refused.
+    await page.goto(withContext(session.context, `/transactions/${ownId}?flash=DISPUTE`));
     await expect(page.getByText(REASON)).toBeVisible();
     await expect(page.getByText(/اعتراض شما ثبت شد/)).toHaveCount(0);
 

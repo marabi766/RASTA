@@ -1,11 +1,27 @@
-import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { AllowService, AuditorSelfService, Public, Roles, zodPipe } from '@rasta/nest-common';
-import { IdentityService, MEMBERSHIP_READ_CALLERS } from './identity.service';
+import {
+  IdentityService,
+  LIVE_MEMBERSHIP_CALLERS,
+  MEMBERSHIP_READ_CALLERS,
+} from './identity.service';
+import { MEMBERSHIP_ADMIN_ROLES, REGISTRATION_REVIEW_ROLES } from './live-authority';
 import {
   approveRegistrationSchema,
   createMembershipSchema,
   createUserSchema,
+  listRegistrationRequestsQuerySchema,
   listUsersQuerySchema,
   membershipWindowQuerySchema,
   rejectRegistrationSchema,
@@ -17,6 +33,7 @@ import {
   type ApproveRegistrationDto,
   type CreateMembershipDto,
   type CreateUserDto,
+  type ListRegistrationRequestsQuery,
   type ListUsersQuery,
   type MembershipWindowQuery,
   type RejectRegistrationDto,
@@ -72,7 +89,7 @@ export class UserController {
    * caller not named here is refused by `AuthGuard` (ADR-020).
    */
   @Get()
-  @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
+  @Roles(...MEMBERSHIP_ADMIN_ROLES)
   @AllowService('notification-service')
   @ApiOperation({ summary: 'List users in the requesting organization' })
   list(@Query(zodPipe(listUsersQuerySchema)) query: ListUsersQuery) {
@@ -100,6 +117,24 @@ export class UserController {
     return this.identity.getMemberships(id, query.from ? new Date(query.from) : undefined);
   }
 
+  @Get(':id/live-membership')
+  @AllowService(...LIVE_MEMBERSHIP_CALLERS)
+  @ApiSecurity(INTERNAL_TOKEN_SCHEME)
+  @ApiOperation({
+    summary: 'Whether a user is a live member of the organization the caller acts for',
+    description:
+      'Service-to-service only: `fleet-service` with a token signed for a tenant, in ' +
+      '`X-Internal-Token`; a person, any other service, or a token signed for no tenant is ' +
+      'refused 403. The organization is the signed one, never a parameter. Answers ' +
+      '`{ userId, organizationId, live, asOf }`: live = an ACTIVE, not deleted membership ' +
+      'whose validity window holds the database clock, of an ACTIVE, not deleted user. A ' +
+      'user who does not exist gets the same `live: false` as one who belongs elsewhere. ' +
+      'Used before a driver is registered.',
+  })
+  liveMembership(@Param('id') id: string) {
+    return this.identity.getLiveMembership(id);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get one user' })
   get(@Param('id') id: string) {
@@ -107,10 +142,23 @@ export class UserController {
   }
 
   @Post()
-  @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Create an already-approved user' })
-  create(@Body(zodPipe(createUserSchema)) dto: CreateUserDto) {
-    return this.identity.createUser(dto);
+  @Roles(...MEMBERSHIP_ADMIN_ROLES)
+  @ApiOperation({
+    summary: 'Create an already-approved user',
+    description:
+      'Requires an `Idempotency-Key` (400 VALIDATION_FAILED without one). The request is recorded ' +
+      'with the user id before the identity-provider account is created, so the same request ' +
+      'again — same caller, key, acting organization and body — finishes it: it creates under that ' +
+      'id, adopts the account an earlier attempt created, or replays the answer once the user ' +
+      'committed. The same key with another body or acting organization: 409 ' +
+      'IDEMPOTENCY_KEY_REUSED. A username or email already held, or an account under the username ' +
+      'that this request did not create: 409 ALREADY_EXISTS.',
+  })
+  create(
+    @Body(zodPipe(createUserSchema)) dto: CreateUserDto,
+    @Headers('idempotency-key') idempotencyKey: unknown,
+  ) {
+    return this.identity.createUser(dto, idempotencyKey);
   }
 
   @Patch(':id')
@@ -120,7 +168,7 @@ export class UserController {
   }
 
   @Post(':id/memberships')
-  @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
+  @Roles(...MEMBERSHIP_ADMIN_ROLES)
   @ApiOperation({ summary: 'Add the user to an organization' })
   addMembership(
     @Param('id') id: string,
@@ -137,8 +185,16 @@ export class MembershipController {
 
   @Post(':id/roles')
   @HttpCode(200)
-  @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Replace the roles held in this organization' })
+  @Roles(...MEMBERSHIP_ADMIN_ROLES)
+  @ApiOperation({
+    summary: 'Replace the roles held in this organization',
+    description:
+      'A change that removes a role is written to the identity provider before it commits ' +
+      '(ADR-060, D-064). Refused with 503 KEYCLOAK_UNAVAILABLE, nothing changed and no event, ' +
+      'when the provider cannot be written; with 503 KEYCLOAK_WRITE_SETTLING and `Retry-After` ' +
+      'while an earlier write of the same user may still land (D-069) — only after the caller was ' +
+      'authorized for this membership. Sending the same roles again answers the same and emits nothing.',
+  })
   updateRoles(
     @Param('id') id: string,
     @Body(zodPipe(updateMembershipRolesSchema)) dto: UpdateMembershipRolesDto,
@@ -148,8 +204,16 @@ export class MembershipController {
 
   @Post(':id/revoke')
   @HttpCode(204)
-  @Roles('ORGANIZATION_ADMIN', 'UNION_ADMIN')
-  @ApiOperation({ summary: 'Revoke a membership' })
+  @Roles(...MEMBERSHIP_ADMIN_ROLES)
+  @ApiOperation({
+    summary: 'Revoke a membership',
+    description:
+      'Written to the identity provider before it commits (ADR-060, D-064). Refused with ' +
+      '503 KEYCLOAK_UNAVAILABLE, the membership still live and no event, when the provider cannot ' +
+      'be written; with 503 KEYCLOAK_WRITE_SETTLING and `Retry-After` while an earlier write of ' +
+      'the same user may still land (D-069) — only after the caller was authorized for this ' +
+      'membership. Revoking an ended membership again answers 204 and emits nothing.',
+  })
   async revoke(
     @Param('id') id: string,
     @Body(zodPipe(revokeMembershipSchema)) dto: RevokeMembershipDto,
@@ -168,18 +232,44 @@ export class RegistrationController {
    *
    * It cannot grant access: it creates a PENDING user with no Keycloak account
    * and a reviewable request. Rate limiting at the gateway is what stops it
-   * being used to enumerate or to flood the review queue.
+   * being used to flood the review queue; the one answer it gives, whatever
+   * became of the request, is what stops it telling anyone whether a username
+   * or an email is registered (task 117, F5).
    */
   @Post()
+  @HttpCode(202)
   @Public('Self-registration must be reachable before the applicant has an account')
-  @ApiOperation({ summary: 'Submit a request to join the platform' })
+  @ApiOperation({
+    summary: 'Submit a request to join the platform',
+    description:
+      'Always answers 202 `{"status":"RECEIVED"}` to a valid request, whether a reviewable ' +
+      'request was recorded or the username or email is already held: the answer never says ' +
+      'which, so the endpoint cannot be used to learn who has an account. A reviewer finds ' +
+      'recorded requests through the review process, not through this answer.',
+  })
   submit(@Body(zodPipe(submitRegistrationSchema)) dto: SubmitRegistrationDto) {
     return this.identity.submitRegistration(dto);
   }
 
+  @Get()
+  @Roles(...REGISTRATION_REVIEW_ROLES)
+  @ApiOperation({
+    summary: 'The registration review queue',
+    description:
+      'Requests for the organizations the reviewer may provision into (their own, or every ' +
+      'organization for a role in USER_PROVISIONING_CROSS_ORG_ROLES), oldest first, filtered by ' +
+      '`status` and the exact `username`. The submission answer carries no id, so this is where ' +
+      'a reviewer finds a request.',
+  })
+  listRequests(
+    @Query(zodPipe(listRegistrationRequestsQuerySchema)) query: ListRegistrationRequestsQuery,
+  ) {
+    return this.identity.listRegistrationRequests(query);
+  }
+
   @Post(':id/approve')
   @HttpCode(200)
-  @Roles('UNION_ADMIN')
+  @Roles(...REGISTRATION_REVIEW_ROLES)
   @ApiOperation({
     summary: 'Approve a registration and provision the account',
     description:
@@ -204,7 +294,7 @@ export class RegistrationController {
 
   @Post(':id/reject')
   @HttpCode(200)
-  @Roles('UNION_ADMIN')
+  @Roles(...REGISTRATION_REVIEW_ROLES)
   @ApiOperation({
     summary: 'Reject a registration, with a required reason',
     description:

@@ -25,6 +25,7 @@ import {
   canDecommissionFrom,
   statusTargetsFrom,
 } from '@/lib/asset-lifecycle-fields';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The three lifecycle commands: what a person may type and in what words a
@@ -40,7 +41,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_1'),
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -295,7 +296,7 @@ describe('writing', () => {
         body,
       });
       expect(calls[0]!.headers['idempotency-key']).toBe('sub_abc');
-      expect(calls[0]!.headers.authorization).toBe('Bearer access-token-value');
+      expect(calls[0]!.headers.authorization).toBe(`Bearer ${SESSION.accessToken}`);
     },
   );
 

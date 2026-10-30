@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { KeycloakAdminClient } from '../../src/keycloak/keycloak.client';
+import type { KeycloakWriteFence } from '../../src/keycloak/keycloak-write-fence';
 import type { PlatformAttributes } from '../../src/keycloak/platform-attributes';
 import { assertDisposableTarget } from './live-target-guard';
 
@@ -97,6 +98,19 @@ const read = async (id: string) => (await (await admin(`/users/${id}`)).json()) 
 const change = (id: string, fields: Partial<KeycloakUser>) =>
   admin(`/users/${id}`, { method: 'PUT', body: JSON.stringify(fields) });
 
+/**
+ * The fence of one write. Here there is no identity database — this suite is
+ * about Keycloak's own behaviour — so it records nothing and carries only the
+ * client's deadline; the fence itself is proven against PostgreSQL in
+ * `keycloak-write-fence.int-spec.ts` (D-069).
+ */
+const unfenced: KeycloakWriteFence = async () => ({
+  id: 'KWA_LIVE',
+  signal: AbortSignal.timeout(10_000),
+  assertDispatchable() {},
+  observeReply: () => false,
+});
+
 function platform(userId: string, roles: string[]): PlatformAttributes {
   return {
     rasta_user_id: [userId],
@@ -152,8 +166,17 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
     });
   });
 
-  /** An account exactly as identity-service provisions one. */
-  async function provisioned(): Promise<{ keycloakId: string; userId: string }> {
+  /**
+   * An account exactly as identity-service provisions one (D-069 addendum D):
+   * created disabled with its provenance alone, then — after the user row
+   * commits — its grants written and the account enabled once, by the same
+   * two writes the projector makes.
+   */
+  async function provisioned(): Promise<{
+    keycloakId: string;
+    userId: string;
+    asCreated: unknown;
+  }> {
     const suffix = randomUUID().slice(0, 8);
     const userId = `USR_LIVE_${suffix.toUpperCase()}`;
     const keycloakId = await client.createUser({
@@ -161,12 +184,16 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
       email: `live.race.${suffix}@example.test`,
       firstName: 'آزمون',
       lastName: 'مسابقه',
-      attributes: platform(userId, ['OPERATOR']),
-      enabled: true,
+      userId,
     });
     if (!keycloakId) throw new Error('createUser returned no id');
     created.push(keycloakId);
-    return { keycloakId, userId };
+    const asCreated = await read(keycloakId);
+    await client.replacePlatformAttributes(keycloakId, platform(userId, ['OPERATOR']), {
+      fence: unfenced,
+    });
+    await client.activateAccount(keycloakId, userId, { fence: unfenced });
+    return { keycloakId, userId, asCreated };
   }
 
   /** Projects new roles, with `concurrently` run while the write is held after its read. */
@@ -177,7 +204,9 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
   ): Promise<void> {
     const gate = holdNextWrite(keycloakId);
     try {
-      const projection = client.replacePlatformAttributes(keycloakId, attributes);
+      const projection = client.replacePlatformAttributes(keycloakId, attributes, {
+        fence: unfenced,
+      });
       await gate.reached;
       await concurrently();
       gate.release();
@@ -196,7 +225,15 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
   });
 
   it('provisions the account the way the tests below assume', async () => {
-    const { keycloakId, userId } = await provisioned();
+    const { keycloakId, userId, asCreated } = await provisioned();
+    // Created harmless: disabled, and nothing but its provenance.
+    expect(asCreated).toMatchObject({
+      enabled: false,
+      attributes: { rasta_user_id: [userId] },
+    });
+    expect((asCreated as { attributes: Record<string, unknown> }).attributes).not.toHaveProperty(
+      'organization_roles',
+    );
     const user = await read(keycloakId);
     expect(user.requiredActions).toEqual(['UPDATE_PASSWORD']);
     expect(user.enabled).toBe(true);

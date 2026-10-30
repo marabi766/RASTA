@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey, type KeyLike } from 'jose';
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 /**
  * The four OIDC steps this portal needs, on the server (ADR-059 § 2).
@@ -64,6 +65,14 @@ export interface AuthorizationRequest {
   readonly state: string;
   readonly nonce: string;
   readonly challenge: string;
+  /**
+   * `login`: the provider asks for credentials again even over a live
+   * single sign-on session — how a person whose account the portal refuses
+   * signs in with another one (`app/account/recovery`; PR 405 review 2, F3).
+   * Keycloak 26 honours `login`; `select_account` it only passes to a brokered
+   * provider, so it is not offered.
+   */
+  readonly prompt?: 'login';
 }
 
 /**
@@ -84,6 +93,7 @@ export function authorizationUrl(request: AuthorizationRequest): string {
   url.searchParams.set('nonce', request.nonce);
   url.searchParams.set('code_challenge', request.challenge);
   url.searchParams.set('code_challenge_method', 'S256');
+  if (request.prompt === 'login') url.searchParams.set('prompt', 'login');
   return url.toString();
 }
 
@@ -195,11 +205,11 @@ async function postForm(
     throw new OidcError('MALFORMED_RESPONSE', 'the token response was not JSON');
   }
 
-  const parsed = tokenResponseSchema.safeParse(payload);
+  const parsed = legacyParse(tokenResponseSchema, payload);
   if (!parsed.success) {
     throw new OidcError(
       'MALFORMED_RESPONSE',
-      `the token response is missing ${parsed.error.issues.map((i) => i.path.join('.')).join(', ')}`,
+      `the token response is missing ${parsed.refusal.issues.map((i) => i.path.join('.')).join(', ')}`,
     );
   }
   return parsed.data;
@@ -272,13 +282,13 @@ const idTokenClaimsSchema = z.object({
   nonce: z.string().min(1),
   preferred_username: z.string().min(1).optional(),
   email: z.string().optional(),
-  org_id: z.string().optional(),
 });
 
 export interface VerifiedIdentity {
   readonly subject: string;
   readonly username: string;
-  readonly organizationId: string | null;
+  // No organization: the access token's is the only one the portal reads
+  // (`session-organization.ts`); the id token's claim was a second copy.
 }
 
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
@@ -352,7 +362,6 @@ export async function verifyIdToken(
   return {
     subject: parsed.data.sub,
     username: parsed.data.preferred_username ?? parsed.data.email ?? parsed.data.sub,
-    organizationId: parsed.data.org_id ?? null,
   };
 }
 

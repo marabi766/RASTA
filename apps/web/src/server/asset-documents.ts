@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import {
   ATTACH_DOCUMENT_TEXT_FIELDS,
@@ -276,7 +277,7 @@ export function attachDocumentFormValues(form: FormData): AttachDocumentFormValu
 export const attachDocumentFormSchema = z
   .object({
     kind: z.enum(DOCUMENT_KINDS, {
-      errorMap: () => ({ message: 'نوع مدرک را از فهرست انتخاب کنید' }),
+      error: 'نوع مدرک را از فهرست انتخاب کنید',
     }),
     title: displayText('عنوان', DOCUMENT_BOUNDS.title.min, DOCUMENT_BOUNDS.title.max).refine(
       (value) => !BIDI_CONTROL.test(value),
@@ -304,11 +305,11 @@ export type ParsedAttachForm =
     };
 
 export function parseAttachDocumentForm(values: AttachDocumentFormValues): ParsedAttachForm {
-  const parsed = attachDocumentFormSchema.safeParse(values);
+  const parsed = legacyParse(attachDocumentFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, (value): value is AttachDocumentTextField =>
+    fieldErrors: firstIssuePerField(parsed.refusal, (value): value is AttachDocumentTextField =>
       (ATTACH_DOCUMENT_TEXT_FIELDS as readonly string[]).includes(value),
     ),
   };

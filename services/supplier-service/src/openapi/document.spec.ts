@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { OpenAPIObject } from '@nestjs/swagger';
+import { errorEnvelopeProblems } from '@rasta/nest-common';
 import { enrichOpenApiDocument } from './document';
 
 /**
@@ -289,5 +290,25 @@ describe('route ordering in the controller', () => {
     );
 
     expect(controller).not.toMatch(/'AUDITOR'/);
+  });
+});
+
+describe('the published error envelope (audit 10-26 F3)', () => {
+  it('accepts the error bodies the shared filter really sends, on every route', () => {
+    const operations = { get: {}, post: {} };
+    const document = enrichOpenApiDocument(
+      withPaths({
+        '/v1/suppliers': operations,
+        '/v1/suppliers/{id}': operations,
+        '/v1/suppliers/{id}/suspend': operations,
+        '/v1/suppliers/{id}/qualifications': operations,
+        '/v1/suppliers/{id}/qualifications/{qualificationId}/approve': operations,
+        '/v1/suppliers/qualified': operations,
+        '/v1/suppliers/qualifications': operations,
+        '/v1/suppliers/standing-snapshot': operations,
+        '/v1/suppliers/standing-snapshot/{organizationId}': operations,
+      }),
+    );
+    expect(errorEnvelopeProblems(document)).toEqual([]);
   });
 });

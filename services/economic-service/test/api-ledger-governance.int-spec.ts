@@ -399,6 +399,7 @@ describe('ledger and governance API', () => {
     const created = await request(http)
       .post('/v1/rewards/rules')
       .set('authorization', asSystem())
+      .set('idempotency-key', id('api-reward-rule'))
       .send({
         organizationId: org,
         triggerEvent: 'USAGE_RECORDED',
@@ -416,6 +417,7 @@ describe('ledger and governance API', () => {
     const capless = await request(http)
       .post('/v1/rewards/rules')
       .set('authorization', asSystem())
+      .set('idempotency-key', id('api-reward-rule'))
       .send({ organizationId: org, triggerEvent: 'USAGE_RECORDED', points: 5, periodCap: 50 })
       .expect(400);
     expect(capless.body.code).toBe('VALIDATION_FAILED');
@@ -447,6 +449,7 @@ describe('ledger and governance API', () => {
     const response = await request(http)
       .post('/v1/rewards/rules')
       .set('authorization', asSystem())
+      .set('idempotency-key', id('api-reward-rule'))
       .send({
         organizationId: org,
         triggerEvent: 'MAINTENANCE_COMPLETED',

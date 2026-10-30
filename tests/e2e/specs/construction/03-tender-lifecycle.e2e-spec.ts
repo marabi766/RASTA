@@ -9,6 +9,7 @@ import {
   until,
   type ApiResponse,
 } from '../../src/api';
+import { expectNotDisclosed } from '@rasta/testing';
 import { ORG, e2eConfig } from '../../src/env';
 import { EconomicEventTap, type ObservedEvent } from '../../src/events';
 import { enableSignIn, freshToken, membershipClaims } from '../../src/keycloak-accounts';
@@ -908,7 +909,8 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       expect(receipt).toMatchObject({ tenderId, status: 'SUBMITTED', revision: 1 });
       expect(receipt.receipt).toMatch(/^[0-9a-f]{64}$/);
       // The content is sealed: the answer is the receipt, never what was sent.
-      expect(JSON.stringify(receipt)).not.toContain(PRICE[key]);
+      // Server-generated id/commitment/receipt have no independent source here; leave searched.
+      expectNotDisclosed(receipt, [PRICE[key]]);
       bid[key] = receipt.bidId;
       receipts[key] = receipt.receipt;
     }
@@ -924,7 +926,7 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     expect(revised.body).toMatchObject({ bidId: bid.c2, status: 'SUBMITTED', revision: 2 });
     expect((revised.body as ReceiptBody).receipt).toMatch(/^[0-9a-f]{64}$/);
     expect((revised.body as ReceiptBody).receipt).not.toBe(receipts.c2);
-    expect(JSON.stringify(revised.body)).not.toContain(PRICE.c2);
+    expectNotDisclosed(revised.body, [PRICE.c2]);
 
     // Each bidder sees its own receipt — no content, and not the other's.
     for (const [key, contractor, revision] of [
@@ -934,7 +936,7 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       const mine = await contractor.get(`/v1/tenders/${tenderId}/bids/mine`);
       expect(mine.status, JSON.stringify(mine.body)).toBe(200);
       expect(mine.body).toMatchObject({ bidId: bid[key], status: 'SUBMITTED', revision });
-      expect(JSON.stringify(mine.body)).not.toContain(PRICE[key]);
+      expectNotDisclosed(mine.body, [PRICE[key]]);
     }
 
     // A bidder changing the other bidder's bid gets exactly what it gets for a
@@ -1083,7 +1085,7 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
     expect(counted.status, JSON.stringify(counted.body)).toBe(200);
     expect(counted.body).toMatchObject({ opened: false, bidCount: 2, bids: [] });
     expect(JSON.stringify(counted.body)).not.toContain(org.c1);
-    expect(JSON.stringify(counted.body)).not.toContain(PRICE.c1);
+    expectNotDisclosed(counted.body, [PRICE.c1]);
 
     await assertInvisibleToStranger(tenantB, {
       tenderId,
@@ -1153,7 +1155,8 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       { status: 403, code: 'FORBIDDEN', reason: 'CONFLICT_OF_INTEREST' },
       'a member of a bidding organization reading the evaluation',
     );
-    expect(JSON.stringify(refused.body)).not.toContain(PRICE.c2);
+    // No response-derived exemptions: search the complete parsed refusal body.
+    expectNotDisclosed(refused.body, [PRICE.c2]);
     evidence.push({
       label: 'conflict of interest refused',
       correlationId: coi,
@@ -1410,8 +1413,8 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       status: 'NOT_AWARDED',
       content: { priceMinor: PRICE.c2 },
     });
-    for (const leak of [PRICE.c1, bid.c1, org.c1])
-      expect(JSON.stringify(own2.body)).not.toContain(leak);
+    // Unknown generated values stay searched; no response-derived receipt exemption.
+    expectNotDisclosed(own2.body, [PRICE.c1, bid.c1, org.c1]);
 
     await assertInvisibleToStranger(tenantB, { tenderId, bidIds: [bid.c1, bid.c2], approvalIds });
   });
@@ -1551,8 +1554,9 @@ test.describe.serial('a tender, end to end (CON-002)', () => {
       for (const event of tap.correlated(entry.correlationId)) {
         expect(event.tenantId).toBe(org.owner);
         expect([tenderId, cancelledTenderId]).toContain(event.key);
-        expect(JSON.stringify(event.payload)).not.toContain(PRICE.c1);
-        expect(JSON.stringify(event.payload)).not.toContain(PRICE.c2);
+        // Unknown event ids/digests/instants remain searched, including every price substring.
+        expectNotDisclosed(event.payload, [PRICE.c1]);
+        expectNotDisclosed(event.payload, [PRICE.c2]);
       }
     }
   });

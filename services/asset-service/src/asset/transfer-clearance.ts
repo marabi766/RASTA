@@ -1,6 +1,7 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
@@ -98,14 +99,20 @@ const answerSchemas: Record<WorkOwner, z.ZodType<Record<string, unknown>>> = {
     assetId: z.string(),
     fenceId: z.string(),
     clear: z.boolean(),
-    fencedUntil: z.string().datetime({ offset: true }).nullable(),
+    fencedUntil: z
+      .string()
+      .check(isoDateTime({ offset: true }))
+      .nullable(),
     openAssignments: count,
   }),
   [MAINTENANCE_SERVICE]: z.object({
     assetId: z.string(),
     fenceId: z.string(),
     clear: z.boolean(),
-    fencedUntil: z.string().datetime({ offset: true }).nullable(),
+    fencedUntil: z
+      .string()
+      .check(isoDateTime({ offset: true }))
+      .nullable(),
     openRequests: count,
     openRepairOrders: count,
   }),
@@ -236,11 +243,13 @@ export class TransferClearanceClient implements TransferClearance {
     path: string,
     body?: string,
   ): Promise<Response> {
-    const token = await this.options.tokens.issue(SERVICE_NAME, owner, 'SERVICE', organizationId);
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'x-internal-token': token,
-    };
+    const sender = await new InternalHttpClient(this.options.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: owner,
+      purpose: 'SERVICE',
+      organizationId,
+    });
+    const headers: Record<string, string> = { accept: 'application/json' };
     if (body !== undefined) headers['content-type'] = 'application/json';
     const context = tryGetContext();
     if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
@@ -251,10 +260,9 @@ export class TransferClearanceClient implements TransferClearance {
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     timer.unref?.();
     try {
-      const response = await internalFetch(
+      const response = await sender.send(
         `${this.options.baseUrls[owner].replace(/\/+$/, '')}${path}`,
         { method, headers, body, signal: controller.signal },
-        this.fetchImpl,
       );
       // The body is read inside the deadline too, and an answer that arrives
       // after it is not taken, even from a transport that ignored the abort.

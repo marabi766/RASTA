@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient, type InternalSender } from '@rasta/nest-common';
 import { z } from 'zod';
 import { readUrl } from '@rasta/config';
 import type { InternalTokenService } from '@rasta/nest-common';
@@ -58,7 +58,7 @@ const userPageSchema = z.object({
     z.object({
       id: z.string().min(1),
       status: z.string(),
-      roles: z.array(z.string()).default([]),
+      roles: z.array(z.string()).prefault([]),
       // Optional rather than required: an identity deployment that stops
       // returning addresses has to degrade to "nobody is emailable", not to a
       // malformed-response failure that stops the in-app half working too.
@@ -66,7 +66,7 @@ const userPageSchema = z.object({
     }),
   ),
   nextCursor: z.string().nullable().optional(),
-  hasMore: z.boolean().default(false),
+  hasMore: z.boolean().prefault(false),
 });
 
 /** identity caps a page at `MAX_PAGE_SIZE` (200); asking for more is a 400. */
@@ -92,18 +92,19 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
     let truncated = false;
 
     // Minted once per resolution and reused across roles and pages: the same
-    // target, the same organization, and a TTL far longer than the call.
-    const token = await this.tokens.issue(
-      SERVICE_NAME,
-      IDENTITY_SERVICE,
-      'SERVICE',
-      query.organizationId,
-    );
+    // target, the same organization, and a TTL far longer than the call. The
+    // sender holds it; this adapter never sees the token itself.
+    const sender = await new InternalHttpClient(this.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: IDENTITY_SERVICE,
+      purpose: 'SERVICE',
+      organizationId: query.organizationId,
+    });
 
     for (const role of query.roles) {
       let cursor: string | undefined;
       for (let page = 0; page < MAX_PAGES_PER_ROLE; page += 1) {
-        const result = await this.fetchPage(token, role, cursor, query.correlationId);
+        const result = await this.fetchPage(sender, role, cursor, query.correlationId);
 
         for (const user of result.items) {
           // `status=ACTIVE` is the query; re-checking costs nothing and means
@@ -128,7 +129,7 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
   }
 
   private async fetchPage(
-    token: string,
+    sender: InternalSender,
     role: string,
     cursor: string | undefined,
     correlationId: string,
@@ -149,19 +150,14 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
 
     let response: Response;
     try {
-      response = await internalFetch(
-        url,
-        {
-          method: 'GET',
-          headers: {
-            accept: 'application/json',
-            'x-internal-token': token,
-            'x-correlation-id': correlationId,
-          },
-          signal: controller.signal,
+      response = await sender.send(url, {
+        method: 'GET',
+        headers: {
+          accept: 'application/json',
+          'x-correlation-id': correlationId,
         },
-        this.fetchImpl,
-      );
+        signal: controller.signal,
+      });
     } catch (error) {
       // The error object is not forwarded: depending on the runtime it can
       // carry the request URL and headers, and the header is the token.

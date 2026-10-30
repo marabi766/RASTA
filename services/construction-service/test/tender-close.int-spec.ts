@@ -2,6 +2,7 @@ import { eligibilityClockSql } from '@rasta/testing';
 import { setEligibilityFixture } from '@rasta/testing';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { runUnscoped } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import { ulid } from 'ulid';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { TenderCloseRepository } from '../src/tender/tender-close.repository';
@@ -198,7 +199,8 @@ describe('tender close sweeper', () => {
       const [event] = await closedEvents(owner);
       const payload = eventEnvelopeSchema.parse(event!.payload).payload;
       expect(payload).toMatchObject({ bidCount: 1 });
-      expect(JSON.stringify(event!.payload)).not.toMatch(/1250000000|Mobilisation|bidder/i);
+      // No independently verified path exemption: generated values stay searched (#452).
+      expectNotDisclosed(event!.payload, [/1250000000|Mobilisation|bidder/i]);
     });
 
     it('leaves a tender whose deadline has not passed alone', async () => {

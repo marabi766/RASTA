@@ -201,7 +201,7 @@ describe('identity-service outbox purge (D-052)', () => {
            TO "${runtimeRole()}"`,
       );
     } finally {
-      await owner.onModuleDestroy();
+      await owner.stop();
     }
     runtime = new PrismaService(schemaUrl());
     holder = new PrismaService(schemaUrl());
@@ -218,13 +218,13 @@ describe('identity-service outbox purge (D-052)', () => {
   });
 
   afterAll(async () => {
-    await runtime?.onModuleDestroy();
-    await holder?.onModuleDestroy();
+    await runtime?.stop();
+    await holder?.stop();
     const owner = new PrismaService(ownerUrl());
     try {
       await owner.client.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCHEMA}" CASCADE`);
     } finally {
-      await owner.onModuleDestroy();
+      await owner.stop();
     }
   });
 
@@ -397,7 +397,7 @@ describe('identity-service outbox purge (D-052)', () => {
     } finally {
       letGo();
       await holding;
-      await starved.onModuleDestroy();
+      await starved.stop();
     }
     // The pool free again, the same row goes.
     expect(await purge().runOnce()).toMatchObject({ outcome: 'completed', deleted: 1 });

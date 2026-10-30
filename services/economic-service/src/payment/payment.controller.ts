@@ -77,7 +77,13 @@ export class PaymentController {
       'auditor needs to see. Refused with 422 INSUFFICIENT_BALANCE when the money has since ' +
       'been spent, because refunding it would drive the wallet negative. Requires an ' +
       '`Idempotency-Key`. A refund the payment provider declined is final: the same key and ' +
-      'body replay the recorded 422 instead of holding the amount again.',
+      'body replay the recorded 422 instead of holding the amount again. A 422 ' +
+      'BUSINESS_RULE_VIOLATION whose `details[].code` is `REFUND_REVERSAL_PENDING` is not a ' +
+      'refusal before the provider was asked: the provider **has refunded**, and the ledger ' +
+      'reversal waits — for a wallet that is not ACTIVE to be active again — with the amount ' +
+      'held; `GET /v1/payment-intents/{id}` shows `REFUNDED_NOT_REVERSED` (docs/06 § 6.8). ' +
+      'Every later attempt answers the same until the reversal is recorded; the provider is ' +
+      'never asked twice.',
   })
   async refund(
     @Param('id') id: string,

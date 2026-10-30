@@ -117,7 +117,7 @@ spec:
         - { name: clamav-socket, mountPath: /run/clamav }
 
     - name: clamav
-      image: clamav/clamav@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+      image: clamav/clamav@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
       command: ['clamd'] # نه /init، که برای ساخت /run/clamav به root نیاز دارد
       securityContext:
         runAsUser: 100
@@ -141,7 +141,7 @@ spec:
         - { name: clamd-config, mountPath: /etc/clamav/clamd.conf, subPath: clamd.conf }
 
     - name: clamav-freshclam
-      image: clamav/clamav@sha256:638d90201ee7ee6a82d249a2fc23b132e578673b5f1f2766852b127676ca1ef6
+      image: clamav/clamav@sha256:bda39705e291105049c3936e2803ac90b955172af8030f94f05dce1252df6c6d
       command: ['freshclam', '--daemon', '--foreground']
       securityContext: { runAsUser: 100, runAsGroup: 101, runAsNonRoot: true }
       volumeMounts:

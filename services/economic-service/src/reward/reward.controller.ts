@@ -18,9 +18,11 @@ import { RecognitionService } from './recognition.service';
 import { toRecognitionRuleApiView, toRecognitionView } from './recognition-views';
 import { assertNotAuditor } from '../access/access';
 import { IdempotencyStore } from '../shared/idempotency';
+import { canonicalPipe } from '../shared/canonical';
 import { requireIdempotencyKey } from '../wallet/wallet.controller';
 import {
   toRewardBalanceView,
+  toRewardRuleView,
   toRewardView,
   type RewardBalanceRow,
   type RewardRow,
@@ -256,7 +258,7 @@ export class RewardController {
   async listRules(@Query(zodPipe(listRewardRulesQuerySchema)) query: ListRewardRulesQuery) {
     assertNotAuditor();
     const rows = await this.rewards.listRules(query.triggerEvent);
-    return { items: rows };
+    return { items: rows.map(toRewardRuleView) };
   }
 
   @Post('rules')
@@ -271,11 +273,35 @@ export class RewardController {
       'docs/10 § 10.4 describes. `periodCap` and `periodType` must be given together: a cap ' +
       'with no window is not a cap, and the cap is an anti-fraud control (docs/10 § 10.9). ' +
       'CASHBACK rules are refused while the feature flag is off — the product document ' +
-      'conditions cashback on a regulatory review (docs/24 Q-07).',
+      'conditions cashback on a regulatory review (docs/24 Q-07). `creditPerPointMinor` is ' +
+      'answered as a decimal string in minor units, or null. Requires an `Idempotency-Key`: a ' +
+      'retry returns the rule the first request created, never a second rule paying for the ' +
+      'same fact again.',
   })
-  async createRule(@Body(zodPipe(createRewardRuleSchema)) dto: CreateRewardRuleDto) {
+  async createRule(
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    // Canonical first (the amount, the instants, the label's line endings, the
+    // condition's numeric operands), so a retry that says the same thing
+    // differently replays rather than 409s.
+    @Body(canonicalPipe(createRewardRuleSchema), zodPipe(createRewardRuleSchema))
+    dto: CreateRewardRuleDto,
+  ) {
     assertNotAuditor();
-    return this.rewards.createRule(dto);
+    const key = requireIdempotencyKey(idempotencyKey);
+
+    return this.idempotency.run(
+      'POST /v1/rewards/rules',
+      key,
+      dto,
+      201,
+      (answer) => this.rewards.createRule(dto, answer.map(toRewardRuleView)),
+      // Nothing to re-check before the stored rule is shown: the route is
+      // SYSTEM_ADMIN's alone, and the role and oversight checks above have run
+      // as the caller now is; a system administrator reaches every rule
+      // (PATCH /v1/rewards/rules/{id} reads by id alone). The record answers
+      // only the actor who made it (`IdempotencyStore`).
+      { mayReplay: async () => undefined },
+    );
   }
 
   @Patch('rules/:id')
@@ -288,13 +314,14 @@ export class RewardController {
       'to occurrences not yet granted. docs/24 Q-09 is answered by closing the points-only ' +
       'rule and creating one with `creditPerPointMinor` from the same instant — still no code ' +
       'change and no deployment. `validTo` only moves forward. Every change publishes ' +
-      '`REWARD_RULE_CHANGED` with the actor and the terms before and after.',
+      '`REWARD_RULE_CHANGED` with the actor and the terms before and after. Answers the rule ' +
+      'as POST does.',
   })
   async updateRule(
     @Param('id') id: string,
     @Body(zodPipe(updateRewardRuleSchema)) dto: UpdateRewardRuleDto,
   ) {
     assertNotAuditor();
-    return this.rewards.updateRule(id, dto);
+    return toRewardRuleView(await this.rewards.updateRule(id, dto));
   }
 }

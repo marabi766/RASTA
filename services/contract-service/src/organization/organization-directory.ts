@@ -1,4 +1,4 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
 import { z } from 'zod';
@@ -110,12 +110,12 @@ export class OrganizationDirectory {
     organizationId: string,
     requireVersion: boolean,
   ): Promise<{ hierarchyVersion: number | null } | null> {
-    const token = await this.tokens.issue(
-      SERVICE_NAME,
-      ORGANIZATION_SERVICE,
-      'SERVICE',
-      scopeOrganizationId,
-    );
+    const sender = await new InternalHttpClient(this.tokens).authorize({
+      from: SERVICE_NAME,
+      to: ORGANIZATION_SERVICE,
+      purpose: 'SERVICE',
+      organizationId: scopeOrganizationId,
+    });
     const url =
       `${this.env.ORGANIZATION_SERVICE_URL.replace(/\/+$/, '')}` +
       `/v1/organizations/${encodeURIComponent(organizationId)}`;
@@ -126,11 +126,10 @@ export class OrganizationDirectory {
     // One deadline for the whole exchange: headers, body and parse. A server that answers 200 and
     // then stalls its body is a timeout, not a hang.
     try {
-      const response = await internalFetch(url, {
+      const response = await sender.send(url, {
         method: 'GET',
         headers: {
           accept: 'application/json',
-          'x-internal-token': token,
           'x-correlation-id': getContext().correlationId,
         },
         signal: controller.signal,

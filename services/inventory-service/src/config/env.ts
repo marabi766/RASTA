@@ -50,7 +50,7 @@ function roleList(name: string) {
   const unknownRole = fixed(`Unknown role in ${name}`);
   return commaList().pipe(
     z
-      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: unknownRole }) }))
+      .array(z.enum(PLATFORM_ROLES, { error: unknownRole }))
       .min(1, fixed(`${name} must name at least one role`))
       .refine(
         (roles) => !roles.some((role) => (REFUSED_ROLES as readonly string[]).includes(role)),
@@ -142,21 +142,21 @@ export const inventoryEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     INVENTORY_OPERATOR_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('INVENTORY_OPERATOR_ROLES')),
 
     INVENTORY_READER_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('INVENTORY_READER_ROLES')),
 
     INVENTORY_CONSIGNEE_READER_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('INVENTORY_CONSIGNEE_READER_ROLES')),
 
     INVENTORY_RESERVATION_MAX_TTL_SECONDS: z.coerce
@@ -164,16 +164,16 @@ export const inventoryEnvSchema = baseEnvSchema
       .int()
       .min(60)
       .max(366 * 24 * 60 * 60)
-      .default(7 * 24 * 60 * 60),
+      .prefault(7 * 24 * 60 * 60),
 
     INVENTORY_RESERVATION_SWEEP_INTERVAL_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(3600)
-      .default(30),
-    INVENTORY_RESERVATION_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
-    INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+      .prefault(30),
+    INVENTORY_RESERVATION_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(100),
+    INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
 
     /**
      * Q-133 (RUN-005, ADR-048 § 1): which dispositions a return shipment may be resolved with —
@@ -186,11 +186,11 @@ export const inventoryEnvSchema = baseEnvSchema
       .pipe(
         z.array(
           z.enum(RETURN_DISPOSITIONS, {
-            errorMap: () => ({ message: UNKNOWN_DISPOSITION }),
+            error: UNKNOWN_DISPOSITION,
           }),
         ),
       )
-      .default(''),
+      .prefault(''),
 
     /**
      * Q-133 (4) (Codex r1 on #313): what a return shipment of which nothing arrived resolves to is
@@ -201,17 +201,17 @@ export const inventoryEnvSchema = baseEnvSchema
      */
     INVENTORY_RETURN_RESOLVE_NOTHING_RECEIVED: z
       .enum(['true', 'false'])
-      .default('false')
+      .prefault('false')
       .transform((value) => value === 'true'),
 
-    INVENTORY_LOCK_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+    INVENTORY_LOCK_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).prefault(5000),
 
     /**
      * marketplace-service, which owns the return request (ADR-048 § 2). Before a return shipment
      * is recorded, the request is read there and its dispatch reserved (A-13, ADR-061 § 4; Codex
      * r1 on #336) — over REST with an internal token signed for the supplier, never its database.
      */
-    MARKETPLACE_SERVICE_URL: serviceUrlSchema.default('http://localhost:3106'),
+    MARKETPLACE_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3106'),
     /**
      * How long each of those two exchanges may take, body included. Both run before the
      * command's transaction, never inside it; one that does not answer in time refuses the
@@ -222,15 +222,15 @@ export const inventoryEnvSchema = baseEnvSchema
       .int()
       .min(200)
       .max(10_000)
-      .default(3000),
+      .prefault(3000),
 
-    INVENTORY_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    INVENTORY_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
     INVENTORY_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
       .number()
       .int()
       .min(10)
       .max(900)
-      .default(120),
+      .prefault(120),
   });
 
 export const INVENTORY_ENV_MESSAGES = seal();

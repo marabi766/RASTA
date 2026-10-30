@@ -1,6 +1,12 @@
 import { z } from 'zod';
-import { amountMinorSchema, organizationIdSchema, numberInput } from '@rasta/contracts';
+import {
+  amountMinorSchema,
+  isoDateTime,
+  numberInput,
+  organizationIdSchema,
+} from '@rasta/contracts';
 import { RULE_STATUSES } from '../commission/dto';
+import { canonicalDecimal, canonicalWithin, withCanonicalForm } from '../shared/canonical';
 import {
   PARTICIPATION_FACTS,
   PARTICIPATION_MAX_PER_WINDOW,
@@ -48,31 +54,75 @@ export const REWARD_TRIGGER_EVENTS = ['USAGE_RECORDED', 'MAINTENANCE_COMPLETED']
  * shape evaluates to **false** — a mistyped condition withholds a reward
  * rather than granting one to everybody.
  */
+/**
+ * The comparisons whose two sides are read as numbers (`conditionMet` in
+ * `rule-engine.ts`): only for these is `"7.50"` the same operand as `"7.5"`.
+ */
+export const NUMERIC_COMPARISONS = ['gt', 'gte', 'lt', 'lte'] as const;
+
+const conditionOperand = z.union([z.string(), z.number(), z.boolean()]);
+
 const conditionLeaf = z
   .object({
     field: z.string().trim().min(1).max(64),
-    op: z.enum(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'present', 'absent']),
-    value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    op: z.enum(['eq', 'neq', ...NUMERIC_COMPARISONS, 'present', 'absent']),
+    value: conditionOperand.optional(),
   })
   .strict();
 
 type ConditionNode =
   z.infer<typeof conditionLeaf> | { all: ConditionNode[] } | { any: ConditionNode[] };
 
-const conditionSchema: z.ZodType<ConditionNode> = z.lazy(() =>
-  z.union([
-    conditionLeaf,
-    z.object({ all: z.array(conditionSchema).min(1).max(10) }).strict(),
-    z.object({ any: z.array(conditionSchema).min(1).max(10) }).strict(),
-  ]),
+const conditionSchema: z.ZodType<ConditionNode> = withCanonicalForm(
+  z.lazy(() =>
+    z.union([
+      conditionLeaf,
+      z.object({ all: z.array(conditionSchema).min(1).max(10) }).strict(),
+      z.object({ any: z.array(conditionSchema).min(1).max(10) }).strict(),
+    ]),
+  ),
+  canonicalCondition,
 );
+
+/**
+ * A condition with the operand of every numeric comparison (`gt`, `gte`,
+ * `lt`, `lte`), at any depth under `all` / `any`, in its exact decimal form
+ * (`canonicalDecimal`), before the rule is validated, hashed and stored
+ * (Codex PR-480 r2, R2). Rewritten only where the operand as sent and its
+ * canonical form both pass the operand's own schema. A JSON number is a
+ * number, not a spelling, and is left as it is.
+ *
+ * `eq` and `neq` are left exactly as sent: they compare the operand as a
+ * string (`String(actual) === String(value)`), so `"7.50"` and `"7.5"` are two
+ * different rules there, and normalizing them would change which payloads
+ * match.
+ *
+ * Anything that is not a condition node is returned as it is, for the schema
+ * to refuse; the request's own objects are never modified.
+ */
+export function canonicalCondition(node: unknown): unknown {
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return node;
+  const copy: Record<string, unknown> = { ...(node as Record<string, unknown>) };
+  for (const branch of ['all', 'any'] as const) {
+    const children = copy[branch];
+    if (Array.isArray(children)) copy[branch] = children.map(canonicalCondition);
+  }
+  if (
+    typeof copy.op === 'string' &&
+    (NUMERIC_COMPARISONS as readonly string[]).includes(copy.op) &&
+    Object.prototype.hasOwnProperty.call(copy, 'value')
+  ) {
+    copy.value = canonicalWithin(conditionOperand, copy.value, canonicalDecimal);
+  }
+  return copy;
+}
 
 export const createRewardRuleSchema = z
   .object({
     /** Omit for a platform-wide rule. */
     organizationId: organizationIdSchema.optional(),
     triggerEvent: z.enum(REWARD_TRIGGER_EVENTS),
-    rewardType: z.enum(REWARD_TYPES).default('POINTS'),
+    rewardType: z.enum(REWARD_TYPES).prefault('POINTS'),
     condition: conditionSchema.optional(),
     /** Positive. A rule granting nothing should be INACTIVE instead. */
     points: z.number().int().positive().max(1_000_000),
@@ -90,9 +140,9 @@ export const createRewardRuleSchema = z
      */
     periodCap: z.number().int().positive().max(10_000_000).optional(),
     periodType: z.enum(PERIOD_TYPES).optional(),
-    validFrom: z.string().datetime().optional(),
-    validTo: z.string().datetime().optional(),
-    status: z.enum(RULE_STATUSES).default('ACTIVE'),
+    validFrom: z.string().check(isoDateTime()).optional(),
+    validTo: z.string().check(isoDateTime()).optional(),
+    status: z.enum(RULE_STATUSES).prefault('ACTIVE'),
     /** "نمونه — نیازمند تصویب" for demonstration data (ADR-023). */
     label: z.string().trim().max(200).optional(),
   })
@@ -116,7 +166,7 @@ export type CreateRewardRuleDto = z.infer<typeof createRewardRuleSchema>;
 export const updateRewardRuleSchema = z
   .object({
     status: z.enum(RULE_STATUSES).optional(),
-    validTo: z.string().datetime().nullable().optional(),
+    validTo: z.string().check(isoDateTime()).nullable().optional(),
     label: z.string().trim().max(200).optional(),
   })
   .strict();
@@ -133,7 +183,7 @@ export type ListRewardRulesQuery = z.infer<typeof listRewardRulesQuerySchema>;
 
 export const myRewardsQuerySchema = z
   .object({
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 
@@ -192,7 +242,7 @@ export type CreateParticipationRuleDto = z.infer<typeof createParticipationRuleS
  */
 export const myParticipationQuerySchema = z
   .object({
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 
@@ -371,4 +421,31 @@ export interface RewardBalanceView {
   level: { id: string; name: string; rank: number; minPoints: number } | null;
   lifetimeCreditMinor: string;
   updatedAt: string;
+}
+
+/**
+ * A reward rule as every rule route answers it — the list, the create (and
+ * its replay), the update. `creditPerPointMinor` is a decimal string in minor
+ * units, or null on a points-only rule (ADR-022, ADR-033); `periodCap` is a
+ * number of **points**, not money.
+ */
+export interface RewardRuleApiView {
+  id: string;
+  /** Null for a platform-wide rule. */
+  organizationId: string | null;
+  triggerEvent: string;
+  rewardType: string;
+  condition: unknown;
+  points: number;
+  creditPerPointMinor: string | null;
+  periodCap: number | null;
+  periodType: string | null;
+  validFrom: string;
+  validTo: string | null;
+  status: string;
+  label: string | null;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  updatedBy: string;
 }

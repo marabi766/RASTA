@@ -1,6 +1,7 @@
 import { eligibilityClockSql } from '@rasta/testing';
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import {
   reasonsOf,
   actor,
@@ -226,7 +227,8 @@ describe('open-bids API', () => {
       .set(as(orgAdmin(owner)));
     expect(before.status).toBe(200);
     expect(before.body).toMatchObject({ opened: false, bidCount: 1, bids: [] });
-    expect(JSON.stringify(before.body)).not.toMatch(/1250000000|Licence 1234/);
+    // No independently verified path exemption: generated values stay searched (#452).
+    expectNotDisclosed(before.body, [/1250000000|Licence 1234/]);
     expect(JSON.stringify(before.body)).not.toContain(bidder);
     expect(
       (
@@ -297,7 +299,7 @@ describe('open-bids API', () => {
       bidCount: 1,
       alreadyOpened: false,
     });
-    expect(JSON.stringify(opened.body)).not.toMatch(/1250000000|Licence 1234/);
+    expectNotDisclosed(opened.body, [/1250000000|Licence 1234/]);
 
     const again = await http()
       .post(`/v1/tenders/${tenderId}/open-bids`)
@@ -338,7 +340,8 @@ describe('open-bids API', () => {
         'READ_BID:GRANTED',
       ]),
     );
-    expect(JSON.stringify(log.body)).not.toMatch(/1250000000|Licence 1234/);
+    // No independently verified path exemption: generated values stay searched (#452).
+    expectNotDisclosed(log.body, [/1250000000|Licence 1234/]);
   });
 
   it('a withdrawal names its proposal: a stale one is 409 PROPOSAL_SUPERSEDED with its code, and a retry under its key is its first answer (task 060)', async () => {

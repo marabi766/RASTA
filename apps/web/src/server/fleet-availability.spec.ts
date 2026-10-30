@@ -22,6 +22,7 @@ import {
   type AvailabilityWindow,
 } from './fleet-availability';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The two availability commands and their reads: who is offered the forms, what
@@ -38,7 +39,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_1'),
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -304,7 +305,7 @@ describe('declaring', () => {
     expect(new URL(g.calls[0]!.url).pathname).toBe('/v1/fleet/availability');
     expect(g.calls[0]!.body).toEqual({ assetId: ASSET, ...body });
     expect(g.calls[0]!.headers['idempotency-key']).toBe(SUBMISSION);
-    expect(g.calls[0]!.headers.authorization).toBe('Bearer access-token-value');
+    expect(g.calls[0]!.headers.authorization).toBe(`Bearer ${SESSION.accessToken}`);
   });
 
   it('places the service’s field errors on the form’s fields', async () => {

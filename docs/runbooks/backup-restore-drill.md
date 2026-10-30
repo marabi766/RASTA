@@ -69,10 +69,30 @@ REF equality proves the backup under test restores to exactly what PostgreSQL it
 
 Restore REF into a second fresh scratch database and dump it: these bytes must
 also equal REF. Private WeakMap provenance, issued only by schema dump collection,
-requires three distinct dumps: SOURCE from the service database with label `source`,
-REF from `drill_ref_<suffix>` with label `reference`, and the fixed point from
-`drill_fixed_<suffix>` with label `fixed-point`. Both scratch names must share the
-same invocation suffix. Dumping the wrong database refuses even if its bytes match.
+requires four distinct dumps: SOURCE from the service database with label `source`,
+the separate SOURCE dump that gets restored (`reference-input`, same database, same
+`pg_dump` version, bytes equal to SOURCE), REF from `drill_ref_<suffix>` with label
+`reference`, and the fixed point from `drill_fixed_<suffix>` with label `fixed-point`.
+Both scratch names must share the same invocation suffix.
+
+The restore INPUTS are bound as well as the dump outputs. `restore` receives the input
+evidence object (never a caller-chosen path: the private file is looked up through the
+provenance), and the dump that follows records `restoredFrom: <input dumpId>`, taken from
+the evidence actually restored. REF must name the reference-input dump, the fixed point
+must name REF, and a dump callback that drops or changes the lineage refuses. Restoring
+SOURCE a second time instead of REF therefore cannot produce a pass, even though PostgreSQL's
+deparse is deterministic and the bytes would match. On the restored side, `compareSnapshots`
+requires the post-restore dump to carry the `restored` label for the same database, and
+SOURCE must be the very dump REF was built from (object identity, not equal bytes), so
+`compareSnapshots(before, before)` refuses.
+
+Limit: the database name in a provenance record is the caller's claim. It is tied to
+`pg_dump -d` only by construction: `scripts/backup-restore-drill.mjs` passes one variable to
+both. A dump claimed for another database or label refuses even if its bytes match; a dump
+whose claim lies about its own `-d` argument cannot be detected by this library.
+The same holds for the archive file given to `pg_restore` (`<temporary>/<service>.dump`) and for
+the SOURCE/restored ledger objects: they are named by construction in the CLI, not by evidence;
+the library refuses only the same ledger object on both sides.
 Missing REF, missing fixed-point evidence, a skipped allowance
 guard, or any failed reference restore/dump refuses operator acceptance. The drill
 creates both databases with its random suffix inside its existing single active
@@ -156,8 +176,113 @@ consistency with active writers, or full-system recovery.
 پاکسازی را شروع می‌کنند؛ سیگنال‌های بعدی ثبت می‌شوند و فرمان پاکسازی را نمی‌کشند.
 خطای نوشتن stderr پس از قطع پایپ مانع پاکسازی نمی‌شود. برای هر فرمان سقف زمان داریم. SIGKILL، قطع برق یا از دست
 رفتن Docker daemon می‌تواند منابع را باقی بگذارد. بلافاصله پس از ساخت نام پروژه، گزارش اولیه با
-`project` و `temporary` و `passed: false` نوشته می‌شود؛ نبود `finishedAt` یعنی اجرا کامل نشده است.
-فقط با همین نام پروژه ثبت‌شده در گزارش و فایل `compose.json` در مسیر `temporary` پاکسازی کنید؛
+`project` و `temporary` و `recoveryId` و `passed: false` نوشته می‌شود (نشانگر `recovery.json` پیش از آن در
+پوشه موقت نوشته شده است) و `project` و `temporary` همیشه نخستین کلیدهای گزارش‌اند؛
+نبود `finishedAt` یعنی اجرا کامل نشده است. هر گزارش ناتمام `passed: false` دارد.
+
+هر نوشتن گزارش اتمی است: فایل خواهر تصادفی (`<report>.<hex>.tmp`) با ساخت انحصاری و مجوز `0600`
+(بدون دنبال‌کردن symlink) نوشته، fsync و روی گزارش rename می‌شود. پس قطع در هر لحظه گزارش
+اولیه یا گزارش کامل را باقی می‌گذارد؛ هر دو JSON معتبر با `project` و `temporary`‌اند. شکست نوشتن،
+fsync یا rename گزارش قبلی را نگه می‌دارد، فایل خواهر را حذف می‌کند و فقط روی stderr (بدون مسیر)
+اعلام می‌شود؛ تمرین هرگز با چنین شکستی موفق گزارش نمی‌شود و کد خروج غیرصفر است. شکست نوشتن در
+حین پاکسازی هم فراموش نمی‌شود: پاکسازی ادامه می‌یابد، مرحله شکست (بدون مسیر) در `reportWriteFailures`
+می‌ماند و در نوشتن بعدی گزارش (از جمله نوشتن پایانی) ثبت می‌شود و `passed: false` و کد خروج ۱ می‌دهد. نوشتن‌های میانی فقط
+در برابر مرگ فرایند ایمن‌اند؛ تنها نوشتن اولیه و پایانی پوشه والد را هم fsync می‌کنند و تنها برای آن‌ها
+می‌توان ماندگاری پس از قطع برق را ادعا کرد؛ اگر fsync پوشه شکست بخورد، گزارش کامل در جای خود می‌ماند و
+هشدار روی stderr چاپ می‌شود. اگر قطع یا شکست میانه نوشتن رخ دهد، فایل خواهر
+`<report>.<hex>.tmp` با مجوز `0600` ممکن است بماند؛ پس از بررسی حذفش کنید.
+
+هر فرزند در گروه فرایند جدا (`detached`) اجرا می‌شود، پس SIGKILL تمرین فرزندان را نمی‌کشد:
+`docker compose up --wait`، `pg_dump` یا `pnpm db:migrate` ممکن است همچنان منابع بگیرند.
+شناسه گروه (PGID) هر فرزند پیش از انتظار برای آن در `processGroups` گزارش نوشته می‌شود (گروه‌های
+در حال اجرا؛ ورودی تازه‌تمام‌شده ممکن است بماند، پس عضویت را بررسی کنید). پنجره چند میلی‌ثانیه‌ای
+بین ساخت فرزند و نوشتن گزارش ثبت‌نشده می‌ماند. جست‌وجوی `pgrep -f <project>` به‌تنهایی کافی نیست:
+فرزندان migration و build نام پروژه را در argv ندارند. پس از SIGKILL به این ترتیب عمل کنید:
+
+1. فهرست گروه‌ها اجتماع `processGroups` و `orphanProcessGroups` است (گروه بازمانده همیشه در هر دو
+   می‌ماند). برای هر PGID اجرا کنید `ps -o pid,pgid,args -g <PGID>`. خروجی خالی یعنی گروه رفته است.
+   فقط گروهی که فرایندهای همین تمرین را نشان می‌دهد (نه PGID بازمصرف‌شده کاربر یا فرمان دیگر) با
+   `kill -KILL -- -<PGID>` متوقف شود؛ پیش از هر kill همین بررسی را دوباره انجام دهید. هرگز بر پایه الگو
+   (`pkill -f`، `killall`) نکشید.
+2. صبر کنید تا `ps -g` برای همه PGIDها خالی شود و `pgrep -f <project>` هم چیزی نشان ندهد.
+3. فقط سپس `docker compose --project-name <project> --file <temporary>/compose.json down --volumes`.
+4. سپس پوشه `temporary` (فایل‌های SQL و آرشیوهای dump با مجوز `0600`) و فایل‌های خواهر `.tmp` گزارش را حذف کنید.
+
+در اجرای عادی، پایان رهبر گروه (رویداد `exit`، نه بسته‌شدن پایپ‌ها) ملاک است: اگر فرزندی پایپ
+stdout/stderr را نگه دارد، پس از انتظار کوتاه و محدود (۲ ثانیه) گروه کشته می‌شود و تا سقف زمان فرمان
+(تا ۱۰ دقیقه) باقی نمی‌ماند. عضوی که پس از خروج رهبر بماند کشته و در `reapedProcessGroups` ثبت می‌شود.
+گروهی که پس از انتظار محدود باز هم بماند در `processGroups` و `orphanProcessGroups` می‌ماند، سیگنال‌های
+بعدی (حتی در حین پاکسازی) دوباره آن را می‌کشند، پیش از نتیجه پاکسازی یک بار دیگر بررسی می‌شود و
+`cleanup.passed: false` همراه `project` و `temporary` می‌ماند. گروه فقط وقتی از مالکیت خارج می‌شود
+که ناپدیدشدنش تأیید شده باشد. سقف زمان فرمان همیشه شکست است، حتی اگر کد خروج پس از kill صفر باشد
+(`timedOut: true` در شکست خصوصی). اگر نوشتن PGID در گزارش شکست بخورد، فرمان غیر پاکسازی متوقف
+می‌شود، گروهش کشته و ناپدیدشدنش تأیید می‌شود و خطا `Could not record process group` است؛ فرمان پاکسازی
+ادامه می‌یابد. در هر دو حالت `reportWriteFailures` ثبت و نتیجه ناموفق است.
+پاکسازی همیشه به همین ترتیب پایان می‌یابد: ابتدا همه فرمان‌های در حال اجرا (از جمله همتایان فرمانی که
+شکست خورده، مثل بررسی هم‌زمان container، volume و network) تمام و گروه‌هایشان بررسی می‌شود؛ بعد
+`compose down` و فهرست منابع؛ سپس یک بار دیگر هر گروه بازمانده بررسی می‌شود، حتی اگر `down` یا فهرست
+منابع شکست خورده باشد؛ و فقط پس از آن گزارش نهایی نوشته می‌شود. نتیجه این بررسی در
+`cleanup.orphanRetry` (`retried` و `remaining`) و منابع باقی‌مانده یا بررسی‌نشده (فقط نوع منبع، بدون
+شناسه) در `cleanup.leftovers` و `cleanup.unverified` ثبت می‌شود.
+انتظار برای پایان فرمانی که کشته شده به رویدادهای خود فرزند وابسته نیست. هر توقف (سقف زمان، سرریز
+خروجی، ثبت‌نشدن PGID، سیگنال) از یک مسیر می‌گذرد: گروه با SIGKILL کشته می‌شود و مهلت تأیید کشتن
+(`KILL_CONFIRMATION_DEADLINE_MS`، در `scripts/backup-restore-drill-lib.mjs`، ۱۰ ثانیه) شروع می‌شود. فرزندی
+که در I/O غیرقابل‌وقفه گیر کرده ممکن است پس از SIGKILL هیچ‌گاه `exit`، `close` یا `error` نفرستد. اگر
+مهلت تمام شود و رهبر گروه خارج نشده باشد، فرمان با کد `KILL_UNCONFIRMED` رد می‌شود و در انتظار پایان
+همه فرمان‌ها تمام‌شده حساب می‌شود، پس پاکسازی و گزارش نهایی منتظر آن نمی‌مانند. PGID آن بدون تأیید می‌ماند: در
+`unconfirmedProcessGroups` (`pgid`، `stage`، `reason`)، در `processGroups` و `orphanProcessGroups` ثبت
+می‌شود و بررسی دوباره پیش از نتیجه پاکسازی آن را می‌آزماید؛ تا وقتی ناپدیدشدنش تأیید نشود
+`cleanup.passed` برابر `false` است. برای چنین گروهی همان مراحل بازیابی بالا (`ps -g`، سپس `kill -KILL`)
+را دنبال کنید؛ اگر فرایند در حالت `D` بماند فقط راه‌اندازی مجدد میزبان آن را آزاد می‌کند.
+بازیابی خودکار: `scripts/backup-restore-drill --cleanup-from /path/to/report.json` فقط وقتی عمل می‌کند که
+گزارش را با وضعیت واقعی ماشین اثبات کند و در غیر این صورت با کد خروج ۲ رد می‌کند (گزارش گم‌شده، ناخوانا،
+JSON ناقص یا بدون مالکیت «کاری نیست» نیست). گزارش باید فایل عادی خصوصی همین کاربر باشد (`0600`، بدون
+دنبال‌کردن symlink) و `project`، `temporary` و `recoveryId` را با همان شکل‌هایی داشته باشد که تمرین می‌سازد.
+پوشه `temporary` باید مستقیماً زیر `TMPDIR`، دایرکتوری واقعی و خصوصی باشد (symlink رد می‌شود) و
+نشانگر `recovery.json` در آن، که تمرین پیش از هر چیز دیگر می‌نویسد، باید همان پروژه، شناسه و نام پوشه را
+بگوید؛ پس گزارش پروژه A با پوشه پروژه B رد می‌شود. `compose.json` باید فایل عادی (نه symlink) باشد و تعریفش
+دقیقاً تعریف همین پروژه: دو سرویس `source` و `restored` با نام container پروژه، حجم‌های نام‌دار، پورت
+loopback و mount فقط‌خواندنی init؛ هر کلید یا mount دیگر (privileged، bind به میزبان، include) پیش از آنکه
+Compose فایل را بخواند رد می‌شود. همین بررسی پیش از `compose down` در پایان اجرای عادی هم انجام می‌شود، پس
+پاکسازی عادی و بازیابی یک مرز مشترک دارند. گروه‌های فرایند ثبت‌شده (`processGroups`،
+`orphanProcessGroups`، `unconfirmedProcessGroups`) فقط وقتی کشته می‌شوند که محیط هر عضو زنده آن‌ها (از
+`/proc`، فقط لینوکس) `RASTA_DRILL_RECOVERY_ID` همین اجرا را داشته باشد؛ هرگز بر پایه نام یا خط فرمان. گروهی
+که اثبات نشود سیگنال نمی‌گیرد و بازیابی با کد ۱ ناموفق می‌شود. کد خروج ۰ یعنی چیزی باقی نیست، ۱ یعنی منبعی
+یا گروهی ماند یا بررسی نشد (پوشه و گزارش برای تلاش دوباره می‌مانند) و ۲ یعنی گزارش رد شد. استثنا: پوشه
+`temporary` وجود ندارد و خود گزارش `cleanup.passed: true` را دارد؛ آن‌گاه فقط برچسب منابع پروژه بررسی می‌شود.
+بازیابی هیچ‌گاه گزارش را بازنویسی نمی‌کند و پیام‌هایش مسیر، نام یا شناسه‌ای از گزارش را تکرار نمی‌کنند.
+فرزندهای خود بازیابی هم ثبت می‌شوند، در هر بار اجرا و حتی وقتی پوشه `temporary` دیگر وجود ندارد: بلافاصله پس از هر
+spawn شناسه گروهشان در دفترچه جداگانه `<report>.recovery-journal.json` می‌آید و همان `RASTA_DRILL_RECOVERY_ID` را
+دارند. این دفترچه کنار گزارش است و بیرون از پوشه‌ای که بازیابی حذف می‌کند (نوشتن اتمی با فایل موقت، `fsync` فایل و
+پوشه، و `rename`). اگر خود بازیابی با SIGKILL کشته شود، بازیابی بعدی پیش از هر کار دیگر گروه‌های دفترچه را با
+همان اثبات می‌کشد و تا وقتی گروهی زنده باشد موفقیت گزارش نمی‌کند؛ گزارش اصلی تغییر نمی‌کند. نقطه‌های بازرسی هم در
+همین دفترچه‌اند: `recovered` پیش از حذف پوشه و `removed` پس از آن. پس تلاش دوباره پس از قطع در هر مرحله حذف (نشانگر
+یا خود پوشه رفته، یا خروج به فراخواننده نرسیده) به‌جای رد شدن کار را تمام می‌کند و بدون پرسیدن از Docker موفق می‌شود.
+شکست نوشتن دفترچه یا گزارش، از جمله شکست `fsync` فایل یا پوشه، چسبنده است: آن بازیابی دیگر هرگز با کد ۰ تمام نمی‌شود و
+چیزی را بیشتر حذف نمی‌کند، حتی اگر نوشتن‌های بعدی موفق باشند. هر اجرا و هر بازیابی یک گزارش قفل انحصاری
+(فایل‌های `<report>.lock.<hex>` کنار گزارش) را تا پایان عمرش نگه می‌دارد؛ بازیابی دوم، یا بازیابی هم‌زمان با اجرای
+زنده، تا ۳۰ ثانیه منتظر می‌ماند و سپس با کد ۲ و یک پیام ثابت رد می‌شود. قفل بازمانده از فرایند کشته‌شده فقط وقتی
+برداشته می‌شود که نبودن صاحبش اثبات شود (شناسه فرایند و زمان شروع آن، بوت و فضای نام)؛ حالت نامشخص هرگز برداشته
+نمی‌شود. محدودیت اعلام‌شده (مدیر پروژه آن را پذیرفته است و راه‌حل مهندسی‌شده‌ای برایش نیست): SIGKILL بین spawn و نوشتن
+همان لحظه دفترچه (یا گزارش) می‌تواند یک گروه را ثبت‌نشده بگذارد. پنجره، یک نوشتن کوچک با دو `fsync` است: چند
+میلی‌ثانیه و روی دیسک کند بیشتر. رزرو پیش از spawn ممکن نیست، چون شناسه گروه همان pid فرزند است و پیش از ساخته‌شدن
+فرزند وجود ندارد؛ یافتن بعدی آن فقط با پیمایش `/proc` بر پایه محیط ممکن می‌شد که با اثبات ضعیف‌تری سیگنال می‌دهد و
+فرایندهای پنهان‌شده با `hidepid` را نمی‌بیند. قفل و دفترچه به مسیر گزارش وابسته‌اند: نسخه کپی‌شده گزارش در مسیر
+دیگر هویت دیگری است و با اصلی هم‌زمان‌سازی نمی‌شود، پس از یک گزارش فقط یک نسخه را به بازیابی بدهید. همه نام‌های کنار گزارش پیش از ساخت هر منبعی رزرو می‌شود: هر فایلی که تمرین یا بازیابی می‌نویسد خود مسیر
+گزارش به‌علاوه یکی از سه پسوند `.recovery-journal.json`، `.lock.<hex>` و `.<hex>.tmp` است، پس مسیر گزارش نباید خودش به
+یکی از این پسوندها ختم شود (مثلاً `R.recovery-journal.json` وقتی `R` در کار است): `--report` و `--cleanup-from` هر دو، پیش
+از ساخت قفل یا هر فایل دیگری، با کد ۲ و یک خط ثابت رد می‌کنند. تمرین عادی گزارش را انحصاری می‌سازد و بلافاصله دفترچه را هم
+انحصاری و با یک «رزرو» می‌سازد (فقط شناسه همین اجرا، بدون گروه و بدون نقطه بازرسی؛ بازیابی آن را «چیزی ثبت نشده» می‌خواند).
+اگر مسیر دفترچه از پیش وجود داشته باشد، چه دفترچه اجرای پایان‌یافته یا ناتمام قبلی، چه فایل ناقص یا بی‌ربط، شروع با کد ۲ و
+یک خط ثابت رد می‌شود و چیزی ساخته یا دست‌خورده نمی‌شود. سیاست انتخاب‌شده: دفترچه باقی‌مانده خودکار بایگانی **نمی‌شود**،
+رد می‌شود؛ برای استفاده دوباره از یک مسیر گزارش، گزارش و دفترچه‌اش را با هم بایگانی یا حذف کنید (گردش‌کار CI هر بار پوشه
+خصوصی تازه می‌سازد، پس به آن برنمی‌خورد). نتیجه: دفترچه اجرای A هیچ‌گاه در بازیابی اجرای B خوانده نمی‌شود و دو گزارش با
+نام‌های هم‌پوشان هیچ فایلی را مشترک ندارند. وضعیت هر گروه سه‌حالته
+است: ناپدیدشده (`kill(-pgid, 0)` ثابت می‌کند)، اثبات‌شده (همه اعضا خوانده و با شناسه مطابق شده‌اند) یا
+نامشخص (هر خطای خواندن `/proc`، فیلد ناقص، عضو بدون شناسه، یا گروه زنده‌ای که هیچ عضوی از آن دیده نمی‌شود).
+گروه نامشخص هرگز سیگنال نمی‌گیرد و هرگز موفقیت حساب نمی‌شود: بازیابی با کد ۱ و پیام ثابتی که فقط شناسه گروه
+را می‌گوید تمام می‌شود. ورودی‌های قابل جایگزینی (گزارش، نشانگر، دفترچه، `compose.json` و دو ورودی خلاصه)
+بدون مسدودشدن باز می‌شوند، فقط اگر فایل عادی باشند خوانده می‌شوند و اندازه‌شان سقف دارد؛ FIFO رد می‌شود.
 هرگز stack مشترک را reset نکنید. شکست حذف پایگاه scratch در `scratchDropFailed` ثبت می‌شود؛
 خطای اصلی جمع‌آوری مدرک حفظ می‌شود و پاکسازی خوشه متعلق به تمرین همچنان انجام می‌شود.
 
@@ -184,10 +309,112 @@ backup، انتقال و نگهداری خارج از میزبان، Kafka و of
 سرویس‌های در حال نوشتن و بازیابی سامانه کامل در دامنه این تمرین نیستند. منبع هیچ
 نویسنده فعال ندارد؛ dumpهای جدا تضمین snapshot توزیع‌شده production نیستند.
 
-برای خودکارسازی ماهانه باید مالک زیرساخت یک job زمان‌بندی‌شده جدا با نگهداری گزارش
-تصویب کند. تست‌های مقایسه و SQL منفی در CI اجرا می‌شوند؛ job مستقل
-`integration-backup-drill` با سقف ۱۰ دقیقه عضو گیت `Integration and security tests` است؛ اجرای کامل تمرین
-زمان‌بندی نشده است. سقف گام آزمون PostgreSQL پنج دقیقه است و افزایش نیافته؛ زمان این job در CI و زمان کامل فرمان ۱۶ پایگاه باید جدا گزارش شوند. جمع `before.schemaDump.milliseconds` و `after.schemaDump.milliseconds` هزینه جمع‌آوری schema را نشان می‌دهد.
+خودکارسازی ماهانه: approved 2026-10-24 (owner), scheduled monthly by
+`backup-drill-monthly.yml` (بخش «Monthly scheduled drill» پایین). تست‌های مقایسه و SQL
+منفی در CI اجرا می‌شوند؛ job مستقل `integration-backup-drill` با سقف ۱۰ دقیقه عضو گیت
+`Integration and security tests` است و فقط این تست‌ها را اجرا می‌کند، نه فرمان کامل
+۱۶ پایگاه. سقف گام آزمون PostgreSQL پنج دقیقه است و افزایش نیافته؛ زمان این job در CI و
+زمان کامل فرمان ۱۶ پایگاه باید جدا گزارش شوند. جمع `before.schemaDump.milliseconds` و
+`after.schemaDump.milliseconds` هزینه جمع‌آوری schema را نشان می‌دهد.
+
+## Monthly scheduled drill
+
+**When.** `.github/workflows/backup-drill-monthly.yml` runs at 03:17 UTC on the 1st of every
+month (`17 3 1 * *`), on demand (Actions → "Backup restore drill (monthly)" → Run workflow,
+or `gh workflow run backup-drill-monthly.yml`), and on a pull request that changes that file
+or `scripts/backup-restore-drill*` (so the change itself proves the job still runs).
+Runs of one ref do not overlap and a running drill is never cancelled (GitHub keeps one pending
+run per group, so a newer pending run replaces an older pending one).
+
+**What it runs.** The same command as an operator, `scripts/backup-restore-drill --report <new
+file>`, on an `ubuntu-latest` runner after `pnpm install --frozen-lockfile`. The CLI owns its two
+PostgreSQL servers (the image pinned in `docker-compose.yml`, the same digest `ci.yml` pins);
+the workflow declares no service container and no database URL. It builds, migrates and seeds all
+databases, adds the synthetic ledger fixture, dumps, restores into a fresh server, and applies
+every gate of this runbook: database coverage, row counts and digests, migrations, database and
+object state, reference allowance, schema fixed point, ledger equality including the
+per-currency totals, wallets/escrow/active holds, the `9007199254740993` amount above the safe
+integer range, and cleanup of the CLI's own containers, networks and volumes.
+
+**Measured duration.** On a GitHub-hosted `ubuntu-latest` runner the drill step took 219 s (run
+40800884574, 2026-10-29: install 28 s, the drill 3 min 39 s; 16 databases, 260 tables, 262
+application rows, 193 migration rows; 7.4 s of schema-dump collection and 31.8 s of reference and
+fixed-point work in total). On the dev host the same command took 703 s. The workflow's limits come
+from those, separately from the 5-minute PostgreSQL test step of `ci.yml`: 20 minutes for the drill
+step (about five times the runner's measurement, under twice the slower host's) and 30 for the job.
+Read the real duration from each run's summary ("total seconds") and move the limits if it
+approaches them.
+
+**What the job shows.** The CLI's stdout (it carries synthetic ledger amounts), stderr and the
+JSON report stay in a private directory under `RUNNER_TEMP` (`backup-drill`, mode 0700); nothing is
+uploaded. Its path is never exported through `GITHUB_ENV` or a step `env:` (GitHub prints those in
+the header of every later step); each step derives it from `RUNNER_TEMP` and the runner masks it
+(`::add-mask::`) before its first use, so it does not reach the log even in a command's error
+message. The log and the job summary come from `scripts/backup-restore-drill-summary.mjs`, which
+builds them from an allowlist (pass/fail per gate, counts, durations, the failing stage and
+database names, the CLI's exit code) and never copies a field from the report by key. Database and
+stage names are accepted only if they are in the service registry
+(`infrastructure/docker/postgres/lib/role-passwords.bash`, the list the drill iterates), and the
+coverage gate compares the databases in the report with that registry, not with a list the report
+carries. A failure of the summary script itself (unreadable registry, a malformed report) prints
+one fixed message and exits 1, never a stack trace. A failing
+run is red: the drill step exits with the CLI's status, the summary step exits non-zero unless
+every gate passed and the CLI status is 0, and the summary names the failing gates. The workflow
+has `permissions: contents: read`, references no secret (the repository is public) and sends no
+alert itself. Its last step runs `scripts/backup-restore-drill --cleanup-from <report>` (also
+after a cancellation or a timeout; see the recovery paragraph above for what it proves before it
+removes or kills anything). A missing, unreadable or unprovable record fails the step (exit 2), and
+so does anything it could not remove (exit 1); the private directory, the recovery record included,
+is deleted only after a cleanup that succeeded.
+One run or recovery of a report at a time: each holds an exclusive lock (`<report>.lock.<hex>` files
+beside the report) for its whole lifetime; a second one waits up to 30 s for a live owner and then
+exits 2 with a fixed line, and a claim left by a killed process is taken over only after its owner is
+proven gone (pid, start time, boot, pid namespace; an unprovable owner is never taken over). Recovery's
+own journal (`<report>.recovery-journal.json`, beside the report, outside the directory it deletes)
+exists for every invocation, also when the directory is already gone, and carries the completion
+checkpoints (`recovered` before the removal, `removed` after), so a retry after any interruption
+finishes or succeeds without asking Docker. A journal or report write that fails, a failed directory
+fsync included, is sticky for that invocation: it never exits 0 and removes nothing more.
+The report's whole artifact namespace is reserved before anything is allocated. Everything a run or
+recovery writes is the report path plus `.recovery-journal.json`, `.lock.<hex>` or `.<hex>.tmp`, so a
+report path that itself ends in one of these (for example `R.recovery-journal.json` while `R` is in
+use) is refused by `--report` and `--cleanup-from` alike with one fixed line and exit 2, before any
+file is created. A normal run then creates the report exclusively and the journal exclusively as a
+reservation (its recovery id only; recovery reads it as "nothing recorded"). If the journal path
+already exists (a journal left by a finished run on that path, an unreadable or unrelated file) the
+start is refused with one fixed line and exit 2, nothing is created and the existing file is not
+touched: **a stale journal is refused, never archived or adopted.** To reuse a report path, archive or
+delete the report together with its journal.
+**Residual, accepted by the project manager:** a SIGKILL between a child's spawn and the synchronous
+write that names its process group (one small write plus two fsyncs: milliseconds, more on a slow
+disk) can leave that one group unrecorded, for the original run's children and recovery's alike. A
+reservation before the spawn is not done: the group id is the child's pid and does not exist yet, and
+finding it again would need a `/proc` sweep by environment alone, which signals on weaker proof than
+the per-group check and misses processes a `hidepid` mount hides. The lock and the journal are keyed
+by the report's path: a copy of a report at another path is another identity.
+Every invocation of the CLI goes through a guarded entry without static imports: a module that cannot
+be loaded (for example a checkout without `pnpm install`) ends in one fixed line and exit 1, never a
+stack trace with source paths; `--cleanup-from` itself needs only Node's built-in modules.
+
+**Who reacts to a red run.** The host's bot watches this workflow's runs and reports a red one to
+the project manager; the infrastructure owner of RUN-003 triages it. Open the run, read the
+summary (failing gates, failed stage, database, exit code), reproduce with the command above in a
+clean worktree, and fix or file the cause. One re-run is fair when the failing stage is an image
+or package download; a second red run is not noise. A red drill is never left until the next
+month: restore capability is unproven while it is red. A month with no run at all is also a
+failure to react to: GitHub disables scheduled workflows of a public repository after 60 days
+without repository activity, so check that the workflow is still enabled when a run is missing.
+
+**What a green run proves.** The tools of this commit restore a logical dump of the seeded
+databases plus a synthetic ledger into a fresh cluster, and every gate above holds there.
+
+**What it does not prove.** Synthetic data only: this is not a production restore, nor a
+restore of production-sized data or roles. Restored writers, services, consumers and publishers
+stay stopped (restored outboxes never publish), so it does not prove runtime tenant isolation,
+event replay or consumer idempotency after a restore, or that a service works against the
+restored databases. The limits in "دامنه اثبات و محدودیت‌ها" above (PITR, WAL archiving, RPO/RTO,
+off-host backup storage and retention, encryption, Keycloak/Temporal, object storage, Kafka
+offsets) apply unchanged to the scheduled run.
 
 ## آزمون منطق مقایسه
 

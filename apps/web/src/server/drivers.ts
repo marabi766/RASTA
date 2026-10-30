@@ -1,5 +1,5 @@
 import { TZDate } from '@date-fns/tz';
-import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
+import { ID_PREFIXES, legacyParse, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -7,6 +7,7 @@ import { BIDI_CONTROL, DISPLAY_TIME_ZONE, normalizePersianText, toLatinDigits } 
 import {
   CHANGE_STATUS_FIELDS,
   CREATE_DRIVER_FIELDS,
+  NOT_A_MEMBER_TEXT,
   UPDATE_DRIVER_FIELDS,
   type ChangeStatusField,
   type ChangeStatusFormValues,
@@ -73,10 +74,10 @@ export function canManageDrivers(roles: readonly string[]): boolean {
 const driverSummarySchema = z.object({
   id: z.string(),
   userId: z.string(),
-  employeeNo: z.string().nullable().default(null),
-  licenceNumber: z.string().nullable().default(null),
-  licenceClass: z.string().nullable().default(null),
-  licenceValidTo: renderableDate.nullable().default(null),
+  employeeNo: z.string().nullable().prefault(null),
+  licenceNumber: z.string().nullable().prefault(null),
+  licenceClass: z.string().nullable().prefault(null),
+  licenceValidTo: renderableDate.nullable().prefault(null),
   status: z.string(),
 });
 
@@ -84,15 +85,15 @@ export type DriverSummary = z.infer<typeof driverSummarySchema>;
 
 const driverPageSchema = z.object({
   items: z.array(driverSummarySchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type DriverPage = z.infer<typeof driverPageSchema>;
 
 const driverDetailSchema = driverSummarySchema.extend({
-  statusReason: z.string().nullable().default(null),
-  notes: z.string().nullable().default(null),
+  statusReason: z.string().nullable().prefault(null),
+  notes: z.string().nullable().prefault(null),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -136,8 +137,9 @@ export const DRIVERS_PER_PAGE = 20;
 export function fetchDrivers(
   session: WebSession,
   query: DriverListQuery = {},
+  limit: number = DRIVERS_PER_PAGE,
 ): Promise<ReadResult<DriverPage>> {
-  const params = new URLSearchParams({ limit: String(DRIVERS_PER_PAGE) });
+  const params = new URLSearchParams({ limit: String(limit) });
   // Only what the caller actually set — an empty filter is a filter nobody
   // asked for.
   if (query.status) params.set('status', query.status);
@@ -334,15 +336,29 @@ export type ParsedCreateDriverForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<CreateDriverField, string>> };
 
 export function parseCreateDriverForm(values: CreateDriverFormValues): ParsedCreateDriverForm {
-  const parsed = createDriverFormSchema.safeParse(values);
+  const parsed = legacyParse(createDriverFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isCreateDriverField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, isCreateDriverField),
+  };
 }
 
 function isCreateDriverField(value: string): value is CreateDriverField {
   return (CREATE_DRIVER_FIELDS as readonly string[]).includes(value);
 }
+
+/**
+ * fleet-service's refusal of a user who is not a live member of this
+ * organization (task 095): `422`, `details[].code` `USER_NOT_A_MEMBER` on
+ * `userId`. One sentence for every way of not being one — no such user, a
+ * member of another organization, a membership that ended — because the
+ * service gives one answer for all of them. Pinned to `membership.ts` by
+ * `drivers.contract.spec.ts`.
+ */
+export const NOT_A_MEMBER_CODE = 'USER_NOT_A_MEMBER';
+export { NOT_A_MEMBER_TEXT };
 
 export const CREATE_DRIVER_FIELD_MAPPING: FieldMapping<CreateDriverField> = {
   paths: {
@@ -355,7 +371,9 @@ export const CREATE_DRIVER_FIELD_MAPPING: FieldMapping<CreateDriverField> = {
   },
   messages: {
     'Driver already exists': 'این کاربر پیش‌تر در این سازمان به‌عنوان راننده ثبت شده است',
+    'The user is not a member of this organization': NOT_A_MEMBER_TEXT,
   },
+  byDetailCode: { [NOT_A_MEMBER_CODE]: NOT_A_MEMBER_TEXT },
 };
 
 export function createDriver(
@@ -419,10 +437,13 @@ export type ParsedUpdateDriverForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<UpdateDriverField, string>> };
 
 export function parseUpdateDriverForm(values: UpdateDriverFormValues): ParsedUpdateDriverForm {
-  const parsed = updateDriverFormSchema.safeParse(values);
+  const parsed = legacyParse(updateDriverFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isUpdateDriverField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, isUpdateDriverField),
+  };
 }
 
 function isUpdateDriverField(value: string): value is UpdateDriverField {
@@ -480,7 +501,7 @@ export function changeStatusFormValues(form: FormData): ChangeStatusFormValues {
 
 export const changeStatusFormSchema = z
   .object({
-    status: z.enum(DRIVER_STATUSES, { errorMap: () => ({ message: 'وضعیت را انتخاب کنید' }) }),
+    status: z.enum(DRIVER_STATUSES, { error: 'وضعیت را انتخاب کنید' }),
     // Required, not optional. A driver barred from work without a recorded
     // reason is a decision nobody can review later (AGENTS.md S-06).
     reason: z
@@ -498,10 +519,13 @@ export type ParsedChangeStatusForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<ChangeStatusField, string>> };
 
 export function parseChangeStatusForm(values: ChangeStatusFormValues): ParsedChangeStatusForm {
-  const parsed = changeStatusFormSchema.safeParse(values);
+  const parsed = legacyParse(changeStatusFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isChangeStatusField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, isChangeStatusField),
+  };
 }
 
 function isChangeStatusField(value: string): value is ChangeStatusField {
@@ -522,7 +546,12 @@ export const CHANGE_STATUS_FIELD_MAPPING: FieldMapping<ChangeStatusField> = {
       'این رکورد را درخواستی دیگر تغییر داد؛ صفحه را تازه کنید و دوباره تلاش کنید',
     'A deactivated driver is terminal; register a new driver record instead':
       'راننده‌ای که از رده خارج شده نهایی است؛ به‌جای آن رانندهٔ تازه ثبت کنید',
+    'The user is not a member of this organization': NOT_A_MEMBER_TEXT,
   },
+  // Reactivating asks fleet-service the registration's question again (task
+  // 095); its refusal names `userId`, which this form has no field for, so it
+  // is shown above the form.
+  byDetailCode: { [NOT_A_MEMBER_CODE]: NOT_A_MEMBER_TEXT },
 };
 
 export function changeDriverStatus(

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 
 /**
  * Whether the owner of an award confirms what `TENDER_AWARDED` claims (ADR-061 § 4,
@@ -40,7 +41,7 @@ export const awardFactSchema = z.object({
   bidderOrganizationId: z.string().min(1).max(128),
   amountMinor: z.string().regex(/^\d{1,19}$/),
   matrixDigest: digest,
-  awardedAt: z.string().datetime({ offset: true }),
+  awardedAt: z.string().check(isoDateTime({ offset: true })),
   awardedBy: z.string().min(1).max(128),
 });
 

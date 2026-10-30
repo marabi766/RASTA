@@ -75,7 +75,8 @@ describe('the view', () => {
   it('derives the state from the timestamps and never stores it', () => {
     expect(stateOf(row)).toBe('UNREAD');
     expect(stateOf({ ...row, readAt: new Date() })).toBe('READ');
-    expect(stateOf({ ...row, readAt: new Date(), dismissedAt: new Date() })).toBe('DISMISSED');
+    const now = new Date();
+    expect(stateOf({ ...row, readAt: now, dismissedAt: now })).toBe('DISMISSED');
   });
 
   it('publishes neither the owner nor the delivery plumbing, and matches its own schema', () => {

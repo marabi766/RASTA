@@ -94,6 +94,50 @@ export function platformAttributesFor(
 }
 
 /**
+ * What a narrowing change writes to Keycloak **before** it commits (ADR-060,
+ * write-ahead addendum, D-064): each attribute keeps only the values it holds
+ * both before and after the change.
+ *
+ * Never wider than either side, so it is safe whichever way the transaction
+ * ends: committed, Keycloak is at most what the rows now grant, and the
+ * projection after commit writes `after` in full; rolled back, it is at most
+ * what they granted all along. A removed role, a revoked or lapsed
+ * organization and an active organization that moves are all absent from it;
+ * a role added in the same change waits for the projection after commit.
+ * Every other organization of the user — their roles there, and an active
+ * organization that does not move — is in both, and is written unchanged.
+ */
+export function intersectAttributes(
+  before: PlatformAttributes,
+  after: PlatformAttributes,
+): PlatformAttributes {
+  const both = (name: PlatformAttributeName) =>
+    before[name].filter((value) => after[name].includes(value));
+  return {
+    rasta_user_id: both('rasta_user_id'),
+    organization_ids: both('organization_ids'),
+    organization_roles: both('organization_roles'),
+    active_organization_id: both('active_organization_id'),
+  };
+}
+
+/** Whether `narrower` holds no value `wider` does not, in any of the four attributes. */
+export function isWithin(narrower: PlatformAttributes, wider: PlatformAttributes): boolean {
+  return PLATFORM_ATTRIBUTE_NAMES.every((name) =>
+    narrower[name].every((value) => wider[name].includes(value)),
+  );
+}
+
+/**
+ * Whether two attribute sets hold the same values, order aside: what a write
+ * carried against what is committed (D-069 — a fence is cleared only when
+ * Keycloak holds the committed state).
+ */
+export function sameAttributes(a: PlatformAttributes, b: PlatformAttributes): boolean {
+  return isWithin(a, b) && isWithin(b, a);
+}
+
+/**
  * The attributes of an account no decision has granted anything yet: its
  * provenance alone. What a registration approval creates its account with,
  * and what the orphan repair leaves one with (#219 r2).

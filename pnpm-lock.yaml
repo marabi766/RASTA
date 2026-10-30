@@ -4,6 +4,12 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+catalogs:
+  default:
+    zod:
+      specifier: 4.6.7
+      version: 4.6.7
+
 overrides:
   deepmerge-ts: ^8.0.0
   js-yaml@>=3.0.0 <3.15.2: 3.15.2
@@ -15,6 +21,7 @@ overrides:
   brace-expansion@>=2.0.0 <2.1.7: 2.1.7
   brace-expansion@>=4.0.0 <5.0.12: 5.0.12
   '@grpc/grpc-js@>=1.14.0 <1.14.5': 1.14.5
+  systeminformation@<5.33.16: 5.33.16
   proxy-addr@<2.0.8: 2.0.8
   qs@>=6.0.0 <6.16.0: 6.16.0
   js-yaml@>=5.0.0 <5.4.1: 5.4.2
@@ -22,6 +29,9 @@ overrides:
   sharp@<0.35.5: 0.35.5
   source-map-js@<1.2.2: 1.2.2
   body-parser@<2.4.0: 2.4.0
+
+patchedDependencies:
+  zod@4.6.7: 6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2
 
 importers:
 
@@ -77,7 +87,7 @@ importers:
         version: 1.5.0
       '@hookform/resolvers':
         specifier: ^5.9.1
-        version: 5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@3.25.76)
+        version: 5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2))
       '@radix-ui/react-label':
         specifier: ^2.1.15
         version: 2.1.15(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -118,8 +128,8 @@ importers:
         specifier: ^3.7.0
         version: 3.7.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@axe-core/playwright':
         specifier: ^4.13.0
@@ -127,6 +137,9 @@ importers:
       '@playwright/test':
         specifier: ^1.62.1
         version: 1.62.1
+      '@rasta/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
       '@swc/core':
         specifier: ^1.10.7
         version: 1.16.1(@swc/helpers@0.5.23)
@@ -191,8 +204,8 @@ importers:
         specifier: workspace:*
         version: link:../contracts
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@swc/core':
         specifier: ^1.10.7
@@ -219,8 +232,8 @@ importers:
   packages/contracts:
     dependencies:
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@swc/core':
         specifier: ^1.10.7
@@ -299,8 +312,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/common':
         specifier: ^11.0.0
@@ -515,8 +528,8 @@ importers:
         specifier: ^7.8.1
         version: 7.8.2
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -615,8 +628,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@rasta/testing':
         specifier: workspace:*
@@ -709,8 +722,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -806,8 +819,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -906,8 +919,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1006,8 +1019,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1112,8 +1125,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1209,8 +1222,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1306,8 +1319,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1406,8 +1419,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1506,8 +1519,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1606,8 +1619,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1715,8 +1728,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1818,8 +1831,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -1918,8 +1931,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -2018,8 +2031,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -2118,8 +2131,8 @@ importers:
         specifier: ^2.3.0
         version: 2.4.0
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: 'catalog:'
+        version: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -2175,6 +2188,9 @@ importers:
       '@rasta/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@rasta/testing':
+        specifier: workspace:*
+        version: link:../../packages/testing
       '@types/node':
         specifier: ^22.18.14
         version: 22.20.1
@@ -7291,8 +7307,8 @@ packages:
   symbol-tree@3.2.4:
     resolution: {integrity: sha512-9QNk5KwDF+Bvz+PyObkmSYjI5ksVUYtjW7AU22r2NKcfLJcXp96hkDWU3+XndOsUb+AQ9QhfzfCT2O+CNWT5Tw==}
 
-  systeminformation@5.33.4:
-    resolution: {integrity: sha512-poXpX8M9NBll1NDMW1ho6qRFkjrlttfm8E/YtPmn5x0TQ1z8LoJUHg9kwr/sRDmCjktqfnFRxqsoUNpaRakeMQ==}
+  systeminformation@5.33.16:
+    resolution: {integrity: sha512-R+Lh69IJXfJj6bfyH1In5cIR9FTr4hBS39YvlZHZjsK1p9cuELPq7hplZZIb56ZESMMb+DzdKqqE6Iomi01Mvg==}
     engines: {node: '>=10.0.0'}
     os: [darwin, linux, win32, freebsd, openbsd, netbsd, sunos, android]
     hasBin: true
@@ -7632,8 +7648,8 @@ packages:
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
 snapshots:
 
@@ -8172,7 +8188,7 @@ snapshots:
       protobufjs: 7.6.5
       yargs: 17.7.3
 
-  '@hookform/resolvers@5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@3.25.76)':
+  '@hookform/resolvers@5.9.1(@sinclair/typebox@0.34.52)(@standard-schema/spec@1.1.0)(ajv-formats@2.1.1(ajv@8.20.0))(ajv@8.20.0)(effect@3.21.0)(react-hook-form@7.88.0(react@19.3.0))(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2))':
     dependencies:
       '@standard-schema/utils': 0.3.0
       react-hook-form: 7.88.0(react@19.3.0)
@@ -8182,7 +8198,7 @@ snapshots:
       ajv: 8.20.0
       ajv-formats: 2.1.1(ajv@8.20.0)
       effect: 3.21.0
-      zod: 3.25.76
+      zod: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -9126,7 +9142,7 @@ snapshots:
     dependencies:
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/instrumentation': 0.221.0(@opentelemetry/api@1.9.1)(supports-color@8.1.1)
-      systeminformation: 5.33.4
+      systeminformation: 5.33.16
     transitivePeerDependencies:
       - supports-color
 
@@ -11161,8 +11177,8 @@ snapshots:
       '@babel/parser': 7.29.8
       eslint: 9.39.5(jiti@2.7.0)(supports-color@8.1.1)
       hermes-parser: 0.25.1
-      zod: 3.25.76
-      zod-validation-error: 4.0.2(zod@3.25.76)
+      zod: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
+      zod-validation-error: 4.0.2(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2))
     transitivePeerDependencies:
       - supports-color
 
@@ -13338,7 +13354,7 @@ snapshots:
 
   symbol-tree@3.2.4: {}
 
-  systeminformation@5.33.4: {}
+  systeminformation@5.33.16: {}
 
   tailwind-merge@3.7.0: {}
 
@@ -13707,8 +13723,8 @@ snapshots:
 
   yocto-queue@0.1.0: {}
 
-  zod-validation-error@4.0.2(zod@3.25.76):
+  zod-validation-error@4.0.2(zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)):
     dependencies:
-      zod: 3.25.76
+      zod: 4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2)
 
-  zod@3.25.76: {}
+  zod@4.6.7(patch_hash=6881d21a929a9c0d2077f40088d0061d9dfce76b5a73ac4bf83097ac8c2ad7c2): {}

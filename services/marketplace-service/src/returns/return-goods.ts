@@ -1,7 +1,8 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -61,7 +62,7 @@ const withdrawalAnswerSchema = z.discriminatedUnion('outcome', [
     outcome: z.literal('WITHDRAWN'),
     returnRequestId: z.string().min(1),
     reservationId: z.string().min(1),
-    withdrawnAt: z.string().datetime({ offset: true }),
+    withdrawnAt: z.string().check(isoDateTime({ offset: true })),
     returnShipment: z.null(),
   }),
   z.object({
@@ -163,16 +164,13 @@ export class ReturnGoodsClient implements ReturnGoodsOwner {
     path: string,
     payload: Record<string, string> | undefined,
   ): Promise<unknown> {
-    const token = await this.options.tokens.issue(
-      SERVICE_NAME,
-      INVENTORY_SERVICE,
-      'SERVICE',
+    const sender = await new InternalHttpClient(this.options.tokens, this.fetchImpl).authorize({
+      from: SERVICE_NAME,
+      to: INVENTORY_SERVICE,
+      purpose: 'SERVICE',
       organizationId,
-    );
-    const headers: Record<string, string> = {
-      accept: 'application/json',
-      'x-internal-token': token,
-    };
+    });
+    const headers: Record<string, string> = { accept: 'application/json' };
     if (payload) headers['content-type'] = 'application/json';
     const context = tryGetContext();
     if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
@@ -183,7 +181,7 @@ export class ReturnGoodsClient implements ReturnGoodsOwner {
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     timer.unref?.();
     try {
-      const response = await internalFetch(
+      const response = await sender.send(
         `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/return-requests/${path}`,
         {
           method,
@@ -191,7 +189,6 @@ export class ReturnGoodsClient implements ReturnGoodsOwner {
           signal: controller.signal,
           ...(payload ? { body: JSON.stringify(payload) } : {}),
         },
-        this.fetchImpl,
       );
       if (response.status !== 200) {
         await response.body?.cancel().catch(() => undefined);

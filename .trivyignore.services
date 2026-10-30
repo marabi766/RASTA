@@ -1,15 +1,27 @@
-# Time-boxed exception for the Rasta service image scans (ci.yml job
-# `containers`, step "Scan image"). It mirrors, and must be deleted together
-# with, the `auditConfig.ignoreGhsas` entry for GHSA-mrhx-c7xc-m3w5 in
-# pnpm-workspace.yaml (#373), where the reasoning is recorded in full.
+# Time-boxed exceptions for the Rasta service image scans (ci.yml job
+# "Build and scan images", step "Scan image"). One entry per CVE, each with
+# the reason it is not reachable and an expiry date; an expired entry turns
+# the scan red again on its own.
 #
-# CVE-2023-54404 is the same advisory as GHSA-mrhx-c7xc-m3w5 (zod <4.6.6,
-# memory exhaustion while validating an oversized array). Trivy's database
-# started reporting it against the zod 3.25.76 inside every service image on
-# 2026-10-24; the dependency audit has ignored it since 2026-10-23. The only
-# fix is the zod 4 migration (W#1 task 087), not an override. Reached at
-# runtime, bounded by each service's JSON body limit (16 kb to 512 kb).
-# Expires on its own: on 2026-10-30, the same re-check date as the audit
-# entry, every service image scan fails again unless the migration has
-# merged (delete this file) or the exception is re-reviewed.
-CVE-2023-54404 exp:2026-10-30
+# CVE-2026-115905 (CRITICAL, 2026-10-29 in CI) — Rust `zip` crate 8.5.1, listed
+# in node_modules/@temporalio/core-bridge@1.23.0/Cargo.lock (marketplace-service
+# image). Inside sdk-core the crate is used only by `ephemeral_server`, which
+# downloads and unpacks a local Temporal dev/test server archive; that path is
+# reached only through @temporalio/testing (a devDependency) and never by the
+# production worker or client, which connect to the deployed Temporal
+# frontend. The fix (zip 9.0.5) ships in @temporalio/core-bridge 1.25.0,
+# published 2026-10-27 — younger than the seven-day minimum release age until
+# 2026-11-03 18:28 UTC. Expires 2026-11-04: by then bump every @temporalio/*
+# package to 1.25.0 (lockfile shows core-bridge 1.25.0) and delete this entry
+# and, if it is the last one, this file and the `trivyignores` input.
+CVE-2026-115905 exp:2026-11-04
+#
+# CVE-2026-115907, CVE-2026-115908, CVE-2026-115909 (HIGH, 2026-10-29 in CI) —
+# the same `zip` 8.5.1 in the same core-bridge Cargo.lock (115908: a file
+# written outside the extraction directory). Same single use, the same
+# ephemeral_server archive unpacking reached only through @temporalio/testing,
+# so not by the production worker or client; fixed in zip 9.0.0, which the
+# same core-bridge 1.25.0 bump brings. Same expiry, removed with that bump.
+CVE-2026-115907 exp:2026-11-04
+CVE-2026-115908 exp:2026-11-04
+CVE-2026-115909 exp:2026-11-04

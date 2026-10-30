@@ -1,8 +1,19 @@
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { releaseWithin } from '@rasta/nest-common';
+import {
+  ISO_INSTANT_SHAPE,
+  SEMVER_SHAPE,
+  TRACEPARENT_SHAPE,
+  ULID_SHAPE,
+  envelopeShape,
+  exactly,
+  expectStoredMessageWithout,
+  optional,
+  wholly,
+} from '@rasta/testing';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { validateInventoryPayload, type InventoryEventName } from '../src/events/events';
-import { client, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
+import { actor, client, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, newOrganizationId } from './helpers';
 
 /**
@@ -88,15 +99,73 @@ describe('the transactional outbox', () => {
 
   it('carries no warehouse name or location — identifiers, quantities and instants only', async () => {
     const a = org();
-    const owner = client(api, orgAdmin(a));
-    await owner.createWarehouse({
-      name: 'Very identifiable name',
-      location: { latitude: 35.7, longitude: 51.4 },
+    const creator = 'USR-APITEST-OUTBOX';
+    const owner = client(api, actor(a, ['ORGANIZATION_ADMIN'], { rastaUserId: creator }));
+    const name = 'Very identifiable name';
+    const location = { latitude: 35.689197, longitude: 51.388974 };
+    const created = await owner.createWarehouse({ name, location });
+    expect(created.status).toBe(201);
+
+    // The one event this command wrote — never an empty list read as "nothing disclosed".
+    const rows = await outboxOf(a);
+    expect(rows.map((row) => row.eventName)).toEqual(['WAREHOUSE_CREATED']);
+    const envelope = eventEnvelopeSchema.parse(rows[0]?.payload);
+
+    // The exact allowed fields, with the values they must hold. Nothing else may be there, so no
+    // name, no coordinate, rounded or not, and no new field can pass unseen. The schema is strict
+    // too (events.ts warehouseCreatedPayload); this pins the contract independently of it.
+    expect(envelope.payload).toEqual({
+      warehouseId: created.body.id,
+      organizationId: a,
+      createdBy: creator,
+      createdAt: expect.stringMatching(ISO_INSTANT_SHAPE),
     });
-    const [row] = await outboxOf(a);
-    const text = JSON.stringify(row?.payload);
-    expect(text).not.toContain('Very identifiable name');
-    expect(text).not.toContain('35.7');
+
+    // The whole stored message, envelope included, pinned and searched at every depth: the exact
+    // shape (an unknown key anywhere, `actor` too, is a failure; only `occurredAt` and `createdAt`
+    // are exempt from the search, and must hold a strict instant), and the name and both
+    // coordinates nowhere in it — as a value, part of one, a property NAME, or a number written
+    // another way — and no number or decimal word within 0.5 of either coordinate, so a rounded
+    // one fails too. Envelope parsing strips an unknown key, so only the raw row shows it. Never
+    // as a substring of its JSON: that text carries ULIDs and instants, and a short coordinate
+    // such as "35.7" occurs inside "…:35.712Z" about one run in 600 (train run 40130819112).
+    expectStoredMessageWithout(rows[0]?.payload, {
+      anywhere: [name, String(location.latitude), String(location.longitude)],
+      numbers: [location.latitude, location.longitude],
+      near: { values: [location.latitude, location.longitude], within: 0.5 },
+      shape: envelopeShape(
+        {
+          warehouseId: exactly(created.body.id),
+          organizationId: exactly(a),
+          createdBy: exactly(creator),
+          createdAt: 'instant',
+        },
+        // Every envelope string is pinned, so no text can be appended to one (`… location:35.7/51.4`,
+        // `{"lat":35.7}`: punctuation that no tokenizer is sure to split on): by the value this test
+        // itself knows, or by a strict whole-value shape for what the writer makes — the request's
+        // correlation id is minted by the service (a ULID), the version is `SERVICE_VERSION` or its
+        // default, a trace id exists only under a tracer, hence optional. No cause, no aggregate
+        // version: the command passes none.
+        {
+          eventId: exactly(rows[0]?.id as string),
+          eventName: exactly('WAREHOUSE_CREATED'),
+          eventVersion: exactly(1),
+          producer: exactly('inventory-service'),
+          producerVersion: wholly(SEMVER_SHAPE),
+          aggregateType: exactly('Warehouse'),
+          aggregateId: exactly(created.body.id),
+          aggregateVersion: null,
+          tenantId: exactly(a),
+          correlationId: wholly(ULID_SHAPE),
+          causationId: null,
+          traceparent: optional(wholly(TRACEPARENT_SHAPE)),
+          actor: { type: exactly('USER'), id: exactly(creator) },
+          anonymous: null,
+          streamSeq: exactly(1),
+          streamKey: exactly(created.body.id),
+        },
+      ),
+    });
   });
 
   it('writes nothing when a command is refused', async () => {

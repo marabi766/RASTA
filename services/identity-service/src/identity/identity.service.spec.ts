@@ -1,9 +1,10 @@
-import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
+import { RastaError, getContext, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { TEST_ORG_A, TEST_ORG_B, TEST_USER_A, TEST_USER_B } from '@rasta/testing';
 import { IdentityService } from './identity.service';
 import type { IdentityRepository } from './identity.repository';
 import type { KeycloakAdminClient } from '../keycloak/keycloak.client';
 import { KeycloakProjector } from '../keycloak/keycloak.projector';
+import type { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
 import { IDENTITY_EVENTS } from './events';
 import { REFUSAL_SITES, refusalSiteOf } from '../security-events/refusal-sites';
 import { DEFAULT_ROLE_GRANT_POLICY, assertMayGrantRoles } from './role-grants';
@@ -67,11 +68,13 @@ interface Harness {
   service: IdentityService;
   repository: jest.Mocked<IdentityRepository>;
   keycloak: jest.Mocked<KeycloakAdminClient>;
+  fences: jest.Mocked<KeycloakWriteFences>;
   enqueued: Array<{ eventName: string; payload: unknown }>;
 }
 
 function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harness {
   const enqueued: Array<{ eventName: string; payload: unknown }> = [];
+  const intents: Record<string, Record<string, unknown>> = {};
 
   const tx = {
     user: { create: jest.fn(), update: jest.fn() },
@@ -97,18 +100,63 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
     findMembership: jest.fn(),
     findMembershipById: jest.fn(),
     listMembershipsForUser: jest.fn(async () => []),
-    lockUserProjection: jest.fn(async () => undefined),
+    // The database's clock, read after the user lock (#402 r1 F3).
+    databaseNow: jest.fn(async () => new Date()),
+    findActivationSource: jest.fn(async () => null),
     // The request row lock a registration decision takes (#219 r2): PENDING here.
     lockRegistrationRequest: jest.fn(async () => ({ status: 'PENDING', userId: 'USR_ANY' })),
     revokeMembership: jest.fn(async () => undefined),
-    lockUserMemberships: jest.fn(async () => ({
-      activeOrganizationId: TEST_ORG_A,
-      now: new Date(),
-    })),
+    lockUserMemberships: jest.fn(async () => ({ activeOrganizationId: TEST_ORG_A })),
     findOrganizationRefs: jest.fn(async () => []),
     listUsersInOrganization: jest.fn(),
+    // The caller's live roles (task 117, F1): by default what the token says,
+    // so the tests of everything else read as they did; `live-authority` tests
+    // set the two apart.
+    findLiveRoles: jest.fn(async () =>
+      getContext().roles.filter((role) => role !== 'SYSTEM_ADMIN'),
+    ),
+    // Access proof for another person (F3): whatever `findMembership` answers.
+    findLiveMembership: jest.fn((...args: Parameters<IdentityRepository['findMembership']>) =>
+      repository.findMembership(args[0], args[1]),
+    ),
+    // A direct provisioning's intent (F6): one per key, held here.
+    claimProvisioningIntent: jest.fn(
+      async (_tx: unknown, input: Record<string, unknown>) =>
+        (intents[String(input.idempotencyKey)] ??= {
+          ...input,
+          completedAt: null,
+          responseBody: null,
+        }),
+    ),
+    lockProvisioningIntent: jest.fn(
+      async (_tx: unknown, _actor: string, key: string) => intents[key] ?? null,
+    ),
+    completeProvisioningIntent: jest.fn(
+      async (_tx: unknown, _actor: string, key: string, response: unknown) => {
+        intents[key] = { ...intents[key], completedAt: new Date(), responseBody: response };
+      },
+    ),
     ...overrides,
   } as unknown as jest.Mocked<IdentityRepository>;
+  // Every user lock of an administration write, the caller's beside the
+  // target's (`lockUsersInOrder`): the targets' through `lockUserMemberships`.
+  (repository as unknown as Record<string, unknown>).lockUsersInOrder ??= jest.fn(
+    async (lockTx: unknown, targets: string[]) =>
+      new Map(
+        await Promise.all(
+          targets.map(
+            async (target) =>
+              [target, await repository.lockUserMemberships(lockTx as never, target)] as const,
+          ),
+        ),
+      ),
+  );
+  // A revocation reads ended memberships too (sent again, it answers as it
+  // did): here the same rows as `findMembershipById`, whatever a test mocks.
+  (repository as unknown as Record<string, unknown>).findMembershipByIdIncludingRevoked ??= jest.fn(
+    (...args: Parameters<IdentityRepository['findMembershipById']>) =>
+      repository.findMembershipById(...args),
+  );
 
   const keycloak = {
     enabled: true,
@@ -120,12 +168,22 @@ function harness(overrides: Partial<jest.Mocked<IdentityRepository>> = {}): Harn
 
   // The real projector over the mocked repository and client, so these tests
   // see exactly the attribute set a membership change writes.
-  const projector = new KeycloakProjector(repository, keycloak);
+  // No fence is live (D-069); the mocked client opens none, so there is
+  // nothing to release or settle.
+  const fences = {
+    ofUser: jest.fn(async () => []),
+    open: jest.fn(),
+    release: jest.fn(async () => true),
+    settle: jest.fn(async () => undefined),
+    markAccountMissing: jest.fn(async () => undefined),
+  } as unknown as jest.Mocked<KeycloakWriteFences>;
+  const projector = new KeycloakProjector(repository, keycloak, fences);
 
   return {
     service: new IdentityService(repository, keycloak, projector),
     repository,
     keycloak,
+    fences,
     enqueued,
   };
 }
@@ -190,10 +248,7 @@ describe('switchActiveOrganization', () => {
 
   it('records null as the previous organization when none was active', async () => {
     const h = harness();
-    h.repository.lockUserMemberships.mockResolvedValue({
-      activeOrganizationId: null,
-      now: new Date(),
-    });
+    h.repository.lockUserMemberships.mockResolvedValue({ activeOrganizationId: null });
     h.repository.findMembership.mockResolvedValue(
       membershipRow({ organizationId: TEST_ORG_B }) as never,
     );
@@ -239,10 +294,7 @@ describe('switchActiveOrganization', () => {
       }) as never,
     );
     // The application clock says the membership is live; the database says not.
-    h.repository.lockUserMemberships.mockResolvedValue({
-      activeOrganizationId: TEST_ORG_A,
-      now: new Date('2026-06-01T00:00:00.000Z'),
-    });
+    h.repository.databaseNow.mockResolvedValue(new Date('2026-06-01T00:00:00.000Z'));
     const tx = h.repository.client as unknown as { user: { update: jest.Mock } };
 
     await expect(
@@ -353,14 +405,17 @@ describe('createUser', () => {
 
     const error = await runWithContext(context(), () =>
       h.service
-        .createUser({
-          username: 'someone',
-          email: 'someone@rasta.local',
-          firstName: 'A',
-          lastName: 'B',
-          organizationId: TEST_ORG_A,
-          roles: ['OPERATOR'],
-        })
+        .createUser(
+          {
+            username: 'someone',
+            email: 'someone@rasta.local',
+            firstName: 'A',
+            lastName: 'B',
+            organizationId: TEST_ORG_A,
+            roles: ['OPERATOR'],
+          },
+          'itest-key',
+        )
         .catch((e: unknown) => e),
     );
 
@@ -379,14 +434,17 @@ describe('createUser', () => {
     client.membership.create.mockResolvedValue(membershipRow());
 
     await runWithContext(context(), () =>
-      h.service.createUser({
-        username: 'new.user',
-        email: 'new.user@rasta.local',
-        firstName: 'نو',
-        lastName: 'کاربر',
-        organizationId: TEST_ORG_A,
-        roles: ['OPERATOR'],
-      }),
+      h.service.createUser(
+        {
+          username: 'new.user',
+          email: 'new.user@rasta.local',
+          firstName: 'نو',
+          lastName: 'کاربر',
+          organizationId: TEST_ORG_A,
+          roles: ['OPERATOR'],
+        },
+        'itest-key',
+      ),
     );
 
     expect(h.enqueued.map((e) => e.eventName)).toEqual([
@@ -394,8 +452,13 @@ describe('createUser', () => {
       IDENTITY_EVENTS.MEMBERSHIP_CREATED,
     ]);
     // The events go through the same transaction callback as the writes, which
-    // is what the outbox guarantee rests on.
-    expect(h.repository.transaction).toHaveBeenCalledTimes(1);
+    // is what the outbox guarantee rests on. The first transaction commits the
+    // provisioning's intent before Keycloak is called (task 117, F6); the
+    // second reconciles it under its lock (task 130, R3); the fourth is the
+    // projection after commit, which writes the grants and enables the
+    // account (D-069 addendum D).
+    expect(h.repository.transaction).toHaveBeenCalledTimes(4);
+    expect(h.enqueued).toHaveLength(2);
   });
 });
 
@@ -404,6 +467,7 @@ describe('updateMembershipRoles', () => {
     // The gateway consumes this to drop its cached permissions. Without the
     // event, a revoked role keeps working until the cache TTL expires.
     const h = harness();
+    h.repository.findUserById.mockResolvedValue(userRow() as never);
     h.repository.findMembershipById.mockResolvedValue(
       membershipRow({ roles: ['FLEET_MANAGER', 'PROCUREMENT_USER'] }) as never,
     );
@@ -443,6 +507,7 @@ describe('updateMembershipRoles', () => {
 
   it('emits both when roles are exchanged', async () => {
     const h = harness();
+    h.repository.findUserById.mockResolvedValue(userRow() as never);
     h.repository.findMembershipById.mockResolvedValue(
       membershipRow({ roles: ['OPERATOR'] }) as never,
     );
@@ -611,10 +676,12 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
       membership: { update: jest.Mock; findFirst: jest.Mock };
     };
 
-  it('creates the account with all four attributes, rasta_user_id included', async () => {
-    // Before, only the two organization attributes were written — and on
+  it('creates the account disabled with its provenance, then projects all four attributes after commit (D-069 addendum D)', async () => {
+    // Before #219, only the two organization attributes were written — and on
     // Keycloak 26 not even those survived — so every API-provisioned token fell
-    // back to `sub` for its user id and carried no organization at all.
+    // back to `sub` for its user id. Before D-069 the account was created
+    // enabled and granting, ahead of a transaction that might not commit; now
+    // it is created harmless, and the grants follow the committed rows.
     const h = harness();
     h.repository.findUserByUsernameOrEmail.mockResolvedValue(null as never);
     const client = h.repository.client as unknown as {
@@ -625,52 +692,80 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
     client.membership.create.mockResolvedValue(membershipRow());
 
     await runWithContext(context(), () =>
-      h.service.createUser({
-        username: 'new.user',
-        email: 'new.user@rasta.local',
-        firstName: 'نو',
-        lastName: 'کاربر',
-        organizationId: TEST_ORG_A,
-        roles: ['OPERATOR', 'DRIVER'],
-      }),
+      h.service.createUser(
+        {
+          username: 'new.user',
+          email: 'new.user@rasta.local',
+          firstName: 'نو',
+          lastName: 'کاربر',
+          organizationId: TEST_ORG_A,
+          roles: ['OPERATOR', 'DRIVER'],
+        },
+        'itest-key',
+      ),
     );
 
-    const input = (h.keycloak.createUser as unknown as jest.Mock).mock.calls[0]![0] as {
-      attributes: Record<string, string[]>;
-    };
-    const created = (client.user.create.mock.calls[0]![0] as { data: { id: string } }).data;
-    expect(input.attributes).toEqual({
-      rasta_user_id: [created.id],
-      organization_ids: [TEST_ORG_A],
-      organization_roles: [`${TEST_ORG_A}:DRIVER`, `${TEST_ORG_A}:OPERATOR`],
-      active_organization_id: [TEST_ORG_A],
+    const input = (h.keycloak.createUser as unknown as jest.Mock).mock.calls[0]![0] as Record<
+      string,
+      unknown
+    >;
+    const created = (
+      client.user.create.mock.calls[0]![0] as {
+        data: { id: string; keycloakId: string; accountActivationPending: boolean };
+      }
+    ).data;
+    // Nothing to ask for but the provenance: the client creates it disabled.
+    expect(input).toEqual({
+      username: 'new.user',
+      email: 'new.user@rasta.local',
+      firstName: 'نو',
+      lastName: 'کاربر',
+      userId: created.id,
     });
+    expect(created).toMatchObject({ keycloakId: 'kc-new', accountActivationPending: true });
+    // The account's grants, written by the projection after commit, from the
+    // committed rows.
+    expect(h.keycloak.createUser).toHaveBeenCalledTimes(1);
+    expect(
+      // The intent, its reconciliation, then the user's: after the create.
+      (h.repository.transaction as unknown as jest.Mock).mock.invocationCallOrder[2],
+    ).toBeGreaterThan((h.keycloak.createUser as unknown as jest.Mock).mock.invocationCallOrder[0]!);
   });
 
-  it('writes a demotion to Keycloak — the whole set, in one write', async () => {
+  it('writes a demotion to Keycloak before its event, then the whole set after commit', async () => {
     // Roles used to reach Keycloak only when the account was created, so a
-    // demoted administrator kept administering.
+    // demoted administrator kept administering. Since D-064 the demotion is
+    // written ahead, before the event that is the gateway's cutoff exists.
     const h = harness();
     h.repository.findMembershipById.mockResolvedValue(
       membershipRow({ roles: ['ORGANIZATION_ADMIN', 'FLEET_MANAGER'] }) as never,
     );
     tx(h).membership.update.mockResolvedValue(membershipRow({ roles: ['FLEET_MANAGER'] }));
     h.repository.findUserById.mockResolvedValue(userRow() as never);
-    h.repository.listMembershipsForUser.mockResolvedValue([
-      membershipRow({ roles: ['FLEET_MANAGER'] }),
-    ] as never);
+    // Read before the change, then after it.
+    h.repository.listMembershipsForUser
+      .mockResolvedValueOnce([
+        membershipRow({ roles: ['ORGANIZATION_ADMIN', 'FLEET_MANAGER'] }),
+      ] as never)
+      .mockResolvedValue([membershipRow({ roles: ['FLEET_MANAGER'] })] as never);
 
     await runWithContext(context(), () =>
       h.service.updateMembershipRoles('MBR_1', { roles: ['FLEET_MANAGER'], reason: 'demoted' }),
     );
 
-    expect(put(h)).toHaveBeenCalledTimes(1);
-    expect(put(h)).toHaveBeenCalledWith('kc-1', {
+    const demoted = {
       rasta_user_id: [TEST_USER_A],
       organization_ids: [TEST_ORG_A],
       organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`],
       active_organization_id: [TEST_ORG_A],
-    });
+    };
+    expect(put(h).mock.calls).toEqual([
+      ['kc-1', demoted, expect.objectContaining({ fence: expect.any(Function) })],
+      ['kc-1', demoted, expect.objectContaining({ fence: expect.any(Function) })],
+    ]);
+    expect(put(h).mock.invocationCallOrder[0]).toBeLessThan(
+      (h.repository.enqueueEvent as unknown as jest.Mock).mock.invocationCallOrder[0]!,
+    );
   });
 
   it('writes a new membership to Keycloak', async () => {
@@ -697,6 +792,7 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
         organization_ids: [TEST_ORG_A, TEST_ORG_B].sort(),
         organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`, `${TEST_ORG_B}:DRIVER`].sort(),
       }),
+      expect.anything(),
     );
   });
 
@@ -723,12 +819,11 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
         }),
       );
       // In the revoke's own transaction, so the two never disagree: the first
-      // transaction is the revoke, and the move lands before the projection's
-      // own transaction takes its lock.
+      // transaction is the revoke, the move lands in it before its write-ahead,
+      // and the projection after commit is the second.
       expect(h.repository.transaction).toHaveBeenCalledTimes(2);
-      const lock = h.repository.lockUserProjection as unknown as jest.Mock;
       expect(tx(h).user.update.mock.invocationCallOrder[0]).toBeLessThan(
-        lock.mock.invocationCallOrder[0]!,
+        put(h).mock.invocationCallOrder[0]!,
       );
     });
 
@@ -765,18 +860,41 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
         h.service.revokeMembership('MBR_1', { reason: 'left' }),
       );
 
-      expect(put(h)).toHaveBeenCalledWith('kc-1', {
-        rasta_user_id: [TEST_USER_A],
-        organization_ids: [],
-        organization_roles: [],
-        active_organization_id: [],
-      });
+      expect(put(h)).toHaveBeenCalledWith(
+        'kc-1',
+        {
+          rasta_user_id: [TEST_USER_A],
+          organization_ids: [],
+          organization_roles: [],
+          active_organization_id: [],
+        },
+        expect.anything(),
+      );
     });
   });
 
-  it('does not fail a committed membership change when Keycloak is down', async () => {
+  it('does not fail a committed widening change when Keycloak is down', async () => {
     // The row is committed; failing now would report a change that happened as
     // one that did not. The outbox event from the same transaction retries it.
+    const h = harness();
+    h.repository.findMembershipById.mockResolvedValue(membershipRow() as never);
+    tx(h).membership.update.mockResolvedValue(
+      membershipRow({ roles: ['FLEET_MANAGER', 'DRIVER'] }),
+    );
+    h.repository.findUserById.mockResolvedValue(userRow() as never);
+    put(h).mockRejectedValue(RastaError.upstreamUnavailable('keycloak'));
+
+    await expect(
+      runWithContext(context(), () =>
+        h.service.updateMembershipRoles('MBR_1', {
+          roles: ['FLEET_MANAGER', 'DRIVER'],
+          reason: 'also drives',
+        }),
+      ),
+    ).resolves.toMatchObject({ roles: ['FLEET_MANAGER', 'DRIVER'] });
+  });
+
+  it('refuses a narrowing change when Keycloak is down: 503 KEYCLOAK_UNAVAILABLE, no event (D-064)', async () => {
     const h = harness();
     h.repository.findMembershipById.mockResolvedValue(membershipRow() as never);
     tx(h).membership.update.mockResolvedValue(membershipRow({ roles: ['DRIVER'] }));
@@ -787,7 +905,11 @@ describe('Keycloak projection (ADR-060 § 5)', () => {
       runWithContext(context(), () =>
         h.service.updateMembershipRoles('MBR_1', { roles: ['DRIVER'], reason: 'reassigned' }),
       ),
-    ).resolves.toMatchObject({ roles: ['DRIVER'] });
+    ).rejects.toMatchObject({ status: 503, code: 'KEYCLOAK_UNAVAILABLE' });
+    expect(h.enqueued).toEqual([]);
+    // A confirmed refusal: nothing can land later, so nothing is held back —
+    // and with this mocked client no fence was opened at all.
+    expect(h.fences.open).not.toHaveBeenCalled();
   });
 
   it('reports a failed switch: its audit event is not a re-projection trigger', async () => {
@@ -856,12 +978,16 @@ describe('membership validity window (ADR-060 § 5)', () => {
       ),
     );
 
-    expect(put(h)).toHaveBeenCalledWith('kc-1', {
-      rasta_user_id: [TEST_USER_A],
-      organization_ids: [TEST_ORG_A, TEST_ORG_B].sort(),
-      organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`, `${TEST_ORG_B}:FLEET_MANAGER`].sort(),
-      active_organization_id: [TEST_ORG_B],
-    });
+    expect(put(h)).toHaveBeenCalledWith(
+      'kc-1',
+      {
+        rasta_user_id: [TEST_USER_A],
+        organization_ids: [TEST_ORG_A, TEST_ORG_B].sort(),
+        organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`, `${TEST_ORG_B}:FLEET_MANAGER`].sort(),
+        active_organization_id: [TEST_ORG_B],
+      },
+      expect.anything(),
+    );
   });
 
   it.each([
@@ -905,8 +1031,11 @@ describe('membership validity window (ADR-060 § 5)', () => {
       const h = windowHarness();
       // The remaining live membership the active organization moves to.
       tx(h).membership.findFirst.mockResolvedValue(inA);
-      // What the projector reads once the lapse has committed.
+      // Read twice in the lapse's transaction — what the rows grant before
+      // it, and the move — then, once moved, by the write-ahead's second read
+      // and the projector after commit.
       h.repository.findUserById
+        .mockResolvedValueOnce(userRow({ activeOrganizationId: TEST_ORG_B }) as never)
         .mockResolvedValueOnce(userRow({ activeOrganizationId: TEST_ORG_B }) as never)
         .mockResolvedValue(userRow({ activeOrganizationId: TEST_ORG_A }) as never);
 
@@ -915,7 +1044,13 @@ describe('membership validity window (ADR-060 § 5)', () => {
       expect(acted).toBe(true);
       // Claimed with the guard, so a second replica cannot act on it too.
       expect(tx(h).membership.updateMany).toHaveBeenCalledWith({
-        where: { id: 'MBR_B', lapseHandledAt: null, deletedAt: null },
+        where: {
+          id: 'MBR_B',
+          lapseHandledAt: null,
+          deletedAt: null,
+          // Lapsed on the database's clock read after the lock (#402 r1 F3).
+          validUntil: { lte: after },
+        },
         data: { lapseHandledAt: after },
       });
       expect(tx(h).user.update).toHaveBeenCalledWith(
@@ -934,12 +1069,16 @@ describe('membership validity window (ADR-060 § 5)', () => {
           },
         },
       ]);
-      expect(put(h)).toHaveBeenCalledWith('kc-1', {
-        rasta_user_id: [TEST_USER_A],
-        organization_ids: [TEST_ORG_A],
-        organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`],
-        active_organization_id: [TEST_ORG_A],
-      });
+      expect(put(h)).toHaveBeenCalledWith(
+        'kc-1',
+        {
+          rasta_user_id: [TEST_USER_A],
+          organization_ids: [TEST_ORG_A],
+          organization_roles: [`${TEST_ORG_A}:FLEET_MANAGER`],
+          active_organization_id: [TEST_ORG_A],
+        },
+        expect.anything(),
+      );
     });
 
     it('does nothing when another replica claimed the lapse first', async () => {

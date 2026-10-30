@@ -28,19 +28,23 @@ import {
   outboxAckFencedTotal,
   outboxClaimAttemptsTotal,
   outboxLeaseReclaimedTotal,
-  outboxLeasesActive,
-  outboxPendingAgeSeconds,
-  outboxPendingTotal,
 } from '@rasta/observability';
 import { PrismaService } from './prisma/prisma.service';
 import { PrismaOutboxStore } from './outbox/outbox.store';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
 import { KeycloakAdminClient } from './keycloak/keycloak.client';
-import { KeycloakProjector } from './keycloak/keycloak.projector';
+import {
+  KEYCLOAK_PROJECTOR_OPTIONS,
+  KeycloakProjector,
+  type KeycloakProjectorOptions,
+} from './keycloak/keycloak.projector';
 import { KeycloakProjectionConsumer } from './keycloak/keycloak-projection.consumer';
+import { FENCE_POOL_CONNECTIONS, KeycloakWriteFences } from './keycloak/keycloak-write-fence';
 import { IdentityRepository } from './identity/identity.repository';
 import { IdentityService } from './identity/identity.service';
 import { MembershipExpiryScanner } from './identity/membership-expiry.scanner';
+import { RegistrationIntakeWorker } from './identity/registration-intake.worker';
+import { KeycloakFenceSampler, pooledFenceSampleSource } from './keycloak/keycloak-fence-sampler';
 import {
   MembershipController,
   RegistrationController,
@@ -70,20 +74,14 @@ import {
   createSecurityEventRelay,
   SECURITY_EVENT_RELAY,
 } from './security-events/security-event.relay';
-import {
-  securityEventOutboxClosedBacklogAgeSeconds,
-  securityEventOutboxClosedBacklogTotal,
-  securityEventOutboxLeasesActive,
-  securityEventOutboxOpenWindows,
-  securityEventOutboxPendingAgeSeconds,
-  securityEventOutboxPendingTotal,
-} from './observability/security-event.metrics';
+import { OutboxGauges } from './observability/outbox-gauges';
 
 export const ENV = Symbol('IDENTITY_ENV');
+/** The Keycloak write fences' own pool (D-069): never the one business transactions hold. */
+export const FENCE_PRISMA = Symbol('IDENTITY_FENCE_PRISMA');
+/** The fence sampler's own pool of one (#402 r3 R3-2). */
+export const SAMPLER_PRISMA = Symbol('IDENTITY_SAMPLER_PRISMA');
 export const LOGGER = Symbol('IDENTITY_LOGGER');
-
-/** How often both outbox gauges are sampled from the database. */
-const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
 
 @Module({
   controllers: [
@@ -121,6 +119,21 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
       inject: [ENV],
       useFactory: (env: IdentityEnv) => new PrismaService(env.DATABASE_URL),
     },
+    {
+      // A second, small pool: a fence is inserted while the business
+      // transaction holds the user lock, so it must never wait for a
+      // connection of a pool that transactions queued on that lock can
+      // exhaust (D-069, KeycloakWriteFences).
+      provide: FENCE_PRISMA,
+      inject: [ENV],
+      useFactory: (env: IdentityEnv) =>
+        new PrismaService(env.DATABASE_URL, { connections: FENCE_POOL_CONNECTIONS }),
+    },
+    {
+      provide: KeycloakWriteFences,
+      inject: [FENCE_PRISMA],
+      useFactory: (pool: PrismaService) => new KeycloakWriteFences(pool),
+    },
 
     {
       provide: KeycloakAdminClient,
@@ -156,17 +169,63 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
 
     PrismaOutboxStore,
     IdentityRepository,
+    {
+      provide: KEYCLOAK_PROJECTOR_OPTIONS,
+      inject: [ENV],
+      useFactory: (env: IdentityEnv): KeycloakProjectorOptions => ({
+        writeSettleSeconds: env.KEYCLOAK_WRITE_SETTLE_SECONDS,
+      }),
+    },
     KeycloakProjector,
     IdentityService,
     {
       provide: MembershipExpiryScanner,
+      inject: [ENV, IdentityRepository, IdentityService, KeycloakProjector, KeycloakWriteFences],
+      useFactory: (
+        env: IdentityEnv,
+        repository: IdentityRepository,
+        identity: IdentityService,
+        projector: KeycloakProjector,
+        fences: KeycloakWriteFences,
+      ) =>
+        new MembershipExpiryScanner(
+          repository,
+          identity,
+          {
+            enabled: env.MEMBERSHIP_EXPIRY_SCAN_ENABLED,
+            intervalSeconds: env.MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS,
+            batchSize: env.MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE,
+          },
+          projector,
+          fences,
+        ),
+    },
+    {
+      provide: RegistrationIntakeWorker,
       inject: [ENV, IdentityRepository, IdentityService],
       useFactory: (env: IdentityEnv, repository: IdentityRepository, identity: IdentityService) =>
-        new MembershipExpiryScanner(repository, identity, {
-          enabled: env.MEMBERSHIP_EXPIRY_SCAN_ENABLED,
-          intervalSeconds: env.MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS,
-          batchSize: env.MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE,
+        new RegistrationIntakeWorker(repository, identity, {
+          intervalSeconds: env.REGISTRATION_INTAKE_INTERVAL_SECONDS,
+          batchSize: env.REGISTRATION_INTAKE_BATCH_SIZE,
         }),
+    },
+
+    // The fence and lapse gauges, sampled on their own timers and their own
+    // connection — never by the sweep's serial pass (#402 r3 R3-2). A pool of
+    // one: it can starve neither the business pool nor the fence pool's two
+    // connections every Keycloak write needs, and neither can starve it.
+    // Closed, like every pool, by OutboxShutdown once the sampler stopped.
+    {
+      provide: SAMPLER_PRISMA,
+      inject: [ENV],
+      useFactory: (env: IdentityEnv) =>
+        new PrismaService(env.DATABASE_URL, { connections: 1, waitSeconds: 1 }),
+    },
+    {
+      provide: KeycloakFenceSampler,
+      inject: [SAMPLER_PRISMA, IdentityRepository],
+      useFactory: (own: PrismaService, repository: IdentityRepository) =>
+        new KeycloakFenceSampler(pooledFenceSampleSource(own, repository)),
     },
 
     // The durable half of the Keycloak projection (ADR-060 § 5): re-projects
@@ -269,6 +328,12 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
     // whether or not either is reachable.
     // ------------------------------------------------------------------------
     SecurityEventOutboxStore,
+    {
+      provide: OutboxGauges,
+      inject: [PrismaOutboxStore, SecurityEventOutboxStore],
+      useFactory: (store: PrismaOutboxStore, securityStore: SecurityEventOutboxStore) =>
+        new OutboxGauges(store, securityStore),
+    },
 
     {
       provide: RefusalAuditRecorder,
@@ -324,19 +389,34 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
         }),
     },
     {
-      // D-052: both relays, the purge, the expiry scanner and the Keycloak
-      // projection consumer stop together in the destroy phase, by one deadline
-      // inside SHUTDOWN_TIMEOUT_MS. Before, the relays stopped in
+      // D-052: both relays, the purge, the expiry scanner, the registration
+      // intake worker (task 130), the Keycloak
+      // projection consumer, the projector's recovery projections (D-070 D,
+      // #458 r1 F2: a request's recovery has no other owner), the fence
+      // sampler and the outbox gauges stop together in the destroy phase, by
+      // one deadline inside SHUTDOWN_TIMEOUT_MS. Before, the relays stopped in
       // `onApplicationShutdown`, after the consumer's unbounded stop, while the
       // scanner went on writing outbox rows.
+      //
+      // The one owner of the whole teardown, the pools included (#458 r2 F2):
+      // every pool closes here, last, once everything that uses it has
+      // returned — no pool has a destroy hook of its own, which Nest would run
+      // beside this one.
       provide: OutboxShutdown,
       inject: [
         OutboxRelay,
         OutboxPurgeScheduler,
         SECURITY_EVENT_RELAY,
         MembershipExpiryScanner,
+        RegistrationIntakeWorker,
         KeycloakProjectionConsumer,
+        KeycloakProjector,
+        KeycloakFenceSampler,
+        OutboxGauges,
         KafkaEventPublisher,
+        PrismaService,
+        FENCE_PRISMA,
+        SAMPLER_PRISMA,
         ENV,
       ],
       useFactory: (
@@ -344,16 +424,26 @@ const OUTBOX_GAUGE_INTERVAL_MS = 15_000;
         purge: OutboxPurgeScheduler,
         securityRelay: OutboxRelay,
         scanner: MembershipExpiryScanner,
+        intake: RegistrationIntakeWorker,
         projection: KeycloakProjectionConsumer,
+        projector: KeycloakProjector,
+        sampler: KeycloakFenceSampler,
+        gauges: OutboxGauges,
         publisher: KafkaEventPublisher,
+        prisma: PrismaService,
+        fencePool: PrismaService,
+        samplerPool: PrismaService,
         env: IdentityEnv,
       ) =>
         new OutboxShutdown({
           relay,
           purge,
-          workers: [securityRelay, scanner, projection],
-          // Closed last, once the drain has returned, by the same deadline (D-052 phase 4b).
+          workers: [securityRelay, scanner, intake, projection, projector, sampler, gauges],
+          // Closed once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
+          // Last of all, by the same deadline: each waits for its transactions
+          // still in flight, then refuses everything and disconnects.
+          databases: [prisma, fencePool, samplerPool],
           budgetMs: outboxShutdownBudgetMs(env),
         }),
     },
@@ -397,10 +487,9 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
   constructor(
     private readonly prisma: PrismaService,
     private readonly relay: OutboxRelay,
-    private readonly store: PrismaOutboxStore,
     @Inject(SECURITY_EVENT_RELAY) private readonly securityRelay: OutboxRelay,
-    private readonly securityStore: SecurityEventOutboxStore,
     private readonly purge: OutboxPurgeScheduler,
+    private readonly gauges: OutboxGauges,
     private readonly outboxShutdown: OutboxShutdown,
   ) {}
 
@@ -418,54 +507,14 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     this.relay.start();
     this.securityRelay.start();
     this.purge.start();
-    this.startOutboxGauges();
+    this.gauges.start();
   }
 
   async onApplicationShutdown(): Promise<void> {
-    // Both relays, the purge, the expiry scanner and the projection consumer
-    // already stopped in OutboxShutdown's onModuleDestroy, concurrently and by
-    // one deadline; this joins that stop and returns at once.
+    // Everything — both relays, the purge, the scanner, the projection
+    // consumer, the recoveries, the sampler, the outbox gauges, then the
+    // publisher and the pools — already stopped in OutboxShutdown's
+    // onModuleDestroy, by one deadline; this joins that stop and returns at once.
     await this.outboxShutdown.stop();
-    if (this.gaugeTimer) clearInterval(this.gaugeTimer);
-  }
-
-  private gaugeTimer?: NodeJS.Timeout;
-
-  /**
-   * Feeds the stuck-relay and audit-gap alerts. Age matters more than count: a
-   * large backlog draining quickly is fine, while three rows stuck for ten
-   * minutes is not.
-   */
-  private startOutboxGauges(): void {
-    const sample = async () => {
-      try {
-        outboxPendingTotal.set({ service: SERVICE_NAME }, await this.store.pendingCount());
-        outboxLeasesActive.set({ service: SERVICE_NAME }, await this.store.activeLeaseCount());
-        outboxPendingAgeSeconds.set(
-          { service: SERVICE_NAME },
-          await this.store.oldestPendingAgeSeconds(),
-        );
-      } catch {
-        // Metrics must never take the service down.
-      }
-      // Sampled separately, so a failure on one queue never blanks the other's.
-      try {
-        securityEventOutboxPendingTotal.set(await this.securityStore.pendingCount());
-        securityEventOutboxLeasesActive.set(await this.securityStore.activeLeaseCount());
-        securityEventOutboxPendingAgeSeconds.set(
-          await this.securityStore.oldestPendingAgeSeconds(),
-        );
-        // Phase C2: an open window is expected to wait; a closed one is not.
-        const backlog = await this.securityStore.aggregationBacklog();
-        securityEventOutboxOpenWindows.set(backlog.openWindows);
-        securityEventOutboxClosedBacklogTotal.set(backlog.closedBacklog);
-        securityEventOutboxClosedBacklogAgeSeconds.set(backlog.closedBacklogAgeSeconds);
-      } catch {
-        // Metrics must never take the service down.
-      }
-    };
-
-    this.gaugeTimer = setInterval(() => void sample(), OUTBOX_GAUGE_INTERVAL_MS);
-    this.gaugeTimer.unref?.();
   }
 }

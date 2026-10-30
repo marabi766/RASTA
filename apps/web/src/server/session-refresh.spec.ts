@@ -10,6 +10,7 @@ import {
 } from './session-refresh';
 import type { RefreshCoordinator, RefreshOutcome } from './refresh-coordinator';
 import { openSession, seal, sealSession, type WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * Keeping a session alive, and ending it on time (ADR-059 § 4).
@@ -37,7 +38,7 @@ function session(overrides: Partial<WebSession> = {}): WebSession {
     subject: 'USR_01J8',
     username: 'dehyar',
     organizationId: 'ORG_01J8',
-    accessToken: 'access-0',
+    accessToken: actingAccessToken('ORG_01J8'),
     accessTokenExpiresAt: T0 + 900,
     refreshToken: 'refresh-0',
     csrfToken: 'csrf-token-value',
@@ -331,6 +332,132 @@ describe('a token that runs out while its refresh is out (PR 319 review 3, findi
 
     expect(
       await renewSession(sealed(), { env: ENV, refresh, now: startedAt, clock: () => clock }),
+    ).toEqual({ kind: 'REFUSED', usable: true });
+  });
+});
+
+describe('the organization goes with the token (PR 405 review 1, F1)', () => {
+  /** A provider that answers every refresh with a token acting for `org`. */
+  const providerActingFor =
+    (org: string | null, accessToken = actingAccessToken(org)) =>
+    async (): Promise<TokenResponse> => ({
+      access_token: accessToken,
+      refresh_token: 'refresh-next',
+      id_token: 'id-next',
+      expires_in: 900,
+      token_type: 'Bearer',
+    });
+
+  it('a refresh after a switch from A to B stores B, the new token’s organization', async () => {
+    const renewal = await renewSession(sealed(), {
+      env: ENV,
+      refresh: providerActingFor('ORG_B'),
+      now: at(T0 + 880),
+    });
+    expect(renewal.kind).toBe('RENEWED');
+    if (renewal.kind !== 'RENEWED') return;
+    const opened = openSession(renewal.sealed, SECRET)!;
+    expect(opened.organizationId).toBe('ORG_B');
+    expect(opened.accessToken).toBe(actingAccessToken('ORG_B'));
+  });
+
+  it('a refresh to a token with no organization stores none', async () => {
+    const renewal = await renewSession(sealed(), {
+      env: ENV,
+      refresh: providerActingFor(null),
+      now: at(T0 + 880),
+    });
+    if (renewal.kind !== 'RENEWED') throw new Error(renewal.kind);
+    expect(openSession(renewal.sealed, SECRET)!.organizationId).toBeNull();
+  });
+
+  it('a refresh to a token that does not resolve stores none, which no reader takes for "no organization"', async () => {
+    const renewal = await renewSession(sealed(), {
+      env: ENV,
+      refresh: providerActingFor('ORG_B', 'opaque'),
+      now: at(T0 + 880),
+    });
+    if (renewal.kind !== 'RENEWED') throw new Error(renewal.kind);
+    expect(openSession(renewal.sealed, SECRET)!.organizationId).toBeNull();
+  });
+
+  it('reseals a cookie whose stored copy disagrees with its fresh token — same tokens, the token’s organization, no refresh', async () => {
+    // Sealed before task 100: refreshed into B while the copy still said A.
+    const stale = sealed({ organizationId: 'ORG_A', accessToken: actingAccessToken('ORG_B') });
+    const { refresh, calls } = rotatingProvider();
+    const renewal = await renewSession(stale, { env: ENV, refresh, now: at(T0 + 60) });
+
+    expect(calls).toEqual([]);
+    expect(renewal.kind).toBe('RENEWED');
+    if (renewal.kind !== 'RENEWED') return;
+    const opened = openSession(renewal.sealed, SECRET)!;
+    expect(opened).toMatchObject({
+      organizationId: 'ORG_B',
+      accessToken: actingAccessToken('ORG_B'),
+      refreshToken: 'refresh-0',
+      accessTokenExpiresAt: T0 + 900,
+      issuedAt: T0,
+    });
+    expect(renewal.maxAgeSeconds).toBe(MAX_AGE - 60);
+    // And once resealed, it needs nothing more.
+    expect(await renewSession(renewal.sealed, { env: ENV, refresh, now: at(T0 + 61) })).toEqual({
+      kind: 'VALID',
+    });
+  });
+
+  it('keeps the copy it replaces beside the session — to recognise what was remembered under it (PR 405 r2 F1)', async () => {
+    const stale = sealed({ organizationId: 'ORG_A', accessToken: actingAccessToken('ORG_B') });
+    const { refresh } = rotatingProvider();
+    const resealed = await renewSession(stale, { env: ENV, refresh, now: at(T0 + 60) });
+    if (resealed.kind !== 'RENEWED') throw new Error(resealed.kind);
+    expect(openSession(resealed.sealed, SECRET)!).toMatchObject({
+      organizationId: 'ORG_B',
+      formerOrganizationId: 'ORG_A',
+    });
+    // A stale cookie that needs a refresh keeps it too.
+    const refreshed = await renewSession(stale, {
+      env: ENV,
+      refresh: providerActingFor('ORG_C'),
+      now: at(T0 + 880),
+    });
+    if (refreshed.kind !== 'RENEWED') throw new Error(refreshed.kind);
+    expect(openSession(refreshed.sealed, SECRET)!).toMatchObject({
+      organizationId: 'ORG_C',
+      formerOrganizationId: 'ORG_A',
+    });
+    // And every refresh after carries it, unchanged: it is the old build's copy, once.
+    const later = await renewSession(refreshed.sealed, {
+      env: ENV,
+      refresh: providerActingFor('ORG_D'),
+      now: at(T0 + 880 + 890),
+    });
+    if (later.kind !== 'RENEWED') throw new Error(later.kind);
+    expect(openSession(later.sealed, SECRET)!.formerOrganizationId).toBe('ORG_A');
+  });
+
+  it('a cookie in step gets no former copy, not even across a switch', async () => {
+    const renewal = await renewSession(sealed(), {
+      env: ENV,
+      refresh: providerActingFor('ORG_B'),
+      now: at(T0 + 880),
+    });
+    if (renewal.kind !== 'RENEWED') throw new Error(renewal.kind);
+    expect(openSession(renewal.sealed, SECRET)!.formerOrganizationId).toBeUndefined();
+  });
+
+  it('a refused refresh leaves such a cookie alone, and this render does not use it — it cannot be resealed', async () => {
+    const stale = sealed({ organizationId: 'ORG_A', accessToken: actingAccessToken('ORG_B') });
+    const refusing = async (): Promise<TokenResponse> => {
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider answered 503');
+    };
+    // The access token is still valid (880 < 900): without the copy check it would be usable.
+    expect(await renewSession(stale, { env: ENV, refresh: refusing, now: at(T0 + 880) })).toEqual({
+      kind: 'REFUSED',
+      usable: false,
+    });
+    // In step, the same refusal is usable as before.
+    expect(
+      await renewSession(sealed(), { env: ENV, refresh: refusing, now: at(T0 + 880) }),
     ).toEqual({ kind: 'REFUSED', usable: true });
   });
 });

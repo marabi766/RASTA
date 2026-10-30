@@ -18,6 +18,7 @@ import {
   type UnresolvedStore,
 } from './unresolved-request-store';
 import { MAX_CLOCK_SKEW_MS } from './unresolved-request-policy';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The retention of an unresolved write request: what it keeps, for whom, and what
@@ -98,11 +99,13 @@ let counter = 0;
 const uniq = `${process.pid}-${Date.now()}`;
 function login(overrides: Partial<WebSession> = {}): WebSession {
   counter += 1;
+  const organizationId =
+    overrides.organizationId !== undefined ? overrides.organizationId : `ORG_${uniq}_${counter}`;
   return {
     subject: `USR_${uniq}_${counter}`,
     username: 'owner',
-    organizationId: `ORG_${uniq}_${counter}`,
-    accessToken: 'access-token-value',
+    organizationId,
+    accessToken: actingAccessToken(organizationId),
     accessTokenExpiresAt: 2_000_000_000,
     refreshToken: 'refresh-token-value',
     csrfToken: `csrf-${counter}`,
@@ -127,6 +130,7 @@ interface Backend {
   getRaw(key: string): Promise<string | null>;
   setRaw(key: string, raw: string): Promise<void>;
   members(setKey: string): Promise<string[]>;
+  /** Adds `member` to the index AFTER every member already in it (the order a purge walks). */
   addMember(setKey: string, member: string): Promise<void>;
   setKeys(session: WebSession): Promise<string[]>;
   reset(): Promise<void>;
@@ -258,7 +262,12 @@ function redisBackend(url: string): Backend {
     getRaw: (key) => redis.get(key),
     setRaw: async (key, raw) => void (await redis.set(key, raw, 'KEEPTTL')),
     members: (setKey) => redis.zrange(setKey, 0, -1),
-    addMember: async (setKey, member) => void (await redis.zadd(setKey, Date.now() + HOUR, member)),
+    // Scored above every member already there: ZRANGE (what a purge walks) lists it LAST, so a
+    // purge that deletes each valid member as it goes has deleted the valid ones before it refuses.
+    addMember: async (setKey, member) => {
+      const top = await redis.zrange(setKey, -1, -1, 'WITHSCORES');
+      await redis.zadd(setKey, top.length === 2 ? Number(top[1]) + 1 : Date.now() + HOUR, member);
+    },
     setKeys: async (s) =>
       redis.keys(
         `${PENDING_KEY_PREFIX}:org:${encodeURIComponent(s.organizationId ?? 'none')}:pwl:*`,
@@ -1008,8 +1017,18 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
     it.each([
       ['another person', (s: WebSession) => ({ ...s, subject: `${s.subject}-2` })],
       ['a later login', (s: WebSession) => ({ ...s, csrfToken: 'a-later-login' })],
-      ['another organization', (s: WebSession) => ({ ...s, organizationId: 'ORG_OTHER' })],
-      ['no organization', (s: WebSession) => ({ ...s, organizationId: null })],
+      [
+        'another organization',
+        (s: WebSession) => ({
+          ...s,
+          organizationId: 'ORG_OTHER',
+          accessToken: actingAccessToken('ORG_OTHER'),
+        }),
+      ],
+      [
+        'no organization',
+        (s: WebSession) => ({ ...s, organizationId: null, accessToken: actingAccessToken(null) }),
+      ],
     ])('%s reads nothing, reserves its own, and cannot release it', async (_name, other) => {
       const s = login();
       const mine = await reserved(s);
@@ -1020,6 +1039,63 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
       const request = (await held(s)) as never;
       expect(await releaseUnresolved(o, SCOPE, releaseToken(s, SCOPE, request))).toBe('STALE');
       expect(await held(s)).toMatchObject({ key: 'sub_1' });
+    });
+
+    it('memberships change between save and read: A’s request is not B’s, and is still A’s', async () => {
+      const a = login();
+      const mine = await reserved(a);
+      await settleUnresolved(mine.attempt, 'UNRESOLVED');
+      // The same login, its token now acting for B only (A's membership ended).
+      const b = {
+        ...a,
+        organizationId: 'ORG_B_ONLY',
+        accessToken: actingAccessToken('ORG_B_ONLY'),
+      };
+      expect(await readUnresolved(b, SCOPE)).toEqual({ kind: 'NONE' });
+      // Nothing of A's was removed by it.
+      expect(await held(a)).toMatchObject({ key: 'sub_1' });
+    });
+
+    it('a record an older cookie keyed under its stale copy holds the scope, is never re-sent, and goes only by release (PR 405 r2 F1)', async () => {
+      // The build before task 100 kept the login's organization A as the copy while the
+      // token acted for B, and keyed this login's records under A.
+      const before = login();
+      const written = await reserved(before);
+      await settleUnresolved(written.attempt, 'UNRESOLVED');
+      // Brought into step: acting for B, the stale copy kept beside it; A no longer listed.
+      const after: WebSession = {
+        ...before,
+        organizationId: 'ORG_B_NOW',
+        accessToken: actingAccessToken('ORG_B_NOW'),
+        formerOrganizationId: before.organizationId,
+      };
+      const read = await readUnresolved(after, SCOPE);
+      expect(read).toMatchObject({ kind: 'PENDING', request: { key: 'sub_1', former: true } });
+      if (read.kind !== 'PENDING') throw new Error('held');
+      expect(mayResend(read.request, read.now)).toBe(false);
+      // Nothing is sent over it — not even the same key and body.
+      expect(await reserve(after, 'sub_1')).toMatchObject({
+        kind: 'HELD',
+        reason: 'RECONCILE_ONLY',
+      });
+      expect(await reserve(after, 'sub_2')).toMatchObject({
+        kind: 'HELD',
+        reason: 'RECONCILE_ONLY',
+      });
+      // The explicit release, fenced to that record, lets go of it — and only then.
+      expect(await releaseUnresolved(after, SCOPE, releaseToken(after, SCOPE, read.request))).toBe(
+        'RELEASED',
+      );
+      expect(await readUnresolved(after, SCOPE)).toEqual({ kind: 'NONE' });
+      expect(await reserve(after, 'sub_2')).toMatchObject({ kind: 'RESERVED' });
+    });
+
+    it('a session whose organization cannot be told reads and reserves nothing: it throws', async () => {
+      const s = login();
+      const untold = { ...s, accessToken: actingAccessToken(s.organizationId, []) };
+      await expect(readUnresolved(untold, SCOPE)).rejects.toThrow();
+      await expect(reserve(untold, 'sub_1')).rejects.toThrow();
+      expect(await purgeUnresolved(untold)).toBe(false);
     });
 
     it('is keyed by purpose and by target', async () => {
@@ -1180,15 +1256,23 @@ describe.each(backends)('an unresolved request held by %s', (_name, make) => {
     it('a corrupt member stops the whole purge: no record and no index entry is touched', async () => {
       const s = login();
       const { keys, setKey } = await threeScopes(s);
+      // The corrupt one is the LAST the purge walks, behind two valid members: a purge that deletes
+      // each valid member as it goes has already deleted them when it reaches this one.
+      const order = await backend.members(setKey);
+      const corrupt = order[order.length - 1]!;
+      expect(order).toHaveLength(3);
       await backend.setRaw(
-        keys[1]!,
-        JSON.stringify({ ...JSON.parse((await backend.getRaw(keys[1]!))!), state: 'BOGUS' }),
+        corrupt,
+        JSON.stringify({ ...JSON.parse((await backend.getRaw(corrupt))!), state: 'BOGUS' }),
       );
       const before = await snapshot(keys, setKey);
       expect(await purgeUnresolved(s)).toBe(false);
       expect(await snapshot(keys, setKey)).toEqual(before);
       // The valid holds of the others are still there, and still held.
-      expect(await held(s, { purpose: 'filler', target: 'A' })).toMatchObject({ key: 'k-A' });
+      for (const [i, target] of ['A', 'B', 'C'].entries()) {
+        if (keys[i] === corrupt) continue;
+        expect(await held(s, { purpose: 'filler', target })).toMatchObject({ key: `k-${target}` });
+      }
     });
 
     it('an index entry that points at another login’s (valid) record is not deleted, and stops the purge', async () => {

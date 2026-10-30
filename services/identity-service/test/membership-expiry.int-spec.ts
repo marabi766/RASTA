@@ -7,17 +7,19 @@ import type { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
 import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
 import type { PlatformAttributes } from '../src/keycloak/platform-attributes';
 import type { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, id, newPrisma, tenants } from './helpers';
+import { asActor, id, newFences, newPrisma, tenants } from './helpers';
 
 /**
  * ADR-060 § 5 — a membership's validUntil is enforced, against a real
  * database and with a controlled clock.
  *
- * Only `Date` is faked: Prisma's own timers and the pool keep real time, while
- * every `new Date()` the service reads — the sweep, the projection — is the
- * instant the test chooses. The switch reads the database's clock instead
- * (inside its lock), so its refusal waits for real time to pass validUntil. Keycloak is the one stand-in: a recorder of the
- * attribute sets the projector writes, which is exactly what reaches the token.
+ * Only `Date` is faked: Prisma's own timers and the pool keep real time. The
+ * faked instant is what the sweep **selects** lapses with; every decision
+ * under the user lock — the switch, the projection, the lapse itself — is
+ * made on the database's clock read after that lock (#402 r1 F3), which no
+ * fake reaches, so the "after" cases wait for real time to pass validUntil.
+ * Keycloak is the one stand-in: a recorder of the attribute sets the
+ * projector writes, which is exactly what reaches the token.
  *
  * The same membership is observed on both sides of its validUntil: before,
  * switching to it works and org_ids carries it; after, the switch is refused,
@@ -30,6 +32,7 @@ describe('membership validUntil (ADR-060 § 5)', () => {
   let repository: IdentityRepository;
   let service: IdentityService;
   let scanner: MembershipExpiryScanner;
+  let fencing: Awaited<ReturnType<typeof newFences>> | undefined;
   const written: Array<{ keycloakId: string; attributes: PlatformAttributes }> = [];
 
   const userId = id('USR-EXP');
@@ -76,17 +79,22 @@ describe('membership validUntil (ADR-060 § 5)', () => {
       enabled: true,
       replacePlatformAttributes: jest.fn(
         async (keycloakId: string, attributes: PlatformAttributes) => {
-          written.push({ keycloakId, attributes });
+          // This suite's user only: the sweep also re-asserts due write fences
+          // (D-069), and another suite sharing the database may have left one.
+          if (keycloakId === `kc-${userId}`) written.push({ keycloakId, attributes });
         },
       ),
     } as unknown as KeycloakAdminClient;
-    const projector = new KeycloakProjector(repository, keycloak);
+    fencing = await newFences();
+    const projector = new KeycloakProjector(repository, keycloak, fencing.fences);
     service = new IdentityService(repository, keycloak, projector);
-    scanner = new MembershipExpiryScanner(repository, service, {
-      enabled: false,
-      intervalSeconds: 60,
-      batchSize: 500,
-    });
+    scanner = new MembershipExpiryScanner(
+      repository,
+      service,
+      { enabled: false, intervalSeconds: 60, batchSize: 500 },
+      projector,
+      fencing.fences,
+    );
 
     await runUnscoped('test fixture spans two organizations', async () => {
       await prisma.client.user.create({
@@ -136,7 +144,8 @@ describe('membership validUntil (ADR-060 § 5)', () => {
 
   afterAll(async () => {
     jest.useRealTimers();
-    await prisma.onModuleDestroy();
+    await fencing?.pool.stop();
+    await prisma.stop();
   });
 
   const asUser = <T>(fn: () => Promise<T>) =>
@@ -170,8 +179,15 @@ describe('membership validUntil (ADR-060 § 5)', () => {
     expect(await expiredEvents()).toHaveLength(0);
   });
 
+  /** Until the database's clock has passed validUntil too (see the fixture). */
+  const realTimePastValidUntil = async () => {
+    const wait = validUntil.getTime() - jest.getRealSystemTime() + 250;
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+  };
+
   it('after validUntil: the sweep records the expiry once, moves the user, and the token drops it', async () => {
     setClock(after);
+    await realTimePastValidUntil();
 
     await scanner.scan(after);
 
@@ -204,14 +220,15 @@ describe('membership validUntil (ADR-060 § 5)', () => {
     const row = await runUnscoped('read back the fixture', () =>
       prisma.client.membership.findUniqueOrThrow({ where: { id: inB } }),
     );
-    expect(row).toMatchObject({ status: 'ACTIVE', deletedAt: null, lapseHandledAt: after });
+    expect(row).toMatchObject({ status: 'ACTIVE', deletedAt: null });
+    // Stamped with the database's clock under the lock, not the selection's.
+    expect(row.lapseHandledAt!.getTime()).toBeGreaterThanOrEqual(validUntil.getTime());
+    expect(row.lapseHandledAt!.getTime()).toBeLessThan(after.getTime());
   });
 
   it('after validUntil: switching back to the organization is refused', async () => {
     setClock(after);
-    // The database clock must have passed validUntil too (see the fixture).
-    const wait = validUntil.getTime() - jest.getRealSystemTime() + 250;
-    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    await realTimePastValidUntil();
 
     await expect(
       asUser(() => service.switchActiveOrganization({ organizationId: org.b })),

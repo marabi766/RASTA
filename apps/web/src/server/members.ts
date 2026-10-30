@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
@@ -38,20 +39,20 @@ import { writeThroughGateway, type FieldMapping, type WriteResult } from './writ
 const memberSchema = z.object({
   id: z.string(),
   /** Null only for a row whose membership vanished between two queries. */
-  membershipId: z.string().nullable().default(null),
+  membershipId: z.string().nullable().prefault(null),
   username: z.string(),
-  firstName: z.string().default(''),
-  lastName: z.string().default(''),
+  firstName: z.string().prefault(''),
+  lastName: z.string().prefault(''),
   status: z.string(),
-  roles: z.array(z.string()).default([]),
+  roles: z.array(z.string()).prefault([]),
 });
 
 export type Member = z.infer<typeof memberSchema>;
 
 const memberPageSchema = z.object({
   items: z.array(memberSchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type MemberPage = z.infer<typeof memberPageSchema>;
@@ -62,13 +63,15 @@ export interface MemberListQuery {
   readonly q?: string;
   readonly role?: string;
   readonly cursor?: string;
+  /** Rows per page; {@link MEMBERS_PER_PAGE} unless a caller reads every page. */
+  readonly limit?: number;
 }
 
 export async function fetchMembers(
   session: WebSession,
   query: MemberListQuery = {},
 ): Promise<ReadResult<MemberPage>> {
-  const search = new URLSearchParams({ limit: String(MEMBERS_PER_PAGE) });
+  const search = new URLSearchParams({ limit: String(query.limit ?? MEMBERS_PER_PAGE) });
   if (query.q) search.set('q', query.q);
   if (query.role) search.set('role', query.role);
   if (query.cursor) search.set('cursor', query.cursor);
@@ -161,12 +164,12 @@ export type ParsedUpdateMemberRolesForm =
 export function parseUpdateMemberRolesForm(
   values: UpdateMemberRolesFormValues,
 ): ParsedUpdateMemberRolesForm {
-  const parsed = updateMemberRolesFormSchema.safeParse(values);
+  const parsed = legacyParse(updateMemberRolesFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, ['membershipId', 'roles', 'reason'] as const),
+    fieldErrors: firstIssuePerField(parsed.refusal, ['membershipId', 'roles', 'reason'] as const),
   };
 }
 
@@ -227,12 +230,12 @@ export type ParsedRevokeMembershipForm =
 export function parseRevokeMembershipForm(
   values: RevokeMembershipFormValues,
 ): ParsedRevokeMembershipForm {
-  const parsed = revokeMembershipFormSchema.safeParse(values);
+  const parsed = legacyParse(revokeMembershipFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, ['membershipId', 'reason'] as const),
+    fieldErrors: firstIssuePerField(parsed.refusal, ['membershipId', 'reason'] as const),
   };
 }
 

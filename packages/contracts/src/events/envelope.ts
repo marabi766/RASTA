@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '../common/iso-datetime';
 
 /**
  * The envelope every Kafka message on the platform carries.
@@ -38,16 +39,16 @@ export const eventEnvelopeSchema = z.object({
   eventId: z.string().min(1),
   eventName: z.string().regex(/^[A-Z][A-Z0-9_]*$/, 'Event names are SCREAMING_SNAKE_CASE'),
   /** Payload schema version. Distinct from the topic's envelope version. */
-  eventVersion: z.number().int().positive().default(1),
+  eventVersion: z.number().int().positive().prefault(1),
 
   /** When it happened in the domain — not when it was published. */
-  occurredAt: z.string().datetime(),
+  occurredAt: z.string().check(isoDateTime()),
 
   /** The publishing service's `SERVICE_NAME` — see `PRODUCER_NAME_PATTERN`. */
   producer: z
     .string()
     .regex(PRODUCER_NAME_PATTERN, 'producer must be a service name (lower-case, digits, hyphens)'),
-  producerVersion: z.string().default('0.0.0'),
+  producerVersion: z.string().prefault('0.0.0'),
 
   aggregateType: z.string().min(1),
   aggregateId: z.string().min(1),
@@ -66,6 +67,21 @@ export const eventEnvelopeSchema = z.object({
   traceparent: z.string().optional(),
 
   actor: eventActorSchema.optional(),
+  /**
+   * `true`: the event records a request whose caller was **not authenticated**
+   * — a public self-registration — so there is no principal to name, and that
+   * is the fact (PR #483 r3 F1). Absent `actor` *and* absent `anonymous`:
+   * background work of the producer, which audit records as `SYSTEM /
+   * <producer>`. Only with no `actor`; a producer never sets both, and a
+   * consumer that sees both reads the actor.
+   *
+   * A sibling flag, not a fourth `actor.type`: `parseEnvelope` runs on consume
+   * too, and a consumer still on the previous schema would refuse an actor
+   * type it does not know — the whole envelope, to its dead-letter topic. An
+   * unknown key is dropped instead, so an old consumer reads the event exactly
+   * as before. Optional, so `eventVersion` does not change.
+   */
+  anonymous: z.literal(true).optional(),
 
   /**
    * ADR-051 — the event's position within its ordered stream.
@@ -91,10 +107,26 @@ export const eventEnvelopeSchema = z.object({
    * Carrying these two adds no personal data: `streamKey` is the partition key
    * already on the row, and `streamSeq` is a counter.
    */
-  streamSeq: z.number().int().positive().safe().optional(),
+  // zod 3's safe-integer bounds, spelled out: zod 4's method of that name is a second
+  // `.int()` (the integer issue twice, no bound; zod-compat-patch.spec).
+  streamSeq: z
+    .number()
+    .int()
+    .positive()
+    .min(Number.MIN_SAFE_INTEGER)
+    .max(Number.MAX_SAFE_INTEGER)
+    .optional(),
   streamKey: z.string().min(1).optional(),
 
-  payload: z.unknown(),
+  /**
+   * Whatever the event carries; each consumer's own schema reads it. A message
+   * without the key is still an envelope, as it was under zod 3: zod 4.6.7
+   * refuses a missing key whose schema is not optional even when that schema
+   * takes `undefined`, which would dead-letter such a message as unreadable
+   * instead of letting a consumer skip an event it does not handle, and audit
+   * record it (PR #444 r2).
+   */
+  payload: z.unknown().optional(),
 });
 
 /**

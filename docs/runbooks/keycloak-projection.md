@@ -3,7 +3,10 @@
 **شدت:** 🟠 هشدار (پس از ADR-060 گام ۳، 🔴 بحرانی — آن‌گاه توکن تنها منبع مجوز است)
 **سیگنال محرک:** افزایش `rasta_identity_keycloak_projections_total{outcome="failed"}`، یا پیام تازه در
 `rasta.identity.v1.dlq` از گروه `identity-service.keycloak-projection`، یا پیش از هر انتشارِ گام ۳ ADR-060.
-**هشدار خودکار:** ندارد. شمارنده صادر می‌شود؛ قاعدهٔ Prometheus برایش نوشته نشده است.
+**هشدار خودکار:** برای Projection پس از Commit ندارد (شمارنده صادر می‌شود). برای تغییرهای تنگ‌کننده (D-064) و حصار
+نوشتن‌ها (D-069) چهار هشدار در `infrastructure/docker/prometheus/rules/rasta-identity-alerts.yml`:
+`RastaIdentityNarrowingRefused`، `RastaIdentityMembershipLapseBacklog`، `RastaIdentityKeycloakReassertBacklog` و
+`RastaIdentityKeycloakAccountMissing` — بخش [«تنزل یا ابطال 503 می‌دهد»](#narrowing-refused).
 **زمان پاسخ هدف:** ۱ ساعت؛ برای یک تنزل یا ابطالِ نرسیده ۱۵ دقیقه.
 
 ---
@@ -32,8 +35,14 @@
 
 وقتی `validUntil` می‌گذرد، هیچ درخواستی نمی‌آید. پس `MembershipExpiryScanner` هر
 `MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS` (پیش‌فرض ۶۰) عضویت‌های گذشته از `validUntil` را که هنوز
-`lapse_handled_at` ندارند برمی‌دارد، و برای هرکدام در یک تراکنش: آن را Claim می‌کند، سازمان فعال کاربر را اگر همان بود به
-قدیمی‌ترین عضویت زندهٔ دیگر منتقل (یا خالی) می‌کند، و `MEMBERSHIP_EXPIRED` منتشر می‌کند؛ سپس کاربر را Project می‌کند.
+`lapse_handled_at` ندارند برمی‌دارد، و برای هرکدام در یک تراکنش زیر قفل کاربر: سازمان فعال کاربر را اگر همان بود به
+قدیمی‌ترین عضویت زنده‌ی دیگر منتقل (یا خالی) می‌کند، **Keycloak را پیش از Commit تنگ می‌کند** (D-064)، آن را Claim می‌کند و
+`MEMBERSHIP_EXPIRED` منتشر می‌کند؛ سپس کاربر را Project می‌کند. اگر Keycloak نوشته نشود، هیچ‌کدام Commit نمی‌شود: عضویت
+Claim‌نشده می‌ماند، با Backoff دوبرابرشونده (تا ۱۶ Interval) که **در ردیف خودش** ثبت می‌شود (`lapse_retry_at`،
+`lapse_failures`) کنار گذاشته می‌شود — Restart یا Replica دیگر هم صبر می‌کند — و نشانگر گذر از جایی که گذر قبلی ایستاد ادامه
+می‌دهد و یک بار از ابتدا دور می‌زند، پس هیچ پیشوند شکست‌خورده‌ای عضویت‌های پشت آن را پنهان نمی‌کند؛ هرگز رها نمی‌شود. همین
+گذر کاربرانی را که حصار نوشتنِ سررسیده دارند (`keycloak_write_attempt`، `takeover_at` گذشته؛ D-069) زیر قفل از ردیف‌ها
+دوباره Project می‌کند و حصار را پاک؛ کاربری که شکست می‌خورد در همان ردیف‌ها کنار گذاشته می‌شود (`next_reassert_at`).
 Claim با `WHERE lapse_handled_at IS NULL` است، پس اجرا روی چند Replica یک بار عمل می‌کند و Replicaی که هنگام انقضا
 خاموش بوده، در اولین گذرش آن را می‌یابد. عضویت Revoke نمی‌شود.
 
@@ -42,11 +51,11 @@ Claim با `WHERE lapse_handled_at IS NULL` است، پس اجرا روی چند
 | از `validUntil` تا …                           | حداکثر                                                     |
 | ---------------------------------------------- | ---------------------------------------------------------- |
 | رد شدن تغییر سازمان فعال در `identity-service` | **صفر** — از ساعت خوانده می‌شود                            |
-| حذف از صفات Keycloak                           | یک Interval اسکن (۶۰ ثانیه) + نوشتن Projector              |
+| حذف از صفات Keycloak                           | یک Interval اسکن (۶۰ ثانیه) + نوشتن، تا Keycloak بپذیرد    |
 | آخرین توکنی که هنوز آن سازمان را نام می‌برد    | **Interval + ۹۰۵ ثانیه** (ADR-060 § ۷) — پیش‌فرض ۹۶۵ ثانیه |
 
-`MEMBERSHIP_EXPIRY_SCAN_ENABLED=false` دسترسی را باز نمی‌کند، ولی عضویت منقضی تا Project بعدیِ کاربر در توکن می‌ماند؛
-`keycloak:reconcile` آن را واگرا گزارش می‌کند.
+`MEMBERSHIP_EXPIRY_SCAN_ENABLED=false` و `KEYCLOAK_SYNC_ENABLED=false` فقط با `NODE_ENV` برابر `development` یا `test`
+پذیرفته می‌شوند؛ جای دیگر سرویس بالا نمی‌آید (D-064).
 
 ## اثر
 
@@ -79,6 +88,98 @@ Claim با `WHERE lapse_handled_at IS NULL` است، پس اجرا روی چند
 
 4. **دوباره گام ۱.** کد خروج باید ۰ باشد.
 
+<a id="narrowing-refused"></a>
+
+## تنزل یا ابطال `503 KEYCLOAK_UNAVAILABLE` می‌دهد (Keycloak پایین است)
+
+**چرا.** حذف نقش، ابطال عضویت و انقضا پیش از Commit در Keycloak نوشته می‌شوند (ADR-060، افزوده‌ی D-064). اگر Keycloak
+نپذیرد یا پاسخ ندهد، تغییر **Commit نمی‌شود**: نقش‌ها در پایگاه داده و Keycloak همان قبلی‌اند و رویدادی نیست. هیچ تنزلی
+«نیمه‌کاره» نمی‌ماند. افزودن نقش و عضویت تازه کار می‌کند.
+
+1. Keycloak را برگردان (`rasta-keycloak` سالم، Admin API پاسخ دهد). هشدار `RastaIdentityNarrowingRefused` پس از ده دقیقه
+   رد پیوسته روشن می‌شود.
+2. همان درخواست‌ها را **همان‌طور** دوباره بفرست؛ تکرار بی‌خطر است (همان پاسخ، بی رویداد دوم) — حتی اگر پاسخ اول `504` Gateway
+   بوده. انقضاها را گذر خودش دوباره می‌کند؛ `RastaIdentityMembershipLapseBacklog` تا صفر شدن صف روشن می‌ماند.
+3. `503 KEYCLOAK_WRITE_SETTLING` با `Retry-After` برای **یک کاربر**: نوشتنی پیشین از همان کاربر بی‌پاسخ ماند و ممکن است
+   هنوز بنشیند (حصارش در `keycloak_write_attempt` زنده است، D-069)؛ تا مهلت آن نوشتن + `KEYCLOAK_WRITE_SETTLE_SECONDS`
+   (پیش‌فرض ۱۰ + ۱۲۰ ثانیه) تنزل او رد می‌شود، سپس گذر انقضا او را از ردیف‌ها بازمی‌نویسد و حصار را پاک می‌کند. صبر کن و دوباره
+   بفرست. این قطعی Keycloak نیست و Gateway آن را در مدار identity نمی‌شمارد.
+4. `RastaIdentityKeycloakReassertBacklog` (هشدار): حصارهای سررسیده ۲۰ دقیقه بازنویسی نشده‌اند. Keycloak را سالم کن؛ گذر خودش
+   دوباره می‌کوشد، و `keycloak:backfill` همه را بازنویسی می‌کند. فهرست: `SELECT user_id, reassert_failures, next_reassert_at
+FROM keycloak_write_attempt WHERE takeover_at < now() AND account_missing_at IS NULL`.
+5. `RastaIdentityKeycloakAccountMissing` (هشدار): Keycloak برای حساب یک کاربر 404 داد؛ حصار او **نهایی** است
+   (`account_missing_at`) و دیگر کوشیده نمی‌شود. توکنی برای حساب ناموجود ساخته نمی‌شود، پس دسترسی در خطر نیست، و تنزل او رد
+   نمی‌شود. حساب را بازگردان و `keycloak:backfill` بزن، یا `keycloak_id` کاربر را درست کن؛ Projection بعدی که بنشیند حصار را
+   پاک می‌کند.
+6. **بازگرداندن Migration** (`20261024120000_keycloak_write_attempt/down.sql`) تا وقتی **هر** ردیفی در جدول است رد می‌شود
+   — زنده، سررسیده، در انتظار Backoff یا نهایی:
+   1. **همه‌ی Replicaهای identity-service را متوقف کن** — نه یکی: هر Replica زنده حصار تازه باز می‌کند، و گذرش همان ردیف‌ها را
+      می‌نویسد.
+   2. صبر کن تا آخرین `takeover_at` بگذرد: `SELECT max(takeover_at) FROM keycloak_write_attempt`.
+   3. `keycloak:backfill` را اجرا کن. پس از کاربران دارای حساب و یتیم‌ها، **همه‌ی صاحبان حصار** را — صفحه‌به‌صفحه، با حساب
+      پیوندخورده یا بی آن (حساب یتیم بی‌خطر می‌شود و حصارش پاک)، سررسیده یا در انتظار Backoff — Project می‌کند، و در پایان
+      `COUNT(*)` همه‌ی ردیف‌ها را در `fences.outstanding` گزارش می‌کند (`live`، `due`، `accountMissing` می‌گویند چرا مانده‌اند).
+      پیش از شمردن، منتظر Projectionهای بازیابی نوشتن‌های دیرکرده می‌ماند و حصارهای تازه‌ی بدهکار را می‌نویسد (`fences.owed`، بند ۱۱).
+      کد خروج ۰ فقط وقتی است که `fences.outstanding` و `fences.owed` هر دو **صفر** باشند.
+   4. اگر چیزی مانده: حصار نهایی را با بند ۵ حل کن، `live` یعنی نویسنده‌ای هنوز در کار است یا صبر کافی نبود (گام ۱ و ۲)؛
+      سپس گام ۳ را تکرار کن.
+   5. فقط با `fences.outstanding: 0` و در حالی که همه‌ی Replicaها هنوز متوقف‌اند، `down.sql` را اجرا کن؛ خودش جدول را قفل و
+      دوباره بررسی می‌کند.
+7. `RastaIdentityKeycloakWriteOverdue` (هشدار، D-070): نوشتنی به Keycloak از مهلتش به‌اضافه‌ی **نیمی** از
+   `KEYCLOAK_WRITE_SETTLE_SECONDS` گذشته و نتیجه‌اش هنوز معلوم نیست (Timeout، قطع اتصال، 5xx، یا فرستنده‌ای که متوقف مانده).
+   هنوز چیزی ناامن نیست — تنزل آن کاربر تا `takeover_at` رد می‌شود — اما ضمانت تکیه بر فرض استقرار D-070 دارد: هیچ درخواستی
+   دیرتر از پنجره نمی‌رسد یا اعمال نمی‌شود. همین حالا تاخیر Admin API در Keycloak، Proxy و شبکه‌ی جلوی آن، و مکث‌های Event
+   Loop در identity-service را ببین؛ اگر به پنجره نزدیک‌اند، `KEYCLOAK_WRITE_SETTLE_SECONDS` را بالا ببر. فهرست:
+   `SELECT user_id, operation, deadline_at, takeover_at FROM keycloak_write_attempt WHERE takeover_at > now() AND
+account_missing_at IS NULL ORDER BY deadline_at`. **چه اندازه قابل اتکاست (#402 r3 R3-2، ADR-060 افزوده‌ی D-069 § ۸):**
+   Gauge را `KeycloakFenceSampler` با زمان‌سنج و Pool یک‌اتصالی خودش هر ۲ ثانیه می‌گیرد — نه گذر جاروکننده — و هر نمونه
+   حداکثر ۱ ثانیه است؛ بیشینه‌ی `overdue` در ۳۰ ثانیه‌ی آخر نگه داشته می‌شود. ثابت شده: هر پنجره‌ی دیرکرد (نیمی از
+   `KEYCLOAK_WRITE_SETTLE_SECONDS`، دست‌کم ۷٫۵ ثانیه) یا نمونه‌ای موفق در خود دارد، یا فاصله‌ی دو نمونه‌ی موفق از ۶ ثانیه گذشته
+   و بند ۹ روشن است. هشدار حداکثر ۳۷ ثانیه پس از باز شدن پنجره روشن می‌شود (۷ + Scrape ۱۵ + ارزیابی ۱۵) — با پیش‌فرض ۱۲۰
+   ثانیه (پنجره‌ی ۶۰ ثانیه) پیش از Takeover، و با پنجره‌ی کوتاه‌تر از ۷۵ ثانیه شاید پس از آن؛ آنگاه بند ۸ آن را می‌گیرد.
+   مسیریابی هشدار در Production هنوز وجود ندارد: فقط Prometheus محلی.
+8. `RastaIdentityKeycloakWriteExpired` (هشدار، D-070): نوشتنی که نتیجه‌اش هرگز معلوم نشد **تمام** پنجره را گذراند و هنوز
+   بازنویسی نشده (`expired`، زیرمجموعه‌ی `due`). گذر آن را در یک دوره بازنویسی می‌کند؛ تا آن زمان Keycloak ممکن است آنچه نوشتن
+   کهنه برد نگه دارد. اگر آن نوشتن باز هم دیرتر برسد، پس از Takeover می‌نشیند: فرض D-070 برایش شکست. همان بررسی بند ۷، و اگر
+   ماند بند ۴. فهرست: `SELECT user_id, operation, deadline_at, takeover_at FROM keycloak_write_attempt WHERE takeover_at <=
+now() AND deadline_at < takeover_at AND account_missing_at IS NULL`.
+9. `RastaIdentityKeycloakFenceSamplerStale` (هشدار، R3-2): هیچ Replicaیی بیش از ۶ ثانیه نمونه‌ی موفقی از حصارها نگرفته؛ بندهای ۷
+   و ۸ تا بازگشت آن قابل اتکا نیستند — پرس‌وجوهای آن دو بند را مستقیم اجرا کن. سن در لحظه‌ی Scrape حساب می‌شود، پس هنگام گیر
+   کردن نمونه‌گیری بالا می‌رود و فاصله‌ای که میان دو Scrape بسته شد هم ۳۰ ثانیه دیده می‌شود. ببین:
+   `rasta_identity_keycloak_fence_samples_total{outcome="failed"}` و `rasta_identity_keycloak_fence_sample_duration_seconds`؛
+   قفلی روی `keycloak_write_attempt` (Migration)، پایگاه داده‌ی کند یا در دسترس نبودن آن، یا Event Loop متوقف. پیش از نخستین نمونه‌ی
+   موفق هیچ سری حصاری صادر نمی‌شود و سن از آغاز نمونه‌گیر شمرده می‌شود: سکوت صفر نیست.
+10. `RastaIdentityKeycloakFenceSamplerMissing` (هشدار، R3-2): identity-service Scrape می‌شود ولی
+    `rasta_identity_keycloak_fence_sample_age_seconds` ندارد: نمونه‌گیر اجرا نمی‌شود (سیم‌کشی `app.module.ts` یا نام Metric)، و
+    بندهای ۷ تا ۹ همه خاموش‌اند. Replicaیی که نمونه‌گیر ندارد (سیم‌کشی‌نشده، آغازنشده یا متوقف) هیچ سنی صادر نمی‌کند، نه صفر
+    (#458 r1 F3): اگر Replicaهای دیگر نمونه بگیرند، این هشدار روشن نمی‌شود و بند ۹ روی همان‌ها سنجیده می‌شود.
+11. **فرستنده‌ی دیرکرده (D-070 گزینه‌ی D).** فرستنده‌ای که نتیجه‌ی نوشتنش را پس از مهلت خودش بفهمد (مکث فرایند، GC، Timeout)
+    — هر نتیجه‌ای — یک حصار **تازه** برای کاربر Commit می‌کند و Projection فوری او را می‌خواهد:
+    `rasta_identity_keycloak_write_fence_events_total{event="late_reply"}` (پاسخ دیرکرده)، `late_fenced` (حصار تازه نوشته شد)،
+    `late_owed` (نوشته نشد — پایگاه داده یا توقف Worker — و در حافظه ماند تا گذر بعدی یا توقف همان فرایند بنویسدش)، و
+    `rasta_identity_keycloak_projections_total{trigger="recovery"}`. افزایش `late_reply` یعنی مکث یا تأخیرهایی هم‌اندازه‌ی مهلت:
+    همان بررسی بند ۷. هشدار جدا ندارد؛ حصار تازه در بندهای ۷ تا ۹ دیده می‌شود. لاگ «Stopping with N late Keycloak write fences
+    unwritten» هنگام توقف یعنی N حصار تازه پیش از خروج نوشته نشد: حصار قدیمی، اگر هنوز Takeover نشده، می‌ماند؛ بندهای ۷ و ۸.
+    «unknown» به جای N یعنی Flush توقف تا مهلت تمام نشد و لغو شد: پس از برگشتن توقف هیچ تراکنشی از آن آغاز نمی‌شود، و COMMIT‌ای
+    که پیش از آن سپرده شده بود یا تا مهلت رسیده یا در لاگ بند ۱۳ شمرده شده (#458 r1/r2 F2). لاگ «N Keycloak recovery projections still unwinding after cancellation» یعنی Projection بازیابی لغو شد و تا مهلت
+    باز نشد؛ کاری به پایگاه داده نمی‌فرستد، و حصار تازه‌اش برای گذر می‌ماند. در گزارش Backfill/Reconcile همین
+    `fences.recoveriesAbandoned` است و گزارش را ناپاک می‌کند: فرمان را دوباره اجرا کن.
+12. `RastaIdentityMembershipLapseBacklogUnknown` (هشدار، #458 r1 F3، r2 F6): هیچ Replicaیی بیش از ۳ دقیقه شمارش موفق انقضا
+    نداشته (`min(rasta_identity_membership_lapse_count_age_seconds) > 180`)، یا هیچ Replicaیی نمونه‌گیر ندارد و سرویس Scrape
+    می‌شود — پس به `RastaIdentityMembershipLapseBacklog` نمی‌شود تکیه کرد. شمارش هر ۳۰ ثانیه یک پرس‌وجوی کران‌دار روی Pool
+    کسب‌وکار است. `rasta_identity_membership_lapse_count_age_seconds` هر Replica می‌گوید آخرین شمارش موفقش چقدر کهنه است؛
+    `rasta_identity_membership_lapse_backlog` در این میان همان شمارش را نگه می‌دارد (شمارش ناموفق آن را حذف نمی‌کند). لاگ
+    identity-service علت شکست را می‌گوید (پایگاه داده‌ی کند یا در دسترس نبودن آن، Pool پر). اگر `RastaIdentityMembershipLapseBacklog`
+    هم روشن است ولی Replica دیگری شمارش تازه‌ی صفر دارد، عدد مثبت از Replicaیی است که شمارشش شکست می‌خورد (سنش را ببین): خطا به سوی
+    روشن شدن است. تا بازگشت شمارش، فهرست انقضاهای عمل‌نشده را مستقیم بخوان:
+    `SELECT id, valid_until FROM membership WHERE valid_until <= now() AND lapse_handled_at IS NULL`.
+13. **توقف با تراکنش در راه (#458 r2 F2).** لاگ خطای «… stopped at the shutdown deadline with N transactions unsettled» (پیمایش
+    انقضا یا مصرف‌کننده‌ی Projection) یا «Closing a database pool with N transactions unsettled» یعنی N تراکنش که COMMIT‌شان پیش از
+    مهلت به پایگاه داده سپرده شده بود تا مهلت خاموش‌شدن پاسخ نگرفتند: **ممکن است پس از خروج فرایند Commit شده باشند** — نه «هیچ
+    تغییری نکرد». حصارها و انقضاها را با بندهای ۷ تا ۹ و ۱۲ بسنج؛ گذر بعدی هر Replica آنچه نیمه‌کاره مانده را از ردیف‌ها می‌یابد. در
+    Backfill/Reconcile همین با لاگ «teardown reached its deadline with work still in flight» می‌آید و فرمان با کد ۱ (ناپاک) بیرون
+    می‌رود: پس از آرام شدن پایگاه داده دوباره اجرا کن.
+
 <a id="registration-approval-orphan"></a>
 
 ## حساب تأیید ثبت‌نام: فعال‌سازی معوق و حساب یتیم (`activationPending`، `orphans`)
@@ -89,6 +190,31 @@ Claim با `WHERE lapse_handled_at IS NULL` است، پس اجرا روی چند
 Commit، Projector صفت‌ها را می‌نویسد و حساب را **یک بار** فعال می‌کند (ستون `account_activation_pending`)؛ پس پاسخ
 گم‌شدهٔ Keycloak، Crash یا تراکنش شکست‌خورده فقط حسابی غیرفعال و بی‌اعطا باقی می‌گذارد، که تأیید بعدی همان درخواست آن را
 به کار می‌گیرد. رویداد بازپخش‌شده حسابی را که مدیر بعداً غیرفعال کرده، دوباره فعال نمی‌کند.
+
+حساب کاربری که **اپراتور** می‌سازد (`POST /v1/users`) هم از D-069 همین‌طور ساخته می‌شود: غیرفعال، فقط `rasta_user_id`، پیش
+از تراکنش؛ اعطاها و فعال‌سازی پس از Commit و از مسیر حصاردار، با شناسه‌ی خود کاربر به‌عنوان نشانگر `rasta_activation`. فعال‌سازی
+تا وقتی نوشتنی پیشین از همان کاربر ممکن است بنشیند (حصار زنده) **صبر می‌کند** — وگرنه غیرفعال‌سازیِ دیررسِ یک Adoption پس از
+آن می‌نشست — و گذر انقضا آن را پس از سررسیدن حصار انجام می‌دهد؛ تا آن زمان `activationPending` در گزارش می‌ماند.
+
+**ثبت‌نام عمومی دریافت شد ولی در صف بررسی نیست (task 130، R5).** `POST /v1/registration-requests` فقط یک ردیف
+`registration_intake` می‌نویسد؛ کارگر ثبت‌نام (`RegistrationIntakeWorker`) هر `REGISTRATION_INTAKE_INTERVAL_SECONDS`
+(پیش‌فرض ۵) آن را به کاربر PENDING و درخواست بررسی تبدیل می‌کند، یا اگر نام کاربری یا ایمیل گرفته باشد کنارش می‌گذارد؛ در هر دو
+حالت ردیف حذف می‌شود و جزئیات متقاضیِ تکراری نگه داشته نمی‌شود. خاموش‌کردنش ممکن نیست. ردیفی که پردازشش شکست بخورد با تأخیر
+دوبرابرشونده (تا ۱۶ بازه) دوباره امتحان می‌شود و جلوی بقیه را نمی‌گیرد؛ Log آن `Failed to handle registration intake <id>` است.
+عقب‌ماندگی: `SELECT count(*), min(received_at) FROM registration_intake;` — ردیف‌های قدیمی‌تر از چند بازه یعنی کارگر اجرا نمی‌شود
+یا هر بار شکست می‌خورد. برگرداندن Migration (`down.sql` در `20261029130000_registration_intake`) فقط با جدول خالی و کارگر
+متوقف، وگرنه درخواست‌هایی که `202` گرفته‌اند گم می‌شوند. ردگیری یک ثبت‌نام: ستون `correlation_id` همان شناسه‌ای است که پاسخ
+`202` در `x-correlation-id` برگرداند و رویداد `REGISTRATION_SUBMITTED` و Log کنار گذاشتنِ تکراری همان را دارند (PR #483 r2 N1).
+`actor_type` یکی از `USER`، `SERVICE` یا `ANONYMOUS` است (ثبت‌نام بی توکن، با `actor_id` خالی)؛ رکورد ممیزی چنین ثبت‌نامی
+`ANONYMOUS` است، نه `SYSTEM / identity-service` (PR #483 r3 F1). ردیفی که این ستون‌ها را ندارد یا ردشان می‌کند نوشته نمی‌شود.
+
+**ساخت مستقیم حساب که پس از Keycloak شکست خورد (task 117، F6).** `POST /v1/users` اکنون `Idempotency-Key` لازم دارد و پیش از
+Keycloak یک Intent (`user_provisioning_intent`) با شناسهٔ پایدار کاربر Commit می‌کند؛ حساب با همان شناسه (`rasta_user_id`)
+ساخته می‌شود. اگر تراکنش کاربر شکست بخورد، **همان درخواست با همان کلید** — همان فراخواننده، سازمان و بدنه — حساب را به کار
+می‌گیرد؛ پاسخ گم‌شدهٔ درخواستی که Commit شده بازپخش می‌شود. کاری برای اپراتور نیست، مگر پاسخ `409` با
+`details[0].code = ACCOUNT_NOT_HARMLESS`: حسابِ همان Intent بیرون از پلتفرم فعال شده یا اعطایی گرفته و به کار گرفته نمی‌شود؛
+اپراتور در کنسول Keycloak آن را غیرفعال و صفت‌هایش را به `rasta_user_id` تنها برمی‌گرداند (یا حذفش می‌کند) و درخواست دوباره
+فرستاده می‌شود. حسابی زیر همان نام کاربری که `rasta_user_id` دیگری دارد هرگز به کار گرفته نمی‌شود (`409 ALREADY_EXISTS`).
 
 فعال‌سازی **یک‌بار و اثبات‌پذیر** است (#219 r3): `enabled: true` و صفت فقط-مدیرِ `rasta_activation` (شناسهٔ درخواست
 ثبت‌نام) در **یک** به‌روزرسانی نوشته می‌شوند. پیش از فعال‌سازی، Projector حساب را می‌خواند؛ اگر نشانه هست، فعال‌سازی پیشین
