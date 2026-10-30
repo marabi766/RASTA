@@ -278,7 +278,12 @@ const ECHOES = [
   ],
   ['check-kafka-topic-limits.mjs', [`/tmp/${SU}/${SP}`], 'the topics file cannot be read'],
   ['check-service-boundaries.mjs', ['--root', `/tmp/${SU}/${SP}`], 'nothing scanned under'],
-  ['backup-restore-drill.mjs', ['--report', `/tmp/${SU}/${SP}.json`], 'cannot be created'],
+  // The report's directory is checked first (#512 r1 F1); a missing one is refused by a fixed line.
+  [
+    'backup-restore-drill.mjs',
+    ['--report', `/tmp/${SU}/${SP}.json`],
+    'the report directory must be private',
+  ],
   ['aggregation-evidence.mjs', [`--${SU}`, SP], 'unknown option at position 1'],
   [
     'aggregation-evidence.mjs',
