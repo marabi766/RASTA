@@ -268,7 +268,16 @@ spawn شناسه گروهشان در دفترچه جداگانه `<report>.recov
 میلی‌ثانیه و روی دیسک کند بیشتر. رزرو پیش از spawn ممکن نیست، چون شناسه گروه همان pid فرزند است و پیش از ساخته‌شدن
 فرزند وجود ندارد؛ یافتن بعدی آن فقط با پیمایش `/proc` بر پایه محیط ممکن می‌شد که با اثبات ضعیف‌تری سیگنال می‌دهد و
 فرایندهای پنهان‌شده با `hidepid` را نمی‌بیند. قفل و دفترچه به مسیر گزارش وابسته‌اند: نسخه کپی‌شده گزارش در مسیر
-دیگر هویت دیگری است و با اصلی هم‌زمان‌سازی نمی‌شود، پس از یک گزارش فقط یک نسخه را به بازیابی بدهید. وضعیت هر گروه سه‌حالته
+دیگر هویت دیگری است و با اصلی هم‌زمان‌سازی نمی‌شود، پس از یک گزارش فقط یک نسخه را به بازیابی بدهید. همه نام‌های کنار گزارش پیش از ساخت هر منبعی رزرو می‌شود: هر فایلی که تمرین یا بازیابی می‌نویسد خود مسیر
+گزارش به‌علاوه یکی از سه پسوند `.recovery-journal.json`، `.lock.<hex>` و `.<hex>.tmp` است، پس مسیر گزارش نباید خودش به
+یکی از این پسوندها ختم شود (مثلاً `R.recovery-journal.json` وقتی `R` در کار است): `--report` و `--cleanup-from` هر دو، پیش
+از ساخت قفل یا هر فایل دیگری، با کد ۲ و یک خط ثابت رد می‌کنند. تمرین عادی گزارش را انحصاری می‌سازد و بلافاصله دفترچه را هم
+انحصاری و با یک «رزرو» می‌سازد (فقط شناسه همین اجرا، بدون گروه و بدون نقطه بازرسی؛ بازیابی آن را «چیزی ثبت نشده» می‌خواند).
+اگر مسیر دفترچه از پیش وجود داشته باشد، چه دفترچه اجرای پایان‌یافته یا ناتمام قبلی، چه فایل ناقص یا بی‌ربط، شروع با کد ۲ و
+یک خط ثابت رد می‌شود و چیزی ساخته یا دست‌خورده نمی‌شود. سیاست انتخاب‌شده: دفترچه باقی‌مانده خودکار بایگانی **نمی‌شود**،
+رد می‌شود؛ برای استفاده دوباره از یک مسیر گزارش، گزارش و دفترچه‌اش را با هم بایگانی یا حذف کنید (گردش‌کار CI هر بار پوشه
+خصوصی تازه می‌سازد، پس به آن برنمی‌خورد). نتیجه: دفترچه اجرای A هیچ‌گاه در بازیابی اجرای B خوانده نمی‌شود و دو گزارش با
+نام‌های هم‌پوشان هیچ فایلی را مشترک ندارند. وضعیت هر گروه سه‌حالته
 است: ناپدیدشده (`kill(-pgid, 0)` ثابت می‌کند)، اثبات‌شده (همه اعضا خوانده و با شناسه مطابق شده‌اند) یا
 نامشخص (هر خطای خواندن `/proc`، فیلد ناقص، عضو بدون شناسه، یا گروه زنده‌ای که هیچ عضوی از آن دیده نمی‌شود).
 گروه نامشخص هرگز سیگنال نمی‌گیرد و هرگز موفقیت حساب نمی‌شود: بازیابی با کد ۱ و پیام ثابتی که فقط شناسه گروه
@@ -366,6 +375,16 @@ exists for every invocation, also when the directory is already gone, and carrie
 checkpoints (`recovered` before the removal, `removed` after), so a retry after any interruption
 finishes or succeeds without asking Docker. A journal or report write that fails, a failed directory
 fsync included, is sticky for that invocation: it never exits 0 and removes nothing more.
+The report's whole artifact namespace is reserved before anything is allocated. Everything a run or
+recovery writes is the report path plus `.recovery-journal.json`, `.lock.<hex>` or `.<hex>.tmp`, so a
+report path that itself ends in one of these (for example `R.recovery-journal.json` while `R` is in
+use) is refused by `--report` and `--cleanup-from` alike with one fixed line and exit 2, before any
+file is created. A normal run then creates the report exclusively and the journal exclusively as a
+reservation (its recovery id only; recovery reads it as "nothing recorded"). If the journal path
+already exists (a journal left by a finished run on that path, an unreadable or unrelated file) the
+start is refused with one fixed line and exit 2, nothing is created and the existing file is not
+touched: **a stale journal is refused, never archived or adopted.** To reuse a report path, archive or
+delete the report together with its journal.
 **Residual, accepted by the project manager:** a SIGKILL between a child's spawn and the synchronous
 write that names its process group (one small write plus two fsyncs: milliseconds, more on a slow
 disk) can leave that one group unrecorded, for the original run's children and recovery's alike. A

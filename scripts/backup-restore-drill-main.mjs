@@ -42,17 +42,20 @@ import {
   FIXTURE_SQL,
 } from './backup-restore-drill-lib.mjs';
 import {
+  ArtifactRefused,
   LOCK_WAIT_MILLISECONDS,
   LockRefused,
   RECOVERY_ENV,
   RecoveryRefused,
   acquireDrillLock,
   assertOwnedCompose,
+  assertReportName,
   loadRecoveryRecord,
   newRecoveryId,
   removeOwnedDirectory,
   recoverProcessGroups,
   recoveryJournalPath,
+  reserveRunArtifacts,
   writeRecoveryJournal,
   writeRecoveryMarker,
 } from './backup-restore-drill-recovery.mjs';
@@ -73,6 +76,15 @@ if (!cleanupOnly && (args.length !== 2 || args[0] !== '--report')) {
   process.exit(2);
 }
 const reportPath = resolve(args[1]);
+// The report's artifacts (journal, lock claims, atomic siblings) are all `<report>` plus a suffix:
+// a report path that is itself such a name could be another report's artifact. Refused first,
+// before the lock or any file next to it exists, for a run and a recovery alike.
+try {
+  assertReportName(reportPath);
+} catch (error) {
+  console.error(`[backup-restore-drill] ${error.message}`);
+  process.exit(2);
+}
 // One owner at a time: a run and a recovery of the same report hold this lock for their whole
 // lifetime (released when the process exits; a killed owner leaves a claim that a later one takes
 // over only after proving the owner gone). RASTA_DRILL_LOCK_WAIT_MS bounds the wait for a live
@@ -91,15 +103,22 @@ try {
   process.exit(2);
 }
 process.on('exit', () => drillLock.release());
-// Exclusive creation avoids overwriting an operator's file (including through a symlink).
-// Later writes replace it atomically through a sibling file (see writeReportAtomically).
+// The whole artifact namespace is reserved before anything is allocated: the report (exclusive
+// creation avoids overwriting an operator's file, including through a symlink) and the recovery
+// journal path (refused when it exists: it is an earlier run's or another report's). Later writes
+// replace both atomically through a sibling file (see writeReportAtomically).
+const recoveryId = cleanupOnly ? undefined : newRecoveryId();
 if (!cleanupOnly) {
   try {
-    closeSync(openSync(reportPath, 'wx', 0o600));
-  } catch {
-    // Not the path, nor the error that quotes it (#385 r6).
+    reserveRunArtifacts(reportPath, { id: recoveryId });
+  } catch (error) {
+    // Fixed phrases only: never the path, nor the error that quotes it (#385 r6).
     console.error(
-      'the --report file cannot be created (it must not exist yet); its path is not repeated',
+      error instanceof ArtifactRefused
+        ? error.reason === 'report'
+          ? error.message
+          : `[backup-restore-drill] ${error.message}`
+        : 'the artifacts next to the report could not be reserved; nothing was done',
     );
     process.exit(2);
   }
@@ -111,7 +130,6 @@ let services;
 // Only explicit local Docker endpoint/context; HOME is retained for pnpm, not daemon selection.
 // Every child carries the run's recovery id, so a process group the report names can later be
 // proven to be this run's before anything signals it (see recoverProcessGroups).
-const recoveryId = cleanupOnly ? undefined : newRecoveryId();
 const env = {
   PATH: process.env.PATH,
   HOME: process.env.HOME,

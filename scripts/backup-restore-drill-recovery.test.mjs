@@ -21,11 +21,16 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { atomicTempPath } from './backup-restore-drill-lib.mjs';
 import {
   RECOVERY_ENV,
   RECOVERY_MARKER,
+  ArtifactRefused,
   LockRefused,
   acquireDrillLock,
+  assertReportName,
+  isDerivedArtifactName,
+  reserveRunArtifacts,
   currentLockOwner,
   inspectLockOwner,
   recoveryJournalPath,
@@ -1012,4 +1017,152 @@ test('a file that is not a claim this drill wrote is refused, never taken over',
       );
       assert.deepEqual(lockFiles(root), ['report.json.lock.0123456789abcdef'], name);
     }
+  }));
+
+// --- the report's artifact namespace is reserved before anything is allocated (#478 r6 F4) ----------
+
+const artifactRefused = (action, reason) =>
+  assert.throws(action, (error) => {
+    assert.ok(error instanceof ArtifactRefused, String(error));
+    assert.equal(error.reason, reason);
+    return true;
+  });
+
+test('a report path may never be a name this drill derives from a report path: every artifact it writes is covered', () =>
+  withRoot(async (root) => {
+    const report = join(root, 'report.json');
+    // The three families, taken from what the code really creates (not retyped here).
+    const claims = [];
+    const lock = await acquireDrillLock(report, { owner: claim({ pid: 11 }) });
+    claims.push(...lockFiles(root));
+    lock.release();
+    const derived = [
+      recoveryJournalPath(report),
+      atomicTempPath(report),
+      atomicTempPath(recoveryJournalPath(report)),
+      ...claims.map((name) => join(root, name)),
+      atomicTempPath(claims[0] ? join(root, claims[0]) : report),
+    ];
+    assert.ok(claims.length === 1, 'a lock claim was observed');
+    for (const path of derived) {
+      assert.ok(isDerivedArtifactName(path.slice(root.length + 1)), path);
+      artifactRefused(() => assertReportName(path), 'name');
+    }
+    // Ordinary operator names, including look-alikes, are fine.
+    for (const name of [
+      'report.json',
+      'report',
+      'x.recovery-journal.json.bak',
+      'x.lock.zzzzzzzzzzzzzzzz',
+      'x.lock.0123456789abcde',
+      'x.0123456789abcdef.tmp.old',
+      'drill.tmp',
+    ]) {
+      assert.equal(isDerivedArtifactName(name), false, name);
+      assertReportName(join(root, name));
+    }
+  }));
+
+test('reserving: the report and a journal reservation exist, private, before anything else; the loader reads the reservation as "nothing recorded"', () =>
+  withRoot((root) => {
+    const record = makeRecord(root);
+    const report = join(root, 'fresh.json');
+    const id = newRecoveryId();
+    reserveRunArtifacts(report, { id });
+    assert.equal(readFileSync(report, 'utf8'), '');
+    assert.equal(statSync(report).mode & 0o777, 0o600);
+    const journal = recoveryJournalPath(report);
+    assert.deepEqual(JSON.parse(readFileSync(journal, 'utf8')), {
+      version: 1,
+      id,
+      reservation: true,
+    });
+    assert.equal(statSync(journal).mode & 0o777, 0o600);
+    // The run's own record, with only the reservation beside it, loads exactly as with no journal.
+    const mine = makeRecord(root, { id });
+    writeFileSync(recoveryJournalPath(mine.reportPath), readFileSync(journal), { mode: 0o600 });
+    const loaded = loadRecoveryRecord(mine.reportPath, { tmpRoot: root });
+    assert.deepEqual([loaded.journalGroups, loaded.checkpoint], [[], undefined]);
+    // Another run's reservation, or a reservation with anything added, proves nothing.
+    writeFileSync(recoveryJournalPath(record.reportPath), readFileSync(journal), { mode: 0o600 });
+    refused(() => loadRecoveryRecord(record.reportPath, { tmpRoot: root }), /does not match/);
+    for (const extra of [
+      { checkpoint: 'removed' },
+      { groups: [4242] },
+      { project: mine.project },
+    ]) {
+      writeFileSync(
+        recoveryJournalPath(mine.reportPath),
+        JSON.stringify({ version: 1, id, reservation: true, ...extra }),
+        { mode: 0o600 },
+      );
+      refused(() => loadRecoveryRecord(mine.reportPath, { tmpRoot: root }), /does not match/);
+    }
+  }));
+
+test('reserving refuses an existing journal of any kind and leaves it, and creates nothing', () =>
+  withRoot((root) => {
+    const report = join(root, 'report.json');
+    const journal = recoveryJournalPath(report);
+    const left = [
+      ['a finished run’s journal', JSON.stringify({ version: 1, checkpoint: 'removed' })],
+      ['an unreadable sidecar', '{'],
+      ['an unrelated file', 'operator notes'],
+      ['an empty file', ''],
+    ];
+    for (const [name, text] of left) {
+      writeFileSync(journal, text, { mode: 0o600 });
+      artifactRefused(() => reserveRunArtifacts(report, { id: newRecoveryId() }), 'journal');
+      assert.equal(readFileSync(journal, 'utf8'), text, `${name} untouched`);
+      assert.equal(existsSync(report), false, `${name}: no report created`);
+      rmSync(journal);
+    }
+    // A dangling symlink is a name in use too, and is not followed.
+    symlinkSync(join(root, 'elsewhere'), journal);
+    artifactRefused(() => reserveRunArtifacts(report, { id: newRecoveryId() }), 'journal');
+    assert.equal(existsSync(join(root, 'elsewhere')), false);
+    assert.equal(existsSync(report), false);
+    rmSync(journal);
+    // An existing report is refused as before, and its journal is not created.
+    writeFileSync(report, 'x');
+    artifactRefused(() => reserveRunArtifacts(report, { id: newRecoveryId() }), 'report');
+    assert.equal(existsSync(journal), false);
+    assert.equal(readFileSync(report, 'utf8'), 'x');
+    assert.deepEqual(readdirSync(root).sort(), ['report.json']);
+  }));
+
+test('reserving: two contenders for one journal path, whoever is second is refused and the first’s files stand', () =>
+  withRoot((root) => {
+    // The journal appears between the check and the exclusive creation (another report claims the
+    // name): the exclusive creation is the arbiter, and the report this call made is taken back.
+    const report = join(root, 'report.json');
+    const journal = recoveryJournalPath(report);
+    const open = (path, flags, mode) => {
+      if (path === journal) writeFileSync(journal, 'theirs', { mode: 0o600 });
+      return openSync(path, flags, mode);
+    };
+    artifactRefused(
+      () => reserveRunArtifacts(report, { id: newRecoveryId() }, { fs: { open } }),
+      'journal',
+    );
+    assert.equal(readFileSync(journal, 'utf8'), 'theirs', 'their journal is not removed');
+    assert.equal(existsSync(report), false, 'our report is taken back');
+    rmSync(journal);
+    // A write that fails after the journal was created removes what this call created.
+    artifactRefused(
+      () =>
+        reserveRunArtifacts(
+          report,
+          { id: newRecoveryId() },
+          {
+            fs: {
+              write: () => {
+                throw new Error('disk full');
+              },
+            },
+          },
+        ),
+      'journal',
+    );
+    assert.deepEqual(readdirSync(root), []);
   }));

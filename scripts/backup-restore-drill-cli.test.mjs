@@ -1635,7 +1635,12 @@ test('a journal that cannot be written at all is never a success, and nothing is
     assert.match(result.stderr, /a journal write failed/);
     assert.match(result.stderr, /success is not reported/);
     assert.ok(existsSync(run.report.temporary), 'the directory is kept');
-    assert.equal(existsSync(recoveryJournal(run)), false);
+    // Nothing was published: all the journal holds is the run's own reservation.
+    assert.deepEqual(JSON.parse(readFileSync(recoveryJournal(run), 'utf8')), {
+      version: 1,
+      id: run.report.recoveryId,
+      reservation: true,
+    });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -2125,6 +2130,152 @@ test('a module that cannot be loaded ends in one fixed line: no stack, no path, 
       /ERR_MODULE_NOT_FOUND|node:internal|yaml|\bat /,
     );
     assert.equal(JSON.parse(readFileSync(report, 'utf8')).passed, false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// --- the report's whole artifact namespace is reserved before anything is allocated (#478 r6 F4) ---
+const JOURNAL_REFUSED =
+  '[backup-restore-drill] a recovery journal already exists next to the report path (an earlier run left it, or another report claims the name); remove or archive it together with its report, then start again; nothing was done\n';
+const NAME_REFUSED =
+  '[backup-restore-drill] the --report path ends in a name this drill derives from a report path (.recovery-journal.json, .lock.<hex>, .<hex>.tmp); nothing was done\n';
+/** One invocation (`--report` or `--cleanup-from`) run to its end, output captured. */
+function invoke(directory, root, flag, reportPath, extra = {}) {
+  const child = spawn(process.execPath, [cli.pathname, flag, reportPath], {
+    env: {
+      ...process.env,
+      PATH: `${directory}:${process.env.PATH}`,
+      TMPDIR: directory,
+      RASTA_DRILL_ROOT: root,
+      ...extra,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => (stdout += chunk));
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  return { child, done: once(child, 'close').then(([code]) => ({ code, stdout, stderr })) };
+}
+/** Nothing the refused invocation did is left: no directory, no Docker call, no lock claim. */
+function assertUntouched(directory, before) {
+  assert.deepEqual(readdirSync(directory).sort(), before);
+  assert.equal(calls(directory), '');
+  assert.equal(existsSync(join(directory, 'pnpm-called')), false);
+}
+const stubs = (directory) => {
+  recordingDocker(directory);
+  writeFileSync(join(directory, 'pnpm'), `#!/bin/sh\ntouch '${directory}/pnpm-called'\n`, {
+    mode: 0o700,
+  });
+};
+
+test('a journal left by a finished run refuses the next run on that report path, touching nothing; cleared together with its report the path is free', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-reuse-'));
+  try {
+    const root = fixture(directory);
+    const a = await ordinaryRun(directory, root);
+    assert.equal(journalOf(a.reportPath).checkpoint, 'removed');
+    // The operator archives A's report only and starts B on the same path.
+    rmSync(a.reportPath);
+    const journal = `${a.reportPath}.recovery-journal.json`;
+    const bytes = readFileSync(journal);
+    stubs(directory);
+    rmSync(join(directory, 'docker-calls'), { force: true });
+    const before = readdirSync(directory).sort();
+    const b = await invoke(directory, root, '--report', a.reportPath).done;
+    assert.equal(b.code, 2, b.stderr);
+    assert.equal(b.stderr, JOURNAL_REFUSED);
+    assert.doesNotMatch(b.stderr, new RegExp(directory));
+    assertUntouched(directory, before);
+    assert.deepEqual(readFileSync(journal), bytes, 'A’s journal is exactly as it was');
+    assert.equal(existsSync(a.reportPath), false, 'no report was created');
+    // Archived together with its report, the path is free, and a run killed after it allocated
+    // is recovered by ITS OWN journal (the original failure: recovery read A's and refused).
+    rmSync(journal);
+    const run = await crashedRun(directory, root);
+    recordingDocker(directory);
+    const recovery = await recover(directory, root, run.reportPath);
+    assert.equal(recovery.code, 0, recovery.stderr);
+    assert.doesNotMatch(recovery.stderr, /does not match the directory/);
+    assert.equal(existsSync(run.report.temporary), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('overlapping names, a live run first: a report named like its journal, lock claim or write sibling is refused and the run’s files stand', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-overlap-live-'));
+  let live;
+  try {
+    const root = fixture(directory);
+    writeFileSync(
+      join(directory, 'pnpm'),
+      `#!/bin/sh
+echo $$ > '${directory}/blocked-pgid'
+while [ ! -f '${directory}/release' ]; do sleep 0.05; done
+`,
+      { mode: 0o700 },
+    );
+    writeFileSync(join(directory, 'docker'), '#!/bin/sh\ncase "$*" in *"up -d"*) exit 1;; esac\n', {
+      mode: 0o700,
+    });
+    const reportPath = join(directory, 'report.json');
+    live = invoke(directory, root, '--report', reportPath);
+    await waitFor(join(directory, 'blocked-pgid'));
+    const journal = `${reportPath}.recovery-journal.json`;
+    const reserved = readFileSync(journal);
+    const reportBytes = readFileSync(reportPath);
+    const before = readdirSync(directory).sort();
+    for (const name of [
+      `${reportPath}.recovery-journal.json`,
+      `${reportPath}.lock.0123456789abcdef`,
+      `${reportPath}.0123456789abcdef.tmp`,
+      `${journal}.recovery-journal.json`,
+    ])
+      for (const flag of ['--report', '--cleanup-from']) {
+        const result = await invoke(directory, root, flag, name).done;
+        assert.equal(result.code, 2, `${flag} ${name}: ${result.stderr}`);
+        assert.equal(result.stderr, NAME_REFUSED);
+        assert.deepEqual(readdirSync(directory).sort(), before, 'not one file was created');
+      }
+    assert.deepEqual(readFileSync(journal), reserved, 'the live run’s journal is untouched');
+    assert.deepEqual(readFileSync(reportPath), reportBytes);
+    // The live run finishes: its teardown journal is ITS OWN, not overwritten into anything else.
+    writeFileSync(join(directory, 'release'), '');
+    const done = await live.done;
+    assert.equal(done.code, 1, done.stderr);
+    const final = journalOf(reportPath);
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    assert.equal(final.id, report.recoveryId);
+    assert.equal(final.project, report.project);
+    assert.equal(final.checkpoint, 'removed');
+    assert.equal(report.cleanup.passed, true);
+  } finally {
+    writeFileSync(join(directory, 'release'), '');
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('overlapping names, the journal’s name taken first: the run is refused and what holds the name is not touched', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-overlap-first-'));
+  try {
+    const root = fixture(directory);
+    stubs(directory);
+    const reportPath = join(directory, 'report.json');
+    const journal = `${reportPath}.recovery-journal.json`;
+    // What an earlier B (report named `<R>.recovery-journal.json`) would hold there, or any file.
+    for (const text of ['{"project":"restore-drill-0123456789abcdef"}', '', 'operator notes']) {
+      writeFileSync(journal, text, { mode: 0o600 });
+      const before = readdirSync(directory).sort();
+      const result = await invoke(directory, root, '--report', reportPath).done;
+      assert.equal(result.code, 2, result.stderr);
+      assert.equal(result.stderr, JOURNAL_REFUSED);
+      assertUntouched(directory, before);
+      assert.equal(readFileSync(journal, 'utf8'), text);
+      rmSync(journal);
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

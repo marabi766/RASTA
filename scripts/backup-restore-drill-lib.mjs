@@ -831,6 +831,13 @@ COMMIT;
 const reportFs = { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync };
 
 /**
+ * The sibling an atomic write goes through, and the one pattern that recognises it: both live here,
+ * so the report-path namespace check (recovery.mjs) cannot drift from what this module creates.
+ */
+export const ATOMIC_TEMP_PATTERN = /\.[0-9a-f]{16}\.tmp$/;
+export const atomicTempPath = (path) => `${path}.${randomBytes(8).toString('hex')}.tmp`;
+
+/**
  * Replace the report in one step: a random sibling is created exclusively (never through a
  * symlink) with mode 0600, written, fsynced and renamed over the destination, so a kill at any
  * point leaves the previous complete report or the new one. A failure removes the sibling and
@@ -841,7 +848,7 @@ const reportFs = { openSync, writeSync, fsyncSync, closeSync, renameSync, unlink
  */
 export function writeReportAtomically(path, report, { durable = false, fs = reportFs } = {}) {
   const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
-  const sibling = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+  const sibling = atomicTempPath(path);
   let fd;
   try {
     fd = fs.openSync(sibling, 'wx', 0o600);

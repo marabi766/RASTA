@@ -1,9 +1,21 @@
 import { randomBytes } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync, readlinkSync, rmSync, unlinkSync } from 'node:fs';
+import {
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import {
+  ATOMIC_TEMP_PATTERN,
   InputFileError,
   MAX_REPORT_BYTES,
   groupAlive,
@@ -41,6 +53,13 @@ import {
 //     (acquireDrillLock) for its whole lifetime, so two recoveries, or a recovery and a live run,
 //     can never both act on the same groups, journal or directory. A lock whose owner is not
 //     PROVEN gone is never taken over.
+//   * the report's whole ARTIFACT NAMESPACE is reserved at startup, before anything is allocated
+//     (reserveRunArtifacts): a report path may not itself be a name this drill derives from a
+//     report path (`<r>.recovery-journal.json`, `<r>.lock.<hex>`, `<r>.<hex>.tmp`), and the
+//     journal path must not exist yet; the run then creates the report and a journal reservation
+//     exclusively. Every artifact of a report is `<report>` plus one of those suffixes, so two
+//     live reports can never share an artifact, whichever starts first. A journal left by an
+//     earlier run on that path is refused (an operator removes or archives it WITH its report).
 //   * A journal or report write that fails is STICKY: the invocation can no longer report success,
 //     whatever later writes do, and nothing is removed after it.
 // RESIDUAL (stated, accepted by the project manager, not engineered around): between a child's
@@ -339,6 +358,9 @@ function loadRecoveryJournal(journalPath, { id, project, temporary, uid }) {
   if (text === undefined) return { groups: [], checkpoint: undefined };
   const journal = parseJson(text, 'the recovery journal');
   if (!isObject(journal)) refuse('the recovery journal is not an object');
+  // A run's reservation (reserveRunArtifacts): its id and nothing else, so no groups and no checkpoint.
+  if (isDeepStrictEqual(journal, { version: RECOVERY_VERSION, id, reservation: true }))
+    return { groups: [], checkpoint: undefined };
   const { groups, checkpoint, ...bound } = journal;
   if (
     !isDeepStrictEqual(bound, {
@@ -564,6 +586,7 @@ export async function recoverProcessGroups(
 
 export const LOCK_WAIT_MILLISECONDS = 30_000;
 const MAX_LOCK_BYTES = 4096;
+const LOCK_INFIX = '.lock.';
 const LOCK_NAME = /^[0-9a-f]{16}$/;
 const BOOT_ID = /^[0-9a-f-]{36}$/;
 const PID_NAMESPACE = /^pid:\[\d+\]$/;
@@ -720,7 +743,7 @@ export async function acquireDrillLock(
   } = {},
 ) {
   const directory = dirname(reportPath);
-  const prefix = `${basename(reportPath)}.lock.`;
+  const prefix = `${basename(reportPath)}${LOCK_INFIX}`;
   const deadline = now() + waitMilliseconds;
   const remove = (path) => {
     try {
@@ -730,7 +753,7 @@ export async function acquireDrillLock(
     }
   };
   for (;;) {
-    const mine = `${reportPath}.lock.${randomBytes(8).toString('hex')}`;
+    const mine = `${reportPath}${LOCK_INFIX}${randomBytes(8).toString('hex')}`;
     try {
       writeReportAtomically(mine, owner);
     } catch {
@@ -767,5 +790,106 @@ export async function acquireDrillLock(
     remove(mine);
     if (now() >= deadline) throw new LockRefused('busy');
     await sleep(pollMilliseconds + Math.floor(random() * pollMilliseconds));
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The artifact namespace of a report path: everything a run or recovery writes is the report path
+// plus one suffix (the journal, a lock claim, an atomic write's sibling). Claiming the report
+// path therefore claims the namespace, PROVIDED no report path is itself such a name: that is
+// the one rule (isDerivedArtifactName) that makes two different reports disjoint. A run reserves
+// its artifacts before it allocates anything; recovery only needs the name rule.
+// ---------------------------------------------------------------------------------------------
+
+const ARTIFACT_REASONS = {
+  name: 'the --report path ends in a name this drill derives from a report path (.recovery-journal.json, .lock.<hex>, .<hex>.tmp); nothing was done',
+  journal:
+    'a recovery journal already exists next to the report path (an earlier run left it, or another report claims the name); remove or archive it together with its report, then start again; nothing was done',
+  report: 'the --report file cannot be created (it must not exist yet); its path is not repeated',
+};
+/** Refused before anything was allocated; the phrase is fixed (no path, pid or name). */
+export class ArtifactRefused extends Error {
+  constructor(reason) {
+    super(ARTIFACT_REASONS[reason]);
+    this.name = 'ArtifactRefused';
+    this.reason = reason;
+  }
+}
+
+/** True for a basename the drill itself derives from some report path. */
+export function isDerivedArtifactName(name) {
+  if (name.endsWith(RECOVERY_JOURNAL) || ATOMIC_TEMP_PATTERN.test(name)) return true;
+  const at = name.lastIndexOf(LOCK_INFIX);
+  return at >= 0 && LOCK_NAME.test(name.slice(at + LOCK_INFIX.length));
+}
+
+/** Throws ArtifactRefused('name') when `reportPath` could collide with another report's artifact. */
+export function assertReportName(reportPath) {
+  if (isDerivedArtifactName(basename(reportPath))) throw new ArtifactRefused('name');
+}
+
+const exists = (path) => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    return true; // cannot be inspected: not ours to use
+  }
+};
+
+/**
+ * Reserves a run's report and journal paths, exclusively and before any resource exists. The
+ * journal path must not exist (a journal outlives its run on purpose, so a leftover belongs to
+ * another run and is never adopted, replaced or archived behind the operator's back); the report is
+ * created, then the journal as a reservation that names only this run's id. Whatever fails removes
+ * what this call created. Never follows a symlink and never overwrites.
+ */
+export function reserveRunArtifacts(reportPath, { id }, { fs = {} } = {}) {
+  const { open = openSync, write = writeSync, sync = fsyncSync, close = closeSync } = fs;
+  const journalPath = recoveryJournalPath(reportPath);
+  assertReportName(reportPath);
+  if (exists(journalPath)) throw new ArtifactRefused('journal');
+  const remove = (path) => {
+    try {
+      unlinkSync(path);
+    } catch {
+      /* never created */
+    }
+  };
+  // Exclusive: a path somebody else holds fails here and is left alone; a path this call created
+  // and could not finish is removed again.
+  const create = (path, contents) => {
+    const fd = open(path, 'wx', 0o600);
+    try {
+      if (contents) {
+        const bytes = Buffer.from(contents);
+        for (let offset = 0; offset < bytes.length;) {
+          const written = write(fd, bytes, offset, bytes.length - offset, offset);
+          if (!written) throw new Error('short write');
+          offset += written;
+        }
+        sync(fd);
+      }
+    } catch (error) {
+      remove(path);
+      throw error;
+    } finally {
+      close(fd);
+    }
+  };
+  try {
+    create(reportPath);
+  } catch {
+    throw new ArtifactRefused('report');
+  }
+  try {
+    create(
+      journalPath,
+      `${JSON.stringify({ version: RECOVERY_VERSION, id, reservation: true }, null, 2)}\n`,
+    );
+  } catch {
+    remove(reportPath);
+    throw new ArtifactRefused('journal');
   }
 }
