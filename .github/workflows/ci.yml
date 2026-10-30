@@ -769,6 +769,13 @@ jobs:
           --filter=@rasta/supplier-service...
           --filter=@rasta/audit-service...
 
+      - name: The portal build holds no test-only signer (@rasta/testing)
+        # The portal has no image in this repository; its deployable artifact
+        # is `.next`. Same check as the service images (job `containers`),
+        # on the build output itself; BUILD_ID must exist, so a missing
+        # build fails rather than passes (PR #514 r1 F1).
+        run: node scripts/testing-dev-only.mjs tree apps/web/.next BUILD_ID
+
       - name: Start MinIO and create the document bucket
         # EXP-002 slice 7: the portal attaches a file by having its server ask
         # document-service for a signed URL and put the bytes in object storage

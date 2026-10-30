@@ -429,8 +429,9 @@ export const CLI_CONTRACT = Object.freeze({
     other: ['--depth', '--no-tags', '--quiet', '--verify'],
   },
   'scripts/testing-dev-only.mjs': {
-    // `image <ref>`: the ref is checked against IMAGE_REF before any use.
-    positionals: ['enum', 'identifier'],
+    // `image <ref>` | `tree <dir> <entry>`: each checked against IMAGE_REF or
+    // REPO_PATH before any use.
+    positionals: ['enum', 'identifier', 'identifier'],
     other: [
       '--depth',
       '--exclude',

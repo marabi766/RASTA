@@ -20,7 +20,7 @@
  *    identified by where it resolves and the name in its manifest, never by
  *    the key it is declared under (`signing: workspace:@rasta/testing@*`,
  *    `link:`/`file:` paths, any depth).
- * 3. **Images** — `node scripts/testing-dev-only.mjs image <ref>`, run in CI
+ * 3. **Artifacts** — `node scripts/testing-dev-only.mjs image <ref>`, run in CI
  *    on every image that is built (job `containers`: every image on a push
  *    to main, the affected ones on a merge-train run). It exports the final
  *    image filesystem and refuses a manifest named `@rasta/testing`, a
@@ -29,7 +29,10 @@
  *    name in anything but TypeScript source. So a stage inherited from the
  *    build, a deploy without `--prod`, a copy after deploy or a
  *    `RUN --mount` copy is caught by what the image holds, however the
- *    Dockerfile says it.
+ *    Dockerfile says it. `tree <dir> <entry>` checks a build-output
+ *    directory the same way: CI runs it on the portal's `.next` (job
+ *    `web-browser`, every pull request), which has no image in this
+ *    repository.
  *
  * Only Node built-ins here: CI runs the image check on a runner without an
  * install.
@@ -331,24 +334,45 @@ export function checkImage(ref) {
   }
 }
 
+/**
+ * Checks a build-output directory (the portal's `.next`) the same way.
+ * `entry` must be a file in it, so an empty or misplaced directory is an
+ * error rather than a pass.
+ */
+export function checkTree(dir, entry) {
+  const main = join(dir, entry);
+  if (!existsSync(main) || !lstatSync(main).isFile()) {
+    throw new Error(`${entry} is not in ${dir}: not a build output`);
+  }
+  return imageTreeProblems(dir);
+}
+
 /** An image reference as CI tags one (`rasta/<service>:<sha>`), or a local tag. */
 const IMAGE_REF = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?$/;
+/** A repository-relative directory or file name: no `..`, no leading `/`. */
+const REPO_PATH = /^(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._-][A-Za-z0-9._/-]*$/;
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [command, ref, ...rest] = process.argv.slice(2);
-  if (command !== 'image' || rest.length > 0 || !IMAGE_REF.test(ref ?? '')) {
-    console.error('usage: node scripts/testing-dev-only.mjs image <image-ref> (one name[:tag])');
+  const [command, target, entry, ...rest] = process.argv.slice(2);
+  const valid =
+    rest.length === 0 &&
+    ((command === 'image' && entry === undefined && IMAGE_REF.test(target ?? '')) ||
+      (command === 'tree' && REPO_PATH.test(target ?? '') && REPO_PATH.test(entry ?? '')));
+  if (!valid) {
+    console.error(
+      'usage: node scripts/testing-dev-only.mjs image <name[:tag]> | tree <dir> <entry-file>',
+    );
     process.exit(2);
   }
   try {
-    const problems = checkImage(ref);
+    const problems = command === 'image' ? checkImage(target) : checkTree(target, entry);
     if (problems.length > 0) {
-      console.error(`${ref}: test-only signer code in the image:\n  ${problems.join('\n  ')}`);
+      console.error(`${target}: test-only signer code:\n  ${problems.join('\n  ')}`);
       process.exit(1);
     }
-    console.log(`${ref}: no ${TESTING} package and no test signer in the final filesystem`);
+    console.log(`${target}: no ${TESTING} package and no test signer`);
   } catch (error) {
-    console.error(`${ref}: cannot verify: ${error.message}`);
+    console.error(`${target}: cannot verify: ${error.message}`);
     process.exit(1);
   }
 }

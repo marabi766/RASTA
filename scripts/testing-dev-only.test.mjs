@@ -11,6 +11,7 @@ import {
   REPO_ROOT,
   SIGNER_MARKER,
   TESTING_DIR,
+  checkTree,
   devOnlyRule,
   imageTreeProblems,
   isTestOnlyPath,
@@ -304,4 +305,14 @@ test('the test signer or its package anywhere in an image filesystem is refused'
     write(root, { ...CLEAN_IMAGE, ...files });
     assert.notDeepEqual(imageTreeProblems(root), [], name);
   }
+});
+
+test('a build-output directory is checked the same way, and must hold its entry file', (t) => {
+  const root = scratch(t);
+  write(root, { BUILD_ID: 'x', 'server/app/page.js': 'export default 1;' });
+  assert.deepEqual(checkTree(root, 'BUILD_ID'), []);
+  assert.throws(() => checkTree(root, 'missing'), /not a build output/);
+  assert.throws(() => checkTree(join(root, 'nowhere'), 'BUILD_ID'), /not a build output/);
+  write(root, { 'server/chunks/1.js': `e("${SIGNER_MARKER}")` });
+  assert.deepEqual(checkTree(root, 'BUILD_ID'), ['server/chunks/1.js: contains the test signer']);
 });
