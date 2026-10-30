@@ -1,4 +1,4 @@
-import { InternalHttpClient, withExchangeDeadline } from '@rasta/nest-common';
+import { InternalHttpClient, exchangeWithDeadline } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError } from '@rasta/nest-common';
 import { ERROR_CODES, type ApiError, type ErrorCode } from '@rasta/contracts';
@@ -536,10 +536,10 @@ export class EconomicClient {
     // commit replays instead of being applied twice.
     let received: { ok: boolean; status: number; text: string };
     try {
-      received = await withExchangeDeadline(
+      received = await exchangeWithDeadline(
         this.env.ECONOMIC_REQUEST_TIMEOUT_MS,
-        async (signal) => {
-          const response = await sender.send(url, {
+        (signal) =>
+          sender.send(url, {
             method: request.method,
             headers: {
               'content-type': 'application/json',
@@ -548,9 +548,12 @@ export class EconomicClient {
             },
             ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
             signal,
-          });
-          return { ok: response.ok, status: response.status, text: await response.text() };
-        },
+          }),
+        async (response) => ({
+          ok: response.ok,
+          status: response.status,
+          text: await response.text(),
+        }),
       );
     } catch (error) {
       stop();

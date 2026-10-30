@@ -54,25 +54,39 @@ the current transport rule must not be described as source-boundary enforcement.
 | 8. Fake local internalFetch                | Local name grants no exception; only the resolved shared client is trusted.                                                                       |
 | 9. dev/seed/E2E                            | Workspace ESLint now rejects direct raw sender fixtures in these paths. Source-boundary and E2E exemption tests remain required in the follow-up. |
 
-## One deadline over the whole exchange (PR #502 r1 F1)
+## One deadline over the whole exchange (#502 r1 F1; PR #507 r1 F1/F2)
 
 `fetch` settles when the response headers arrive, so a client that clears its abort
-timer there has no deadline on the body: a server that answers `200` and then
-stalls or trickles holds the caller as long as the socket lives. Two clients did
-this (marketplace's `EconomicClient`, notification's identity adapter). Both now
-use `withExchangeDeadline` from nest-common, which keeps one signal armed through
-sending **and** reading the body and enforces the deadline itself, so a transport
-that ignores the abort still ends at the deadline. The rejection is an
-`ExchangeDeadlineError` named `AbortError`, so each caller's existing timeout
-handling applies; a write keeps its unresolved outcome and its idempotency key.
+timer there has no deadline on the body (r1: a server answering `200` and then
+stalling or trickling held the caller as long as the socket lived), and a client
+that returns on a refusal status without reading or cancelling the body leaves the
+connection and its buffers to the same peer, once per retry (#507 r1). One obligation
+covers both: **a response's deadline may be released only once its body is
+consumed or given up.**
+
+`exchangeWithDeadline` (and `upstreamExchange`, which adds the platform's
+`UPSTREAM_TIMEOUT` / `UPSTREAM_UNAVAILABLE` mapping) in `@rasta/nest-common` owns
+that obligation, so no caller has to remember it: the signal stays armed through
+sending and the reader, the deadline is enforced by the boundary itself (a
+transport that ignores the abort still ends at it), a body the reader never
+touched — a status-based refusal — is cancelled at once and not awaited, a
+response that arrives after the exchange ended is cancelled on arrival, and the
+signal is aborted on every exit. The caller leaving can be passed as `cancel`
+(the gateway's `abandoned` verdict); the two causes stay apart as
+`ExchangeDeadlineError` and `ExchangeCancelledError`. Every internal HTTP client
+in `services/*` and `packages/nest-common` goes through it.
 
 The lint rule `internal/exchange-deadline` (`scripts/exchange-deadline-rule.mjs`,
-same workspace paths as the transport rule) refuses, inside one function, a body
-read (`.text()`, `.json()`, `.arrayBuffer()`, `.blob()`, `.formData()`, `.bytes()`,
-`.getReader()`, `readCapped(…)`) that comes after a `clearTimeout(…)` call. The
-sound shape clears the timer in a `finally` after every read. A timer cleared
-through a helper or a nested function is not followed; `AbortSignal.timeout(…)`
-has no timer to clear and is not a case.
+same workspace paths as the transport rule) enforces the boundary instead of
+following a caller's control flow: a `setTimeout` whose callback aborts something
+(inline, through a local name, a destructured `abort`, `controller.abort` or its
+`.bind`) is an error everywhere except `exchange-deadline.ts` itself. The earlier
+rule matched `clearTimeout` and body reads by source order, so it missed
+`try { return response.text(); } finally { clearTimeout(t); }` and computed or
+aliased readers, and it flagged an unrelated `clearTimeout`. `AbortSignal.timeout(…)`
+has no timer to clear and stays allowed; a callback imported from another module,
+and a deadline built without an abort (a `Promise.race` against a timer), cannot be
+seen from one file and are not covered.
 
 ## Evidence limits
 

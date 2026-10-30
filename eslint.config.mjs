@@ -121,6 +121,12 @@ const base = tseslint.config(
     rules: { 'internal/transport': 'error', 'internal/exchange-deadline': 'error' },
   },
   {
+    // The shared boundary is where the timer lives: it is the one place an
+    // abort timer is written, so that no caller has to (PR #507 r1 F2).
+    files: ['**/http/exchange-deadline.ts'],
+    rules: { 'internal/exchange-deadline': 'off' },
+  },
+  {
     // @rasta/config's URL reader is plain CommonJS so the scripts can import
     // it before any build (url-reader.js); Node's CommonJS globals apply.
     files: ['**/src/url-reader.js'],

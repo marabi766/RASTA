@@ -1,4 +1,4 @@
-import { InternalHttpClient, withExchangeDeadline, type InternalSender } from '@rasta/nest-common';
+import { InternalHttpClient, exchangeWithDeadline, type InternalSender } from '@rasta/nest-common';
 import { z } from 'zod';
 import { readUrl } from '@rasta/config';
 import type { InternalTokenService } from '@rasta/nest-common';
@@ -150,22 +150,25 @@ export class IdentityHttpRecipientAdapter implements RecipientPort {
     // every later tick of the worker, which skips while a batch is in flight.
     let answer: { ok: boolean; status: number; text: string | undefined };
     try {
-      answer = await withExchangeDeadline(this.options.timeoutMs, async (signal) => {
-        const response = await sender.send(url, {
-          method: 'GET',
-          headers: {
-            accept: 'application/json',
-            'x-correlation-id': correlationId,
-          },
-          signal,
-        });
-        // A refusal's body is not read: the status is the only detail kept.
-        return {
+      answer = await exchangeWithDeadline(
+        this.options.timeoutMs,
+        (signal) =>
+          sender.send(url, {
+            method: 'GET',
+            headers: {
+              accept: 'application/json',
+              'x-correlation-id': correlationId,
+            },
+            signal,
+          }),
+        // A refusal's body is not read: the status is the only detail kept, and
+        // the boundary cancels the body it finds unread.
+        async (response) => ({
           ok: response.ok,
           status: response.status,
           text: response.ok ? await response.text() : undefined,
-        };
-      });
+        }),
+      );
     } catch (error) {
       // The error object is not forwarded: depending on the runtime it can
       // carry the request URL and headers, and the header is the token.

@@ -1,6 +1,11 @@
 import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
-import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  RastaError,
+  tryGetContext,
+  upstreamExchange,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -104,29 +109,18 @@ export class DocumentLookupClient implements DocumentLookup {
       headers['x-correlation-id'] = context.correlationId;
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    timer.unref?.();
-    let status: number;
-    let text: string;
-    try {
-      const response = await sender.send(
-        `${this.options.baseUrl.replace(/\/+$/, '')}/v1/documents/${encodeURIComponent(documentId)}`,
-        { method: 'GET', headers, signal: controller.signal },
-      );
-      status = response.status;
-      // The body is read inside the deadline too, and an answer that arrives
-      // after it is not taken, even from a transport that ignored the abort.
-      text = await response.text();
-      if (controller.signal.aborted) throw new Error('deadline passed');
-    } catch {
-      // No cause attached: a runtime's transport error can quote the URL.
-      throw controller.signal.aborted
-        ? RastaError.upstreamTimeout(DOCUMENT_SERVICE, this.options.timeoutMs)
-        : RastaError.upstreamUnavailable(DOCUMENT_SERVICE);
-    } finally {
-      clearTimeout(timer);
-    }
+    // The body is read inside the deadline too, and an answer that arrives
+    // after it is not taken, even from a transport that ignored the abort.
+    const { status, text } = await upstreamExchange(
+      DOCUMENT_SERVICE,
+      this.options.timeoutMs,
+      (signal) =>
+        sender.send(
+          `${this.options.baseUrl.replace(/\/+$/, '')}/v1/documents/${encodeURIComponent(documentId)}`,
+          { method: 'GET', headers, signal },
+        ),
+      async (response) => ({ status: response.status, text: await response.text() }),
+    );
 
     const body = parseJson(text);
     if (status === 404) {
