@@ -7,10 +7,11 @@ import {
   statSync,
   writeFileSync,
   rmSync,
+  symlinkSync,
 } from 'node:fs';
 import * as realFs from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,6 +35,8 @@ import {
   compareLedgers,
   checkDatabaseCoverage,
   summarizeTables,
+  InputFileError,
+  readRegularFile,
   writeReportAtomically,
   reapProcessGroup,
   createProcessRunner,
@@ -464,6 +467,91 @@ test('SOURCE/REF allowance scopes identities by database/schema/table/name and p
       '    "amount" integer DEFAULT 0,',
       '    CONSTRAINT "same_name" CHECK ((amount >= 0)),',
     ),
+  ])
+    assert.throws(() => checkSourceReference(source, evidence(body), 'rasta_test'));
+});
+
+// PostgreSQL prints a CASE expression over several physical lines (a real one: identity's
+// registration-intake actor constraint) and deparses `ANY ((ARRAY[...])::text[])` differently in
+// the reference. The constraint owns every one of its physical lines, and only those.
+const caseBody = `CREATE TABLE "public"."intake" (
+    "kind" character varying(16) NOT NULL,
+    CONSTRAINT "ck_actor" CHECK (
+CASE
+    WHEN (("kind")::"text" = 'A'::"text") THEN true
+    WHEN (("kind")::"text" = ANY ((ARRAY['B'::character varying, 'C'::character varying])::"text"[])) THEN false
+    ELSE false
+END),
+    CONSTRAINT "ck_other" CHECK (("kind" <> ''::"text"))
+);
+`;
+test('a multi-line CHECK may differ on its own lines only, once per constraint', () => {
+  const source = evidence(caseBody);
+  const ref = evidence(
+    caseBody.replace(
+      `ANY ((ARRAY['B'::character varying, 'C'::character varying])::"text"[])`,
+      `ANY (ARRAY[('B'::character varying)::"text", ('C'::character varying)::"text"])`,
+    ),
+  );
+  assert.deepEqual(checkSourceReference(source, ref, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 1,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  // Two of its lines differ: still one constraint.
+  const two = evidence(
+    caseBody.replace('THEN true', 'THEN (true)').replace(`'B'::character varying, 'C'`, `'B', 'C'`),
+  );
+  assert.deepEqual(checkSourceReference(source, two, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 2,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  // Separated differences (the first WHEN and the ELSE, the line between them unchanged): still
+  // one entry, as adjacent ones are.
+  const separated = evidence(
+    caseBody.replace('THEN true', 'THEN (true)').replace('ELSE false', 'ELSE (false)'),
+  );
+  assert.deepEqual(checkSourceReference(source, separated, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 2,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  // Every line of the span, with and without gaps: one entry.
+  const everyOther = evidence(
+    caseBody
+      .replace('THEN true', 'THEN (true)')
+      .replace(`'B'::character varying, 'C'`, `'B', 'C'`)
+      .replace('ELSE false', 'ELSE (false)'),
+  );
+  assert.deepEqual(checkSourceReference(source, everyOther, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 3,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  // Two ADJACENT constraints that both changed (the last line of one, the line of the next):
+  // two entries, one per constraint.
+  const neighbours = evidence(
+    caseBody
+      .replace('END),\n', 'END ),\n')
+      .replace(`CHECK (("kind" <> ''::"text"))`, `CHECK ("kind" <> ''::"text")`),
+  );
+  assert.deepEqual(checkSourceReference(source, neighbours, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 2,
+    checkConstraints: [
+      { schema: 'public', table: 'intake', name: 'ck_actor' },
+      { schema: 'public', table: 'intake', name: 'ck_other' },
+    ],
+  });
+  for (const body of [
+    // outside the constraint: the column, the closing line
+    caseBody.replace('character varying(16)', 'character varying(17)'),
+    caseBody.replace('\n);\n', '\n) WITH (fillfactor=50);\n'),
+    // the structure of the constraint: fewer lines, another name
+    caseBody.replace('END),\n', 'END),\n\n'),
+    caseBody.replace('    ELSE false\nEND)', '    ELSE false END)'),
+    caseBody.replace('"ck_actor"', '"ck_renamed"'),
   ])
     assert.throws(() => checkSourceReference(source, evidence(body), 'rasta_test'));
 });
@@ -1607,4 +1695,77 @@ test('a leader that exited before the deadline is settled by the drain and reap,
   });
   await assert.rejects(runner.run('slow', [], { timeout: 10 }), /Command timed out \(exit 137\)/);
   assert.equal(report.unconfirmedProcessGroups, undefined);
+});
+
+// --- readRegularFile: the one reader of files somebody else could have substituted -------------
+test('readRegularFile reads a regular file within its bound and refuses everything else by kind', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-read-regular-'));
+  try {
+    const file = join(directory, 'f');
+    writeFileSync(file, 'héllo', { mode: 0o600 });
+    assert.equal(readRegularFile(file, { maxBytes: 100 }), 'héllo');
+    writeFileSync(join(directory, 'empty'), '');
+    assert.equal(readRegularFile(join(directory, 'empty'), { maxBytes: 0 }), '');
+    const kind = (action) => {
+      try {
+        action();
+      } catch (error) {
+        assert.ok(error instanceof InputFileError);
+        assert.doesNotMatch(error.message, new RegExp(directory));
+        return error.kind;
+      }
+      return 'accepted';
+    };
+    // Exactly the cap is fine; one byte more is refused, on the descriptor's size.
+    assert.equal(readRegularFile(file, { maxBytes: 6 }), 'héllo');
+    assert.equal(
+      kind(() => readRegularFile(file, { maxBytes: 5 })),
+      'too-large',
+    );
+    assert.equal(
+      kind(() => readRegularFile(join(directory, 'absent'), { maxBytes: 9 })),
+      'missing',
+    );
+    assert.equal(
+      kind(() => readRegularFile(directory, { maxBytes: 9 })),
+      'not-file',
+    );
+    symlinkSync(file, join(directory, 'link'));
+    assert.equal(readRegularFile(join(directory, 'link'), { maxBytes: 9 }), 'héllo');
+    assert.equal(
+      kind(() => readRegularFile(join(directory, 'link'), { maxBytes: 9, noFollow: true })),
+      'open',
+    );
+    // The caller's own refusal (owner, mode) propagates untouched.
+    assert.throws(
+      () =>
+        readRegularFile(file, {
+          maxBytes: 9,
+          inspect: () => {
+            throw new RangeError('mine');
+          },
+        }),
+      RangeError,
+    );
+    // A FIFO is refused by kind, and the open itself does not wait for a writer: the child has a
+    // deadline, so a blocking open fails here instead of hanging the suite.
+    const fifo = join(directory, 'fifo');
+    execFileSync('mkfifo', [fifo]);
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `import { readRegularFile } from ${JSON.stringify(new URL('./backup-restore-drill-lib.mjs', import.meta.url).href)};
+         try { readRegularFile(process.argv[1], { maxBytes: 9 }); console.log('accepted'); } catch (e) { console.log(e.kind); }`,
+        '--',
+        fifo,
+      ],
+      { encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL' },
+    );
+    assert.equal(child.signal, null, 'the open blocked on a FIFO');
+    assert.equal(child.stdout.trim(), 'not-file');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
