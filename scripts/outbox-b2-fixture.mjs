@@ -11,6 +11,7 @@
 // Test-only. Nothing in `scripts/outbox-b2-backfill.mjs` imports it, and it
 // creates and drops only schemas whose name it was given.
 // -----------------------------------------------------------------------------
+import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.ts';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { readUrl } from '../packages/config/src/url-reader.js';
@@ -225,7 +226,9 @@ SELECT '${prefix}-' || lpad(g::text, 8, '0'),
  * pattern literally and silently publish nothing.
  */
 export function publishSql(idRegex) {
-  return `
+  // A reviewed probe: it clears the clock-gated claim and retry instants (NULL,
+  // as markPublished does), never dates them.
+  return eligibilityClockSql`
 UPDATE "outbox_message"
    SET "published_at" = TIMESTAMP '2026-01-02 00:00:00',
        "claim_token" = NULL, "claim_owner" = NULL,

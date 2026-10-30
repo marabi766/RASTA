@@ -1,7 +1,10 @@
 import { InternalHttpClient } from '@rasta/nest-common';
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import {
+  ExchangeCancelledError,
+  ExchangeDeadlineError,
   RastaError,
+  exchangeWithDeadline,
   getContext,
   httpStatusToCode,
   requestPath,
@@ -245,21 +248,10 @@ export class ProxyService {
       ...(context.roles.length > 0 ? { 'x-user-roles': context.roles.join(',') } : {}),
     };
 
-    // One abort for the whole exchange — headers and body alike — fired by
+    // One deadline for the whole exchange — headers and body alike — ended by
     // whichever comes first: the deadline (an upstream failure) or the caller
-    // leaving (no verdict). Both are removed on every exit.
-    const controller = new AbortController();
-    let abortedBy: 'deadline' | 'caller' | undefined;
+    // leaving (no verdict). The response is released with it, read or not.
     const timeoutMs = this.deadlineFor(request);
-    const timeout = setTimeout(() => {
-      abortedBy ??= 'deadline';
-      controller.abort();
-    }, timeoutMs);
-    const onCancelled = () => {
-      abortedBy ??= 'caller';
-      controller.abort();
-    };
-    cancelled?.addEventListener('abort', onCancelled, { once: true });
     // The status line, once it has arrived: a 5xx is evidence even if its body never is.
     let status: number | undefined;
 
@@ -267,76 +259,82 @@ export class ProxyService {
       // From here the service may receive it: a caller leaving is no longer a
       // `release` (nothing reached the service) but `abandoned`.
       this.circuits.dispatched(permit, timeoutMs);
-      const response = await sender.send(target, {
-        method: request.method,
-        headers,
-        body: this.bodyFor(request.method, request.body),
-        signal: controller.signal,
-      });
+      return await exchangeWithDeadline(
+        timeoutMs,
+        (signal) =>
+          sender.send(target, {
+            method: request.method,
+            headers,
+            body: this.bodyFor(request.method, request.body),
+            signal,
+          }),
+        async (response) => {
+          status = response.status;
+          // Nothing is decided on the status line: a 200 whose body then stalls or
+          // is cut off is a failure, and a 5xx is judged once its body is in.
+          const text = await response.text();
 
-      status = response.status;
-      // Nothing is decided on the status line: a 200 whose body then stalls or
-      // is cut off is a failure, and a 5xx is judged once its body is in.
-      const text = await response.text();
+          if (response.status >= 500) {
+            // A 5xx counts toward the circuit, once. (#381's expected identity
+            // refusals would be the one exception: `release`, never `success` —
+            // and only with the body complete; see the caller-gone branch below.)
+            //
+            // Parsed once, and only the parsed, allow-listed fields travel. The
+            // schema accepting a body says nothing about what else the body held:
+            // a `stack` or an internal field beside a valid envelope would reach
+            // the caller if the original object were forwarded.
+            const envelope = platformErrorEnvelope(response.status, text, request);
+            if (envelope) {
+              return {
+                outcome: 'failure',
+                response: {
+                  status: response.status,
+                  headers: this.responseHeaders(response),
+                  body: envelope,
+                },
+              };
+            }
+            // L1-06. A 5xx that is not the platform's own error envelope is a
+            // crash page, a proxy's HTML or a stack trace — reflecting it hands
+            // internals to the caller. The shape, status and content type are
+            // logged; the body never is (S-09), because it is exactly the part
+            // that may hold what must not leak.
+            this.logger.error(
+              `${request.service} answered ${response.status} without a platform error body ` +
+                `(content-type ${response.headers.get('content-type') ?? 'none'}, ${text.length} chars)`,
+            );
+            throw new UpstreamFailure(
+              RastaError.upstreamUnavailable(request.service, {
+                upstreamStatus: response.status,
+                reason: 'malformed-error-body',
+              }),
+            );
+          }
 
-      if (response.status >= 500) {
-        // A 5xx counts toward the circuit, once. (#381's expected identity
-        // refusals would be the one exception: `release`, never `success` —
-        // and only with the body complete; see the caller-gone branch below.)
-        //
-        // Parsed once, and only the parsed, allow-listed fields travel. The
-        // schema accepting a body says nothing about what else the body held:
-        // a `stack` or an internal field beside a valid envelope would reach
-        // the caller if the original object were forwarded.
-        const envelope = platformErrorEnvelope(response.status, text, request);
-        if (envelope) {
+          // 4xx does not count against the circuit: a client sending bad requests
+          // is not evidence that the downstream is unhealthy — it answered.
+          if (response.status >= 400) {
+            return {
+              outcome: 'success',
+              response: {
+                status: response.status,
+                headers: this.responseHeaders(response),
+                body: this.relayedClientError(request, response, text),
+              },
+            };
+          }
+
           return {
-            outcome: 'failure',
+            outcome: 'success',
             response: {
               status: response.status,
               headers: this.responseHeaders(response),
-              body: envelope,
+              body: text.length > 0 ? this.parseJson(text) : undefined,
             },
           };
-        }
-        // L1-06. A 5xx that is not the platform's own error envelope is a
-        // crash page, a proxy's HTML or a stack trace — reflecting it hands
-        // internals to the caller. The shape, status and content type are
-        // logged; the body never is (S-09), because it is exactly the part
-        // that may hold what must not leak.
-        this.logger.error(
-          `${request.service} answered ${response.status} without a platform error body ` +
-            `(content-type ${response.headers.get('content-type') ?? 'none'}, ${text.length} chars)`,
-        );
-        throw new UpstreamFailure(
-          RastaError.upstreamUnavailable(request.service, {
-            upstreamStatus: response.status,
-            reason: 'malformed-error-body',
-          }),
-        );
-      }
-
-      // 4xx does not count against the circuit: a client sending bad requests
-      // is not evidence that the downstream is unhealthy — it answered.
-      if (response.status >= 400) {
-        return {
-          outcome: 'success',
-          response: {
-            status: response.status,
-            headers: this.responseHeaders(response),
-            body: this.relayedClientError(request, response, text),
-          },
-        };
-      }
-
-      return {
-        outcome: 'success',
-        response: {
-          status: response.status,
-          headers: this.responseHeaders(response),
-          body: text.length > 0 ? this.parseJson(text) : undefined,
         },
-      };
+        { cancel: cancelled },
+      );
     } catch (error) {
       if (error instanceof UpstreamFailure) throw error;
 
@@ -346,14 +344,14 @@ export class ProxyService {
       // it or tells anyone it did not happen. A 5xx status line already
       // received is a `failure`: without its complete body no exemption
       // (#381) can be proven, so none is applied — fail closed.
-      if (abortedBy === 'caller') {
+      if (error instanceof ExchangeCancelledError) {
         throw new CallerGoneAfterSending(
           status !== undefined && status >= 500 ? 'failure' : 'abandoned',
           new ClientCancelledError(request.service),
         );
       }
 
-      if (abortedBy === 'deadline') {
+      if (error instanceof ExchangeDeadlineError) {
         throw new UpstreamFailure(
           new RastaError('UPSTREAM_TIMEOUT', 'The upstream service did not respond in time', {
             internalContext: { service: request.service, timeoutMs },
@@ -367,9 +365,6 @@ export class ProxyService {
           message: (error as Error).message,
         }),
       );
-    } finally {
-      clearTimeout(timeout);
-      cancelled?.removeEventListener('abort', onCancelled);
     }
   }
 

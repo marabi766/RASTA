@@ -1,6 +1,11 @@
 import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
-import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  RastaError,
+  tryGetContext,
+  upstreamExchange,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { readCapped } from '../award/award-source.client';
 import { SERVICE_NAME } from '../config/env';
 import { obligationFactSchema, type ObligationFact } from './obligation-confirm';
@@ -71,10 +76,11 @@ export interface ObligationSourceClientOptions {
 }
 
 export class ObligationSourceClient implements ObligationSource {
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
 
   constructor(private readonly options: ObligationSourceClientOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
   }
 
   async obligation(organizationId: string, statementId: string): Promise<ObligationFact | null> {
@@ -96,60 +102,35 @@ export class ObligationSourceClient implements ObligationSource {
       }
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    timer.unref?.();
-
-    const failed = () =>
-      controller.signal.aborted
-        ? RastaError.upstreamTimeout(ECONOMIC_SERVICE, this.options.timeoutMs)
-        : RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
-
-    try {
-      let response: Response;
-      try {
-        response = await sender.send(
+    return upstreamExchange(
+      ECONOMIC_SERVICE,
+      this.options.timeoutMs,
+      (signal) =>
+        sender.send(
           `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/obligations/by-source/STATEMENT/${encodeURIComponent(statementId)}`,
-          { method: 'GET', headers, signal: controller.signal },
-        );
-      } catch {
-        // No cause attached: a runtime's transport error can quote the URL.
-        throw failed();
-      }
+          { method: 'GET', headers, signal },
+        ),
+      async (response) => {
+        if (response.status !== 200 && response.status !== 404) {
+          throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+        }
 
-      if (response.status !== 200 && response.status !== 404) {
-        await response.body?.cancel().catch(() => undefined);
-        throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
-      }
+        const text = await readCapped(response, MAX_OBLIGATION_BYTES);
+        if (text === null) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+        const body: unknown = JSON.parse(text);
 
-      let text: string | null;
-      try {
-        text = await readCapped(response, MAX_OBLIGATION_BYTES);
-      } catch {
-        throw failed();
-      }
-      if (text === null) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+        if (response.status === 404) {
+          // Absence only when economic's own handler said so, about an obligation. Unavailable
+          // otherwise: retried, never taken as "no".
+          if (isObligationNotFound(body)) return null;
+          throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+        }
 
-      let body: unknown;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        throw failed();
-      }
-
-      if (response.status === 404) {
-        // Absence only when economic's own handler said so, about an obligation. Unavailable
-        // otherwise: retried, never taken as "no".
-        if (isObligationNotFound(body)) return null;
-        throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
-      }
-
-      const parsed = obligationFactSchema.safeParse(body);
-      if (!parsed.success) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
-      return parsed.data;
-    } finally {
-      clearTimeout(timer);
-    }
+        const parsed = obligationFactSchema.safeParse(body);
+        if (!parsed.success) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
+        return parsed.data;
+      },
+    );
   }
 }
 

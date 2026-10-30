@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { ulid } from 'ulid';
@@ -576,7 +577,7 @@ describe('windowed refusal aggregation (real PostgreSQL)', () => {
         async (tx) => {
           // Exactly the columns a claim writes, held uncommitted.
           const claimed = await tx.$executeRawUnsafe(
-            `UPDATE security_event_outbox
+            eligibilityClockSql`UPDATE security_event_outbox
                 SET claim_token = $2, claim_owner = 'itest-race',
                     claim_expires_at = now() + interval '60 seconds',
                     claim_count = claim_count + 1
@@ -832,7 +833,7 @@ describe('windowed refusal aggregation (real PostgreSQL)', () => {
 
       // Claimed: out of the index, so a successor is accepted.
       await prisma.client.$executeRawUnsafe(
-        `UPDATE security_event_outbox
+        eligibilityClockSql`UPDATE security_event_outbox
             SET claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1
           WHERE id = $1`,
         openId,
@@ -880,7 +881,7 @@ describe('windowed refusal aggregation (real PostgreSQL)', () => {
       ).rejects.toThrow(/tg_security_event_outbox_guard/);
 
       await prisma.client.$executeRawUnsafe(
-        `UPDATE security_event_outbox
+        eligibilityClockSql`UPDATE security_event_outbox
             SET claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1
           WHERE id = $1`,
         id,
@@ -893,7 +894,7 @@ describe('windowed refusal aggregation (real PostgreSQL)', () => {
       ).rejects.toThrow(/tg_security_event_outbox_guard/);
       await expect(
         prisma.client.$executeRawUnsafe(
-          `UPDATE security_event_outbox
+          eligibilityClockSql`UPDATE security_event_outbox
               SET claim_token = NULL, claim_owner = NULL, claim_expires_at = NULL, claim_count = 0
             WHERE id = $1`,
           id,

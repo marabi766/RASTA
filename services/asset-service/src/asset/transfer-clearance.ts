@@ -2,7 +2,12 @@ import { InternalHttpClient } from '@rasta/nest-common';
 import { performance } from 'node:perf_hooks';
 import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
-import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  RastaError,
+  tryGetContext,
+  upstreamExchange,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 
 /**
@@ -137,12 +142,13 @@ export interface TransferClearanceClientOptions {
 
 export class TransferClearanceClient implements TransferClearance {
   readonly fenceTtlSeconds: number;
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
   private readonly clock: () => number;
 
   constructor(private readonly options: TransferClearanceClientOptions) {
     this.fenceTtlSeconds = options.fenceTtlSeconds;
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
     this.clock = options.now ?? (() => performance.now());
   }
 
@@ -256,27 +262,21 @@ export class TransferClearanceClient implements TransferClearance {
       headers['x-correlation-id'] = context.correlationId;
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    timer.unref?.();
-    try {
-      const response = await sender.send(
-        `${this.options.baseUrls[owner].replace(/\/+$/, '')}${path}`,
-        { method, headers, body, signal: controller.signal },
-      );
-      // The body is read inside the deadline too, and an answer that arrives
-      // after it is not taken, even from a transport that ignored the abort.
-      const text = await response.text();
-      if (controller.signal.aborted) throw new Error('deadline passed');
-      return new Response(text.length > 0 ? text : null, { status: response.status });
-    } catch {
-      // No cause attached: a runtime's transport error can quote the URL.
-      throw controller.signal.aborted
-        ? RastaError.upstreamTimeout(owner, this.options.timeoutMs)
-        : RastaError.upstreamUnavailable(owner);
-    } finally {
-      clearTimeout(timer);
-    }
+    // The body is read inside the deadline too, and an answer that arrives
+    // after it is not taken, even from a transport that ignored the abort.
+    const { status, text } = await upstreamExchange(
+      owner,
+      this.options.timeoutMs,
+      (signal) =>
+        sender.send(`${this.options.baseUrls[owner].replace(/\/+$/, '')}${path}`, {
+          method,
+          headers,
+          body,
+          signal,
+        }),
+      async (response) => ({ status: response.status, text: await response.text() }),
+    );
+    return new Response(text.length > 0 ? text : null, { status });
   }
 }
 

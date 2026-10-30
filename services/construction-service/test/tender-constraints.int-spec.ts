@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { cleanup, newOrganizationId, ownerClient, wire, type Wiring } from './helpers';
 
@@ -45,12 +46,17 @@ describe('tender database invariants', () => {
     return id;
   }
 
-  /** One raw INSERT of a tender, the service's role unless the row is past DRAFT (see the suite comment). */
+  /**
+   * One raw INSERT of a tender, the service's role unless the row is past DRAFT (see the suite
+   * comment). The bidding window is the one part of the row a sweep compares with the database
+   * clock (`bid_closing_at <= now()`), so it is never an override: it has its own two static
+   * columns, NULL unless `options.window` names an instant (eligibility-clock guard, F4).
+   */
   async function insertTender(
     organizationId: string,
     projectId: string,
     overrides: Record<string, string> = {},
-    options: { asService?: boolean } = {},
+    options: { asService?: boolean; window?: { opening?: string; closing?: string } } = {},
   ): Promise<void> {
     const columns: Record<string, string> = {
       id: `'TND_${ulid()}'`,
@@ -68,10 +74,11 @@ describe('tender database invariants', () => {
       updated_by: `'USR_1'`,
       ...overrides,
     };
-    const sql = `INSERT INTO "tender" (${Object.keys(columns)
+    const window = options.window ?? {};
+    const sql = eligibilityClockSql`INSERT INTO "tender" (${Object.keys(columns)
       .map((c) => `"${c}"`)
-      .join(', ')})
-       VALUES (${Object.values(columns).join(', ')})`;
+      .join(', ')}, "bid_opening_at", "bid_closing_at")
+       VALUES (${Object.values(columns).join(', ')}, ${window.opening ?? 'NULL'}, ${window.closing ?? 'NULL'})`;
     if (options.asService || columns.status === `'DRAFT'`) {
       await w.prisma.client.$executeRawUnsafe(sql);
       return;
@@ -95,9 +102,9 @@ describe('tender database invariants', () => {
   const COMPLETE = {
     procurement_nature: `'FORMAL_TENDER'`,
     visibility: `'PUBLIC'`,
-    bid_opening_at: `'2026-11-01T08:00:00Z'`,
-    bid_closing_at: `'2026-11-30T20:30:00Z'`,
   };
+  // Far in the future, so no tender-close sweep sharing this database ever finds one due.
+  const WINDOW = { opening: `'2099-11-01T08:00:00Z'`, closing: `'2099-11-30T20:30:00Z'` };
 
   /** Who published and when: required from PUBLISHED on (`ck_tender_publication_complete`). */
   const PUBLISHED_BY = { published_at: 'now()', published_by: `'USR_1'` };
@@ -107,7 +114,12 @@ describe('tender database invariants', () => {
     const project = await insertProject(a);
     await expect(insertTender(a, project)).resolves.toBeUndefined();
     await expect(
-      insertTender(a, project, { status: `'PUBLISHED'`, ...COMPLETE, ...PUBLISHED_BY }),
+      insertTender(
+        a,
+        project,
+        { status: `'PUBLISHED'`, ...COMPLETE, ...PUBLISHED_BY },
+        { window: WINDOW },
+      ),
     ).resolves.toBeUndefined();
   });
 
@@ -132,7 +144,7 @@ describe('tender database invariants', () => {
                   }
                 : {}),
             },
-            { asService: true },
+            { asService: true, window: WINDOW },
           ),
         ).rejects.toThrow(/ck_tender_insert_draft/);
         const rows = await w.prisma.client.$queryRawUnsafe<{ n: bigint }[]>(
@@ -189,32 +201,36 @@ describe('tender database invariants', () => {
     it.each([
       [
         'closing before opening',
-        { bid_opening_at: `'2026-11-30T20:30:00Z'`, bid_closing_at: `'2026-11-01T08:00:00Z'` },
+        { opening: `'2099-11-30T20:30:00Z'`, closing: `'2099-11-01T08:00:00Z'` },
       ],
       [
         'closing at the same instant as opening',
-        { bid_opening_at: `'2026-11-01T08:00:00Z'`, bid_closing_at: `'2026-11-01T08:00:00Z'` },
+        { opening: `'2099-11-01T08:00:00Z'`, closing: `'2099-11-01T08:00:00Z'` },
       ],
-      ['only an opening', { bid_opening_at: `'2026-11-01T08:00:00Z'` }],
-      ['only a closing', { bid_closing_at: `'2026-11-30T20:30:00Z'` }],
-    ])('refuses %s', async (_label, overrides) => {
+      ['only an opening', { opening: `'2099-11-01T08:00:00Z'` }],
+      ['only a closing', { closing: `'2099-11-30T20:30:00Z'` }],
+    ])('refuses %s', async (_label, window) => {
       const a = org();
       const project = await insertProject(a);
-      await expect(insertTender(a, project, overrides)).rejects.toThrow(/ck_tender_window_ordered/);
+      await expect(insertTender(a, project, {}, { window })).rejects.toThrow(
+        /ck_tender_window_ordered/,
+      );
     });
 
     it('stores a deadline as one UTC instant whatever offset it was written with', async () => {
       const a = org();
       const project = await insertProject(a);
-      await insertTender(a, project, {
-        bid_opening_at: `'2026-11-01T11:30:00+03:30'`,
-        bid_closing_at: `'2026-11-30T20:30:00Z'`,
-      });
+      await insertTender(
+        a,
+        project,
+        {},
+        { window: { opening: `'2099-11-01T11:30:00+03:30'`, closing: `'2099-11-30T20:30:00Z'` } },
+      );
       const rows = await w.prisma.client.$queryRawUnsafe<{ opening: string }[]>(
         `SELECT to_char("bid_opening_at" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS opening
            FROM "tender" WHERE "organization_id" = '${a}' AND "bid_opening_at" IS NOT NULL`,
       );
-      expect(rows[0]?.opening).toBe('2026-11-01T08:00:00Z');
+      expect(rows[0]?.opening).toBe('2099-11-01T08:00:00Z');
     });
   });
 
@@ -236,8 +252,12 @@ describe('tender database invariants', () => {
         const a = org();
         const project = await insertProject(a);
         const { [missing]: _omitted, ...rest } = COMPLETE as Record<string, string>;
+        const window = {
+          opening: missing === 'bid_opening_at' ? undefined : WINDOW.opening,
+          closing: missing === 'bid_closing_at' ? undefined : WINDOW.closing,
+        };
         await expect(
-          insertTender(a, project, { status: `'PUBLISHED'`, ...rest, ...PUBLISHED_BY }),
+          insertTender(a, project, { status: `'PUBLISHED'`, ...rest, ...PUBLISHED_BY }, { window }),
         ).rejects.toThrow(/ck_tender_published_complete|ck_tender_window_ordered/);
       },
     );

@@ -1,3 +1,4 @@
+import { setEligibilityFixture } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { PrismaService } from '../src/prisma/prisma.service';
@@ -662,9 +663,7 @@ describe('malware scanning with a real ClamAV', () => {
       await drain(down);
       // Clear the backoff so the second attempt is claimable now rather than
       // making the test wait for a timer.
-      await prisma.client.$executeRaw`
-        UPDATE "document" SET "scan_next_attempt_at" = now() - interval '1 minute'
-         WHERE "id" = ${document.id}`;
+      await setEligibilityFixture(prisma, 'scanDue', [document.id]);
       await drain(down);
 
       const scanned = await row(document.id);
@@ -855,17 +854,15 @@ describe('malware scanning with a real ClamAV', () => {
         const claimed = await leases.claim('that-died', 200, 300);
         expect(claimed.map((d) => d.id)).toContain(document.id);
 
-        // Both lease columns, because `ck_document_scan_lease_complete` refuses a
-        // half-written lease — an expiry with no owner never expires from
-        // anybody's point of view.
+        // Only the expiry moves, a second into the past by the database clock; the
+        // owner the claim wrote stays (asserted first), because
+        // `ck_document_scan_lease_complete` refuses a half-written lease — an
+        // expiry with no owner never expires from anybody's point of view.
         //
         // Bounded to the one row this test registered. Expiring leases by owner
         // or by state would expire whatever else the claim above swallowed.
-        await prisma.client.$executeRaw`
-          UPDATE "document"
-             SET "scan_lease_owner" = ${owner('that-died')},
-                 "scan_lease_expires_at" = now() - interval '1 minute'
-           WHERE "id" = ${document.id}`;
+        expect((await row(document.id))?.scanLeaseOwner).toBe(owner('that-died'));
+        await setEligibilityFixture(prisma, 'scanExpired', [document.id]);
 
         const reclaimed = await leases.claim('taking-over', 200, 300);
         expect(reclaimed.map((d) => d.id)).toContain(document.id);

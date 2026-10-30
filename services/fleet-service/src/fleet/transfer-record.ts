@@ -1,6 +1,11 @@
 import { InternalHttpClient } from '@rasta/nest-common';
 import { z } from 'zod';
-import { RastaError, tryGetContext, type InternalTokenService } from '@rasta/nest-common';
+import {
+  RastaError,
+  tryGetContext,
+  upstreamExchange,
+  type InternalTokenService,
+} from '@rasta/nest-common';
 import { SERVICE_NAME } from '../config/env';
 import { transferFenceResolutionsTotal } from '../observability/metrics';
 
@@ -68,10 +73,11 @@ export interface TransferRecordClientOptions {
  * proxy `404` — is no answer. Nothing from a failure goes into the error.
  */
 export class TransferRecordClient implements TransferRecordSource {
-  private readonly fetchImpl: typeof fetch;
+  /** Absent: internalFetch's own fetch, the only raw one (Q-155 boundary). */
+  private readonly fetchImpl: typeof fetch | undefined;
 
   constructor(private readonly options: TransferRecordClientOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    this.fetchImpl = options.fetch;
   }
 
   async resolve(organizationId: string, assetId: string, fenceId: string): Promise<TransferRecord> {
@@ -87,28 +93,17 @@ export class TransferRecordClient implements TransferRecordSource {
       headers['x-correlation-id'] = context.correlationId;
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    timer.unref?.();
-    let status: number;
-    let text: string;
-    try {
-      const response = await sender.send(
-        `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/assets/` +
-          `${encodeURIComponent(assetId)}/transfers/${encodeURIComponent(fenceId)}`,
-        { method: 'GET', headers, signal: controller.signal },
-      );
-      text = await response.text();
-      if (controller.signal.aborted) throw new Error('deadline passed');
-      status = response.status;
-    } catch {
-      // No cause attached: a runtime's transport error can quote the URL.
-      throw controller.signal.aborted
-        ? RastaError.upstreamTimeout(ASSET_SERVICE, this.options.timeoutMs)
-        : RastaError.upstreamUnavailable(ASSET_SERVICE);
-    } finally {
-      clearTimeout(timer);
-    }
+    const { status, text } = await upstreamExchange(
+      ASSET_SERVICE,
+      this.options.timeoutMs,
+      (signal) =>
+        sender.send(
+          `${this.options.baseUrl.replace(/\/+$/, '')}/v1/internal/assets/` +
+            `${encodeURIComponent(assetId)}/transfers/${encodeURIComponent(fenceId)}`,
+          { method: 'GET', headers, signal },
+        ),
+      async (response) => ({ status: response.status, text: await response.text() }),
+    );
 
     const body = parseJson(text);
     if (status === 200) {

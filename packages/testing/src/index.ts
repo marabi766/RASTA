@@ -50,7 +50,16 @@ export type { ParticipantStop, ShutdownFactoryProvider } from './outbox-shutdown
 export { SAGA_DISPUTE_RECOVERY } from './saga-dispute-recovery';
 export type { SagaDisputeRecoveryRow } from './saga-dispute-recovery';
 
-export { expireClaim, makeDue } from './eligibility-clock';
+export {
+  expireClaim,
+  makeDue,
+  setEligibilityFixture,
+  setTenantEligibilityFixture,
+  insertTransferFixture,
+  eligibilityClockSql,
+  eligibilityClockWrite,
+  eligibilityClockTag,
+} from './eligibility-clock';
 
 export { withRedirectProbe, REDIRECT_CASES } from './redirect-probe';
 export type { RedirectProbe } from './redirect-probe';
@@ -96,3 +105,13 @@ export type {
   MetadataExpectation,
   MetadataMatcher,
 } from './disclosure';
+
+export {
+  globalFetchStub,
+  guardedFetch,
+  guardFetch,
+  guardRequestContext,
+  RedirectRefusedError,
+  REFUSED_REDIRECT_STATUSES,
+} from './guarded-http';
+export type { GuardableRequestContext, GuardedFetch } from './guarded-http';

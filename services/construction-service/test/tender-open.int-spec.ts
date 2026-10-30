@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -132,7 +133,7 @@ describe('opening the bids of a tender', () => {
   const makeOverdue = (tenderId: string) =>
     sql(
       'the suite lets the deadline pass',
-      `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+      eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
          "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
     );
 
@@ -524,7 +525,7 @@ describe('opening the bids of a tender', () => {
       )!;
       await sql(
         'the suite gives back the claims it did not mean to take',
-        `UPDATE "tender" SET "close_lease_until" = NULL, "close_fence" = NULL WHERE "close_fence" = 'fence-a' AND "id" <> '${tenderId}'`,
+        eligibilityClockSql`UPDATE "tender" SET "close_lease_until" = NULL, "close_fence" = NULL WHERE "close_fence" = 'fence-a' AND "id" <> '${tenderId}'`,
       );
       expect(claimed).toBeDefined();
       // Closed by hand while the sweeper holds the claim, then opened.
