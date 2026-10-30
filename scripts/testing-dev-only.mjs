@@ -247,7 +247,17 @@ const IMAGE_REF = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?$/;
 /** A repository-relative directory or file name: no `..`, no leading `/`. */
 const REPO_PATH = /^(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._-][A-Za-z0-9._/-]*$/;
 
-if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/** Run as a script, not imported (the token-source lint rule imports this module). */
+function invokedAsScript() {
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    // No argv[1], or one that is no path (`node -e <script> <argument>`).
+    return false;
+  }
+}
+
+if (invokedAsScript()) {
   const [command, target, entry, ...rest] = process.argv.slice(2);
   const valid =
     rest.length === 0 &&

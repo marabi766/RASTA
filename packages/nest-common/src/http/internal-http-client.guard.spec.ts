@@ -2,11 +2,15 @@ import { randomBytes } from 'node:crypto';
 import type { ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
 import { AuthGuard } from '../guards/auth.guard';
-import { InternalTokenService, type TokenVerifier } from '../auth/token-verifier';
+import { type TokenVerifier } from '../auth/token-verifier';
 import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { ALLOW_SERVICE_KEY, IS_PUBLIC_KEY } from '../decorators';
 import { runWithContext, tryGetContext } from '../context/request-context';
-import { InternalHttpClient, type InternalGrant } from './internal-http-client';
+import {
+  InternalHttpClient,
+  InternalTokenService,
+  type InternalGrant,
+} from './internal-http-client';
 
 /**
  * What the receiving guard makes of the requests InternalHttpClient sends:

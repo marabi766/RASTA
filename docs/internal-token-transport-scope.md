@@ -1,58 +1,230 @@
-# Internal-token HTTP transport: enforcement scope and follow-up
+# Internal-token HTTP transport and source boundary
 
-PR #423 protects the 23 current production call sites, **including `internalGet`**,
-with `internalFetch`. It sets `redirect: 'manual'` after caller options, refuses
-301/302/303/307/308 before parsing, cancels without awaiting cancellation, and
-exposes no redirect URL, Location or response body in the error. A 304 remains a
-normal response; the gateway relays it and records success, clearing previous
-failures. Its breaker is per service and shared across tenants within one gateway
-instance. 300 (multiple choices) and deprecated 305 do not trigger Fetch navigation;
-they and unknown 3xx retain the caller's previous status semantics.
+## Transport (PR #423)
 
-The transport lint rule runs from workspace directories over `src`, `dev`, and
-`prisma` TypeScript, plus root scripts. It detects known raw transport names and
-aliases only in modules containing the internal header literal. Unit/integration
-specs and test helpers are excluded. The sole E2E transport implementation,
-`tests/e2e/src/http.ts`, has an explicit local exemption because it uses a hand
-guard instead of a nest-common runtime dependency. Real-HTTP Actor tests verify
-that guard, including 304 passthrough; a real-ESLint test verifies the exemption
-and rejection in other E2E source files. This is a transport regression rule,
-**not a complete credential or token-source boundary**.
+Every internal-token request goes through `internalFetch` (`@rasta/nest-common`).
+It sets `redirect: 'manual'` after caller options, refuses 301/302/303/307/308
+before parsing, cancels without awaiting cancellation, and exposes no redirect
+URL, Location or response body in the error. A 304 remains a normal response;
+the gateway relays it and records success, clearing previous failures. Its
+breaker is per service and shared across tenants within one gateway instance.
+300 (multiple choices) and deprecated 305 do not trigger Fetch navigation; they
+and unknown 3xx retain the caller's previous status semantics.
 
-## Follow-up 1: type-aware token-source boundary (review F3, deferred)
+The transport lint rule (`internal/transport`) runs from workspace directories
+over `src`, `dev`, and `prisma` TypeScript, plus root scripts. It detects known
+raw transport names and aliases only in modules containing the internal header
+literal; specs and test helpers are excluded, and the E2E transport
+`tests/e2e/src/http.ts` is exempt from it (hand guard, below). It is a transport
+regression rule. The source boundary below is what keeps tokens away from any
+other transport.
 
-The PM's Task 830 addendum permits this follow-up. A safe implementation needs
-TypeScript symbol/type resolution across workspace configs and one nest-common
-internal HTTP client, followed by migration of issuance and sending together at
-all 23 call sites. Doing that here would extend a transport repair into a separate
-cross-workspace client API migration. No sender migration or blanket `.issue(` or
-header ban is introduced here. The present runtime protections remain in place,
-but future senders can evade the lint rule as detailed below.
+## Source boundary (PR #423 follow-up 1; #503 r2)
 
-The follow-up must reject use of **InternalTokenService.issue**, resolved through
-its type/import rather than method spelling, outside that client. It must cover
-aliased imports, computed access, destructuring and aliased issuance methods.
-Unrelated domain issuance (RFQ and inventory reservations) must remain valid.
-Ban the internal header only in outbound request construction. Explicit, tested
-exceptions must cover logging redaction, OpenAPI declarations, test token
-factories and the E2E hand guard. Preserve signed tenant SERVICE context, RELAY,
-tenant-less platform reads and replacement of caller-provided internal headers.
+**One client mints and sends.** `InternalHttpClient`
+(`packages/nest-common/src/http/internal-http-client.ts`) is the only code that
+mints an internal token and the only code that puts `X-Internal-Token` on an
+outbound request. `authorize(grant)` mints at the point each caller minted
+before, with the same arguments; the sender it returns sends through
+`internalFetch`, never exposes the token, and replaces a caller-provided internal
+header in any letter case and header representation. All 24 senders use it:
+`internalGet` and 23 service clients, including the gateway's RELAY, tenant
+SERVICE reads and writes, and tenant-less platform reads. Notification keeps one
+token per resolution by keeping one sender across roles and pages.
 
-The following review evasions are **open**, not claimed as fixed or moot. Each
-requires a failing rule/real-workspace fixture in Follow-up 1; test results for
-the current transport rule must not be described as source-boundary enforcement.
+### The boundary holds at run time
 
-| Review evasion                             | Required follow-up proof                                                                                                                          |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Headers/constants built in another file | Cross-file token issuance and outbound-header fixture fails.                                                                                      |
-| 2. Constructor parameter transport         | Parameter-property sender cannot obtain a token outside the client.                                                                               |
-| 3. Class field transport alias             | Field-initializer sender cannot obtain a token outside the client.                                                                                |
-| 4. Destructured transport                  | Destructured fetch and destructured issuance both fail outside the client.                                                                        |
-| 5. bind/call/Reflect.apply                 | Indirect transport and aliased issuance fail at the source boundary.                                                                              |
-| 6. require/dynamic import                  | Dynamic/require transport fixtures fail without depending on transport imports.                                                                   |
-| 7. http2/got/ky/superagent/XHR             | Each alternate transport fixture fails at issuance/header construction.                                                                           |
-| 8. Fake local internalFetch                | Local name grants no exception; only the resolved shared client is trusted.                                                                       |
-| 9. dev/seed/E2E                            | Workspace ESLint now rejects direct raw sender fixtures in these paths. Source-boundary and E2E exemption tests remain required in the follow-up. |
+Review r1 showed that a lint rule alone cannot hold this (`Reflect.get` with a
+computed name is undecidable), so the guarantee is enforced where it runs:
+
+- **The issuer lives with the client.** `InternalTokenService` is declared in
+  the same module as `InternalHttpClient`. Its HMAC key, issuer and TTL are in a
+  `WeakMap` private to that module, frozen. The instance has no own properties,
+  no symbols and no getters, so `Reflect.get(t, 'key')` finds nothing. Before
+  r2 the key was a TypeScript `private` field, which is an ordinary property at
+  run time (141 probe, escape 2).
+- **`issue()` throws a `TypeError`**, however it is reached: a cast, a
+  container, a closure, a generic `Reflect.get` wrapper with a joined name,
+  `call`/`apply`/`bind`, a computed name, or `new InternalTokenService(…) as any`.
+  `authorize` mints for a genuine instance through a module-private `mint()`.
+  An object that is no genuine instance is asked through its own `issue()`;
+  this is what lets sender unit tests stand in with `{ issue }`. Such a
+  stand-in signs nothing a service accepts, and an object built on the
+  prototype reaches the throwing `issue()`. A subclass that overrides
+  `issue()` is ignored, and it gains no key.
+- **The client is frozen** when constructed, so the transport and issuer of a
+  client production code already holds cannot be swapped.
+- **No subpath.** `@rasta/nest-common`'s `package.json` has
+  `"exports": { ".": … }`. Node refuses every `@rasta/nest-common/dist/…`,
+  `/src/…` and `/package.json` specifier, for `require` and `import`, with
+  `ERR_PACKAGE_PATH_NOT_EXPORTED`. Before the change no workspace imported a
+  subpath (`git grep "@rasta/nest-common/"`: only an ADR's prose and a
+  fixture string). Scripts that load `dist` by file path are unaffected.
+
+`packages/nest-common/src/http/internal-token-boundary.spec.ts` runs every F1/F2
+snippet of the review, and the 141 probe's escapes, against the real classes:
+none yields a token `verify` accepts. The subpath case resolves from a real
+consumer (economic-service) in a child Node process.
+
+### The secret stays in the environment (D-086)
+
+`INTERNAL_TOKEN_SECRET` stays a string in the environment and in each service's
+`ENV` object, which hands it to `new InternalTokenService(…)`. **The process is
+the trust boundary.** Code running inside a service process can read
+`process.env` and can rewrite anything that process shares: jose, `crypto`,
+`WeakMap.prototype`, `globalThis.fetch`. No in-process seal survives that. An
+opaque secret handle with a scrubbed environment (task 141, D1(a)) would add a
+second process-local hiding place while code in the same process still runs.
+It would also touch config, 17 app modules and every test that loads the
+environment twice. The run-time boundary therefore guarantees something
+narrower: **no object reachable from nest-common's API hands out a token or the
+key.** The rule refuses naming the secret anywhere but as the issuer's first
+argument. That covers a property, a string, a folded or joined name, and a
+computed key on a value that holds it. Per-workload identity (mTLS, ADR-020,
+risk S-03) remains the replacement for the shared secret.
+
+### The lint rule is the second layer
+
+`internal/token-source` (`scripts/internal-token-source-rule.mjs`) refuses at
+review time what the run time would refuse, or what it cannot see. It decides
+through TypeScript symbols and types, not spelling:
+
+- **issuance**: any read of the `issue` method, by `.issue`, `['issue']`, a
+  constant, folded (`'is' + 'sue'`) or `keyof` key, destructuring, `super`,
+  `bind`/`call`/`apply`. It is resolved to the method's declaration in
+  nest-common, so a `Pick<…>`, alias or re-export is the same method, and a
+  domain `issue()` (RFQ, inventory reservations) is not.
+- **escape**: a value that carries the issuer flowing where that is lost. It
+  may carry it directly, or inside a public property, an element, a type
+  argument (a promise) or a function's return, three levels deep. It is lost
+  in `any`, `unknown`, `object`, a structural stand-in, a type assertion,
+  `Reflect`/`Object.*`, or a generic parameter (`<T>(t: T)`). For a generic
+  parameter the call site is refused, because inside the generic nothing
+  carries a type. The one allowance is a verified DI factory:
+  `new InternalTokenService(…)` returned from the `useFactory` of a provider
+  whose `provide` is `InternalTokenService`, and that provider object.
+- **header**: the header name as a literal, template, constant of that literal
+  type, or folded through `+`, `[…].join`, `concat` or letter case, in any
+  case. It is refused as an object key, an assigned key, a `[name, value]`
+  pair or a name followed by a value in a call. Reading it (`headers.get`,
+  `req.headers[…]`), logging redaction paths and OpenAPI declarations are not
+  construction and pass.
+- **signer**: jose's signing classes from `jose` or any `jose/…` subpath, the
+  four signing subpaths included. Also refused: a jose namespace used other
+  than as `ns.<fixed non-signing name>` (an alias, a computed member, an
+  argument), and `INTERNAL_TOKEN_SECRET` named anywhere but as the first
+  argument of `new InternalTokenService`.
+- **fail closed**: without type information (JavaScript, a file no project
+  includes, text that differs from the file on disk), `issue` and a computed
+  key on the issuer or on a value holding the secret are refused. In
+  production code (every path that is neither test-only by `isTestOnlyPath`,
+  `scripts/test-only-path.mjs`, nor root tooling in `scripts/`) the rule also
+  refuses:
+  - nest-common or TypeScript source imported without types;
+  - any module loader (`require`, `module.require`, `createRequire(…)`, any
+    `const` alias of them, `import()`) whose specifier is not a constant. A
+    specifier is followed through `const`, `+`, templates and the path
+    builders (`join`, `resolve`, `dirname`, `pathToFileURL`, `new URL`), and
+    tested whole, so `'@rasta/' + 'nest-' + 'common'` is nest-common. Any
+    other call's result is unknown;
+  - a loader or code generator used other than by calling it;
+  - code generation: `eval`, `Function`, `globalThis.eval`, a `vm` import, a
+    `.constructor(…)` call, a string timer;
+  - without types, a method called by a computed name or through `Reflect`.
+
+  Test-only code (`tests/`, test trees, `packages/testing`, test-runner files)
+  is never in an image, and no production file may import it (the source sweep
+  in `scripts/testing-dev-only-source.mjs`, PR #514). Root tooling (`scripts/`)
+  is CI and operator code, not copied into an image: a production file that
+  imports one makes it production for that sweep, which follows it and refuses
+  its loaders. Today the root tooling it follows is the lint configs and their
+  rule modules. In both, the run-time boundary alone answers loaders.
+  `isTestOnlyPath` has one definition, in a module with no loader
+  (`scripts/test-only-path.mjs`), because the lint configs the sweep follows
+  import it through this rule.
+
+Types come from the linted file's own workspace project
+(`scripts/internal-token-parser.mjs`): `tsconfig.test.json` where one exists
+(src, test, dev, seed), otherwise `tsconfig.json`. A file the project does not
+include is parsed without types rather than failing. Lint depends on `^build`,
+so nest-common's declarations are present.
+
+**Scope.** The rule is on for every extension ESLint lints
+(`.ts .tsx .mts .cts .js .jsx .mjs .cjs`) in every workspace with a `lint`
+script, in `apps/web` (its own config restates the rule with its own parser),
+in the E2E workspace's root files, and in root `scripts/`.
+
+### Every exemption, with its reason
+
+| Config                            | Exemption                                                                                                  | Reason                                                                                       | Why production cannot reach it                                                                                                                             |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| root `INTERNAL_TOKEN_SOURCE`, web | rule `off` for `*.spec.*`, `*.int-spec.ts`, `*.e2e-spec.ts`, `*.test.*`, `test/**`                         | test token factories exercise the services' guards                                           | test-only by `isTestOnlyPath`; the source sweep refuses any production import of a test-only file, by its resolved target (extensionless imports included) |
+| root, allow `header`              | `send()` in `tests/e2e/src/http.ts`                                                                        | the E2E transport (no nest-common dependency) sets the header behind its redirect hand guard | `tests/` is test-only                                                                                                                                      |
+| root, allow `signer`              | `mintInternalToken()` in `tests/e2e/src/internal.ts`                                                       | the E2E harness signs the wire format itself                                                 | `tests/` is test-only                                                                                                                                      |
+| root, allow `signer`              | `e2eConfig()` in `tests/e2e/src/env.ts`                                                                    | the harness reads the secret by name from its environment                                    | `tests/` is test-only                                                                                                                                      |
+| root, allow `signer`              | `mintTestInternalToken()` in `packages/testing/src/internal-token.ts`                                      | the services' test factories mint here (PR #514)                                             | devDependency only; checked in source, in the production dependency graph and in images (`scripts/testing-dev-only.mjs`)                                   |
+| root, allow `signer`              | `secretName()` in `scripts/internal-token-source-rule.mjs`                                                 | the rule names the secret it refuses                                                         | root tooling; it returns a name, not a capability                                                                                                          |
+| root, allow `header`              | `credentialNames()` in `scripts/internal-token-transport-rule.mjs`                                         | the transport rule lists the header among the credentials it checks (Q-155)                  | root tooling; it returns a name, not a capability                                                                                                          |
+| root, web, e2e                    | global ignores (`node_modules`, `dist`, `.next`, `.turbo`, `coverage`, `src/generated`, Playwright output) | build output and generated code                                                              | linted by the coverage test below when tracked                                                                                                             |
+| nest-common                       | the client file itself (`internal-http-client.ts`)                                                         | holds the issuer, `mint()` and the header                                                    | it is the boundary                                                                                                                                         |
+
+The coverage tests in `scripts/internal-token-source-workspace.test.mjs` derive
+this from ESLint itself, not from directory prefixes. For every tracked JS/TS
+file they ask each lint script's ESLint whether it lints the file, and at which
+level:
+
+- every file linted with the rule off must be test-only;
+- every allowance must name a test-only file or a root lint rule;
+- every file no lint script reaches is linted there with the rule itself,
+  without types and with inline configuration off. These are root config
+  files and ignored paths (`apps/web/e2e/**` is linted by the portal since
+  PR #492). This replaces r1's spelling scan, which
+  the review's generic `mint<T>` helper passed;
+- no production file may hold an inline directive that switches an `internal/`
+  rule off, or a blanket `eslint-disable`.
+
+### Review evasions and their fixtures
+
+Every fixture is a real file linted by the real ESLint binary from its
+workspace. Expectations are per line: a marked line must carry its report and
+an unmarked line must carry none. r1's helper only checked that a message
+occurred somewhere in a file (review "Fixtures"), so one case could hide
+another.
+
+| Review                                                                                                                                                                             | Closed at run time by                          | Lint fixture                                                                                    |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| r1 F3 evasions 1–9 (headers in another file, constructor/field/destructured transports, bind/call/Reflect, require/import, http2/got/ky/superagent/XHR, fake client, dev/seed/E2E) | `issue()` throws; the key is no property       | `e1`–`e8`, `f-*`, `dev/…`, `prisma/…`, seed, E2E cases                                          |
+| r2 F1: containers and arrays cast through `unknown`, closure-return cast, spread widening, generic `Reflect.get` wrapper, `new …() as any`                                         | `issue()` throws                               | `r2-f1.ts` (each on its own line), DI factory allowed only with `provide: InternalTokenService` |
+| r2 F2: jose subpaths, namespace alias, computed `j['Sign'+'JWT']`                                                                                                                  | no key reachable: nothing to sign with         | nest-common `subpaths.ts`, `namespace.ts`, `reexport.ts`                                        |
+| r2 F2: secret by `Reflect.get`, joined, folded, cased or computed name                                                                                                             | D-086: process boundary                        | `r2-f2-secret.ts`; E2E `env.ts` widened                                                         |
+| r2 F2: header by `join`, `toLowerCase`, entries                                                                                                                                    | the client replaces the header (run-time spec) | `r2-f2-header.ts`                                                                               |
+| r2 F3: untyped computed `issue`, split module names, `require`/`eval`/`Function` aliases, `module.require`, `createRequire`, `globalThis.eval`, helper-built specifiers            | `issue()` throws                               | `r2-f3.mjs` (production JavaScript); root scripts keep issuance, header and secret              |
+| r2 F4: exempt helper imported by production; unlinted generic wrapper; ignored paths                                                                                               | `issue()` throws                               | "review F4…" (refused by the source sweep), both coverage tests                                 |
+
+## Limits
+
+- **The transport sees the header (141 probe, escape 3).** A client hands each
+  request, header included, to the transport it was built with. That is the
+  global `fetch` in production wiring. About 12 production clients forward an
+  optional `fetchImpl` test seam to the client; production modules pass none.
+  Code that builds a client with its own transport, or replaces
+  `globalThis.fetch`, receives a valid token. Sealing that would mean removing
+  the seam from those clients and their specs. The token stays bounded: one
+  audience, one organization (signed), one TTL. The run-time spec pins this
+  residual so the doc stays true.
+- **Code that rewrites the shared runtime** (jose, `crypto`, `WeakMap`,
+  intrinsics) or reads the environment is inside the trust boundary (D-086).
+- **A secret name computed from run-time input** (`process.env[name]`, where
+  `name` is no constant) is out of static reach. `process.env` declares no
+  such property, so only a constant name is refused there.
+- **Dependency injection by a string or symbol token.** A parameter injected
+  with a structural type naming `issue` is caught where `issue` is read. One
+  typed as a string-indexed record and read with a computed key is caught only
+  at run time.
+- **Each workspace's own `lint` script** is proven by the opt-in case of the
+  same test (`INTERNAL_TOKEN_LINT_SCRIPTS=1`; a full repository lint, not run in
+  CI). CI runs the structural and coverage tests, which check the
+  configuration those scripts load.
 
 **Status after task 135 (PR #492 round 2):** the _transport_ half of every row is closed by
 the boundary below. Outside the audited files no raw sender can be reached at all, so it does
@@ -109,12 +281,6 @@ settlement-completed. The marketplace committed-response tests are real HTTP
 **unit tests with an in-memory commit map**, for all seven economic write
 operations including dispute resolution; they are not real-PG commit proofs.
 Pagination and failed-bootstrap cursor regressions remain in their existing tests.
-
-The original disabled-rule mutant exercised only direct `Linter` unit tests.
-Task 830 adds a real CLI ESLint test in service/package/dev/seed/E2E workspaces,
-wired into root `lint:scripts`, and disables the real configured rule to verify
-that test detects missing enforcement. No claim of complete alias/data-flow
-coverage follows from either mutant.
 
 ## Q-155: every credential, not only the internal token (task 106)
 
