@@ -13,6 +13,7 @@ import {
   STEP_INVENTORY,
   checkIntegrationSplit,
   checkIntegrationSplitText,
+  jobBudgetProblems,
 } from './ci-integration-split-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -335,6 +336,69 @@ test('a job outside the split is held to its cumulative budget too', () => {
   const gone = real();
   delete gone.jobs['migration-guards'];
   fails(gone, /^migration-guards has a declared time budget but is not a job/);
+});
+
+// Every name Object.prototype gives a plain object: a lookup by job id into the
+// budget tables must not find any of them (N1 of the review of #499).
+const INHERITED_KEYS = Object.getOwnPropertyNames(Object.prototype);
+
+const jobWithId = (workflow, id, job) => {
+  // `workflow.jobs[id] = ...` would set the prototype for `__proto__`.
+  Object.defineProperty(workflow.jobs, id, {
+    value: job,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+};
+
+test('a job named like an inherited property has no setup allowance and is refused', () => {
+  assert.equal(INHERITED_KEYS.length, 12, INHERITED_KEYS.join(', '));
+  for (const id of INHERITED_KEYS) {
+    const workflow = real();
+    jobWithId(workflow, id, {
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 1,
+      steps: [{ name: 'Slow', run: 'true', 'timeout-minutes': 2 }],
+    });
+    fails(
+      workflow,
+      new RegExp(`^${escape(id)} has step time limits \\(2 minutes in all\\) but no setup`),
+    );
+  }
+});
+
+test('a job named like an inherited property is not given a floor either', () => {
+  for (const id of INHERITED_KEYS) {
+    const workflow = real();
+    jobWithId(workflow, id, { 'runs-on': 'ubuntu-latest', 'timeout-minutes': 1, steps: [] });
+    const problems = checkIntegrationSplit(workflow);
+    assert.ok(
+      !problems.some((problem) => /floor|below its/.test(problem)),
+      `${id}: ${JSON.stringify(problems)}`,
+    );
+  }
+});
+
+test('a budget entry that is not a number of minutes is a problem, not a pass', () => {
+  const jobs = {
+    slow: { 'timeout-minutes': 5, steps: [{ name: 'a', run: 'true', 'timeout-minutes': 4 }] },
+  };
+  for (const bad of [() => 'x', 'x', null, NaN, 0, -1, {}]) {
+    const setup = jobBudgetProblems(jobs, [], { slow: bad }, {});
+    assert.ok(
+      setup.some((problem) =>
+        /^slow has a setup allowance .* not a number of minutes/.test(problem),
+      ),
+      String(bad),
+    );
+    const floor = jobBudgetProblems(jobs, [], { slow: 1 }, { slow: bad });
+    assert.ok(
+      floor.some((problem) => /^slow has a floor .* not a number of minutes/.test(problem)),
+      String(bad),
+    );
+  }
+  assert.deepEqual(jobBudgetProblems(jobs, [], { slow: 1 }, { slow: 5 }), []);
 });
 
 test('a job whose measured runtime needed its limit may not go back below it', () => {
