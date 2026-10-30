@@ -304,6 +304,12 @@ const commandLines = (run) =>
     .map((line) => line.trim())
     .filter((line) => line !== '' && !line.startsWith('#'));
 const isMinutes = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0;
+/**
+ * A budget table's entry for a job id, from the workflow. Only an own entry
+ * counts: `table['constructor']` or `table['__proto__']` is a function or an
+ * object, which makes `sum + setup > limit` false and so accepts the overrun.
+ */
+const budgetEntry = (table, id) => (Object.hasOwn(table, id) ? table[id] : undefined);
 
 export function checkIntegrationSplitText(text) {
   let workflow;
@@ -466,7 +472,12 @@ export function checkIntegrationSplit(workflow) {
  * job deadline while it is still within its own limit. The sum of the step
  * limits plus the setup allowance for the steps without one must fit.
  */
-function jobBudgetProblems(jobs, splitIds) {
+export function jobBudgetProblems(
+  jobs,
+  splitIds,
+  setupMinutes = JOB_SETUP_MINUTES,
+  floorMinutes = JOB_FLOOR_MINUTES,
+) {
   const problems = [];
   for (const [id, job] of Object.entries(jobs)) {
     if (!isMapping(job)) continue;
@@ -475,8 +486,10 @@ function jobBudgetProblems(jobs, splitIds) {
     if (!isMinutes(limit) && !splitIds.includes(id) && id !== AGGREGATE_JOB) {
       problems.push(`${id} has no timeout-minutes (a positive number)`);
     }
-    const floor = JOB_FLOOR_MINUTES[id];
-    if (floor !== undefined && isMinutes(limit) && limit < floor) {
+    const floor = budgetEntry(floorMinutes, id);
+    if (floor !== undefined && !isMinutes(floor)) {
+      problems.push(`${id} has a floor in JOB_FLOOR_MINUTES that is not a number of minutes`);
+    } else if (floor !== undefined && isMinutes(limit) && limit < floor) {
       problems.push(
         `${id} has timeout-minutes ${limit}, below its ${floor}: its slowest green runs needed it`,
       );
@@ -492,10 +505,14 @@ function jobBudgetProblems(jobs, splitIds) {
     }
     if (unknown.length > 0) continue;
     const sum = limited.reduce((total, step) => total + step['timeout-minutes'], 0);
-    const setup = JOB_SETUP_MINUTES[id];
+    const setup = budgetEntry(setupMinutes, id);
     if (setup === undefined) {
       problems.push(
         `${id} has step time limits (${sum} minutes in all) but no setup allowance in JOB_SETUP_MINUTES`,
+      );
+    } else if (!isMinutes(setup)) {
+      problems.push(
+        `${id} has a setup allowance in JOB_SETUP_MINUTES that is not a number of minutes`,
       );
     } else if (isMinutes(limit) && sum + setup > limit) {
       problems.push(
@@ -503,7 +520,7 @@ function jobBudgetProblems(jobs, splitIds) {
       );
     }
   }
-  for (const id of Object.keys({ ...JOB_SETUP_MINUTES, ...JOB_FLOOR_MINUTES })) {
+  for (const id of Object.keys({ ...setupMinutes, ...floorMinutes })) {
     if (!isMapping(jobs[id])) problems.push(`${id} has a declared time budget but is not a job`);
   }
   return problems;
