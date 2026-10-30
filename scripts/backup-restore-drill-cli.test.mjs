@@ -17,6 +17,13 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
+import {
+  holdUntil,
+  pollUntil,
+  waitForFile as waitFor,
+  waitForPid,
+  waitForRecordedGroup,
+} from './backup-restore-drill-test-support.mjs';
 
 const cli = new URL('./backup-restore-drill.mjs', import.meta.url);
 const repo = new URL('..', import.meta.url).pathname;
@@ -42,12 +49,6 @@ function fixture(directory) {
     }
   }
   return root;
-}
-async function waitFor(path) {
-  for (let attempt = 0; attempt < 400 && !existsSync(path); attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  assert.ok(existsSync(path), path);
 }
 function start(directory, root, extra = {}, executable = cli.pathname) {
   const child = spawn(process.execPath, [executable, '--report', join(directory, 'report.json')], {
@@ -153,13 +154,13 @@ for (const stoppedLeftover of [false, true]) {
       writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
       writeFileSync(
         join(directory, 'docker'),
-        `#!/bin/sh
+        `#!/bin/bash
 [ "$DOCKER_CONTEXT" = default ] && [ "$DOCKER_HOST" = unix:///var/run/docker.sock ] || exit 99
 case "$*" in
   *'up -d'*) touch '${directory}/started'; exec sleep 30 ;;
   *'down --volumes'*)
     touch '${directory}/cleaning'
-    while [ ! -f '${directory}/release' ]; do sleep 0.05; done
+    ${holdUntil(directory, `${directory}/release`)}
     touch '${directory}/cleaned' ;;
   'container ls -a '*) ${stoppedLeftover ? 'echo stopped-owned-container' : ':'} ;;
 esac
@@ -410,7 +411,7 @@ exit 0
   };
   writeFileSync(
     join(directory, 'docker'),
-    `#!/bin/sh
+    `#!/bin/bash
 printf '%s\\n' "$*" >> '${directory}/commands'
 case "$*" in
   *'port source 5432'*) echo 127.0.0.1:54321 ;;
@@ -448,7 +449,7 @@ case "$*" in
       *'WITH namespaces AS'*) echo '{"schemas":[{"name":"public","owner":"rasta"}],"relations":[{"name":"public.fixture","owner":"rasta"}],"defaultPrivileges":[]}' ;;
       *'row_to_json(t)'*) echo '{"name":"public.fixture","rows":"1","kind":"application","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' ;;
     esac ;;
-  *'down --volumes'*) ${mode === 'cleanup-write-fails' ? `chmod 755 '${directory}'; ` : ''}touch '${directory}/cleaned' ;;
+  *'down --volumes'*) ${mode === 'cleanup-write-fails' ? `${holdUntil(directory, `${directory}/writable`)}; ` : ''}touch '${directory}/cleaned' ;;
 esac
 `,
     { mode: 0o700 },
@@ -612,9 +613,8 @@ const pidExists = (pid) => {
   }
 };
 async function waitGone(pgid) {
-  for (let attempt = 0; attempt < 200 && alive(pgid); attempt++)
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  return !alive(pgid);
+  await pollUntil(() => !alive(pgid), `process group ${pgid} to stop`);
+  return true;
 }
 
 test('SIGKILL leaves a provisional private report naming the project, directory and live process groups', async () => {
@@ -626,10 +626,10 @@ test('SIGKILL leaves a provisional private report naming the project, directory 
     // The migration child's argv never contains the project name: pgrep -f <project> cannot find it.
     writeFileSync(
       join(directory, 'pnpm'),
-      `#!/bin/sh
+      `#!/bin/bash
 echo $$ > '${directory}/migrate-pgid'
 touch '${directory}/migrating'
-while [ ! -f '${directory}/release' ]; do sleep 0.05; done
+${holdUntil(directory, `${directory}/release`)}
 touch '${directory}/migrate-released'
 `,
       { mode: 0o700 },
@@ -649,11 +649,7 @@ esac
     pgid = Number(readFileSync(join(directory, 'migrate-pgid'), 'utf8'));
     // The child is blocked until `release`: its group must be recorded while it still runs. The
     // record is written right after spawn, so wait for it instead of racing the child's start.
-    for (let attempt = 0; attempt < 400; attempt++) {
-      const recorded = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
-      if (recorded.processGroups?.includes(pgid)) break;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await waitForRecordedGroup(join(directory, 'report.json'), pgid, 'processGroups');
     child.kill('SIGKILL');
     const [code, signal] = await exited;
     assert.equal(code, null);
@@ -871,6 +867,17 @@ test('a report write that fails while cleanup starts is never forgotten: the run
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
     });
+    // `compose down` is held until the drill has REPORTED the write it could not make: a stub that
+    // made the directory writable the moment it started raced the parent, which records the
+    // group right after the spawn, and a loaded machine let the stub win.
+    // (The whole drill runs before this point, hence the long budget.)
+    await pollUntil(
+      () => /a report write failed/.test(stderr),
+      'the drill to report the failed cleanup write',
+      300_000,
+    );
+    chmodSync(directory, 0o755);
+    writeFileSync(join(directory, 'writable'), '');
     const [code] = await once(child, 'close');
     chmodSync(directory, 0o755);
     assert.equal(code, 1);
@@ -895,6 +902,7 @@ test('a report write that fails while cleanup starts is never forgotten: the run
     child?.kill('SIGKILL');
     try {
       chmodSync(directory, 0o755);
+      writeFileSync(join(directory, 'writable'), '');
     } catch {
       /* removed already */
     }
@@ -1024,8 +1032,7 @@ esac
     assert.deepEqual(report.processGroups, []);
     assert.equal(report.orphanProcessGroups, undefined);
     for (const pid of descendants) {
-      for (let attempt = 0; attempt < 200 && pidExists(pid); attempt++)
-        await new Promise((resolve) => setTimeout(resolve, 25));
+      await pollUntil(() => !pidExists(pid), `process ${pid} to exit`);
       assert.equal(pidExists(pid), false, 'the descendant is gone');
     }
     assert.doesNotMatch(stderr, new RegExp(directory));
@@ -1142,7 +1149,7 @@ function recover(directory, root, reportPath, extra = {}) {
 const recordingDocker = (directory, extra = '') =>
   writeFileSync(
     join(directory, 'docker'),
-    `#!/bin/sh
+    `#!/bin/bash
 echo "$*" >> '${directory}/docker-calls'
 ${extra}
 `,
@@ -1157,9 +1164,9 @@ ${extra}
 async function crashedRun(directory, root) {
   writeFileSync(
     join(directory, 'pnpm'),
-    `#!/bin/sh
+    `#!/bin/bash
 echo $$ > '${directory}/blocked-pgid'
-while [ ! -f '${directory}/release' ]; do sleep 0.05; done
+${holdUntil(directory, `${directory}/release`)}
 `,
     { mode: 0o700 },
   );
@@ -1168,13 +1175,9 @@ while [ ! -f '${directory}/release' ]; do sleep 0.05; done
   });
   const child = start(directory, root);
   const exited = once(child, 'exit');
-  await waitFor(join(directory, 'blocked-pgid'));
-  const pgid = Number(readFileSync(join(directory, 'blocked-pgid'), 'utf8'));
+  const pgid = await waitForPid(join(directory, 'blocked-pgid'));
   const reportPath = join(directory, 'report.json');
-  for (let attempt = 0; attempt < 400; attempt++) {
-    if (JSON.parse(readFileSync(reportPath, 'utf8')).processGroups?.includes(pgid)) break;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await waitForRecordedGroup(reportPath, pgid, 'processGroups');
   child.kill('SIGKILL');
   await exited;
   rmSync(join(directory, 'early-docker'), { force: true });
@@ -1406,8 +1409,7 @@ esac`,
     assert.equal(result.code, 1);
     assert.match(result.stderr, /unverified: container/);
     for (const pid of descendants) {
-      for (let attempt = 0; attempt < 200 && pidExists(pid); attempt++)
-        await new Promise((resolve) => setTimeout(resolve, 25));
+      await pollUntil(() => !pidExists(pid), `process ${pid} to exit`);
       assert.equal(pidExists(pid), false, 'the siblings were reaped before the exit');
     }
   } finally {
@@ -1485,7 +1487,7 @@ const blockingFirstDown = (directory) =>
     if mkdir '${directory}/first-down' 2>/dev/null; then
       env | grep '^RASTA_DRILL_RECOVERY_ID=' > '${directory}/down-env'
       echo $$ > '${directory}/down-pgid'
-      while [ ! -f '${directory}/release-down' ]; do sleep 0.05; done
+      ${holdUntil(directory, `${directory}/release-down`)}
     fi ;;
 esac`,
   );
@@ -1507,11 +1509,12 @@ test('a recovery killed mid-command is itself recovered: the next one reaps its 
     blockingFirstDown(directory);
     const first = startRecovery(directory, root, run.reportPath);
     const killed = once(first, 'exit');
-    await waitFor(join(directory, 'down-pgid'));
-    const downGroup = Number(readFileSync(join(directory, 'down-pgid'), 'utf8'));
+    const downGroup = await waitForPid(join(directory, 'down-pgid'));
     stray.push(downGroup);
     // Ownership is on disk while the child runs: the journal names its group, the child carries
-    // the run's id, and the original record is untouched.
+    // the run's id, and the original record is untouched. The journal is written after the spawn,
+    // so wait for it to name the group instead of racing the recovery.
+    await waitForRecordedGroup(recoveryJournal(run), downGroup, 'groups');
     const journal = JSON.parse(readFileSync(recoveryJournal(run), 'utf8'));
     assert.ok(journal.groups.includes(downGroup), 'the journal names the recovery child');
     assert.equal(journal.id, run.report.recoveryId);
@@ -1685,8 +1688,7 @@ for (const order of ['the second starts once the first one’s child runs', 'bot
       const processes = [spawnRecovery(directory, root, run.reportPath)];
       if (order === 'both start together')
         processes.push(spawnRecovery(directory, root, run.reportPath));
-      await waitFor(join(directory, 'down-pgid'));
-      const downGroup = Number(readFileSync(join(directory, 'down-pgid'), 'utf8'));
+      const downGroup = await waitForPid(join(directory, 'down-pgid'));
       stray.push(downGroup);
       if (order !== 'both start together')
         processes.push(spawnRecovery(directory, root, run.reportPath));
@@ -1723,18 +1725,14 @@ test('a recovery never signals or removes what a LIVE run still owns', async () 
     const root = fixture(directory);
     writeFileSync(
       join(directory, 'pnpm'),
-      `#!/bin/sh\necho $$ > '${directory}/blocked-pgid'\nwhile [ ! -f '${directory}/release' ]; do sleep 0.05; done\n`,
+      `#!/bin/bash\necho $$ > '${directory}/blocked-pgid'\n${holdUntil(directory, `${directory}/release`)}\n`,
       { mode: 0o700 },
     );
     recordingDocker(directory);
     child = start(directory, root);
-    await waitFor(join(directory, 'blocked-pgid'));
-    pgid = Number(readFileSync(join(directory, 'blocked-pgid'), 'utf8'));
+    pgid = await waitForPid(join(directory, 'blocked-pgid'));
     const reportPath = join(directory, 'report.json');
-    for (let attempt = 0; attempt < 400; attempt++) {
-      if (JSON.parse(readFileSync(reportPath, 'utf8')).processGroups?.includes(pgid)) break;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await waitForRecordedGroup(reportPath, pgid, 'processGroups');
     const report = JSON.parse(readFileSync(reportPath, 'utf8'));
     const result = await recover(directory, root, reportPath, SHORT_LOCK_WAIT);
     assert.notEqual(result.code, 0, result.stderr);
@@ -1768,14 +1766,16 @@ test('a recovery of a drill whose directory is already gone is journaled too: ki
   *'container ls'*)
     if mkdir '${directory}/first-ls' 2>/dev/null; then
       echo $$ > '${directory}/ls-pgid'
-      while [ ! -f '${directory}/release-ls' ]; do sleep 0.05; done
+      ${holdUntil(directory, `${directory}/release-ls`)}
     fi ;;
 esac`,
     );
     const first = spawnRecovery(directory, root, run.reportPath);
-    await waitFor(join(directory, 'ls-pgid'));
-    const listing = Number(readFileSync(join(directory, 'ls-pgid'), 'utf8'));
+    const listing = await waitForPid(join(directory, 'ls-pgid'));
     stray.push(listing);
+    // Kill the first recovery only once its journal names the listing: killed earlier, there is
+    // nothing for the second one to find and the test would prove nothing.
+    await waitForRecordedGroup(recoveryJournal(run), listing, 'groups');
     first.child.kill('SIGKILL');
     await first.done;
     assert.ok(alive(listing), 'the killed recovery left its listing running');
@@ -2212,9 +2212,9 @@ test('overlapping names, a live run first: a report named like its journal, lock
     const root = fixture(directory);
     writeFileSync(
       join(directory, 'pnpm'),
-      `#!/bin/sh
+      `#!/bin/bash
 echo $$ > '${directory}/blocked-pgid'
-while [ ! -f '${directory}/release' ]; do sleep 0.05; done
+${holdUntil(directory, `${directory}/release`)}
 `,
       { mode: 0o700 },
     );
@@ -2223,7 +2223,14 @@ while [ ! -f '${directory}/release' ]; do sleep 0.05; done
     });
     const reportPath = join(directory, 'report.json');
     live = invoke(directory, root, '--report', reportPath);
-    await waitFor(join(directory, 'blocked-pgid'));
+    // The run records its child's group right after the spawn and then writes nothing until the
+    // child ends: snapshot the directory only once that record (and so its write sibling's
+    // rename) is on disk, not on the child's own marker.
+    await waitForRecordedGroup(
+      reportPath,
+      await waitForPid(join(directory, 'blocked-pgid')),
+      'processGroups',
+    );
     const journal = `${reportPath}.recovery-journal.json`;
     const reserved = readFileSync(journal);
     const reportBytes = readFileSync(reportPath);
@@ -2254,6 +2261,9 @@ while [ ! -f '${directory}/release' ]; do sleep 0.05; done
     assert.equal(report.cleanup.passed, true);
   } finally {
     writeFileSync(join(directory, 'release'), '');
+    // The stub polls for `release` inside the directory: let the live run end before the directory
+    // is removed, or a failed assertion above strands the run and the test process never exits.
+    await live?.done;
     rmSync(directory, { recursive: true, force: true });
   }
 });

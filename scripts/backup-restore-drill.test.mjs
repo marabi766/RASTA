@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import * as realFs from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -42,7 +42,9 @@ import {
   createProcessRunner,
   finalizeCleanup,
   verifyResourceKinds,
+  KILL_CONFIRMATION_DEADLINE_MS,
 } from './backup-restore-drill-lib.mjs';
+import { holdUntil, pollUntil, waitForPid } from './backup-restore-drill-test-support.mjs';
 
 const SUFFIX = '0123456789abcdef';
 const REF_DB = `drill_ref_${SUFFIX}`;
@@ -1019,6 +1021,73 @@ test('process groups: nothing left is gone; members are killed and confirmed; su
   assert.equal(waits.length, 1 + 3);
 });
 
+// A stub that holds a process group with a `sleep` inside a shell loop forks a child every poll,
+// and a recovery inspecting that group can catch the child mid-exec (its environment reads empty),
+// call the group unproven and refuse it: a failure of the stub, not of the drill (#478 follow-up,
+// task 278). holdUntil (backup-restore-drill-test-support.mjs) is the one wait that stays a
+// single process.
+test('no drill test stub polls with a forking sleep: holdUntil is the one wait', () => {
+  const files = readdirSync(new URL('.', import.meta.url)).filter((name) =>
+    /^backup-restore-drill.*\.test\.mjs$/.test(name),
+  );
+  assert.ok(files.length >= 5, `the drill test files were found (${files.join(', ')})`);
+  for (const name of files) {
+    const source = readFileSync(new URL(`./${name}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /\bdo\s+sleep\b/, `${name}: a stub polls with a forked sleep`);
+  }
+});
+
+test('waitForPid returns only a whole pid line; an empty or partial file is not a pid', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-support-pid-'));
+  try {
+    const path = join(directory, 'pid');
+    // `echo $$ > file` creates the file before it writes: both states must keep the wait going.
+    writeFileSync(path, '');
+    await assert.rejects(waitForPid(path, 150), /timed out after 150 ms waiting for a process id/);
+    writeFileSync(path, '4242');
+    await assert.rejects(waitForPid(path, 150), /timed out/);
+    writeFileSync(path, '0\n');
+    await assert.rejects(waitForPid(path, 150), /timed out/);
+    const waiting = waitForPid(path);
+    await sleep(60);
+    writeFileSync(path, '4242\n');
+    assert.equal(await waiting, 4242);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('holdUntil keeps its process group at ONE process while it waits, then exits 0 when the file appears', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-support-hold-'));
+  let holder;
+  try {
+    const release = join(directory, 'release');
+    const members = (pgid) =>
+      spawnSync('ps', ['-eo', 'pid=,pgid='], { encoding: 'utf8' })
+        .stdout.split('\n')
+        .filter((line) => Number(line.trim().split(/\s+/)[1]) === pgid).length;
+    holder = spawn('/bin/bash', ['-c', holdUntil(directory, release)], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    const exited = new Promise((resolve) => holder.once('exit', (code) => resolve(code)));
+    await new Promise((resolve) => holder.once('spawn', resolve));
+    // A forking poll would put a short-lived `sleep` into the group every 50 ms: sample across
+    // many polls (about a second) and never see a second member.
+    let most = 0;
+    for (let sample = 0; sample < 40; sample++) {
+      most = Math.max(most, members(holder.pid));
+      await sleep(25);
+    }
+    assert.equal(most, 1, 'the waiting group is the shell alone');
+    writeFileSync(release, '');
+    assert.equal(await exited, 0, 'the status of the last timed-out read is not the stub’s status');
+  } finally {
+    if (holder && pidAlive(holder.pid)) process.kill(-holder.pid, 'SIGKILL');
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 // The process lifecycle boundary: real children for what the kernel decides, a fake spawn for
 // the orderings a real child cannot be forced into.
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1031,8 +1100,8 @@ const pidAlive = (pid) => {
   }
 };
 async function becomesGone(pid) {
-  for (let attempt = 0; attempt < 200 && pidAlive(pid); attempt++) await sleep(25);
-  return !pidAlive(pid);
+  await pollUntil(() => !pidAlive(pid), `process ${pid} to exit`);
+  return true;
 }
 function fakeChild(pid) {
   const child = new EventEmitter();
@@ -1070,11 +1139,13 @@ test('a leader that exits 0 while a descendant holds stdout/stderr is reaped lon
     const output = await runner.run(
       '/bin/sh',
       ['-c', `sleep 60 & echo $! > '${directory}/pid'; echo leader-output`],
-      { timeout: 20_000 },
+      { timeout: 60_000 },
     );
     descendant = Number(readFileSync(join(directory, 'pid'), 'utf8'));
     assert.equal(output, 'leader-output');
-    assert.ok(Date.now() - started < 5000, 'reaped by the drain bound, not the 20 s timeout');
+    // The drain bound is 200 ms and the timeout a minute: half the timeout still tells them apart
+    // by two orders of magnitude, so a loaded machine cannot turn a pass into a failure.
+    assert.ok(Date.now() - started < 30_000, 'reaped by the drain bound, not the 60 s timeout');
     assert.equal(report.reapedProcessGroups.length, 1);
     assert.equal(report.orphanProcessGroups, undefined);
     assert.deepEqual(report.processGroups, []);
@@ -1585,7 +1656,12 @@ for (const [name, start, reason, extra = {}] of stopReasons) {
     assert.equal(barrier, false, 'the deadline has not expired yet');
     await rejection;
     await waiting;
-    assert.ok(Date.now() - started < NEVER_EXITS * 10, 'released by the deadline, not by a timer');
+    // The injected deadline (150 ms), not the default one (10 s): half the default still tells
+    // them apart by a factor of 30 without a machine-speed assumption.
+    assert.ok(
+      Date.now() - started < KILL_CONFIRMATION_DEADLINE_MS / 2,
+      'released by the injected deadline, not the default one',
+    );
     assert.ok(kills.includes(424900));
     // The group stays owned and unconfirmed: report list, signal set, retry set.
     assert.deepEqual(report.unconfirmedProcessGroups, [{ pgid: 424900, stage: 'cleanup', reason }]);
