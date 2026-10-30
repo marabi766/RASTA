@@ -351,7 +351,7 @@ describe('public registration answers the same, and does the same, whoever alrea
    * run, not on one in several. This is the precise layer. It sees what goes
    * through the service's client, and only that: a read through a client kept
    * from before the probe, or through a pool of the code's own, is for the
-   * database-side count two tests down. The answers' headers are compared too.
+   * database-side count in the next test. The answers' headers are compared too.
    */
   it('every valid submission asks the database for exactly the same thing before its answer — fresh or held, at the service and over HTTP', async () => {
     const org = tenants();
