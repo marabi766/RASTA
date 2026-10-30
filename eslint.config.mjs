@@ -2,6 +2,7 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
+import exchangeDeadline from './scripts/exchange-deadline-rule.mjs';
 import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
 import noZodDefault from './scripts/no-zod-default-rule.mjs';
 
@@ -112,8 +113,12 @@ const base = tseslint.config(
       '**/*.e2e-spec.ts',
       '**/test/**',
     ],
-    plugins: { internal: { rules: { transport: internalTokenTransport } } },
-    rules: { 'internal/transport': 'error' },
+    plugins: {
+      internal: {
+        rules: { transport: internalTokenTransport, 'exchange-deadline': exchangeDeadline },
+      },
+    },
+    rules: { 'internal/transport': 'error', 'internal/exchange-deadline': 'error' },
   },
   {
     // @rasta/config's URL reader is plain CommonJS so the scripts can import

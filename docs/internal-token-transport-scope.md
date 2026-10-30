@@ -54,6 +54,26 @@ the current transport rule must not be described as source-boundary enforcement.
 | 8. Fake local internalFetch                | Local name grants no exception; only the resolved shared client is trusted.                                                                       |
 | 9. dev/seed/E2E                            | Workspace ESLint now rejects direct raw sender fixtures in these paths. Source-boundary and E2E exemption tests remain required in the follow-up. |
 
+## One deadline over the whole exchange (PR #502 r1 F1)
+
+`fetch` settles when the response headers arrive, so a client that clears its abort
+timer there has no deadline on the body: a server that answers `200` and then
+stalls or trickles holds the caller as long as the socket lives. Two clients did
+this (marketplace's `EconomicClient`, notification's identity adapter). Both now
+use `withExchangeDeadline` from nest-common, which keeps one signal armed through
+sending **and** reading the body and enforces the deadline itself, so a transport
+that ignores the abort still ends at the deadline. The rejection is an
+`ExchangeDeadlineError` named `AbortError`, so each caller's existing timeout
+handling applies; a write keeps its unresolved outcome and its idempotency key.
+
+The lint rule `internal/exchange-deadline` (`scripts/exchange-deadline-rule.mjs`,
+same workspace paths as the transport rule) refuses, inside one function, a body
+read (`.text()`, `.json()`, `.arrayBuffer()`, `.blob()`, `.formData()`, `.bytes()`,
+`.getReader()`, `readCapped(…)`) that comes after a `clearTimeout(…)` call. The
+sound shape clears the timer in a `finally` after every read. A timer cleared
+through a helper or a nested function is not followed; `AbortSignal.timeout(…)`
+has no timer to clear and is not a case.
+
 ## Evidence limits
 
 Real PostgreSQL redirect/recovery tests cover economic settlement-authority,

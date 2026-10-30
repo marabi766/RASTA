@@ -1,4 +1,4 @@
-import { InternalHttpClient } from '@rasta/nest-common';
+import { InternalHttpClient, withExchangeDeadline } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InternalTokenService, RastaError } from '@rasta/nest-common';
 import { ERROR_CODES, type ApiError, type ErrorCode } from '@rasta/contracts';
@@ -529,21 +529,29 @@ export class EconomicClient {
     const url = `${this.env.ECONOMIC_SERVICE_URL}${request.path}`;
     const stop = economicCallDuration.startTimer({ service: SERVICE_NAME, operation });
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.env.ECONOMIC_REQUEST_TIMEOUT_MS);
-
-    let response: Response;
+    // One deadline for the whole exchange, body included: a 200 whose body then
+    // stalls is as unresolved as one that never answered, and the activity must
+    // not hang on it. The request is not sent again here; whoever retries sends
+    // the same idempotency key (derived from the order), so a write that did
+    // commit replays instead of being applied twice.
+    let received: { ok: boolean; status: number; text: string };
     try {
-      response = await sender.send(url, {
-        method: request.method,
-        headers: {
-          'content-type': 'application/json',
-          'x-correlation-id': request.correlationId,
-          ...(request.idempotencyKey ? { 'idempotency-key': request.idempotencyKey } : {}),
+      received = await withExchangeDeadline(
+        this.env.ECONOMIC_REQUEST_TIMEOUT_MS,
+        async (signal) => {
+          const response = await sender.send(url, {
+            method: request.method,
+            headers: {
+              'content-type': 'application/json',
+              'x-correlation-id': request.correlationId,
+              ...(request.idempotencyKey ? { 'idempotency-key': request.idempotencyKey } : {}),
+            },
+            ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+            signal,
+          });
+          return { ok: response.ok, status: response.status, text: await response.text() };
         },
-        ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-        signal: controller.signal,
-      });
+      );
     } catch (error) {
       stop();
       economicCallsTotal.inc({ service: SERVICE_NAME, operation, outcome: 'UNREACHABLE' });
@@ -552,16 +560,14 @@ export class EconomicClient {
       // by Temporal, so what matters is that it failed, not how.
       this.logger.error({ operation, err: error }, 'economic-service could not be reached');
       throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
-    } finally {
-      clearTimeout(timer);
     }
 
     stop();
 
-    const text = await response.text();
+    const { ok, text, status } = received;
     const parsed: unknown = text ? JSON.parse(text) : undefined;
 
-    if (response.ok) {
+    if (ok) {
       economicCallsTotal.inc({ service: SERVICE_NAME, operation, outcome: 'OK' });
       return parsed as T;
     }
@@ -588,7 +594,7 @@ export class EconomicClient {
     const message = body?.message ?? 'The financial service refused this operation';
 
     throw new RastaError(code, message, {
-      internalContext: { operation, status: response.status },
+      internalContext: { operation, status },
     });
   }
 }

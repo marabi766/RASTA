@@ -56,6 +56,7 @@ export {
 export { TokenVerifier, InternalTokenService } from './auth/token-verifier';
 export { internalGet } from './auth/internal-get';
 export { RedirectRefusedError, internalFetch } from './http/internal-fetch';
+export { ExchangeDeadlineError, withExchangeDeadline } from './http/exchange-deadline';
 export { InternalHttpClient } from './http/internal-http-client';
 export type { InternalGrant, InternalSender } from './http/internal-http-client';
 export {
