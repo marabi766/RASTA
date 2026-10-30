@@ -52,6 +52,9 @@ export type { SagaDisputeRecoveryRow } from './saga-dispute-recovery';
 
 export { expireClaim, makeDue } from './eligibility-clock';
 
+export { mintTestInternalToken } from './internal-token';
+export type { TestInternalTokenKey } from './internal-token';
+
 export { withRedirectProbe, REDIRECT_CASES } from './redirect-probe';
 export type { RedirectProbe } from './redirect-probe';
 
