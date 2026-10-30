@@ -136,6 +136,15 @@ const base = tseslint.config(
     rules: { 'internal/transport': 'error', 'internal/raw-http': 'error' },
   },
   {
+    // Live suites aim at an endpoint the environment names (KEYCLOAK_URL), with
+    // real credentials — an admin password grant, an admin bearer — so they get
+    // the boundary too (PR #492 r2 F2): they send through guardedFetch, or
+    // globalFetchStub when they replace the global (@rasta/testing).
+    files: ['**/*.live-spec.ts'],
+    plugins: { internal: internalPlugin },
+    rules: { 'internal/raw-http': 'error' },
+  },
+  {
     // @rasta/config's URL reader is plain CommonJS so the scripts can import
     // it before any build (url-reader.js); Node's CommonJS globals apply.
     files: ['**/src/url-reader.js'],

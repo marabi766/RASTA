@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { inspect } from 'node:util';
 import {
+  globalFetchStub,
   guardedFetch,
+  guardFetch,
   RedirectRefusedError,
   REDIRECT_CASES,
   withRedirectProbe,
@@ -92,6 +94,74 @@ describe('guardedFetch', () => {
         assert.equal((await guardedFetch(probe.baseUrl)).status, status);
       });
     }
+  });
+});
+
+describe('guardFetch over an explicit sender (PR #492 r2 F2)', () => {
+  for (const status of [307, 308]) {
+    it(`refuses a ${status} to another origin: the admin password grant is sent once on the sender`, async () => {
+      await withRedirectProbe({ body: { access_token: 'attacker' }, status }, async (probe) => {
+        const calls: (RequestInit | undefined)[] = [];
+        const sender = guardFetch(((input, init) => {
+          calls.push(init);
+          return probe.fetch(input, init);
+        }) as typeof fetch);
+        await assert.rejects(
+          sender(`${probe.baseUrl}/realms/master/protocol/openid-connect/token`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ grant_type: 'password', password: PASSWORD }),
+          }),
+          (error) => assertRefusal(error, probe.baseUrl),
+        );
+        assert.equal(calls.length, 1, 'sent once, on the explicit sender');
+        assert.equal(calls[0]?.redirect, 'manual');
+        assert.equal(probe.sent.length, 1);
+        assert.deepEqual(probe.target, [], 'nothing reached the other origin');
+      });
+    });
+  }
+
+  it("overrides a caller's redirect: 'follow' on the explicit sender", async () => {
+    for (const status of [307, 308]) {
+      await withRedirectProbe({ body: { ok: true }, status }, async (probe) => {
+        const init = { headers: { authorization: BEARER }, redirect: 'follow' } as RequestInit;
+        await assert.rejects(guardFetch(probe.fetch)(probe.baseUrl, init), (error) =>
+          assertRefusal(error, probe.baseUrl),
+        );
+        assert.deepEqual(probe.target, [], String(status));
+      });
+    }
+  });
+
+  it('globalFetchStub: send bypasses the replacement, guarded; restore puts the global back', async () => {
+    await withRedirectProbe({ body: { ok: true }, status: 307 }, async (probe) => {
+      const before = globalThis.fetch;
+      const stub = globalFetchStub();
+      const seen: string[] = [];
+      stub.replace(async (input, init) => {
+        seen.push(String(input));
+        return stub.send(input, init);
+      });
+      try {
+        // The test's own (administrator) request never passes the replacement…
+        await assert.rejects(
+          stub.send(probe.baseUrl, { method: 'POST', body: PASSWORD }),
+          (error) => assertRefusal(error, probe.baseUrl),
+        );
+        assert.deepEqual(seen, []);
+        // …and the code under test, through the replacement, cannot opt into following.
+        await assert.rejects(
+          fetch(probe.baseUrl, { headers: { authorization: BEARER }, redirect: 'follow' }),
+          RedirectRefusedError,
+        );
+        assert.deepEqual(seen, [probe.baseUrl]);
+        assert.deepEqual(probe.target, []);
+      } finally {
+        stub.restore();
+      }
+      assert.equal(globalThis.fetch, before);
+    });
   });
 });
 

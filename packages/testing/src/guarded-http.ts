@@ -15,26 +15,67 @@ export class RedirectRefusedError extends Error {
   }
 }
 
+/** A request as `guardedFetch` takes it: the redirect policy is not the caller's. */
+export type GuardedFetch = (
+  input: string | URL | Request,
+  init?: Omit<RequestInit, 'redirect'>,
+) => Promise<Response>;
+
+/**
+ * The redirect policy over an explicit `sender` (PR #492 r2 F2): nothing is
+ * followed, a redirect is refused before its body is read, and the caller's
+ * `redirect` cannot change that. Everything else is the caller's request,
+ * sent once on `sender`.
+ */
+export function guardFetch(sender: typeof fetch): GuardedFetch {
+  return async (input, init = {}) => {
+    // Set after init so even an untyped caller cannot override it.
+    const response = await sender(input, { ...init, redirect: 'manual' });
+    if (REFUSED_REDIRECT_STATUSES.includes(response.status)) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new RedirectRefusedError();
+    }
+    return response;
+  };
+}
+
 /**
  * `fetch` for E2E helpers and specs (Q-155, PR #492 r1 F2). Their requests
  * carry real credentials — the Keycloak admin password, password grants, an
  * admin or user bearer — or a signed storage URL and its bytes, and a
  * following fetch resends a 307/308 body to whatever origin the Location names
- * and accepts that origin's answer. Here nothing is followed: a redirect is
- * refused before its body is read, and the caller's `redirect` cannot change
- * that. Everything else is the caller's request, sent once.
+ * and accepts that origin's answer. `guardFetch` over the global `fetch`, read
+ * at call time.
  */
-export async function guardedFetch(
-  input: string | URL | Request,
-  init: Omit<RequestInit, 'redirect'> = {},
-): Promise<Response> {
-  // Set after init so even an untyped caller cannot override it.
-  const response = await fetch(input, { ...init, redirect: 'manual' });
-  if (REFUSED_REDIRECT_STATUSES.includes(response.status)) {
-    void response.body?.cancel().catch(() => undefined);
-    throw new RedirectRefusedError();
-  }
-  return response;
+export const guardedFetch: GuardedFetch = guardFetch((input, init) => fetch(input, init));
+
+/**
+ * For a test that replaces the global `fetch` to intercept what the code under
+ * test sends (the Keycloak live spec holds a `PUT` on a gate). `send` is
+ * `guardFetch` over the global `fetch` as it was when this was called, so the
+ * test's own credential-bearing requests never pass through its replacement
+ * and never follow a redirect. `replace` installs a replacement, which
+ * forwards on `send` (the caller's `redirect` is dropped there: nothing is
+ * followed); `restore` puts the captured `fetch` back.
+ */
+export function globalFetchStub(): {
+  send: GuardedFetch;
+  replace(replacement: GuardedFetch): void;
+  restore(): void;
+} {
+  const original = globalThis.fetch;
+  return {
+    send: guardFetch(original),
+    replace(replacement) {
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const { redirect: _dropped, ...rest } = init ?? {};
+        return replacement(input, rest);
+      }) as typeof fetch;
+    },
+    restore() {
+      globalThis.fetch = original;
+    },
+  };
 }
 
 /** Playwright's `APIRequestContext`, structurally: this package does not depend on Playwright. */

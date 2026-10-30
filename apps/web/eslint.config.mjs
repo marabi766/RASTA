@@ -49,6 +49,13 @@ export default tseslint.config(
     rules: { 'internal/transport': 'error', 'internal/raw-http': 'error' },
   },
   {
+    // Live suites aim at an endpoint the environment names, with real
+    // credentials, as in the root config (PR #492 r2 F2).
+    files: ['**/*.live-spec.ts'],
+    plugins: { internal },
+    rules: { 'internal/raw-http': 'error' },
+  },
+  {
     // The browser suite's helpers and specs send real credentials (the
     // Keycloak admin password, password grants, bearers) and signed storage
     // URLs: all of them, specs included, go through guardedFetch or the

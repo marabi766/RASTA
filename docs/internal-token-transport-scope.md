@@ -152,7 +152,9 @@ the module sends:
 It runs, at `error`, on non-test source of `apps/web/src`, `services/*/{src,dev,prisma}`,
 `packages/*/src` and `scripts/`, and on **everything** in `apps/web/e2e` and `tests/e2e`
 (specs included; only the node:test unit tests of the harness, `tests/e2e/src/*.test.ts`,
-are not scenarios and are excluded). The portal's lint now includes `e2e`. A real-config
+are not scenarios and are excluded), and on every `*.live-spec.ts` wherever it lives
+(PR #492 r2 F2: a live suite aims at an endpoint the environment names, with real
+credentials). The portal's lint now includes `e2e`. A real-config
 test computes the rule for every in-scope tracked file (more than a thousand) in its own
 workspace and checks that the workspace's lint script reaches it. Another test holds inline
 disables of either rule to one pinned line. The credential rule stays on as a second layer.
@@ -162,23 +164,28 @@ has a reason, and that the list equals a pinned copy. An exempt file is exempt o
 file. **What each one exports is reviewed by hand**; the boundary cannot follow a raw sender
 handed out of an audited file:
 
-| Audited file                                        | What it exports                                                       | Reviewed                                                                                |
-| --------------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `packages/nest-common/src/http/internal-fetch.ts`   | `internalFetch` (refuses the five statuses)                           | no raw sender exported                                                                  |
-| `apps/web/src/server/credential-fetch.ts`           | `credentialFetch`, its error                                          | no raw sender exported                                                                  |
-| `apps/web/src/server/signed-url-upload.ts`          | `putToSignedUrl` (`redirect: 'error'`, set after the caller's init)   | no raw sender exported                                                                  |
-| `apps/web/src/lib/session-refusal.ts`               | `sessionHasEnded` (a boolean), `isRedirect`                           | browser same-origin `/auth/session` with the browser's own cookie                       |
-| `scripts/credential-fetch.mjs`                      | `credentialFetch` for scripts                                         | no raw sender exported                                                                  |
-| `packages/testing/src/guarded-http.ts`              | `guardedFetch`, `guardRequestContext`                                 | no raw sender exported                                                                  |
-| `packages/testing/src/redirect-probe.ts`            | `withRedirectProbe`: test servers, and `probe.fetch` = the real fetch | **raw, by design**: for specs that stub the global; a test package (devDependency only) |
-| `tests/e2e/src/http.ts`                             | `send` (refuses the five statuses), errors, types                     | no raw sender exported                                                                  |
-| `tests/e2e/src/expect.ts`, `apps/web/e2e/expect.ts` | guarded `request` fixture, `newApiContext()`                          | no raw context exported                                                                 |
+| Audited file                                        | What it exports                                                        | Reviewed                                                                                |
+| --------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `packages/nest-common/src/http/internal-fetch.ts`   | `internalFetch` (refuses the five statuses)                            | no raw sender exported                                                                  |
+| `apps/web/src/server/credential-fetch.ts`           | `credentialFetch`, its error                                           | no raw sender exported                                                                  |
+| `apps/web/src/server/signed-url-upload.ts`          | `putToSignedUrl` (`redirect: 'error'`, set after the caller's init)    | no raw sender exported                                                                  |
+| `apps/web/src/lib/session-refusal.ts`               | `sessionHasEnded` (a boolean), `isRedirect`                            | browser same-origin `/auth/session` with the browser's own cookie                       |
+| `scripts/credential-fetch.mjs`                      | `credentialFetch` for scripts                                          | no raw sender exported                                                                  |
+| `packages/testing/src/guarded-http.ts`              | `guardFetch`, `guardedFetch`, `globalFetchStub`, `guardRequestContext` | no raw sender exported                                                                  |
+| `packages/testing/src/redirect-probe.ts`            | `withRedirectProbe`: test servers, and `probe.fetch` = the real fetch  | **raw, by design**: for specs that stub the global; a test package (devDependency only) |
+| `tests/e2e/src/http.ts`                             | `send` (refuses the five statuses), errors, types                      | no raw sender exported                                                                  |
+| `tests/e2e/src/expect.ts`, `apps/web/e2e/expect.ts` | guarded `request` fixture, `newApiContext()`                           | no raw context exported                                                                 |
 
-Also outside what the rule sees: test code outside the two E2E trees (`services/*/test`,
-`*.spec.ts`, `__tests__`, `apps/web/src/test`, which talk to loopback fakes; the
-document-service signed-URL helpers there use `guardedFetch` anyway); a Playwright context
-reached by a computed member name (`page[name]`), which cannot be told apart from ordinary
-indexing without types; browser flows (page navigation, `route.fetch`, code inside
+Live suites (`*.live-spec.ts`) are in scope: the Keycloak projection-race spec sends the
+master-realm password grant and the admin bearer to the environment's `KEYCLOAK_URL`, so its
+administrator calls go out on `globalFetchStub().send` (guarded, and never through the gate
+the spec installs in place of the global `fetch`). Also outside what the rule sees: other
+test code outside the two E2E trees (`services/*/test`, `*.spec.ts`, `__tests__`,
+`apps/web/src/test`). It sends to loopback fakes, in-process applications and test
+containers, with one exception: the notification-service Mailpit reads (`MAILPIT_API_URL`),
+which carry no credential (GETs with no header). The document-service signed-URL helpers
+there use `guardedFetch` anyway. Then a Playwright context reached by a computed member name
+(`page[name]`), which cannot be told apart from ordinary indexing without types; browser flows (page navigation, `route.fetch`, code inside
 `page.evaluate`, such as the pinned form replay in `apps/web/e2e/usage.spec.ts`); workspace
 tooling configs (`eslint`, `jest`, `next`, `postcss` configs), which send nothing; and SDK
 internals (jose JWKS, the S3 client, the OTLP exporters), as listed in the task 106 sweep.
@@ -189,6 +196,9 @@ that every sending method goes out with `maxRedirects: 0` (the caller's value ov
 and a redirect status is refused. Without it, Playwright follows a 307/308 to another
 origin with the body, keeps `authorization` on a same-origin hop, and returns the target's
 success. Both harnesses' `request` fixtures and `newApiContext()` use it.
+`guardFetch(sender)` is the same policy over an explicit `fetch` (`guardedFetch` is it
+over the global, read at call time); `globalFetchStub()` uses it on the `fetch` captured
+before a test replaces the global, for the live spec's administrator (r2 F2).
 `tests/e2e/src/guarded-http.test.ts` holds the redirect regressions (307 and 308 to
 another origin on every method, all five statuses on both origins, overrides,
 non-redirect statuses, a control that shows an unguarded context following). One

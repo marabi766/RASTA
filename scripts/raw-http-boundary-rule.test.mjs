@@ -82,6 +82,9 @@ const VARIANTS = {
   'global object passed on': 'Object.assign(target, globalThis);',
   'destructured from window': 'const { fetch: f } = window; f(url);',
   XMLHttpRequest: 'const xhr = new XMLHttpRequest();',
+  // PR #492 r2 F2: the Keycloak live spec's own forms before the fix.
+  'captured global fetch': 'const realFetch = globalThis.fetch; realFetch(url, init);',
+  'global fetch replaced': 'globalThis.fetch = (async () => new Response()) as typeof fetch;',
   'eval of a name': "eval('fe' + 'tch')(url, init);",
   'Function constructor': "new Function('return fetch')()(url, init);",
   'Function call': "Function('return globalThis')().fetch(url, init);",
@@ -246,6 +249,7 @@ function lintInWorkspace(workspace, filePath, sources) {
 
 /** Plain-JavaScript forms of the fixtures, for the root scripts (no TypeScript syntax). */
 const JS_FORMS = {
+  'global fetch replaced': 'globalThis.fetch = async () => new Response();',
   'headers.authorization assignment':
     'const headers = {};\nheaders.authorization = token;\nfetch(url, { headers });',
   'class-field transport':
@@ -267,6 +271,10 @@ const REAL_SITES = [
   ['services/api-gateway', 'src/raw-fixture.ts'],
   ['services/api-gateway', 'dev/raw-fixture.ts'],
   ['services/identity-service', 'src/keycloak/raw-fixture.ts'],
+  // PR #492 r2 F2: a live suite, outside every src/ and E2E block, is in scope by its name.
+  ['services/identity-service', 'test/keycloak-live/raw-fixture.live-spec.ts'],
+  ['services/notification-service', 'test/raw-fixture.live-spec.ts'],
+  ['apps/web', 'src/test/raw-fixture.live-spec.ts'],
   ['services/economic-service', 'prisma/seed.ts'],
   ['packages/nest-common', 'src/http/raw-fixture.ts'],
   ['packages/testing', 'src/raw-fixture.ts'],
@@ -316,6 +324,8 @@ const isTestFile = (file) =>
   /(?:^|\/)(?:test|__tests__)\//.test(file);
 function inScope(file) {
   if (!/\.(?:ts|tsx|js|mjs|cjs)$/.test(file) || file.endsWith('.d.ts')) return false;
+  // Live suites aim at an endpoint the environment names (PR #492 r2 F2), wherever they are.
+  if (/\.live-spec\.ts$/.test(file)) return true;
   if (/^apps\/web\/e2e\//.test(file)) return true; // specs included
   if (/^tests\/e2e\//.test(file))
     return !/^tests\/e2e\/src\/[^/]+\.test\.ts$/.test(file) && !/eslint\.config\.mjs$/.test(file);
