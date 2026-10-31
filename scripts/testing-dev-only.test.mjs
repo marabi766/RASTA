@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   MINTER_NAME,
@@ -1016,7 +1016,7 @@ const urlSubpathEscapes = [
   [
     'a package target that is not a path',
     urlPackage('https://example.test/x.mjs', { [`${SVC}/main.ts`]: "import '@rasta/urlpkg';\n" }),
-    /@rasta\/urlpkg: the package target https:\/\/example\.test\/x\.mjs is not a path/,
+    /@rasta\/urlpkg: the package target https:\/\/example\.test\/x\.mjs must start with \.\/ \(ERR_INVALID_PACKAGE_TARGET\)/,
   ],
 ];
 
@@ -1283,6 +1283,364 @@ for (const [name, files, expected] of closures) {
     );
   });
 }
+
+// ---- #526 r1 follow-ups (D-087) ------------------------------------------------
+
+/** F4: a package whose only runtime target is missing: a value import of it is refused, a type reference is not. */
+const R2_UNBUILT = { exports: { '.': { types: './src/index.ts', import: './dist/missing.mjs' } } };
+const R2_TYPES = { 'packages/f2/src/index.ts': 'export type T = 1;\n' };
+const typeOnlyEscapes = [
+  ['import type', "import type { T } from '@rasta/f2';\nexport type U = T;\n"],
+  ['import type with a default', "import type T from '@rasta/f2';\nexport type U = T;\n"],
+  ['import type of a namespace', "import type * as ns from '@rasta/f2';\nexport type U = ns.T;\n"],
+  ['export type', "export type { T } from '@rasta/f2';\n"],
+  ['export type *', "export type * from '@rasta/f2';\n"],
+  ['export type * as', "export type * as ns from '@rasta/f2';\n"],
+  ['type-only import-equals', "import type f2 = require('@rasta/f2');\nexport type U = f2.T;\n"],
+];
+// A type reference needs no runtime target; the same reference as a value does.
+const typeOnlyValueTwins = [
+  ['import', "import { T } from '@rasta/f2';\nexport const u = T;\n"],
+  ['export from', "export { T } from '@rasta/f2';\n"],
+  ['import-equals', "import f2 = require('@rasta/f2');\nexport const u = f2;\n"],
+];
+
+/** F4: TypeScript's own output mapping, where the config names no rootDir or outDir. */
+const nested = (compilerOptions, include = ['src/**/*']) => ({
+  'packages/f2/package.json': JSON.stringify({ name: '@rasta/f2', main: './dist/index.js' }),
+  'services/svc/node_modules/@rasta/f2': { link: 'packages/f2' },
+  [`${SVC}/main.ts`]: "import '@rasta/f2';\n",
+  'packages/f2/src/lib/index.ts': 'export {};\n',
+  'packages/f2/tsconfig.json': JSON.stringify({
+    compilerOptions: { module: 'nodenext', ...compilerOptions },
+    include,
+  }),
+});
+
+/** F4: overlapping export patterns: Node selects the most specific key. */
+const overlap = (exports, files = {}, request = '@rasta/f2/feat/a') => ({
+  'packages/f2/package.json': JSON.stringify({ name: '@rasta/f2', exports }),
+  'services/svc/node_modules/@rasta/f2': { link: 'packages/f2' },
+  [`${SVC}/main.ts`]: `import '${request}';\n`,
+  ...files,
+});
+
+/** F2: targets Node rejects before any URL normalization. */
+const invalidTargets = [
+  ['a target in a sibling package', '../plain/src/index.cjs'],
+  ['a ./.. target', './../plain/src/index.cjs'],
+  ['an encoded ./%2e%2e target', './%2e%2e/plain/src/index.cjs'],
+  ['a .. segment inside the package', './dist/../dist/a.cjs'],
+  ['a . segment', './dist/./a.cjs'],
+  ['a node_modules segment', './node_modules/dep/a.cjs'],
+  ['an encoded node_modules segment', './%6eode_modules/dep/a.cjs'],
+  ['a target without ./', 'dist/a.cjs'],
+  ['an absolute path', process.execPath],
+  ['a file: URL', pathToFileURL(process.execPath).href],
+];
+const invalidPackage = (target) => ({
+  'packages/inv/package.json': JSON.stringify({
+    name: '@rasta/inv',
+    exports: { '.': { types: './src/index.ts', import: target }, './*': { default: target } },
+    imports: { '#rt': target },
+  }),
+  'packages/inv/src/index.ts': 'export {};\n',
+  'packages/inv/dist/a.cjs': 'module.exports = 1;\n',
+  'packages/inv/node_modules/dep/a.cjs': 'module.exports = 1;\n',
+  'packages/plain/src/index.cjs': 'module.exports = 1;\n',
+  'services/svc/node_modules/@rasta/inv': { link: 'packages/inv' },
+});
+const INVALID_TARGET = /ERR_INVALID_PACKAGE_TARGET/;
+const invalidEscapes = invalidTargets.flatMap(([how, target]) => [
+  [
+    `exports with ${how}`,
+    { ...invalidPackage(target), [`${SVC}/main.ts`]: "import '@rasta/inv';\n" },
+    INVALID_TARGET,
+  ],
+  [
+    `a pattern export with ${how}`,
+    { ...invalidPackage(target), [`${SVC}/main.ts`]: "import '@rasta/inv/sub';\n" },
+    INVALID_TARGET,
+  ],
+  [
+    `self-reference to ${how}`,
+    { ...invalidPackage(target), 'packages/inv/src/self.ts': "import '@rasta/inv';\n" },
+    INVALID_TARGET,
+  ],
+  // A bare `imports` target names a package, not a file: only the others are invalid.
+  ...(target.startsWith('.') || isAbsolute(target) || target.startsWith('file:')
+    ? [
+        [
+          `#imports with ${how}`,
+          { ...invalidPackage(target), 'packages/inv/src/internal.ts': "import '#rt';\n" },
+          INVALID_TARGET,
+        ],
+      ]
+    : []),
+]);
+const wildcardEscapes = [
+  ['..', '@rasta/inv/a/../b'],
+  ['an encoded ..', '@rasta/inv/a/%2e%2e/b'],
+  ['node_modules', '@rasta/inv/node_modules/x'],
+].map(([how, request]) => [
+  `a wildcard substituted with ${how}`,
+  {
+    'packages/inv/package.json': JSON.stringify({
+      name: '@rasta/inv',
+      exports: { './*': './dist/*.cjs' },
+    }),
+    'packages/inv/dist/b.cjs': 'module.exports = 1;\n',
+    'packages/inv/dist/x.cjs': 'module.exports = 1;\n',
+    'services/svc/node_modules/@rasta/inv': { link: 'packages/inv' },
+    [`${SVC}/main.ts`]: `import '${request}';\n`,
+  },
+  /ERR_INVALID_MODULE_SPECIFIER/,
+]);
+
+/** F1: Node's CommonJS dispatch is case-sensitive, and a dotfile has no extension. */
+const CJS_EXACT = [
+  ['.JSON', 'payload.JSON'],
+  ['.Json', 'payload.Json'],
+  ['.NODE', 'payload.NODE'],
+  ['a dotfile named .json', '.json'],
+  ['a dotfile named .node', '.node'],
+  ['.json.txt', 'payload.json.txt'],
+  ['a name with .node inside', 'payload.node.bak'],
+];
+const exactEscapes = CJS_PLACES.flatMap(([place, spec, path]) =>
+  CJS_EXACT.map(([how, name]) => {
+    const at = (p) => p.replace(/[^/]+$/, name);
+    return [
+      `require of ${how} in ${place}`,
+      {
+        [`${SVC}/main.ts`]: `export const p = require('${at(spec(''))}');\n`,
+        [at(path(''))]: "require('@rasta/testing');\n",
+        'services/svc/node_modules/payload/package.json': '{"name":"payload"}',
+      },
+      new RegExp(`${quoted(at(path('')))}:1 imports @rasta/testing`),
+    ];
+  }),
+);
+
+/** F3: a declaration in one scope does not shadow the global in another. */
+const NAMES = ['globalThis', 'global', 'window', 'self', 'process'];
+const SHADOWS = [
+  [
+    'a parameter of another function',
+    (n) => `export function local(${n}: unknown) { return ${n}; }`,
+  ],
+  [
+    'a local of another function',
+    (n) => `export function local() { const ${n} = 1; return ${n}; }`,
+  ],
+  ['a block', (n) => `{ const ${n} = [1]; void ${n}; }`],
+  ['a catch binding', (n) => `try { void 0; } catch (${n}) { void ${n}; }`],
+  ['a named function expression', (n) => `export const f = function ${n}() { return ${n}; };`],
+  ['a named class expression', (n) => `export const C = class ${n} { m() { return ${n}; } };`],
+  ['an arrow parameter', (n) => `export const f = (${n}: unknown) => ${n};`],
+  ['a for-of binding', (n) => `for (const ${n} of [1]) void ${n};`],
+  ['a destructured parameter', (n) => `export const f = ({ a: [${n}] }: any) => ${n};`],
+];
+const shadowEscapes = NAMES.flatMap((name) =>
+  SHADOWS.map(([how, declare]) => [
+    `${name} used after ${how} declares it`,
+    f3(`const key = String(Math.random());\n${declare(name)}\nexport const x = ${name}[key];\n`),
+    new RegExp(`computed member access on ${name}`),
+  ]),
+);
+const shadowChained = [
+  [
+    'a chained global after a parameter of another function',
+    f3(
+      "export function local(globalThis: unknown) { return globalThis; }\nexport const x = globalThis.self.eval('1');\n",
+    ),
+    /code loader reached through a property/,
+  ],
+  [
+    'the review trigger: Function through a global after a shadowing parameter',
+    f3(
+      'export function local(globalThis: unknown): unknown {\n  return globalThis;\n}\nexport const load = globalThis.Function(\'return import("@rasta/testing")\')();\n',
+    ),
+    /a code loader reached through a property/,
+  ],
+];
+
+const followups = [
+  ...typeOnlyValueTwins.map(([how, code]) => [
+    `a value ${how} of a package with no runtime target`,
+    { ...f2(R2_UNBUILT, R2_TYPES, {}), [`${SVC}/main.ts`]: code },
+    NEITHER('packages/f2/dist/missing.mjs'),
+  ]),
+  [
+    'a type-only import still may not reach the test signer',
+    {
+      [`${SVC}/main.ts`]:
+        "import type { signer } from '@rasta/testing';\nexport type S = typeof signer;\n",
+    },
+    /main\.ts:1 imports @rasta\/testing/,
+  ],
+  [
+    'a type-only re-export of a test-only file',
+    {
+      [`${SVC}/main.ts`]: "export type * from './bridge.spec';\n",
+      [`${SVC}/bridge.spec.ts`]: 'export type T = 1;\n',
+    },
+    /reaches test-only services\/svc\/src\/bridge\.spec\.ts/,
+  ],
+  [
+    'a type-only import that resolves to nothing',
+    { [`${SVC}/main.ts`]: "import type { T } from './nowhere';\nexport type U = T;\n" },
+    /\.\/nowhere: an unresolvable path/,
+  ],
+  [
+    'the less specific pattern is not selected, the more specific one is missing',
+    overlap(
+      { './*': './dist/any/*.js', './feat/*': './dist/feat/*.js' },
+      { 'packages/f2/dist/any/feat/a.js': 'export {};\n' },
+    ),
+    NEITHER('packages/f2/dist/feat/a.js'),
+  ],
+  [
+    'a main that exists nowhere, with no index either',
+    {
+      'packages/f2/package.json': JSON.stringify({ name: '@rasta/f2', main: './dist/gone.js' }),
+      'services/svc/node_modules/@rasta/f2': { link: 'packages/f2' },
+      [`${SVC}/main.ts`]: "import '@rasta/f2';\n",
+    },
+    NEITHER('packages/f2/dist/gone.js'),
+  ],
+  ...invalidEscapes,
+  ...wildcardEscapes,
+  ...exactEscapes,
+  ...shadowEscapes,
+  ...shadowChained,
+  [
+    'a dynamic import() of a dotfile named .json',
+    {
+      [`${SVC}/edge.mjs`]: "export default import('./.json');\n",
+      [`${SVC}/.json`]: "import '@rasta/testing';\n",
+    },
+    /services\/svc\/src\/\.json:1 imports @rasta\/testing/,
+  ],
+];
+for (const [name, files, expected] of followups) {
+  test(`refused in production (#526 r1): ${name}`, (t) => {
+    const { problems } = sourceProblems(fixture(t, files));
+    assert.ok(
+      problems.some((p) => expected.test(p)),
+      `expected ${expected}, got:\n  ${problems.join('\n  ')}`,
+    );
+  });
+}
+
+for (const [how, code] of typeOnlyEscapes) {
+  test(`#526 r1 F4: ${how} needs no runtime target`, (t) => {
+    const root = fixture(t, { ...f2(R2_UNBUILT, R2_TYPES, {}), [`${SVC}/main.ts`]: code });
+    assert.deepEqual(sourceProblems(root).problems, []);
+  });
+}
+
+test("#526 r1 F4: TypeScript's own output mapping, inverted", (t) => {
+  // rootDir is the common source directory (src/lib), outDir given: dist/index.js.
+  assert.deepEqual(sourceProblems(fixture(t, nested({ outDir: './dist' }))).problems, []);
+});
+test('#526 r1 F4: no outDir: the output is beside the source', (t) => {
+  const files = nested({});
+  files['packages/f2/package.json'] = JSON.stringify({
+    name: '@rasta/f2',
+    main: './src/lib/index.js',
+  });
+  assert.deepEqual(sourceProblems(fixture(t, files)).problems, []);
+});
+test('#526 r1 F4: a path the mapping does not write is still unproven', (t) => {
+  const files = nested({ outDir: './dist' });
+  files['packages/f2/package.json'] = JSON.stringify({
+    name: '@rasta/f2',
+    main: './dist/lib/index.js',
+  });
+  const { problems } = sourceProblems(fixture(t, files));
+  assert.ok(
+    problems.some((p) => NEITHER('packages/f2/dist/lib/index.js').test(p)),
+    problems.join('\n'),
+  );
+});
+test('#526 r1 F4: emitDeclarationOnly writes no JavaScript', (t) => {
+  const { problems } = sourceProblems(
+    fixture(t, nested({ outDir: './dist', emitDeclarationOnly: true, declaration: true })),
+  );
+  assert.ok(
+    problems.some((p) => NEITHER('packages/f2/dist/index.js').test(p)),
+    problems.join('\n'),
+  );
+});
+test('#526 r1 F4: Node selects the most specific pattern; the rest need no target', (t) => {
+  const root = fixture(
+    t,
+    overlap(
+      { './*': './dist/any/*.js', './feat/*': './dist/feat/*.js', './feat/x*': './dist/x/*.js' },
+      { 'packages/f2/dist/feat/a.js': 'export {};\n' },
+    ),
+  );
+  assert.deepEqual(sourceProblems(root).problems, []);
+});
+test('#526 r1 F4: a longer key wins over a shorter one with the same prefix', (t) => {
+  const root = fixture(
+    t,
+    overlap(
+      { './feat/*': './dist/short/*.js', './feat/*.js': './dist/long/*.js' },
+      { 'packages/f2/dist/long/a.js': 'export {};\n' },
+      '@rasta/f2/feat/a.js',
+    ),
+  );
+  assert.deepEqual(sourceProblems(root).problems, []);
+});
+test('#526 r1 F4: a main that is missing falls back to the package root index.js', (t) => {
+  const root = fixture(t, {
+    'packages/f2/package.json': JSON.stringify({ name: '@rasta/f2', main: './dist/gone.js' }),
+    'packages/f2/index.js': 'module.exports = 1;\n',
+    'services/svc/node_modules/@rasta/f2': { link: 'packages/f2' },
+    [`${SVC}/main.ts`]: "import '@rasta/f2';\n",
+  });
+  assert.deepEqual(sourceProblems(root).problems, []);
+});
+
+test('#526 r1 controls: targets Node accepts, scopes that do shadow, data that is data', (t) => {
+  const root = fixture(t, {
+    // An invalid target under a condition Node does not take, or skipped in an array, is never read.
+    'packages/ok/package.json': JSON.stringify({
+      name: '@rasta/ok',
+      exports: {
+        '.': { types: '../x.d.ts', browser: '../x.js', import: ['../bad.mjs', './dist/a.mjs'] },
+        './feat/*': './dist/*.mjs',
+        './x/': null,
+      },
+    }),
+    'packages/ok/dist/a.mjs': 'export {};\n',
+    'packages/ok/dist/q.mjs': 'export {};\n',
+    'services/svc/node_modules/@rasta/ok': { link: 'packages/ok' },
+    [`${SVC}/main.ts`]: "import '@rasta/ok';\nimport '@rasta/ok/feat/q';\n",
+    // Data to require(): lowercase .json and .node, a longer name ending in them.
+    [`${SVC}/data.ts`]:
+      "export const d = [require('./a.b.json'), require('./v1.node'), require('./c.json')];\n",
+    [`${SVC}/a.b.json`]: "require('@rasta/testing')",
+    [`${SVC}/v1.node`]: "require('@rasta/testing')",
+    [`${SVC}/c.json`]: "require('@rasta/testing')",
+    // Used where the declaration is in scope.
+    [`${SVC}/scoped.ts`]: [
+      'const key = String(Math.random());',
+      'export function a(globalThis: Record<string, number>) { return globalThis[key]; }',
+      'export function b() { var window = { x: 1 } as Record<string, number>; return window[key]; }',
+      'export const c = (({ self }: any) => self[key])({ self: {} });',
+      'export function d() { try { void 0; } catch (process) { return (process as any)[key]; } }',
+      'export const e = function global() { return (global as any)[key]; };',
+      'export const f = class window { m() { return (window as any)[key]; } };',
+      'export function g() { for (const self of [{}]) return (self as any)[key]; }',
+      'export function h() { { const globalThis = { y: 1 } as Record<string, number>; return globalThis[key]; } }',
+      '',
+    ].join('\n'),
+  });
+  assert.deepEqual(sourceProblems(root).problems, []);
+});
 
 test('#523 r1 controls: what stays allowed', (t) => {
   const root = fixture(t, {
