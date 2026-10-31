@@ -872,20 +872,22 @@ try {
     report.cleanup = { ...report.cleanup, passed: false, foreign: true };
   };
   sealForeign();
-  const published = () => {
+  // One attempt: whether it was written, and whether THIS attempt met a replaced sibling (an
+  // earlier foreign artifact elsewhere says nothing about it).
+  const publish = () => {
     try {
       writeReport({ durable: true, final: true });
-      return true;
-    } catch {
-      return false;
+      return { written: true, metForeign: false };
+    } catch (error) {
+      return { written: false, metForeign: error instanceof ForeignArtifact };
     }
   };
-  const knew = foreignFound;
-  let written = published();
-  if (!written && foreignFound && !knew) {
-    // The final write itself met a replaced file: the provisional report cannot say so, so say it once more.
+  let { written, metForeign } = publish();
+  if (!written && metForeign) {
+    // The final write itself met a replaced file, whatever was found before it: the report on disk
+    // is still the provisional one, so publish the sealed status once more.
     sealForeign();
-    written = published();
+    ({ written } = publish());
   }
   if (!written) {
     // The provisional report stays: it still names the project, temporary directory and groups.

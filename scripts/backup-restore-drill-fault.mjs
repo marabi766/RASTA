@@ -19,7 +19,9 @@
 //   swapSibling:    { contains, skip = 0, times = 1 }
 //                   the write sibling (`*.tmp`) of an atomic write whose bytes contain `contains`
 //                   is replaced by another file right after it is closed, as an actor with write
-//                   access to the directory could do before the write is published;
+//                   access to the directory could do before the write is published (a list of
+//                   specs hits different writes of one run: the first one that still has swaps
+//                   left and matches claims a write);
 //   swapDirectory:  { parent }
 //                   right after the first rename that publishes a recovery journal, the drill
 //                   directory found in `parent` is moved aside and another directory (holding
@@ -71,24 +73,30 @@ if (fault.swapDirectory) {
 if (fault.swapSibling) {
   const { open, close } = { open: fs.openSync, close: fs.closeSync };
   const write = fs.writeSync;
-  const spec = fault.swapSibling;
+  // One spec, or a list of them (a write is claimed by the first spec that matches it and still
+  // has swaps left, so two faults can hit two different writes of one run).
+  const specs = [fault.swapSibling].flat();
   const siblings = new Map();
-  const marked = new Set();
+  const marked = new Map();
   fs.openSync = (path, ...rest) => {
     const fd = open(path, ...rest);
     if (String(path).endsWith('.tmp')) siblings.set(fd, String(path));
     return fd;
   };
   fs.writeSync = (fd, ...rest) => {
-    if (siblings.has(fd) && Buffer.isBuffer(rest[0]) && rest[0].includes(spec.contains))
-      marked.add(fd);
+    if (siblings.has(fd) && !marked.has(fd) && Buffer.isBuffer(rest[0])) {
+      const spec = specs.find((one) => (one.times ?? 1) > 0 && rest[0].includes(one.contains));
+      if (spec) marked.set(fd, spec);
+    }
     return write(fd, ...rest);
   };
   fs.closeSync = (fd) => {
     const result = close(fd);
     const path = siblings.get(fd);
     siblings.delete(fd);
-    if (marked.delete(fd)) {
+    const spec = marked.get(fd);
+    marked.delete(fd);
+    if (spec) {
       if ((spec.skip ?? 0) > 0) spec.skip -= 1;
       else if (remaining(spec)) {
         fs.unlinkSync(path);

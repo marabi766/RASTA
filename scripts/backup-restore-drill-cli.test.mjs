@@ -2727,6 +2727,34 @@ test('a publication that meets a replaced file is foreign wherever it happens: f
   }
 });
 
+test('a final report write that meets a replaced file is retried once even when an earlier operation already found a foreign artifact: disk and stdout carry the same sealed status', async () => {
+  const earlier = {
+    'a progress report': '"processGroups"',
+    'the directory marker': '"directory":',
+  };
+  for (const [name, contains] of Object.entries(earlier)) {
+    const label = `${name}, then the final report`;
+    const run = await passingRun(
+      'drill-publication-foreign-twice-',
+      'baseline',
+      faultEnv({ swapSibling: [{ contains }, { contains: '"finishedAt"' }] }),
+    );
+    try {
+      assertForeignStatus(run, label);
+      assert.deepEqual(run.report.cleanup, run.summary.cleanup, `${label}: one status`);
+      assert.equal(run.report.passed, run.summary.passed, `${label}: one verdict`);
+      assert.ok(
+        readdirSync(run.directory).filter((entry) => entry.endsWith('.tmp')).length >=
+          (name.includes('marker') ? 1 : 2),
+        `${label}: every replaced sibling stays`,
+      );
+      assert.ok(!run.stderr.includes('the previous report remains'), `${label}: the retry wrote`);
+    } finally {
+      rmSync(run.directory, { recursive: true, force: true });
+    }
+  }
+});
+
 test('a recovery journal write that meets a replaced file is foreign (the exit and the line), not a generic write failure', async () => {
   const context = await recoverable('drill-journal-foreign-');
   try {
