@@ -5,10 +5,24 @@
 // The checks read decoded string values (escapes and line continuations resolved), not source
 // spelling, so `do :; sleep`, `do\<newline>sleep` and `\n` inside a JS string all read the same.
 // Constant string composition is evaluated first (`'while ...; ' + 'do ...'`, a template, a
-// `.concat`, a `[...].join()`, a constant a name was bound to), so the text that is checked is the
-// text that would run. What cannot be evaluated is not trusted: a loop whose head, `do` or `done` is
-// built somewhere the guard cannot see, and a module named by anything but a constant string, are
-// refused. Nothing here is the code under test.
+// `.concat`, a `[...].join()` over an array literal, a constant a name was bound to), so for those
+// forms the text that is checked is the text that would run.
+//
+// WHAT THIS IS, AND IS NOT (decision D-092, as D-088 for the token boundary): a static scan that
+// keeps the drill's own tests from ACCIDENTALLY polling with a forking loop or starting a child
+// behind the owner's back. It is not a sandbox and does not stand against code written to get past
+// it. It refuses: a loop whose head, `do` or `done` sits in a string the scan cannot join to the
+// rest; a loop of the holder with a part it cannot read; a module named by an expression it cannot
+// evaluate to constant strings; a name with a write it cannot evaluate (an `=`, `+=` or other
+// update whose value is not constant makes every later reading of the name uncertain); and any
+// expression or name with more than CAP alternatives. Known gaps, NOT refused (listed in STATUS of
+// PR #532): bindings are file-wide, not lexically scoped (a parameter or inner declaration of the
+// same name is not seen as a write); a `[...]` array bound to a name and joined later; computed
+// `module['require']`, a parenthesised, aliased or `.call`/`.apply`'d `require`, a renamed or
+// chained `createRequire`, `process.getBuiltinModule`, `Module._load`; `eval`/`Function` reached
+// through an alias, a property (`globalThis.eval`) or a computed key; a computed `binding`;
+// character-code calls through an alias or a computed key; and text read at run time (a file, the
+// environment). Nothing here is the code under test.
 import ts from 'typescript';
 
 const SEPARATOR = /^[;&|(){}\n]$/;
@@ -29,27 +43,60 @@ const SHELL_KEYWORDS = new Set([
 ]);
 
 const MARK = ' ${} ';
-const CAP = 64; // alternatives kept per expression; more is a spelling nobody writes by hand
+const MARKS = / \$\{\} (?: \$\{\} )+/g;
+// Alternatives one expression or name may have. More is a spelling nobody writes by hand; it is
+// refused (see `overflow`), never cut to the first CAP and read as if that were all of it.
+const CAP = 4096;
 
 const parse = (source) =>
   ts.createSourceFile('fixture.mjs', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
 
-const combine = (parts) => {
-  let out = [''];
-  for (const alternatives of parts)
-    out = out.flatMap((head) => alternatives.map((tail) => head + tail)).slice(0, CAP);
-  return out;
-};
+// Assignment operators other than `=` and `+=`: an update the evaluator does not model.
+const UPDATES = new Set([
+  ts.SyntaxKind.MinusEqualsToken,
+  ts.SyntaxKind.AsteriskEqualsToken,
+  ts.SyntaxKind.AsteriskAsteriskEqualsToken,
+  ts.SyntaxKind.SlashEqualsToken,
+  ts.SyntaxKind.PercentEqualsToken,
+  ts.SyntaxKind.LessThanLessThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.AmpersandEqualsToken,
+  ts.SyntaxKind.BarEqualsToken,
+  ts.SyntaxKind.CaretEqualsToken,
+  ts.SyntaxKind.BarBarEqualsToken,
+  ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+  ts.SyntaxKind.QuestionQuestionEqualsToken,
+]);
 
 /**
  * What the constant strings of one source evaluate to. `evaluate(node, opaque)` returns every
- * value the expression can have (`+`, templates, `.concat`, `[...].join(...)`, `String.raw`,
- * parentheses, conditionals, and a name bound by a declaration or an assignment anywhere in the
- * source), or null when it is not a string expression. A part it cannot evaluate becomes the
- * marker ` ${} ` and is pushed to `opaque`, so the caller can still read what is inside it.
+ * value the expression can have (`+`, templates, `.concat`, `[...].join(...)` over an array
+ * literal, `String.raw`, parentheses, conditionals, and a name: every value written to it anywhere
+ * in the source, file-wide, with the marker for each write it cannot evaluate), or null when it is
+ * not a string expression. A part it cannot evaluate becomes the marker ` ${} ` and is pushed to
+ * `opaque`, so the caller can still read what is inside it. `overflow` collects what had more than
+ * CAP alternatives.
  */
 function stringEvaluator(ast) {
   const bound = new Map(); // name -> Set of values
+  const overflow = new Set(); // what had more than CAP alternatives: refused by both checks
+  const combine = (parts, where) => {
+    let out = [''];
+    for (const alternatives of parts) {
+      // Unknown next to unknown is one unknown part: `s += chunk` in a loop is not a new value.
+      out = [
+        ...new Set(
+          out.flatMap((head) => alternatives.map((tail) => (head + tail).replace(MARKS, MARK))),
+        ),
+      ];
+      if (out.length > CAP) {
+        overflow.add(where);
+        out = out.slice(0, CAP);
+      }
+    }
+    return out;
+  };
   const requires = new Set(); // names bound to createRequire(...)
   const isCreateRequire = (node) =>
     ts.isCallExpression(node) &&
@@ -65,11 +112,15 @@ function stringEvaluator(ast) {
     };
     if (ts.isStringLiteralLike(node)) return [node.text];
     if (ts.isParenthesizedExpression(node)) return evaluate(node.expression, opaque);
+    const where = () => node.getText(ast).slice(0, 80);
     if (ts.isTemplateExpression(node))
-      return combine([
-        [node.head.text],
-        ...node.templateSpans.flatMap((span) => [part(span.expression), [span.literal.text]]),
-      ]);
+      return combine(
+        [
+          [node.head.text],
+          ...node.templateSpans.flatMap((span) => [part(span.expression), [span.literal.text]]),
+        ],
+        where(),
+      );
     if (ts.isTaggedTemplateExpression(node) && node.tag.getText() === 'String.raw')
       return evaluate(node.template, opaque);
     if (ts.isIdentifier(node)) return bound.has(node.text) ? [...bound.get(node.text)] : null;
@@ -77,34 +128,47 @@ function stringEvaluator(ast) {
       const whenTrue = evaluate(node.whenTrue, opaque);
       const whenFalse = evaluate(node.whenFalse, opaque);
       if (!whenTrue && !whenFalse) return null;
-      return [...(whenTrue ?? part(node.whenTrue)), ...(whenFalse ?? part(node.whenFalse))];
+      const both = [...(whenTrue ?? part(node.whenTrue)), ...(whenFalse ?? part(node.whenFalse))];
+      if (both.length > CAP) overflow.add(where());
+      return both.slice(0, CAP);
     }
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
       const left = evaluate(node.left, opaque);
       const right = evaluate(node.right, opaque);
       if (!left && !right) return null;
-      return combine([left ?? part(node.left), right ?? part(node.right)]);
+      return combine([left ?? part(node.left), right ?? part(node.right)], where());
     }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const { expression: receiver, name } = node.expression;
       if (name.text === 'concat') {
         const head = evaluate(receiver, opaque);
-        if (head) return combine([head, ...node.arguments.map(part)]);
+        if (head) return combine([head, ...node.arguments.map(part)], where());
       }
       if (name.text === 'join' && ts.isArrayLiteralExpression(receiver)) {
         const separator = node.arguments.length > 0 ? part(node.arguments[0]) : [','];
         const items = receiver.elements.map((element) =>
           ts.isSpreadElement(element) ? (opaque.push(element), [MARK]) : part(element),
         );
-        return combine(items.flatMap((item, at) => (at === 0 ? [item] : [separator, item])));
+        return combine(
+          items.flatMap((item, at) => (at === 0 ? [item] : [separator, item])),
+          where(),
+        );
       }
     }
     return null;
   };
   const bind = (name, values) => {
     const known = bound.get(name) ?? new Set();
-    for (const value of values) if (known.size < CAP) known.add(value);
+    for (const value of values)
+      if (known.size < CAP || known.has(value)) known.add(value);
+      else overflow.add(name);
     bound.set(name, known);
+  };
+  // A write whose value cannot be evaluated: the name may hold anything from then on, so every
+  // reading of it has an unknown alternative (`=`), or an unknown tail on each value (`+=`).
+  const unknownWrite = (name, appended) => {
+    const before = bound.get(name);
+    bind(name, appended && before ? combine([[...before], [MARK]], name) : [MARK]);
   };
   // Two passes: a name may be used before the line that binds it is reached.
   for (let pass = 0; pass < 2; pass++) {
@@ -112,6 +176,7 @@ function stringEvaluator(ast) {
       if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
         const values = evaluate(node.initializer);
         if (values) bind(node.name.text, values);
+        else unknownWrite(node.name.text, false);
         if (isCreateRequire(node.initializer)) requires.add(node.name.text);
       } else if (
         ts.isBinaryExpression(node) &&
@@ -119,23 +184,65 @@ function stringEvaluator(ast) {
         (node.operatorToken.kind === ts.SyntaxKind.EqualsToken ||
           node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken)
       ) {
+        const appended = node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken;
         const values = evaluate(node.right);
         if (values) {
           const before = bound.get(node.left.text);
           bind(
             node.left.text,
-            node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken && before
-              ? combine([[...before], values])
-              : values,
+            appended && before ? combine([[...before], values], node.left.text) : values,
           );
-        }
+        } else unknownWrite(node.left.text, appended);
         if (isCreateRequire(node.right)) requires.add(node.left.text);
+      } else if (
+        ts.isBinaryExpression(node) &&
+        ts.isIdentifier(node.left) &&
+        UPDATES.has(node.operatorToken.kind)
+      )
+        unknownWrite(node.left.text, false);
+      else if (
+        (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+        [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator) &&
+        ts.isIdentifier(node.operand)
+      )
+        unknownWrite(node.operand.text, false);
+      else if (
+        (ts.isForOfStatement(node) || ts.isForInStatement(node)) &&
+        ts.isIdentifier(node.initializer)
+      )
+        unknownWrite(node.initializer.text, false);
+      else if (
+        // Any other declaration of a name: a parameter, a destructured name, an import, a catch
+        // variable, a function or class. Its value is not a constant string the scan can read.
+        (ts.isParameter(node) ||
+          ts.isBindingElement(node) ||
+          ts.isImportSpecifier(node) ||
+          ts.isImportClause(node) ||
+          ts.isNamespaceImport(node) ||
+          ts.isFunctionDeclaration(node) ||
+          ts.isClassDeclaration(node) ||
+          (ts.isVariableDeclaration(node) && ts.isCatchClause(node.parent))) &&
+        node.name &&
+        ts.isIdentifier(node.name)
+      )
+        unknownWrite(node.name.text, false);
+      else if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        (ts.isArrayLiteralExpression(node.left) || ts.isObjectLiteralExpression(node.left))
+      ) {
+        // a destructuring assignment writes every name in its pattern
+        const names = (target) => {
+          if (ts.isIdentifier(target)) unknownWrite(target.text, false);
+          else ts.forEachChild(target, names);
+        };
+        names(node.left);
       }
       ts.forEachChild(node, visit);
     };
     visit(ast);
   }
-  return { evaluate, requires, isCreateRequire };
+  return { evaluate, requires, isCreateRequire, overflow };
 }
 
 const isComposition = (node) =>
@@ -152,8 +259,13 @@ const isComposition = (node) =>
  * ` ${} `, and what is inside such a part is read as values of its own.
  */
 export function stringValues(source) {
+  return readStrings(source).values;
+}
+
+/** `stringValues`, and what had more alternatives than the scan keeps (refused by both checks). */
+function readStrings(source) {
   const ast = parse(source);
-  const { evaluate } = stringEvaluator(ast);
+  const { evaluate, overflow } = stringEvaluator(ast);
   const values = [];
   const visit = (node) => {
     if (ts.isStringLiteralLike(node)) {
@@ -172,7 +284,7 @@ export function stringValues(source) {
     ts.forEachChild(node, visit);
   };
   visit(ast);
-  return values;
+  return { values, overflow };
 }
 
 /**
@@ -297,11 +409,16 @@ export function loopFragments(text) {
  * business writing a loop at all.
  */
 export function waitViolations(source, { holder = false } = {}) {
-  const violations = [];
-  for (const value of stringValues(source)) {
+  const { values, overflow } = readStrings(source);
+  const violations = [...overflow].map(
+    (where) => `more than ${CAP} alternatives, which the guard does not read: ${where}`,
+  );
+  for (const value of values) {
     for (const loop of shellLoops(value)) {
       const forking = loop.commands.filter((command) => !BUILTINS.has(command));
       if (!holder) violations.push(`a shell loop outside holdUntil: ${loop.region}`);
+      else if (loop.region.includes(MARK.trim()))
+        violations.push(`holdUntil's loop has a part the guard cannot read: ${loop.region}`);
       else if (forking.length > 0)
         violations.push(`holdUntil's loop runs ${forking.join(', ')}, which forks: ${loop.region}`);
     }
@@ -334,19 +451,25 @@ function loadsModule(call, requires, isCreateRequire) {
 }
 
 /**
- * Violations of rule 2 in one fixture source: any way to get an asynchronous child (spawn, exec,
- * execFile, fork, a namespace import, an export from the module, require, a dynamic import, however
- * the module name is composed) other than the fixture owner. A module loaded by a name that is not
- * a constant string cannot be shown to be anything else, and is refused; so is code made from
- * text (`eval`, `Function`, `vm`) and text built from character codes (`fromCharCode`, `atob`).
- * The synchronous calls finish before they return and carry their own
- * timeouts. `owner` is true for the one file that IS the fixture owner.
+ * Violations of rule 2 in one fixture source: the ways to get an asynchronous child that this scan
+ * recognises (spawn, exec, execFile, fork, a namespace import, an export from the module, `require`
+ * or a name bound to `createRequire(...)`, `module.require`, a dynamic import, with the module name
+ * composed by the forms the evaluator folds) other than the fixture owner. A module loaded through
+ * one of those calls by a name that does not evaluate to constant strings is refused; so are the
+ * direct calls `eval(...)`, `Function(...)`, `new Function(...)`, the module `vm`, `.binding(...)`,
+ * and the character-code calls `fromCharCode`, `fromCodePoint`, `atob`. Other spellings of these
+ * (the header lists them) are not recognised. The synchronous calls finish before they return and
+ * carry their own timeouts. `owner` is true for the one file that IS the fixture owner.
  */
 export function spawnViolations(source, { owner = false } = {}) {
   if (owner) return [];
   const ast = parse(source);
-  const { evaluate, requires, isCreateRequire } = stringEvaluator(ast);
+  const { evaluate, requires, isCreateRequire, overflow } = stringEvaluator(ast);
   const violations = [];
+  const overflowed = () =>
+    [...overflow].map(
+      (where) => `more than ${CAP} alternatives, which the guard does not read: ${where}`,
+    );
   const visit = (node) => {
     if (
       (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
@@ -403,5 +526,5 @@ export function spawnViolations(source, { owner = false } = {}) {
     ts.forEachChild(node, visit);
   };
   visit(ast);
-  return violations;
+  return [...overflowed(), ...violations];
 }

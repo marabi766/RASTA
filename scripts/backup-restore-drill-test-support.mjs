@@ -110,6 +110,17 @@ export function signalProbe(target) {
 // `tail -f <directory>/x` and it must be neither signalled nor blamed on the test. No identity
 // (unreadable at registration) means the registration fails; it never means "any pid will do".
 //
+// Every link of such a walk is proven by identity AT THE TIME IT IS USED: the child is read first
+// (it names the parent), then the parent is read again and must still be the registered process
+// (same start time, running). A parent whose identity was known before the child was read and is
+// confirmed after it was the child's parent in between: nothing else can have had its number.
+// What a table read a moment earlier says about a parent is never enough on its own.
+//
+// The records of a scope belong to the ONE process table they were read from (the first one the
+// scope used): under any other table (a test's injected one, or the real one after a test's) the
+// scope inspects nothing, signals nothing and reports itself unknown. A number in one table is not
+// evidence about a number in another.
+//
 // Inspection has three answers: alive, gone, unknown. Only "no such process" is gone; an unreadable
 // or malformed /proc entry is UNKNOWN, which keeps the ownership and the directory, is retried
 // until the stop budget is spent, and then fails the test loudly. Unknown also holds for a row of
@@ -120,13 +131,14 @@ export function signalProbe(target) {
 // A row that could descend from the fixture and cannot be identified is a CANDIDATE, and a candidate
 // belongs to the scope, not to the look that found it: it is kept across inspections, and
 // re-parenting (to init, or to a subreaper such as `systemd --user`) never makes it somebody
-// else's, because a child of the fixture whose parent exits is exactly such a row. It is settled
-// only by the kernel saying it is absent, by the number answering as another process (the start
-// time recorded when it was readable differs, or it is a zombie), or by identification: once
-// readable, a candidate whose ancestry was recorded as reaching a live process of the fixture is
-// registered with the identity just read and stopped like any other; one whose ancestry was never
-// established stays a candidate. An unidentified candidate is never signalled, and while one
-// exists the stop and the after-hook fail, naming it.
+// else's, because a child of the fixture whose parent exits is exactly such a row. A candidate is
+// never signalled and never evidence for anything: not for registering itself (its identity was
+// not readable when its ancestry was, so the process that answers at its number later may be one
+// that took the number since) and not for registering a row below it. It is settled only by the
+// kernel saying it is absent, by the number answering as another process (the start time recorded
+// when it was readable differs, or it is a zombie), or by being freshly proven the fixture's: a
+// walk from a live process of the fixture reaches it, link by link, as above. Until then the stop
+// and the after-hook fail, naming it.
 //
 // Every child is started as the leader of its own process group, so the owner holds one handle and
 // one group for it. If registering it fails, the group is killed through that handle (the child
@@ -135,13 +147,12 @@ export function signalProbe(target) {
 //
 // ACCEPTED RESIDUALS (decision D-089, 2026-10-30: this is test-support code on a dedicated host;
 // pidfd / supervisor / cgroup containment is out of scope and nothing here pretends to be it):
-//   (a) PID reuse in the microseconds between the /proc identity re-read and the kill() that
-//       follows it. Node has no pidfd, and pid_max is 4194304. The same holds for a candidate
-//       whose number is reused by a process that is not a descendant of the fixture within the
-//       milliseconds of one test: nothing can tell them apart without an identity to compare.
-//   (b) A detached grandchild that forks and whose parent exits before the first 25 ms sample.
-//       The fixture commands are our own scripts and none does this; a test over their source
-//       ("no fixture detaches", backup-restore-drill.test.mjs) fails if one starts to.
+//   (a) PID reuse in the microseconds between the final /proc identity re-read and the kill() that
+//       follows it. Node has no pidfd, and pid_max is 4194304.
+//   (b) A detached grandchild that forks and whose parent exits before a look has read it as the
+//       child of a live process of the fixture (the 25 ms sample). The fixture commands are our own
+//       scripts and none does this; a test over their source ("no fixture detaches",
+//       backup-restore-drill.test.mjs) fails if one starts to.
 
 /** How long a stop may take after SIGKILL before a process counts as having survived it. */
 export const ownerSettings = {
@@ -163,10 +174,37 @@ export function ownedDirectory(prefix) {
   const directory = mkdtempSync(join(tmpdir(), prefix));
   // pid -> { start, leads }: `start` is the identity, `leads` that the pid leads its own group.
   // `condemned`: groups killed after their leader could not be registered, until seen empty.
-  // `candidates`: pid -> { owned, start, source, ... }, rows of the process table that may descend
+  // `candidates`: pid -> { start, ancestry, reason }, rows of the process table that may descend
   // from the fixture and cannot be identified (see `look`); kept until they are settled.
-  scopes.set(directory, { procs: new Map(), condemned: [], candidates: new Map() });
+  // `table`: the process table every record of the scope was read from (bound by the first one).
+  scopes.set(directory, { procs: new Map(), condemned: [], candidates: new Map(), table: null });
   return directory;
+}
+
+/**
+ * Null while the scope's records belong to the process table in use (or it has none yet), else
+ * why nothing of it can be inspected here. Every operation on a scope asks this first.
+ */
+function foreignTable(scope) {
+  if (scope.table === null || scope.table === ownerSettings.system) return null;
+  return {
+    pid: 0,
+    reason:
+      'recorded in another process table: nothing of it is inspected or signalled in this one',
+  };
+}
+
+/** Refuses to work on the scope under a table other than its own. */
+function sameTable(scope) {
+  const foreign = foreignTable(scope);
+  if (foreign) throw new Error(`the fixture's processes were ${foreign.reason}`);
+}
+
+/** Puts a record in the scope, which binds the scope to the table it was read from. */
+function record(scope, pid, entry) {
+  sameTable(scope);
+  scope.table = ownerSettings.system;
+  scope.procs.set(pid, entry);
 }
 
 const scopeOf = (directory) => {
@@ -214,10 +252,12 @@ function classify(pid, entry, info = inspect(pid)) {
  * whose identity cannot be read cannot be told apart from a later one with the same number.
  */
 export function recordOwned(directory, pid, { leads = false } = {}) {
+  const scope = scopeOf(directory);
+  sameTable(scope);
   const info = inspect(pid);
   if (info.status !== 'alive')
     throw new Error(`process ${pid} has no readable identity (${info.status}): not registered`);
-  scopeOf(directory).procs.set(pid, { start: info.start, leads });
+  record(scope, pid, { start: info.start, leads });
 }
 
 /**
@@ -228,6 +268,7 @@ export function recordOwned(directory, pid, { leads = false } = {}) {
  */
 export function spawnOwned(directory, command, args, options = {}) {
   const scope = scopeOf(directory);
+  sameTable(scope); // nothing is started that could not be recorded
   const child = spawn(command, args, { ...options, detached: true });
   if (child.pid !== undefined) {
     try {
@@ -244,24 +285,45 @@ export function spawnOwned(directory, command, args, options = {}) {
   return child;
 }
 
-/** The pid is a descendant of a live process the scope owns (walking parent pids). */
+/**
+ * The identity (start time) of `pid` when it is a descendant of a live process the scope owns,
+ * walking parent pids; else null. The walk is read twice: the first pass finds the chain, the
+ * second re-reads every link child first, then its parent, each with the identity the first pass
+ * recorded, and the owned process last. A chain is only as good as its links at the time they are
+ * used: a number on the way that was taken by another process in between breaks it.
+ */
 function descendsFromScope(scope, pid) {
+  const chain = [];
   let current = pid;
   for (let hops = 0; hops < 64; hops++) {
     const info = inspect(current);
     if (info.status === 'unknown')
       throw new Error(`process ${current} cannot be inspected (${info.reason}): not adopted`);
-    if (info.status !== 'alive' || info.dead) return false;
+    if (info.status !== 'alive' || info.dead) return null;
+    chain.push({ pid: current, start: info.start, ppid: info.ppid });
     const parent = scope.procs.get(info.ppid);
-    if (parent && classify(info.ppid, parent) === 'alive') return true;
-    if (info.ppid <= 1) return false;
+    if (parent && classify(info.ppid, parent) === 'alive') {
+      for (const link of chain) {
+        const now = inspect(link.pid);
+        if (
+          now.status !== 'alive' ||
+          now.dead ||
+          now.start !== link.start ||
+          now.ppid !== link.ppid
+        )
+          return null;
+      }
+      return classify(info.ppid, parent) === 'alive' ? chain[0].start : null;
+    }
+    if (info.ppid <= 1) return null;
     current = info.ppid;
   }
-  return false;
+  return null;
 }
 
 function adopt(directory, pid, leads) {
   const scope = scopeOf(directory);
+  sameTable(scope);
   const info = inspect(pid);
   if (info.status === 'unknown')
     throw new Error(`process ${pid} cannot be inspected (${info.reason}): not adopted`);
@@ -271,11 +333,12 @@ function adopt(directory, pid, leads) {
     known.leads ||= leads;
     return;
   }
+  const start = descendsFromScope(scope, pid);
   assert.ok(
-    descendsFromScope(scope, pid),
+    start !== null,
     `process ${pid} cannot be shown to descend from a process of ${directory}: it is not adopted, and will not be signalled`,
   );
-  scope.procs.set(pid, { start: info.start, leads });
+  record(scope, pid, { start, leads });
 }
 
 /** A process group a test learned of (a stub wrote its `$$`): owned from now on, if provably ours. */
@@ -292,12 +355,14 @@ export async function waitForGroup(directory, file) {
 
 /**
  * A fresh look at what the scope owns. Walks parent pids from every live owned process (and the
- * group of every live owned leader) and RETAINS what it finds with its identity, so that a child
+ * group of every live owned leader) and RETAINS what it proves with its identity, so that a child
  * whose parent later dies and is re-parented is still known. Returns the owned processes that are
  * `alive` and the ones whose state is `unknown`; `gone` ones are neither.
  */
 function look(scope) {
   const { system } = ownerSettings;
+  const foreign = foreignTable(scope);
+  if (foreign) return { alive: [], unknown: [foreign], condemned: scope.condemned };
   let pids;
   try {
     pids = system.listPids();
@@ -318,30 +383,50 @@ function look(scope) {
   const children = new Map();
   for (const [pid, info] of table)
     children.set(info.ppid, [...(children.get(info.ppid) ?? []), pid]);
-  const known = (pid) => scope.procs.get(pid)?.start === table.get(pid)?.start;
-  const retain = (pid) => {
-    const info = table.get(pid);
-    if (info && pid !== process.pid && !known(pid))
-      scope.procs.set(pid, { start: info.start, leads: false });
-  };
+  const known = (pid, start) => scope.procs.get(pid)?.start === start;
+  const confirmed = (pid) => classify(pid, scope.procs.get(pid)) === 'alive';
+  // Roots: registered before this snapshot was read, and confirmed after it, so what the snapshot
+  // says about their group (only a root can lead one) was said while they were there.
   const frontier = [];
   for (const [pid, entry] of scope.procs) if (classify(pid, entry) === 'alive') frontier.push(pid);
   for (const pid of frontier) {
     const entry = scope.procs.get(pid);
-    const leader = table.get(pid);
-    if (entry.leads && leader?.pgrp === pid)
-      for (const [member, info] of table) if (info.pgrp === pid) retain(member);
+    if (entry.leads && table.get(pid)?.pgrp === pid)
+      for (const [member, info] of table)
+        if (info.pgrp === pid && member !== process.pid && !known(member, info.start))
+          scope.procs.set(member, { start: info.start, leads: false });
   }
-  for (let next = 0; next < frontier.length; next++)
-    for (const child of children.get(frontier[next]) ?? []) {
-      if (known(child)) continue;
-      retain(child);
+  // Children: the snapshot only says where to look, because a parent retained in this walk was read
+  // in the same snapshot, possibly after its child. A child is retained only once a FRESH read of
+  // it names the parent, and the parent is then confirmed to be the recorded process: its identity
+  // predates that read and is confirmed after it, so nothing else had its number in between.
+  for (let next = 0; next < frontier.length; next++) {
+    const parent = frontier[next];
+    for (const child of children.get(parent) ?? []) {
+      if (child === process.pid) continue;
+      const now = inspect(child);
+      if (now.status !== 'alive' || now.dead || now.ppid !== parent) continue;
+      if (known(child, now.start)) continue; // registered: walked from on its own
+      if (!confirmed(parent)) continue;
+      scope.procs.set(child, { start: now.start, leads: false });
       frontier.push(child);
     }
-  // Candidates: rows that may descend from the fixture and cannot be identified. Found now (an
-  // unreadable row whose ancestry leads into the fixture, or is itself unreadable; a readable
-  // row below such a candidate) and KEPT in the scope, so that the next look still has them after
-  // their parent was killed and they were re-parented.
+  }
+  // Candidates: rows that may descend from the fixture and cannot be identified. Those kept from an
+  // earlier look are checked against this table FIRST, so that one whose number now answers as
+  // another process (or none) is settled before anything below that number is read as being below
+  // it. A candidate is never evidence of ownership: what is found below one is a candidate too.
+  // (Registered: a walk proved the process at the number the fixture's, by identity.)
+  const settled = (pid, candidate, info) =>
+    info.status === 'gone' ||
+    (info.status === 'unknown' && scope.procs.has(pid)) ||
+    (info.status === 'alive' &&
+      (info.dead || known(pid, info.start) || (candidate.start && candidate.start !== info.start)));
+  for (const [pid, candidate] of [...scope.candidates])
+    if (settled(pid, candidate, inspect(pid))) scope.candidates.delete(pid);
+  // Found now (an unreadable row whose ancestry leads into the fixture, or is itself unreadable; a
+  // readable row below such a candidate) and KEPT in the scope, so that the next look still has
+  // them after their parent was killed and they were re-parented.
   const found = new Map();
   for (const [pid, reason] of unreadable) {
     if (scope.procs.has(pid)) continue;
@@ -350,13 +435,12 @@ function look(scope) {
   }
   if (found.size + scope.candidates.size > 0)
     for (const [pid, info] of table) {
-      if (pid === process.pid || scope.procs.has(pid) || found.has(pid)) continue;
+      if (pid === process.pid || known(pid, info.start) || found.has(pid)) continue;
       let current = info.ppid;
       for (let hops = 0; hops < 64 && current > 1; hops++) {
-        const above = found.get(current) ?? scope.candidates.get(current);
-        if (above) {
+        if (found.has(current) || scope.candidates.has(current)) {
           found.set(pid, {
-            owned: above.owned,
+            ancestry: 'unknown',
             start: info.start,
             reason: `descends from ${current}, which cannot be identified`,
           });
@@ -365,10 +449,12 @@ function look(scope) {
         current = table.get(current)?.ppid ?? 0;
       }
     }
+  if (found.size > 0) scope.table = system;
   for (const [pid, candidate] of found) {
     const kept = scope.candidates.get(pid);
-    if (!kept) scope.candidates.set(pid, { ...candidate, source: system });
-    else if (!kept.owned && candidate.owned) kept.owned = candidate.owned;
+    if (!kept) scope.candidates.set(pid, candidate);
+    else if (kept.ancestry === 'unknown' && candidate.ancestry === 'fixture')
+      kept.ancestry = 'fixture';
   }
   // The verdict is a fresh one, taken after everything above: what was readable a moment ago and
   // is not now is unknown, not absent.
@@ -383,34 +469,19 @@ function look(scope) {
   }
   for (const [pid, candidate] of [...scope.candidates]) {
     const info = inspect(pid);
-    // Settled: the kernel says there is none, it runs nothing, or the number now answers as a
-    // different process than the one that was read. (A candidate seen by another process table than
-    // this one was never read from it.)
-    if (
-      candidate.source !== system ||
-      scope.procs.has(pid) ||
-      info.status === 'gone' ||
-      (info.status === 'alive' &&
-        (info.dead || (candidate.start && candidate.start !== info.start)))
-    ) {
-      scope.candidates.delete(pid);
-    } else if (info.status === 'unknown') {
+    if (settled(pid, candidate, info)) scope.candidates.delete(pid);
+    else if (info.status === 'unknown')
       unknown.push({ pid, reason: `unreadable row: ${info.reason}` });
-    } else if (candidate.owned) {
-      // Readable now, and its ancestry was recorded as reaching a live process of the fixture
-      // before anything was re-parented: identified, so it is registered and stopped like the rest.
-      const entry = { start: info.start, leads: false };
-      scope.procs.set(pid, entry);
-      scope.candidates.delete(pid);
-      alive.push({ pid, ...entry });
-    } else {
+    else if (candidate.reason.startsWith('descends'))
+      unknown.push({ pid, reason: candidate.reason });
+    else
       unknown.push({
         pid,
-        reason: candidate.reason.startsWith('descends')
-          ? candidate.reason
-          : `${candidate.reason}; readable now, but never shown to descend from the fixture`,
+        reason:
+          candidate.ancestry === 'fixture'
+            ? `${candidate.reason}; readable now, but it was never identified while it descended from the fixture`
+            : `${candidate.reason}; readable now, but never shown to descend from the fixture`,
       });
-    }
   }
   // A group killed after its leader could not be registered: present until the kernel says it is not
   // (a member keeps its number from being reused, so asking is safe; only ESRCH ends the question).
@@ -431,27 +502,28 @@ function statusParent(pid) {
 /**
  * What a row nobody registered, and whose stat cannot be read, may be: `null` when its parent
  * chain is read all the way up to init through rows the fixture does not own (it is somebody
- * else's), otherwise an object: `owned` is the live process of the fixture the chain was read as
- * reaching (pid and start time, recorded now, before anything is re-parented) or null when the
- * chain is unreadable at some hop or leads into another candidate.
+ * else's), otherwise a candidate: `ancestry: 'fixture'` when the chain was read as reaching a live
+ * process of the fixture, `'unknown'` when it is unreadable at some hop or leads into another
+ * candidate. Either way it is only a candidate: its own identity was not readable, so neither
+ * answer can later stand for the process that is at its number then.
  */
 function ancestryOf(scope, row, table, unreadable) {
   let current = row;
   for (let hops = 0; hops < 64; hops++) {
     const parent = current === row ? statusParent(current) : table.get(current)?.ppid;
-    if (parent === undefined) return { owned: null };
+    if (parent === undefined) return { ancestry: 'unknown' };
     if (parent <= 1) return null;
     const owned = scope.procs.get(parent);
     if (owned) {
       const state = classify(parent, owned);
-      if (state === 'alive') return { owned: { pid: parent, start: owned.start } };
-      if (state === 'unknown') return { owned: null };
+      if (state === 'alive') return { ancestry: 'fixture' };
+      if (state === 'unknown') return { ancestry: 'unknown' };
     }
-    if (unreadable.has(parent) || scope.candidates.has(parent)) return { owned: null };
-    if (!table.has(parent)) return { owned: null }; // not in the snapshot: cannot be told this round
+    if (unreadable.has(parent) || scope.candidates.has(parent)) return { ancestry: 'unknown' };
+    if (!table.has(parent)) return { ancestry: 'unknown' }; // not in the snapshot: cannot be told this round
     current = parent;
   }
-  return { owned: null };
+  return { ancestry: 'unknown' };
 }
 
 const signalOnce = (target, name) => {
@@ -602,6 +674,14 @@ export async function runOwned(directory, command, args, { timeoutMs = 60_000, .
 export async function leakedFixtures() {
   const leaked = [];
   for (const directory of [...scopes.keys()]) {
+    const foreign = foreignTable(scopes.get(directory));
+    if (foreign) {
+      // A test's injected table outlived by its scope: reported once, nothing read or signalled in
+      // this table on its behalf, and the directory is kept.
+      scopes.delete(directory);
+      leaked.push(`${directory}: its processes were ${foreign.reason}; the directory is kept`);
+      continue;
+    }
     const alive = hasLiveProcesses(directory);
     try {
       await disposeOwned(directory);

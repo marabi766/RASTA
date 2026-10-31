@@ -1418,6 +1418,82 @@ test('the spawn guard refuses a module named by composition or by anything but a
   assert.deepEqual(spawnViolations(refused[0], { owner: true }), []);
 });
 
+test('a name the guard cannot evaluate every write of is uncertain, and a module it names is refused (PR-532 R2)', () => {
+  const cp = ['child', 'process'].join('_');
+  const load = 'const m = await import(name); m.spawn("x", [], { detached: true });';
+  const refused = {
+    // the review's reproduction: the old constant stayed authoritative after an unknown write
+    'an unknown reassignment': `let name = 'node:fs'; name = process.env.MODULE; ${load}`,
+    'an unknown +=': `let name = 'node:'; name += process.env.MODULE; ${load}`,
+    'an unknown +=, read before it in the source': `${load} let name = 'node:'; name += suffix;`,
+    'an unknown ||=': `let name = 'node:fs'; name ||= process.env.MODULE; ${load}`,
+    'an increment': `let name = 'node:fs'; name++; ${load}`,
+    'a destructuring assignment': `let name = 'node:fs'; [name] = names; ${load}`,
+    'a for-of head': `let name = 'node:fs'; ${'f·or'.replace('·', '')} (name of names) {} ${load}`,
+    'an unknown declaration of the same name': `const name = 'node:fs'; { const name = pick(); } ${load}`,
+    'a parameter of the same name': `const name = 'node:fs'; function f(name) {} ${load}`,
+  };
+  for (const [what, source] of Object.entries(refused))
+    assert.match(spawnViolations(source).join(), /not a constant string/, what);
+  for (const source of [
+    `let name = 'node:fs'; name = 'node:path'; ${load}`,
+    `let name = 'node:'; name += 'fs'; ${load}`,
+    "let out = ''; out += chunk; out += chunk;",
+  ])
+    assert.deepEqual(spawnViolations(source), [], source);
+  assert.match(
+    spawnViolations(`let name = 'node:fs'; name = 'node:${cp}'; ${load}`).join(),
+    /child_process reached by a call/,
+  );
+  // In the shell check: a holder loop with a part the guard cannot read is refused, not read as
+  // the builtin it starts with (`: ; sleep 1` would fork).
+  const unmark = (text) => text.replaceAll('·', '');
+  for (const write of ['body += extra;', 'body = extra;']) {
+    const source = unmark(
+      `let body = ':'; ${write} const s = 'wh·ile [ ! -f f ]; d·o ' + body + '; d·one';`,
+    );
+    assert.match(
+      waitViolations(source, { holder: true }).join(),
+      /holdUntil's loop has a part the guard cannot read/,
+      write,
+    );
+    assert.ok(waitViolations(source).length > 0, write);
+  }
+  assert.deepEqual(
+    waitViolations(
+      unmark("let body = ':'; const s = 'wh·ile [ ! -f f ]; d·o ' + body + '; d·one';"),
+      {
+        holder: true,
+      },
+    ),
+    [],
+  );
+});
+
+test('more alternatives than the guard keeps are refused, not cut to the first ones (PR-532 R2)', () => {
+  const cp = ['child', 'process'].join('_');
+  // Twelve two-way choices: 4096 distinct values, exactly what the guard keeps.
+  const choices = (n) =>
+    '`' + Array.from({ length: n }, (_, at) => `\${f${at} ? 'a' : 'b'}`).join('') + '`';
+  assert.deepEqual(spawnViolations(`const s = ${choices(12)};`), []);
+  assert.deepEqual(waitViolations(`const s = ${choices(12)};`), []);
+  // One more choice, in an expression or in a name: refused by both checks.
+  for (const source of [
+    `const s = ${choices(13)};`,
+    `let name = ${choices(12)}; name = 'node:fs'; const m = await import(name);`,
+  ]) {
+    assert.match(spawnViolations(source).join(), /more than 4096 alternatives/, source);
+    assert.match(waitViolations(source).join(), /more than 4096 alternatives/, source);
+  }
+  // What the old cut dropped: the value written last, past the cap.
+  assert.match(
+    spawnViolations(
+      `let name = ${choices(12)}; name = 'node:${cp}'; const m = await import(name);`,
+    ).join(),
+    /more than 4096 alternatives/,
+  );
+});
+
 test('the spawn guard refuses every route to an asynchronous child that skips the owner', () => {
   for (const source of [
     "import { spawn } from 'node:child_process';",
@@ -2237,14 +2313,17 @@ test('a candidate seen before its parent died is kept across looks and re-parent
             ownerSettings.stopBudgetMs = GENEROUS_MS;
             if (after === 'readable') {
               mend();
-              // Readable now, and it was read as a descendant of the fixture's before it was
-              // re-parented: identified, registered with the identity just read, and stopped.
-              await disposeOwned(directory);
-              assert.deepEqual(
-                killed(system).filter((pid) => pid === 300),
-                [300],
+              // Readable now, but its identity was not readable while its ancestry was (PR-532 R1,
+              // D-092): the process at 300 now cannot be told from one that took the number since.
+              // It stays a candidate, named and never signalled, until the kernel reports it absent.
+              await refuses(
+                directory,
+                /state unknown: \[300 \(unreadable row: [^;]+; readable now, but it was never identified while it descended from the fixture\)\]/,
                 what,
               );
+              assert.equal(signalledAt(system, 300).length, 0, `${what}: never signalled`);
+              system.table.delete(300);
+              await disposeOwned(directory);
             } else {
               await refuses(directory, /state unknown: \[300 /, what);
               assert.equal(signalledAt(system, 300).length, 0, `${what}: never signalled`);
@@ -2314,16 +2393,16 @@ test('a candidate whose ancestry was never read is kept and named, readable or n
   }
 });
 
-test('a readable row below an unidentified candidate is a candidate too, and is stopped once its ancestry is known', async () => {
+test('a readable row below an unidentified candidate is a candidate too, and nothing is identified through a candidate', async () => {
   const build = () =>
     fakeSystem(
       [100, { ppid: process.pid, pgrp: 100, start: '10' }],
       [335, { ppid: 100, pgrp: 335, start: '33' }],
       [300, { ppid: 335, pgrp: 300, start: '30' }],
     );
-  // 335 cannot be identified. When its status names the fixture's 100 as its parent, 300 below it
-  // inherits that and is identified (readable) at once; when nothing is known of 335's ancestry,
-  // 300 is as unidentified as 335 and stays so, also after 335 ends and 300 goes to init.
+  // 335 cannot be identified. Whether or not its status names the fixture's 100 as its parent, 300
+  // below it is as unidentified as 335 (PR-532 R1, D-092: a candidate is never evidence), and both
+  // stay so after 100 is stopped and they go to init, readable or not, until they are absent.
   for (const statusKnown of [true, false]) {
     for (const after of ['absent', 'readable']) {
       const what = `335's status ${statusKnown ? 'readable' : 'unreadable'}, then ${after}`;
@@ -2334,63 +2413,75 @@ test('a readable row below an unidentified candidate is a candidate too, and is 
         recordOwned(directory, 100);
         system.unreadable.add(335);
         if (statusKnown) system.statusReadable.add(335);
-        if (statusKnown) {
-          await refuses(directory, /state unknown: \[335 \(unreadable row: EACCES\)\]/, what);
-          assert.equal(system.table.has(300), false, `${what}: 300 was identified and stopped`);
-        } else {
-          // ONE look (a budget of nothing allows exactly one) already finds the row below.
-          await assert.rejects(
-            stopOwned(directory, 0),
-            /state unknown: \[335 \(unreadable row: EACCES\),300 \(descends from 335, which cannot be identified\)\]/,
-            what,
-          );
-          await refuses(
-            directory,
-            /state unknown: \[335 \(unreadable row: EACCES\),300 \(descends from 335, which cannot be identified\)\]/,
-            what,
-          );
-          assert.equal(system.table.get(300).ppid, 335, `${what}: 300 is still below 335`);
-        }
-        assert.equal(
-          signalledAt(system, 335).length,
-          0,
-          `${what}: 335 is never signalled unidentified`,
+        // ONE look (a budget of nothing allows exactly one) already finds the row below.
+        await assert.rejects(
+          stopOwned(directory, 0),
+          /state unknown: \[335 \(unreadable row: EACCES\),300 \(descends from 335, which cannot be identified\)\]/,
+          what,
         );
+        await refuses(
+          directory,
+          /state unknown: \[335 \(unreadable row: EACCES\),300 \(descends from 335, which cannot be identified\)\]/,
+          what,
+        );
+        assert.equal(system.table.has(100), false, `${what}: the fixture's 100 was stopped`);
+        assert.equal(system.table.get(300).ppid, 335, `${what}: 300 is still below 335`);
+        const untouched = () =>
+          assert.equal(
+            signalledAt(system, 335).length + signalledAt(system, 300).length,
+            0,
+            `${what}: neither is ever signalled`,
+          );
+        untouched();
         if (after === 'absent') {
           system.table.delete(335);
           system.unreadable.delete(335);
-          if (system.table.has(300)) {
-            system.table.get(300).ppid = 1; // 335 ended, 300 was re-parented
-            await refuses(directory, /state unknown: \[300 /, what);
-            assert.equal(signalledAt(system, 300).length, 0, `${what}: still no signal`);
-            system.table.delete(300);
-          }
+          system.table.get(300).ppid = 1; // 335 ended, 300 was re-parented
+          await refuses(directory, /state unknown: \[300 \(descends from 335/, what);
+          untouched();
+          system.table.delete(300);
         } else {
           system.unreadable.delete(335);
-          if (!statusKnown) {
-            // Readable, but nothing ever tied 335 to the fixture (and 300 hangs below it): both
-            // stay named and unsignalled until the kernel reports them absent.
-            await refuses(
-              directory,
-              /state unknown: \[335 \(unreadable row: EACCES; readable now, but never shown/,
-              what,
-            );
-            assert.equal(
-              signalledAt(system, 335).length + signalledAt(system, 300).length,
-              0,
-              what,
-            );
-            system.table.delete(335);
-            system.table.delete(300);
-          }
+          await refuses(
+            directory,
+            statusKnown
+              ? /state unknown: \[335 \(unreadable row: EACCES; readable now, but it was never identified while it descended from the fixture\),300 \(descends from 335/
+              : /state unknown: \[335 \(unreadable row: EACCES; readable now, but never shown to descend from the fixture\),300 \(descends from 335/,
+            what,
+          );
+          untouched();
+          system.table.delete(335);
+          system.table.delete(300);
         }
         await disposeOwned(directory);
-        if (after === 'readable' && statusKnown)
-          assert.equal(killed(system).includes(335), true, `${what}: 335 stopped once readable`);
+        untouched();
       });
       assert.equal(existsSync(directory), false, what);
     }
   }
+});
+
+test('a candidate that turns readable while its parent of the fixture lives is freshly proven, and stopped', async () => {
+  // The only way out of candidacy besides absence: a walk from a live process of the fixture reaches
+  // it again, child read first, parent confirmed after (and the row below it the same way).
+  const directory = ownedDirectory('drill-owner-candidate-proven-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [335, { ppid: 100, pgrp: 335, start: '33' }],
+    [300, { ppid: 335, pgrp: 300, start: '30' }],
+  );
+  await withSystem(system, async () => {
+    ownerSettings.stopBudgetMs = GENEROUS_MS;
+    recordOwned(directory, 100);
+    system.unreadable.add(335);
+    system.statusReadable.add(335);
+    assert.equal(hasLiveProcesses(directory), true, 'a candidate (a read: nothing is signalled)');
+    assert.deepEqual(system.signals, []);
+    system.unreadable.delete(335);
+    await disposeOwned(directory);
+    assert.deepEqual(killed(system).sort(), [100, 300, 335]);
+  });
+  assert.equal(existsSync(directory), false);
 });
 
 test('a row that appears below a candidate later is a candidate too, whether or not the candidate is readable by then', async () => {
@@ -2429,9 +2520,16 @@ test('a row that appears below a candidate later is a candidate too, whether or 
 });
 
 test('a candidate is settled when the number answers as another process, or as a zombie', async () => {
-  for (const [what, replacement] of [
+  for (const [what, replacement, child] of [
     ['another process at the number', { state: 'S', ppid: 1, pgrp: 300, start: '99' }],
     ['a zombie', { state: 'Z', ppid: 1, pgrp: 300, start: '30' }],
+    // Checked against the table BEFORE anything is read as being below it (PR-532 R1): the child
+    // of the process that took the number is not below the candidate, and is not one itself.
+    [
+      'another process at the number, with a child',
+      { state: 'S', ppid: 1, pgrp: 300, start: '99' },
+      { state: 'S', ppid: 300, pgrp: 300, start: '98' },
+    ],
   ]) {
     const directory = ownedDirectory('drill-owner-candidate-settled-');
     const system = fakeSystem(
@@ -2447,16 +2545,77 @@ test('a candidate is settled when the number answers as another process, or as a
       system.table.delete(335);
       system.unreadable.delete(335);
       system.table.set(300, { ...replacement });
+      if (child) system.table.set(301, { ...child });
       await disposeOwned(directory);
       assert.equal(signalledAt(system, 300).length, 0, `${what}: not the fixture's, not signalled`);
+      assert.equal(signalledAt(system, 301).length, 0, `${what}: nor its child`);
       assert.equal(system.table.has(300), true);
     });
     assert.equal(existsSync(directory), false, what);
   }
 });
 
-test('a candidate read from another process table is not carried into this one', async () => {
-  const directory = ownedDirectory('drill-owner-candidate-source-');
+test('a candidate whose identity was never read authorizes nothing: what takes its number is left alone (PR-532 R1)', async () => {
+  // The review's first counterexample. One inspection sees 300 below the fixture's 100, its stat
+  // unreadable, its status naming 100. Before the next one, both exit and the number 300 goes to a
+  // process that is not the fixture's (and, in the second case, has a child of its own).
+  for (const [what, arrange] of [
+    [
+      'an unrelated process takes the number',
+      (system) => system.table.set(300, { state: 'S', ppid: 1, pgrp: 300, start: '99' }),
+    ],
+    [
+      'an unrelated process with a child of its own takes the number',
+      (system) => {
+        system.table.set(300, { state: 'S', ppid: 1, pgrp: 300, start: '99' });
+        system.table.set(301, { state: 'S', ppid: 300, pgrp: 300, start: '98' });
+      },
+    ],
+  ]) {
+    const directory = ownedDirectory('drill-owner-candidate-replaced-');
+    const system = fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [300, { ppid: 100, pgrp: 300, start: '30' }],
+    );
+    system.unreadable.add(300);
+    system.statusReadable.add(300);
+    await withSystem(system, async () => {
+      ownerSettings.stopBudgetMs = GENEROUS_MS;
+      recordOwned(directory, 100, { leads: true });
+      assert.equal(hasLiveProcesses(directory), true, `${what}: 300 is a candidate`);
+      system.table.delete(100);
+      system.table.delete(300);
+      system.unreadable.delete(300);
+      system.statusReadable.delete(300);
+      arrange(system);
+      const outcome = await withBudget(REFUSAL_MS, () =>
+        disposeOwned(directory).then(
+          () => null,
+          (error) => error,
+        ),
+      );
+      assert.deepEqual(signalledAt(system, 300), [], `${what}: no SIGSTOP, no SIGKILL to 300`);
+      assert.deepEqual(signalledAt(system, 301), [], `${what}: nor to its child`);
+      assert.match(
+        `${outcome?.message}`,
+        /state unknown: \[300 \(unreadable row: EACCES; readable now, but it was never identified while it descended from the fixture\)/,
+        what,
+      );
+      // It ends on its own: the candidate is settled and the stop completes, having signalled nothing.
+      system.table.delete(300);
+      system.table.delete(301);
+      await disposeOwned(directory);
+      assert.deepEqual(system.signals, [], `${what}: nothing was ever signalled`);
+    });
+    assert.equal(existsSync(directory), false, what);
+  }
+});
+
+test('a scope read from one process table is neither read nor signalled under another (PR-532 R1)', async () => {
+  // The review's second counterexample: a candidate of table A, then table B, where 300 is
+  // unrelated and has a child 301, and where even the fixture's number 100 answers with the start
+  // time recorded in A. Nothing of A may reach any of them.
+  const directory = ownedDirectory('drill-owner-table-');
   const first = fakeSystem(
     [100, { ppid: process.pid, pgrp: 100, start: '10' }],
     [300, { ppid: 100, pgrp: 300, start: '30' }],
@@ -2464,15 +2623,156 @@ test('a candidate read from another process table is not carried into this one',
   first.unreadable.add(300);
   first.statusReadable.add(300);
   await withSystem(first, async () => {
-    recordOwned(directory, 100);
+    recordOwned(directory, 100, { leads: true });
     assert.equal(hasLiveProcesses(directory), true);
   });
-  // The numbers mean something else in this table: nothing recorded in the first may reach them.
-  const second = fakeSystem([300, { ppid: 1, pgrp: 300, start: '31' }]);
+  const second = fakeSystem(
+    [100, { ppid: 1, pgrp: 100, start: '10' }],
+    [300, { ppid: 1, pgrp: 300, start: '30' }],
+    [301, { ppid: 300, pgrp: 300, start: '31' }],
+  );
   await withSystem(second, async () => {
-    await disposeOwned(directory);
+    const outcome = await disposeOwned(directory).then(
+      () => null,
+      (error) => error,
+    );
+    assert.deepEqual(second.signals, [], '301 (and 300, and 100) neither promoted nor signalled');
+    assert.match(
+      `${outcome?.message}`,
+      /state unknown: \[0 \(recorded in another process table: nothing of it is inspected or signalled in this one\)\]/,
+    );
+    assert.equal(hasLiveProcesses(directory), true, 'not provably gone');
+    assert.throws(() => recordOwned(directory, 301), /recorded in another process table/);
+    assert.throws(() => adoptPid(directory, 301), /recorded in another process table/);
+    assert.deepEqual(second.signals, [], '301 (and 300, and 100) neither promoted nor signalled');
+    assert.deepEqual(second.asked, [], 'not one row of this table was read on the scope’s behalf');
+    assert.equal(existsSync(directory), true, 'the directory stays');
+  });
+  // The after-hook under yet another table (the real one, after a test): reported once, nothing
+  // read or signalled there, the directory kept.
+  const spy = {
+    listPids: () => assert.fail('the table was listed'),
+    readProcFile: () => assert.fail('a row was read'),
+    signal: () => assert.fail('a signal was sent'),
+  };
+  await withSystem(spy, async () => {
+    const leaked = await leakedFixtures();
+    assert.equal(leaked.length, 1);
+    assert.match(leaked[0], /recorded in another process table/);
+    assert.deepEqual(await leakedFixtures(), [], 'reported once');
+  });
+  assert.equal(existsSync(directory), true);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test('a scope stays usable in its own table: back in it, its processes are stopped there', async () => {
+  const directory = ownedDirectory('drill-owner-table-back-');
+  const first = fakeSystem([100, { ppid: process.pid, pgrp: 100, start: '10' }]);
+  const second = fakeSystem([100, { ppid: 1, pgrp: 100, start: '10' }]);
+  await withSystem(first, async () => recordOwned(directory, 100));
+  await withSystem(second, async () => {
+    await assert.rejects(disposeOwned(directory), /recorded in another process table/);
     assert.deepEqual(second.signals, []);
-    assert.equal(second.table.has(300), true);
+  });
+  await withSystem(first, async () => {
+    await disposeOwned(directory);
+    assert.deepEqual(killed(first), [100]);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('a link of the walk is proven at the time it is used: a number taken over during a look proves nothing', async () => {
+  // 100 is the fixture's; 335 its child, 300 below 335. During one look the process table changes
+  // under the walk in three ways; each time 300 (and what took 335's number) is somebody else's.
+  const cases = [
+    {
+      what: '335 is replaced right after the snapshot read it',
+      // the walk's fresh read of 335 shows the stranger (its parent is init)
+      at: [335, 1],
+      change: (system) => {
+        system.table.set(335, { state: 'S', ppid: 1, pgrp: 335, start: '99' });
+      },
+    },
+    {
+      what: '300 was read while 335 was a stranger, then the fixture’s child took the number 335',
+      order: [100, 300, 335],
+      initial: (system) => {
+        system.table.set(335, { state: 'S', ppid: 1, pgrp: 335, start: '99' });
+      },
+      at: [300, 1],
+      change: (system) => {
+        // the stranger exits (300 goes to init), the fixture's 100 forks a child that gets 335
+        system.table.get(300).ppid = 1;
+        system.table.set(335, { state: 'S', ppid: 100, pgrp: 335, start: '33' });
+      },
+      fixtureOwns: [335],
+    },
+    {
+      what: '335 and 300 are replaced after the walk read 335 afresh',
+      at: [335, 2],
+      change: (system) => {
+        system.table.set(335, { state: 'S', ppid: 1, pgrp: 335, start: '99' });
+        system.table.set(300, { state: 'S', ppid: 335, pgrp: 300, start: '97' });
+      },
+    },
+  ];
+  for (const { what, order, initial, at, change, fixtureOwns = [] } of cases) {
+    const directory = ownedDirectory('drill-owner-walk-');
+    const system = fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [335, { ppid: 100, pgrp: 335, start: '33' }],
+      [300, { ppid: 335, pgrp: 300, start: '30' }],
+    );
+    if (order) {
+      const list = system.listPids;
+      system.listPids = () => [...order, ...list().filter((pid) => !order.includes(pid))];
+    }
+    initial?.(system);
+    await withSystem(system, async () => {
+      recordOwned(directory, 100);
+      system.reads.clear();
+      let done = false;
+      system.afterRead = (pid, count) => {
+        if (!done && pid === at[0] && count === at[1]) {
+          done = true;
+          change(system);
+        }
+      };
+      await disposeOwned(directory);
+      assert.deepEqual(signalledAt(system, 300), [], `${what}: 300 is not signalled`);
+      if (!fixtureOwns.includes(335))
+        assert.deepEqual(signalledAt(system, 335), [], `${what}: the stranger at 335 is not`);
+      assert.equal(system.table.has(300), true, `${what}: 300 is left alone`);
+      assert.equal(killed(system).includes(100), true, `${what}: the fixture's 100 is stopped`);
+    });
+    assert.equal(existsSync(directory), false, what);
+  }
+});
+
+test('an adopted pid is proven by a chain read twice: a number taken over in between proves nothing', async () => {
+  // A test learns of 301. When it is read, 301 is the child of a stranger at 300; then the stranger
+  // exits (301 goes to init) and the fixture's 100 forks a child that gets the number 300. Read
+  // once, the chain 301 -> 300 -> 100 looks like the fixture's.
+  const directory = ownedDirectory('drill-owner-adopt-chain-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [300, { ppid: 1, pgrp: 300, start: '99' }],
+    [301, { ppid: 300, pgrp: 301, start: '31' }],
+  );
+  await withSystem(system, async () => {
+    recordOwned(directory, 100);
+    system.reads.clear();
+    system.afterRead = (pid, count) => {
+      if (pid === 301 && count === 2) {
+        system.table.get(301).ppid = 1;
+        system.table.set(300, { state: 'S', ppid: 100, pgrp: 300, start: '30' });
+      }
+    };
+    assert.throws(() => adoptPid(directory, 301), /cannot be shown to descend/);
+    system.afterRead = undefined;
+    await disposeOwned(directory);
+    assert.deepEqual(signalledAt(system, 301), [], '301 is not the fixture’s and is not signalled');
+    assert.equal(system.table.has(301), true);
   });
 });
 
