@@ -883,6 +883,7 @@ test('a shard, services or run that YAML builds as a mapping is a problem, not a
   const gate = structuredClone(migrationGate());
   const chain = gate.workflow.jobs[CHAIN_JOB];
   chain.strategy.matrix.include[0].shard = odd;
+  chain.strategy.matrix.include[0].services = '';
   chain.strategy.matrix.include[1].services = odd;
   const guards = gate.workflow.jobs[GUARDS_JOB];
   guards.steps.find((candidate) => candidate.run).run = odd;
@@ -890,6 +891,10 @@ test('a shard, services or run that YAML builds as a mapping is a problem, not a
   assert.doesNotThrow(() => (problems = gateProblems(gate)));
   assert.ok(
     problems.some((problem) => /which is not a service with migrations/.test(problem)),
+    problems.join('\n'),
+  );
+  assert.ok(
+    problems.some((problem) => /shard \{"toString":"x"\} lists no services/.test(problem)),
     problems.join('\n'),
   );
 });

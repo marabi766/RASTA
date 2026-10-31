@@ -411,6 +411,10 @@ test('a budget entry that is not a whole number of minutes is a problem, not a p
   assert.deepEqual(jobBudgetProblems(bare, [], { slow: undefined }, {}), [
     'slow has a setup allowance in JOB_SETUP_MINUTES that is not a positive whole number of minutes',
   ]);
+  // Declared and wrong is one problem, not also "no allowance".
+  assert.deepEqual(jobBudgetProblems(jobs, [], { slow: undefined }, {}), [
+    'slow has a setup allowance in JOB_SETUP_MINUTES that is not a positive whole number of minutes',
+  ]);
   assert.deepEqual(jobBudgetProblems(jobs, [], { slow: 1 }, { slow: undefined }), [
     'slow has a floor in JOB_FLOOR_MINUTES that is not a positive whole number of minutes',
   ]);
