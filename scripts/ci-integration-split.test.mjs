@@ -332,7 +332,10 @@ test('a job outside the split is held to its cumulative budget too', () => {
   const unknown = real();
   const [step] = limitedSteps(unknown.jobs['trivy-db']);
   step['timeout-minutes'] = '${{ vars.MINUTES }}';
-  fails(unknown, /^trivy-db: ".*" has a timeout-minutes that is not a number of minutes/);
+  fails(
+    unknown,
+    /^trivy-db: ".*" has a timeout-minutes that is not a positive whole number of minutes/,
+  );
   const gone = real();
   delete gone.jobs['migration-guards'];
   fails(gone, /^migration-guards has a declared time budget but is not a job/);
@@ -380,25 +383,84 @@ test('a job named like an inherited property is not given a floor either', () =>
   }
 });
 
-test('a budget entry that is not a number of minutes is a problem, not a pass', () => {
+test('a budget entry that is not a whole number of minutes is a problem, not a pass', () => {
   const jobs = {
     slow: { 'timeout-minutes': 5, steps: [{ name: 'a', run: 'true', 'timeout-minutes': 4 }] },
   };
-  for (const bad of [() => 'x', 'x', null, NaN, 0, -1, {}]) {
+  // `undefined` is an own entry that is declared and wrong, not an absent one (N2 of the #509 r1 review).
+  for (const bad of [() => 'x', 'x', null, undefined, NaN, Infinity, 0, -1, 0.5, 1.5, {}]) {
     const setup = jobBudgetProblems(jobs, [], { slow: bad }, {});
     assert.ok(
       setup.some((problem) =>
-        /^slow has a setup allowance .* not a number of minutes/.test(problem),
+        /^slow has a setup allowance .* not a positive whole number of minutes/.test(problem),
       ),
       String(bad),
     );
     const floor = jobBudgetProblems(jobs, [], { slow: 1 }, { slow: bad });
     assert.ok(
-      floor.some((problem) => /^slow has a floor .* not a number of minutes/.test(problem)),
+      floor.some((problem) =>
+        /^slow has a floor .* not a positive whole number of minutes/.test(problem),
+      ),
       String(bad),
     );
   }
   assert.deepEqual(jobBudgetProblems(jobs, [], { slow: 1 }, { slow: 5 }), []);
+  // The tables are checked whether or not a job uses the entry: a job without step limits has
+  // no use for a setup allowance, and a floor does not need the allowance.
+  const bare = { slow: { 'timeout-minutes': 5, steps: [] } };
+  assert.deepEqual(jobBudgetProblems(bare, [], { slow: undefined }, {}), [
+    'slow has a setup allowance in JOB_SETUP_MINUTES that is not a positive whole number of minutes',
+  ]);
+  assert.deepEqual(jobBudgetProblems(jobs, [], { slow: 1 }, { slow: undefined }), [
+    'slow has a floor in JOB_FLOOR_MINUTES that is not a positive whole number of minutes',
+  ]);
+});
+
+test('minutes are positive whole numbers everywhere: a fraction is refused, not accepted', () => {
+  const mutations = {
+    'the aggregate timeout': (w) => (w.jobs[AGGREGATE_JOB]['timeout-minutes'] = 0.5),
+    'a split job timeout': (w) => (w.jobs['integration-suites']['timeout-minutes'] = 70.5),
+    'another job timeout': (w) => (w.jobs['prometheus-rules']['timeout-minutes'] = 0.5),
+    'an inventoried step timeout': (w) =>
+      (stepNamed(w, 'Integration tests')['timeout-minutes'] = 0.5),
+    'a non-inventoried step timeout': (w) =>
+      (w.jobs['integration-suites'].steps.find(
+        (step) => step.name === 'PostgreSQL connection ceiling',
+      )['timeout-minutes'] = 0.5),
+    'a step timeout past its job limit': (w) =>
+      (stepNamed(w, 'Integration tests')['timeout-minutes'] = 20.5),
+    'a job timeout above an integer floor': (w) => (w.jobs.quality['timeout-minutes'] = 37.5),
+  };
+  for (const [what, mutate] of Object.entries(mutations)) {
+    const workflow = real();
+    mutate(workflow);
+    assert.notDeepEqual(checkIntegrationSplit(workflow), [], what);
+  }
+  const jobs = {
+    slow: { 'timeout-minutes': 5.5, steps: [{ name: 'a', run: 'true', 'timeout-minutes': 4 }] },
+  };
+  assert.ok(jobBudgetProblems(jobs, [], { slow: 1 }, {}).length > 0);
+  assert.ok(jobBudgetProblems(jobs, [], { slow: 1.5 }, {}).length > 0);
+  assert.ok(jobBudgetProblems(jobs, [], { slow: 1 }, { slow: 1.5 }).length > 0);
+});
+
+test('a step named like an inherited property is an ordinary step, not a crash', () => {
+  assert.equal(INHERITED_KEYS.length, 12, INHERITED_KEYS.join(', '));
+  for (const name of INHERITED_KEYS) {
+    const workflow = real();
+    workflow.jobs['integration-suites'].steps.push({ name, run: 'true' });
+    assert.deepEqual(checkIntegrationSplit(workflow), [], name);
+    // And it is not mistaken for an inventory entry: dropping a real one is still reported.
+    dropStep(workflow.jobs[jobRunning(workflow, 'Audit coverage gate')], 'Audit coverage gate');
+    fails(workflow, /no integration-\* job runs "Audit coverage gate"/);
+  }
+  // A name that is not a string never matches the inventory either (an array
+  // of one name used to coerce to it and then miss the table that counts it).
+  for (const name of [['Audit coverage gate'], { toString: 'x' }, 7, null, true]) {
+    const workflow = real();
+    workflow.jobs['integration-suites'].steps.push({ name, run: 'true' });
+    assert.deepEqual(checkIntegrationSplit(workflow), [], JSON.stringify(name));
+  }
 });
 
 test('a job whose measured runtime needed its limit may not go back below it', () => {
