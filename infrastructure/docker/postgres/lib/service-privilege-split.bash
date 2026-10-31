@@ -229,79 +229,126 @@ _runtime_reachable_sql() {
   printf '%s' "${sql//RUNTIME_ROLE/\'${1}\'}"
 }
 
-# Revoke actual ACL entries as THEIR grantor. PG16 object REVOKE GRANTED BY
-# cannot name a different current_user. The privileged session switches roles
-# for each grant, then resets; CASCADE removes dependent grant chains too.
-# 'extension' is separate so every mode runs it AFTER application table grants.
+# The closure and the forbidden rights, both shared with the catalogue check:
+# runtime-forbidden.sql over the runtime role's runtime-reachable.sql.
+_runtime_forbidden_sql() {
+  local forbidden
+  forbidden="$(cat "$(dirname "${BASH_SOURCE[0]}")/runtime-forbidden.sql")"
+  printf 'WITH reachable AS (%s), forbidden AS (%s)' "$(_runtime_reachable_sql "${1}")" \
+    "${forbidden//MIGRATOR_ROLE/\'${2}\'}"
+}
+
+# Revoke actual ACL entries as THEIR grantor: PG16 object REVOKE GRANTED BY
+# cannot name a different current_user, so the privileged session switches to
+# each grantor, then resets. CASCADE takes dependent grant chains with it — and
+# so may take an entry a later REVOKE would have named, whose grantor then
+# holds nothing on the object and is refused (#421 r1 F1). So the cleanup runs
+# to a fixed point over the LIVE ACL (#421 r1 F1):
+#
+#   * one entry at a time, in grantor and command order, the ACL read afresh
+#     before every REVOKE, so an entry a CASCADE took is simply gone;
+#   * an entry whose grantor no longer holds the grant option — PG16 keeps a
+#     column grant made under a TABLE-level grant option when that option is
+#     revoked, and its grantor can revoke it no more — is revoked with the
+#     option lent by the object's owner and taken back at once, in the same
+#     transaction, so the grantor ends with exactly what it had;
+#   * each REVOKE must remove its own entry, so the loop ends within as many
+#     passes as there were entries; it fails closed if one does not.
+#
+# The loop ending is not convergence: assert_no_forbidden_rights, last in the
+# split, is. 'extension' is separate so every mode runs it AFTER application
+# table grants.
 _restrict_reachable_acl() {
   local db="$1" runtime="$2" migrator="$3" scope="$4"
   _svc_split_psql "${db}" "DO \$\$
-    DECLARE item record;
+    DECLARE
+      pending CONSTANT text := \$q\$$(_runtime_forbidden_sql "${runtime}" "${migrator}"),
+        entries AS (
+          SELECT DISTINCT a.grantor, a.grantee, f.privilege, f.acl, f.owner,
+            f.revoke_prefix, f.revoke_what, f.revoke_on
+          FROM forbidden f CROSS JOIN LATERAL aclexplode(f.acl) a
+          WHERE f.scope = '${scope}' AND a.privilege_type = f.privilege
+            AND a.grantee IN (SELECT oid FROM reachable)
+            AND (NOT f.public_only OR a.grantee = 0))
+        SELECT pg_get_userbyid(e.grantor) AS grantor,
+          format('%sREVOKE %s ON %s FROM %s CASCADE', e.revoke_prefix, e.revoke_what,
+            e.revoke_on, CASE WHEN e.grantee = 0 THEN 'PUBLIC'
+                              ELSE quote_ident(pg_get_userbyid(e.grantee)) END) AS command,
+          pg_get_userbyid(e.owner) AS owner,
+          format('GRANT %s ON %s TO %I WITH GRANT OPTION', e.revoke_what, e.revoke_on,
+            pg_get_userbyid(e.grantor)) AS lend,
+          format(CASE WHEN EXISTS (SELECT 1 FROM aclexplode(e.acl) o WHERE o.grantor = e.owner
+                   AND o.grantee = e.grantor AND o.privilege_type = e.privilege)
+                 THEN 'REVOKE GRANT OPTION FOR %s ON %s FROM %I CASCADE'
+                 ELSE 'REVOKE %s ON %s FROM %I CASCADE' END,
+            e.revoke_what, e.revoke_on, pg_get_userbyid(e.grantor)) AS take_back,
+          e.revoke_prefix = '' AND e.grantor <> e.owner AS lendable
+        FROM entries e\$q\$;
+      still CONSTANT text := 'SELECT EXISTS (SELECT 1 FROM (' || pending || ') p
+        WHERE p.grantor = \$1 AND p.command = \$2)';
+      item record;
+      passes integer;
+      remains boolean;
     BEGIN
-      FOR item IN
-        WITH reachable AS ($(_runtime_reachable_sql "${runtime}")),
-        relations AS (
-          SELECT c.*, n.nspname,
-            EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass
-              AND d.objid = c.oid AND d.deptype = 'e') AS extension
-          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-            AND n.nspname NOT LIKE 'pg\\_%'
-            AND c.relkind IN ('r','p','v','m','f','S')
-        ), entries AS (
-          SELECT a.grantor, a.grantee, a.privilege_type AS privilege,
-            format('%s %I.%I', CASE WHEN c.relkind = 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
-              c.nspname, c.relname) AS target, '' AS column_sql
-          FROM relations c, LATERAL aclexplode(c.relacl) a
-          WHERE ('${scope}' = 'extension' AND c.extension AND
-              ((c.relkind = 'S' AND a.privilege_type IN ('USAGE','UPDATE')) OR
-               (c.relkind <> 'S' AND a.privilege_type <> 'SELECT')))
-             OR ('${scope}' = 'general' AND
-              (c.relname = '_prisma_migrations' OR
-               (c.relkind <> 'S' AND a.privilege_type IN ('TRUNCATE','REFERENCES','TRIGGER'))))
-          UNION ALL
-          SELECT a.grantor, a.grantee, a.privilege_type,
-            format('TABLE %I.%I', c.nspname, c.relname), format(' (%I)', att.attname)
-          FROM relations c JOIN pg_attribute att ON att.attrelid = c.oid,
-            LATERAL aclexplode(att.attacl) a
-          WHERE ('${scope}' = 'extension' AND c.extension AND a.privilege_type <> 'SELECT')
-             OR ('${scope}' = 'general' AND
-                 (c.relname = '_prisma_migrations' OR a.privilege_type = 'REFERENCES'))
-          UNION ALL
-          SELECT a.grantor, a.grantee, a.privilege_type,
-            format('SCHEMA %I', n.nspname), ''
-          FROM pg_namespace n, LATERAL aclexplode(n.nspacl) a
-          WHERE '${scope}' = 'general' AND a.privilege_type = 'CREATE'
-            AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'
-          UNION ALL
-          SELECT a.grantor, a.grantee, a.privilege_type, format('DATABASE %I', d.datname), ''
-          FROM pg_database d, LATERAL aclexplode(d.datacl) a
-          WHERE '${scope}' = 'general' AND d.datname = current_database()
-            AND a.privilege_type IN ('CREATE','TEMPORARY')
-          UNION ALL
-          SELECT a.grantor, a.grantee, a.privilege_type,
-            format('FUNCTION %s', p.oid::regprocedure), ''
-          FROM pg_proc p, LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
-          WHERE '${scope}' = 'general'
-            AND p.pronamespace IN (SELECT oid FROM pg_namespace WHERE nspname NOT IN ('pg_catalog','information_schema') AND nspname NOT LIKE 'pg\\_%')
-            AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass
-              AND d.objid = p.oid AND d.deptype = 'e')
-            AND ((a.grantee = 0 AND p.proowner = '${migrator}'::regrole) OR p.prosecdef OR p.prorettype IN ('trigger'::regtype,'event_trigger'::regtype))
-        )
-        SELECT DISTINCT pg_get_userbyid(e.grantor) AS grantor,
-          format('REVOKE %s%s ON %s FROM %s CASCADE', e.privilege, e.column_sql, e.target,
-            CASE WHEN e.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(e.grantee)) END) AS command
-        FROM entries e JOIN reachable r ON r.oid = e.grantee
+      EXECUTE 'SELECT count(*) FROM (' || pending || ') p' INTO passes;
       LOOP
-        EXECUTE format('SET LOCAL ROLE %I', item.grantor);
-        EXECUTE item.command;
-        EXECUTE 'RESET ROLE';
+        EXECUTE pending || ' ORDER BY grantor, command LIMIT 1' INTO item;
+        EXIT WHEN item.command IS NULL;
+        IF passes = 0 THEN
+          RAISE EXCEPTION 'the % ACL cleanup did not converge: % (as %) is still pending',
+            '${scope}', item.command, item.grantor;
+        END IF;
+        passes := passes - 1;
+        BEGIN
+          EXECUTE format('SET LOCAL ROLE %I', item.grantor);
+          EXECUTE item.command;
+          EXECUTE 'RESET ROLE';
+        EXCEPTION WHEN insufficient_privilege THEN
+          NULL; -- an orphaned entry: lent its grant option below
+        END;
+        EXECUTE still INTO STRICT remains USING item.grantor, item.command;
+        IF remains AND item.lendable THEN
+          EXECUTE format('SET LOCAL ROLE %I', item.owner);
+          EXECUTE item.lend;
+          EXECUTE format('SET LOCAL ROLE %I', item.grantor);
+          EXECUTE item.command;
+          EXECUTE format('SET LOCAL ROLE %I', item.owner);
+          EXECUTE item.take_back;
+          EXECUTE 'RESET ROLE';
+          EXECUTE still INTO STRICT remains USING item.grantor, item.command;
+        END IF;
+        IF remains THEN
+          RAISE EXCEPTION 'the % ACL cleanup did not converge: % (as %) left its entry',
+            '${scope}', item.command, item.grantor;
+        END IF;
       END LOOP;
     END \$\$;"
 }
 
+# assert_no_forbidden_rights <database> <runtime> <migrator>
+#
+# The split's last word, and what convergence means: no role of the closure
+# HOLDS any right of runtime-forbidden.sql (has_*_privilege), in any scope —
+# what scripts/check-db-runtime-privileges.mjs would report from the same file.
+# A right no REVOKE removes (a predefined role's) fails the split here, as it
+# fails the check, instead of the split ending as if it had converged.
+assert_no_forbidden_rights() {
+  local db="$1" runtime="$2" migrator="$3"
+  _svc_split_psql "${db}" "DO \$\$
+    DECLARE left_over text;
+    BEGIN
+      EXECUTE \$q\$$(_runtime_forbidden_sql "${runtime}" "${migrator}")
+        SELECT string_agg(DISTINCT label, '; ' ORDER BY label) FROM forbidden WHERE held\$q\$
+        INTO left_over;
+      IF left_over IS NOT NULL THEN
+        RAISE EXCEPTION 'the split did not converge: % still holds %', '${runtime}', left_over;
+      END IF;
+    END \$\$;"
+}
+
+# restrict_extension_relations <database> <runtime> [migrator]
 restrict_extension_relations() {
-  _restrict_reachable_acl "$1" "$2" "$2" extension
+  _restrict_reachable_acl "$1" "$2" "${3:-${2}_migrator}" extension
 }
 
 restrict_service_functions_and_rights() {
@@ -311,27 +358,54 @@ restrict_service_functions_and_rights() {
 }
 
 # Repair grants stripped by pre-407 splitters, even when migrations are already
-# recorded as applied. Bootstrap may precede the helper's creating migration.
-# Never turn an allowlisted signature into a SECURITY DEFINER/trigger back door.
+# recorded as applied. Never turn an allowlisted signature into a SECURITY
+# DEFINER/trigger back door. Every line of runtime-function-grants.txt is read —
+# the last one too, with or without its newline — and a malformed one refuses.
+# A listed function that does not exist is skipped only while the migration
+# that creates it has not been applied (bootstrap, a pending, failed or
+# rolled-back one: it grants EXECUTE itself when it runs); with that migration
+# recorded as applied in the ledger, it is gone, and the split refuses (#421 r1
+# F5). The types are schema-qualified, so search_path decides nothing.
 restore_runtime_function_grants() {
-  local svc="$1" db="$2" runtime="$3" migrator="$4" service signature
-  while IFS='|' read -r service signature; do
+  local svc="$1" db="$2" runtime="$3" migrator="$4" service signature migration extra
+  local signature_re='^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\([A-Za-z0-9_.",]*\)$'
+  local migration_re='^[0-9]{14}_[a-z0-9_]+$'
+  while IFS='|' read -r service signature migration extra || [[ -n "${service}" ]]; do
+    [[ -z "${service}" || "${service}" == \#* ]] && continue
+    if [[ -n "${extra}" || ! "${service}" =~ ^[a-z][a-z0-9]*$ || ! "${signature}" =~ ${signature_re} ||
+      ! "${migration}" =~ ${migration_re} ]]; then
+      echo "runtime-function-grants.txt: malformed line for ${service:-?}; nothing restored" >&2
+      return 1
+    fi
     [[ "${service}" == "${svc}" ]] || continue
     _svc_split_psql "${db}" "DO \$\$
-      DECLARE fn oid := to_regprocedure('${signature}');
+      DECLARE
+        fn oid := to_regprocedure('${signature}');
+        recorded boolean := false;
       BEGIN
-        IF fn IS NOT NULL THEN
-          IF NOT EXISTS (SELECT 1 FROM pg_proc p WHERE p.oid = fn
-            AND p.proowner = '${migrator}'::regrole AND NOT p.prosecdef
-            AND p.prorettype NOT IN ('trigger'::regtype,'event_trigger'::regtype)
-            AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass
-              AND d.objid = p.oid AND d.deptype = 'e')) THEN
-            RAISE EXCEPTION 'required runtime function has unsafe ownership or definition';
+        IF fn IS NULL THEN
+          -- Read only once the ledger exists: a bootstrap runs before it does.
+          IF to_regclass('public._prisma_migrations') IS NOT NULL THEN
+            EXECUTE 'SELECT EXISTS (SELECT 1 FROM public._prisma_migrations
+                       WHERE migration_name = \$1 AND finished_at IS NOT NULL
+                         AND rolled_back_at IS NULL)' INTO recorded USING '${migration}';
           END IF;
-          EXECUTE format('SET LOCAL ROLE %I', '${migrator}');
-          EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', fn::regprocedure, '${runtime}');
-          EXECUTE 'RESET ROLE';
+          IF recorded THEN
+            RAISE EXCEPTION 'required runtime function % is missing, yet migration % is recorded as applied',
+              '${signature}', '${migration}';
+          END IF;
+          RETURN;
         END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_proc p WHERE p.oid = fn
+          AND p.proowner = '${migrator}'::regrole AND NOT p.prosecdef
+          AND p.prorettype NOT IN ('trigger'::regtype,'event_trigger'::regtype)
+          AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass
+            AND d.objid = p.oid AND d.deptype = 'e')) THEN
+          RAISE EXCEPTION 'required runtime function has unsafe ownership or definition';
+        END IF;
+        EXECUTE format('SET LOCAL ROLE %I', '${migrator}');
+        EXECUTE format('GRANT EXECUTE ON ROUTINE %s TO %I', fn::regprocedure, '${runtime}');
+        EXECUTE 'RESET ROLE';
       END \$\$;" || return 1
   done < "$(dirname "${BASH_SOURCE[0]}")/runtime-function-grants.txt"
 }
@@ -391,12 +465,14 @@ split_service_privileges() {
   restore_runtime_function_grants "${svc}" "${db}" "${runtime}" "${migrator}" || return 1
 
   grant_service_tables "${svc}" "${db}" "${mode}"
-  restrict_extension_relations "${db}" "${runtime}" || return 1
+  restrict_extension_relations "${db}" "${runtime}" "${migrator}" || return 1
 
   # The migration ledger is the migrator's alone, from before the first
   # migration: a runtime role that could write it could mark a guard-creating
   # migration as already applied. Last, so the grants above cannot reach it.
   own_migration_ledger "${db}" public "${migrator}" "${runtime}"
+
+  assert_no_forbidden_rights "${db}" "${runtime}" "${migrator}" || return 1
 
   ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
   ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
@@ -449,10 +525,11 @@ split_audit_database_privileges() {
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA audit FROM ${runtime}"
   _svc_split_psql "${db}" "GRANT USAGE ON SCHEMA audit TO ${runtime}"
   restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" || return 1
-  restrict_extension_relations "${db}" "${runtime}" || return 1
+  restrict_extension_relations "${db}" "${runtime}" "${migrator}" || return 1
   # Its migrations run with `?schema=audit`, so that is where Prisma keeps the
   # ledger; the same pre-creation, so it never holds a runtime grant either.
   own_migration_ledger "${db}" audit "${migrator}" "${runtime}"
+  assert_no_forbidden_rights "${db}" "${runtime}" "${migrator}" || return 1
 
   ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
   ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1

@@ -874,14 +874,17 @@ jobs:
           # maintenance-service's usage projection start their consumers in
           # their own onModuleInit, which Nest runs before AppModule's. Started
           # with its owner's URL, each must be gone before a consumer joins, a
-          # USAGE_RECORDED queued for it neither consumed nor committed. Before
-          # either starts, so neither group has run; the positive controls
+          # USAGE_RECORDED queued for it neither consumed nor committed — refused
+          # by the environment guard (the URL's user, #421 r1 F2), and, with its
+          # runtime URL while the migrator lends it CREATE, by the preflight.
+          # Before either starts, so neither group has run; the positive controls
           # follow the start step. scripts/runtime-preflight.e2e.mjs.
           ( asset_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service asset-service)" && \
             fleet_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service fleet-service)" && \
             eval "${asset_credentials}" && eval "${fleet_credentials}" && \
             PORT=3103 PREFLIGHT_STATE_DIR=/tmp/rasta-web-e2e-logs \
             PREFLIGHT_OWNER_URL=postgresql://rasta_asset_migrator:rasta_asset_migrator_dev_password@localhost:5432/rasta_asset?schema=public \
+            DATABASE_URL_ASSET=postgresql://rasta_asset:rasta_asset_dev_password@localhost:5432/rasta_asset?schema=public \
             node scripts/runtime-preflight.e2e.mjs refused asset-service )
           ( maintenance_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service maintenance-service)" && \
             fleet_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service fleet-service)" && \
@@ -4084,7 +4087,9 @@ jobs:
           unset KAFKA_SECRETS_DIR
           mkdir -p /tmp/rasta-logs
 
-          # D-045 (Codex on #178): started with its owner's URL, a service is gone
+          # D-045 (Codex on #178): started with its owner's URL — refused by the
+          # environment guard (#421 r1 F2) — or with its runtime URL while the
+          # migrator lends it CREATE — refused by the preflight — a service is gone
           # before Nest builds a single provider. audit-service: a Kafka event
           # queued for its domain projector is neither consumed nor committed.
           # identity-service: its Keycloak re-projection consumer, which starts
@@ -4102,6 +4107,7 @@ jobs:
             eval "${identity_credentials}" && \
             PORT=3101 \
             PREFLIGHT_OWNER_URL=postgresql://rasta_identity_migrator:rasta_identity_migrator_dev_password@localhost:5432/rasta_identity?schema=public \
+            DATABASE_URL_IDENTITY=postgresql://rasta_identity:rasta_identity_dev_password@localhost:5432/rasta_identity?schema=public \
             node scripts/runtime-preflight.e2e.mjs refused identity-service )
 
           ( kafka_credentials="$(KAFKA_SECRETS_DIR="${kafka_secrets_dir}" bash infrastructure/docker/kafka/kafka-credentials.sh service identity-service)" && \

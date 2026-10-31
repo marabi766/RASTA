@@ -1,9 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
 import {
   FINDINGS_SQL,
   TIMEZONE_FINDINGS_SQL,
   classifyServices,
+  findingsSql,
+  parseRequiredRuntimeFunctions,
+  requiredRuntimeFunctions,
   timezoneVerdict,
   verdict,
 } from './check-db-runtime-privileges-lib.mjs';
@@ -66,12 +70,15 @@ test('the query asks about every right the PM ruled out, through role membership
     'rolcreaterole',
     'rolbypassrls',
     "'owns database '",
-    "'CREATE on database '",
     "'owns schema '",
-    "'CREATE on schema '",
     "'owns function '",
     "'owns type '",
-    "'TRUNCATE', 'REFERENCES', 'TRIGGER'",
+    "ARRAY['CREATE', 'TEMPORARY'], '%s on database %s'",
+    "ARRAY['CREATE'], '%s on schema %s'",
+    "ARRAY['TRUNCATE', 'REFERENCES', 'TRIGGER'], '%s on %s'",
+    "ARRAY['UPDATE'], '%s on sequence %s'",
+    "c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')",
+    'pg_default_acl',
     '_prisma_migrations',
     "pg_has_role(me.oid, t.relowner, 'MEMBER')",
     "pg_has_role(me.oid, m.oid, 'MEMBER')",
@@ -80,6 +87,72 @@ test('the query asks about every right the PM ruled out, through role membership
     assert.ok(FINDINGS_SQL.includes(fragment), fragment);
   }
   assert.match(FINDINGS_SQL, /rolname = :'runtime'/);
+});
+
+// #421 r1 F3: one rule set. The split revokes by the very file the check
+// reports from, and keeps no privilege list of its own.
+test('the split and the check read one forbidden-rights file', () => {
+  const lib = new URL('../infrastructure/docker/postgres/lib/', import.meta.url);
+  const rules = readFileSync(new URL('runtime-forbidden.sql', lib), 'utf8');
+  const split = readFileSync(new URL('service-privilege-split.bash', lib), 'utf8');
+  assert.ok(
+    FINDINGS_SQL.includes(rules.replaceAll('MIGRATOR_ROLE', "(:'runtime' || '_migrator')")),
+  );
+  assert.match(split, /runtime-forbidden\.sql/);
+  const cleanup = split.slice(
+    split.indexOf('_restrict_reachable_acl() {'),
+    split.indexOf('restrict_extension_relations() {'),
+  );
+  for (const privilege of ['TRUNCATE', 'REFERENCES', 'TRIGGER', 'TEMPORARY', 'USAGE']) {
+    assert.ok(!cleanup.includes(`'${privilege}'`), `the split names ${privilege} itself`);
+  }
+  assert.ok(!/relkind|pg_proc|pg_class/.test(cleanup), 'the split selects objects itself');
+});
+
+// #421 r1 F5: the list the split repairs from and the check holds to.
+test('the required runtime function list: every line, the last one too; malformed refuses', () => {
+  const line =
+    'economic|public.f(text,public."BusinessLine")|20261016120000_commission_business_lines';
+  assert.deepEqual(parseRequiredRuntimeFunctions(`# c\n${line}`), [line.split('|')]);
+  assert.deepEqual(parseRequiredRuntimeFunctions(`${line}\n`), [line.split('|')]);
+  for (const bad of [
+    'economic|public.f(text)',
+    `${line}|extra`,
+    "economic|public.f(text');DROP|20261016120000_x",
+    'economic|f(text)|20261016120000_x',
+    'economic|public.f(text)|20261016_x',
+  ]) {
+    assert.throws(() => parseRequiredRuntimeFunctions(bad), /malformed/, bad);
+  }
+  assert.ok(requiredRuntimeFunctions.length >= 4);
+  // The types are schema-qualified: search_path decides nothing.
+  for (const [, signature] of requiredRuntimeFunctions) {
+    const types = signature.slice(signature.indexOf('(') + 1, -1).split(',');
+    for (const type of types) {
+      assert.ok(/^(text|integer|public\."[A-Za-z]+")$/.test(type), `${signature}: ${type}`);
+    }
+  }
+});
+
+test('each required function maps to the migration that creates it and grants its EXECUTE', () => {
+  for (const [service, signature, migration] of requiredRuntimeFunctions) {
+    const dir = new URL(`../services/${service}-service/prisma/migrations/`, import.meta.url);
+    assert.ok(readdirSync(dir).includes(migration), `${service}: no migration ${migration}`);
+    const sql = readFileSync(new URL(`${migration}/migration.sql`, dir), 'utf8');
+    const name = signature.slice(signature.indexOf('.') + 1, signature.indexOf('('));
+    assert.match(sql, new RegExp(`CREATE (OR REPLACE )?FUNCTION "?${name}"?\\(`), signature);
+    assert.match(
+      sql,
+      new RegExp(`GRANT EXECUTE ON FUNCTION "?${name}"?\\([^)]*\\) TO rasta_${service};`),
+      signature,
+    );
+  }
+});
+
+test('a test holds a role to its own required list', () => {
+  const sql = findingsSql([['d825e1', 'public.f(text)', '20261016120000_x']]);
+  assert.ok(sql.includes("('d825e1', 'public.f(text)')"));
+  assert.ok(!sql.includes("('economic',"));
 });
 
 test('UTC session defaults: any finding fails, none passes (L7-37)', () => {

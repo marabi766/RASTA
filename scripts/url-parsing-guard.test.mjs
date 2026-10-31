@@ -63,6 +63,12 @@ const ALLOWED = Object.freeze([
     reason: 'a repository file: a constant migration name against import.meta.url',
   },
   {
+    file: 'scripts/testing-dev-only-source.mjs',
+    call: 'new URL(target, pathToFileURL(join(dir, sep)))',
+    reason:
+      "a package.json exports/imports target against its package's own file URL, as Node resolves it (percent-escapes, ?query); a repository file, no configuration",
+  },
+  {
     file: 'services/identity-service/test/audit-stub.ts',
     call: "new URL(request.url ?? '/', 'http://stub.invalid')",
     reason: "the stub server's incoming request path against a literal base; no configuration",
@@ -75,7 +81,8 @@ const ALLOWED = Object.freeze([
   {
     file: 'services/identity-service/test/keycloak-http-stub.ts',
     call: "new URL(request.url ?? '', this.url)",
-    reason: "the stub server's incoming request path against its own loopback base; no configuration",
+    reason:
+      "the stub server's incoming request path against its own loopback base; no configuration",
   },
   {
     file: 'apps/web/src/app/AccountBoundary.tsx',

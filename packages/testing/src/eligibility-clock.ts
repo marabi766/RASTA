@@ -179,6 +179,14 @@ const reviewedClockTemplates: readonly {
   template: string;
   expressions: string | null;
 }[] = [
+  // The procurement digest's trigger path as the runtime role (#421 r1 nit H): a
+  // window opened two hours and closed one hour ago by the database clock, ended
+  // and its empty digest written — far from any eligibility boundary; rolled back.
+  {
+    file: 'scripts/check-db-runtime-privileges.pg.test.mjs',
+    template: '14ea0b06f0ed4ac806b2bdd7ada2e54c8e00ffeb9686d7bab04e98f03218e45a',
+    expressions: null,
+  },
   // publishSql: clears the claim and retry instants (NULL) of rows it marks published.
   {
     file: 'scripts/outbox-b2-fixture.mjs',

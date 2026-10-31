@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
+import { PrismaClient } from '../src/generated/prisma';
 import { databaseUrl } from './helpers';
 
 /**
@@ -14,10 +15,13 @@ import { databaseUrl } from './helpers';
  * neither of the service's gates — main.ts's preflight, AppModule's check —
  * stands in front of it. Pointed at the migrator, it would read identity data
  * and write Keycloak attributes as the database owner. It now runs
- * `preflightRuntimeRole` itself. This runs the real CLI, as the package script
- * does, against a stub Keycloak that counts the requests it receives: with the
- * migrator's URL the process exits 2 naming the role — never the URL — and
- * Keycloak is never called; with the runtime URL it gets past the gate.
+ * `preflightRuntimeRole` itself, after the environment guard. This runs the
+ * real CLI, as the package script does, against a stub Keycloak that counts
+ * the requests it receives: with the migrator's URL the process exits 2 at the
+ * environment guard, which reads the URL's user (#421 r1 F2); as the runtime
+ * role holding CREATE — which no URL shows — it exits 2 at the preflight,
+ * naming the role; never the URL, and Keycloak is never called. With the
+ * runtime URL alone it gets past both gates.
  */
 const SERVICE_DIR = join(__dirname, '..');
 const RUN_TIMEOUT_MS = 90_000;
@@ -106,18 +110,42 @@ describe('the Keycloak projection CLI runs only as the runtime role (D-045)', ()
   });
 
   it.each(['backfill', 'reconcile'] as const)(
-    '%s with the migrator URL exits 2 naming the role, before it reads a row or calls Keycloak',
+    '%s with the migrator URL exits 2 at the environment guard, before it reads a row or calls Keycloak',
     async (mode) => {
       const owner = migratorUrl();
       const run = await runCli(mode, owner, keycloakUrl);
 
       expect(run.code).toBe(2);
       expect(run.output).toMatch(
-        /identity-service refuses to start: it is connected as rasta_identity_migrator/,
+        /Refusing to start: this service's environment holds a database owner credential \(DATABASE_URL\)/,
       );
-      // The refusal names the role and what it owns — never the URL or its password.
+      // The refusal names the variable — never the URL or its password.
       expect(run.output).not.toContain(owner);
       expect(run.output).not.toContain(decodeURIComponent(new URL(owner).password));
+      expect(requests).toBe(0);
+    },
+    RUN_TIMEOUT_MS + 10_000,
+  );
+
+  it.each(['backfill', 'reconcile'] as const)(
+    '%s as the runtime role holding CREATE exits 2 at the preflight naming the role, before it reads a row or calls Keycloak',
+    async (mode) => {
+      // Only the catalogue shows it: the URL is the runtime role's own.
+      const owner = new PrismaClient({ datasources: { db: { url: migratorUrl() } } });
+      let run: CliRun;
+      try {
+        await owner.$executeRawUnsafe('GRANT CREATE ON SCHEMA public TO rasta_identity');
+        run = await runCli(mode, databaseUrl(), keycloakUrl);
+      } finally {
+        await owner.$executeRawUnsafe('REVOKE CREATE ON SCHEMA public FROM rasta_identity');
+        await owner.$disconnect();
+      }
+
+      expect(run.code).toBe(2);
+      expect(run.output).toMatch(
+        /identity-service refuses to start: it is connected as rasta_identity, which holds CREATE on schema public/,
+      );
+      expect(run.output).not.toContain(databaseUrl());
       expect(requests).toBe(0);
     },
     RUN_TIMEOUT_MS + 10_000,

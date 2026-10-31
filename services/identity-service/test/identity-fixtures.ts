@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { ulid } from 'ulid';
-import { runUnscoped, runWithContext } from '@rasta/nest-common';
+import { runUnscoped, runWithContext, tryGetContext } from '@rasta/nest-common';
 import { eligibilityClockWrite } from '@rasta/testing';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { RegistrationIntakeWorker } from '../src/identity/registration-intake.worker';
@@ -183,8 +183,12 @@ export function http(harness: IdentityApiHarness) {
       request(server()).patch(`/v1/users/${userId}`).set('authorization', bearer).send(body),
     listUsers: (bearer: string, query: Record<string, string> = {}) =>
       request(server()).get('/v1/users').query(query).set('authorization', bearer),
-    register: (body: Record<string, unknown>) =>
-      request(server()).post('/v1/registration-requests').send(body),
+    register: (body: Record<string, unknown>, correlationId?: string) => {
+      const call = request(server()).post('/v1/registration-requests');
+      return (
+        correlationId === undefined ? call : call.set('x-correlation-id', correlationId)
+      ).send(body);
+    },
     approve: (bearer: string, registrationId: string) =>
       request(server())
         .post(`/v1/registration-requests/${registrationId}/approve`)
@@ -227,12 +231,13 @@ export async function processRegistrations(harness: IdentityApiHarness): Promise
  * Runs `fn` as the public registration route does: inside an HTTP request
  * that presented no credential (`authType: 'ANONYMOUS'`). An intake is always
  * some request's; outside one there is no origin to record, and it is refused
- * (PR #483 r3 F1).
+ * (PR #483 r3 F1). A test that must tell this request's database work from
+ * the background workers' names its correlation id.
  */
-export function asAnonymousRequest<T>(fn: () => T): T {
+export function asAnonymousRequest<T>(fn: () => T, correlationId: string = ulid()): T {
   return runWithContext(
     {
-      correlationId: ulid(),
+      correlationId,
       requestId: ulid(),
       organizationIds: [],
       roles: [],
@@ -256,4 +261,74 @@ export async function recordRegistration(
   const handled = await service.processRegistrationIntake(intakeId);
   if (handled.outcome !== 'RECORDED') throw new Error(`registration ${handled.outcome}`);
   return handled.registrationId;
+}
+
+/** One thing a request asked the database for, as its shape: no value in it that varies with the data. */
+export interface DatabaseOperation {
+  model?: string;
+  operation: string;
+  /** A raw statement: its text with the parameters as `?`, whitespace collapsed. */
+  statement?: string;
+  /** What each parameter / argument leaf is (`string`, `null`, …), never what it holds. */
+  shape: unknown;
+}
+
+const leafKind = (value: unknown) => (value === null ? 'null' : typeof value);
+const shapeOf = (value: unknown): unknown =>
+  Array.isArray(value)
+    ? value.map(shapeOf)
+    : value !== null &&
+        typeof value === 'object' &&
+        Object.getPrototypeOf(value) === Object.prototype
+      ? Object.fromEntries(Object.entries(value).map(([key, leaf]) => [key, shapeOf(leaf)]))
+      : leafKind(value);
+
+const describeOperation = (model: string | undefined, operation: string, args: unknown) => {
+  const raw = args as { strings?: string[]; values?: unknown[] } | undefined;
+  return Array.isArray(raw?.strings) && Array.isArray(raw?.values)
+    ? ({
+        operation,
+        statement: raw.strings.join('?').replace(/\s+/g, ' ').trim(),
+        shape: raw.values.map(leafKind),
+      } satisfies DatabaseOperation)
+    : ({ model, operation, shape: shapeOf(args) } satisfies DatabaseOperation);
+};
+
+/**
+ * What the database is asked for by one request, as an ordered list of shapes —
+ * for a property about the *work* a request does (what it reads, writes and
+ * constrains), which is what a time measurement can only estimate. Every
+ * operation of the service's client passes one extension that records it under
+ * the correlation id of the request it ran in (`tryGetContext`), so the
+ * background workers' queries on the same client are never in a list. The
+ * client is swapped for the extended one only until {@link stop}.
+ */
+export function observeDatabaseWork(prisma: PrismaService) {
+  const real = prisma.client;
+  const seen = new Map<string, DatabaseOperation[]>();
+  const probe = real.$extends({
+    name: 'database-work-probe',
+    query: {
+      $allOperations({ model, operation, args, query }) {
+        const correlationId = tryGetContext()?.correlationId;
+        const log = correlationId === undefined ? undefined : seen.get(correlationId);
+        log?.push(describeOperation(model, operation, args));
+        return query(args);
+      },
+    },
+  });
+  Object.defineProperty(prisma, 'client', { value: probe, configurable: true, writable: true });
+  return {
+    /** Runs `run` as one request with a correlation id of its own; resolves to what it asked the database. */
+    async during(run: (correlationId: string) => Promise<unknown>): Promise<DatabaseOperation[]> {
+      const correlationId = ulid();
+      const log: DatabaseOperation[] = [];
+      seen.set(correlationId, log);
+      await run(correlationId);
+      return log;
+    },
+    stop() {
+      Object.defineProperty(prisma, 'client', { value: real, configurable: true, writable: true });
+    },
+  };
 }

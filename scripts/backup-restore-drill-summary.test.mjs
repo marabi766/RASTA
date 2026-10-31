@@ -350,7 +350,7 @@ function runSummary(directory, report, exitCode, extra = []) {
   return spawnSync(
     process.execPath,
     [summaryCli, '--report', reportPath, '--exit-code', exitCode, ...extra],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL' },
   );
 }
 
@@ -397,7 +397,11 @@ test('summary CLI: a bad command line is refused by position, never repeated', (
     [secret, 'x'],
     ['--report', secret, '--report', secret, '--exit-code', '0'],
   ]) {
-    const result = spawnSync(process.execPath, [summaryCli, ...argv], { encoding: 'utf8' });
+    const result = spawnSync(process.execPath, [summaryCli, ...argv], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      killSignal: 'SIGKILL',
+    });
     assert.equal(result.status, 2, argv.join(' '));
     assert.ok(!`${result.stdout}${result.stderr}`.includes('SENTINEL_ARGUMENT'));
   }
@@ -486,6 +490,8 @@ test('summary CLI: its own failures are one fixed message, never a stack, a path
       const cli = sandboxedSummary(join(directory, without[0]), { without });
       const result = spawnSync(process.execPath, [cli, '--report', report, '--exit-code', '0'], {
         encoding: 'utf8',
+        timeout: 60_000,
+        killSignal: 'SIGKILL',
       });
       const printed = `${result.stdout}${result.stderr}`;
       assert.equal(result.status, 1, without[0]);
@@ -498,6 +504,8 @@ test('summary CLI: its own failures are one fixed message, never a stack, a path
     const fine = sandboxedSummary(join(directory, 'fine'));
     const ok = spawnSync(process.execPath, [fine, '--report', report, '--exit-code', '0'], {
       encoding: 'utf8',
+      timeout: 60_000,
+      killSignal: 'SIGKILL',
     });
     assert.equal(ok.status, 0, ok.stderr);
     assert.match(ok.stdout, /PASSED/);
@@ -516,6 +524,8 @@ test('summary CLI: a report that claims two databases is not a pass against the 
       [summaryCli, '--report', report, '--exit-code', '0'],
       {
         encoding: 'utf8',
+        timeout: 60_000,
+        killSignal: 'SIGKILL',
       },
     );
     assert.equal(short.status, 1);
@@ -539,7 +549,7 @@ test('summary CLI: a report that claims two databases is not a pass against the 
         '--progress',
         join(directory, 'stderr.log'),
       ],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL' },
     );
     assert.equal(result.status, 1);
     assert.ok(!`${result.stdout}${result.stderr}`.includes(HUGE));

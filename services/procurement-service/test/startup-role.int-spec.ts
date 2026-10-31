@@ -1,4 +1,4 @@
-import { migratorCredentialsIn, withUtcSession } from '@rasta/config';
+import { migratorCredentialsIn, privilegedDatabaseUrlsIn, withUtcSession } from '@rasta/config';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl } from './helpers';
 
@@ -38,7 +38,10 @@ describe('procurement-service starts only as its runtime role (D-045)', () => {
   });
 
   it('refuses a DATABASE_URL that names the migrator, which no *_MIGRATOR variable reveals', async () => {
+    // The name gives nothing away; the value does, and the environment guard
+    // refuses it first (#421 r1 F2) — the connected role is the second gate.
     expect(migratorCredentialsIn({ DATABASE_URL: migratorUrl() })).toEqual([]);
+    expect(privilegedDatabaseUrlsIn({ DATABASE_URL: migratorUrl() })).toEqual(['DATABASE_URL']);
     await expect(open(migratorUrl()).assertRuntimeRole()).rejects.toThrow(
       /procurement-service refuses to start: it is connected as rasta_procurement_migrator, which is a migrator role \(rasta_procurement_migrator\).*can act as the owner of database rasta_procurement/,
     );

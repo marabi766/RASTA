@@ -1,4 +1,4 @@
-import { migratorCredentialsIn } from '@rasta/config';
+import { migratorCredentialsIn, privilegedDatabaseUrlsIn } from '@rasta/config';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, ownerDatabaseUrl } from './helpers';
 
@@ -29,7 +29,12 @@ describe('analytics-service starts only as its runtime role (D-045)', () => {
   });
 
   it('refuses a DATABASE_URL that names the migrator, which no *_MIGRATOR variable reveals', async () => {
+    // The name gives nothing away; the value does, and the environment guard
+    // refuses it first (#421 r1 F2) — the connected role is the second gate.
     expect(migratorCredentialsIn({ DATABASE_URL: ownerDatabaseUrl() })).toEqual([]);
+    expect(privilegedDatabaseUrlsIn({ DATABASE_URL: ownerDatabaseUrl() })).toEqual([
+      'DATABASE_URL',
+    ]);
     await expect(open(ownerDatabaseUrl()).assertRuntimeRole()).rejects.toThrow(
       /analytics-service refuses to start: it is connected as rasta_analytics_migrator, which is a migrator role/,
     );
