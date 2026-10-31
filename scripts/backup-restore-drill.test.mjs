@@ -52,6 +52,7 @@ import {
   disposeOwned,
   hasLiveProcesses,
   holdUntil,
+  leakedFixtures,
   ownedDirectory,
   ownerSettings,
   recordOwned,
@@ -1118,8 +1119,12 @@ function forkFindings(text) {
 const textId = (text) => createHash('sha1').update(joinedLines(text)).digest('hex').slice(0, 10);
 const FORK_AND_EXIT = new Map([
   [
-    '05d50245fb',
-    'cli docker stub of drill-orphan-test: the drill reaps the group; waitGone(pgid), kill(orphan, 0) ESRCH',
+    'eb359e50d1',
+    'cli docker stub of drill-orphan-test (without the redirect): the drill reaps the group; waitGone(pgid), kill(orphan, 0) ESRCH',
+  ],
+  [
+    '24574f1ef2',
+    'cli docker stub of drill-orphan-test (with the redirect): the drill reaps the group; waitGone(pgid), kill(orphan, 0) ESRCH',
   ],
   [
     '626385143c',
@@ -1130,6 +1135,8 @@ const FORK_AND_EXIT = new Map([
     'cli docker stub of --cleanup-from settles every check: descendants polled gone before the exit',
   ],
   ['37d527f709', 'an input to waitViolations (what stays allowed); never run'],
+  ['a106952e3c', 'an input to forkFindings, composed from pieces in its own test; never run'],
+  ['745c86ce3d', 'an input to forkFindings (a continued line), composed from pieces; never run'],
   ['8385c60a4c', 'the runner test: reapedProcessGroups.length 1, becomesGone(descendant)'],
 ]);
 function forkingFixtures() {
@@ -1223,18 +1230,18 @@ test('the shell-loop guard reads what the shell would run, not how the text is s
     'const stub = `#!/bin/sh\n' + text.replace(/[\\`]|\$\{/g, (m) => `\\${m}`) + '\n${extra}`;',
   ];
   const forms = {
-    'the original polling loop': 'while [ ! -f f ]; d·o sleep 0.05; d·one',
-    'a no-op before the sleep': 'while [ ! -f f ]; d·o :; sleep 0.05; d·one',
-    'a line break after do': 'while [ ! -f f ]; d·o\n  sleep 0.05\ndone',
-    'a continued line': 'while [ ! -f f ]; d·o \\\n sleep 0.05; d·one',
-    until: 'until [ -f f ]; d·o sleep 1; d·one',
-    'a for loop': 'for i in 1 2 3; d·o sleep 1; d·one',
-    'another binary': 'while ! test -f f; d·o ls /; d·one',
-    'a command substitution': 'while [ ! -f f ]; d·o read -t 1 $(sleep 1); d·one',
-    'a loop in a nested shell': "sh -c 'while true; d·o sleep 1; d·one'",
-    'a loop in eval': 'eval "until [ -f f ]; d·o :; sleep 1; d·one"',
-    'a loop after then': 'if true; then while [ ! -f f ]; d·o sleep 1; d·one; fi',
-    'a loop in a group': '{ while [ ! -f f ]; d·o sleep 1; d·one; }',
+    'the original polling loop': 'wh·ile [ ! -f f ]; d·o sleep 0.05; d·one',
+    'a no-op before the sleep': 'wh·ile [ ! -f f ]; d·o :; sleep 0.05; d·one',
+    'a line break after do': 'wh·ile [ ! -f f ]; d·o\n  sleep 0.05\nd·one',
+    'a continued line': 'wh·ile [ ! -f f ]; d·o \\\n sleep 0.05; d·one',
+    until: 'unt·il [ -f f ]; d·o sleep 1; d·one',
+    'a for loop': 'f·or i in 1 2 3; d·o sleep 1; d·one',
+    'another binary': 'wh·ile ! test -f f; d·o ls /; d·one',
+    'a command substitution': 'wh·ile [ ! -f f ]; d·o read -t 1 $(sleep 1); d·one',
+    'a loop in a nested shell': "sh -c 'wh·ile true; d·o sleep 1; d·one'",
+    'a loop in eval': 'eval "unt·il [ -f f ]; d·o :; sleep 1; d·one"',
+    'a loop after then': 'if true; then wh·ile [ ! -f f ]; d·o sleep 1; d·one; fi',
+    'a loop in a group': '{ wh·ile [ ! -f f ]; d·o sleep 1; d·one; }',
   };
   for (const [name, marked] of Object.entries(forms))
     for (const source of spellings(unmark(marked))) {
@@ -1246,7 +1253,7 @@ test('the shell-loop guard reads what the shell would run, not how the text is s
     }
   // The shell joins a continued line INSIDE a word: a builtin split that way is still the builtin,
   // and a binary split that way is still the binary.
-  const continued = (command) => `while [ ! -f f ]; d·o ${command}; d·one`;
+  const continued = (command) => `wh·ile [ ! -f f ]; d·o ${command}; d·one`;
   const split = (word) => `${word.slice(0, 2)}\\\n${word.slice(2)}`;
   assert.deepEqual(
     waitViolations(spellings(unmark(continued(`${split('read')} -t 0.05 -u 9 _ || :`)))[0], {
@@ -1278,6 +1285,137 @@ test('the shell-loop guard reads what the shell would run, not how the text is s
   } finally {
     await disposeOwned(directory);
   }
+});
+
+test('the shell-loop guard reads composed text and quoted substitutions as the shell would (PR-515-r2/r3/r4 R3)', () => {
+  // This file is a fixture source: the examples are JS source held in strings, with a marker
+  // inside every loop word so that no string of this file is a loop (or a part of one).
+  const unmark = (text) => text.replaceAll('·', '');
+  const refused = {
+    // a substitution inside double quotes still runs
+    'a quoted substitution':
+      'const s = "wh·ile [ ! -f f ]; d·o read -t 1 \\"$(sleep 1)\\"; d·one";',
+    'a quoted substitution in the condition':
+      'const s = \'wh·ile [ "$(cat f)" = x ]; d·o :; d·one\';',
+    'a quoted backtick substitution':
+      'const s = \'wh·ile [ ! -f f ]; d·o read "`sleep 1`"; d·one\';',
+    'a substitution around text': 'const s = \'wh·ile :; d·o read -t 1 "a$(sleep 1)b"; d·one\';',
+    // a loop written in parts
+    'a plus': "const s = 'wh·ile [ ! -f f ]; ' + 'd·o sleep 1; d·one';",
+    'a plus chain': "const s = 'wh·ile [ ! -f f ];' + ' ' + 'd·o sleep 1;' + ' d·one';",
+    'a template with a constant part': "const s = `wh·ile [ ! -f f ]; ${'d·o'} sleep 1; d·one`;",
+    'a concat': "const s = 'wh·ile [ ! -f f ]; '.concat('d·o sleep 1; d·one');",
+    'a join': "const s = ['wh·ile [ ! -f f ];', 'd·o sleep 1;', 'd·one'].join(' ');",
+    'names bound to the parts':
+      "const head = 'wh·ile [ ! -f f ]; '; const body = 'd·o sleep 1; d·one'; run(head + body);",
+    'a name extended later': "let s = 'wh·ile [ ! -f f ]; '; s += 'd·o sleep 1; d·one';",
+    'a name assigned later': "let s; s = 'wh·ile [ ! -f f ]; ' + 'd·o sleep 1; d·one';",
+    'a part from a call': "const s = 'wh·ile [ ! -f f ]; ' + pick() + ' sleep 1; d·one';",
+    // parts the guard cannot join are refused as parts
+    'parts in an object':
+      "const p = { head: 'wh·ile [ ! -f f ]; ', body: 'd·o sleep 1; d·one' }; run(p.head + p.body);",
+    'parts in an array':
+      "const p = ['wh·ile [ ! -f f ]; ', 'd·o sleep 1; d·one']; run(p[0] + p[1]);",
+    'a head alone': "const s = 'wh·ile [ ! -f f ]; ' + tail;",
+    'a body alone': "const s = head + ' d·o sleep 1; d·one';",
+  };
+  for (const [name, marked] of Object.entries(refused)) {
+    const source = unmark(marked);
+    assert.ok(waitViolations(source).length > 0, `${name}: refused in a test file (${source})`);
+    assert.ok(
+      waitViolations(source, { holder: true }).length > 0,
+      `${name}: refused in the holder`,
+    );
+  }
+  // The holder's own loop may be written in parts, as long as it runs builtins only.
+  const held = unmark("const s = 'wh·ile [ ! -f f ]; ' + 'd·o read -t 0.05 -u 9 _ || :; d·one';");
+  assert.deepEqual(waitViolations(held, { holder: true }), []);
+  assert.equal(waitViolations(held).length, 1);
+  // Every way of composing the holder's loop reads as the whole loop, not as parts of one: allowed
+  // there with builtins, refused there with a command that forks.
+  for (const [name, compose] of Object.entries({
+    concat: (command) => `const s = 'wh·ile [ ! -f f ]; '.concat('d·o ${command}; ', 'd·one');`,
+    join: (command) => `const s = ['wh·ile [ ! -f f ];', 'd·o ${command};', 'd·one'].join(' ');`,
+    template: (command) => `const s = \`wh·ile [ ! -f f ]; \${'d·o'} ${command}; d·one\`;`,
+  })) {
+    assert.deepEqual(waitViolations(unmark(compose(':')), { holder: true }), [], name);
+    assert.match(
+      waitViolations(unmark(compose('sleep 1')), { holder: true }).join(),
+      /runs sleep,/,
+      name,
+    );
+  }
+  // A name extended in steps is read as the text it ends with where it is used; its steps, like the
+  // parts of a name used in a plus, are parts of a loop in themselves, which the holder may not write.
+  const stepped = stringValues(
+    unmark("let s = 'wh·ile :; '; s += 'd·o :; '; s += 'd·one'; run(s + ' ');"),
+  );
+  assert.ok(stepped.includes(unmark('wh·ile :; d·o :; d·one ')), JSON.stringify(stepped));
+  assert.ok(
+    waitViolations(unmark("let s = 'wh·ile :; '; s += 'd·o :; d·one';"), { holder: true }).length >
+      0,
+  );
+  // Text that is not a loop stays fine, however it is composed.
+  for (const fine of [
+    "const s = 'exec ' + 'sleep 30';",
+    'const s = `touch ${dir}/done; echo done`;',
+    "const s = 'waiting ' + 'for the record' + ' to name the group';",
+    "const s = ['a', 'b'].join(' ');",
+    "const s = 'cmd 2>&1; ' + 'echo done';",
+  ])
+    assert.deepEqual(waitViolations(fine), [], fine);
+  // The composed value is what is read: a composed text is one value, not two halves.
+  const joined = stringValues(unmark("const s = 'wh·ile :; ' + 'd·o :; d·one';"));
+  assert.ok(joined.includes(unmark('wh·ile :; d·o :; d·one')), JSON.stringify(joined));
+});
+
+test('the spawn guard refuses a module named by composition or by anything but a constant string', () => {
+  // The module name is spelled in pieces here for the same reason as above: this file is read too.
+  const cp = ['child', 'process'].join('_');
+  const refused = [
+    `const m = await import('node:' + '${cp}');`,
+    `const m = await import('${'child_'}' + 'process');`,
+    `const name = 'node:${cp}'; const m = await import(name);`,
+    `const m = await import(['node', '${cp}'].join(':'));`,
+    `const m = await import('node:'.concat('${cp}'));`,
+    `const m = await import(\`node:\${'${cp}'}\`);`,
+    `const m = require('child_' + 'process');`,
+    `const r = createRequire(import.meta.url); const m = r('node:${cp}');`,
+    `const m = createRequire(import.meta.url)('child_' + 'process');`,
+    `export { spawn } from 'node:${cp}';`,
+    `export * from '${cp}';`,
+    `import cluster from 'node:cluster';`,
+    // not a constant string: the module cannot be shown to be another one
+    'const m = await import(moduleName);',
+    'const m = await import(`node:${which}`);',
+    'const m = await import(base + name);',
+    'const m = await import(new URL("./x.mjs", import.meta.url));',
+    'const m = require(name);',
+    'const r = createRequire(import.meta.url); const m = r(name);',
+    'const m = createRequire(import.meta.url)(name);',
+    'const m = module.require(name);',
+    'process.binding("process_wrap");',
+    // code made from text, or text no reader can read
+    "import vm from 'node:vm';",
+    'const s = String.fromCharCode(119, 104, 105, 108, 101);',
+    'const s = String.fromCodePoint(119);',
+    'const s = atob(encoded);',
+    'eval(code);',
+    'new Function("return process")();',
+    'Function("return process")();',
+  ];
+  for (const source of refused) assert.ok(spawnViolations(source).length > 0, source);
+  for (const source of [
+    "const { readFileSync } = await import('node:fs');",
+    "const fs = await import('node:' + 'fs');",
+    "const name = 'node:path'; const path = await import(name);",
+    "const require = createRequire(import.meta.url); const x = require('node:fs');",
+    `import { execFileSync, spawnSync } from 'node:${cp}';`,
+    `export { execFileSync } from 'node:${cp}';`,
+    'const r = createRequire(import.meta.url);',
+  ])
+    assert.deepEqual(spawnViolations(source), [], source);
+  assert.deepEqual(spawnViolations(refused[0], { owner: true }), []);
 });
 
 test('the spawn guard refuses every route to an asynchronous child that skips the owner', () => {
@@ -1571,11 +1709,16 @@ function fakeSystem(...rows) {
     signal(target, name) {
       system.signals.push([target, name]);
       if (system.real.has(-target)) process.kill(target, name);
+      const died = new Set();
       for (const [pid, row] of [...table])
         if (pid === target || (target < 0 && row.pgrp === -target && pid !== process.pid)) {
-          if (name === 'SIGKILL') table.delete(pid);
-          else if (name === 'SIGSTOP') row.state = 'T';
+          if (name === 'SIGKILL') {
+            table.delete(pid);
+            died.add(pid);
+          } else if (name === 'SIGSTOP') row.state = 'T';
         }
+      // Like the kernel: the children of what died are adopted by init, alive and unsignalled.
+      for (const row of table.values()) if (died.has(row.ppid)) row.ppid = 1;
     },
   };
   return system;
@@ -2013,6 +2156,324 @@ test('an unreadable row nobody registered is unknown when it could descend from 
     });
     assert.equal(existsSync(directory), false, what);
   }
+});
+
+// --- a candidate belongs to the scope, not to one look (PR-515-r4 R2, task 290). A row seen once as
+// --- unidentified and possibly the fixture's stays so after its parent was killed and the kernel
+// --- re-parented it: re-parenting is what a surviving child of the fixture looks like.
+// A refusal only has to outlast one look, so it may use a short budget. A success must not race its
+// deadline (a stalled scheduler would make it "seen only after the deadline"): it gets the long one.
+const REFUSAL_MS = 150;
+const GENEROUS_MS = 15_000;
+async function withBudget(ms, body) {
+  const saved = ownerSettings.stopBudgetMs;
+  ownerSettings.stopBudgetMs = ms;
+  try {
+    return await body();
+  } finally {
+    ownerSettings.stopBudgetMs = saved;
+  }
+}
+const refuses = (directory, pattern, what) =>
+  withBudget(REFUSAL_MS, () => assert.rejects(disposeOwned(directory), pattern, what));
+const signalledAt = (system, pid) =>
+  system.signals.filter(([target]) => target === pid || target === -pid);
+
+async function reparentedCandidate({ ancestry, shared, fault }) {
+  const directory = ownedDirectory('drill-owner-candidate-');
+  const system = fakeSystem([100, { ppid: process.pid, pgrp: 100, start: '10' }]);
+  const group = (pid) => (shared ? 100 : pid);
+  if (ancestry === 'intermediate')
+    system.table.set(335, { state: 'S', ppid: 100, pgrp: group(335), start: '33' });
+  system.table.set(300, {
+    state: 'S',
+    ppid: ancestry === 'intermediate' ? 335 : 100,
+    pgrp: group(300),
+    start: '30',
+  });
+  const spoil = () => {
+    if (fault === 'malformed') system.garbage.add(300);
+    else {
+      system.unreadable.add(300);
+      if (fault === 'EACCES') system.statusReadable.add(300); // else: its status cannot be read either
+    }
+  };
+  const mend = () => {
+    system.garbage.delete(300);
+    system.unreadable.delete(300);
+  };
+  const reason = fault === 'malformed' ? 'unreadable stat' : 'EACCES';
+  await withSystem(system, async () => {
+    ownerSettings.stopBudgetMs = GENEROUS_MS;
+    recordOwned(directory, 100, { leads: true });
+    spoil();
+    // First look: 300 is unidentified and may be the fixture's. Its parent is killed (by identity;
+    // no group signal while 300 is unknown) and the kernel hands 300 to init.
+    await refuses(
+      directory,
+      new RegExp(`state unknown: \\[300 \\(unreadable row: ${reason}\\)\\]`),
+    );
+    assert.equal(system.table.has(100), false, 'the confirmed parent was stopped');
+    assert.equal(system.table.get(300).ppid, 1, 'and 300 was re-parented to init, alive');
+    assert.equal(hasLiveProcesses(directory), true, 'a re-parented candidate is still a candidate');
+    // Look again, as many times as it takes: it is not forgotten, and never signalled unidentified.
+    await refuses(directory, /state unknown: \[300 /);
+    assert.equal(existsSync(directory), true, 'the directory stays');
+    assert.equal(signalledAt(system, 300).length, 0, 'an unidentified candidate is not signalled');
+    assert.equal(system.table.has(300), true);
+  });
+  return { directory, system, mend };
+}
+
+test('a candidate seen before its parent died is kept across looks and re-parenting: 16 combinations', async () => {
+  for (const ancestry of ['direct', 'intermediate'])
+    for (const shared of [true, false])
+      for (const fault of ['EACCES', 'malformed'])
+        for (const after of ['unreadable', 'readable']) {
+          const what = `${ancestry} ancestry, ${shared ? 'shared' : 'separate'} group, ${fault}, ${after} after re-parenting`;
+          const made = await reparentedCandidate({ ancestry, shared, fault });
+          const { directory, system, mend } = made;
+          await withSystem(system, async () => {
+            ownerSettings.stopBudgetMs = GENEROUS_MS;
+            if (after === 'readable') {
+              mend();
+              // Readable now, and it was read as a descendant of the fixture's before it was
+              // re-parented: identified, registered with the identity just read, and stopped.
+              await disposeOwned(directory);
+              assert.deepEqual(
+                killed(system).filter((pid) => pid === 300),
+                [300],
+                what,
+              );
+            } else {
+              await refuses(directory, /state unknown: \[300 /, what);
+              assert.equal(signalledAt(system, 300).length, 0, `${what}: never signalled`);
+              // The kernel reports it absent: the candidate is settled and the stop completes.
+              system.table.delete(300);
+              mend();
+              await disposeOwned(directory);
+            }
+            assert.equal(
+              system.signals.some(([target]) => target < 0),
+              false,
+              `${what}: no group was signalled while 300 was unknown`,
+            );
+          });
+          assert.equal(existsSync(directory), false, what);
+        }
+});
+
+test('the after-hook names a candidate that survived its parent, and keeps the directory', async () => {
+  const directory = ownedDirectory('drill-owner-candidate-hook-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [300, { ppid: 100, pgrp: 300, start: '30' }],
+  );
+  system.unreadable.add(300);
+  system.statusReadable.add(300);
+  await withSystem(system, async () => {
+    ownerSettings.stopBudgetMs = GENEROUS_MS;
+    recordOwned(directory, 100);
+    await refuses(directory, /state unknown: \[300 /); // 100 stopped, 300 to init
+    const leaked = await withBudget(REFUSAL_MS, leakedFixtures);
+    assert.equal(leaked.length, 1);
+    assert.match(leaked[0], /state unknown: \[300 \(unreadable row: EACCES\)\]/);
+    assert.equal(existsSync(directory), true);
+    assert.equal(signalledAt(system, 300).length, 0);
+    system.table.delete(300);
+    system.unreadable.delete(300);
+    assert.deepEqual(await leakedFixtures(), []);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('a candidate whose ancestry was never read is kept and named, readable or not, and never signalled', async () => {
+  for (const after of ['unreadable', 'readable']) {
+    const { directory, system, mend } = await reparentedCandidate({
+      ancestry: 'direct',
+      shared: false,
+      fault: 'status-too',
+    });
+    await withSystem(system, async () => {
+      ownerSettings.stopBudgetMs = GENEROUS_MS;
+      if (after === 'readable') mend();
+      if (after === 'readable')
+        await refuses(
+          directory,
+          /state unknown: \[300 \(unreadable row: EACCES; readable now, but never shown to descend from the fixture\)\]/,
+        );
+      else await refuses(directory, /state unknown: \[300 \(unreadable row/);
+      assert.equal(existsSync(directory), true, `${after}: the directory stays`);
+      assert.equal(signalledAt(system, 300).length, 0, `${after}: nothing is signalled`);
+      assert.equal(hasLiveProcesses(directory), true);
+      system.table.delete(300); // absent: settled
+      mend();
+      await disposeOwned(directory);
+    });
+    assert.equal(existsSync(directory), false);
+  }
+});
+
+test('a readable row below an unidentified candidate is a candidate too, and is stopped once its ancestry is known', async () => {
+  const build = () =>
+    fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [335, { ppid: 100, pgrp: 335, start: '33' }],
+      [300, { ppid: 335, pgrp: 300, start: '30' }],
+    );
+  // 335 cannot be identified. When its status names the fixture's 100 as its parent, 300 below it
+  // inherits that and is identified (readable) at once; when nothing is known of 335's ancestry,
+  // 300 is as unidentified as 335 and stays so, also after 335 ends and 300 goes to init.
+  for (const statusKnown of [true, false]) {
+    for (const after of ['absent', 'readable']) {
+      const what = `335's status ${statusKnown ? 'readable' : 'unreadable'}, then ${after}`;
+      const directory = ownedDirectory('drill-owner-candidate-below-');
+      const system = build();
+      await withSystem(system, async () => {
+        ownerSettings.stopBudgetMs = GENEROUS_MS;
+        recordOwned(directory, 100);
+        system.unreadable.add(335);
+        if (statusKnown) system.statusReadable.add(335);
+        if (statusKnown) {
+          await refuses(directory, /state unknown: \[335 \(unreadable row: EACCES\)\]/, what);
+          assert.equal(system.table.has(300), false, `${what}: 300 was identified and stopped`);
+        } else {
+          // ONE look (a budget of nothing allows exactly one) already finds the row below.
+          await assert.rejects(
+            stopOwned(directory, 0),
+            /state unknown: \[335 \(unreadable row: EACCES\),300 \(descends from 335, which cannot be identified\)\]/,
+            what,
+          );
+          await refuses(
+            directory,
+            /state unknown: \[335 \(unreadable row: EACCES\),300 \(descends from 335, which cannot be identified\)\]/,
+            what,
+          );
+          assert.equal(system.table.get(300).ppid, 335, `${what}: 300 is still below 335`);
+        }
+        assert.equal(
+          signalledAt(system, 335).length,
+          0,
+          `${what}: 335 is never signalled unidentified`,
+        );
+        if (after === 'absent') {
+          system.table.delete(335);
+          system.unreadable.delete(335);
+          if (system.table.has(300)) {
+            system.table.get(300).ppid = 1; // 335 ended, 300 was re-parented
+            await refuses(directory, /state unknown: \[300 /, what);
+            assert.equal(signalledAt(system, 300).length, 0, `${what}: still no signal`);
+            system.table.delete(300);
+          }
+        } else {
+          system.unreadable.delete(335);
+          if (!statusKnown) {
+            // Readable, but nothing ever tied 335 to the fixture (and 300 hangs below it): both
+            // stay named and unsignalled until the kernel reports them absent.
+            await refuses(
+              directory,
+              /state unknown: \[335 \(unreadable row: EACCES; readable now, but never shown/,
+              what,
+            );
+            assert.equal(
+              signalledAt(system, 335).length + signalledAt(system, 300).length,
+              0,
+              what,
+            );
+            system.table.delete(335);
+            system.table.delete(300);
+          }
+        }
+        await disposeOwned(directory);
+        if (after === 'readable' && statusKnown)
+          assert.equal(killed(system).includes(335), true, `${what}: 335 stopped once readable`);
+      });
+      assert.equal(existsSync(directory), false, what);
+    }
+  }
+});
+
+test('a row that appears below a candidate later is a candidate too, whether or not the candidate is readable by then', async () => {
+  const directory = ownedDirectory('drill-owner-candidate-later-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [335, { ppid: 100, pgrp: 335, start: '33' }],
+  );
+  await withSystem(system, async () => {
+    ownerSettings.stopBudgetMs = GENEROUS_MS;
+    recordOwned(directory, 100);
+    system.unreadable.add(335); // nothing is known of 335's ancestry: it stays unproven
+    await refuses(directory, /state unknown: \[335 /);
+    assert.equal(system.table.get(335).ppid, 1, '335 was re-parented');
+    system.unreadable.delete(335); // readable now, still a candidate, parent init
+    // 335 forks: the child's stat cannot be read, its status says 335. Its chain reaches init
+    // through a readable row nobody registered, which proves nothing: 335 is a candidate.
+    system.table.set(300, { state: 'S', ppid: 335, pgrp: 300, start: '30' });
+    system.unreadable.add(300);
+    system.statusReadable.add(300);
+    // ... and a readable one below it is the same.
+    system.table.set(301, { state: 'S', ppid: 335, pgrp: 301, start: '31' });
+    await assert.rejects(
+      stopOwned(directory, 0),
+      /state unknown: \[335 \(unreadable row: EACCES; readable now[^\]]*\),300 \(unreadable row: EACCES\),301 \(descends from 335, which cannot be identified\)\]/,
+    );
+    assert.equal(signalledAt(system, 335).length + signalledAt(system, 300).length, 0);
+    assert.equal(signalledAt(system, 301).length, 0);
+    system.table.delete(335);
+    system.table.delete(300);
+    system.table.delete(301);
+    system.unreadable.delete(300);
+    await disposeOwned(directory);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('a candidate is settled when the number answers as another process, or as a zombie', async () => {
+  for (const [what, replacement] of [
+    ['another process at the number', { state: 'S', ppid: 1, pgrp: 300, start: '99' }],
+    ['a zombie', { state: 'Z', ppid: 1, pgrp: 300, start: '30' }],
+  ]) {
+    const directory = ownedDirectory('drill-owner-candidate-settled-');
+    const system = fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [335, { ppid: 100, pgrp: 335, start: '33' }],
+      [300, { ppid: 335, pgrp: 300, start: '30' }],
+    );
+    await withSystem(system, async () => {
+      ownerSettings.stopBudgetMs = GENEROUS_MS;
+      recordOwned(directory, 100);
+      system.unreadable.add(335); // its status cannot be read either: 300 below it is unproven
+      await refuses(directory, /state unknown/);
+      system.table.delete(335);
+      system.unreadable.delete(335);
+      system.table.set(300, { ...replacement });
+      await disposeOwned(directory);
+      assert.equal(signalledAt(system, 300).length, 0, `${what}: not the fixture's, not signalled`);
+      assert.equal(system.table.has(300), true);
+    });
+    assert.equal(existsSync(directory), false, what);
+  }
+});
+
+test('a candidate read from another process table is not carried into this one', async () => {
+  const directory = ownedDirectory('drill-owner-candidate-source-');
+  const first = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [300, { ppid: 100, pgrp: 300, start: '30' }],
+  );
+  first.unreadable.add(300);
+  first.statusReadable.add(300);
+  await withSystem(first, async () => {
+    recordOwned(directory, 100);
+    assert.equal(hasLiveProcesses(directory), true);
+  });
+  // The numbers mean something else in this table: nothing recorded in the first may reach them.
+  const second = fakeSystem([300, { ppid: 1, pgrp: 300, start: '31' }]);
+  await withSystem(second, async () => {
+    await disposeOwned(directory);
+    assert.deepEqual(second.signals, []);
+    assert.equal(second.table.has(300), true);
+  });
 });
 
 test('while anything of the fixture is unknown no group is signalled: only confirmed members, one by one', async () => {
