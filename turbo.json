@@ -59,8 +59,11 @@
       "env": ["DATABASE_URL", "DATABASE_URL_*", "RASTA_ALLOW_DEMO_SEED"]
     },
     "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
-    // Every scripts/*-rule.mjs that an eslint.config.* imports is an input below;
-    // scripts/lint-scripts-registration.test.mjs (run by lint:scripts) fails the one that is not.
+    // Every file an eslint.config.* loads outside its own workspace (rules, their
+    // helpers, a shared config) must be hashed by the task that applies to that
+    // workspace — this one, a "<pkg>#lint" here, or the workspace turbo.json.
+    // scripts/lint-scripts-registration.test.mjs (run by lint:scripts) follows the
+    // imports, resolves those tasks and fails the file that is not covered.
     "lint": {
       "dependsOn": ["^build"],
       "inputs": [
