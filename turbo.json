@@ -59,6 +59,11 @@
       "env": ["DATABASE_URL", "DATABASE_URL_*", "RASTA_ALLOW_DEMO_SEED"]
     },
     "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
+    // Every file an eslint.config.* loads outside its own workspace (rules, their
+    // helpers, a shared config) must be hashed by the task that applies to that
+    // workspace — this one, a "<pkg>#lint" here, or the workspace turbo.json.
+    // scripts/lint-scripts-registration.test.mjs (run by lint:scripts) follows the
+    // imports, resolves those tasks and fails the file that is not covered.
     "lint": {
       "dependsOn": ["^build"],
       "inputs": [
@@ -66,7 +71,8 @@
         "$TURBO_ROOT$/eslint.config.mjs",
         "$TURBO_ROOT$/scripts/internal-token-transport-rule.mjs",
         "$TURBO_ROOT$/scripts/raw-http-boundary-rule.mjs",
-        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs"
+        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs",
+        "$TURBO_ROOT$/scripts/no-zod-default-rule.mjs"
       ],
       "outputs": []
     },
