@@ -83,6 +83,18 @@ argument. That covers a property, a string, a folded or joined name, and a
 computed key on a value that holds it. Per-workload identity (mTLS, ADR-020,
 risk S-03) remains the replacement for the shared secret.
 
+### The lint rule guards against accident, not obfuscation (D-088)
+
+PM decision D-088 (task 150, #503 r2 F3) follows from D-086. In-process code
+can already mint with the environment's secret, so **the lint layer is defence
+in depth against accidental misuse**, not against deliberately obfuscated code;
+pull-request review catches that. Capability extraction through code
+generation, loaders and computed members is therefore an **accepted residual**
+(listed under [Limits](#limits)). Only its two forms most plausible by accident
+are refused in production: `process.getBuiltinModule('module')` (treated like
+an import of `node:module`) and a computed `['constructor']` read on a function
+value. Each has a fixture.
+
 ### The lint rule is the second layer
 
 `internal/token-source` (`scripts/internal-token-source-rule.mjs`) refuses at
@@ -130,6 +142,16 @@ through TypeScript symbols and types, not spelling:
   - a loader or code generator used other than by calling it;
   - code generation: `eval`, `Function`, `globalThis.eval`, a `vm` import, a
     `.constructor(…)` call, a string timer;
+  - D-088: `process.getBuiltinModule(…)` named `module`/`node:module` (the
+    loader namespace), `vm`, or by an expression, and `getBuiltinModule` used
+    other than by calling it (kept, destructured, imported from
+    `node:process`);
+  - D-088: a read of `constructor` on a function or class value, by
+    `['constructor']`, a folded key, `.constructor` kept for later, or
+    destructuring (`{ constructor: C } = fn`), sync, async or generator. On
+    an `any` value only the computed form is refused. Without types, the
+    computed form and `.constructor` on a function or class literal are
+    refused;
   - without types, a method called by a computed name or through `Reflect`.
 
   Test-only code (`tests/`, test trees, `packages/testing`, test-runner files)
@@ -156,6 +178,24 @@ in the E2E workspace's root files, and in root `scripts/`.
 
 ### Every exemption, with its reason
 
+A privileged file (the client exemption and each function allowance) is named
+by its **exact repository path**. That path is compared with the linted file's
+canonical one: its real path, links resolved, relative to the repository's
+real root (`repoPath`). A file is never matched by a suffix (#503 r2 F4).
+`services/economic-service/src/packages/nest-common/src/http/internal-http-client.ts`
+is ordinary production code. A path that is not a file on disk inside the
+repository (stdin text for a missing file, another checkout) is granted
+nothing, and the same canonical path decides what counts as production.
+
+The genuine `InternalTokenService` grants two things. One is the verified DI
+factory. The other is the secret as the first argument of
+`new InternalTokenService`. Both require the class to resolve, through types,
+to a declaration at one of its two exact paths (the client source or
+nest-common's `dist/http/internal-http-client.d.ts`). Without types, nothing
+named `InternalTokenService` takes the secret. Recognising the issuer's
+`issue` to refuse it still matches those two files by suffix, because a wider
+match there only refuses more.
+
 | Config                            | Exemption                                                                                                  | Reason                                                                                       | Why production cannot reach it                                                                                                                             |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | root `INTERNAL_TOKEN_SOURCE`, web | rule `off` for `*.spec.*`, `*.int-spec.ts`, `*.e2e-spec.ts`, `*.test.*`, `test/**`                         | test token factories exercise the services' guards                                           | test-only by `isTestOnlyPath`; the source sweep refuses any production import of a test-only file, by its resolved target (extensionless imports included) |
@@ -166,7 +206,7 @@ in the E2E workspace's root files, and in root `scripts/`.
 | root, allow `signer`              | `secretName()` in `scripts/internal-token-source-rule.mjs`                                                 | the rule names the secret it refuses                                                         | root tooling; it returns a name, not a capability                                                                                                          |
 | root, allow `header`              | `credentialNames()` in `scripts/internal-token-transport-rule.mjs`                                         | the transport rule lists the header among the credentials it checks (Q-155)                  | root tooling; it returns a name, not a capability                                                                                                          |
 | root, web, e2e                    | global ignores (`node_modules`, `dist`, `.next`, `.turbo`, `coverage`, `src/generated`, Playwright output) | build output and generated code                                                              | linted by the coverage test below when tracked                                                                                                             |
-| nest-common                       | the client file itself (`internal-http-client.ts`)                                                         | holds the issuer, `mint()` and the header                                                    | it is the boundary                                                                                                                                         |
+| nest-common                       | the client file itself (exactly `packages/nest-common/src/http/internal-http-client.ts`)                   | holds the issuer, `mint()` and the header                                                    | it is the boundary                                                                                                                                         |
 
 The coverage tests in `scripts/internal-token-source-workspace.test.mjs` derive
 this from ESLint itself, not from directory prefixes. For every tracked JS/TS
@@ -200,6 +240,8 @@ another.
 | r2 F2: header by `join`, `toLowerCase`, entries                                                                                                                                    | the client replaces the header (run-time spec) | `r2-f2-header.ts`                                                                               |
 | r2 F3: untyped computed `issue`, split module names, `require`/`eval`/`Function` aliases, `module.require`, `createRequire`, `globalThis.eval`, helper-built specifiers            | `issue()` throws                               | `r2-f3.mjs` (production JavaScript); root scripts keep issuance, header and secret              |
 | r2 F4: exempt helper imported by production; unlinted generic wrapper; ignored paths                                                                                               | `issue()` throws                               | "review F4…" (refused by the source sweep), both coverage tests                                 |
+| r3 F4: shadow paths ending like the client file or any of the six allowances                                                                                                       | `issue()` throws; the key is no property       | "review F4: a file whose path only ends like…" (7 shadows + web), "…canonical path"             |
+| r3 F3 (D-088): `process.getBuiltinModule('module')`, `fn['constructor']` and its siblings above                                                                                    | `issue()` throws; D-086 for the rest           | "D-088: …" (`d088.ts` typed, `d088.mjs` untyped, test-only `e2e/` tree not refused)             |
 
 ## Limits
 
@@ -214,6 +256,30 @@ another.
   residual so the doc stays true.
 - **Code that rewrites the shared runtime** (jose, `crypto`, `WeakMap`,
   intrinsics) or reads the environment is inside the trust boundary (D-086).
+- **Deliberately obfuscated capability extraction (D-088, accepted
+  residual).** The review of #503 r2 (F3) found 88 forms across all eight
+  source extensions that pass the lint layer and the source sweep. Pull-request
+  review catches these, not the rule. The class, in the reviewer's examples
+  (the two D-088 forms excepted):
+  - **the Function constructor reached** through a computed or folded name not
+    read on a function value (`Object.getPrototypeOf(fn).constructor`,
+    `Reflect.get(fn, 'constr' + 'uctor')`), on an `any` value by `.constructor`,
+    or detached through an alias the rule does not follow;
+  - **async and generator constructors** reached the same ways;
+  - **loaders reached by name** on a builtin module the rule does not treat as
+    a loader, or a `getBuiltinModule` reached through a computed key, an alias
+    of `process` or `globalThis.process`;
+  - **`Reflect.get` aliased, destructured or bracketed** (`const { get } =
+Reflect`, `Reflect['get']`), and `Reflect.get.call(…)`;
+  - **sequence expressions** (`(0, obj.method)(…)`) and computed members
+    extracted into a variable before the call;
+  - **descriptor extraction** (`Object.getOwnPropertyDescriptor(…).value`,
+    `Object.getOwnPropertyDescriptors`).
+
+  Code inside any of these can mint only as any in-process code can (D-086).
+  The run-time boundary still holds: `issue()` throws, and no object reachable
+  from nest-common's API hands out a token or the key.
+
 - **A secret name computed from run-time input** (`process.env[name]`, where
   `name` is no constant) is out of static reach. `process.env` declares no
   such property, so only a constant name is refused there.

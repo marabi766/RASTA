@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
 import { isTestOnlyPath } from './test-only-path.mjs';
@@ -45,8 +46,15 @@ import { REPO_ROOT } from './testing-dev-only.mjs';
  * (`require`, `module.require`, `createRequire`, `import()`) whose specifier
  * is not a constant or that is used other than by calling it, code generation
  * (`eval`, `Function`, `vm`, a `.constructor(…)` call, string timers, any
- * alias of them) and, without types, a method called by a computed name or
- * through `Reflect`. Test-only code (tests/, test trees, packages/testing,
+ * alias of them), `process.getBuiltinModule` of `module`/`vm` or of an
+ * expression, a `constructor` read on a function value (D-088) and, without
+ * types, a method called by a computed name or through `Reflect`.
+ * Deliberately obfuscated extraction beyond these is an accepted residual
+ * (D-088: the lint layer guards against accident; review against intent).
+ *
+ * Privileged files — the client, each allowance's file, the issuer's
+ * declaration where it grants — are exact repository paths compared with the
+ * file's canonical one (`repoPath`), never suffixes (#503 r2 F4). Test-only code (tests/, test trees, packages/testing,
  * test-runner files) is never in an image and no production file may import
  * it (scripts/testing-dev-only-source.mjs). Root tooling (`scripts/`) is CI
  * and operator code, never copied into an image; a production file that
@@ -54,9 +62,23 @@ import { REPO_ROOT } from './testing-dev-only.mjs';
  * refuses its loaders. In both, the run-time boundary alone answers loaders.
  */
 
-const CLIENT_FILE = /(?:^|\/)packages\/nest-common\/src\/http\/internal-http-client\.ts$/;
+/**
+ * Privileged files are named by their exact repository path, compared with the
+ * file's canonical one (`repoPath`): never by a suffix, so a file elsewhere
+ * that merely ends the same way (services/…/src/packages/nest-common/src/http/
+ * internal-http-client.ts) is ordinary production code (#503 r2 F4).
+ */
+const CLIENT_FILE = 'packages/nest-common/src/http/internal-http-client.ts';
 /** Where `InternalTokenService` is declared: its source, or nest-common's emitted types. */
-const ISSUER_FILE =
+const ISSUER_FILES = new Set([
+  CLIENT_FILE,
+  'packages/nest-common/dist/http/internal-http-client.d.ts',
+]);
+/**
+ * The same, matched by suffix: only to RECOGNISE the issuer's `issue` (a
+ * refusal), never to grant anything — a wider match there refuses more.
+ */
+const ISSUER_FILE_SUFFIX =
   /(?:^|\/)packages\/nest-common\/(?:src\/http\/internal-http-client\.ts|dist\/http\/internal-http-client\.d\.ts)$/;
 const HEADER = 'x-internal-token';
 /** Root CI and operator tooling: neither test-only nor in an image (see above). */
@@ -87,6 +109,28 @@ const PATH_BUILDERS = new Set([
 ]);
 
 const posix = (file) => file.split(path.sep).join('/');
+
+const CANONICAL_ROOT = fs.realpathSync(REPO_ROOT);
+const repoPaths = new Map();
+/**
+ * A file's canonical repository path: its real path (links resolved) relative
+ * to the repository's real root, `/`-separated; null when it is not a file on
+ * disk inside the repository (stdin, another checkout), which nothing grants.
+ */
+export function repoPath(file) {
+  if (!repoPaths.has(file)) {
+    let canonical = null;
+    try {
+      const relative = path.relative(CANONICAL_ROOT, fs.realpathSync(file));
+      if (relative && !relative.startsWith('..') && !path.isAbsolute(relative))
+        canonical = posix(relative);
+    } catch {
+      // not on disk: nothing to grant
+    }
+    repoPaths.set(file, canonical);
+  }
+  return repoPaths.get(file);
+}
 
 /** The secret's name. This rule names what it refuses; its one allowance is here (eslint.config.mjs). */
 function secretName() {
@@ -132,14 +176,15 @@ export default {
   },
   create(context) {
     const filename = posix(context.physicalFilename ?? context.filename);
-    if (CLIENT_FILE.test(filename)) return {};
+    const canonical = repoPath(context.physicalFilename ?? context.filename);
+    if (canonical === CLIENT_FILE) return {};
     const services = context.sourceCode.parserServices;
     const program = services?.program ?? null;
     const typed = Boolean(program && services.esTreeNodeToTSNodeMap);
     const checker = typed ? program.getTypeChecker() : null;
     const tsNode = (node) => services.esTreeNodeToTSNodeMap.get(node);
     const allowances = (context.options[0]?.allow ?? []).filter(
-      (allowance) => filename === allowance.file || filename.endsWith(`/${allowance.file}`),
+      (allowance) => canonical !== null && canonical === allowance.file,
     );
 
     const enclosingFunctionNames = (node) => {
@@ -165,12 +210,8 @@ export default {
       );
     const unresolved = (node, what) =>
       context.report({ node, messageId: 'unresolved', data: { what } });
-    const relativePath = path.relative(REPO_ROOT, filename);
     const production =
-      relativePath.startsWith('..') || path.isAbsolute(relativePath)
-        ? true
-        : !isTestOnlyPath(relativePath) &&
-          !ROOT_TOOLING.test(relativePath.split(path.sep).join('/'));
+      canonical === null || (!isTestOnlyPath(canonical) && !ROOT_TOOLING.test(canonical));
     /** Loaders and code generation: refused in production code (see above). */
     const failClosed = (node, what) => {
       if (production) unresolved(node, what);
@@ -188,7 +229,7 @@ export default {
           declaration.name.text === 'issue' &&
           ts.isClassDeclaration(declaration.parent) &&
           declaration.parent.name?.text === 'InternalTokenService' &&
-          ISSUER_FILE.test(posix(declaration.getSourceFile().fileName)),
+          ISSUER_FILE_SUFFIX.test(posix(declaration.getSourceFile().fileName)),
       );
     /** 'original' | 'unknown' | 'other' — what `.issue` on a value of this type is. */
     const issueOf = (type, seen = new Set()) => {
@@ -422,12 +463,13 @@ export default {
         data: { target: erased ? 'a generic parameter' : checker.typeToString(contextual) },
       });
     };
+    /** The genuine issuer class: it grants (a DI factory, the secret as its argument), so exact. */
     const isIssuerClass = (callee) =>
       (resolveAlias(checker.getSymbolAtLocation(tsNode(callee)))?.declarations ?? []).some(
         (declaration) =>
           ts.isClassDeclaration(declaration) &&
           declaration.name?.text === 'InternalTokenService' &&
-          ISSUER_FILE.test(posix(declaration.getSourceFile().fileName)),
+          ISSUER_FILES.has(repoPath(declaration.getSourceFile().fileName)),
       );
     const propertyName = (property) =>
       property.type === 'Property' && !property.computed
@@ -720,6 +762,63 @@ export default {
           ? (keyNames(node.property) ?? ['eval']).some((name) => CODEGEN_NAMES.has(name))
           : CODEGEN_NAMES.has(node.property.name)));
     /**
+     * Whether a value of this type is a function or a class: its `constructor`
+     * is `Function` (or the async/generator one), code built from a string.
+     */
+    const isFunctionValue = (type) =>
+      Boolean(type) &&
+      (type.isUnion() || type.isIntersection() ? type.types : [type]).some(
+        (part) => part.getCallSignatures().length > 0 || part.getConstructSignatures().length > 0,
+      );
+    const isUntypedValue = (type) =>
+      Boolean(type) && Boolean(type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown));
+    const FUNCTION_LITERALS = new Set([
+      'FunctionExpression',
+      'ArrowFunctionExpression',
+      'ClassExpression',
+    ]);
+    /**
+     * D-088: a read of `constructor` on a function value — `fn['constructor']`,
+     * `(function () {}).constructor` kept for later, `{ constructor: C } = fn`
+     * — reaches the Function constructor. Refused in production; a direct
+     * `.constructor(…)` call is reported where it is called.
+     */
+    const checkConstructorRead = (node, objectNode, objectType, names, computed) => {
+      if (names !== null && !names.includes('constructor')) return;
+      const reason = 'code built from a string (`constructor` read on a function value)';
+      if (typed) {
+        if (isFunctionValue(objectType)) failClosed(node, reason);
+        else if (computed && names !== null && isUntypedValue(objectType)) failClosed(node, reason);
+        return;
+      }
+      if (names === null) return; // reported as a computed call without types where called
+      if (computed || FUNCTION_LITERALS.has(objectNode?.type)) failClosed(node, reason);
+    };
+    /**
+     * D-088: `process.getBuiltinModule(…)` hands out builtins by name, so it is
+     * an import: 'module' is node:module's namespace (its loaders), 'vm' is code
+     * generation, and a name that is not a constant could be either. Called
+     * other than directly (an alias, destructured, passed on), it is unseen.
+     */
+    const checkBuiltinModuleReference = (node) => {
+      const parent = node.parent;
+      if (!(parent.type === 'CallExpression' && parent.callee === node)) {
+        failClosed(node, '`getBuiltinModule` used other than by calling it');
+        return;
+      }
+      const specifiers = specifiersOf(parent.arguments[0]);
+      if (specifiers === null) {
+        failClosed(parent, 'a builtin module named by an expression (`getBuiltinModule`)');
+        return;
+      }
+      for (const specifier of specifiers.names) {
+        if (LOADER_MODULE.test(specifier))
+          failClosed(parent, 'the module loader namespace (`getBuiltinModule`)');
+        if (CODEGEN_MODULE.test(specifier))
+          failClosed(parent, 'code built from a string (vm, `getBuiltinModule`)');
+      }
+    };
+    /**
      * A reference to a loader or to code generation that is not a direct call
      * (an alias, an argument, a property): from here on its calls are unseen.
      */
@@ -765,6 +864,14 @@ export default {
     return {
       ImportDeclaration(node) {
         checkModule(node, node.source, node.importKind === 'type');
+        if (node.importKind !== 'type')
+          for (const part of node.specifiers)
+            if (
+              part.type === 'ImportSpecifier' &&
+              part.importKind !== 'type' &&
+              (part.imported.name ?? part.imported.value) === 'getBuiltinModule'
+            )
+              failClosed(part, '`getBuiltinModule` used other than by calling it');
       },
       ImportExpression(node) {
         checkModule(node, node.source, false);
@@ -872,6 +979,10 @@ export default {
         if (isCodegen(node)) checkLoaderReference(node);
         const names = node.computed ? keyNames(node.property) : [node.property.name];
         const objectType = typed ? checker.getTypeAtLocation(tsNode(node.object)) : null;
+        if (names?.includes('getBuiltinModule')) checkBuiltinModuleReference(node);
+        const calledByDot =
+          !node.computed && node.parent.type === 'CallExpression' && node.parent.callee === node;
+        if (!calledByDot) checkConstructorRead(node, node.object, objectType, names, node.computed);
         if (names === null || names.includes('issue')) checkIssueRead(node, objectType, names);
         if (
           names?.some((name) => SIGNERS.has(name)) &&
@@ -888,13 +999,13 @@ export default {
           });
         if (names?.includes(SECRET)) {
           const parent = node.parent;
+          // Without types a callee named InternalTokenService could be any
+          // class: only the resolved genuine one takes the secret.
           const isIssuerSecret =
+            typed &&
             parent?.type === 'NewExpression' &&
             parent.arguments[0] === node &&
-            (typed
-              ? isIssuerClass(parent.callee)
-              : parent.callee.type === 'Identifier' &&
-                parent.callee.name === 'InternalTokenService');
+            isIssuerClass(parent.callee);
           if (!isIssuerSecret) reportSecret(node);
         } else if (names === null && typed && holdsSecret(objectType)) {
           unresolved(node, `a computed key on a value holding ${SECRET}`);
@@ -940,6 +1051,10 @@ export default {
             : [property.key.type === 'Identifier' ? property.key.name : String(property.key.value)];
           if (names === null || names.includes('issue'))
             checkIssueRead(property, sourceType, names);
+          if (names?.includes('getBuiltinModule'))
+            failClosed(property, '`getBuiltinModule` used other than by calling it');
+          if (names?.includes('constructor') || (names === null && typed))
+            checkConstructorRead(property, null, sourceType, names, false);
           if (names?.includes(SECRET)) reportSecret(property);
           else if (names === null && typed && holdsSecret(sourceType))
             unresolved(property, `a computed key on a value holding ${SECRET}`);

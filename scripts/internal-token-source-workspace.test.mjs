@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isTestOnlyPath } from './test-only-path.mjs';
 import { sourceProblems } from './testing-dev-only-source.mjs';
+import { repoPath } from './internal-token-source-rule.mjs';
 
 /**
  * The internal-token source boundary's lint layer in real workspaces (PR #423
@@ -38,6 +39,8 @@ const RULE = 'internal/token-source';
 const TAG = `__token_source_${process.pid}__`;
 const EXTENSIONS = ['ts', 'tsx', 'mts', 'cts', 'js', 'jsx', 'mjs', 'cjs'];
 const MARK = /\/\/ ✗ ([\w ]+)$/;
+/** The one file the rule exempts whole (scripts/internal-token-source-rule.mjs). */
+const CLIENT_FILE = 'packages/nest-common/src/http/internal-http-client.ts';
 
 /** Writes `files` (workspace-relative path → text), lints them, removes them. */
 function lintFixtures(workspace, files, { stdin } = {}) {
@@ -524,6 +527,168 @@ test('root scripts (test-only): issuance, header and secret refused; loaders lef
       "export const secret = () => process.env['INTERNAL_TOKEN_' + 'SECRET']; // ✗ signer",
       "export const signer = async () => new (await import('jose')).SignJWT({}); // ✗ signer",
     ),
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #503 r2 F4: privileged files are exact repository paths, never suffixes.
+// Each shadow below is an ordinary file whose path ENDS like a privileged one
+// (the client exemption or one of the six function allowances) and does what
+// only the privileged file may; each must be refused, by the full config.
+
+const SHADOW = 'src/packages/nest-common/src/http/internal-http-client.ts';
+const SHADOWS = {
+  // The client exemption (CLIENT_FILE): the review's example, verbatim…
+  [SHADOW]: lines(
+    'export const key = process.env.INTERNAL_TOKEN_SECRET; // ✗ signer',
+    "export const headers = { 'x-internal-token': 'chosen' }; // ✗ header",
+    // …and the issuer's own allowances: a shadow InternalTokenService is no
+    // issuer, so neither its DI factory nor the secret as its argument is.
+    'export class InternalTokenService {',
+    '  constructor(readonly secret: string) {}',
+    '  issue(): string { return this.secret; }',
+    '}',
+  ),
+  [`${S}/shadow-issuer-user.ts`]: lines(
+    "import { InternalTokenService } from '../packages/nest-common/src/http/internal-http-client';",
+    'export const tokens = (env: { INTERNAL_TOKEN_SECRET: string }) =>',
+    '  new InternalTokenService(env.INTERNAL_TOKEN_SECRET); // ✗ signer',
+  ),
+  // The six function allowances (eslint.config.mjs), each in its function.
+  'src/tests/e2e/src/http.ts': lines(
+    'export function send(token: string) {',
+    "  return fetch('/x', { headers: { 'x-internal-token': token } }); // ✗ header",
+    '}',
+  ),
+  'src/tests/e2e/src/internal.ts': lines(
+    "import { SignJWT } from 'jose';",
+    'export function mintInternalToken() {',
+    '  return new SignJWT({}); // ✗ signer',
+    '}',
+  ),
+  'src/tests/e2e/src/env.ts': lines(
+    'export function e2eConfig() {',
+    '  return process.env.INTERNAL_TOKEN_SECRET; // ✗ signer',
+    '}',
+  ),
+  'src/packages/testing/src/internal-token.ts': lines(
+    "import { SignJWT } from 'jose';",
+    'export function mintTestInternalToken() {',
+    '  return new SignJWT({}); // ✗ signer',
+    '}',
+  ),
+  'src/scripts/internal-token-source-rule.mjs': lines(
+    'export function secretName() {',
+    "  return 'INTERNAL_TOKEN_SECRET'; // ✗ signer",
+    '}',
+  ),
+  'src/scripts/internal-token-transport-rule.mjs': lines(
+    'export function credentialNames() {',
+    "  return ['x-internal-token', 'authorization']; // ✗ header",
+    '}',
+  ),
+};
+
+test('review F4: a file whose path only ends like a privileged one is ordinary production code', async () => {
+  // Every privileged path has its shadow here (`src/<path>`), so a new
+  // allowance needs one.
+  const { INTERNAL_TOKEN_SOURCE } = await import(path.join(ROOT, 'eslint.config.mjs'));
+  const allow = INTERNAL_TOKEN_SOURCE.flatMap((block) => block.rules?.[RULE]?.[1]?.allow ?? []);
+  assert.equal(allow.length, 6, 'the allow-list was read');
+  assert.deepEqual(
+    [CLIENT_FILE, ...allow.map((allowance) => allowance.file)].filter(
+      (file) => !(`src/${file}` in SHADOWS),
+    ),
+    [],
+    'a privileged path without a shadow fixture',
+  );
+  lintMarked('services/economic-service', SHADOWS);
+  // The portal's own config: no allowances, but the client exemption.
+  lintMarked('apps/web', {
+    [SHADOW]: "export const headers = { 'x-internal-token': 'chosen' }; // ✗ header\n",
+  });
+});
+
+test('review F4: the genuine privileged files keep their privilege, under their canonical path', () => {
+  assert.equal(repoPath(path.join(ROOT, CLIENT_FILE)), CLIENT_FILE);
+  assert.equal(
+    repoPath(path.join(ROOT, 'packages/nest-common/src/http/../http/internal-http-client.ts')),
+    CLIENT_FILE,
+  );
+  assert.equal(repoPath(path.join(ROOT, 'services/economic-service', SHADOW)), null, 'not on disk');
+  assert.equal(repoPath(path.join(os.tmpdir(), CLIENT_FILE)), null, 'outside the repository');
+  // A link is its target: a link named like the client to another file is
+  // that file; a link elsewhere to the client is the client's own bytes.
+  const dir = fs.mkdtempSync(path.join(ROOT, `services/economic-service/src/${TAG}-link-`));
+  try {
+    fs.writeFileSync(path.join(dir, 'other.ts'), 'export {};\n');
+    fs.mkdirSync(path.join(dir, 'packages/nest-common/src/http'), { recursive: true });
+    fs.symlinkSync(
+      path.join(dir, 'other.ts'),
+      path.join(dir, 'packages/nest-common/src/http/internal-http-client.ts'),
+    );
+    fs.symlinkSync(path.join(ROOT, CLIENT_FILE), path.join(dir, 'client-link.ts'));
+    assert.equal(
+      repoPath(path.join(dir, 'packages/nest-common/src/http/internal-http-client.ts')),
+      path.relative(ROOT, path.join(dir, 'other.ts')).split(path.sep).join('/'),
+    );
+    assert.equal(repoPath(path.join(dir, 'client-link.ts')), CLIENT_FILE);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  // The genuine client and each allowance, as they are, still pass.
+  const byFile = lintFixtures(
+    'packages/nest-common',
+    {},
+    {
+      stdin: {
+        file: 'src/http/internal-http-client.ts',
+        text: fs.readFileSync(path.join(ROOT, CLIENT_FILE), 'utf8'),
+      },
+    },
+  );
+  assert.deepEqual(boundary(byFile.get('src/http/internal-http-client.ts'), CLIENT_FILE), []);
+});
+
+// ---------------------------------------------------------------------------
+// D-088: the two capability extractions closed in production (the rest of the
+// class is the documented residual, docs/internal-token-transport-scope.md).
+
+test('D-088: process.getBuiltinModule(module) and a constructor read on a function value are refused in production', () => {
+  lintMarked('services/economic-service', {
+    [`${S}/d088.ts`]: lines(
+      "import process from 'node:process';",
+      "import { getBuiltinModule } from 'node:process'; // ✗ unresolved",
+      'export const viaImport = getBuiltinModule;',
+      "const name = 'createRequire';",
+      "const load = process.getBuiltinModule('module')[name](__filename); // ✗ unresolved",
+      "export const signer = () => load('jose');",
+      "export const prefixed = () => process.getBuiltinModule('node:module'); // ✗ unresolved",
+      "export const vm = () => process.getBuiltinModule('vm'); // ✗ unresolved",
+      'export const named = (which: string) => process.getBuiltinModule(which); // ✗ unresolved',
+      'export const kept = process.getBuiltinModule; // ✗ unresolved',
+      'export const { getBuiltinModule: picked } = process; // ✗ unresolved',
+      "export const fs = process.getBuiltinModule('node:fs');",
+      "export const run = () => (function () {})['constructor']('return 123')(); // ✗ unresolved",
+      "export const folded = () => (() => 0)['constr' + 'uctor']; // ✗ unresolved",
+      'const C = (function () {}).constructor; // ✗ unresolved',
+      "export const other = () => C('return 123')();",
+      'export const asyncCtor = (async function () {}).constructor; // ✗ unresolved',
+      'export const { constructor: D } = function* () {}; // ✗ unresolved',
+      'export const ofClass = class {}.constructor; // ✗ unresolved',
+      'export const fine = [new Date().constructor, ({}).constructor.name];',
+    ),
+    // Without types, the computed read and a literal function's are refused.
+    [`${S}/d088.mjs`]: lines(
+      "export const run = () => (function () {})['constructor']('return 123')(); // ✗ unresolved",
+      'export const dot = (async () => 0).constructor; // ✗ unresolved',
+      "export const load = () => process.getBuiltinModule('module'); // ✗ unresolved",
+      'class InternalTokenService { constructor(secret) { this.secret = secret; } }',
+      'export const t = new InternalTokenService(process.env.INTERNAL_TOKEN_SECRET); // ✗ signer',
+    ),
+    // Test-only code (an e2e/ tree; the rule is on there) is answered by the
+    // run-time boundary, as for loaders.
+    [`${S}/e2e/d088.ts`]: "export const run = () => (function () {})['constructor'];\n",
   });
 });
 
