@@ -117,6 +117,7 @@ import { createRequire, isBuiltin } from 'node:module';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
+import { isTestOnlyPath } from './test-only-path.mjs';
 import { REPO_ROOT, TESTING } from './testing-dev-only.mjs';
 
 const toPosix = (path) => path.split(sep).join('/');
@@ -131,19 +132,7 @@ const SWEPT = ['apps', 'services', 'packages'];
 /** What a workspace may leave unswept, at its own root only. */
 const BUILD_DIRS = new Set(['dist', 'coverage', '.next', 'node_modules']);
 
-/**
- * Whether a repository-relative path is test-only code that no image runs:
- * root tests/, packages/testing, a test/, __tests__/ or e2e/ directory, a
- * spec/test file, or a test runner's own files (`jest.config.js`,
- * `jest.setup.cjs`, `playwright.config.ts`). Everything else is production.
- */
-export function isTestOnlyPath(relPath) {
-  const rel = toPosix(relPath);
-  if (/^(tests|packages\/testing)\//.test(rel)) return true;
-  if (/(^|\/)(test|__tests__|e2e)\//.test(rel)) return true;
-  if (/(^|\/)(jest|playwright)\.[\w.-]+\.[cm]?[jt]s$/.test(rel)) return true;
-  return /\.(spec|test|int-spec|e2e-spec)\.[cm]?[jt]sx?$/.test(rel);
-}
+export { isTestOnlyPath };
 
 // ---------------------------------------------------------------------------
 // References and loaders in one file

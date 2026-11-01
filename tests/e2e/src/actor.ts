@@ -271,9 +271,8 @@ export class Actor {
     const headers: Record<string, string> = {
       'x-correlation-id': correlationId,
       accept: 'application/json',
-      ...(options.internalToken
-        ? { 'x-internal-token': options.internalToken }
-        : { authorization: `Bearer ${await this.token.value()}` }),
+      // The internal token travels in the request, and send() alone sets its header.
+      ...(options.internalToken ? {} : { authorization: `Bearer ${await this.token.value()}` }),
     };
     if (options.idempotencyKey) headers['idempotency-key'] = options.idempotencyKey;
     if (options.replayDeadline !== undefined) {
@@ -290,6 +289,7 @@ export class Actor {
         baseUrl: options.baseUrl ?? this.config.gatewayUrl,
         path,
         headers,
+        ...(options.internalToken ? { internalToken: options.internalToken } : {}),
         body: options.body,
       },
       this.fetchImpl,
