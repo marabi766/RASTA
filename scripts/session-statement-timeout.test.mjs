@@ -33,7 +33,9 @@ function withPsql(script, args, env, { psqlStatus = 0 } = {}) {
     writeFileSync(
       psql,
       `#!/bin/bash\nsql="$(cat)"\nprintf '%s\\n' "$sql" >> "${log}"\n` +
-        `[[ "$sql" == *statement_timeout* ]] && exit ${psqlStatus}\nexit 0\n`,
+        // The ALTER that sets it — not any SQL naming it (runtime-settings.sql
+        // allows the parameter by name, #540 r2).
+        `[[ "$sql" == *"SET statement_timeout ="* ]] && exit ${psqlStatus}\nexit 0\n`,
     );
     chmodSync(psql, 0o755);
     const run = spawnSync('bash', ['-c', script, 'test', ...args], {

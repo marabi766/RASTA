@@ -19,6 +19,7 @@ const runtime: ConnectedRoleFacts = {
   createDb: false,
   createRole: false,
   bypassRls: false,
+  replication: false,
   ownsDatabase: false,
   ownedSchemas: [],
   ownsRelationIn: [],
@@ -80,6 +81,7 @@ describe('a service runs only as its runtime role (D-045)', () => {
     ]);
     expect(connectedRoleProblems({ ...runtime, bypassRls: true })).toEqual(['holds BYPASSRLS']);
     expect(connectedRoleProblems({ ...runtime, createRole: true })).toEqual(['holds CREATEROLE']);
+    expect(connectedRoleProblems({ ...runtime, replication: true })).toEqual(['holds REPLICATION']);
     expect(connectedRoleProblems({ ...runtime, ownsRelationIn: ['audit'] })).toEqual([
       'can act as the owner of a relation in schema audit',
     ]);
@@ -112,6 +114,8 @@ describe('a service runs only as its runtime role (D-045)', () => {
       "has_database_privilege(current_database(), 'CREATE')",
       "has_schema_privilege(n.oid, 'CREATE')",
       'rolbypassrls',
+      'r.rolreplication AS replication',
+      'OR m.rolreplication',
     ]) {
       expect(CONNECTED_ROLE_SQL).toContain(fragment);
     }

@@ -6,16 +6,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  CONNECTABLE_DATABASES_SQL,
   FINDINGS_SQL,
+  FOREIGN_FINDINGS_SQL,
   FUNCTION_GRANT_LINE,
   TIMEZONE_FINDINGS_SQL,
   allowlistSql,
   classifyServices,
   findingsSql,
+  foreignExceptionsSql,
+  foreignVerdict,
   grantsModesFromLibrary,
+  matrix,
   parseRequiredRuntimeFunctions,
   policyFor,
   requiredRuntimeFunctions,
+  runtimeRolesSql,
   timezoneVerdict,
   verdict,
 } from './check-db-runtime-privileges-lib.mjs';
@@ -153,6 +159,207 @@ test('the split and the check read one allowlist and one forbidden-rights file',
   assert.match(grants, /WHERE policy = 'default'/);
 });
 
+// #540 r1 F1 (D-097): the complete inventory. Every ACL column PostgreSQL 16
+// has is modeled, one that is not is a finding nobody can revoke, and the
+// classes the review named are judged by built-in privileges, not skipped.
+test('every ACL PostgreSQL 16 has is in the inventory, and an unmodeled one fails closed', () => {
+  const lib = new URL('../infrastructure/docker/postgres/lib/', import.meta.url);
+  const entries = readFileSync(new URL('runtime-acl-entries.sql', lib), 'utf8');
+  for (const column of [
+    "('pg_database', 'datacl')",
+    "('pg_namespace', 'nspacl')",
+    "('pg_class', 'relacl')",
+    "('pg_attribute', 'attacl')",
+    "('pg_proc', 'proacl')",
+    "('pg_type', 'typacl')",
+    "('pg_language', 'lanacl')",
+    "('pg_largeobject_metadata', 'lomacl')",
+    "('pg_foreign_data_wrapper', 'fdwacl')",
+    "('pg_foreign_server', 'srvacl')",
+    "('pg_tablespace', 'spcacl')",
+    "('pg_parameter_acl', 'paracl')",
+    "('pg_default_acl', 'defaclacl')",
+  ]) {
+    assert.ok(entries.includes(column), column);
+  }
+  for (const source of [
+    'FROM pg_largeobject_metadata lo',
+    'FROM pg_foreign_data_wrapper w',
+    'FROM pg_foreign_server s',
+    'FROM pg_tablespace ts',
+    'FROM pg_parameter_acl pa',
+    'FROM pg_language l',
+    'FROM pg_type t',
+    'FROM pg_default_acl da',
+    'LEFT JOIN pg_init_privs i',
+    "atttypid = 'aclitem[]'::regtype",
+  ]) {
+    assert.ok(entries.includes(source), source);
+  }
+  for (const rule of [
+    'the ACL column %s is not modeled (runtime-acl-entries.sql): nothing checks it',
+    'beyond the built-in privileges',
+    'not to the runtime role itself',
+    "('type', ARRAY['USAGE'])",
+  ]) {
+    assert.ok(FINDINGS_SQL.includes(rule), rule);
+  }
+  assert.ok(FINDINGS_SQL.includes(entries), 'the check reads the inventory as written');
+});
+
+test('role attributes, ownership and membership: REPLICATION, every owned class, every predefined role', () => {
+  const lib = new URL('../infrastructure/docker/postgres/lib/', import.meta.url);
+  const dangerous = readFileSync(new URL('runtime-dangerous-roles.sql', lib), 'utf8');
+  const split = readFileSync(new URL('service-privilege-split.bash', lib), 'utf8');
+  for (const fragment of [
+    "('REPLICATION', rolreplication)",
+    "s.refclassid = 'pg_authid'::regclass AND s.deptype = 'o'",
+    "'member of predefined role '",
+    "r.rolname LIKE 'pg\\_%'",
+    "' is a member of the runtime role'",
+    "current_setting('lo_compat_privileges')",
+    'which accepts no connections and so cannot be checked',
+    'm.oid IN (SELECT d.oid FROM dangerous d)',
+  ]) {
+    assert.ok(FINDINGS_SQL.includes(fragment), fragment);
+  }
+  for (const fragment of [
+    'r.rolreplication',
+    "r.rolname LIKE 'pg\\_%'",
+    "s.deptype = 'o'",
+    'r.rolname = ANY (RUNTIME_ROLES)',
+    "m.rolname = r.rolname || '_migrator'",
+  ]) {
+    assert.ok(dangerous.includes(fragment), fragment);
+  }
+  assert.equal(
+    split.match(/NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION/g)?.length,
+    2,
+  );
+  assert.match(split, /runtime-dangerous-roles\.sql/);
+  assert.match(split, /OR am\.roleid = '\$\{runtime\}'::regrole/);
+});
+
+// #540 r1 F2 (D-097): the service-role × database matrix.
+test('the matrix visits every database that accepts connections, with its own runtime role or none', () => {
+  const entries = [
+    { database: 'rasta_audit', runtime: 'rasta_audit' },
+    { database: 'rasta_economic', runtime: 'rasta_economic' },
+  ];
+  assert.deepEqual(
+    matrix(entries, ['postgres|t', 'rasta_audit|t', 'rasta_economic|t', 'template0|f', 'x|t']),
+    [
+      { database: 'postgres', runtime: '' },
+      { database: 'rasta_audit', runtime: 'rasta_audit' },
+      { database: 'rasta_economic', runtime: 'rasta_economic' },
+      { database: 'x', runtime: '' },
+    ],
+  );
+  assert.deepEqual(matrix(entries, ['rasta_audit|f']), [
+    { database: 'rasta_audit', problem: 'accepts no connections, so it cannot be checked' },
+    { database: 'rasta_economic', problem: 'does not exist' },
+  ]);
+  assert.throws(() => matrix(entries, ['rasta_audit']), /unreadable database row/);
+  assert.match(CONNECTABLE_DATABASES_SQL, /FROM pg_database/);
+  assert.equal(foreignVerdict('rasta_audit', []).ok, true);
+  const failed = foreignVerdict('rasta_audit', [
+    'rasta_economic can CONNECT to database rasta_audit',
+  ]);
+  assert.equal(failed.ok, false);
+  assert.match(failed.line, /rasta_economic can CONNECT to database rasta_audit/);
+});
+
+test('the split and the check read one foreign-access rule set and one runtime-role list', () => {
+  const lib = new URL('../infrastructure/docker/postgres/lib/', import.meta.url);
+  const split = readFileSync(new URL('service-privilege-split.bash', lib), 'utf8');
+  const foreign = readFileSync(new URL('runtime-foreign.sql', lib), 'utf8');
+  const services = servicesFromLibrary();
+  const roles = runtimeRolesSql(services);
+  assert.equal(roles, `ARRAY[${services.map((s) => `'rasta_${s}'`).join(', ')}]::text[]`);
+  assert.ok(
+    FOREIGN_FINDINGS_SQL.includes(
+      foreign.replaceAll('RUNTIME_ROLES', roles).replaceAll('RUNTIME_ROLE', ":'runtime'"),
+    ),
+  );
+  assert.ok(FOREIGN_FINDINGS_SQL.includes(foreignExceptionsSql));
+  assert.throws(() => runtimeRolesSql(["x'); DROP"]), /unreadable service name/);
+  for (const file of [
+    'runtime-foreign.sql',
+    'runtime-acl-entries.sql',
+    'runtime-foreign-exceptions.sql',
+    'runtime-dangerous-roles.sql',
+  ]) {
+    assert.ok(split.includes(file), file);
+  }
+  assert.match(
+    split,
+    /restrict_foreign_access "\$\{db\}" "\$\{runtime\}" "\$\{migrator\}" "\$\{policy\}"/,
+  );
+  assert.match(split, /restrict_foreign_access "\$\{db\}" "\$\{runtime\}" "\$\{migrator\}" audit/);
+  assert.match(split, /for svc in "\$\{RASTA_SERVICES\[@\]\}"; do list\+=/);
+});
+
+// #540 r1 F1, beyond ACLs: a stored setting is applied at login unchecked.
+test('the split and the check read one stored-settings rule, and both splits reset by it', () => {
+  const lib = new URL('../infrastructure/docker/postgres/lib/', import.meta.url);
+  const split = readFileSync(new URL('service-privilege-split.bash', lib), 'utf8');
+  const settings = readFileSync(new URL('runtime-settings.sql', lib), 'utf8');
+  assert.ok(FINDINGS_SQL.includes(settings.replaceAll('RUNTIME_ROLE', ":'runtime'")));
+  assert.ok(split.includes('runtime-settings.sql'));
+  // Both splits, each right after the membership cleanup.
+  assert.equal(
+    split.split(
+      'revoke_owner_memberships "${db}" "${runtime}" || return 1\n  reset_runtime_settings "${db}" "${runtime}" || return 1',
+    ).length,
+    3,
+  );
+  // The allowed parameters: exactly the three the bootstrap stores.
+  assert.match(
+    settings,
+    /NOT IN \('timezone', 'statement_timeout', 'rasta\.disposable_database'\)\s*$/,
+  );
+});
+
+// Expected: none for a service database (D-097).
+test('the foreign-access exceptions: no service database, PUBLIC only, CONNECT or TEMPORARY, a reason each', () => {
+  const rows = [
+    ...foreignExceptionsSql.matchAll(
+      /^\s*\('([^']+)', '([^']+)', '([^']+)', '((?:[^']|'')+)'\),?$/gm,
+    ),
+  ];
+  const declared = foreignExceptionsSql.split('\n').filter((line) => /^\s*\('/.test(line)).length;
+  assert.equal(rows.length, declared, 'a row the test cannot read');
+  const services = new Set(servicesFromLibrary().map((s) => `rasta_${s}`));
+  for (const [, database, privilege, grantee, reason] of rows) {
+    assert.ok(!services.has(database) && !database.startsWith('rasta_'), database);
+    assert.equal(grantee, 'PUBLIC', database);
+    assert.ok(['CONNECT', 'TEMPORARY'].includes(privilege), `${database} ${privilege}`);
+    assert.ok(reason.trim().length > 0, `${database}: no reason`);
+  }
+  // D-100: PostgreSQL's own databases, and the infrastructure ones only while
+  // the bootstrap superuser owns them (Keycloak and Temporal connect as it).
+  // One with a dedicated owner loses PUBLIC at bootstrap instead.
+  const bootstrap = readFileSync(
+    new URL('../infrastructure/docker/postgres/00-init-databases.sh', import.meta.url),
+    'utf8',
+  );
+  const infra = /^INFRA_DATABASES=\(([^)]*)\)$/m.exec(bootstrap)?.[1].trim().split(/\s+/);
+  assert.deepEqual(infra, ['keycloak', 'temporal', 'temporal_visibility']);
+  assert.match(
+    bootstrap,
+    /for db in "\$\{INFRA_DATABASES\[@\]\}"; do[\s\S]*?CREATE DATABASE \$\{db\} OWNER \$\{POSTGRES_USER\}/,
+    'an infrastructure database with an owner of its own: revoke PUBLIC there, not an exception',
+  );
+  assert.deepEqual([...new Set(rows.map(([, database]) => database))].sort(), [
+    'keycloak',
+    'postgres',
+    'template1',
+    'template_postgis',
+    'temporal',
+    'temporal_visibility',
+  ]);
+});
+
 /** runtime-allowlist.sql's rows (a test-only reading; PostgreSQL reads the file). */
 function allowlistRows() {
   const rows = [
@@ -195,9 +402,12 @@ function migrationGrants(service, schema) {
       if (!new RegExp(`\\b${runtime}\\b`).test(statement)) continue;
       const flat = statement.replace(/\s+/g, ' ');
       let m;
-      if (/ ON (TYPE|FUNCTION|ROUTINE) /i.test(flat) || /^GRANT USAGE ON SCHEMA/i.test(flat))
-        continue;
-      if ((m = /^GRANT ([A-Z, ]+) ON (SEQUENCE |TABLE )?(.+) TO (\w+);$/i.exec(flat))) {
+      if (/ ON (FUNCTION|ROUTINE) /i.test(flat) || /^GRANT USAGE ON SCHEMA/i.test(flat)) continue;
+      // A type's USAGE (#540 r1 F1): the allowlist's `type` rows.
+      if ((m = /^GRANT USAGE ON TYPE (\w+) TO (\w+);$/i.exec(flat))) {
+        assert.equal(m[2], runtime, flat);
+        held.set(`type ${names(m[1])[0]}`, new Set(['USAGE']));
+      } else if ((m = /^GRANT ([A-Z, ]+) ON (SEQUENCE |TABLE )?(.+) TO (\w+);$/i.exec(flat))) {
         assert.equal(m[4], runtime, flat);
         const cls = m[2]?.trim().toUpperCase() === 'SEQUENCE' ? 'sequence' : 'relation';
         for (const name of names(m[3])) {
@@ -234,7 +444,7 @@ test('each migration-managed policy is exactly what its migrations grant', () =>
   ]) {
     const declared = new Map(
       rows
-        .filter((r) => r.policy === policy && ['relation', 'sequence'].includes(r.cls))
+        .filter((r) => r.policy === policy && ['relation', 'sequence', 'type'].includes(r.cls))
         .map((r) => [`${r.cls} ${r.object}`, [...r.privileges].sort()]),
     );
     const granted = new Map(
@@ -274,6 +484,10 @@ test('each migration-managed policy is exactly what its migrations grant', () =>
     'DELETE',
   ]);
   assert.ok(!rows.some((r) => /audit_event_/.test(r.object) && r.cls === 'relation'));
+  assert.deepEqual(
+    rows.filter((r) => r.cls === 'type').map((r) => `${r.policy} ${r.object}`),
+    ['audit audit.organization_relation_state', 'audit audit.audit_chain_scope'],
+  );
   // Wildcards and defaults only in the default policy.
   for (const row of rows.filter((r) => r.object.endsWith('.*') || r.cls.startsWith('default'))) {
     assert.equal(row.policy, 'default', `${row.policy} ${row.cls} ${row.object}`);

@@ -918,21 +918,17 @@ for (const order of ['a', 'z']) {
       assert.equal(run(ACLS_SQL), repaired);
       assert.deepEqual(inspect(), []);
 
-      // A right no REVOKE can remove fails the split closed, naming it — as
-      // it fails the check — instead of ending as if it had converged.
+      // A right no ACL REVOKE can remove — a predefined role's, reached through
+      // a member role — is a finding, and since #540 r1 F1 (every predefined
+      // role is in runtime-dangerous-roles.sql) the split revokes the
+      // membership that reaches it instead of failing on it.
       run(`GRANT pg_read_all_data TO ${grantor}`);
-      const refused = splitRun(svc, db, 'default', migrator);
-      assert.notEqual(refused.status, 0);
-      assert.match(
-        refused.stderr,
-        new RegExp(
-          `the split did not converge: ${runtime} still holds a right on public\\._prisma_migrations`,
-        ),
-      );
       assert.ok(inspect().includes('member of predefined role pg_read_all_data'));
-      run(`REVOKE pg_read_all_data FROM ${grantor}`);
       split();
+      assert.ok(!holds(`pg_has_role('${runtime}', '${grantor}', 'MEMBER')`));
+      assert.ok(!holds(`pg_has_role('${runtime}', 'pg_read_all_data', 'MEMBER')`));
       assert.deepEqual(inspect(), []);
+      run(`REVOKE pg_read_all_data FROM ${grantor}`);
     } finally {
       psql(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`, { database: 'postgres' });
       for (const role of [runtime, migrator, grantor, orphaner]) {
@@ -1491,7 +1487,7 @@ for (const policy of ['supplier', 'analytics', 'audit']) {
 const SHARED_ROLES_SQL = `
   SELECT coalesce(json_agg(row_to_json(r) ORDER BY r.rolname), '[]') FROM (
     SELECT a.rolname, a.rolsuper, a.rolinherit, a.rolcreaterole, a.rolcreatedb, a.rolcanlogin,
-      a.rolbypassrls, a.rolconnlimit, a.rolpassword, a.rolvaliduntil,
+      a.rolbypassrls, a.rolreplication, a.rolconnlimit, a.rolpassword, a.rolvaliduntil,
       ARRAY(SELECT m.roleid::regrole || ' ' || m.admin_option || m.inherit_option || m.set_option
               || ' by ' || m.grantor::regrole FROM pg_auth_members m
              WHERE m.member = a.oid OR m.roleid = a.oid ORDER BY 1) AS memberships,
