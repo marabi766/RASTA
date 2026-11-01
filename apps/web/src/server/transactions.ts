@@ -9,7 +9,7 @@ import {
   DISPUTE_COMMANDS,
   DISPUTE_FIELD_LIMITS as LIMITS,
   DISPUTE_FROM_STATES,
-  DISPUTE_TARGET_STATE,
+  DISPUTE_TARGET_STATES,
   NEVER_ROLE,
   PLATFORM_ROLES,
   disputedThroughOrder,
@@ -328,13 +328,13 @@ export const DISPUTE_FIELD_MAPPING: FieldMapping<DisputeField> = {
 };
 
 /**
- * What a confirmed answer must look like: this transaction, in the state the
+ * What a confirmed answer must look like: this transaction, in a state the
  * command leads to. A replay answers with the stored result, which is that same
  * state, so a 2xx that shows anything else cannot be told from "maybe" and is
  * unconfirmed (`writeThroughGateway`).
  */
 const answerSchema = (transactionId: string, command: DisputeCommand) =>
-  z.object({ id: z.literal(transactionId), status: z.literal(DISPUTE_TARGET_STATE[command]) });
+  z.object({ id: z.literal(transactionId), status: z.enum(DISPUTE_TARGET_STATES[command]) });
 
 export type DisputeCommandResult = Exclude<
   WriteResult<{ id: string; status: string }, DisputeField>,

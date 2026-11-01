@@ -122,7 +122,15 @@ export class TransactionRepository {
                  source_type                     AS "sourceType",
                  source_reference                AS "sourceReference",
                  correlation_id                  AS "correlationId",
-                 dispute_id                      AS "disputeId"
+                 dispute_id                      AS "disputeId",
+                 settlement_authorised_at IS NOT NULL AS "settlementAuthorised",
+                 EXISTS (
+                   SELECT 1
+                     FROM wallet_hold
+                    WHERE wallet_hold.reference = "transaction".id
+                      AND wallet_hold.reference_type = 'TRANSACTION'
+                      AND wallet_hold.status = 'ACTIVE'
+                 )                               AS "fundsHeld"
             FROM "transaction"
            WHERE id = ${id}
              FOR UPDATE
@@ -343,6 +351,13 @@ export interface LockedTransaction {
   correlationId: string;
   /** The dispute it holds, or held last; null if never disputed. */
   disputeId: string | null;
+  /**
+   * Its settlement authority (`SettlementAuthority`), read with the lock: where
+   * a resolved dispute returns it (D-083). The hold is read, not locked — only
+   * a settlement or a refund releases it, and both lock this row first.
+   */
+  settlementAuthorised: boolean;
+  fundsHeld: boolean;
 }
 
 export interface TransactionRow {

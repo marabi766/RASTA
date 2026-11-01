@@ -2154,6 +2154,8 @@ export const EXPECTED = {
       // A quarantined source key is never changed nor deleted.
       'trg_transaction_source_quarantine_append_only',
       'trg_transaction_source_quarantine_no_truncate',
+      // A resolved dispute goes back to where its settlement authority stands (D-083).
+      'trg_transaction_dispute_resolution',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: ['BusinessLine', 'CommissionOutcome'],
@@ -2172,6 +2174,7 @@ export const EXPECTED = {
       'reject_transaction_source_quarantine_mutation',
       // The correction 20261017130000's preflight names (an operator's tool).
       'quarantine_transaction_source',
+      'enforce_transaction_dispute_resolution',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [

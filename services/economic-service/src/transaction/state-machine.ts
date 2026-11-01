@@ -12,10 +12,13 @@ import type { TransactionStatus } from '../generated/prisma';
  *
  * ```
  *   CREATED ─────► HELD ──────────► PENDING_SETTLEMENT ─────► SETTLED
- *      │             │       ▲               │  ▲
- *      │             │       └───────────────┼──┘   (dispute resolved)
- *      │             ▼                       ▼
- *      │          REFUNDED               DISPUTED ──► REFUNDED
+ *      │           │  ▲                   │  ▲
+ *      │           │  │                   ▼  │ (resolved, settlement authorised)
+ *      │           │  └─────────────── DISPUTED ──► REFUNDED
+ *      │           │   (resolved, never authorised: back to the escrow)
+ *      │           ├──► DISPUTED
+ *      │           ▼
+ *      │        REFUNDED
  *      │
  *      ├──► PENDING_SETTLEMENT     (an obligation with no escrow — ADR-032)
  *      ├──► CANCELLED
@@ -25,10 +28,19 @@ import type { TransactionStatus } from '../generated/prisma';
  * ## The two rules that are controls rather than conveniences
  *
  * **A disputed transaction never moves.** `DISPUTED` has no edge to `SETTLED`.
- * Settlement can only resume by way of an explicit human resolution back to
- * `PENDING_SETTLEMENT`, which is the product document's requirement that a
- * registered objection stops settlement completely (docs/10 § 10.5). There is
- * no automatic resolution and no timeout that resolves one.
+ * It leaves only by an explicit human resolution or a refund, which is the
+ * product document's requirement that a registered objection stops settlement
+ * completely (docs/10 § 10.5). There is no automatic resolution and no timeout
+ * that resolves one.
+ *
+ * **A resolution only lifts the dispute; it never authorises.** It returns the
+ * transaction to where its recorded authority stands ({@link resolvedStatus}):
+ * `PENDING_SETTLEMENT` when settlement was authorised, or when nothing was
+ * ever held (an ADR-032 obligation, authorised when recorded); `HELD` when
+ * funds are escrowed and no authorisation is recorded. It used to send every
+ * dispute to `PENDING_SETTLEMENT`, so an order's obligation disputed before
+ * its buyer confirmed receipt came out of the dispute settlement-ready with
+ * no receipt behind it (marketplace audit F1, PM decision D-083).
  *
  * **Settlement is reachable only from `PENDING_SETTLEMENT`.** Which is only
  * reachable when the authorising fact has arrived — receipt confirmed, or the
@@ -48,9 +60,20 @@ export type TransactionEvent =
   | 'DISPUTE'
   | 'RESOLVE_DISPUTE';
 
+/**
+ * The target of `RESOLVE_DISPUTE`: not one status, but the one of
+ * {@link RESOLUTION_TARGETS} the transaction's authority supports
+ * ({@link resolvedStatus}). A literal in the table, like every other edge, so
+ * the portal's copy of this table can read it (`transactions.contract.spec.ts`).
+ */
+type ByAuthority = 'BY_AUTHORITY';
+
+/** Every status a resolved dispute can return a transaction to. */
+export const RESOLUTION_TARGETS = ['HELD', 'PENDING_SETTLEMENT'] as const;
+
 const TRANSITIONS: Record<
   TransactionStatus,
-  Partial<Record<TransactionEvent, TransactionStatus>>
+  Partial<Record<TransactionEvent, TransactionStatus | ByAuthority>>
 > = {
   CREATED: {
     HOLD_PLACED: 'HELD',
@@ -71,8 +94,9 @@ const TRANSITIONS: Record<
     REFUND: 'REFUNDED',
   },
   DISPUTED: {
-    // Back to the queue, by an explicit human decision. Never automatic.
-    RESOLVE_DISPUTE: 'PENDING_SETTLEMENT',
+    // By an explicit human decision, never automatic — and back to where the
+    // recorded authority stands, never further (`resolvedStatus`).
+    RESOLVE_DISPUTE: 'BY_AUTHORITY',
     REFUND: 'REFUNDED',
   },
   SETTLED: {},
@@ -98,6 +122,40 @@ export function canTransition(from: TransactionStatus, event: TransactionEvent):
 }
 
 /**
+ * What a transaction records about its settlement authority — the facts
+ * {@link resolvedStatus} decides from, read under the row lock.
+ */
+export interface SettlementAuthority {
+  /** `settlement_authorised_at` is set: settlement was authorised. */
+  readonly settlementAuthorised: boolean;
+  /** An ACTIVE wallet hold names the transaction: its funds are escrowed. */
+  readonly fundsHeld: boolean;
+}
+
+/**
+ * Where a resolved dispute leaves a transaction: as settlement-ready as its
+ * recorded authority makes it, and no more (D-083).
+ *
+ * - Authorised (`settlement_authorised_at`): `PENDING_SETTLEMENT`. Nothing
+ *   moves an authorised transaction back to `HELD`, so that is where its
+ *   dispute found it.
+ * - Escrowed and never authorised: `HELD`. Where a dispute raised from `HELD`
+ *   found it — and also where a transaction belongs that an older release's
+ *   resolution sent to `PENDING_SETTLEMENT` with no authorisation, or that was
+ *   authorised before 20260926120000 recorded the instant: settlement then
+ *   needs an authorisation first, which is the side to err on with money.
+ * - No escrow: `PENDING_SETTLEMENT`. A `DISPUTED` transaction with no active
+ *   hold was never `HELD` — a hold is released only by settling or refunding,
+ *   both terminal — so it is an ADR-032 obligation, authorised when recorded.
+ */
+export function resolvedStatus(
+  authority: SettlementAuthority,
+): (typeof RESOLUTION_TARGETS)[number] {
+  if (authority.settlementAuthorised || !authority.fundsHeld) return 'PENDING_SETTLEMENT';
+  return 'HELD';
+}
+
+/**
  * The state after `event`, or a refusal.
  *
  * Refuses with `INVALID_STATE_TRANSITION` (409) — the platform code that
@@ -120,6 +178,12 @@ export function nextStatus(
   transactionId: string,
   from: TransactionStatus,
   event: TransactionEvent,
+  /**
+   * Required for `RESOLVE_DISPUTE` from `DISPUTED`, whose target depends on
+   * it; unread by every other move. Absent where it is required, the move is
+   * refused rather than guessed.
+   */
+  authority?: SettlementAuthority,
 ): TransactionStatus {
   const to = TRANSITIONS[from][event];
   if (!to) {
@@ -129,7 +193,13 @@ export function nextStatus(
       { internalContext: { transactionId, from, event } },
     );
   }
-  return to;
+  if (to !== 'BY_AUTHORITY') return to;
+  if (!authority) {
+    throw new Error(
+      `Resolving transaction ${transactionId}'s dispute needs its settlement authority`,
+    );
+  }
+  return resolvedStatus(authority);
 }
 
 function describe(event: TransactionEvent): string {
