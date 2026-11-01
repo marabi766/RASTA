@@ -13,5 +13,5 @@ DROP TABLE reward_rule_status_history;
 DROP FUNCTION reject_reward_rule_status_mutation();
 DROP INDEX reward_organization_id_user_id_rule_id_occurred_at_idx;
 ALTER TABLE reward DROP COLUMN occurred_at;
-DELETE FROM "_prisma_migrations" WHERE migration_name = '20261101193000_reward_engine_correctness';
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261101193000_reward_engine_correctness';
 COMMIT;

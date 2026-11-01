@@ -7,24 +7,45 @@ import { ownerDatabaseUrl } from './helpers';
 describe('reward status migration on populated historical data', () => {
   it('backfills evidence, refuses to discard it, preserves legacy keys, and runs down/up with no history', () => {
     const schema = `reward_history_${ulid().toLowerCase()}`;
-    const url = new URL(ownerDatabaseUrl());
-    const env = {
-      ...process.env,
-      PGHOST: url.hostname,
-      PGPORT: url.port,
-      PGUSER: decodeURIComponent(url.username),
-      PGPASSWORD: decodeURIComponent(url.password),
-      PGDATABASE: url.pathname.slice(1),
-      PGOPTIONS: `-c timezone=UTC -c search_path=${schema}`,
-    };
-    const psql = (input: string) =>
-      spawnSync('psql', ['-X', '-q', '-v', 'ON_ERROR_STOP=1'], { input, env, encoding: 'utf8' });
+    // Run the shared ESM transport outside Jest, like the other migration
+    // fixtures: passwords stay in libpq's environment, never process argv.
+    const invoke = (input: string | undefined, file = '') =>
+      spawnSync(
+        process.execPath,
+        [
+          '--disable-warning=MODULE_TYPELESS_PACKAGE_JSON',
+          '--input-type=module',
+          '-e',
+          `
+          import { readFileSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          import { libpqInvocation } from './scripts/verify-migration-reversible-lib.mjs';
+          const url = new URL(process.env.REWARD_MIGRATION_TEST_OWNER_URL);
+          url.searchParams.set('options', '-c timezone=UTC -c search_path=' + process.argv[1]);
+          const { target, env } = libpqInvocation(url.toString());
+          const file = process.argv[2];
+          const result = spawnSync('psql', [target, '-X', '-q', '-v', 'ON_ERROR_STOP=1',
+            ...(file ? ['-f', file] : [])], {
+              input: file ? undefined : readFileSync(0, 'utf8'),
+              env: { ...process.env, ...env }, encoding: 'utf8',
+            });
+          process.stdout.write(result.stdout ?? '');
+          process.stderr.write(result.stderr ?? result.error?.code ?? '');
+          process.exit(result.status ?? 1);
+        `,
+          schema,
+          file,
+        ],
+        {
+          input,
+          encoding: 'utf8',
+          cwd: join(__dirname, '..', '..', '..'),
+          env: { ...process.env, REWARD_MIGRATION_TEST_OWNER_URL: ownerDatabaseUrl() },
+        },
+      );
+    const psql = (input: string) => invoke(input);
     const dir = join(__dirname, '../prisma/migrations/20261101193000_reward_engine_correctness');
-    const apply = (file: string) =>
-      spawnSync('psql', ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-f', join(dir, file)], {
-        env,
-        encoding: 'utf8',
-      });
+    const apply = (file: string) => invoke(undefined, join(dir, file));
     const succeeds = (result: ReturnType<typeof psql>) =>
       expect({ status: result.status, error: result.stderr }).toEqual({ status: 0, error: '' });
     try {
