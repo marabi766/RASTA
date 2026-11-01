@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -390,6 +390,52 @@ test('the split and the check read the function list by one grammar: the same ro
   );
   assert.deepEqual(bashRows(real), jsRows(real));
   assert.equal(jsRows(real).length, requiredRuntimeFunctions.length);
+});
+
+// …and every reader of it in the split refuses before it sends any SQL: the
+// repair, both cleanups and the final assertion, each on its own.
+test('every split step that reads the function list refuses a malformed one, sending nothing', () => {
+  const lib = fileURLToPath(new URL('../infrastructure/docker/postgres/lib/', import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), 'grant-list-lib-'));
+  try {
+    cpSync(lib, dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'runtime-function-grants.txt'),
+      `${GOOD}\n${LIST_CORPUS['empty service']}\n`,
+    );
+    for (const step of [
+      'restore_runtime_function_grants economic db rt rt_migrator',
+      'restrict_service_functions_and_rights db rt rt_migrator default',
+      'restrict_extension_relations db rt rt_migrator default',
+      'assert_no_forbidden_rights db rt rt_migrator default',
+      'grant_service_tables economic db default',
+    ]) {
+      const result = spawnSync(
+        'bash',
+        [
+          '-c',
+          'source "$1/service-privilege-split.bash" && ' +
+            '_svc_split_psql() { printf "SQL\\n"; } && ' +
+            `${step}`,
+          'grant-list',
+          dir,
+        ],
+        { encoding: 'utf8' },
+      );
+      const sent = result.stdout.split('\n').filter((line) => line === 'SQL').length;
+      if (step.startsWith('grant_service_tables')) {
+        // It reads only the allowlist: it goes on, and grants by it.
+        assert.equal(result.status, 0, `${step}: ${result.stderr}`);
+        continue;
+      }
+      assert.notEqual(result.status, 0, `${step} accepted a malformed list`);
+      assert.match(result.stderr, /runtime-function-grants\.txt: malformed line 2/, step);
+      // The default-privilege REVOKE precedes the cleanup and reads no list.
+      assert.equal(sent, step.startsWith('restrict_service_functions') ? 1 : 0, step);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('each required function maps to the migration that creates it and grants its EXECUTE', () => {
