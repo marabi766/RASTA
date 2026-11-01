@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative as relativePath, sep } from 'node:path';
+import { dirname, join, relative as relativePath, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Linter } from 'eslint';
 import tseslint from 'typescript-eslint';
@@ -586,7 +586,7 @@ test('inherited names are not entries', () => {
 // ---------------------------------------------------------------------------
 // The rule is only a boundary if the real workspace configs load it.
 // ---------------------------------------------------------------------------
-const lintStdin = (workspace, filename, code) => {
+const lintStdin = (workspace, filename, code = manualDeadline) => {
   const result = spawnSync(
     process.execPath,
     [
@@ -778,30 +778,40 @@ test('real workspace ESLint: the config grants nothing by suffix, the real file 
 for (const path of SHADOW_PATHS) {
   test(`real workspace ESLint refuses the shadow ${path} (virtual and on disk)`, () => {
     const both = (messages) => messages.map(({ messageId }) => messageId).sort();
-    // Virtual: nothing at that path.
-    assert.deepEqual(both(lintStdin('', path, manualDeadline)), [CONTROLLER, TIMER_ABORT]);
-    // On disk: the file really exists at the shadow path (stdin supplies the text, the path decides).
-    const first = (() => {
-      const parts = path.split('/');
-      for (let i = 1; i < parts.length; i++) {
-        try {
-          statSync(`${root}${parts.slice(0, i).join('/')}`);
-        } catch {
-          return parts.slice(0, i).join('/');
-        }
-      }
-      return undefined;
-    })();
+    // Virtual: nothing at that path (the workspace config decides by the name alone).
+    assert.deepEqual(both(lintStdin('', path)), [CONTROLLER, TIMER_ABORT]);
+    // On disk: a real file whose canonical path ENDS in the shadow path (so a suffix grant would
+    // exempt it), inside the repository but under a scratch directory of scripts/ — never in
+    // apps/, services/ or packages/, where a concurrent source sweep (testing-dev-only) would
+    // see the file appear and vanish: that race turned #536 r3's first CI run red.
+    const scratch = mkdtempSync(join(root, 'scripts', 'exdl-shadow-'));
     try {
-      mkdirSync(`${root}${path.split('/').slice(0, -1).join('/')}`, { recursive: true });
-      writeFileSync(`${root}${path}`, manualDeadline);
-      assert.deepEqual(both(lintStdin('', path, manualDeadline)), [CONTROLLER, TIMER_ABORT]);
+      const file = join(scratch, path);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, manualDeadline);
+      assert.equal(repoPath(file), relativePath(root, file).split(sep).join('/'));
+      assert.ok(repoPath(file).endsWith(path));
+      assert.deepEqual(found(manualDeadline, { file }), [CONTROLLER, TIMER_ABORT]);
     } finally {
-      if (first) rmSync(`${root}${first}`, { recursive: true, force: true });
-      else rmSync(`${root}${path}`, { force: true });
+      rmSync(scratch, { recursive: true, force: true });
     }
   });
 }
+
+test('this file writes only under scripts/exdl-* or the system temp directory, never into a swept source tree', () => {
+  // The structural guard for the race above: a concurrent `node --test` file sweeps apps/,
+  // services/ and packages/, so every directory this file creates is rooted in scripts/ or tmp.
+  const source = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+  const bases = [...source.matchAll(/mkdtempSync\(\s*join\(([^)]*\)?)[,)]/g)].map(([, base]) =>
+    base.replace(/\s+/g, ' ').trim(),
+  );
+  assert.ok(bases.length >= 3, bases.join(' | '));
+  for (const base of bases) {
+    assert.ok(/^(?:root, 'scripts'|tmpdir\(\)$|tmpdir\(\)\b)/.test(base), base);
+  }
+  // …and nothing is written or created at a `${root}…` path directly.
+  assert.ok(!/(?:writeFile|mkdir)Sync\(\s*`\$\{root\}/.test(source));
+});
 
 // ---------------------------------------------------------------------------
 // #536 r1 F3: every import-definition shape is read before its source is — the
