@@ -1839,6 +1839,367 @@ test('uncertainty reaches every name that builds on another, however long the ch
   assert.deepEqual(spawnViolations("var a = 'node:'; a += 'f'; a += 's'; await import(a);"), []);
 });
 
+// --- PR-539 r2 (D-096): the guard fails CLOSED. What it cannot prove it refuses, and every probe
+// --- program of the review (PR-539-r1.md) is a regression here.
+
+// Five ways to load a module by a name, so a fix is proved for each, not for the one reproduced.
+const LOADS = {
+  'a dynamic import': (name) => `const cp = await import(${name});`,
+  require: (name) => `const cp = require(${name});`,
+  '.require': (name) => `const cp = module.require(${name});`,
+  'a createRequire result': (name) =>
+    `const load = createRequire(import.meta.url); const cp = load(${name});`,
+  'a direct createRequire call': (name) => `const cp = createRequire(import.meta.url)(${name});`,
+};
+const START = "cp.spawn('sleep', ['600'], { detached: true });";
+
+test('a += that can run more than once, or out of source order, makes the name unknown (PR-539 r2 F1)', () => {
+  const unmark = (text) => text.replaceAll('·', '');
+  const cp = ['child', 'process'].join('_');
+  // The name is one letter short of the child-process module: `s` added any number of times (the
+  // appends below run twice or once, in the order the program calls them) completes it.
+  const base = `let name = 'node:${cp.slice(0, -1)}';`;
+  const repeated = {
+    'a for loop': "f·or (let i = 0; i < 2; i++) name += 's';",
+    'a while loop': "let i = 0; wh·ile (i++ < 2) name += 's';",
+    'a do loop': "let i = 0; d·o { name += 's'; } wh·ile (i++ < 2);",
+    'a for-of loop': "f·or (const x of [1, 2]) name += 's';",
+    'a for-in loop': "f·or (const x in { a: 1 }) name += 's';",
+    'a for-await-of loop': "f·or await (const x of source) name += 's';",
+    'a loop with a block': "f·or (let i = 0; i < 2; i++) { if (i) { name += 's'; } }",
+    'a callback': "[1, 2].forEach(() => { name += 's'; });",
+    'an async callback': "await Promise.all([1, 2].map(async () => { name += 's'; }));",
+    'a function called twice': "function add() { name += 's'; } add(); add();",
+    'a recursion': "function add(n) { if (n > 0) { name += 's'; add(n - 1); } } add(2);",
+    'an arrow with an expression body': "const add = () => (name += 's'); add(); add();",
+    'a method': "const o = { add() { name += 's'; } }; o.add(); o.add();",
+    'a getter': "const o = { get add() { name += 's'; return 1; } }; o.add; o.add;",
+    'a class field': "class K { x = (name += 's'); } new K(); new K();",
+    'a constructor': "class K { constructor() { name += 's'; } } new K(); new K();",
+    'a static block': "class K { static { name += 's'; } }",
+    'a default parameter': "function add(x = (name += 's')) {} add(); add();",
+    'a generator': "function* add() { name += 's'; } [...add(), ...add()];",
+  };
+  for (const [form, load] of Object.entries(LOADS))
+    for (const [what, append] of Object.entries(repeated))
+      assert.match(
+        spawnViolations(unmark(`${base} ${append} ${load('name')} ${START}`)).join(),
+        /not a constant string/,
+        `${what} / ${form}`,
+      );
+  // The review's reordered setters: the append of 'process' is declared first and called last.
+  const reordered = (load) =>
+    `let name = 'node:'; function second() { name += 'process'; } function first() { name += 'child_'; } first(); second(); ${load('name')} ${START}`;
+  for (const [form, load] of Object.entries(LOADS))
+    assert.match(spawnViolations(reordered(load)).join(), /not a constant string/, form);
+  // Appends in different functions, in either order, and one function plus the top level.
+  for (const source of [
+    "let name = 'node:'; const a = () => { name += 'child_'; }; const b = () => { name += 'process'; }; b(); a(); await import(name);",
+    "let name = 'node:'; name += 'child_'; function b() { name += 'process'; } b(); await import(name);",
+  ])
+    assert.match(spawnViolations(source).join(), /not a constant string/, source);
+  // Controls: appends that run once, in source order, at the top level are still read as the text
+  // they add up to (the module here IS the child-process module: refused for that, not as unknown).
+  assert.match(
+    spawnViolations(
+      `let name = 'node:'; name += 'child_'; name += 'process'; await import(name);`,
+    ).join(),
+    /child_process reached by a call/,
+  );
+  assert.deepEqual(
+    spawnViolations("let name = 'node:'; name += 'p'; name += 'ath'; await import(name);"),
+    [],
+  );
+  // A conditional append is still a top-level append: both outcomes are values of the name.
+  assert.match(
+    spawnViolations(
+      `let name = 'node:child_proces'; if (flag) name += 's'; await import(name);`,
+    ).join(),
+    /child_process reached by a call/,
+  );
+});
+
+test('an accumulated binding value is read as text, and a script assembled out of order reaches no shell (PR-539 r2 F1)', () => {
+  const unmark = (text) => text.replaceAll('·', '');
+  const flag = ['-', 'c'].join('');
+  // The review's program: only literals, `+=` and one identifier use. The accumulated script is
+  // `wh·ile :; d·o sleep 1; d·one`, a loop that forks.
+  const accumulated = unmark(
+    `let s = 'wh·'; s += 'ile :; '; s += 'd·o '; s += 'sleep 1; '; s += 'd·one'; spawnSync('bash', ['${flag}', s]);`,
+  );
+  assert.ok(waitViolations(accumulated).length > 0, 'a loop outside holdUntil');
+  assert.match(
+    waitViolations(accumulated, { holder: true }).join(),
+    /holdUntil's loop runs sleep, which forks/,
+  );
+  assert.ok(
+    stringValues(accumulated).includes(unmark('wh·ile :; d·o sleep 1; d·one')),
+    'the accumulated value is a value',
+  );
+  // ... and the steps of a loop are parts of a loop in themselves, which the holder may not write.
+  const builtins = unmark("let s = 'wh·ile :; '; s += 'd·o :; '; s += 'd·one'; run(s);");
+  assert.ok(waitViolations(builtins, { holder: true }).length > 0);
+  assert.ok(waitViolations(builtins).length > 0);
+  // The same script assembled where the guard cannot follow the order: refused where a shell reads
+  // it, in BOTH guards and in the holder.
+  const assembled = {
+    'a loop': 'f·or (const part of parts) s += part;',
+    'a loop with constants': "f·or (let i = 0; i < 2; i++) s += ': ';",
+    'a while loop': "let i = 0; wh·ile (i++ < 2) s += ': ';",
+    'a callback': 'parts.forEach((part) => { s += part; });',
+    'a function': "function add(part) { s += part; } add('d·o '); add('sleep 1');",
+    'a recursion': "function add(n) { if (n) { s += ': '; add(n - 1); } } add(3);",
+  };
+  const through = {
+    'a name': (s) => `['${flag}', ${s}]`,
+    'a plus': (s) => `['${flag}', 'echo ' + ${s}]`,
+    'a template': (s) => `['${flag}', \`echo \${${s}}\`]`,
+    'a concat': (s) => `['${flag}', 'echo '.concat(${s})]`,
+    'a method': (s) => `['${flag}', ${s}.trim()]`,
+    'a conditional': (s) => `['${flag}', flag ? ${s} : 'true']`,
+    'a cluster': (s) => `['-l${flag.slice(1)}', ${s}]`,
+    'an option between': (s) => `['${flag}', '--', ${s}]`,
+  };
+  for (const [how, write] of Object.entries(assembled))
+    for (const [via, array] of Object.entries(through)) {
+      const source = unmark(`let s = 'wh·ile :; '; ${write} spawnSync('bash', ${array('s')});`);
+      for (const check of [
+        (text) => waitViolations(text),
+        (text) => waitViolations(text, { holder: true }),
+        (text) => spawnViolations(text),
+      ])
+        assert.match(check(source).join(), /cannot read reaches a shell/, `${how} / ${via}`);
+    }
+  // A name made from the assembled one is assembled too, however many steps it is from it. (With
+  // constant text next to it, so that the unknown part is not the whole script.)
+  const looped = "let s = ''; f·or (const p of parts) s += p;";
+  for (const source of [
+    `${looped} const t = s; spawnSync('bash', ['${flag}', 'echo ' + t]);`,
+    `${looped} var t = ''; t = s; spawnSync('bash', ['${flag}', 'echo ' + t]);`,
+    `${looped} const t = s + ';'; const u = \`\${t}\`; spawnSync('bash', ['${flag}', 'echo ' + u]);`,
+    `${looped} const t = flag ? s : 'true'; const u = [t, 'x'].join(' '); spawnSync('bash', ['${flag}', 'echo ' + u]);`,
+    `${looped} const t = ['a', s].join(' '); spawnSync('bash', ['${flag}', 'echo ' + t]);`,
+    `${looped} const t = 'a'.concat(s); spawnSync('bash', ['${flag}', 'echo ' + t]);`,
+    `${looped} const args = ['${flag}', 'echo ' + s]; spawnSync('bash', args);`,
+    `${looped} run(['${flag}', 'echo ' + s]);`,
+    `${looped} const o = { args: ['${flag}', 'echo ' + s] }; spawnSync('bash', o.args);`,
+    `${looped} spawnSync(s, []);`,
+    `${looped} spawnSync('bash', [...flags, s]);`,
+    `${looped} spawnSync('bash', [...s]);`,
+    `${looped} execSync('echo ' + s);`,
+    `${looped} const t = s; execSync(t);`,
+  ])
+    for (const check of [waitViolations, spawnViolations])
+      assert.match(check(unmark(source)).join(), /cannot read reaches a shell/, source);
+  // A name, or a composition of names, that is wholly unknown where a shell reads it: nothing
+  // constant next to the unknown part, or no value at all.
+  for (const [what, source] of Object.entries({
+    'a flag cluster': `const script = make(); spawnSync('bash', ['-l${flag.slice(1)}', script]);`,
+    'an option between': `const script = make(); spawnSync('bash', ['${flag}', '--', script]);`,
+    'a spread after the flag': `spawnSync('bash', ['${flag}', ...parts]);`,
+    'an array bound to a name': `const s = make(); const args = ['${flag}', s]; spawnSync('bash', args);`,
+    'an array handed on': `const s = make(); run(['${flag}', s]);`,
+    'a name written from the environment': `const s = process.env.SCRIPT; spawnSync('bash', ['${flag}', s]);`,
+    'a name no write settles': `let s; s = s; spawnSync('bash', ['${flag}', s]);`,
+    'a name nothing declares': `spawnSync('bash', ['${flag}', script]);`,
+    'a composition of unknowns': `spawnSync('bash', ['${flag}', a + b]);`,
+    'a template of unknowns': `spawnSync('bash', ['${flag}', \`\${a}\${b}\`]);`,
+    'a name one write of which is unknown': `let s = 'true'; s = make(); spawnSync('bash', ['${flag}', s]);`,
+    'execSync of a name': 'execSync(command);',
+    'a shell option': 'spawnSync(command, [], { shell: true });',
+    'a shell option naming a shell': "spawnSync(command, { shell: '/bin/sh' });",
+    'a shorthand shell option': 'spawnSync(command, { shell });',
+  }))
+    for (const check of [waitViolations, spawnViolations])
+      assert.match(check(source).join(), /cannot read reaches a shell/, `${what} (${check.name})`);
+  // Controls: a script the guard reads, the words after it, a flag that is no shell flag, a shell
+  // option that is false, node's own -e, and the text of a call's result or with constant text
+  // around an unknown part (the header's known gaps: `holdUntil(...)` is the sanctioned wait, and
+  // the fixtures template their stubs).
+  for (const source of [
+    `spawnSync('bash', ['${flag}', 'echo hello']);`,
+    `spawnSync('bash', ['${flag}', 'echo "$@"', '--', ...rest]);`,
+    `spawnSync('bash', ['${flag}', 'echo ' + 'hello']);`,
+    `spawnSync('bash', ['${flag}', holdUntil(directory, release)]);`,
+    `spawnSync('bash', ['${flag}', script()]);`,
+    `spawnSync('bash', ['${flag}', \`echo \${thing}; \${holdUntil(directory, release)}\`]);`,
+    `spawnSync('bash', ['${flag}', 'echo ' + thing]);`,
+    `spawnSync('pg_dump', ['-F${flag.slice(1)}', '-d', database]);`,
+    "spawnSync(process.execPath, ['-e', source, '--', ...args]);",
+    "spawnSync(process.execPath, ['--input-type=module', '-e', source]);",
+    'spawnSync(command, [], { shell: false });',
+    "spawnSync(command, [], { encoding: 'utf8' });",
+    "execSync('echo hello');",
+    'execSync(command());',
+    'cp.execSync(`kill ${pid}`);',
+    're.exec(text);',
+    "let out = ''; child.stdout.on('data', (chunk) => { out += chunk; }); spawnSync('ls', [dir]);",
+  ])
+    for (const check of [waitViolations, spawnViolations])
+      assert.deepEqual(check(source), [], `${source} (${check.name})`);
+  // A false refusal, stated: a flag spelled like the shell's whose next word is a name the scan
+  // cannot read (grep's -c, psql's -c) is refused too. None of the eight fixture sources has one.
+  assert.match(
+    spawnViolations(`spawnSync('grep', ['${flag}', pattern]);`).join(),
+    /cannot read reaches a shell/,
+  );
+});
+
+test('a declaration without an initializer, and a name nothing gives a value, are unknown, never an empty set (PR-539 r2 F2)', () => {
+  const unmark = (text) => text.replaceAll('·', '');
+  const cp = ['child', 'process'].join('_');
+  const holes = {
+    'the review: an unresolved self assignment':
+      "let part; part = part; const name = ['node:child_', part, 'process'].join('');",
+    'a mutual unresolved assignment':
+      "let part, other; part = other; other = part; const name = ['node:child_', part, 'process'].join('');",
+    'a mutual assignment with no declaration':
+      "part = other; other = part; const name = ['node:child_', part, 'process'].join('');",
+    'a declaration only': "let part; const name = ['node:child_', part, 'process'].join('');",
+    'a var declaration only': "var part; const name = ['node:child_', part, 'process'].join('');",
+    'a declaration with a later write':
+      "let part; part = ''; const name = ['node:child_', part, 'process'].join('');",
+    'a classic for initializer':
+      "f·or (let part; ; ) { break; } const name = ['node:child_', part, 'process'].join('');",
+    'a classic for var':
+      "f·or (var part, i = 0; i < 1; i++) {} const name = ['node:child_', part, 'process'].join('');",
+    'a template': 'let part; const name = `node:child_${part}process`;',
+    'a plus': "let part; const name = 'node:child_' + part + 'process';",
+    'a concat': "let part; const name = 'node:child_'.concat(part, 'process');",
+    'a conditional': "let part; const name = 'node:child_' + (flag ? part : part) + 'process';",
+    'a declaration in a function':
+      "function f() { let part; return part; } const part = f(); const name = ['node:child_', part, 'process'].join('');",
+  };
+  for (const [form, load] of Object.entries(LOADS))
+    for (const [what, hole] of Object.entries(holes))
+      assert.match(
+        spawnViolations(unmark(`${hole} ${load('name')} ${START}`)).join(),
+        // The later write is '': one of the values of the name is the child-process module itself.
+        what === 'a declaration with a later write'
+          ? /child_process reached by a call/
+          : /not a constant string/,
+        `${what} / ${form}`,
+      );
+  // Shadowing: an inner `let part;` is a value the outer constants do not describe. The scan is
+  // file-wide, so the outer name is unknown too (more refusals, never fewer): the module below is
+  // the child-process one at run time (part is undefined, which join reads as nothing).
+  for (const [form, load] of Object.entries(LOADS))
+    for (const source of [
+      `const part = 'fs'; function f() { let part; const name = ['node:${cp}', part].join(''); ${load('name')} } f();`,
+      `const part = 'fs'; { let part; const name = ['node:${cp}', part].join(''); ${load('name')} }`,
+      `var part = 'fs'; f·or (let part; ; ) { const name = ['node:${cp}', part].join(''); ${load('name')} break; }`,
+    ])
+      assert.match(
+        spawnViolations(unmark(source)).join(),
+        /not a constant string/,
+        `${form}: ${source}`,
+      );
+  // The loop the review hid behind the same hole, in both checks: the literal part of a join is
+  // still read, next to the unknown one.
+  const parts = (part) => ({
+    'a join': `[${part}, 'wh·ile :; d·o sleep 1; d·one'].join('')`,
+    'a join with the loop first': `['wh·ile :; d·o sleep 1; ', ${part}, 'd·one'].join('')`,
+    'a plus': `${part} + 'wh·ile :; d·o sleep 1; d·one'`,
+    'a template': `\`\${${part}}wh·ile :; d·o sleep 1; d·one\``,
+    'a concat': `''.concat(${part}, 'wh·ile :; d·o sleep 1; d·one')`,
+  });
+  for (const [what, composed] of Object.entries(parts('part')))
+    for (const head of ['let part; part = part;', 'let part;', 'part = part;']) {
+      const source = unmark(`${head} const s = ${composed};`);
+      assert.ok(waitViolations(source).length > 0, `${what} / ${head}`);
+      assert.match(waitViolations(source, { holder: true }).join(), /forks|cannot read/, what);
+    }
+  // Controls: names that have a value stay known, and an unknown that is only a declaration of a
+  // name nothing reads costs nothing.
+  assert.deepEqual(
+    spawnViolations("let part = 'fs'; const name = ['node:', part].join(''); await import(name);"),
+    [],
+  );
+  assert.deepEqual(spawnViolations("let unused; await import('node:fs');"), []);
+  // A false refusal, stated: a name declared without a value and written once before use is
+  // unknown too (the scan does not follow the order). None of the eight fixture sources has one.
+  assert.match(
+    spawnViolations("let part; part = 'fs'; await import('node:' + part);").join(),
+    /not a constant string/,
+  );
+});
+
+test('the fixed point has a budget: exhaustion refuses as such, only a proven growth is called one, and a cycle that settles is read (PR-539 r2 F3)', () => {
+  const quiet = (source, options) => [
+    ...spawnViolations(source, options),
+    ...waitViolations(source, options),
+  ];
+  // The review's example: marker folding makes the values finite; they change in rounds 0-3 and
+  // are stable in round 4, more rounds than names (2) + 1. It settles, so nothing is refused.
+  const settling = "var a = 'x', b = 'y'; a = b + process.env.X; b = process.env.X + a;";
+  assert.deepEqual(quiet(settling), []);
+  // M18's example: the original accepts it, a bound one round shorter refused it.
+  assert.deepEqual(quiet("var a = ''; a = a + process.env.X;"), []);
+  assert.deepEqual(quiet("var a = 'x'; a = process.env.X + a;"), []);
+  // ... and what it settles to is unknown, so a module named by it is refused for THAT.
+  assert.match(spawnViolations(`${settling} await import(a);`).join(), /not a constant string/);
+  assert.doesNotMatch(spawnViolations(`${settling} await import(a);`).join(), /do not settle/);
+  // A budget spent before the values settle refuses, saying so: not a claim of growth.
+  for (const check of [spawnViolations, waitViolations])
+    assert.match(
+      check(settling, { rounds: 1 }).join(),
+      /writes to \w+ do not settle within the budget/,
+    );
+  assert.doesNotMatch(spawnViolations(settling, { rounds: 1 }).join(), /grows without end/);
+  // The budget counts rounds that change something: this one changes in rounds 0-3 and is stable
+  // in round 4, so four rounds are too few and five are enough.
+  assert.match(spawnViolations(settling, { rounds: 4 }).join(), /do not settle within the budget/);
+  assert.deepEqual(quiet(settling, { rounds: 5 }), []);
+  // Growth that is PROVEN: a name written from its own text with a constant added.
+  for (const source of [
+    "var s = 'a'; s = s + 'x';",
+    "var s = 'a'; s = 'x' + s;",
+    "var s = 'a'; s = `${s}x`;",
+    "var s = 'a'; s = (s) + ('x');",
+    "var s = 'a'; s = s + process.env.X + 'x';",
+  ])
+    for (const check of [spawnViolations, waitViolations])
+      assert.match(
+        check(source).join(),
+        /writes to s do not settle \(it is built on its own text/,
+        source,
+      );
+  // ... and what is not proven is not called that: an indirect cycle, a cycle through three names.
+  for (const source of [
+    "var a = 'x', b = ''; a = b + 'x'; b = a + 'y';",
+    "var a = 'x', b = 'y', c = 'z'; a = b + c; b = c + a; c = a + b;",
+  ]) {
+    const problems = spawnViolations(source).join();
+    assert.match(problems, /do not settle within the budget/, source);
+    assert.doesNotMatch(problems, /grows without end/, source);
+  }
+  // A name that reads itself without adding a constant settles.
+  for (const source of [
+    "var s = 'a'; s = s;",
+    "var s = 'a'; s = flag ? s : 'b';",
+    "var s = 'a'; s = s + '';",
+  ])
+    assert.deepEqual(quiet(source), [], source);
+  // A source refused for its names has no values computed: they would be thousands of long texts.
+  const rotating = "var a = 'x', b = 'y', c = 'z'; a = b + c; b = c + a; c = a + b;";
+  assert.deepEqual(stringValues(rotating), []);
+  assert.match(waitViolations(rotating).join(), /more than 4096 alternatives/);
+  // The work is part of the budget: a chain that would settle, but whose texts double at every
+  // name and pass a million characters in all, is refused as spent, not computed to the end.
+  const big = 'x'.repeat(1000);
+  const doubling = Array.from({ length: 12 }, (_, at) => `n${at + 1} = n${at} + n${at}`).join(', ');
+  assert.match(
+    spawnViolations(`var n0 = '${big}', ${doubling};`).join(),
+    /do not settle within the budget/,
+  );
+  // A long chain still settles inside the budget (the budget is four rounds a name plus eight).
+  const chain = Array.from({ length: 150 }, (_, at) => `n${at} = n${at + 1} + 'x';`).join(' ');
+  assert.deepEqual(
+    quiet(`var ${Array.from({ length: 151 }, (_, at) => `n${at} = ''`).join(', ')}; ${chain}`),
+    [],
+  );
+});
+
 test('the spawn guard refuses every route to an asynchronous child that skips the owner', () => {
   for (const source of [
     "import { spawn } from 'node:child_process';",
