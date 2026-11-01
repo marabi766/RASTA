@@ -263,11 +263,13 @@ export class S3ObjectStorage implements ObjectStorage {
     const cleanup = finished(source, (error) => {
       if (error) safeSource.destroy(storageFailure(error));
     });
+    // A source may fail asynchronously while destroy() is closing its socket.
+    // Keep its error listener until that close; public-pipeline completion is earlier.
+    source.once('close', cleanup);
     safeSource.once('close', () => source.destroy());
     source.pipe(safeSource);
     return pipeline(safeSource, bounded, () => {
       source.destroy();
-      cleanup();
     });
   }
 

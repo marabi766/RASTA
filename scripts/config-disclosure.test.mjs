@@ -571,3 +571,43 @@ test('real Redis ready-check diagnostics never print an INFO/NOPERM reply', () =
   assert.match(output, /REDIS_URL: Redis readiness diagnostic, code NOPERM/);
   assertNoSentinel(output);
 });
+
+test('real S3 stream: asynchronous cleanup failure cannot become an uncaught SDK diagnostic', () => {
+  const run = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `
+    const { Readable } = require('node:stream');
+    const { createRequire } = require('node:module');
+    const req = createRequire(require('node:path').resolve('services/document-service/package.json'));
+    const { S3Client } = req('@aws-sdk/client-s3');
+    const body = new Readable({ read() {}, destroy(_error, done) {
+      setImmediate(() => done(Object.assign(new Error('${USER} ${PASSWORD}'), {
+        cause: new Error('${PASSWORD}'), input: '${USER}',
+      })));
+    }});
+    S3Client.prototype.send = async () => ({ Body: body });
+    process.on('uncaughtException', (error) => {
+      console.error(require('node:util').inspect(error, { showHidden: true, depth: 10 }));
+      process.exitCode = 2;
+    });
+    const { S3ObjectStorage } = require('./services/document-service/dist/storage/s3.storage');
+    (async () => {
+      const storage = new S3ObjectStorage({ endpoint: 'http://localhost:9000', region: 'local',
+        accessKeyId: 'test', secretAccessKey: 'test', bucket: 'b', forcePathStyle: true });
+      const stream = await storage.openReadStream({ objectKey: 'x', maxBytes: 10 });
+      stream.on('error', () => undefined);
+      stream.destroy();
+      await new Promise(resolve => body.once('close', resolve));
+      if (!body.destroyed) process.exitCode = 3;
+    })();
+  `,
+    ],
+    { cwd: ROOT, encoding: 'utf8', timeout: 30_000 },
+  );
+  const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  assert.equal(run.error, undefined);
+  assert.equal(run.status, 0, output);
+  assertNoSentinel(output);
+});

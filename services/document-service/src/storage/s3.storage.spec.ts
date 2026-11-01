@@ -197,3 +197,23 @@ test('S3 construction discards a foreign failure before exposing the adapter', (
   }
   safe(failure);
 });
+
+test('an asynchronous SDK destroy failure stays contained after consumer cancellation', async () => {
+  const body = new Readable({
+    read(): void {},
+    destroy(_error, done): void {
+      setImmediate(() => done(foreign()));
+    },
+  });
+  send.mockResolvedValue({ Body: body } as never);
+  const stream = await new S3ObjectStorage(options).openReadStream({
+    objectKey: 'x',
+    maxBytes: 10,
+  });
+  stream.on('error', () => undefined);
+  const closed = new Promise<void>((resolve) => body.once('close', resolve));
+  stream.destroy();
+  await closed;
+  expect(body.destroyed).toBe(true);
+  expect(body.listenerCount('error')).toBe(0);
+});
