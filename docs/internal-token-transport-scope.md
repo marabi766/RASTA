@@ -90,22 +90,41 @@ by asking two questions about the **module**, not by following a name through th
 code (#507 r2 F2: a callback wrapper, an alias, an assignment, an object method, a
 renamed destructured `abort`, a timer alias, `.call` / `.apply` / `.bind`, an
 imported timer and a computed method name each walked round the version that
-followed the timer's callback). Outside `exchange-deadline.ts` itself:
+followed the timer's callback). Outside the shared boundary itself:
 
 - **A** — any reference to the global `AbortController` (`new`, an alias,
-  `globalThis.` member, import, type annotation) is an error unless the file is in
-  `ABORT_OWNERS`;
+  `globalThis.` member — also through a direct `const` alias of the global object,
+  import, type annotation) is an error unless the file is in `ABORT_OWNERS`;
 - **B** — a module that references `setTimeout` in any form and also mentions an
   `abort` member or binding anywhere (constant-folded computed names included) is an
-  error unless the file is in `TIMER_ABORT_MODULES`.
+  error unless the file is in `TIMER_ABORT_MODULES`;
+- **C** — a member of the global object read by a computed name that is not a
+  constant (`new globalThis[key]()`) is an error too (it could be either): fail
+  closed, same exemption as A.
 
-Both lists are exact files with a reason, held by tests to an existing file that
-still needs the entry. `AbortSignal.timeout(…)` has no timer to clear and stays
-allowed; so do timers in a module with no abort (outbox, consumer, shutdown,
-readiness) and shutdown/client-close controllers with no timer. Not covered: an abort
-method whose name is read from data in a module that was handed the controller, and a
-timer and a controller that both come from other modules into one that owns neither
-(the module that owns either is the one refused).
+The shared boundary is exempt by its **exact canonical repository path**,
+`packages/nest-common/src/http/exchange-deadline.ts` (real path relative to the real
+repository root, decided inside the rule); the workspace config grants nothing by
+suffix, so a same-named file anywhere else gets both diagnostics (#536 r1 F2). A path
+that is not a file of this repository is exempt from nothing. Both lists are decided on
+the same canonical path, are exact files with a reason, and are held by tests to an
+existing file that still needs the entry. `AbortSignal.timeout(…)` has no timer to clear
+and stays allowed; so do timers in a module with no abort (outbox, consumer, shutdown,
+readiness) and shutdown/client-close controllers with no timer.
+
+**Trust model (PM decision D-095, with D-086/D-088/D-094).** The rule guards against an
+_accidental_ early-clear deadline; deliberately obfuscated code is caught by PR review.
+These forms are accepted residual and produce **no diagnostic** (each is pinned by a
+test, so this list cannot drift): a global object reached by anything but a name or a
+direct alias of one (nested `globalThis.global.AbortController`, a destructured
+`const { global: g } = globalThis`, an alias made by assignment, `Reflect.get(globalThis,
+'setTimeout')`, a host handed in as a parameter, a qualified type annotation
+`globalThis.AbortController`, `timers[key]`, a timer inside a dynamic-import callback); an
+abort not reached by a member or binding named `abort` (`Reflect.get(c, 'abort')`, a
+constant enum/object member, a constant conditional, a constant chain longer than the
+folding depth, a name read from data); and a timer and a controller that both come from
+other modules into one that owns neither (the module that owns either is the one
+refused).
 
 The two boundaries compose (merge of #502/#507 into PR #492): `internalGet` sends on the
 `InternalHttpClient` sender, which is `internalFetch` with redirects refused, inside

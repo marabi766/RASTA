@@ -1,27 +1,50 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, relative as relativePath, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Linter } from 'eslint';
 import tseslint from 'typescript-eslint';
-import exchangeDeadline, { ABORT_OWNERS, TIMER_ABORT_MODULES } from './exchange-deadline-rule.mjs';
+import exchangeDeadline, {
+  ABORT_OWNERS,
+  SHARED_BOUNDARY,
+  TIMER_ABORT_MODULES,
+  repoPath,
+} from './exchange-deadline-rule.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const linter = new Linter({ cwd: root });
 /** Findings of the rule alone, for `code` as the file `path` (repository-relative). */
-const check = (code, { path = 'services/fixture-service/src/probe.ts' } = {}) =>
-  linter.verify(
+const check = (
+  code,
+  { path = 'services/fixture-service/src/probe.ts', file = `${root}${path}`, using = linter } = {},
+) =>
+  using.verify(
     code,
     [
       {
         files: ['**/*.{ts,tsx,mjs,js}'],
-        languageOptions: { parser: tseslint.parser, sourceType: 'module' },
+        languageOptions: {
+          parser: tseslint.parser,
+          sourceType: 'module',
+          parserOptions: { tsconfigRootDir: root },
+        },
         plugins: { internal: { rules: { 'exchange-deadline': exchangeDeadline } } },
         rules: { 'internal/exchange-deadline': 'error' },
       },
     ],
-    `${root}${path}`,
+    file,
   );
 /**
  * The message ids of this rule, sorted. A parse error fails here; findings of other rules
@@ -43,6 +66,7 @@ const allowed = (code, options) => assert.deepEqual(found(code, options), [], co
 
 const CONTROLLER = 'controller';
 const TIMER_ABORT = 'timerAbort';
+const BY_NAME = 'globalByName';
 
 // ---------------------------------------------------------------------------
 // The shapes #502 r1 F1 found, and what #507 r1 F2 showed the old order-based rule missed.
@@ -602,18 +626,6 @@ for (const [workspace, filename] of [
   });
 }
 
-test('the shared boundary is the one file the workspace config lets keep its timer', () => {
-  assert.deepEqual(
-    lintStdin('packages/nest-common', 'src/http/exchange-deadline.ts', manualDeadline),
-    [],
-  );
-  // Same directory, any other file: refused.
-  assert.equal(
-    lintStdin('packages/nest-common', 'src/http/other-client.ts', manualDeadline).length,
-    2,
-  );
-});
-
 test('every workspace that lints source loads the rule (a new workspace cannot opt out silently)', async () => {
   const { ESLint } = await import('eslint');
   const workspaces = ['services', 'packages', 'apps', 'tests'].flatMap((group) =>
@@ -635,4 +647,395 @@ test('every workspace that lints source loads the rule (a new workspace cannot o
     checked += 1;
   }
   assert.ok(checked >= 20, `only ${checked} workspaces found`);
+});
+
+// ---------------------------------------------------------------------------
+// #536 r1 F2: the shared boundary is ONE file, identified by its exact canonical
+// repository path inside the rule — not by a suffix in the workspace config.
+// ---------------------------------------------------------------------------
+const SHADOW_PATHS = [
+  'services/identity-service/src/http/exchange-deadline.ts',
+  'services/identity-service/dev/http/exchange-deadline.ts',
+  'packages/config/src/http/exchange-deadline.ts',
+  // the same basename around the real one: another directory, another depth, another workspace
+  'packages/nest-common/dev/http/exchange-deadline.ts',
+  'packages/nest-common/src/exchange-deadline.ts',
+  'packages/nest-common/src/http/nested/exchange-deadline.ts',
+  'packages/nest-common-copy/src/http/exchange-deadline.ts',
+  'services/economic-service/prisma/http/exchange-deadline.ts',
+  'tests/e2e/src/http/exchange-deadline.ts',
+];
+
+test('the shared boundary is a real file, and the rule exempts it by that path', () => {
+  assert.ok(statSync(`${root}${SHARED_BOUNDARY}`).isFile());
+  assert.equal(repoPath(`${root}${SHARED_BOUNDARY}`), SHARED_BOUNDARY);
+  // Its own source, at its own path: clean. The same bytes one step away: both diagnostics.
+  const source = READ(SHARED_BOUNDARY);
+  assert.deepEqual(found(source, { path: SHARED_BOUNDARY }), []);
+  assert.deepEqual(found(source, { path: beside(SHARED_BOUNDARY) }).sort(), [
+    CONTROLLER,
+    TIMER_ABORT,
+  ]);
+  // Whatever is written at that path is exempt (it is the boundary, not a pattern of content).
+  assert.deepEqual(found(manualDeadline, { path: SHARED_BOUNDARY }), []);
+});
+
+for (const path of SHADOW_PATHS) {
+  test(`${path}: a shadow of the boundary's name gets both diagnostics`, () => {
+    assert.deepEqual(found(manualDeadline, { path }), [CONTROLLER, TIMER_ABORT]);
+  });
+}
+
+test('a path the rule cannot place in this repository is exempt from nothing', () => {
+  // Not on disk, outside the repository, the root itself, a directory, no file at all.
+  for (const file of [
+    `${root}services/identity-service/src/http/exchange-deadline.ts`,
+    join(tmpdir(), SHARED_BOUNDARY),
+    root,
+    `${root}packages/nest-common/src/http`,
+    `${root}packages/nest-common/src/http/not-there.ts`,
+    '<input>',
+    '<text>',
+    '',
+  ]) {
+    assert.equal(repoPath(file), null, file);
+  }
+  // …and the lint decision agrees: an input the linter names `<input>.ts` is refused like any other.
+  const messages = linter
+    .verify(
+      manualDeadline,
+      [
+        {
+          files: ['**/*.ts'],
+          languageOptions: {
+            parser: tseslint.parser,
+            sourceType: 'module',
+            parserOptions: { tsconfigRootDir: root },
+          },
+          plugins: { internal: { rules: { 'exchange-deadline': exchangeDeadline } } },
+          rules: { 'internal/exchange-deadline': 'error' },
+        },
+      ],
+      '<input>.ts',
+    )
+    .map(({ messageId }) => messageId)
+    .sort();
+  assert.deepEqual(messages, [CONTROLLER, TIMER_ABORT]);
+});
+
+test('a link is its target: the boundary is the boundary under any name, and a name is not the boundary', () => {
+  const dir = mkdtempSync(join(root, 'scripts', 'exdl-link-'));
+  try {
+    const rel = (file) => relativePath(root, file).split(sep).join('/');
+    // A link elsewhere to the real boundary is the boundary's own bytes: exempt.
+    const toBoundary = join(dir, 'boundary-link.ts');
+    symlinkSync(`${root}${SHARED_BOUNDARY}`, toBoundary);
+    assert.equal(repoPath(toBoundary), SHARED_BOUNDARY);
+    assert.deepEqual(found(manualDeadline, { path: rel(toBoundary) }), []);
+    // A file at a boundary-shaped path that is a link to something else is that something else.
+    const other = join(dir, 'other.ts');
+    writeFileSync(other, 'export {};\n');
+    const shaped = join(dir, 'packages/nest-common/src/http');
+    mkdirSync(shaped, { recursive: true });
+    symlinkSync(other, join(shaped, 'exchange-deadline.ts'));
+    const shadow = join(shaped, 'exchange-deadline.ts');
+    assert.equal(repoPath(shadow), rel(other));
+    assert.deepEqual(found(manualDeadline, { path: rel(shadow) }), [CONTROLLER, TIMER_ABORT]);
+    // A whole directory link to the real http directory: the file under it is the real one.
+    symlinkSync(`${root}packages/nest-common/src/http`, join(dir, 'http-link'));
+    assert.equal(repoPath(join(dir, 'http-link/exchange-deadline.ts')), SHARED_BOUNDARY);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('real workspace ESLint: the config grants nothing by suffix, the real file stays clean', async () => {
+  const { ESLint } = await import('eslint');
+  // The rule is ON for every one of these paths, the boundary included: its exemption is inside the rule.
+  for (const [cwd, path] of [
+    ['', SHARED_BOUNDARY],
+    ...SHADOW_PATHS.map((shadow) => ['', shadow]),
+  ]) {
+    const eslint = new ESLint({ cwd: `${root}${cwd}` });
+    const config = await eslint.calculateConfigForFile(`${root}${path}`);
+    assert.equal(config?.rules?.['internal/exchange-deadline']?.[0], 2, path);
+  }
+  assert.deepEqual(
+    lintStdin('packages/nest-common', 'src/http/exchange-deadline.ts', manualDeadline),
+    [],
+  );
+  assert.deepEqual(lintStdin('', SHARED_BOUNDARY, manualDeadline), []);
+  const real = lintStdin(
+    'packages/nest-common',
+    'src/http/exchange-deadline.ts',
+    READ(SHARED_BOUNDARY),
+  );
+  assert.deepEqual(real, []);
+});
+
+for (const path of SHADOW_PATHS) {
+  test(`real workspace ESLint refuses the shadow ${path} (virtual and on disk)`, () => {
+    const both = (messages) => messages.map(({ messageId }) => messageId).sort();
+    // Virtual: nothing at that path.
+    assert.deepEqual(both(lintStdin('', path, manualDeadline)), [CONTROLLER, TIMER_ABORT]);
+    // On disk: the file really exists at the shadow path (stdin supplies the text, the path decides).
+    const first = (() => {
+      const parts = path.split('/');
+      for (let i = 1; i < parts.length; i++) {
+        try {
+          statSync(`${root}${parts.slice(0, i).join('/')}`);
+        } catch {
+          return parts.slice(0, i).join('/');
+        }
+      }
+      return undefined;
+    })();
+    try {
+      mkdirSync(`${root}${path.split('/').slice(0, -1).join('/')}`, { recursive: true });
+      writeFileSync(`${root}${path}`, manualDeadline);
+      assert.deepEqual(both(lintStdin('', path, manualDeadline)), [CONTROLLER, TIMER_ABORT]);
+    } finally {
+      if (first) rmSync(`${root}${first}`, { recursive: true, force: true });
+      else rmSync(`${root}${path}`, { force: true });
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// #536 r1 F3: every import-definition shape is read before its source is — the
+// TypeScript import-equals forms have no ImportDeclaration. A crash is a failure.
+// ---------------------------------------------------------------------------
+test('review F3: import-equals of the timers module does not crash and is a timer host', () => {
+  const alone = "import clock = require('node:timers'); clock.setTimeout(wake, 5);";
+  allowed(alone);
+  refused(`${alone} export const stop = (c: { abort(): void }) => c.abort();`, TIMER_ABORT);
+  refused(
+    "import clock = require('timers/promises'); clock.setTimeout(() => c.abort(), 5);",
+    TIMER_ABORT,
+  );
+  // Another module is not the timers module.
+  allowed("import fs = require('node:fs'); fs.setTimeout(() => c.abort(), 5);");
+});
+
+test('review F3: import-equals of the global object does not crash and is a global host', () => {
+  allowed('import g = globalThis; g.setTimeout(wake, 5);');
+  refused('import g = globalThis; g.setTimeout(() => c.abort(), 5);', TIMER_ABORT);
+  refused('import g = globalThis; export const c = new g.AbortController();', CONTROLLER);
+  refused('export import g = globalThis; g.setTimeout(() => c.abort(), 5);', TIMER_ABORT);
+  refused(
+    'namespace N { import g = globalThis; export const c = new g.AbortController(); }',
+    CONTROLLER,
+  );
+  // An alias of an alias, across both import forms.
+  refused(
+    "import t = require('timers'); import u = t; u.setTimeout(() => c.abort(), 5);",
+    TIMER_ABORT,
+  );
+  // The member itself, aliased by import-equals.
+  refused('import t = globalThis.setTimeout; t(() => c.abort(), 5);', TIMER_ABORT);
+  refused('import A = globalThis.AbortController; export type T = A;', CONTROLLER);
+  // A qualified name on something that is not a host is somebody's own member.
+  allowed('import t = Foo.setTimeout; export const stop = (c) => c.abort(); t(wake, 5);');
+});
+
+test('review F3: no definition type, import form or declaration kind crashes the rule', () => {
+  const shapes = [
+    "import timers from 'node:timers'; timers.setTimeout(wake, 5);",
+    "import * as timers from 'node:timers/promises'; timers.setTimeout(wake, 5);",
+    "import type timers from 'node:timers'; timers.setTimeout(wake, 5);",
+    "import { setTimeout as later } from 'node:timers'; later(wake, 5);",
+    "import def, * as ns from 'node:timers'; def.setTimeout(wake, 5); ns.setTimeout(wake, 5);",
+    "import 'node:timers';",
+    "import json from './x.json' with { type: 'json' }; json.setTimeout(wake, 5);",
+    "import a = require('./x'); a.setTimeout(wake, 5);",
+    'import a = B.C.D; a.setTimeout(wake, 5);',
+    'import a = b; a.setTimeout(wake, 5);',
+    "import type a = require('node:timers'); export type T = typeof a;",
+    "export import a = require('node:timers'); a.setTimeout(wake, 5);",
+    'enum E { A } E.setTimeout; class K { static setTimeout() {} } K.setTimeout(wake, 5);',
+    'function fn() {} fn.setTimeout(wake, 5); export default function named() {}',
+    'try { run(); } catch (e) { e.setTimeout(wake, 5); }',
+    'export function f(param, { setTimeout: s }, [x] = []) { param.setTimeout(wake, 5); s(wake); }',
+    'declare module "m" { import g = globalThis; } declare global { interface Window { x: 1 } }',
+    'namespace N { export namespace M { export const timers = globalThis; } } N.M.timers.setTimeout(wake, 5);',
+    'type T = { setTimeout(): void }; interface I { abort(): void } let v: T; v.setTimeout();',
+    'declare const timers: typeof import("node:timers"); timers.setTimeout(wake, 5);',
+    'const { a: { setTimeout: later }, ...rest } = globalThis; later(wake, 5); rest.setTimeout(wake, 5);',
+    'let x; ({ setTimeout: x } = globalThis); x(wake, 5);',
+    'export = globalThis;',
+    'const a = require("node:timers"), b = await import("node:timers"); a.setTimeout(wake); b.setTimeout(wake);',
+  ];
+  for (const code of shapes) {
+    assert.doesNotThrow(() => found(code), code);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// #536 r1 F1 (D-095): the two plausibly-accidental forms closed; the rest pinned as residual.
+// ---------------------------------------------------------------------------
+test('review F1(a): a direct const alias of the global object is the global object', () => {
+  for (const host of ['globalThis', 'global', 'window', 'self']) {
+    refused(`const root = ${host}; export const c = new root.AbortController();`, CONTROLLER);
+    refused(`const root = ${host}; export const c = new root['AbortController']();`, CONTROLLER);
+  }
+  // An alias of an alias; a type wrapper on the way.
+  refused(
+    'const a = globalThis; const b = a; export const c = new b.AbortController();',
+    CONTROLLER,
+  );
+  refused(
+    'const w = window as typeof window; export const c = new w.AbortController();',
+    CONTROLLER,
+  );
+  refused('export const c = new (globalThis as any).AbortController();', CONTROLLER);
+  refused('export const c = new (globalThis satisfies object).AbortController();', CONTROLLER);
+  // The review's complete regression: before this round it received zero diagnostics.
+  refused(
+    `
+    async function call(sender, timeoutMs) {
+      const root = globalThis;
+      const c = new root.AbortController();
+      const timer = setTimeout(() => Reflect.get(c, 'abort').call(c), timeoutMs);
+      try {
+        const response = await sender.send(url, { signal: c.signal });
+        return response.text();
+      } finally {
+        clearTimeout(timer);
+      }
+    }`,
+    CONTROLLER,
+  );
+  // The timer side already followed an alias; it still does, through the same function.
+  refused('const root = globalThis; root.setTimeout(() => c.abort(), 5);', TIMER_ABORT);
+  // A name the module declares itself is that declaration, not the global.
+  allowed('const window = [1, 2]; export const last = window[window.length - 1];');
+  allowed('const self = { AbortController: 1 }; export const n = self.AbortController;');
+  allowed(
+    'const root = { AbortController: class {} }; export const c = new root.AbortController();',
+  );
+  // An owner may hold a controller, however it reaches it.
+  const owner = 'services/identity-service/src/identity/membership-expiry.scanner.ts';
+  allowed('const root = globalThis; export const c = new root.AbortController();', { path: owner });
+});
+
+test('review F1(b): a global member read by a name that is not a constant is refused (fail closed)', () => {
+  refused('const key = pick(); export const c = new globalThis[key]();', BY_NAME);
+  refused('const key = pick(); export const c = new (globalThis as any)[key]();', BY_NAME);
+  refused(
+    'const key = pick(); const root = globalThis; export const c = new root[key]();',
+    BY_NAME,
+  );
+  refused('export const c = new window[`Abort${pick()}`]();', BY_NAME);
+  refused('export const get = (key: string) => self[key];', BY_NAME);
+  refused(
+    'const key = pick(); const { [key]: C } = globalThis; export const c = new C();',
+    BY_NAME,
+  );
+  refused('function f(key) { return global[key]; }', BY_NAME);
+  refused('let key = "a"; key = pick(); export const c = globalThis[key];', BY_NAME);
+  // Constants fold, so they are judged by what they say.
+  refused("export const c = new globalThis['Abort' + 'Controller']();", CONTROLLER);
+  refused("const k = 'AbortController'; export const c = new globalThis[k]();", CONTROLLER);
+  allowed("const k = 'fetch'; export const f = globalThis[k];");
+  allowed("export const f = globalThis['fetch'];");
+  // A symbol or a number can be neither name (the real packages/testing/src/disclosure-guard.ts).
+  allowed("export const r = (globalThis as unknown as Record<symbol, X>)[Symbol.for('jest')];");
+  allowed('export const r = globalThis[Symbol.iterator]; export const s = self[Symbol("x")];');
+  allowed("const key = Symbol.for('jest'); export const r = globalThis[key];");
+  allowed('export const r = globalThis[0];');
+  // …but a string made from one is a name again.
+  refused("export const r = globalThis[String(Symbol.for('jest'))];", BY_NAME);
+  refused("const Symbol = pick(); export const r = globalThis[Symbol.for('jest')];", BY_NAME);
+  // Writing a global by a computed name creates nothing; a member of anything else is its own field.
+  allowed('export const set = (key, value) => { globalThis[key] = value; };');
+  allowed('export const get = (obj, key) => obj[key];');
+  allowed('const table = {}; export const get = (key) => table[key];');
+  // A local that shadows the global's name is the local.
+  allowed('const window = []; export const last = (i) => window[i];');
+  allowed('export function f(self, key) { return self[key]; }');
+  // Same exemption as the controller question: a file that may hold a controller.
+  const owner = 'services/identity-service/src/identity/membership-expiry.scanner.ts';
+  allowed('const key = pick(); export const c = new globalThis[key]();', { path: owner });
+});
+
+// Each of these is ACCEPTED (PM decision D-095): the rule guards against an accidental
+// early-clear deadline, and review catches deliberate obfuscation. They are listed so that the
+// documentation (rule header, docs/internal-token-transport-scope.md, PR body) says exactly this
+// and no more; a change that closes one must change this table and those texts together.
+const ACCEPTED_RESIDUAL = {
+  'abort through Reflect.get':
+    'const c = handed; setTimeout(() => Reflect.get(c, "abort").call(c), 5);',
+  'abort as a constant enum member': 'enum E { A = "abort" } setTimeout(() => c[E.A](), 5);',
+  'abort as a constant object member': 'const M = { A: "abort" }; setTimeout(() => c[M.A](), 5);',
+  'abort as a constant conditional': 'setTimeout(() => c[true ? "abort" : "x"](), 5);',
+  'abort named from data': 'setTimeout(() => c[name](), 5);',
+  'nested global member': 'export const c = new globalThis.global.AbortController();',
+  'destructured global member':
+    'const { global: g } = globalThis; export const c = new g.AbortController();',
+  'alias made by assignment': 'let g; g = globalThis; export const c = new g.AbortController();',
+  'Reflect.get of a global timer':
+    'const T = Reflect.get(globalThis, "setTimeout"); T(() => c.abort(), 5);',
+  'timer host handed in': 'export function f(h, c) { return h.setTimeout(() => c.abort(), 5); }',
+  'controller host handed in': 'export function f(h) { return new h.AbortController(); }',
+  'qualified type annotation': 'export let c: globalThis.AbortController;',
+  'computed name on the timers module':
+    'import * as t from "node:timers"; const k = pick(); t[k](() => c.abort(), 5);',
+  'timer inside a dynamic-import callback':
+    'import("node:timers").then((t) => t.setTimeout(() => c.abort(), 5));',
+  'timer host reached through a call': 'getTimers().setTimeout(() => c.abort(), 5);',
+};
+test('accepted residual (D-095): these forms produce no diagnostic, and the docs say so', () => {
+  for (const [label, code] of Object.entries(ACCEPTED_RESIDUAL)) {
+    assert.deepEqual(found(code), [], label);
+  }
+});
+
+test('accepted residual: the constant-fold depth is finite, and past it a computed global is refused', () => {
+  // A chain longer than the folding depth is not folded…
+  let chain = "const k0 = 'abort';";
+  for (let i = 1; i <= 12; i++) chain += ` const k${i} = k${i - 1} + '';`;
+  allowed(`${chain} setTimeout(() => c[k12](), 5);`);
+  // …but for a global it fails closed instead of passing.
+  refused(`${chain} export const f = globalThis[k12];`, BY_NAME);
+});
+
+test('the decision is on the canonical path: the same files reached through a linked root, and files outside', () => {
+  const outside = mkdtempSync(join(tmpdir(), 'exdl-root-'));
+  try {
+    // The repository reached through a link (a checkout mounted elsewhere, a workspace symlink),
+    // linted from there: the linter's own base path is the link, so the rule really runs.
+    const linked = join(outside, 'repo');
+    symlinkSync(root.replace(/\/$/, ''), linked);
+    const using = new Linter({ cwd: linked });
+    const via = (code, path) => found(code, { file: join(linked, path), using });
+    // Positive control: a file of no list is refused through the link as anywhere.
+    assert.deepEqual(via(manualDeadline, 'services/fixture-service/src/probe.ts'), [
+      CONTROLLER,
+      TIMER_ABORT,
+    ]);
+    assert.equal(repoPath(join(linked, SHARED_BOUNDARY)), SHARED_BOUNDARY);
+    assert.deepEqual(via(manualDeadline, SHARED_BOUNDARY), []);
+    // …an allow-list entry is the same file under any name that reaches it…
+    const owner = 'services/identity-service/src/identity/membership-expiry.scanner.ts';
+    assert.ok(Object.hasOwn(ABORT_OWNERS, owner));
+    assert.deepEqual(via('export const c = new AbortController();', owner), []);
+    const timerModule = 'scripts/replay-dlq.mjs';
+    assert.ok(Object.hasOwn(TIMER_ABORT_MODULES, timerModule));
+    assert.deepEqual(via('setTimeout(() => c.abort(), 5);', timerModule), []);
+    // …and a real file outside the repository (or reached only by a link out of it) is exempt from nothing.
+    const foreign = join(outside, 'exchange-deadline.ts');
+    writeFileSync(foreign, 'export {};\n');
+    assert.equal(repoPath(foreign), null);
+    const linkOut = join(root, 'scripts', `exdl-out-${process.pid}.ts`);
+    try {
+      symlinkSync(foreign, linkOut);
+      assert.equal(repoPath(linkOut), null);
+      assert.deepEqual(found(manualDeadline, { file: linkOut }), [CONTROLLER, TIMER_ABORT]);
+    } finally {
+      rmSync(linkOut, { force: true });
+    }
+  } finally {
+    rmSync(join(outside, 'repo'), { force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
 });
