@@ -24,9 +24,13 @@ import { parse as parseYaml } from 'yaml';
  * Two lists are kept by hand and each fails silently when a file is missing
  * from it:
  *
- *  1. root `package.json` `lint:scripts` — `node --test <files>`, an explicit
- *     list. A rule test that is not in it is never run: `pnpm lint` stays green
- *     and the rule it was written to hold can be disabled with no test failing.
+ *  1. root `package.json` `lint:scripts` — `eslint … && node --test <files>
+ *     [&& node --test <files>]`, explicit lists (main runs two `node --test`
+ *     commands). A rule test that is not in ANY of them is never run: `pnpm lint`
+ *     stays green and the rule it was written to hold can be disabled with no test
+ *     failing. The script is read as a chain; a shape the guard does not model
+ *     (`;`, `||`, `|`, a background `&`, an option after `--test`, a glob, another
+ *     program) throws instead of registering a file that might not run.
  *  2. turbo's `lint` inputs — turbo hashes a workspace's `lint` from that
  *     workspace's files plus the task's `inputs`. Any file eslint loads for that
  *     workspace that the hash does not cover can change, and turbo replays a
@@ -54,7 +58,12 @@ import { parse as parseYaml } from 'yaml';
  *    explicit JS/TS extension and no `% ? # \` or whitespace/control character
  *    (so the specifier is a file name, not a URL), or (b) a bare package that is
  *    not a workspace package, a workspace alias or a `link:`/`file:`/`portal:`
- *    dependency (or a node built-in from a short allow-list). Any other use of
+ *    dependency (or a node built-in from a short allow-list: path, url, util,
+ *    assert). `fs`, `child_process`, `os` and the rest are NOT on it. A module that
+ *    must use one has an EXACT-PATH entry in BUILTIN_READERS (one per module: the
+ *    members it uses, the names an importer may take, and each thing it reads); the
+ *    guard checks the members and that every file it reads is a hashed turbo input
+ *    of the lint task (decision D-101). Any other use of
  *    require/module/Module/createRequire/_load/Function/eval, a filesystem read
  *    through the names and members listed in BANNED_*, `.call/.apply/.bind`, a
  *    directory or extensionless or `.json` path is a problem with a message.
@@ -119,16 +128,55 @@ export const parseJsonc = (text) => {
   return JSON.parse(out);
 };
 
-/** The `.test.mjs` files `lint:scripts` passes to `node --test`, as written. */
+/**
+ * The `.test.mjs` files `lint:scripts` passes to `node --test`, as written, over EVERY
+ * `node --test` command of the script (main runs two, joined by `&&`; PR #503).
+ *
+ * The script is read as a chain: `<command> && <command> …` where a command is
+ * `eslint <args>` or `node --test <scripts/NAME.test.mjs>…`, and nothing else. Anything
+ * the guard does not model THROWS (a registered file might then not run, or run with
+ * a filter): a newline, `; | & ` $ ( ) < > \ * ? [ ] { } # ' " !`, a lone `&` (a
+ * background job), `||`, an empty segment, an environment prefix, any other program,
+ * an option after `--test` (`--test-name-pattern`, `--test-skip-pattern`, `--test-only`
+ * … would register a file whose tests do not run), or a path that is not a plain
+ * `scripts/<name>.test.mjs`.
+ */
 export const registeredTests = (lintScripts) => {
-  const tokens = lintScripts.split(/\s+/).filter(Boolean);
-  const at = tokens.findIndex((t, i) => t === 'node' && tokens[i + 1] === '--test');
-  assert.ok(at >= 0, 'package.json `lint:scripts` no longer runs `node --test <files>`');
+  const refuse = (why) => {
+    throw new assert.AssertionError({
+      message:
+        `package.json \`lint:scripts\` is ${JSON.stringify(lintScripts)}: ${why}. The registration guard only ` +
+        'reads `eslint <args> && node --test scripts/<name>.test.mjs … [&& node --test …]`, because a test ' +
+        'file in any other shape may never run (or run filtered) while `pnpm lint` stays green.',
+    });
+  };
+  // `&&` is the only separator: with every `&&` removed, any `&` left is a background job.
+  const control = /[\n\r;|`$()<>\\*?[\]{}#'"!&]/.exec(lintScripts.replaceAll('&&', ' '));
+  if (control !== null) refuse(`it contains ${JSON.stringify(control[0])}`);
   const files = [];
-  for (const token of tokens.slice(at + 2)) {
-    if (token === '&&' || token === ';' || token.startsWith('-')) break;
-    files.push(token);
+  let nodeTests = 0;
+  for (const segment of lintScripts.split('&&')) {
+    const tokens = segment.split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) refuse('it has an empty command around `&&`');
+    if (tokens[0] === 'eslint') continue;
+    if (tokens[0] !== 'node' || tokens[1] !== '--test') {
+      refuse(
+        `the command ${JSON.stringify(segment.trim())} is neither \`eslint …\` nor \`node --test …\``,
+      );
+    }
+    nodeTests += 1;
+    if (tokens.length < 3) refuse('a `node --test` command lists no file');
+    for (const token of tokens.slice(2)) {
+      if (!/^scripts\/[A-Za-z0-9_.-]+\.test\.mjs$/.test(token)) {
+        refuse(
+          `\`node --test\` is given ${JSON.stringify(token)}, which is not a plain scripts/<name>.test.mjs ` +
+            'file (an option or a pattern can make a registered test not run)',
+        );
+      }
+      files.push(token);
+    }
   }
+  if (nodeTests === 0) refuse('it no longer runs `node --test <files>`');
   return files;
 };
 
@@ -203,6 +251,175 @@ export const ALLOWED_BUILTINS = new Set([
   'assert/strict',
 ]);
 
+/**
+ * Exact-path exceptions to the built-in rule (decision D-101, 2026-11-01; main's #503).
+ *
+ * A module the eslint config loads may import `fs`, `child_process`, `os` (or any other
+ * built-in outside ALLOWED_BUILTINS) ONLY if its repository path is a key here. There is
+ * no pattern and no directory entry: a new module that does so fails until it is listed,
+ * with its read surface, in a reviewed change to this table.
+ *
+ * Each entry is checked, not trusted:
+ *  - `builtins`: built-in → the exact members the module uses (static import, `local.member`
+ *    access only). A member used and not listed, listed and no longer used, a built-in listed
+ *    and not imported, or a load the guard cannot list (`require`, `import()`, re-export,
+ *    destructuring, the namespace passed as a value) fails.
+ *  - `exports` (optional): the only names a lint-time importer may take from the module.
+ *    Its other exports (an image check that spawns docker, say) are then unreachable from
+ *    the eslint config, so they are not part of what the rule reads.
+ *  - `reads`: what the module reads, as surfaces of the closed vocabulary below. For every
+ *    lint workspace that loads the module, every file of every surface must be in the hashed
+ *    inputs turbo resolves for that workspace's lint task (`turbo run lint --dry=json`), or
+ *    the guard fails naming the module, the surface and the files. The surfaces:
+ *      linted-files        every tracked file under the workspace directory (what eslint lints,
+ *                          and what the module reads or resolves a path of while linting it)
+ *      workspace-manifest  the workspace's package.json
+ *      typescript-project  the workspace's tsconfig.test.json, else tsconfig.json (the parser picks the
+ *                          first that exists), their `extends`
+ *                          chain, and every file or directory their `files`, `include`,
+ *                          `references`, `baseUrl`, `rootDirs`, `typeRoots` and `paths` name
+ *      dependency-builds   the built output of the workspace's dependencies (type declarations),
+ *                          hashed because the lint task `dependsOn` `^build`
+ *      location-only      resolves a path (a realpath, the running script) and reads no content
+ *    An entry with no surface, or a surface outside this list, fails.
+ *
+ * Residual (D-094): a module may still read an UNDECLARED path through a declared member
+ * (`readFileSync('../rules.json')`); the table names the intended reads and the guard checks
+ * them, review catches the rest. The member and `exports` checks are what keep that surface small.
+ */
+export const BUILTIN_READERS = new Map([
+  [
+    'scripts/internal-token-parser.mjs',
+    {
+      why:
+        'the typed-or-untyped parser decides, per linted file, whether a TypeScript project covers it, ' +
+        'so it looks for the workspace manifest and tsconfig and compares the file on disk with the text eslint passes',
+      builtins: { fs: ['existsSync', 'readFileSync'] },
+      reads: [
+        {
+          surface: 'linted-files',
+          why: '`fs.existsSync(options.filePath)` and `fs.readFileSync(options.filePath)`: the linted file on disk',
+        },
+        {
+          surface: 'workspace-manifest',
+          why: '`fs.existsSync(<dir>/package.json)` walking up from the linted file to its workspace',
+        },
+        {
+          surface: 'typescript-project',
+          why: '`fs.existsSync(<dir>/tsconfig.test.json | tsconfig.json)` selects the project the wrapped parser then reads',
+        },
+        {
+          surface: 'dependency-builds',
+          why: 'the program it builds resolves @rasta/* imports to dependency build output (.d.ts)',
+        },
+      ],
+    },
+  ],
+  [
+    'scripts/internal-token-source-rule.mjs',
+    {
+      why:
+        'the rule keys its allowances on a file’s canonical repository path, so it resolves symlinks ' +
+        'of the linted file and of the checkout root; it reads no file content',
+      builtins: { fs: ['realpathSync'] },
+      reads: [
+        { surface: 'linted-files', why: '`fs.realpathSync(file)`: the linted file’s real path' },
+        {
+          surface: 'location-only',
+          why: '`fs.realpathSync(REPO_ROOT)`: the checkout directory, resolved and not read',
+        },
+      ],
+    },
+  ],
+  [
+    'scripts/testing-dev-only.mjs',
+    {
+      why:
+        'a CLI and library for the test-signer boundary (pnpm graph, image and build-output checks); the lint rule ' +
+        'imports it only for REPO_ROOT. Its fs, child_process and os calls run from the CLI and from ' +
+        'testing-dev-only.test.mjs, never while eslint loads it',
+      builtins: {
+        child_process: ['spawnSync'],
+        fs: [
+          'existsSync',
+          'lstatSync',
+          'mkdtempSync',
+          'readdirSync',
+          'readFileSync',
+          'realpathSync',
+          'rmSync',
+        ],
+        os: ['tmpdir'],
+      },
+      exports: ['REPO_ROOT'],
+      reads: [
+        {
+          surface: 'location-only',
+          why:
+            'on import its only call is `fs.realpathSync(process.argv[1])` (am I the script being run?), the ' +
+            'path of the running program, not a repository input; REPO_ROOT is computed from import.meta.url',
+        },
+      ],
+    },
+  ],
+]);
+
+const READ_SURFACES = new Set([
+  'linted-files',
+  'workspace-manifest',
+  'typescript-project',
+  'dependency-builds',
+  'location-only',
+]);
+const own = (object, key) =>
+  object !== null && typeof object === 'object' && Object.hasOwn(object, key)
+    ? object[key]
+    : undefined;
+const nonEmpty = (text) => typeof text === 'string' && text.trim() !== '';
+
+/** The table itself must be exact: literal paths, listed members, a known surface, a reason. */
+export const exceptionTableProblems = (exceptions) => {
+  const problems = [];
+  for (const [path, entry] of exceptions) {
+    const bad = (what) => problems.push(`BUILTIN_READERS[${JSON.stringify(path)}] ${what}.`);
+    if (
+      !/^[A-Za-z0-9_@.+-]+(?:\/[A-Za-z0-9_@.+-]+)*\.[cm]?[jt]s$/.test(path) ||
+      /(^|\/)\.\.?(\/|$)/.test(path)
+    ) {
+      bad('is not an exact repository path to a JS/TS file (no glob, directory or `..`)');
+    }
+    if (entry === null || typeof entry !== 'object') {
+      bad('is not an entry');
+      continue;
+    }
+    if (!nonEmpty(entry.why)) bad('has no `why`');
+    const builtins = Object.entries(entry.builtins ?? {});
+    if (builtins.length === 0) bad('lists no built-in');
+    for (const [module, members] of builtins) {
+      if (ALLOWED_BUILTINS.has(module) || !isBuiltin(module)) {
+        bad(`lists \`${module}\`, which is not a built-in outside ALLOWED_BUILTINS`);
+      }
+      if (!Array.isArray(members) || members.length === 0 || !members.every(nonEmpty)) {
+        bad(`lists no members of \`${module}\``);
+      }
+    }
+    if (
+      entry.exports !== undefined &&
+      !(Array.isArray(entry.exports) && entry.exports.every(nonEmpty))
+    ) {
+      bad('has an `exports` that is not a list of names');
+    }
+    if (!Array.isArray(entry.reads) || entry.reads.length === 0) bad('declares no `reads`');
+    for (const read of Array.isArray(entry.reads) ? entry.reads : []) {
+      if (!READ_SURFACES.has(read?.surface)) {
+        bad(`declares the unknown read surface ${JSON.stringify(read?.surface)}`);
+      } else if (!nonEmpty(read.why))
+        bad(`declares the surface \`${read.surface}\` without saying why`);
+    }
+  }
+  return problems;
+};
+
 /** Identifiers that reach the module loader, a code evaluator or the global object. */
 const BANNED_NAMES = new Set([
   'require',
@@ -265,25 +482,94 @@ const analyze = (path, source) => {
   const sf = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
   const specifiers = new Set();
   const errors = [];
+  /** specifier → the names taken from it (`'*'`: a namespace, default or non-static load). */
+  const importNames = new Map();
+  /** built-in (without `node:`) → the members used by name; `opaque` when they cannot be listed. */
+  const builtinUse = new Map();
+  /** local name → built-in, for `import fs from 'node:fs'` and `import * as fs from 'node:fs'`. */
+  const namespaceLocals = new Map();
+  const builtinOf = (specifier) =>
+    specifier.startsWith('node:') || isBuiltin(specifier) ? specifier.replace(/^node:/, '') : null;
+  const usage = (builtin) => {
+    if (!builtinUse.has(builtin)) builtinUse.set(builtin, { members: new Set(), opaque: false });
+    return builtinUse.get(builtin);
+  };
+  /** A load whose names are not a static member list (`require`, `import()`, `export *`, …). */
+  const loadsEverything = (specifier) => {
+    importNames.set(specifier, '*');
+    const builtin = builtinOf(specifier);
+    if (builtin !== null) usage(builtin).opaque = true;
+  };
+  const loadsNames = (specifier, names) => {
+    if (importNames.get(specifier) !== '*') {
+      importNames.set(specifier, new Set([...(importNames.get(specifier) ?? []), ...names]));
+    }
+    const builtin = builtinOf(specifier);
+    if (builtin !== null) for (const name of names) usage(builtin).members.add(name);
+  };
   const at = (node) => `${path}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1}`;
   const bad = (node, what) => errors.push(`${at(node)} ${what} ${GRAMMAR}.`);
   const literalArg = (call, form) => {
     const [first] = call.arguments;
-    if (isLiteral(first)) specifiers.add(first.text);
-    else bad(call, `${form} with a non-literal specifier`);
+    if (isLiteral(first)) {
+      specifiers.add(first.text);
+      loadsEverything(first.text);
+    } else bad(call, `${form} with a non-literal specifier`);
   };
+  // Static imports first: a built-in imported as a namespace or default is read through
+  // `local.member`, and an import may follow its first use.
+  for (const statement of sf.statements) {
+    const clause = ts.isImportDeclaration(statement) ? statement.importClause : undefined;
+    if (clause === undefined || !isLiteral(statement.moduleSpecifier)) continue;
+    const specifier = statement.moduleSpecifier.text;
+    const names = [];
+    if (clause.name !== undefined) {
+      names.push('default');
+      if (builtinOf(specifier) !== null) namespaceLocals.set(clause.name.text, specifier);
+    }
+    const bindings = clause.namedBindings;
+    if (bindings !== undefined && ts.isNamespaceImport(bindings)) {
+      names.push('*');
+      if (builtinOf(specifier) !== null) namespaceLocals.set(bindings.name.text, specifier);
+    } else if (bindings !== undefined) {
+      for (const element of bindings.elements) {
+        names.push((element.propertyName ?? element.name).text);
+      }
+    }
+    if (names.includes('*') || names.includes('default')) {
+      // a default/namespace import takes everything the importer might use
+      const named = names.filter((n) => n !== '*' && n !== 'default');
+      importNames.set(specifier, '*');
+      const builtin = builtinOf(specifier);
+      if (builtin !== null) for (const name of named) usage(builtin).members.add(name);
+    } else {
+      loadsNames(specifier, names);
+    }
+  }
 
   const visit = (node) => {
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
       if (node.moduleSpecifier !== undefined) {
-        if (isLiteral(node.moduleSpecifier)) specifiers.add(node.moduleSpecifier.text);
-        else bad(node, 'a module specifier that is not a literal');
+        if (isLiteral(node.moduleSpecifier)) {
+          specifiers.add(node.moduleSpecifier.text);
+          if (ts.isExportDeclaration(node)) {
+            const clause = node.exportClause;
+            if (clause !== undefined && ts.isNamedExports(clause)) {
+              loadsNames(
+                node.moduleSpecifier.text,
+                clause.elements.map((element) => (element.propertyName ?? element.name).text),
+              );
+            } else loadsEverything(node.moduleSpecifier.text);
+          }
+        } else bad(node, 'a module specifier that is not a literal');
       }
     } else if (ts.isImportEqualsDeclaration(node)) {
       if (ts.isExternalModuleReference(node.moduleReference)) {
         const { expression } = node.moduleReference;
-        if (isLiteral(expression)) specifiers.add(expression.text);
-        else bad(node, '`import x = require(…)` with a non-literal specifier');
+        if (isLiteral(expression)) {
+          specifiers.add(expression.text);
+          loadsEverything(expression.text);
+        } else bad(node, '`import x = require(…)` with a non-literal specifier');
       }
     } else if (ts.isCallExpression(node)) {
       const callee = node.expression;
@@ -317,6 +603,25 @@ const analyze = (path, source) => {
       ) {
         bad(node, '`import.meta` used as a value');
       }
+    } else if (ts.isIdentifier(node) && namespaceLocals.has(node.text)) {
+      const { parent } = node;
+      const builtin = builtinOf(namespaceLocals.get(node.text));
+      if (ts.isImportClause(parent) || ts.isNamespaceImport(parent)) {
+        // the binding itself
+      } else if (ts.isPropertyAccessExpression(parent) && parent.expression === node) {
+        usage(builtin).members.add(parent.name.text);
+      } else if (
+        ts.isElementAccessExpression(parent) &&
+        parent.expression === node &&
+        isLiteral(parent.argumentExpression)
+      ) {
+        usage(builtin).members.add(parent.argumentExpression.text);
+      } else if (
+        !(ts.isPropertyAccessExpression(parent) && parent.name === node) &&
+        !(KEY_KINDS.has(parent.kind) && parent.name === node)
+      ) {
+        usage(builtin).opaque = true; // passed as a value, destructured, shadowed: members unknown
+      }
     } else if (ts.isIdentifier(node) && BANNED_NAMES.has(node.text)) {
       const { parent } = node;
       const isKey = KEY_KINDS.has(parent.kind) && parent.name === node;
@@ -338,7 +643,7 @@ const analyze = (path, source) => {
     ts.forEachChild(node, visit);
   };
   visit(sf);
-  return { specifiers, errors };
+  return { specifiers, errors, builtinUse, importNames };
 };
 
 /**
@@ -463,9 +768,14 @@ const nearestPackageJson = (file, tracked) => {
  * every loading form outside the grammar. A visited set makes cycles terminate.
  * Result: file → why it is there.
  */
-export const dependencyClosure = (entries, { tracked, read, localNames }) => {
+export const dependencyClosure = (
+  entries,
+  { tracked, read, localNames, exceptions = BUILTIN_READERS },
+) => {
   const files = new Map(entries.map((entry) => [entry, 'an eslint config']));
   const errors = [];
+  /** The loaded modules that have an exact-path built-in exception. */
+  const excepted = new Set();
   const queue = [...entries];
   const bare = (file, specifier) => {
     const name = specifier.startsWith('@')
@@ -489,8 +799,10 @@ export const dependencyClosure = (entries, { tracked, read, localNames }) => {
       errors.push(`${file} cannot be read, so what it loads is unknown.`);
       continue;
     }
-    const { specifiers, errors: found } = analyzeModule(file, source);
+    const { specifiers, errors: found, builtinUse, importNames } = analyzeModule(file, source);
     errors.push(...found);
+    const entry = exceptions.get(file);
+    const usedBuiltins = new Set();
     for (const specifier of specifiers) {
       if (/^\.\.?([/\\]|$)/.test(specifier)) {
         const resolved = posix.normalize(posix.join(posix.dirname(file), specifier));
@@ -508,15 +820,60 @@ export const dependencyClosure = (entries, { tracked, read, localNames }) => {
           errors.push(
             `${file} loads '${specifier}', which is not an existing tracked file, so this ${GRAMMAR}.`,
           );
-        } else if (!files.has(resolved)) {
-          files.set(resolved, `loaded by ${file}`);
-          queue.push(resolved);
+        } else {
+          const only = exceptions.get(resolved)?.exports;
+          const names = importNames.get(specifier) ?? new Set(); // a side-effect import takes no name
+          if (only !== undefined && (names === '*' || ![...names].every((n) => only.includes(n)))) {
+            errors.push(
+              `${file} loads '${specifier}' (${resolved}), whose built-in exception allows a lint-time importer ` +
+                `only ${only.map((n) => `\`${n}\``).join(', ')}, but it takes ${
+                  names === '*'
+                    ? 'everything (a default, namespace, require() or import())'
+                    : [...names].join(', ')
+                }: its other exports run what it was excepted from, so this ${GRAMMAR}.`,
+            );
+          }
+          if (!files.has(resolved)) {
+            files.set(resolved, `loaded by ${file}`);
+            queue.push(resolved);
+          }
         }
       } else if (specifier.startsWith('node:') || isBuiltin(specifier)) {
-        if (!ALLOWED_BUILTINS.has(specifier.replace(/^node:/, ''))) {
+        const builtin = specifier.replace(/^node:/, '');
+        if (ALLOWED_BUILTINS.has(builtin)) continue;
+        const declared = own(entry?.builtins, builtin);
+        if (declared === undefined) {
           errors.push(
-            `${file} loads the built-in '${specifier}', which can load code or read files, so this ${GRAMMAR}.`,
+            `${file} loads the built-in '${specifier}', which can load code or read files, so this ${GRAMMAR}. ` +
+              'A module that has to use one needs its own exact-path entry in BUILTIN_READERS naming the members ' +
+              'it uses and what it reads; a built-in allow-list is not an option.',
           );
+          continue;
+        }
+        usedBuiltins.add(builtin);
+        const use = builtinUse.get(builtin);
+        if (use === undefined || use.opaque) {
+          errors.push(
+            `${file} loads '${specifier}' other than by static import and \`local.member\` access (require, ` +
+              'import(), a re-export, destructuring, or the namespace used as a value), so the members it uses ' +
+              `cannot be checked against its BUILTIN_READERS entry, and this ${GRAMMAR}.`,
+          );
+          continue;
+        }
+        for (const member of use.members) {
+          if (!declared.includes(member)) {
+            errors.push(
+              `${file} uses \`${builtin}.${member}\`, which its BUILTIN_READERS entry does not list: declare it ` +
+                'with what it reads, so the guard can check that it is a hashed lint input.',
+            );
+          }
+        }
+        for (const member of declared) {
+          if (!use.members.has(member)) {
+            errors.push(
+              `${file} no longer uses \`${builtin}.${member}\`, which its BUILTIN_READERS entry still lists: remove it.`,
+            );
+          }
         }
       } else if (/^[#/]/.test(specifier) || /^[a-z][a-z0-9+.-]*:/i.test(specifier)) {
         errors.push(
@@ -526,8 +883,18 @@ export const dependencyClosure = (entries, { tracked, read, localNames }) => {
         bare(file, specifier);
       }
     }
+    if (entry !== undefined) {
+      excepted.add(file);
+      for (const builtin of Object.keys(entry.builtins ?? {})) {
+        if (!usedBuiltins.has(builtin)) {
+          errors.push(
+            `${file} no longer imports the built-in '${builtin}', which its BUILTIN_READERS entry still lists: remove it.`,
+          );
+        }
+      }
+    }
   }
-  return { files, errors };
+  return { files, errors, excepted };
 };
 
 // ---------------------------------------------------------------------------
@@ -611,8 +978,8 @@ const LEGACY_CONFIG = /(^|\/)\.eslintrc(\.[a-z]+)?$/;
  * What eslint loads for every lint workspace, and every problem with the way it
  * loads it. Needs no turbo: this half is the grammar.
  */
-export const discover = ({ tracked, read }) => {
-  const problems = [];
+export const discover = ({ tracked, read, exceptions = BUILTIN_READERS }) => {
+  const problems = [...exceptionTableProblems(exceptions)];
   const { lint, all, localNames } = workspaces(tracked, read, problems);
   for (const file of tracked) {
     if (LEGACY_CONFIG.test(file)) {
@@ -629,10 +996,15 @@ export const discover = ({ tracked, read }) => {
       );
       continue;
     }
-    const { files, errors } = dependencyClosure(configs, { tracked, read, localNames });
+    const { files, errors, excepted } = dependencyClosure(configs, {
+      tracked,
+      read,
+      localNames,
+      exceptions,
+    });
     for (const config of configs) used.add(config);
     for (const error of errors) if (!problems.includes(error)) problems.push(error);
-    found.push({ ...workspace, files });
+    found.push({ ...workspace, files, excepted });
   }
   for (const file of tracked) {
     if (/^eslint\.config\./.test(file) || !/(^|\/)eslint\.config\.[cm]?[jt]s$/.test(file)) continue;
@@ -642,7 +1014,7 @@ export const discover = ({ tracked, read }) => {
       );
     }
   }
-  return { problems, workspaces: found, all };
+  return { problems, workspaces: found, all, tracked, read, localNames, exceptions };
 };
 
 /**
@@ -689,10 +1061,200 @@ export const coverageProblems = ({ workspaces: found, all }, hashed) => {
   return problems;
 };
 
+/** Every tracked file at `prefix` (a file) or under it (a directory); `.` is the repository. */
+const trackedAt = (tracked, prefix) =>
+  [...tracked].filter((f) => prefix === '.' || f === prefix || f.startsWith(`${prefix}/`));
+
+const TSCONFIG_LEAVES = ['tsconfig.test.json', 'tsconfig.json'];
+const GLOB_CHAR = /[*?[{]/;
+
+/**
+ * The `typescript-project` read surface of the workspace in `dir`: its tsconfig files, their
+ * `extends` chain (a relative path, `.json` implied; a bare name is a package unless it is a
+ * workspace package), and every file or directory those configs point at — `files`, `include`
+ * (the static part before a glob), `references`, `baseUrl`, `rootDirs`, `typeRoots`, `paths`
+ * targets. A config that sets neither `files` nor `include` anywhere in its chain includes its
+ * own directory. Fails closed: an unreadable config, an `extends` that is not a tracked file, an
+ * absolute or `${…}` path, or a path outside the repository is a problem.
+ * Result: { files: Map<file, why>, problems }.
+ */
+export const typescriptProject = (dir, { tracked, read, localNames }) => {
+  const files = new Map();
+  const problems = [];
+  // The parser picks the first of these that exists, and reads only that project.
+  const leaf = TSCONFIG_LEAVES.map((name) => (dir === '.' ? name : `${dir}/${name}`)).find((f) =>
+    tracked.has(f),
+  );
+  if (leaf !== undefined) {
+    const seen = new Set();
+    const trees = new Map();
+    const baseUrls = new Set();
+    const pathTargets = [];
+    let selects = false;
+    const tree = (config, raw, what, base = posix.dirname(config)) => {
+      if (typeof raw !== 'string' || /^[/\\]|^[A-Za-z]:|\$\{|\\/.test(raw)) {
+        problems.push(
+          `${config} ${what} ${JSON.stringify(raw)} is not a relative path the guard can follow, so the TypeScript ` +
+            'project the lint parser reads cannot be checked against turbo’s hashed inputs.',
+        );
+        return undefined;
+      }
+      const fixed = [];
+      for (const part of raw.split('/')) {
+        if (GLOB_CHAR.test(part)) break;
+        fixed.push(part);
+      }
+      const prefix = posix.normalize(posix.join(base, fixed.join('/') || '.'));
+      if (prefix === '..' || prefix.startsWith('../')) {
+        problems.push(
+          `${config} ${what} ${JSON.stringify(raw)} reaches outside the repository, so the TypeScript project the ` +
+            'lint parser reads cannot be hashed.',
+        );
+        return undefined;
+      }
+      trees.set(prefix, `${config} ${what} ${raw}`);
+      return prefix;
+    };
+    const visit = (file, why) => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      files.set(file, why);
+      const { config, error } = ts.parseConfigFileTextToJson(file, read(file) ?? '');
+      if (error !== undefined || config === null || typeof config !== 'object') {
+        problems.push(
+          `${file} is not a readable tsconfig, so the TypeScript project it describes cannot be checked.`,
+        );
+        return;
+      }
+      const here = posix.dirname(file);
+      const extended = config.extends === undefined ? [] : [config.extends].flat();
+      for (const target of extended) {
+        if (typeof target !== 'string') {
+          problems.push(`${file} has an \`extends\` that is not a path or a list of paths.`);
+        } else if (/^\.{1,2}(?:\/|$)/.test(target)) {
+          const resolved = posix.normalize(posix.join(here, target));
+          const found = [resolved, `${resolved}.json`].find((candidate) => tracked.has(candidate));
+          if (found === undefined) {
+            problems.push(`${file} extends '${target}', which is not a tracked file.`);
+          } else visit(found, `extended by ${file}`);
+        } else {
+          const bare = target.startsWith('@')
+            ? target.split('/').slice(0, 2).join('/')
+            : target.split('/')[0];
+          if (/^[/\\]|^[A-Za-z]:|\\/.test(target) || localNames.has(bare)) {
+            problems.push(
+              `${file} extends '${target}', an absolute path or a workspace package: its source is a lint input ` +
+                'the guard does not follow. Extend it by relative path.',
+            );
+          }
+        }
+      }
+      for (const key of ['files', 'include']) {
+        if (config[key] === undefined) continue;
+        selects = true;
+        for (const raw of [config[key]].flat()) tree(file, raw, `\`${key}\` entry`);
+      }
+      for (const reference of [config.references ?? []].flat()) {
+        tree(file, reference?.path, '`references` path');
+      }
+      const options = config.compilerOptions ?? {};
+      if (options.baseUrl !== undefined) {
+        const base = tree(file, options.baseUrl, '`baseUrl`');
+        if (base !== undefined) baseUrls.add(base);
+      }
+      for (const key of ['rootDirs', 'typeRoots']) {
+        for (const raw of [options[key] ?? []].flat()) tree(file, raw, `\`${key}\` entry`);
+      }
+      for (const targets of Object.values(options.paths ?? {})) {
+        for (const raw of [targets].flat()) pathTargets.push({ file, raw });
+      }
+    };
+    visit(leaf, 'the project tsconfig the lint parser selects');
+    for (const { file, raw } of pathTargets) {
+      tree(file, raw, '`paths` target');
+      for (const base of baseUrls) tree(file, raw, '`paths` target', base);
+    }
+    if (!selects) tree(leaf, '.', 'default include (neither `files` nor `include` is set)');
+    for (const [prefix, why] of trees) {
+      for (const file of trackedAt(tracked, prefix)) if (!files.has(file)) files.set(file, why);
+    }
+  }
+  return { files, problems };
+};
+
+/** The files of one read surface of one lint workspace: { files: Map<file, why>, problems }. */
+const readSurface = (surface, workspace, state) => {
+  const { dir } = workspace;
+  if (surface === 'linted-files') {
+    const files = new Map(
+      trackedAt(state.tracked, dir).map((f) => [
+        f,
+        `a file under ${dir}, linted by ${workspace.name}`,
+      ]),
+    );
+    return { files, problems: [] };
+  }
+  if (surface === 'workspace-manifest') {
+    const manifest = dir === '.' ? 'package.json' : `${dir}/package.json`;
+    return { files: new Map([[manifest, `the manifest of ${workspace.name}`]]), problems: [] };
+  }
+  if (surface === 'typescript-project') return typescriptProject(dir, state);
+  return { files: new Map(), problems: [] };
+};
+
+/**
+ * Everything an excepted built-in reader reads must be hashed by the lint task of each
+ * workspace that loads it: `found` is `discover()`'s result, `hashed` turbo's.
+ */
+export const exceptionReadProblems = (found, hashed) => {
+  const problems = [];
+  for (const workspace of found.workspaces) {
+    const task = hashed.tasks.get(`${workspace.name}#lint`);
+    if (task === undefined || !task.cache) continue;
+    for (const path of workspace.excepted) {
+      for (const { surface, why } of found.exceptions.get(path).reads) {
+        if (surface === 'dependency-builds') {
+          if (!task.dependsOn.includes('^build')) {
+            problems.push(
+              `${path} reads ${surface} (${why}) for ${workspace.name}, but its lint task does not depend on ` +
+                '`^build`, so a change to a dependency’s build output would replay a cached lint green.',
+            );
+          }
+          continue;
+        }
+        const { files, problems: unreadable } = readSurface(surface, workspace, found);
+        problems.push(...unreadable);
+        const missing = [...files.keys()].filter(
+          (f) => !task.files.has(f) && !hashed.global.has(f),
+        );
+        if (missing.length > 0) {
+          problems.push(
+            `${path} reads the \`${surface}\` surface (${why}) for ${workspace.name}, but ${missing.length} of its ` +
+              `files are not in turbo’s resolved hashed inputs for that task (\`turbo run lint --dry=json\`), e.g. ` +
+              `${missing.slice(0, 3).join(', ')}: a change to one would replay a cached lint green. Add them as ` +
+              'plain "$TURBO_ROOT$/…" inputs to the lint task that applies.',
+          );
+        }
+      }
+    }
+  }
+  return [...new Set(problems)];
+};
+
+/** Exceptions no lint workspace loads: the list must stay exact, so each is removed. */
+export const staleExceptions = (found) =>
+  [...found.exceptions.keys()].filter(
+    (path) => !found.workspaces.some((w) => w.excepted.has(path)),
+  );
+
 /** Every problem with what turbo's lint tasks hash versus what eslint loads. */
-export const inputProblems = ({ tracked, read, hashed }) => {
-  const found = discover({ tracked, read });
-  return [...found.problems, ...coverageProblems(found, hashed)];
+export const inputProblems = ({ tracked, read, hashed, exceptions }) => {
+  const found = discover({ tracked, read, exceptions });
+  return [
+    ...found.problems,
+    ...coverageProblems(found, hashed),
+    ...exceptionReadProblems(found, hashed),
+  ];
 };
 
 // ---------------------------------------------------------------------------
@@ -707,6 +1269,7 @@ export const parseDryRun = (json) => {
     if (!task.taskId.endsWith('#lint') || task.command === '<NONEXISTENT>') continue;
     tasks.set(task.taskId, {
       cache: task.resolvedTaskDefinition?.cache !== false,
+      dependsOn: task.resolvedTaskDefinition?.dependsOn ?? [],
       files: new Set(
         Object.keys(task.inputs ?? {}).map((f) => posix.normalize(posix.join(task.directory, f))),
       ),
@@ -793,10 +1356,10 @@ export const withFixtureRepo = (files, use) => {
 };
 
 /** Run the whole guard on an in-memory repository, with turbo reading a real copy. */
-export const fixtureProblems = (files) =>
+export const fixtureProblems = (files, exceptions) =>
   withFixtureRepo(files, (dir) => {
     const state = memoryState(files);
-    return inputProblems({ ...state, hashed: turboSnapshot({ cwd: dir }) });
+    return inputProblems({ ...state, exceptions, hashed: turboSnapshot({ cwd: dir }) });
   });
 
 // ---------------------------------------------------------------------------
@@ -978,7 +1541,8 @@ test('mutant: excluding any one loaded file from every lint task (and the global
       }
       eachLintDefinition(doc, (inputs) => [...inputs, `!$TURBO_ROOT$/${file}`]);
     });
-    const problems = inputProblems({ ...state, hashed });
+    // The discovery half only: the read-surface half has its own mutants below.
+    const problems = [...found.problems, ...coverageProblems(found, hashed)];
     assert.equal(startsWith(problems, `${file} `).length, 1, `${file}: ${problems.join(' | ')}`);
     assert.equal(problems.length, 1, `${file}: ${problems.join(' | ')}`);
   });
@@ -2092,4 +2656,646 @@ test('the JSONC reader rejects unterminated input instead of hanging', () => {
   for (const text of ['{"unfinished":"', '{"a":"x\\', '{"a": "b"', '{ /* open', '"']) {
     assert.throws(() => parseJsonc(text), undefined, text);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Both `node --test` chains of lint:scripts (main runs two joined by `&&`).
+// ---------------------------------------------------------------------------
+
+const FIRST = 'scripts/a-rule.test.mjs';
+const SECOND = 'scripts/b-workspace.test.mjs';
+
+test('lint:scripts is read as a chain: every node --test command registers its files', () => {
+  assert.deepEqual(
+    registeredTests(`eslint scripts && node --test ${FIRST} && node --test ${SECOND} ${SELF}`),
+    [FIRST, SECOND, SELF],
+  );
+  assert.deepEqual(registeredTests(`node --test ${FIRST}`), [FIRST]);
+  assert.deepEqual(registeredTests(`eslint . && node --test ${FIRST} ${SECOND}`), [FIRST, SECOND]);
+  const text = JSON.parse(readDisk('package.json')).scripts['lint:scripts'];
+  const real = registeredTests(text);
+  assert.ok(text.split('&&').length >= 3, 'the real script is no longer a chain of commands');
+  for (const file of [
+    'scripts/internal-token-source-workspace.test.mjs',
+    'scripts/internal-token-transport-rule.test.mjs',
+    SELF,
+  ]) {
+    assert.ok(real.includes(file), `${file} is not registered`);
+  }
+});
+
+test('a file in the second chain is required and registered like one in the first', () => {
+  const state = realState();
+  const second = 'scripts/internal-token-source-workspace.test.mjs';
+  assert.ok(requiredTests(state.names).has(second), 'the convention no longer requires it');
+  assert.deepEqual(registrationProblems(state), []);
+  // The old reader stopped at the first `&&`: the second chain looked unregistered.
+  const text = JSON.parse(readDisk('package.json')).scripts['lint:scripts'];
+  const firstOnly = registeredTests(
+    text.slice(0, text.indexOf(' && node --test scripts/internal-token-source')),
+  );
+  assert.ok(!firstOnly.includes(second));
+  assert.ok(
+    unregisteredTests(state.names, firstOnly).some((p) => p.startsWith(`${second} `)),
+    'a file only the second chain runs must be reported when that chain is not read',
+  );
+  // And listing a file in both chains is a duplicate, not two registrations.
+  const both = registeredTests(`${text} && node --test ${second}`);
+  assert.ok(
+    staleRegistrations(both, (f) => state.tracked.has(f)).some((p) =>
+      p.startsWith(`${second} is listed twice`),
+    ),
+  );
+});
+
+test('fail closed: a lint:scripts shape other than eslint / node --test chains throws', () => {
+  const bad = {
+    'a semicolon': `node --test ${FIRST}; node --test ${SECOND}`,
+    'an or': `node --test ${FIRST} || node --test ${SECOND}`,
+    'a pipe': `node --test ${FIRST} | cat`,
+    'a background job': `node --test ${FIRST} & node --test ${SECOND}`,
+    'three ampersands': `node --test ${FIRST} &&& node --test ${SECOND}`,
+    'a trailing ampersand': `node --test ${FIRST} &`,
+    'a variable': `node --test $FILES`,
+    'a command substitution': `node --test $(ls scripts)`,
+    'a backtick': 'node --test `ls`',
+    'a newline': `node --test ${FIRST}\nnode --test ${SECOND}`,
+    'a redirect': `node --test ${FIRST} > out.txt`,
+    'a comment': `node --test ${FIRST} # ${SECOND}`,
+    'a quote': `node --test '${FIRST}'`,
+    'a glob': 'node --test scripts/*.test.mjs',
+    'a brace expansion': 'node --test scripts/{a,b}.test.mjs',
+    'a leading &&': `&& node --test ${FIRST}`,
+    'a trailing &&': `node --test ${FIRST} &&`,
+    'an empty segment': `node --test ${FIRST} && && node --test ${SECOND}`,
+    'an env prefix': `FOO=1 node --test ${FIRST}`,
+    'another program': `node --test ${FIRST} && npm test`,
+    'node without --test': `node ${FIRST}`,
+    'no file': 'node --test',
+    'a second command with no file': `node --test ${FIRST} && node --test`,
+    'a name filter': `node --test --test-name-pattern=x ${FIRST}`,
+    'a name filter after the files': `node --test ${FIRST} --test-skip-pattern=x`,
+    only: `node --test --test-only ${FIRST}`,
+    'a path outside scripts': 'node --test ../scripts/a.test.mjs',
+    'a nested path': 'node --test scripts/sub/a.test.mjs',
+    'a non-test file': 'node --test scripts/a.mjs',
+    'no node --test at all': 'eslint scripts',
+  };
+  for (const [what, script] of Object.entries(bad)) {
+    assert.throws(() => registeredTests(script), /lint:scripts/, `${what}: ${script}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Exact-path built-in exceptions (D-101): BUILTIN_READERS.
+// ---------------------------------------------------------------------------
+
+const exceptionsOf = (...entries) => new Map(entries);
+const READER_PATH = 'scripts/helper-b.mjs';
+const reader = (extra = {}) => ({
+  why: 'a fixture reader',
+  builtins: { fs: ['readFileSync'] },
+  reads: [{ surface: 'linted-files', why: 'the linted file' }],
+  ...extra,
+});
+const READER_SOURCE =
+  "import { readFileSync } from 'node:fs';\nexport const y = (f) => readFileSync(f, 'utf8');\n";
+const withReader = (source = READER_SOURCE) => ({
+  ...baseFiles(),
+  [READER_PATH]: source,
+});
+const messages = (problems, needle) => problems.filter((p) => p.includes(needle));
+
+test('exceptions: the real table is exact, and every excepted module is loaded and passes', () => {
+  assert.deepEqual(exceptionTableProblems(BUILTIN_READERS), []);
+  assert.deepEqual(
+    [...BUILTIN_READERS.keys()].sort(),
+    [
+      'scripts/internal-token-parser.mjs',
+      'scripts/internal-token-source-rule.mjs',
+      'scripts/testing-dev-only.mjs',
+    ],
+    'a built-in exception was added or removed: update this list in the same reviewed change',
+  );
+  const state = realState();
+  const found = discover(state);
+  assert.deepEqual(staleExceptions(found), [], 'a stale exception: remove it from BUILTIN_READERS');
+  const problems = realProblems(state);
+  for (const path of BUILTIN_READERS.keys()) {
+    assert.deepEqual(messages(problems, path), [], `${path} does not pass: ${fail(problems)}`);
+  }
+  assert.deepEqual(problems, [], fail(problems));
+});
+
+test('exceptions: a module outside the list that loads fs, child_process or os fails', () => {
+  for (const [what, source] of Object.entries({
+    'a named fs import': READER_SOURCE,
+    'the unprefixed fs': "import { readFileSync } from 'fs';\nexport const y = readFileSync;\n",
+    'fs/promises': "import { readFile } from 'node:fs/promises';\nexport const y = readFile;\n",
+    child_process: "import { execSync } from 'node:child_process';\nexport const y = execSync;\n",
+    os: "import { tmpdir } from 'node:os';\nexport const y = tmpdir;\n",
+    'a namespace import': "import * as fs from 'node:fs';\nexport const y = fs.readFileSync;\n",
+    'a default import': "import fs from 'node:fs';\nexport const y = fs.readFileSync;\n",
+    'a require': "const fs = require('node:fs');\nexports.y = fs.readFileSync;\n",
+    'a dynamic import': "export const y = await import('node:fs');\n",
+    'a re-export': "export { readFileSync as y } from 'node:fs';\n",
+  })) {
+    const found = discover(memoryState(withReader(source)));
+    assert.ok(
+      found.problems.some(
+        (p) => p.startsWith(`${READER_PATH} loads the built-in`) && p.includes('BUILTIN_READERS'),
+      ),
+      `${what}: not rejected (${fail(found.problems)})`,
+    );
+  }
+});
+
+test('exceptions: a module in the list passes only for the members and surfaces it declares', () => {
+  const ok = (source, entry = reader()) =>
+    discover({
+      ...memoryState(withReader(source)),
+      exceptions: exceptionsOf([READER_PATH, entry]),
+    });
+  assert.deepEqual(ok(READER_SOURCE).problems, []);
+  assert.deepEqual(
+    ok("import * as fs from 'fs';\nexport const y = (f) => fs.readFileSync(f);\n").problems,
+    [],
+  );
+  assert.deepEqual(
+    ok("import fs from 'node:fs';\nexport const y = (f) => fs['readFileSync'](f);\n").problems,
+    [],
+  );
+  const wrong = {
+    'an undeclared member': [
+      "import { readFileSync, rmSync } from 'node:fs';\nexport const y = [readFileSync, rmSync];\n",
+      'uses `fs.rmSync`',
+    ],
+    'an undeclared member through the namespace': [
+      "import fs from 'node:fs';\nexport const y = [fs.readFileSync, fs.writeFileSync];\n",
+      'uses `fs.writeFileSync`',
+    ],
+    'a declared member no longer used': [
+      "import { existsSync } from 'node:fs';\nexport const y = existsSync;\n",
+      'no longer uses `fs.readFileSync`',
+    ],
+    'a declared built-in no longer imported': [
+      'export const y = 1;\n',
+      "no longer imports the built-in 'fs'",
+    ],
+    'an undeclared built-in': [
+      "import { readFileSync } from 'node:fs';\nimport { tmpdir } from 'node:os';\nexport const y = [readFileSync, tmpdir];\n",
+      "loads the built-in 'node:os'",
+    ],
+    'a namespace used as a value': [
+      "import fs from 'node:fs';\nexport const y = Object.assign({}, fs);\n",
+      'other than by static import',
+    ],
+    'a destructured namespace': [
+      "import fs from 'node:fs';\nconst { readFileSync } = fs;\nexport const y = readFileSync;\n",
+      'other than by static import',
+    ],
+    'a require': [
+      "const fs = require('node:fs');\nexports.y = fs.readFileSync;\n",
+      'other than by static import',
+    ],
+    'a dynamic import': [
+      "export const y = (await import('node:fs')).readFileSync;\n",
+      'other than by static import',
+    ],
+    'a computed member': [
+      "import fs from 'node:fs';\nexport const y = (name) => fs[name];\n",
+      'other than by static import',
+    ],
+    'a re-export of the built-in': ["export * from 'node:fs';\n", 'other than by static import'],
+  };
+  for (const [what, [source, needle]] of Object.entries(wrong)) {
+    const problems = ok(source).problems;
+    assert.ok(
+      problems.some((p) => p.startsWith(`${READER_PATH} `) && p.includes(needle)),
+      `${what}: expected "${needle}" in ${fail(problems)}`,
+    );
+  }
+});
+
+test('exceptions: the names a lint-time importer may take are restricted by `exports`', () => {
+  const only = reader({ exports: ['y'] });
+  const importing = (line) => ({
+    ...withReader(),
+    'scripts/helper-a.mjs': `${line}\nexport const x = 1;\n`,
+  });
+  const run = (line) =>
+    discover({
+      ...memoryState(importing(line)),
+      exceptions: exceptionsOf([READER_PATH, only]),
+    }).problems;
+  assert.deepEqual(run("import { y } from './helper-b.mjs';"), []);
+  assert.deepEqual(run("export { y as z } from './helper-b.mjs';"), []);
+  for (const line of [
+    "import { y, other } from './helper-b.mjs';",
+    "import other from './helper-b.mjs';",
+    "import * as all from './helper-b.mjs';",
+    "export * from './helper-b.mjs';",
+    "export { other } from './helper-b.mjs';",
+    "const all = await import('./helper-b.mjs');",
+    "const all = require('./helper-b.mjs');",
+  ]) {
+    assert.ok(
+      messages(run(line), 'whose built-in exception allows a lint-time importer only `y`').length >=
+        1,
+      `${line}: not rejected (${fail(run(line))})`,
+    );
+  }
+  // a side-effect import takes no name; the module's top level runs, which `exports` does not bound
+  assert.deepEqual(run("import './helper-b.mjs';"), []);
+});
+
+test('exceptions: a malformed table is rejected', () => {
+  const entry = reader();
+  const cases = {
+    'a glob path': [['scripts/*.mjs', entry]],
+    'a directory path': [['scripts', entry]],
+    'a parent path': [['scripts/../x.mjs', entry]],
+    'no why': [[READER_PATH, reader({ why: ' ' })]],
+    'no builtins': [[READER_PATH, reader({ builtins: {} })]],
+    'an allowed built-in': [[READER_PATH, reader({ builtins: { path: ['join'] } })]],
+    'a name that is no built-in': [[READER_PATH, reader({ builtins: { nothing: ['x'] } })]],
+    'no members': [[READER_PATH, reader({ builtins: { fs: [] } })]],
+    'no reads': [[READER_PATH, reader({ reads: [] })]],
+    'an unknown surface': [[READER_PATH, reader({ reads: [{ surface: 'everything', why: 'x' }] })]],
+    'a surface without a reason': [[READER_PATH, reader({ reads: [{ surface: 'linted-files' }] })]],
+    'a bad exports': [[READER_PATH, reader({ exports: 'y' })]],
+  };
+  for (const [what, entries] of Object.entries(cases)) {
+    assert.ok(exceptionTableProblems(exceptionsOf(...entries)).length >= 1, what);
+    const found = discover({ ...memoryState(withReader()), exceptions: exceptionsOf(...entries) });
+    assert.ok(
+      found.problems.some((p) => p.startsWith('BUILTIN_READERS[')),
+      `${what}: not in discover`,
+    );
+  }
+  assert.deepEqual(exceptionTableProblems(exceptionsOf([READER_PATH, entry])), []);
+});
+
+test('exceptions: an excepted module whose read surface is not a turbo input fails', async () => {
+  const tsFiles = {
+    ...withReader(),
+    'tsconfig.base.json': '{}',
+    'apps/web/tsconfig.json':
+      '// the portal\n{"extends":"../../tsconfig.base.json","include":["src/**/*","../../shared/**/*.ts",],}',
+    'apps/web/src/index.ts': 'export {};\n',
+    'shared/x.ts': 'export {};\n',
+  };
+  const surfaces = (...names) =>
+    exceptionsOf([
+      READER_PATH,
+      reader({ reads: names.map((surface) => ({ surface, why: 'fixture' })) }),
+    ]);
+  const run = (files, exceptions, inputs = BASE_INPUTS, extra = {}) =>
+    withFixtureRepo({ ...files, 'turbo.json': turboJson(inputs, extra) }, (dir) =>
+      inputProblems({
+        ...memoryState({ ...files, 'turbo.json': turboJson(inputs, extra) }),
+        exceptions,
+        hashed: turboSnapshot({ cwd: dir }),
+      }),
+    );
+  // all hashed: passes
+  assert.deepEqual(
+    run(
+      tsFiles,
+      surfaces('linted-files', 'workspace-manifest', 'typescript-project', 'location-only'),
+      [...BASE_INPUTS, '$TURBO_ROOT$/shared/x.ts'],
+      { globalDependencies: ['tsconfig.base.json'] },
+    ),
+    [],
+  );
+  // dropping the default inputs: the linted files and the manifest are no longer hashed
+  const noDefault = BASE_INPUTS.filter((i) => i !== '$TURBO_DEFAULT$');
+  {
+    const problems = messages(
+      run(tsFiles, surfaces('linted-files'), noDefault),
+      `${READER_PATH} reads the \`linted-files\``,
+    );
+    assert.equal(problems.length, 1, problems.join(' | '));
+    assert.ok(problems[0].includes('@rasta/web') && problems[0].includes('apps/web/'), problems[0]);
+    // turbo hashes a package's own package.json whatever its inputs say, so that surface holds
+    assert.deepEqual(
+      messages(run(tsFiles, surfaces('workspace-manifest'), noDefault), 'workspace-manifest'),
+      [],
+    );
+  }
+  // a tsconfig that extends a root config turbo does not hash, and includes a tree outside the workspace
+  const noGlobals = messages(
+    run(tsFiles, surfaces('typescript-project'), BASE_INPUTS),
+    `${READER_PATH} reads the \`typescript-project\``,
+  );
+  assert.equal(noGlobals.length, 1, noGlobals.join(' | '));
+  assert.ok(
+    noGlobals[0].includes('tsconfig.base.json') || noGlobals[0].includes('shared/x.ts'),
+    noGlobals[0],
+  );
+  const onlyBase = messages(
+    run(tsFiles, surfaces('typescript-project'), BASE_INPUTS, {
+      globalDependencies: ['tsconfig.base.json'],
+    }),
+    'reads the `typescript-project`',
+  );
+  assert.equal(onlyBase.length, 1, onlyBase.join(' | '));
+  assert.ok(
+    onlyBase[0].includes('shared/x.ts') && !onlyBase[0].includes('tsconfig.base.json'),
+    onlyBase[0],
+  );
+  const onlyShared = messages(
+    run(tsFiles, surfaces('typescript-project'), [...BASE_INPUTS, '$TURBO_ROOT$/shared/x.ts']),
+    'reads the `typescript-project`',
+  );
+  assert.equal(onlyShared.length, 1, onlyShared.join(' | '));
+  assert.ok(onlyShared[0].includes('tsconfig.base.json'), onlyShared[0]);
+  // dependency-builds needs `^build`
+  const depends = () =>
+    messages(
+      run(tsFiles, surfaces('dependency-builds'), BASE_INPUTS, {}),
+      'reads dependency-builds',
+    );
+  assert.equal(depends().length, 1, 'a lint task without ^build must fail dependency-builds');
+  const withBuild = withFixtureRepo(
+    {
+      ...tsFiles,
+      'turbo.json': JSON.stringify({
+        tasks: { lint: { dependsOn: ['^build'], inputs: BASE_INPUTS } },
+      }),
+    },
+    (dir) =>
+      inputProblems({
+        ...memoryState(tsFiles),
+        exceptions: surfaces('dependency-builds'),
+        hashed: turboSnapshot({ cwd: dir }),
+      }),
+  );
+  assert.deepEqual(messages(withBuild, 'dependency-builds'), []);
+});
+
+test('typescript-project surface: the chain, the trees and the refusals', () => {
+  const state = (files) => ({
+    tracked: new Set(Object.keys(files)),
+    read: (f) => files[f],
+    localNames: new Set(['@rasta/contracts']),
+  });
+  const surface = (files, dir = 'apps/web') => typescriptProject(dir, state(files));
+  const keys = (files, dir) => [...surface(files, dir).files.keys()].sort();
+  const base = { 'tsconfig.base.json': '{}', 'apps/web/a.ts': '', 'apps/web/b.ts': '' };
+
+  // a leaf, its extends chain (".json" implied, comments and trailing commas allowed) and its include tree
+  assert.deepEqual(
+    keys({
+      ...base,
+      'apps/web/tsconfig.test.json': '{"extends":"./tsconfig","include":["a.ts"],}',
+      'apps/web/tsconfig.json': '// c\n{"extends":"../../tsconfig.base"}',
+    }),
+    [
+      'apps/web/a.ts',
+      'apps/web/tsconfig.json',
+      'apps/web/tsconfig.test.json',
+      'tsconfig.base.json',
+    ],
+  );
+  // neither `files` nor `include` anywhere: the config’s own directory
+  assert.deepEqual(
+    keys({ ...base, 'apps/web/tsconfig.json': '{"extends":["../../tsconfig.base.json"]}' }),
+    ['apps/web/a.ts', 'apps/web/b.ts', 'apps/web/tsconfig.json', 'tsconfig.base.json'],
+  );
+  // references, rootDirs, typeRoots, paths (against the config and the baseUrl), a glob cut at its static part
+  const refs = surface({
+    ...base,
+    'packages/x/src/i.ts': '',
+    'packages/y/t/i.d.ts': '',
+    'packages/z/r/i.ts': '',
+    'packages/w/p/i.ts': '',
+    'packages/v/q/i.ts': '',
+    'apps/web/tsconfig.json': JSON.stringify({
+      include: ['../../packages/x/src/**/*.ts'],
+      references: [{ path: '../../packages/z' }],
+      compilerOptions: {
+        rootDirs: ['../../packages/y'],
+        typeRoots: ['../../packages/y/t'],
+        baseUrl: '../../packages/v',
+        paths: { '@w/*': ['../../packages/w/p/*'], '@q/*': ['q/*'] },
+      },
+    }),
+  });
+  assert.deepEqual(refs.problems, []);
+  for (const f of [
+    'packages/x/src/i.ts',
+    'packages/z/r/i.ts',
+    'packages/y/t/i.d.ts',
+    'packages/w/p/i.ts',
+  ]) {
+    assert.ok(refs.files.has(f), `${f} not in the surface: ${[...refs.files.keys()].join(', ')}`);
+  }
+  assert.ok(refs.files.has('packages/v/q/i.ts'), 'a paths target is resolved against baseUrl too');
+  // refusals
+  const refuse = (config, needle, extra = {}) => {
+    const { problems } = surface({ ...base, ...extra, 'apps/web/tsconfig.json': config });
+    assert.ok(
+      problems.some((p) => p.includes(needle)),
+      `${config}: ${problems.join(' | ')}`,
+    );
+  };
+  refuse('{ not json', 'not a readable tsconfig');
+  refuse('[1]', 'not a readable tsconfig');
+  refuse('{"extends":"./missing.json"}', 'not a tracked file');
+  refuse('{"extends":5}', 'not a path');
+  refuse('{"extends":"/etc/tsconfig.json"}', 'absolute path or a workspace package');
+  refuse('{"extends":"@rasta/contracts/tsconfig.json"}', 'absolute path or a workspace package');
+  refuse('{"include":["/abs/**"]}', 'not a relative path');
+  refuse('{"include":["${configDir}/x"]}', 'not a relative path');
+  refuse('{"include":["../../../outside/**"]}', 'outside the repository');
+  refuse('{"include":[5]}', 'not a relative path');
+  refuse('{"references":[{"path":"/abs"}]}', 'not a relative path');
+  refuse('{"compilerOptions":{"typeRoots":["../../../x"]}}', 'outside the repository');
+  // a registry package to extend is not a local source
+  assert.deepEqual(
+    surface({ ...base, 'apps/web/tsconfig.json': '{"extends":"@tsconfig/node20/tsconfig.json"}' })
+      .problems,
+    [],
+  );
+  // a cycle terminates
+  assert.deepEqual(
+    keys({
+      'apps/web/tsconfig.test.json': '{"extends":"./tsconfig.json"}',
+      'apps/web/tsconfig.json': '{"extends":"./tsconfig.test.json"}',
+    }),
+    ['apps/web/tsconfig.json', 'apps/web/tsconfig.test.json'],
+  );
+  // no tsconfig: nothing is read
+  assert.deepEqual(keys(base), []);
+});
+
+// Mutants on the real repository: each takes one real thing away and the exception check must fail.
+test('mutant: removing any one exception fails naming the module and the built-in', () => {
+  const state = realState();
+  for (const path of BUILTIN_READERS.keys()) {
+    const exceptions = new Map([...BUILTIN_READERS].filter(([key]) => key !== path));
+    const problems = discover({ ...state, exceptions }).problems;
+    assert.ok(
+      problems.some(
+        (p) => p.startsWith(`${path} loads the built-in`) && p.includes('BUILTIN_READERS'),
+      ),
+      `${path}: ${fail(problems)}`,
+    );
+  }
+});
+
+test('mutant: a new module that loads fs from a real rule is rejected until it is listed', () => {
+  const state = realState();
+  const added = {
+    'scripts/new-reader.mjs': () =>
+      "import { readFileSync } from 'node:fs';\nexport default readFileSync;\n",
+    'scripts/no-zod-default-rule.mjs': (text) => `import './new-reader.mjs';\n${text}`,
+  };
+  const tracked = new Set([...state.tracked, 'scripts/new-reader.mjs']);
+  const mutated = { ...withText(state, added), tracked };
+  const problems = discover(mutated).problems;
+  assert.ok(
+    problems.some((p) => p.startsWith('scripts/new-reader.mjs loads the built-in')),
+    fail(problems),
+  );
+  // the same module, listed with a surface, then passes discovery
+  const listed = new Map([
+    ...BUILTIN_READERS,
+    ['scripts/new-reader.mjs', reader({ reads: [{ surface: 'location-only', why: 'x' }] })],
+  ]);
+  assert.deepEqual(discover({ ...mutated, exceptions: listed }).problems, []);
+  // an excepted module is only excepted for its own path: a copy under another name is not
+  const copy = { ...mutated, tracked: new Set([...tracked, 'scripts/copy-of-parser.mjs']) };
+  const renamed = withText(copy, {
+    'scripts/copy-of-parser.mjs': () => state.read('scripts/internal-token-parser.mjs'),
+    'scripts/new-reader.mjs': () => "import './copy-of-parser.mjs';\nexport default 1;\n",
+    'scripts/no-zod-default-rule.mjs': (text) => `import './new-reader.mjs';\n${text}`,
+  });
+  assert.ok(
+    discover({ ...renamed, tracked: copy.tracked }).problems.some((p) =>
+      p.startsWith('scripts/copy-of-parser.mjs loads the built-in'),
+    ),
+  );
+});
+
+test('mutant: the real excepted modules cannot grow a new member, lose one, or widen their exports', () => {
+  const state = realState();
+  const edit = (file, from, to) => {
+    const text = state.read(file);
+    assert.ok(text.includes(from), `${file} no longer contains ${from}`);
+    return discover(withText(state, { [file]: () => text.replace(from, to) })).problems;
+  };
+  const parser = 'scripts/internal-token-parser.mjs';
+  const rule = 'scripts/internal-token-source-rule.mjs';
+  const dev = 'scripts/testing-dev-only.mjs';
+  const has = (problems, file, needle) =>
+    problems.some((p) => p.startsWith(`${file} `) && p.includes(needle));
+  assert.ok(
+    has(
+      edit(parser, "import fs from 'node:fs';", "import fs from 'node:fs';\nfs.readdirSync('.');"),
+      parser,
+      'uses `fs.readdirSync`',
+    ),
+  );
+  assert.ok(
+    has(
+      edit(parser, "fs.readFileSync(options.filePath, 'utf8') !== code", 'false'),
+      parser,
+      'no longer uses `fs.readFileSync`',
+    ),
+  );
+  assert.ok(
+    has(
+      edit(rule, 'fs.realpathSync(REPO_ROOT)', 'fs.readFileSync(REPO_ROOT)'),
+      rule,
+      'uses `fs.readFileSync`',
+    ),
+  );
+  assert.ok(
+    has(
+      edit(rule, 'fs.realpathSync(REPO_ROOT)', 'Object.assign({}, fs)'),
+      rule,
+      'other than by static import',
+    ),
+  );
+  assert.ok(
+    has(
+      edit(
+        dev,
+        "import { tmpdir } from 'node:os';",
+        "import { tmpdir, homedir } from 'node:os';\nhomedir();",
+      ),
+      dev,
+      'uses `os.homedir`',
+    ),
+  );
+  assert.ok(
+    has(
+      edit(
+        rule,
+        "import { REPO_ROOT } from './testing-dev-only.mjs';",
+        "import { REPO_ROOT, checkImage } from './testing-dev-only.mjs';\ncheckImage;",
+      ),
+      rule,
+      'allows a lint-time importer only `REPO_ROOT`',
+    ),
+  );
+  assert.ok(
+    edit(
+      rule,
+      "import { REPO_ROOT } from './testing-dev-only.mjs';",
+      "import * as dev from './testing-dev-only.mjs';\nconst REPO_ROOT = dev.REPO_ROOT;",
+    ).some((p) => p.includes('allows a lint-time importer only `REPO_ROOT`')),
+  );
+});
+
+test('mutant: a real excepted module’s read surface that turbo stops hashing fails naming it', async () => {
+  const state = realState();
+  const found = discover(state);
+  const run = async (change) => inputProblems({ ...state, hashed: await mutatedSnapshot(change) });
+  // the default inputs carry the linted files, the manifests and the tsconfigs of every workspace
+  const noDefault = await run((doc) => {
+    doc.tasks.lint.inputs = doc.tasks.lint.inputs.filter((i) => i !== '$TURBO_DEFAULT$');
+  });
+  for (const path of [
+    'scripts/internal-token-parser.mjs',
+    'scripts/internal-token-source-rule.mjs',
+  ]) {
+    assert.ok(
+      noDefault.some((p) => p.startsWith(`${path} reads the \`linted-files\` surface`)),
+      `${path}: ${fail(noDefault)}`,
+    );
+  }
+  assert.ok(
+    noDefault.some((p) =>
+      p.startsWith('scripts/internal-token-parser.mjs reads the `typescript-project`'),
+    ),
+  );
+  // tsconfig.base.json is a global dependency: the extends chain of every workspace reaches it
+  const noBase = await run((doc) => {
+    doc.globalDependencies = doc.globalDependencies.filter((f) => f !== 'tsconfig.base.json');
+  });
+  const baseProblems = noBase.filter(
+    (p) =>
+      p.startsWith('scripts/internal-token-parser.mjs reads the `typescript-project`') &&
+      p.includes('tsconfig.base.json'),
+  );
+  assert.equal(baseProblems.length, found.workspaces.length, fail(noBase));
+  // the type declarations come from dependency builds, hashed through `^build`
+  const noBuild = await run((doc) => {
+    doc.tasks.lint.dependsOn = [];
+  });
+  assert.ok(
+    noBuild.some((p) => p.startsWith('scripts/internal-token-parser.mjs reads dependency-builds')),
+    fail(noBuild),
+  );
+  // a stale entry (a tracked module nothing loads) is found by the exact-list check
+  const stale = new Map([
+    ...BUILTIN_READERS,
+    ['scripts/check-compose-ports-lib.mjs', reader({ builtins: { fs: ['readFileSync'] } })],
+  ]);
+  assert.deepEqual(staleExceptions(discover({ ...state, exceptions: stale })), [
+    'scripts/check-compose-ports-lib.mjs',
+  ]);
 });

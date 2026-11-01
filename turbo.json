@@ -67,6 +67,8 @@
     // itself: `turbo run lint --dry=json` lists each task's hashed files, and a
     // loaded file missing from that list fails. List rule files as plain paths:
     // turbo accepts an @(…), +(…) or !(…) pattern and hashes nothing for it.
+    // A rule module that imports fs, child_process or os needs its own exact-path
+    // entry (BUILTIN_READERS in that test) and what it reads must be hashed here too.
     "lint": {
       "dependsOn": ["^build"],
       "inputs": [
