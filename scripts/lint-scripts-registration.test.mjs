@@ -822,14 +822,16 @@ export const dependencyClosure = (
           );
         } else {
           const only = exceptions.get(resolved)?.exports;
-          const names = importNames.get(specifier) ?? new Set(); // a side-effect import takes no name
-          if (only !== undefined && (names === '*' || ![...names].every((n) => only.includes(n)))) {
+          // a side-effect import takes no name; a default, namespace or non-static load takes everything
+          const names = importNames.get(specifier) ?? new Set();
+          const taken = names === '*' ? ['*'] : [...names];
+          if (only !== undefined && !taken.every((n) => only.includes(n))) {
             errors.push(
               `${file} loads '${specifier}' (${resolved}), whose built-in exception allows a lint-time importer ` +
                 `only ${only.map((n) => `\`${n}\``).join(', ')}, but it takes ${
-                  names === '*'
+                  taken.includes('*')
                     ? 'everything (a default, namespace, require() or import())'
-                    : [...names].join(', ')
+                    : taken.join(', ')
                 }: its other exports run what it was excepted from, so this ${GRAMMAR}.`,
             );
           }
@@ -2710,6 +2712,22 @@ test('a file in the second chain is required and registered like one in the firs
 
 test('fail closed: a lint:scripts shape other than eslint / node --test chains throws', () => {
   const bad = {
+    // an `eslint …` command's own arguments are not read, so the control characters are what
+    // keep text after them from hiding that a registered file never runs
+    'eslint then a semicolon that exits': `eslint scripts; exit 0 && node --test ${FIRST}`,
+    'eslint in the background': `eslint scripts & exit && node --test ${FIRST}`,
+    'eslint then a comment': `eslint scripts # && node --test ${FIRST}`,
+    'eslint piped': `eslint scripts | cat && node --test ${FIRST}`,
+    'eslint or': `eslint scripts || exit 1 && node --test ${FIRST}`,
+    'eslint then a substitution': `eslint $(echo scripts) && node --test ${FIRST}`,
+    'eslint then a redirect': `eslint scripts > /dev/null && node --test ${FIRST}`,
+    'eslint then a backtick': `eslint \`echo scripts\` && node --test ${FIRST}`,
+    'eslint then a newline': `eslint scripts\nexit 0 && node --test ${FIRST}`,
+    // `node` that is not `node --test`: the files would be run as scripts, or not at all
+    'node with another option first': `node --inspect ${FIRST}`,
+    'node run on the files': `node ${SECOND} ${FIRST}`,
+    'node with a preload': `node --require ./x.js --test ${FIRST}`,
+    'another test runner': `tsx --test ${FIRST}`,
     'a semicolon': `node --test ${FIRST}; node --test ${SECOND}`,
     'an or': `node --test ${FIRST} || node --test ${SECOND}`,
     'a pipe': `node --test ${FIRST} | cat`,
@@ -2776,6 +2794,48 @@ test('exceptions: the real table is exact, and every excepted module is loaded a
       'scripts/testing-dev-only.mjs',
     ],
     'a built-in exception was added or removed: update this list in the same reviewed change',
+  );
+  // What each entry declares is reviewed data: changing it is a change to this list too.
+  assert.deepEqual(
+    [...BUILTIN_READERS].map(([path, { builtins, exports, reads }]) => [
+      path,
+      builtins,
+      exports ?? null,
+      reads.map((read) => read.surface),
+    ]),
+    [
+      [
+        'scripts/internal-token-parser.mjs',
+        { fs: ['existsSync', 'readFileSync'] },
+        null,
+        ['linted-files', 'workspace-manifest', 'typescript-project', 'dependency-builds'],
+      ],
+      [
+        'scripts/internal-token-source-rule.mjs',
+        { fs: ['realpathSync'] },
+        null,
+        ['linted-files', 'location-only'],
+      ],
+      [
+        'scripts/testing-dev-only.mjs',
+        {
+          child_process: ['spawnSync'],
+          fs: [
+            'existsSync',
+            'lstatSync',
+            'mkdtempSync',
+            'readdirSync',
+            'readFileSync',
+            'realpathSync',
+            'rmSync',
+          ],
+          os: ['tmpdir'],
+        },
+        ['REPO_ROOT'],
+        ['location-only'],
+      ],
+    ],
+    'an exception’s members, exports or read surfaces changed: update this list in the same reviewed change',
   );
   const state = realState();
   const found = discover(state);
@@ -3042,7 +3102,13 @@ test('typescript-project surface: the chain, the trees and the refusals', () => 
   });
   const surface = (files, dir = 'apps/web') => typescriptProject(dir, state(files));
   const keys = (files, dir) => [...surface(files, dir).files.keys()].sort();
-  const base = { 'tsconfig.base.json': '{}', 'apps/web/a.ts': '', 'apps/web/b.ts': '' };
+  const base = {
+    'tsconfig.base.json': '{}',
+    'apps/web/a.ts': '',
+    'apps/web/b.ts': '',
+    // a sibling whose name only starts like the workspace's is not under it
+    'apps/web-extra/c.ts': '',
+  };
 
   // a leaf, its extends chain (".json" implied, comments and trailing commas allowed) and its include tree
   assert.deepEqual(
@@ -3063,6 +3129,24 @@ test('typescript-project surface: the chain, the trees and the refusals', () => 
     keys({ ...base, 'apps/web/tsconfig.json': '{"extends":["../../tsconfig.base.json"]}' }),
     ['apps/web/a.ts', 'apps/web/b.ts', 'apps/web/tsconfig.json', 'tsconfig.base.json'],
   );
+  // a workspace at the repository root: the whole repository is its directory
+  assert.deepEqual(
+    keys(
+      {
+        'package.json': '{}',
+        'tsconfig.json': '{"include":["src/**/*"]}',
+        'src/a.ts': '',
+        'other/b.ts': '',
+      },
+      '.',
+    ),
+    ['src/a.ts', 'tsconfig.json'],
+  );
+  assert.deepEqual(keys({ 'package.json': '{}', 'tsconfig.json': '{}', 'src/a.ts': '' }, '.'), [
+    'package.json',
+    'src/a.ts',
+    'tsconfig.json',
+  ]);
   // references, rootDirs, typeRoots, paths (against the config and the baseUrl), a glob cut at its static part
   const refs = surface({
     ...base,
