@@ -63,7 +63,10 @@
     // helpers, a shared config) must be hashed by the task that applies to that
     // workspace — this one, a "<pkg>#lint" here, or the workspace turbo.json.
     // scripts/lint-scripts-registration.test.mjs (run by lint:scripts) follows the
-    // imports, resolves those tasks and fails the file that is not covered.
+    // imports (a fixed loading grammar, anything else fails) and then asks turbo
+    // itself: `turbo run lint --dry=json` lists each task's hashed files, and a
+    // loaded file missing from that list fails. List rule files as plain paths:
+    // turbo accepts an @(…), +(…) or !(…) pattern and hashes nothing for it.
     "lint": {
       "dependsOn": ["^build"],
       "inputs": [
