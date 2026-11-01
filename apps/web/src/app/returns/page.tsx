@@ -54,7 +54,7 @@ export default async function ReturnsPage({
   };
 
   const result = await fetchReturns(session, query);
-  const caller = returnCallerOf(session.accessToken);
+  const caller = returnCallerOf(session);
   const actionable = new Set(
     result.kind === 'OK'
       ? result.data.items

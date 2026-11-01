@@ -20,6 +20,7 @@ import {
 } from '@/lib/transaction-dispute-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import { utcInstant } from './instant';
 import type { WebSession } from './session';
@@ -130,7 +131,7 @@ export async function fetchTransaction(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: `/v1/transactions/${encodeURIComponent(transactionId)}`,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = transactionSchema.safeParse(response.data);
@@ -156,7 +157,7 @@ export async function fetchTransaction(
 export interface DisputeViewer {
   /**
    * The roles the service will act on for this request — read from the access
-   * token (`tokenAuthority`), never from `/v1/users/me` — or `null` when they
+   * token (`sessionAuthority`), never from `/v1/users/me` — or `null` when they
    * could not be read.
    */
   readonly roles: readonly string[] | null;

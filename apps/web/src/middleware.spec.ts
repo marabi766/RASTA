@@ -8,7 +8,11 @@ import { renewSession } from '@/server/session-refresh';
 import { SESSION_COOKIE, openSession, sealSession, type WebSession } from '@/server/session';
 import { actingAccessToken } from '@/test/session-token';
 import { OidcError } from '@/server/oidc';
-import { REFRESH_UNAVAILABLE, SESSION_STATE_HEADER } from '@/server/session-state';
+import { NO_ORGANIZATION, REFRESH_UNAVAILABLE, SESSION_STATE_HEADER } from '@/server/session-state';
+import { sessionOrganization } from '@/server/session-organization';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 // Only the session wiring below reaches these: a request without a session
 // cookie returns before the environment or the renewal is consulted, so the
@@ -301,7 +305,7 @@ describe('what is refused before the body is read (ADR-069)', () => {
         subject: 'USR_1',
         username: 'buyer',
         organizationId: 'ORG_1',
-        accessToken: 'access-token-value',
+        accessToken: ACCESS_TOKEN_VALUE,
         accessTokenExpiresAt: 2_000_000_000,
         refreshToken: 'refresh-token-value',
         csrfToken: 'csrf-token-value',
@@ -344,7 +348,7 @@ describe('what is refused before the body is read (ADR-069)', () => {
   });
 });
 
-describe('an organization switch reaches the render of the same request (task 100)', () => {
+describe('an organization switch elsewhere does not move the session (task 118)', () => {
   const SECRET = 'a-session-secret-that-is-long-enough-to-be-one';
   const actual = jest.requireActual(
     '@/server/session-refresh',
@@ -385,23 +389,47 @@ describe('an organization switch reaches the render of the same request (task 10
     actual.forgetSharedRefreshes();
   });
 
-  it('the refresh that brings B’s token hands this render — and the browser — a session acting for B', async () => {
-    renewingWith(async () => ({
-      access_token: actingAccessToken('ORG_B'),
-      refresh_token: 'refresh-b',
-      id_token: 'id-b',
-      expires_in: 900,
-      token_type: 'Bearer',
-    }));
+  /** A token active in B that still grants A — the account switched to B elsewhere. */
+  const activeInBHoldingA = actingAccessToken('ORG_B', ['OPERATOR'], {
+    org_ids: ['ORG_A', 'ORG_B'],
+    org_roles: ['ORG_A:OPERATOR', 'ORG_B:OPERATOR'],
+  });
+  const tokens = (access: string) => async () => ({
+    access_token: access,
+    refresh_token: 'refresh-b',
+    id_token: 'id-b',
+    expires_in: 900,
+    token_type: 'Bearer',
+  });
+
+  it('a refresh after a switch to B elsewhere keeps this render — and the browser — acting for A (audit F2)', async () => {
+    renewingWith(tokens(activeInBHoldingA));
 
     const response = await middleware(request(inA));
 
+    // The trigger is real: the token the session now holds is active in B.
     expect(rendered(response)).toMatchObject({
-      organizationId: 'ORG_B',
-      accessToken: actingAccessToken('ORG_B'),
+      organizationId: 'ORG_A',
+      accessToken: activeInBHoldingA,
     });
     const written = openSession(response.cookies.get(SESSION_COOKIE)!.value, SECRET);
-    expect(written).toMatchObject({ organizationId: 'ORG_B' });
+    expect(written).toMatchObject({ organizationId: 'ORG_A', accessToken: activeInBHoldingA });
+  });
+
+  it('a refresh whose token no longer grants A: the rotated tokens are kept, A is kept, and the render cannot act — never B', async () => {
+    renewingWith(tokens(actingAccessToken('ORG_B')));
+
+    const response = await middleware(request(inA));
+
+    const written = openSession(response.cookies.get(SESSION_COOKIE)!.value, SECRET);
+    expect(written).toMatchObject({
+      organizationId: 'ORG_A',
+      accessToken: actingAccessToken('ORG_B'),
+      refreshToken: 'refresh-b',
+    });
+    expect(rendered(response)).toMatchObject({ organizationId: 'ORG_A' });
+    // `readSession()` refuses it: `/account/recovery` says the organization changed.
+    expect(sessionOrganization(rendered(response)!)).toBeUndefined();
   });
 
   it('a cookie whose copy disagrees with its token, on a refused refresh: hidden from this render, the browser’s cookie untouched', async () => {
@@ -415,5 +443,75 @@ describe('an organization switch reaches the render of the same request (task 10
     expect(rendered(response)).toBeNull();
     expect(response.cookies.get(SESSION_COOKIE)).toBeUndefined();
     expect(forwardedHeader(response, SESSION_STATE_HEADER)).toBe(REFRESH_UNAVAILABLE);
+  });
+});
+
+describe('a session that acts for no organization never reaches a tenant-bound route (task 118)', () => {
+  const SECRET = 'a-session-secret-that-is-long-enough-to-be-one';
+  const now = Math.floor(Date.now() / 1000);
+  /** Pinned to none at sign-in; the account has since been made active in B elsewhere. */
+  const noOrganization: WebSession = {
+    subject: 'USR_1',
+    username: 'u',
+    organizationId: null,
+    accessToken: actingAccessToken('ORG_B'),
+    accessTokenExpiresAt: now + 900,
+    refreshToken: 'refresh',
+    csrfToken: 'csrf',
+    issuedAt: now - 60,
+  };
+  const request = (path: string, method = 'GET', session: WebSession = noOrganization) =>
+    new NextRequest(`http://localhost:3200${path}`, {
+      method,
+      headers: {
+        cookie: `${SESSION_COOKIE}=${sealSession(session, SECRET)}`,
+        ...(method === 'POST'
+          ? { 'next-action': 'abc', 'content-type': 'text/plain', 'content-length': '1' }
+          : {}),
+      },
+      ...(method === 'POST' ? { body: 'x' } : {}),
+    });
+
+  beforeEach(() => {
+    renew.mockReset();
+    renew.mockResolvedValue({ kind: 'VALID' });
+  });
+
+  it.each(['/wallet', '/drivers', '/organizations', '/transactions/TXN_1', '/some-new-page'])(
+    'a page request for %s is sent to the page that says why — nothing is drawn',
+    async (path) => {
+      const response = await middleware(request(path));
+      expect(response.status).toBe(307);
+      expect(new URL(response.headers.get('location')!).pathname).toBe('/account/no-organization');
+    },
+  );
+
+  it('an action POST runs without the session, marked so it answers NO_ORGANIZATION', async () => {
+    const response = await middleware(request('/wallet', 'POST'));
+    expect(response.headers.get('location')).toBeNull();
+    const forwarded = response.headers.get('x-middleware-request-cookie') ?? '';
+    expect(forwarded).not.toContain(`${SESSION_COOKIE}=`);
+    expect(forwardedHeader(response, SESSION_STATE_HEADER)).toBe(NO_ORGANIZATION);
+    // The browser keeps its cookie: the person's own pages still work.
+    expect(response.cookies.get(SESSION_COOKIE)).toBeUndefined();
+  });
+
+  it.each(['/', '/login', '/account/no-organization', '/account/recovery', '/auth/logout'])(
+    'the person’s own route %s still runs with the session',
+    async (path) => {
+      const response = await middleware(request(path));
+      expect(response.headers.get('location')).toBeNull();
+      expect(response.headers.get('x-middleware-request-cookie') ?? '').toContain(
+        `${SESSION_COOKIE}=`,
+      );
+      expect(forwardedHeader(response, SESSION_STATE_HEADER)).toBeNull();
+    },
+  );
+
+  it('a session that acts for an organization passes everywhere', async () => {
+    const pinned = { ...noOrganization, organizationId: 'ORG_B' };
+    const response = await middleware(request('/wallet', 'GET', pinned));
+    expect(response.headers.get('location')).toBeNull();
+    expect(forwardedHeader(response, SESSION_STATE_HEADER)).toBeNull();
   });
 });

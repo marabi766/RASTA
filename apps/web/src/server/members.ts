@@ -11,6 +11,7 @@ import type {
 } from '@/lib/organization-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
@@ -80,7 +81,7 @@ export async function fetchMembers(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: `/v1/users?${search.toString()}`,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = memberPageSchema.safeParse(response.data);

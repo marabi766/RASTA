@@ -11,7 +11,6 @@ import { webServerEnv } from '@/server/env';
 import { readFlash } from '@/server/flash';
 import { safeReturnTo } from '@/server/login-attempt';
 import { tenderDoorsFor } from '@/server/portal-nav';
-import { tokenRoles } from '@/server/realm-roles';
 import { submissionBinding } from '@/server/submission';
 import { bidderCallerOf, canBid, fetchOwnBid } from '@/server/tender-bids';
 import {
@@ -80,7 +79,7 @@ import {
   PublicationSection,
 } from './OwnerSections';
 import { OpenTenderDetailScreen, OwnBidSection, OwnTenderDetailScreen } from './TenderDetailScreen';
-import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { actingOrganizationLabel, actingScope, sessionRoles } from '@/server/session-organization';
 import { pageContext, pageParams } from '@/server/page-context';
 import { withContext } from '@/lib/page-context';
 
@@ -91,7 +90,7 @@ import { withContext } from '@/lib/page-context';
  * (`/v1/tenders/{id}`) and the bidder's (`/v1/open-tenders/{id}`) — and the
  * address says which one a link meant (`?view=open` from the bidder's list). A
  * bare address takes the owner's door, or the bidder's for somebody who is only
- * a bidder — by the access token's own roles (`tokenRoles`); a token whose
+ * a bidder — by the token's roles in the pinned organization (`sessionRoles`); a token whose
  * roles cannot be read is no bidder, so takes the owner's door. Whether this caller may see the tender is construction-service's
  * answer, against the record: one it will not show is `404` and is rendered as
  * absent.
@@ -133,12 +132,12 @@ export default async function TenderPage({
   const demoMode = fetchDemoMode(session);
 
   // From the token's own roles, the set construction-service decides on.
-  const doors = tenderDoorsFor(tokenRoles(session.accessToken) ?? [], webServerEnv());
+  const doors = tenderDoorsFor(sessionRoles(session) ?? [], webServerEnv());
   const open = requested === 'open' || (requested !== 'own' && !doors.own);
 
   let body: ReactNode;
   if (open) {
-    const caller = bidderCallerOf(session.accessToken);
+    const caller = bidderCallerOf(session);
     const bidder = canBid(caller);
     const [result, own] = await Promise.all([
       fetchOpenTender(session, id),
@@ -178,7 +177,7 @@ export default async function TenderPage({
         />
       ) : null;
     body = <OpenTenderDetailScreen result={result} ownBid={ownBid} />;
-  } else if (isBidSideOnly(ownerCallerOf(session.accessToken), webServerEnv())) {
+  } else if (isBidSideOnly(ownerCallerOf(session), webServerEnv())) {
     // An opener or evaluator refused the tender read is given the bid side without it (PR 345 r1, finding 4).
     body = await bidSideOnlyBody(session, id, query);
   } else {
@@ -264,7 +263,7 @@ async function loadAuthority(
   const from = inboxCursor(query[INBOX_CURSOR_PARAM]);
   const steps = await fetchAuthoritySteps(session, id, from);
   if (steps.kind !== 'OK') return null;
-  const caller = ownerCallerOf(session.accessToken);
+  const caller = ownerCallerOf(session);
   // One step's forms each, so a step's decisions are drawn under that step alone.
   const views = steps.data.items.map((item) => {
     const { offers, notes } = authorityOffers(caller, item);
@@ -437,7 +436,7 @@ async function bidSideOnlyBody(
   query: Record<string, string | string[] | undefined>,
 ): Promise<ReactNode> {
   const settings = webServerEnv();
-  const caller = ownerCallerOf(session.accessToken);
+  const caller = ownerCallerOf(session);
   const opens = canOpenBids(caller, settings);
   const bids = opens ? await fetchOwnerBids(session, id) : null;
   if (bids !== null && bids.kind !== 'OK') return absentOrAuthority(session, id, query, bids);
@@ -530,7 +529,7 @@ async function ownerSections(
   criteria: ReadResult<TenderCriteria> | null,
 ): Promise<ReactNode> {
   const settings = webServerEnv();
-  const caller = ownerCallerOf(session.accessToken);
+  const caller = ownerCallerOf(session);
   const draft = tender.status === 'DRAFT';
   const awarding = tender.status === 'EVALUATED' || tender.status === 'AWARDED';
   const [publication, bids, matrix, awardRequest, thresholdPreview] = await Promise.all([

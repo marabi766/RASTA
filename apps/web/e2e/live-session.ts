@@ -7,7 +7,7 @@ import { guardedFetch } from '@rasta/testing';
 import { z } from 'zod';
 
 import { SESSION_COOKIE, newCsrfToken, sealSession } from '../src/server/session';
-import { storedOrganizationFor } from '../src/server/session-organization';
+import { pinnedOrganizationFor } from '../src/server/session-organization';
 import { contextTagFor } from '../src/server/context-tag';
 
 /**
@@ -258,6 +258,17 @@ export interface ProvisionedPerson {
   readonly userId: string;
 }
 
+export interface InstallOptions {
+  /**
+   * Seal the session as if its access token were about to run out, so the
+   * portal's middleware refreshes it on the session's first request — with
+   * the real refresh token, against the real realm. The token itself is still
+   * valid; only the session's own record of its expiry is moved. For a
+   * scenario about what a refresh does (task 118).
+   */
+  readonly refreshOnFirstRequest?: boolean;
+}
+
 /**
  * Signs in a person the scenario provisioned, with every check a realm persona
  * gets: the token's claims, and `/v1/users/me` agreeing with them.
@@ -265,11 +276,16 @@ export interface ProvisionedPerson {
 export async function installProvisionedSession(
   context: BrowserContext,
   person: ProvisionedPerson,
+  options: InstallOptions = {},
 ): Promise<LiveSession> {
-  return installSession(context, person);
+  return installSession(context, person, options);
 }
 
-async function installSession(context: BrowserContext, fixture: Fixture): Promise<LiveSession> {
+async function installSession(
+  context: BrowserContext,
+  fixture: Fixture,
+  options: InstallOptions = {},
+): Promise<LiveSession> {
   const tokens = await tokensFor(fixture);
   const claims = z
     .object({
@@ -281,15 +297,16 @@ async function installSession(context: BrowserContext, fixture: Fixture): Promis
     .parse(decodeJwt(tokens.access_token));
   await requireSeededPlatformUser(fixture, tokens.access_token);
   const now = Math.floor(Date.now() / 1000);
-  const expiresAt = now + tokens.expires_in;
+  // Within the portal's refresh skew from the start: the first request refreshes.
+  const expiresAt = options.refreshOnFirstRequest ? now : now + tokens.expires_in;
 
   const sealed = sealSession(
     {
       subject: claims.sub,
       username: claims.preferred_username,
-      // As `auth/callback` stores it: the access token's organization, resolved
-      // the way the guard and every portal reader resolve it (task 100).
-      organizationId: storedOrganizationFor(tokens.access_token),
+      // As `auth/callback` pins it: the access token's active organization at
+      // sign-in, for the session's whole life (task 118).
+      organizationId: pinnedOrganizationFor(tokens.access_token),
       accessToken: tokens.access_token,
       accessTokenExpiresAt: expiresAt,
       refreshToken: tokens.refresh_token,
@@ -316,7 +333,7 @@ async function installSession(context: BrowserContext, fixture: Fixture): Promis
     organizationId: claims.org_id,
     context: contextTagFor(
       requiredEnv('WEB_SESSION_SECRET'),
-      storedOrganizationFor(tokens.access_token),
+      pinnedOrganizationFor(tokens.access_token),
     ),
   };
 }

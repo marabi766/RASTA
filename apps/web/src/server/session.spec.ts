@@ -19,6 +19,9 @@ import {
 } from './session';
 import { actingAccessToken } from '@/test/session-token';
 
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
+
 /**
  * The session cookie is where this portal's whole security posture lives
  * (ADR-059 § 4), so what it refuses matters more than what it accepts.
@@ -104,7 +107,7 @@ describe('sealing and opening', () => {
     const asText = Buffer.from(sealed, 'base64url').toString('utf8');
     expect(sealed).not.toContain('refresh-token-value');
     expect(asText).not.toContain('refresh-token-value');
-    expect(asText).not.toContain('access-token-value');
+    expect(asText).not.toContain(ACCESS_TOKEN_VALUE);
   });
 });
 

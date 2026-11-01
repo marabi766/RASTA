@@ -93,8 +93,8 @@ describe('submission ids', () => {
     ).toBe(true);
   });
 
-  describe('bound to the organization the access token acts for (task 095)', () => {
-    /** A session whose token — and so its stored copy — acts for `org` (none: undefined). */
+  describe('bound to the organization the session acts for (task 095, task 118)', () => {
+    /** A session pinned to `org` (none: undefined), whose token grants it. */
     const forOrg = (org: string | undefined, extra: Record<string, unknown> = {}): WebSession => ({
       ...SESSION,
       organizationId: org ?? null,
@@ -106,14 +106,29 @@ describe('submission ids', () => {
       expect(isBoundSubmissionId(id, forOrg('ORG-DEH-0001', { exp: 2, jti: 'next' }))).toBe(true);
     });
 
-    it('refuses a form drawn for one organization once the token acts for another', () => {
+    it('refuses a form drawn for one organization once the session acts for another', () => {
       const id = mintSubmissionId(forOrg('ORG-DEH-0001'));
       expect(isBoundSubmissionId(id, forOrg('ORG-DEH-0002'))).toBe(false);
       expect(isBoundSubmissionId(id, forOrg(undefined))).toBe(false);
-      // And the reverse: drawn while acting for none, sent while acting for one.
-      expect(isBoundSubmissionId(mintSubmissionId(forOrg(undefined)), forOrg('ORG-DEH-0001'))).toBe(
-        false,
-      );
+    });
+
+    it('a session that acts for no organization mints no id and verifies none (task 118)', () => {
+      expect(() => mintSubmissionId(forOrg(undefined))).toThrow(/no known organization/);
+      // Even an id from the same login for an organization: nothing is accepted for none.
+      const id = mintSubmissionId(forOrg('ORG-DEH-0001'));
+      expect(isBoundSubmissionId(id, forOrg(undefined))).toBe(false);
+    });
+
+    it('keeps a form drawn for A valid after a switch to B elsewhere: the session still acts for A (task 118)', () => {
+      const id = mintSubmissionId(forOrg('ORG-DEH-0001'));
+      const switched: WebSession = {
+        ...forOrg('ORG-DEH-0001'),
+        accessToken: actingAccessToken('ORG-DEH-0002', ['OPERATOR'], {
+          org_ids: ['ORG-DEH-0001', 'ORG-DEH-0002'],
+          org_roles: ['ORG-DEH-0001:OPERATOR', 'ORG-DEH-0002:OPERATOR'],
+        }),
+      };
+      expect(isBoundSubmissionId(id, switched)).toBe(true);
     });
 
     it('reads the claim strictly: an organization id the guard would not accept binds nothing', () => {

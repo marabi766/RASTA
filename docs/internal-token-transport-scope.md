@@ -457,7 +457,8 @@ containers, with one exception: the notification-service Mailpit reads (`MAILPIT
 which carry no credential (GETs with no header). The document-service signed-URL helpers
 there use `guardedFetch` anyway. Then a Playwright context reached by a computed member name
 (`page[name]`), which cannot be told apart from ordinary indexing without types; browser flows (page navigation, `route.fetch`, code inside
-`page.evaluate`, such as the pinned form replay in `apps/web/e2e/usage.spec.ts`); workspace
+`page.evaluate`, such as the pinned form replay in `apps/web/e2e/action-outcome.ts`, which the
+usage and session-pinning specs share); workspace
 tooling configs (`eslint`, `jest`, `next`, `postcss` configs), which send nothing; and SDK
 internals (jose JWKS, the S3 client, the OTLP exporters), as listed in the task 106 sweep.
 
