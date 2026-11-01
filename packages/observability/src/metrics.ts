@@ -186,6 +186,22 @@ export const eventProcessingDuration = new Histogram({
   registers: [registry],
 });
 
+/** Closed reasons only; never error messages, payloads, headers or record identifiers. */
+export const consumerCrashesTotal = new Counter({
+  name: 'rasta_consumer_crashes_total',
+  help: 'Kafka consumer crashes, including crashes KafkaJS restarts',
+  labelNames: ['service', 'group', 'reason'] as const,
+  registers: [registry],
+});
+
+/** Only constructed (enabled), declared consumer groups export this gate. */
+export const consumerExpected = new Gauge({
+  name: 'rasta_consumer_expected',
+  help: 'Enabled expected consumer group subscriptions',
+  labelNames: ['service', 'group', 'topic'] as const,
+  registers: [registry],
+});
+
 /** Any increase alerts. A DLQ message is never routine. */
 export const dlqMessagesTotal = new Counter({
   name: 'rasta_dlq_messages_total',
