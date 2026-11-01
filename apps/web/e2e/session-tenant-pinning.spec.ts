@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import { decodeJwt } from 'jose';
 
-import { expect, test, type APIRequestContext } from './expect';
+import { expectActionSucceeded, logStep, postFromPage } from './action-outcome';
+import { expect, test, type APIRequestContext, type Request, type Route } from './expect';
 import { installProvisionedSession, liveAccessToken } from './live-session';
 import { provisionPerson, provisionedAccessToken } from './provisioned-people';
 import { SESSION_COOKIE, openSession, type WebSession } from '../src/server/session';
@@ -218,6 +219,10 @@ test.describe('a portal session pinned to A, the account switched to B elsewhere
       );
       await form.getByRole('button', { name: 'افزایش موجودی نمایشی' }).click();
       const topUp = await sent;
+      // The action succeeded — its redirect to the wallet, not a refusal rendered as 200 —
+      // and the ledger moved by exactly the amount, in A.
+      await expectActionSucceeded(topUp, { path: '/wallet' });
+      logStep(`pinning: top-up answered 303 → /wallet (session pinned to ${A})`);
       await expect
         .poll(
           async () =>
@@ -229,19 +234,32 @@ test.describe('a portal session pinned to A, the account switched to B elsewhere
         )
         .toBe(String(BigInt(walletA.body.ledgerBalanceMinor) + BigInt(AMOUNT_MINOR)));
 
-      // The same submission again — the form's own request, resent byte for byte with
-      // session 1's cookie: a replay of the same key, which the portal sends for A again.
-      // Its answer is the action's redirect or its page; the ledgers below are the oracle.
-      const replayed = await request
-        .post(topUp.url(), {
-          headers: await topUp.allHeaders(),
-          data: topUp.postDataBuffer() ?? '',
-        })
-        .then(
-          (response) => response.status(),
-          (error: unknown) => String(error),
-        );
-      expect(typeof replayed === 'number' ? replayed < 500 : /redirect/i.test(replayed)).toBe(true);
+      // The same submission again — the form's own request, resent byte for byte from
+      // session 1's page with its cookie: a replay of the same key, which the portal sends
+      // for A again. It must SUCCEED (the stored answer replayed, the same redirect), not
+      // merely fail to credit: a refused replay — a 4xx, or the action's REFUSED /
+      // UNCONFIRMED result as a 200 — leaves both ledgers as they are too (PR #541 r1 F1).
+      const [replay] = await postFromPage(page.locator('body'), [{ resend: topUp }]);
+      expect(replay!.headers()['next-action']).toBe(topUp.headers()['next-action']);
+      await expectActionSucceeded(replay!, { path: '/wallet' });
+      logStep('pinning: replay of the same submission answered 303 → /wallet');
+
+      // The control (the review's mutant, kept): the same replay once more, answered in
+      // the page as a refused action is — HTTP 200 and the REFUSED result — before it
+      // leaves the browser. The oracle above must reject it here, live.
+      const refuse = (route: Route, sent: Request) =>
+        sent.method() === 'POST'
+          ? route.fulfill({
+              status: 200,
+              contentType: 'text/x-component',
+              body: '1:{"kind":"REFUSED","reason":"SUBMISSION"}\n',
+            })
+          : route.continue();
+      await page.route(topUp.url(), refuse);
+      const [refused] = await postFromPage(page.locator('body'), [{ resend: topUp }]);
+      await page.unroute(topUp.url(), refuse);
+      await expect(expectActionSucceeded(refused!, { path: '/wallet' })).rejects.toThrow();
+      logStep('pinning: control — the same replay refused (200 REFUSED) fails the oracle');
 
       const afterA = await call<WalletView>(
         request,
@@ -260,6 +278,7 @@ test.describe('a portal session pinned to A, the account switched to B elsewhere
       expect(after.wallet.body).toEqual(before.wallet.body);
       expect(after.owed.body).toEqual(before.owed.body);
       expect(after.owedTo.body).toEqual(before.owedTo.body);
+      logStep(`pinning: A credited once; B's wallet and both transaction lists unchanged`);
 
       // And session 1 is still A after all of it.
       expect((await sessionOf(context))?.organizationId).toBe(A);
