@@ -16,6 +16,7 @@ import { dirname, join, posix, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import ts from 'typescript';
+import { parse as parseYaml } from 'yaml';
 
 /**
  * Nothing that guards the lint rules may fall out of CI unnoticed.
@@ -46,17 +47,38 @@ import ts from 'typescript';
  *    own matcher decides what a glob, `@(…)`, `!(…)`, a hidden path or an
  *    exclusion means, so the guard has no glob semantics to get wrong. If turbo
  *    cannot run the test FAILS; it never skips.
- *  - DISCOVERY is a supported GRAMMAR, failing closed. In an eslint config and
- *    every module it loads, the only loading forms are a static `import`,
- *    `export … from`, a literal `import()` or a literal `require()` of (a) a
- *    relative path to an existing tracked file with an explicit JS/TS extension
- *    or (b) a bare package that is not a workspace package, a workspace alias
- *    or a `link:`/`file:`/`portal:` dependency (or a node built-in from a short
- *    allow-list). Anything else — any other use of require/module/Module/
- *    createRequire/_load/Function/eval, a filesystem read, `.call/.apply/.bind`,
- *    a directory or extensionless or `.json` path — is a problem with a message,
- *    not something the guard tries to resolve. Lint scripts must be exactly
- *    `eslint <paths>`.
+ *  - DISCOVERY is a supported GRAMMAR for MODULE LOADING, failing closed. In an
+ *    eslint config and every module it loads, the only loading forms are a
+ *    static `import`, `export … from`, a literal `import()` or a literal
+ *    `require()` of (a) a relative path to an existing tracked file with an
+ *    explicit JS/TS extension and no `% ? # \` or whitespace/control character
+ *    (so the specifier is a file name, not a URL), or (b) a bare package that is
+ *    not a workspace package, a workspace alias or a `link:`/`file:`/`portal:`
+ *    dependency (or a node built-in from a short allow-list). Any other use of
+ *    require/module/Module/createRequire/_load/Function/eval, a filesystem read
+ *    through the names and members listed in BANNED_*, `.call/.apply/.bind`, a
+ *    directory or extensionless or `.json` path is a problem with a message.
+ *    A lint script must be ONE command, `eslint <paths>`: no newline, CR,
+ *    `; & | \` $ ( ) < >` or backslash, no glob character, and each path is `.`,
+ *    starts with `./`, or starts with a letter, digit, `_` or `@` (so no path is
+ *    or can expand to an option).
+ *    pnpm-workspace.yaml is parsed with the `yaml` package and package.json
+ *    structurally; override selectors are normalized (`parent>foo@1` → `foo`).
+ *
+ *  WHAT THIS GUARD DOES NOT CLAIM (decision D-094, 2026-11-01). It protects the lint
+ *  cache against ACCIDENTAL drift; deliberately obfuscated code is caught by PR
+ *  review (same trust model as D-086/D-088). The grammar governs how MODULES ARE
+ *  LOADED; it is NOT a capability sandbox. Documented residual, not detected:
+ *   - Reading files or reaching capabilities from inside rule/config/helper code
+ *     by routes the BANNED_* lists do not name, e.g. `const { getBuiltinModule: b }
+ *     = process; b('fs').readFileSync(new URL('../rules.json', import.meta.url))`,
+ *     `Reflect.get`, `Object.getOwnPropertyDescriptor`, an aliased `process` with
+ *     computed access, a destructured/computed `constructor` evaluator,
+ *     `process.loadEnvFile`, or an allowed `typescript` import followed by
+ *     `ts.sys.readFile`. A data file so read is not a hashed input.
+ *   - pnpm dependency specs the structural walk does not classify: unprefixed
+ *     relative paths (`./x`, `../x`) and any other exotic spelling of a local source.
+ *   - Anything else a reviewer would recognise as deliberate evasion.
  *
  * Mutants run against the real repository through turbo too (a mutated copy of
  * turbo.json passed with `--root-turbo-json`), so no test agrees with itself.
@@ -160,6 +182,10 @@ export const staleRegistrations = (registered, exists) => {
 // (2a) The supported loading grammar.
 // ---------------------------------------------------------------------------
 
+/** A relative specifier is a file name only when none of these URL-meaningful characters is in it. */
+const nonCanonical = (specifier) =>
+  /[%?#\\\s]/.test(specifier) ||
+  [...specifier].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f);
 const GRAMMAR =
   'is outside the supported grammar of the lint-input guard (static import, export … from, ' +
   'literal import() or require() of a relative path with an explicit JS/TS extension, or a bare, non-workspace package)';
@@ -313,6 +339,17 @@ const analyze = (path, source) => {
 };
 
 /**
+ * The package an override selector names: `parent>foo@1` and `foo@^1` both mean `foo`
+ * (a dependency key is already a bare name, which this leaves alone).
+ */
+const selectorName = (key) =>
+  key
+    .split('>')
+    .pop()
+    .trim()
+    .replace(/^(@?[^@]+)@.*$/, '$1');
+
+/**
  * Package names and aliases that resolve to code in this repository (or on disk):
  * every package.json `name`, every dependency key whose spec is `workspace:`,
  * `link:`, `file:` or `portal:` (a `workspace:name@*` spec also names its target),
@@ -321,7 +358,8 @@ const analyze = (path, source) => {
 export const localPackageNames = (tracked, read, problems) => {
   const names = new Set();
   const aliases = [];
-  const walk = (value, key) => {
+  const walk = (value, rawKey) => {
+    const key = rawKey === undefined ? undefined : selectorName(rawKey);
     if (typeof value === 'string') {
       if (key !== undefined && /^(?:workspace|link|file|portal):/.test(value)) names.add(key);
       const target = /^workspace:((?:@[^/@]+\/)?[^/@]+)@/.exec(value);
@@ -344,9 +382,12 @@ export const localPackageNames = (tracked, read, problems) => {
         );
       }
     } else if (/(^|\/)pnpm-workspace\.ya?ml$/.test(file)) {
-      for (const line of String(read(file) ?? '').split('\n')) {
-        const m = /^\s*['"]?([^'":\s]+)['"]?\s*:\s*['"]?(?:workspace|link|file|portal):/.exec(line);
-        if (m) names.add(m[1]);
+      try {
+        walk(parseYaml(String(read(file) ?? '')));
+      } catch (error) {
+        problems.push(
+          `${file} is not readable YAML (${error.message}); its overrides and aliases cannot be checked.`,
+        );
       }
     }
   }
@@ -397,9 +438,14 @@ export const dependencyClosure = (entries, { tracked, read, localNames }) => {
     const { specifiers, errors: found } = analyzeModule(file, source);
     errors.push(...found);
     for (const specifier of specifiers) {
-      if (/^\.\.?(\/|$)/.test(specifier)) {
+      if (/^\.\.?([/\\]|$)/.test(specifier)) {
         const resolved = posix.normalize(posix.join(posix.dirname(file), specifier));
-        if (!KNOWN_EXT.test(specifier)) {
+        if (nonCanonical(specifier)) {
+          errors.push(
+            `${file} loads ${JSON.stringify(specifier)}, a relative specifier with a %, ?, #, backslash, whitespace or ` +
+              `control character: ESM resolves it as a URL, not as a file name, so this ${GRAMMAR}.`,
+          );
+        } else if (!KNOWN_EXT.test(specifier)) {
           errors.push(
             `${file} loads '${specifier}', a relative path without an explicit JS/TS extension (a directory, ` +
               `extensionless, .json or unknown suffix), so this ${GRAMMAR}.`,
@@ -440,10 +486,27 @@ export const dependencyClosure = (entries, { tracked, read, localNames }) => {
  * prefix. ESLint then looks its flat config up from the workspace directory.
  */
 export const lintScriptProblem = (script) => {
-  const tokens = script.trim().split(/\s+/);
-  const path = /^[A-Za-z0-9_@./*{},+][A-Za-z0-9_@./*{},+-]*$/;
-  if (tokens[0] !== 'eslint' || tokens.length < 2 || !tokens.slice(1).every((t) => path.test(t))) {
-    return `\`lint\` is \`${script}\`: the guard only supports exactly \`eslint <paths>\` (no flag such as -c/--config, no cd, &&, ; or environment prefix), because it reads the default config lookup from the workspace directory.`;
+  const why = (reason) =>
+    `\`lint\` is ${JSON.stringify(script)}: ${reason}. The guard only supports exactly one command, \`eslint <paths>\`, ` +
+    'because it reads the default config lookup from the workspace directory.';
+  // ONE command, decided on the raw text before any tokenizing (a newline or a
+  // separator would otherwise be erased by the whitespace split).
+  const control = /[\n\r;&|`$()<>\\]/.exec(script);
+  if (control !== null) {
+    return why(`it contains ${JSON.stringify(control[0])}, so it is not a single command`);
+  }
+  const tokens = script.trim().split(/[ \t]+/);
+  if (tokens[0] !== 'eslint' || tokens.length < 2) return why('it is not `eslint <paths>`');
+  for (const arg of tokens.slice(1)) {
+    if (/[*?[\]{}]/.test(arg)) return why(`the path \`${arg}\` has a glob character`);
+    // One simple rule: a path is `.`, or starts with `./`, or starts with a letter,
+    // digit, `_` or `@` (a literal directory or file name). Nothing that can start
+    // with `-` (an option, or a tracked file named like one) is accepted.
+    if (!/^(?:\.|\.\/[A-Za-z0-9_@./+,-]*|[A-Za-z0-9_@][A-Za-z0-9_@./+,-]*)$/.test(arg)) {
+      return why(
+        `the path \`${arg}\` is not \`.\`, \`./…\` or a literal name starting with a letter, digit, _ or @`,
+      );
+    }
   }
   return undefined;
 };
@@ -1401,6 +1464,30 @@ export const COMMANDS = [
   'eslint --fix src',
   'eslint src $(echo x)',
   'tsc --noEmit',
+  // r4: one command only, decided before tokenizing
+  'eslint src\ntrue',
+  'eslint src\nexit 0',
+  'eslint src\nnode ../../tools/alternate.mjs',
+  'eslint src\rtrue',
+  'eslint src `true`',
+  'eslint src > out',
+  'eslint src < in',
+  'eslint src &',
+  'eslint src \\\ntrue',
+  // r4: no glob, no path that can expand to or be read as an option
+  'eslint *',
+  'eslint *.mjs',
+  'eslint src/**/*.ts',
+  'eslint src?',
+  'eslint [a]rc',
+  'eslint {src,test}',
+  'eslint -- src',
+  'eslint --config=alternate.mjs',
+  'eslint -x',
+  'eslint ../other',
+  'eslint ~/src',
+  'eslint /abs/src',
+  "eslint 'src'",
 ];
 
 for (const [name, code] of Object.entries(LOADERS)) {
@@ -1582,6 +1669,137 @@ test('fixture: a legacy eslintrc and an unused config are errors', () => {
 // ---------------------------------------------------------------------------
 // The JSONC reader (used to mutate the real turbo.json).
 // ---------------------------------------------------------------------------
+
+test('control: the lint commands the repository uses are single commands the guard accepts', () => {
+  for (const command of [
+    'eslint .',
+    'eslint src',
+    'eslint src test dev',
+    'eslint src test dev prisma/seed.ts',
+    'eslint ./src ./test',
+    'eslint  src\ttest',
+  ]) {
+    assert.equal(lintScriptProblem(command), undefined, command);
+  }
+});
+
+test('each lint command check fails on its own, with its own reason (no check hides behind another)', () => {
+  const reason = (command) => lintScriptProblem(command) ?? '';
+  for (const command of [
+    'eslint src\ntrue',
+    'eslint src\rtrue',
+    'eslint src; true',
+    'eslint src && true',
+    'eslint src | cat',
+    'eslint src `true`',
+    'eslint src $(true)',
+    'eslint src > out',
+    'eslint src < in',
+    'eslint src \\\ntrue',
+  ]) {
+    assert.match(reason(command), /so it is not a single command/, JSON.stringify(command));
+  }
+  for (const command of [
+    'eslint *',
+    'eslint *.mjs',
+    'eslint src/?',
+    'eslint [a]',
+    'eslint {a,b}',
+  ]) {
+    assert.match(reason(command), /has a glob character/, command);
+  }
+  for (const command of [
+    'eslint -x',
+    'eslint --config=a.mjs',
+    'eslint ../x',
+    'eslint /x',
+    "eslint 'src'",
+  ]) {
+    assert.match(reason(command), /is not `\.`, `\.\/…` or a literal name/, command);
+  }
+});
+
+const NON_CANONICAL_SPECIFIERS = {
+  'a percent escape': '../../scripts/%61-rule.mjs',
+  'a query ending in .mjs': '../../scripts/a-rule.mjs?x=.mjs',
+  'a fragment ending in .mjs': '../../scripts/a-rule.mjs#x.mjs',
+  'a backslash': '..\\..\\scripts\\a-rule.mjs',
+  'an embedded tab': '../../scripts/a-\trule.mjs',
+  'a space': '../../scripts/a- rule.mjs',
+  'a newline': '../../scripts/a-\nrule.mjs',
+  'a NUL': '../../scripts/a-\u0000rule.mjs',
+  'a non-breaking space': '../../scripts/a-\u00a0rule.mjs',
+};
+for (const [name, specifier] of Object.entries(NON_CANONICAL_SPECIFIERS)) {
+  for (const form of ['import', 'export', 'dynamic', 'require']) {
+    test(`fail closed: ${name} in a ${form} specifier is an error even when a decoy file is tracked`, () => {
+      const literal = JSON.stringify(specifier);
+      const body = {
+        import: `import rule from ${literal};\nexport default [rule];\n`,
+        export: `export { default } from ${literal};\n`,
+        dynamic: `export default [await import(${literal})];\n`,
+        require: `module.exports = [require(${literal})];\n`,
+      }[form];
+      const files = {
+        ...baseFiles(),
+        // a decoy whose literal name equals what POSIX normalization makes of the specifier
+        [posix.normalize(posix.join('apps/web', specifier))]: 'export default {};\n',
+        [WEB_CONFIG]: body,
+      };
+      const problems = discover(memoryState(files)).problems;
+      assert.ok(
+        problems.some((p) => /relative specifier with a %/.test(p)),
+        fail(problems),
+      );
+    });
+  }
+}
+
+test('fail closed: an override selector with a version or parent qualifier, a flow mapping, an anchor or a merge key still names the local package', () => {
+  const YAMLS = {
+    'a version-qualified key': 'overrides:\n  "plugin-alias@^1": "link:./tools/local-plugin"\n',
+    'a parent-qualified key': 'overrides:\n  "host>plugin-alias": "link:./tools/local-plugin"\n',
+    'both qualifiers': 'overrides:\n  "host@2>plugin-alias@^1": "link:./tools/local-plugin"\n',
+    'a flow mapping': 'overrides: {plugin-alias: "link:./tools/local-plugin"}\n',
+    'a folded scalar': 'overrides:\n  plugin-alias: >-\n    link:./tools/local-plugin\n',
+    'an anchored value': 'x: &l "link:./tools/local-plugin"\noverrides:\n  plugin-alias: *l\n',
+    'a merge key': 'base: &b\n  plugin-alias: "link:./tools/local-plugin"\noverrides:\n  <<: *b\n',
+  };
+  for (const [name, yaml] of Object.entries(YAMLS)) {
+    const files = {
+      ...baseFiles(),
+      'pnpm-workspace.yaml': `packages:\n  - "apps/*"\n${yaml}`,
+      [WEB_CONFIG]: "import plugin from 'plugin-alias';\nexport default [plugin];\n",
+    };
+    assert.ok(
+      discover(memoryState(files)).problems.some((p) => p.includes("'plugin-alias'")),
+      name,
+    );
+  }
+  const scoped = {
+    ...baseFiles(),
+    'package.json':
+      '{"name":"root","pnpm":{"overrides":{"@s/plugin@1>@s/plugin-alias@2":"link:./x"}},"scripts":{"lint":"turbo run lint"}}',
+    [WEB_CONFIG]: "import plugin from '@s/plugin-alias';\nexport default [plugin];\n",
+  };
+  assert.ok(discover(memoryState(scoped)).problems.some((p) => p.includes("'@s/plugin-alias'")));
+});
+
+test('fail closed: a YAML npm: alias of a workspace package names the local package', () => {
+  const files = {
+    ...baseFiles(),
+    'tools/local-plugin/package.json': '{"name":"@rasta/local-plugin"}',
+    'pnpm-workspace.yaml':
+      'packages:\n  - "apps/*"\noverrides:\n  plugin-alias: "npm:@rasta/local-plugin@*"\n',
+    [WEB_CONFIG]: "import plugin from 'plugin-alias';\nexport default [plugin];\n",
+  };
+  assert.ok(discover(memoryState(files)).problems.some((p) => p.includes("'plugin-alias'")));
+});
+
+test('fail closed: a pnpm-workspace.yaml that does not parse is an error', () => {
+  const files = { ...baseFiles(), 'pnpm-workspace.yaml': 'overrides: {a: [\n' };
+  assert.ok(discover(memoryState(files)).problems.some((p) => /not readable YAML/.test(p)));
+});
 
 test('the JSONC reader keeps strings that look like comments', () => {
   assert.deepEqual(parseJsonc('{ // c\n "a": "x // y /* z */", /* b */ "b": 1 }'), {
