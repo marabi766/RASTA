@@ -11,8 +11,9 @@ import { canManageDrivers } from './drivers';
 import { canManageAvailability } from './fleet-availability';
 import { canManageMaintenance, canReportMaintenance } from './maintenance-commands';
 import { canPlaceOrder } from './place-order';
-import { tokenWriteRoles } from './realm-roles';
 import { OVERSIGHT_ROLE, rolesGuardAdmits, SUPER_ROLE } from './roles-guard';
+import { sessionWriteRoles } from './session-organization';
+import { pinnedTokens } from '@/test/session-token';
 
 /**
  * PR 325 review 1, finding 2: every write form's "may this person use it" is
@@ -104,30 +105,36 @@ describe('tokenWriteRoles — a write needs the organization it is for', () => {
 
   it('a token resolving to an organization: its roles there, with the global ones', () => {
     expect(
-      tokenWriteRoles(
-        jwt({
-          org_id: ORG,
-          org_ids: [ORG],
-          org_roles: [`${ORG}:DRIVER`],
-          realm_access: { roles: ['SYSTEM_ADMIN'] },
-        }),
+      sessionWriteRoles(
+        pinnedTokens(
+          jwt({
+            org_id: ORG,
+            org_ids: [ORG],
+            org_roles: [`${ORG}:DRIVER`],
+            realm_access: { roles: ['SYSTEM_ADMIN'] },
+          }),
+        ),
       ),
     ).toEqual(['DRIVER', 'SYSTEM_ADMIN']);
   });
 
   it('the global administrator with no organization: none — a tenant-scoped write cannot run', () => {
-    expect(tokenWriteRoles(jwt({ realm_access: { roles: ['SYSTEM_ADMIN'] } }))).toBeNull();
+    expect(
+      sessionWriteRoles(pinnedTokens(jwt({ realm_access: { roles: ['SYSTEM_ADMIN'] } }))),
+    ).toBeNull();
   });
 
   it('the global administrator naming an organization it holds no role in: none (TENANT_MISMATCH)', () => {
     expect(
-      tokenWriteRoles(
-        jwt({
-          org_id: ORG,
-          org_ids: [ORG],
-          org_roles: [],
-          realm_access: { roles: ['SYSTEM_ADMIN'] },
-        }),
+      sessionWriteRoles(
+        pinnedTokens(
+          jwt({
+            org_id: ORG,
+            org_ids: [ORG],
+            org_roles: [],
+            realm_access: { roles: ['SYSTEM_ADMIN'] },
+          }),
+        ),
       ),
     ).toBeNull();
   });

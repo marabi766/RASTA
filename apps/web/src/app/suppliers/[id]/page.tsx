@@ -92,7 +92,7 @@ export default async function SupplierPage({
                   session,
                   result.data,
                   unresolved.kind !== 'NONE',
-                  supplierActor(session.accessToken),
+                  supplierActor(session),
                 )
               : NO_COMMANDS
           }

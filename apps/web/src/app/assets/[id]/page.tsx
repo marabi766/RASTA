@@ -34,7 +34,6 @@ import {
   type AssetLifecycleCommand,
 } from '@/lib/asset-lifecycle-fields';
 import type { WebSession } from '@/server/session';
-import { tokenWriteRoles } from '@/server/realm-roles';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { readFlash } from '@/server/flash';
 import { mintSubmissionId } from '@/server/submission';
@@ -48,7 +47,11 @@ import { AssetDocuments } from './AssetDocuments';
 import { AttachDocumentForm } from './AssetDocumentForm';
 import { AssetAvailability } from './AssetAvailability';
 import { DeclareAvailabilityForm, RevokeAvailabilityForm } from './AvailabilityForms';
-import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import {
+  actingOrganizationLabel,
+  actingScope,
+  sessionWriteRoles,
+} from '@/server/session-organization';
 import { pageContext, pageParams } from '@/server/page-context';
 
 /**
@@ -122,10 +125,10 @@ export default async function AssetDossierPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/assets/${id}`)}`);
   const query = await pageParams(session, searchParams);
-  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  // What the forms are offered on: the token's roles in the pinned organization (`sessionWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
-  const roles = tokenWriteRoles(session.accessToken);
+  const roles = sessionWriteRoles(session);
 
   // The server's clock, taken once: every record's "in force" on this page is
   // judged against this instant, here and not in the browser.

@@ -19,7 +19,6 @@ import {
   type ProjectBaseline,
 } from '@/server/project-commands';
 import { webServerEnv } from '@/server/env';
-import { tokenWriteRoles } from '@/server/realm-roles';
 import {
   fetchExecutionPolicy,
   fetchProject,
@@ -40,7 +39,11 @@ import {
   type ProjectToken,
 } from './ProjectCommands';
 import { ProjectDetailScreen } from './ProjectDetailScreen';
-import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import {
+  actingOrganizationLabel,
+  actingScope,
+  sessionWriteRoles,
+} from '@/server/session-organization';
 import { pageParams } from '@/server/page-context';
 
 /**
@@ -102,7 +105,7 @@ function decisionTokens(
 ): Record<string, DecisionTokens> {
   const tokens: Record<string, DecisionTokens> = {};
   for (const step of steps) {
-    if (!mayDecide(session.accessToken, step)) continue;
+    if (!mayDecide(session, step)) continue;
     const token = (command: 'grant' | 'reject'): ProjectToken => ({
       submissionId: mintSubmissionId(session),
       baseline: sealProjectBaseline(session, {
@@ -150,7 +153,7 @@ export default async function ProjectPage({
   // "closed" — the request stays offered and the service decides.
   const closed = policy?.kind === 'OK' && policy.data.kind === 'CLOSED';
 
-  const canWrite = canWriteProjects(tokenWriteRoles(session.accessToken), webServerEnv());
+  const canWrite = canWriteProjects(sessionWriteRoles(session), webServerEnv());
   const offered = project
     ? offeredCommands({ status: project.status, canWrite, policyClosed: closed })
     : [];

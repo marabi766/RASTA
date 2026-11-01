@@ -11,20 +11,27 @@
  *   unavailable right now (`server/session-state.ts`): the login may still come
  *   back, so the person is told to try again shortly, not that they were
  *   signed out.
+ * - `NO_ORGANIZATION` — the session is signed in but acts for no organization
+ *   (`server/tenant-gate.ts`): nothing tenant-bound runs for it, and the
+ *   person is told to sign in with an organization rather than to retry.
  *
  * The action decides which (`missingSessionReason` in
  * `server/current-session.ts`); nothing was sent in either case.
  */
-export type SessionRefusal = 'NO_SESSION' | 'SESSION_UNAVAILABLE';
+export type SessionRefusal = 'NO_SESSION' | 'SESSION_UNAVAILABLE' | 'NO_ORGANIZATION';
 
 export const SESSION_REFUSAL_MESSAGES: Readonly<Record<SessionRefusal, string>> = {
   NO_SESSION: 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.',
   SESSION_UNAVAILABLE:
     'نشست شما همین حالا در دسترس نیست و درخواست ارسال نشد. چند لحظه بعد دوباره بفرستید؛ اگر باز هم نشد، دوباره وارد شوید.',
+  NO_ORGANIZATION:
+    'برای این ورود هیچ سازمانی انتخاب نشده است و درخواست ارسال نشد. برای کار با داده‌های یک سازمان، خارج شوید و با عضویت در آن سازمان دوباره وارد شوید.',
 };
 
 export function isSessionRefusal(reason: string): reason is SessionRefusal {
-  return reason === 'NO_SESSION' || reason === 'SESSION_UNAVAILABLE';
+  return (
+    reason === 'NO_SESSION' || reason === 'SESSION_UNAVAILABLE' || reason === 'NO_ORGANIZATION'
+  );
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   GatewayRequestError,
   type GatewayProblem,
 } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import type { WebSession } from './session';
 
@@ -329,7 +330,7 @@ export async function writeThroughGateway<S extends z.ZodTypeAny, F extends stri
       path: call.path,
       method: call.method ?? 'POST',
       body: call.body,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
       idempotencyKey: call.idempotency === 'NONE' ? undefined : call.submissionId,
       replayDeadline: call.idempotency === 'NONE' ? undefined : call.replayDeadline,
       fetchImpl: call.fetchImpl,

@@ -24,8 +24,8 @@ import {
 } from '@/lib/project-commands';
 
 import type { WebServerEnv } from './env';
-import { tokenAuthority } from './realm-roles';
 import type { WebSession } from './session';
+import { sessionAuthority, type SessionTokens } from './session-organization';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 
@@ -80,7 +80,7 @@ const PLATFORM_ADMINISTRATOR = 'SYSTEM_ADMIN';
  * person it refuses is told so in fixed words.
  *
  * `roles` is the token's own set for an organization it resolves to
- * (`tokenWriteRoles`), null when there is none to read.
+ * (`sessionWriteRoles`), null when there is none to read.
  */
 export function canWriteProjects(
   roles: readonly string[] | null,
@@ -126,9 +126,9 @@ export interface DecidableStep {
  * `project-commands.contract.spec.ts`); it chooses what is drawn, and the
  * service decides again on every send.
  */
-export function mayDecide(accessToken: string, step: DecidableStep): boolean {
+export function mayDecide(session: SessionTokens, step: DecidableStep): boolean {
   if (step.status !== 'PENDING' || !isProjectWorkflow(step.workflowKey)) return false;
-  const authority = tokenAuthority(accessToken);
+  const authority = sessionAuthority(session);
   if (!authority || authority.organizationId === null) return false;
   if (authority.roles.includes(OVERSIGHT_ROLE)) return false;
   return (

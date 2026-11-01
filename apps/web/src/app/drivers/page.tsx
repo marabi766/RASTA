@@ -4,12 +4,15 @@ import type { DriverPicker } from '@/lib/driver-fields';
 import { currentSession } from '@/server/current-session';
 import { canManageDrivers, fetchDrivers, type DriverListQuery } from '@/server/drivers';
 import { loadDriverRoster, type DriverRoster } from '@/server/driver-roster';
-import { tokenWriteRoles } from '@/server/realm-roles';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriversScreen } from './DriversScreen';
 import { NewDriverForm } from './NewDriverForm';
-import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import {
+  actingOrganizationLabel,
+  actingScope,
+  sessionWriteRoles,
+} from '@/server/session-organization';
 import { pageContext, pageParams } from '@/server/page-context';
 
 /**
@@ -43,10 +46,10 @@ export default async function DriversPage({
 }) {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/drivers');
-  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  // What the forms are offered on: the token's roles in the pinned organization (`sessionWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
-  const roles = tokenWriteRoles(session.accessToken);
+  const roles = sessionWriteRoles(session);
 
   const params = await pageParams(session, searchParams);
   const query: DriverListQuery = {

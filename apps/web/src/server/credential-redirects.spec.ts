@@ -15,6 +15,7 @@ import {
   GatewayOutcomeUnknownError,
   GatewayRequestError,
 } from './gateway';
+import { tenantCredential } from './session-organization';
 import { revokeMembership } from './members';
 import { endpointsFor, exchangeCode, OidcError, refreshTokens } from './oidc';
 import { processRefreshCoordinator } from './refresh-coordinator';
@@ -146,7 +147,10 @@ describe('gateway calls carry the bearer token to the gateway only', () => {
                 callGateway({
                   baseUrl: probe.baseUrl,
                   path: '/v1/memberships/MEM_1/revoke',
-                  accessToken: ACCESS_TOKEN,
+                  credential: tenantCredential({
+                    accessToken: ACCESS_TOKEN,
+                    organizationId: 'ORG_01J8',
+                  }),
                   method,
                   correlationId: 'corr-1',
                   ...(write
@@ -174,6 +178,7 @@ describe('gateway calls carry the bearer token to the gateway only', () => {
             expect(probe.sent[0]?.method).toBe(method);
             expect(probe.sent[0]?.headers).toMatchObject({
               authorization: `Bearer ${ACCESS_TOKEN}`,
+              'x-organization-id': 'ORG_01J8',
               'x-correlation-id': 'corr-1',
               ...(write
                 ? {
@@ -296,7 +301,12 @@ describe('non-redirect statuses keep their meaning', () => {
   });
 
   const call = (method: 'GET' | 'POST' = 'GET') =>
-    callGateway<unknown>({ baseUrl, path: '/v1/x', accessToken: ACCESS_TOKEN, method });
+    callGateway<unknown>({
+      baseUrl,
+      path: '/v1/x',
+      credential: tenantCredential({ accessToken: ACCESS_TOKEN, organizationId: 'ORG_01J8' }),
+      method,
+    });
 
   it('304 is the platform status it always was: a GatewayRequestError(304), not an unknown', async () => {
     answer = { status: 304, headers: { etag: '"v1"' } };
@@ -332,7 +342,7 @@ describe('gateway request shape is unchanged', () => {
     await callGateway({
       baseUrl: 'http://gateway.test:3000',
       path: '/v1/x',
-      accessToken: ACCESS_TOKEN,
+      credential: tenantCredential({ accessToken: ACCESS_TOKEN, organizationId: 'ORG_01J8' }),
       method: 'POST',
       body: { a: 1 },
       correlationId: 'corr-1',
@@ -349,6 +359,7 @@ describe('gateway request shape is unchanged', () => {
         headers: {
           accept: 'application/json',
           authorization: `Bearer ${ACCESS_TOKEN}`,
+          'x-organization-id': 'ORG_01J8',
           'x-correlation-id': 'corr-1',
           'content-type': 'application/json',
           'idempotency-key': 'submission-1',

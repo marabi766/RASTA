@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import { renderableDate } from './instant';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
@@ -106,7 +107,7 @@ async function read<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = schema.safeParse(response.data);

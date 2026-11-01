@@ -3,6 +3,10 @@
  */
 import { fetchAssets, fetchDossier } from './assets';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * What the portal asks the gateway for, and what it keeps from the answer.
@@ -17,7 +21,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'dehyar',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
