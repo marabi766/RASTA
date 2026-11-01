@@ -205,8 +205,11 @@ test.describe('a portal session pinned to A, the account switched to B elsewhere
 
       // --- What session 1 shows and does: A's. ----------------------------------
       await expect(page.getByRole('heading', { level: 1 })).toHaveText('کیف پول و تراکنش');
-      await expect(page.locator('header')).toContainText(A);
-      await expect(page.locator('header')).not.toContainText(B);
+      // The top bar (the page has a second <header>, the page title's): its label is A.
+      const topBar = page.locator('header').filter({ hasText: 'رستا' });
+      await expect(topBar).toHaveCount(1);
+      await expect(topBar).toContainText(A);
+      await expect(topBar).not.toContainText(B);
 
       const form = page.locator('form').filter({ has: page.getByLabel('مبلغ (ریال)') });
       await form.getByLabel('مبلغ (ریال)').fill(AMOUNT_MINOR);
