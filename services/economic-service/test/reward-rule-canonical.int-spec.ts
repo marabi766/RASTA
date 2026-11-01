@@ -100,9 +100,6 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
   });
 
   afterAll(async () => {
-    await runUnscoped('the suite removes the rules it created', () =>
-      harness.prisma.client.rewardRule.deleteMany({ where: { organizationId: org } }),
-    );
     await cleanup(harness.prisma, [org]);
     await harness.close();
   });
@@ -178,6 +175,43 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
     expect(await rulesOf(marker)).toHaveLength(1);
   });
 
+  it.each(['9007199254740993', '9007199254740991.1', '1.00000000000000001', '7'])(
+    'F5 refuses raw JSON numeric operand %s before creating a rule',
+    async (lexeme) => {
+      const marker = `unsafe-number-${ulid()}`;
+      const json = JSON.stringify(
+        body(marker, { condition: { field: 'hours', op: 'gte', value: '__NUMBER__' } }),
+      ).replace('"__NUMBER__"', lexeme);
+      await createRaw(json, id('unsafe-number')).expect(400);
+      expect(await rulesOf(marker)).toHaveLength(0);
+    },
+  );
+
+  it('F5 trims a numeric field before canonicalizing equality for the idempotency hash', async () => {
+    const marker = `trim-field-${ulid()}`;
+    const key = id('trim-field');
+    const first = await createRule(
+      body(marker, { condition: { field: ' hours ', op: 'eq', value: '07.50' } }),
+      key,
+    ).expect(201);
+    expect(first.body.condition).toEqual({ field: 'hours', op: 'eq', value: '7.5' });
+    const replay = await createRule(
+      body(marker, { condition: { field: 'hours', op: 'eq', value: '7.5' } }),
+      key,
+    ).expect(201);
+    expect(replay.body.id).toBe(first.body.id);
+    expect(await rulesOf(marker)).toHaveLength(1);
+  });
+
+  it('F5 field whitespace cannot canonicalize invalid minor-unit grammar into an integer', async () => {
+    const marker = `trim-minor-${ulid()}`;
+    const created = await createRule(
+      body(marker, { condition: { field: ' totalCostMinor ', op: 'gte', value: '1.0' } }),
+      id('trim-minor'),
+    ).expect(201);
+    expect(created.body.condition).toEqual({ field: 'totalCostMinor', op: 'gte', value: '1.0' });
+  });
+
   describe('the condition’s numeric operands (Codex PR-480 r2, R2)', () => {
     const leaf = (op: string, value: string) => ({ field: 'hours', op, value });
     const shapes: [string, (node: unknown) => unknown][] = [
@@ -185,7 +219,7 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
       ['under all → any', (node) => ({ all: [{ field: 'x', op: 'present' }, { any: [node] }] })],
       ['under any → all', (node) => ({ any: [{ all: [{ field: 'x', op: 'absent' }, node] }] })],
     ];
-    const combos = (['gt', 'gte', 'lt', 'lte'] as const).flatMap((op) =>
+    const combos = (['gt', 'gte', 'lt', 'lte', 'eq', 'neq'] as const).flatMap((op) =>
       shapes.map(([where, shape]) => [op, where, shape] as const),
     );
 
@@ -234,12 +268,12 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
       async (op) => {
         const marker = `canon-cond-eq-${ulid()}`;
         const key = id('canon-cond-eq');
-        const condition = { all: [{ any: [leaf(op, '7.50')] }] };
+        const condition = { all: [{ any: [{ field: 'type', op, value: '7.50' }] }] };
         const first = await createRule(body(marker, { condition }), key).expect(201);
         expect(first.body.condition).toEqual(condition);
 
         const refused = await createRule(
-          body(marker, { condition: { all: [{ any: [leaf(op, '7.5')] }] } }),
+          body(marker, { condition: { all: [{ any: [{ field: 'type', op, value: '7.5' }] }] } }),
           key,
         ).expect(409);
 

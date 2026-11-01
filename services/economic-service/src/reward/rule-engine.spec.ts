@@ -32,6 +32,13 @@ function rule(overrides: Partial<RewardRuleView> = {}): RewardRuleView {
     validFrom: new Date('2026-01-01T00:00:00.000Z'),
     validTo: null,
     status: 'ACTIVE',
+    statusHistory: [
+      {
+        id: 1n,
+        status: overrides.status ?? 'ACTIVE',
+        effectiveAt: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    ],
     ...overrides,
   };
 }

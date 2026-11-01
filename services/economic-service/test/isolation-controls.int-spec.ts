@@ -8,6 +8,7 @@ import {
   ownerDatabaseUrl,
   PLATFORM_ORGANIZATION_ID,
   tenants,
+  removeRewardRules,
   wire,
   type Wiring,
   unanswered,
@@ -416,9 +417,7 @@ describe('the economic suite mutates only what it owns', () => {
       // Theirs is not, even though it is a `USR-ITEST-…` author too.
       expect(await exists(theirs.id)).toBe(1);
     } finally {
-      await runUnscoped('the control removes the rule it seeded for another run', () =>
-        prisma.client.rewardRule.deleteMany({ where: { id: theirs.id } }),
-      );
+      await removeRewardRules([theirs.id]);
     }
   });
 

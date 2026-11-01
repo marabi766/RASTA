@@ -742,14 +742,14 @@ exports[`zod-3 golden: list queries as they arrive in a query string GET /v1/tra
 exports[`zod-3 golden: reward rule conditions (recursive) POST /v1/reward-rules: leaves, all/any nesting and their bounds 1`] = `
 {
   "anyOfLeaves": {
-    "hash": "effb024fd65409423d6f7b54197dd45a6d25be8f7be52ab4bb08b3b6e1b7b742",
+    "hash": "5b0c4472a8fb15fa5a18d14f63927c5c847852d7edfb611c78ea25915f2faee5",
     "parsed": {
       "condition": {
         "any": [
           {
             "field": "hours",
             "op": "gte",
-            "value": 4,
+            "value": "4",
           },
           {
             "field": "kind",
@@ -785,7 +785,7 @@ exports[`zod-3 golden: reward rule conditions (recursive) POST /v1/reward-rules:
     "refused": "VALIDATION_FAILED",
   },
   "deep": {
-    "hash": "820c7a905889314d09e0bdbf75df0a8b059ff17380e519ebc404781374ed7098",
+    "hash": "d4fbd46bf09fee6d74aab623ef1c33c4082dc67b907a64a5095722b099dd59a2",
     "parsed": {
       "condition": {
         "all": [
@@ -798,7 +798,7 @@ exports[`zod-3 golden: reward rule conditions (recursive) POST /v1/reward-rules:
                       {
                         "field": "hours",
                         "op": "gte",
-                        "value": 4,
+                        "value": "4",
                       },
                       {
                         "field": "kind",
@@ -851,12 +851,12 @@ exports[`zod-3 golden: reward rule conditions (recursive) POST /v1/reward-rules:
     "refused": "VALIDATION_FAILED",
   },
   "leaf": {
-    "hash": "b084d84327a679cb3c27c851ea936b181886b20ec42a304483d073fb47a9c0d4",
+    "hash": "7c7561b8e6c5f3faefb7224f629ba917299100b9082da841622f11b2d7ba8aa8",
     "parsed": {
       "condition": {
         "field": "hours",
         "op": "gte",
-        "value": 4,
+        "value": "4",
       },
       "points": 10,
       "rewardType": "POINTS",

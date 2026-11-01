@@ -253,7 +253,7 @@ describe('canonical request values (checklist #16)', () => {
       const hashOf = (condition: unknown) => hashRequestBody(parse(withCondition(condition)));
 
       describe.each(shapes)('%s', (_, shape) => {
-        it.each([...NUMERIC_COMPARISONS])(
+        it.each([...NUMERIC_COMPARISONS, 'eq', 'neq'])(
           '%s: hashes "7.50" as "7.5", "007" as "7", and stores the canonical form',
           (op) => {
             expect(hashOf(shape(leaf(op, '7.50')))).toBe(hashOf(shape(leaf(op, '7.5'))));
@@ -264,15 +264,16 @@ describe('canonical request values (checklist #16)', () => {
           },
         );
 
-        it.each([...NUMERIC_COMPARISONS])('%s: still tells 7.5 from 7.6', (op) => {
+        it.each([...NUMERIC_COMPARISONS, 'eq', 'neq'])('%s: still tells 7.5 from 7.6', (op) => {
           expect(hashOf(shape(leaf(op, '7.5')))).not.toBe(hashOf(shape(leaf(op, '7.6'))));
           expect(hashOf(shape(leaf(op, '7.50')))).not.toBe(hashOf(shape(leaf(op, '-7.5'))));
         });
 
-        it.each(['eq', 'neq'])('%s: compared as text, so "7.50" and "7.5" stay two rules', (op) => {
-          expect(hashOf(shape(leaf(op, '7.50')))).not.toBe(hashOf(shape(leaf(op, '7.5'))));
-          expect(parse(withCondition(shape(leaf(op, '007'))))).toMatchObject({
-            condition: shape(leaf(op, '007')),
+        it.each(['eq', 'neq'])('%s: textual facts keep literal operands', (op) => {
+          const text = (value: string) => ({ field: 'type', op, value });
+          expect(hashOf(shape(text('7.50')))).not.toBe(hashOf(shape(text('7.5'))));
+          expect(parse(withCondition(shape(text('007'))))).toMatchObject({
+            condition: shape(text('007')),
           });
         });
       });

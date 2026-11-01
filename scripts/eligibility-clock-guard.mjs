@@ -83,6 +83,13 @@ import { scope as testScope } from './eligibility-clock-scope.mjs';
 //                    reading; the column is gated.
 export const REVIEWED_SITES = [
   {
+    site: 'services/economic-service/src/reward/reward.service.ts#pointsInPeriod',
+    columns: ['occurred_at'],
+    verdict: 'not-db-clock',
+    reason:
+      'start/end are isoWeekWindow(input.occurredAt) from grantOne: the owner-confirmed fact occurrence (reward-trigger.consumer.ts confirmedFact), including legacy evaluation evidence; UTC reward period bounds, not a clock reading (D-080/F6)',
+  },
+  {
     site: 'services/analytics-service/src/kpis/kpi.repository.ts#read',
     columns: ['completed_at', 'period_start', 'period_end'],
     verdict: 'not-db-clock',
