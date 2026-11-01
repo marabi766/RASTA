@@ -948,13 +948,16 @@ function allowlistQuery(sql) {
   return ok(`WITH allowlist AS (${allowlistSql}) ${sql}`, { database: 'postgres' });
 }
 
-/** A table `policy` allows exactly SELECT, INSERT on (an append-only one). */
-function appendOnlyTable(policy) {
-  const table = allowlistQuery(`SELECT object FROM allowlist WHERE policy = '${policy}'
-    AND class = 'relation' AND privileges = ARRAY['SELECT', 'INSERT'] ORDER BY object LIMIT 1`);
-  assert.ok(table, `${policy}: no append-only table`);
-  return table;
-}
+/**
+ * A table each migration-managed policy allows exactly SELECT, INSERT on — an
+ * append-only one. Named here, not looked up, so the eligibility-clock guard
+ * can read every write to it; checked against the allowlist where it is used.
+ */
+const APPEND_ONLY = {
+  supplier: 'performance_event',
+  analytics: 'fact_maintenance',
+  audit: 'processed_event',
+};
 
 // Every configured service, including audit's separate path, in both bootstrap
 // orders. Synthetic roles/databases keep this safe beside the real CI services.
@@ -1098,8 +1101,14 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
         const schema = mode === 'audit' ? 'audit' : 'public';
         // The application table: any table in default mode; else one the
         // policy allows SELECT, INSERT on, granted as its migration does.
-        const app =
-          policy === 'default' ? 'app_probe' : appendOnlyTable(policy).replace(`${schema}.`, '');
+        const app = policy === 'default' ? 'app_probe' : APPEND_ONLY[policy];
+        if (policy !== 'default') {
+          assert.equal(
+            allowlistQuery(`SELECT array_to_string(privileges, ',') FROM allowlist
+              WHERE policy = '${policy}' AND class = 'relation' AND object = '${schema}.${app}'`),
+            'SELECT,INSERT',
+          );
+        }
         run(
           `CREATE TABLE ${schema}.${app} (id int PRIMARY KEY, value text);
              INSERT INTO ${schema}.${app} VALUES (1, 'preserved');`,
@@ -1388,8 +1397,7 @@ for (const policy of ['supplier', 'analytics', 'audit']) {
             ? `CREATE SEQUENCE ${object}; GRANT ${privileges} ON SEQUENCE ${object} TO ${runtime};`
             : `CREATE TABLE ${object} (id int, v int)${partitioned ? ' PARTITION BY RANGE (id)' : ''};
                ${partitioned ? `CREATE TABLE audit.audit_event_p0 PARTITION OF audit.audit_event FOR VALUES FROM (0) TO (1000);` : ''}
-               GRANT ${privileges} ON ${object} TO ${runtime};
-               INSERT INTO ${object} VALUES (1, 1);`,
+               GRANT ${privileges} ON ${object} TO ${runtime};`,
           migrator,
         );
       }

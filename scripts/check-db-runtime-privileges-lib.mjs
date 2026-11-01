@@ -62,20 +62,17 @@ export const requiredRuntimeFunctions = parseRequiredRuntimeFunctions(
 
 /**
  * Each split service's grants mode, as the split itself gets it:
- * privilege_split_grants_mode of lib/role-passwords.bash, run by bash.
+ * privilege_split_grants_mode of lib/role-passwords.bash, run by bash (the
+ * script on stdin, the library's path in the environment: no argv).
  */
 export function grantsModesFromLibrary(library = ROLE_LIBRARY) {
-  const result = spawnSync(
-    'bash',
-    [
-      '-c',
-      'source "$1" && for svc in "${PRIVILEGE_SPLIT_SERVICES[@]}"; do ' +
-        'printf "%s %s\\n" "$svc" "$(privilege_split_grants_mode "$svc")"; done',
-      'grants-modes',
-      library,
-    ],
-    { encoding: 'utf8' },
-  );
+  const result = spawnSync('bash', [], {
+    input:
+      'source "$RASTA_ROLE_LIBRARY" && for svc in "${PRIVILEGE_SPLIT_SERVICES[@]}"; do ' +
+      'printf "%s %s\\n" "$svc" "$(privilege_split_grants_mode "$svc")"; done\n',
+    env: { ...process.env, RASTA_ROLE_LIBRARY: library },
+    encoding: 'utf8',
+  });
   if (result.status !== 0) throw new Error(`grants modes unreadable: ${result.stderr}`);
   return new Map(
     result.stdout
