@@ -1333,16 +1333,17 @@ jobs:
     # the guards 28 s), when the suites carried their own 12.
     # History of the single job's limit: 60 (#197), 35 once reversibility
     # moved out (#198), 50 as #273's stopgap until this split.
-    # 70 minutes: the job must hold every step at its own limit, one after
+    # 82 minutes: the job must hold every step at its own limit, one after
     # the other (scripts/ci-integration-split-lib.mjs, JOB_SETUP_MINUTES):
-    # the steps' limits sum to 62 (Integration tests 21, the seven 5-minute
-    # guards 35, the three 2-minute PostgreSQL connection steps 6) and the
+    # the steps' limits sum to 74 (Integration tests 21, six 5-minute guards
+    # 30 and the 17-minute runtime-role split suite, the three 2-minute
+    # PostgreSQL connection steps 6) and the
     # steps without a limit of their own took up to 298 s over the last 20
     # green runs, which is 8 minutes at x 1.5. The job itself took up to
-    # 1359 s (p50 1210 s), so 70 is a ceiling that no healthy run comes near;
-    # the sharding PR returns the Integration tests step, and with it this
-    # job, to its smaller size.
-    timeout-minutes: 70
+    # 1359 s (p50 1210 s), so 82 (74 + 8, #540 r2) is a ceiling that no
+    # healthy run comes near; the sharding PR returns the Integration tests
+    # step, and with it this job, to its smaller size.
+    timeout-minutes: 82
     needs: quality
 
     services:
@@ -1851,7 +1852,7 @@ jobs:
         # A service's runtime database role must hold DML and nothing more: no
         # ownership of its database, a schema, a table, a function or a type;
         # no CREATE; no TRUNCATE, REFERENCES or TRIGGER; nothing on the
-        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
+        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS, REPLICATION or SUPERUSER.
         # Owning a table is what lets SQL running as the service ALTER TABLE
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service
@@ -1869,7 +1870,12 @@ jobs:
         # unsplit service is — owned by its runtime role — must be reported in
         # full; after lib/service-privilege-split.bash it must be reported
         # clean, its rows intact and its trigger out of the runtime role's reach.
-        timeout-minutes: 5
+        # And #540 r1's exploits, each planted, reported, revoked and refused
+        # (check-db-runtime-privileges-boundary.pg.test.mjs).
+        # 17 = ceil(641 s x 1.5 / 60). Measured on one host: 64e1b76e's suite
+        # 772 s there against 296 s here (x 2.6); this branch's two files
+        # 1632 s there, + ~35 s for the stored-settings test, so ~641 s here.
+        timeout-minutes: 17
         run: pnpm run test:db-runtime-privileges
         env:
           PGHOST: localhost
@@ -3294,7 +3300,7 @@ jobs:
         # A service's runtime database role must hold DML and nothing more: no
         # ownership of its database, a schema, a table, a function or a type;
         # no CREATE; no TRUNCATE, REFERENCES or TRIGGER; nothing on the
-        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
+        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS, REPLICATION or SUPERUSER.
         # Owning a table is what lets SQL running as the service ALTER TABLE
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service
@@ -3521,7 +3527,7 @@ jobs:
         # A service's runtime database role must hold DML and nothing more: no
         # ownership of its database, a schema, a table, a function or a type;
         # no CREATE; no TRUNCATE, REFERENCES or TRIGGER; nothing on the
-        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
+        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS, REPLICATION or SUPERUSER.
         # Owning a table is what lets SQL running as the service ALTER TABLE
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service

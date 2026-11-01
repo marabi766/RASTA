@@ -274,7 +274,7 @@ test('every job holds its steps one after the other: step limits plus setup fit 
   assert.deepEqual(
     Object.fromEntries(jobs.map(([id, job]) => [id, stepSum(job) + JOB_SETUP_MINUTES[id]])),
     {
-      'integration-suites': 70,
+      'integration-suites': 82,
       'integration-security': 37,
       'integration-coverage-critical': 35,
       'integration-coverage': 80,
@@ -315,7 +315,7 @@ test('a job whose step limits plus setup exceed its own limit is refused', () =>
     (step) => step.name === 'PostgreSQL connection ceiling',
   );
   connections['timeout-minutes'] += 1;
-  fails(peak, /^integration-suites: its steps' timeout-minutes sum to 63 .* 71 in all/);
+  fails(peak, /^integration-suites: its steps' timeout-minutes sum to 75 .* 83 in all/);
 });
 
 test('a job outside the split is held to its cumulative budget too', () => {
