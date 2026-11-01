@@ -5,6 +5,10 @@ import tseslint from 'typescript-eslint';
 // The services' rule itself, not a copy: zod 4's `.default()` skips parsing;
 // `.prefault()` is zod 3's (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F2).
 import noZodDefault from '../../scripts/no-zod-default-rule.mjs';
+// The internal-token source boundary, restated with this config's own parser
+// (PR #423 follow-up 1): the root config cannot be imported here.
+import internalTokenSource from '../../scripts/internal-token-source-rule.mjs';
+import { typedOrUntypedParser } from '../../scripts/internal-token-parser.mjs';
 // Also the services' rule, not a copy: a module that sends a bearer token,
 // cookie, API key or secret/grant form field must send it through
 // credentialFetch, which refuses redirects (Q-155).
@@ -22,6 +26,7 @@ const internal = {
     transport: credentialTransport,
     'raw-http': rawHttpBoundary,
     'exchange-deadline': exchangeDeadline,
+    'token-source': internalTokenSource,
   },
 };
 
@@ -49,6 +54,19 @@ export default tseslint.config(
   {
     plugins: { zod: { rules: { 'no-default': noZodDefault } } },
     rules: { 'zod/no-default': 'error' },
+  },
+  {
+    // Every file this config lints; typed through tsconfig.json where it covers
+    // the file, fail closed where it does not (.js/.mjs/.cjs).
+    files: ['**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    languageOptions: { parser: typedOrUntypedParser(tseslint.parser) },
+    plugins: { internal },
+    rules: { 'internal/token-source': 'error' },
+  },
+  {
+    // Test token factories only: specs and src/test plumbing.
+    files: ['**/*.spec.{ts,tsx}', '**/*.test.{ts,tsx,mjs}', '**/test/**'],
+    rules: { 'internal/token-source': 'off' },
   },
   {
     // Production source only, as in the services: specs and test helpers
