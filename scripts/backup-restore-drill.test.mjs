@@ -1640,6 +1640,205 @@ test('more alternatives than the guard keeps are refused, not cut to the first o
   );
 });
 
+test('every write to a name makes it uncertain: parenthesised targets, patterns at any depth, loop heads (PR-532 r2 R2)', () => {
+  // The words of a loop head carry a marker (here and below): this file is read by the guards too.
+  const unmark = (text) => text.replaceAll('·', '');
+  const load = 'const m = await import(name); m.spawn("x", [], { detached: true });';
+  const around = (write) => unmark(`var name = 'node:fs'; ${write} ${load}`);
+  // The twelve bypasses of the review: each returned no violation before.
+  const review = {
+    'a parenthesised =': '(name) = process.env.MODULE;',
+    'a parenthesised +=': '(name) += process.env.MODULE;',
+    'a parenthesised &&=': '(name) &&= process.env.MODULE;',
+    'an array target of a for-of': 'f·or ([name] of suppliedValues) {}',
+    'an object target of a for-of': 'f·or ({ name } of suppliedValues) {}',
+    'a parenthesised target of a for-of': 'f·or ((name) of suppliedValues) {}',
+    'a declaration in a for-of': 'f·or (var name of suppliedValues) {}',
+    'a declaration in a for-in': 'f·or (var name in suppliedValues) {}',
+    'a declaration in a for-await-of': 'f·or await (var name of suppliedValues) {}',
+    'an array declaration in a for-await-of': 'f·or await (var [name] of suppliedValues) {}',
+    'an object declaration in a for-await-of': 'f·or await (var { name } of suppliedValues) {}',
+  };
+  // ... and the siblings of each shape: every other operator, wrapper, pattern and head.
+  const siblings = {
+    'a doubly parenthesised =': '((name)) = process.env.MODULE;',
+    'a parenthesised -=': '(name) -= 1;',
+    'a parenthesised ||=': '(name) ||= process.env.MODULE;',
+    'a parenthesised ??=': '(name) ??= process.env.MODULE;',
+    'a parenthesised **=': '(name) **= 2;',
+    'a parenthesised postfix ++': '(name)++;',
+    'a parenthesised prefix --': '--(name);',
+    'a plain &&=': 'name &&= process.env.MODULE;',
+    'a plain ??=': 'name ??= process.env.MODULE;',
+    'a nested array target': '[[name]] = suppliedValues;',
+    'a skipped element': '[, name] = suppliedValues;',
+    'a rest target': '[first, ...name] = suppliedValues;',
+    'a nested rest target': '[first, ...[name]] = suppliedValues;',
+    'a default in an array target': "[name = 'node:fs'] = suppliedValues;",
+    'a parenthesised element': '[(name)] = suppliedValues;',
+    'a renamed object target': '({ key: name } = suppliedValues);',
+    'a deep object target': '({ key: { inner: [name] } } = suppliedValues);',
+    'a shorthand with a default': "({ name = 'node:fs' } = suppliedValues);",
+    'an object rest target': '({ ...name } = suppliedValues);',
+    'a parenthesised renamed target': '({ key: (name) } = suppliedValues);',
+    'an array target of a for-in': 'f·or ([name] in suppliedValues) {}',
+    'an object target of a for-in': 'f·or ({ name } in suppliedValues) {}',
+    'a parenthesised target of a for-in': 'f·or ((name) in suppliedValues) {}',
+    'a bare target of a for-in': 'f·or (name in suppliedValues) {}',
+    'a bare target of a for-of': 'f·or (name of suppliedValues) {}',
+    'a bare target of a for-await-of': 'f·or await (name of suppliedValues) {}',
+    'an array target of a for-await-of': 'f·or await ([name] of suppliedValues) {}',
+    'an object target of a for-await-of': 'f·or await ({ name } of suppliedValues) {}',
+    'a parenthesised target of a for-await-of': 'f·or await ((name) of suppliedValues) {}',
+    'a let declaration in a for-of': 'f·or (let name of suppliedValues) {}',
+    'a const declaration in a for-in': 'f·or (const name in suppliedValues) {}',
+    'a deep declaration in a for-of': 'f·or (const { key: [first, ...name] } of suppliedValues) {}',
+    'a declaration with a default in a for-of':
+      "f·or (const [name = 'node:fs'] of suppliedValues) {}",
+    'an array declaration in a for-in': 'f·or (var [name] in suppliedValues) {}',
+    'a destructuring declaration': 'var [name] = suppliedValues;',
+    'an object destructuring declaration': 'var { name } = suppliedValues;',
+    'a rest parameter': 'function f(...name) {}',
+    'a destructured parameter': 'function f({ key: [name] }) {}',
+    'an arrow parameter with a default': "const f = (name = 'node:fs') => 0;",
+    'a catch variable': 'try {} catch (name) {}',
+    'a destructured catch variable': 'try {} catch ({ name }) {}',
+    'a function expression of the name': 'const f = function name() {};',
+    'a class expression of the name': 'const C = class name {};',
+    'a function declaration of the name': 'function name() {}',
+    'an import of the name': "import name from 'x';",
+    'a namespace import of the name': "import * as name from 'x';",
+    'an import specifier of the name': "import { key as name } from 'x';",
+    'a class declaration of the name': 'class name {}',
+    'a destructured parameter with a default': "function f({ key: [name] = ['node:fs'] }) {}",
+    'a destructured arrow parameter': 'const f = ([name]) => 0;',
+  };
+  for (const [what, write] of Object.entries({ ...review, ...siblings }))
+    assert.match(spawnViolations(around(write)).join(), /not a constant string/, what);
+  // The same writes in the shell check: a holder loop with a part the guard cannot read.
+  const holder = (write) =>
+    unmark(`let body = ':'; ${write} const s = 'wh·ile [ ! -f f ]; d·o ' + body + '; d·one';`);
+  assert.deepEqual(waitViolations(holder(''), { holder: true }), []);
+  for (const write of [
+    'f·or ([body] of extra) {}',
+    'f·or (var body of extra) {}',
+    'f·or await ({ body } of extra) {}',
+    '(body) = extra;',
+    '(body) += extra;',
+    '[[body]] = extra;',
+  ]) {
+    assert.match(
+      waitViolations(holder(write), { holder: true }).join(),
+      /holdUntil's loop has a part the guard cannot read/,
+      write,
+    );
+    assert.ok(waitViolations(holder(write)).length > 0, write);
+  }
+  // Controls: a name nothing but constants is written stays known, whatever the wrapper; a write
+  // to a property is not a write to the name.
+  const cp = ['child', 'process'].join('_');
+  for (const write of [
+    "(name) = 'node:path';",
+    "[name] = ['node:path'];".replace('[name] = [', 'name = (').replace('];', ');'),
+    'obj.name = process.env.MODULE;',
+    'obj[name] = process.env.MODULE;',
+    '({ key: obj.name } = suppliedValues);',
+    '[obj.name] = suppliedValues;',
+    'f·or (obj.name of suppliedValues) {}',
+    'f·or (const key of suppliedValues) {}',
+  ])
+    assert.deepEqual(spawnViolations(around(write)), [], write);
+  assert.match(
+    spawnViolations(around(`(name) = 'node:${cp}';`)).join(),
+    /child_process reached by a call/,
+  );
+});
+
+test('the review reproduction: a for-of target replaces the module a name stood for (PR-532 r2 R2)', () => {
+  const unmark = (text) => text.replaceAll('·', '');
+  const source = unmark(`
+    let name = 'node:fs';
+    f·or ([name] of suppliedValues) {
+      const cp = await import(name);
+      cp.spawn('sleep', ['600'], { detached: true });
+    }
+  `);
+  assert.match(spawnViolations(source).join(), /import\(\) names a module by something/);
+  // ... and with the head removed the module is the constant it was written as.
+  assert.deepEqual(
+    spawnViolations(
+      source.replace(unmark('f·or ([name] of suppliedValues)'), 'if (suppliedValues)'),
+    ),
+    [],
+  );
+});
+
+test('uncertainty reaches every name that builds on another, however long the chain, and a chain that does not settle is refused (PR-532 r2 R2)', () => {
+  const cp = ['child', 'process'].join('_');
+  // The review's shape: setters declared in the order name=b, b=c, c=d, ..., the unknown written to
+  // the last name, the setters called in the reverse order. Two or three passes over the source
+  // cannot carry the unknown to `name`; a fixed point does, at any depth.
+  const chain = (depth, last) => {
+    const at = (index) => (index === 0 ? 'name' : `link${index}`);
+    const names = Array.from({ length: depth + 1 }, (_, index) => at(index));
+    const setters = names
+      .slice(0, depth)
+      .map((one, index) => `function set${index}() { ${one} = ${at(index + 1)}; }`);
+    const calls = names.slice(0, depth).map((_, index) => `set${depth - 1 - index}();`);
+    return [
+      `var ${names.map((one) => `${one} = 'node:fs'`).join(', ')};`,
+      ...setters,
+      `${at(depth)} = ${last};`,
+      ...calls,
+      'const m = await import(name); m.spawn("x", [], { detached: true });',
+    ].join('\n');
+  };
+  for (const depth of [1, 2, 3, 4, 5, 9, 25, 100]) {
+    assert.match(
+      spawnViolations(chain(depth, 'process.env.MODULE')).join(),
+      /not a constant string/,
+      `depth ${depth}`,
+    );
+    assert.match(
+      spawnViolations(chain(depth, `'node:${cp}'`)).join(),
+      /child_process reached by a call/,
+      `depth ${depth}`,
+    );
+    assert.deepEqual(spawnViolations(chain(depth, "'node:path'")), [], `depth ${depth}`);
+  }
+  // The same chain in the shell check.
+  const unmark = (text) => text.replaceAll('·', '');
+  const loop = unmark(
+    "var body = ':', one = ':', two = ':'; function a() { body = one; } function b() { one = two; } two = extra; b(); a(); const s = 'wh·ile [ ! -f f ]; d·o ' + body + '; d·one';",
+  );
+  assert.match(
+    waitViolations(loop, { holder: true }).join(),
+    /holdUntil's loop has a part the guard cannot read/,
+  );
+  // Names that depend on each other in a cycle settle when the cycle adds nothing new ...
+  assert.deepEqual(
+    spawnViolations("var a = 'node:fs', b = 'node:path'; a = b; b = a; await import(a);"),
+    [],
+  );
+  assert.match(
+    spawnViolations(
+      "var a = 'node:fs', b; a = b; b = a; a = process.env.X; await import(b);",
+    ).join(),
+    /not a constant string/,
+  );
+  // ... and are refused when each round adds something: the text never stops growing.
+  for (const source of [
+    "var a = 'node:fs', b = ''; a = b + 'x'; b = a + 'y'; await import(a);",
+    "var a = 'node:fs'; a = a + 'x'; await import(a);",
+    "var a = 'x', b = 'y', c = 'z'; a = b + c; b = c + a; c = a + b;",
+  ]) {
+    assert.match(spawnViolations(source).join(), /writes to \w+ do not settle/, source);
+    assert.match(waitViolations(source).join(), /writes to \w+ do not settle/, source);
+  }
+  // A name appended to by itself is a different thing: each `+=` is applied once, and settles.
+  assert.deepEqual(spawnViolations("var a = 'node:'; a += 'f'; a += 's'; await import(a);"), []);
+});
+
 test('the spawn guard refuses every route to an asynchronous child that skips the owner', () => {
   for (const source of [
     "import { spawn } from 'node:child_process';",

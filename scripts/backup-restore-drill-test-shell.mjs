@@ -14,13 +14,17 @@
 // it. It refuses: a loop whose head, `do` or `done` sits in a string the scan cannot join to the
 // rest; a loop of the holder with a part it cannot read; a module named by an expression it cannot
 // evaluate to constant strings; a name with a write it cannot evaluate (an `=`, `+=` or other
-// update whose value is not constant makes every later reading of the name uncertain); and any
-// expression or name with more than CAP alternatives. Known gaps, NOT refused (listed in STATUS of
-// PR #532): bindings are file-wide, not lexically scoped (a parameter or inner declaration of the
-// same name is not seen as a write); a `[...]` array bound to a name and joined later; computed
-// `module['require']`, a parenthesised, aliased or `.call`/`.apply`'d `require`, a renamed or
-// chained `createRequire`, `process.getBuiltinModule`, `Module._load`; `eval`/`Function` reached
-// through an alias, a property (`globalThis.eval`) or a computed key; a computed `binding`;
+// update whose value is not constant, a destructuring, a for-of / for-in / for-await-of head, a
+// parameter, an import: every reading of the name is then uncertain; a target is read through its
+// parentheses and at any depth of a pattern); names whose values build on each other without
+// settling (the values are computed to a fixed point, and one that does not settle is refused);
+// and any expression or name with more than CAP alternatives. Known gaps, NOT refused (listed in
+// STATUS of PR #532): bindings are file-wide, not lexically scoped (every declaration of a name, in
+// any scope, counts as a write to the one name: more refusals, never fewer); a `[...]` array bound
+// to a name and joined later; computed `module['require']`, a parenthesised, aliased or
+// `.call`/`.apply`'d `require`, a renamed or chained `createRequire`, `process.getBuiltinModule`,
+// `Module._load`; `eval`/`Function` reached through an alias, a property (`globalThis.eval`) or a
+// computed key; a computed `binding`;
 // character-code calls through an alias or a computed key; and text read at run time (a file, the
 // environment). Nothing here is the code under test.
 import ts from 'typescript';
@@ -68,6 +72,40 @@ const UPDATES = new Set([
   ts.SyntaxKind.AmpersandAmpersandEqualsToken,
   ts.SyntaxKind.QuestionQuestionEqualsToken,
 ]);
+const ASSIGNMENTS = new Set([ts.SyntaxKind.EqualsToken, ts.SyntaxKind.PlusEqualsToken, ...UPDATES]);
+
+/** `(a)`, `((a))` and the like read as what they wrap: the one place a target is normalised. */
+const unwrap = (node) => {
+  let inner = node;
+  while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+  return inner;
+};
+
+/**
+ * Every name a write to `target` writes: an identifier; each name in an array or object pattern, at
+ * any depth, through defaults (`[a = 1]`, `{ a = 1 }`, `{ k: a = 1 }`), rest (`...a`, `...[a]`),
+ * nesting and parentheses; the same for a binding pattern of a declaration or a parameter. A
+ * property or element access (`o.a`, `o[k]`) writes a property, not a name: none.
+ */
+function writtenNames(target, out = []) {
+  const node = unwrap(target);
+  if (ts.isIdentifier(node)) out.push(node.text);
+  else if (ts.isArrayLiteralExpression(node) || ts.isArrayBindingPattern(node))
+    for (const element of node.elements) writtenNames(element, out);
+  else if (ts.isObjectLiteralExpression(node))
+    for (const property of node.properties) {
+      if (ts.isPropertyAssignment(property)) writtenNames(property.initializer, out);
+      else if (ts.isShorthandPropertyAssignment(property)) out.push(property.name.text);
+      else if (ts.isSpreadAssignment(property)) writtenNames(property.expression, out);
+    }
+  else if (ts.isObjectBindingPattern(node))
+    for (const element of node.elements) writtenNames(element, out);
+  else if (ts.isBindingElement(node)) writtenNames(node.name, out);
+  else if (ts.isSpreadElement(node)) writtenNames(node.expression, out);
+  else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken)
+    writtenNames(node.left, out); // a default: `[a = 1] = v`
+  return out;
+}
 
 /**
  * What the constant strings of one source evaluate to. `evaluate(node, opaque)` returns every
@@ -79,7 +117,7 @@ const UPDATES = new Set([
  * CAP alternatives.
  */
 function stringEvaluator(ast) {
-  const bound = new Map(); // name -> Set of values
+  let bound = new Map(); // name -> Set of values, as of the last round
   const overflow = new Set(); // what had more than CAP alternatives: refused by both checks
   const combine = (parts, where) => {
     let out = [''];
@@ -157,92 +195,107 @@ function stringEvaluator(ast) {
     }
     return null;
   };
-  const bind = (name, values) => {
-    const known = bound.get(name) ?? new Set();
+  const write = (into, name, values) => {
+    const known = into.get(name) ?? new Set();
     for (const value of values)
       if (known.size < CAP || known.has(value)) known.add(value);
       else overflow.add(name);
-    bound.set(name, known);
+    into.set(name, known);
   };
-  // A write whose value cannot be evaluated: the name may hold anything from then on, so every
-  // reading of it has an unknown alternative (`=`), or an unknown tail on each value (`+=`).
-  const unknownWrite = (name, appended) => {
-    const before = bound.get(name);
-    bind(name, appended && before ? combine([[...before], [MARK]], name) : [MARK]);
+  // The write sites of the source, found ONCE, each with its target normalised (parentheses
+  // stripped) and every name it writes enumerated, however deep in a pattern. Three kinds:
+  //   'set'     a name written a value (`=`, a declaration with an initializer);
+  //   'append'  `+=`;
+  //   'unknown' every other write: a compound or logical update, `++`/`--`, a destructuring (an
+  //             assignment, a declaration, a parameter, a catch variable), the head of a for-of,
+  //             for-in or for-await-of, an import, a function or class name.
+  const sites = [];
+  const site = (names, kind, expression) => {
+    for (const name of names) sites.push({ name, kind, expression });
   };
-  // Two passes: a name may be used before the line that binds it is reached.
-  for (let pass = 0; pass < 2; pass++) {
-    const visit = (node) => {
-      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-        const values = evaluate(node.initializer);
-        if (values) bind(node.name.text, values);
-        else unknownWrite(node.name.text, false);
+  const visit = (node) => {
+    if (ts.isVariableDeclaration(node)) {
+      const head =
+        ts.isVariableDeclarationList(node.parent) &&
+        (ts.isForOfStatement(node.parent.parent) || ts.isForInStatement(node.parent.parent));
+      const names = writtenNames(node.name);
+      if (node.initializer && ts.isIdentifier(node.name)) {
+        site(names, 'set', node.initializer);
         if (isCreateRequire(node.initializer)) requires.add(node.name.text);
-      } else if (
-        ts.isBinaryExpression(node) &&
-        ts.isIdentifier(node.left) &&
-        (node.operatorToken.kind === ts.SyntaxKind.EqualsToken ||
-          node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken)
-      ) {
-        const appended = node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken;
-        const values = evaluate(node.right);
-        if (values) {
-          const before = bound.get(node.left.text);
-          bind(
-            node.left.text,
-            appended && before ? combine([[...before], values], node.left.text) : values,
-          );
-        } else unknownWrite(node.left.text, appended);
-        if (isCreateRequire(node.right)) requires.add(node.left.text);
-      } else if (
-        ts.isBinaryExpression(node) &&
-        ts.isIdentifier(node.left) &&
-        UPDATES.has(node.operatorToken.kind)
-      )
-        unknownWrite(node.left.text, false);
-      else if (
-        (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
-        [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator) &&
-        ts.isIdentifier(node.operand)
-      )
-        unknownWrite(node.operand.text, false);
-      else if (
-        (ts.isForOfStatement(node) || ts.isForInStatement(node)) &&
-        ts.isIdentifier(node.initializer)
-      )
-        unknownWrite(node.initializer.text, false);
-      else if (
-        // Any other declaration of a name: a parameter, a destructured name, an import, a catch
-        // variable, a function or class. Its value is not a constant string the scan can read.
-        (ts.isParameter(node) ||
-          ts.isBindingElement(node) ||
-          ts.isImportSpecifier(node) ||
-          ts.isImportClause(node) ||
-          ts.isNamespaceImport(node) ||
-          ts.isFunctionDeclaration(node) ||
-          ts.isClassDeclaration(node) ||
-          (ts.isVariableDeclaration(node) && ts.isCatchClause(node.parent))) &&
-        node.name &&
-        ts.isIdentifier(node.name)
-      )
-        unknownWrite(node.name.text, false);
-      else if (
-        ts.isBinaryExpression(node) &&
-        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-        (ts.isArrayLiteralExpression(node.left) || ts.isObjectLiteralExpression(node.left))
-      ) {
-        // a destructuring assignment writes every name in its pattern
-        const names = (target) => {
-          if (ts.isIdentifier(target)) unknownWrite(target.text, false);
-          else ts.forEachChild(target, names);
-        };
-        names(node.left);
+      } else if (node.initializer || head || ts.isCatchClause(node.parent)) site(names, 'unknown');
+    } else if (ts.isBinaryExpression(node) && ASSIGNMENTS.has(node.operatorToken.kind)) {
+      const target = unwrap(node.left);
+      const kind = node.operatorToken.kind;
+      if (ts.isIdentifier(target) && kind === ts.SyntaxKind.EqualsToken) {
+        site([target.text], 'set', node.right);
+        if (isCreateRequire(node.right)) requires.add(target.text);
+      } else if (ts.isIdentifier(target) && kind === ts.SyntaxKind.PlusEqualsToken) {
+        site([target.text], 'append', node.right);
+        if (isCreateRequire(node.right)) requires.add(target.text);
+      } else site(writtenNames(target), 'unknown');
+    } else if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)
+    )
+      site(writtenNames(node.operand), 'unknown');
+    else if (
+      (ts.isForOfStatement(node) || ts.isForInStatement(node)) &&
+      !ts.isVariableDeclarationList(node.initializer)
+    )
+      site(writtenNames(node.initializer), 'unknown');
+    else if (
+      // Any other declaration of a name: a parameter (a pattern is enumerated by `writtenNames`, so
+      // it is the one place that reads one), an import, a function or class (declared or an
+      // expression's own name). Not a constant string the scan can read.
+      (ts.isParameter(node) ||
+        ts.isImportSpecifier(node) ||
+        ts.isImportClause(node) ||
+        ts.isNamespaceImport(node) ||
+        ts.isFunctionDeclaration(node) ||
+        ts.isClassDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isClassExpression(node)) &&
+      node.name
+    )
+      site(writtenNames(node.name), 'unknown');
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  const written = new Set(sites.map((each) => each.name));
+  // What the writes add up to, as a fixed point: a name is written from other names, so every
+  // round reads the previous round's values and the rounds repeat until none changes. Values only
+  // grow (a name starts with none), so a settled round is the answer. Information crosses one name
+  // per round, so a source that settles does so within one round per written name, plus the round
+  // that finds nothing changed; a source that does not (names that build on each other's text
+  // without end: `a = b + 'x'; b = a + 'y'`, or `s = s + 'x'`) is `unsettled`, and both checks
+  // refuse it.
+  const unsettled = new Set();
+  const empty = () => new Map([...written].map((name) => [name, new Set()]));
+  const differs = (name, left, right) =>
+    left.get(name).size !== right.get(name).size ||
+    [...left.get(name)].some((value) => !right.get(name).has(value));
+  bound = empty();
+  for (let round = 0; ; round++) {
+    const next = empty();
+    for (const { name, kind, expression } of sites)
+      if (kind === 'unknown') write(next, name, [MARK]);
+      else if (kind === 'set') write(next, name, evaluate(expression) ?? [MARK]);
+    // Appends, in source order, to what the other writes gave the name: each is applied once.
+    for (const { name, kind, expression } of sites)
+      if (kind === 'append') {
+        const before = next.get(name);
+        const values = evaluate(expression) ?? [MARK];
+        write(next, name, before.size > 0 ? combine([[...before], values], name) : values);
       }
-      ts.forEachChild(node, visit);
-    };
-    visit(ast);
+    const changed = [...written].filter((name) => differs(name, bound, next));
+    bound = next;
+    if (changed.length === 0) break;
+    if (round > written.size) {
+      for (const name of changed) unsettled.add(name);
+      break;
+    }
   }
-  return { evaluate, requires, isCreateRequire, overflow };
+  return { evaluate, requires, isCreateRequire, overflow, unsettled };
 }
 
 const isComposition = (node) =>
@@ -262,10 +315,13 @@ export function stringValues(source) {
   return readStrings(source).values;
 }
 
-/** `stringValues`, and what had more alternatives than the scan keeps (refused by both checks). */
+/**
+ * `stringValues`, what had more alternatives than the scan keeps, and the names whose writes do
+ * not settle (both refused by both checks).
+ */
 function readStrings(source) {
   const ast = parse(source);
-  const { evaluate, overflow } = stringEvaluator(ast);
+  const { evaluate, overflow, unsettled } = stringEvaluator(ast);
   const values = [];
   const visit = (node) => {
     if (ts.isStringLiteralLike(node)) {
@@ -284,7 +340,7 @@ function readStrings(source) {
     ts.forEachChild(node, visit);
   };
   visit(ast);
-  return { values, overflow };
+  return { values, overflow, unsettled };
 }
 
 /**
@@ -403,16 +459,25 @@ export function loopFragments(text) {
   return fragments;
 }
 
+/** What the scan refuses to read at all, in either check: too many alternatives, writes that do not settle. */
+const unreadable = (overflow, unsettled) => [
+  ...[...overflow].map(
+    (where) => `more than ${CAP} alternatives, which the guard does not read: ${where}`,
+  ),
+  ...[...unsettled].map(
+    (name) =>
+      `writes to ${name} do not settle (names built on each other's text without end), which the guard does not read`,
+  ),
+];
+
 /**
  * Violations of rule 1 in one fixture source. `holder` is true for the one file that defines
  * holdUntil: there a loop may exist, but only over builtins. Everywhere else a stub has no
  * business writing a loop at all.
  */
 export function waitViolations(source, { holder = false } = {}) {
-  const { values, overflow } = readStrings(source);
-  const violations = [...overflow].map(
-    (where) => `more than ${CAP} alternatives, which the guard does not read: ${where}`,
-  );
+  const { values, overflow, unsettled } = readStrings(source);
+  const violations = [...unreadable(overflow, unsettled)];
   for (const value of values) {
     for (const loop of shellLoops(value)) {
       const forking = loop.commands.filter((command) => !BUILTINS.has(command));
@@ -464,12 +529,8 @@ function loadsModule(call, requires, isCreateRequire) {
 export function spawnViolations(source, { owner = false } = {}) {
   if (owner) return [];
   const ast = parse(source);
-  const { evaluate, requires, isCreateRequire, overflow } = stringEvaluator(ast);
+  const { evaluate, requires, isCreateRequire, overflow, unsettled } = stringEvaluator(ast);
   const violations = [];
-  const overflowed = () =>
-    [...overflow].map(
-      (where) => `more than ${CAP} alternatives, which the guard does not read: ${where}`,
-    );
   const visit = (node) => {
     if (
       (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
@@ -526,5 +587,5 @@ export function spawnViolations(source, { owner = false } = {}) {
     ts.forEachChild(node, visit);
   };
   visit(ast);
-  return [...overflowed(), ...violations];
+  return [...unreadable(overflow, unsettled), ...violations];
 }
