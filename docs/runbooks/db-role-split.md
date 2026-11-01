@@ -16,10 +16,10 @@ construction، تغییرناپذیری دفتر کل در economic، فقط‌�
 
 برای هر سرویس `<svc>` در `PRIVILEGE_SPLIT_SERVICES` (`lib/role-passwords.bash`):
 
-| نقش                    | کیست                                    | چه دارد                                                                                                                                                                      |
-| ---------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rasta_<svc>_migrator` | مالک؛ فقط Migration و پاک‌سازی آزمون‌ها | مالک پایگاه داده `rasta_<svc>`، Schema `public` و **همهٔ** جدول‌ها، Sequenceها، توابع و `_prisma_migrations`. `CREATEDB` فقط برای Shadow Database محلی `prisma migrate dev`. |
-| `rasta_<svc>`          | نقش اجرا؛ سرویس با این وصل می‌شود       | `CONNECT` روی پایگاه داده، `USAGE` روی `public`، و `SELECT, INSERT, UPDATE, DELETE` روی جدول‌ها و `USAGE, SELECT` روی Sequenceها — نه بیشتر.                                 |
+| نقش                    | کیست                                    | چه دارد                                                                                                                                                                                                                          |
+| ---------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rasta_<svc>_migrator` | مالک؛ فقط Migration و پاک‌سازی آزمون‌ها | مالک پایگاه داده `rasta_<svc>`، Schema `public` و **همهٔ** جدول‌ها، Sequenceها، توابع و `_prisma_migrations`. `CREATEDB` فقط برای Shadow Database محلی `prisma migrate dev`.                                                     |
+| `rasta_<svc>`          | نقش اجرا؛ سرویس با این وصل می‌شود       | دقیقاً آنچه سیاستش در `lib/runtime-allowlist.sql` مجاز می‌داند — در حالت `default`: `CONNECT` روی پایگاه داده، `USAGE` روی `public`، و `SELECT, INSERT, UPDATE, DELETE` روی جدول‌ها و `USAGE, SELECT` روی Sequenceها — نه بیشتر. |
 
 نقش اجرا **ندارد**: مالکیت هیچ چیز؛ `CREATE` روی پایگاه داده یا Schema (پس نمی‌تواند چیزی بسازد که مالکش شود)؛
 `TRUNCATE`، `REFERENCES`، `TRIGGER`؛ هیچ حقی روی `_prisma_migrations`؛ `CREATEDB`، `CREATEROLE`، `BYPASSRLS`، `SUPERUSER`.
@@ -31,7 +31,8 @@ construction، تغییرناپذیری دفتر کل در economic، فقط‌�
 - `default` — DML روی همهٔ جدول‌های فعلی، و با `ALTER DEFAULT PRIVILEGES FOR ROLE rasta_<svc>_migrator IN SCHEMA public`
   روی هر جدول و Sequenceی که مهاجر بعداً بسازد.
 - `migration` — هیچ حقی در اسکریپت؛ هر جدول حقش را از Migration خود سرویس می‌گیرد. supplier و analytics: روی جدول‌های
-  فقط‌افزودنی کمتر از DML می‌دهد.
+  فقط‌افزودنی کمتر از DML می‌دهد. هر حق باید سطری هم در سیاست خود سرویس در `lib/runtime-allowlist.sql` داشته باشد؛
+  اسکریپت هر حقی را که سیاست نام نبرده است پس می‌گیرد (پایین‌تر: «One allowlist»).
 
 Analytics (RUN-001 PR 2) uses migration-managed grants. Apply the split script first.
 B (`20261024120000_baseline_metric`) grants baseline `SELECT` and revokes baseline/sequence writes
@@ -86,17 +87,34 @@ MEMBER too. Predefined `pg_write_all_data`, `pg_read_all_data`, server-file and 
 roles are explicitly refused; their implicit rights cannot be removed by object REVOKE. Remove
 those memberships administratively, then rerun the checker.
 
-**One rule set (#421 r1 F3).** What the closure may never hold is one declarative file,
-`lib/runtime-forbidden.sql`, read by both sides: the split revokes every ACL entry it lists, the
-checker reports every right it lists that the closure effectively holds. CREATE and TEMPORARY on the
-database; CREATE on a schema; TRUNCATE, REFERENCES (a column's too) and TRIGGER on tables, views,
-materialized views and foreign tables; UPDATE (`setval`) on sequences; any right on the ledger;
-EXECUTE on definer/trigger functions; PUBLIC EXECUTE on migrator functions; default privileges
-(`pg_default_acl`, and the migrator's built-in function default) that would grant any of these to an
-object created later; extension writes. Role attributes, ownership, membership, predefined roles
-and the required runtime EXECUTE list stay the checker's own: no ACL REVOKE repairs them.
-Migration-mode table DML (analytics' read-only baseline, supplier's append-only and audit's
-insert-only tables, reached through a closure role) is not yet in the file: follow-up F3b.
+**One allowlist (#421 r1 F3, F3b = #520 r1 R1).** What a runtime role may hold is one declarative
+file, `lib/runtime-allowlist.sql`: per policy — `default` (every split service in grants mode
+`default`), the service's own name (mode `migration`: `supplier`, `analytics`) and `audit` — the
+schema it may use, each relation (`schema.name`, or `schema.*` for every relation of the schema) and
+sequence with its privileges, and the migrator's default privileges; `*` rows hold for every policy
+(`CONNECT` on the database, `SELECT` on extension relations and sequences). Functions are
+`lib/runtime-function-grants.txt`. `lib/runtime-forbidden.sql` turns it round: every privilege of
+every ACL-bearing object — the database, each schema, relation (each partition too: an
+`audit_event` partition is allowed nothing), column grant, sequence, non-extension routine and
+default ACL — that the policy does not allow, plus any grant option, held by the closure (the role,
+every role it is a MEMBER of, PUBLIC). Each class has a ceiling the allowlist cannot raise: never
+`TRUNCATE`, `REFERENCES` or `TRIGGER`; never `UPDATE` (`setval`) on a sequence; nothing on the
+ledger; nothing on a definer or trigger function, nor PUBLIC `EXECUTE` on a migrator function; no
+default for functions or schemas; no `CREATE` or `TEMPORARY`. The split revokes every ACL entry that
+file lists and fails unless nothing is held; in grants mode `default` it also grants exactly the
+`default` policy's `schema.*` and default-privilege rows. The checker reports every forbidden right
+held **and** every allowed right on an existing object, schema or the database that the role does
+not hold (`allowed but not held: …`), so the allowlist and the migrations must agree; a unit test
+reads each migration-managed policy against its migrations' `GRANT`/`REVOKE` statements, row for
+row. A broken policy — none for the name, a service with its own policy held to `default`, a row
+above its ceiling — fails both. Role attributes, ownership, membership, predefined roles and the
+required runtime EXECUTE list stay the checker's own: no ACL REVOKE repairs them.
+
+**A new table** in `default` needs nothing. In `supplier`, `analytics` or `audit` it needs its `GRANT`
+in the migration **and** its row in `runtime-allowlist.sql`: without the row the split revokes the
+grant on its next run and the check fails on a fresh bootstrap. An `EXECUTE` a service needs goes in
+`runtime-function-grants.txt`; one granted elsewhere is revoked (`EXECUTE on function …, not in
+runtime-function-grants.txt`).
 
 The split revokes each actual ACL entry while temporarily acting as its recorded grantor
 (`SET LOCAL ROLE <grantor>; REVOKE ... CASCADE; RESET ROLE`). PG16 object `GRANTED BY` cannot
@@ -132,7 +150,10 @@ repair lost ACLs by themselves. The declared source of truth is `lib/runtime-fun
 
 All are in `public`; each line names its creating migration, and types are schema-qualified so the
 DBA's `search_path` decides nothing. The splitter reads every line (the last one too) and refuses a
-malformed one; it idempotently restores these existing migration grants on every run (`GRANT EXECUTE
+malformed one — the same grammar as the checker (#520 r1 R2): an empty line or one starting with `#`
+is skipped, every other line is exactly three non-empty `|`-separated fields matched whole (no
+trailing `|`, no empty service, no blank or carriage return), and a NUL byte anywhere refuses the
+file; it idempotently restores these existing migration grants on every run (`GRANT EXECUTE
 ON ROUTINE`), only after verifying migrator ownership and SECURITY INVOKER/non-trigger/non-extension
 definition. A missing signature is skipped only while its creating migration is not recorded as
 applied in `public._prisma_migrations` (pre-migration bootstrap, or a pending, failed or rolled-back

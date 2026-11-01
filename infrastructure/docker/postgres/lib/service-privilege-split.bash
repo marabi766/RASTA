@@ -204,20 +204,43 @@ rotate_and_verify_split_logins() {
 # grant_service_tables <service> <database> <default|migration>
 # Analytics grants are migration-managed, even for an older caller passing
 # default explicitly. A split re-run must never reopen baseline INSERT.
+#
+# Default mode grants the `default` policy of runtime-allowlist.sql — its
+# `schema.*` relation and sequence rows (GRANT … ON ALL … IN SCHEMA) and its
+# default-privilege rows (ALTER DEFAULT PRIVILEGES FOR ROLE the migrator) — and
+# refuses a row of any other class, so what is granted is what is allowed. The
+# schema's USAGE is the split's own statement.
 grant_service_tables() {
   local svc="$1" db="$2" mode="$3"
-  local runtime="rasta_${svc}" migrator="rasta_${svc}_migrator"
+  local runtime="rasta_${svc}" migrator="rasta_${svc}_migrator" allowlist
   [[ "${svc}" == analytics ]] && mode=migration
   if [[ "${mode}" == default ]]; then
-    # Exactly DML, whatever the tables held before: an upgraded database's
-    # runtime role held ALL as their owner, and REASSIGN does not carry a
-    # former owner's rights over as grants — but say it rather than rely on it.
+    allowlist="$(_runtime_allowlist_sql)" || return 1
+    # Exactly the policy, whatever the tables held before: an upgraded
+    # database's runtime role held ALL as their owner, and REASSIGN does not
+    # carry a former owner's rights over as grants — but say it rather than
+    # rely on it.
     _svc_split_psql "${db}" "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${runtime}"
     _svc_split_psql "${db}" "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${runtime}"
-    _svc_split_psql "${db}" "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${runtime}"
-    _svc_split_psql "${db}" "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${runtime}"
-    _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${runtime}"
-    _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ${runtime}"
+    _svc_split_psql "${db}" "DO \$\$
+      DECLARE g record;
+      BEGIN
+        FOR g IN WITH allowlist AS (${allowlist})
+          SELECT class, object, array_to_string(privileges, ', ') AS privileges FROM allowlist
+           WHERE policy = 'default' ORDER BY class, object
+        LOOP
+          IF g.class IN ('relation', 'sequence') AND g.object LIKE '%.*' THEN
+            EXECUTE format('GRANT %s ON ALL %s IN SCHEMA %I TO %I', g.privileges,
+              CASE g.class WHEN 'relation' THEN 'TABLES' ELSE 'SEQUENCES' END,
+              split_part(g.object, '.', 1), '${runtime}');
+          ELSIF g.class IN ('default tables', 'default sequences') THEN
+            EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT %s ON %s TO %I',
+              '${migrator}', g.object, g.privileges, upper(substr(g.class, 9)), '${runtime}');
+          ELSIF g.class <> 'schema' THEN
+            RAISE EXCEPTION 'runtime-allowlist.sql: the split grants no % row in policy default', g.class;
+          END IF;
+        END LOOP;
+      END \$\$;" || return 1
   fi
 }
 
@@ -229,13 +252,74 @@ _runtime_reachable_sql() {
   printf '%s' "${sql//RUNTIME_ROLE/\'${1}\'}"
 }
 
-# The closure and the forbidden rights, both shared with the catalogue check:
-# runtime-forbidden.sql over the runtime role's runtime-reachable.sql.
+# The allowlist, shared with the catalogue check (runtime-allowlist.sql).
+_runtime_allowlist_sql() {
+  cat "$(dirname "${BASH_SOURCE[0]}")/runtime-allowlist.sql"
+}
+
+# _runtime_function_grant_rows [file]
+#
+# Every row of runtime-function-grants.txt, `service|signature|migration`, one
+# per line — or, for a malformed file, nothing and a failure. The grammar is the
+# checker's (parseRequiredRuntimeFunctions), and a test holds both to the same
+# corpus (#520 r1 R2): an empty line or one starting with `#` is skipped; every
+# other line is EXACTLY three non-empty fields, each matching its pattern, the
+# whole raw line matched at once — no field more or less, no empty one, no
+# trailing `|`, no blank or carriage return. A NUL byte anywhere refuses the
+# file (bash would drop it unseen). The last line is read with or without its
+# newline.
+_runtime_function_grant_rows() {
+  local file="${1:-$(dirname "${BASH_SOURCE[0]}")/runtime-function-grants.txt}" line number=0
+  local line_re='^[a-z][a-z0-9]*[|][a-z_][a-z0-9_]*[.][a-z_][a-z0-9_]*[(][A-Za-z0-9_.",]*[)][|][0-9]{14}_[a-z0-9_]+$'
+  if [[ ! -r "${file}" ]] || [[ "$(LC_ALL=C tr -d '\000' < "${file}" | wc -c)" != "$(wc -c < "${file}")" ]]; then
+    echo "runtime-function-grants.txt: unreadable, or holds a NUL byte; nothing restored" >&2
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    number=$((number + 1))
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+    if [[ ! "${line}" =~ ${line_re} ]]; then
+      echo "runtime-function-grants.txt: malformed line ${number}; nothing restored" >&2
+      return 1
+    fi
+    printf '%s\n' "${line}"
+  done < "${file}"
+}
+
+# The listed functions as `runtime_functions (service, signature)` rows. A
+# signature holds no quote of either kind but `"` (the line pattern), so it is
+# a safe string literal.
+_runtime_functions_sql() {
+  local rows values="" service signature migration
+  rows="$(_runtime_function_grant_rows)" || return 1
+  while IFS='|' read -r service signature migration; do
+    [[ -n "${service}" ]] || continue
+    values+="${values:+, }('${service}', '${signature}')"
+  done <<< "${rows}"
+  if [[ -n "${values}" ]]; then
+    printf 'SELECT * FROM (VALUES %s) v(service, signature)' "${values}"
+  else
+    printf 'SELECT NULL::text AS service, NULL::text AS signature WHERE false'
+  fi
+}
+
+# _runtime_forbidden_sql <runtime> <migrator> <policy>
+#
+# The closure, the allowlist and the forbidden rights, all shared with the
+# catalogue check: runtime-forbidden.sql over the runtime role's
+# runtime-reachable.sql, runtime-allowlist.sql's <policy> and the listed
+# functions. Fails, printing nothing usable, when the function list is malformed:
+# call it as `sql="$(_runtime_forbidden_sql …)" || return 1`.
 _runtime_forbidden_sql() {
-  local forbidden
-  forbidden="$(cat "$(dirname "${BASH_SOURCE[0]}")/runtime-forbidden.sql")"
-  printf 'WITH reachable AS (%s), forbidden AS (%s)' "$(_runtime_reachable_sql "${1}")" \
-    "${forbidden//MIGRATOR_ROLE/\'${2}\'}"
+  local forbidden allowlist functions
+  forbidden="$(cat "$(dirname "${BASH_SOURCE[0]}")/runtime-forbidden.sql")" || return 1
+  allowlist="$(_runtime_allowlist_sql)" || return 1
+  functions="$(_runtime_functions_sql)" || return 1
+  forbidden="${forbidden//MIGRATOR_ROLE/\'${2}\'}"
+  forbidden="${forbidden//RUNTIME_ROLE/\'${1}\'}"
+  forbidden="${forbidden//RUNTIME_POLICY/\'${3}\'}"
+  printf 'WITH reachable AS (%s), allowlist AS (%s), runtime_functions AS (%s), forbidden AS (%s)' \
+    "$(_runtime_reachable_sql "${1}")" "${allowlist}" "${functions}" "${forbidden}"
 }
 
 # Revoke actual ACL entries as THEIR grantor: PG16 object REVOKE GRANTED BY
@@ -259,15 +343,17 @@ _runtime_forbidden_sql() {
 # split, is. 'extension' is separate so every mode runs it AFTER application
 # table grants.
 _restrict_reachable_acl() {
-  local db="$1" runtime="$2" migrator="$3" scope="$4"
+  local db="$1" runtime="$2" migrator="$3" scope="$4" policy="$5" forbidden
+  forbidden="$(_runtime_forbidden_sql "${runtime}" "${migrator}" "${policy}")" || return 1
   _svc_split_psql "${db}" "DO \$\$
     DECLARE
-      pending CONSTANT text := \$q\$$(_runtime_forbidden_sql "${runtime}" "${migrator}"),
+      pending CONSTANT text := \$q\$${forbidden},
         entries AS (
           SELECT DISTINCT a.grantor, a.grantee, f.privilege, f.acl, f.owner,
-            f.revoke_prefix, f.revoke_what, f.revoke_on
+            f.privilege_sql, f.revoke_prefix, f.revoke_what, f.revoke_on
           FROM forbidden f CROSS JOIN LATERAL aclexplode(f.acl) a
           WHERE f.scope = '${scope}' AND a.privilege_type = f.privilege
+            AND (a.is_grantable OR NOT f.grant_option)
             AND a.grantee IN (SELECT oid FROM reachable)
             AND (NOT f.public_only OR a.grantee = 0))
         SELECT pg_get_userbyid(e.grantor) AS grantor,
@@ -275,13 +361,13 @@ _restrict_reachable_acl() {
             e.revoke_on, CASE WHEN e.grantee = 0 THEN 'PUBLIC'
                               ELSE quote_ident(pg_get_userbyid(e.grantee)) END) AS command,
           pg_get_userbyid(e.owner) AS owner,
-          format('GRANT %s ON %s TO %I WITH GRANT OPTION', e.revoke_what, e.revoke_on,
+          format('GRANT %s ON %s TO %I WITH GRANT OPTION', e.privilege_sql, e.revoke_on,
             pg_get_userbyid(e.grantor)) AS lend,
           format(CASE WHEN EXISTS (SELECT 1 FROM aclexplode(e.acl) o WHERE o.grantor = e.owner
                    AND o.grantee = e.grantor AND o.privilege_type = e.privilege)
                  THEN 'REVOKE GRANT OPTION FOR %s ON %s FROM %I CASCADE'
                  ELSE 'REVOKE %s ON %s FROM %I CASCADE' END,
-            e.revoke_what, e.revoke_on, pg_get_userbyid(e.grantor)) AS take_back,
+            e.privilege_sql, e.revoke_on, pg_get_userbyid(e.grantor)) AS take_back,
           e.revoke_prefix = '' AND e.grantor <> e.owner AS lendable
         FROM entries e\$q\$;
       still CONSTANT text := 'SELECT EXISTS (SELECT 1 FROM (' || pending || ') p
@@ -325,19 +411,21 @@ _restrict_reachable_acl() {
     END \$\$;"
 }
 
-# assert_no_forbidden_rights <database> <runtime> <migrator>
+# assert_no_forbidden_rights <database> <runtime> <migrator> <policy>
 #
 # The split's last word, and what convergence means: no role of the closure
-# HOLDS any right of runtime-forbidden.sql (has_*_privilege), in any scope —
-# what scripts/check-db-runtime-privileges.mjs would report from the same file.
-# A right no REVOKE removes (a predefined role's) fails the split here, as it
-# fails the check, instead of the split ending as if it had converged.
+# HOLDS any right of runtime-forbidden.sql (has_*_privilege) — anything the
+# policy does not allow — in any scope: what scripts/check-db-runtime-privileges.mjs
+# would report from the same files. A right no REVOKE removes (a predefined
+# role's), or a broken policy, fails the split here, as it fails the check,
+# instead of the split ending as if it had converged.
 assert_no_forbidden_rights() {
-  local db="$1" runtime="$2" migrator="$3"
+  local db="$1" runtime="$2" migrator="$3" policy="$4" forbidden
+  forbidden="$(_runtime_forbidden_sql "${runtime}" "${migrator}" "${policy}")" || return 1
   _svc_split_psql "${db}" "DO \$\$
     DECLARE left_over text;
     BEGIN
-      EXECUTE \$q\$$(_runtime_forbidden_sql "${runtime}" "${migrator}")
+      EXECUTE \$q\$${forbidden}
         SELECT string_agg(DISTINCT label, '; ' ORDER BY label) FROM forbidden WHERE held\$q\$
         INTO left_over;
       IF left_over IS NOT NULL THEN
@@ -346,38 +434,34 @@ assert_no_forbidden_rights() {
     END \$\$;"
 }
 
-# restrict_extension_relations <database> <runtime> [migrator]
+# restrict_extension_relations <database> <runtime> [migrator] [policy]
+# (Every policy allows the same on extensions: SELECT.)
 restrict_extension_relations() {
-  _restrict_reachable_acl "$1" "$2" "${3:-${2}_migrator}" extension
+  _restrict_reachable_acl "$1" "$2" "${3:-${2}_migrator}" extension "${4:-default}"
 }
 
+# restrict_service_functions_and_rights <database> <runtime> <migrator> <policy>
 restrict_service_functions_and_rights() {
-  local db="$1" runtime="$2" migrator="$3"
+  local db="$1" runtime="$2" migrator="$3" policy="$4"
   _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC" || return 1
-  _restrict_reachable_acl "${db}" "${runtime}" "${migrator}" general || return 1
+  _restrict_reachable_acl "${db}" "${runtime}" "${migrator}" general "${policy}" || return 1
 }
 
 # Repair grants stripped by pre-407 splitters, even when migrations are already
 # recorded as applied. Never turn an allowlisted signature into a SECURITY
 # DEFINER/trigger back door. Every line of runtime-function-grants.txt is read —
-# the last one too, with or without its newline — and a malformed one refuses.
+# the last one too, with or without its newline — and a malformed one refuses
+# before anything is restored (_runtime_function_grant_rows, #520 r1 R2).
 # A listed function that does not exist is skipped only while the migration
 # that creates it has not been applied (bootstrap, a pending, failed or
 # rolled-back one: it grants EXECUTE itself when it runs); with that migration
 # recorded as applied in the ledger, it is gone, and the split refuses (#421 r1
 # F5). The types are schema-qualified, so search_path decides nothing.
 restore_runtime_function_grants() {
-  local svc="$1" db="$2" runtime="$3" migrator="$4" service signature migration extra
-  local signature_re='^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\([A-Za-z0-9_.",]*\)$'
-  local migration_re='^[0-9]{14}_[a-z0-9_]+$'
-  while IFS='|' read -r service signature migration extra || [[ -n "${service}" ]]; do
-    [[ -z "${service}" || "${service}" == \#* ]] && continue
-    if [[ -n "${extra}" || ! "${service}" =~ ^[a-z][a-z0-9]*$ || ! "${signature}" =~ ${signature_re} ||
-      ! "${migration}" =~ ${migration_re} ]]; then
-      echo "runtime-function-grants.txt: malformed line for ${service:-?}; nothing restored" >&2
-      return 1
-    fi
-    [[ "${service}" == "${svc}" ]] || continue
+  local svc="$1" db="$2" runtime="$3" migrator="$4" rows service signature migration
+  rows="$(_runtime_function_grant_rows)" || return 1
+  while IFS='|' read -r service signature migration; do
+    [[ -n "${service}" && "${service}" == "${svc}" ]] || continue
     _svc_split_psql "${db}" "DO \$\$
       DECLARE
         fn oid := to_regprocedure('${signature}');
@@ -407,15 +491,21 @@ restore_runtime_function_grants() {
         EXECUTE format('GRANT EXECUTE ON ROUTINE %s TO %I', fn::regprocedure, '${runtime}');
         EXECUTE 'RESET ROLE';
       END \$\$;" || return 1
-  done < "$(dirname "${BASH_SOURCE[0]}")/runtime-function-grants.txt"
+  done <<< "${rows}"
 }
 
-# split_service_privileges <service> [database] [default|migration]
+# split_service_privileges <service> [database] [default|migration] [policy]
+#
+# The runtime role is held to runtime-allowlist.sql's policy: `default` in
+# default mode, the service's own in migration mode. A test splitting a
+# throwaway pair the way a migration-mode service is split names that
+# service's policy.
 split_service_privileges() {
   local svc="${1:?a service name is required}"
   local db="${2:-rasta_${svc}}"
   local mode="${3:-default}"
   [[ "${svc}" == analytics ]] && mode=migration
+  local policy="${4:-$([[ "${mode}" == default ]] && echo default || echo "${svc}")}"
   local runtime="rasta_${svc}"
   local migrator="rasta_${svc}_migrator"
   local password="${ROLE_PASSWORDS[$migrator]:?the ${migrator} password was not resolved (is ${svc} in PRIVILEGE_SPLIT_SERVICES?)}"
@@ -461,18 +551,18 @@ split_service_privileges() {
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA public FROM ${runtime}"
   _svc_split_psql "${db}" "GRANT USAGE ON SCHEMA public TO ${runtime}"
 
-  restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" || return 1
+  restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
   restore_runtime_function_grants "${svc}" "${db}" "${runtime}" "${migrator}" || return 1
 
-  grant_service_tables "${svc}" "${db}" "${mode}"
-  restrict_extension_relations "${db}" "${runtime}" "${migrator}" || return 1
+  grant_service_tables "${svc}" "${db}" "${mode}" || return 1
+  restrict_extension_relations "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
 
   # The migration ledger is the migrator's alone, from before the first
   # migration: a runtime role that could write it could mark a guard-creating
   # migration as already applied. Last, so the grants above cannot reach it.
   own_migration_ledger "${db}" public "${migrator}" "${runtime}"
 
-  assert_no_forbidden_rights "${db}" "${runtime}" "${migrator}" || return 1
+  assert_no_forbidden_rights "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
 
   ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
   ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
@@ -524,12 +614,13 @@ split_audit_database_privileges() {
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA audit FROM PUBLIC"
   _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA audit FROM ${runtime}"
   _svc_split_psql "${db}" "GRANT USAGE ON SCHEMA audit TO ${runtime}"
-  restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" || return 1
-  restrict_extension_relations "${db}" "${runtime}" "${migrator}" || return 1
+  # Held to the `audit` policy of runtime-allowlist.sql, whatever `service` is.
+  restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" audit || return 1
+  restrict_extension_relations "${db}" "${runtime}" "${migrator}" audit || return 1
   # Its migrations run with `?schema=audit`, so that is where Prisma keeps the
   # ledger; the same pre-creation, so it never holds a runtime grant either.
   own_migration_ledger "${db}" audit "${migrator}" "${runtime}"
-  assert_no_forbidden_rights "${db}" "${runtime}" "${migrator}" || return 1
+  assert_no_forbidden_rights "${db}" "${runtime}" "${migrator}" audit || return 1
 
   ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
   ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1

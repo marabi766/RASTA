@@ -49,9 +49,11 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import {
+  allowlistSql,
   classifyServices,
   FINDINGS_SQL,
   findingsSql,
+  policyFor,
   requiredRuntimeFunctions,
 } from './check-db-runtime-privileges-lib.mjs';
 import { ledgerRevoke } from './prisma-lib.mjs';
@@ -98,7 +100,7 @@ function ok(sql, options) {
 }
 
 const findings = () =>
-  ok(FINDINGS_SQL, { variables: { runtime: RUNTIME } })
+  ok(FINDINGS_SQL, { variables: { runtime: RUNTIME, policy: 'default' } })
     .split('\n')
     .filter(Boolean);
 
@@ -185,6 +187,45 @@ const LEDGER_RIGHTS = `SELECT has_table_privilege('${RUNTIME}', 'public._prisma_
                                  'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
                          OR has_any_column_privilege('${RUNTIME}', 'public._prisma_migrations',
                                  'SELECT, INSERT, UPDATE, REFERENCES')`;
+
+// #520 r1 R1: a policy that cannot be right is a finding, never a silent pass —
+// none by the name asked for; a service with a policy of its own held to
+// another; a row asking more than its class may hold, which allows nothing
+// beyond the ceiling either.
+test('a broken policy is a finding: no such policy, a service with its own held to default, a row above its ceiling', () => {
+  const connect = "('*', 'database', '*', ARRAY['CONNECT']),";
+  assert.ok(FINDINGS_SQL.includes(connect));
+  const inspect = (policy, extra = '') =>
+    ok(FINDINGS_SQL.replace(connect, `${connect}\n${extra}`), {
+      variables: { runtime: RUNTIME, policy },
+    })
+      .split('\n')
+      .filter(Boolean);
+  assert.ok(
+    inspect('nosuch').includes('no runtime allowlist for policy nosuch (runtime-allowlist.sql)'),
+  );
+  assert.ok(
+    inspect('default', `('${SERVICE}', 'schema', 'public', ARRAY['USAGE']),`).includes(
+      `${RUNTIME} has a runtime allowlist of its own, yet is held to policy default`,
+    ),
+  );
+  ok(`GRANT TRUNCATE ON guarded TO ${RUNTIME}`);
+  try {
+    const found = inspect(
+      'default',
+      "('default', 'relation', 'public.guarded', ARRAY['TRUNCATE']),",
+    );
+    for (const expected of [
+      'runtime-allowlist.sql: default allows TRUNCATE on relation public.guarded, beyond what its class may hold',
+      'TRUNCATE on public.guarded',
+    ]) {
+      assert.ok(found.includes(expected), `missing "${expected}" in:\n${found.join('\n')}`);
+    }
+  } finally {
+    ok(`REVOKE TRUNCATE ON guarded FROM ${RUNTIME}`);
+  }
+  assert.deepEqual(findings(), []);
+});
 
 test('the split creates the migration ledger itself: the migrator owns it, the runtime role holds nothing on it', () => {
   assert.equal(
@@ -455,8 +496,11 @@ const LEGACY = [
 // The one password both roles of each pair share before the upgrade.
 const SHARED = `shared_${randomBytes(12).toString('hex')}`;
 
-function legacyFindings({ db, runtime }) {
-  return ok(FINDINGS_SQL, { database: db, variables: { runtime } }).split('\n').filter(Boolean);
+function legacyFindings({ db, runtime, mode }) {
+  const policy = mode === 'audit' ? 'audit' : 'default';
+  return ok(FINDINGS_SQL, { database: db, variables: { runtime, policy } })
+    .split('\n')
+    .filter(Boolean);
 }
 
 function legacyStartupProblems({ db, runtime }) {
@@ -772,7 +816,9 @@ for (const order of ['a', 'z']) {
     PASSWORD[migrator] = `mg_${randomBytes(12).toString('hex')}`;
     const run = (sql, role) => ok(sql, { database: db, role });
     const inspect = () =>
-      run(FINDINGS_SQL.replaceAll(":'runtime'", `'${runtime}'`))
+      run(
+        FINDINGS_SQL.replaceAll(":'runtime'", `'${runtime}'`).replaceAll(":'policy'", "'default'"),
+      )
         .split('\n')
         .filter(Boolean);
     const split = () => {
@@ -897,6 +943,19 @@ for (const order of ['a', 'z']) {
   });
 }
 
+/** runtime-allowlist.sql, read by PostgreSQL itself: `sql` over its rows. */
+function allowlistQuery(sql) {
+  return ok(`WITH allowlist AS (${allowlistSql}) ${sql}`, { database: 'postgres' });
+}
+
+/** A table `policy` allows exactly SELECT, INSERT on (an append-only one). */
+function appendOnlyTable(policy) {
+  const table = allowlistQuery(`SELECT object FROM allowlist WHERE policy = '${policy}'
+    AND class = 'relation' AND privileges = ARRAY['SELECT', 'INSERT'] ORDER BY object LIMIT 1`);
+  assert.ok(table, `${policy}: no append-only table`);
+  return table;
+}
+
 // Every configured service, including audit's separate path, in both bootstrap
 // orders. Synthetic roles/databases keep this safe beside the real CI services.
 const extensionModes = spawnSync(
@@ -929,7 +988,15 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
       PASSWORD[runtime] = `rt_${randomBytes(12).toString('hex')}`;
       PASSWORD[migrator] = `mg_${randomBytes(12).toString('hex')}`;
       const run = (sql, role) => ok(sql, { database: db, role });
-      const inspect = () => run(FINDINGS_SQL.replaceAll(":'runtime'", `'${runtime}'`));
+      // The service's own policy (#421 r1 F3b), for this throwaway pair.
+      const policy = policyFor(service, kind, mode);
+      const inspect = () =>
+        run(
+          FINDINGS_SQL.replaceAll(":'runtime'", `'${runtime}'`).replaceAll(
+            ":'policy'",
+            `'${policy}'`,
+          ),
+        );
       const doSplit = () => {
         const result = spawnSync(
           'bash',
@@ -939,7 +1006,7 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
             `
           source "${SPLIT}"
           declare -gA ROLE_PASSWORDS=([${migrator}]=${PASSWORD[migrator]})
-          ${mode === 'audit' ? `split_audit_database_privileges ${db} ${svc}` : `split_service_privileges ${svc} ${db} ${mode}`}
+          ${mode === 'audit' ? `split_audit_database_privileges ${db} ${svc}` : `split_service_privileges ${svc} ${db} ${mode} ${policy}`}
         `,
           ],
           { env: { ...process.env, POSTGRES_USER: process.env.PGUSER }, encoding: 'utf8' },
@@ -1029,16 +1096,22 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
           doSplit();
         }
         const schema = mode === 'audit' ? 'audit' : 'public';
+        // The application table: any table in default mode; else one the
+        // policy allows SELECT, INSERT on, granted as its migration does.
+        const app =
+          policy === 'default' ? 'app_probe' : appendOnlyTable(policy).replace(`${schema}.`, '');
         run(
-          `CREATE TABLE ${schema}.app_probe (id int PRIMARY KEY, value text);
-             INSERT INTO ${schema}.app_probe VALUES (1, 'preserved');`,
+          `CREATE TABLE ${schema}.${app} (id int PRIMARY KEY, value text);
+             INSERT INTO ${schema}.${app} VALUES (1, 'preserved');`,
           migrator,
         );
         if (mode !== 'default')
-          run(`GRANT SELECT, INSERT ON ${schema}.app_probe TO ${runtime}`, migrator);
-        // Explicit invoker grants are application permissions too (economic's
-        // commission locks and procurement's digest). A rerun must keep them,
-        // while PUBLIC, ungranted invokers, definers and trigger functions stay closed.
+          run(`GRANT SELECT, INSERT ON ${schema}.${app} TO ${runtime}`, migrator);
+        // An application's EXECUTE is runtime-function-grants.txt's (economic's
+        // commission locks and procurement's digest; the repair test below): an
+        // invoker granted outside it is reported and revoked like any right the
+        // allowlist does not name (#421 r1 F3b). PUBLIC, ungranted invokers,
+        // definers and trigger functions stay closed.
         run(
           `CREATE FUNCTION ${schema}.app_invoker_probe() RETURNS int LANGUAGE sql AS 'SELECT 42';
              CREATE FUNCTION ${schema}.app_ungranted_probe() RETURNS int LANGUAGE sql AS 'SELECT 42';
@@ -1056,6 +1129,10 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
         }
         // Drift must be detected WITHOUT a split rerun, including audit trigger functions.
         assert.match(inspect(), /reachable EXECUTE on definer\/trigger function/);
+        assert.match(
+          inspect(),
+          /EXECUTE on function .*app_invoker_probe\(\), not in runtime-function-grants\.txt/,
+        );
         run(`GRANT EXECUTE ON FUNCTION ${schema}.app_ungranted_probe() TO PUBLIC`, migrator);
         assert.match(inspect(), /PUBLIC EXECUTE on migrator function/);
         // One service per grants mode: default, migration and audit.
@@ -1093,11 +1170,11 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
           run(`GRANT ${reader} TO ${runtime} WITH INHERIT FALSE, SET FALSE;
              GRANT CREATE ON SCHEMA ${schema} TO ${reader};
              GRANT SELECT (id) ON ${schema}._prisma_migrations TO ${reader};
-             GRANT TRIGGER ON ${schema}.app_probe TO ${reader};`);
+             GRANT TRIGGER ON ${schema}.${app} TO ${reader};`);
           assert.equal(run(`SELECT pg_has_role('${runtime}', '${reader}', 'SET')`), 'f');
           assert.match(inspect(), /CREATE on schema/);
           assert.match(inspect(), /a right on .*_prisma_migrations/);
-          assert.match(inspect(), /TRIGGER on .*app_probe/);
+          assert.match(inspect(), new RegExp(`TRIGGER on .*${app}`));
           for (const predefined of [
             'pg_write_all_data',
             'pg_read_all_data',
@@ -1151,7 +1228,7 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
           // afterwards. Found without a rerun; gone after it, and from what is
           // created later too.
           run(`GRANT TEMPORARY ON DATABASE ${db} TO ${reader};
-             CREATE VIEW ${schema}.app_view AS SELECT id FROM ${schema}.app_probe;
+             CREATE VIEW ${schema}.app_view AS SELECT id FROM ${schema}.${app};
              CREATE SEQUENCE ${schema}.app_seq;
              GRANT TRIGGER ON ${schema}.app_view TO ${reader};
              GRANT UPDATE ON SEQUENCE ${schema}.app_seq TO ${reader};
@@ -1197,28 +1274,27 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
         for (let rerun = 0; rerun < 2; rerun += 1) {
           if (rerun) doSplit();
           assertExtension();
-          assert.equal(
-            run(`SELECT value FROM ${schema}.app_probe WHERE id=1`, runtime),
-            'preserved',
-          );
-          run(`INSERT INTO ${schema}.app_probe VALUES (${rerun + 2}, 'append')`, runtime);
+          assert.equal(run(`SELECT value FROM ${schema}.${app} WHERE id=1`, runtime), 'preserved');
+          run(`INSERT INTO ${schema}.${app} VALUES (${rerun + 2}, 'append')`, runtime);
           if (mode === 'default') {
             run(
-              `UPDATE ${schema}.app_probe SET value='writable' WHERE id=${rerun + 2};
-                 DELETE FROM ${schema}.app_probe WHERE id=${rerun + 2}`,
+              `UPDATE ${schema}.${app} SET value='writable' WHERE id=${rerun + 2};
+                 DELETE FROM ${schema}.${app} WHERE id=${rerun + 2}`,
               runtime,
             );
           } else {
             assert.equal(
-              run(
-                `SELECT has_table_privilege('${runtime}', '${schema}.app_probe', 'UPDATE,DELETE')`,
-              ),
+              run(`SELECT has_table_privilege('${runtime}', '${schema}.${app}', 'UPDATE,DELETE')`),
               'f',
             );
           }
-          assert.equal(run(`SELECT ${schema}.app_invoker_probe()`, runtime), '42');
           if (rerun) {
-            for (const fn of ['app_ungranted_probe', 'app_definer_probe', 'app_trigger_probe']) {
+            for (const fn of [
+              'app_invoker_probe',
+              'app_ungranted_probe',
+              'app_definer_probe',
+              'app_trigger_probe',
+            ]) {
               assert.equal(
                 run(`SELECT has_function_privilege('${runtime}', '${schema}.${fn}()', 'EXECUTE')`),
                 'f',
@@ -1236,6 +1312,171 @@ for (const [index, { service, kind }] of classifyServices().entries()) {
       }
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// #520 r1 R1 (#421 F3b): one allowlist. For each policy whose migrations grant
+// per table, a throwaway pair is split that way and given exactly the tables,
+// sequences and grants the policy names — what its migrations do; the check
+// then finds nothing, either way. Then every right the policy withholds is
+// planted on every table — through a role the runtime role is a member of and
+// through PUBLIC — with a column grant, a grant option, direct grants on a
+// partition, a sequence the policy does not name and default privileges
+// besides: the check reports each without a rerun, the split revokes them all,
+// and what the policy names is still held.
+// ---------------------------------------------------------------------------
+const WRITES = {
+  INSERT: 'INSERT INTO %t VALUES (7, 7)',
+  UPDATE: 'UPDATE %t SET v = v',
+  DELETE: 'DELETE FROM %t',
+};
+
+for (const policy of ['supplier', 'analytics', 'audit']) {
+  test(`${policy}: a right its allowlist withholds — membership, PUBLIC, column, grant option, partition, sequence, default — is reported, then revoked by the split; what it names survives (#520 r1 R1)`, () => {
+    const svc = `d149${policy.slice(0, 2)}${process.pid}`;
+    const runtime = `rasta_${svc}`;
+    const migrator = `${runtime}_migrator`;
+    const member = `${runtime}_g`;
+    const db = runtime;
+    const schema = policy === 'audit' ? 'audit' : 'public';
+    PASSWORD[runtime] = `rt_${randomBytes(12).toString('hex')}`;
+    PASSWORD[migrator] = `mg_${randomBytes(12).toString('hex')}`;
+    const run = (sql, role) => ok(sql, { database: db, role });
+    const inspect = () =>
+      run(
+        FINDINGS_SQL.replaceAll(":'runtime'", `'${runtime}'`).replaceAll(
+          ":'policy'",
+          `'${policy}'`,
+        ),
+      )
+        .split('\n')
+        .filter(Boolean);
+    const doSplit = () => {
+      const result = spawnSync(
+        'bash',
+        [
+          '-eu',
+          '-c',
+          `source "${SPLIT}"
+           declare -gA ROLE_PASSWORDS=([${migrator}]=${PASSWORD[migrator]})
+           ${policy === 'audit' ? `split_audit_database_privileges ${db} ${svc}` : `split_service_privileges ${svc} ${db} migration ${policy}`}`,
+        ],
+        { env: { ...process.env, POSTGRES_USER: process.env.PGUSER }, encoding: 'utf8' },
+      );
+      assert.equal(result.status, 0, result.stderr);
+    };
+    const rows =
+      allowlistQuery(`SELECT class || ' ' || object || ' ' || array_to_string(privileges, ',')
+        FROM allowlist WHERE policy = '${policy}' AND class IN ('relation', 'sequence') ORDER BY 1`)
+        .split('\n')
+        .map((line) => {
+          const [cls, object, privileges] = line.split(' ');
+          return { cls, object, privileges: privileges.split(',') };
+        });
+    const tables = rows.filter((row) => row.cls === 'relation');
+    try {
+      ok(`CREATE ROLE ${runtime} LOGIN PASSWORD '${PASSWORD[runtime]}'; CREATE ROLE ${member};`, {
+        database: 'postgres',
+      });
+      ok(`CREATE DATABASE ${db} TEMPLATE template0 OWNER ${runtime}`, { database: 'postgres' });
+      doSplit();
+      // The migrations: each named object, granted exactly what the policy names.
+      for (const { cls, object, privileges } of rows) {
+        const partitioned = object === 'audit.audit_event';
+        run(
+          cls === 'sequence'
+            ? `CREATE SEQUENCE ${object}; GRANT ${privileges} ON SEQUENCE ${object} TO ${runtime};`
+            : `CREATE TABLE ${object} (id int, v int)${partitioned ? ' PARTITION BY RANGE (id)' : ''};
+               ${partitioned ? `CREATE TABLE audit.audit_event_p0 PARTITION OF audit.audit_event FOR VALUES FROM (0) TO (1000);` : ''}
+               GRANT ${privileges} ON ${object} TO ${runtime};
+               INSERT INTO ${object} VALUES (1, 1);`,
+          migrator,
+        );
+      }
+      run(`CREATE SEQUENCE ${schema}.unnamed_seq`, migrator);
+      assert.deepEqual(inspect(), [], 'the policy and its "migrations" disagree');
+      // …and when they disagree the other way, a right the policy names that
+      // a migration did not grant, the check says so.
+      const [first] = tables;
+      run(`REVOKE SELECT ON ${first.object} FROM ${runtime}`, migrator);
+      assert.deepEqual(inspect(), [
+        `allowed but not held: SELECT on ${first.object} (runtime-allowlist.sql and the migrations disagree)`,
+      ]);
+      run(`GRANT SELECT ON ${first.object} TO ${runtime}`, migrator);
+
+      // Planted: everything the policy withholds, through every holder.
+      run(`GRANT ${member} TO ${runtime}`);
+      const planted = [];
+      const probes = [];
+      tables.forEach(({ object, privileges }, index) => {
+        for (const privilege of ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) {
+          if (privileges.includes(privilege)) continue;
+          run(`GRANT ${privilege} ON ${object} TO ${index % 2 ? member : 'PUBLIC'}`, migrator);
+          planted.push(`${privilege} on ${object}`);
+          if (WRITES[privilege]) probes.push({ object, privilege });
+        }
+        if (!privileges.includes('UPDATE')) {
+          run(`GRANT UPDATE (v) ON ${object} TO ${member}`, migrator);
+          planted.push(`UPDATE on ${object} (v)`);
+        }
+        run(`GRANT SELECT ON ${object} TO ${runtime} WITH GRANT OPTION`, migrator);
+        planted.push(`grant option: SELECT on ${object}`);
+      });
+      if (policy === 'audit') {
+        run(`GRANT SELECT, INSERT, UPDATE ON audit.audit_event_p0 TO ${runtime}`, migrator);
+        planted.push('SELECT on audit.audit_event_p0', 'UPDATE on audit.audit_event_p0');
+      }
+      run(
+        `GRANT USAGE, SELECT ON SEQUENCE ${schema}.unnamed_seq TO ${member};
+         ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} IN SCHEMA ${schema}
+           GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${member};
+         ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} IN SCHEMA ${schema}
+           GRANT USAGE ON SEQUENCES TO ${runtime};`,
+      );
+      planted.push(
+        `USAGE on sequence ${schema}.unnamed_seq`,
+        `SELECT on sequence ${schema}.unnamed_seq`,
+        `default INSERT on new tables of ${migrator} in schema ${schema}`,
+        `default USAGE on new sequences of ${migrator} in schema ${schema}`,
+      );
+      const found = inspect();
+      for (const expected of planted) {
+        assert.ok(found.includes(expected), `missing "${expected}" in:\n${found.join('\n')}`);
+      }
+      assert.ok(probes.length > 0, `${policy}: every table allows every write`);
+      // The review's trigger, concretely: the withheld write really works now…
+      const probe = probes[0];
+      const write = WRITES[probe.privilege].replace('%t', probe.object);
+      run(`BEGIN; ${write}; ROLLBACK;`, runtime);
+
+      doSplit();
+      // …and not after the split, which leaves exactly the policy.
+      assert.deepEqual(inspect(), []);
+      for (const { object, privilege } of probes) {
+        const refused = psql(WRITES[privilege].replace('%t', object), {
+          database: db,
+          role: runtime,
+        });
+        assert.match(refused.stderr, /permission denied/, `${privilege} on ${object}`);
+      }
+      for (const { cls, object, privileges } of rows) {
+        const holds = cls === 'sequence' ? 'has_sequence_privilege' : 'has_table_privilege';
+        assert.equal(
+          run(`SELECT ${holds}('${runtime}', '${object}', '${privileges}')`),
+          't',
+          object,
+        );
+      }
+      run(`CREATE TABLE ${schema}.made_later (id int)`, migrator);
+      assert.deepEqual(inspect(), [], 'a table made after the split inherits a right');
+    } finally {
+      psql(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`, { database: 'postgres' });
+      for (const role of [runtime, migrator, member]) {
+        const result = psql(`DROP ROLE IF EXISTS ${role}`, { database: 'postgres' });
+        assert.equal(result.status, 0, result.stderr);
+      }
+    }
+  });
 }
 
 /** The real service roles' attributes, password, memberships and settings: never touched here. */
@@ -1298,7 +1539,12 @@ for (const service of ['economic', 'procurement']) {
       .filter(([listed]) => listed === service)
       .map(([, signature, migration]) => [svc, signature, migration]);
     const signatures = list.map(([, signature]) => signature);
-    const inspect = () => run(findingsSql(list).replaceAll(":'runtime'", `'${runtime}'`));
+    const inspect = () =>
+      run(
+        findingsSql(list)
+          .replaceAll(":'runtime'", `'${runtime}'`)
+          .replaceAll(":'policy'", "'default'"),
+      );
     const acl = () =>
       run(`SELECT p.oid::regprocedure::text, p.proacl::text FROM pg_proc p
       WHERE p.oid IN (${signatures.map((sig) => `'${sig}'::regprocedure`).join(',')}) ORDER BY 1`);
