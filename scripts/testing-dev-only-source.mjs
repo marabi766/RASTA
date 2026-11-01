@@ -11,18 +11,46 @@
  *   which is what runs `.mjs`/`.cjs` and compiled output. A package's
  *   `exports` (and a file's `#imports`) are read too: every target of the
  *   matching entry, under every condition — `import` and `require`, not only
- *   the `types` TypeScript picks. The real path of each target is then
- *   classified. A relative, absolute, `file:` URL, `#imports`, `paths` alias
- *   or package specifier that resolves to no file is refused: what cannot be
- *   resolved cannot be checked. A package directory that exists is evidence
- *   of which package is named, never of a resolved subpath.
+ *   the `types` TypeScript picks. Of overlapping `*` patterns only the key
+ *   Node selects (the most specific) is read. A target is validated as Node
+ *   does BEFORE it is read as a URL: it must start with `./`, have no `.`,
+ *   `..` or `node_modules` segment (literal or percent-encoded) and fill a
+ *   `*` with none; an absolute path, a `file:` URL or any other target is
+ *   refused as Node's ERR_INVALID_PACKAGE_TARGET (an invalid one that Node
+ *   never reads — under a condition it does not take, or beside a valid one
+ *   in an array — names nothing). A valid one is a URL against its package's:
+ *   percent-escapes are decoded and a `?query` or `#fragment` dropped, as
+ *   Node does, before its real path is classified. A relative, absolute,
+ *   `file:` URL, `#imports`, `paths` alias or package specifier that resolves
+ *   to no file is refused: what cannot be resolved cannot be checked. A
+ *   package directory that exists is evidence of which package is named,
+ *   never of a resolved subpath. A type-only reference (`import type`,
+ *   `export type`, `export type *`, `import type x = require()`) is erased and
+ *   needs no runtime target; where it points is still checked.
+ * - **Executable branches.** The targets under `import`, `require`, `node`,
+ *   `default` and `module-sync` (and a `main`) are validated apart from
+ *   `types` and from other resolvers: each must exist, or be an output a
+ *   tsconfig that emits will write — the outputs TypeScript itself names for
+ *   its inputs (`ts.getOutputFileNames`: an `outDir` or none, a `rootDir`
+ *   given or inferred, `.mts` → `.mjs`, `.cts` → `.cjs`; `noEmit`, and
+ *   `emitDeclarationOnly` for JavaScript, prove nothing). A `main` that names
+ *   no file falls back as Node does, to the package root's `index.js`. A link
+ *   to nothing is no target. Packages
+ *   outside the repository or in pnpm's store are installed artifacts and
+ *   are not asked to prove their targets.
  * - **Reachability.** A production file may not reach packages/testing (or
  *   an installed copy of it) or a test-only file (`isTestOnlyPath`). Files
  *   that are neither — root `scripts/`, root jest helpers, a workspace's
  *   build directories, anything in a `node_modules` that pnpm's store did not
  *   put there — are not swept on their own, but once a production file
  *   reaches one it is production too and its own references are followed.
- *   Only pnpm's store (`node_modules/.pnpm/`) holds leaves.
+ *   Only pnpm's store (`node_modules/.pnpm/`) holds leaves. What a `require()`
+ *   reaches is code whatever its suffix: Node's CommonJS loader dispatches on
+ *   the longest registered extension, case-sensitively, and runs anything but
+ *   `.json` and `.node` as JavaScript, so `./x`, `./x.txt`, `./x.bin`, a text
+ *   `.wasm`, `./x.JSON` and a dotfile named `.json` or `.node` are followed,
+ *   classified by their real path; an extensionless file is code to `import`
+ *   as well.
  * - **Loaders.** `require`, `module.require` and `createRequire` bindings are
  *   traced within the module, whatever the key is spelled as (`{ 'createRequire': cr }`).
  *   A literal argument is resolved like an import; a non-literal one, a
@@ -32,7 +60,16 @@
  *   file (a shadowed or reassigned `__filename` is not this file), or another
  *   way to reach a loader (`process.mainModule`, `process.getBuiltinModule`,
  *   `Module._load`, `eval`, `Function` or a `.constructor` that yields it,
- *   `node:vm`, `worker_threads`, module-scope `arguments`) is refused.
+ *   `node:vm`, `worker_threads`, module-scope `arguments`) is refused. One
+ *   key policy serves member access and destructuring (`LOADER_KEYS`, with
+ *   `constructor`), a receiver is seen through parentheses, `as`, `!`,
+ *   `satisfies` and `<T>`, and computed access is refused on `globalThis`,
+ *   `global`, `window`, `self` and `process`, also as a reference to
+ *   themselves (`globalThis.self[k]`). A name that a scope around the
+ *   reference declares (`const window = rows`, a parameter, a block local, a
+ *   `catch` binding, a named function or class expression's own name, an
+ *   import) is not the global there; a declaration in another scope of the
+ *   file is not a shadow.
  * - **Sweep.** Every source file on disk under apps/, services/ and
  *   packages/ — through symbolic links to files and directories, workspaces
  *   included, each real directory entered once per path (no cycles) — except
@@ -46,13 +83,41 @@
  *   Node loads).
  * - A file, tsconfig or package.json that does not parse, or a link that
  *   resolves nowhere, is a problem.
+ *
+ * Process = trust boundary (D-087): this is a defence against accidental
+ * misuse, not against code written to evade it. Residual, not closed:
+ * - aliasing the global object (`const g = globalThis; g.eval(…)`), `this`
+ *   as the global in a sloppy function, and a declared `window`/`self` that
+ *   is bound to the global;
+ * - reflection (`Reflect.get(f, 'constructor')`) and `obj[key]` with a
+ *   non-literal key on an object that is not the global;
+ * - runtime-only conditions (`node --conditions=x`): every condition's target
+ *   is classified, but only the default ones are required to exist;
+ * - an `import` of a file with an unfamiliar suffix that a CommonJS-emitting
+ *   tsconfig compiles to `require` (TypeScript resolves known suffixes only);
+ *   a `.json` or `.node` that `require` loads is a leaf, as a native addon is
+ *   not source we can read;
+ * - an inline `import { type X } from 'x'` is a runtime reference (it is kept
+ *   by `verbatimModuleSyntax` and by Node's type stripping): only `import
+ *   type` and its siblings are erased;
+ * - a target Node would reject but never reads (under a condition it does not
+ *   take, `--conditions` aside) is ignored, and an `imports` target that is a
+ *   builtin or a bare name is a package to resolve, not a file; sloppy-mode
+ *   block-function hoisting does not shadow outside its block; `__filename`,
+ *   `require`, `module`, `eval`, `Function` are matched by name file-wide
+ *   (over-refusing, never exempting);
+ * - a package built by something other than the repository's tsconfigs
+ *   (its unbuilt target cannot be proved: fix the package, not this check);
+ * - a link target outside the repository is a leaf; `child_process` (unchanged
+ *   from #514).
  */
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createRequire, isBuiltin } from 'node:module';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
+import { isTestOnlyPath } from './test-only-path.mjs';
 import { REPO_ROOT, TESTING } from './testing-dev-only.mjs';
 
 const toPosix = (path) => path.split(sep).join('/');
@@ -67,28 +132,18 @@ const SWEPT = ['apps', 'services', 'packages'];
 /** What a workspace may leave unswept, at its own root only. */
 const BUILD_DIRS = new Set(['dist', 'coverage', '.next', 'node_modules']);
 
-/**
- * Whether a repository-relative path is test-only code that no image runs:
- * root tests/, packages/testing, a test/, __tests__/ or e2e/ directory, a
- * spec/test file, or a test runner's own files (`jest.config.js`,
- * `jest.setup.cjs`, `playwright.config.ts`). Everything else is production.
- */
-export function isTestOnlyPath(relPath) {
-  const rel = toPosix(relPath);
-  if (/^(tests|packages\/testing)\//.test(rel)) return true;
-  if (/(^|\/)(test|__tests__|e2e)\//.test(rel)) return true;
-  if (/(^|\/)(jest|playwright)\.[\w.-]+\.[cm]?[jt]s$/.test(rel)) return true;
-  return /\.(spec|test|int-spec|e2e-spec)\.[cm]?[jt]sx?$/.test(rel);
-}
+export { isTestOnlyPath };
 
 // ---------------------------------------------------------------------------
 // References and loaders in one file
 // ---------------------------------------------------------------------------
 
-const literal = (node) =>
-  node && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))
+const literal = (expression) => {
+  const node = expression && unwrapped(expression);
+  return node && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))
     ? node.text
     : undefined;
+};
 
 /** The name a property key spells when it is static (`a`, `'a'`, `['a']`), else undefined. */
 const keyName = (name) => {
@@ -124,8 +179,15 @@ const CODE_PROPERTIES = new Set(['eval', 'Function']);
 const GLOBAL_NAMES = new Set(['globalThis', 'global', 'window', 'self']);
 /** Bundler-injected loaders: nothing in production may use them. */
 const BUNDLER_LOADERS = new Set(['__non_webpack_require__', '__webpack_require__']);
-/** The global object, which holds `eval`, `Function` and `process` under any name. */
-const GLOBAL_OBJECTS = new Set(['process', 'globalThis', 'global']);
+/** Objects that hold `eval`, `Function` and the loaders, under any name: computed access on them is refused. */
+const GLOBAL_OBJECTS = new Set([...GLOBAL_NAMES, 'process']);
+/**
+ * One policy for a key that hands out a loader, whether it is read as a member
+ * (`x.constructor`, `x['constructor']`) or destructured (`{ constructor: C }`,
+ * nested, computed-literal, in an assignment). A member read may still be let
+ * through where it is only compared or its `.name` read.
+ */
+const LOADER_KEYS = new Set([...LOADER_PROPERTIES, ...CODE_PROPERTIES, 'constructor']);
 
 /** The expression inside parentheses and type-only wrappers (`(x as T)!` is `x`). */
 const unwrapped = (node) => {
@@ -264,11 +326,118 @@ const inFunctionWithArguments = (node) => {
   return false;
 };
 
+// ---------------------------------------------------------------------------
+// Lexical scope: which declaration an identifier means
+// ---------------------------------------------------------------------------
+
+/** Each name a binding name or pattern declares (`a`, `{ a, b: [c] }`). */
+function bindingNames(name, out) {
+  if (ts.isIdentifier(name)) out.add(name.text);
+  else {
+    for (const el of name.elements) {
+      if (ts.isBindingElement(el)) bindingNames(el.name, out);
+    }
+  }
+}
+
+/** The `var` declarations under `node`, function boundaries not crossed (they hoist to the function). */
+function hoistedVars(node, out) {
+  if (ts.isFunctionLike(node) || ts.isClassStaticBlockDeclaration(node)) return;
+  if (ts.isVariableDeclarationList(node) && !(node.flags & ts.NodeFlags.BlockScoped)) {
+    for (const d of node.declarations) {
+      if (!(d.flags & ts.NodeFlags.Ambient)) bindingNames(d.name, out);
+    }
+  }
+  ts.forEachChild(node, (child) => hoistedVars(child, out));
+}
+
+/** What a statement list declares in its own block: let, const, function, class, enum, namespace, import. */
+function blockDeclarations(statements, out) {
+  for (const st of statements) {
+    if (st.flags & ts.NodeFlags.Ambient) continue; // `declare const window: Window`: no runtime binding
+    if (ts.isVariableStatement(st)) {
+      if (st.declarationList.flags & ts.NodeFlags.BlockScoped) {
+        for (const d of st.declarationList.declarations) bindingNames(d.name, out);
+      }
+    } else if (
+      (ts.isFunctionDeclaration(st) ||
+        ts.isClassDeclaration(st) ||
+        ts.isEnumDeclaration(st) ||
+        ts.isModuleDeclaration(st) ||
+        ts.isImportEqualsDeclaration(st)) &&
+      st.name &&
+      ts.isIdentifier(st.name)
+    ) {
+      out.add(st.name.text);
+    } else if (ts.isImportDeclaration(st) && st.importClause) {
+      const { name, namedBindings } = st.importClause;
+      if (name) out.add(name.text);
+      if (namedBindings && ts.isNamespaceImport(namedBindings)) out.add(namedBindings.name.text);
+      else if (namedBindings) for (const el of namedBindings.elements) out.add(el.name.text);
+    }
+  }
+}
+
+const scopeNames = new WeakMap();
+/**
+ * The names `node` binds for what is inside it, or `undefined` when `node` is
+ * no scope: a module, block, `case` block, `for` head, `catch` clause,
+ * function (parameters, its `var`s, and a function expression's own name),
+ * class (its own name) or static block.
+ */
+function namesBoundBy(node) {
+  if (scopeNames.has(node)) return scopeNames.get(node);
+  const names = new Set();
+  let scope = true;
+  if (ts.isSourceFile(node) || ts.isModuleBlock(node)) {
+    blockDeclarations(node.statements, names);
+    hoistedVars(node, names);
+  } else if (ts.isBlock(node)) {
+    blockDeclarations(node.statements, names);
+  } else if (ts.isCaseBlock(node)) {
+    for (const clause of node.clauses) blockDeclarations(clause.statements, names);
+  } else if (ts.isForStatement(node) || ts.isForInStatement(node) || ts.isForOfStatement(node)) {
+    const head = node.initializer;
+    if (head && ts.isVariableDeclarationList(head) && head.flags & ts.NodeFlags.BlockScoped) {
+      for (const d of head.declarations) bindingNames(d.name, names);
+    }
+  } else if (ts.isCatchClause(node)) {
+    if (node.variableDeclaration) bindingNames(node.variableDeclaration.name, names);
+  } else if (ts.isClassStaticBlockDeclaration(node)) {
+    hoistedVars(node.body, names);
+  } else if (ts.isFunctionLike(node)) {
+    for (const p of node.parameters ?? []) bindingNames(p.name, names);
+    if (ts.isFunctionExpression(node) && node.name) names.add(node.name.text);
+    if (node.body) hoistedVars(node.body, names);
+  } else if (ts.isClassLike(node)) {
+    if (node.name) names.add(node.name.text);
+  } else {
+    scope = false;
+  }
+  const result = scope ? names : undefined;
+  scopeNames.set(node, result);
+  return result;
+}
+
+/**
+ * Whether identifier `id` means a declaration of the file (a parameter, a
+ * local, a catch binding, a named function or class expression's own name, an
+ * import) rather than a global of that name: the scopes around it, innermost
+ * first, are asked. A declaration elsewhere in the file binds nothing here.
+ * (Binding the global to a name is aliasing: residual.)
+ */
+function isShadowed(id) {
+  for (let n = id.parent; n; n = n.parent) {
+    if (namesBoundBy(n)?.has(id.text)) return true;
+  }
+  return false;
+}
+
 /**
  * Every module reference in `sourceFile` and every loader use that cannot
  * be traced to a literal. A reference is `{ specifier, kind, node }`, kind
  * `import` (static, in the file's own module format), `require`, `dynamic`
- * (`import()`), `type` (`import()` type), `url` (`new URL(…, import.meta.url)`),
+ * (`import()`), `type` (`import()` type, `import type`, `export type`), `url` (`new URL(…, import.meta.url)`),
  * `path` (`/// <reference path>`) or `types` (`/// <reference types>`).
  */
 export function moduleReferences(sourceFile) {
@@ -301,6 +470,20 @@ export function moduleReferences(sourceFile) {
   // then the requires they make.
   const createRequires = new Set();
   const loaders = new Set(['require']);
+  /**
+   * `expr` is the global object or `process`, seen through wrappers and through
+   * the global's own references to itself (`(globalThis as any).self`, `window['window']`).
+   */
+  const isGlobalObject = (expr) => {
+    const e = unwrapped(expr);
+    if (ts.isIdentifier(e)) return GLOBAL_OBJECTS.has(e.text) && !isShadowed(e);
+    const key = ts.isPropertyAccessExpression(e)
+      ? e.name.text
+      : ts.isElementAccessExpression(e)
+        ? literal(e.argumentExpression)
+        : undefined;
+    return key !== undefined && GLOBAL_OBJECTS.has(key) && isGlobalObject(e.expression);
+  };
   const collect = (node) => {
     if (
       ts.isIdentifier(node) &&
@@ -310,7 +493,11 @@ export function moduleReferences(sourceFile) {
     ) {
       ownFilename = false;
     }
-    if (ts.isImportDeclaration(node) && LOADER_MODULES.has(literal(node.moduleSpecifier))) {
+    if (
+      ts.isImportDeclaration(node) &&
+      !node.importClause?.isTypeOnly &&
+      LOADER_MODULES.has(literal(node.moduleSpecifier))
+    ) {
       const clause = node.importClause;
       if (clause?.name || (clause?.namedBindings && !ts.isNamedImports(clause.namedBindings))) {
         refuse(node, `only createRequire may be imported from ${literal(node.moduleSpecifier)}`);
@@ -400,12 +587,19 @@ export function moduleReferences(sourceFile) {
   const destructuredKey = (node, key) => {
     if (key === undefined) {
       refuse(node, 'destructuring by a computed key cannot be traced');
-    } else if (LOADER_PROPERTIES.has(key) || CODE_PROPERTIES.has(key)) {
+    } else if (LOADER_KEYS.has(key)) {
       refuse(node, `destructuring ${key}: a loader that cannot be traced`);
     }
   };
 
   const visit = (node) => {
+    if (
+      ts.isElementAccessExpression(node) &&
+      literal(node.argumentExpression) === undefined &&
+      isGlobalObject(node.expression)
+    ) {
+      refuse(node, `computed member access on ${unwrapped(node.expression).getText(sourceFile)}`);
+    }
     if (
       ts.isBindingElement(node) &&
       ts.isObjectBindingPattern(node.parent) &&
@@ -431,16 +625,21 @@ export function moduleReferences(sourceFile) {
     }
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
       const specifier = literal(node.moduleSpecifier);
+      // `import type`, `export type` and `export type *` are erased: they name
+      // a type, and no runtime target is needed (reachability still applies).
+      const typeOnly = ts.isImportDeclaration(node)
+        ? node.importClause?.isTypeOnly
+        : node.isTypeOnly;
       if (specifier === undefined) refuse(node, 'a non-literal module specifier');
-      else refer(specifier, 'import', node);
-      if (ts.isExportDeclaration(node) && LOADER_MODULES.has(specifier)) {
+      else refer(specifier, typeOnly ? 'type' : 'import', node);
+      if (ts.isExportDeclaration(node) && !node.isTypeOnly && LOADER_MODULES.has(specifier)) {
         refuse(node, `re-exporting ${specifier} hands a loader on untraced`);
       }
     } else if (ts.isExternalModuleReference(node)) {
       const specifier = literal(node.expression);
       if (specifier === undefined) refuse(node, 'a non-literal module specifier');
-      else refer(specifier, 'require', node);
-      if (LOADER_MODULES.has(specifier))
+      else refer(specifier, node.parent.isTypeOnly ? 'type' : 'require', node);
+      if (!node.parent.isTypeOnly && LOADER_MODULES.has(specifier))
         refuse(node, `only createRequire may be taken from ${specifier}`);
     } else if (ts.isImportTypeNode(node)) {
       const arg = node.argument;
@@ -483,8 +682,7 @@ export function moduleReferences(sourceFile) {
       CODE_PROPERTIES.has(
         ts.isPropertyAccessExpression(node) ? node.name.text : literal(node.argumentExpression),
       ) &&
-      ts.isIdentifier(unwrapped(node.expression)) &&
-      GLOBAL_NAMES.has(unwrapped(node.expression).text)
+      isGlobalObject(node.expression)
     ) {
       refuse(node, `${node.getText(sourceFile)}: a code loader reached through a property`);
     } else if (
@@ -539,12 +737,6 @@ export function moduleReferences(sourceFile) {
         } else if (!isComparison(p) && !ts.isTypeOfExpression(p)) {
           refuse(node, 'module used as a value: untraceable loader');
         }
-      } else if (GLOBAL_OBJECTS.has(name)) {
-        if (ts.isElementAccessExpression(p) && p.expression === node) {
-          if (literal(p.argumentExpression) === undefined) {
-            refuse(p, `computed member access on ${name}`);
-          }
-        }
       } else if (BUNDLER_LOADERS.has(name)) {
         refuse(node, `${name}: a bundler's loader cannot be checked`);
       } else if (name === 'eval') {
@@ -568,7 +760,13 @@ export function moduleReferences(sourceFile) {
     if (CODE_LOADER_MODULES.has(ref.specifier)) {
       refuse(ref.node, `${ref.specifier} loads code that cannot be checked`);
     }
-    if (LOADER_MODULES.has(ref.specifier) && ref.kind !== 'import' && ref.kind !== 'require') {
+    // A type (`import type`, `import('x').T`) hands out no loader.
+    if (
+      LOADER_MODULES.has(ref.specifier) &&
+      ref.kind !== 'import' &&
+      ref.kind !== 'require' &&
+      ref.kind !== 'type'
+    ) {
       refuse(ref.node, `${ref.specifier} through ${ref.kind}`);
     }
   }
@@ -619,6 +817,7 @@ function readConfig(path) {
     options: parsed.options,
     files: new Set(parsed.fileNames.map((f) => resolve(f))),
     cache: ts.createModuleResolutionCache(dirname(path), (f) => f, parsed.options),
+    parsed,
   };
 }
 
@@ -657,6 +856,34 @@ function manifest(dir) {
   return value;
 }
 
+/**
+ * The extension Node's CommonJS loader dispatches `file` on
+ * (`Module._findLongestRegisteredExtension`): the longest dotted tail of the
+ * name, a leading dot skipped, that is registered — `.json` and `.node`; the
+ * rest is `.js`. Case-sensitive: `x.JSON` is JavaScript; so is a dotfile named
+ * `.json` or `.node` (its `extname` is empty), and `x.json.txt` or `x.node.js`.
+ */
+const commonJsExtension = (file) => {
+  const name = basename(file);
+  for (let dot = name.indexOf('.', 1); dot !== -1; dot = name.indexOf('.', dot + 1)) {
+    const extension = name.slice(dot);
+    if (extension === '.json' || extension === '.node') return extension;
+  }
+  return '.js';
+};
+
+/**
+ * Whether the loader that `kind` of reference uses runs `file` as code though
+ * its suffix is not a source one. Node's CommonJS loader runs everything but
+ * `.json` and `.node` as JavaScript (`require('./x.txt')`, `./x.bin`, a text
+ * `.wasm`, `./x.JSON`, a dotfile `.json`, a `.cjs` link to an extensionless
+ * file: classified by the real path); either loader runs an extensionless
+ * file. Any other suffix under an `import` is an asset (the bundler's, or
+ * Node's refusal).
+ */
+const loadedAsCode = (file, kind) =>
+  kind === 'require' ? commonJsExtension(file) === '.js' : extname(file) === '';
+
 /** The directory of the package.json whose scope `file` is in. */
 function packageScope(file) {
   for (let dir = dirname(file); ; dir = dirname(dir)) {
@@ -680,6 +907,15 @@ const realpath = (path) => {
     return undefined;
   }
 };
+/** Something is at `path`, even a link to nothing. */
+const lstatExists = (path) => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
 const isFile = (path) => {
   try {
     return statSync(path).isFile();
@@ -700,44 +936,177 @@ const urlPath = (specifier, file) => {
   }
 };
 
-/** Every string an `exports` or `imports` entry maps to, under any condition. */
-function entryTargets(value, out = []) {
-  if (typeof value === 'string') out.push(value);
-  else if (value && typeof value === 'object') {
-    for (const v of Array.isArray(value) ? value : Object.values(value)) entryTargets(v, out);
+/**
+ * Conditions Node takes by default: the branches that run. Every other
+ * condition (`types`, `browser`, `development`, a custom one) is classified
+ * but is not evidence that the package can be loaded.
+ */
+const EXECUTABLE_CONDITIONS = new Set(['import', 'require', 'node', 'default', 'module-sync']);
+
+/** `target` as a URL against the directory `dir` (a package's own): the one native parse here. */
+const fileUrl = (target, dir) => new URL(target, pathToFileURL(join(dir, sep)));
+
+/**
+ * The file a subpath of a package without `exports` names from `dir`, as
+ * Node's ESM loader reads it: a URL against the package's own, so
+ * percent-escapes are decoded and a `?query` or `#fragment` dropped. One that
+ * encodes a separator is no file (fileURLToPath throws).
+ */
+function urlFile(dir, request) {
+  return fileURLToPath(fileUrl(request, dir));
+}
+
+/** Node's ERR_INVALID_PACKAGE_TARGET and ERR_INVALID_MODULE_SPECIFIER: no file is named. */
+class InvalidTarget extends Error {}
+
+/**
+ * Node's own pattern for a package-target segment that is `.`, `..` or
+ * `node_modules`, literal or percent-encoded, between separators
+ * (`invalidSegmentRegEx`, errors only: an empty segment is merely deprecated).
+ */
+const INVALID_SEGMENT =
+  /(^|\\|\/)((\.|%2e)(\.|%2e)?|(n|%6e|%4e)(o|%6f|%4f)(d|%64|%44)(e|%65|%45)(_|%5f)(m|%6d|%4d)(o|%6f|%4f)(d|%64|%44)(u|%75|%55)(l|%6c|%4c)(e|%65|%45)(s|%73|%53))(\\|\/|$)/i;
+
+/**
+ * One `exports`/`imports` target string, validated as Node's
+ * `resolvePackageTarget` does BEFORE any URL normalization, then read as a
+ * URL against the package's own (percent-escapes decoded, a `?query` or
+ * `#fragment` dropped: `./dist/%72untime.mjs?x` is `dist/runtime.mjs`):
+ *
+ * - it must start with `./` (an `imports` target may also be a bare package
+ *   name, `{ bare }`, but never `../`, an absolute path or a URL);
+ * - after `./`, no `.`, `..` or `node_modules` segment, literal or encoded;
+ * - a `*` pattern is filled with `subpath`, which has no such segment either.
+ *
+ * Node throws for any other target; so does this (InvalidTarget), where a
+ * file URL would normalize into a path that merely exists.
+ */
+function packageTarget(dir, target, { subpath, pattern, internal }) {
+  const fill = (text) => (pattern ? text.replaceAll('*', () => subpath) : text + subpath);
+  if (!target.startsWith('./')) {
+    if (
+      internal &&
+      !target.startsWith('../') &&
+      !target.startsWith('/') &&
+      (isBuiltin(target) || !/^[a-z][a-z\d+.-]*:/i.test(target))
+    ) {
+      return { bare: fill(target) };
+    }
+    throw new InvalidTarget(
+      `the package target ${target} must start with ./ (ERR_INVALID_PACKAGE_TARGET)`,
+    );
+  }
+  if (INVALID_SEGMENT.test(target.slice(2))) {
+    throw new InvalidTarget(
+      `the package target ${target} has a . or .. or node_modules segment (ERR_INVALID_PACKAGE_TARGET)`,
+    );
+  }
+  const resolved = fileUrl(target, dir);
+  if (subpath !== '' && INVALID_SEGMENT.test(subpath)) {
+    throw new InvalidTarget(
+      `the subpath ${subpath} has a . or .. or node_modules segment (ERR_INVALID_MODULE_SPECIFIER)`,
+    );
+  }
+  return { path: fileURLToPath(pattern ? fileUrl(fill(resolved.href), dir) : resolved) };
+}
+
+/**
+ * Every string an `exports` or `imports` entry maps to, under any condition,
+ * as `{ path | bare, executable }` (`resolveOne` validates and reads one
+ * string): `executable` while every condition on the way is one Node takes by
+ * default. An invalid target under such a condition is refused (it throws,
+ * as Node does); under another condition Node never reads it, and it names
+ * nothing. In an array Node takes the first target that is valid: an invalid
+ * one is skipped, and refused only when none is valid.
+ */
+function entryTargets(value, resolveOne, executable = true, out = []) {
+  if (typeof value === 'string') {
+    try {
+      out.push({ ...resolveOne(value), executable });
+    } catch (error) {
+      if (executable || !(error instanceof InvalidTarget)) throw error;
+    }
+  } else if (Array.isArray(value)) {
+    let invalid;
+    let valid = false;
+    for (const v of value) {
+      const before = out.length;
+      try {
+        entryTargets(v, resolveOne, executable, out);
+        valid = true;
+      } catch (error) {
+        if (!(error instanceof InvalidTarget)) throw error;
+        out.length = before;
+        invalid = error;
+      }
+    }
+    if (invalid && !valid) throw invalid;
+  } else if (value && typeof value === 'object') {
+    for (const [condition, v] of Object.entries(value)) {
+      entryTargets(v, resolveOne, executable && EXECUTABLE_CONDITIONS.has(condition), out);
+    }
   }
   return out;
 }
 
+/** Node's `PATTERN_KEY_COMPARE`: 1 when `b` is the more specific key (longer part before `*`, then longer key). */
+function patternKeyCompare(a, b) {
+  const [starA, starB] = [a.indexOf('*'), b.indexOf('*')];
+  const [baseA, baseB] = [starA === -1 ? a.length : starA + 1, starB === -1 ? b.length : starB + 1];
+  if (baseA > baseB) return -1;
+  if (baseB > baseA) return 1;
+  if (starA === -1) return 1;
+  if (starB === -1) return -1;
+  if (a.length > b.length) return -1;
+  if (b.length > a.length) return 1;
+  return 0;
+}
+
 /**
- * The targets `request` (`.`, `./sub`, `#x`) has in an `exports` or
- * `imports` map: every condition's (`import`, `require`, `node`, `default`,
- * `types`…), with a `*` pattern filled in. `undefined` when no key matches:
- * Node refuses such a request (ERR_PACKAGE_PATH_NOT_EXPORTED).
+ * The targets `request` (`.`, `./sub`, `#x`) has in an `exports` or `imports`
+ * map under `dir`, as `entryTargets` gives them: every condition's (`import`,
+ * `require`, `node`, `default`, `types`…), with a `*` pattern filled in. The
+ * key is chosen as Node does — an exact key, else the most specific pattern
+ * (`patternKeyCompare`) — and only its targets are read: a less specific
+ * pattern that Node never selects needs no target. (Folder mappings, a key
+ * ending `/`, are not supported since Node 17.) `undefined` when no key
+ * matches: Node refuses such a request (ERR_PACKAGE_PATH_NOT_EXPORTED).
  */
-function mapTargets(map, request) {
+function mapTargets(map, request, dir, internal) {
   if (map === undefined || map === null) return undefined;
   const sugar =
     typeof map !== 'object' ||
     Array.isArray(map) ||
     !Object.keys(map).some((k) => k.startsWith('.') || k.startsWith('#'));
   const entries = sugar ? { '.': map } : map;
-  if (Object.hasOwn(entries, request)) return entryTargets(entries[request]);
-  let found;
-  for (const [key, value] of Object.entries(entries)) {
-    const star = key.indexOf('*');
-    let fill;
-    if (star >= 0) {
-      const [head, tail] = [key.slice(0, star), key.slice(star + 1)];
-      if (request.length >= key.length && request.startsWith(head) && request.endsWith(tail)) {
-        fill = (t) => t.replaceAll('*', request.slice(head.length, request.length - tail.length));
+  let key;
+  let subpath = '';
+  let pattern = false;
+  if (Object.hasOwn(entries, request) && !request.includes('*') && !request.endsWith('/')) {
+    key = request;
+  } else {
+    let best = '';
+    for (const candidate of Object.keys(entries)) {
+      const star = candidate.indexOf('*');
+      if (star === -1 || !request.startsWith(candidate.slice(0, star))) continue;
+      const trailer = candidate.slice(star + 1);
+      if (
+        request.length >= candidate.length &&
+        request.endsWith(trailer) &&
+        patternKeyCompare(best, candidate) === 1 &&
+        candidate.lastIndexOf('*') === star
+      ) {
+        best = candidate;
+        subpath = request.slice(star, request.length - trailer.length);
       }
-    } else if (key.endsWith('/') && request.startsWith(key)) {
-      fill = (t) => t + request.slice(key.length);
     }
-    if (fill) (found ??= []).push(...entryTargets(value).map(fill));
+    if (!best) return undefined;
+    key = best;
+    pattern = true;
   }
-  return found;
+  return entryTargets(entries[key], (target) =>
+    packageTarget(dir, target, { subpath, pattern, internal }),
+  );
 }
 
 /**
@@ -745,19 +1114,27 @@ function mapTargets(map, request) {
  * Node reads it. `identity`: the installed package's directory — which
  * package is named, never proof that the request resolves. `targets`: the
  * files its `exports` (every condition), `imports`, main fields or plain
- * subpath name, whether they exist or not.
+ * subpath name, whether they exist or not, each `{ path, executable }`
+ * (`executable`: a branch that runs, not `types` or a condition Node does not
+ * take; `main` is probed like Node does), with `home`, the directory of the
+ * package.json it comes from.
  */
 function packageTargets(specifier, from, depth = 0) {
   const scope = packageScope(from);
   if (specifier.startsWith('#')) {
     const result = { identity: [], targets: [] };
-    for (const target of (scope && mapTargets(manifest(scope).imports, specifier)) ?? []) {
-      if (target.startsWith('./')) result.targets.push(resolve(scope, target));
-      else if (depth < 8 && !isBuiltin(target)) {
+    for (const { path, bare, executable } of (scope &&
+      mapTargets(manifest(scope).imports, specifier, scope, true)) ??
+      []) {
+      if (path !== undefined) {
+        result.targets.push({ path, executable, home: scope });
+      } else if (depth < 8 && !isBuiltin(bare)) {
         // `"#db": "some-package/sub"`: what that package maps it to.
-        const named = packageTargets(target, join(scope, 'package.json'), depth + 1);
+        const named = packageTargets(bare, join(scope, 'package.json'), depth + 1);
         result.identity.push(...named.identity);
-        result.targets.push(...named.targets);
+        for (const t of named.targets) {
+          result.targets.push({ ...t, executable: t.executable && executable });
+        }
       }
     }
     return result;
@@ -778,15 +1155,28 @@ function packageTargets(specifier, from, depth = 0) {
   if (!dir) return { identity: [], targets: [] };
   const pkg = manifest(dir) ?? {};
   const request = subpath ? `./${subpath}` : '.';
-  let named;
-  if (pkg.exports !== undefined) named = mapTargets(pkg.exports, request) ?? [];
-  else if (subpath) named = [request];
-  else {
-    named = [pkg.main, pkg.module, pkg.browser, pkg.types, pkg.typings].filter(
-      (field) => typeof field === 'string',
-    );
+  const targets = [];
+  if (pkg.exports !== undefined) {
+    for (const { path, executable } of mapTargets(pkg.exports, request, dir, false) ?? []) {
+      targets.push({ path, executable, home: dir });
+    }
+  } else if (subpath) {
+    // Node's CommonJS loader reads the path; its ESM loader reads a URL.
+    targets.push({ path: resolve(dir, request), executable: false, home: dir });
+    try {
+      targets.push({ path: urlFile(dir, request), executable: false, home: dir });
+    } catch {
+      // Not a URL path: the plain one above stands.
+    }
+  } else {
+    for (const field of ['main', 'module', 'browser', 'types', 'typings']) {
+      if (typeof pkg[field] === 'string') {
+        const path = resolve(dir, pkg[field]);
+        targets.push({ path, executable: field === 'main', probe: field === 'main', home: dir });
+      }
+    }
   }
-  return { identity: [dir], targets: named.map((t) => resolve(dir, t)) };
+  return { identity: [dir], targets };
 }
 
 // ---------------------------------------------------------------------------
@@ -999,27 +1389,78 @@ export function sourceProblems(root = REPO_ROOT) {
   };
 
   /**
+   * What a tsconfig that emits writes, by output path: every output TypeScript
+   * itself names (`ts.getOutputFileNames`) for each input it compiles, so the
+   * output directory, a `rootDir` given or inferred as the common source
+   * directory, no `outDir` at all (output beside the source), `.mts` → `.mjs`,
+   * `.tsx` → `.js`/`.jsx`, `allowJs` inputs and `.json` are TypeScript's own
+   * mapping, inverted, not guessed. `noEmit` writes nothing, and
+   * `emitDeclarationOnly` writes no JavaScript (`getOutputFileNames` knows).
+   */
+  const outputMemo = new Map();
+  const outputsOf = (c) => {
+    if (!outputMemo.has(c)) {
+      const outputs = new Map();
+      if (!c.options.noEmit) {
+        for (const input of c.parsed.fileNames) {
+          if (/\.d\.[cm]?ts$/.test(input)) continue;
+          for (const out of ts.getOutputFileNames(
+            c.parsed,
+            input,
+            !ts.sys.useCaseSensitiveFileNames,
+          )) {
+            if (!outputs.has(resolve(out))) outputs.set(resolve(out), resolve(input));
+          }
+        }
+      }
+      outputMemo.set(c, outputs);
+    }
+    return outputMemo.get(c);
+  };
+
+  /**
    * The source one of the repository's tsconfigs compiles to `target`, a
    * build output not on disk yet (`main: ./dist/index.js` before a build):
-   * what will run there is that source, compiled.
+   * what will run there is that source, compiled (`outputsOf`).
    */
   const builtFrom = (target) => {
     for (const c of configs.values()) {
-      const { outDir, rootDir } = c.options;
-      if (!outDir || target === outDir || !inside(outDir, target)) continue;
-      const base = join(rootDir ?? dirname(c.path), relative(outDir, target)).replace(
-        /(\.d)?\.[cm]?[jt]sx?$/,
-        '',
-      );
-      for (const ext of ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']) {
-        if (c.files.has(base + ext)) return base + ext;
-      }
+      const source = outputsOf(c).get(resolve(target));
+      if (source) return source;
     }
     return undefined;
   };
 
+  /**
+   * Whether an executable package target will exist: a file on disk, or an
+   * unbuilt output a tsconfig emits (`builtFrom`). A link to nothing is
+   * neither: a build would not make it a file. A `main` that names no file is
+   * probed the way Node does (`.js`, `.json`, `.node`, `/index.…`, then the
+   * package root's `index.js`, `index.json`, `index.node`).
+   */
+  const provable = ({ path, probe, home }) => {
+    if (isFile(path)) return true;
+    const candidates = probe
+      ? [
+          path,
+          ...['.js', '.json', '.node'].flatMap((e) => [path + e, join(path, `index${e}`)]),
+          // Then the package root's own index (Node's legacy main fallback).
+          ...['.js', '.json', '.node'].map((e) => join(home, `index${e}`)),
+        ]
+      : [path];
+    return candidates.some((c) => isFile(c) || (!lstatExists(c) && builtFrom(c) !== undefined));
+  };
+
+  /** An installed package (pnpm's store, or outside the repository): `classify` treats it as a leaf. */
+  const installed = (dir) => {
+    const real = realpath(dir) ?? dir;
+    return (
+      !inside(root, real) || /(^|\/)node_modules\/\.pnpm\//.test(toPosix(relative(root, real)))
+    );
+  };
+
   /** Where `file` sits: a problem, a leaf, or production code to follow. */
-  const classify = (target) => {
+  const classify = (target, kind) => {
     const real = realpath(target) ?? resolve(target);
     if (inside(testingDir, real) || /[/\\]@rasta[+/]testing([/@\\]|$)/.test(real)) {
       return { problem: 'packages/testing (the test signer)' };
@@ -1035,7 +1476,8 @@ export function sourceProblems(root = REPO_ROOT) {
     const dir = existsSync(real) && statSync(real).isDirectory();
     if (isTestOnlyPath(dir ? `${rel}/` : rel)) return { problem: `test-only ${rel}` };
     if (ws && !dir && verifiedPrismaRuntime(real, ws, generated)) return { leaf: true };
-    if (!SOURCE.test(real) || !existsSync(real)) return { leaf: true };
+    if (!existsSync(real) || dir) return { leaf: true };
+    if (!SOURCE.test(real) && !loadedAsCode(real, kind)) return { leaf: true };
     return { follow: real };
   };
 
@@ -1048,7 +1490,12 @@ export function sourceProblems(root = REPO_ROOT) {
   const resolveAll = (specifier, kind, file) => {
     const targets = new Set();
     const evidence = new Set();
-    const result = () => ({ targets: [...targets], evidence: [...evidence] });
+    const unproven = new Set();
+    const result = () => ({
+      targets: [...targets],
+      evidence: [...evidence],
+      unproven: [...unproven],
+    });
     if (kind === 'path') {
       // A reference that names no file compiles nothing in: the name is classified.
       targets.add(resolve(dirname(file), specifier));
@@ -1113,9 +1560,20 @@ export function sourceProblems(root = REPO_ROOT) {
         for (const dir of named.identity) evidence.add(dir);
         for (const target of named.targets) {
           // A target on disk resolves; so does an unbuilt one a tsconfig compiles from source.
-          const source = isFile(target) ? target : builtFrom(target);
+          const source = isFile(target.path) ? target.path : builtFrom(target.path);
           if (source) targets.add(source);
-          evidence.add(target);
+          evidence.add(target.path);
+          // Types, or another resolver, finding something is not proof that the
+          // runtime branch exists: each executable target stands on its own.
+          if (
+            target.executable &&
+            kind !== 'types' &&
+            kind !== 'type' &&
+            !installed(target.home) &&
+            !provable(target)
+          ) {
+            unproven.add(target.path);
+          }
         }
       }
     }
@@ -1143,7 +1601,14 @@ export function sourceProblems(root = REPO_ROOT) {
     checked += 1;
     const where = (pos) => `${chain(file)}:${pos.line + 1}`;
     const text = readFileSync(file, 'utf8');
-    const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+    // A file with a suffix TypeScript does not know (`require('./x.txt')`) is read as JavaScript.
+    const sourceFile = ts.createSourceFile(
+      file,
+      text,
+      ts.ScriptTarget.Latest,
+      true,
+      SOURCE.test(file) ? undefined : ts.ScriptKind.JS,
+    );
     const position = (node) =>
       sourceFile.getLineAndCharacterOfPosition(
         Math.min(node.getStart?.(sourceFile) ?? node.pos ?? 0, text.length),
@@ -1180,7 +1645,12 @@ export function sourceProblems(root = REPO_ROOT) {
       const found = new Set();
       try {
         for (const from of froms) {
-          const { targets, evidence } = resolveAll(specifier, kind, from);
+          const { targets, evidence, unproven } = resolveAll(specifier, kind, from);
+          for (const path of unproven) {
+            problems.push(
+              `${at} ${specifier}: the executable target ${toPosix(relative(root, path))} neither exists nor is built from a source a tsconfig emits`,
+            );
+          }
           // Each place it is loaded from must resolve.
           if (targets.length === 0) {
             const alias =
@@ -1197,7 +1667,7 @@ export function sourceProblems(root = REPO_ROOT) {
         continue;
       }
       for (const target of found) {
-        const verdict = classify(target);
+        const verdict = classify(target, kind);
         if (verdict.problem) {
           problems.push(`${at} ${specifier} reaches ${verdict.problem}`);
         } else if (verdict.follow && !seen.has(verdict.follow)) {
