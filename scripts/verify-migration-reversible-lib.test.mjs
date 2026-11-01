@@ -877,6 +877,28 @@ test('the migration gate refuses a shard list, job or aggregate that would verif
   }, /test:migration must end with/);
 });
 
+test('a shard, services or run that YAML builds as a mapping is a problem, not a crash', () => {
+  // `String({ toString: 'x' })` throws; the gate turns the value into text itself.
+  const odd = { toString: 'x' };
+  const gate = structuredClone(migrationGate());
+  const chain = gate.workflow.jobs[CHAIN_JOB];
+  chain.strategy.matrix.include[0].shard = odd;
+  chain.strategy.matrix.include[0].services = '';
+  chain.strategy.matrix.include[1].services = odd;
+  const guards = gate.workflow.jobs[GUARDS_JOB];
+  guards.steps.find((candidate) => candidate.run).run = odd;
+  let problems;
+  assert.doesNotThrow(() => (problems = gateProblems(gate)));
+  assert.ok(
+    problems.some((problem) => /which is not a service with migrations/.test(problem)),
+    problems.join('\n'),
+  );
+  assert.ok(
+    problems.some((problem) => /shard \{"toString":"x"\} lists no services/.test(problem)),
+    problems.join('\n'),
+  );
+});
+
 test('the gate accepts every shell that stops at a failed command, wherever it is set', () => {
   for (const shell of ['bash', 'bash -e {0}', 'bash --noprofile --norc -eo pipefail {0}']) {
     const gate = structuredClone(migrationGate());
