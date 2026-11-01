@@ -1,6 +1,6 @@
 import { Runtime, type Logger as TemporalLogger, type RuntimeOptions } from '@temporalio/worker';
-import { createLogger, scrubMessage, type Logger } from '@rasta/logging';
-import { scrubLogValue } from '@rasta/nest-common';
+import { createLogger, type Logger } from '@rasta/logging';
+import { foreignFailure } from './foreign-failure';
 import { SERVICE_NAME, type MarketplaceEnv } from '../config/env';
 
 type TemporalLevel = 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
@@ -20,8 +20,8 @@ const LEVELS = {
  * activity executor with the error — message, stack and `cause` chain — and
  * the default one writes that to stderr as it is. An upstream refusal that
  * quotes a DSN or a bearer token, or a response body of 200 kB, reached the
- * log whole (Codex on #296, F1). This one scrubs and caps the message, and
- * scrubs every metadata field (an `error` among them), before it is written.
+ * log whole (Codex on #296, F1). This one reports fixed categories and
+ * allowlisted error codes, discarding SDK text and metadata.
  * It never throws: the SDK calls it from inside activity and workflow
  * processing.
  */
@@ -29,19 +29,27 @@ export class TemporalRuntimeLogger implements TemporalLogger {
   constructor(private readonly base: Logger) {}
 
   log(level: TemporalLevel, message: string, meta?: Record<string | symbol, unknown>): void {
+    // Core and JS diagnostics can contain the endpoint in free text and arbitrary
+    // metadata. Substring scrubbing cannot recognize a plain username or key.
+    let failure = foreignFailure(undefined);
+    let core = false;
     try {
-      const { error, ...fields } =
-        meta === undefined
-          ? ({} as Record<string, unknown>)
-          : (scrubLogValue(meta) as Record<string, unknown>);
+      failure = foreignFailure(meta?.error);
+      core = meta?.sdkComponent === 'core';
+    } catch {
+      // Hostile metadata still gets a fixed diagnostic.
+    }
+    try {
+      const category =
+        message === 'Activity failed'
+          ? 'Activity failed'
+          : 'Temporal SDK diagnostic (TEMPORAL_ADDRESS)';
       this.base[LEVELS[level] ?? 'info'](
-        // The SDK names the failure `error`; pino serializes an Error (message,
-        // stack, cause chain) only under `err`, and would drop it otherwise.
-        { ...fields, ...(error === undefined ? {} : { err: error }), component: 'temporal' },
-        scrubMessage(String(message)),
+        { component: 'temporal', ...(core ? { sdkComponent: 'core' } : {}), failure },
+        category,
       );
     } catch {
-      // A log call must not fail the activity or the workflow task it describes.
+      // A log call must not fail the activity or workflow it describes.
     }
   }
 

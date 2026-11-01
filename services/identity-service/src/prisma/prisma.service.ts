@@ -1,3 +1,4 @@
+import { createSafePrismaClient } from '@rasta/nest-common';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { readUrl } from '@rasta/config';
 import { SERVICE_NAME } from '../config/env';
@@ -148,13 +149,17 @@ export class PrismaService implements OnModuleInit {
     const databaseUrl = pool
       ? separatePoolUrl(loadedUrl, pool.connections, pool.waitSeconds)
       : loadedUrl;
-    this.base = new PrismaClient({
-      datasources: { db: { url: databaseUrl } },
-      log: [
-        { emit: 'event', level: 'warn' },
-        { emit: 'event', level: 'error' },
-      ],
-    });
+    this.base = createSafePrismaClient(
+      () =>
+        new PrismaClient({
+          datasources: { db: { url: databaseUrl } },
+          log: [
+            { emit: 'event', level: 'warn' },
+            { emit: 'event', level: 'error' },
+          ],
+        }),
+      'DATABASE_URL_IDENTITY',
+    );
     this.client = this.buildClient();
   }
 

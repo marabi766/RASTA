@@ -1,5 +1,7 @@
 import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import Redis from 'ioredis';
+import { redisUrlSchema } from '@rasta/config';
+import { clientFailureCode } from '@rasta/nest-common';
 
 /**
  * Sliding-window rate limiting backed by Redis.
@@ -68,15 +70,51 @@ return {0, 0, retry_ms}
  * A Redis failure as it is logged: its class and code (`ECONNREFUSED`,
  * `ReplyError`), never its message, which may quote the host it dialled from
  * REDIS_URL or the server's answer (#385 r6, the configuration-disclosure
- * class). Shapes are checked: a name or code that is not one is `unknown`.
+ * class). Names and codes are allowlisted; every other value is `unknown`.
  */
 export function redisFailure(error: unknown): string {
-  const type =
-    error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
-      ? error.name
-      : 'unknown';
-  const code = (error as { code?: unknown } | null | undefined)?.code;
-  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? `${type} ${code}` : type;
+  try {
+    const names = new Set(['Error', 'ReplyError', 'AbortError', 'MaxRetriesPerRequestError']);
+    const name = (error as { name?: unknown } | null)?.name;
+    const type = typeof name === 'string' && names.has(name) ? name : 'unknown';
+    const code = clientFailureCode(error);
+    return code === 'unknown' ? type : `${type} ${code}`;
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * ioredis writes an INFO/NOPERM reply directly to console.warn in `_readyCheck`,
+ * bypassing error events. Reduce that reply before its callback reaches the SDK.
+ * Keep NOPERM's existing skip-ready-check decision; all other replies pass through.
+ */
+function protectRedisReadyCheck(redis: Redis): void {
+  const info = redis.info;
+  if (typeof info !== 'function') return;
+  redis.info = new Proxy(info, {
+    apply(target, receiver, args: unknown[]): unknown {
+      const callback = args.at(-1);
+      if (typeof callback === 'function') {
+        args[args.length - 1] = (error: unknown, result: unknown): unknown => {
+          let noperm = false;
+          try {
+            const message = (error as { message?: unknown } | null)?.message;
+            noperm = typeof message === 'string' && message.includes('NOPERM');
+          } catch {
+            // An unreadable failure is reported through the ordinary error-event boundary.
+          }
+          return callback(
+            noperm
+              ? new Error('NOPERM (REDIS_URL: Redis readiness diagnostic, code NOPERM)')
+              : error,
+            result,
+          );
+        };
+      }
+      return Reflect.apply(target, receiver, args);
+    },
+  });
 }
 
 @Injectable()
@@ -99,12 +137,20 @@ export class RateLimiter implements OnModuleDestroy {
      */
     private readonly failOpen = true,
   ) {
-    this.redis = new Redis(redisUrl, {
-      maxRetriesPerRequest: 2,
-      enableOfflineQueue: false,
-      lazyConnect: false,
-    });
+    if (!redisUrlSchema.safeParse(redisUrl).success) {
+      throw new Error('REDIS_URL: Redis configuration refused (code INVALID_ENDPOINT)');
+    }
+    try {
+      this.redis = new Redis(redisUrl, {
+        maxRetriesPerRequest: 2,
+        enableOfflineQueue: false,
+        lazyConnect: false,
+      });
+    } catch (error) {
+      throw new Error(`REDIS_URL: Redis construction failed (${redisFailure(error)})`);
+    }
 
+    protectRedisReadyCheck(this.redis);
     this.redis.on('error', (error) => {
       // Logged at warn, not error: a transient reconnect is expected and this
       // path is designed to degrade rather than fail.

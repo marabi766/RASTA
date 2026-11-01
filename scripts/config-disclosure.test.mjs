@@ -17,7 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -337,3 +337,237 @@ for (const [script, args, text] of [
     assert.doesNotMatch(run.output, /invalid|getaddrinfo/i, "kafkajs's own text");
   });
 }
+
+// #426 F1: retain real generated clients, extensions and CLI orchestration, replacing
+// only engine I/O. The first client can pass preflight; the second fails at connect.
+const PRISMA_IO_FAILURE = `
+const Module = require('node:module');
+const originalLoad = Module._load;
+let opened = 0;
+Module._load = function(id, ...args) {
+  const mod = originalLoad.call(this, id, ...args);
+  if (!/generated[\\/]prisma$/.test(id) || !mod.PrismaClient) return mod;
+  return { ...mod, PrismaClient: class {
+    constructor(options) {
+      if (process.env.DISCLOSURE_PHASE === 'construct') throw failure();
+      const client = new mod.PrismaClient(options);
+      const number = ++opened;
+      const phase = process.env.DISCLOSURE_PHASE;
+      function failure() {
+        return Object.assign(new Error('Authentication failed for ${USER} ${PASSWORD}'), {
+          name: 'PrismaClientInitializationError', errorCode: process.env.DISCLOSURE_CODE,
+          input: '${USER}', cause: new Error('${PASSWORD}'),
+        });
+      }
+      client._engine.start = async () => { throw failure(); };
+      client._engine.request = async () => { throw failure(); };
+      client._engine.transaction = async () => { throw failure(); };
+      client._engine.stop = async () => { if ((phase === 'disconnect' || phase === 'second-disconnect') && number > (phase === 'second-disconnect' ? 1 : 0)) throw failure(); };
+      if (phase.startsWith('second-') && number === 1) {
+        client.$queryRawUnsafe = async () => [{
+          role: 'rasta_asset', sessionRole: 'rasta_asset', database: 'asset',
+          superuser: false, createDb: false, createRole: false, bypassRls: false,
+          ownsDatabase: false, ownedSchemas: [], ownsRelationIn: [],
+          createOnDatabase: false, createOnSchemas: [], memberOf: [],
+        }];
+        process.stdout.write('probe: preflight client opened\\n');
+      } else if (phase.startsWith('second-')) {
+        process.stdout.write('probe: second client opened\\n');
+      }
+      if (phase === 'second-disconnect' && number === 2) {
+        client._engine.start = async () => undefined;
+        client.$queryRaw = async () => [{ n: 0 }];
+      }
+      return client;
+    }
+  }};
+};
+`;
+
+function prismaProbe(entry, phase, code = 'P1000', inline = false) {
+  const dir = mkdtempSync(join(tmpdir(), 'disclosure-prisma-'));
+  const hook = join(dir, 'engine.cjs');
+  writeFileSync(hook, PRISMA_IO_FAILURE);
+  try {
+    const run = spawnSync(
+      process.execPath,
+      ['--require', hook, ...(inline ? ['-e', entry] : [entry])],
+      {
+        cwd: ROOT,
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: cleanEnv({
+          DISCLOSURE_PHASE: phase,
+          DISCLOSURE_CODE: code,
+          NODE_ENV: 'test',
+          DATABASE_URL_ASSET: 'postgresql://rasta_asset:x@127.0.0.1:1/asset',
+          DATABASE_URL_ECONOMIC: 'postgresql://rasta_economic:x@127.0.0.1:1/economic',
+          KAFKA_BROKERS: 'localhost:9092',
+          KAFKA_ALLOW_PLAINTEXT: 'true',
+          OIDC_ISSUER_URL: 'http://localhost:8080',
+          OIDC_JWKS_URI: 'http://localhost:8080/keys',
+          OIDC_AUDIENCE: 'rasta-api',
+          INTERNAL_TOKEN_SECRET: 'x'.repeat(32),
+          FLEET_SERVICE_URL: 'http://localhost:3104',
+          MAINTENANCE_SERVICE_URL: 'http://localhost:3105',
+          DOCUMENT_SERVICE_URL: 'http://localhost:3114',
+          CONTRACT_SERVICE_URL: 'http://localhost:3111',
+        }),
+      },
+    );
+    assert.equal(run.error, undefined);
+    return { status: run.status, output: `${run.stdout ?? ''}${run.stderr ?? ''}` };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+for (const code of ['P1000', 'P1001', 'PRIVATE_SENTINEL_79']) {
+  test(`real asset drain-check CLI: ${code} on SECOND connection is withheld, exit stays 2`, () => {
+    const run = prismaProbe(
+      'services/asset-service/dist/insurance/drain-check.cli.js',
+      'second-connect',
+      code,
+    );
+    assert.equal(run.status, 2, run.output);
+    assert.match(run.output, /probe: preflight client opened/);
+    assert.match(run.output, /probe: second client opened/);
+    assert.match(run.output, /DATABASE_URL_ASSET: database connection failed/);
+    assertNoSentinel(run.output);
+  });
+}
+
+test('real economic backfill CLI: a LAZY connection failure after preflight stays exit 1', () => {
+  const run = prismaProbe(
+    'services/economic-service/dist/transaction/resolved-dispute-backfill.cli.js',
+    'second-connect',
+  );
+  assert.equal(run.status, 1, run.output);
+  assert.match(run.output, /probe: second client opened/);
+  assert.match(run.output, /DATABASE_URL_ECONOMIC: database connection failed/);
+  assertNoSentinel(run.output);
+});
+
+test('real asset drain-check CLI: cleanup failure is sanitized and stays exit 2', () => {
+  const run = prismaProbe(
+    'services/asset-service/dist/insurance/drain-check.cli.js',
+    'second-disconnect',
+  );
+  assert.equal(run.status, 2, run.output);
+  assert.match(run.output, /"drained":true/);
+  assert.match(run.output, /DATABASE_URL_ASSET: database connection failed/);
+  assertNoSentinel(run.output);
+});
+
+const DATABASE_SERVICES = [
+  'analytics',
+  'asset',
+  'audit',
+  'construction',
+  'contract',
+  'document',
+  'economic',
+  'fleet',
+  'identity',
+  'inventory',
+  'maintenance',
+  'marketplace',
+  'notification',
+  'organization',
+  'procurement',
+  'supplier',
+];
+for (const service of DATABASE_SERVICES) {
+  test(`${service} PrismaService: construction, connect, lazy, transaction and disconnect diagnostics`, () => {
+    const run = prismaProbe(
+      `
+      const { PrismaService } = require('./services/${service}-service/dist/prisma/prisma.service');
+      const { inspect } = require('node:util');
+      (async () => {
+        for (const phase of ['construct', 'connect', 'lazy', 'transaction', 'disconnect']) {
+          process.env.DISCLOSURE_PHASE = phase;
+          try {
+            const prisma = new PrismaService('postgresql://rasta_${service}:x@127.0.0.1:1/db');
+            if (phase === 'disconnect') {
+              if (prisma.stop) {
+                const result = await prisma.stop();
+                if (result.drained) { process.exitCode = 3; return; }
+                process.stdout.write('disconnect: DATABASE_URL_IDENTITY failed closed\\n');
+                continue;
+              }
+              await prisma.onModuleDestroy();
+            } else if (phase === 'lazy') {
+              await prisma.client.$queryRawUnsafe('SELECT 1');
+            } else if (phase === 'transaction') {
+              await prisma.client.$transaction(async () => undefined);
+            } else {
+              await prisma.onModuleInit();
+            }
+            process.stdout.write('unexpected success: ' + phase);
+            process.exitCode = 3;
+            return;
+          } catch (error) {
+            process.stdout.write(phase + ': ' + inspect(error, { depth: 10, showHidden: true }) + '\\n');
+          }
+        }
+        process.exitCode = 2;
+      })();
+    `,
+      'all',
+      'P1000',
+      true,
+    );
+    assert.equal(run.status, 2, run.output);
+    assert.match(run.output, new RegExp(`DATABASE_URL_${service.toUpperCase()}`));
+    for (const phase of ['construct', 'connect', 'lazy', 'transaction', 'disconnect']) {
+      assert.ok(run.output.includes(`${phase}:`), run.output);
+    }
+    assertNoSentinel(run.output);
+  });
+}
+
+test('real S3 constructor rejects SDK-disclosing endpoint before any SDK diagnostic', () => {
+  const run = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `
+    const { S3ObjectStorage } = require('./services/document-service/dist/storage/s3.storage');
+    try {
+      new S3ObjectStorage({ endpoint: 'data:${USER}:${PASSWORD}', region: 'local',
+        accessKeyId: '${USER}', secretAccessKey: '${PASSWORD}', bucket: 'b', forcePathStyle: true });
+    } catch (error) { console.error(require('node:util').inspect(error, { showHidden: true, depth: 10 })); process.exitCode = 2; }
+  `,
+    ],
+    { cwd: ROOT, encoding: 'utf8', timeout: 30_000 },
+  );
+  const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  assert.equal(run.status, 2, output);
+  assert.match(output, /S3_ENDPOINT/);
+  assertNoSentinel(output);
+});
+
+test('real Redis ready-check diagnostics never print an INFO/NOPERM reply', () => {
+  const run = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `
+    const { createRequire } = require('node:module');
+    const req = createRequire(require('node:path').resolve('services/api-gateway/package.json'));
+    const Redis = req('ioredis').default;
+    Redis.prototype.connect = async () => undefined;
+    Redis.prototype.info = function(callback) { callback(new Error('NOPERM ${USER} ${PASSWORD}')); return Promise.resolve(); };
+    const { RateLimiter } = require('./services/api-gateway/dist/proxy/rate-limiter');
+    const limiter = new RateLimiter('redis://localhost:6379', 'rasta');
+    limiter.redis._readyCheck((error) => { if (error) process.exitCode = 2; });
+  `,
+    ],
+    { cwd: ROOT, encoding: 'utf8', timeout: 30_000 },
+  );
+  const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  assert.equal(run.error, undefined);
+  assert.equal(run.status, 0, output);
+  assert.match(output, /REDIS_URL: Redis readiness diagnostic, code NOPERM/);
+  assertNoSentinel(output);
+});

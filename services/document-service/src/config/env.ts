@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { parsableUrl } from '@rasta/contracts';
 import {
   authEnvSchema,
   baseEnvSchema,
@@ -8,6 +7,7 @@ import {
   fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
+  serviceUrlSchema,
   outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { documentOperationBudgets } from './operation-budgets';
@@ -66,7 +66,7 @@ export const documentEnvSchema = baseEnvSchema
 
     // ---- Object storage (ADR-014) ----------------------------------------
 
-    S3_ENDPOINT: z.string().check(parsableUrl()).prefault('http://localhost:9000'),
+    S3_ENDPOINT: serviceUrlSchema.prefault('http://localhost:9000'),
     S3_REGION: z.string().min(1).prefault('us-east-1'),
     S3_ACCESS_KEY: z.string().min(1),
     S3_SECRET_KEY: z.string().min(1),

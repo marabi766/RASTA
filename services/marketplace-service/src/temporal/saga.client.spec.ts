@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import { Logger } from '@nestjs/common';
 import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { foreignFailure } from './foreign-failure';
@@ -353,7 +354,7 @@ describe('what is logged about Temporal (#385 r6)', () => {
     expect(logged(log)).not.toMatch(SENTINEL);
   });
 
-  it('foreignFailure keeps a class and a well-formed code, nothing else', () => {
+  it('foreignFailure keeps only allowlisted classes and codes', () => {
     expect(foreignFailure(Object.assign(new Error(ADDRESS), { code: 'UNAVAILABLE' }))).toEqual({
       type: 'Error',
       code: 'UNAVAILABLE',
@@ -365,4 +366,29 @@ describe('what is logged about Temporal (#385 r6)', () => {
     expect(foreignFailure(renamed)).toEqual({ type: 'unknown' });
     expect(foreignFailure(ADDRESS)).toEqual({ type: 'unknown' });
   });
+});
+
+test('foreignFailure rejects identifier-shaped secrets in names and codes', () => {
+  const failure = Object.assign(new Error('private-sentinel-79'), {
+    name: 'PrivateSentinel79',
+    code: 'JZ97_ANOTHER_SECRET',
+  });
+  expect(JSON.stringify(foreignFailure(failure))).not.toMatch(/sentinel|JZ97|another.secret/i);
+});
+
+test('Temporal close failures expose fixed diagnostics only', async () => {
+  const { close } = stubTemporal();
+  close.mockRejectedValue(
+    Object.assign(new Error('private-sentinel-79 JZ97-another-secret'), {
+      name: 'PrivateSentinel79',
+      code: 'JZ97_ANOTHER_SECRET',
+      cause: new Error('private-sentinel-79'),
+    }),
+  );
+  const client = new OrderSagaClient(env());
+  await client.start('ORD_CLOSE');
+  const failure: unknown = await client.onModuleDestroy().catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(Error);
+  expect(String(failure)).toContain('TEMPORAL_ADDRESS: Temporal close failed');
+  expect(inspect(failure, { showHidden: true, depth: 10 })).not.toMatch(/sentinel|JZ97/i);
 });
