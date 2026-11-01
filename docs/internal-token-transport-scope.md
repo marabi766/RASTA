@@ -85,16 +85,27 @@ signal is aborted on every exit. The caller leaving can be passed as `cancel`
 in `services/*` and `packages/nest-common` goes through it.
 
 The lint rule `internal/exchange-deadline` (`scripts/exchange-deadline-rule.mjs`,
-same workspace paths as the transport rule) enforces the boundary instead of
-following a caller's control flow: a `setTimeout` whose callback aborts something
-(inline, through a local name, a destructured `abort`, `controller.abort` or its
-`.bind`) is an error everywhere except `exchange-deadline.ts` itself. The earlier
-rule matched `clearTimeout` and body reads by source order, so it missed
-`try { return response.text(); } finally { clearTimeout(t); }` and computed or
-aliased readers, and it flagged an unrelated `clearTimeout`. `AbortSignal.timeout(…)`
-has no timer to clear and stays allowed; a callback imported from another module,
-and a deadline built without an abort (a `Promise.race` against a timer), cannot be
-seen from one file and are not covered.
+same workspace paths as the transport rule, plus `apps/web`) enforces the boundary
+by asking two questions about the **module**, not by following a name through the
+code (#507 r2 F2: a callback wrapper, an alias, an assignment, an object method, a
+renamed destructured `abort`, a timer alias, `.call` / `.apply` / `.bind`, an
+imported timer and a computed method name each walked round the version that
+followed the timer's callback). Outside `exchange-deadline.ts` itself:
+
+- **A** — any reference to the global `AbortController` (`new`, an alias,
+  `globalThis.` member, import, type annotation) is an error unless the file is in
+  `ABORT_OWNERS`;
+- **B** — a module that references `setTimeout` in any form and also mentions an
+  `abort` member or binding anywhere (constant-folded computed names included) is an
+  error unless the file is in `TIMER_ABORT_MODULES`.
+
+Both lists are exact files with a reason, held by tests to an existing file that
+still needs the entry. `AbortSignal.timeout(…)` has no timer to clear and stays
+allowed; so do timers in a module with no abort (outbox, consumer, shutdown,
+readiness) and shutdown/client-close controllers with no timer. Not covered: an abort
+method whose name is read from data in a module that was handed the controller, and a
+timer and a controller that both come from other modules into one that owns neither
+(the module that owns either is the one refused).
 
 The two boundaries compose (merge of #502/#507 into PR #492): `internalGet` sends on the
 `InternalHttpClient` sender, which is `internalFetch` with redirects refused, inside
