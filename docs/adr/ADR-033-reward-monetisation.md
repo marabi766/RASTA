@@ -135,3 +135,76 @@ Journal پاداش بدهکار `EXP-PLATFORM-REWARD` می‌زند — یک ح�
   تصویب» دارد.
 - `grep -rn "creditPerPointMinor" services/economic-service/prisma/seed.ts` باید خالی
   باشد.
+
+## Correctness amendment (D-080, task 1201)
+
+Rule applicability uses the owner's confirmed fact time and immutable status
+transitions written with rule creation/PATCH, independently of outbox retention.
+A delayed fact from an ACTIVE interval remains eligible after deactivation or
+closing; saved evaluations resume their recorded rule IDs. Initially INACTIVE
+rules, activation and reactivation each retain their own intervals. Usage still
+uses fleet's server arrival `recordedAt`, as ADR-073 § 3 (11) requires pending
+Q-153; this amendment does not use the reported usage period.
+
+The migration records the best available historical evidence: ACTIVE from the
+earlier of `validFrom` and `createdAt`, and, for a currently INACTIVE rule,
+INACTIVE from its last `updatedAt`. Purged transitions and the original status
+cannot be reconstructed. New initially INACTIVE rules record INACTIVE directly.
+A future `validFrom` still gates applicability; it does not schedule a later
+status activation that could undo an intervening deactivation.
+
+Reward periods use UTC (AGENTS.md § 3). Weekly keys use the ISO Thursday's year.
+Weekly caps count occurrence times under the subject balance lock. Old keys stay
+unchanged. Existing owner-confirmed evaluation timestamps supply legacy
+occurrence evidence; `grantedAt` is never a substitute. An unknown occurrence
+counts conservatively in every week its legacy key could denote, including the
+two different weeks formerly conflated as `2018-W01`. Already exceeded caps admit
+no new grant. Each grant remains financially atomic; evaluation records and the
+separate processed marker retain the existing partial-success/replay design.
+
+Only the reward's `(rule_id, source_reference)` uniqueness conflict can mean
+"duplicate", and only after checking tenant, subject, trigger and source identity.
+A wallet uniqueness race escapes as a retryable failure, preserving redelivery.
+
+Numeric fact types exposed by `RewardTriggerConsumer.confirmedFact`:
+
+| Field                                                                                               | Type                              | Comparison                            |
+| --------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------- |
+| `totalCostMinor`                                                                                    | Integer minor-unit string         | Bigint                                |
+| `downtimeMinutes`                                                                                   | Nullable safe integer             | Bigint                                |
+| `hours`, `kilometres`, `hourMeter`, `odometer`                                                      | Nullable exact decimal strings    | Bigint coefficient with decimal scale |
+| `usageRecordId`, `requestId`, `assetId`, `organizationId`, `driverId`, `assignmentId`, `scheduleId` | Identifier strings, some nullable | Literal equality/presence             |
+| `periodStart`, `periodEnd`, `completedAt`                                                           | Timestamp strings                 | Literal equality/presence             |
+| `source`, `type`, `currency`                                                                        | Closed textual values             | Literal equality/presence             |
+
+| Operator                 | Operand type                                                       | Behaviour                                                     |
+| ------------------------ | ------------------------------------------------------------------ | ------------------------------------------------------------- |
+| `gt`, `gte`, `lt`, `lte` | Plain decimal strings (safe integer JSON numbers in legacy rules)  | Exact numeric ordering; integer facts require integer grammar |
+| `eq`, `neq`              | Numeric fact, or legacy safe integer JSON number operand           | Exact numeric equality; `7.50` equals `7.5`                   |
+| `eq`, `neq`              | Textual fact and string/boolean operand                            | Existing string equality                                      |
+| Numeric comparisons      | Malformed, unsafe, fractional JSON number, null or missing operand | False, including `neq`                                        |
+| `eq`, `neq`              | Null or missing actual/expected                                    | False                                                         |
+| `present`, `absent`      | Any field                                                          | Existing non-null / null-or-missing check                     |
+| `all`, `any`             | Nested predicates                                                  | Existing every/some semantics                                 |
+
+Exact decimal strings permit a sign, whole and/or fractional digits, no exponent,
+hex or whitespace, with at most 256 characters. New numeric operands must use strings. All JSON number operands are refused at
+creation: even a fractional token can round to a safe integer during JSON parsing
+(`9007199254740991.1`), so its original precision cannot be proven by the DTO.
+Legacy safe integer operands still compare exactly. This is the conservative
+fail-closed choice for F5, without adding a raw JSON parsing subsystem. Numeric equality on typed facts is canonicalized before
+idempotency hashing; textual equality keeps its literal spelling.
+
+Regression evidence: `correctness.spec.ts`, `reward-correctness.int-spec.ts`,
+`reward-status-migration.int-spec.ts`, and the numeric/textual retry cases in
+`reward-rule-canonical.int-spec.ts`. Rule responses retain their explicit API
+mapping and exclude the internal history relation. Versionless PATCH and
+unpaginated rule listing remain follow-ups from #480.
+
+Rollout requires draining old reward consumers and rule writers before migration
+and switching to the new code: old binaries do not enforce occurrence-based caps
+or append status history. Schema rollback refuses while any status history exists, preserving applicability
+evidence, like the other append-only configuration histories. Against an empty
+history it removes the additions and migration record; existing grants, journals
+and stored keys remain. A code rollback can leave this additive schema intact;
+it must keep old reward consumers/rule writers drained.

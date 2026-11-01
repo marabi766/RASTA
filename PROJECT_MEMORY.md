@@ -2323,6 +2323,16 @@ HTTP → maintenance-service
   دلیلش در ADR-031
 - **صفر نرخ کارمزد یا نرخ تبدیل پاداش در کد یا Seed** — `grep` اجرا شد
 
+Task 1201 (D-080) adds append-only `RewardRuleStatusHistory`, written with rule
+creation/PATCH, and nullable `Reward.occurredAt` for occurrence-based UTC weekly
+caps. Delayed facts use historical status; saved evaluations retain their rule
+IDs. Usage keeps fleet's arrival `recordedAt` pending Q-153. Legacy status backfill
+is best available evidence (ACTIVE from validFrom/createdAt; current INACTIVE
+from updatedAt); unknown legacy occurrence is counted conservatively, never
+inferred from delivery time. Exact predicates and wallet-race retry classification
+are documented in ADR-033's correctness amendment. Validation evidence belongs
+to task 1201's PR STATUS; this paragraph makes no new live-verification claim.
+
 ### پنج ماژول ADR-013، به‌علاوه دو
 
 `wallet` · `ledger` · `payment` · `commission` · `reward` — دقیقاً همان‌طور که
