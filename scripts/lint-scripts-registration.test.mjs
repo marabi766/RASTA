@@ -63,7 +63,9 @@ import { parse as parseYaml } from 'yaml';
  *    starts with `./`, or starts with a letter, digit, `_` or `@` (so no path is
  *    or can expand to an option).
  *    pnpm-workspace.yaml is parsed with the `yaml` package and package.json
- *    structurally; override selectors are normalized (`parent>foo@1` → `foo`).
+ *    structurally; an override selector is read with pnpm's own grammar
+ *    (`[parent>]name[@range]`, `parseOverrideSelector`) and one that cannot be
+ *    read to exactly one package name, over a local source, is a problem.
  *
  *  WHAT THIS GUARD DOES NOT CLAIM (decision D-094, 2026-11-01). It protects the lint
  *  cache against ACCIDENTAL drift; deliberately obfuscated code is caught by PR
@@ -77,7 +79,8 @@ import { parse as parseYaml } from 'yaml';
  *     `process.loadEnvFile`, or an allowed `typescript` import followed by
  *     `ts.sys.readFile`. A data file so read is not a hashed input.
  *   - pnpm dependency specs the structural walk does not classify: unprefixed
- *     relative paths (`./x`, `../x`) and any other exotic spelling of a local source.
+ *     relative paths outside a dependency/override map, and any other exotic
+ *     spelling of a local source.
  *   - Anything else a reviewer would recognise as deliberate evasion.
  *
  * Mutants run against the real repository through turbo too (a mutated copy of
@@ -339,15 +342,54 @@ const analyze = (path, source) => {
 };
 
 /**
- * The package an override selector names: `parent>foo@1` and `foo@^1` both mean `foo`
- * (a dependency key is already a bare name, which this leaves alone).
+ * pnpm's own selector grammar (`config/parse-overrides` and `resolving/parse-wanted-dependency`
+ * in the bundled pnpm 11.22.0, which is not an importable dependency, so this mirrors it):
+ *
+ *   selector := [ parent '>' ] name [ '@' range ]
+ *
+ * The parent/child separator is the FIRST `>` whose previous character is not a space,
+ * `|` or `@` (so the `>` of `plugin@>=1` and of `plugin@^1 || >=2` is part of the range).
+ * Each side is cut at its first `@` after position 0 (a scope's `@` is position 0); the
+ * range is never parsed, only cut off, so it may hold any character, newlines included.
+ * A name is a valid (old-style) npm package name: `name` or `@scope/name`, each part
+ * unchanged by `encodeURIComponent` and not starting with `.` or `_`.
+ *
+ * Returns the package the override applies to, or undefined when the selector does not
+ * name exactly one package (pnpm itself rejects those with INVALID_SELECTOR). A caller
+ * that sees a local source under such a key must fail closed.
  */
-const selectorName = (key) =>
-  key
-    .split('>')
-    .pop()
-    .trim()
-    .replace(/^(@?[^@]+)@.*$/, '$1');
+const SELECTOR_SEPARATOR = /[^ |@]>/;
+const selectorPackage = (side) => {
+  const at = side.indexOf('@', 1);
+  const name = at === -1 ? side : side.slice(0, at);
+  const m = /^(?:@([^/]+)\/)?([^/]+)$/.exec(name);
+  if (m === null) return undefined;
+  const parts = m[1] === undefined ? [m[2]] : [m[1], m[2]];
+  const ok = parts.every((part) => part === encodeURIComponent(part) && !/^[._]/.test(part));
+  return ok ? name : undefined;
+};
+export const parseOverrideSelector = (key) => {
+  if (typeof key !== 'string') return undefined;
+  const separator = SELECTOR_SEPARATOR.exec(key);
+  if (separator === null) return selectorPackage(key);
+  const parent = key.slice(0, separator.index + 1);
+  const child = key.slice(separator.index + 2);
+  return selectorPackage(parent) === undefined ? undefined : selectorPackage(child);
+};
+
+/** A dependency spec that points at code on disk or in the workspace, whatever the key. */
+const LOCAL_PREFIX = /^(?:workspace|link|file|portal):/;
+/** An unprefixed path spec; only read as one inside a map of dependencies or overrides. */
+const LOCAL_PATH = /^(?:\.{1,2}(?:[/\\]|$)|[/\\]|~[/\\])/;
+/** Maps whose values are dependency specs (a key is a package, a value a spec). */
+const SPEC_MAPS = new Set([
+  'dependencies',
+  'devDependencies',
+  'optionalDependencies',
+  'peerDependencies',
+  'overrides',
+  'resolutions',
+]);
 
 /**
  * Package names and aliases that resolve to code in this repository (or on disk):
@@ -358,16 +400,24 @@ const selectorName = (key) =>
 export const localPackageNames = (tracked, read, problems) => {
   const names = new Set();
   const aliases = [];
-  const walk = (value, rawKey) => {
-    const key = rawKey === undefined ? undefined : selectorName(rawKey);
+  const unnamed = (file, rawKey, value) =>
+    `${file} maps the selector ${JSON.stringify(rawKey)} to the local source ${JSON.stringify(value)}, but the ` +
+    'selector does not name exactly one package (pnpm reads `[parent>]name[@range]`), so the guard cannot tell ' +
+    'which import it redirects to workspace code. Use a plain package name as the key.';
+  const walk = (file, value, rawKey, map) => {
+    const key = rawKey === undefined ? undefined : parseOverrideSelector(rawKey);
     if (typeof value === 'string') {
-      if (key !== undefined && /^(?:workspace|link|file|portal):/.test(value)) names.add(key);
+      const local = LOCAL_PREFIX.test(value) || (SPEC_MAPS.has(map) && LOCAL_PATH.test(value));
+      if (local && rawKey !== undefined) {
+        if (key === undefined) problems.push(unnamed(file, rawKey, value));
+        else names.add(key);
+      }
       const target = /^workspace:((?:@[^/@]+\/)?[^/@]+)@/.exec(value);
       if (target) names.add(target[1]);
       const npm = /^npm:((?:@[^/@]+\/)?[^/@]+)(?:@|$)/.exec(value);
-      if (npm && key !== undefined) aliases.push([key, npm[1]]);
+      if (npm && rawKey !== undefined) aliases.push({ key, rawKey, file, value, target: npm[1] });
     } else if (value !== null && typeof value === 'object') {
-      for (const [k, v] of Object.entries(value)) walk(v, k);
+      for (const [k, v] of Object.entries(value)) walk(file, v, k, rawKey);
     }
   };
   for (const file of tracked) {
@@ -375,7 +425,7 @@ export const localPackageNames = (tracked, read, problems) => {
       try {
         const pkg = JSON.parse(read(file));
         if (typeof pkg.name === 'string') names.add(pkg.name);
-        walk(pkg);
+        walk(file, pkg);
       } catch (error) {
         problems.push(
           `${file} is not readable JSON (${error.message}); its lint task cannot be checked.`,
@@ -383,7 +433,7 @@ export const localPackageNames = (tracked, read, problems) => {
       }
     } else if (/(^|\/)pnpm-workspace\.ya?ml$/.test(file)) {
       try {
-        walk(parseYaml(String(read(file) ?? '')));
+        walk(file, parseYaml(String(read(file) ?? '')));
       } catch (error) {
         problems.push(
           `${file} is not readable YAML (${error.message}); its overrides and aliases cannot be checked.`,
@@ -391,7 +441,11 @@ export const localPackageNames = (tracked, read, problems) => {
       }
     }
   }
-  for (const [alias, target] of aliases) if (names.has(target)) names.add(alias);
+  for (const { key, rawKey, file, value, target } of aliases) {
+    if (!names.has(target)) continue;
+    if (key === undefined) problems.push(unnamed(file, rawKey, value));
+    else names.add(key);
+  }
   return names;
 };
 
@@ -1783,6 +1837,232 @@ test('fail closed: an override selector with a version or parent qualifier, a fl
     [WEB_CONFIG]: "import plugin from '@s/plugin-alias';\nexport default [plugin];\n",
   };
   assert.ok(discover(memoryState(scoped)).problems.some((p) => p.includes("'@s/plugin-alias'")));
+});
+
+// F1.4 (r5): the selector grammar is pnpm's, so a range comparator (`>=`, `>`), a union, a
+// bounded range or a multi-line range never turns into a package name or a parent separator.
+const SELECTOR_SHAPES = [
+  'N',
+  'N@1',
+  'N@^1',
+  'N@~1.2',
+  'N@1.x',
+  'N@*',
+  'N@>=1',
+  'N@>1',
+  'N@<2',
+  'N@<=2',
+  'N@>=1 <2',
+  'N@>1.0.0 <=2.0.0',
+  'N@1.0.0 - 2.0.0',
+  'N@^1 || ^2',
+  'N@^1||>=3',
+  'N@^1\n|| ^2',
+  'N@>=1\n <2',
+  'N@>=1 || <0.5\n|| 2.x',
+  'host>N',
+  'host>N@>=1',
+  'host>N@>=1 <2',
+  'h>N',
+  'h@>=1>N@>=1',
+  'host@2>N',
+  'host@2>N@>1',
+  'host@>=2 <3>N@^1 || ^2',
+  'host@^1\n|| ^2>N@^1\n|| ^2',
+  'host@>=1>N@>=1',
+  '@s/host>N@>=1',
+  '@s/host@>=2>N',
+];
+const shapesOf = (name) => SELECTOR_SHAPES.map((shape) => shape.replace(/N/g, name));
+
+test('parseOverrideSelector reads pnpm selectors: a comparator is not a separator, a range is only cut off', () => {
+  for (const name of ['plugin-alias', '@s/plugin-alias']) {
+    for (const selector of shapesOf(name)) {
+      // `host` also contains no N, so the child is always `name`.
+      assert.equal(parseOverrideSelector(selector), name, JSON.stringify(selector));
+    }
+  }
+  assert.equal(parseOverrideSelector('plugin-alias@>=1'), 'plugin-alias');
+  assert.equal(parseOverrideSelector('plugin-alias@^1\n|| ^2'), 'plugin-alias');
+  assert.equal(parseOverrideSelector('@s/n@>=1\n<3'), '@s/n');
+});
+
+test('parseOverrideSelector rejects what does not name exactly one package', () => {
+  for (const selector of [
+    '',
+    ' ',
+    '>',
+    'host>',
+    '>plugin-alias',
+    'plugin-alias@1>=2', // pnpm splits at `1>`; `=2` is not a package name
+    'plugin-alias@^1\n>=2',
+    'a>b>c',
+    ' plugin-alias',
+    'plugin-alias ',
+    '.plugin-alias',
+    '_plugin-alias',
+    'a/b',
+    '@s',
+    '@s/',
+    '@/n',
+    'a b',
+    'a%20b',
+    'host@>=1>',
+    '@s/a/b',
+    '.host>plugin-alias', // the parent must be a package too, or pnpm rejects the selector
+    'a b>plugin-alias',
+    'host/x>plugin-alias',
+    '@s>plugin-alias',
+  ]) {
+    assert.equal(parseOverrideSelector(selector), undefined, JSON.stringify(selector));
+  }
+  assert.equal(parseOverrideSelector(undefined), undefined);
+});
+
+const OVERRIDE_PLACES = {
+  'pnpm-workspace.yaml overrides': (key, value) => ({
+    'pnpm-workspace.yaml': `packages:\n  - "apps/*"\noverrides:\n  ${JSON.stringify(key)}: ${JSON.stringify(value)}\n`,
+  }),
+  'package.json pnpm.overrides': (key, value) => ({
+    'package.json': JSON.stringify({
+      name: 'root',
+      pnpm: { overrides: { [key]: value } },
+      scripts: { lint: 'turbo run lint' },
+    }),
+  }),
+  'package.json resolutions': (key, value) => ({
+    'package.json': JSON.stringify({
+      name: 'root',
+      resolutions: { [key]: value },
+      scripts: { lint: 'turbo run lint' },
+    }),
+  }),
+};
+const SELECTOR_HOLDERS = {
+  config: WEB_CONFIG,
+  rule: 'scripts/a-rule.mjs',
+  helper: 'scripts/helper-b.mjs',
+};
+for (const [place, make] of Object.entries(OVERRIDE_PLACES)) {
+  for (const [holder, path] of Object.entries(SELECTOR_HOLDERS)) {
+    test(`fail closed: every override selector shape redirects to a local package (${place}, ${holder})`, () => {
+      for (const name of ['plugin-alias', '@s/plugin-alias']) {
+        for (const selector of shapesOf(name)) {
+          for (const spec of ['link:./tools/local-plugin', 'file:./tools/local-plugin']) {
+            const files = {
+              ...baseFiles(),
+              ...make(selector, spec),
+              [path]: `import plugin from '${name}';\nexport default [plugin];\n`,
+            };
+            const problems = discover(memoryState(files)).problems;
+            assert.ok(
+              problems.some((p) => p.includes(`'${name}'`) && /workspace/.test(p)),
+              `${JSON.stringify(selector)} → ${spec}\n${fail(problems)}`,
+            );
+          }
+        }
+      }
+    });
+
+    test(`fail closed: a selector that names no single package over a local source is an error (${place}, ${holder})`, () => {
+      for (const selector of [
+        'plugin-alias@1>=2',
+        'plugin-alias@^1\n>=2',
+        'host>',
+        ' plugin-alias',
+        'a>b>c',
+        '.',
+      ]) {
+        for (const spec of [
+          'link:./tools/local-plugin',
+          'portal:./tools/local-plugin',
+          'workspace:*',
+          './tools/local-plugin',
+        ]) {
+          const files = {
+            ...baseFiles(),
+            ...make(selector, spec),
+            [path]: "import plugin from 'plugin-alias';\nexport default [plugin];\n",
+          };
+          const problems = discover(memoryState(files)).problems;
+          assert.ok(
+            problems.some((p) => /does not name exactly one package/.test(p)),
+            `${JSON.stringify(selector)} → ${spec}\n${fail(problems)}`,
+          );
+        }
+      }
+    });
+  }
+}
+
+test('an unparsable override selector over a registry version is not an error, and a path map is not an override', () => {
+  for (const make of Object.values(OVERRIDE_PLACES)) {
+    const files = { ...baseFiles(), ...make('plugin-alias@1>=2', '1.2.3') };
+    assert.deepEqual(discover(memoryState(files)).problems, []);
+  }
+  const files = {
+    ...baseFiles(),
+    'apps/web/package.json': JSON.stringify({
+      name: '@rasta/web',
+      scripts: { lint: 'eslint src' },
+      exports: { './x': './dist/x.js', '.': './dist/index.js' },
+    }),
+  };
+  assert.deepEqual(discover(memoryState(files)).problems, []);
+});
+
+test('fail closed: an unprefixed relative override or dependency path names the local package', () => {
+  const OVERRIDE_PATHS = ['./tools/local-plugin', '../tools/local-plugin', '~/local-plugin'];
+  for (const [place, make] of Object.entries(OVERRIDE_PLACES)) {
+    for (const spec of OVERRIDE_PATHS) {
+      const files = {
+        ...baseFiles(),
+        ...make('plugin-alias@>=1', spec),
+        [WEB_CONFIG]: "import plugin from 'plugin-alias';\nexport default [plugin];\n",
+      };
+      assert.ok(
+        discover(memoryState(files)).problems.some((p) => p.includes("'plugin-alias'")),
+        `${place} ${spec}`,
+      );
+    }
+  }
+  const dependency = {
+    ...baseFiles(),
+    'apps/web/package.json': JSON.stringify({
+      name: '@rasta/web',
+      scripts: { lint: 'eslint src' },
+      dependencies: { 'plugin-alias': '../../tools/local-plugin' },
+    }),
+    [WEB_CONFIG]: "import plugin from 'plugin-alias';\nexport default [plugin];\n",
+  };
+  assert.ok(discover(memoryState(dependency)).problems.some((p) => p.includes("'plugin-alias'")));
+});
+
+test('fail closed: an npm: alias of a workspace package under a selector that names no package is an error', () => {
+  for (const [place, make] of Object.entries(OVERRIDE_PLACES)) {
+    const files = {
+      ...baseFiles(),
+      'tools/local-plugin/package.json': '{"name":"@rasta/local-plugin"}',
+      ...make('plugin-alias@^1\n>=2', 'npm:@rasta/local-plugin@*'),
+    };
+    assert.ok(
+      discover(memoryState(files)).problems.some((p) =>
+        /does not name exactly one package/.test(p),
+      ),
+      place,
+    );
+  }
+  // and an npm: alias under a good selector with a comparator still names the local package
+  const files = {
+    ...baseFiles(),
+    'tools/local-plugin/package.json': '{"name":"@rasta/local-plugin"}',
+    ...OVERRIDE_PLACES['pnpm-workspace.yaml overrides'](
+      'plugin-alias@>=1',
+      'npm:@rasta/local-plugin@*',
+    ),
+    [WEB_CONFIG]: "import plugin from 'plugin-alias';\nexport default [plugin];\n",
+  };
+  assert.ok(discover(memoryState(files)).problems.some((p) => p.includes("'plugin-alias'")));
 });
 
 test('fail closed: a YAML npm: alias of a workspace package names the local package', () => {
