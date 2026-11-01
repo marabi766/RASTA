@@ -34,7 +34,7 @@ const check = (
     code,
     [
       {
-        files: ['**/*.{ts,tsx,mjs,js}'],
+        files: ['**/*.{ts,tsx,mts,cts,mjs,js,jsx,cjs}'],
         languageOptions: {
           parser: tseslint.parser,
           sourceType: 'module',
@@ -67,6 +67,8 @@ const allowed = (code, options) => assert.deepEqual(found(code, options), [], co
 const CONTROLLER = 'controller';
 const TIMER_ABORT = 'timerAbort';
 const BY_NAME = 'globalByName';
+/** Every file type the repository lints with this rule. */
+const FILE_TYPES = ['ts', 'tsx', 'mts', 'cts', 'js', 'jsx', 'mjs', 'cjs'];
 
 // ---------------------------------------------------------------------------
 // The shapes #502 r1 F1 found, and what #507 r1 F2 showed the old order-based rule missed.
@@ -958,6 +960,379 @@ test('review F1(b): a global member read by a name that is not a constant is ref
   allowed('const key = pick(); export const c = new globalThis[key]();', { path: owner });
 });
 
+// ---------------------------------------------------------------------------
+// #536 r3 (D-098): F1(b) closed completely. ONE read/write classifier (`useOf` / `sourcesOf`)
+// serves every computed-global path, and ONE key classifier (`keyKind`) serves member access and
+// patterns alike.
+// ---------------------------------------------------------------------------
+test('review N1: the review regression (destructuring assignment of two computed globals) is refused', () => {
+  const regression = `
+    async function call(sender, url, controllerKey, timerKey) {
+      let C, later;
+      ({ [controllerKey]: C, [timerKey]: later } = globalThis);
+      const c = new C();
+      const timer = later(() => c.abort(), 1000);
+      try {
+        const response = await sender.send(url, { signal: c.signal });
+        return response.text();
+      } finally {
+        clearTimeout(timer);
+      }
+    }`;
+  refused(regression, BY_NAME, BY_NAME);
+  // The same code in every file type the repository lints.
+  for (const ext of FILE_TYPES) {
+    assert.deepEqual(
+      found(regression, { path: `services/fixture-service/src/probe.${ext}` }),
+      [BY_NAME, BY_NAME],
+      ext,
+    );
+  }
+});
+
+// Every context in which a computed global's VALUE is taken, one diagnostic each.
+const READS = {
+  'plain read': 'export const c = globalThis[k];',
+  'call of it': 'globalThis[k]();',
+  'new of it': 'export const c = new globalThis[k]();',
+  'member of it': 'export const n = globalThis[k].name;',
+  'write to a member of it': 'globalThis[k].x = 1;',
+  'typeof it': 'export const t = typeof globalThis[k];',
+  'type-wrapped read': 'export const c = (globalThis as any)[k];',
+  'optional read': 'export const c = globalThis?.[k];',
+  'through a const alias': 'const root = globalThis; export const c = root[k];',
+  increment: 'globalThis[k]++;',
+  decrement: '--globalThis[k];',
+  'computed key inside a destructuring target': '({ [globalThis[k]]: x } = o);',
+  'default value of a target': '({ a: x = globalThis[k] } = o);',
+  'right side of a write': 'globalThis[j] = globalThis[k];',
+  'argument of delete': 'delete globalThis[globalThis[k]];',
+};
+for (const operator of [
+  '+=',
+  '-=',
+  '*=',
+  '/=',
+  '%=',
+  '**=',
+  '<<=',
+  '>>=',
+  '>>>=',
+  '&=',
+  '|=',
+  '^=',
+  '&&=',
+  '||=',
+  '??=',
+]) {
+  READS[`compound assignment ${operator}`] = `globalThis[k] ${operator} v;`;
+  READS[`type-wrapped compound ${operator}`] = `(globalThis as any)[k] ${operator} v;`;
+}
+Object.assign(READS, {
+  // Destructuring declarations.
+  declaration: 'const { [k]: C } = globalThis; export { C };',
+  'declaration with a default': 'const { [k]: C = D } = globalThis; export { C };',
+  'declaration through an alias': 'const g = globalThis; const { [k]: C } = g; export { C };',
+  'declaration, type-wrapped source': 'const { [k]: C } = globalThis as any; export { C };',
+  'declaration, rest beside it': 'const { [k]: C, ...rest } = globalThis; export { C, rest };',
+  // Destructuring assignments, every nesting.
+  'assignment pattern': 'let C; ({ [k]: C } = globalThis);',
+  'assignment pattern with a default': 'let C; ({ [k]: C = D } = globalThis);',
+  'assignment pattern, two keys': 'let C, T; ({ [a]: C, [b]: T } = globalThis);',
+  'assignment pattern through an alias': 'const g = window; let C; ({ [k]: C } = g);',
+  'chained assignment': 'let C, o; o = { [k]: C } = globalThis;',
+  'nested in an object source': 'let C; ({ a: { [k]: C } } = { a: globalThis });',
+  'nested in an array source': 'let C; ([{ [k]: C }] = [globalThis]);',
+  'nested, second element': 'let C; ([x, { [k]: C }] = [1, globalThis]);',
+  'defaulted pattern fed by an outer array':
+    'const [{ [k]: C } = {}] = [globalThis]; export { C };',
+  'defaulted pattern fed by an outer object':
+    'let C; ({ a: { [k]: C } = {} } = { a: globalThis });',
+  'type-wrapped literal source': 'let C; ([{ [k]: C }] = [globalThis] as const);',
+  'type-wrapped object source': 'const { a: { [k]: C } } = { a: globalThis } as any; export { C };',
+  'nested, behind a spread': 'let C; ([x, { [k]: C }] = [...xs, globalThis]);',
+  'nested, behind a spread, position shifted': 'let C; ([x, y, { [k]: C }] = [...xs, globalThis]);',
+  'declaration, array source': 'const [{ [k]: C }] = [globalThis]; export { C };',
+  'declaration, object source': 'const { a: { [k]: C } } = { a: globalThis }; export { C };',
+  'declaration, container held by a const':
+    'const box = { g: globalThis }; const { g: { [k]: C } } = box; export { C };',
+  // Defaults: parameters and values inside patterns.
+  'function parameter defaulting to the global':
+    'export function f({ [k]: C } = globalThis) { return C; }',
+  'arrow parameter defaulting to the global': 'export const f = ({ [k]: C } = globalThis) => C;',
+  'async arrow parameter': 'export const f = async ({ [k]: C } = window) => C;',
+  'method parameter': 'class A { m({ [k]: C } = self) { return C; } }',
+  'second parameter': 'export function f(a, { [k]: C } = globalThis) { return C; }',
+  'default of a nested declaration pattern':
+    'const { a: { [k]: C } = globalThis } = {}; export { C };',
+  'default of an array element': 'let C; ([{ [k]: C } = globalThis] = []);',
+  'default of an element in a declaration': 'const [{ [k]: C } = globalThis] = []; export { C };',
+  'default of an assignment-pattern property': 'let C; ({ a: { [k]: C } = globalThis } = {});',
+  // for…of heads.
+  'for-of declaration head': 'for (const { [k]: C } of [globalThis]) use(C);',
+  'for-of assignment head': 'let C; for ({ [k]: C } of [globalThis]) use(C);',
+});
+test('review N1: every context that takes the value of a computed global is refused', () => {
+  for (const [label, code] of Object.entries(READS)) {
+    assert.ok(found(code).includes(BY_NAME), `${label}: ${code}`);
+  }
+  // …and the same read is allowed where a controller may be held.
+  const owner = 'services/identity-service/src/identity/membership-expiry.scanner.ts';
+  allowed('globalThis[k] ??= v; const { [j]: C } = globalThis;', { path: owner });
+});
+
+// Every context that only REPLACES or REMOVES the slot: no value is read, no diagnostic.
+const WRITES = {
+  'plain assignment': 'globalThis[k] = v;',
+  'assignment through an alias': 'const root = globalThis; root[k] = v;',
+  'assignment, type-wrapped object': '(globalThis as any)[k] = v;',
+  'assignment, type-wrapped target': '(globalThis[k] as any) = v;',
+  'assignment, non-null target': 'globalThis[k]! = v;',
+  'assignment, satisfies target': '(globalThis[k] satisfies unknown) = v;',
+  'assignment, angle-bracket target': '(<any>globalThis[k]) = v;',
+  'chained plain assignment': 'globalThis[a] = globalThis[b] = v;',
+  'array destructuring target': '[globalThis[k]] = xs;',
+  'array destructuring target, second': '[a, globalThis[k]] = xs;',
+  'array destructuring target, default': '[globalThis[k] = 1] = xs;',
+  'array destructuring rest target': '[...globalThis[k]] = xs;',
+  'object destructuring target': '({ a: globalThis[k] } = o);',
+  'object destructuring target, default': '({ a: globalThis[k] = 1 } = o);',
+  'object destructuring rest target': '({ ...globalThis[k] } = o);',
+  'nested destructuring target': '({ a: [globalThis[k]] } = o);',
+  'nested destructuring target, wrapped': '[(globalThis[k] as any)] = xs;',
+  'for-in target': 'for (globalThis[k] in o);',
+  'for-of target': 'for (globalThis[k] of xs);',
+  'for-of destructuring target': 'for ([globalThis[k]] of xs);',
+  'for-of object destructuring target': 'for ({ a: globalThis[k] } of xs);',
+  delete: 'delete globalThis[k];',
+  'delete, type-wrapped': 'delete (globalThis as any)[k];',
+  'delete through an alias': 'const root = window; delete root[k];',
+  // A pattern whose source is not the global object reads something else.
+  'pattern over another value': 'const { [k]: C } = other; export { C };',
+  'assignment pattern over another value': 'let C; ({ [k]: C } = other);',
+  'parameter default of another value': 'export function f({ [k]: C } = {}) { return C; }',
+  'for-of head over another value': 'for (const { [k]: C } of [other]) use(C);',
+  'for-in head (string keys)': 'for (const { [k]: C } in globalThis) use(C);',
+  'nested, global in a different slot': 'let C; ({ b: { [k]: C } } = { a: globalThis, b: other });',
+  'array, global in a different slot': 'let C; ([{ [k]: C }, x] = [other, globalThis]);',
+  'a local named like the global':
+    'const globalThis = {}; const { [k]: C } = globalThis; export { C };',
+};
+test('review N1: a pure write of a computed global is not a read (the review’s false positives)', () => {
+  for (const [label, code] of Object.entries(WRITES)) {
+    assert.deepEqual(found(code), [], `${label}: ${code}`);
+  }
+});
+
+test('review N1: a write that also reads is a read, and the write beside a read keeps its one diagnostic', () => {
+  // Left is a pure write, the right side is a read: exactly one diagnostic.
+  refused('globalThis[a] = globalThis[b];', BY_NAME);
+  // A destructuring target does not hide a read in the SOURCE of the same statement.
+  refused('let x; ({ a: globalThis[k] } = { a: globalThis[j] });', BY_NAME);
+  // The pattern's own key reads even when its value target is a write.
+  refused('({ [k]: globalThis[j] } = globalThis);', BY_NAME);
+});
+
+// A computed key that is provably a number, a bigint or a symbol names neither the controller nor
+// the timer; anything not provable could, and fails closed.
+const NOT_NAMES = {
+  zero: '0',
+  'negative literal': '-1',
+  'positive literal': '+1',
+  'bitwise not': '~1',
+  'sum of literals': '1 + 2',
+  difference: '1 - 2',
+  product: '2 * 3',
+  quotient: '6 / 3',
+  remainder: '7 % 3',
+  power: '2 ** 3',
+  shift: '1 << 2',
+  'unsigned shift': '-1 >>> 0',
+  'bit or': '1 | 2',
+  'bit and': '3 & 1',
+  'bit xor': '3 ^ 1',
+  'nested arithmetic': '(1 + 2) * -(3 - 4)',
+  'bigint literal': '1n',
+  'negative bigint': '-1n',
+  'bigint arithmetic': '1n + 2n',
+  NaN: 'NaN',
+  Infinity: 'Infinity',
+  'negative Infinity': '-Infinity',
+  'Number of anything': 'Number(x)',
+  'Number of a string': 'Number("1")',
+  'BigInt of anything': 'BigInt(x)',
+  'Number plus a literal': 'Number(x) + 1',
+  'literal times Number': '2 * Number(x)',
+  'type-wrapped Number callee': '(Number as any)(x)',
+  'non-null Number callee': 'Number!(x)',
+  'unary minus of Number': '-Number(x)',
+  'type-wrapped numeric': '(1 + 2) as number',
+  'non-null numeric': 'Number(x)!',
+  'conditional of numerics': 'c ? 1 : -2',
+  symbol: 'Symbol("x")',
+  'symbol.for': 'Symbol.for("x")',
+  'well-known symbol': 'Symbol.iterator',
+  'conditional of symbols': 'c ? Symbol.iterator : Symbol.asyncIterator',
+};
+// Aliases: a constant holding a provable key inherits it.
+const NOT_NAME_ALIASES = {
+  'constant literal': 'const n = -1;',
+  'constant arithmetic': 'const n = 1 + 2;',
+  'constant of a constant': 'const m = 4; const n = m * 2;',
+  'constant Number': 'const n = Number(x);',
+  'constant NaN': 'const n = NaN;',
+  'constant symbol': 'const n = Symbol.for("x");',
+  'let never reassigned': 'let n = 1;',
+};
+// Not provable: each could be (or build) the name, so each fails closed.
+const MAY_BE_NAMES = {
+  'unknown operand of arithmetic': 'x - 1',
+  'unknown operand of unary minus': '-x',
+  'unknown plus a literal': 'x + 1',
+  'literal plus unknown': '1 + x',
+  'literal times unknown': '2 * x',
+  'bitwise with an unknown right operand': '1 | x',
+  'string plus a number': '"Abort" + 1',
+  'unknown call': 'pick()',
+  'String of a number': 'String(1)',
+  'template with a number': '`${1}`',
+  'a parameter': 'x',
+  'the Number function itself': 'Number',
+  'Number member': 'Number.parseInt(x)',
+  'Math call': 'Math.floor(x)',
+  typeof: 'typeof 1',
+  comparison: '1 < 2',
+  void: 'void 0',
+  undefined: 'undefined',
+  sequence: '(0, x)',
+  'conditional with an unknown branch': 'c ? 1 : x',
+  'a mixed conditional with a string': 'c ? 1 : "AbortController"',
+  'logical not': '!1',
+  'logical not of a variable': '!x',
+  'Symbol description': 'Symbol("x").description',
+  'symbol key description': 'Symbol.keyFor(s)',
+};
+const MAY_BE_NAME_ALIASES = {
+  'let reassigned': 'let n = 1; n = pick();',
+  'let reassigned in a function': 'let n = 1; const set = () => { n = pick(); };',
+  'constant of an unknown': 'const n = pick();',
+  'constant of an unknown operand': 'const n = x - 1;',
+  'a for-of variable': 'const xs = []; for (const n of xs) { use(n); }',
+};
+// The same key, in each position that classifies a computed global.
+const KEY_POSITIONS = {
+  'member read': (key, prelude) => `${prelude} export const v = globalThis[${key}];`,
+  'member read through a const alias': (key, prelude) =>
+    `${prelude} const g = globalThis; export const v = g[${key}];`,
+  'member read, compound assignment': (key, prelude) => `${prelude} globalThis[${key}] ||= v;`,
+  'member read, call': (key, prelude) => `${prelude} globalThis[${key}]();`,
+  'declaration pattern': (key, prelude) =>
+    `${prelude} const { [${key}]: C } = globalThis; export { C };`,
+  'assignment pattern': (key, prelude) => `${prelude} let C; ({ [${key}]: C } = globalThis);`,
+  'parameter default pattern': (key, prelude) =>
+    `${prelude} export function f({ [${key}]: C } = globalThis) { return C; }`,
+  'for-of head pattern': (key, prelude) =>
+    `${prelude} for (const { [${key}]: C } of [globalThis]) use(C);`,
+};
+test('review N2: a key that is provably a number, a bigint or a symbol names no global — in every position', () => {
+  for (const [position, build] of Object.entries(KEY_POSITIONS)) {
+    for (const [label, key] of Object.entries(NOT_NAMES)) {
+      assert.deepEqual(found(build(key, '')), [], `${position} / ${label}: ${build(key, '')}`);
+    }
+    for (const [label, prelude] of Object.entries(NOT_NAME_ALIASES)) {
+      assert.deepEqual(
+        found(build('n', prelude)),
+        [],
+        `${position} / ${label}: ${build('n', prelude)}`,
+      );
+    }
+  }
+});
+test('review N2: a key that is not provably a number or a symbol could be the name, so it is refused — in every position', () => {
+  for (const [position, build] of Object.entries(KEY_POSITIONS)) {
+    for (const [label, key] of Object.entries(MAY_BE_NAMES)) {
+      assert.ok(
+        found(build(key, '')).includes(BY_NAME),
+        `${position} / ${label}: ${build(key, '')}`,
+      );
+    }
+    for (const [label, prelude] of Object.entries(MAY_BE_NAME_ALIASES)) {
+      assert.ok(
+        found(build('n', prelude)).includes(BY_NAME),
+        `${position} / ${label}: ${build('n', prelude)}`,
+      );
+    }
+  }
+});
+
+test('review N2: Number, BigInt, NaN, Infinity and Symbol count only as the unshadowed globals', () => {
+  const shadows = {
+    'parameter Number': (key) => `export function f(Number, x) { return globalThis[${key}]; }`,
+    'local Number': (key) => `const Number = pick(); export const v = globalThis[${key}];`,
+    'imported Number': (key) =>
+      `import { Number } from "./n"; export const v = globalThis[${key}];`,
+    'class Number': (key) => `class Number {} export const v = globalThis[${key}];`,
+    'function Number': (key) => `function Number() {} export const v = globalThis[${key}];`,
+    'inner-scope Number': (key) =>
+      `export function f(x) { const Number = pick; return globalThis[${key}]; }`,
+    'local BigInt': (key) => `const BigInt = pick(); export const v = globalThis[${key}];`,
+    'local NaN': (key) => `const NaN = pick(); export const v = globalThis[${key}];`,
+    'parameter Infinity': (key) => `export function f(Infinity) { return globalThis[${key}]; }`,
+    'local Symbol': (key) => `const Symbol = pick(); export const v = globalThis[${key}];`,
+  };
+  const keys = {
+    'parameter Number': 'Number(x)',
+    'local Number': 'Number(x)',
+    'imported Number': 'Number(x)',
+    'class Number': 'Number(x)',
+    'function Number': 'Number(x)',
+    'inner-scope Number': 'Number(x)',
+    'local BigInt': 'BigInt(x)',
+    'local NaN': 'NaN',
+    'parameter Infinity': 'Infinity',
+    'local Symbol': 'Symbol.for("x")',
+  };
+  for (const [label, build] of Object.entries(shadows)) {
+    refused(build(keys[label]), BY_NAME);
+    // The same shadow in a pattern.
+    const pattern = build(keys[label]).replace(/globalThis\[(.*)\];/, 'globalThis[$1]; ');
+    assert.ok(found(pattern).includes(BY_NAME), label);
+  }
+  // A shadowed name in the pattern position, with the key written in the pattern.
+  refused(
+    'export function f(Number, x) { const { [Number(x)]: C } = globalThis; return C; }',
+    BY_NAME,
+  );
+  refused('const NaN = pick(); let C; ({ [NaN]: C } = globalThis);', BY_NAME);
+  // The shadow is local: the unshadowed global in another scope still proves a number.
+  allowed(
+    'export function f(Number, x) { return Number(x); } export const v = globalThis[Number("1")];',
+  );
+  // Constant aliases of a shadowed name do not prove it either.
+  refused('const Number = pick(); const n = Number(x); export const v = globalThis[n];', BY_NAME);
+});
+
+test('review N1/N2: the class sweep — every file type, every global-object name', () => {
+  const sources = [
+    'const { [k]: C } = HOST; export { C };',
+    'let C; ({ [k]: C } = HOST);',
+    'HOST[k] ??= v;',
+    'export function f({ [k]: C } = HOST) { return C; }',
+  ];
+  for (const host of ['globalThis', 'global', 'window', 'self']) {
+    for (const source of sources) {
+      const code = source.replaceAll('HOST', host);
+      for (const ext of FILE_TYPES) {
+        assert.deepEqual(
+          found(code, { path: `services/fixture-service/src/probe.${ext}` }),
+          [BY_NAME],
+          `${ext}: ${code}`,
+        );
+      }
+    }
+  }
+});
+
 // Each of these is ACCEPTED (PM decision D-095): the rule guards against an accidental
 // early-clear deadline, and review catches deliberate obfuscation. They are listed so that the
 // documentation (rule header, docs/internal-token-transport-scope.md, PR body) says exactly this
@@ -983,6 +1358,24 @@ const ACCEPTED_RESIDUAL = {
   'timer inside a dynamic-import callback':
     'import("node:timers").then((t) => t.setTimeout(() => c.abort(), 5));',
   'timer host reached through a call': 'getTimers().setTimeout(() => c.abort(), 5);',
+  // r3: sources of a computed pattern/member that are not the global object by name or direct alias.
+  'computed read of a parameter that defaults to the global':
+    'export function f(g = globalThis) { return g[k]; }',
+  'computed read of a global inside a logical expression':
+    'export const v = (globalThis ?? other)[k];',
+  'computed read of a global inside a conditional': 'export const v = (c ? globalThis : other)[k];',
+  'pattern over a global inside a logical expression':
+    'const { [k]: C } = globalThis ?? other; export { C };',
+  'pattern over a spread copy of the global': 'const { [k]: C } = { ...globalThis }; export { C };',
+  'pattern with a for-of head over a variable iterable':
+    'const list = getHosts(); for (const { [k]: C } of list) use(C);',
+  'pattern over a member of the global object':
+    'const { [k]: C } = globalThis.global; export { C };',
+  'pattern in a parameter with no default': 'export function f({ [k]: C }) { return C; }',
+  'pattern in a catch clause': 'try { f(); } catch ({ [k]: C }) { use(C); }',
+  'pattern over a call': 'const { [k]: C } = getGlobal(); export { C };',
+  'key built from a numeric that is not provable, on a handed-in host':
+    'export function f(h, x) { return h[x - 1]; }',
 };
 test('accepted residual (D-095): these forms produce no diagnostic, and the docs say so', () => {
   for (const [label, code] of Object.entries(ACCEPTED_RESIDUAL)) {

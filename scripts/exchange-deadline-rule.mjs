@@ -74,11 +74,28 @@ export const SHARED_BOUNDARY = 'packages/nest-common/src/http/exchange-deadline.
  *   `abort`, a renamed one) is refused unless it is in {@link TIMER_ABORT_MODULES}.
  *   Where the abort sits relative to the timer — inline, behind a wrapper, in
  *   another function — is not asked.
- * - **C — a global member read by a name nobody can read.** `globalThis[key]`
- *   (or `{ [key]: C } = globalThis`) with a computed name that does not fold to
- *   a constant could be the controller or the timer, so it is refused too — fail
- *   closed, in files that may not hold a controller (#536 r1 F1). A key that can
- *   only be a symbol or a number (`globalThis[Symbol.for('x')]`) names neither.
+ * - **C — a global member READ by a name nobody can read.** A computed key on the
+ *   global object that does not fold to a constant string and is not provably a
+ *   number, bigint or symbol could be the controller or the timer, so the read is
+ *   refused — fail closed, in files that may not hold a controller (#536 r1 F1,
+ *   r3 N1/N2). Two shared classifiers decide it, for member access and patterns alike:
+ *   - **What is a read** (`useOf`, `sourcesOf`). Every use that takes the value:
+ *     a plain use, a call, `.member`, every compound and logical assignment
+ *     (`+=`, `||=`, `??=`, …), `++`/`--`, a destructuring declaration, a
+ *     destructuring ASSIGNMENT, a parameter pattern with a default
+ *     (`function f({ [k]: C } = globalThis)`), a default inside a pattern, a nested
+ *     or array pattern over a literal source (`({ a: { [k]: C } } = { a: globalThis })`,
+ *     `[{ [k]: C }] = [globalThis]`), a `for…of` head over a literal array. A pure
+ *     WRITE reads nothing and is not refused: `g[k] = v` (also type-wrapped), a
+ *     destructuring-assignment target (`[g[k]] = xs`, `({ a: g[k] = 1 } = o)`, rest
+ *     targets), a `for…in`/`for…of` target, `delete g[k]`.
+ *   - **What is not a name** (`keyKind`). Only a key PROVABLY numeric, bigint or
+ *     symbol: numeric/bigint literals, unary `+ - ~` and arithmetic/bitwise of provable
+ *     numerics, `NaN`/`Infinity`, `Number(…)`/`BigInt(…)` — these identifiers only
+ *     when they resolve to the unshadowed global — `Symbol(…)`, `Symbol.for(…)`,
+ *     `Symbol.<x>`, a constant alias of any of these, a conditional whose branches
+ *     both are. Everything else (`x - 1`, `-x`, `Math.floor(x)`, `String(1)`, a
+ *     shadowed `Number`) could name a global and is refused.
  * - **Allowed:** `AbortSignal.timeout(…)` (no timer to clear; the deadline
  *   stays armed through the body), timers that no `abort` shares a module
  *   with (sleeps, outbox and consumer loops, shutdown bounds), a controller
@@ -108,10 +125,19 @@ export const SHARED_BOUNDARY = 'packages/nest-common/src/http/exchange-deadline.
  *   other modules into one that owns neither — the module that owns either is the
  *   one refused.
  *
- * The two that are plausibly accidental are closed: a direct alias of the global
- * object (`const root = globalThis; new root.AbortController()`), and a computed
- * global name that is not a constant (rule C). Every closed form has a test; every
- * residual form above is pinned by a test too, so that changing either is visible.
+ * - **A computed read whose global object or source is not named or directly
+ *   aliased** (rule C reaches only what it can resolve): a parameter that merely
+ *   defaults to the global (`function f(g = globalThis) { g[k] }`); the global inside
+ *   a logical or conditional expression (`(globalThis ?? o)[k]`, `(c ? globalThis : o)[k]`);
+ *   a spread copy (`{ ...globalThis }`); a pattern fed by a handed-in value
+ *   (a parameter with no default, a catch clause, a call, a `for…of` over a variable
+ *   or a non-literal iterable); a member of the global (`globalThis.global`).
+ *
+ * The forms that are plausibly accidental are closed: a direct alias of the global
+ * object (`const root = globalThis; new root.AbortController()`) and a computed
+ * global name that is not a provable number or symbol, in every context that reads
+ * it (rule C). Every closed form has a test; every residual form above is pinned by a
+ * test too, so that changing either is visible.
  */
 
 /**
@@ -178,6 +204,10 @@ const TIMERS_MODULE = /^(?:node:)?timers(?:\/promises)?$/;
 
 const FOLD_DEPTH = 8;
 
+/** Operators whose result is a number/bigint when both operands are (a `+` of two numerics cannot concatenate). */
+const NUMERIC_UNARY = new Set(['+', '-', '~']);
+const NUMERIC_BINARY = new Set(['+', '-', '*', '/', '%', '**', '&', '|', '^', '<<', '>>', '>>>']);
+
 export default {
   meta: {
     type: 'problem',
@@ -234,64 +264,101 @@ export default {
         case 'TSNonNullExpression':
         case 'TSTypeAssertion':
           return constantString(node.expression, depth + 1);
-        case 'Identifier': {
-          // A `const` (or a `let` never reassigned) read through its binding.
-          let scope = scopeOf(node);
-          let variable;
-          while (scope && !variable) {
-            variable = scope.set.get(node.name);
-            scope = scope.upper;
-          }
-          if (!variable || variable.defs.length !== 1) return undefined;
-          const [def] = variable.defs;
-          if (def.type !== 'Variable' || def.node.id !== def.name) return undefined;
-          if (variable.references.some((ref) => ref.isWrite() && !ref.init)) return undefined;
-          return constantString(def.node.init, depth + 1);
-        }
+        case 'Identifier':
+          return constantString(constantBinding(node), depth + 1);
         default:
           return undefined;
       }
     };
 
     /**
-     * Whether a computed key can only be a symbol or a number — never the string
-     * `AbortController` / `setTimeout`: `Symbol('x')`, `Symbol.for('x')`,
-     * `Symbol.iterator`, a numeric literal, or a `const` holding one. Anything
-     * else that is not a constant string could be a name.
+     * The initializer of a `const` (or a `let` never reassigned) read through its binding:
+     * one declaration, a plain identifier id, no write after the initializer. The one
+     * place "a constant alias" is decided, for strings, keys and containers alike.
      */
-    const neverAName = (key, depth = 0) => {
+    const constantBinding = (identifier) => {
+      const variable = variableOf(identifier);
+      if (!variable || variable.defs.length !== 1) return undefined;
+      const [def] = variable.defs;
+      if (def.type !== 'Variable' || def.node.id !== def.name) return undefined;
+      if (variable.references.some((ref) => ref.isWrite() && !ref.init)) return undefined;
+      return def.node.init ?? undefined;
+    };
+
+    /** `node` is the platform's global of that name — no declaration of the module answers it. */
+    const isUnshadowedGlobal = (node, name) => {
+      if (node?.type !== 'Identifier' || node.name !== name) return false;
+      const variable = variableOf(node);
+      return !variable || variable.defs.length === 0;
+    };
+
+    /**
+     * THE key classifier, shared by member access (`globalThis[key]`) and patterns
+     * (`{ [key]: C } = globalThis`): what a computed key provably is, when it is
+     * provably not a string — 'numeric' (number or bigint) or 'symbol' — and
+     * undefined for anything else, which could be the name `AbortController` /
+     * `setTimeout` and so fails closed (#536 r3 N2). Proof, not guess:
+     *
+     * - numeric: a number/bigint literal; unary `+ - ~` and arithmetic/bitwise
+     *   (`+ - * / % ** & | ^ << >> >>>`) of provably numeric operands (a `+` of two
+     *   numerics cannot concatenate); the global `NaN` / `Infinity`; a call of the
+     *   global `Number` / `BigInt` — all only when the identifier resolves to the
+     *   unshadowed global, never to a module's own `Number`;
+     * - symbol: `Symbol(…)`, `Symbol.for(…)`, `Symbol.<well-known>` of the global `Symbol`;
+     * - a constant alias inherits (`const n = -1; globalThis[n]`); both branches of a
+     *   conditional must agree on being provable; type wrappers are looked through.
+     */
+    const keyKind = (key, depth = 0) => {
       const at = unwrapped(key);
-      if (!at || depth > FOLD_DEPTH) return false;
-      const isGlobalSymbol = (node) => {
-        if (node?.type !== 'Identifier' || node.name !== 'Symbol') return false;
-        const variable = variableOf(node);
-        return !variable || variable.defs.length === 0;
-      };
+      if (!at || depth > FOLD_DEPTH) return undefined;
+      const inner = (node) => keyKind(node, depth + 1);
       switch (at.type) {
         case 'Literal':
-          return typeof at.value === 'number' || typeof at.value === 'bigint';
-        case 'CallExpression':
-          return (
-            isGlobalSymbol(at.callee) ||
-            (at.callee.type === 'MemberExpression' &&
-              !at.callee.computed &&
-              isGlobalSymbol(at.callee.object) &&
-              at.callee.property.name === 'for')
-          );
-        case 'MemberExpression':
-          return isGlobalSymbol(at.object);
-        case 'Identifier': {
-          const variable = variableOf(at);
-          if (!variable || variable.defs.length !== 1) return false;
-          const [def] = variable.defs;
-          if (def.type !== 'Variable' || def.node.id !== def.name) return false;
-          if (variable.references.some((ref) => ref.isWrite() && !ref.init)) return false;
-          return neverAName(def.node.init, depth + 1);
+          return typeof at.value === 'number' || typeof at.value === 'bigint'
+            ? 'numeric'
+            : undefined;
+        case 'UnaryExpression':
+          return NUMERIC_UNARY.has(at.operator) && inner(at.argument) === 'numeric'
+            ? 'numeric'
+            : undefined;
+        case 'BinaryExpression':
+          return NUMERIC_BINARY.has(at.operator) &&
+            inner(at.left) === 'numeric' &&
+            inner(at.right) === 'numeric'
+            ? 'numeric'
+            : undefined;
+        case 'ConditionalExpression': {
+          const yes = inner(at.consequent);
+          const no = inner(at.alternate);
+          return yes === undefined || no === undefined ? undefined : yes === no ? yes : 'mixed';
         }
+        case 'Identifier':
+          if (isUnshadowedGlobal(at, 'NaN') || isUnshadowedGlobal(at, 'Infinity')) return 'numeric';
+          return inner(constantBinding(at));
+        case 'CallExpression': {
+          const callee = unwrapped(at.callee);
+          if (isUnshadowedGlobal(callee, 'Number') || isUnshadowedGlobal(callee, 'BigInt')) {
+            return 'numeric';
+          }
+          if (
+            isUnshadowedGlobal(callee, 'Symbol') ||
+            (callee.type === 'MemberExpression' &&
+              !callee.computed &&
+              callee.property.name === 'for' &&
+              isUnshadowedGlobal(callee.object, 'Symbol'))
+          ) {
+            return 'symbol';
+          }
+          return undefined;
+        }
+        case 'MemberExpression':
+          return isUnshadowedGlobal(at.object, 'Symbol') ? 'symbol' : undefined;
         default:
-          return false;
+          return undefined;
       }
     };
+    /** A computed key that could name a global: everything not provably a number or a symbol. */
+    const mayNameAGlobal = (key) => keyKind(key) === undefined;
 
     /** The name a member access / pattern key spells, when it is a constant. */
     const keyName = (key, computed) => {
@@ -395,6 +462,123 @@ export default {
     const isTimerHost = (node) => hostKind(node) !== undefined;
     const isGlobalObject = (node) => hostKind(node) === 'global';
 
+    /**
+     * THE read/write classifier for a computed global (#536 r3 N1): how the code around
+     * a member access `node` uses the slot it names.
+     *
+     * - 'read' — the value is taken: a plain use, a call, `.member`, but also every
+     *   compound and logical assignment (`+=`, `||=`, `??=`, …) and `++` / `--`, which
+     *   read before they write;
+     * - 'write' — the slot is only replaced or removed, so there is no value to be a
+     *   controller or a timer: a plain `=`, an element/property/rest/default target of a
+     *   destructuring assignment (`[g[k]] = xs`, `({ a: g[k] = 1 } = o)`), a `for…in` /
+     *   `for…of` target, and `delete`. Type wrappers (`(g[k] as any) = v`, `g[k]! = v`)
+     *   are looked through on the way up.
+     */
+    const useOf = (node) => {
+      let at = node;
+      for (;;) {
+        const { parent } = at;
+        if (!parent) return 'read';
+        if (TYPE_WRAPPERS.has(parent.type) && parent.expression === at) at = parent;
+        else if (
+          parent.type === 'Property' &&
+          parent.value === at &&
+          parent.parent.type === 'ObjectPattern'
+        ) {
+          at = parent.parent;
+        } else if (parent.type === 'ArrayPattern' || parent.type === 'ObjectPattern') at = parent;
+        else if (parent.type === 'RestElement' && parent.argument === at) at = parent;
+        else if (parent.type === 'AssignmentPattern' && parent.left === at) at = parent;
+        else break;
+      }
+      const { parent } = at;
+      if (parent.type === 'AssignmentExpression' && parent.left === at) {
+        return parent.operator === '=' ? 'write' : 'read';
+      }
+      if (
+        (parent.type === 'ForInStatement' || parent.type === 'ForOfStatement') &&
+        parent.left === at
+      ) {
+        return 'write';
+      }
+      if (parent.type === 'UnaryExpression' && parent.operator === 'delete') return 'write';
+      return 'read';
+    };
+
+    /** The object/array literal an expression is — directly or through a constant alias. */
+    const literalOf = (node, depth = 0) => {
+      const at = unwrapped(node);
+      if (!at || depth > FOLD_DEPTH) return undefined;
+      if (at.type === 'ObjectExpression' || at.type === 'ArrayExpression') return at;
+      return at.type === 'Identifier' ? literalOf(constantBinding(at), depth + 1) : undefined;
+    };
+
+    /** The values a literal array can hand out (a spread makes positions unknown, so it hands out any). */
+    const elementsOf = (source, index) => {
+      const array = literalOf(source);
+      if (array?.type !== 'ArrayExpression') return [];
+      const items = array.elements.filter((item) => item && item.type !== 'SpreadElement');
+      if (index === undefined) return items; // a for…of head takes every element
+      const positional = array.elements
+        .slice(0, index + 1)
+        .every((item) => item?.type !== 'SpreadElement');
+      if (!positional) return items;
+      return array.elements[index] ? [array.elements[index]] : [];
+    };
+
+    /**
+     * The expressions that can supply the value a destructuring `target` takes apart —
+     * the one resolver for patterns, wherever they stand (#536 r3 N1): a declaration's
+     * initializer, an assignment's right side, a default (`{ [k]: C } = globalThis` as a
+     * parameter, `[{ [k]: C } = globalThis] = []`, `{ a: { [k]: C } = globalThis } = {}`),
+     * the matching member/element of a literal source for a nested pattern, and the
+     * elements of a literal array for a `for…of` head. A source it cannot name (a
+     * parameter with no default, a call, a variable holding an iterable) is not listed:
+     * accepted residual, as for any value handed in.
+     */
+    const sourcesOf = (target, depth = 0) => {
+      const { parent } = target;
+      if (!parent || depth > FOLD_DEPTH) return [];
+      switch (parent.type) {
+        case 'VariableDeclarator': {
+          if (parent.id !== target) return [];
+          if (parent.init) return [parent.init];
+          const loop = parent.parent?.parent;
+          return loop?.type === 'ForOfStatement' && loop.left === parent.parent
+            ? elementsOf(loop.right)
+            : [];
+        }
+        case 'AssignmentExpression':
+          return parent.left === target ? [parent.right] : [];
+        case 'ForOfStatement':
+          return parent.left === target ? elementsOf(parent.right) : [];
+        case 'AssignmentPattern':
+          return parent.left === target ? [parent.right, ...sourcesOf(parent, depth + 1)] : [];
+        case 'Property': {
+          if (parent.value !== target || parent.parent.type !== 'ObjectPattern') return [];
+          const key = keyName(parent.key, parent.computed);
+          return sourcesOf(parent.parent, depth + 1).flatMap((source) => {
+            const object = literalOf(source);
+            if (object?.type !== 'ObjectExpression') return [];
+            return object.properties
+              .filter((member) => member.type === 'Property')
+              .filter((member) => {
+                const own = keyName(member.key, member.computed);
+                return key === undefined || own === undefined || own === key;
+              })
+              .map((member) => member.value);
+          });
+        }
+        case 'ArrayPattern':
+          return sourcesOf(parent, depth + 1).flatMap((source) =>
+            elementsOf(source, parent.elements.indexOf(target)),
+          );
+        default:
+          return [];
+      }
+    };
+
     /** A reference that no module-level binding answers: the global of that name. */
     const isGlobalReference = (ref) => !ref.resolved || ref.resolved.defs.length === 0;
 
@@ -428,13 +612,11 @@ export default {
       MemberExpression(node) {
         const name = keyName(node.property, node.computed);
         if (name === undefined) {
-          const assigned =
-            node.parent?.type === 'AssignmentExpression' && node.parent.left === node;
           if (
             node.computed &&
-            !assigned &&
-            !neverAName(node.property) &&
-            isGlobalObject(node.object)
+            mayNameAGlobal(node.property) &&
+            isGlobalObject(node.object) &&
+            useOf(node) === 'read'
           ) {
             note(byName, node, '[…]');
           }
@@ -453,18 +635,17 @@ export default {
         // takes whatever it is handed, so a `setTimeout` key there is a timer.
         const from = node.parent?.type === 'VariableDeclarator' ? node.parent.init : undefined;
         const timerSource = from === undefined || isTimerHost(from);
+        // Every way a pattern is fed (declaration, assignment, default, nested, for…of
+        // head): a computed key reads the global when ANY source is the global object.
+        let readsGlobal;
         for (const property of node.properties) {
           if (property.type !== 'Property') continue;
           const name = keyName(property.key, property.computed);
-          // `const { [key]: C } = globalThis`: the same unreadable name.
-          if (
-            name === undefined &&
-            property.computed &&
-            !neverAName(property.key) &&
-            from &&
-            isGlobalObject(from)
-          ) {
-            note(byName, property, '[…]');
+          // `const { [key]: C } = globalThis`: the same unreadable name. A pattern
+          // property always reads its source — there is no write-only form.
+          if (name === undefined && property.computed && mayNameAGlobal(property.key)) {
+            readsGlobal ??= sourcesOf(node).some(isGlobalObject);
+            if (readsGlobal) note(byName, property, '[…]');
           }
           if (TIMER_NAMES.has(name) && timerSource) note(timers, property, name);
           if (name === 'abort') note(aborts, property, name);

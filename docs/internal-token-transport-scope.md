@@ -336,9 +336,24 @@ followed the timer's callback). Outside the shared boundary itself:
 - **B** — a module that references `setTimeout` in any form and also mentions an
   `abort` member or binding anywhere (constant-folded computed names included) is an
   error unless the file is in `TIMER_ABORT_MODULES`;
-- **C** — a member of the global object read by a computed name that is not a
+- **C** — a member of the global object **read** by a computed name that is not a
   constant (`new globalThis[key]()`) is an error too (it could be either): fail
-  closed, same exemption as A.
+  closed, same exemption as A. One read/write classifier and one key classifier serve
+  member access and destructuring alike (#536 r3 N1/N2):
+  - _Reads_ (refused): a plain use, a call or `.member`; every compound and logical
+    assignment (`+=`, `||=`, `??=`, …) and `++`/`--`; a destructuring declaration; a
+    destructuring **assignment** (`({ [k]: C } = globalThis)`, with defaults, nested
+    over a literal source, array form); a parameter pattern defaulting to the global
+    (`function f({ [k]: C } = globalThis)`); a default inside a pattern; a `for…of`
+    head over a literal array. _Pure writes_ (not refused, nothing is read): `g[k] = v`
+    (also through a type assertion), a destructuring-assignment target (`[g[k]] = xs`,
+    `({ a: g[k] = 1 } = o)`, rest targets), a `for…in`/`for…of` target, `delete g[k]`.
+  - _Keys_: excluded only when **provably** a number, bigint or symbol — numeric/bigint
+    literals, unary `+ - ~` and arithmetic/bitwise of provable numerics, `NaN`,
+    `Infinity`, `Number(…)`, `BigInt(…)` (these four only when they resolve to the
+    unshadowed global), `Symbol(…)`, `Symbol.for(…)`, `Symbol.<x>`, a constant alias of
+    any of them, a conditional whose branches both are. Anything else (`x - 1`, `-x`,
+    `Math.floor(x)`, a shadowed `Number`) is treated as possibly naming a global.
 
 The shared boundary is exempt by its **exact canonical repository path**,
 `packages/nest-common/src/http/exchange-deadline.ts` (real path relative to the real
@@ -360,9 +375,13 @@ direct alias of one (nested `globalThis.global.AbortController`, a destructured
 `globalThis.AbortController`, `timers[key]`, a timer inside a dynamic-import callback); an
 abort not reached by a member or binding named `abort` (`Reflect.get(c, 'abort')`, a
 constant enum/object member, a constant conditional, a constant chain longer than the
-folding depth, a name read from data); and a timer and a controller that both come from
+folding depth, a name read from data); a timer and a controller that both come from
 other modules into one that owns neither (the module that owns either is the one
-refused).
+refused); and, for rule C, a computed read whose global object or destructuring source is
+not named or directly aliased — a parameter that merely defaults to the global
+(`function f(g = globalThis) { g[k] }`), the global inside a logical or conditional
+expression, a spread copy, a pattern fed by a handed-in value (a parameter with no
+default, a catch clause, a call, a `for…of` over a variable).
 
 The two boundaries compose (merge of #502/#507 into PR #492): `internalGet` sends on the
 `InternalHttpClient` sender, which is `internalFetch` with redirects refused, inside
