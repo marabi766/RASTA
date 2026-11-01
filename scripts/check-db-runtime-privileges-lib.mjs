@@ -28,6 +28,48 @@ const forbiddenSql = readFileSync(new URL('runtime-forbidden.sql', privilegeLibr
   .replaceAll('MIGRATOR_ROLE', "(:'runtime' || '_migrator')")
   .replaceAll('RUNTIME_ROLE', ":'runtime'")
   .replaceAll('RUNTIME_POLICY', ":'policy'");
+/**
+ * Every service's runtime role, as the SQL files take them: a text[] of
+ * `rasta_<svc>` for each RASTA_SERVICES entry — what the split passes too
+ * (lib/service-privilege-split.bash _runtime_roles_sql). Each name matched
+ * SERVICE_NAME, so it is a safe literal.
+ */
+const SERVICE_NAME = /^[a-z][a-z0-9]*$/;
+export function runtimeRolesSql(services = servicesFromLibrary()) {
+  for (const service of services) {
+    if (!SERVICE_NAME.test(service)) throw new Error(`unreadable service name: ${service}`);
+  }
+  return `ARRAY[${services.map((service) => `'rasta_${service}'`).join(', ')}]::text[]`;
+}
+const RUNTIME_ROLES = runtimeRolesSql();
+/**
+ * Each query below starts with this. They read a few thousand catalogue rows;
+ * their estimates cross jit_above_cost, and compiling then costs about a
+ * second a query for nothing (measured on PG16: 1.4 s against 0.2 s). The
+ * split's sessions set the same (lib/service-privilege-split.bash).
+ */
+const NO_JIT = 'SET jit = off;';
+/** Every ACL entry of every object (#540 r1 F1): the inventory both rule files judge. */
+const aclEntriesSql = readFileSync(new URL('runtime-acl-entries.sql', privilegeLibrary), 'utf8');
+/** The roles no runtime role may be a member of — the split's list. */
+/** Stored settings that reach the runtime role's sessions — the split resets the same rows. */
+const settingsSql = readFileSync(
+  new URL('runtime-settings.sql', privilegeLibrary),
+  'utf8',
+).replaceAll('RUNTIME_ROLE', ":'runtime'");
+const dangerousSql = readFileSync(
+  new URL('runtime-dangerous-roles.sql', privilegeLibrary),
+  'utf8',
+).replaceAll('RUNTIME_ROLES', RUNTIME_ROLES);
+/** The one file of declared foreign-access exceptions (#540 r1 F2). */
+export const foreignExceptionsSql = readFileSync(
+  new URL('runtime-foreign-exceptions.sql', privilegeLibrary),
+  'utf8',
+);
+/** What other services' runtime roles hold in a database: the file the split revokes from. */
+const foreignSql = readFileSync(new URL('runtime-foreign.sql', privilegeLibrary), 'utf8')
+  .replaceAll('RUNTIME_ROLES', RUNTIME_ROLES)
+  .replaceAll('RUNTIME_ROLE', ":'runtime'");
 
 /**
  * One line of runtime-function-grants.txt, matched whole: exactly three
@@ -138,16 +180,23 @@ export function classifyServices({
 /**
  * One row per thing the runtime role holds that it must not, in the database
  * psql is connected to, or is allowed and does not hold. Feed to
- * `psql -v runtime=<role> -v policy=<policy>` on stdin. Ownership
- * counts through membership of any kind (`pg_has_role … MEMBER`): a member
- * MEMBER is an intentionally conservative superset, including INHERIT FALSE
- * and SET FALSE membership; every forbidden-right rule uses it plus PUBLIC.
+ * `psql -v runtime=<role> -v policy=<policy>` on stdin. Ownership counts through membership of any kind
+ * (`pg_has_role … MEMBER`): a member MEMBER is an intentionally conservative
+ * superset, including INHERIT FALSE and SET FALSE membership; every
+ * forbidden-right rule uses it plus PUBLIC.
  *
- *   * role attributes: SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS;
- *   * owns the database, any non-system schema, relation, function or type;
- *   * membership in any role that owns something here, is named `*_migrator`,
- *     or is superuser-capable, and in the predefined roles that read or write
- *     everything or the server's files;
+ *   * role attributes: SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS, REPLICATION;
+ *   * owns the database, any non-system schema, relation, function or type —
+ *     and anything else of any class, here or cluster-wide (pg_shdepend:
+ *     large objects, foreign-data wrappers and servers, tablespaces,
+ *     publications, subscriptions, event triggers, languages, …) — and
+ *     anything in a database the check cannot connect to;
+ *   * membership in any role of runtime-dangerous-roles.sql (an owner of
+ *     anything anywhere, a migrator, any service's runtime role, a role with
+ *     an attribute above, a predefined role); a member of its own;
+ *   * a stored setting that reaches its sessions, but TimeZone, statement_timeout
+ *     and the disposable marker (runtime-settings.sql: the split resets the same);
+ *   * lo_compat_privileges on (it switches every large object's ACL off);
  *   * a required runtime function (runtime-function-grants.txt) it cannot run;
  *   * every right of runtime-forbidden.sql — the rules the split revokes by:
  *     whatever the policy's runtime-allowlist.sql rows do not allow, on the
@@ -170,14 +219,17 @@ export function findingsSql(required = requiredRuntimeFunctions) {
       : `SELECT * FROM (VALUES ${required
           .map(([service, signature]) => `('${service}', '${signature}')`)
           .join(',\n')}) v(service, signature)`;
-  return String.raw`
+  return String.raw`${NO_JIT}
 WITH me AS (
-  SELECT oid, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
+  SELECT oid, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls, rolreplication
     FROM pg_roles WHERE rolname = :'runtime'
 ),
 reachable AS (${reachableSql}),
 allowlist AS (${allowlistSql}),
 runtime_functions AS (${functionRows}),
+acl_entries AS (${aclEntriesSql}),
+dangerous AS (${dangerousSql}),
+stored_settings AS (${settingsSql}),
 forbidden AS (${forbiddenSql}),
 required_functions AS MATERIALIZED (
   SELECT signature FROM runtime_functions WHERE :'runtime' = 'rasta_' || service
@@ -215,7 +267,8 @@ user_tables AS (
 SELECT DISTINCT finding FROM (
   SELECT 'is ' || a AS finding FROM me,
     LATERAL (VALUES ('SUPERUSER', rolsuper), ('CREATEDB', rolcreatedb),
-                    ('CREATEROLE', rolcreaterole), ('BYPASSRLS', rolbypassrls)) v(a, held)
+                    ('CREATEROLE', rolcreaterole), ('BYPASSRLS', rolbypassrls),
+                    ('REPLICATION', rolreplication)) v(a, held)
    WHERE held
   UNION ALL
   SELECT 'owns database ' || d.datname FROM pg_database d, me
@@ -238,22 +291,43 @@ SELECT DISTINCT finding FROM (
     JOIN user_ns n ON n.oid = ty.typnamespace, me
    WHERE ty.typrelid = 0 AND ty.typelem = 0 AND pg_has_role(me.oid, ty.typowner, 'MEMBER')
   UNION ALL
+  -- Every class, every database (#540 r1 F1): pg_shdepend records each owner
+  -- but the bootstrap superuser's (a superuser, reported above). Here and
+  -- cluster-wide objects by name; another database's when the check visits it
+  -- (runtime-foreign.sql), or here if it cannot.
+  SELECT 'owns ' || pg_describe_object(s.classid, s.objid, s.objsubid)
+         || CASE WHEN s.refobjid = me.oid THEN '' ELSE ', through ' || pg_get_userbyid(s.refobjid) END
+    FROM pg_shdepend s JOIN reachable h ON h.oid = s.refobjid, me
+   WHERE s.refclassid = 'pg_authid'::regclass AND s.deptype = 'o'
+     AND (s.dbid = 0 OR s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database()))
+  UNION ALL
+  SELECT 'owns or is granted something in database ' || d.datname
+         || ', which accepts no connections and so cannot be checked'
+    FROM pg_shdepend s JOIN reachable h ON h.oid = s.refobjid
+    JOIN pg_database d ON d.oid = s.dbid
+   WHERE s.refclassid = 'pg_authid'::regclass AND NOT d.datallowconn
+  UNION ALL
   SELECT f.label FROM forbidden f WHERE f.held
   UNION ALL
   SELECT 'member of ' || m.rolname || ' (could SET ROLE to an owner or superuser-capable role)'
     FROM pg_roles m, me
    WHERE m.oid <> me.oid AND pg_has_role(me.oid, m.oid, 'MEMBER')
-     AND (m.rolsuper OR m.rolcreatedb OR m.rolcreaterole OR m.rolbypassrls
-          OR m.rolname LIKE '%\_migrator'
-          OR EXISTS (SELECT 1 FROM pg_database d
-                      WHERE d.datname = current_database() AND d.datdba = m.oid)
-          OR EXISTS (SELECT 1 FROM user_ns n WHERE n.nspowner = m.oid)
-          OR EXISTS (SELECT 1 FROM user_tables t WHERE t.relowner = m.oid))
+     AND m.oid IN (SELECT d.oid FROM dangerous d) AND m.rolname NOT LIKE 'pg\_%'
   UNION ALL
+  -- Every predefined role (#540 r1 F1): reading every table or setting, the
+  -- server's files, signalling other backends, …
   SELECT 'member of predefined role ' || r.rolname FROM pg_roles r
-    JOIN reachable h ON h.oid = r.oid
-   WHERE r.rolname IN ('pg_write_all_data', 'pg_read_all_data', 'pg_write_server_files',
-     'pg_read_server_files', 'pg_execute_server_program', 'pg_maintain')
+    JOIN reachable h ON h.oid = r.oid, me
+   WHERE r.rolname LIKE 'pg\_%' AND r.oid <> me.oid
+  UNION ALL
+  -- A member reaches every grant the runtime role holds (#540 r1 F2).
+  SELECT 'role ' || pg_get_userbyid(am.member) || ' is a member of the runtime role'
+    FROM pg_auth_members am, me WHERE am.roleid = me.oid
+  UNION ALL
+  SELECT label FROM stored_settings
+  UNION ALL
+  SELECT 'lo_compat_privileges is on: no large object''s ACL is checked'
+   WHERE current_setting('lo_compat_privileges') = 'on'
   UNION ALL
   SELECT 'missing required runtime EXECUTE on ' || f.signature FROM required_functions f, me
    WHERE to_regprocedure(f.signature) IS NULL
@@ -272,9 +346,12 @@ SELECT DISTINCT finding FROM (
   SELECT format('allowed but not held: %s on %s %s (runtime-allowlist.sql and the database disagree)',
                 priv, a.class, a.object)
     FROM allowlist a CROSS JOIN unnest(a.privileges) priv, me
-   WHERE a.policy IN (:'policy', '*') AND a.class IN ('database', 'schema')
+   WHERE a.policy IN (:'policy', '*') AND a.class IN ('database', 'schema', 'type')
      AND NOT CASE a.class
        WHEN 'database' THEN has_database_privilege(me.oid, current_database(), priv)
+       -- A type as a relation: judged once it exists (its migration made it).
+       WHEN 'type' THEN CASE WHEN to_regtype(a.object) IS NULL THEN true
+                             ELSE has_type_privilege(me.oid, to_regtype(a.object), priv) END
        ELSE CASE WHEN to_regnamespace(a.object) IS NULL THEN false
                  ELSE has_schema_privilege(me.oid, to_regnamespace(a.object), priv) END
      END
@@ -295,6 +372,69 @@ ORDER BY finding;
 }
 
 export const FINDINGS_SQL = findingsSql();
+
+/**
+ * One row per right another service's runtime role holds in the database psql
+ * is connected to (#540 r1 F2): runtime-foreign.sql, the rules the split
+ * revokes by — CONNECT, any ACL entry beyond the built-in privileges on any
+ * object, through itself, PUBLIC or a role it is a member of; ownership of
+ * anything here — less runtime-foreign-exceptions.sql. Feed to
+ * `psql -v runtime=<this database's runtime role, or empty>`. The check runs it in every
+ * database it can connect to: the whole (database, runtime role) matrix.
+ */
+export const FOREIGN_FINDINGS_SQL = String.raw`${NO_JIT}
+WITH acl_entries AS (${aclEntriesSql}),
+dangerous AS (${dangerousSql}),
+foreign_exceptions AS (${foreignExceptionsSql}),
+foreign_rights AS (${foreignSql})
+SELECT DISTINCT label FROM foreign_rights WHERE held ORDER BY label;
+`;
+
+/** Every database of the cluster, `name|t` when it accepts connections, `name|f` when not. */
+export const CONNECTABLE_DATABASES_SQL =
+  "SELECT datname || '|' || CASE WHEN datallowconn THEN 't' ELSE 'f' END FROM pg_database ORDER BY 1;";
+
+/**
+ * The (database, own runtime role) visits that cover every (database, runtime
+ * role) pair (#540 r1 F2): every database that accepts connections, with its
+ * service's runtime role ('' where no service owns it) — FOREIGN_FINDINGS_SQL
+ * judges all the others there. A database that accepts none cannot hold a
+ * foreign right over a connection; a service database among them is still a
+ * problem (it is not checked), and so is a service database that is missing.
+ * `lines` are CONNECTABLE_DATABASES_SQL's rows.
+ */
+export function matrix(entries, lines) {
+  const owners = new Map(entries.map(({ database, runtime }) => [database, runtime]));
+  const seen = new Set();
+  const visits = [];
+  for (const line of lines) {
+    const match = /^(.+)\|([tf])$/.exec(line);
+    if (!match) throw new Error(`unreadable database row: ${line}`);
+    const [, database, connectable] = match;
+    seen.add(database);
+    if (connectable === 't') visits.push({ database, runtime: owners.get(database) ?? '' });
+    else if (owners.has(database)) {
+      visits.push({ database, problem: 'accepts no connections, so it cannot be checked' });
+    }
+  }
+  for (const database of owners.keys()) {
+    if (!seen.has(database)) visits.push({ database, problem: 'does not exist' });
+  }
+  return visits;
+}
+
+/** The verdict for one database's foreign runtime roles, from FOREIGN_FINDINGS_SQL's rows. */
+export function foreignVerdict(database, findings) {
+  if (findings.length === 0) {
+    return { ok: true, line: `${database}: no other service's runtime role holds anything` };
+  }
+  return {
+    ok: false,
+    line: `${database}: another service's runtime role holds:\n${findings
+      .map((f) => `    - ${f}`)
+      .join('\n')}`,
+  };
+}
 
 /** The verdict for one service, from its findings: any finding fails. */
 export function verdict({ service }, findings) {

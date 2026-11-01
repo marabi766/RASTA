@@ -20,11 +20,16 @@
 --               each partition, views, materialized views, foreign tables),
 --               sequence, extension relation, extension sequence,
 --               default tables, default sequences (the migrator's default
---               privileges in that schema). A column's grant is allowed what
---               its relation is. Functions: lib/runtime-function-grants.txt.
---   object      `schema.name`, unquoted; `schema.*` is every relation (every
---               sequence) of that schema; a schema name for `schema` and the
---               two default classes; `*` for the database and extensions.
+--               privileges in that schema), type (a type or domain). A
+--               column's grant is allowed what its relation is. Functions:
+--               lib/runtime-function-grants.txt. Every other ACL — the system
+--               catalogues, parameters, tablespaces, languages, large objects,
+--               foreign-data wrappers and servers — allows nothing beyond its
+--               built-in privileges (runtime-acl-entries.sql).
+--   object      `schema.name`, unquoted (a type's too); `schema.*` is every
+--               relation (every sequence) of that schema; a schema name for
+--               `schema` and the two default classes; `*` for the database
+--               and extensions.
 --   privileges  as aclexplode() spells them. runtime-forbidden.sql caps each
 --               class (relations SELECT, INSERT, UPDATE, DELETE; sequences
 --               USAGE, SELECT; …) and reports a row that asks for more.
@@ -93,5 +98,8 @@ SELECT policy, class, object, privileges FROM (VALUES
   ('audit', 'relation', 'audit.tender_receipt_link', ARRAY['SELECT', 'INSERT']),
   ('audit', 'relation', 'audit.bid_access_evidence', ARRAY['SELECT', 'INSERT']),
   ('audit', 'relation', 'audit.tender_receipt_pending', ARRAY['SELECT', 'INSERT', 'DELETE']),
-  ('audit', 'relation', 'audit.payment_reconciliation_evidence', ARRAY['SELECT', 'INSERT'])
+  ('audit', 'relation', 'audit.payment_reconciliation_evidence', ARRAY['SELECT', 'INSERT']),
+  -- 20260909093000_audit_org_hierarchy_projection, 20260910120000_audit_chain_head.
+  ('audit', 'type', 'audit.organization_relation_state', ARRAY['USAGE']),
+  ('audit', 'type', 'audit.audit_chain_scope', ARRAY['USAGE'])
 ) a(policy, class, object, privileges)

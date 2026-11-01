@@ -22,7 +22,7 @@ construction، تغییرناپذیری دفتر کل در economic، فقط‌�
 | `rasta_<svc>`          | نقش اجرا؛ سرویس با این وصل می‌شود       | دقیقاً آنچه سیاستش در `lib/runtime-allowlist.sql` مجاز می‌داند — در حالت `default`: `CONNECT` روی پایگاه داده، `USAGE` روی `public`، و `SELECT, INSERT, UPDATE, DELETE` روی جدول‌ها و `USAGE, SELECT` روی Sequenceها — نه بیشتر. |
 
 نقش اجرا **ندارد**: مالکیت هیچ چیز؛ `CREATE` روی پایگاه داده یا Schema (پس نمی‌تواند چیزی بسازد که مالکش شود)؛
-`TRUNCATE`، `REFERENCES`، `TRIGGER`؛ هیچ حقی روی `_prisma_migrations`؛ `CREATEDB`، `CREATEROLE`، `BYPASSRLS`، `SUPERUSER`.
+`TRUNCATE`، `REFERENCES`، `TRIGGER`؛ هیچ حقی روی `_prisma_migrations`؛ `CREATEDB`، `CREATEROLE`، `BYPASSRLS`، `REPLICATION`، `SUPERUSER`.
 `EXECUTE` روی توابع مهاجر از `PUBLIC` گرفته شده (Triggerها همچنان اجرا می‌شوند: حق EXECUTE هنگام **ساختن** Trigger بررسی
 می‌شود، نه هنگام اجرا). دو نقش عضو یکدیگر نیستند — عضویت همان قدرت‌ها را پس می‌دهد.
 
@@ -83,9 +83,9 @@ plus PUBLIC. MEMBER is an intentionally **conservative superset**, including INH
 SET FALSE memberships; it is not a claim that every member can SET ROLE on PG16. Every forbidden
 right in the checker uses this closure: schema/database CREATE, ledger rights, dangerous table
 privileges, extension writes and function EXECUTE. Ownership and dangerous-role membership use
-MEMBER too. Predefined `pg_write_all_data`, `pg_read_all_data`, server-file and program-execution
-roles are explicitly refused; their implicit rights cannot be removed by object REVOKE. Remove
-those memberships administratively, then rerun the checker.
+MEMBER too. Every predefined `pg_*` role is refused (#540 r1 F1: not only the read/write-all,
+server-file and program-execution ones). Their implicit rights cannot be removed by object REVOKE,
+so the split revokes the runtime role's membership that reaches one, whoever granted it.
 
 **One allowlist (#421 r1 F3, F3b = #520 r1 R1).** What a runtime role may hold is one declarative
 file, `lib/runtime-allowlist.sql`: per policy — `default` (every split service in grants mode
@@ -109,6 +109,38 @@ reads each migration-managed policy against its migrations' `GRANT`/`REVOKE` sta
 row. A broken policy — none for the name, a service with its own policy held to `default`, a row
 above its ceiling — fails both. Role attributes, ownership, membership, predefined roles and the
 required runtime EXECUTE list stay the checker's own: no ACL REVOKE repairs them.
+
+**The whole inventory and the whole matrix (#540 r1 F1, F2; D-097, D-100).** The rules above judge
+`lib/runtime-acl-entries.sql`: every ACL entry of every PostgreSQL 16 ACL column — database, schema,
+relation, column, routine, type and domain, language, large object, foreign-data wrapper, server,
+tablespace, parameter (`pg_parameter_acl`: `SET`, `ALTER SYSTEM`) and default ACL (types too) —
+compared with the object's built-in privileges (`pg_init_privs`, else `acldefault`). On system
+catalogues (`pg_catalog`, `information_schema`, their columns), extension routines and every class
+the allowlist has no row for, any entry beyond the built-in privileges held by the closure is
+forbidden (a grant on `pg_authid` is). A catalogue ACL column the file does not model — a later
+PostgreSQL's — is a finding nothing can revoke: the check and the split fail closed until it is
+modeled. `lib/runtime-dangerous-roles.sql` is the one list of roles no runtime role may be a member
+of: `SUPERUSER`, `CREATEDB`, `CREATEROLE`, `BYPASSRLS`, `REPLICATION`; any migrator; any service's
+runtime role; every predefined role; the owner of anything of any class in any database
+(`pg_shdepend`: publications, subscriptions, event triggers, large objects, FDWs, servers,
+tablespaces, …). Both reset statements add `NOREPLICATION`, and no role may be a member of a runtime
+role. **Stored settings** (`lib/runtime-settings.sql`): a setting stored for the runtime role, for
+it in its database, for its database or for every role (`ALTER ROLE ALL`) is applied at each login
+with no privilege check, so `session_replication_role = replica` stored there would switch the
+triggers off like the parameter grant. Only `TimeZone`, `statement_timeout` and
+`rasta.disposable_database` may be stored. The split resets every other one and fails if one is left;
+the check reports it. **Across services,** `lib/runtime-foreign.sql`: in each service's database no other service's
+runtime role — directly, through PUBLIC or through a role it is a member of — holds `CONNECT`,
+`TEMPORARY`, any right on any object (the database's built-in PUBLIC entries and a user routine's
+default PUBLIC `EXECUTE` included) or owns anything. The split revokes that in its own database and
+gives what another runtime role owned there to its migrator. The checker runs the rule in **every**
+database that accepts connections, so every (database, runtime role) pair is checked. A service
+database that is missing or refuses connections fails. The only exceptions are in
+`lib/runtime-foreign-exceptions.sql`, each with its reason: PostgreSQL's default PUBLIC `CONNECT`
+(and `TEMPORARY`) on `postgres`, `template1` and `template_postgis`. `keycloak`, `temporal` and
+`temporal_visibility` are there too, because the bootstrap superuser owns them and Keycloak and
+Temporal connect as that superuser (D-100). A unit test fails if one of them gets a dedicated owner;
+PUBLIC is then revoked at bootstrap instead. No service database may be listed.
 
 **A new table** in `default` needs nothing. In `supplier`, `analytics` or `audit` it needs its `GRANT`
 in the migration **and** its row in `runtime-allowlist.sql`: without the row the split revokes the
@@ -214,7 +246,7 @@ URL مهاجر، Superuser، `TEST_ANALYTICS_ADMIN_URL` و حتی `DATABASE_URL`
 (و audit) نخستین کارِ `AppModule.onModuleInit` را `PrismaService.assertRuntimeRole()` می‌کند — بررسی مشترک
 `@rasta/nest-common` (`runtime-role.ts`) که از Catalogue می‌پرسد و بالا نمی‌آید اگر نقش وصل‌شده (مستقیم یا با عضویت)
 Superuser باشد، نامش (`current_user` یا `session_user`) به `_migrator` ختم شود، مالک پایگاه داده، Schemaی غیرسیستمی یا
-هر Relationی باشد، روی پایگاه داده یا Schemaی `CREATE` داشته باشد، یا `CREATEDB`/`CREATEROLE`/`BYPASSRLS` داشته باشد.
+هر Relationی باشد، روی پایگاه داده یا Schemaی `CREATE` داشته باشد، یا `CREATEDB`/`CREATEROLE`/`BYPASSRLS`/`REPLICATION` داشته باشد.
 آزمون زنده: `test/startup-role.int-spec.ts` هر سرویس (URL مهاجر در جای `DATABASE_URL` → رد)، و در CI
 `scripts/runtime-preflight.e2e.mjs`: URL مهاجر → ردِ نگهبان محیط؛ نقش اجرا با `CREATE` روی Schemaاش → ردِ Preflight.
 
@@ -248,7 +280,7 @@ psql URL بی گذرواژه می‌گیرد و گذرواژه را از `PGPASS
 **عضویت هم مالکیت است.** نقش اجرایی که عضو مهاجر باشد — حتی `WITH INHERIT FALSE`، که چیزی به ارث نمی‌برد — با
 `SET ROLE` مهاجر می‌شود و هر نگهبان را برمی‌دارد. پس هر دو بررسی (`assertRuntimeRole` و `check:db-runtime-privileges`)
 مالکیت را با `pg_has_role … 'MEMBER'` می‌سنجند و هر عضویتی در نقشی که اینجا مالک چیزی است، نامش `*_migrator` است یا
-`SUPERUSER`/`CREATEDB`/`CREATEROLE`/`BYPASSRLS` دارد را رد می‌کنند؛ و اسکریپت تقسیم هر عضویت مستقیم نقش اجرا در چنین
+`SUPERUSER`/`CREATEDB`/`CREATEROLE`/`BYPASSRLS`/`REPLICATION` دارد را رد می‌کنند؛ و اسکریپت تقسیم هر عضویت مستقیم نقش اجرا در چنین
 نقشی (یا در نقشی که به آن می‌رسد) را، هر که داده باشد، `REVOKE … GRANTED BY … CASCADE` می‌کند.
 
 ## ۴. خوشهٔ تازه
@@ -340,6 +372,20 @@ statement_timeout = '<ms>ms'`، هرگز روی مهاجر. همان اسکری�
 - **سرویس تقسیم‌شده با یافته:** Migrationی جدولی را با نقش اجرا ساخته (URL مهاجر تنظیم نبوده) یا کسی دستی Grant داده
   است. گام‌های ۵٫۲ تا ۵٫۴ را دوباره اجرا کن؛ اسکریپت Idempotent است.
 - **«in RASTA_SERVICES but not in PRIVILEGE_SPLIT_SERVICES»:** سرویس تازه‌ای بی تقسیم اضافه شده — گام‌های § ۷.
+- **`<db>: another service's runtime role holds: …`** (#540 r1 F2): in a service database, rerun
+  that service's split (§ 5.2); it revokes the foreign entries and takes foreign-owned objects. In a
+  database no service owns, revoke the named grant there by hand (`REVOKE … FROM <role>`; for PUBLIC's
+  default on a database of your own, `REVOKE ALL ON DATABASE <db> FROM PUBLIC`). Only if it is truly
+  infrastructure, declare it in `lib/runtime-foreign-exceptions.sql` with its reason.
+- **`… on system table …` / `… on parameter …` / `… beyond the built-in privileges`** (#540 r1 F1): a
+  grant beyond PostgreSQL's built-in privileges on a catalogue, parameter, tablespace, large object,
+  FDW, server, type, language or extension routine. The split revokes it (a parameter or tablespace
+  grant is cluster-wide: any service's split does).
+- **`a stored setting reaches its sessions: …`:** rerun the split (it resets it), or `ALTER ROLE …
+RESET <parameter>` / `ALTER DATABASE … RESET <parameter>` by hand.
+- **`the ACL column … is not modeled`:** this PostgreSQL has an ACL the inventory does not know. Model it
+  in `lib/runtime-acl-entries.sql` (and its unit test) before running the split again; it refuses
+  until then.
 
 **Privileged URL names at boot.** The existing guard's scope is credential variable names, not all
 foreign runtime URLs: `DATABASE_URL_*_MIGRATOR` and `POSTGRES_PASSWORD_*_MIGRATOR` were refused.

@@ -28,7 +28,8 @@
 #     shadow database `prisma migrate dev` provisions locally; production runs
 #     `migrate deploy`, which needs none.
 #   * `rasta_<svc>` — the runtime role — loses SUPERUSER, CREATEDB,
-#     CREATEROLE and BYPASSRLS.
+#     CREATEROLE, BYPASSRLS and REPLICATION; it is a member of no role it must
+#     not reach (runtime-dangerous-roles.sql), and no role is a member of it.
 #   * The database and **every object in it** (tables, sequences, types,
 #     functions, the Prisma ledger) are reassigned to the migrator, and so is
 #     schema `public` whoever owns it — the runtime role, `pg_database_owner`,
@@ -37,6 +38,9 @@
 #     an existing database keeps every row and its migration history.
 #   * The runtime role keeps CONNECT on the database and USAGE on `public`:
 #     no CREATE (it cannot add objects it would own), no TEMP.
+#   * No other service's runtime role holds anything in the database (#540 r1
+#     F2): no CONNECT, no right on any object, through itself, PUBLIC or a
+#     role it is a member of, and owns nothing there (runtime-foreign.sql).
 #   * PUBLIC loses EXECUTE on functions the migrator creates, and on those it
 #     already owns (supplier's finding, Codex review of #120 round 3): a later
 #     SECURITY DEFINER function must not hand the runtime role the migrator's
@@ -85,8 +89,12 @@
 # a role's password (ALTER ROLE … PASSWORD), and a process's argv is readable
 # by every local user while it runs (D-045 follow-up, Codex on #191). `printf`
 # is a shell builtin, so the text is never an argument of any process either.
+# JIT off: the privilege queries read a few thousand catalogue rows, and
+# compiling them costs a second each for nothing (as
+# scripts/check-db-runtime-privileges-lib.mjs NO_JIT).
 _svc_split_psql() {
-  printf '%s\n' "$2" | psql -v ON_ERROR_STOP=1 -X -q --username "$POSTGRES_USER" --dbname "$1" -f -
+  printf '%s\n' "$2" | PGOPTIONS="${PGOPTIONS:-} -c jit=off" \
+    psql -v ON_ERROR_STOP=1 -X -q --username "$POSTGRES_USER" --dbname "$1" -f -
 }
 
 # shellcheck source=session-timezone.bash
@@ -126,46 +134,112 @@ own_migration_ledger() {
     COMMIT;"
 }
 
+# reset_runtime_settings <database> <runtime>
+#
+# Every stored setting that reaches the runtime role's sessions but TimeZone,
+# statement_timeout and the disposable marker (runtime-settings.sql, shared
+# with the check) is RESET: a superuser's `ALTER ROLE … SET
+# session_replication_role = replica` is applied at each login with no
+# privilege check (#540 r1 F1, beyond ACLs). Fails when one is left — a
+# name the file will not spell into a RESET included.
+reset_runtime_settings() {
+  local db="$1" runtime="$2" settings
+  settings="$(cat "$(dirname "${BASH_SOURCE[0]}")/runtime-settings.sql")" || return 1
+  settings="${settings//RUNTIME_ROLE/\'${runtime}\'}"
+  _svc_split_psql "${db}" "DO \$\$
+    DECLARE row record; left_over text;
+    BEGIN
+      FOR row IN WITH stored_settings AS (${settings})
+                 SELECT reset FROM stored_settings WHERE reset IS NOT NULL ORDER BY 1 LOOP
+        EXECUTE row.reset;
+      END LOOP;
+      WITH stored_settings AS (${settings})
+      SELECT string_agg(label, '; ' ORDER BY label) INTO left_over FROM stored_settings;
+      IF left_over IS NOT NULL THEN
+        RAISE EXCEPTION 'the split cannot reset %''s settings: %', '${runtime}', left_over;
+      END IF;
+    END \$\$;"
+}
+
 # revoke_owner_memberships <database> <runtime>
 #
-# The runtime role is a member of nothing that could act as an owner here
-# (Codex round 3 on #176). On an existing cluster it may have been granted the
+# The runtime role is a member of nothing that could act as an owner (Codex
+# round 3 on #176). On an existing cluster it may have been granted the
 # migrator — or any owner, or a superuser-capable role — WITH INHERIT FALSE:
 # it then inherits nothing and owns nothing, yet `SET ROLE` makes it that role,
-# and every guard is liftable again. Every direct membership of the runtime
-# role in a role that can reach (through further membership) a role that owns
-# something in this database, is named `*_migrator`, or holds SUPERUSER,
-# CREATEDB, CREATEROLE or BYPASSRLS is revoked — whoever granted it.
+# and every guard is liftable again. Every direct membership, whoever granted
+# it, in a role that reaches (through further membership) a role of
+# runtime-dangerous-roles.sql — SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS or
+# REPLICATION; a migrator; any service's runtime role; a predefined role; the
+# owner of anything of any class in any database (#540 r1 F1) — is revoked:
+# the runtime role's own, and every other service's runtime role's too, whose
+# way into this database it would be (#540 r1 F2). And no role is a member of
+# this runtime role: a member reaches every grant it holds.
 revoke_owner_memberships() {
-  local db="$1" runtime="$2"
+  local db="$1" runtime="$2" dangerous runtimes
+  dangerous="$(_runtime_dangerous_sql)" || return 1
+  runtimes="$(_runtime_roles_sql)"
   _svc_split_psql "${db}" "DO \$\$
     DECLARE grant_row record;
     BEGIN
       FOR grant_row IN
-        WITH dangerous AS (
+        WITH dangerous AS (${dangerous}),
+        runtimes AS (
           SELECT r.oid FROM pg_roles r
-           WHERE r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolbypassrls
-              OR r.rolname LIKE '%\\_migrator'
-              OR EXISTS (SELECT 1 FROM pg_database d
-                          WHERE d.datname = current_database() AND d.datdba = r.oid)
-              OR EXISTS (SELECT 1 FROM pg_namespace n
-                          WHERE n.nspowner = r.oid
-                            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-                            AND n.nspname NOT LIKE 'pg\\_%')
-              OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                          WHERE c.relowner = r.oid
-                            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-                            AND n.nspname NOT LIKE 'pg\\_%')
+           WHERE r.rolname = '${runtime}' OR r.rolname = ANY (${runtimes})
+              OR EXISTS (SELECT 1 FROM pg_roles m WHERE m.rolname = r.rolname || '_migrator')
         )
-        SELECT granted.rolname AS granted, grantor.rolname AS grantor
+        SELECT granted.rolname AS granted, member.rolname AS member, grantor.rolname AS grantor
           FROM pg_auth_members am
           JOIN pg_roles granted ON granted.oid = am.roleid
+          JOIN pg_roles member ON member.oid = am.member
           JOIN pg_roles grantor ON grantor.oid = am.grantor
-         WHERE am.member = '${runtime}'::regrole
-           AND EXISTS (SELECT 1 FROM dangerous d WHERE pg_has_role(am.roleid, d.oid, 'MEMBER'))
+         WHERE (am.member IN (SELECT oid FROM runtimes)
+                AND EXISTS (SELECT 1 FROM dangerous d WHERE pg_has_role(am.roleid, d.oid, 'MEMBER')))
+            OR am.roleid = '${runtime}'::regrole
+         ORDER BY 1, 2, 3
       LOOP
         EXECUTE format('REVOKE %I FROM %I GRANTED BY %I CASCADE',
-                       grant_row.granted, '${runtime}', grant_row.grantor);
+                       grant_row.granted, grant_row.member, grant_row.grantor);
+      END LOOP;
+    END \$\$;"
+}
+
+# reassign_foreign_ownership <database> <migrator> <runtime>
+#
+# What another service's runtime role owns in this database — directly; an
+# owner it reaches through membership lost that membership above — becomes the
+# migrator's, object by object (#540 r1 F2). Not REASSIGN OWNED: that would
+# hand the migrator that role's shared objects too, its own database among
+# them. Every class pg_shdepend records is named by pg_identify_object, which
+# spells it as ALTER … OWNER TO does; one ALTER cannot take (an event trigger
+# needs a superuser owner) fails the split.
+reassign_foreign_ownership() {
+  local db="$1" migrator="$2" runtime="$3" runtimes
+  runtimes="$(_runtime_roles_sql)"
+  _svc_split_psql "${db}" "DO \$\$
+    DECLARE owned record;
+    BEGIN
+      FOR owned IN
+        SELECT upper(replace(replace(i.type, 'foreign-data wrapper', 'foreign data wrapper'),
+                             'statistics object', 'statistics')) AS kind,
+               i.identity, pg_get_userbyid(s.refobjid) AS owner
+          FROM pg_shdepend s
+          JOIN pg_roles r ON r.oid = s.refobjid,
+          LATERAL pg_identify_object(s.classid, s.objid, s.objsubid) i
+         WHERE s.refclassid = 'pg_authid'::regclass AND s.deptype = 'o'
+           AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND r.rolname <> '${runtime}'
+           AND (r.rolname = ANY (${runtimes})
+                OR EXISTS (SELECT 1 FROM pg_roles m WHERE m.rolname = r.rolname || '_migrator'))
+         ORDER BY 1, 2
+      LOOP
+        BEGIN
+          EXECUTE format('ALTER %s %s OWNER TO %I', owned.kind, owned.identity, '${migrator}');
+        EXCEPTION WHEN OTHERS THEN
+          RAISE EXCEPTION 'cannot take % % from %, another service''s runtime role: %',
+            lower(owned.kind), owned.identity, owned.owner, SQLERRM;
+        END;
       END LOOP;
     END \$\$;"
 }
@@ -244,6 +318,26 @@ grant_service_tables() {
   fi
 }
 
+# Every service's runtime role this run knows, as a text[]: RASTA_SERVICES
+# (lib/role-passwords.bash) when it is loaded — the bootstrap and a standalone
+# run load it — else none; runtime-foreign.sql and runtime-dangerous-roles.sql
+# add every role with a `<name>_migrator` beside it either way.
+_runtime_roles_sql() {
+  local svc list=""
+  if declare -p RASTA_SERVICES >/dev/null 2>&1; then
+    for svc in "${RASTA_SERVICES[@]}"; do list+="${list:+, }'rasta_${svc}'"; done
+  fi
+  printf 'ARRAY[%s]::text[]' "${list}"
+}
+
+# The roles no runtime role may be a member of (runtime-dangerous-roles.sql),
+# shared with the catalogue check.
+_runtime_dangerous_sql() {
+  local sql
+  sql="$(cat "$(dirname "${BASH_SOURCE[0]}")/runtime-dangerous-roles.sql")" || return 1
+  printf '%s' "${sql//RUNTIME_ROLES/$(_runtime_roles_sql)}"
+}
+
 # Shared with the catalogue checker. Do not replace MEMBER with USAGE/SET:
 # this deliberately conservative closure also includes non-inherited memberships.
 _runtime_reachable_sql() {
@@ -307,19 +401,31 @@ _runtime_functions_sql() {
 #
 # The closure, the allowlist and the forbidden rights, all shared with the
 # catalogue check: runtime-forbidden.sql over the runtime role's
-# runtime-reachable.sql, runtime-allowlist.sql's <policy> and the listed
-# functions. Fails, printing nothing usable, when the function list is malformed:
-# call it as `sql="$(_runtime_forbidden_sql …)" || return 1`.
+# runtime-reachable.sql, runtime-allowlist.sql's <policy>, the listed
+# functions and every ACL entry here (runtime-acl-entries.sql) — and, scope
+# `foreign`, runtime-foreign.sql: what every other service's runtime role holds
+# in this database. Fails, printing nothing usable, when a file is unreadable
+# or the function list malformed: call it as
+# `sql="$(_runtime_forbidden_sql …)" || return 1`.
 _runtime_forbidden_sql() {
-  local forbidden allowlist functions
-  forbidden="$(cat "$(dirname "${BASH_SOURCE[0]}")/runtime-forbidden.sql")" || return 1
+  local lib forbidden foreign allowlist functions entries dangerous exceptions runtimes
+  lib="$(dirname "${BASH_SOURCE[0]}")"
+  forbidden="$(cat "${lib}/runtime-forbidden.sql")" || return 1
+  foreign="$(cat "${lib}/runtime-foreign.sql")" || return 1
+  entries="$(cat "${lib}/runtime-acl-entries.sql")" || return 1
+  exceptions="$(cat "${lib}/runtime-foreign-exceptions.sql")" || return 1
+  dangerous="$(_runtime_dangerous_sql)" || return 1
   allowlist="$(_runtime_allowlist_sql)" || return 1
   functions="$(_runtime_functions_sql)" || return 1
+  runtimes="$(_runtime_roles_sql)"
   forbidden="${forbidden//MIGRATOR_ROLE/\'${2}\'}"
   forbidden="${forbidden//RUNTIME_ROLE/\'${1}\'}"
   forbidden="${forbidden//RUNTIME_POLICY/\'${3}\'}"
-  printf 'WITH reachable AS (%s), allowlist AS (%s), runtime_functions AS (%s), forbidden AS (%s)' \
-    "$(_runtime_reachable_sql "${1}")" "${allowlist}" "${functions}" "${forbidden}"
+  foreign="${foreign//RUNTIME_ROLES/${runtimes}}"
+  foreign="${foreign//RUNTIME_ROLE/\'${1}\'}"
+  printf 'WITH reachable AS (%s), allowlist AS (%s), runtime_functions AS (%s), acl_entries AS (%s), dangerous AS (%s), foreign_exceptions AS (%s), own_rights AS (%s), foreign_rights AS (%s), forbidden AS (SELECT * FROM own_rights UNION ALL SELECT * FROM foreign_rights)' \
+    "$(_runtime_reachable_sql "${1}")" "${allowlist}" "${functions}" "${entries}" "${dangerous}" \
+    "${exceptions}" "${forbidden}" "${foreign}"
 }
 
 # Revoke actual ACL entries as THEIR grantor: PG16 object REVOKE GRANTED BY
@@ -341,7 +447,8 @@ _runtime_forbidden_sql() {
 #
 # The loop ending is not convergence: assert_no_forbidden_rights, last in the
 # split, is. 'extension' is separate so every mode runs it AFTER application
-# table grants.
+# table grants; 'foreign' is the other services' runtime roles' entries here,
+# each row naming its grantee (never this runtime role's).
 _restrict_reachable_acl() {
   local db="$1" runtime="$2" migrator="$3" scope="$4" policy="$5" forbidden
   forbidden="$(_runtime_forbidden_sql "${runtime}" "${migrator}" "${policy}")" || return 1
@@ -354,7 +461,7 @@ _restrict_reachable_acl() {
           FROM forbidden f CROSS JOIN LATERAL aclexplode(f.acl) a
           WHERE f.scope = '${scope}' AND a.privilege_type = f.privilege
             AND (a.is_grantable OR NOT f.grant_option)
-            AND a.grantee IN (SELECT oid FROM reachable)
+            AND a.grantee = ANY (coalesce(f.grantees, ARRAY(SELECT oid FROM reachable)))
             AND (NOT f.public_only OR a.grantee = 0))
         SELECT pg_get_userbyid(e.grantor) AS grantor,
           format('%sREVOKE %s ON %s FROM %s CASCADE', e.revoke_prefix, e.revoke_what,
@@ -368,7 +475,11 @@ _restrict_reachable_acl() {
                  THEN 'REVOKE GRANT OPTION FOR %s ON %s FROM %I CASCADE'
                  ELSE 'REVOKE %s ON %s FROM %I CASCADE' END,
             e.privilege_sql, e.revoke_on, pg_get_userbyid(e.grantor)) AS take_back,
-          e.revoke_prefix = '' AND e.grantor <> e.owner AS lendable
+          e.revoke_prefix = '' AND e.grantor <> e.owner AS lendable,
+          -- A schema's or the database's entry last: a grantor that lost USAGE
+          -- on the schema could no longer name the objects it still has to
+          -- revoke (#540 r1 F2 revokes a closure role's allowed USAGE too).
+          e.revoke_on ~ '^(SCHEMA|DATABASE) ' AS container
         FROM entries e\$q\$;
       still CONSTANT text := 'SELECT EXISTS (SELECT 1 FROM (' || pending || ') p
         WHERE p.grantor = \$1 AND p.command = \$2)';
@@ -378,7 +489,7 @@ _restrict_reachable_acl() {
     BEGIN
       EXECUTE 'SELECT count(*) FROM (' || pending || ') p' INTO passes;
       LOOP
-        EXECUTE pending || ' ORDER BY grantor, command LIMIT 1' INTO item;
+        EXECUTE pending || ' ORDER BY container, grantor, command LIMIT 1' INTO item;
         EXIT WHEN item.command IS NULL;
         IF passes = 0 THEN
           RAISE EXCEPTION 'the % ACL cleanup did not converge: % (as %) is still pending',
@@ -432,6 +543,19 @@ assert_no_forbidden_rights() {
         RAISE EXCEPTION 'the split did not converge: % still holds %', '${runtime}', left_over;
       END IF;
     END \$\$;"
+}
+
+# restrict_foreign_access <database> <runtime> <migrator> <policy>
+#
+# Every other service's runtime role leaves this database with nothing
+# (#540 r1 F2): what it owned here is the migrator's, its memberships in an
+# owner or this runtime role are gone (revoke_owner_memberships), and every ACL
+# entry it — or PUBLIC, or a role it is a member of — holds here beyond the
+# built-in privileges is revoked, CONNECT included.
+restrict_foreign_access() {
+  local db="$1" runtime="$2" migrator="$3" policy="$4"
+  reassign_foreign_ownership "${db}" "${migrator}" "${runtime}" || return 1
+  _restrict_reachable_acl "${db}" "${runtime}" "${migrator}" foreign "${policy}"
 }
 
 # restrict_extension_relations <database> <runtime> [migrator] [policy]
@@ -523,7 +647,7 @@ split_service_privileges() {
   _svc_split_psql postgres "ALTER ROLE ${migrator} WITH LOGIN PASSWORD '${password}'"
 
   # The runtime role can no longer create — or, owning none, drop — a database.
-  _svc_split_psql postgres "ALTER ROLE ${runtime} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS"
+  _svc_split_psql postgres "ALTER ROLE ${runtime} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION"
 
   _svc_split_psql postgres "ALTER DATABASE ${db} OWNER TO ${migrator}"
 
@@ -539,7 +663,8 @@ split_service_privileges() {
   _svc_split_psql "${db}" "ALTER SCHEMA public OWNER TO ${migrator}"
 
   # No back door: no membership in the migrator or any other owner.
-  revoke_owner_memberships "${db}" "${runtime}"
+  revoke_owner_memberships "${db}" "${runtime}" || return 1
+  reset_runtime_settings "${db}" "${runtime}" || return 1
 
   # Database level: CONNECT, nothing more. TEMP and CREATE are withdrawn.
   _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM PUBLIC"
@@ -556,6 +681,7 @@ split_service_privileges() {
 
   grant_service_tables "${svc}" "${db}" "${mode}" || return 1
   restrict_extension_relations "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
+  restrict_foreign_access "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
 
   # The migration ledger is the migrator's alone, from before the first
   # migration: a runtime role that could write it could mark a guard-creating
@@ -597,14 +723,15 @@ split_audit_database_privileges() {
       END IF;
     END \$\$;"
   _svc_split_psql postgres "ALTER ROLE ${migrator} WITH LOGIN PASSWORD '${password}'"
-  _svc_split_psql postgres "ALTER ROLE ${runtime} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS"
+  _svc_split_psql postgres "ALTER ROLE ${runtime} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION"
   _svc_split_psql postgres "ALTER DATABASE ${db} OWNER TO ${migrator}"
   _svc_split_psql "${db}" "REASSIGN OWNED BY ${runtime} TO ${migrator}"
   # Both schemas whoever owns them (see split_service_privileges).
   _svc_split_psql "${db}" "ALTER SCHEMA public OWNER TO ${migrator}"
   _svc_split_psql "${db}" "CREATE SCHEMA IF NOT EXISTS audit AUTHORIZATION ${migrator}"
   _svc_split_psql "${db}" "ALTER SCHEMA audit OWNER TO ${migrator}"
-  revoke_owner_memberships "${db}" "${runtime}"
+  revoke_owner_memberships "${db}" "${runtime}" || return 1
+  reset_runtime_settings "${db}" "${runtime}" || return 1
   _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM PUBLIC"
   _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM ${runtime}"
   _svc_split_psql postgres "GRANT CONNECT ON DATABASE ${db} TO ${runtime}"
@@ -617,6 +744,7 @@ split_audit_database_privileges() {
   # Held to the `audit` policy of runtime-allowlist.sql, whatever `service` is.
   restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" audit || return 1
   restrict_extension_relations "${db}" "${runtime}" "${migrator}" audit || return 1
+  restrict_foreign_access "${db}" "${runtime}" "${migrator}" audit || return 1
   # Its migrations run with `?schema=audit`, so that is where Prisma keeps the
   # ledger; the same pre-creation, so it never holds a runtime grant either.
   own_migration_ledger "${db}" audit "${migrator}" "${runtime}"
