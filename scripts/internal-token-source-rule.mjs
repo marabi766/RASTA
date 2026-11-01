@@ -175,7 +175,6 @@ export default {
     },
   },
   create(context) {
-    const filename = posix(context.physicalFilename ?? context.filename);
     const canonical = repoPath(context.physicalFilename ?? context.filename);
     if (canonical === CLIENT_FILE) return {};
     const services = context.sourceCode.parserServices;
