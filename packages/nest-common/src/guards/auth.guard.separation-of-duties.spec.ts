@@ -5,7 +5,8 @@ import type { ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { SignJWT, exportJWK, generateKeyPair, type KeyLike } from 'jose';
 import { AuthGuard } from './auth.guard';
-import { InternalTokenService, TokenVerifier } from '../auth/token-verifier';
+import { TokenVerifier } from '../auth/token-verifier';
+import { InternalTokenService } from '../http/internal-http-client';
 import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import {
   assertDistinctActors,

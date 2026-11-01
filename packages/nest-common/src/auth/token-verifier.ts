@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, jwtVerify, SignJWT, type JWTPayload } from 'jose';
+import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { readUrl } from '@rasta/config';
 import { RastaError } from '../errors/rasta-error';
 
@@ -90,6 +90,10 @@ export interface ServiceClaims {
   expiresAt: number;
 }
 
+// Service-to-service tokens are signed and verified by `InternalTokenService`,
+// which lives with `InternalHttpClient` in ../http/internal-http-client.ts so
+// that its key never leaves that module (PR #503 r2).
+
 export interface TokenVerifierOptions {
   jwksUri: string;
   issuer: string;
@@ -153,98 +157,6 @@ export class TokenVerifier {
 }
 
 /**
- * Service-to-service tokens.
- *
- * MVP uses a short-lived HS256 token signed with a shared secret. This is a
- * documented simplification (risk S-03): production replaces it with mTLS and
- * per-workload identity per ADR-020. The token is scoped to a single target
- * service so a leaked token for `notification-service` cannot be replayed
- * against `economic-service`.
- */
-export class InternalTokenService {
-  private readonly key: Uint8Array;
-
-  constructor(
-    secret: string,
-    private readonly issuer: string,
-    private readonly ttlSeconds: number,
-  ) {
-    if (secret.length < 32) {
-      throw new Error('INTERNAL_TOKEN_SECRET must be at least 32 characters');
-    }
-    this.key = new TextEncoder().encode(secret);
-  }
-
-  /**
-   * Mints a token for one caller, one target and — for a tenant-scoped call —
-   * one organization.
-   *
-   * `organizationId` goes **inside the signature**. That is the whole point of
-   * ADR-035: an unsigned `X-Organization-Id` header can be written by anything
-   * that reaches the service, so it cannot be the authority for which tenant a
-   * service acts as. Minting per (target, organization) keeps a leaked token
-   * worth exactly one organization on one service for `ttlSeconds`.
-   *
-   * Omit it for a platform-wide operation, and for every `RELAY` token.
-   */
-  async issue(
-    callerService: string,
-    targetService: string,
-    purpose: InternalTokenPurpose = 'SERVICE',
-    organizationId?: string,
-  ): Promise<string> {
-    return new SignJWT({
-      svc: callerService,
-      purpose,
-      ...(organizationId ? { org_id: organizationId } : {}),
-    })
-      .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
-      .setIssuer(this.issuer)
-      .setAudience(targetService)
-      .setSubject(callerService)
-      .setIssuedAt()
-      .setExpirationTime(`${this.ttlSeconds}s`)
-      .sign(this.key);
-  }
-
-  async verify(token: string, expectedTarget: string): Promise<ServiceClaims> {
-    try {
-      const { payload } = await jwtVerify(token, this.key, {
-        issuer: this.issuer,
-        audience: expectedTarget,
-        algorithms: ['HS256'],
-        clockTolerance: 5,
-        // As for user tokens: `issue` always sets one, so this refuses only a
-        // token that did not come from `issue`.
-        requiredClaims: ['exp'],
-      });
-
-      if (!payload.sub) {
-        throw new RastaError('TOKEN_INVALID', 'Internal token has no subject');
-      }
-
-      const purpose: InternalTokenPurpose = payload['purpose'] === 'RELAY' ? 'RELAY' : 'SERVICE';
-
-      return {
-        callerService: payload.sub,
-        targetService: expectedTarget,
-        // Absent means SERVICE: the stricter reading, and what every token
-        // minted before the claim existed meant.
-        purpose,
-        // Read only for SERVICE. A relay names no actor and therefore no
-        // tenant; honouring an `org_id` on one would let the gateway — the
-        // component exposed to outside traffic — choose a tenant for a call it
-        // is only forwarding (ADR-035).
-        ...(purpose === 'SERVICE' ? { organizationId: readString(payload, 'org_id') } : {}),
-        expiresAt: expiryMillis(payload),
-      };
-    } catch (error) {
-      throw mapJoseError(error);
-    }
-  }
-}
-
-/**
  * The token's expiry in epoch milliseconds.
  *
  * `requiredClaims: ['exp']` means jose has already refused a token without
@@ -253,14 +165,14 @@ export class InternalTokenService {
  * saying so — a value that reads as "long expired" to one caller and as "no
  * expiry recorded" to another.
  */
-function expiryMillis(payload: JWTPayload): number {
+export function expiryMillis(payload: JWTPayload): number {
   if (typeof payload.exp !== 'number') {
     throw new RastaError('TOKEN_INVALID', 'Token has no expiry');
   }
   return payload.exp * 1000;
 }
 
-function mapJoseError(error: unknown): RastaError {
+export function mapJoseError(error: unknown): RastaError {
   if (error instanceof RastaError) return error;
 
   const code = (error as { code?: string })?.code;
@@ -278,7 +190,7 @@ function mapJoseError(error: unknown): RastaError {
   });
 }
 
-function readString(payload: JWTPayload, key: string): string | undefined {
+export function readString(payload: JWTPayload, key: string): string | undefined {
   const value = payload[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }

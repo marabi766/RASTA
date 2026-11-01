@@ -2,12 +2,8 @@ import { Injectable, Inject, type CanActivate, type ExecutionContext } from '@ne
 import { Reflector } from '@nestjs/core';
 import { ERROR_CODES } from '@rasta/contracts';
 import { RastaError } from '../errors/rasta-error';
-import {
-  TokenVerifier,
-  InternalTokenService,
-  type ServiceClaims,
-  type UserClaims,
-} from '../auth/token-verifier';
+import { TokenVerifier, type ServiceClaims, type UserClaims } from '../auth/token-verifier';
+import type { InternalTokenService } from '../http/internal-http-client';
 import { IS_PUBLIC_KEY, ALLOW_SERVICE_KEY, REQUIRE_PLATFORM_USER_ID_KEY } from '../decorators';
 import { platformUserIdRequired } from '../auth/separation-of-duties';
 import { tryGetContext, upgradeContext, type RequestContext } from '../context/request-context';

@@ -1,7 +1,6 @@
-import { InternalHttpClient } from '../http/internal-http-client';
+import { InternalHttpClient, type InternalTokenService } from '../http/internal-http-client';
 import { tryGetContext } from '../context/request-context';
 import { upstreamExchange } from '../http/exchange-deadline';
-import type { InternalTokenService } from './token-verifier';
 
 /** Identifier characters only; anything else is not forwarded as a correlation id. */
 const SAFE_CORRELATION_ID = /^[A-Za-z0-9_.:-]{1,128}$/;

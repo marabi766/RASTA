@@ -3,7 +3,8 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { inspect } from 'node:util';
 import { SignJWT, exportJWK, generateKeyPair, type KeyLike } from 'jose';
-import { InternalTokenService, TokenVerifier } from './token-verifier';
+import { TokenVerifier } from './token-verifier';
+import { InternalTokenService } from '../http/internal-http-client';
 import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { RastaError } from '../errors/rasta-error';
 
