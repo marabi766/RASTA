@@ -34,6 +34,8 @@
     "test:outbox-b2": "node --test scripts/outbox-b2-lib.test.mjs",
     "test:outbox-provenance-restoration-guard": "node --test scripts/outbox-provenance-restoration-guard.test.mjs",
     "test:url-parsing-guard": "node --test scripts/url-parsing-guard.test.mjs",
+    "prepush:scope": "node scripts/prepush-scope.mjs",
+    "test:prepush-scope": "node --test scripts/prepush-scope.test.mjs",
     "test:unit-step-concurrency": "node --test scripts/check-unit-step-concurrency.test.mjs && node scripts/check-unit-step-concurrency.mjs",
     "test:credential-fetch": "node --test scripts/credential-fetch.test.mjs",
     "test:config-disclosure": "node --test scripts/config-disclosure.test.mjs",
