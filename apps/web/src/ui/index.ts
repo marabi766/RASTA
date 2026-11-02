@@ -42,5 +42,18 @@ export { Form, useSchemaForm } from './form/Form';
 export { MoneyField } from './form/MoneyField';
 export { TextField } from './form/TextField';
 
+export { ThemeProvider, ThemeSwitch } from './theme/ThemeSwitch';
+export {
+  DEFAULT_THEME,
+  DEVICE_THEME_COOKIE,
+  THEMES,
+  THEME_COOKIE_MAX_AGE_SECONDS,
+  THEME_COOKIE_NAME,
+  parseTheme,
+  resolveTheme,
+  themeCookie,
+} from './theme/theme';
+export type { Theme } from './theme/theme';
+
 export { DirectionalIcon } from './text/DirectionalIcon';
 export { Identifier, IsolatedText } from './text/Identifier';

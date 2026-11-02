@@ -58,6 +58,21 @@ describe('AppShell', () => {
   ));
 });
 
+describe('TopBar', () => {
+  it('carries the light / dark switch before the page’s own controls, with or without them', () => {
+    const { container, rerender } = renderInDirection(<TopBar />, 'rtl');
+    expect(screen.getByRole('button', { name: 'حالت تیره' })).toHaveAttribute('type', 'button');
+
+    rerender(
+      <TopBar>
+        <button type="button">خروج</button>
+      </TopBar>,
+    );
+    const buttons = [...container.querySelectorAll('header button')].map((b) => b.textContent);
+    expect(buttons).toEqual(['حالت تیره', 'خروج']);
+  });
+});
+
 describe('Sidebar', () => {
   // Colour marks the current item for everyone who can see it and for nobody
   // who cannot. `aria-current` is the half that is announced.

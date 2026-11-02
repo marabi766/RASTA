@@ -1,6 +1,9 @@
 import type { Metadata } from 'next';
 import { Suspense, type ReactNode } from 'react';
 
+import { readThemePreference } from '@/server/theme';
+import { ThemeProvider } from '@/ui';
+
 import { AccountGuard } from './AccountGuard';
 import { vazirmatn } from './fonts';
 import './globals.css';
@@ -26,16 +29,21 @@ export const metadata: Metadata = {
  * `globals.css` reads as the head of `--font-sans`. No component names a font,
  * for the same reason no component names a colour.
  *
- * There is deliberately no `data-theme` attribute here. Its absence means
- * "follow the operating system", which `globals.css` implements in CSS alone —
- * no inline script, no flash of the wrong theme on first paint, and nothing
- * for a content security policy to have to permit.
+ * `data-theme` is rendered here, from the preference cookie the server reads
+ * (`server/theme.ts`): `light` unless this person — or, on the login page,
+ * this device — has chosen `dark`, whatever the operating system prefers (owner
+ * decision 2026-10-24). It is in the HTML itself, so the first paint is already
+ * the right one, nothing needs an inline script (and so nothing for the content
+ * security policy to permit), and it holds with scripts blocked.
  */
-export default function RootLayout({ children }: { children: ReactNode }) {
+export default async function RootLayout({ children }: { children: ReactNode }) {
+  const { theme, cookieName, secure } = await readThemePreference();
   return (
-    <html lang="fa" dir="rtl" className={vazirmatn.variable}>
+    <html lang="fa" dir="rtl" data-theme={theme} className={vazirmatn.variable}>
       <body>
-        {children}
+        <ThemeProvider cookieName={cookieName} secure={secure}>
+          {children}
+        </ThemeProvider>
         <Suspense fallback={null}>
           <AccountGuard />
         </Suspense>

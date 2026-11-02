@@ -36,6 +36,17 @@ exports[`AppShell the full shell (ltr) 1`] = `
           دهیاری نمونه
         </span>
       </div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <button
+          aria-pressed="false"
+          class="inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-bold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-not-allowed disabled:opacity-60 border border-border-strong bg-surface-raised text-content hover:bg-surface-sunken shrink-0 whitespace-nowrap aria-pressed:bg-surface-sunken"
+          type="button"
+        >
+          حالت تیره
+        </button>
+      </div>
     </header>
     <div
       class="flex flex-1 flex-col md:flex-row"
@@ -120,6 +131,17 @@ exports[`AppShell the full shell (rtl) 1`] = `
         >
           دهیاری نمونه
         </span>
+      </div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <button
+          aria-pressed="false"
+          class="inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-bold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-not-allowed disabled:opacity-60 border border-border-strong bg-surface-raised text-content hover:bg-surface-sunken shrink-0 whitespace-nowrap aria-pressed:bg-surface-sunken"
+          type="button"
+        >
+          حالت تیره
+        </button>
       </div>
     </header>
     <div

@@ -1,6 +1,8 @@
 import { test } from './expect';
 import { expect } from './expect';
 
+import { THEME_COOKIE_NAME } from '../src/ui/theme/theme';
+
 /**
  * `/assets` in a real browser.
  *
@@ -70,5 +72,10 @@ test.describe('the assets routes', () => {
 
     expect(stored.local).toEqual([]);
     expect(stored.session).toEqual([]);
+    // No cookie either, beyond the theme's own (narrow allow-list).
+    for (const cookie of await page.context().cookies()) {
+      expect(cookie.name).toMatch(THEME_COOKIE_NAME);
+      expect(['light', 'dark']).toContain(cookie.value);
+    }
   });
 });

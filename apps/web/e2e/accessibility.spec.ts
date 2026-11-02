@@ -59,6 +59,22 @@ test.describe('a visitor page', () => {
     expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
   });
 
+  // Dark is a choice made with the switch (owner decision 2026-10-24), and a
+  // page nobody can read in it is a page the choice breaks. Same rules, same
+  // two viewports; reduced motion so the colour transition cannot be sampled
+  // half-way.
+  test('the login page in dark has no WCAG 2.1 AA violations and fits the screen', async ({
+    page,
+  }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto('/login');
+    await page.getByRole('button', { name: 'حالت تیره' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+
+    expect(await violationsOf(page)).toEqual([]);
+    expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+  });
+
   test('is live: the same check reports a violation when one is put on the page', async ({
     page,
   }) => {
@@ -119,6 +135,14 @@ test.describe('the signed-in pages (live stack)', () => {
       await expect(page).toHaveURL(new RegExp(`${path.replace(/[/-]/g, '\\$&')}$`));
       await expect(page.getByRole('heading', { level: 1 })).toHaveText(title);
 
+      expect(await violationsOf(page)).toEqual([]);
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+
+      // The same page after the switch, in dark: still readable, still fits
+      // (the switch itself sits in the top bar, so it is measured here too).
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await page.getByRole('banner').getByRole('button', { name: 'حالت تیره' }).click();
+      await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
       expect(await violationsOf(page)).toEqual([]);
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
     });
