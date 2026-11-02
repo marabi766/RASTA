@@ -6,6 +6,7 @@ import { z } from 'zod';
 import {
   isOptionalField,
   objectShapeOf,
+  publishedApiErrorSchema,
   RETRY_AFTER_MAX_SECONDS,
   RETRY_AFTER_MIN_SECONDS,
   toJsonSchema,
@@ -87,15 +88,6 @@ import { REFUSAL_REASONS, type RefusalArea } from '../shared/refusal';
 
 /** Pinned so the committed document is deterministic. */
 export const INVENTORY_VERSION = '0.1.0';
-
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
-  })
-  .strict();
 
 const cursorPageOf = (item: z.ZodTypeAny) =>
   z
@@ -267,7 +259,7 @@ function refusalErrorSchema(area: RefusalArea, status: number): z.ZodTypeAny | u
     .filter(([, answered]) => answered === status)
     .map(([code]) => code);
   if (codes.length === 0) return undefined;
-  return apiErrorSchema.extend({
+  return publishedApiErrorSchema.extend({
     details: z
       .array(
         z
@@ -365,7 +357,7 @@ export async function buildDocumentationApp(): Promise<INestApplication> {
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
-  document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {

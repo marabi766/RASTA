@@ -547,7 +547,7 @@ pnpm --filter @rasta/procurement-service exec node ../../scripts/prisma.mjs migr
 
 ```bash
 docker compose down -v
-docker compose up -d
+pnpm infra:up   # preflight, startup, confirmed kafka-init completion, then ACLs
 # صبر تا سالم شدن postgres
 pnpm db:migrate
 pnpm db:seed

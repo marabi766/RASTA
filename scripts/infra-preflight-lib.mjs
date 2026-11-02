@@ -173,29 +173,47 @@ export function checkKafkaClientEnv(env, services = kafkaServicesFromPrincipals(
 }
 
 /**
+ * The privileged credential names @rasta/config's boot refusal refuses by name
+ * (MIGRATOR_CREDENTIAL_PATTERN, owner-credentials.ts — the same text, held to
+ * it by infra-preflight.test.mjs).
+ */
+export const PRIVILEGED_CREDENTIAL_PATTERN =
+  /^(?:DATABASE_URL_(?:[A-Z0-9_]+_)?(?:ADMIN|TEST_ADMIN|MIGRATOR|SUPERUSER|OWNER|DBA|ROOT)|POSTGRES_PASSWORD_[A-Z0-9_]+_MIGRATOR|TEST_(?:[A-Z0-9_]+_)?ADMIN_URL|POSTGRES_SUPERUSER_PASSWORD|POSTGRES_PASSWORD|PGPASSWORD)$/;
+
+/** Privileged names that belong to no one service, and may be named. */
+const SHARED_PRIVILEGED_NAMES = new Set([
+  'POSTGRES_SUPERUSER_PASSWORD',
+  'POSTGRES_PASSWORD',
+  'PGPASSWORD',
+]);
+
+/**
  * A `.env` copied before D-045's env split still carries database owner
- * credentials (`*_MIGRATOR`). Every service loads `.env`, and every service now
- * refuses to start with one in its environment
+ * credentials (`*_MIGRATOR`), and one copied before #421 r1 F2 the superuser's
+ * password (`POSTGRES_SUPERUSER_PASSWORD`). Every service loads `.env`, and
+ * every service now refuses to start with any of them in its environment
  * (@rasta/config assertNoMigratorCredentials) — so say so here, by name only.
- * Compose no longer reads them from `.env` either: the postgres container takes
- * them from .env.migrator.example / .env.migrator.
+ * Compose no longer reads the migrators' from `.env` either: the postgres
+ * container takes them from .env.migrator.example / .env.migrator; the
+ * superuser's password defaults in docker-compose.yml, or comes from the shell.
  */
 export function migratorCredentialsInEnvFile(
   fromEnvFile,
   registered = registeredDatabaseSettings(),
 ) {
   const found = Object.keys(fromEnvFile)
-    .filter((name) => /^(?:DATABASE_URL|POSTGRES_PASSWORD)_[A-Z0-9_]+_MIGRATOR$/.test(name))
+    .filter((name) => PRIVILEGED_CREDENTIAL_PATTERN.test(name))
     .sort();
   if (found.length === 0) return [];
   // Named only when registered; a name for no service is the file's own, and
   // counted (#385 r4), as @rasta/config's boot refusal counts it.
-  const names = found.filter((name) => registered.has(name));
+  const names = found.filter((name) => registered.has(name) || SHARED_PRIVILEGED_NAMES.has(name));
   const others = found.length - names.length;
   if (others > 0) names.push(`${others} more *_MIGRATOR variable(s) named for no service`);
   return [
     `.env holds database owner credentials (${names.join(', ')}), and every service refuses to ` +
       'start with one in its environment (D-045). Move them to .env.migrator ' +
-      '(see .env.migrator.example) and delete them from .env.',
+      '(see .env.migrator.example) and delete them from .env; the superuser password needs no ' +
+      'line at all (docker-compose.yml defaults it; export another in the shell for infra:up).',
   ];
 }

@@ -10,7 +10,7 @@ import { RewardService } from '../src/reward/reward.service';
 import { RECOGNITION_RULE_LOCK_KEY } from '../src/reward/recognition.service';
 import { PrismaClient } from '../src/generated/prisma';
 import { admin, apiTenant, bearer, startApi, type ApiHarness } from './api-helpers';
-import { cleanup, ITEST_ACTOR, ownerDatabaseUrl } from './helpers';
+import { cleanup, id, ITEST_ACTOR, ownerDatabaseUrl } from './helpers';
 import { FakeSourceFacts } from './source-facts.fake';
 
 /**
@@ -452,6 +452,7 @@ describe('levels and badges (COM-012 criterion 2)', () => {
       await request(http)
         .post('/v1/rewards/rules')
         .set('authorization', asRuleAdmin())
+        .set('idempotency-key', id('api-reward-rule'))
         .send({ organizationId: orgA, triggerEvent: 'USAGE_RECORDED', points: 25 })
         .expect(201);
       const created = (await createVersion(await againstCurrent(POINTS_VERSION)).expect(201)).body;

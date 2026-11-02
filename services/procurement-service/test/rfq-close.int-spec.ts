@@ -1,3 +1,4 @@
+import { eligibilityClockWrite } from '@rasta/testing';
 import request from 'supertest';
 import { rfqCancelledPayloadSchema, rfqClosedPayloadSchema } from '@rasta/contracts';
 import { RfqRepository } from '../src/rfq/rfq.repository';
@@ -197,7 +198,7 @@ describe('closing and cancelling an RFQ', () => {
       // The claim's own filter never selects one; this is the decision under the lock, judged
       // again whatever claimed it.
       const { organizationId, rfq } = await issued(24);
-      await h.api.prisma.client.$executeRaw`
+      await eligibilityClockWrite(h.api.prisma.client)`
         UPDATE rfq SET sweep_lease_until = clock_timestamp() + interval '1 minute',
                sweep_fence = 'FENCE-EARLY' WHERE id = ${rfq.id as string}`;
       h.clock.set(new Date(new Date(rfq.quotationClosingAt as string).getTime() - 1));
@@ -507,7 +508,7 @@ describe('closing and cancelling an RFQ', () => {
       async function claimed(fence: string) {
         const due = await issued(1, PAST);
         h.clock.set(null);
-        await h.api.prisma.client.$executeRaw`
+        await eligibilityClockWrite(h.api.prisma.client)`
           UPDATE rfq SET sweep_lease_until = clock_timestamp() + interval '1 minute',
                  sweep_fence = ${fence} WHERE id = ${due.rfq.id as string}`;
         const sweep = () =>

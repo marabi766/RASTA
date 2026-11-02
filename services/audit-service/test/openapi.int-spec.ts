@@ -6,6 +6,7 @@ import { buildAuditOpenApiDocument, ERROR_DESCRIPTIONS } from '../src/openapi/do
 import { cleanupRun, newMigratorPrisma } from './helpers';
 import { auditor, internalToken, startApi, systemAdmin, type ApiHarness } from './api-helpers';
 import { at, orgId, projectOrganization, queryWindow, seedAuditEvent } from './fixtures';
+import { PROBE_TRACEPARENT, httpErrorBodyProblems } from '@rasta/nest-common';
 
 /**
  * The published contract, checked against the service that answers it.
@@ -457,6 +458,43 @@ describe('the published OpenAPI contract (real application)', () => {
     it('documents the verification ceiling where a caller meets it', () => {
       expect(ERROR_DESCRIPTIONS[400]).toContain('AUDIT_MAX_VERIFICATION_RECORDS');
     });
+  });
+
+  it('accepts the error bodies the application really sends over HTTP, with and without a trace (audit 10-26 F3)', async () => {
+    const problems: string[] = [];
+    for (const traced of [true, false]) {
+      const headers: Record<string, string> = traced ? { traceparent: PROBE_TRACEPARENT } : {};
+      const answers = [
+        {
+          method: 'GET',
+          url: LIST,
+          response: await request(server).get(LIST).query(window).set(headers),
+        },
+        {
+          method: 'GET',
+          url: LIST,
+          response: await request(server)
+            .get(LIST)
+            .set(headers)
+            .set('Authorization', `Bearer ${systemAdmin()}`),
+        },
+      ];
+      expect(answers.map(({ response }) => response.status)).toEqual([401, 400]);
+      expect(answers[1]!.response.body).toMatchObject({ code: 'VALIDATION_FAILED' });
+      expect(answers[1]!.response.body.details.length).toBeGreaterThan(0);
+      for (const { method, url, response } of answers) {
+        problems.push(
+          ...httpErrorBodyProblems(document, {
+            method,
+            url,
+            status: response.status,
+            body: response.body,
+            traced,
+          }),
+        );
+      }
+    }
+    expect(problems).toEqual([]);
   });
 });
 

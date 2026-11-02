@@ -17,6 +17,7 @@ import { withForgedMac } from '@/test/forged-token';
 
 import { IDLE_PROJECT_FORM } from './project-form-state';
 import type { ProjectPlace } from './project-runner';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The project commands' write path. Mirrors `lifecycle-actions.spec.ts`: the
@@ -71,7 +72,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'owner',
   organizationId: 'ORG-OWNER',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-OWNER'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

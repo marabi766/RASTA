@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.ts';
 // -----------------------------------------------------------------------------
 // Proves the outbox migrations are reversible on all eight service-owned
 // databases, by actually reversing them.
@@ -220,16 +221,20 @@ const CLAIMABLE_INDEXDEF =
   'CREATE INDEX ix_outbox_claimable ON public.outbox_message ' +
   'USING btree (created_at, id) WHERE (published_at IS NULL)';
 
-/** A minimal, valid unpublished row. Every NOT NULL column the table has. */
-const insertRow = (id, extra = '') => `
+/**
+ * A minimal, valid unpublished row. Every NOT NULL column the table has, and
+ * none of the claim or retry columns: those are compared with the database
+ * clock, so a probe that needs one names it in its own static statement.
+ */
+const insertRow = (id) => eligibilityClockSql`
 INSERT INTO "outbox_message" (
   "id", "aggregate_type", "aggregate_id", "event_name", "event_version",
   "topic", "partition_key", "payload", "headers", "correlation_id",
-  "created_at", "attempts"${extra ? ', ' + extra.split('=')[0].trim() : ''}
+  "created_at", "attempts"
 ) VALUES (
   '${id}', 'Probe', '${id}', 'PROBE', 1,
   't.probe', '${id}', '{}'::jsonb, '{}'::jsonb, 'COR-${id}',
-  now(), 0${extra ? ', ' + extra.split('=').slice(1).join('=').trim() : ''}
+  now(), 0
 );`;
 
 /** Probe rows this script writes, removed before and after the constraint checks. */
@@ -612,7 +617,7 @@ function assertConstraintsBite(mustRun, mustFail) {
   );
   mustRun(
     'ck_outbox_claim_triple accepts all three together',
-    `UPDATE "outbox_message"
+    eligibilityClockSql`UPDATE "outbox_message"
         SET "claim_token" = 't', "claim_owner" = 'o',
             "claim_expires_at" = now() + interval '60 seconds'
       WHERE id = 'OBXCHK_VALID';`,
@@ -642,19 +647,19 @@ function assertConstraintsBite(mustRun, mustFail) {
   // ck_outbox_next_attempt_requires_failure — a retry with no prior attempt.
   mustFail(
     'ck_outbox_next_attempt_requires_failure refuses a retry scheduled with zero attempts',
-    `UPDATE "outbox_message" SET "next_attempt_at" = now() + interval '5 seconds'
+    eligibilityClockSql`UPDATE "outbox_message" SET "next_attempt_at" = now() + interval '5 seconds'
       WHERE id = 'OBXCHK_VALID';`,
     'ck_outbox_next_attempt_requires_failure',
   );
   mustRun(
     'ck_outbox_next_attempt_requires_failure accepts one after a real failure',
-    `UPDATE "outbox_message"
+    eligibilityClockSql`UPDATE "outbox_message"
         SET "attempts" = 1, "next_attempt_at" = now() + interval '5 seconds'
       WHERE id = 'OBXCHK_VALID';`,
   );
   mustFail(
     'ck_outbox_next_attempt_requires_failure refuses a retry on a published row',
-    `UPDATE "outbox_message"
+    eligibilityClockSql`UPDATE "outbox_message"
         SET "claim_token" = NULL, "claim_owner" = NULL, "claim_expires_at" = NULL,
             "published_at" = now()
       WHERE id = 'OBXCHK_VALID';`,

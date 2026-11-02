@@ -5,6 +5,7 @@ import { Logger } from '@nestjs/common';
 import { COMMIT_RESERVE_MS } from '../prisma/cancellation';
 import type { ExtendedPrismaClient } from '../prisma/prisma.service';
 import { gate, modelledPool } from '../../test/modelled-engine';
+import { onTheTestsClock, returnedBy } from '../../test/test-clock';
 import { KeycloakProjectionConsumer } from './keycloak-projection.consumer';
 import type { KeycloakProjector } from './keycloak.projector';
 import { KeycloakWriteFences, type KeycloakWriteAttempt } from './keycloak-write-fence';
@@ -48,6 +49,15 @@ async function setup() {
       now = ms;
     },
   };
+}
+
+/**
+ * A stop's own return, logged by the stop's promise at the instant it returned
+ * (#912) — never by the test once the clock was moved: a stop that returned
+ * early, before a COMMIT it had to wait for, is logged before that COMMIT.
+ */
+function logReturn(log: string[], stopping: Promise<void>): Promise<void> {
+  return stopping.then(() => void log.push('STOP RETURNED'));
 }
 
 describe('#458 r1 F1: an obligation is cleared only by a write of its own generation', () => {
@@ -140,6 +150,8 @@ describe('#458 r1 F1/F5: a timeout is not lateness — the observation decides',
 });
 
 describe('#458 r1 F2: a stop’s flush begins, inserts and commits nothing after the stop returned', () => {
+  onTheTestsClock();
+
   async function twoOwed() {
     const t = await setup();
     const attempts = [await t.sent(), await t.sent()];
@@ -183,10 +195,15 @@ describe('#458 r1 F2: a stop’s flush begins, inserts and commits nothing after
       const connection = gate();
       t.steps.push({ connection: connection.opened });
 
-      await stop(t, Date.now() + 50);
-      t.log.push('STOP RETURNED');
+      const startedAt = Date.now();
+      // All 50 ms lie inside the COMMIT reserve: no window to begin in, so it
+      // returns at once — before the connection comes.
+      expect(await returnedBy(logReturn(t.log, stop(t, startedAt + 50)), 50)).toMatchObject({
+        status: 'fulfilled',
+        settledAt: startedAt,
+      });
       connection.open();
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await jest.advanceTimersByTimeAsync(100);
 
       const after = t.log.slice(t.log.indexOf('STOP RETURNED') + 1);
       expect(after.filter((step) => /^(BEGIN|SET|INSERT|COMMIT)/.test(step))).toEqual([]);
@@ -211,10 +228,13 @@ describe('#458 r1 F2: a stop’s flush begins, inserts and commits nothing after
         }, options),
       );
 
-      await stop(t, Date.now() + COMMIT_RESERVE_MS + 100);
-      t.log.push('STOP RETURNED');
+      const startedAt = Date.now();
+      const { settledAt } = await returnedBy(
+        logReturn(t.log, stop(t, startedAt + COMMIT_RESERVE_MS + 100)),
+        COMMIT_RESERVE_MS + 100,
+      );
       held.open();
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await jest.advanceTimersByTimeAsync(100);
 
       // (Transactions 1 and 2 opened the two fences.) The flush's first is
       // rolled back by its own timeout, within the window; the second is
@@ -230,6 +250,9 @@ describe('#458 r1 F2: a stop’s flush begins, inserts and commits nothing after
         'COMMIT 4',
         'STOP RETURNED',
       ]);
+      // Returned when the second's COMMIT came — at once, after the engine's
+      // timeout of the first ended it — not before.
+      expect(settledAt).toBe(startedAt + t.bounds[2]!.timeout!);
       expect(t.fences.owedCount).toBe(1);
     },
   );
@@ -250,6 +273,8 @@ describe('#458 r1 F2: a stop’s flush begins, inserts and commits nothing after
 });
 
 describe('#458 r2 F2: one budget, and a COMMIT handed to the engine is waited for before the stop returns', () => {
+  onTheTestsClock();
+
   async function twoOwed() {
     const t = await setup();
     const attempts = [await t.sent(), await t.sent()];
@@ -302,13 +327,17 @@ describe('#458 r2 F2: one budget, and a COMMIT handed to the engine is waited fo
       t.steps.push({ commit: answer.opened });
       setTimeout(answer.open, 100 + 150);
 
-      await stop(t, startedAt + COMMIT_RESERVE_MS + 100);
-      t.log.push('STOP RETURNED');
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      const { settledAt } = await returnedBy(
+        logReturn(t.log, stop(t, startedAt + COMMIT_RESERVE_MS + 100)),
+        COMMIT_RESERVE_MS + 100,
+      );
+      await jest.advanceTimersByTimeAsync(50);
 
       // (Transactions 1 and 2 opened the two fences.) Not "BEGIN, SET,
       // INSERT, STOP RETURNED, COMMIT" — the reviewer's trace.
       expect(t.log).toEqual(['BEGIN 3', 'SET', 'INSERT', 'COMMIT 3', 'STOP RETURNED']);
+      // Returned once the answer came (250 ms), not when the window closed.
+      expect(settledAt).toBe(startedAt + 100 + 150);
       // The second began nothing once the window closed: still owed.
       expect(t.fences.owedCount).toBe(1);
     },
@@ -322,10 +351,16 @@ describe('#458 r2 F2: one budget, and a COMMIT handed to the engine is waited fo
       const answer = gate();
       t.steps.push({ commit: answer.opened });
 
-      await stop(t, Date.now() + COMMIT_RESERVE_MS + 100);
-      t.log.push('STOP RETURNED');
+      const deadlineAt = Date.now() + COMMIT_RESERVE_MS + 100;
+      // It waited for the answer until the deadline, not less.
+      expect(
+        await returnedBy(logReturn(t.log, stop(t, deadlineAt)), COMMIT_RESERVE_MS + 100),
+      ).toMatchObject({
+        status: 'fulfilled',
+        settledAt: deadlineAt,
+      });
       answer.open();
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await jest.advanceTimersByTimeAsync(20);
 
       expect(t.log).toEqual(['BEGIN 3', 'SET', 'INSERT', 'STOP RETURNED', 'COMMIT 3']);
       expect(errors.mock.calls.map(([message]) => String(message))).toEqual(
@@ -355,10 +390,12 @@ describe('#458 r2 F2: one budget, and a COMMIT handed to the engine is waited fo
         }, options),
       );
 
-      await stop(t, startedAt + COMMIT_RESERVE_MS + window);
-      t.log.push('STOP RETURNED');
+      const { settledAt } = await returnedBy(
+        logReturn(t.log, stop(t, startedAt + COMMIT_RESERVE_MS + window)),
+        COMMIT_RESERVE_MS + window,
+      );
       held.open();
-      await new Promise((resolve) => setTimeout(resolve, window));
+      await jest.advanceTimersByTimeAsync(window);
 
       const [first] = t.bounds;
       expect(first!.maxWait! + first!.timeout!).toBeLessThanOrEqual(window);
@@ -367,6 +404,9 @@ describe('#458 r2 F2: one budget, and a COMMIT handed to the engine is waited fo
       expect(t.log.indexOf('ROLLBACK 3')).toBeGreaterThan(-1);
       expect(t.log.indexOf('ROLLBACK 3')).toBeLessThan(t.log.indexOf('STOP RETURNED'));
       expect(t.log.slice(t.log.indexOf('STOP RETURNED') + 1)).toEqual([]);
+      // Returned when the second's COMMIT came — at once, after the first's
+      // own timeout, counted from its connection at 40% — not before.
+      expect(settledAt).toBe(startedAt + window * 0.4 + first!.timeout!);
     },
   );
 
@@ -376,11 +416,17 @@ describe('#458 r2 F2: one budget, and a COMMIT handed to the engine is waited fo
     t.steps.push({ commit: answer.opened });
     const writing = t.pool.transaction((tx) => tx.$executeRawUnsafe('SET LOCAL x = 1'));
 
-    const closing = t.pool.stop({ deadlineAt: Date.now() + 1_000 });
+    const startedAt = Date.now();
+    const closing = t.pool.stop({ deadlineAt: startedAt + 1_000 });
     // Closing: no transaction begins any more.
     expect(() => t.pool.transaction(async () => undefined)).toThrow(/pool is closed/);
     setTimeout(answer.open, 50);
-    expect(await closing).toEqual({ drained: true, unsettled: 0 });
+    // Closed when the answer came, not before it.
+    expect(await returnedBy(closing, 50)).toEqual({
+      status: 'fulfilled',
+      value: { drained: true, unsettled: 0 },
+      settledAt: startedAt + 50,
+    });
     await writing;
     expect(t.log).toEqual(['BEGIN 1', 'SET', 'COMMIT 1', 'DISCONNECT']);
   });
@@ -392,13 +438,17 @@ describe('#458 r2 F2: one budget, and a COMMIT handed to the engine is waited fo
     t.steps.push({ commit: answer.opened });
     const writing = t.pool.transaction((tx) => tx.$executeRawUnsafe('SET LOCAL x = 1'));
 
-    expect(await t.pool.stop({ deadlineAt: Date.now() + 50 })).toEqual({
-      drained: false,
-      unsettled: 1,
+    const deadlineAt = Date.now() + 50;
+    // At the deadline, not before it.
+    expect(await returnedBy(t.pool.stop({ deadlineAt }), 50)).toEqual({
+      status: 'fulfilled',
+      value: { drained: false, unsettled: 1 },
+      settledAt: deadlineAt,
     });
     expect(errors.mock.calls.map(([message]) => String(message))).toEqual([
       expect.stringMatching(/with 1 operations unsettled/),
-      // No time was left for the disconnect: the close is abandoned, loudly.
+      // No time was left for the disconnect — the clock is exactly at the
+      // deadline, on any runner: the close is abandoned, loudly.
       expect.stringMatching(/close ABANDONED.*1 operations still unsettled/),
     ]);
     answer.open();

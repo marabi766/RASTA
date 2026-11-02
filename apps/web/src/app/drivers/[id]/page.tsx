@@ -2,10 +2,14 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { canManageDrivers, fetchDriver, fetchDriverAssignments } from '@/server/drivers';
-import { tokenWriteRoles } from '@/server/realm-roles';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriverDetailScreen } from './DriverDetailScreen';
+import {
+  actingOrganizationLabel,
+  actingScope,
+  sessionWriteRoles,
+} from '@/server/session-organization';
 
 /**
  * The `/drivers/[id]` route (docs/16 § ۱۶٫۶).
@@ -28,10 +32,10 @@ export default async function DriverDetailPage({ params }: { params: Promise<{ i
 
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/drivers/${id}`)}`);
-  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  // What the forms are offered on: the token's roles in the pinned organization (`sessionWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
-  const roles = tokenWriteRoles(session.accessToken);
+  const roles = sessionWriteRoles(session);
 
   const [result, assignments] = await Promise.all([
     fetchDriver(session, id),
@@ -44,8 +48,9 @@ export default async function DriverDetailPage({ params }: { params: Promise<{ i
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

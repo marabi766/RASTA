@@ -1,6 +1,8 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 
+import { actingOrganizationId } from './session-organization';
+
 /**
  * The session cookie: what it holds, and how it is sealed (ADR-059 § 4).
  *
@@ -40,8 +42,24 @@ export const sessionSchema = z.object({
   subject: z.string().min(1),
   /** For display in the shell. Never used for a decision. */
   username: z.string().min(1),
-  /** The organization this session is acting for, as identity reported it. */
+  /**
+   * The organization this session is pinned to: the access token's active one
+   * at sign-in, never moved by a refresh, and named in `X-Organization-Id` on
+   * every gateway call (`session-organization.ts`, task 118). Null: pinned to
+   * none. Nothing outside the session boundary reads it: consumers ask
+   * `actingOrganizationId`, which refuses it once the token grants it no role.
+   */
   organizationId: z.string().min(1).nullable(),
+  /**
+   * The copy a cookie sealed before the copy was kept in step carried when it
+   * was first brought into step (`session-refresh.ts`): that build's login
+   * organization, under which it tagged and keyed every unresolved submission
+   * of this login — even one sent for another organization (PR 405 review 2,
+   * F1). Absent otherwise. Read only to **recognise** those records as this
+   * person's (`formerOrganizationCopy`), never to act for, label or send
+   * anything.
+   */
+  formerOrganizationId: z.string().min(1).nullable().optional(),
   accessToken: z.string().min(1),
   /** Seconds since the epoch. Compared against the server clock, never the browser's. */
   accessTokenExpiresAt: z.number().int().positive(),
@@ -209,6 +227,6 @@ export function viewOf(session: WebSession): SessionView {
   return {
     subject: session.subject,
     username: session.username,
-    organizationId: session.organizationId,
+    organizationId: actingOrganizationId(session),
   };
 }

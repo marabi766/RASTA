@@ -20,6 +20,7 @@ const privilegeMigration = join(
   '20261024130000_analytics_runtime_privileges',
   'migration.sql',
 );
+const coverageMigration = join(migrations, '20261029120000_projection_coverage', 'migration.sql');
 const repositoryRoot = join(__dirname, '..', '..', '..');
 
 // Inspect raw ACLs, including defaults and columns, to prove a refused run did
@@ -74,7 +75,10 @@ function currentGrantStep(mode: 'configured' | 'default'): string {
   return result.stdout;
 }
 
-function currentExtensionStep(): string {
+/** The split's extension cleanup as it runs it: with the ledger of lent schema
+ * access opened before and returned after (#540 r3 R3-1) — the cleanup refuses
+ * to act without it. One statement per psql call, in order. */
+function currentExtensionStep(): string[] {
   const result = spawnSync(
     'bash',
     [
@@ -82,14 +86,19 @@ function currentExtensionStep(): string {
       '-c',
       `
     source infrastructure/docker/postgres/lib/service-privilege-split.bash
-    _svc_split_psql() { printf '%s;\\n' "$2"; }
+    _svc_split_psql() { printf '%s\\x1e' "$2"; }
+    _open_namespace_ledger ignored
     restrict_extension_relations ignored rasta_analytics
+    _return_lent_namespaces ignored
   `,
     ],
     { encoding: 'utf8', cwd: repositoryRoot },
   );
   if (result.status !== 0) throw new Error(`extension step failed: ${result.stderr}`);
-  return result.stdout;
+  return result.stdout
+    .split('\x1e')
+    .map((statement) => statement.trim())
+    .filter(Boolean);
 }
 
 // Separate databases, not the integration database: both realistic provisioning
@@ -117,6 +126,8 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
       ? [{ relation: 'legacy_runtime_seq', kind: 'S', privileges: [] }]
       : []),
     { relation: 'processed_event', kind: 'r', privileges: ['INSERT', 'SELECT'] },
+    // Q-154: the consumer inserts the coverage start once, the KPI read selects it; never more.
+    { relation: 'projection_coverage', kind: 'r', privileges: ['INSERT', 'SELECT'] },
   ];
   let creationGrants: unknown;
   let creationInsertError: unknown;
@@ -194,6 +205,9 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
     }
     wrongRole = { before, after: await aclSnapshot(owner), error: wrongRoleError };
     applyMigration(ownerUrl.toString(), 'public', privilegeMigration);
+    // Real order: the coverage table is born after the privilege migration revoked the defaults,
+    // so its explicit GRANT is the only thing giving the runtime role anything on it.
+    applyMigration(ownerUrl.toString(), 'public', coverageMigration);
     const adminUrl = process.env.TEST_ANALYTICS_ADMIN_URL;
     if (!adminUrl) throw new Error('TEST_ANALYTICS_ADMIN_URL is required');
     const extensionUrl = new URL(adminUrl);
@@ -209,9 +223,10 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
       expect(
         await runtime.$queryRaw`SELECT has_any_column_privilege('spatial_ref_sys', 'UPDATE') AS forbidden`,
       ).toEqual([{ forbidden: true }]);
-      // psql accepts the DO block as one statement; Prisma sends that block atomically too.
-      const cleanup = currentExtensionStep().trim().replace(/;$/, '');
-      if (cleanup) await extensionAdmin.$executeRawUnsafe(cleanup);
+      // psql accepts each DO block as one statement; Prisma sends each atomically too.
+      const steps = currentExtensionStep();
+      expect(steps).toHaveLength(3);
+      for (const step of steps) await extensionAdmin.$executeRawUnsafe(step);
       expect(
         await runtime.$queryRaw`SELECT has_any_column_privilege('spatial_ref_sys', 'UPDATE') AS forbidden`,
       ).toEqual([{ forbidden: false }]);
@@ -387,6 +402,27 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
       ).rejects.toThrow(/Code: `42501`/);
     },
   );
+
+  it('runtime records the coverage start once (insert-if-absent) and reads it; the database stamps the instant', async () => {
+    const insert = () =>
+      runtime.$executeRawUnsafe(
+        "INSERT INTO projection_coverage (consumer_name, covered_from) VALUES ('probe', '2000-01-01') ON CONFLICT (consumer_name) DO NOTHING",
+      );
+    expect(await insert()).toBe(1);
+    expect(await insert()).toBe(0);
+    const [row] = await runtime.$queryRaw<{ covered_from: Date }[]>`
+      SELECT covered_from FROM projection_coverage WHERE consumer_name = 'probe'`;
+    // The supplied 2000-01-01 was ignored: coverage cannot be claimed for an unobserved past.
+    expect(row?.covered_from.getUTCFullYear()).toBeGreaterThanOrEqual(2026);
+  });
+
+  it.each([
+    ['UPDATE', "UPDATE projection_coverage SET covered_from = '2000-01-01'"],
+    ['DELETE', 'DELETE FROM projection_coverage'],
+    ['TRUNCATE', 'TRUNCATE projection_coverage'],
+  ])('runtime %s of the coverage start fails with SQLSTATE 42501', async (_operation, sql) => {
+    await expect(runtime.$executeRawUnsafe(sql)).rejects.toThrow(/Code: `42501`/);
+  });
 
   it('runtime still inserts/reads facts and markers in one transaction', async () => {
     await runtime.$transaction(async (tx) => {

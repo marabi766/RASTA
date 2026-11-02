@@ -7,6 +7,7 @@ import {
   RastaError,
   type AuthGuardOptions,
 } from '@rasta/nest-common';
+import { mintTestInternalToken } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { AuditTrailConsumer } from '../src/consumers/audit-trail.consumer';
@@ -131,7 +132,8 @@ export function internalToken(
   /** Signed into the token: a tenant-scoped call. Omitted, the token is platform-wide. */
   organizationId?: string,
 ): Promise<string> {
-  return new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300).issue(
+  return mintTestInternalToken(
+    { secret: INTERNAL_SECRET, issuer: 'rasta-internal', ttlSeconds: 300 },
     callerService,
     SERVICE_NAME,
     purpose,

@@ -1,3 +1,4 @@
+import { createSafePrismaClient } from '@rasta/nest-common';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { readUrl } from '@rasta/config';
 import { SERVICE_NAME } from '../config/env';
@@ -8,7 +9,7 @@ import {
   type OutboxStopOptions,
   type RuntimeRoleQueryClient,
 } from '@rasta/nest-common';
-import { PrismaClient } from '../generated/prisma';
+import { Prisma, PrismaClient } from '../generated/prisma';
 import { settleWithin, throwIfCancelled, trackInScope, transactionBounds } from './cancellation';
 
 /**
@@ -148,13 +149,17 @@ export class PrismaService implements OnModuleInit {
     const databaseUrl = pool
       ? separatePoolUrl(loadedUrl, pool.connections, pool.waitSeconds)
       : loadedUrl;
-    this.base = new PrismaClient({
-      datasources: { db: { url: databaseUrl } },
-      log: [
-        { emit: 'event', level: 'warn' },
-        { emit: 'event', level: 'error' },
-      ],
-    });
+    this.base = createSafePrismaClient(
+      () =>
+        new PrismaClient({
+          datasources: { db: { url: databaseUrl } },
+          log: [
+            { emit: 'event', level: 'warn' },
+            { emit: 'event', level: 'error' },
+          ],
+        }),
+      'DATABASE_URL_IDENTITY',
+    );
     this.client = this.buildClient();
   }
 
@@ -179,6 +184,7 @@ export class PrismaService implements OnModuleInit {
       .$extends(
         createTenantGuardExtension({
           scopedModels: TENANT_SCOPED_MODELS,
+          datamodel: Prisma.dmmf.datamodel,
           onUnscopedQuery: ({ model, operation, reason }) => {
             // Every deliberate boundary crossing is recorded, so an auditor can
             // enumerate them without reading the whole codebase.

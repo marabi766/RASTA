@@ -46,10 +46,12 @@
 // -----------------------------------------------------------------------------
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 import { splitServicesFromLibrary } from './infra-preflight-lib.mjs';
 import { KEY_SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
@@ -83,14 +85,29 @@ for (const service of SERVICES) {
   test(`${service}: the built service exits on an owner credential, naming it and never its value`, () => {
     const main = join(ROOT, 'services', service, 'dist', 'main.js');
     assert.ok(existsSync(main), `${main} is missing — run \`pnpm build\` first`);
-    for (const variable of [
-      'DATABASE_URL_ECONOMIC_MIGRATOR',
-      'POSTGRES_PASSWORD_AUDIT_MIGRATOR',
-      'DATABASE_URL_ANALYTICS_TEST_ADMIN',
-      'DATABASE_URL_ASSET_SUPERUSER',
-      'DATABASE_URL_ADMIN',
+    // #421 r1 F2: the names really in use, by name (a password has no user to
+    // read), and a database URL for anything but a runtime role by value —
+    // DATABASE_URL itself included.
+    for (const [variable, value] of [
+      [
+        'DATABASE_URL_ECONOMIC_MIGRATOR',
+        'postgresql://rasta_x_migrator:owner_secret_value@127.0.0.1:1/rasta_x',
+      ],
+      ['POSTGRES_PASSWORD_AUDIT_MIGRATOR', 'owner_secret_value'],
+      ['TEST_ANALYTICS_ADMIN_URL', 'postgresql://rasta:owner_secret_value@127.0.0.1:1/postgres'],
+      ['POSTGRES_SUPERUSER_PASSWORD', 'owner_secret_value'],
+      ['PGPASSWORD', 'owner_secret_value'],
+      [
+        'DATABASE_URL_ASSET_SUPERUSER',
+        'postgresql://rasta:owner_secret_value@127.0.0.1:1/rasta_asset',
+      ],
+      ['DATABASE_URL_ADMIN', 'postgresql://rasta:owner_secret_value@127.0.0.1:1/postgres'],
+      [
+        'DATABASE_URL',
+        'postgresql://rasta_economic_migrator:owner_secret_value@127.0.0.1:1/rasta_economic',
+      ],
+      ['DATABASE_URL_IDENTITY', 'postgresql://rasta:owner_secret_value@127.0.0.1:1/rasta_identity'],
     ]) {
-      const value = 'postgresql://rasta_x_migrator:owner_secret_value@127.0.0.1:1/rasta_x';
       const result = spawnSync(process.execPath, [main], {
         cwd: join(ROOT, 'services', service),
         // Nothing else: were the guard not first, the service would fail on
@@ -124,8 +141,85 @@ for (const service of SERVICES) {
       );
       assertNoSentinel(output, `${service} ${variable}`);
     }
+    // …and a database URL under a name no service has: counted, never named.
+    for (const key of KEY_SENTINELS) {
+      const variable = `${key}_DSN`;
+      const result = spawnSync(process.execPath, [main], {
+        cwd: join(ROOT, 'services', service),
+        env: {
+          PATH: process.env.PATH,
+          NODE_ENV: 'development',
+          [variable]: 'postgresql://rasta:owner_secret_value@127.0.0.1:1/postgres',
+        },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      assert.notEqual(result.status, 0, `${variable}: the service did not refuse`);
+      const output = result.stdout + result.stderr;
+      assert.match(
+        output,
+        /1 more variable\(s\) holding a database URL for no runtime role/,
+        output.slice(0, 2000),
+      );
+      assert.ok(!output.includes('owner_secret_value'), `${variable}: the value was printed`);
+      assertNoSentinel(output, `${service} ${variable}`);
+    }
+  });
+
+  // The service runtime environment must boot (PM addendum to #421 r1 F2):
+  // the whole of .env.example, which `pnpm dev` and `start` load, gets past
+  // the guard — the service fails later, or keeps running, for want of its
+  // infrastructure, never on a credential.
+  test(`${service}: the built service gets past the guard with the shared .env.example`, async () => {
+    const main = join(ROOT, 'services', service, 'dist', 'main.js');
+    const child = spawn(process.execPath, [main], {
+      cwd: join(ROOT, 'services', service),
+      env: { PATH: process.env.PATH, ...exampleEnv(), NODE_ENV: 'development', PORT: '0' },
+    });
+    let output = '';
+    child.stdout.on('data', (chunk) => (output += chunk));
+    child.stderr.on('data', (chunk) => (output += chunk));
+    const exited = new Promise((done) => child.on('exit', done));
+    // The guard is the first statement of main.js: a refusal is out within a second.
+    const timer = setTimeout(() => child.kill('SIGKILL'), 5_000);
+    await exited;
+    clearTimeout(timer);
+    assert.ok(!/MigratorCredentialInServiceError/.test(output), output.slice(0, 2000));
   });
 }
+
+/** `NAME=value` lines of .env.example, as `node --env-file` reads ours. */
+function exampleEnv(name = '.env.example') {
+  return Object.fromEntries(
+    readFileSync(join(ROOT, name), 'utf8')
+      .split('\n')
+      .filter((line) => /^[A-Z][A-Z0-9_]*=/.test(line))
+      .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+  );
+}
+
+// …and every environment CI starts a service with: the workflow's, the job's
+// and the step's `env`, and each `NAME=value` the step's script sets — the
+// built guard must refuse nothing in any of them.
+test('every CI step that starts a built service gives it an environment the guard accepts', () => {
+  const { assertNoMigratorCredentials } = createRequire(import.meta.url)(
+    join(ROOT, 'packages', 'config', 'dist', 'index.js'),
+  );
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'));
+  let checked = 0;
+  for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    for (const step of job.steps ?? []) {
+      if (!/node dist\/main\.js|runtime-preflight\.e2e\.mjs/.test(step.run ?? '')) continue;
+      const env = { ...workflow.env, ...job.env, ...step.env };
+      for (const [, name, value] of step.run.matchAll(/(?:^|[\s(])([A-Z][A-Z0-9_]*)=(\S+)/g)) {
+        if (name !== 'PREFLIGHT_OWNER_URL') env[name] = value.replace(/^"|"$/g, '');
+      }
+      assert.doesNotThrow(() => assertNoMigratorCredentials(env), `${jobName}: ${step.name}`);
+      checked += 1;
+    }
+  }
+  assert.ok(checked >= 4, `only ${checked} service-starting steps found`);
+});
 
 const ROLE_CHECKED = [...splitServicesFromLibrary(), 'audit']
   .map((service) => `${service}-service`)

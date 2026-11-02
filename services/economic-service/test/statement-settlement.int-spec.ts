@@ -52,11 +52,20 @@ import {
 
 const SECRET = 'itest_internal_secret_at_least_32_characters';
 const REQUEST_TIMEOUT_MS = 400;
+/**
+ * The owner read for the specs that race many deliveries at once. 400 ms is
+ * right for the specs that need a silent owner to be given up on quickly, but
+ * under a busy runner it also fails an ordinary read now and then — and a
+ * delivery that fails before it writes its marker is a legitimate retry, not
+ * the marker race those specs are about.
+ */
+const PATIENT_REQUEST_TIMEOUT_MS = 10_000;
 
 describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () => {
   let prisma: PrismaService;
   let wiring: Wiring;
   let consumer: StatementSettlementConsumer;
+  let patient: StatementSettlementConsumer;
   const org = tenants();
   const employer = org.a;
   const contractor = org.b;
@@ -67,7 +76,12 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
   const noBroker = (): EventConsumer =>
     ({ start: async () => undefined, stop: async () => undefined }) as unknown as EventConsumer;
 
-  const consumerWith = (businessLine: BusinessLine | null, w: Wiring = wiring, p = prisma) =>
+  const consumerWith = (
+    businessLine: BusinessLine | null,
+    w: Wiring = wiring,
+    p = prisma,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+  ) =>
     new StatementSettlementConsumer(
       noBroker,
       p,
@@ -76,7 +90,7 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
         maintenanceBaseUrl: 'http://127.0.0.1:9',
         fleetBaseUrl: 'http://127.0.0.1:9',
         contractBaseUrl: contract.url,
-        timeoutMs: REQUEST_TIMEOUT_MS,
+        timeoutMs,
         tokens,
       }),
       businessLine,
@@ -88,10 +102,12 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
     wiring = wire(prisma);
     await contract.start();
     consumer = consumerWith(null);
+    patient = consumerWith(null, wiring, prisma, PATIENT_REQUEST_TIMEOUT_MS);
   });
 
   afterEach(() => {
     contract.mode = 'up';
+    contract.failNext(0);
   });
 
   afterAll(async () => {
@@ -306,20 +322,60 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
       const same = envelope(payload);
       const deliveries = [...Array.from({ length: 5 }, () => envelope(payload)), same, same, same];
 
-      const outcomes = await Promise.allSettled(deliveries.map((e) => consumer.handle(e)));
+      // One delivery's read of the owner fails, as a slow runner makes one do
+      // at random: it throws before it has written anything. Which delivery it
+      // is, is the scheduler's business; that one is certain.
+      contract.failNext(1);
+      const outcomes = await Promise.allSettled(deliveries.map((e) => patient.handle(e)));
 
-      // A loser of the same-id race fails on the processed marker and is retried;
-      // it is never a verdict, and its retry has no effect.
-      for (const [index, outcome] of outcomes.entries()) {
-        if (outcome.status === 'rejected') {
-          expect(outcome.reason).not.toBeInstanceOf(UnprocessableEventError);
-          await expect(consumer.handle(deliveries[index]!)).resolves.toBe('SKIPPED');
+      const refused = outcomes.flatMap((outcome, index) =>
+        outcome.status === 'rejected'
+          ? [{ delivery: deliveries[index]!, reason: outcome.reason }]
+          : [],
+      );
+      expect(
+        refused.some(({ reason }) => (reason as RastaError).code === 'UPSTREAM_UNAVAILABLE'),
+      ).toBe(true);
+      for (const { delivery, reason } of refused) {
+        // Neither is ever a verdict: both are retried.
+        expect(reason).not.toBeInstanceOf(UnprocessableEventError);
+        const lostTheMarkerRace = (reason as { code?: string }).code === 'P2002';
+        const retried = await patient.handle(delivery);
+        if (lostTheMarkerRace) {
+          // The winner of the same-id race committed its marker, so the retry
+          // is a replay with no effect.
+          expect(retried).toBe('SKIPPED');
+        } else {
+          // It failed before its marker: its retry is its first processing —
+          // it writes the marker and finds the obligation already there, which
+          // is not a replay (undefined), unless its twin got in first.
+          expect([undefined, 'SKIPPED']).toContain(retried);
         }
+        // Whichever it was, delivered once more it has no effect.
+        await expect(patient.handle(delivery)).resolves.toBe('SKIPPED');
       }
       expect(await obligationsOf(fact.statementId)).toHaveLength(1);
       for (const delivery of new Set(deliveries)) {
         expect(await processedCount(delivery.eventId)).toBe(1);
       }
+    });
+
+    it('a delivery that failed before its marker is processed, not skipped, when retried — and has no second effect', async () => {
+      const { fact, payload } = approved();
+      const first = envelope(payload);
+      const again = envelope(payload);
+      await consumer.handle(first);
+
+      contract.failNext(1);
+      await expect(consumer.handle(again)).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+      expect(await processedCount(again.eventId)).toBe(0);
+
+      // Its first processing: the marker is written, the obligation is found.
+      await expect(consumer.handle(again)).resolves.toBeUndefined();
+      expect(await processedCount(again.eventId)).toBe(1);
+      expect(await obligationsOf(fact.statementId)).toHaveLength(1);
+      await expect(consumer.handle(again)).resolves.toBe('SKIPPED');
+      expect(await obligationsOf(fact.statementId)).toHaveLength(1);
     });
 
     it('lets the unique key decide a race the fast path cannot see', async () => {
@@ -857,12 +913,12 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
         statements.flatMap(({ payload }) => {
           const original = envelope(payload);
           return [original, original, envelope(payload), envelope(payload)].map((e) =>
-            consumer.handle(e),
+            patient.handle(e),
           );
         }),
       );
       // Whatever lost a race is redelivered, as the consumer would.
-      for (const { payload } of statements) await consumer.handle(envelope(payload));
+      for (const { payload } of statements) await patient.handle(envelope(payload));
 
       const ids = statements.map(({ fact }) => fact.statementId);
       const groups = await runUnscoped('the suite counts obligations per statement', () =>
@@ -1323,6 +1379,8 @@ async function brokerOver(
   );
   (consumer as unknown as { kafka: unknown }).kafka = {
     consumer: () => ({
+      events: { CRASH: 'consumer.crash' },
+      on: () => () => undefined,
       connect: async () => undefined,
       subscribe: async () => undefined,
       disconnect: async () => undefined,

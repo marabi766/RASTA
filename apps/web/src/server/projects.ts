@@ -8,6 +8,7 @@ import { webServerEnv } from './env';
 import { utcInstant } from './instant';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
+import { actingOrganizationId, tenantCredential } from './session-organization';
 
 export type { ReadResult };
 
@@ -185,7 +186,7 @@ async function read<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = schema.safeParse(response.data);
@@ -282,7 +283,8 @@ export async function fetchApprovalInbox(session: WebSession): Promise<ReadResul
 export async function fetchExecutionPolicy(
   session: WebSession,
 ): Promise<ReadResult<ExecutionPolicy>> {
-  const organizationId = session.organizationId;
+  // The organization the session acts for — the one the policy read is for (PR 405, task 118).
+  const organizationId = actingOrganizationId(session);
   if (!organizationId) return { kind: 'NOT_FOUND' };
 
   const result = await read(

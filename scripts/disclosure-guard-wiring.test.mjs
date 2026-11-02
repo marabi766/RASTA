@@ -188,7 +188,12 @@ test('specs take test and expect only from guarded harnesses, including test.exp
     );
     assert.match(
       source,
-      /export const test = Object\.assign\(base\.extend\(\{\}\), \{ expect \}\);/,
+      /export const test = Object\.assign\(\s*base\.extend[^]*?\{ expect \},\s*\);/,
+    );
+    // And its API request fixture refuses redirects (Q-155, PR #492 r1 F2).
+    assert.match(
+      source,
+      /request: async \(\{ request \}, provide\) => provide\(guardRequestContext\(request\)\),/,
     );
   }
   const api = readFileSync(join(root, 'tests/e2e/src/api.ts'), 'utf8');

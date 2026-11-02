@@ -121,6 +121,10 @@ class FakeKafkaConsumer {
   private eachMessage?: EachMessage;
   private inFlight: Promise<void> = Promise.resolve();
   async connect(): Promise<void> {}
+  readonly events = { CRASH: 'consumer.crash' };
+  on(): () => void {
+    return () => undefined;
+  }
   async subscribe(): Promise<void> {}
   async run(config: { eachMessage: EachMessage }): Promise<void> {
     this.eachMessage = config.eachMessage;

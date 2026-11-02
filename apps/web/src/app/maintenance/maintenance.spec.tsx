@@ -10,6 +10,8 @@ import type {
   ReadResult,
   RepairOrderDetail,
 } from '@/server/maintenance';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The two maintenance screens, in every state the server can put them in.
@@ -41,7 +43,9 @@ const page = (
 
 describe('the maintenance list', () => {
   it('shows a row per request, linking to its detail and to its asset', () => {
-    const { getByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(getByRole('link', { name: 'صدای غیرعادی موتور' })).toHaveAttribute(
       'href',
       '/maintenance/MREQ_1',
@@ -52,7 +56,9 @@ describe('the maintenance list', () => {
   it('translates the type, severity and status without translating the data', () => {
     // CLAUDE.md: the label is presentation; the value stays Latin everywhere
     // a comparison or a filter could see it.
-    const { getByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     const row = getByRole('row', { name: /صدای غیرعادی موتور/ });
     expect(row).toHaveTextContent('اصلاحی');
     expect(row).toHaveTextContent('زیاد');
@@ -64,37 +70,43 @@ describe('the maintenance list', () => {
     const { getByText } = render(
       <MaintenanceScreen
         result={page({ items: [{ ...REQUEST, status: 'ESCALATED' }] })}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
       />,
     );
     expect(getByText('ESCALATED')).toBeInTheDocument();
   });
 
   it('offers the next page only when there is one', () => {
-    const { queryByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+    const { queryByRole } = render(
+      <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(queryByRole('link', { name: 'صفحهٔ بعد' })).toBeNull();
 
     const { getByRole } = render(
       <MaintenanceScreen
         result={page({ hasMore: true, nextCursor: 'CUR_2' })}
-        query={{ status: 'OPEN' }}
+        query={{ context: TEST_CONTEXT, status: 'OPEN' }}
       />,
     );
     // The filter travels with the cursor: a second page of a filtered list is
     // still that filtered list.
     expect(getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      '/maintenance?status=OPEN&cursor=CUR_2',
+      withContext(TEST_CONTEXT, '/maintenance?status=OPEN&cursor=CUR_2'),
     );
   });
 
   it('says something different when a filter matched nothing', () => {
     const empty = page({ items: [] });
 
-    const unfiltered = render(<MaintenanceScreen result={empty} query={{}} />);
+    const unfiltered = render(
+      <MaintenanceScreen result={empty} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(unfiltered.getByText('هیچ درخواست نگهداری‌ای ثبت نشده')).toBeInTheDocument();
 
-    const filtered = render(<MaintenanceScreen result={empty} query={{ severity: 'CRITICAL' }} />);
+    const filtered = render(
+      <MaintenanceScreen result={empty} query={{ context: TEST_CONTEXT, severity: 'CRITICAL' }} />,
+    );
     expect(filtered.getByText('چیزی با این پالایش پیدا نشد')).toBeInTheDocument();
     expect(filtered.getByRole('link', { name: 'نمایش همه' })).toHaveAttribute(
       'href',
@@ -103,13 +115,15 @@ describe('the maintenance list', () => {
   });
 
   it('renders a refusal as a refusal and an outage as an outage', () => {
-    const forbidden = render(<MaintenanceScreen result={{ kind: 'FORBIDDEN' }} query={{}} />);
+    const forbidden = render(
+      <MaintenanceScreen result={{ kind: 'FORBIDDEN' }} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(forbidden.getByText('دسترسی ندارید')).toBeInTheDocument();
 
     const down = render(
       <MaintenanceScreen
         result={{ kind: 'UNAVAILABLE', status: 503, correlationId: 'COR_9' }}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
       />,
     );
     // docs/16 § 16.11: the correlation id is on screen so support can find the
@@ -118,14 +132,18 @@ describe('the maintenance list', () => {
   });
 
   it('filters through the URL, with no javascript', () => {
-    const { getByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     const form = getByRole('form', { name: 'پالایش فهرست' });
     expect(form).toHaveAttribute('method', 'get');
     expect(form).toHaveAttribute('action', '/maintenance');
   });
 
   it('has no accessibility violations', async () => {
-    const { container } = render(<MaintenanceScreen result={page()} query={{}} />);
+    const { container } = render(
+      <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 
@@ -134,7 +152,7 @@ describe('the maintenance list', () => {
 
     it('puts the form under its own heading, before the filters, when it is handed one', () => {
       const { getByRole, getByText } = render(
-        <MaintenanceScreen result={page()} query={{}} reportForm={form} />,
+        <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} reportForm={form} />,
       );
       const heading = getByRole('heading', { name: 'ثبت درخواست' });
       expect(heading).toBeInTheDocument();
@@ -146,18 +164,22 @@ describe('the maintenance list', () => {
     });
 
     it('shows nothing where it was not handed one — no empty section, no dead heading', () => {
-      const { queryByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+      const { queryByRole } = render(
+        <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+      );
       expect(queryByRole('heading', { name: 'ثبت درخواست' })).toBeNull();
     });
 
     it('still lists the requests when the person cannot report one', () => {
-      const { getByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+      const { getByRole } = render(
+        <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+      );
       expect(getByRole('link', { name: 'صدای غیرعادی موتور' })).toBeInTheDocument();
     });
 
     it('has no accessibility violations with the slot filled', async () => {
       const { container } = render(
-        <MaintenanceScreen result={page()} query={{}} reportForm={form} />,
+        <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} reportForm={form} />,
       );
       expect(await axe(container)).toHaveNoViolations();
     });

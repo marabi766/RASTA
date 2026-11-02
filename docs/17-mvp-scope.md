@@ -18,7 +18,7 @@
 | Feature                      | سرویس         | وابستگی | Acceptance Criteria                                             |
 | ---------------------------- | ------------- | ------- | --------------------------------------------------------------- |
 | Monorepo + TypeScript strict | —             | —       | `pnpm build`، `pnpm typecheck`، `pnpm lint` هر سه سبز           |
-| Docker Compose               | —             | —       | `docker compose up -d` کل زیرساخت را سالم بالا می‌آورد          |
+| Docker Compose               | —             | —       | `pnpm infra:up` کل زیرساخت را سالم بالا می‌آورد                 |
 | CI Pipeline                  | —             | —       | Lint، Typecheck، Test، Build، اسکن Secret روی هر Push           |
 | Outbox + Kafka Relay         | `nest-common` | Kafka   | رویداد در همان تراکنش ثبت و پس از Commit منتشر می‌شود           |
 | Tenant Context               | `nest-common` | —       | `organizationId` در کل چرخه درخواست جریان دارد؛ تست ثابت می‌کند |

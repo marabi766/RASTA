@@ -6,6 +6,7 @@ import { fetchSettlement } from '@/server/settlements';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { SettlementDetailScreen } from '../SettlementDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/settlements/[id]` route. No role check here: economic-service answers
@@ -23,8 +24,9 @@ export default async function SettlementPage({ params }: { params: Promise<{ id:
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

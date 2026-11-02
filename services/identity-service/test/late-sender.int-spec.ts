@@ -1,4 +1,4 @@
-import { performance } from 'node:perf_hooks';
+import { eligibilityClockWrite } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { IdentityRepository } from '../src/identity/identity.repository';
 import { IdentityService } from '../src/identity/identity.service';
@@ -21,14 +21,17 @@ import {
   keycloakWriteFenceEventsTotal,
 } from '../src/observability/keycloak-projection.metrics';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { asActor, databaseUrl, id, newPrisma, tenants, untilEveryFenceTakenOver } from './helpers';
 import {
-  DEADLINE_FIXTURE_MS,
-  KeycloakHttpStub,
-  SLOW_ROUND_TRIP_MS,
-  SUCCESS_REQUEST_BUDGET_MS,
-  type StubRequest,
-} from './keycloak-http-stub';
+  FenceTestTimeline,
+  asActor,
+  databaseUrl,
+  id,
+  newPrisma,
+  tenants,
+  ensureLiveMember,
+} from './helpers';
+import { dateMembershipWindow } from './identity-fixtures';
+import { KeycloakHttpStub, SLOW_ROUND_TRIP_MS, type StubRequest } from './keycloak-http-stub';
 
 /**
  * D-070 option D, against a real PostgreSQL and the real `KeycloakAdminClient`
@@ -58,14 +61,8 @@ import {
  */
 
 const SETTLE_SECONDS = 2;
-/**
- * The shared client's request budget — every ordinary success path's — and
- * so its fences' `deadline_at - started_at` (#458 r3 F8): generous, so a slow
- * runner never turns a success into a timeout. Lateness here is a pause, never
- * the real clock; only a test about a timeout uses the short fixture
- * (`short`, {@link DEADLINE_FIXTURE_MS}).
- */
-const REQUEST_BUDGET_MS = SUCCESS_REQUEST_BUDGET_MS;
+/** The shared timeline owns signals; DB lifetimes exceed the 60 s harness bound. */
+const REQUEST_BUDGET_MS = FenceTestTimeline.requestBudgetMs;
 /** Longer than any request's deadline here: what a paused sender's clock moves on by. */
 const PAUSE_MS = REQUEST_BUDGET_MS + 1_000;
 
@@ -78,14 +75,13 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
   let fences: KeycloakWriteFences;
   let projector: KeycloakProjector;
   let service: IdentityService;
-  /**
-   * The explicit short-budget fixture (#458 r3 F8): only for a test about a
-   * timeout — the request that must time out goes through it.
-   */
-  let short: KeycloakProjector;
   /** How far the senders' monotonic clock is ahead of `performance.now`: the pauses so far. */
   let paused = 0;
   const mine = new Set<string>();
+
+  const timeline = new FenceTestTimeline();
+  const nativeTimeout = AbortSignal.timeout;
+  beforeEach(() => timeline.install());
 
   beforeAll(async () => {
     prisma = newPrisma();
@@ -96,20 +92,24 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
     stub = new KeycloakHttpStub();
     await stub.start();
     keycloak = stub.client(REQUEST_BUDGET_MS);
-    fences = new KeycloakWriteFences(fencePool, { monotonicNow: () => performance.now() + paused });
+    fences = new KeycloakWriteFences(fencePool, {
+      monotonicNow: () => timeline.monotonicNow() + paused,
+    });
     projector = new KeycloakProjector(repository, keycloak, fences, {
       writeSettleSeconds: SETTLE_SECONDS,
     });
     service = new IdentityService(repository, keycloak, projector);
-    short = new KeycloakProjector(repository, stub.client(DEADLINE_FIXTURE_MS), fences, {
-      writeSettleSeconds: SETTLE_SECONDS,
-    });
   });
 
   afterEach(async () => {
-    await settleRecoveryProjections(30_000);
-    stub.onPut = null;
-    jest.restoreAllMocks();
+    try {
+      await settleRecoveryProjections(30_000);
+    } finally {
+      timeline.restore();
+      expect(AbortSignal.timeout).toBe(nativeTimeout);
+      stub.onPut = null;
+      jest.restoreAllMocks();
+    }
   });
 
   afterAll(async () => {
@@ -130,14 +130,15 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
   }
 
   async function seed(
-    memberships: Array<{ in: 'a' | 'b'; roles: string[]; validUntil?: Date }>,
+    memberships: Array<{ in: 'a' | 'b'; roles: string[]; endsInMs?: number }>,
   ): Promise<Seeded> {
     const org = tenants();
     const userId = id('USR-LS');
     mine.add(userId);
     const keycloakId = `kc-${userId.slice(-16).toLowerCase()}`;
     const ids = memberships.map(() => id('MBR-LS'));
-    const validFrom = new Date(Date.now() - 3_600_000);
+    // Grants as of a minute after the first membership began (the stub's account).
+    let grantedAt = Date.now() - 3_540_000;
     const username = `ls-${userId.slice(-12)}`.toLowerCase();
     await runUnscoped('test fixture spans organizations', async () => {
       await prisma.client.user.create({
@@ -161,12 +162,17 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
             userId,
             organizationId: org[membership.in],
             roles: membership.roles,
-            validFrom: new Date(validFrom.getTime() + index),
-            validUntil: membership.validUntil ?? null,
             createdBy: 'ITEST',
             updatedBy: 'ITEST',
           },
         });
+        // Its window on the database clock that judges it: begun an hour ago (in
+        // order, a millisecond apart), ending `endsInMs` from now or open-ended.
+        const dated = await dateMembershipWindow(prisma, ids[index]!, {
+          fromMs: -3_600_000 + index,
+          untilMs: membership.endsInMs ?? null,
+        });
+        if (index === 0) grantedAt = dated.validFrom.getTime() + 60_000;
       }
     });
     stub.add({
@@ -176,7 +182,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       firstName: 'آزمون',
       lastName: 'دیرکرد',
       attributes: {
-        ...(await rowsGrant(userId, validFrom.getTime() + 60_000)),
+        ...(await rowsGrant(userId, grantedAt)),
         rasta_activation: ['REG_FIXTURE'],
       },
     });
@@ -212,7 +218,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
     reassertFailures: number;
   }
 
-  const fencesOf = async (userId: string): Promise<FenceRow[]> =>
+  const fencesOf = async (userId: string, at?: Date): Promise<FenceRow[]> =>
     (
       await prisma.client.$queryRaw<
         Array<{
@@ -230,7 +236,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
         }>
       >`
         SELECT attempt_id, operation, keycloak_id,
-               takeover_at > (clock_timestamp() AT TIME ZONE 'UTC') AS live,
+               takeover_at > COALESCE(${at ?? null}::timestamp, clock_timestamp() AT TIME ZONE 'UTC') AS live,
                EXTRACT(EPOCH FROM takeover_at - deadline_at)::float AS window,
                EXTRACT(EPOCH FROM deadline_at - started_at)::float AS timeout,
                EXTRACT(EPOCH FROM (clock_timestamp() AT TIME ZONE 'UTC') - started_at)::float AS started_ago,
@@ -280,7 +286,14 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
         const record = { late: attempt.id, known, written, rows: [] as FenceRow[] };
         seen.push(record);
         // A stopped sender's scope refuses this read too: then there is no snapshot.
-        record.rows = await Promise.all([...mine].map((userId) => fencesOf(userId))).then(
+        record.rows = await Promise.all(
+          [...mine].map(async (userId) => {
+            const rows = await fencesOf(userId);
+            return !known && rows.length > 0
+              ? fencesOf(userId, await timeline.observation(prisma, userId))
+              : rows;
+          }),
+        ).then(
           (all) => all.flat(),
           () => [],
         );
@@ -334,8 +347,16 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       prisma.client.membership.update({ where: { id: membershipId }, data: { roles } }),
     );
 
-  const asAdmin = <T>(organizationId: string, fn: () => Promise<T>) =>
-    asActor({ organizationId, userId: 'USR-LS-ADMIN', roles: ['ORGANIZATION_ADMIN'] }, fn);
+  // A live administrator of the organization, in the database: the authority
+  // a membership change re-reads under its locks (task 117, F1).
+  const asAdmin = async <T>(organizationId: string, fn: () => Promise<T>) => {
+    await ensureLiveMember(prisma, {
+      userId: 'USR-LS-ADMIN',
+      organizationId,
+      roles: ['ORGANIZATION_ADMIN'],
+    });
+    return asActor({ organizationId, userId: 'USR-LS-ADMIN', roles: ['ORGANIZATION_ADMIN'] }, fn);
+  };
 
   // -------------------------------------------------------------------------
   // The outcome, whatever it is
@@ -433,6 +454,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
 
       await settleRecoveryProjections(10_000);
       // A narrowing waits for a re-assertion after takeover.
+      await timeline.holdLive(prisma, s.userId);
       await expect(
         asAdmin(s.org.a, () =>
           service.updateMembershipRoles(s.memberships[0]!, {
@@ -442,7 +464,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
         ),
       ).rejects.toMatchObject({ code: 'KEYCLOAK_WRITE_SETTLING' });
 
-      await untilEveryFenceTakenOver(prisma, s.userId);
+      await timeline.expire(prisma, s.userId);
       await ownScanner().scan();
       expect(await fencesOf(s.userId)).toEqual([]);
       expect(stub.platform(s.keycloakId)).toEqual(await rowsGrant(s.userId));
@@ -454,29 +476,32 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       stub.nextPut('hang');
       pauseNextSender();
 
-      // A request that must time out: the short fixture.
-      await expect(short.project(s.userId, 'event')).rejects.toBeDefined();
+      // The test fires the deadline after the complete PUT reaches the server.
+      await expect(
+        timeline.timeoutAfterPut(stub, () => projector.project(s.userId, 'event')),
+      ).rejects.toBeDefined();
 
       expect(late).toEqual([expect.objectContaining({ known: false, written: true })]);
       const fresh = late[0]!.rows.filter((row) => row.attemptId !== late[0]!.late);
       expect(fresh).toEqual([expect.objectContaining({ live: true, window: SETTLE_SECONDS })]);
     });
 
-    it('a timeout on the real clock alone is not lateness (#458 r1 F5): a fresh fence exactly when it was observed past the deadline, and its own live fence either way', async () => {
+    it('a deadline signal alone is not lateness (#458 r1 F5): observed on time, it keeps its own live fence without fencing afresh', async () => {
       const s = await seed([{ in: 'a', roles: ['OPERATOR'] }]);
       const late = recordLateFences();
       stub.nextPut('hang');
 
-      // A request that must time out: the short fixture.
-      await expect(short.project(s.userId, 'event')).rejects.toBeDefined();
+      // The test fires the deadline after the complete PUT reaches the server.
+      await expect(
+        timeline.timeoutAfterPut(stub, () => projector.project(s.userId, 'event')),
+      ).rejects.toBeDefined();
       await settleRecoveryProjections(10_000);
 
-      // The timer may fire a fraction before the deadline (not late: nothing
-      // more) or after it (late: one fresh fence) — the verdict is the
-      // observation's, and the fences follow it, whichever it was.
-      expect(late.length).toBeLessThanOrEqual(1);
-      expect(late.every((record) => record.written && !record.known)).toBe(true);
-      const rows = await fencesOf(s.userId);
+      // Firing a signal does not advance the sender clock. The observation
+      // is on time, so only its own fence remains; the paused case above
+      // separately proves that an observation past the deadline fences afresh.
+      expect(late).toEqual([]);
+      const rows = await fencesOf(s.userId, await timeline.observation(prisma, s.userId));
       expect(rows).toHaveLength(1 + late.length);
       expect(rows.every((row) => row.live)).toBe(true);
     });
@@ -488,7 +513,9 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       let seenAtKeycloak = 0;
       stub.onPut = async () => {
         seenAtKeycloak = (await fencesOf(s.userId)).length;
-        // A slow round trip (#458 r3 F8): still on time within the budget.
+        // A slow round trip (#458 r3 F8), measured on the controlled sender
+        // clock too: a reduced request budget still fails this regression.
+        paused += SLOW_ROUND_TRIP_MS;
         await new Promise((resolve) => setTimeout(resolve, SLOW_ROUND_TRIP_MS));
       };
 
@@ -539,7 +566,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
     it('the sweep’s lapse (its write-ahead)', async () => {
       const s = await seed([
         { in: 'a', roles: ['OPERATOR'] },
-        { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() - 1_000) },
+        { in: 'b', roles: ['DRIVER'], endsInMs: -1_000 },
       ]);
       const late = recordLateFences();
       const triggers = recordProjections();
@@ -557,7 +584,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
     it('the sweep’s re-assertion of a due fence', async () => {
       const s = await seed([{ in: 'a', roles: ['OPERATOR'] }]);
       // A write that timed out long ago and is past takeover: due.
-      await prisma.client.$executeRaw`
+      await eligibilityClockWrite(prisma.client)`
         INSERT INTO keycloak_write_attempt
                (attempt_id, user_id, keycloak_id, operation,
                 started_at, deadline_at, takeover_at, next_reassert_at)
@@ -608,7 +635,8 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
   describe('the old attempt was already taken over while its sender was paused', () => {
     /**
      * While the sender is paused at Keycloak: its fence is taken over (its
-     * row gone) and a newer attempt's fence — the replacement — is live.
+     * row gone) and a newer attempt's fence — the replacement — is live, for
+     * hours: past the test's whole run, never a window it consumes (#912).
      */
     async function takeOverAndReplace(s: Seeded) {
       const [own] = await fencesOf(s.userId);
@@ -616,12 +644,12 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       await prisma.client.$transaction([
         prisma.client
           .$executeRaw`DELETE FROM keycloak_write_attempt WHERE attempt_id = ${own!.attemptId}`,
-        prisma.client.$executeRaw`
+        eligibilityClockWrite(prisma.client)`
           INSERT INTO keycloak_write_attempt
                  (attempt_id, user_id, keycloak_id, operation,
                   started_at, deadline_at, takeover_at, next_reassert_at)
           SELECT ${replacement}, ${s.userId}, ${s.keycloakId}, 'replace_attributes',
-                 c, c + interval '30 seconds', c + interval '60 seconds', c + interval '60 seconds'
+                 c, c + interval '1 hour', c + interval '2 hours', c + interval '2 hours'
             FROM (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS c) t`,
       ]);
       return { own: own!.attemptId, replacement };
@@ -645,7 +673,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
         await settleRecoveryProjections(10_000);
 
         expect(late).toEqual([expect.objectContaining({ late: ids.own, written: true })]);
-        const rows = await fencesOf(s.userId);
+        const rows = await fencesOf(s.userId, await timeline.observation(prisma, s.userId));
         expect(rows.find((row) => row.attemptId === ids.own)).toBeUndefined();
         const after = rows.find((row) => row.attemptId === ids.replacement);
         // Exactly as it was: not deleted, not shortened, not deferred.
@@ -673,7 +701,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
     it('the resumed sender’s fresh fence is refused in its stopped scope, owed, and written by the stop’s flush outside it; the lapse rolls back with no event', async () => {
       const s = await seed([
         { in: 'a', roles: ['OPERATOR'] },
-        { in: 'b', roles: ['DRIVER'], validUntil: new Date(Date.now() - 1_000) },
+        { in: 'b', roles: ['DRIVER'], endsInMs: -1_000 },
       ]);
       const late = recordLateFences();
       const scanner = ownScanner();
@@ -685,7 +713,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
         if (!armed) return;
         armed = false;
         paused += PAUSE_MS;
-        stopping = scanner.stop({ deadlineAt: Date.now() + 10_000 });
+        stopping = scanner.stop({ deadlineAt: Date.now() + REQUEST_BUDGET_MS });
       };
 
       await scanner.scan();
@@ -693,7 +721,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
 
       expect(late).toEqual([expect.objectContaining({ known: false, written: false })]);
       // Written by the stop's flush, before the stop returned: a fresh live row.
-      const rows = await fencesOf(s.userId);
+      const rows = await fencesOf(s.userId, await timeline.observation(prisma, s.userId));
       const fresh = rows.filter((row) => row.attemptId !== late[0]!.late);
       expect(fresh).toEqual([expect.objectContaining({ live: true, window: SETTLE_SECONDS })]);
       expect(fences.owedCount).toBe(0);
@@ -725,7 +753,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       await atKeycloak;
       // The worker's stop flushes, outside any stopped scope.
       expect(await fences.recoverOwed()).toBe(0);
-      const rows = await fencesOf(s.userId);
+      const rows = await fencesOf(s.userId, await timeline.observation(prisma, s.userId));
       expect(rows).toHaveLength(2);
       expect(rows.every((row) => row.live)).toBe(true);
       expect(rows[1]!.window).toBe(SETTLE_SECONDS);
@@ -763,10 +791,22 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       // Every fence connection is busy: the flush's transaction waits.
       let release!: () => void;
       const released = new Promise<void>((resolve) => (release = resolve));
+      let inside = 0;
+      let allInside!: () => void;
+      const busy = new Promise<void>((resolve) => (allInside = resolve));
       const holders = Array.from({ length: FENCE_POOL_CONNECTIONS }, () =>
-        fencePool.transaction(() => released, { maxWait: 5_000, timeout: 10_000 }),
+        fencePool.transaction(
+          () => {
+            inside += 1;
+            if (inside === FENCE_POOL_CONNECTIONS) allInside();
+            return released;
+          },
+          { maxWait: 5_000, timeout: REQUEST_BUDGET_MS },
+        ),
       );
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Each holder is inside its transaction, on its connection, before the
+      // flush asks for one (#910) — not a guess that 200 ms was enough.
+      await busy;
       // What reached the fence pool's transactions, and when.
       const log: string[] = [];
       const real = fencePool.transaction.bind(fencePool);
@@ -791,7 +831,7 @@ describe('D-070 option D: a late sender fences afresh and asks for a projection'
       expect(log).toEqual(['STOP RETURNED']);
       // Nothing written, nothing forgotten: only the attempt's own row, and
       // the fresh fence still owed in the process.
-      expect(await fencesOf(s.userId)).toEqual([
+      expect(await fencesOf(s.userId, await timeline.observation(prisma, s.userId))).toEqual([
         expect.objectContaining({ attemptId: attempt.id, live: true }),
       ]);
       expect(fences.owedCount).toBe(1);

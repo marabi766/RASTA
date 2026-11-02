@@ -4,6 +4,7 @@ import { test, type APIRequestContext, type Page } from './expect';
 import { expect } from './expect';
 
 import { installLiveSession } from './live-session';
+import { withContext } from '../src/lib/page-context';
 
 /**
  * `/settlements` through the real stack: a real token, the real gateway, a real
@@ -120,12 +121,12 @@ test.describe('settlements through the live stack', () => {
     return (await page.locator('main').innerText()).trim();
   }
 
-  test.beforeAll(async ({ browser, playwright }) => {
+  test.beforeAll(async ({ browser, newApiContext }) => {
     const context = await browser.newContext();
     const session = await installLiveSession(context, 'orgAdmin');
     await context.close();
 
-    const request = await playwright.request.newContext();
+    const request = await newApiContext();
     try {
       ownId = await settle(request, session.accessToken, OWN_PAYEE);
       thirdId = await settle(request, session.accessToken, THIRD_ORGANIZATION);
@@ -157,8 +158,8 @@ test.describe('settlements through the live stack', () => {
   });
 
   test('the payer’s received side holds neither of them', async ({ context, page }) => {
-    await installLiveSession(context, 'orgAdmin');
-    await page.goto('/settlements?view=RECEIVED');
+    const session = await installLiveSession(context, 'orgAdmin');
+    await page.goto(withContext(session.context, '/settlements?view=RECEIVED'));
 
     const text = await mainText(page);
     expect(text).not.toContain(ownId);
@@ -169,9 +170,9 @@ test.describe('settlements through the live stack', () => {
     context,
     page,
   }) => {
-    await installLiveSession(context, 'orgAdminB');
+    const session = await installLiveSession(context, 'orgAdminB');
 
-    await page.goto('/settlements?view=RECEIVED');
+    await page.goto(withContext(session.context, '/settlements?view=RECEIVED'));
     const received = await mainText(page);
     expect(received).toContain(ownId);
     expect(received).toContain('ORG-DEH-0001');

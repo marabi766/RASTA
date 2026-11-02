@@ -1,7 +1,8 @@
 /**
  * The disposable-broker declaration (PR #378 r5 F2). A broker test that
  * changes the broker beyond topics of its own imports this module FIRST — the
- * create-topics test sets the cluster-wide default `message.max.bytes`, the
+ * replay/ACL tests leave records on platform topics, the create-topics test
+ * sets the cluster-wide default `message.max.bytes`, the
  * dead-letter escape test leaves a poison record on `rasta.organization.v1` —
  * and runs only when the environment says the broker is thrown away after the
  * run:

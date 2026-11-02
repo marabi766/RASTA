@@ -1,9 +1,10 @@
+import { createSafePrismaClient } from '@rasta/nest-common';
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import {
   createTenantGuardExtension,
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
-import { PrismaClient } from '../generated/prisma';
+import { Prisma, PrismaClient } from '../generated/prisma';
 
 /**
  * Models carrying an `organizationId` and therefore scoped automatically
@@ -92,13 +93,17 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
   readonly client: ExtendedPrismaClient;
 
   constructor(databaseUrl: string) {
-    this.base = new PrismaClient({
-      datasources: { db: { url: databaseUrl } },
-      log: [
-        { emit: 'event', level: 'warn' },
-        { emit: 'event', level: 'error' },
-      ],
-    });
+    this.base = createSafePrismaClient(
+      () =>
+        new PrismaClient({
+          datasources: { db: { url: databaseUrl } },
+          log: [
+            { emit: 'event', level: 'warn' },
+            { emit: 'event', level: 'error' },
+          ],
+        }),
+      'DATABASE_URL_SUPPLIER',
+    );
     this.client = this.buildClient();
   }
 
@@ -106,6 +111,7 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     return this.base.$extends(
       createTenantGuardExtension({
         scopedModels: TENANT_SCOPED_MODELS,
+        datamodel: Prisma.dmmf.datamodel,
         onUnscopedQuery: ({ model, operation, reason }) => {
           // Every deliberate boundary crossing is recorded with its written
           // reason, so an auditor can enumerate them without reading the whole
@@ -131,7 +137,7 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
    * service must connect as `rasta_supplier`, which owns nothing. So startup
    * asks the catalogue who it is and stops if that role is a superuser or a
    * migrator, owns the database, a schema or any relation, holds CREATE, or
-   * holds CREATEDB, CREATEROLE or BYPASSRLS — the shared check every split
+   * holds CREATEDB, CREATEROLE, BYPASSRLS or REPLICATION — the shared check every split
    * service runs (@rasta/nest-common runtime-role.ts, D-045).
    *
    * Called by `AppModule` before the relay starts. Not in `onModuleInit`

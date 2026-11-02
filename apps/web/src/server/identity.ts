@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { callGateway, GatewayRequestError } from './gateway';
+import { personalCredential } from './session-organization';
 import { webServerEnv } from './env';
 import type { WebSession } from './session';
 
@@ -84,7 +85,7 @@ export async function fetchCurrentUser(session: WebSession): Promise<CurrentUser
     const response = await callGateway<unknown>({
       baseUrl: env.API_GATEWAY_URL,
       path: '/v1/users/me',
-      accessToken: session.accessToken,
+      credential: personalCredential(session),
     });
 
     const parsed = currentUserSchema.safeParse(response.data);
@@ -104,9 +105,12 @@ export function displayName(user: CurrentUser): string {
   return full.length > 0 ? full : user.username;
 }
 
-/** The membership for the organization this session is acting in, if any. */
-export function activeMembership(user: CurrentUser) {
-  return user.memberships.find(
-    (membership) => membership.organizationId === user.activeOrganizationId,
-  );
+/**
+ * The membership for the organization this session acts for — the one it is
+ * pinned to (`actingOrganizationId`), not identity's `activeOrganizationId`,
+ * which a switch made elsewhere moves (task 118).
+ */
+export function membershipIn(user: CurrentUser, organizationId: string | null) {
+  if (organizationId === null) return undefined;
+  return user.memberships.find((membership) => membership.organizationId === organizationId);
 }

@@ -11,6 +11,7 @@ import type {
 } from '@/lib/organization-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
@@ -63,13 +64,15 @@ export interface MemberListQuery {
   readonly q?: string;
   readonly role?: string;
   readonly cursor?: string;
+  /** Rows per page; {@link MEMBERS_PER_PAGE} unless a caller reads every page. */
+  readonly limit?: number;
 }
 
 export async function fetchMembers(
   session: WebSession,
   query: MemberListQuery = {},
 ): Promise<ReadResult<MemberPage>> {
-  const search = new URLSearchParams({ limit: String(MEMBERS_PER_PAGE) });
+  const search = new URLSearchParams({ limit: String(query.limit ?? MEMBERS_PER_PAGE) });
   if (query.q) search.set('q', query.q);
   if (query.role) search.set('role', query.role);
   if (query.cursor) search.set('cursor', query.cursor);
@@ -78,7 +81,7 @@ export async function fetchMembers(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: `/v1/users?${search.toString()}`,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = memberPageSchema.safeParse(response.data);

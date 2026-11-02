@@ -16,6 +16,7 @@ import {
 } from '@/server/supplier-unresolved';
 
 import { IDLE_SUPPLIER_FORM } from './supplier-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The supplier write path against a **real Redis** (where the Lua of the
@@ -78,7 +79,7 @@ function login(): WebSession {
     subject: `user-${process.pid}-${Date.now()}-${n}`,
     username: 'operator',
     organizationId: `ORG-REDIS-${process.pid}-${n}`,
-    accessToken: 'access-token-value',
+    accessToken: actingAccessToken(`ORG-REDIS-${process.pid}-${n}`, ['SUPPLIER']),
     accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
     refreshToken: 'refresh-token-value',
     csrfToken: `csrf-${n}`,

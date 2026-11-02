@@ -13,6 +13,8 @@ import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { bidRequest, issueBidCommand } from '@/server/tender-bids';
 
 import { afterRetry, type BidFormState } from './bid-form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The server action behind the bid forms on `/tenders/[id]`.
@@ -85,7 +87,10 @@ async function attempt(tenderId: string, form: FormData): Promise<BidFormState> 
   switch (result.kind) {
     case 'CREATED':
       return redirect(
-        `/tenders/${encodeURIComponent(tenderId)}?view=open&${FLASH_PARAM}=${mintFlash(session, tenderId, command)}`,
+        withContext(
+          pageContext(session),
+          `/tenders/${encodeURIComponent(tenderId)}?view=open&${FLASH_PARAM}=${mintFlash(session, tenderId, command)}`,
+        ),
       );
     case 'INVALID':
       return {

@@ -136,18 +136,38 @@ describe('assertBalanced', () => {
     ).toThrow(expect.objectContaining({ code: 'LEDGER_UNBALANCED' }));
   });
 
-  it('names the currency and the delta in the failure', () => {
-    // "Unbalanced" with no figure sends an operator to the database anyway.
+  it.each([
+    ['too few entries', [entry({ amountMinor: 918_273_645n })], 'TOO_FEW_ENTRIES'],
+    [
+      'a non-positive entry',
+      [
+        entry({ direction: 'DEBIT', amountMinor: 0n }),
+        entry({ direction: 'CREDIT', amountMinor: 918_273_645n, accountId: 'ACC_2' }),
+      ],
+      'NON_POSITIVE_ENTRY',
+    ],
+    [
+      'debits that differ from credits',
+      [
+        entry({ direction: 'DEBIT', amountMinor: 918_273_645n }),
+        entry({ direction: 'CREDIT', amountMinor: 546_372_819n, accountId: 'ACC_2' }),
+      ],
+      'DEBITS_NOT_CREDITS',
+    ],
+  ])('names the journal and a reason code for %s — never a figure', (_case, entries, reason) => {
+    // The context is logged by the exception filter, and an imbalance is an
+    // amount (AGENTS.md S-09; economic audit F9). The journal id is the
+    // handle to the entries, in the database.
     try {
-      assertBalanced('JRN_1', [
-        entry({ direction: 'DEBIT', amountMinor: 500n }),
-        entry({ direction: 'CREDIT', amountMinor: 300n, accountId: 'ACC_2' }),
-      ]);
+      assertBalanced('JRN_1', entries);
       throw new Error('expected a refusal');
     } catch (error) {
-      expect((error as { internalContext?: { delta?: string } }).internalContext?.delta).toBe(
-        'IRR: 200',
-      );
+      const thrown = error as { message: string; internalContext?: Record<string, unknown> };
+      expect(thrown.internalContext).toEqual({ journalId: 'JRN_1', reason });
+      const said = JSON.stringify({ message: thrown.message, context: thrown.internalContext });
+      for (const figure of ['918273645', '546372819', '371900826']) {
+        expect(said).not.toContain(figure);
+      }
     }
   });
 });

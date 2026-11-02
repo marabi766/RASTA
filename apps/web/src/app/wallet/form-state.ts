@@ -11,7 +11,7 @@ import type { TopUpFormField, TopUpFormValues } from '@/lib/wallet-fields';
  * (`drivers/[id]/form-state.ts` documents the same split).
  *
  * No success state to render: a successful top-up redirects rather than
- * returning one, back to `/wallet?toppedUp=1` — a fresh read of the balance
+ * returning one, back to `/wallet` — a fresh read of the balance
  * this form just changed, and a refresh that cannot resubmit it.
  */
 export type TopUpFormState =

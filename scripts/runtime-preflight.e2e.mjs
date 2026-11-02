@@ -17,10 +17,17 @@
 //   refused  — records the service consumer group's committed offsets, queues
 //              (where SERVICES gives one) a valid event on a topic it consumes,
 //              as that topic's only permitted producer, then starts the service
-//              with its runtime URL naming its migrator. The process must exit non-zero
-//              naming RuntimeRoleRefusedError — never the URL's password — and
-//              afterwards the group must never have formed (Kafka reports it
-//              Dead: no consumer so much as joined, which only a gate before
+//              twice, and each run must exit non-zero, never printing the
+//              owner's password:
+//                1. with its runtime URL naming its migrator: refused by the
+//                   environment guard, MigratorCredentialInServiceError naming
+//                   the variable — the first statement of main.js (#421 r1 F2);
+//                2. with its real runtime URL, while the migrator has granted the
+//                   runtime role CREATE on its schema (revoked again whatever
+//                   happens): the URL is a runtime role's, so only the catalogue
+//                   can tell — RuntimeRoleRefusedError from the preflight;
+//              and afterwards the group must never have formed (Kafka reports
+//              it Dead: no consumer so much as joined, which only a gate before
 //              Nest can promise), its offsets must be exactly as before
 //              (nothing committed) and, where the service records the event,
 //              no record may exist (nothing consumed).
@@ -34,8 +41,8 @@
 //
 // SERVICES below says, per service, what it consumes and from whom.
 // Environment (the CI step's, plus): PREFLIGHT_OWNER_URL — the service
-// migrator's URL; the service's runtime URL variable (audit: read back for its
-// rows); KAFKA_SASL_PASSWORD_<SERVICE> and the producer's. The event id passes
+// migrator's URL; the service's first runtime URL variable — its real runtime
+// URL (audit: also read back for its rows); KAFKA_SASL_PASSWORD_<SERVICE> and the producer's. The event id passes
 // from `refused` to `consumed` in PREFLIGHT_STATE_DIR (default /tmp/rasta-logs).
 // -----------------------------------------------------------------------------
 import { spawn } from 'node:child_process';
@@ -46,6 +53,7 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { UnreadableUrlError, readUrl } from '../packages/config/src/url-reader.js';
 import { withUtcSession } from './prisma-lib.mjs';
+import { psqlRunner } from './verify-migration-reversible-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -349,10 +357,10 @@ async function queueEvent(spec) {
   return envelope.eventId;
 }
 
-/** The service's dist/main.js with the owner's URL; resolves with how it ended. */
-function startWithOwnerUrl(service, spec, ownerUrl) {
+/** The service's dist/main.js with `url` as its runtime URL; resolves with how it ended. */
+function startWith(service, spec, url) {
   const env = { ...process.env, SERVICE_NAME: service };
-  for (const variable of spec.runtimeVariables) env[variable] = ownerUrl;
+  for (const variable of spec.runtimeVariables) env[variable] = url;
   // The service gets its own Kafka credential only, as in the start step.
   if (spec.producer) delete env[kafkaPasswordVariable(spec.producer)];
   delete env.PREFLIGHT_OWNER_URL;
@@ -375,6 +383,17 @@ function startWithOwnerUrl(service, spec, ownerUrl) {
       done({ code: null, output, timedOut: false });
     });
   });
+}
+
+/** What every refused run must show, whichever gate refused it. */
+function checkRefused(service, run, ownerPassword) {
+  // The service's output is tested, never printed: what it wrote is its own,
+  // and may quote anything it was configured with (WITHHELD).
+  check(!run.output.includes(ownerPassword), `the owner password was printed; ${WITHHELD}`);
+  check(!run.timedOut, `${service} kept running; ${WITHHELD}`);
+  check(run.code !== 0, `${service} exited 0; ${WITHHELD}`);
+  check(!/listening on :/.test(run.output), 'the application started listening');
+  check(!/Consuming /.test(run.output), 'a consumer started before the refusal');
 }
 
 async function refused(service, spec) {
@@ -402,20 +421,47 @@ async function refused(service, spec) {
     `${group} on ${spec.topic}: ${JSON.stringify(before)}; queued ${eventId ?? 'nothing'}`,
   );
 
-  const run = await startWithOwnerUrl(service, spec, ownerUrl);
-  // The service's output is tested, never printed: what it wrote is its own,
-  // and may quote anything it was configured with (WITHHELD).
-  check(!run.output.includes(ownerPassword), `the owner password was printed; ${WITHHELD}`);
-  check(!run.timedOut, `${service} kept running with the owner URL; ${WITHHELD}`);
-  check(run.code !== 0, `${service} exited 0 with the owner URL; ${WITHHELD}`);
-  check(/RuntimeRoleRefusedError/.test(run.output), `no RuntimeRoleRefusedError; ${WITHHELD}`);
+  // 1. The owner's URL: the environment guard, before anything is loaded.
+  const owned = await startWith(service, spec, ownerUrl);
+  checkRefused(service, owned, ownerPassword);
   check(
-    new RegExp(`${service} refuses to start: it is connected as ${spec.migrator}`).test(run.output),
-    `${service} did not refuse naming ${spec.migrator}; ${WITHHELD}`,
+    /MigratorCredentialInServiceError/.test(owned.output) &&
+      new RegExp(`\\b${spec.runtimeVariables[0]}\\b`).test(owned.output),
+    `no MigratorCredentialInServiceError naming ${spec.runtimeVariables[0]}; ${WITHHELD}`,
   );
-  check(!/listening on :/.test(run.output), 'the application started listening');
-  check(!/Consuming /.test(run.output), 'a consumer started before the refusal');
-  console.log(`${service} with the owner URL exited ${run.code}: RuntimeRoleRefusedError`);
+  console.log(
+    `${service} with the owner URL exited ${owned.code}: MigratorCredentialInServiceError`,
+  );
+
+  // 2. The runtime role's own URL, the role granted CREATE on its schema by the
+  // migrator: only the catalogue shows it, so only the preflight can refuse.
+  const runtimeUrl = required(spec.runtimeVariables[0]);
+  const runtime = spec.migrator.replace(/_migrator$/, '');
+  const schema = owner.searchParams.get('schema') ?? 'public';
+  const asOwner = psqlRunner(ownerUrl);
+  const grant = asOwner(`GRANT CREATE ON SCHEMA "${schema}" TO ${runtime}`);
+  check(grant.ok, `the migrator could not grant CREATE on ${schema} (sqlstate ${grant.sqlstate})`);
+  let creating;
+  try {
+    creating = await startWith(service, spec, runtimeUrl);
+  } finally {
+    const revoke = asOwner(`REVOKE CREATE ON SCHEMA "${schema}" FROM ${runtime}`);
+    check(
+      revoke.ok,
+      `CREATE on ${schema} could not be revoked again (sqlstate ${revoke.sqlstate})`,
+    );
+  }
+  checkRefused(service, creating, ownerPassword);
+  check(/RuntimeRoleRefusedError/.test(creating.output), `no RuntimeRoleRefusedError; ${WITHHELD}`);
+  check(
+    new RegExp(
+      `${service} refuses to start: it is connected as ${runtime}, which holds CREATE on schema ${schema}`,
+    ).test(creating.output),
+    `${service} did not refuse naming CREATE on ${schema}; ${WITHHELD}`,
+  );
+  console.log(
+    `${service} as ${runtime} holding CREATE exited ${creating.code}: RuntimeRoleRefusedError`,
+  );
 
   // No consumer joined, nothing was committed, nothing was recorded.
   const after = await reported(KAFKA_FAILED(service, `reading ${group}`), () =>

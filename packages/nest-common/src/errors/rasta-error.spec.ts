@@ -106,3 +106,46 @@ describe('RastaError.idempotencyKeyReused (S-09)', () => {
     expect(dump(lines)).toContain('SENTINEL-7f3a-client-key');
   });
 });
+
+describe('RastaError.insufficientBalance and ledgerUnbalanced carry no amounts (S-09, economic audit F9)', () => {
+  // Digits no identifier here contains, so finding one anywhere is the leak.
+  const REQUESTED = '918273645';
+  const AVAILABLE = '546372819';
+  const DELTA = '7340231';
+
+  it('keeps the wallet id and a fixed reason, and takes no figures', () => {
+    // @ts-expect-error — the amount parameters were removed on purpose: a
+    // caller that still passes them fails to compile instead of logging them.
+    const error = RastaError.insufficientBalance('WLT_1', REQUESTED, AVAILABLE);
+    expect(error.code).toBe(ERROR_CODES.INSUFFICIENT_BALANCE);
+    expect(error.internalContext).toEqual({
+      walletId: 'WLT_1',
+      reason: 'AVAILABLE_BELOW_REQUESTED',
+    });
+    expect(dump(error)).not.toContain(REQUESTED);
+    expect(dump(error)).not.toContain(AVAILABLE);
+  });
+
+  it('keeps the journal id and a closed reason code, never the delta', () => {
+    // @ts-expect-error — a figure is not a reason code: the union refuses it.
+    const typed = RastaError.ledgerUnbalanced('JRN_1', `IRR: ${DELTA}`);
+    expect(typed.code).toBe(ERROR_CODES.LEDGER_UNBALANCED);
+
+    const error = RastaError.ledgerUnbalanced('JRN_1', 'DEBITS_NOT_CREDITS');
+    expect(error.internalContext).toEqual({ journalId: 'JRN_1', reason: 'DEBITS_NOT_CREDITS' });
+  });
+
+  it('reaches the debug line through the exception filter with the ids and reasons only', () => {
+    const { filter, lines } = capturingFilter();
+
+    respond(filter, RastaError.insufficientBalance('WLT_1'));
+    respond(filter, RastaError.ledgerUnbalanced('JRN_1', 'DEBITS_NOT_CREDITS'));
+
+    expect(lines.map(([level]) => level)).toEqual(['debug', 'debug']);
+    const [first, second] = lines.map(
+      ([, payload]) => (payload as { internalContext?: unknown }).internalContext,
+    );
+    expect(first).toEqual({ walletId: 'WLT_1', reason: 'AVAILABLE_BELOW_REQUESTED' });
+    expect(second).toEqual({ journalId: 'JRN_1', reason: 'DEBITS_NOT_CREDITS' });
+  });
+});

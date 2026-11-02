@@ -5,6 +5,7 @@ import { test, type APIRequestContext, type Page } from './expect';
 import { expect } from './expect';
 
 import { installLiveSession, type LiveSession } from './live-session';
+import { withContext } from '../src/lib/page-context';
 
 /**
  * Tenant isolation through the real stack, in a real browser, at desktop and at
@@ -150,7 +151,9 @@ test.describe('tenant isolation through the live stack', () => {
       // page of twenty, ordered by id, and every browser scenario registers
       // machines of its own in this organization that sort ahead of the seeds
       // and are never deleted — so the seed's place on page one is not a fact.
-      await page.goto(`/assets?q=${encodeURIComponent(OWN_ASSET_TAG)}`);
+      await page.goto(
+        withContext(session.context, `/assets?q=${encodeURIComponent(OWN_ASSET_TAG)}`),
+      );
       await expect(page.getByRole('heading', { level: 1 })).toHaveText('ماشین‌آلات');
       expect(await mainText(page)).toContain(OWN_ASSET_TAG);
 
@@ -165,7 +168,9 @@ test.describe('tenant isolation through the live stack', () => {
     test('searching for the other organization’s tag finds nothing, and says nothing more', async ({
       page,
     }) => {
-      await page.goto(`/assets?q=${encodeURIComponent(OTHER_TENANT_ASSET_TAG)}`);
+      await page.goto(
+        withContext(session.context, `/assets?q=${encodeURIComponent(OTHER_TENANT_ASSET_TAG)}`),
+      );
 
       await expect(page.getByText('چیزی با این پالایش پیدا نشد')).toBeVisible();
       expect(await mainText(page)).not.toContain(OTHER_TENANT_ASSET_TAG);
@@ -362,7 +367,9 @@ test.describe('tenant isolation through the live stack', () => {
     test('sees its own machine and not ORG-DEH-0001’s', async ({ page }) => {
       // By tag, not by position (see the same scenario for ORG-DEH-0001): this
       // organization's seeded machine is not always on the first page of twenty.
-      await page.goto(`/assets?q=${encodeURIComponent(OTHER_TENANT_ASSET_TAG)}`);
+      await page.goto(
+        withContext(session.context, `/assets?q=${encodeURIComponent(OTHER_TENANT_ASSET_TAG)}`),
+      );
       await expect(page.getByRole('heading', { level: 1 })).toHaveText('ماشین‌آلات');
       expect(await mainText(page)).toContain(OTHER_TENANT_ASSET_TAG);
 
@@ -557,13 +564,13 @@ test.describe('tenant isolation through the live stack', () => {
     });
 
     test('ORG-DEH-0001’s own project and warehouse are shown, not refused', async ({ page }) => {
-      await installLiveSession(page.context(), 'orgAdmin');
+      const live = await installLiveSession(page.context(), 'orgAdmin');
 
       await page.goto(`/projects/${projectA}`);
       await expect(page.getByText('این پروژه پیدا نشد')).toHaveCount(0);
       expect(await mainText(page)).toContain(PROJECT_A_TITLE);
 
-      await page.goto(`/inventory?warehouse=${warehouseA}`);
+      await page.goto(withContext(live.context, `/inventory?warehouse=${warehouseA}`));
       await expect(page.getByText('انبار یافت نشد')).toHaveCount(0);
       expect(await mainText(page)).toContain(WAREHOUSE_A_NAME);
     });
@@ -587,13 +594,13 @@ test.describe('tenant isolation through the live stack', () => {
     test('ORG-DEH-0002’s warehouse is answered exactly as a warehouse that does not exist', async ({
       page,
     }) => {
-      await installLiveSession(page.context(), 'orgAdmin');
+      const live = await installLiveSession(page.context(), 'orgAdmin');
 
-      await page.goto(`/inventory?warehouse=${warehouseB}`);
+      await page.goto(withContext(live.context, `/inventory?warehouse=${warehouseB}`));
       await expect(page.getByText('انبار یافت نشد')).toBeVisible();
       const foreign = await mainText(page);
 
-      await page.goto(`/inventory?warehouse=${MISSING_WAREHOUSE}`);
+      await page.goto(withContext(live.context, `/inventory?warehouse=${MISSING_WAREHOUSE}`));
       const missing = await mainText(page);
 
       expect(foreign).toBe(missing);
@@ -603,7 +610,7 @@ test.describe('tenant isolation through the live stack', () => {
     test('from the other side: ORG-DEH-0002 sees its own and not ORG-DEH-0001’s', async ({
       page,
     }) => {
-      await installLiveSession(page.context(), 'orgAdminB');
+      const live = await installLiveSession(page.context(), 'orgAdminB');
 
       await page.goto('/projects');
       const projects = await mainText(page);
@@ -619,7 +626,7 @@ test.describe('tenant isolation through the live stack', () => {
       expect(warehouses).toContain(WAREHOUSE_B_NAME);
       expect(warehouses).not.toContain(WAREHOUSE_A_NAME);
 
-      await page.goto(`/inventory?warehouse=${warehouseA}`);
+      await page.goto(withContext(live.context, `/inventory?warehouse=${warehouseA}`));
       await expect(page.getByText('انبار یافت نشد')).toBeVisible();
       expect(await mainText(page)).not.toContain(WAREHOUSE_A_NAME);
     });

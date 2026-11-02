@@ -1,3 +1,4 @@
+import { NUMERIC_FACT_TYPES, exactComparison } from './exact-comparison';
 import { z } from 'zod';
 import {
   amountMinorSchema,
@@ -6,6 +7,7 @@ import {
   organizationIdSchema,
 } from '@rasta/contracts';
 import { RULE_STATUSES } from '../commission/dto';
+import { canonicalDecimal, canonicalWithin, withCanonicalForm } from '../shared/canonical';
 import {
   PARTICIPATION_FACTS,
   PARTICIPATION_MAX_PER_WINDOW,
@@ -53,24 +55,65 @@ export const REWARD_TRIGGER_EVENTS = ['USAGE_RECORDED', 'MAINTENANCE_COMPLETED']
  * shape evaluates to **false** — a mistyped condition withholds a reward
  * rather than granting one to everybody.
  */
+/**
+ * Ordering always requires numeric operands. Equality is also exact for
+ * typed numeric facts; textual equality retains its original spelling.
+ */
+export const NUMERIC_COMPARISONS = ['gt', 'gte', 'lt', 'lte'] as const;
+
+// JSON parsing can round a fractional token to a safe integer before DTO
+// validation sees it. Exact numeric configuration therefore uses strings;
+// boolean/text equality retains its existing operands (F5, fail closed).
+const conditionOperand = z.union([z.string(), z.boolean()]);
+
 const conditionLeaf = z
   .object({
     field: z.string().trim().min(1).max(64),
-    op: z.enum(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'present', 'absent']),
-    value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    op: z.enum(['eq', 'neq', ...NUMERIC_COMPARISONS, 'present', 'absent']),
+    value: conditionOperand.optional(),
   })
   .strict();
 
 type ConditionNode =
   z.infer<typeof conditionLeaf> | { all: ConditionNode[] } | { any: ConditionNode[] };
 
-const conditionSchema: z.ZodType<ConditionNode> = z.lazy(() =>
-  z.union([
-    conditionLeaf,
-    z.object({ all: z.array(conditionSchema).min(1).max(10) }).strict(),
-    z.object({ any: z.array(conditionSchema).min(1).max(10) }).strict(),
-  ]),
+const conditionSchema: z.ZodType<ConditionNode> = withCanonicalForm(
+  z.lazy(() =>
+    z.union([
+      conditionLeaf,
+      z.object({ all: z.array(conditionSchema).min(1).max(10) }).strict(),
+      z.object({ any: z.array(conditionSchema).min(1).max(10) }).strict(),
+    ]),
+  ),
+  canonicalCondition,
 );
+
+/** Canonicalize exact numeric operands, including equality on typed numeric facts.
+ * Text equality stays literal; JSON number operands are refused at creation.
+ */
+export function canonicalCondition(node: unknown): unknown {
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return node;
+  const copy: Record<string, unknown> = { ...(node as Record<string, unknown>) };
+  // Use the same field name the leaf schema will execute after trimming.
+  const field = typeof copy.field === 'string' ? copy.field.trim() : null;
+  for (const branch of ['all', 'any'] as const) {
+    const children = copy[branch];
+    if (Array.isArray(children)) copy[branch] = children.map(canonicalCondition);
+  }
+  if (
+    typeof copy.op === 'string' &&
+    ((NUMERIC_COMPARISONS as readonly string[]).includes(copy.op) ||
+      ((copy.op === 'eq' || copy.op === 'neq') &&
+        field !== null &&
+        NUMERIC_FACT_TYPES[field] !== undefined)) &&
+    Object.prototype.hasOwnProperty.call(copy, 'value') &&
+    field !== null &&
+    exactComparison(copy.value, copy.value, field) !== null
+  ) {
+    copy.value = canonicalWithin(conditionOperand, copy.value, canonicalDecimal);
+  }
+  return copy;
+}
 
 export const createRewardRuleSchema = z
   .object({
@@ -107,6 +150,52 @@ export const createRewardRuleSchema = z
       'periodCap and periodType must be supplied together — a cap without a window is not a cap',
     path: ['periodCap'],
   });
+
+/** Frozen pre-F5 fingerprint input, for retained records only. Never used to create. */
+const legacyOperand = z.union([z.string(), z.number(), z.boolean()]);
+const legacyLeaf = conditionLeaf.extend({ value: legacyOperand.optional() });
+type LegacyNode = z.infer<typeof legacyLeaf> | { all: LegacyNode[] } | { any: LegacyNode[] };
+const legacyConditionSchema: z.ZodType<LegacyNode> = withCanonicalForm(
+  z.lazy(() =>
+    z.union([
+      legacyLeaf,
+      z.object({ all: z.array(legacyConditionSchema).min(1).max(10) }).strict(),
+      z.object({ any: z.array(legacyConditionSchema).min(1).max(10) }).strict(),
+    ]),
+  ),
+  legacyCanonicalCondition,
+);
+
+function legacyCanonicalCondition(node: unknown): unknown {
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return node;
+  const copy = { ...(node as Record<string, unknown>) };
+  for (const branch of ['all', 'any'] as const) {
+    const children = copy[branch];
+    if (Array.isArray(children)) copy[branch] = children.map(legacyCanonicalCondition);
+  }
+  if (
+    typeof copy.op === 'string' &&
+    (NUMERIC_COMPARISONS as readonly string[]).includes(copy.op) &&
+    Object.prototype.hasOwnProperty.call(copy, 'value')
+  ) {
+    copy.value = canonicalWithin(legacyOperand, copy.value, canonicalDecimal);
+  }
+  return copy;
+}
+
+export const legacyCreateRewardRuleSchema = z
+  .object({
+    ...createRewardRuleSchema.shape,
+    condition: legacyConditionSchema.optional(),
+  })
+  .strict()
+  .refine((dto) => (dto.periodCap === undefined) === (dto.periodType === undefined), {
+    message: 'periodCap and periodType must be supplied together',
+    path: ['periodCap'],
+  });
+
+// Kept in the TEXT request_hash itself: old unprefixed hashes are version 1.
+export const REWARD_FINGERPRINT_VERSION = 'reward-v2';
 
 export type CreateRewardRuleDto = z.infer<typeof createRewardRuleSchema>;
 
@@ -376,4 +465,31 @@ export interface RewardBalanceView {
   level: { id: string; name: string; rank: number; minPoints: number } | null;
   lifetimeCreditMinor: string;
   updatedAt: string;
+}
+
+/**
+ * A reward rule as every rule route answers it — the list, the create (and
+ * its replay), the update. `creditPerPointMinor` is a decimal string in minor
+ * units, or null on a points-only rule (ADR-022, ADR-033); `periodCap` is a
+ * number of **points**, not money.
+ */
+export interface RewardRuleApiView {
+  id: string;
+  /** Null for a platform-wide rule. */
+  organizationId: string | null;
+  triggerEvent: string;
+  rewardType: string;
+  condition: unknown;
+  points: number;
+  creditPerPointMinor: string | null;
+  periodCap: number | null;
+  periodType: string | null;
+  validFrom: string;
+  validTo: string | null;
+  status: string;
+  label: string | null;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  updatedBy: string;
 }

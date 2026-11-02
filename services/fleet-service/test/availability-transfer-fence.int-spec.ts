@@ -1,3 +1,4 @@
+import { setTenantEligibilityFixture } from '@rasta/testing';
 import type { EventEnvelope } from '@rasta/contracts';
 import { AssetSyncConsumer } from '../src/consumers/asset-sync.consumer';
 import { AvailabilityService } from '../src/fleet/availability.service';
@@ -93,10 +94,7 @@ describe('availability under a pending transfer', () => {
     const assetId = id('AST');
     await consumer.handle(created(assetId));
     await fenceOn(assetId, 600);
-    await prisma.client.$executeRawUnsafe(
-      `UPDATE asset_transfer_fence SET expires_at = now() - interval '1 second' WHERE asset_id = $1`,
-      assetId,
-    );
+    await setTenantEligibilityFixture(prisma, 'transferFenceExpired', org.a, [assetId]);
 
     expect(await listed(assetId)).toMatchObject({ available: false });
 

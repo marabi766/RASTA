@@ -39,6 +39,31 @@ type EachMessage = (payload: {
 }) => Promise<void>;
 
 export class FakeKafkaConsumer {
+  readonly events = {
+    CRASH: 'consumer.crash',
+    STOP: 'consumer.stop',
+    DISCONNECT: 'consumer.disconnect',
+  };
+  private readonly listeners = new Map<
+    string,
+    ((event: { payload: { error: Error; restart: boolean } }) => void)[]
+  >();
+
+  on(
+    event: string,
+    listener: (event: { payload: { error: Error; restart: boolean } }) => void,
+  ): () => void {
+    const entries = this.listeners.get(event) ?? [];
+    entries.push(listener);
+    this.listeners.set(event, entries);
+    return () => undefined;
+  }
+
+  emit(event: string, restart = false, error = new Error('test failure')): void {
+    for (const listener of this.listeners.get(event) ?? [])
+      listener({ payload: { error, restart } });
+  }
+
   /** Offsets whose `eachMessage` returned: kafkajs resolves and commits these. */
   readonly committed: string[] = [];
   /** Offsets whose `eachMessage` threw: uncommitted, so delivered again. */

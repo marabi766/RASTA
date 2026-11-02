@@ -17,6 +17,8 @@ import {
 } from '@/server/transactions';
 
 import { pastReplayDeadline, withRetryNote, type DisputeFormState } from './form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The one server action behind both dispute commands on `/transactions/[id]`.
@@ -110,7 +112,10 @@ async function attempt(transactionId: string, form: FormData): Promise<DisputeFo
       // (`server/flash.ts`) — never a flag anybody could type (PR 319 review 1,
       // finding 3) — and the page removes it from the address once shown.
       redirect(
-        `/transactions/${encodeURIComponent(transactionId)}?${FLASH_PARAM}=${mintFlash(session, transactionId, command)}`,
+        withContext(
+          pageContext(session),
+          `/transactions/${encodeURIComponent(transactionId)}?${FLASH_PARAM}=${mintFlash(session, transactionId, command)}`,
+        ),
       );
       break;
     case 'INVALID':

@@ -3,7 +3,7 @@ import type { Server } from 'node:http';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
 import { apiTenant, bearer, startApi, type ApiHarness } from './api-helpers';
-import { cleanup } from './helpers';
+import { cleanup, id } from './helpers';
 
 /**
  * Every commission and reward rule change leaves a record: who, when, and the
@@ -160,6 +160,7 @@ describe('rule change audit records', () => {
     const created = await request(http)
       .post('/v1/rewards/rules')
       .set('authorization', asSystem())
+      .set('idempotency-key', id('api-reward-rule'))
       .send({ organizationId: org, triggerEvent: 'MAINTENANCE_COMPLETED', points: 7 })
       .expect(201);
     const ruleId = created.body.id as string;

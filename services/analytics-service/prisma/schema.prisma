@@ -83,6 +83,18 @@ model ProcessedEvent {
   @@map("processed_event")
 }
 
+/// From which instant a projection is complete (ADR-071 § 6, Q-154, D-082): one row per consumer,
+/// deployment-wide (consumption is not per tenant), inserted once when the consumer has started
+/// successfully for the first time and never moved (`tg_projection_coverage_append_only`). The
+/// database clock stamps it (`tg_projection_coverage_started_at`); a migration never inserts it,
+/// so an upgraded deployment's coverage starts at its upgrade. Carries no organization.
+model ProjectionCoverage {
+  consumerName String   @id @map("consumer_name") @db.VarChar(128)
+  coveredFrom  DateTime @default(dbgenerated("clock_timestamp()")) @map("covered_from") @db.Timestamptz(3)
+
+  @@map("projection_coverage")
+}
+
 /// Append-only reference measurements (ADR-071 § 6, Q-142 (1)). No application writer or seed.
 /// New versions are new rows; database identity order decides the latest exact match.
 model BaselineMetric {

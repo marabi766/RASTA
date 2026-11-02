@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
 import { expectNotDisclosed } from '@rasta/testing';
@@ -58,10 +59,9 @@ describe('open-bids API', () => {
       w.bids.submit(tenderId, { content: bidContent() }, bidKey()),
     );
     await runUnscoped('the suite lets the deadline pass', () =>
-      w.prisma.client.$executeRawUnsafe(
-        `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-           "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
-      ),
+      w.prisma.client
+        .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+           "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`),
     );
     await w.tenderClose.close({ organizationId: owner, tenderId });
     return { owner, bidder, tenderId, bidId: bid.bidId };

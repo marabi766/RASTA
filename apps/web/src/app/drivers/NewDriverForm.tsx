@@ -3,12 +3,15 @@
 import { useActionState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
+import { withoutBidiControls } from '@/lib/format';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import {
   EMPTY_CREATE_DRIVER_FORM,
   type CreateDriverField,
   type CreateDriverFormValues,
+  type DriverPicker,
+  type DriverPickerOption,
 } from '@/lib/driver-fields';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 
@@ -38,13 +41,28 @@ function errorsOf(state: CreateDriverFormState): Partial<Record<CreateDriverFiel
   return state.kind === 'INVALID' ? state.fieldErrors : {};
 }
 
+/** What the picker says for one member: their name, then their username. */
+export function pickerLabel(option: DriverPickerOption): string {
+  return `${withoutBidiControls(option.name)} — ${withoutBidiControls(option.username)}`;
+}
+
+const ID_HINTS: Record<Extract<DriverPicker, { kind: 'ID' }>['reason'], string> = {
+  NOT_ALLOWED: 'شناسه کاربری عضو این سازمان، مانند USR_01J… را از مدیر سازمان بگیرید.',
+  INCOMPLETE:
+    'فهرست اعضای این سازمان بلندتر از آن است که اینجا کامل نشان داده شود؛ شناسه کاربر را وارد کنید.',
+  UNAVAILABLE: 'فهرست اعضای این سازمان اکنون خوانده نشد؛ شناسه کاربر را وارد کنید.',
+};
+
 export function NewDriverForm({
   csrfToken,
   submissionId,
+  picker,
 }: {
   csrfToken: string;
   /** Minted for this render; reused on a retry so a retry is not a second record. */
   submissionId: string;
+  /** Who may be picked, or the id field (`server/driver-roster.ts`). */
+  picker: DriverPicker;
 }) {
   const [state, action, pending] = useActionState(submitCreateDriver, IDLE_CREATE_DRIVER_FORM);
 
@@ -59,18 +77,47 @@ export function NewDriverForm({
 
       <FormBanner state={state} />
 
-      <Field label={LABELS.userId} required error={errors.userId} hint="مانند USR_01J…">
-        {(control) => (
-          <input
-            {...control}
-            name="userId"
-            defaultValue={values.userId}
-            dir="ltr"
-            autoComplete="off"
-            className={controlClassName}
-          />
-        )}
-      </Field>
+      {picker.kind === 'PICK' ? (
+        <Field
+          label="عضو سازمان"
+          required
+          error={errors.userId}
+          hint="تنها اعضای این سازمان که هنوز راننده نیستند."
+        >
+          {(control) => (
+            <select
+              // Keyed by its default: a select reads `defaultValue` only at
+              // mount, and a refused attempt must not lose the member picked
+              // (docs/16 § ۱۶٫۱, `select-reset.spec.tsx`).
+              key={values.userId}
+              {...control}
+              name="userId"
+              defaultValue={values.userId}
+              className={controlClassName}
+            >
+              <option value="">یک عضو را برگزینید</option>
+              {picker.candidates.map((option) => (
+                <option key={option.userId} value={option.userId}>
+                  {pickerLabel(option)}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+      ) : (
+        <Field label={LABELS.userId} required error={errors.userId} hint={ID_HINTS[picker.reason]}>
+          {(control) => (
+            <input
+              {...control}
+              name="userId"
+              defaultValue={values.userId}
+              dir="ltr"
+              autoComplete="off"
+              className={controlClassName}
+            />
+          )}
+        </Field>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label={LABELS.employeeNo} error={errors.employeeNo}>

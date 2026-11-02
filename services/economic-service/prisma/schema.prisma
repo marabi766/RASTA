@@ -1117,11 +1117,24 @@ model RewardRule {
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy String   @map("updated_by")
 
-  rewards Reward[]
+  rewards       Reward[]
+  statusHistory RewardRuleStatusHistory[]
 
   @@index([triggerEvent, status, validFrom])
   @@index([organizationId, triggerEvent, status])
   @@map("reward_rule")
+}
+
+/// D-080: immutable status transitions, independent of purgeable outbox history.
+model RewardRuleStatusHistory {
+  id          BigInt     @id @default(autoincrement())
+  ruleId      String     @map("rule_id")
+  status      RuleStatus
+  effectiveAt DateTime   @map("effective_at")
+  rule        RewardRule @relation(fields: [ruleId], references: [id])
+
+  @@index([ruleId, effectiveAt, id])
+  @@map("reward_rule_status_history")
 }
 
 enum RewardType {
@@ -1170,18 +1183,21 @@ model Reward {
   /// The journal that expensed the credit. Null for a points-only reward.
   journalId String? @map("journal_id")
 
-  /// The cap window this grant counted against, e.g. `2026-08`. Stored so cap
-  /// enforcement is an indexed count rather than a date-range scan.
+  /// The historical cap key, e.g. `2026-08`, retained unchanged for audit.
+  /// Weekly enforcement uses occurrence time and confirmed legacy evidence.
   periodKey String @map("period_key")
+
+  /// Owner-confirmed fact time; null only for legacy rows without evidence.
+  occurredAt DateTime? @map("occurred_at")
 
   grantedAt DateTime @map("granted_at")
 
   rule RewardRule @relation(fields: [ruleId], references: [id])
 
   @@unique([ruleId, sourceReference])
-  /// The cap query: "how many points has this subject taken from this rule in
-  /// this window".
+  /// Day/month caps use their stored key; weekly caps use occurrence time.
   @@index([organizationId, userId, ruleId, periodKey])
+  @@index([organizationId, userId, ruleId, occurredAt])
   @@index([organizationId, grantedAt(sort: Desc)])
   @@map("reward")
 }

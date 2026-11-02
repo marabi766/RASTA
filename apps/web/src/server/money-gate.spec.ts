@@ -5,6 +5,10 @@ import type { DemoMode, MoneyEffect } from '@/lib/demo-mode';
 
 import { mayDispatch } from './money-gate';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * `mayDispatch` on its own, with the read stubbed: what the actions' fake
@@ -12,7 +16,7 @@ import type { WebSession } from './session';
  * table does not name. The actions themselves are `app/money-actions-gate.spec.ts`.
  */
 
-const SESSION = { accessToken: 'access-token-value' } as WebSession;
+const SESSION = { accessToken: ACCESS_TOKEN_VALUE, organizationId: 'ORG-DEH-0001' } as WebSession;
 const reading = (mode: DemoMode) => jest.fn(async () => mode);
 
 describe('mayDispatch', () => {

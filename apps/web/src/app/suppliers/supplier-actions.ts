@@ -45,6 +45,7 @@ import {
 
 import type { SupplierFormState } from './supplier-form-state';
 import { runOnSupplier, runRegister } from './supplier-runner';
+import { pageHref } from '@/server/page-context';
 
 /**
  * The six supplier commands. They run through `supplier-runner.ts`.
@@ -206,6 +207,8 @@ export async function reconcileSupplierWrite(
     form.get(RELEASE_FIELD),
   );
   redirect(
-    outcome === 'RELEASED' || outcome === 'GONE' ? back : `${back}?${RELEASE_PARAM}=${outcome}`,
+    outcome === 'RELEASED' || outcome === 'GONE'
+      ? back
+      : pageHref(session, back, { [RELEASE_PARAM]: outcome }),
   );
 }

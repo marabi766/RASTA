@@ -1,3 +1,5 @@
+import { exactComparison, NUMERIC_FACT_TYPES } from './exact-comparison';
+
 /**
  * The reward engine (docs/10 § 10.8, ADR-033).
  *
@@ -27,6 +29,7 @@ export interface RewardRuleView {
   validFrom: Date;
   validTo: Date | null;
   status: string;
+  statusHistory?: readonly { status: string; effectiveAt: Date; id: bigint }[];
 }
 
 export interface RewardDecision {
@@ -63,12 +66,17 @@ export function applicableRules(
 ): RewardRuleView[] {
   return rules.filter(
     (rule) =>
-      rule.status === 'ACTIVE' &&
+      statusAt(rule, occurredAt) === 'ACTIVE' &&
       rule.triggerEvent === triggerEvent &&
       (rule.organizationId === null || rule.organizationId === organizationId) &&
       rule.validFrom.getTime() <= occurredAt.getTime() &&
       (rule.validTo === null || rule.validTo.getTime() > occurredAt.getTime()),
   );
+}
+
+/** History is ordered by effectiveAt and id, newest first. Missing history fails closed. */
+function statusAt(rule: RewardRuleView, at: Date): string | undefined {
+  return rule.statusHistory?.find((entry) => entry.effectiveAt <= at)?.status;
 }
 
 /**
@@ -117,20 +125,38 @@ export function conditionMet(condition: unknown, payload: Record<string, unknown
     case 'absent':
       return actual === undefined || actual === null;
     case 'eq':
-      return String(actual) === String(node.value);
-    case 'neq':
-      return String(actual) !== String(node.value);
+    case 'neq': {
+      if (
+        actual === null ||
+        actual === undefined ||
+        node.value === null ||
+        node.value === undefined
+      ) {
+        return false;
+      }
+      const comparison = exactComparison(actual, node.value, field);
+      if (
+        NUMERIC_FACT_TYPES[field] !== undefined ||
+        typeof actual === 'number' ||
+        typeof node.value === 'number'
+      ) {
+        if (comparison === null) return false;
+        return op === 'eq' ? comparison === 0 : comparison !== 0;
+      }
+      return op === 'eq'
+        ? String(actual) === String(node.value)
+        : String(actual) !== String(node.value);
+    }
     case 'gte':
     case 'gt':
     case 'lte':
     case 'lt': {
-      const left = toComparable(actual);
-      const right = toComparable(node.value);
-      if (left === null || right === null) return false;
-      if (op === 'gte') return left >= right;
-      if (op === 'gt') return left > right;
-      if (op === 'lte') return left <= right;
-      return left < right;
+      const comparison = exactComparison(actual, node.value, field);
+      if (comparison === null) return false;
+      if (op === 'gte') return comparison >= 0;
+      if (op === 'gt') return comparison > 0;
+      if (op === 'lte') return comparison <= 0;
+      return comparison < 0;
     }
     default:
       return false;
@@ -138,27 +164,10 @@ export function conditionMet(condition: unknown, payload: Record<string, unknown
 }
 
 /**
- * Numbers arrive as strings on every event this service consumes — hours and
- * kilometres are NUMERIC at the source and a JSON float would reintroduce the
- * drift the column type prevents. Comparing them numerically therefore means
- * parsing, and a value that is not a number compares to nothing.
- */
-function toComparable(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-/**
  * The cap window a grant counts against.
  *
- * A stored string rather than a date range, so enforcing the cap is an indexed
- * count on `(organizationId, userId, ruleId, periodKey)` instead of a scan over
- * a time window — which matters because the count runs inside the granting
- * transaction, under a lock, on every trigger.
+ * Keys are retained for audit. Weekly enforcement uses occurrence time,
+ * including conservative attribution of legacy grants whose time is unknown.
  *
  * UTC throughout, like every other timestamp on the platform. A cap window
  * that shifted with the viewer's calendar would let the same behaviour be
@@ -173,7 +182,7 @@ export function periodKeyFor(periodType: string | null, at: Date): string {
     case 'DAY':
       return `${year}-${month}-${String(at.getUTCDate()).padStart(2, '0')}`;
     case 'WEEK':
-      return `${year}-W${String(isoWeek(at)).padStart(2, '0')}`;
+      return `${isoThursday(at).getUTCFullYear()}-W${String(isoWeek(at)).padStart(2, '0')}`;
     case 'MONTH':
       return `${year}-${month}`;
     default:
@@ -182,15 +191,33 @@ export function periodKeyFor(periodType: string | null, at: Date): string {
 }
 
 /** ISO-8601 week number, in UTC. */
-function isoWeek(date: Date): number {
+function isoThursday(date: Date): Date {
   const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
   // Thursday determines the ISO year, so shift to it before counting.
   const day = (target.getUTCDay() + 6) % 7;
   target.setUTCDate(target.getUTCDate() - day + 3);
+  return target;
+}
+
+function isoWeek(date: Date): number {
+  const target = isoThursday(date);
   const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
   const firstDay = (firstThursday.getUTCDay() + 6) % 7;
   firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDay + 3);
   return 1 + Math.round((target.getTime() - firstThursday.getTime()) / (7 * 24 * 3600 * 1000));
+}
+
+/** UTC ISO week window and every Gregorian-year key the old writer could have used. */
+export function isoWeekWindow(at: Date): { start: Date; end: Date; legacyKeys: string[] } {
+  const start = isoThursday(at);
+  start.setUTCDate(start.getUTCDate() - 3);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 7);
+  const keys = new Set<string>();
+  for (let day = new Date(start); day < end; day.setUTCDate(day.getUTCDate() + 1)) {
+    keys.add(`${day.getUTCFullYear()}-W${String(isoWeek(day)).padStart(2, '0')}`);
+  }
+  return { start, end, legacyKeys: [...keys] };
 }
 
 /**

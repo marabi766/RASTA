@@ -152,6 +152,9 @@ async function seedSampleRules(): Promise<void> {
     where: { id: 'RWR_SAMPLE_USAGE' },
     create: {
       id: 'RWR_SAMPLE_USAGE',
+      statusHistory: {
+        create: { status: 'ACTIVE', effectiveAt: new Date('2020-01-01T00:00:00.000Z') },
+      },
       organizationId: null,
       triggerEvent: 'USAGE_RECORDED',
       rewardType: 'POINTS',

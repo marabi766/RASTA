@@ -20,6 +20,7 @@ import { runProjectionCommand } from '../src/keycloak/projection.command';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, id, newFences, newPrisma, tenants } from './helpers';
 import type { KeycloakWriteOperation } from '../src/keycloak/keycloak-write-fence';
+import { recordRegistration } from './identity-fixtures';
 
 /**
  * Registration decisions against a real database, and the Keycloak account an
@@ -236,7 +237,7 @@ describe('registration decisions and the Keycloak account an approval creates', 
 
   async function submit(): Promise<{ registrationId: string; userId: string; username: string }> {
     const username = `reg-${ulid().slice(-12)}`.toLowerCase();
-    const { registrationId } = await service.submitRegistration({
+    const registrationId = await recordRegistration(service, {
       username,
       email: `${username}@example.test`,
       firstName: 'متقاضی',
@@ -511,11 +512,16 @@ describe('registration decisions and the Keycloak account an approval creates', 
 
     it('A’s transaction fails for its own reason after B committed: nothing is disabled or cleared', async () => {
       const { registrationId, userId, username } = await submit();
-      // A's transaction is the first one; B runs inside it, then A fails.
-      jest.spyOn(repository, 'transaction').mockImplementationOnce(async () => {
-        await approve(registrationId);
-        throw new Error('the database went away under A');
-      });
+      // A's decision transaction is its second — the first is its reviewer's
+      // early live check (task 117, F1); B runs inside it, then A fails.
+      const transaction = repository.transaction.bind(repository);
+      jest
+        .spyOn(repository, 'transaction')
+        .mockImplementationOnce(transaction)
+        .mockImplementationOnce(async () => {
+          await approve(registrationId);
+          throw new Error('the database went away under A');
+        });
 
       await expect(approve(registrationId)).rejects.toThrow('the database went away under A');
       expectActivated(username, userId);
@@ -702,14 +708,18 @@ describe('registration decisions and the Keycloak account an approval creates', 
       // The approval is inside its transaction, holding the request lock,
       // when the repair starts; the repair can only decide after it commits.
       const transaction = repository.transaction.bind(repository);
-      jest.spyOn(repository, 'transaction').mockImplementationOnce(async (fn, options) =>
-        transaction(async (tx) => {
-          const result = await fn(tx);
-          repair = projector.repairOrphan(userId, username);
-          await new Promise((resolve) => setTimeout(resolve, 200));
-          return result;
-        }, options),
-      );
+      jest
+        .spyOn(repository, 'transaction')
+        // The reviewer's early live check (task 117, F1), before Keycloak.
+        .mockImplementationOnce(transaction)
+        .mockImplementationOnce(async (fn, options) =>
+          transaction(async (tx) => {
+            const result = await fn(tx);
+            repair = projector.repairOrphan(userId, username);
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            return result;
+          }, options),
+        );
 
       await approve(registrationId);
       await expect(repair).resolves.toBe('owned');

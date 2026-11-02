@@ -229,6 +229,14 @@ export const paymentCaptureUnreconciledPayload = z.object({
  *   `REVERSAL_FAILED` / `INSUFFICIENT_BALANCE` — the provider refunded and the
  *     reversal could not be written. `failure_reason = REFUNDED_NOT_REVERSED`;
  *     a retry of the refund reverses it without asking the provider again.
+ *   `WALLET_NOT_ACTIVE` — the provider refunded and the wallet was frozen or
+ *     closed by the time the reversal was recorded (under its lock). The same
+ *     `REFUNDED_NOT_REVERSED`, the amount still held; the reconciler defers it
+ *     until the wallet is ACTIVE, then reverses it once — while its task is
+ *     PENDING. Past `ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS` (72 h by
+ *     default) the task is ESCALATED, which reactivation alone does not
+ *     resume: the operator's procedure is docs/runbooks/payment-refund-stuck.md
+ *     § 2.
  *
  * Published in the transaction that records the failure reason. Codes only.
  */
@@ -244,6 +252,7 @@ export const paymentRefundUnreconciledPayload = z.object({
     'PROVIDER_OUTCOME_UNKNOWN',
     'PROVIDER_DECLINED_RELEASE_PENDING',
     'INSUFFICIENT_BALANCE',
+    'WALLET_NOT_ACTIVE',
     'REVERSAL_FAILED',
   ]),
   detectedAt: z.string(),

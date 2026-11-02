@@ -1,7 +1,12 @@
 import type { INestApplication } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { z } from 'zod';
-import { isOptionalField, objectShapeOf, toJsonSchema } from '@rasta/nest-common';
+import {
+  isOptionalField,
+  objectShapeOf,
+  publishedApiErrorSchema,
+  toJsonSchema,
+} from '@rasta/nest-common';
 import {
   auditEventDetailQuerySchema,
   auditEventQuerySchema,
@@ -36,15 +41,6 @@ import { tenderChainViewSchema } from '../audit/tender-evidence.service';
  * service and inventing one here would create a second thing to keep in step —
  * with no generator, no CI check and no consumer asking for it.
  */
-
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
-  })
-  .strict();
 
 /**
  * Success responses, each with the status the handler actually answers.
@@ -144,7 +140,7 @@ export function buildAuditOpenApiDocument(
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
-  document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
   // The internal correction-target lookup is not bearer-authenticated: it is
   // reached with a signed service token (ADR-020/035) and by exactly one
   // service. Publishing it under the bearer scheme would describe a door that
