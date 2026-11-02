@@ -16,7 +16,7 @@ export const createProductSchema = z
     name: plainText().min(1).max(200),
     description: plainText().max(2000).optional(),
     category: plainText().min(1).max(100),
-    kind: z.enum(['GOOD', 'SERVICE']).default('GOOD'),
+    kind: z.enum(['GOOD', 'SERVICE']).prefault('GOOD'),
     /** Free text from the defining organization: "عدد", "لیتر", "ساعت". */
     unit: plainText().min(1).max(32),
   })
@@ -29,7 +29,7 @@ export const createOfferSchema = z
     productId: z.string().trim().min(1).max(64),
     /** Minor units as a string, never a JSON number (ADR-022). */
     unitPriceMinor: amountMinorSchema,
-    currency: currencySchema.default('IRR'),
+    currency: currencySchema.prefault('IRR'),
     /**
      * What the supplier says it can supply.
      *
@@ -39,9 +39,9 @@ export const createOfferSchema = z
      */
     availableQuantity: z.number().int().min(0).max(10_000_000),
     leadTimeDays: z.number().int().min(0).max(365),
-    minimumQuantity: z.number().int().min(1).max(10_000_000).default(1),
+    minimumQuantity: z.number().int().min(1).max(10_000_000).prefault(1),
     /** Publish immediately, or leave as a draft the supplier can review. */
-    publish: z.boolean().default(false),
+    publish: z.boolean().prefault(false),
   })
   .strict();
 
@@ -66,8 +66,8 @@ export const searchProductsQuerySchema = z
     /** Free text, matched against the trigram index (ADR-042). */
     q: z.string().trim().min(1).max(200).optional(),
     category: z.string().trim().min(1).max(100).optional(),
-    sort: z.enum(['PRICE_ASC', 'PRICE_DESC', 'LEAD_TIME_ASC']).default('PRICE_ASC'),
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    sort: z.enum(['PRICE_ASC', 'PRICE_DESC', 'LEAD_TIME_ASC']).prefault('PRICE_ASC'),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 

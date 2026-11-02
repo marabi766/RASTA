@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { expectNotDisclosed } from '@rasta/testing';
 import { IdempotencyStore, hashRequestBody } from '../src/shared/idempotency';
 import {
   reasonsOf,
@@ -126,8 +127,10 @@ describe('bids API', () => {
     expect(withdrawn.status).toBe(200);
     expect(withdrawn.body.status).toBe('WITHDRAWN');
 
+    // Receipt ids, digests and timestamps have no independent source here; keep them searched.
+
     for (const body of [submitted.body, mine.body, replaced.body, withdrawn.body]) {
-      expect(JSON.stringify(body)).not.toMatch(/1250000000|900000000|Mobilisation|Licence 1234/);
+      expectNotDisclosed(body, [/1250000000|900000000|Mobilisation|Licence 1234/]);
     }
   });
 
@@ -310,13 +313,17 @@ describe('bids API', () => {
       const [stored] = await w.prisma.client.$queryRawUnsafe<
         { request_hash: string; response_body: unknown }[]
       >(
-        `SELECT request_hash, response_body FROM idempotency_key WHERE organization_id = $1 AND endpoint = $2`,
+        `SELECT request_hash, response_body FROM idempotency_key WHERE organization_id = $1 AND endpoint = $2 AND key = $3`,
         bidder,
         'POST /v1/tenders/:id/bids',
+        key,
       );
       expect(stored?.request_hash).toMatch(KEYED_SALTED);
       expect(stored?.request_hash).not.toContain(hashRequestBody({ id: tenderId, body }));
-      expect(JSON.stringify(stored?.response_body)).not.toContain('1250000000');
+      // The stored answer is the receipt, ids and instants the store recorded — not the price.
+      expectNotDisclosed(stored?.response_body, ['1250000000'], {
+        input: body,
+      });
     });
 
     it('stores digests no two claims share: identical bids of two organizations, or of two users of one, never compare (Codex r1 on #250, R1)', async () => {

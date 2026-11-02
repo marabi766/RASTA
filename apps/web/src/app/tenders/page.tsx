@@ -5,11 +5,12 @@ import { isTenderStatus } from '@/lib/tender-fields';
 import { currentSession } from '@/server/current-session';
 import { webServerEnv } from '@/server/env';
 import { tenderDoorsFor } from '@/server/portal-nav';
-import { tokenRoles } from '@/server/realm-roles';
 import { fetchOpenTenders, fetchTenders } from '@/server/tenders';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { TendersScreen, type TendersQuery, type TendersView } from './TendersScreen';
+import { actingOrganizationLabel, actingScope, sessionRoles } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/tenders` route — مناقصه‌ها (docs/16 § ۱۶٫۶). Read-only.
@@ -18,7 +19,7 @@ import { TendersScreen, type TendersQuery, type TendersView } from './TendersScr
  * which gateway door to ask (the owner's list, the bidder's list, or both), and
  * construction-service decides what each answers; a refusal is rendered as an
  * outcome (`docs/16` § ۱۶٫۱۱). The roles are the access token's
- * (`tokenRoles`); when they cannot be read the owner's door is asked, and its
+ * (`sessionRoles`); when they cannot be read the owner's door is asked, and its
  * answer — a refusal, then — is what is shown.
  */
 export const dynamic = 'force-dynamic';
@@ -37,7 +38,7 @@ export default async function TendersPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/tenders');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const status = one(params.status);
   // A status the service would not accept is dropped, not forwarded to earn a
   // 400 the person cannot act on.
@@ -51,7 +52,7 @@ export default async function TendersPage({
   // decides on — not `/v1/users/me`, which runs ahead of the token until it is
   // refreshed. A token that cannot be read is no bidder: the owner's door is
   // asked and its own answer shown.
-  const doors = tenderDoorsFor(tokenRoles(session.accessToken) ?? [], webServerEnv());
+  const doors = tenderDoorsFor(sessionRoles(session) ?? [], webServerEnv());
   const [own, open] = await Promise.all([
     doors.own ? fetchTenders(session, query) : null,
     doors.open ? fetchOpenTenders(session, { cursor: query.openCursor }) : null,
@@ -60,8 +61,9 @@ export default async function TendersPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -77,7 +79,7 @@ export default async function TendersPage({
         description="مناقصه‌هایی که این سازمان برگزار کرده و مناقصه‌هایی که می‌تواند برایشان پیشنهاد بدهد."
       />
       <div className="mt-4">
-        <TendersScreen view={view} query={query} />
+        <TendersScreen view={view} query={{ ...query, context: pageContext(session) }} />
       </div>
     </AppShell>
   );

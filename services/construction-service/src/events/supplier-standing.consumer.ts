@@ -45,7 +45,8 @@ const instant = z
     return at;
   });
 
-const qualifiedPayload = z.object({
+/** Exported for its early-rejection test. */
+export const qualifiedPayload = z.object({
   organizationId: identifier,
   // supplier-service qualifies for at most its three capabilities at once;
   // the cap only stops a payload whose length alone makes it a defect
@@ -172,7 +173,7 @@ export class SupplierStandingConsumer {
     }
   }
 
-  private parse<T>(envelope: EventEnvelope, schema: z.ZodType<T, z.ZodTypeDef, unknown>): T {
+  private parse<T>(envelope: EventEnvelope, schema: z.ZodType<T, unknown>): T {
     const parsed = schema.safeParse(envelope.payload);
     if (!parsed.success) {
       // A verdict on the event, not a failure to retry: it can never parse.

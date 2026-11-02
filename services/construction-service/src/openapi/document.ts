@@ -8,7 +8,13 @@ import {
   tenderApprovalRequestViewSchema,
   listTenderApprovalsQuerySchema,
 } from '../tender/tender-approval.dto';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS, toJsonSchema } from '@rasta/nest-common';
+import {
+  isOptionalField,
+  objectShapeOf,
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+  toJsonSchema,
+} from '@rasta/nest-common';
 import type { RefusalArea } from '../shared/refusal';
 import { thresholdPreviewSchema } from '../tender/procurement-thresholds';
 import { PUBLICATION_REFUSALS, type PublicationRefusal } from '../tender/publication';
@@ -17,6 +23,8 @@ import type { OpeningRefusal } from '../tender/tender-open.service';
 import type { EvaluationRefusal } from '../tender/evaluation.service';
 import { AWARD_REFUSALS, type AwardRefusal } from '../tender/award.service';
 import type { TenderApprovalRefusal } from '../tender/tender-approval.errors';
+import { InternalProjectController } from '../project/internal-project.controller';
+import { ProjectCompletionService, projectCompletionFactSchema } from '../project/completion-fact';
 import { ProjectController } from '../project/project.controller';
 import { ProjectService } from '../project/project.service';
 import { NeedService } from '../project/need.service';
@@ -191,6 +199,10 @@ export const RESPONSE_BODIES: Record<
 > = {
   'POST /v1/projects': { status: '201', schema: projectViewSchema },
   'GET /v1/projects': { status: '200', schema: cursorPageOf(projectSummaryViewSchema) },
+  'GET /v1/internal/projects/{id}/completion': {
+    status: '200',
+    schema: projectCompletionFactSchema,
+  },
   'GET /v1/projects/{id}': { status: '200', schema: projectViewSchema },
   'PATCH /v1/projects/{id}': { status: '200', schema: projectViewSchema },
   'POST /v1/projects/{id}/cancel': { status: '200', schema: projectViewSchema },
@@ -733,6 +745,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
       .setDescription(DESCRIPTION)
       .setVersion(CONTRACT_VERSION)
       .addBearerAuth()
+      .addApiKey({ type: 'apiKey', in: 'header', name: 'X-Internal-Token' }, 'internalToken')
       .build(),
   );
   return enrichOpenApiDocument(document);
@@ -745,6 +758,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
 @Module({
   controllers: [
     ProjectController,
+    InternalProjectController,
     ProjectLifecycleController,
     PolicyController,
     ApprovalController,
@@ -766,6 +780,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
     { provide: AwardService, useValue: {} },
     { provide: TenderApprovalService, useValue: {} },
     { provide: ProjectService, useValue: {} },
+    { provide: ProjectCompletionService, useValue: {} },
     { provide: TenderService, useValue: {} },
     { provide: CriteriaService, useValue: {} },
     { provide: NeedService, useValue: {} },
@@ -797,7 +812,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       // `addBearerAuth()` declares the scheme; it does not apply it. Without
       // this the contract would describe endpoints anybody can call.
-      operation.security ??= [{ bearer: [] }];
+      operation.security ??= path.startsWith('/v1/internal/')
+        ? [{ internalToken: [] }]
+        : [{ bearer: [] }];
 
       // The header is read with `@Headers`, which Nest documents as a required
       // parameter with no schema. Replaced with the truth: optional, bounded.
@@ -869,6 +886,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       }
 
       for (const [status, description] of Object.entries(ERROR_DESCRIPTIONS)) {
+        if (status === '400' && path.startsWith('/v1/internal/')) continue;
         // A route with no `{id}` names no existing row, so it cannot answer 404.
         if (status === '404' && !path.includes('{id}')) continue;
         if (
@@ -890,7 +908,12 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           continue;
         }
         operation.responses[status] ??= {
-          description,
+          description:
+            path.startsWith('/v1/internal/') && status === '403'
+              ? 'Every user token and every service except contract-service is refused. A missing signed tenant or a conflicting organization header is SERVICE_TENANT_CONTEXT_INVALID.'
+              : path.startsWith('/v1/internal/') && status === '404'
+                ? 'Project not found in the signed tenant; the same response for missing and other-tenant projects.'
+                : description,
           ...(status === '409' && IDEMPOTENT.has(key)
             ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
             : {}),
@@ -966,42 +989,14 @@ function isHeader(value: unknown, name: string): boolean {
   );
 }
 
-function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
+function toQueryParameters(schema: z.ZodType): unknown[] {
   const shape = objectShapeOf(schema);
   if (!shape) return [];
 
   return Object.entries(shape).map(([name, member]) => ({
     name,
     in: 'query',
-    required: !member.isOptional(),
+    required: !isOptionalField(member),
     schema: toJsonSchema(member),
   }));
-}
-
-function objectShapeOf(schema: z.ZodTypeAny): z.ZodRawShape | undefined {
-  // JUSTIFIED-ANY: zod's `_def` is untyped across its type-kinds, and the walk
-  // below re-checks the kind before reading a field.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = schema;
-
-  for (let depth = 0; depth < 10; depth += 1) {
-    const typeName = current?._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-      return (current as z.ZodObject<z.ZodRawShape>).shape;
-    }
-    if (
-      typeName === z.ZodFirstPartyTypeKind.ZodEffects ||
-      typeName === z.ZodFirstPartyTypeKind.ZodOptional ||
-      typeName === z.ZodFirstPartyTypeKind.ZodDefault
-    ) {
-      current =
-        typeName === z.ZodFirstPartyTypeKind.ZodEffects
-          ? current._def.schema
-          : current._def.innerType;
-      continue;
-    }
-    return undefined;
-  }
-
-  return undefined;
 }

@@ -78,20 +78,19 @@ export function ContractCommands({
     readonly restored: RestoredContractCommand | null;
   } | null>(null);
   const { csrfToken, binding, sessionMaxAgeSeconds, pageHref } = context;
-  const { owner, session } = binding;
 
   useEffect(() => {
     const read = () =>
       setChecked({
         restored: restoreUnresolvedContractCommand(
           { contractId, slot, subjectId },
-          { owner, session },
+          binding,
           sessionMaxAgeSeconds,
         ),
       });
     read();
     return subscribeUnresolvedContractCommands(read);
-  }, [contractId, slot, subjectId, owner, session, sessionMaxAgeSeconds]);
+  }, [contractId, slot, subjectId, binding, sessionMaxAgeSeconds]);
 
   if (checked === null) return null;
   const scope = { contractId, slot, subjectId };

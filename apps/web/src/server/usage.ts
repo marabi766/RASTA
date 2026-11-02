@@ -1,5 +1,5 @@
 import { TZDate } from '@date-fns/tz';
-import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
+import { ID_PREFIXES, legacyParse, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
 import { firstIssuePerField } from '@/lib/form-issues';
@@ -183,7 +183,7 @@ export type ParsedUsageForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<UsageField, string>> };
 
 export function parseUsageForm(values: UsageFormValues, submissionId: string): ParsedUsageForm {
-  const parsed = usageFormSchema.safeParse(values);
+  const parsed = legacyParse(usageFormSchema, values);
   if (parsed.success) {
     return {
       ok: true,
@@ -191,7 +191,10 @@ export function parseUsageForm(values: UsageFormValues, submissionId: string): P
     };
   }
 
-  return { ok: false, fieldErrors: firstIssuePerField(parsed.error, isUsageField) };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, isUsageField),
+  };
 }
 
 function isUsageField(value: string): value is UsageField {
@@ -208,8 +211,8 @@ const usageRecordSchema = z.object({
   assetId: z.string(),
   periodStart: z.string(),
   periodEnd: z.string(),
-  hours: z.string().nullable().default(null),
-  kilometres: z.string().nullable().default(null),
+  hours: z.string().nullable().prefault(null),
+  kilometres: z.string().nullable().prefault(null),
 });
 
 export type UsageRecord = z.infer<typeof usageRecordSchema>;

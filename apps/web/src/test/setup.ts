@@ -2,6 +2,8 @@ import { TextDecoder, TextEncoder } from 'node:util';
 import '@testing-library/jest-dom';
 import { toHaveNoViolations } from 'jest-axe';
 
+import { resetUnrecordedOutcomes } from '@/lib/unresolved-tenancy';
+
 import { installTurboInputsGuard } from './turbo-inputs-guard';
 
 /**
@@ -29,6 +31,10 @@ expect.extend(toHaveNoViolations);
 // (see `turbo-inputs-guard.ts`); a forgotten input is a failure here, not a
 // stale cached green later.
 installTurboInputsGuard();
+
+// A late answer that storage refused is held in this document's memory
+// (`lib/unresolved-tenancy.ts`); each test is a new document.
+beforeEach(() => resetUnrecordedOutcomes());
 
 // An unmapped service sentence is reported with a one-line structured
 // diagnostic on stderr (`server/write.ts`, `reportUnmappedMessage`). Specs

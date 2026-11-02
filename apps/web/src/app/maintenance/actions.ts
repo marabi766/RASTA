@@ -14,6 +14,8 @@ import {
 } from '@/server/maintenance-commands';
 
 import { EDIT_AS_NEW_INTENT, REPORT_INTENT_FIELD, type ReportRequestFormState } from './form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The `/maintenance` report form's server action.
@@ -69,7 +71,10 @@ export async function submitReportRequest(
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
     // form must carry a fresh submission id.
     redirect(
-      `/maintenance/${encodeURIComponent(result.data.id)}?${FLASH_PARAM}=${mintFlash(session, result.data.id, 'created')}`,
+      withContext(
+        pageContext(session),
+        `/maintenance/${encodeURIComponent(result.data.id)}?${FLASH_PARAM}=${mintFlash(session, result.data.id, 'created')}`,
+      ),
     );
   }
 

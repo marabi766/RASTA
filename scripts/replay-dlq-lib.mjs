@@ -380,7 +380,7 @@ const RECORD_PROBE = Object.freeze({
  * stood in by `0`; the run's report id and operator are checked on their own.
  */
 export function recordProblem(summary, contracts) {
-  const probe = contracts.replayExecutedPayloadSchemaV1.safeParse({
+  const probe = contracts.legacyParse(contracts.replayExecutedPayloadSchemaV1, {
     ...RECORD_PROBE,
     replayedEvent: {
       eventId: summary.eventId,
@@ -394,7 +394,7 @@ export function recordProblem(summary, contracts) {
     stale: false,
   });
   if (probe.success) return null;
-  return probe.error.issues[0].path.join('.') || '(root)';
+  return probe.refusal.issues[0].path.join('.') || '(root)';
 }
 
 /**
@@ -668,12 +668,14 @@ export function replayExecutedRecord(
     actor: { type: 'USER', id: operator },
     payload,
   };
-  const checkedPayload = contracts.replayExecutedPayloadSchemaV1.safeParse(payload);
-  const checkedEnvelope = contracts.eventEnvelopeSchema.safeParse(envelope);
+  // zod 3's codes against the schema that refused, as audit's ops-replay
+  // mapper names them for the same record (PR #444 r1 F1).
+  const checkedPayload = contracts.legacyParse(contracts.replayExecutedPayloadSchemaV1, payload);
+  const checkedEnvelope = contracts.legacyParse(contracts.eventEnvelopeSchema, envelope);
   if (!checkedPayload.success || !checkedEnvelope.success) {
     const issues = [
-      ...(checkedPayload.success ? [] : checkedPayload.error.issues),
-      ...(checkedEnvelope.success ? [] : checkedEnvelope.error.issues),
+      ...(checkedPayload.success ? [] : checkedPayload.refusal.issues),
+      ...(checkedEnvelope.success ? [] : checkedEnvelope.refusal.issues),
     ].map((issue) => `${issue.path.join('.') || '(root)'} ${issue.code}`);
     throw new ReplayFailure(`the replay record breaks its contract: ${issues.join(', ')}`);
   }

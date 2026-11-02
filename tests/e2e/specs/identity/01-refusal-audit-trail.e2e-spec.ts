@@ -38,12 +38,14 @@ import { waitFor } from '../../src/events';
  *
  * ## The gateway budget on `registration-requests`
  *
- * The gateway allows 5 calls per user per hour on that prefix
- * (`services/api-gateway/src/config/routes.ts`), for authenticated callers
- * too. The three scenarios that use it each use their own actor and stay
- * inside it: `province.auditor` 5 (C8), `dehyari.admin` 5 (C9) and
- * `dehyari.admin.b` 4 (the separation scenario). Nothing here raises, resets
- * or bypasses the limit; a local rerun inside the same hour is answered 429.
+ * The gateway allows 5 calls per caller per hour to the submission,
+ * `POST /v1/registration-requests` (`services/api-gateway/src/config/routes.ts`).
+ * The decisions these scenarios refuse — approve and reject — are a different
+ * operation, on the platform default in a bucket of their own (task 130,
+ * PR #483 r1 R6; before it, they shared the submission's five an hour, so each
+ * scenario used its own actor to stay inside it: `province.auditor` 5 (C8),
+ * `dehyari.admin` 5 (C9), `dehyari.admin.b` 4). Nothing here raises, resets or
+ * bypasses a limit.
  *
  * C10 adds no call to that prefix. Its one gateway call is a `users` read by
  * `dehyari.admin.b`, which runs on the platform default (300 per minute per
@@ -742,12 +744,10 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     // refusal names a different request and a different body secret; the record
     // must aggregate by the caller alone.
     //
-    // The gateway throttles the whole `registration-requests` prefix at 5 calls
-    // per user per hour (`services/api-gateway/src/config/routes.ts`) — the
-    // self-registration surface's protection, applied to authenticated callers
-    // too. The burst below spends exactly this actor's hour; the Phase C9
-    // scenarios use two other actors for the same reason. Nothing here raises,
-    // resets or bypasses the limit.
+    // Approvals are on the gateway's platform default (task 130, R6), not the
+    // submission's five an hour; the burst stays at five, as it was written
+    // when they shared that budget. Nothing here raises, resets or bypasses
+    // a limit.
     const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;
     if (windowMs < BURST_BUDGET_MS + WINDOW_START_MARGIN_MS * 2) {
       throw new Error(
@@ -944,7 +944,7 @@ test.describe('AUD-004 — real identity refusals become one aggregated, queryab
     systemAdmin,
   }) => {
     // `dehyari.admin.b` holds only ORGANIZATION_ADMIN. Two approvals and two
-    // rejections — four calls, inside its 5-per-hour gateway budget — share one
+    // rejections — four calls, on the gateway's platform default — share one
     // caller, one tenant, one window and one correlation id. Only the action
     // differs, and that alone must keep the two outcomes apart.
     const windowMs = e2eConfig().identityAggregationWindowSeconds * 1000;

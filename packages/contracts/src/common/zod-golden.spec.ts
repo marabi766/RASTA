@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { amountMinorSchema, signedAmountMinorSchema } from './money';
 import { organizationIdSchema } from './identifiers';
+import { isoDateTime } from './iso-datetime';
 
 /**
  * Golden fixtures for the zod 4 migration (GHSA-mrhx-c7xc-m3w5, PR B): which
@@ -113,9 +114,10 @@ describe('zod-3 golden: string formats', () => {
       '',
     ];
     expect({
-      utc: accepts(z.string().datetime(), inputs),
-      offset: accepts(z.string().datetime({ offset: true }), inputs),
-      local: accepts(z.string().datetime({ offset: false }), inputs),
+      // zod 4's own .datetime() refuses `12:00Z` and `+0330`; the platform keeps zod 3's rule.
+      utc: accepts(z.string().check(isoDateTime()), inputs),
+      offset: accepts(z.string().check(isoDateTime({ offset: true })), inputs),
+      local: accepts(z.string().check(isoDateTime({ offset: false })), inputs),
     }).toMatchSnapshot();
   });
 

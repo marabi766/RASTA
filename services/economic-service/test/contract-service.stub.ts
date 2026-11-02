@@ -17,6 +17,7 @@ export class StubContractService {
   readonly asked: { statementId: string; organizationId: string }[] = [];
   mode: 'up' | 'down' | 'hang' = 'up';
   url = '';
+  private failures = 0;
   private server?: http.Server;
   private readonly held: http.ServerResponse[] = [];
 
@@ -32,6 +33,16 @@ export class StubContractService {
     for (const res of this.held) res.destroy();
     this.server?.closeAllConnections();
     await new Promise<void>((resolve) => this.server?.close(() => resolve()));
+  }
+
+  /**
+   * The next `count` questions, asked with a valid token, are answered 503 and
+   * the rest as usual: exactly `count` deliveries fail before they write
+   * anything, whichever the scheduler runs first. A slow owner does the same
+   * to a delivery at random (a timed-out read); this makes it certain.
+   */
+  failNext(count: number): void {
+    this.failures = count;
   }
 
   record(fact: StatementFact): StatementFact {
@@ -70,6 +81,10 @@ export class StubContractService {
       return;
     }
     if (this.mode === 'down') return send(503, { code: 'INTERNAL_ERROR', message: 'down' });
+    if (this.failures > 0) {
+      this.failures -= 1;
+      return send(503, { code: 'INTERNAL_ERROR', message: 'failed once' });
+    }
     const fact = this.statements.get(statementId);
     if (!fact || fact.payerOrganizationId !== claims.organizationId) {
       return send(404, { code: 'NOT_FOUND', message: 'Statement not found' });

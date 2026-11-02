@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -260,10 +261,9 @@ describe('opening at the caps (Codex r1 on #250, R2; Codex r2, R2-open)', () => 
 
     if (!shape.published) {
       await runUnscoped('the suite lets the deadline pass', () =>
-        w.prisma.client.$executeRawUnsafe(
-          `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-             "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
-        ),
+        w.prisma.client
+          .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+             "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`),
       );
       await w.tenderClose.close({ organizationId: owner, tenderId });
     }

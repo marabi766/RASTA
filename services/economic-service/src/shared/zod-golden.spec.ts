@@ -193,6 +193,10 @@ describe('zod-3 golden: idempotent request bodies and their hashes', () => {
         empty: { expectedCurrentVersion: 0, windowDays: 30, contributions: [] },
         // No over-cap array of invalid elements here: zod 3 reports every element
         // after `too_big`, which is GHSA-mrhx-c7xc-m3w5 itself and what B changes.
+        // For the same reason the one line B removed from this case's recording:
+        // zod 3 also ran the each-triggerEvent-once refinement over the parsed
+        // elements; zod 4 refuses an over-cap array before parsing any element, so
+        // nothing that reads them runs (the advisory's fix, not a regression).
         overCap: {
           expectedCurrentVersion: 0,
           windowDays: 30,
@@ -327,19 +331,21 @@ describe('zod-3 golden: reward rule conditions (recursive)', () => {
       points: 10,
       condition,
     });
-    const leaf = { field: 'hours', op: 'gte', value: 4 };
+    // F5/task 1201 requires exact numeric strings at creation. These remain
+    // the recursive grammar oracle; raw numeric-token refusals have HTTP tests.
+    const leaf = { field: 'hours', op: 'gte', value: '4' };
     const nest = (depth: number): unknown =>
       depth === 0 ? leaf : { all: [nest(depth - 1), { field: 'kind', op: 'present' }] };
     expect(
       cases(createRewardRuleSchema, {
         noCondition: rule(undefined),
-        leaf: rule({ field: ' hours ', op: 'gte', value: 4 }),
+        leaf: rule({ field: ' hours ', op: 'gte', value: '4' }),
         anyOfLeaves: rule({ any: [leaf, { field: 'kind', op: 'eq', value: 'TRIP' }] }),
         deep: rule(nest(4)),
         emptyAll: rule({ all: [] }),
         elevenAny: rule({ any: Array.from({ length: 11 }, () => leaf) }),
-        unknownOp: rule({ field: 'hours', op: 'between', value: 4 }),
-        leafExtraKey: rule({ field: 'hours', op: 'gte', value: 4, unit: 'h' }),
+        unknownOp: rule({ field: 'hours', op: 'between', value: '4' }),
+        leafExtraKey: rule({ field: 'hours', op: 'gte', value: '4', unit: 'h' }),
         badNestedLeaf: rule({ all: [leaf, { any: [{ field: '', op: 'eq' }] }] }),
         bothAllAndAny: rule({ all: [leaf], any: [leaf] }),
         objectValue: rule({ field: 'hours', op: 'eq', value: { n: 4 } }),

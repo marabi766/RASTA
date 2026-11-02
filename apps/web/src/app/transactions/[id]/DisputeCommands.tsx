@@ -46,13 +46,12 @@ export function DisputeCommands({
   const [checked, setChecked] = useState<{ readonly restored: RestoredDispute | null } | null>(
     null,
   );
-  const { owner, session } = binding;
 
   useEffect(() => {
     setChecked({
-      restored: restoreUnresolvedDispute(transactionId, { owner, session }, sessionMaxAgeSeconds),
+      restored: restoreUnresolvedDispute(transactionId, binding, sessionMaxAgeSeconds),
     });
-  }, [transactionId, owner, session, sessionMaxAgeSeconds]);
+  }, [transactionId, binding, sessionMaxAgeSeconds]);
 
   if (checked === null) return null;
 

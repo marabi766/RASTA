@@ -69,7 +69,7 @@ export const draftStatementSchema = z
     deductions: z
       .array(deduction)
       .max(MAX_STATEMENT_DEDUCTIONS)
-      .default([])
+      .prefault([])
       .refine(
         (value) => new Set(value.map((entry) => entry.deductionRuleId)).size === value.length,
         'A deduction rule is applied at most once',
@@ -150,7 +150,7 @@ export const listStatementsQuerySchema = z
       .refine((value) => Number(value) <= 2_147_483_647, 'cursor is out of range')
       .optional()
       .describe('Opaque, server-issued.'),
-    limit: numberInput(z.number().int().min(1).max(50)).default(20),
+    limit: numberInput(z.number().int().min(1).max(50)).prefault(20),
   })
   .strict();
 export type ListStatementsQuery = z.infer<typeof listStatementsQuerySchema>;

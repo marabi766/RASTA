@@ -20,13 +20,14 @@ const realWorkflow = await readFile(path.join(root, '.github', 'workflows', 'ci.
 
 const dockerfileServices = discoverDockerfileServices(root);
 
-/** `container-scope.mjs --all`, run for real, as the container-scope job runs it on main. */
+/** `container-scope.mjs --run`, run for real, as the container-scope job runs it on main. */
 const deriveAll = () =>
   JSON.parse(
-    execFileSync(process.execPath, [path.join(root, 'scripts', 'container-scope.mjs'), '--all'], {
+    execFileSync(process.execPath, [path.join(root, 'scripts', 'container-scope.mjs'), '--run'], {
       encoding: 'utf8',
+      env: { ...process.env, EVENT_NAME: 'push', REF: 'refs/heads/main' },
     }),
-  );
+  ).services;
 
 /**
  * A written matrix in the shape the workflow used before it was derived. The
@@ -177,9 +178,9 @@ test('the real workflow derives its matrix from the container-scope job', () => 
   assert.ok(matrixIsDerived(realWorkflow), 'containers matrix is no longer the scope output');
 });
 
-test('a derived matrix whose push path forgets --all fails the guard', () => {
+test('a derived matrix whose scope job forgets --run fails the guard', () => {
   const broken = realWorkflow.replace(
-    'node scripts/container-scope.mjs --all',
+    'node scripts/container-scope.mjs --run',
     'node scripts/container-scope.mjs',
   );
   assert.notEqual(broken, realWorkflow);

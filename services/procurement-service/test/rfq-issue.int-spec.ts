@@ -591,10 +591,20 @@ describe('issuing an RFQ', () => {
           await runUnscoped('test: a duplicate outbox id', () =>
             (tx as ExtendedPrismaClient).outboxMessage.create({
               // Only the id is a duplicate: no stream position, so no other unique index is met.
+              // The row's own columns, named, without its claim or retry instants: those are
+              // compared with the database clock and are no business of a refused insert.
               data: {
-                ...row!,
+                id: row!.id,
+                aggregateType: row!.aggregateType,
+                aggregateId: row!.aggregateId,
+                eventName: row!.eventName,
+                eventVersion: row!.eventVersion,
+                topic: row!.topic,
+                partitionKey: row!.partitionKey,
                 payload: row!.payload as object,
                 headers: row!.headers as object,
+                organizationId: row!.organizationId,
+                correlationId: row!.correlationId,
                 streamSeq: null,
               },
             }),

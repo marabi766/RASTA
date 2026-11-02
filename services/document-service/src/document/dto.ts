@@ -178,7 +178,7 @@ export const listDocumentsQuerySchema = z
      * change an API response and so want their own atomic change.
      */
     includeDeleted: queryBoolean(false),
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
     cursor: identifier.optional(),
   })
   .strict();

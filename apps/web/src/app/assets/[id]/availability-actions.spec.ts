@@ -10,6 +10,7 @@ import type { WebSession } from '@/server/session';
 import { withForgedMac } from '@/test/forged-token';
 
 import { IDLE_AVAILABILITY_FORM } from './availability-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The two availability forms' write path (EXP-002 slice 7): declare, and revoke
@@ -55,7 +56,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'manager',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

@@ -25,6 +25,7 @@ import type {
   SupplierSummary,
   ReadResult,
 } from '@/server/suppliers';
+import { withContext, type InContext } from '@/lib/page-context';
 
 /**
  * The supplier directory (docs/16 § ۱۶٫۶, `/suppliers`).
@@ -42,7 +43,7 @@ import type {
 
 export interface SuppliersScreenProps {
   readonly result: ReadResult<SupplierPage>;
-  readonly query: SupplierListQuery;
+  readonly query: InContext<SupplierListQuery>;
   /**
    * The organization this session acts for: its own row is marked, because the
    * API has no "my supplier" lookup and this is the only way to find it.
@@ -52,17 +53,20 @@ export interface SuppliersScreenProps {
   readonly register?: ReactNode;
 }
 
-function hrefWith(query: SupplierListQuery, changes: Partial<SupplierListQuery>): string {
+function hrefWith(
+  query: InContext<SupplierListQuery>,
+  changes: Partial<SupplierListQuery>,
+): string {
   const merged = { ...query, ...changes };
   const params = new URLSearchParams();
   if (merged.status) params.set('status', merged.status);
   if (merged.capability) params.set('capability', merged.capability);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const text = params.toString();
-  return text ? `/suppliers?${text}` : '/suppliers';
+  return withContext(query.context, text ? `/suppliers?${text}` : '/suppliers');
 }
 
-function StatusFilter({ query }: { query: SupplierListQuery }) {
+function StatusFilter({ query }: { query: InContext<SupplierListQuery> }) {
   const items: readonly (SupplierStatus | undefined)[] = [undefined, ...SUPPLIER_STATUSES];
   return (
     <nav aria-label="وضعیت تامین‌کننده" className="flex flex-wrap gap-2">
@@ -84,7 +88,7 @@ function StatusFilter({ query }: { query: SupplierListQuery }) {
   );
 }
 
-function CapabilityFilter({ query }: { query: SupplierListQuery }) {
+function CapabilityFilter({ query }: { query: InContext<SupplierListQuery> }) {
   const items: readonly (SupplierCapability | undefined)[] = [undefined, ...SUPPLIER_CAPABILITIES];
   return (
     <nav aria-label="دسته‌ی تامین‌کننده" className="flex flex-wrap gap-2">

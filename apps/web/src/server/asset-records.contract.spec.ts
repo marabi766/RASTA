@@ -298,8 +298,8 @@ describe('the request bodies', () => {
       ['createInspectionSchema', 'inspectedAt'],
     ] as const) {
       const properties = schemaProperties(name);
-      expect(squash(properties.get(start))).toBe('z.string().datetime()');
-      expect(squash(properties.get('validTo'))).toBe('z.string().datetime()');
+      expect(squash(properties.get(start))).toBe('z.string().check(isoDateTime())');
+      expect(squash(properties.get('validTo'))).toBe('z.string().check(isoDateTime())');
       expect(squash(topLevelConst(dto, name).getText())).toContain(
         `newDate(v.validTo)>newDate(v.${start})`,
       );

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 
 /**
  * The request and response shapes of the fleet dashboard (ADR-071 § 4, RUN-001 PR 1).
@@ -8,7 +9,7 @@ import { z } from 'zod';
  * route that writes.
  */
 
-const instant = z.string().datetime({ offset: true });
+const instant = z.string().check(isoDateTime({ offset: true }));
 
 /**
  * The window, `[from, to)`, both required: a default window would be a number nobody chose

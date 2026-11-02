@@ -21,16 +21,16 @@ import { z } from 'zod';
  * nothing else. A schema that needs more than this should say so by failing
  * review, not by being silently published as `{}`.
  */
-export function ApiQueryFromSchema(schema: z.ZodObject<z.ZodRawShape>): MethodDecorator {
+export function ApiQueryFromSchema(schema: z.ZodObject): MethodDecorator {
   return applyDecorators(...parametersOf(schema).map((parameter) => ApiQuery(parameter)));
 }
 
 /** Exported for its own test: what gets published has to be assertable. */
-export function parametersOf(schema: z.ZodObject<z.ZodRawShape>): ApiQueryOptions[] {
-  return Object.entries(schema.shape).map(([name, field]) => describe(name, field as z.ZodTypeAny));
+export function parametersOf(schema: z.ZodObject): ApiQueryOptions[] {
+  return Object.entries(schema.shape).map(([name, field]) => describe(name, field as z.ZodType));
 }
 
-function describe(name: string, field: z.ZodTypeAny): ApiQueryOptions {
+function describe(name: string, field: z.ZodType): ApiQueryOptions {
   // A query boolean is `boolean | string` at runtime, because that is how a
   // boolean arrives in a query string. Published as the union it would read
   // `anyOf: [boolean, string]` — arbitrary strings, to a generated client,
@@ -42,28 +42,29 @@ function describe(name: string, field: z.ZodTypeAny): ApiQueryOptions {
   }
 
   const { inner, required, defaultValue } = unwrap(field);
-  const def = (inner as z.ZodTypeAny & { _def: Record<string, unknown> })._def;
-  const typeName = def.typeName as z.ZodFirstPartyTypeKind;
+  const def = defOf(inner);
 
-  const schema: Record<string, unknown> = { ...primitive(typeName, def) };
+  const schema: Record<string, unknown> = { ...primitive(def) };
   if (defaultValue !== undefined) schema.default = defaultValue;
 
   return { name, required, schema };
 }
 
-function primitive(
-  typeName: z.ZodFirstPartyTypeKind,
-  def: Record<string, unknown>,
-): Record<string, unknown> {
-  switch (typeName) {
-    case z.ZodFirstPartyTypeKind.ZodBoolean:
+/** A schema's zod 4 definition (`_zod.def`); every branch re-checks `type`. */
+function defOf(schema: z.ZodType): Record<string, unknown> {
+  return (schema as unknown as { _zod: { def: Record<string, unknown> } })._zod.def;
+}
+
+function primitive(def: Record<string, unknown>): Record<string, unknown> {
+  switch (def.type) {
+    case 'boolean':
       return { type: 'boolean' };
 
-    case z.ZodFirstPartyTypeKind.ZodNumber:
+    case 'number':
       return numeric(def);
 
-    case z.ZodFirstPartyTypeKind.ZodEnum:
-      return { type: 'string', enum: [...(def.values as string[])] };
+    case 'enum':
+      return { type: 'string', enum: Object.values(def.entries as Record<string, string>) };
 
     default:
       return { type: 'string' };
@@ -71,13 +72,17 @@ function primitive(
 }
 
 function numeric(def: Record<string, unknown>): Record<string, unknown> {
-  const checks = (def.checks ?? []) as { kind: string; value: number }[];
+  const checks = ((def.checks ?? []) as z.core.$ZodCheck[]).map(
+    (check) => check._zod.def as unknown as { check: string; format?: string; value?: number },
+  );
   const schema: Record<string, unknown> = {
-    type: checks.some((check) => check.kind === 'int') ? 'integer' : 'number',
+    type: checks.some((check) => check.check === 'number_format' && check.format?.includes('int'))
+      ? 'integer'
+      : 'number',
   };
 
-  const min = checks.find((check) => check.kind === 'min');
-  const max = checks.find((check) => check.kind === 'max');
+  const min = checks.find((check) => check.check === 'greater_than');
+  const max = checks.find((check) => check.check === 'less_than');
   if (min) schema.minimum = min.value;
   if (max) schema.maximum = max.value;
 
@@ -85,14 +90,14 @@ function numeric(def: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * Peels `.default()`, `.optional()` and a preprocess off a field.
+ * Peels `.prefault()`, `.optional()` and a preprocess off a field.
  *
  * Both decide whether a client must send the parameter, and both hide the
  * primitive underneath — so the answer to "is it required" and the answer to
  * "what type is it" come from the same unwrap.
  */
-function unwrap(field: z.ZodTypeAny): {
-  inner: z.ZodTypeAny;
+function unwrap(field: z.ZodType): {
+  inner: z.ZodType;
   required: boolean;
   defaultValue?: unknown;
 } {
@@ -101,28 +106,26 @@ function unwrap(field: z.ZodTypeAny): {
   let defaultValue: unknown;
 
   for (;;) {
-    const def = (inner as z.ZodTypeAny & { _def: Record<string, unknown> })._def;
+    const def = defOf(inner);
 
-    if (def.typeName === z.ZodFirstPartyTypeKind.ZodDefault) {
-      defaultValue = (def.defaultValue as () => unknown)();
-      inner = def.innerType as z.ZodTypeAny;
+    if (def.type === 'prefault' || def.type === 'default') {
+      defaultValue = def.defaultValue;
+      inner = def.innerType as z.ZodType;
       required = false;
       continue;
     }
 
-    if (def.typeName === z.ZodFirstPartyTypeKind.ZodOptional) {
-      inner = def.innerType as z.ZodTypeAny;
+    if (def.type === 'optional') {
+      inner = def.innerType as z.ZodType;
       required = false;
       continue;
     }
 
     // `numberInput` (@rasta/contracts): text is converted before the schema
-    // underneath runs, and that schema is what the parameter is.
-    if (
-      def.typeName === z.ZodFirstPartyTypeKind.ZodEffects &&
-      (def.effect as { type: string }).type === 'preprocess'
-    ) {
-      inner = def.schema as z.ZodTypeAny;
+    // underneath runs (a pipe out of a transform), and that schema is what the
+    // parameter is.
+    if (def.type === 'pipe' && defOf(def.in as z.ZodType).type === 'transform') {
+      inner = def.out as z.ZodType;
       continue;
     }
 

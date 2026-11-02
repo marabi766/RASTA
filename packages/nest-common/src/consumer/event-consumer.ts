@@ -18,15 +18,21 @@ import {
   isAllowedProducer,
   isDeclaredConsumer,
   isDeclaredTopic,
+  isLegacyRefusal,
+  legacyParse,
   RETRY_TOPIC_SUFFIX,
+  TOPIC_CONSUMERS,
   type DlqReason,
   type EventEnvelope,
 } from '@rasta/contracts';
-import { dlqMessagesTotal } from '@rasta/observability';
+import { dlqMessagesTotal, consumerCrashesTotal, consumerExpected } from '@rasta/observability';
+import { consumerFailures } from './consumer-health';
+import { fatalShutdown } from '../lifecycle/fatal-shutdown';
 import { createSystemContext, runWithContext } from '../context/request-context';
 import { RastaError } from '../errors/rasta-error';
 import { LOG_TEXT_MAX, safeLogText } from '../errors/safe-log-text';
 import { kafkaClientConfig, type KafkaConnectionOptions } from '../kafka/connection';
+import { kafkaShutdownDeadline } from '../kafka/bounded-disconnect';
 import { withinDeadline, type OutboxStopOptions } from '../outbox/outbox';
 
 /**
@@ -56,13 +62,16 @@ import { withinDeadline, type OutboxStopOptions } from '../outbox/outbox';
  * What it deliberately does not do is commit an offset it could not account
  * for. If even the dead-letter write fails, the error propagates and nothing
  * is committed past the message. A retriable failure (a broker away) is
- * retried by kafkajs and the partition stalls meanwhile. A non-retriable one —
+ * retried by kafkajs; consumption pauses while it restarts the runner. A non-retriable one —
  * MESSAGE_TOO_LARGE, a dead letter its topic refuses — crashes the kafkajs
  * consumer, which kafkajs does not restart: every partition this consumer
  * reads stops until the service restarts and meets the message again, and
- * {@link EventConsumer.isRunning} does not notice. Either is visible in lag
- * (where lag is alerted on) and recoverable while the source topic retains
- * the message; a silently skipped financial event is neither. Which dead
+ * {@link EventConsumer.isRunning} becomes false. Every crash is counted with
+ * a closed reason; a terminal crash makes both health probes red and requests the existing
+ * bounded graceful shutdown with exit code 1. The supervisor must restart with
+ * backoff. No offset is skipped: replay remains possible only while the source
+ * retains the record. Retriable crashes stay running through KafkaJS reconnects;
+ * STOP/DISCONNECT alone do not request an exit. Which dead
  * letters can still be refused is stated in `@rasta/contracts`
  * dead-letter-size.ts (known escapes; PR #378 r4).
  *
@@ -314,6 +323,40 @@ interface ConsumerRun {
   deadlineAt?: number;
   /** Set when the stop gave up waiting at its deadline. */
   abandoned: boolean;
+  terminalReason?: ConsumerCrashReason;
+  failedDelivery?: { topic: string; partition: number; offset: string };
+  /**
+   * Present while a stop is waiting for the disconnect: re-reads `deadlineAt`, so a later,
+   * earlier deadline ends the wait at that one (PR #493 r1, F1).
+   */
+  rearm?: () => void;
+}
+
+/** Finite classification, even when an arbitrary thrown error has a payload in its name. */
+export const CONSUMER_CRASH_REASONS = [
+  'message_too_large',
+  'protocol_error',
+  'connection_error',
+  'other',
+] as const;
+export type ConsumerCrashReason = (typeof CONSUMER_CRASH_REASONS)[number];
+
+function crashReason(error: unknown): ConsumerCrashReason {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as Error & { type?: unknown; cause?: unknown };
+    if (candidate.type === 'MESSAGE_TOO_LARGE') return 'message_too_large';
+    if (candidate.cause === undefined) break;
+    current = candidate.cause;
+  }
+  if (current instanceof Error) {
+    if (current.name === 'KafkaJSProtocolError') return 'protocol_error';
+    if (['KafkaJSConnectionError', 'KafkaJSConnectionClosedError'].includes(current.name))
+      return 'connection_error';
+  }
+  return 'other';
 }
 
 export class EventConsumer {
@@ -378,6 +421,18 @@ export class EventConsumer {
       logLevel: 1, // ERROR — kafkajs is extremely chatty at INFO
     });
     this.initializeDlqSeries();
+    for (const reason of CONSUMER_CRASH_REASONS) {
+      consumerCrashesTotal.inc({ service: this.serviceName(), group: options.groupId, reason }, 0);
+    }
+    const declaredService = consumerGroupService(options.groupId);
+    if (declaredService && isDeclaredConsumer(declaredService)) {
+      const groups: readonly string[] = TOPIC_CONSUMERS[declaredService].groups;
+      if (groups.includes(options.groupId)) {
+        for (const topic of subscribedTopics(options.topics)) {
+          consumerExpected.set({ service: declaredService, group: options.groupId, topic }, 1);
+        }
+      }
+    }
   }
 
   /**
@@ -403,8 +458,18 @@ export class EventConsumer {
     }
   }
 
+  private serviceName(): string {
+    return consumerGroupService(this.options.groupId) ?? this.options.clientId;
+  }
+
+  /** The terminal classification survives stop(); recovery requires a new process. */
+  failureReason(): ConsumerCrashReason | undefined {
+    return this.run.terminalReason;
+  }
+
   async start(): Promise<void> {
     if (this.running) return;
+    if (this.run.terminalReason) throw new Error('CONSUMER_TERMINAL_CRASH');
     const run: ConsumerRun = { stopRequested: false, abandoned: false };
     this.run = run;
     this.stopping = undefined;
@@ -416,6 +481,30 @@ export class EventConsumer {
       // that would only make the backlog worse.
       sessionTimeout: CONSUMER_SESSION_TIMEOUT_MS,
       allowAutoTopicCreation: false,
+    });
+
+    // KafkaJS emits STOP and DISCONNECT before CRASH, including for retriable crashes.
+    // They cannot decide terminality. stop() itself owns normal shutdown state.
+    consumer.on(consumer.events.CRASH, ({ payload }) => {
+      if (this.run !== run || run.stopRequested || run.terminalReason) return;
+      const reason = crashReason(payload.error);
+      consumerCrashesTotal.inc({
+        service: this.serviceName(),
+        group: this.options.groupId,
+        reason,
+      });
+      if (payload.restart) return;
+      run.terminalReason = reason;
+      this.running = false;
+      consumerFailures.report(this.serviceName());
+      const at = run.failedDelivery;
+      this.logger.error(
+        `Consumer terminal crash: service=${logField(this.serviceName())} group=${logField(this.options.groupId)} reason=${reason}` +
+          (at
+            ? ` topic=${logField(at.topic)} partition=${at.partition} offset=${logField(at.offset)}`
+            : ''),
+      );
+      fatalShutdown.request();
     });
 
     await consumer.connect();
@@ -440,16 +529,22 @@ export class EventConsumer {
         // reason the producer sets a partition key; processing concurrently
         // inside a partition would throw it away.
         eachMessage: async ({ topic, partition, message, heartbeat }) => {
-          await this.handleMessage(
-            topic,
-            partition,
-            message.value,
-            message.headers,
-            message.offset,
-            message.key,
-            heartbeat,
-            run,
-          );
+          try {
+            await this.handleMessage(
+              topic,
+              partition,
+              message.value,
+              message.headers,
+              message.offset,
+              message.key,
+              heartbeat,
+              run,
+            );
+            run.failedDelivery = undefined;
+          } catch (error) {
+            run.failedDelivery = { topic, partition, offset: message.offset };
+            throw error;
+          }
           // kafkajs resolves the offset as soon as this returns. A message
           // the stop gave up on at its deadline must not return, however it
           // ended — a handler or a dead letter that finished late included:
@@ -464,10 +559,12 @@ export class EventConsumer {
     }
 
     this.consumer = consumer;
-    this.running = true;
-    this.logger.log(
-      `Consuming ${subscribedTopics(this.options.topics).join(', ')} as group ${this.options.groupId}`,
-    );
+    this.running = !run.terminalReason && !run.stopRequested;
+    if (this.running) {
+      this.logger.log(
+        `Consuming ${subscribedTopics(this.options.topics).join(', ')} as group ${this.options.groupId}`,
+      );
+    }
   }
 
   /**
@@ -481,14 +578,35 @@ export class EventConsumer {
    * yet and nothing here has any.
    */
   private async discardAfterFailedStart(consumer: Consumer, cause: unknown): Promise<void> {
-    try {
-      await consumer.disconnect();
-    } catch (cleanupError) {
+    const closed: { failed: boolean; error?: unknown } = { failed: false };
+    // Consumed here whether it ends in time or not: a disconnect that fails after the budget
+    // must not become an unhandled rejection in a process that is already failing to start.
+    const disconnecting = (async () => consumer.disconnect())().catch((error: unknown) => {
+      closed.failed = true;
+      closed.error = error;
+    });
+    const deadlineAt = kafkaShutdownDeadline(this.options);
+    if ((await withinDeadline(disconnecting, deadlineAt - Date.now())) === 'abandoned') {
+      this.logger.error(this.cleanupGaveUpMessage());
+      return;
+    }
+    if (closed.failed) {
       this.logger.error(
         `Could not disconnect ${this.options.groupId} after a failed start ` +
-          `(${describe(cause)}): ${describe(cleanupError)}`,
+          `(${describe(cause)}): ${describe(closed.error)}`,
       );
     }
+  }
+
+  /**
+   * The one line every startup-failure cleanup logs when it gives up at the shutdown budget.
+   * Fixed text: nothing the cleanup raised, nothing the broker said.
+   */
+  private cleanupGaveUpMessage(): string {
+    return (
+      `${this.options.groupId}: cleanup after a failed start did not finish within the ` +
+      'shutdown budget; abandoned, the original startup error stands'
+    );
   }
 
   private async handleMessage(
@@ -502,16 +620,8 @@ export class EventConsumer {
     run: ConsumerRun = this.run,
   ): Promise<void> {
     const beat = heartbeat === undefined ? undefined : () => this.beat(heartbeat);
-    let envelope: EventEnvelope;
-
-    try {
-      if (!value) throw new Error('Message has no body');
-      const parsed = eventEnvelopeSchema.parse(JSON.parse(value.toString('utf8')));
-      // `payload` is `unknown` in the schema, which zod infers as optional.
-      // Restating it makes it a present key again — the handler is entitled to
-      // find the property there even when its value is undefined.
-      envelope = { ...parsed, payload: parsed.payload };
-    } catch (error) {
+    const read = readEnvelope(value);
+    if (!read.ok) {
       // Unprocessable by construction — no number of retries changes the bytes.
       //
       // Never the parser's own message (S-09): Node's JSON.parse quotes a
@@ -519,7 +629,7 @@ export class EventConsumer {
       // received value. The log line and the dead-letter header carry fixed
       // text and metadata only; the dead-lettered message keeps the original
       // bytes, which is what it is for.
-      const reason = unparseableReason(error, value);
+      const reason = unparseableReason(read.failure, value);
       const where = `${topic}[${partition}]${offset === undefined ? '' : `@${offset}`}`;
       this.logger.error(`Unparseable message on ${where}: ${reason}`);
       await this.deadLetter(
@@ -533,6 +643,7 @@ export class EventConsumer {
       );
       return;
     }
+    const { envelope } = read;
 
     // ADR-061 § 2, before any handler and before any retry: the producer the
     // envelope names must be allowed on the topic the *broker* delivered it on
@@ -866,13 +977,85 @@ export class EventConsumer {
    *     at the latest, when the session times out.
    *
    * Without `deadlineAt` (a test, a CLI) it waits as before. One stop per
-   * `start()`: a later call joins the first — including its deadline — and,
-   * once that has returned, returns at once. A disconnect that fails rejects
-   * the stop, as it always has.
+   * `start()`: a later call joins the first and, once that has returned,
+   * returns at once. While the first is still waiting, the EARLIEST deadline
+   * of any caller applies — a later bounded call tightens an unbounded or
+   * longer wait, and no call ever loosens it (PR #493 r1, F1). A disconnect
+   * that fails rejects the stop, as it always has.
    */
   stop(options: OutboxStopOptions = {}): Promise<void> {
-    this.stopping ??= this.halt(options.deadlineAt);
+    if (this.stopping) {
+      this.tightenStop(options.deadlineAt);
+      return this.stopping;
+    }
+    this.stopping = this.halt(options.deadlineAt);
     return this.stopping;
+  }
+
+  /**
+   * Cleans up after a step of the CALLER's start-up that failed once `start()` had succeeded
+   * (a coverage write, a registration): the one policy for such a path, so none of them can
+   * hold the failing start-up on an unbounded disconnect (PR #493 r1, F1).
+   *
+   * It stops by the shutdown budget the connection carries (`kafkaShutdownDeadline`, the same
+   * bound a stop without a deadline gets from `kafkaConnection`), and a stop already pending
+   * is tightened to it. It never rejects: a disconnect that fails is logged, one that does
+   * not finish by the budget is abandoned with a fixed line, and either way the caller
+   * rethrows ITS error — the one that explains why the service will not come up.
+   */
+  async stopAfterFailedStart(cause?: unknown): Promise<void> {
+    const run = this.run;
+    try {
+      await this.stop({ deadlineAt: kafkaShutdownDeadline(this.options) });
+    } catch (error) {
+      this.logger.error(
+        `Could not stop ${this.options.groupId} after a failed start` +
+          `${cause === undefined ? '' : ` (${describe(cause)})`}: ${describe(error)}`,
+      );
+      return;
+    }
+    if (run.abandoned) this.logger.error(this.cleanupGaveUpMessage());
+  }
+
+  /** A stop already pending ends at the earliest deadline any caller gave it. */
+  private tightenStop(deadlineAt: number | undefined): void {
+    const run = this.run;
+    if (deadlineAt === undefined || !run.rearm) return;
+    if (run.deadlineAt !== undefined && run.deadlineAt <= deadlineAt) return;
+    run.deadlineAt = deadlineAt;
+    run.rearm();
+  }
+
+  /**
+   * Waits for `work`, or until `run.deadlineAt` — re-read whenever a later stop tightens it.
+   * Without a deadline it waits for `work` alone, until one is given.
+   */
+  private waitWithinDeadline(
+    run: ConsumerRun,
+    work: Promise<unknown>,
+  ): Promise<'finished' | 'abandoned'> {
+    return new Promise((resolve) => {
+      let timer: NodeJS.Timeout | undefined;
+      const settle = (outcome: 'finished' | 'abandoned'): void => {
+        clearTimeout(timer);
+        run.rearm = undefined;
+        resolve(outcome);
+      };
+      const arm = (): void => {
+        clearTimeout(timer);
+        if (run.deadlineAt === undefined) return;
+        const boundMs = run.deadlineAt - Date.now();
+        if (boundMs <= 0) return settle('abandoned');
+        timer = setTimeout(() => settle('abandoned'), boundMs);
+        timer.unref?.();
+      };
+      run.rearm = arm;
+      work.then(
+        () => settle('finished'),
+        () => settle('finished'),
+      );
+      arm();
+    });
   }
 
   private async halt(deadlineAt: number | undefined): Promise<void> {
@@ -899,10 +1082,7 @@ export class EventConsumer {
       await closeProducer();
     })();
 
-    if (deadlineAt === undefined) return disconnecting;
-    if ((await withinDeadline(disconnecting, deadlineAt - Date.now())) === 'finished') {
-      return disconnecting;
-    }
+    if ((await this.waitWithinDeadline(run, disconnecting)) === 'finished') return disconnecting;
 
     // From here the message in flight cannot be committed, however it ends.
     run.abandoned = true;
@@ -1079,40 +1259,51 @@ export function handlerMessage(error: unknown): string {
 }
 
 /**
- * Why a message could not be read as an event envelope, in words that contain
- * nothing from the message itself: fixed text, the body's size, and — for an
- * envelope that parsed as JSON but failed the schema — each issue's path and
- * zod code. Paths name schema fields (escaped and bounded all the same);
- * messages are left out because some repeat the value received.
+ * The message's bytes as an event envelope, or why not: the `JSON.parse`
+ * error, or the envelope schema's `LegacyRefusal` (from `legacyParse`,
+ * so {@link unparseableReason} names zod 3's codes against the schema that
+ * refused — PR #444 r1 F1).
  */
-export function unparseableReason(error: unknown, value: Buffer | null): string {
-  if (!value) return 'the message has no body';
-  const size = `${value.length} bytes`;
-  if (isZodError(error)) {
-    const issues = error.issues
-      .slice(0, 5)
-      .map((issue) => `${logField(issue.path.join('.') || '(root)', 48)} ${issue.code}`)
-      .join('; ');
-    const more = error.issues.length > 5 ? `; and ${error.issues.length - 5} more` : '';
-    return `the body is not a valid event envelope (${size}): ${issues}${more}`;
+function readEnvelope(
+  value: Buffer | null,
+): { ok: true; envelope: EventEnvelope } | { ok: false; failure: unknown } {
+  try {
+    if (!value) throw new Error('Message has no body');
+    const parsed = legacyParse(eventEnvelopeSchema, JSON.parse(value.toString('utf8')));
+    if (!parsed.success) return { ok: false, failure: parsed.refusal };
+    // `payload` is `unknown` in the schema, which zod infers as optional.
+    // Restating it makes it a present key again — the handler is entitled to
+    // find the property there even when its value is undefined.
+    return { ok: true, envelope: { ...parsed.data, payload: parsed.data.payload } };
+  } catch (error) {
+    return { ok: false, failure: error };
   }
-  if (error instanceof SyntaxError) return `the body is not valid JSON (${size})`;
-  return `the body could not be read (${size}, ${error instanceof Error ? error.name : 'unknown error'})`;
 }
 
 /**
- * A zod validation error, recognised by shape rather than `instanceof`: the
- * envelope schema lives in `@rasta/contracts`, whose zod need not be the same
- * module instance as this package's.
+ * Why a message could not be read as an event envelope, in words that contain
+ * nothing from the message itself: fixed text, the body's size, and — for an
+ * envelope that parsed as JSON but failed the schema — each issue's path and
+ * zod 3 code, from the envelope schema's `LegacyRefusal`. Paths name
+ * schema fields (escaped and bounded all the same); messages are left out
+ * because some repeat the value received. Anything else — a bare zod error
+ * included, which carries no schema to translate against — is described by its
+ * class only.
  */
-function isZodError(
-  error: unknown,
-): error is { issues: { path: (string | number)[]; code: string }[] } {
-  return (
-    error instanceof Error &&
-    error.name === 'ZodError' &&
-    Array.isArray((error as { issues?: unknown }).issues)
-  );
+export function unparseableReason(failure: unknown, value: Buffer | null): string {
+  if (!value) return 'the message has no body';
+  const size = `${value.length} bytes`;
+  if (isLegacyRefusal(failure)) {
+    const { issues } = failure;
+    const named = issues
+      .slice(0, 5)
+      .map((issue) => `${logField(issue.path.join('.') || '(root)', 48)} ${issue.code}`)
+      .join('; ');
+    const more = issues.length > 5 ? `; and ${issues.length - 5} more` : '';
+    return `the body is not a valid event envelope (${size}): ${named}${more}`;
+  }
+  if (failure instanceof SyntaxError) return `the body is not valid JSON (${size})`;
+  return `the body could not be read (${size}, ${failure instanceof Error ? failure.name : 'unknown error'})`;
 }
 
 function describe(error: unknown): string {

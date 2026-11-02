@@ -104,7 +104,7 @@ describe('gateway conditional GET against Express', () => {
         .get('/v1/users/me')
         .set('x-test-failure', '1')
         .set('x-organization-id', 'ORG_A');
-      expect(proxy.circuitStates().identity).toEqual({ failures: 1, open: false });
+      expect(proxy.circuitStates().identity).toEqual({ failures: 1, open: false, state: 'CLOSED' });
       for (let i = 0; i < 8; i += 1) {
         const answer = await request(gateway)
           .get('/v1/users/me')
@@ -122,7 +122,11 @@ describe('gateway conditional GET against Express', () => {
         expect(answer.status).toBe(304);
         expect(answer.headers.etag).toBe(etag);
         expect(answer.text).toBe('');
-        expect(proxy.circuitStates().identity).toEqual({ failures: 0, open: false });
+        expect(proxy.circuitStates().identity).toEqual({
+          failures: 0,
+          open: false,
+          state: 'CLOSED',
+        });
       }
       // The circuit is shared across tenants inside this one proxy instance.
       expect(

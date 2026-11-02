@@ -17,6 +17,7 @@ import { AMENDMENT_ID, CONTRACT_ID } from '@/test/contract-command-fixtures';
 import { ContractCommandForm } from './[id]/ContractCommandForm';
 import { ContractCommands } from './[id]/ContractCommands';
 import type { ContractFormState } from './[id]/contract-form-state';
+import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
 
 /**
  * The unconfirmed path with the real `useActionState`,
@@ -50,7 +51,7 @@ const sessionProbe = jest.fn<Promise<{ status: number }>, [string]>();
 const KEY = 'sub_FIRSTKEYFIRSTKEYFIRS';
 const OTHER = 'sub_OTHERKEYOTHERKEYOTH';
 const FRESH = 'sub_FRESHKEYFRESHKEYFRE';
-const BINDING = { owner: 'owner-tag-A', session: 'session-tag-1' };
+const BINDING = bindingOf('owner-tag-A', 'session-tag-1');
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const STAMP: ReplayStamp = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
 const CONTRACT_SLOT: ContractScope = { contractId: CONTRACT_ID, slot: 'CONTRACT', subjectId: null };
@@ -109,7 +110,11 @@ const unconfirmed = (): ContractFormState => ({
 });
 
 const storeKey = (scope: ContractScope) =>
-  `rasta.unresolved-contract.${scope.contractId}.${scope.slot}.${scope.subjectId ?? '-'}`;
+  keyFor(
+    'rasta.unresolved-contract.',
+    BINDING,
+    `${scope.contractId}.${scope.slot}.${scope.subjectId ?? '-'}`,
+  );
 
 function stored(scope: ContractScope): Record<string, unknown> | null {
   const raw = window.sessionStorage.getItem(storeKey(scope));
@@ -323,9 +328,9 @@ describe('one slot per object', () => {
           replay: STAMP,
         },
         BINDING,
-      ),
+      ).outcome,
     ).toBe('HELD');
-    clearUnresolvedContractCommand(CONTRACT_SLOT, KEY);
+    clearUnresolvedContractCommand(CONTRACT_SLOT, KEY, BINDING);
     expect(stored(CONTRACT_SLOT)).toMatchObject({ submissionId: OTHER, command: 'SIGN' });
   });
 
@@ -341,7 +346,7 @@ describe('one slot per object', () => {
           replay: STAMP,
         },
         BINDING,
-      ),
+      ).outcome,
     ).toBe('UNAVAILABLE');
     window.sessionStorage.setItem(
       storeKey(CONTRACT_SLOT),
@@ -393,10 +398,12 @@ describe('never silently gone', () => {
 
   it('nothing is stored once a logout has started', () => {
     purgeAllUnresolvedContractCommands();
-    expect(saveUnresolvedContractCommand(CONTRACT_SLOT, entry, BINDING)).toBe('UNAVAILABLE');
+    expect(saveUnresolvedContractCommand(CONTRACT_SLOT, entry, BINDING).outcome).toBe(
+      'UNAVAILABLE',
+    );
   });
 
-  it('from another login it is shown, never re-sent; another person’s page removes it', () => {
+  it('from another login it is shown, never re-sent; another person’s page reduces it to a content-free marker', () => {
     saveUnresolvedContractCommand(CONTRACT_SLOT, entry, BINDING);
     expect(
       restoreUnresolvedContractCommand(
@@ -405,11 +412,11 @@ describe('never silently gone', () => {
         SESSION_MAX_AGE,
       )?.kind,
     ).toBe('VIEW_ONLY');
-    purgeForeignUnresolvedContractCommands('owner-tag-B');
+    purgeForeignUnresolvedContractCommands({ person: OTHER_PERSON, legacy: [] });
     expect(restoreUnresolvedContractCommand(CONTRACT_SLOT, BINDING, SESSION_MAX_AGE)).toBeNull();
   });
 
-  it('refuses an entry whose input is not what its command sends', () => {
+  it('refuses an entry whose input is not what its command sends — never shown, kept as it is (quarantined)', () => {
     window.sessionStorage.setItem(
       storeKey(NEW_AMENDMENT),
       JSON.stringify({
@@ -425,7 +432,8 @@ describe('never silently gone', () => {
         session: BINDING.session,
       }),
     );
+    const raw = window.sessionStorage.getItem(storeKey(NEW_AMENDMENT));
     expect(restoreUnresolvedContractCommand(NEW_AMENDMENT, BINDING, SESSION_MAX_AGE)).toBeNull();
-    expect(stored(NEW_AMENDMENT)).toBeNull();
+    expect(window.sessionStorage.getItem(storeKey(NEW_AMENDMENT))).toBe(raw);
   });
 });

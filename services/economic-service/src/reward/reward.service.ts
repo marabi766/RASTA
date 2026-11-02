@@ -5,22 +5,24 @@ import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/n
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { WalletService } from '../wallet/wallet.service';
-import { isUniqueViolation } from '../ledger/ledger.repository';
 import {
   applicableRules,
   evaluate,
   isRefusal,
   levelFor,
   periodKeyFor,
+  isoWeekWindow,
   type RewardRuleView,
 } from './rule-engine';
 import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor, isStorableMinor, parseMinor } from '../shared/money';
 import { nextValidTo } from '../shared/rule-validity';
+import type { IdempotentAnswer } from '../shared/idempotency';
 import { rewardsGrantedTotal, rewardsSkippedTotal } from '../observability/metrics';
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
-import type { Prisma } from '../generated/prisma';
+import { Prisma } from '../generated/prisma';
+import { lockRewardConfiguration } from './configuration-lock';
 import type { CreateRewardRuleDto, UpdateRewardRuleDto } from './dto';
 
 /**
@@ -88,8 +90,8 @@ export class RewardService {
     /**
      * When given, only these rules may pay — the ones an earlier evaluation of
      * the same fact found applicable (PR #110 round 2 #2). A rule activated
-     * since is not among them, and one deactivated since is not ACTIVE, so the
-     * set can only shrink. Absent, every applicable rule is evaluated.
+     * since is not among them. Saved evaluations resume those same rules
+     * regardless of their current status (D-080).
      */
     onlyRuleIds?: readonly string[];
   }): Promise<GrantOutcome[]> {
@@ -98,14 +100,16 @@ export class RewardService {
       return [];
     }
 
-    const rules = await this.candidateRules(input.organizationId, input.triggerEvent);
-    const allowed = input.onlyRuleIds ? new Set(input.onlyRuleIds) : null;
-    const applicable = applicableRules(
-      rules as RewardRuleView[],
+    const rules = await this.candidateRules(
       input.organizationId,
       input.triggerEvent,
       input.occurredAt,
-    ).filter((rule) => allowed === null || allowed.has(rule.id));
+    );
+    const allowed = input.onlyRuleIds ? new Set(input.onlyRuleIds) : null;
+    const applicable =
+      allowed === null
+        ? applicableRules(rules, input.organizationId, input.triggerEvent, input.occurredAt)
+        : rules.filter((rule) => allowed.has(rule.id));
 
     if (applicable.length === 0) {
       rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_rule' });
@@ -146,18 +150,39 @@ export class RewardService {
   }): Promise<GrantOutcome> {
     const { rule } = input;
 
-    if (rule.rewardType === 'CASHBACK' && !this.env.ECONOMIC_REWARD_CASHBACK_ENABLED) {
-      // Refused rather than silently skipped. A rule that exists, is ACTIVE,
-      // and quietly does nothing is a control claiming something it does not
-      // have (docs/24 Q-07).
-      rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'cashback_disabled' });
-      return { kind: 'SKIPPED', reason: 'cashback_disabled', ruleId: rule.id };
-    }
-
     try {
       return await this.prisma.transaction(async (tx) => {
         await this.ensureBalanceRow(tx, input.organizationId, input.userId);
         const balance = await this.lockBalance(tx, input.organizationId, input.userId);
+
+        // A committed grant wins over every mutable eligibility/capacity guard.
+        // Scope by the unique identity first, then validate all attribution.
+        const existing = await runUnscoped('validate a grant replay under the subject lock', () =>
+          tx.reward.findUnique({
+            where: {
+              ruleId_sourceReference: { ruleId: rule.id, sourceReference: input.sourceReference },
+            },
+          }),
+        );
+        if (existing) {
+          if (
+            existing.organizationId !== input.organizationId ||
+            existing.userId !== input.userId ||
+            existing.triggerEvent !== input.triggerEvent
+          ) {
+            throw RastaError.idempotencyKeyReused();
+          }
+          rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'duplicate' });
+          return { kind: 'SKIPPED', reason: 'duplicate', ruleId: rule.id } as GrantOutcome;
+        }
+
+        if (rule.rewardType === 'CASHBACK' && !this.env.ECONOMIC_REWARD_CASHBACK_ENABLED) {
+          // Refused rather than silently skipped. A rule that exists, is ACTIVE,
+          // and quietly does nothing is a control claiming something it does not
+          // have (docs/24 Q-07).
+          rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'cashback_disabled' });
+          return { kind: 'SKIPPED', reason: 'cashback_disabled', ruleId: rule.id };
+        }
 
         const periodKey = periodKeyFor(rule.periodType, input.occurredAt);
         const alreadyGranted = await this.pointsInPeriod(
@@ -166,6 +191,8 @@ export class RewardService {
           input.userId,
           rule.id,
           periodKey,
+          rule.periodType,
+          input.occurredAt,
         );
 
         const decision = evaluate(rule, input.payload, input.occurredAt, alreadyGranted);
@@ -240,6 +267,7 @@ export class RewardService {
               monetised: decision.monetised,
               journalId,
               periodKey,
+              occurredAt: input.occurredAt,
               grantedAt,
             },
           }),
@@ -296,7 +324,21 @@ export class RewardService {
       // `(rule_id, source_reference)` is unique: a replayed event, or a second
       // consumer instance, cannot grant twice. That is the anti-fraud control
       // in docs/10 § 10.9 as much as it is idempotency.
-      if (isUniqueViolation(error)) {
+      if (isRewardSourceConflict(error)) {
+        const existing = await runUnscoped(
+          'confirm the duplicate belongs to this tenant, subject and fact',
+          () =>
+            this.prisma.client.reward.findFirst({
+              where: {
+                organizationId: input.organizationId,
+                userId: input.userId,
+                ruleId: rule.id,
+                triggerEvent: input.triggerEvent,
+                sourceReference: input.sourceReference,
+              },
+            }),
+        );
+        if (!existing) throw error;
         rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'duplicate' });
         return { kind: 'SKIPPED', reason: 'duplicate', ruleId: rule.id };
       }
@@ -360,7 +402,36 @@ export class RewardService {
     userId: string,
     ruleId: string,
     periodKey: string,
+    periodType: string | null,
+    occurredAt: Date,
   ): Promise<number> {
+    if (periodType === 'WEEK') {
+      const { start, end, legacyKeys } = isoWeekWindow(occurredAt);
+      // Known occurrence time wins over a legacy key, which may conflate two
+      // different ISO weeks (2018-W01). Never infer occurrence from grantedAt.
+      const [row] = await runUnscoped(
+        'weekly cap for this tenant and subject under the balance lock',
+        () =>
+          tx.$queryRaw<{ points: bigint }[]>`
+          SELECT COALESCE(SUM(r.points), 0)::bigint AS points
+            FROM reward r
+            LEFT JOIN reward_source_evaluation e
+              ON e.organization_id = r.organization_id
+             AND e.trigger_event = r.trigger_event
+             AND e.source_reference = r.source_reference
+           WHERE r.organization_id = ${organizationId} AND r.user_id = ${userId}
+             AND r.rule_id = ${ruleId}
+             AND ((COALESCE(r.occurred_at, e.occurred_at) >= ${start}
+                   AND COALESCE(r.occurred_at, e.occurred_at) < ${end})
+                  OR (COALESCE(r.occurred_at, e.occurred_at) IS NULL
+                      AND r.period_key = ANY(${legacyKeys}::text[])))
+        `,
+      );
+      const total = row?.points ?? 0n;
+      // Points, never money: saturate before converting to the engine's
+      // bounded integer domain. Every configured cap is <= 10,000,000.
+      return total > BigInt(MAX_TOTAL_POINTS) ? MAX_TOTAL_POINTS : Number(total);
+    }
     const result = await runUnscoped('the cap count runs under the balance row lock', () =>
       tx.reward.aggregate({
         where: { organizationId, userId, ruleId, periodKey },
@@ -429,16 +500,7 @@ export class RewardService {
   }
 
   /**
-   * Whether any active rule could reward this trigger for this organization.
-   *
-   * Asked before the reward consumer checks the event with the fact's owner
-   * (ADR-061 § 4). With no rule configured, which is the MVP's real state,
-   * nothing can be granted, so there is nothing to confirm, and the busiest
-   * event on the platform costs no round trip. Validity windows are left to
-   * `grantFor`, which evaluates them against the source's own instant.
-   */
-  /**
-   * The ids of the rules that would evaluate this fact now, in a stable order.
+   * The ids of the rules applicable at the confirmed fact time, in a stable order.
    *
    * What the reward consumer records when it claims a fact, so that a
    * redelivery after a crash evaluates the same rules and no others (PR #110
@@ -450,22 +512,42 @@ export class RewardService {
     organizationId: string,
     triggerEvent: string,
     occurredAt: Date,
+    tx: ExtendedPrismaClient = this.prisma.client,
   ): Promise<string[]> {
-    const rules = await this.candidateRules(organizationId, triggerEvent);
+    const rules = await this.candidateRules(organizationId, triggerEvent, occurredAt, tx);
     return applicableRules(rules as RewardRuleView[], organizationId, triggerEvent, occurredAt)
       .map((rule) => rule.id)
       .sort();
   }
 
-  private candidateRules(organizationId: string, triggerEvent: string) {
+  /** Hold through selection AND the durable claim, never through grant transactions. */
+  async withRuleSelection<T>(work: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
+    return this.prisma.transaction(async (tx) => {
+      await lockRewardConfiguration(tx, 'read');
+      return work(tx);
+    });
+  }
+
+  private candidateRules(
+    organizationId: string,
+    triggerEvent: string,
+    occurredAt: Date,
+    tx: ExtendedPrismaClient = this.prisma.client,
+  ) {
     return runUnscoped(
       'reward rules are platform-wide or organization-specific; the OR below is the scope',
       () =>
-        this.prisma.client.rewardRule.findMany({
+        tx.rewardRule.findMany({
           where: {
             triggerEvent,
-            status: 'ACTIVE',
             OR: [{ organizationId: null }, { organizationId }],
+          },
+          include: {
+            statusHistory: {
+              where: { effectiveAt: { lte: occurredAt } },
+              orderBy: [{ effectiveAt: 'desc' }, { id: 'desc' }],
+              take: 1,
+            },
           },
         }),
     );
@@ -475,7 +557,13 @@ export class RewardService {
   // Configuration
   // ==========================================================================
 
-  async createRule(dto: CreateRewardRuleDto) {
+  /**
+   * Creates a reward rule, answering `answer` inside the transaction that
+   * writes it and its `REWARD_RULE_CHANGED` record: a retry whose first
+   * response was lost replays this rule, and never creates a second one that
+   * would pay for the same fact again (economic audit F1).
+   */
+  async createRule(dto: CreateRewardRuleDto, answer: IdempotentAnswer<RewardRuleRow>) {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     if (dto.rewardType === 'CASHBACK' && !this.env.ECONOMIC_REWARD_CASHBACK_ENABLED) {
@@ -525,11 +613,23 @@ export class RewardService {
     };
 
     return this.prisma.transaction(async (tx) => {
+      await lockRewardConfiguration(tx, 'write');
       const created = await runUnscoped(
         'a reward rule may be platform-wide, which no tenant scope can express',
         () => tx.rewardRule.create({ data }),
       );
+      await runUnscoped('initial status history belongs to the newly created rule', () =>
+        tx.rewardRuleStatusHistory.create({
+          data: {
+            ruleId: created.id,
+            status: created.status,
+            effectiveAt:
+              created.validFrom < created.createdAt ? created.validFrom : created.createdAt,
+          },
+        }),
+      );
       await this.recordRuleChange(tx, { rule: created, before: null, actor });
+      await answer.respond(tx, created);
       return created;
     });
   }
@@ -549,6 +649,7 @@ export class RewardService {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     return this.prisma.transaction(async (tx) => {
+      await lockRewardConfiguration(tx, 'write');
       const locked = await runUnscoped(
         'reward rules may be platform-wide',
         () =>
@@ -560,20 +661,32 @@ export class RewardService {
         tx.rewardRule.findUniqueOrThrow({ where: { id } }),
       );
 
+      const [clock] = await tx.$queryRaw<
+        { at: Date }[]
+      >`SELECT (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) AS at`;
+      if (!clock) throw RastaError.internal('Rule change clock unavailable');
       const updated = await runUnscoped('reward rules may be platform-wide', () =>
         tx.rewardRule.update({
           where: { id },
           data: {
             ...(dto.status !== undefined ? { status: dto.status } : {}),
             ...(dto.validTo !== undefined
-              ? { validTo: nextValidTo(existing, dto.validTo, new Date()) }
+              ? { validTo: nextValidTo(existing, dto.validTo, clock.at) }
               : {}),
             ...(dto.label !== undefined ? { label: dto.label } : {}),
             updatedBy: actor,
+            updatedAt: clock.at,
           },
         }),
       );
 
+      if (updated.status !== existing.status) {
+        await runUnscoped('append a status transition under the rule lock', () =>
+          tx.rewardRuleStatusHistory.create({
+            data: { ruleId: id, status: updated.status, effectiveAt: clock.at },
+          }),
+        );
+      }
       await this.recordRuleChange(tx, { rule: updated, before: existing, actor });
       return updated;
     });
@@ -765,4 +878,19 @@ function rewardRuleTerms(rule: RewardRuleRow) {
     status: rule.status,
     label: rule.label,
   };
+}
+
+/** Prisma PostgreSQL reports columns; some adapters report the constraint name. */
+function isRewardSourceConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002')
+    return false;
+  const target = error.meta?.target;
+  return (
+    target === 'reward_rule_id_source_reference_key' ||
+    (Array.isArray(target) &&
+      target.length === 2 &&
+      target.includes('rule_id') &&
+      target.includes('source_reference') &&
+      (error.meta?.modelName === undefined || error.meta.modelName === 'Reward'))
+  );
 }

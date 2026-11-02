@@ -116,7 +116,7 @@ export const submitQualificationSchema = z
      * admissions rule (AGENTS.md § 9); the reviewer decides what is enough, and
      * a submission with nothing attached is one a reviewer can reject.
      */
-    evidence: z.array(qualificationEvidenceInputSchema).max(20).default([]),
+    evidence: z.array(qualificationEvidenceInputSchema).max(20).prefault([]),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -274,7 +274,7 @@ export type ListQualifiedForQuery = z.infer<typeof listQualifiedForQuerySchema>;
 /** The reviewer's queue. Platform operators only — see `access.ts`. */
 export const reviewQueueQuerySchema = cursorPaginationSchema
   .extend({
-    state: z.enum(QUALIFICATION_STATES).default('SUBMITTED'),
+    state: z.enum(QUALIFICATION_STATES).prefault('SUBMITTED'),
     capability: capability.optional(),
   })
   .strict();

@@ -5,12 +5,13 @@ import { z } from 'zod';
 
 import { signPayload, verifyPayload } from './signed-payload';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_1'),
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -64,10 +65,31 @@ describe('signed payloads', () => {
     expect(verifyPayload(SESSION, 'something-else', sign(), SCHEMA, NOW)).toBeNull();
   });
 
-  it('is unaffected by the session fields that do not identify the login', () => {
-    expect(
-      verifyPayload({ ...SESSION, accessToken: 'refreshed' }, 'test', sign(), SCHEMA, NOW),
-    ).not.toBeNull();
+  it('is unaffected by a refresh that keeps the organization', () => {
+    const refreshed = {
+      ...SESSION,
+      accessToken: actingAccessToken('ORG_1', ['ORGANIZATION_ADMIN']),
+    };
+    expect(verifyPayload(refreshed, 'test', sign(), SCHEMA, NOW)).not.toBeNull();
+  });
+
+  it('refuses a token issued while the session acted for another organization (PR 405 r2 F2)', () => {
+    const inB = { ...SESSION, organizationId: 'ORG_2', accessToken: actingAccessToken('ORG_2') };
+    expect(verifyPayload(inB, 'test', sign(), SCHEMA, NOW)).toBeNull();
+    const none = { ...SESSION, organizationId: null, accessToken: actingAccessToken(null) };
+    expect(verifyPayload(none, 'test', sign(), SCHEMA, NOW)).toBeNull();
+  });
+
+  it('signs nothing and accepts nothing for a session whose organization cannot be told', () => {
+    const token = sign();
+    for (const untold of [
+      { ...SESSION, accessToken: 'opaque' },
+      { ...SESSION, organizationId: 'ORG_2' },
+      { ...SESSION, accessToken: actingAccessToken('ORG_1', []) },
+    ]) {
+      expect(verifyPayload(untold, 'test', token, SCHEMA, NOW)).toBeNull();
+      expect(() => signPayload(untold, 'test', { id: 'AST_1', n: 2 }, 60, NOW)).toThrow();
+    }
   });
 
   it('refuses a body that was changed, even when the MAC is left alone', () => {

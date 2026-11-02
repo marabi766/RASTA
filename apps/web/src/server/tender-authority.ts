@@ -85,8 +85,8 @@ export type AuthorityStep = z.infer<typeof AUTHORITY_STEP_SCHEMA>;
 
 const inboxPageSchema = z.object({
   items: z.array(AUTHORITY_STEP_SCHEMA),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 /** One step of this tender in the inbox, and its own read for the decision. */

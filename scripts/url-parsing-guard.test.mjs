@@ -52,14 +52,37 @@ const ALLOWED = Object.freeze([
     reason: 'the reader itself: the native error is discarded, a fixed text is thrown',
   },
   {
+    file: 'packages/contracts/src/common/parsable-url.ts',
+    call: 'new URL(payload.value)',
+    reason:
+      "zod 3's .url() as a schema check: only whether the value parses; the native error is discarded and the issue carries no text of it",
+  },
+  {
     file: 'scripts/verify-migration-reversible-lib.mjs',
     call: 'new URL( `../services/identity-service/prisma/migrations/${MEMBERSHIP_GUARD}/migration.sql`, import.meta.url, )',
     reason: 'a repository file: a constant migration name against import.meta.url',
   },
   {
+    file: 'scripts/testing-dev-only-source.mjs',
+    call: 'new URL(target, pathToFileURL(join(dir, sep)))',
+    reason:
+      "a package.json exports/imports target against its package's own file URL, as Node resolves it (percent-escapes, ?query); a repository file, no configuration",
+  },
+  {
     file: 'services/identity-service/test/audit-stub.ts',
     call: "new URL(request.url ?? '/', 'http://stub.invalid')",
     reason: "the stub server's incoming request path against a literal base; no configuration",
+  },
+  {
+    file: 'apps/web/src/test/landing.ts',
+    call: "new URL(url, 'http://portal.test')",
+    reason: 'test helper: a redirect the portal drew, against a literal base; no configuration',
+  },
+  {
+    file: 'services/identity-service/test/keycloak-http-stub.ts',
+    call: "new URL(request.url ?? '', this.url)",
+    reason:
+      "the stub server's incoming request path against its own loopback base; no configuration",
   },
   {
     file: 'apps/web/src/app/AccountBoundary.tsx',
@@ -128,11 +151,7 @@ const ALLOWED = Object.freeze([
 ]);
 
 /** zod `.url()` settings in a service's configuration that stay, and why. */
-const ALLOWED_ZOD_URL_SETTINGS = Object.freeze({
-  S3_ENDPOINT:
-    'read by the AWS SDK (its own HTTP handler, not fetch), and the endpoint is never ' +
-    'printed by document-service',
-});
+const ALLOWED_ZOD_URL_SETTINGS = Object.freeze({});
 
 const sites = (text, file = 'x.mjs') => rawUrlParses(text, file).map((site) => site.kind);
 
@@ -440,6 +459,8 @@ test('the command-line contract holds for the repository', () => {
 });
 
 test('every service base URL is read with serviceUrlSchema, and no bare zod .url()', () => {
+  // `.check(parsableUrl())` is zod 3's `.url()` kept under zod 4 (@rasta/contracts).
+
   const configFiles = sourceFiles(ROOT).filter(
     (file) => /^services\/[^/]+\/src\/config\/[^/]+\.ts$/.test(file) && !isTestFile(file),
   );
@@ -449,7 +470,7 @@ test('every service base URL is read with serviceUrlSchema, and no bare zod .url
   for (const file of configFiles) {
     const text = readFileSync(join(ROOT, file), 'utf8');
     for (const match of text.matchAll(
-      /\b([A-Z][A-Z0-9_]*)\s*:\s*z\s*\.\s*string\(\)\s*\.\s*url\(/g,
+      /\b([A-Z][A-Z0-9_]*)\s*:\s*z\s*\.\s*string\(\)\s*\.\s*(?:url\(|check\(\s*parsableUrl\()/g,
     )) {
       zodUrlSettings.add(match[1]);
       if (!(match[1] in ALLOWED_ZOD_URL_SETTINGS)) {

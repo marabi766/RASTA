@@ -5,8 +5,9 @@ import {
   runOutboxShutdownProvider,
   type ShutdownFactoryProvider,
 } from '@rasta/testing';
-import { AppModule, ENV } from './app.module';
+import { AppModule, ENV, FENCE_PRISMA, SAMPLER_PRISMA } from './app.module';
 import { KafkaEventPublisher } from './outbox/kafka.publisher';
+import { PrismaService } from './prisma/prisma.service';
 
 /**
  * D-052 phase 4b (Codex r1 on #293, F1): AppModule's `OutboxShutdown` closes
@@ -34,6 +35,13 @@ describe('AppModule closes the Kafka publisher after the outbox drain (D-052 pha
       envToken: ENV,
     });
 
-    expect(publisherCloseProblems(stops, KafkaEventPublisher)).toEqual([]);
+    // The three pools close after it, last of all (#458 r2 F2).
+    expect(
+      publisherCloseProblems(stops, KafkaEventPublisher, [
+        PrismaService,
+        FENCE_PRISMA,
+        SAMPLER_PRISMA,
+      ]),
+    ).toEqual([]);
   });
 });

@@ -1,4 +1,4 @@
-import { makeDue as makeEligibilityDue } from '@rasta/testing';
+import { makeDue as makeEligibilityDue, setEligibilityFixture } from '@rasta/testing';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import { RastaError, runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -142,10 +142,7 @@ describe('approval policies follow an ORGANIZATION_MOVED (Q-83)', () => {
         select: { id: true },
       });
       const ids = tasks.map((task) => task.id);
-      await w.prisma.client.policyReconciliationTask.updateMany({
-        where: { id: { in: ids }, organizationId: { in: organizations }, status: 'PENDING' },
-        data: { leaseUntil: null, leaseToken: null },
-      });
+      await setEligibilityFixture(w.prisma, 'policyReleased', ids);
       await makeEligibilityDue(w.prisma, ids, 'policy_reconciliation_task');
     });
 

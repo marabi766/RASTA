@@ -75,6 +75,10 @@ class FakeKafkaConsumer {
   constructor(private readonly disconnectBehaviour: 'answers' | 'never' = 'answers') {}
 
   async connect(): Promise<void> {}
+  readonly events = { CRASH: 'consumer.crash' };
+  on(): () => void {
+    return () => undefined;
+  }
   async subscribe(): Promise<void> {}
   async run(config: { eachMessage: EachMessage }): Promise<void> {
     this.eachMessage = config.eachMessage;

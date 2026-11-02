@@ -21,7 +21,8 @@
  *   - kafkajs treats MESSAGE_TOO_LARGE as non-retriable: the consumer crashes
  *     and does NOT restart itself (`restart: false`), so it stops on every
  *     partition it reads, not only the poison record's — while
- *     `EventConsumer.isRunning()`, which health checks read, still says true;
+ *     `EventConsumer.isRunning()` becomes false and readiness turns red before
+ *     bounded graceful shutdown begins with a non-zero exit;
  *   - the group's committed offset stays on the poison record and the record
  *     behind it is never consumed: no silent loss, for as long as the source
  *     topic retains the record;
@@ -52,9 +53,13 @@ const { Kafka, logLevel, CompressionTypes, CompressionCodecs } = kafkajs;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const contracts = require(resolve(ROOT, 'packages/contracts/dist/index.js'));
-const { EventConsumer, UnprocessableEventError, kafkaConnectionFor } = require(
-  resolve(ROOT, 'packages/nest-common/dist/index.js'),
-);
+const {
+  EventConsumer,
+  UnprocessableEventError,
+  kafkaConnectionFor,
+  installGracefulShutdown,
+  assertConsumerHealth,
+} = require(resolve(ROOT, 'packages/nest-common/dist/index.js'));
 const encodeRecord = require('kafkajs/src/protocol/recordBatch/record/v0');
 const { RecordBatch } = require('kafkajs/src/protocol/recordBatch/v0');
 
@@ -233,7 +238,29 @@ test('KNOWN ESCAPE (i): a source record GZIP level 9 whose dead letter does not 
     //    dead-letter send, the broker's answer, and each kafkajs crash are
     //    recorded.
     const crashes = [];
+    const crashTimes = [];
+    const exits = [];
+    const shutdownStarts = [];
+    const crashBoundMs = 30_000;
     const consumerFor = (clientId) => {
+      // Production uses the same shutdown function on its Nest application. This test
+      // intercepts only process.exit so the broker offset assertions can run afterwards.
+      installGracefulShutdown(
+        {
+          close: async () => {
+            const elapsed = Date.now() - crashTimes.at(-1);
+            assert.throws(() => assertConsumerHealth('audit-service'), /CONSUMER_TERMINAL_CRASH/);
+            shutdownStarts.push(elapsed);
+          },
+        },
+        {
+          serviceName: 'audit-service',
+          timeoutMs: crashBoundMs,
+          signalSource: { on: () => undefined },
+          logger: { warn: () => undefined, error: () => undefined },
+          exit: (code) => exits.push(code),
+        },
+      );
       const shared = new EventConsumer(
         {
           ...kafkaConnectionFor('audit-service', clientId),
@@ -272,7 +299,10 @@ test('KNOWN ESCAPE (i): a source record GZIP level 9 whose dead letter does not 
       const makeConsumer = client.consumer.bind(client);
       client.consumer = (...args) => {
         const inner = makeConsumer(...args);
-        inner.on(inner.events.CRASH, ({ payload }) => crashes.push(payload));
+        inner.on(inner.events.CRASH, ({ payload }) => {
+          crashes.push(payload);
+          crashTimes.push(Date.now());
+        });
         return inner;
       };
       return shared;
@@ -291,7 +321,16 @@ test('KNOWN ESCAPE (i): a source record GZIP level 9 whose dead letter does not 
     assert.ok(isTooLarge(rejected[0]), String(rejected[0]?.type));
     assert.equal(rootCause(crashes[0].error).type, 'MESSAGE_TOO_LARGE');
     assert.equal(crashes[0].restart, false);
-    assert.equal(consumer.isRunning(), true, 'EventConsumer noticed the crash');
+    await eventually(
+      'readiness red and graceful exit requested',
+      async () => !consumer.isRunning() && exits.length === 1,
+      crashBoundMs,
+    );
+    assert.equal(consumer.isRunning(), false);
+    assert.equal(consumer.failureReason(), 'message_too_large');
+    assert.deepEqual(exits, [1]);
+    assert.ok(shutdownStarts[0] < crashBoundMs);
+    process.stdout.write(`crash to readiness red and shutdown start: ${shutdownStarts[0]} ms\n`);
     assert.deepEqual(sent, []);
     assert.deepEqual(await adminClient.fetchTopicOffsets(DLQ), dlqBefore);
 
@@ -320,6 +359,16 @@ test('KNOWN ESCAPE (i): a source record GZIP level 9 whose dead letter does not 
       poisonOffset,
     );
 
+    assert.equal(consumer.isRunning(), false, 'the whole consumer instance must report down');
+    assert.equal(
+      stalled.partitions.find(({ partition }) => partition === PARTITION + 1).offset,
+      ends.find(({ partition }) => partition === PARTITION + 1).high,
+      'another assigned partition advanced after the terminal crash',
+    );
+    process.stdout.write(
+      'consumer reported down: poison partition uncommitted; other partition unchanged\n',
+    );
+
     await consumer.stop({ deadlineAt: Date.now() + 20_000 });
     consumer = undefined;
 
@@ -336,6 +385,13 @@ test('KNOWN ESCAPE (i): a source record GZIP level 9 whose dead letter does not 
     assert.equal(rejected.length, 2);
     assert.ok(rejected.every(isTooLarge));
     assert.equal(crashes[1].restart, false);
+    await eventually(
+      'second terminal crash to request non-zero exit',
+      async () => exits.length === 2,
+      crashBoundMs,
+    );
+    assert.deepEqual(exits, [1, 1]);
+    assert.ok(shutdownStarts.every((elapsed) => elapsed < crashBoundMs));
     await consumer.stop({ deadlineAt: Date.now() + 20_000 });
     consumer = undefined;
 

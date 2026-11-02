@@ -19,7 +19,6 @@ import {
   type ProjectBaseline,
 } from '@/server/project-commands';
 import { webServerEnv } from '@/server/env';
-import { tokenWriteRoles } from '@/server/realm-roles';
 import {
   fetchExecutionPolicy,
   fetchProject,
@@ -40,6 +39,12 @@ import {
   type ProjectToken,
 } from './ProjectCommands';
 import { ProjectDetailScreen } from './ProjectDetailScreen';
+import {
+  actingOrganizationLabel,
+  actingScope,
+  sessionWriteRoles,
+} from '@/server/session-organization';
+import { pageParams } from '@/server/page-context';
 
 /**
  * The `/projects/[id]` route — جزئیات پروژه (docs/16 § ۱۶٫۶).
@@ -100,7 +105,7 @@ function decisionTokens(
 ): Record<string, DecisionTokens> {
   const tokens: Record<string, DecisionTokens> = {};
   for (const step of steps) {
-    if (!mayDecide(session.accessToken, step)) continue;
+    if (!mayDecide(session, step)) continue;
     const token = (command: 'grant' | 'reject'): ProjectToken => ({
       submissionId: mintSubmissionId(session),
       baseline: sealProjectBaseline(session, {
@@ -128,9 +133,9 @@ export default async function ProjectPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const query = await searchParams;
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/projects/${id}`)}`);
+  const query = await pageParams(session, searchParams);
 
   const [result, approvals, demoMode] = await Promise.all([
     fetchProject(session, id),
@@ -148,7 +153,7 @@ export default async function ProjectPage({
   // "closed" — the request stays offered and the service decides.
   const closed = policy?.kind === 'OK' && policy.data.kind === 'CLOSED';
 
-  const canWrite = canWriteProjects(tokenWriteRoles(session.accessToken), webServerEnv());
+  const canWrite = canWriteProjects(sessionWriteRoles(session), webServerEnv());
   const offered = project
     ? offeredCommands({ status: project.status, canWrite, policyClosed: closed })
     : [];
@@ -164,8 +169,9 @@ export default async function ProjectPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">

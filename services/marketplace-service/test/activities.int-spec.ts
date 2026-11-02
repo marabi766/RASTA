@@ -301,7 +301,7 @@ describe('order saga activities (real database)', () => {
 
     it('marks an insufficient balance non-retryable', async () => {
       const caught = (await failWith(
-        RastaError.insufficientBalance('WAL_1', '500000', '10'),
+        RastaError.insufficientBalance('WAL_1'),
       )) as ApplicationFailure;
 
       expect(caught.nonRetryable).toBe(true);

@@ -25,7 +25,7 @@ export const assetEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * How far ahead to warn about an expiring insurance policy or inspection.
@@ -34,7 +34,7 @@ export const assetEnvSchema = baseEnvSchema
      * needs more notice than one renewing at a counter, and the right number
      * is the client's call, not the platform's.
      */
-    EXPIRY_WARNING_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+    EXPIRY_WARNING_DAYS: z.coerce.number().int().min(1).max(365).prefault(30),
 
     /**
      * Who may decide an insurance claim and record its settlement.
@@ -47,7 +47,7 @@ export const assetEnvSchema = baseEnvSchema
      */
     INSURANCE_CLAIM_DECISION_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN,UNION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN,UNION_ADMIN')
       .transform((raw) => raw.split(',').map((role) => role.trim()))
       .pipe(z.array(z.string().regex(/^[A-Z][A-Z0-9_]*$/)).nonempty()),
 
@@ -63,14 +63,14 @@ export const assetEnvSchema = baseEnvSchema
       .string()
       .trim()
       .regex(/^\d{0,30}$/, fixed('Must be a non-negative integer in minor units, or empty'))
-      .default('')
+      .prefault('')
       .transform((raw) => (raw === '' ? null : BigInt(raw))),
 
     /**
      * The most documents one insurance claim holds (docs/24 Q-128, temporary).
      * Configuration, not code (AGENTS.md § 9); the conservative default is 20.
      */
-    INSURANCE_CLAIM_MAX_DOCUMENTS: z.coerce.number().int().min(1).max(200).default(20),
+    INSURANCE_CLAIM_MAX_DOCUMENTS: z.coerce.number().int().min(1).max(200).prefault(20),
 
     /**
      * The claim statuses in which a document may still be attached (Q-128).
@@ -80,7 +80,7 @@ export const assetEnvSchema = baseEnvSchema
      */
     INSURANCE_CLAIM_DOCUMENT_STATUSES: z
       .string()
-      .default('SUBMITTED,UNDER_REVIEW')
+      .prefault('SUBMITTED,UNDER_REVIEW')
       .transform((raw) => raw.split(',').map((status) => status.trim()))
       .pipe(
         z
@@ -103,7 +103,7 @@ export const assetEnvSchema = baseEnvSchema
      */
     INSURANCE_COVERAGES_FOLLOWING_VEHICLE: z
       .string()
-      .default(INSURANCE_COVERAGES.join(','))
+      .prefault(INSURANCE_COVERAGES.join(','))
       .transform((raw) =>
         raw
           .split(',')
@@ -134,10 +134,15 @@ export const assetEnvSchema = baseEnvSchema
      */
     DOCUMENT_SERVICE_URL: serviceUrlSchema,
     /** One document lookup, body included. A timeout refuses the attach (503-class). */
-    ASSET_DOCUMENT_LOOKUP_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+    ASSET_DOCUMENT_LOOKUP_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).prefault(3000),
 
     /** One clearance exchange, body included. A timeout refuses the transfer. */
-    ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+    ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(100)
+      .max(30_000)
+      .prefault(3000),
 
     /**
      * How long an owner keeps the machine fenced for a transfer that neither
@@ -145,14 +150,14 @@ export const assetEnvSchema = baseEnvSchema
      * the commit. The transfer itself must commit within half of it. The
      * owners accept 30 to 3600.
      */
-    ASSET_TRANSFER_FENCE_TTL_SECONDS: z.coerce.number().int().min(30).max(3600).default(600),
+    ASSET_TRANSFER_FENCE_TTL_SECONDS: z.coerce.number().int().min(30).max(3600).prefault(600),
 
     /**
      * How long a **completed** `POST /v1/assets` under an `Idempotency-Key` is
      * remembered (#169, docs/06 § 6.8). Within it a retry by the same caller
      * with the same body replays the original 201; after it the key is free.
      */
-    ASSET_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    ASSET_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
 
     /**
      * How long a claim on an `Idempotency-Key` stays **in flight**, in seconds:
@@ -166,7 +171,7 @@ export const assetEnvSchema = baseEnvSchema
      * so a request that is merely slow keeps its claim. Ceiling one hour.
      * Default two minutes, as maintenance-service's (#187).
      */
-    ASSET_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).default(120),
+    ASSET_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(30).max(3_600).prefault(120),
   });
 
 export const ASSET_ENV_MESSAGES = seal();

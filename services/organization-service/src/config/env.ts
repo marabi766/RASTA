@@ -28,7 +28,7 @@ export const organizationEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * Maximum depth of the organization tree.
@@ -37,7 +37,7 @@ export const organizationEnvSchema = baseEnvSchema
      * The limit exists to stop a cycle or a bad import producing an unbounded
      * chain that makes every subtree query pathological.
      */
-    MAX_HIERARCHY_DEPTH: z.coerce.number().int().min(1).max(20).default(8),
+    MAX_HIERARCHY_DEPTH: z.coerce.number().int().min(1).max(20).prefault(8),
 
     /**
      * Roles that may set governance policy (`POST /v1/organizations/:id/policies`).
@@ -60,7 +60,7 @@ export const organizationEnvSchema = baseEnvSchema
      */
     GOVERNANCE_POLICY_SETTER_ROLES: z
       .string()
-      .default('SYSTEM_ADMIN,UNION_ADMIN')
+      .prefault('SYSTEM_ADMIN,UNION_ADMIN')
       .transform((raw) =>
         raw
           .split(',')
@@ -70,7 +70,7 @@ export const organizationEnvSchema = baseEnvSchema
       .pipe(
         z
           .array(z.enum(PLATFORM_ROLES), {
-            errorMap: () => ({ message: UNKNOWN_SETTER_ROLE }),
+            error: UNKNOWN_SETTER_ROLE,
           })
           .min(1, fixed('GOVERNANCE_POLICY_SETTER_ROLES must name at least one role')),
       ),

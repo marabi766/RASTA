@@ -31,6 +31,36 @@ export {
 } from './common/text';
 
 export { withMaxKeys } from './common/bounds';
+export { parsableUrl } from './common/parsable-url';
+export { isoDateTime, legacyDatetimeRegex, type IsoDateTimeOptions } from './common/iso-datetime';
+export {
+  LEGACY_PARSED_TYPES,
+  LegacyContextError,
+  LegacyRefusal,
+  describeLegacyRefusal,
+  isLegacyRefusal,
+  isSchemaAuthored,
+  joinLegacyValues,
+  legacyDefaultMessage,
+  legacyParse,
+  legacyParseAsync,
+  legacyParsedType,
+  requireLegacyRefusal,
+  type LegacyIssue,
+  type LegacyParseResult,
+  type LegacyIssueCode,
+  type LegacySizeType,
+  type LegacyStringValidation,
+  type LegacyUnionBranchIssue,
+} from './common/zod-issues';
+export {
+  enumOptions,
+  literalValues,
+  resolveZodPath,
+  unwrapZodSchema,
+  zodDef,
+  type ZodDefLike,
+} from './common/zod-schema-walk';
 
 export {
   CURRENCIES,

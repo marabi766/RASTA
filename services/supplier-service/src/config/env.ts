@@ -42,7 +42,7 @@ export const supplierEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
     /**
      * The ADR-052 step-5 performance consumer. **Off by default, and it fails
      * closed**: it writes append-only facts into the tenant a payload names,

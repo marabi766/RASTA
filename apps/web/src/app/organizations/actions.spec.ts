@@ -10,6 +10,9 @@ import {
   IDLE_UPDATE_MEMBER_ROLES_FORM,
   IDLE_UPDATE_ORGANIZATION_FORM,
 } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
+import { landing } from '@/test/landing';
+import { ORGANIZATION_FLASH_SUBJECT, ORGANIZATION_NOTICES } from './notices';
 
 /**
  * The three `/organizations` write paths, from a posted form to a call.
@@ -68,7 +71,7 @@ const SESSION = {
   subject: 'USR_1',
   username: 'admin',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_1'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -221,7 +224,19 @@ describe('editing the organization profile', () => {
       { name: 'نام تازه', shortName: null, externalCode: null },
       expect.any(String),
     );
-    expect(redirect).toHaveBeenCalledWith('/organizations?saved=profile');
+    expect(
+      landing(
+        redirect.mock.calls[0]![0] as string,
+        SESSION,
+        ORGANIZATION_FLASH_SUBJECT,
+        ORGANIZATION_NOTICES,
+      ),
+    ).toEqual({
+      path: '/organizations',
+      query: {},
+      bound: true,
+      confirmed: 'profile',
+    });
   });
 
   it('does not call the service for a form it can already see is invalid', async () => {
@@ -231,6 +246,16 @@ describe('editing the organization profile', () => {
     );
 
     expect(state).toMatchObject({ kind: 'INVALID', fieldErrors: { name: expect.any(String) } });
+    expect(updateOrganization).not.toHaveBeenCalled();
+  });
+
+  it('refuses a profile form naming another organization than the one this request acts for (task 100)', async () => {
+    const state = await submitUpdateOrganization(
+      IDLE_UPDATE_ORGANIZATION_FORM,
+      formData([...ORG_FORM.filter(([k]) => k !== 'organizationId'), ['organizationId', 'ORG_2']]),
+    );
+
+    expect(state).toEqual({ kind: 'REFUSED', reason: 'SUBMISSION' });
     expect(updateOrganization).not.toHaveBeenCalled();
   });
 
@@ -325,7 +350,19 @@ describe('revoking a membership', () => {
       { membershipId: 'MBR_2', reason: 'پایان همکاری' },
       expect.any(String),
     );
-    expect(redirect).toHaveBeenCalledWith('/organizations?revoked=1');
+    expect(
+      landing(
+        redirect.mock.calls[0]![0] as string,
+        SESSION,
+        ORGANIZATION_FLASH_SUBJECT,
+        ORGANIZATION_NOTICES,
+      ),
+    ).toEqual({
+      path: '/organizations',
+      query: {},
+      bound: true,
+      confirmed: 'revoked',
+    });
   });
 
   it('will not revoke without a stated reason', async () => {

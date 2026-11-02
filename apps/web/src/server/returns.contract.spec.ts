@@ -203,7 +203,7 @@ describe('the bodies', () => {
 
   it('lists by the side the portal asks for, and the statuses it filters on', () => {
     const list = squash(topLevelConst(dto, 'listReturnsQuerySchema').getText()) ?? '';
-    expect(list).toContain("role:z.enum(['BUYER','SUPPLIER']).default('BUYER')");
+    expect(list).toContain("role:z.enum(['BUYER','SUPPLIER']).prefault('BUYER')");
     expect(list).toContain('status:z.enum(RETURN_STATUSES).optional()');
     expect(list).toContain('limit:numberInput(z.number().int().min(1).max(100))');
     expect([...RETURN_LIST_SIDES]).toEqual(['BUYER', 'SUPPLIER']);
@@ -317,7 +317,7 @@ describe('every refusal, in the portal’s own words', () => {
 
   it('mirrors the idempotency retention’s bounds (the replay window, `return-replay.ts`)', () => {
     expect(squash(marketplaceEnv)).toContain(
-      'MARKETPLACE_IDEMPOTENCY_TTL_HOURS:z.coerce.number().int().min(1).max(168).default(24)',
+      'MARKETPLACE_IDEMPOTENCY_TTL_HOURS:z.coerce.number().int().min(1).max(168).prefault(24)',
     );
   });
 });

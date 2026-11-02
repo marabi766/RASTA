@@ -17,10 +17,11 @@ import {
 import type { OwnerInput, ScoringCell } from '@/lib/tender-owner-input';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential, sessionAuthority, type SessionTokens } from './session-organization';
 import { webServerEnv, type WebServerEnv } from './env';
 import { utcInstant } from './instant';
 import { canReadProjects } from './portal-nav';
-import { tokenAuthority, tokenPerson } from './realm-roles';
+import { tokenPerson } from './realm-roles';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import type { TenderDetail } from './tenders';
@@ -113,8 +114,8 @@ export type ApprovalRequest = z.infer<typeof APPROVAL_REQUEST_SCHEMA>;
 
 const requestPageSchema = z.object({
   items: z.array(APPROVAL_REQUEST_SCHEMA),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 /** `approvalViewSchema`, as much as a decision needs. */
@@ -234,7 +235,7 @@ export async function readOwnerView<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
     const parsed = schema.safeParse(response.data);
     if (!parsed.success) return { kind: 'MALFORMED', correlationId: response.correlationId };
@@ -330,9 +331,9 @@ export interface OwnerCaller {
   readonly actorId: string | null;
 }
 
-export function ownerCallerOf(accessToken: string): OwnerCaller {
-  const authority = tokenAuthority(accessToken);
-  const person = tokenPerson(accessToken);
+export function ownerCallerOf(session: SessionTokens): OwnerCaller {
+  const authority = sessionAuthority(session);
+  const person = tokenPerson(session.accessToken);
   return {
     organizationId: authority?.organizationId ?? null,
     roles: authority?.roles ?? null,

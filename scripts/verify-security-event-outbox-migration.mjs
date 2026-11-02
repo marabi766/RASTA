@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.ts';
 // -----------------------------------------------------------------------------
 // Proves identity-service's `security_event_outbox` migrations (ADR-053 § 4,
 // AUD-004 Phases C1 and C2) are reversible, by reversing them.
@@ -345,7 +346,13 @@ const insertLegacy = insertInto(C1_VALUES);
 /** A row as Phase C2 writes it. */
 const insertProbe = insertInto(C2_VALUES);
 const clearProbes = `DELETE FROM "${TABLE}" WHERE id LIKE 'SEOCHK%';`;
-const update = (set, id = PROBE) => `UPDATE "${TABLE}" SET ${set} WHERE id = '${id}';`;
+/**
+ * One probe UPDATE. A reviewed template: its SET list may name a clock-gated
+ * column only through a reviewed `eligibilityClockSql` fragment, which the
+ * guard checks at every call.
+ */
+const update = (set, id = PROBE) =>
+  eligibilityClockSql`UPDATE "${TABLE}" SET ${set} WHERE id = '${id}';`;
 const fresh = (statement) => `${clearProbes} ${statement}`;
 
 const startedAt = Date.now();
@@ -380,7 +387,9 @@ mustFail(
 );
 mustRun(
   'claim triple accepts all three together',
-  update(`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`),
+  update(
+    eligibilityClockSql`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`,
+  ),
 );
 mustFail(
   'a published row must hold no claim',
@@ -394,7 +403,7 @@ mustFail(
 );
 mustFail(
   'a retry needs a prior failure',
-  update(`next_attempt_at = now()`),
+  update(eligibilityClockSql`next_attempt_at = now()`),
   'ck_security_event_outbox_next_attempt_requires_failure',
 );
 
@@ -514,7 +523,7 @@ mustRun(
   'a claimed row leaves the index: a successor is accepted',
   fresh(
     `${insertProbe()}
-     ${update(`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`)}
+     ${update(eligibilityClockSql`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`)}
      ${insertProbe({ id: `'${SECOND}'` })}`,
   ),
 );
@@ -554,17 +563,23 @@ mustRun('the count grows before the first claim', update('occurrence_count = 5')
 mustFail('the count never shrinks', update('occurrence_count = 4'), C2_TRIGGER);
 mustRun(
   'a claim is accepted',
-  update(`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`),
+  update(
+    eligibilityClockSql`claim_token = 't', claim_owner = 'o', claim_expires_at = now(), claim_count = 1`,
+  ),
 );
 mustFail('a claimed row cannot change its count', update('occurrence_count = 6'), C2_TRIGGER);
 mustFail(
   'claim_count never decreases',
-  update(`claim_token = NULL, claim_owner = NULL, claim_expires_at = NULL, claim_count = 0`),
+  update(
+    eligibilityClockSql`claim_token = NULL, claim_owner = NULL, claim_expires_at = NULL, claim_count = 0`,
+  ),
   C2_TRIGGER,
 );
 mustRun(
   'delivery state still moves on a claimed row',
-  update(`published_at = now(), claim_token = NULL, claim_owner = NULL, claim_expires_at = NULL`),
+  update(
+    eligibilityClockSql`published_at = now(), claim_token = NULL, claim_owner = NULL, claim_expires_at = NULL`,
+  ),
 );
 mustRun('clear the probe rows', clearProbes);
 

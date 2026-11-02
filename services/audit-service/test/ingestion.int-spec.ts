@@ -1,9 +1,10 @@
 import {
+  eventEnvelopeSchema,
   returnDispatchReleasedPayloadSchema,
   returnDispatchWithdrawnPayloadSchema,
   type EventEnvelope,
 } from '@rasta/contracts';
-import type { EventDelivery } from '@rasta/nest-common';
+import { buildOutboxRow, runWithContext, type EventDelivery } from '@rasta/nest-common';
 import { SENSITIVE_KEYS } from '@rasta/logging';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { AuditRepository } from '../src/audit/audit.repository';
@@ -119,6 +120,63 @@ describe('domain-event ingestion (real PostgreSQL)', () => {
     expect(row.sourceTopic).toBe('rasta.asset.v1');
     expect(row.sourceStreamSeq).toBe(7n);
     expect(row.outcome).toBe('SUCCESS');
+  });
+
+  it('stores an unauthenticated request origin as ANONYMOUS with no id, and background work as SYSTEM / producer (PR #483 r3 F1)', async () => {
+    // Envelopes as a producer's outbox builds them (`buildOutboxRow`), parsed
+    // as the consumer parses them: one inside an anonymous HTTP request (a
+    // public self-registration), one with no request at all (a sweep).
+    const tenantId = id('ORG');
+    const build = () =>
+      buildOutboxRow(
+        {
+          aggregateType: 'RegistrationRequest',
+          aggregateId: id('REG'),
+          eventName: 'REGISTRATION_SUBMITTED',
+          topic: 'rasta.identity.v1',
+          organizationId: tenantId,
+          payload: {},
+        },
+        { producer: 'identity-service' },
+      ).payload;
+    const anonymous = eventEnvelopeSchema.parse(
+      runWithContext(
+        {
+          correlationId: id('COR'),
+          requestId: id('REQ'),
+          organizationIds: [],
+          roles: [],
+          authType: 'ANONYMOUS',
+          startedAt: Date.now(),
+        },
+        build,
+      ),
+    ) as EventEnvelope;
+    const background = eventEnvelopeSchema.parse(build()) as EventEnvelope;
+    expect(anonymous).toMatchObject({ anonymous: true });
+    expect(anonymous).not.toHaveProperty('actor');
+    expect(background).not.toHaveProperty('anonymous');
+
+    for (const source of [anonymous, background]) {
+      const record = toAuditEventRecord(source, delivery('rasta.identity.v1'));
+      expect(await repository.ingest(record, DOMAIN_PROJECTOR_CONSUMER)).toBe('WRITTEN');
+    }
+    const stored = async (source: EventEnvelope) => {
+      const row = await prisma.client.auditEvent.findFirstOrThrow({
+        where: { sourceEventId: source.eventId },
+      });
+      return { actorType: row.actorType, actorId: row.actorId, organizationId: row.organizationId };
+    };
+    expect(await stored(anonymous)).toEqual({
+      actorType: 'ANONYMOUS',
+      actorId: null,
+      organizationId: tenantId,
+    });
+    expect(await stored(background)).toEqual({
+      actorType: 'SYSTEM',
+      actorId: 'identity-service',
+      organizationId: tenantId,
+    });
   });
 
   it('never persists the payload, so a secret in it cannot reach the store', async () => {

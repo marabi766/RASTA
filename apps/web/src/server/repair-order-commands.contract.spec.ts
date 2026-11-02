@@ -220,7 +220,7 @@ describe('the request bodies', () => {
     ['recordPartSchema', 'quantity', 'partQuantity'],
     ['recordPartSchema', 'unit', 'displayText(1, 32)'],
     ['recordPartSchema', 'unitCostMinor', 'boundedAmountMinorSchema'],
-    ['recordPartSchema', 'source', "partSourceSchema.default('WORKSHOP_SUPPLIED')"],
+    ['recordPartSchema', 'source', "partSourceSchema.prefault('WORKSHOP_SUPPLIED')"],
     ['recordPartSchema', 'sourceReference', 'referenceId().min(1).max(128).optional()'],
     ['recordLabourSchema', 'description', 'displayText(2, 500)'],
     ['recordLabourSchema', 'technician', 'displayText(2, 120).optional()'],
@@ -228,7 +228,7 @@ describe('the request bodies', () => {
     ['recordLabourSchema', 'hourlyRateMinor', 'boundedAmountMinorSchema'],
     ['recordCostSchema', 'category', 'directCostCategorySchema'],
     ['recordCostSchema', 'amountMinor', 'boundedAmountMinorSchema'],
-    ['recordCostSchema', 'currency', "currencySchema.default('IRR')"],
+    ['recordCostSchema', 'currency', "currencySchema.prefault('IRR')"],
     ['recordCostSchema', 'description', 'displayText(2, 500)'],
   ])('still bounds %s.%s as the forms do', (schema, key, expected) => {
     expect(squash(schemaProperties(schema).get(key))).toBe(expected);

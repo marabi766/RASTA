@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
+import { credentialFetch } from './credential-fetch';
+import { credentialHeaders, type GatewayCredential } from './session-organization';
 import { MAX_REQUEST_TIMEOUT_MS } from './unresolved-request-policy';
 
 /**
@@ -68,7 +70,8 @@ export class GatewayRequestError extends Error {
 /**
  * The request may have reached the platform, but no answer it could be judged
  * by came back: the connection failed after it was opened, this portal's own
- * deadline passed, or a 2xx arrived whose body would not parse.
+ * deadline passed, a redirect was refused (`credentialFetch`), or a 2xx
+ * arrived whose body would not parse.
  *
  * A read treats it like any other unavailable gateway — it still *is* a
  * `GatewayRequestError`, with the status it always had. A write must not
@@ -150,7 +153,16 @@ export function gatewayUrl(baseUrl: string, path: string): string {
 export interface GatewayCall {
   readonly baseUrl: string;
   readonly path: string;
-  readonly accessToken: string;
+  /**
+   * The bearer **and** the organization this call acts for, minted from the
+   * session by `tenantCredential` (or, for the person's own record only,
+   * `personalCredential`) in `session-organization.ts` — never a bare token.
+   * Sent as `Authorization` and `X-Organization-Id`, so the guard acts for the
+   * organization the session is pinned to and refuses the call if the token
+   * no longer grants it; it is never answered for the token's active
+   * organization instead (audit F2, task 118).
+   */
+  readonly credential: GatewayCredential;
   readonly method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   readonly body?: unknown;
   /** Reused when the caller already has one; a fresh one otherwise. */
@@ -200,6 +212,9 @@ export interface GatewayResponse<T> {
  */
 export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse<T>> {
   const url = gatewayUrl(call.baseUrl, call.path);
+  // Before anything else: a credential this portal did not mint is refused
+  // here, not sent.
+  const identity = credentialHeaders(call.credential);
   if (
     call.replayDeadline !== undefined &&
     (call.idempotencyKey === undefined ||
@@ -209,26 +224,33 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     throw new Error('a replay deadline needs an idempotency key and a positive safe integer');
   }
   const correlationId = call.correlationId ?? randomUUID();
-  const fetchImpl = call.fetchImpl ?? fetch;
+  // Absent: credentialFetch's own fetch, the only raw one (Q-155 boundary).
+  const fetchImpl = call.fetchImpl;
 
   let response: Response;
   try {
-    response = await fetchImpl(url, {
-      method: call.method ?? 'GET',
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${call.accessToken}`,
-        'x-correlation-id': correlationId,
-        ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
-        ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),
-        ...(call.replayDeadline === undefined
-          ? {}
-          : { 'idempotency-replay-deadline': String(call.replayDeadline) }),
+    // Never follows a redirect: the bearer token, and a write's key and body,
+    // are sent to this URL once and nowhere else (Q-155).
+    response = await credentialFetch(
+      url,
+      {
+        method: call.method ?? 'GET',
+        headers: {
+          accept: 'application/json',
+          ...identity,
+          'x-correlation-id': correlationId,
+          ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
+          ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),
+          ...(call.replayDeadline === undefined
+            ? {}
+            : { 'idempotency-replay-deadline': String(call.replayDeadline) }),
+        },
+        body: call.body === undefined ? undefined : JSON.stringify(call.body),
+        cache: 'no-store',
+        signal: AbortSignal.timeout(call.timeoutMs ?? GATEWAY_TIMEOUT_MS),
       },
-      body: call.body === undefined ? undefined : JSON.stringify(call.body),
-      cache: 'no-store',
-      signal: AbortSignal.timeout(call.timeoutMs ?? GATEWAY_TIMEOUT_MS),
-    });
+      fetchImpl,
+    );
   } catch (error) {
     // A refused connection, a DNS failure, a reset, or this function's own
     // timeout above all reject `fetch` rather than answering it, and none of
@@ -237,7 +259,9 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     // failure as one here — rather than in each of those modules — is what
     // makes that mapping actually total (`docs/16 § ۱۶٫۱۱`). Only a failure
     // before anything was sent is a plain one; after that, whether the
-    // platform acted is unknown.
+    // platform acted is unknown. A refused redirect is one of those: the
+    // request was sent and answered with a 3xx that says nothing about whether
+    // it was applied, so a write it answered is unconfirmed, never `neverSent`.
     if (neverSent(error)) throw new GatewayNeverSentError(correlationId);
     throw new GatewayOutcomeUnknownError(503, correlationId, 'TRANSPORT');
   }

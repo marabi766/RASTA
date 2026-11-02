@@ -103,7 +103,7 @@ export type ReplacePreferencesDto = z.infer<typeof replacePreferencesSchema>;
 export const effectiveQuerySchema = z
   .object({
     ruleKey: z.string().min(1).max(128),
-    channel: channelSchema.default('IN_APP'),
+    channel: channelSchema.prefault('IN_APP'),
   })
   .strict();
 
@@ -138,7 +138,7 @@ export const quietHoursSchema = z
       .min(1)
       .max(64)
       .refine(isKnownTimezone, 'Unknown IANA time zone')
-      .default('Asia/Tehran'),
+      .prefault('Asia/Tehran'),
   })
   .strict()
   .refine((value) => value.start !== value.end, {

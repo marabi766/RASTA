@@ -17,6 +17,7 @@ import {
 import { withForgedMac } from '@/test/forged-token';
 
 import { IDLE_SUPPLIER_FORM } from './supplier-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The six supplier forms' write path. Mirrors `lifecycle-actions.spec.ts`: the
@@ -74,7 +75,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'operator',
   organizationId: 'ORG-UNION',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-UNION'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -571,7 +572,12 @@ describe.each(CASES)('$command — an unresolved write', (testCase) => {
     });
     const none = { kind: 'NONE' };
     expect(await readUnresolved({ ...SESSION, subject: 'user-2' }, scope)).toEqual(none);
-    expect(await readUnresolved({ ...SESSION, organizationId: 'ORG-OTHER' }, scope)).toEqual(none);
+    expect(
+      await readUnresolved(
+        { ...SESSION, organizationId: 'ORG-OTHER', accessToken: actingAccessToken('ORG-OTHER') },
+        scope,
+      ),
+    ).toEqual(none);
     expect(await readUnresolved({ ...SESSION, csrfToken: 'a-later-login' }, scope)).toEqual(none);
     expect(await readUnresolved(SESSION, supplierWriteScope(OTHER_SUPPLIER_ID))).toEqual(none);
     expect(await readUnresolved(SESSION, supplierWriteScope(null))).toEqual(none);

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import { GatewayController } from './gateway.controller';
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
@@ -55,8 +56,11 @@ function requestFor(method: string, path: string, headers: Record<string, string
   } as never;
 }
 
+// An open connection: the controller listens for the caller going away.
 const response = () =>
-  ({
+  Object.assign(new EventEmitter(), {
+    closed: false,
+    writableFinished: false,
     setHeader: () => undefined,
     status: () => response(),
     json: () => undefined,

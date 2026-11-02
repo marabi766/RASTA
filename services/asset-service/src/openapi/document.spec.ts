@@ -135,12 +135,12 @@ describe('the served PATCH /v1/assets/{id} request body', () => {
 
   it('publishes every field the validator accepts, and nothing it would refuse', () => {
     expect(Object.keys(body.properties).sort()).toEqual(
-      Object.keys(updateAssetSchema.innerType().shape).sort(),
+      Object.keys(updateAssetSchema.shape).sort(),
     );
   });
 
   it('marks required exactly the fields the validator does not make optional', () => {
-    const shape = updateAssetSchema.innerType().shape as Record<string, { isOptional(): boolean }>;
+    const shape = updateAssetSchema.shape as Record<string, { isOptional(): boolean }>;
     const required = Object.entries(shape)
       .filter(([, field]) => !field.isOptional())
       .map(([name]) => name);
@@ -148,7 +148,7 @@ describe('the served PATCH /v1/assets/{id} request body', () => {
   });
 
   it('marks a field nullable where the validator accepts null, since null clears it', () => {
-    const shape = updateAssetSchema.innerType().shape as Record<string, { isNullable(): boolean }>;
+    const shape = updateAssetSchema.shape as Record<string, { isNullable(): boolean }>;
     for (const [name, field] of Object.entries(shape)) {
       expect([name, body.properties[name]?.nullable === true]).toEqual([name, field.isNullable()]);
     }
@@ -245,14 +245,19 @@ describe('the character rule in the hand-written request bodies', () => {
     let current: z.ZodTypeAny = field;
     for (;;) {
       if (current instanceof z.ZodOptional || current instanceof z.ZodNullable)
-        current = current.unwrap();
-      else if (current instanceof z.ZodEffects) current = current.innerType();
+        current = current.unwrap() as z.ZodType;
+      // A refinement is a check on the string itself; a transform or preprocess is a pipe.
+      else if (current instanceof z.ZodPipe)
+        current = (current.in instanceof z.ZodTransform ? current.out : current.in) as z.ZodType;
       else break;
     }
     if (!(current instanceof z.ZodString)) return [];
-    return current._def.checks.flatMap((check) =>
-      check.kind === 'regex' ? [check.regex.source] : [],
-    );
+    return (current.def.checks ?? []).flatMap((check) => {
+      const def = check._zod.def as { check: string; format?: string; pattern?: RegExp };
+      return def.check === 'string_format' && def.format === 'regex' && def.pattern
+        ? [def.pattern.source]
+        : [];
+    });
   }
 
   type Body = { properties: Record<string, { pattern?: string }> };
@@ -274,7 +279,7 @@ describe('the character rule in the hand-written request bodies', () => {
   });
 
   it.each([
-    ['update', 'model', updateAssetSchema.innerType().shape.model],
+    ['update', 'model', updateAssetSchema.shape.model],
     ['status', 'reason', changeStatusSchema.shape.reason],
     ['decommission', 'reason', decommissionSchema.shape.reason],
   ] as const)('%s.%s publishes the bidi rule the validator enforces', (body, field, schema) => {
@@ -283,7 +288,7 @@ describe('the character rule in the hand-written request bodies', () => {
   });
 
   it.each([
-    ['update', updateAssetSchema.innerType().shape],
+    ['update', updateAssetSchema.shape],
     ['status', changeStatusSchema.shape],
     ['decommission', decommissionSchema.shape],
   ] as const)('publishes no pattern the %s validator does not enforce', (body, shape) => {

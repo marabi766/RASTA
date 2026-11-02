@@ -1,5 +1,5 @@
 import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
-import { DLQ_REASONS, RETRY_TOPIC_SUFFIX, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, RETRY_TOPIC_SUFFIX, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   HANDLER_MESSAGE_MAX,
   UnprocessableEventError,
@@ -657,7 +657,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
     }
 
     const contract = CONSUMED_PAYLOADS[envelope.eventName as ConsumedEventName];
-    const parsed = contract.schema.safeParse(envelope.payload);
+    const parsed = legacyParse(contract.schema, envelope.payload);
     if (!parsed.success) {
       // An event this service projects, without a field of its producer's
       // contract that the projection uses — no machine, a status change with
@@ -666,7 +666,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
       // failure acknowledged here would leave the machine dispatchable with no
       // trace, and a corrected replay must still be applied (audit L7-26,
       // review #205 r1, docs/07 § 7.6).
-      throw invalidPayloadError(envelope, parsed.error, contract.fields);
+      throw invalidPayloadError(envelope, parsed.refusal, contract.fields);
     }
 
     const payload = parsed.data as Record<string, unknown>;

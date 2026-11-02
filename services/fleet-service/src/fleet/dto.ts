@@ -2,10 +2,11 @@ import { z } from 'zod';
 import {
   cursorPaginationSchema,
   displayText,
-  seedIdSchema,
   ID_PREFIXES,
-  plainText,
+  isoDateTime,
   numberInput,
+  plainText,
+  seedIdSchema,
 } from '@rasta/contracts';
 
 /**
@@ -99,7 +100,7 @@ export function canonicalText(value: string): string {
  * An instant as `datetime()` accepts it (UTC, `Z`), in its canonical spelling.
  * `datetime()` has already refused a date `Date` could not represent.
  */
-const instant = () => z.string().datetime().transform(canonicalInstant);
+const instant = () => z.string().check(isoDateTime()).transform(canonicalInstant);
 
 // ---------------------------------------------------------------------------
 // Driver
@@ -118,7 +119,7 @@ export const createDriverSchema = z
 
     licenceNumber: plainText().min(1).max(64).optional(),
     licenceClass: plainText().min(1).max(32).optional(),
-    licenceValidTo: z.string().datetime().optional(),
+    licenceValidTo: z.string().check(isoDateTime()).optional(),
 
     notes: displayText(1, 1000).optional(),
   })
@@ -131,7 +132,7 @@ export const updateDriverSchema = z
     employeeNo: plainText().min(1).max(64).nullable().optional(),
     licenceNumber: plainText().min(1).max(64).nullable().optional(),
     licenceClass: plainText().min(1).max(32).nullable().optional(),
-    licenceValidTo: z.string().datetime().nullable().optional(),
+    licenceValidTo: z.string().check(isoDateTime()).nullable().optional(),
     notes: displayText(1, 1000).nullable().optional(),
   })
   .strict()
@@ -179,7 +180,7 @@ export const createAssignmentSchema = z
      * scheduled assignments, and accepting one would make `ended_at IS NULL`
      * mean "active" for something that has not begun.
      */
-    startedAt: z.string().datetime().optional(),
+    startedAt: z.string().check(isoDateTime()).optional(),
     purpose: displayText(2, 500).optional(),
   })
   .strict();
@@ -188,8 +189,8 @@ export type CreateAssignmentDto = z.infer<typeof createAssignmentSchema>;
 
 export const endAssignmentSchema = z
   .object({
-    reason: assignmentEndReasonSchema.default('COMPLETED'),
-    endedAt: z.string().datetime().optional(),
+    reason: assignmentEndReasonSchema.prefault('COMPLETED'),
+    endedAt: z.string().check(isoDateTime()).optional(),
     notes: displayText(2, 500).optional(),
   })
   .strict();
@@ -205,8 +206,8 @@ export const listAssignmentsQuerySchema = cursorPaginationSchema
       .union([z.literal('true'), z.literal('false')])
       .transform((value) => value === 'true')
       .optional(),
-    from: z.string().datetime().optional(),
-    to: z.string().datetime().optional(),
+    from: z.string().check(isoDateTime()).optional(),
+    to: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -238,7 +239,7 @@ export const recordUsageSchema = z
     hourMeter: quantity(10).optional(),
     odometer: quantity(10).optional(),
 
-    source: usageSourceSchema.default('MANUAL'),
+    source: usageSourceSchema.prefault('MANUAL'),
     /**
      * Made canonical first (LF, NFC), so neither CRLF nor a decomposed
      * accent is counted twice or makes a different request.
@@ -279,8 +280,8 @@ export const listUsageQuerySchema = cursorPaginationSchema
     assetId: assetId.optional(),
     driverId: driverId.optional(),
     source: usageSourceSchema.optional(),
-    from: z.string().datetime().optional(),
-    to: z.string().datetime().optional(),
+    from: z.string().check(isoDateTime()).optional(),
+    to: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -294,8 +295,8 @@ export const declareAvailabilitySchema = z
   .object({
     assetId,
     available: z.boolean(),
-    fromAt: z.string().datetime().optional(),
-    toAt: z.string().datetime().optional(),
+    fromAt: z.string().check(isoDateTime()).optional(),
+    toAt: z.string().check(isoDateTime()).optional(),
     reason: displayText(3, 500),
   })
   .strict()
@@ -314,7 +315,7 @@ export const availabilityQuerySchema = cursorPaginationSchema
       .union([z.literal('true'), z.literal('false')])
       .transform((value) => value === 'true')
       .optional(),
-    at: z.string().datetime().optional(),
+    at: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -335,9 +336,9 @@ export type ListAvailabilityWindowsQuery = z.infer<typeof listAvailabilityWindow
 export const utilizationQuerySchema = z
   .object({
     assetId: assetId.optional(),
-    from: z.string().datetime().optional(),
-    to: z.string().datetime().optional(),
-    limit: numberInput(z.number().int().min(1).max(200)).default(50),
+    from: z.string().check(isoDateTime()).optional(),
+    to: z.string().check(isoDateTime()).optional(),
+    limit: numberInput(z.number().int().min(1).max(200)).prefault(50),
   })
   .strict();
 

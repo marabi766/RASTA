@@ -407,7 +407,7 @@ describe('who cancels, amends and plans — configured roles, mirrored', () => {
       WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
     });
     const defaultOf = (name: string): string => {
-      const match = new RegExp(`${name}:z\\.string\\(\\)\\.default\\('([^']*)'\\)`).exec(
+      const match = new RegExp(`${name}:z\\.string\\(\\)\\.prefault\\('([^']*)'\\)`).exec(
         contractEnv,
       );
       if (!match) throw new Error(`no default for ${name}`);

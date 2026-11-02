@@ -16,6 +16,11 @@ import {
 } from './transactions';
 import { tokenAuthority } from './realm-roles';
 import type { WebSession } from './session';
+import { pinnedTokens } from '@/test/session-token';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * One transaction and its dispute commands: the reader refuses an answer that
@@ -32,7 +37,7 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-const SESSION = { accessToken: 'access-token-value' } as WebSession;
+const SESSION = { accessToken: ACCESS_TOKEN_VALUE, organizationId: 'ORG-DEH-0001' } as WebSession;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const TXN = 'TXN_01JABCDEFGHJKMNPQRSTVWXYZ';
 
@@ -98,7 +103,7 @@ describe('reading one transaction', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(`http://gateway.test:3000/v1/transactions/${TXN}`);
     expect((init.headers as Record<string, string>).authorization).toBe(
-      'Bearer access-token-value',
+      `Bearer ${ACCESS_TOKEN_VALUE}`,
     );
   });
 
@@ -280,7 +285,7 @@ describe('which commands are offered, from the token the service will see (revie
   const jwt = (claims: unknown): string =>
     `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
   const viewerOf = (token: string) => {
-    const authority = tokenAuthority(token);
+    const authority = tokenAuthority(token, pinnedTokens(token).organizationId);
     return { roles: authority?.roles ?? null, organizationId: authority?.organizationId ?? null };
   };
   const held = {

@@ -449,6 +449,8 @@ describe('a malformed cost, through the shared consumer', () => {
         )(handler);
         (real as unknown as { kafka: unknown }).kafka = {
           consumer: () => ({
+            events: { CRASH: 'consumer.crash' },
+            on: () => () => undefined,
             connect: async () => undefined,
             subscribe: async () => undefined,
             disconnect: async () => undefined,

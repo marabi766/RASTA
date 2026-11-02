@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import { firstIssuePerField } from './form-issues';
 import { normalizePersianText, toPersianDigits } from './format';
@@ -246,7 +247,7 @@ function optionalProse(label: string, max: number) {
 }
 
 const capabilityEnum = z.enum(SUPPLIER_CAPABILITIES, {
-  errorMap: () => ({ message: 'یکی از دسته‌های فهرست را انتخاب کنید' }),
+  error: 'یکی از دسته‌های فهرست را انتخاب کنید',
 });
 
 export const registerFormSchema = z
@@ -333,13 +334,13 @@ export type ParsedSupplierForm<B, F extends string> =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<F, string>> };
 
 function parseWith<B, F extends string>(
-  schema: z.ZodType<B, z.ZodTypeDef, unknown>,
+  schema: z.ZodType<B, unknown>,
   input: unknown,
   fields: readonly F[],
 ): ParsedSupplierForm<B, F> {
-  const parsed = schema.safeParse(input);
+  const parsed = legacyParse(schema, input);
   if (parsed.success) return { ok: true, body: parsed.data };
-  const fieldErrors = firstIssuePerField(parsed.error, fields);
+  const fieldErrors = firstIssuePerField(parsed.refusal, fields);
   return { ok: false, fieldErrors };
 }
 

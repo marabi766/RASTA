@@ -108,7 +108,7 @@ function roleList(name: string, options: { min: number }) {
   const unknownRole = fixed(`Unknown role in ${name}`);
   return commaList().pipe(
     z
-      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: unknownRole }) }))
+      .array(z.enum(PLATFORM_ROLES, { error: unknownRole }))
       .min(options.min, fixed(`${name} must name at least ${options.min} role`))
       .refine((roles) => !roles.includes(REFUSED_ROLE), {
         message: fixed(
@@ -209,15 +209,15 @@ export const procurementEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     PROCUREMENT_DEMAND_ROLES: z
       .string()
-      .default('PROCUREMENT_USER,ORGANIZATION_ADMIN')
+      .prefault('PROCUREMENT_USER,ORGANIZATION_ADMIN')
       .pipe(roleList('PROCUREMENT_DEMAND_ROLES', { min: 1 })),
 
     /** Q-10: seven days. At most a year: a window nobody closes is not a window. */
-    PROCUREMENT_AGGREGATION_WINDOW_HOURS: z.coerce.number().int().min(1).max(8760).default(168),
+    PROCUREMENT_AGGREGATION_WINDOW_HOURS: z.coerce.number().int().min(1).max(8760).prefault(168),
 
     /**
      * Q-10: no threshold. A whole quantity of the product's base unit, as a demand's is (Q-105).
@@ -230,27 +230,27 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(0)
       .max(2_147_483_647)
-      .default(0),
+      .prefault(0),
 
     /** Q-10: "carried into the next window". */
-    PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: z.enum(SHORTFALL_POLICIES).default('EXTEND'),
+    PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: z.enum(SHORTFALL_POLICIES).prefault('EXTEND'),
 
     /** Q-119 (2): who records the organization's aggregation settings (plan PR 3). */
     PROCUREMENT_AGGREGATION_SETTING_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('PROCUREMENT_AGGREGATION_SETTING_ROLES', { min: 1 })),
 
     /** ADR-070 § 3: who cancels a READY aggregation (and, from PR 6, issues its RFQ). */
     PROCUREMENT_RFQ_ISSUER_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('PROCUREMENT_RFQ_ISSUER_ROLES', { min: 1 })),
 
     /** ADR-070 § 4: who reads, for an invited supplier's organization, the RFQs it is invited to. */
     PROCUREMENT_SUPPLIER_ROLES: z
       .string()
-      .default('SUPPLIER')
+      .prefault('SUPPLIER')
       .pipe(roleList('PROCUREMENT_SUPPLIER_ROLES', { min: 1 })),
 
     /**
@@ -260,7 +260,7 @@ export const procurementEnvSchema = baseEnvSchema
      */
     PROCUREMENT_RFQ_CANCELLATION_CODES: z
       .string()
-      .default(DEFAULT_RFQ_CANCELLATION_CODES.join(','))
+      .prefault(DEFAULT_RFQ_CANCELLATION_CODES.join(','))
       .pipe(
         commaList().pipe(
           z
@@ -294,7 +294,7 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(MAX_INVITEES_LIMIT)
-      .default(200),
+      .prefault(200),
 
     /**
      * The key-encryption keys that wrap each RFQ's private sealing key (ADR-070 § 4, ADR-066 § 2):
@@ -333,13 +333,13 @@ export const procurementEnvSchema = baseEnvSchema
      * with a token signed for no tenant, before the issue's transaction. Unreachable, or anything
      * but a well-formed 200, refuses the issue (503; 504 past the timeout) and writes nothing.
      */
-    SUPPLIER_SERVICE_URL: serviceUrlSchema.default('http://localhost:3108'),
+    SUPPLIER_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3108'),
     PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
       .min(100)
       .max(60_000)
-      .default(5000),
+      .prefault(5000),
 
     /**
      * The sweeper that closes RFQs at their deadline (ADR-070 § 3, plan PR 6; the shape of the
@@ -353,26 +353,26 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(500)
       .max(300_000)
-      .default(5000),
-    PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+      .prefault(5000),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
     PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS: z.coerce
       .number()
       .int()
       .min(10)
       .max(3600)
-      .default(60),
+      .prefault(60),
     PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(3600)
-      .default(10),
+      .prefault(10),
     PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(900),
+      .prefault(900),
 
     /**
      * A technical limit, not a business rule (PR-327 r2 F1, PR-338 r1 F1, Q-119 note of
@@ -390,15 +390,15 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(MAX_LIVE_DEMANDS_LIMIT)
-      .default(DEFAULT_MAX_LIVE_DEMANDS),
+      .prefault(DEFAULT_MAX_LIVE_DEMANDS),
 
-    PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
     PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
       .number()
       .int()
       .min(10)
       .max(900)
-      .default(120),
+      .prefault(120),
 
     /**
      * The sweeper that ends windows past `closes_at` (ADR-070 § 2, plan PR 2; the shape of
@@ -415,21 +415,21 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(500)
       .max(300_000)
-      .default(5000),
-    PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
-    PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(60),
+      .prefault(5000),
+    PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).prefault(60),
     PROCUREMENT_WINDOW_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(3600)
-      .default(10),
+      .prefault(10),
     PROCUREMENT_WINDOW_SWEEP_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(900),
+      .prefault(900),
 
     /**
      * The batch of a window's end (`MAX_FOLLOW_BATCH_SIZE`): the most live demands one transaction
@@ -445,7 +445,7 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(MAX_FOLLOW_BATCH_SIZE)
-      .default(2000),
+      .prefault(2000),
   })
   .superRefine((env, ctx) => {
     try {

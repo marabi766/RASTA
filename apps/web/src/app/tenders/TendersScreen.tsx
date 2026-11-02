@@ -26,6 +26,7 @@ import type {
   TenderPage,
   TenderSummary,
 } from '@/server/tenders';
+import { withContext, type InContext } from '@/lib/page-context';
 
 /**
  * The tender list (docs/16 § ۱۶٫۶, `/tenders`).
@@ -56,20 +57,20 @@ export type TendersView = {
 
 export interface TendersScreenProps {
   readonly view: TendersView;
-  readonly query: TendersQuery;
+  readonly query: InContext<TendersQuery>;
 }
 
-function hrefWith(query: TendersQuery, changes: Partial<TendersQuery>): string {
+function hrefWith(query: InContext<TendersQuery>, changes: Partial<TendersQuery>): string {
   const merged = { ...query, ...changes };
   const params = new URLSearchParams();
   if (merged.status) params.set('status', merged.status);
   if (merged.cursor) params.set('cursor', merged.cursor);
   if (merged.openCursor) params.set('openCursor', merged.openCursor);
   const text = params.toString();
-  return text ? `/tenders?${text}` : '/tenders';
+  return withContext(query.context, text ? `/tenders?${text}` : '/tenders');
 }
 
-function StatusFilter({ query }: { query: TendersQuery }) {
+function StatusFilter({ query }: { query: InContext<TendersQuery> }) {
   const items: readonly (TenderStatus | undefined)[] = [undefined, ...TENDER_STATUSES];
   return (
     <nav aria-label="وضعیت مناقصه" className="flex flex-wrap gap-2">
@@ -118,12 +119,12 @@ function OwnTenderRow({ tender }: { tender: TenderSummary }) {
   );
 }
 
-function OpenTenderRow({ tender }: { tender: OpenTenderSummary }) {
+function OpenTenderRow({ tender, context }: { tender: OpenTenderSummary; context: string }) {
   return (
     <li className="rounded-lg border border-border bg-surface-raised p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <Link
-          href={`/tenders/${encodeURIComponent(tender.id)}?view=open`}
+          href={withContext(context, `/tenders/${encodeURIComponent(tender.id)}?view=open`)}
           className="font-medium underline"
         >
           {tender.title}
@@ -149,7 +150,13 @@ export function TendersScreen({ view, query }: TendersScreenProps) {
   );
 }
 
-function OwnSection({ result, query }: { result: ReadResult<TenderPage>; query: TendersQuery }) {
+function OwnSection({
+  result,
+  query,
+}: {
+  result: ReadResult<TenderPage>;
+  query: InContext<TendersQuery>;
+}) {
   return (
     <div className="flex flex-col gap-4">
       <StatusFilter query={query} />
@@ -158,7 +165,13 @@ function OwnSection({ result, query }: { result: ReadResult<TenderPage>; query: 
   );
 }
 
-function OwnBody({ result, query }: { result: ReadResult<TenderPage>; query: TendersQuery }) {
+function OwnBody({
+  result,
+  query,
+}: {
+  result: ReadResult<TenderPage>;
+  query: InContext<TendersQuery>;
+}) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="فهرست مناقصه‌های این سازمان در اختیار شما نیست." />;
   }
@@ -218,7 +231,7 @@ function OpenSection({
   query,
 }: {
   result: ReadResult<OpenTenderPage>;
-  query: TendersQuery;
+  query: InContext<TendersQuery>;
 }) {
   if (result.kind === 'FORBIDDEN') {
     return <NoAccessState description="مناقصه‌های باز برای پیشنهاد در اختیار شما نیست." />;
@@ -253,7 +266,7 @@ function OpenSection({
           </p>
           <ul className="flex flex-col gap-3">
             {page.items.map((tender) => (
-              <OpenTenderRow key={tender.id} tender={tender} />
+              <OpenTenderRow key={tender.id} tender={tender} context={query.context} />
             ))}
           </ul>
         </>

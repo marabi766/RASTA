@@ -1,5 +1,7 @@
 import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import Redis from 'ioredis';
+import { assertRedisDiagnosticsSafe, protectRedisReadyCheck, redisUrlSchema } from '@rasta/config';
+import { clientFailureCode } from '@rasta/nest-common';
 
 /**
  * Sliding-window rate limiting backed by Redis.
@@ -68,15 +70,18 @@ return {0, 0, retry_ms}
  * A Redis failure as it is logged: its class and code (`ECONNREFUSED`,
  * `ReplyError`), never its message, which may quote the host it dialled from
  * REDIS_URL or the server's answer (#385 r6, the configuration-disclosure
- * class). Shapes are checked: a name or code that is not one is `unknown`.
+ * class). Names and codes are allowlisted; every other value is `unknown`.
  */
 export function redisFailure(error: unknown): string {
-  const type =
-    error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
-      ? error.name
-      : 'unknown';
-  const code = (error as { code?: unknown } | null | undefined)?.code;
-  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? `${type} ${code}` : type;
+  try {
+    const names = new Set(['Error', 'ReplyError', 'AbortError', 'MaxRetriesPerRequestError']);
+    const name = (error as { name?: unknown } | null)?.name;
+    const type = typeof name === 'string' && names.has(name) ? name : 'unknown';
+    const code = clientFailureCode(error);
+    return code === 'unknown' ? type : `${type} ${code}`;
+  } catch {
+    return 'unknown';
+  }
 }
 
 @Injectable()
@@ -99,12 +104,21 @@ export class RateLimiter implements OnModuleDestroy {
      */
     private readonly failOpen = true,
   ) {
-    this.redis = new Redis(redisUrl, {
-      maxRetriesPerRequest: 2,
-      enableOfflineQueue: false,
-      lazyConnect: false,
-    });
+    if (!redisUrlSchema.safeParse(redisUrl).success) {
+      throw new Error('REDIS_URL: Redis configuration refused (code INVALID_ENDPOINT)');
+    }
+    assertRedisDiagnosticsSafe();
+    try {
+      this.redis = new Redis(redisUrl, {
+        maxRetriesPerRequest: 2,
+        enableOfflineQueue: false,
+        lazyConnect: false,
+      });
+    } catch (error) {
+      throw new Error(`REDIS_URL: Redis construction failed (${redisFailure(error)})`);
+    }
 
+    protectRedisReadyCheck(this.redis);
     this.redis.on('error', (error) => {
       // Logged at warn, not error: a transient reconnect is expected and this
       // path is designed to degrade rather than fail.

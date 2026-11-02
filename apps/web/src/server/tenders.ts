@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { TenderStatus } from '@/lib/tender-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import { utcInstant } from './instant';
 import { tokenPerson } from './realm-roles';
@@ -52,10 +53,10 @@ export type { ReadResult };
 const tenderSummarySchema = z.object({
   id: z.string(),
   title: z.string(),
-  procurementNature: z.string().nullable().default(null),
-  visibility: z.string().nullable().default(null),
-  bidOpeningAt: utcInstant.nullable().default(null),
-  bidClosingAt: utcInstant.nullable().default(null),
+  procurementNature: z.string().nullable().prefault(null),
+  visibility: z.string().nullable().prefault(null),
+  bidOpeningAt: utcInstant.nullable().prefault(null),
+  bidClosingAt: utcInstant.nullable().prefault(null),
   status: z.string(),
   statusChangedAt: utcInstant,
 });
@@ -64,16 +65,16 @@ export type TenderSummary = z.infer<typeof tenderSummarySchema>;
 
 const tenderDetailSchema = tenderSummarySchema.extend({
   projectId: z.string(),
-  scopeOfWork: z.string().default(''),
+  scopeOfWork: z.string().prefault(''),
   procurementThresholdWarning: z.literal('PROCUREMENT_AMOUNT_OUTSIDE_RANGE').optional(),
-  statusReason: z.string().nullable().default(null),
-  statusReasonCode: z.string().nullable().default(null),
-  publishedAt: utcInstant.nullable().default(null),
+  statusReason: z.string().nullable().prefault(null),
+  statusReasonCode: z.string().nullable().prefault(null),
+  publishedAt: utcInstant.nullable().prefault(null),
   createdAt: utcInstant,
   /** What a publication is bound to (`expectedVersion`, `server/tender-owner.ts`). */
   version: z.number().int().min(1),
   /** Read to be compared with the caller and dropped (`fetchTender`). */
-  statusChangedBy: z.string().nullable().default(null),
+  statusChangedBy: z.string().nullable().prefault(null),
 });
 
 export type TenderDetail = Omit<z.infer<typeof tenderDetailSchema>, 'statusChangedBy'> & {
@@ -83,8 +84,8 @@ export type TenderDetail = Omit<z.infer<typeof tenderDetailSchema>, 'statusChang
 
 const tenderPageSchema = z.object({
   items: z.array(tenderSummarySchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type TenderPage = z.infer<typeof tenderPageSchema>;
@@ -103,7 +104,7 @@ export type TenderCriterion = z.infer<typeof criterionSchema>;
 const tenderCriteriaSchema = z.object({
   items: z.array(criterionSchema),
   totalWeightBp: z.number().int(),
-  complete: z.boolean().default(false),
+  complete: z.boolean().prefault(false),
 });
 
 export type TenderCriteria = z.infer<typeof tenderCriteriaSchema>;
@@ -116,7 +117,7 @@ export type TenderCriteria = z.infer<typeof tenderCriteriaSchema>;
 const openTenderSummarySchema = z.object({
   id: z.string(),
   title: z.string(),
-  procurementNature: z.string().nullable().default(null),
+  procurementNature: z.string().nullable().prefault(null),
   visibility: z.string(),
   bidOpeningAt: utcInstant,
   bidClosingAt: utcInstant,
@@ -125,7 +126,7 @@ const openTenderSummarySchema = z.object({
 export type OpenTenderSummary = z.infer<typeof openTenderSummarySchema>;
 
 const openTenderDetailSchema = openTenderSummarySchema.extend({
-  scopeOfWork: z.string().default(''),
+  scopeOfWork: z.string().prefault(''),
   criteria: z.array(criterionSchema),
 });
 
@@ -133,8 +134,8 @@ export type OpenTenderDetail = z.infer<typeof openTenderDetailSchema>;
 
 const openTenderPageSchema = z.object({
   items: z.array(openTenderSummarySchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type OpenTenderPage = z.infer<typeof openTenderPageSchema>;
@@ -159,7 +160,7 @@ async function read<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = schema.safeParse(response.data);

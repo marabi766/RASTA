@@ -5,7 +5,7 @@ import { amountMinorSchema, currencySchema, digitsToBigInt } from '@rasta/contra
 
 export const walletQuerySchema = z
   .object({
-    currency: currencySchema.default('IRR'),
+    currency: currencySchema.prefault('IRR'),
   })
   .strict();
 
