@@ -443,7 +443,7 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `ORDER_CANCELLED`         | economic (بازگشت) · inventory (آزادسازی) · supplier (امتیاز)              | `orderId`, `reason`, `cancellationCause` (اختیاری، enum بسته، ADR-052 § ۱-پ)                                                    |
 | `ORDER_DISPUTED`          | **economic (توقف تسویه)** · notification · supplier                       | `orderId`, `disputeId`, `reason`                                                                                                |
 | `ORDER_DISPUTE_RESOLVED`  | supplier (امتیاز)                                                         | `orderId`, `disputeId`, `outcome`, `responsibility` (enum بسته، الزامی، ADR-052 § ۱-ب)                                          |
-| `REVIEW_SUBMITTED`        | supplier (امتیاز) · economic (پاداش)                                      | `orderId`, `rating`, `criteria`                                                                                                 |
+| `REVIEW_SUBMITTED`        | supplier (امتیاز) · economic (پاداش)                                      | `orderId`, `rating`, optional `qualityRating` (1–5; Q-56; absent = no quality signal), `submittedAt`                            |
 
 ### رکوردهای حسابرسی — L7-14 (2026-09-25)
 
