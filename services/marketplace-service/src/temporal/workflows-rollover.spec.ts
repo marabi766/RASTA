@@ -42,7 +42,7 @@ it('replays a fixed pre-change history with the new workflow code', async () => 
   );
 });
 
-it('step identity survives a new run id while legacy activity keys stay compatible', async () => {
+it('step identity isolates runs and stays stable on retry for patched and legacy activity ids', async () => {
   const step = (runId: string, activityId: string) =>
     new MockActivityEnvironment({
       workflowExecution: { workflowId: 'order-ORD_ROLLOVER', runId },
@@ -50,8 +50,11 @@ it('step identity survives a new run id while legacy activity keys stay compatib
     }).run<[], ReturnType<typeof temporalStep>, () => Promise<ReturnType<typeof temporalStep>>>(
       async () => temporalStep(),
     );
-  expect((await step('RUN_A', 'saga-step-41')).key).toBe('order-ORD_ROLLOVER/saga-step-41');
-  expect((await step('RUN_B', 'saga-step-41')).key).toBe((await step('RUN_A', 'saga-step-41')).key);
+  expect((await step('RUN_A', 'saga-step-41')).key).toBe('order-ORD_ROLLOVER/RUN_A/saga-step-41');
+  expect((await step('RUN_A', 'saga-step-41')).key).toBe((await step('RUN_A', 'saga-step-41')).key);
+  expect((await step('RUN_B', 'saga-step-41')).key).not.toBe(
+    (await step('RUN_A', 'saga-step-41')).key,
+  );
   expect((await step('RUN_A', '41')).key).toBe('order-ORD_ROLLOVER/RUN_A/41');
 });
 
