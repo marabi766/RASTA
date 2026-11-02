@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { ApplicationFailure, Context } from '@temporalio/activity';
+import { ApplicationFailure, Context, CancelledFailure } from '@temporalio/activity';
 import {
   createSystemContext,
   isRastaError,
@@ -58,9 +58,10 @@ import { settlementsExhaustedTotal } from '../observability/metrics';
  * - a local step whose first attempt ran on a worker older than its record is
  *   recognised by the history row it wrote.
  *
- * The step's key is Temporal's own identity for one scheduled activity —
- * workflow, run and activity id — which every retry of it shares and no other
- * call does (`docs/08` § 8.8, Idempotency). Reads (`readOrder`,
+ * Patched step keys use the order workflow id and a monotonic activity
+ * sequence carried across Continue-As-New. Legacy numeric activity ids keep
+ * their workflow/run/activity key for compatibility. Every retry shares its
+ * key (`docs/08` § 8.8, Idempotency). Reads (`readOrder`,
  * `findObligation`) have no effect and record nothing.
  */
 
@@ -80,7 +81,11 @@ export function temporalStep(): SagaStep {
   // Only a standalone activity has no workflow, and the saga schedules none.
   if (!workflowExecution) throw new Error('A saga activity ran outside a workflow');
   return {
-    key: `${workflowExecution.workflowId}/${workflowExecution.runId}/${activityId}`,
+    // Patched workflows carry a monotonic sequence through Continue-As-New.
+    // Legacy numeric ids retain their old keys for replay compatibility.
+    key: /^saga-step-[1-9]\d*$/.test(activityId)
+      ? `${workflowExecution.workflowId}/${activityId}`
+      : `${workflowExecution.workflowId}/${workflowExecution.runId}/${activityId}`,
     // The first attempt's scheduling, which a retry keeps.
     scheduledAt: new Date(scheduledTimestampMs),
   };
@@ -184,6 +189,18 @@ export function createActivities(deps: ActivityDependencies) {
     orderId: string,
     fn: (order: Awaited<ReturnType<OrderService['describe']>>) => Promise<T>,
   ): Promise<T> {
+    let activity: Context | undefined;
+    try {
+      activity = Context.current();
+    } catch {
+      /* Direct domain test, outside a worker. */
+    }
+    let heartbeat: NodeJS.Timeout | undefined;
+    if (activity?.info.heartbeatTimeoutMs) {
+      activity.heartbeat();
+      heartbeat = setInterval(() => activity?.heartbeat(), 1000);
+      heartbeat.unref();
+    }
     try {
       // Read once without a tenant, purely to learn which tenant to adopt. The
       // describe() call is scoped by the repository's own written reason.
@@ -193,7 +210,11 @@ export function createActivities(deps: ActivityDependencies) {
       const context = systemContext(order.buyerOrganizationId, order.correlationId);
       return await runWithContext(context, () => fn(order));
     } catch (error) {
+      if (activity?.cancellationSignal.aborted)
+        throw new CancelledFailure('The financial activity was cancelled');
       throw asTemporalFailure(error);
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
     }
   }
 

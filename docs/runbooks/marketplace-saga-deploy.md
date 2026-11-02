@@ -129,3 +129,47 @@ that shortens retention after deleting older history also requires operator revi
 two minutes. Local Prometheus loads the rule; external notification routing remains
 a deployment responsibility. Starter shutdown aborts active RPCs, joins database
 work and stops polling before Prisma disconnects.
+
+## Bounded transport and long waits (task 1214 B)
+
+Every economic response, including refusals and obligation lookup pages, is read
+into a buffer capped at 1 MiB. The shared exchange deadline remains active through
+the stream read and JSON parse; a monotonic check refuses a parse that completes
+after the deadline. Invalid JSON, invalid UTF-8, oversized bodies and malformed
+refusal envelopes return fixed platform errors without copying body fragments.
+No transport abort proves that a financial command did not commit: deterministic
+order/operation keys and economic-service reconciliation remain authoritative.
+
+Patched activities have a ten-second heartbeat timeout. They heartbeat immediately
+and once per second while running; the production worker caps heartbeat throttling
+at one second. Temporal's activity cancellation signal cancels the HTTP exchange,
+and cancellation remains a `CancelledFailure`. Heartbeat intervals and exchange
+listeners are removed on exit. Legacy activities without a heartbeat timeout do
+not heartbeat. A cancelled transport neither reverses money nor marks an order
+failed from transport evidence.
+
+The workflow checks for rollover between waiting iterations, after all activities
+have completed. It continues as new at 2,000 history events, 2 MiB, or an earlier
+server suggestion. The assumed server defaults are hard limits of 51,200 events /
+50 MiB, warnings at 10,240 events / 10 MiB, and suggestions at 4,096 events /
+4 MiB. These are the [Temporal 1.26.2 defaults](https://github.com/temporalio/temporal/blob/v1.26.2/common/dynamicconfig/constants.go#L351),
+matching the version pinned by Compose,
+not verified production settings: this repository establishes no deployed history
+overrides. Verify them when deploying. The
+[SDK suggestion](https://typescript.temporal.io/api/namespaces/workflow/interfaces/WorkflowInfo)
+is honored where available; the count/size bounds also work without that hint.
+The internal test threshold can only lower the event ceiling.
+
+A rollover carries both dispute identities, absolute reminder deadlines, status
+and counters, and the monotonic activity sequence. Financial effects are already
+recorded by their owner before a checkpoint; the new run re-reads that owner state.
+It does not repeat initial hold placement. New activity receipt keys derive from
+the order workflow id and a sequence carried across runs, never the new run id.
+Financial HTTP keys remain derived from the order and operation/dispute identity.
+Legacy numeric activity ids retain their previous receipt keys.
+
+`order-saga-durable-rollover-v1` gates new activity options/identities and rollover.
+Pre-change history replays the original commands; an existing live run can adopt
+the patch at a later checkpoint. The checked-in synthetic 49-event pre-change
+history and newly captured pre/post rollover histories are explicitly replayed
+with `Worker.runReplayHistory` in the workflow test suite.
