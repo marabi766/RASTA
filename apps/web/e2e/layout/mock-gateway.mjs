@@ -12,7 +12,7 @@
  * It holds no session, no tenant and no authority: it is a fixture server for
  * a throwaway portal on a loopback port, never a gateway.
  */
-/* global process, URL, console */
+/* global process, console */
 import { createServer } from 'node:http';
 
 const PORT = Number(process.env.LAYOUT_GATEWAY_PORT ?? 3291);
@@ -159,7 +159,8 @@ const ROUTES = new Map([
 ]);
 
 createServer((request, response) => {
-  const { pathname } = new URL(request.url ?? '/', 'http://127.0.0.1');
+  // The path only: no URL parsing, the fixtures ignore the query.
+  const pathname = (request.url ?? '/').split('?')[0];
   const body = request.method === 'GET' ? ROUTES.get(pathname) : undefined;
   response.setHeader('content-type', 'application/json');
   response.setHeader('x-correlation-id', 'COR_LAYOUT_FIXTURE');
