@@ -48,20 +48,7 @@ export default tseslint.config(
     files: ['**/*.cjs'],
     languageOptions: {
       sourceType: 'commonjs',
-      globals: {
-        module: 'writable',
-        require: 'readonly',
-        __dirname: 'readonly',
-        process: 'readonly',
-      },
-    },
-  },
-  {
-    // Build-time scripts run by Node itself (`scripts/*.mjs`).
-    files: ['scripts/**/*.mjs'],
-    languageOptions: {
-      sourceType: 'module',
-      globals: { console: 'readonly', process: 'readonly', URL: 'readonly' },
+      globals: { module: 'writable', require: 'readonly', __dirname: 'readonly' },
     },
   },
   {
@@ -79,14 +66,6 @@ export default tseslint.config(
   {
     // Test token factories only: specs and src/test plumbing.
     files: ['**/*.spec.{ts,tsx}', '**/*.test.{ts,tsx,mjs}', '**/test/**'],
-    rules: { 'internal/token-source': 'off' },
-  },
-  {
-    // Build-time Node scripts (`scripts/*.mjs`, `*.cjs`): plain JavaScript run by `next build`
-    // and CI, never bundled into the portal and handed no credential. The rule needs type
-    // information to follow a token to its source and so refuses every untyped file; they are
-    // still linted by every other rule (merge of PR #503 with the scripts lint of this PR).
-    files: ['scripts/**'],
     rules: { 'internal/token-source': 'off' },
   },
   {

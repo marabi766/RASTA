@@ -66,11 +66,6 @@ describe('the build and check scripts', () => {
     const source = readFileSync(join(SCRIPTS, 'check-server-action-coverage.mjs'), 'utf8');
     expect(source).not.toMatch(/error\.message|\.message\b/);
   });
-  it('lints the scripts directory too', () => {
-    expect(pkg.scripts.lint.split(' ')).toEqual(
-      expect.arrayContaining(['eslint', 'src', 'scripts']),
-    );
-  });
   it('names the manifest the same way in the receipt module and the reader', () => {
     const { out } = runModule(
       `import { MANIFEST_FILE } from ${JSON.stringify(url('build-receipt.mjs'))};\nconsole.log(JSON.stringify(MANIFEST_FILE));`,

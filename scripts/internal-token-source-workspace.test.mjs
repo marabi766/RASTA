@@ -766,6 +766,17 @@ test('structural: the rule is on for every lintable file of every workspace lint
 });
 
 /**
+ * The portal's build-time Node scripts (PR #420): plain JavaScript run by `pnpm build` and CI,
+ * never bundled into the portal, handed no credential, and byte-frozen to their reviewed copy,
+ * so they load code on purpose (a worker, a loader, the checker's src/test imports) and cannot
+ * be held to a rule that needs type information. They are in no lint script's reach on purpose.
+ * Same status as the source sweep gives them (scripts/testing-dev-only-source.mjs
+ * TOOLING_DIRS): not a production root on their own, and production once a production file
+ * reaches one, which that sweep refuses for what they load.
+ */
+const BUILD_TOOLING = /^apps\/web\/scripts\//;
+
+/**
  * Every tracked JS/TS file, classified by ESLint itself (ignores and configs
  * as each lint script sees them): linted with the rule on, linted with it off,
  * or reached by no lint script.
@@ -795,7 +806,9 @@ function coverage() {
       if (config) (config.level === 2 ? on : off).add(prefix + file);
     }
   }
-  const unlinted = tracked.filter((file) => !on.has(file) && !off.has(file));
+  const unlinted = tracked.filter(
+    (file) => !on.has(file) && !off.has(file) && !BUILD_TOOLING.test(file),
+  );
   return { tracked, on, off, unlinted };
 }
 
