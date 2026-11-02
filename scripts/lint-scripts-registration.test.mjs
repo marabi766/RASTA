@@ -51,6 +51,13 @@ import { parse as parseYaml } from 'yaml';
  *    own matcher decides what a glob, `@(…)`, `!(…)`, a hidden path or an
  *    exclusion means, so the guard has no glob semantics to get wrong. If turbo
  *    cannot run the test FAILS; it never skips.
+ *  - The TYPESCRIPT COMPILER'S READS are not discovered at all (PR #524 r7, F5). The lint parser
+ *    builds TypeScript programs; a program reads whatever its imports, type imports, triple-slash
+ *    references, `extends`/`references` chains and nested package projects reach, so any tracked
+ *    source, declaration, script or JSON file. The `lint` task therefore hashes ALL of them
+ *    (globs in turbo.json) and depends on `^build`, or is not cached; compilerReadProblems
+ *    asserts that against turbo's resolved inputs of every lint task, whichever module is the
+ *    cause, so a new module that builds programs needs nothing listed.
  *  - DISCOVERY is a supported GRAMMAR for MODULE LOADING, failing closed. In an
  *    eslint config and every module it loads, the only loading forms are a
  *    static `import`, `export … from`, a literal `import()` or a literal
@@ -274,14 +281,15 @@ export const ALLOWED_BUILTINS = new Set([
  *      linted-files        every tracked file under the workspace directory (what eslint lints,
  *                          and what the module reads or resolves a path of while linting it)
  *      workspace-manifest  the workspace's package.json
- *      typescript-project  the workspace's tsconfig.test.json, else tsconfig.json (the parser picks the
- *                          first that exists), their `extends`
- *                          chain, and every file or directory their `files`, `include`,
- *                          `references`, `baseUrl`, `rootDirs`, `typeRoots` and `paths` name
- *      dependency-builds   the built output of the workspace's dependencies (type declarations),
- *                          hashed because the lint task `dependsOn` `^build`
  *      location-only      resolves a path (a realpath, the running script) and reads no content
  *    An entry with no surface, or a surface outside this list, fails.
+ *
+ * There is deliberately NO surface for the TypeScript compiler's reads (PR #524 r7, F5). A module
+ * that builds TypeScript programs (internal-token-parser.mjs does, through typescript-eslint) lets
+ * the compiler read whatever its import graph, `extends`/`references` chains and nested package
+ * projects reach, and that graph cannot be listed without racing the compiler. It is closed
+ * structurally instead, for EVERY lint task whether or not a listed module is the cause: see
+ * compilerReadProblems.
  *
  * Residual (D-094): a module may still read an UNDECLARED path through a declared member
  * (`readFileSync('../rules.json')`); the table names the intended reads and the guard checks
@@ -295,6 +303,9 @@ export const BUILTIN_READERS = new Map([
         'the typed-or-untyped parser decides, per linted file, whether a TypeScript project covers it, ' +
         'so it looks for the workspace manifest and tsconfig and compares the file on disk with the text eslint passes',
       builtins: { fs: ['existsSync', 'readFileSync'] },
+      // The TypeScript program the wrapped parser then builds reads far more than this module
+      // names (imports, type imports, references, nested projects): that is not a surface of
+      // this table but a property of every lint task, asserted by compilerReadProblems.
       reads: [
         {
           surface: 'linted-files',
@@ -302,15 +313,7 @@ export const BUILTIN_READERS = new Map([
         },
         {
           surface: 'workspace-manifest',
-          why: '`fs.existsSync(<dir>/package.json)` walking up from the linted file to its workspace',
-        },
-        {
-          surface: 'typescript-project',
-          why: '`fs.existsSync(<dir>/tsconfig.test.json | tsconfig.json)` selects the project the wrapped parser then reads',
-        },
-        {
-          surface: 'dependency-builds',
-          why: 'the program it builds resolves @rasta/* imports to dependency build output (.d.ts)',
+          why: '`fs.existsSync(<dir>/package.json)` walking up from the linted file to its workspace (its tsconfig is found the same way)',
         },
       ],
     },
@@ -364,13 +367,7 @@ export const BUILTIN_READERS = new Map([
   ],
 ]);
 
-const READ_SURFACES = new Set([
-  'linted-files',
-  'workspace-manifest',
-  'typescript-project',
-  'dependency-builds',
-  'location-only',
-]);
+const READ_SURFACES = new Set(['linted-files', 'workspace-manifest', 'location-only']);
 const own = (object, key) =>
   object !== null && typeof object === 'object' && Object.hasOwn(object, key)
     ? object[key]
@@ -1067,123 +1064,6 @@ export const coverageProblems = ({ workspaces: found, all }, hashed) => {
 const trackedAt = (tracked, prefix) =>
   [...tracked].filter((f) => prefix === '.' || f === prefix || f.startsWith(`${prefix}/`));
 
-const TSCONFIG_LEAVES = ['tsconfig.test.json', 'tsconfig.json'];
-const GLOB_CHAR = /[*?[{]/;
-
-/**
- * The `typescript-project` read surface of the workspace in `dir`: its tsconfig files, their
- * `extends` chain (a relative path, `.json` implied; a bare name is a package unless it is a
- * workspace package), and every file or directory those configs point at — `files`, `include`
- * (the static part before a glob), `references`, `baseUrl`, `rootDirs`, `typeRoots`, `paths`
- * targets. A config that sets neither `files` nor `include` anywhere in its chain includes its
- * own directory. Fails closed: an unreadable config, an `extends` that is not a tracked file, an
- * absolute or `${…}` path, or a path outside the repository is a problem.
- * Result: { files: Map<file, why>, problems }.
- */
-export const typescriptProject = (dir, { tracked, read, localNames }) => {
-  const files = new Map();
-  const problems = [];
-  // The parser picks the first of these that exists, and reads only that project.
-  const leaf = TSCONFIG_LEAVES.map((name) => (dir === '.' ? name : `${dir}/${name}`)).find((f) =>
-    tracked.has(f),
-  );
-  if (leaf !== undefined) {
-    const seen = new Set();
-    const trees = new Map();
-    const baseUrls = new Set();
-    const pathTargets = [];
-    let selects = false;
-    const tree = (config, raw, what, base = posix.dirname(config)) => {
-      if (typeof raw !== 'string' || /^[/\\]|^[A-Za-z]:|\$\{|\\/.test(raw)) {
-        problems.push(
-          `${config} ${what} ${JSON.stringify(raw)} is not a relative path the guard can follow, so the TypeScript ` +
-            'project the lint parser reads cannot be checked against turbo’s hashed inputs.',
-        );
-        return undefined;
-      }
-      const fixed = [];
-      for (const part of raw.split('/')) {
-        if (GLOB_CHAR.test(part)) break;
-        fixed.push(part);
-      }
-      const prefix = posix.normalize(posix.join(base, fixed.join('/') || '.'));
-      if (prefix === '..' || prefix.startsWith('../')) {
-        problems.push(
-          `${config} ${what} ${JSON.stringify(raw)} reaches outside the repository, so the TypeScript project the ` +
-            'lint parser reads cannot be hashed.',
-        );
-        return undefined;
-      }
-      trees.set(prefix, `${config} ${what} ${raw}`);
-      return prefix;
-    };
-    const visit = (file, why) => {
-      if (seen.has(file)) return;
-      seen.add(file);
-      files.set(file, why);
-      const { config, error } = ts.parseConfigFileTextToJson(file, read(file) ?? '');
-      if (error !== undefined || config === null || typeof config !== 'object') {
-        problems.push(
-          `${file} is not a readable tsconfig, so the TypeScript project it describes cannot be checked.`,
-        );
-        return;
-      }
-      const here = posix.dirname(file);
-      const extended = config.extends === undefined ? [] : [config.extends].flat();
-      for (const target of extended) {
-        if (typeof target !== 'string') {
-          problems.push(`${file} has an \`extends\` that is not a path or a list of paths.`);
-        } else if (/^\.{1,2}(?:\/|$)/.test(target)) {
-          const resolved = posix.normalize(posix.join(here, target));
-          const found = [resolved, `${resolved}.json`].find((candidate) => tracked.has(candidate));
-          if (found === undefined) {
-            problems.push(`${file} extends '${target}', which is not a tracked file.`);
-          } else visit(found, `extended by ${file}`);
-        } else {
-          const bare = target.startsWith('@')
-            ? target.split('/').slice(0, 2).join('/')
-            : target.split('/')[0];
-          if (/^[/\\]|^[A-Za-z]:|\\/.test(target) || localNames.has(bare)) {
-            problems.push(
-              `${file} extends '${target}', an absolute path or a workspace package: its source is a lint input ` +
-                'the guard does not follow. Extend it by relative path.',
-            );
-          }
-        }
-      }
-      for (const key of ['files', 'include']) {
-        if (config[key] === undefined) continue;
-        selects = true;
-        for (const raw of [config[key]].flat()) tree(file, raw, `\`${key}\` entry`);
-      }
-      for (const reference of [config.references ?? []].flat()) {
-        tree(file, reference?.path, '`references` path');
-      }
-      const options = config.compilerOptions ?? {};
-      if (options.baseUrl !== undefined) {
-        const base = tree(file, options.baseUrl, '`baseUrl`');
-        if (base !== undefined) baseUrls.add(base);
-      }
-      for (const key of ['rootDirs', 'typeRoots']) {
-        for (const raw of [options[key] ?? []].flat()) tree(file, raw, `\`${key}\` entry`);
-      }
-      for (const targets of Object.values(options.paths ?? {})) {
-        for (const raw of [targets].flat()) pathTargets.push({ file, raw });
-      }
-    };
-    visit(leaf, 'the project tsconfig the lint parser selects');
-    for (const { file, raw } of pathTargets) {
-      tree(file, raw, '`paths` target');
-      for (const base of baseUrls) tree(file, raw, '`paths` target', base);
-    }
-    if (!selects) tree(leaf, '.', 'default include (neither `files` nor `include` is set)');
-    for (const [prefix, why] of trees) {
-      for (const file of trackedAt(tracked, prefix)) if (!files.has(file)) files.set(file, why);
-    }
-  }
-  return { files, problems };
-};
-
 /** The files of one read surface of one lint workspace: { files: Map<file, why>, problems }. */
 const readSurface = (surface, workspace, state) => {
   const { dir } = workspace;
@@ -1200,7 +1080,6 @@ const readSurface = (surface, workspace, state) => {
     const manifest = dir === '.' ? 'package.json' : `${dir}/package.json`;
     return { files: new Map([[manifest, `the manifest of ${workspace.name}`]]), problems: [] };
   }
-  if (surface === 'typescript-project') return typescriptProject(dir, state);
   return { files: new Map(), problems: [] };
 };
 
@@ -1215,15 +1094,6 @@ export const exceptionReadProblems = (found, hashed) => {
     if (task === undefined || !task.cache) continue;
     for (const path of workspace.excepted) {
       for (const { surface, why } of found.exceptions.get(path).reads) {
-        if (surface === 'dependency-builds') {
-          if (!task.dependsOn.includes('^build')) {
-            problems.push(
-              `${path} reads ${surface} (${why}) for ${workspace.name}, but its lint task does not depend on ` +
-                '`^build`, so a change to a dependency’s build output would replay a cached lint green.',
-            );
-          }
-          continue;
-        }
         const { files, problems: unreadable } = readSurface(surface, workspace, found);
         problems.push(...unreadable);
         const missing = [...files.keys()].filter(
@@ -1258,6 +1128,69 @@ export const inputProblems = ({ tracked, read, hashed, exceptions }) => {
     ...exceptionReadProblems(found, hashed),
   ];
 };
+
+/**
+ * Every file a TypeScript program can read from the repository, by extension: sources and
+ * declarations (`.ts .tsx .mts .cts`, `.d.ts` included), scripts (`.js .jsx .mjs .cjs`, read under
+ * `allowJs`/`checkJs` and by module resolution) and JSON (`tsconfig*.json`, `package.json`, a
+ * resolved `.json` module). Whatever the program's import graph, triple-slash references,
+ * `extends` chains, `references` or nested package projects reach, it is one of these.
+ */
+export const COMPILER_READ_FILE = /\.(?:[cm]?[jt]sx?|json)$/;
+
+/**
+ * The TypeScript compiler's reads, closed structurally (PR #524 r7, F5; no discovery, so no race
+ * with the compiler). The lint parser builds TypeScript programs, and a program may read any
+ * tracked file of the repository. So EVERY lint task that turbo may replay from cache must
+ * either not be cached at all, or hash all of them and depend on `^build` (the untracked build
+ * output the programs resolve @rasta/* imports to). The check does not ask which module builds
+ * programs: a new one is covered the day it appears.
+ */
+export const compilerReadProblems = ({ workspaces: found, tracked }, hashed) => {
+  const problems = [];
+  const byMissing = new Map();
+  for (const workspace of found) {
+    const task = hashed.tasks.get(`${workspace.name}#lint`);
+    // a missing task is reported by coverageProblems; an uncached one always re-runs
+    if (task === undefined || !task.cache) continue;
+    if (!task.dependsOn.includes('^build')) {
+      problems.push(
+        `${workspace.name}'s lint task is cached but does not depend on \`^build\`: the TypeScript programs ` +
+          'the lint parser builds read dependency build output (.d.ts), so a change to it would replay a cached lint green.',
+      );
+    }
+    const missing = unhashedCompilerReads(tracked, task, hashed);
+    if (missing.length === 0) continue;
+    const key = missing.join('\0');
+    const entry = byMissing.get(key) ?? { missing, packages: [] };
+    entry.packages.push(workspace.name);
+    byMissing.set(key, entry);
+  }
+  for (const { missing, packages } of byMissing.values()) {
+    problems.push(
+      `The lint task of ${packages.join(', ')} is cached, but ${missing.length} tracked source, declaration, script ` +
+        `or JSON files that a TypeScript program may read are not in turbo's resolved hashed inputs ` +
+        `(\`turbo run lint --dry=json\`), e.g. ${missing.slice(0, 3).join(', ')}: a change to one would replay a ` +
+        'cached lint green although the type-aware rules read it. Hash all of them in the `lint` task ' +
+        '(`$TURBO_ROOT$/**/*.ts`, `*.tsx`, `*.mts`, `*.cts`, `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `*.json`, with the ' +
+        'node_modules, dist and .next exclusions) or set `"cache": false` on it. Do not narrow this to the trees ' +
+        'a tsconfig names: imports, type imports, references and nested projects reach outside them.',
+    );
+  }
+  return problems;
+};
+
+/** The tracked files a TypeScript program may read that `task` does not hash (sorted). */
+export const unhashedCompilerReads = (tracked, task, hashed) =>
+  [...tracked]
+    .filter((f) => COMPILER_READ_FILE.test(f) && !task.files.has(f) && !hashed.global.has(f))
+    .sort();
+
+/** The whole guard: what eslint loads, what excepted modules read, and what the compiler may read. */
+export const guardProblems = (args) => [
+  ...inputProblems(args),
+  ...compilerReadProblems(discover(args), args.hashed),
+];
 
 // ---------------------------------------------------------------------------
 // Turbo: the source of truth for what a lint task hashes.
@@ -1408,9 +1341,25 @@ const withText = (state, replacements) => ({
   read: (path) => (path in replacements ? replacements[path](state.read(path)) : state.read(path)),
 });
 
+/**
+ * The compiler-read inputs of the real `lint` task (the globs and exclusions turbo.json carries for
+ * compilerReadProblems). They subsume every plain-path rule input, so the mutants that test the
+ * loaded-file model strip them first; the compiler mutants keep them.
+ */
+const COMPILER_INPUT =
+  /^!?\$TURBO_ROOT\$\/\*\*\/(?:\*\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|json)|node_modules\/\*\*|dist\/\*\*|\.next\/\*\*)$/;
+const withoutCompilerInputs = (doc) => {
+  for (const [key, def] of Object.entries(doc.tasks ?? {})) {
+    if ((key === 'lint' || key.endsWith('#lint')) && Array.isArray(def.inputs)) {
+      def.inputs = def.inputs.filter((i) => !COMPILER_INPUT.test(i));
+    }
+  }
+};
+
 /** turbo's answer for the real repository with a changed copy of the root turbo.json. */
-const mutatedSnapshot = async (change) => {
+const mutatedSnapshot = async (change, { keepCompilerInputs = false } = {}) => {
   const doc = parseJsonc(readDisk('turbo.json'));
+  if (!keepCompilerInputs) withoutCompilerInputs(doc);
   change(doc);
   const dir = mkdtempSync(join(tmpdir(), 'lint-input-guard-turbo-'));
   try {
@@ -1448,7 +1397,7 @@ const registrationProblems = ({ names, registered, tracked }) => [
 
 const fail = (problems) => problems.join('\n');
 const startsWith = (problems, prefix) => problems.filter((p) => p.startsWith(prefix));
-const realProblems = (state = realState()) => inputProblems({ ...state, hashed: realHashed() });
+const realProblems = (state = realState()) => guardProblems({ ...state, hashed: realHashed() });
 const loadedFiles = (state) => new Map(discover(state).workspaces.flatMap((w) => [...w.files]));
 
 // ---------------------------------------------------------------------------
@@ -2808,7 +2757,7 @@ test('exceptions: the real table is exact, and every excepted module is loaded a
         'scripts/internal-token-parser.mjs',
         { fs: ['existsSync', 'readFileSync'] },
         null,
-        ['linted-files', 'workspace-manifest', 'typescript-project', 'dependency-builds'],
+        ['linted-files', 'workspace-manifest'],
       ],
       [
         'scripts/internal-token-source-rule.mjs',
@@ -2997,221 +2946,42 @@ test('exceptions: a malformed table is rejected', () => {
 });
 
 test('exceptions: an excepted module whose read surface is not a turbo input fails', async () => {
-  const tsFiles = {
-    ...withReader(),
-    'tsconfig.base.json': '{}',
-    'apps/web/tsconfig.json':
-      '// the portal\n{"extends":"../../tsconfig.base.json","include":["src/**/*","../../shared/**/*.ts",],}',
-    'apps/web/src/index.ts': 'export {};\n',
-    'shared/x.ts': 'export {};\n',
-  };
+  const files = withReader();
   const surfaces = (...names) =>
     exceptionsOf([
       READER_PATH,
       reader({ reads: names.map((surface) => ({ surface, why: 'fixture' })) }),
     ]);
-  const run = (files, exceptions, inputs = BASE_INPUTS, extra = {}) =>
-    withFixtureRepo({ ...files, 'turbo.json': turboJson(inputs, extra) }, (dir) =>
+  const run = (exceptions, inputs = BASE_INPUTS) =>
+    withFixtureRepo({ ...files, 'turbo.json': turboJson(inputs) }, (dir) =>
       inputProblems({
-        ...memoryState({ ...files, 'turbo.json': turboJson(inputs, extra) }),
+        ...memoryState({ ...files, 'turbo.json': turboJson(inputs) }),
         exceptions,
         hashed: turboSnapshot({ cwd: dir }),
       }),
     );
   // all hashed: passes
-  assert.deepEqual(
-    run(
-      tsFiles,
-      surfaces('linted-files', 'workspace-manifest', 'typescript-project', 'location-only'),
-      [...BASE_INPUTS, '$TURBO_ROOT$/shared/x.ts'],
-      { globalDependencies: ['tsconfig.base.json'] },
-    ),
-    [],
-  );
+  assert.deepEqual(run(surfaces('linted-files', 'workspace-manifest', 'location-only')), []);
   // dropping the default inputs: the linted files and the manifest are no longer hashed
   const noDefault = BASE_INPUTS.filter((i) => i !== '$TURBO_DEFAULT$');
-  {
-    const problems = messages(
-      run(tsFiles, surfaces('linted-files'), noDefault),
-      `${READER_PATH} reads the \`linted-files\``,
-    );
-    assert.equal(problems.length, 1, problems.join(' | '));
-    assert.ok(problems[0].includes('@rasta/web') && problems[0].includes('apps/web/'), problems[0]);
-    // turbo hashes a package's own package.json whatever its inputs say, so that surface holds
-    assert.deepEqual(
-      messages(run(tsFiles, surfaces('workspace-manifest'), noDefault), 'workspace-manifest'),
-      [],
-    );
-  }
-  // a tsconfig that extends a root config turbo does not hash, and includes a tree outside the workspace
-  const noGlobals = messages(
-    run(tsFiles, surfaces('typescript-project'), BASE_INPUTS),
-    `${READER_PATH} reads the \`typescript-project\``,
+  const problems = messages(
+    run(surfaces('linted-files'), noDefault),
+    `${READER_PATH} reads the \`linted-files\``,
   );
-  assert.equal(noGlobals.length, 1, noGlobals.join(' | '));
-  assert.ok(
-    noGlobals[0].includes('tsconfig.base.json') || noGlobals[0].includes('shared/x.ts'),
-    noGlobals[0],
-  );
-  const onlyBase = messages(
-    run(tsFiles, surfaces('typescript-project'), BASE_INPUTS, {
-      globalDependencies: ['tsconfig.base.json'],
-    }),
-    'reads the `typescript-project`',
-  );
-  assert.equal(onlyBase.length, 1, onlyBase.join(' | '));
-  assert.ok(
-    onlyBase[0].includes('shared/x.ts') && !onlyBase[0].includes('tsconfig.base.json'),
-    onlyBase[0],
-  );
-  const onlyShared = messages(
-    run(tsFiles, surfaces('typescript-project'), [...BASE_INPUTS, '$TURBO_ROOT$/shared/x.ts']),
-    'reads the `typescript-project`',
-  );
-  assert.equal(onlyShared.length, 1, onlyShared.join(' | '));
-  assert.ok(onlyShared[0].includes('tsconfig.base.json'), onlyShared[0]);
-  // dependency-builds needs `^build`
-  const depends = () =>
-    messages(
-      run(tsFiles, surfaces('dependency-builds'), BASE_INPUTS, {}),
-      'reads dependency-builds',
-    );
-  assert.equal(depends().length, 1, 'a lint task without ^build must fail dependency-builds');
-  const withBuild = withFixtureRepo(
-    {
-      ...tsFiles,
-      'turbo.json': JSON.stringify({
-        tasks: { lint: { dependsOn: ['^build'], inputs: BASE_INPUTS } },
-      }),
-    },
-    (dir) =>
-      inputProblems({
-        ...memoryState(tsFiles),
-        exceptions: surfaces('dependency-builds'),
-        hashed: turboSnapshot({ cwd: dir }),
-      }),
-  );
-  assert.deepEqual(messages(withBuild, 'dependency-builds'), []);
-});
-
-test('typescript-project surface: the chain, the trees and the refusals', () => {
-  const state = (files) => ({
-    tracked: new Set(Object.keys(files)),
-    read: (f) => files[f],
-    localNames: new Set(['@rasta/contracts']),
-  });
-  const surface = (files, dir = 'apps/web') => typescriptProject(dir, state(files));
-  const keys = (files, dir) => [...surface(files, dir).files.keys()].sort();
-  const base = {
-    'tsconfig.base.json': '{}',
-    'apps/web/a.ts': '',
-    'apps/web/b.ts': '',
-    // a sibling whose name only starts like the workspace's is not under it
-    'apps/web-extra/c.ts': '',
-  };
-
-  // a leaf, its extends chain (".json" implied, comments and trailing commas allowed) and its include tree
+  assert.equal(problems.length, 1, problems.join(' | '));
+  assert.ok(problems[0].includes('@rasta/web') && problems[0].includes('apps/web/'), problems[0]);
+  // turbo hashes a package's own package.json whatever its inputs say, so that surface holds
   assert.deepEqual(
-    keys({
-      ...base,
-      'apps/web/tsconfig.test.json': '{"extends":"./tsconfig","include":["a.ts"],}',
-      'apps/web/tsconfig.json': '// c\n{"extends":"../../tsconfig.base"}',
-    }),
-    [
-      'apps/web/a.ts',
-      'apps/web/tsconfig.json',
-      'apps/web/tsconfig.test.json',
-      'tsconfig.base.json',
-    ],
-  );
-  // neither `files` nor `include` anywhere: the config’s own directory
-  assert.deepEqual(
-    keys({ ...base, 'apps/web/tsconfig.json': '{"extends":["../../tsconfig.base.json"]}' }),
-    ['apps/web/a.ts', 'apps/web/b.ts', 'apps/web/tsconfig.json', 'tsconfig.base.json'],
-  );
-  // a workspace at the repository root: the whole repository is its directory
-  assert.deepEqual(
-    keys(
-      {
-        'package.json': '{}',
-        'tsconfig.json': '{"include":["src/**/*"]}',
-        'src/a.ts': '',
-        'other/b.ts': '',
-      },
-      '.',
-    ),
-    ['src/a.ts', 'tsconfig.json'],
-  );
-  assert.deepEqual(keys({ 'package.json': '{}', 'tsconfig.json': '{}', 'src/a.ts': '' }, '.'), [
-    'package.json',
-    'src/a.ts',
-    'tsconfig.json',
-  ]);
-  // references, rootDirs, typeRoots, paths (against the config and the baseUrl), a glob cut at its static part
-  const refs = surface({
-    ...base,
-    'packages/x/src/i.ts': '',
-    'packages/y/t/i.d.ts': '',
-    'packages/z/r/i.ts': '',
-    'packages/w/p/i.ts': '',
-    'packages/v/q/i.ts': '',
-    'apps/web/tsconfig.json': JSON.stringify({
-      include: ['../../packages/x/src/**/*.ts'],
-      references: [{ path: '../../packages/z' }],
-      compilerOptions: {
-        rootDirs: ['../../packages/y'],
-        typeRoots: ['../../packages/y/t'],
-        baseUrl: '../../packages/v',
-        paths: { '@w/*': ['../../packages/w/p/*'], '@q/*': ['q/*'] },
-      },
-    }),
-  });
-  assert.deepEqual(refs.problems, []);
-  for (const f of [
-    'packages/x/src/i.ts',
-    'packages/z/r/i.ts',
-    'packages/y/t/i.d.ts',
-    'packages/w/p/i.ts',
-  ]) {
-    assert.ok(refs.files.has(f), `${f} not in the surface: ${[...refs.files.keys()].join(', ')}`);
-  }
-  assert.ok(refs.files.has('packages/v/q/i.ts'), 'a paths target is resolved against baseUrl too');
-  // refusals
-  const refuse = (config, needle, extra = {}) => {
-    const { problems } = surface({ ...base, ...extra, 'apps/web/tsconfig.json': config });
-    assert.ok(
-      problems.some((p) => p.includes(needle)),
-      `${config}: ${problems.join(' | ')}`,
-    );
-  };
-  refuse('{ not json', 'not a readable tsconfig');
-  refuse('[1]', 'not a readable tsconfig');
-  refuse('{"extends":"./missing.json"}', 'not a tracked file');
-  refuse('{"extends":5}', 'not a path');
-  refuse('{"extends":"/etc/tsconfig.json"}', 'absolute path or a workspace package');
-  refuse('{"extends":"@rasta/contracts/tsconfig.json"}', 'absolute path or a workspace package');
-  refuse('{"include":["/abs/**"]}', 'not a relative path');
-  refuse('{"include":["${configDir}/x"]}', 'not a relative path');
-  refuse('{"include":["../../../outside/**"]}', 'outside the repository');
-  refuse('{"include":[5]}', 'not a relative path');
-  refuse('{"references":[{"path":"/abs"}]}', 'not a relative path');
-  refuse('{"compilerOptions":{"typeRoots":["../../../x"]}}', 'outside the repository');
-  // a registry package to extend is not a local source
-  assert.deepEqual(
-    surface({ ...base, 'apps/web/tsconfig.json': '{"extends":"@tsconfig/node20/tsconfig.json"}' })
-      .problems,
+    messages(run(surfaces('workspace-manifest'), noDefault), 'workspace-manifest'),
     [],
   );
-  // a cycle terminates
-  assert.deepEqual(
-    keys({
-      'apps/web/tsconfig.test.json': '{"extends":"./tsconfig.json"}',
-      'apps/web/tsconfig.json': '{"extends":"./tsconfig.test.json"}',
-    }),
-    ['apps/web/tsconfig.json', 'apps/web/tsconfig.test.json'],
-  );
-  // no tsconfig: nothing is read
-  assert.deepEqual(keys(base), []);
+  // the compiler's reads are not a surface of the table: declaring one is refused
+  for (const surface of ['typescript-project', 'dependency-builds', 'typescript-program']) {
+    assert.ok(
+      exceptionTableProblems(surfaces(surface)).some((p) => p.includes('unknown read surface')),
+      surface,
+    );
+  }
 });
 
 // Mutants on the real repository: each takes one real thing away and the exception check must fail.
@@ -3336,9 +3106,8 @@ test('mutant: the real excepted modules cannot grow a new member, lose one, or w
 
 test('mutant: a real excepted module’s read surface that turbo stops hashing fails naming it', async () => {
   const state = realState();
-  const found = discover(state);
   const run = async (change) => inputProblems({ ...state, hashed: await mutatedSnapshot(change) });
-  // the default inputs carry the linted files, the manifests and the tsconfigs of every workspace
+  // the default inputs carry the linted files and the manifests of every workspace
   const noDefault = await run((doc) => {
     doc.tasks.lint.inputs = doc.tasks.lint.inputs.filter((i) => i !== '$TURBO_DEFAULT$');
   });
@@ -3351,29 +3120,6 @@ test('mutant: a real excepted module’s read surface that turbo stops hashing f
       `${path}: ${fail(noDefault)}`,
     );
   }
-  assert.ok(
-    noDefault.some((p) =>
-      p.startsWith('scripts/internal-token-parser.mjs reads the `typescript-project`'),
-    ),
-  );
-  // tsconfig.base.json is a global dependency: the extends chain of every workspace reaches it
-  const noBase = await run((doc) => {
-    doc.globalDependencies = doc.globalDependencies.filter((f) => f !== 'tsconfig.base.json');
-  });
-  const baseProblems = noBase.filter(
-    (p) =>
-      p.startsWith('scripts/internal-token-parser.mjs reads the `typescript-project`') &&
-      p.includes('tsconfig.base.json'),
-  );
-  assert.equal(baseProblems.length, found.workspaces.length, fail(noBase));
-  // the type declarations come from dependency builds, hashed through `^build`
-  const noBuild = await run((doc) => {
-    doc.tasks.lint.dependsOn = [];
-  });
-  assert.ok(
-    noBuild.some((p) => p.startsWith('scripts/internal-token-parser.mjs reads dependency-builds')),
-    fail(noBuild),
-  );
   // a stale entry (a tracked module nothing loads) is found by the exact-list check
   const stale = new Map([
     ...BUILTIN_READERS,
@@ -3382,4 +3128,299 @@ test('mutant: a real excepted module’s read surface that turbo stops hashing f
   assert.deepEqual(staleExceptions(discover({ ...state, exceptions: stale })), [
     'scripts/check-compose-ports-lib.mjs',
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// The TypeScript compiler's reads, closed structurally (PR #524 r7, F5).
+// ---------------------------------------------------------------------------
+
+/** The compiler-read globs and exclusions the real turbo.json carries (the one source of truth). */
+const realCompilerInputs = () => {
+  const found = parseJsonc(readDisk('turbo.json')).tasks.lint.inputs.filter((i) =>
+    COMPILER_INPUT.test(i),
+  );
+  assert.equal(found.length, 12, `expected nine globs and three exclusions, found ${found}`);
+  return found;
+};
+
+/** The review's three escapes plus a read of every extension, in a repository turbo can hash. */
+const COMPILER_PROBE_EXTENSIONS = [
+  'ts',
+  'd.ts',
+  'tsx',
+  'mts',
+  'cts',
+  'js',
+  'jsx',
+  'mjs',
+  'cjs',
+  'json',
+];
+const compilerFiles = () => ({
+  ...baseFiles(),
+  'pnpm-lock.yaml':
+    "lockfileVersion: '9.0'\n\nimporters:\n  .: {}\n  apps/ref: {}\n  apps/web: {}\n",
+  // 1. a type dependency outside every configured tree (the review's reproduction)
+  'apps/web/tsconfig.json': '{"files":["src/a.ts"],"references":[{"path":"../ref"}]}',
+  'apps/web/src/a.ts':
+    "import type { Header } from '../../../shared/header';\ndeclare const key: Header;\nexport const headers = { [key]: 'token' };\n",
+  'shared/header.d.ts': "export type Header = 'x-other';\n",
+  // 2. a nested package project the parser picks for its own files, extending an unhashed config
+  'apps/web/nested/package.json': '{"name":"nested"}',
+  'apps/web/nested/tsconfig.json': '{"extends":"../../../shared/tsconfig.nested.json"}',
+  'apps/web/nested/n.ts': 'export {};\n',
+  'shared/tsconfig.nested.json': '{"compilerOptions":{"strict":true}}',
+  // 3. a referenced project whose own `extends` is outside every tree
+  'apps/ref/tsconfig.json': '{"extends":"../../shared/ref-base.json"}',
+  'shared/ref-base.json': '{"compilerOptions":{"strict":true}}',
+  // a read of every extension from outside every workspace
+  ...Object.fromEntries(
+    COMPILER_PROBE_EXTENSIONS.map((ext) => [`shared/probe.${ext}`, 'export {};\n']),
+  ),
+  'shared/notes.md': 'not a compiler input\n',
+});
+const compilerTurbo = (inputs, extra = {}) =>
+  JSON.stringify({ tasks: { lint: { dependsOn: ['^build'], inputs, ...extra } } });
+const ESCAPED_READS = [
+  'shared/header.d.ts',
+  'shared/tsconfig.nested.json',
+  'shared/ref-base.json',
+  ...COMPILER_PROBE_EXTENSIONS.map((ext) => `shared/probe.${ext}`),
+];
+
+/** Run the whole guard on a fixture repository with a real turbo and the given `lint` definition. */
+const fixtureGuard = (files, turbo) =>
+  withFixtureRepo({ ...files, 'turbo.json': turbo }, (dir) => {
+    const state = memoryState({ ...files, 'turbo.json': turbo });
+    const hashed = turboSnapshot({ cwd: dir });
+    return {
+      problems: guardProblems({ ...state, hashed }),
+      legacy: inputProblems({ ...state, hashed }),
+      hashed,
+      state,
+    };
+  });
+
+test('compiler reads: the extensions a TypeScript program can read, and only those', () => {
+  for (const file of [
+    'a.ts',
+    'a.d.ts',
+    'a.tsx',
+    'a.mts',
+    'a.cts',
+    'a.d.mts',
+    'a.js',
+    'a.jsx',
+    'a.mjs',
+    'a.cjs',
+    'package.json',
+    'tsconfig.base.json',
+    'x/y/tsconfig.test.json',
+  ]) {
+    assert.ok(COMPILER_READ_FILE.test(file), `${file} must count as a compiler read`);
+  }
+  for (const file of [
+    'a.md',
+    'a.yaml',
+    'a.ts.map',
+    'a.tsbuildinfo',
+    'a.sql',
+    'Dockerfile',
+    'a.json5',
+  ]) {
+    assert.ok(!COMPILER_READ_FILE.test(file), `${file} is not read by the compiler`);
+  }
+});
+
+test('compiler reads: the real lint tasks hash every file a program may read, and depend on ^build', () => {
+  const state = realState();
+  const found = discover(state);
+  const hashed = realHashed();
+  assert.deepEqual(compilerReadProblems(found, hashed), []);
+  // not vacuous: the tasks are cached and the readable set is the whole repository's
+  const cached = found.workspaces.filter((w) => hashed.tasks.get(`${w.name}#lint`)?.cache);
+  assert.equal(cached.length, found.workspaces.length, 'a lint task is no longer cached');
+  const readable = [...state.tracked].filter((f) => COMPILER_READ_FILE.test(f));
+  assert.ok(readable.length >= 1000, `expected the whole repository, found ${readable.length}`);
+  for (const w of cached) {
+    const task = hashed.tasks.get(`${w.name}#lint`);
+    assert.deepEqual(unhashedCompilerReads(state.tracked, task, hashed), [], w.name);
+    assert.ok(task.dependsOn.includes('^build'), w.name);
+    // the globs must not walk dependencies or build output: tens of thousands of files, minutes of hashing
+    const walked = [...task.files].filter((f) => /(^|\/)node_modules\//.test(f));
+    assert.deepEqual(walked.slice(0, 3), [], `${w.name} hashes node_modules`);
+  }
+});
+
+test('compiler reads: the review’s three escapes and every extension are caught, and closed by the globs', () => {
+  const files = compilerFiles();
+  // the old guard (loaded files + excepted reads) passes while a type dependency is unhashed: the escape
+  const open = fixtureGuard(files, compilerTurbo(BASE_INPUTS));
+  assert.deepEqual(open.legacy, [], 'the escape: the older checks cannot see these reads');
+  const task = open.hashed.tasks.get('@rasta/web#lint');
+  assert.deepEqual(
+    ESCAPED_READS.filter(
+      (f) => !unhashedCompilerReads(open.state.tracked, task, open.hashed).includes(f),
+    ),
+    [],
+    'every escaped read must be reported',
+  );
+  assert.equal(open.problems.length, 1, fail(open.problems));
+  assert.ok(
+    open.problems[0].includes('@rasta/web') && open.problems[0].includes('cached'),
+    open.problems[0],
+  );
+  // with the compiler-read inputs of the real turbo.json the same repository passes
+  const closed = fixtureGuard(files, compilerTurbo([...BASE_INPUTS, ...realCompilerInputs()]));
+  assert.deepEqual(closed.problems, [], fail(closed.problems));
+  // global dependencies are hashed by every task: naming the reads there closes them too
+  const viaGlobals = fixtureGuard(
+    files,
+    JSON.stringify({
+      globalDependencies: Object.keys(files).filter((f) => COMPILER_READ_FILE.test(f)),
+      tasks: { lint: { dependsOn: ['^build'], inputs: BASE_INPUTS } },
+    }),
+  );
+  assert.deepEqual(viaGlobals.problems, [], fail(viaGlobals.problems));
+  // an uncached lint task re-runs every time: nothing to hash
+  assert.deepEqual(fixtureGuard(files, compilerTurbo(BASE_INPUTS, { cache: false })).problems, []);
+  // a cached task without ^build, an exclusion of a tree, a narrower glob: each fails
+  const noBuild = fixtureGuard(
+    files,
+    JSON.stringify({ tasks: { lint: { inputs: [...BASE_INPUTS, ...realCompilerInputs()] } } }),
+  );
+  assert.ok(
+    noBuild.problems.some((p) => p.includes('does not depend on `^build`')),
+    fail(noBuild.problems),
+  );
+  const excluded = fixtureGuard(
+    files,
+    compilerTurbo([...BASE_INPUTS, ...realCompilerInputs(), '!$TURBO_ROOT$/shared/**']),
+  );
+  assert.equal(excluded.problems.length, 1, fail(excluded.problems));
+  assert.ok(excluded.problems[0].includes('shared/header.d.ts'), excluded.problems[0]);
+  const narrow = fixtureGuard(
+    files,
+    compilerTurbo([...BASE_INPUTS, '$TURBO_ROOT$/apps/**/*.ts', '$TURBO_ROOT$/apps/**/*.json']),
+  );
+  assert.equal(narrow.problems.length, 1, fail(narrow.problems));
+});
+
+test('compiler reads: a module that builds TypeScript programs is covered without being listed', () => {
+  // a new rule module that sets the parser's `project` itself: no built-in, no BUILTIN_READERS entry,
+  // so nothing in the table or the loading grammar mentions the compiler
+  const files = {
+    ...compilerFiles(),
+    'scripts/helper-b.mjs':
+      "export const y = { languageOptions: { parserOptions: { project: ['./tsconfig.json'], tsconfigRootDir: import.meta.dirname } } };\n",
+  };
+  const open = fixtureGuard(files, compilerTurbo(BASE_INPUTS));
+  assert.deepEqual(open.legacy, []);
+  assert.equal(open.problems.length, 1, fail(open.problems));
+  const closed = fixtureGuard(files, compilerTurbo([...BASE_INPUTS, ...realCompilerInputs()]));
+  assert.deepEqual(closed.problems, []);
+});
+
+test('compiler reads: turbo’s own lint hash changes with any file a program may read, and not with others', () => {
+  const files = compilerFiles();
+  const lintHash = (dir, turbo) => {
+    writeFileSync(join(dir, 'turbo.json'), turbo);
+    const { bin, args, options } = turboCommand({ cwd: dir });
+    const dry = JSON.parse(
+      execFileSync(bin, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] }),
+    );
+    return dry.tasks.find((t) => t.taskId === '@rasta/web#lint').hash;
+  };
+  const probes = [...ESCAPED_READS, 'shared/notes.md'];
+  for (const [what, turbo, changes] of [
+    ['without the compiler inputs', compilerTurbo(BASE_INPUTS), false],
+    ['with the compiler inputs', compilerTurbo([...BASE_INPUTS, ...realCompilerInputs()]), true],
+  ]) {
+    withFixtureRepo({ ...files, 'turbo.json': turbo }, (dir) => {
+      const before = lintHash(dir, turbo);
+      for (const file of probes) {
+        const original = readFileSync(join(dir, file), 'utf8');
+        writeFileSync(join(dir, file), `${original}// changed\n`);
+        const after = lintHash(dir, turbo);
+        writeFileSync(join(dir, file), original);
+        const expected = changes && file !== 'shared/notes.md';
+        assert.equal(after !== before, expected, `${what}: changing ${file}`);
+      }
+    });
+  }
+});
+
+test('mutant: weakening the real compiler-read inputs fails naming the lint tasks', async () => {
+  const state = realState();
+  const found = discover(state);
+  const run = async (change) =>
+    guardProblems({
+      ...state,
+      hashed: await mutatedSnapshot(change, { keepCompilerInputs: true }),
+    });
+  assert.deepEqual(await run(() => {}), [], 'the real configuration passes unchanged');
+  // each glob on its own: the extension it covers becomes an unhashed read. An extension with no
+  // tracked file (.cts today) has nothing to miss, so removing its glob is an equivalent mutant
+  // here; it fails the day such a file is added (the fixture test above has one of every kind).
+  const globs = realCompilerInputs().filter((i) => !i.startsWith('!'));
+  let killed = 0;
+  await inParallel(globs, async (glob) => {
+    const hashed = await mutatedSnapshot(
+      (doc) => {
+        doc.tasks.lint.inputs = doc.tasks.lint.inputs.filter((i) => i !== glob);
+      },
+      { keepCompilerInputs: true },
+    );
+    const problems = guardProblems({ ...state, hashed });
+    const ext = glob.slice(glob.lastIndexOf('.'));
+    const tracked = [...state.tracked].filter((f) => f.endsWith(ext)).sort();
+    if (tracked.length === 0) return assert.deepEqual(problems, [], glob);
+    killed += 1;
+    // a workspace still hashes its own files (turbo's default inputs): what goes unhashed is that
+    // extension outside the workspace, and nothing of any other extension
+    let lost = 0;
+    for (const workspace of found.workspaces) {
+      const task = hashed.tasks.get(`${workspace.name}#lint`);
+      const missing = unhashedCompilerReads(state.tracked, task, hashed);
+      lost += missing.length;
+      assert.ok(
+        missing.every((f) => f.endsWith(ext)),
+        `${glob}: ${workspace.name}: ${missing.filter((f) => !f.endsWith(ext)).slice(0, 3)}`,
+      );
+    }
+    assert.ok(lost > 0, `${glob}: no workspace lost a file`);
+    assert.ok(startsWith(problems, 'The lint task of ').length >= 1, fail(problems));
+  });
+  assert.ok(killed >= 6, `expected most extensions to be tracked, killed ${killed}`);
+  // an exclusion that reaches tracked files
+  const excluded = await run((doc) => {
+    doc.tasks.lint.inputs.push('!$TURBO_ROOT$/packages/**');
+  });
+  assert.ok(
+    excluded.some((p) => p.includes('packages/')),
+    fail(excluded),
+  );
+  // no ^build
+  const noBuild = await run((doc) => {
+    doc.tasks.lint.dependsOn = [];
+  });
+  assert.equal(
+    noBuild.filter((p) => p.includes('does not depend on `^build`')).length,
+    found.workspaces.length,
+    fail(noBuild),
+  );
+  // one workspace overriding the task with narrower inputs
+  const override = await run((doc) => {
+    doc.tasks['@rasta/web#lint'] = { dependsOn: ['^build'], inputs: ['$TURBO_DEFAULT$'] };
+  });
+  assert.ok(
+    override.some((p) => p.includes('@rasta/web') && p.includes('may read')),
+    fail(override),
+  );
+  // an uncached lint task is the other accepted closure (it re-runs every time)
+  const uncached = await mutatedSnapshot((doc) => {
+    doc.tasks.lint.cache = false;
+  });
+  assert.equal(uncached.tasks.get('@rasta/web#lint').cache, false);
+  assert.deepEqual(compilerReadProblems(found, uncached), []);
 });

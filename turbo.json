@@ -69,6 +69,16 @@
     // turbo accepts an @(…), +(…) or !(…) pattern and hashes nothing for it.
     // A rule module that imports fs, child_process or os needs its own exact-path
     // entry (BUILTIN_READERS in that test) and what it reads must be hashed here too.
+    //
+    // The globs after the rule files are the TypeScript compiler's read surface, closed
+    // structurally instead of enumerated (PR #524 r7, F5): eslint's parser builds
+    // TypeScript programs, and a program reads whatever its imports, type imports,
+    // triple-slash references, `extends`/`references` chains and nested package projects
+    // lead to. Rather than rediscover that graph, the task hashes EVERY source, declaration,
+    // script and JSON file in the repository (node_modules, build output and .next are
+    // untracked and hashed by other means: the lockfile, and `^build` above), so no read
+    // can fall outside it. The test asserts the property against turbo's resolved inputs for
+    // every lint task (compilerReadProblems); an exclusion or a narrower glob fails it.
     "lint": {
       "dependsOn": ["^build"],
       "inputs": [
@@ -81,7 +91,19 @@
         "$TURBO_ROOT$/scripts/test-only-path.mjs",
         "$TURBO_ROOT$/scripts/testing-dev-only.mjs",
         "$TURBO_ROOT$/scripts/no-zod-default-rule.mjs",
-        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs"
+        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs",
+        "$TURBO_ROOT$/**/*.ts",
+        "$TURBO_ROOT$/**/*.tsx",
+        "$TURBO_ROOT$/**/*.mts",
+        "$TURBO_ROOT$/**/*.cts",
+        "$TURBO_ROOT$/**/*.js",
+        "$TURBO_ROOT$/**/*.jsx",
+        "$TURBO_ROOT$/**/*.mjs",
+        "$TURBO_ROOT$/**/*.cjs",
+        "$TURBO_ROOT$/**/*.json",
+        "!$TURBO_ROOT$/**/node_modules/**",
+        "!$TURBO_ROOT$/**/dist/**",
+        "!$TURBO_ROOT$/**/.next/**"
       ],
       "outputs": []
     },
