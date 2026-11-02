@@ -1,4 +1,5 @@
 import Redis from 'ioredis';
+import { assertRedisDiagnosticsSafe, protectRedisReadyCheck } from '@rasta/config';
 import type { WebServerEnv } from './env';
 import { endpointsFor, refreshTokens, type TokenResponse } from './oidc';
 import {
@@ -280,6 +281,7 @@ function defaultCoordinator(env: RenewalDependencies['env']): RefreshCoordinator
     return coordinator;
   }
 
+  assertRedisDiagnosticsSafe();
   const redis = new Redis(env.WEB_REDIS_URL, {
     // Bounded, not instant: a command may wait for the connection being
     // established — the first refresh after a start or a reconnect would
@@ -293,6 +295,7 @@ function defaultCoordinator(env: RenewalDependencies['env']): RefreshCoordinator
   });
   // A connection error is reported per command; the client's own event would
   // otherwise be an unhandled 'error' and take the process down.
+  protectRedisReadyCheck(redis);
   redis.on('error', () => undefined);
 
   coordinator = redisRefreshCoordinator({

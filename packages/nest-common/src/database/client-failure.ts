@@ -24,6 +24,7 @@ const CLIENT_CODES: ReadonlySet<string> = new Set([
   'P1016',
   'P1017',
   'P2024',
+  'P2037',
   'AccessDenied',
   'InvalidAccessKeyId',
   'SignatureDoesNotMatch',

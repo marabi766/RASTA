@@ -15,9 +15,9 @@ export class DatabaseConnectionError extends Error {
   }
 }
 
-function initializationFailed(error: unknown): boolean {
+function connectionAcquisitionFailed(error: unknown): boolean {
   const code = clientFailureCode(error);
-  if (code.startsWith('P10')) return true;
+  if (code.startsWith('P10') || code === 'P2024' || code === 'P2037') return true;
   try {
     return (error as { name?: unknown } | null)?.name === 'PrismaClientInitializationError';
   } catch {
@@ -34,7 +34,7 @@ async function databaseOperation<T>(
   try {
     return await run();
   } catch (error) {
-    if (!connectionOnly && !initializationFailed(error)) throw error;
+    if (!connectionOnly && !connectionAcquisitionFailed(error)) throw error;
     throw new DatabaseConnectionError(setting, clientFailureCode(error));
   }
 }

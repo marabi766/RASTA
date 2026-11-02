@@ -102,3 +102,23 @@ test('transaction query/domain failures and options pass through unchanged', asy
   await expect(guarded.$transaction(work, options)).rejects.toBe(refusal);
   expect(raw.$transaction).toHaveBeenCalledWith(work, options);
 });
+
+// Connection acquisition can fail after a pool was initialized successfully.
+test.each(['P1001', 'P1002', 'P1017', 'P2024', 'P2037'])(
+  '%s known-request acquisition failures are replaced independently of initialization',
+  async (code) => {
+    const raw = client();
+    const failure = Object.assign(leaky(), {
+      name: 'PrismaClientKnownRequestError',
+      errorCode: undefined,
+      code,
+    });
+    raw.$transaction.mockRejectedValue(failure);
+    const guarded = createSafePrismaClient(() => raw, 'DATABASE_URL_ASSET');
+    const safeFailure: unknown = await guarded.$transaction().catch((error: unknown) => error);
+    expect(safeFailure).toBeInstanceOf(DatabaseConnectionError);
+    expect(safeFailure).toMatchObject({ code });
+    expect(inspect(safeFailure, { depth: 10, showHidden: true })).not.toMatch(SENTINEL);
+    expect(raw.$transaction).toHaveBeenCalledTimes(1);
+  },
+);

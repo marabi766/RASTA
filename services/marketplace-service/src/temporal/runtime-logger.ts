@@ -1,4 +1,5 @@
 import { Runtime, type Logger as TemporalLogger, type RuntimeOptions } from '@temporalio/worker';
+import { assertTemporalDiagnosticsSafe } from '@rasta/config';
 import { createLogger, type Logger } from '@rasta/logging';
 import { foreignFailure } from './foreign-failure';
 import { SERVICE_NAME, type MarketplaceEnv } from '../config/env';
@@ -101,6 +102,7 @@ let installed = false;
 export function installTemporalRuntimeLogger(
   env: Pick<MarketplaceEnv, 'NODE_ENV' | 'LOG_LEVEL' | 'SERVICE_VERSION'>,
 ): void {
+  assertTemporalDiagnosticsSafe();
   if (installed) return;
   Runtime.install(
     temporalRuntimeOptions(

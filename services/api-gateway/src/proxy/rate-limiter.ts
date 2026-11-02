@@ -1,6 +1,6 @@
 import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import Redis from 'ioredis';
-import { redisUrlSchema } from '@rasta/config';
+import { assertRedisDiagnosticsSafe, protectRedisReadyCheck, redisUrlSchema } from '@rasta/config';
 import { clientFailureCode } from '@rasta/nest-common';
 
 /**
@@ -84,39 +84,6 @@ export function redisFailure(error: unknown): string {
   }
 }
 
-/**
- * ioredis writes an INFO/NOPERM reply directly to console.warn in `_readyCheck`,
- * bypassing error events. Reduce that reply before its callback reaches the SDK.
- * Keep NOPERM's existing skip-ready-check decision; all other replies pass through.
- */
-function protectRedisReadyCheck(redis: Redis): void {
-  const info = redis.info;
-  if (typeof info !== 'function') return;
-  redis.info = new Proxy(info, {
-    apply(target, receiver, args: unknown[]): unknown {
-      const callback = args.at(-1);
-      if (typeof callback === 'function') {
-        args[args.length - 1] = (error: unknown, result: unknown): unknown => {
-          let noperm = false;
-          try {
-            const message = (error as { message?: unknown } | null)?.message;
-            noperm = typeof message === 'string' && message.includes('NOPERM');
-          } catch {
-            // An unreadable failure is reported through the ordinary error-event boundary.
-          }
-          return callback(
-            noperm
-              ? new Error('NOPERM (REDIS_URL: Redis readiness diagnostic, code NOPERM)')
-              : error,
-            result,
-          );
-        };
-      }
-      return Reflect.apply(target, receiver, args);
-    },
-  });
-}
-
 @Injectable()
 export class RateLimiter implements OnModuleDestroy {
   private readonly logger = new Logger(RateLimiter.name);
@@ -140,6 +107,7 @@ export class RateLimiter implements OnModuleDestroy {
     if (!redisUrlSchema.safeParse(redisUrl).success) {
       throw new Error('REDIS_URL: Redis configuration refused (code INVALID_ENDPOINT)');
     }
+    assertRedisDiagnosticsSafe();
     try {
       this.redis = new Redis(redisUrl, {
         maxRetriesPerRequest: 2,

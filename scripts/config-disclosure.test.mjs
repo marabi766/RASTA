@@ -349,20 +349,25 @@ Module._load = function(id, ...args) {
   if (!/generated[\\/]prisma$/.test(id) || !mod.PrismaClient) return mod;
   return { ...mod, PrismaClient: class {
     constructor(options) {
+      globalThis.disclosureCalls ??= {};
+      globalThis.disclosureCalls.construct = (globalThis.disclosureCalls.construct ?? 0) + 1;
       if (process.env.DISCLOSURE_PHASE === 'construct') throw failure();
       const client = new mod.PrismaClient(options);
       const number = ++opened;
       const phase = process.env.DISCLOSURE_PHASE;
       function failure() {
         return Object.assign(new Error('Authentication failed for ${USER} ${PASSWORD}'), {
-          name: 'PrismaClientInitializationError', errorCode: process.env.DISCLOSURE_CODE,
+          name: process.env.DISCLOSURE_PHASE === 'construct' ? 'PrismaClientInitializationError' : 'PrismaClientKnownRequestError',
+          code: process.env.DISCLOSURE_CODE, errorCode: process.env.DISCLOSURE_CODE,
           input: '${USER}', cause: new Error('${PASSWORD}'),
         });
       }
-      client._engine.start = async () => { throw failure(); };
-      client._engine.request = async () => { throw failure(); };
-      client._engine.transaction = async () => { throw failure(); };
-      client._engine.stop = async () => { if ((phase === 'disconnect' || phase === 'second-disconnect') && number > (phase === 'second-disconnect' ? 1 : 0)) throw failure(); };
+      const called = method => { globalThis.disclosureCalls[method] = (globalThis.disclosureCalls[method] ?? 0) + 1; };
+      client._engine.start = async () => { called('start'); throw failure(); };
+      client._engine.request = async () => { called('request'); throw failure(); };
+      client._engine.requestBatch = async () => { called('request'); throw failure(); };
+      client._engine.transaction = async () => { called('transaction'); throw failure(); };
+      client._engine.stop = async () => { called('stop'); if ((phase === 'disconnect' || phase === 'second-disconnect') && number > (phase === 'second-disconnect' ? 1 : 0)) throw failure(); };
       if (phase.startsWith('second-') && number === 1) {
         client.$queryRawUnsafe = async () => [{
           role: 'rasta_asset', sessionRole: 'rasta_asset', database: 'asset',
@@ -478,24 +483,37 @@ const DATABASE_SERVICES = [
   'supplier',
 ];
 for (const service of DATABASE_SERVICES) {
-  test(`${service} PrismaService: construction, connect, lazy, transaction and disconnect diagnostics`, () => {
+  test(`${service} PrismaService: each lifecycle phase verifies its failure and engine call`, () => {
     const run = prismaProbe(
       `
       const { PrismaService } = require('./services/${service}-service/dist/prisma/prisma.service');
+      const { DatabaseConnectionError } = require('./packages/nest-common/dist');
+      const assert = require('node:assert/strict');
       const { inspect } = require('node:util');
+      const { createRequire } = require('node:module');
+      const req = createRequire(require('node:path').resolve('services/${service}-service/package.json'));
+      const { Logger } = req('@nestjs/common');
       (async () => {
         for (const phase of ['construct', 'connect', 'lazy', 'transaction', 'disconnect']) {
           process.env.DISCLOSURE_PHASE = phase;
+          globalThis.disclosureCalls = {};
+          const logs = [];
+          Logger.prototype.error = (...args) => logs.push(inspect(args));
+          let failure;
           try {
             const prisma = new PrismaService('postgresql://rasta_${service}:x@127.0.0.1:1/db');
             if (phase === 'disconnect') {
               if (prisma.stop) {
                 const result = await prisma.stop();
-                if (result.drained) { process.exitCode = 3; return; }
-                process.stdout.write('disconnect: DATABASE_URL_IDENTITY failed closed\\n');
-                continue;
+                assert.deepEqual(result, { drained: false, unsettled: 0 });
+                assert.equal(logs.length, 1);
+                assert.ok(logs[0].includes('DatabaseConnectionError: DATABASE_URL_IDENTITY: database connection failed (code P1000); driver diagnostics withheld'));
+                failure = logs[0];
+              } else if ('${service}' === 'analytics') {
+                await prisma.onApplicationShutdown();
+              } else {
+                await prisma.onModuleDestroy();
               }
-              await prisma.onModuleDestroy();
             } else if (phase === 'lazy') {
               await prisma.client.$queryRawUnsafe('SELECT 1');
             } else if (phase === 'transaction') {
@@ -503,27 +521,69 @@ for (const service of DATABASE_SERVICES) {
             } else {
               await prisma.onModuleInit();
             }
-            process.stdout.write('unexpected success: ' + phase);
-            process.exitCode = 3;
-            return;
           } catch (error) {
-            process.stdout.write(phase + ': ' + inspect(error, { depth: 10, showHidden: true }) + '\\n');
+            assert.ok(error instanceof DatabaseConnectionError, inspect(error));
+            assert.equal(error.setting, 'DATABASE_URL_${service.toUpperCase()}');
+            assert.equal(error.code, 'P1000');
+            failure = error;
           }
+          assert.ok(failure, 'expected failure in ' + phase);
+          const method = { construct: 'construct', connect: 'start', lazy: 'request', transaction: 'transaction', disconnect: 'stop' }[phase];
+          assert.equal(globalThis.disclosureCalls[method], 1, phase + ': engine invocation');
+          process.stdout.write(phase + ': ' + inspect(failure, { depth: 10, showHidden: true }) + '\\n');
         }
         process.exitCode = 2;
-      })();
+      })().catch(error => { console.error(error); process.exitCode = 3; });
     `,
       'all',
       'P1000',
       true,
     );
     assert.equal(run.status, 2, run.output);
-    assert.match(run.output, new RegExp(`DATABASE_URL_${service.toUpperCase()}`));
     for (const phase of ['construct', 'connect', 'lazy', 'transaction', 'disconnect']) {
       assert.ok(run.output.includes(`${phase}:`), run.output);
     }
     assertNoSentinel(run.output);
   });
+}
+
+for (const code of ['P1001', 'P1002', 'P1017', 'P2024', 'P2037']) {
+  for (const operation of ['model', 'raw', 'transaction', 'batch']) {
+    test(`real Prisma connection acquisition ${code}: ${operation} replaces the whole error`, () => {
+      const run = prismaProbe(
+        `
+        const assert = require('node:assert/strict');
+        const { inspect } = require('node:util');
+        const { PrismaService } = require('./services/asset-service/dist/prisma/prisma.service');
+        const { DatabaseConnectionError, runUnscoped } = require('./packages/nest-common/dist');
+        (async () => {
+          const prisma = new PrismaService('postgresql://rasta_asset:x@127.0.0.1:1/db');
+          const client = prisma.client;
+          let failure;
+          try {
+            await runUnscoped('disclosure probe', () => {
+              if ('${operation}' === 'model') return client.asset.findMany();
+              if ('${operation}' === 'raw') return client.$queryRawUnsafe('SELECT 1');
+              if ('${operation}' === 'batch') return client.$transaction([client.$queryRawUnsafe('SELECT 1')]);
+              return client.$transaction(async () => undefined);
+            });
+          } catch (error) { failure = error; }
+          assert.ok(failure instanceof DatabaseConnectionError, inspect(failure));
+          assert.equal(failure.code, '${code}');
+          assert.equal(failure.cause, undefined);
+          assert.equal(globalThis.disclosureCalls['${operation}' === 'transaction' ? 'transaction' : 'request'], 1);
+          console.error(inspect(failure, { depth: 10, showHidden: true }));
+          process.exitCode = 2;
+        })().catch(error => { console.error(error); process.exitCode = 3; });
+      `,
+        'acquisition',
+        code,
+        true,
+      );
+      assert.equal(run.status, 2, run.output);
+      assertNoSentinel(run.output);
+    });
+  }
 }
 
 test('real S3 constructor rejects SDK-disclosing endpoint before any SDK diagnostic', () => {
@@ -611,3 +671,167 @@ test('real S3 stream: asynchronous cleanup failure cannot become an uncaught SDK
   assert.equal(run.status, 0, output);
   assertNoSentinel(output);
 });
+
+// SDK tracing is configured before module loading, as it is in a deployed process.
+function sdkProbe(source, extra = {}) {
+  const run = spawnSync(process.execPath, ['-e', source], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: cleanEnv({ DEBUG: '', GRPC_TRACE: '', GRPC_VERBOSITY: '', ...extra }),
+  });
+  const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  assert.equal(run.error, undefined);
+  assert.equal(run.status, 0, output);
+  assertNoSentinel(output);
+  return output;
+}
+
+const WEB_SOURCE_LOADER = `
+  const { createRequire } = require('node:module');
+  const req = createRequire(require('node:path').resolve('apps/web/package.json'));
+  const { transformSync } = req('@swc/core');
+  require.extensions['.ts'] = (mod, filename) => mod._compile(transformSync(
+    require('node:fs').readFileSync(filename, 'utf8'),
+    { filename, jsc: { parser: { syntax: 'typescript' }, target: 'es2023' }, module: { type: 'commonjs' } }
+  ).code, filename);
+`;
+const REDIS_FACTORY = {
+  gateway: `
+    const { RateLimiter } = require('./services/api-gateway/dist/proxy/rate-limiter');
+    const factory = async () => { const limiter = new RateLimiter(url, 'rasta'); client = limiter.redis; };
+  `,
+  pending: `
+    const { readUnresolved, useUnresolvedStore } = require('./apps/web/src/server/unresolved-request.ts');
+    useUnresolvedStore();
+    const factory = () => readUnresolved(session, { purpose: 'project-create', target: '' });
+  `,
+  refresh: `
+    const { renewSession, forgetSharedRefreshes } = require('./apps/web/src/server/session-refresh.ts');
+    const { sealSession } = require('./apps/web/src/server/session.ts');
+    forgetSharedRefreshes();
+    const factory = () => renewSession(sealSession(session, process.env.WEB_SESSION_SECRET), {
+      env: { WEB_REDIS_URL: url, WEB_SESSION_SECRET: process.env.WEB_SESSION_SECRET,
+        WEB_SESSION_MAX_AGE_SECONDS: 3600 },
+      refresh: async () => { throw new Error('transport must not run'); },
+    });
+  `,
+};
+for (const [name, source] of Object.entries(REDIS_FACTORY)) {
+  for (const phase of ['trace', 'ready']) {
+    test(`${name} Redis factory contains SDK ${phase} diagnostics before transport`, () => {
+      sdkProbe(
+        `
+        ${WEB_SOURCE_LOADER}
+        const assert = require('node:assert/strict');
+        const Redis = req('ioredis').default;
+        let client;
+        let connects = 0;
+        Redis.prototype.connect = async function() { client = this; connects++; };
+        Redis.prototype.info = function(callback) {
+          callback(new Error('NOPERM ${USER} ${PASSWORD}'));
+          return Promise.resolve();
+        };
+        // No operational Redis I/O: exercise each real factory and its real SDK ready-check.
+        Redis.prototype.eval = async () => [null, String(Date.now())];
+        Redis.prototype.sendCommand = async () => { throw new Error('offline probe'); };
+        const { actingAccessToken } = require('./apps/web/src/test/session-token.ts');
+        const url = 'redis://${USER}:${PASSWORD}@127.0.0.1:1';
+        const session = { subject: 'u', username: 'u', organizationId: 'o', accessToken: actingAccessToken('o'),
+          accessTokenExpiresAt: Math.floor(Date.now()/1000) + 1, refreshToken: 'r', csrfToken: 'c',
+          issuedAt: Math.floor(Date.now()/1000), loginId: 'l' };
+        ${source}
+        (async () => {
+          if ('${phase}' === 'trace') {
+            await assert.rejects(factory, /REDIS_URL: SDK tracing refused/);
+            assert.equal(connects, 0);
+          } else {
+            // Factory callers may refuse the synthetic command response; readiness is still probed.
+            await factory().catch(() => undefined);
+            assert.equal(connects, 1);
+            let checked = 0;
+            client._readyCheck(error => { assert.equal(error, null); checked++; });
+            assert.equal(checked, 1);
+          }
+        })().catch(error => { console.error(error); process.exitCode = 3; });
+      `,
+        {
+          DEBUG: phase === 'trace' ? 'ioredis:*' : '',
+          WEB_REDIS_URL: `redis://${USER}:${PASSWORD}@127.0.0.1:1`,
+          WEB_SESSION_SECRET: 'x'.repeat(32),
+          API_GATEWAY_URL: 'http://localhost:3000',
+          OIDC_ISSUER_URL: 'http://localhost:8080',
+          OIDC_CLIENT_ID: 'rasta-web',
+          WEB_PUBLIC_ORIGIN: 'http://localhost:3200',
+          NODE_ENV: 'production',
+        },
+      );
+    });
+  }
+}
+
+test('S3 directory buckets are refused before the SDK can start background session refresh', () => {
+  sdkProbe(`
+    const assert = require('node:assert/strict');
+    const { createRequire } = require('node:module');
+    const req = createRequire(require('node:path').resolve('services/document-service/package.json'));
+    const sdk = req('@aws-sdk/client-s3');
+    const Original = sdk.S3Client;
+    let constructed = 0;
+    sdk.S3Client = class extends Original { constructor(options) {
+      constructed++;
+      super(options);
+      // Models the SDK-owned refresh failure, which no public-operation catch can intercept.
+      Promise.reject(new Error('${USER} ${PASSWORD}'));
+    }};
+    const { S3ObjectStorage, ObjectStorageError } = require('./services/document-service/dist/storage/s3.storage');
+    assert.throws(() => new S3ObjectStorage({
+      endpoint: 'https://${USER}.s3express-use1-az4.us-east-1.amazonaws.com',
+      region: 'us-east-1', bucket: 'test--use1-az4--x-s3', forcePathStyle: false,
+      accessKeyId: '${USER}', secretAccessKey: '${PASSWORD}',
+    }), error => error instanceof ObjectStorageError && error.code === 'UNSUPPORTED_DIRECTORY_BUCKET');
+    assert.equal(constructed, 0);
+  `);
+});
+
+for (const path of ['client', 'worker']) {
+  test(`Temporal ${path} refuses grpc tracing before SDK connection`, () => {
+    sdkProbe(
+      `
+      const assert = require('node:assert/strict');
+      const { createRequire } = require('node:module');
+      const req = createRequire(require('node:path').resolve('services/marketplace-service/package.json'));
+      const { Runtime, NativeConnection } = req('@temporalio/worker');
+      const { Connection } = req('@temporalio/client');
+      let connects = 0;
+      Runtime.install = () => undefined;
+      NativeConnection.connect = Connection.connect = async () => {
+        connects++;
+        console.error('${USER} ${PASSWORD}');
+        throw new Error('unexpected connection');
+      };
+      const { installTemporalRuntimeLogger } = require('./services/marketplace-service/dist/temporal/runtime-logger');
+      const env = { NODE_ENV: 'production', LOG_LEVEL: 'info', SERVICE_VERSION: '1',
+        MARKETPLACE_TEMPORAL_ENABLED: true, TEMPORAL_ADDRESS: '${USER}.${PASSWORD}:7233' };
+      // The guard must also run after the singleton runtime was installed.
+      const trace = process.env.GRPC_TRACE;
+      delete process.env.GRPC_TRACE;
+      delete process.env.GRPC_VERBOSITY;
+      installTemporalRuntimeLogger(env);
+      process.env.GRPC_TRACE = trace;
+      (async () => {
+        if ('${path}' === 'client') {
+          const { OrderSagaClient } = require('./services/marketplace-service/dist/temporal/saga.client');
+          await new OrderSagaClient(env).start('order');
+        } else {
+          const { OrderSagaWorker } = require('./services/marketplace-service/dist/temporal/worker');
+          await new OrderSagaWorker(env, {}, {}).onApplicationBootstrap();
+        }
+        assert.equal(connects, 0);
+        assert.throws(() => installTemporalRuntimeLogger(env), /TEMPORAL_ADDRESS: SDK tracing refused/);
+      })().catch(error => { console.error(error); process.exitCode = 3; });
+    `,
+      { GRPC_TRACE: 'all', GRPC_VERBOSITY: 'DEBUG' },
+    );
+  });
+}
