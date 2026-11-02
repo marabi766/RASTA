@@ -16,7 +16,7 @@
  * which counts a grant WITH INHERIT FALSE too: such a member still can
  * `SET ROLE` to the owner; Codex round 3 on #176):
  *
- *   * is a superuser, or holds CREATEDB, CREATEROLE or BYPASSRLS;
+ *   * is a superuser, or holds CREATEDB, CREATEROLE, BYPASSRLS or REPLICATION;
  *   * is a migrator role by name (`current_user` or `session_user` ending in
  *     `_migrator`);
  *   * owns the database, any non-system schema, or any relation in one — the
@@ -24,7 +24,8 @@
  *   * holds CREATE on the database or on any non-system schema — it could make
  *     objects it would own;
  *   * is a member of any role that owns something here, is named `*_migrator`,
- *     or is superuser-capable (SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS).
+ *     or is superuser-capable (SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS,
+ *     REPLICATION — #540 r1 F1).
  *
  * Infrastructure, not business logic: it decides whether a process may start,
  * never what it does. Each service runs it twice:
@@ -59,6 +60,8 @@ export interface ConnectedRoleFacts {
   createDb: boolean;
   createRole: boolean;
   bypassRls: boolean;
+  /** REPLICATION: it could stream every database's changes (#540 r1 F1). */
+  replication: boolean;
   ownsDatabase: boolean;
   ownedSchemas: string[];
   ownsRelationIn: string[];
@@ -82,6 +85,7 @@ export const CONNECTED_ROLE_SQL = `
          r.rolcreatedb AS "createDb",
          r.rolcreaterole AS "createRole",
          r.rolbypassrls AS "bypassRls",
+         r.rolreplication AS replication,
          EXISTS (SELECT 1 FROM pg_database d
                   WHERE d.datname = current_database()
                     AND pg_has_role(current_user, d.datdba, 'MEMBER')) AS "ownsDatabase",
@@ -99,6 +103,7 @@ export const CONNECTED_ROLE_SQL = `
                 WHERE m.rolname <> current_user
                   AND pg_has_role(current_user, m.oid, 'MEMBER')
                   AND (m.rolsuper OR m.rolcreatedb OR m.rolcreaterole OR m.rolbypassrls
+                       OR m.rolreplication
                        OR m.rolname LIKE '%\\_migrator'
                        OR EXISTS (SELECT 1 FROM pg_database d
                                    WHERE d.datname = current_database() AND d.datdba = m.oid)
@@ -119,6 +124,7 @@ export function connectedRoleProblems(facts: ConnectedRoleFacts): string[] {
   if (facts.createDb) problems.push('holds CREATEDB');
   if (facts.createRole) problems.push('holds CREATEROLE');
   if (facts.bypassRls) problems.push('holds BYPASSRLS');
+  if (facts.replication) problems.push('holds REPLICATION');
   if (facts.ownsDatabase) problems.push(`can act as the owner of database ${facts.database}`);
   for (const schema of facts.ownedSchemas) {
     problems.push(`can act as the owner of schema ${schema}`);

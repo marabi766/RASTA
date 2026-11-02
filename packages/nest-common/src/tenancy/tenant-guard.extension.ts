@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getOrganizationId, tryGetContext } from '../context/request-context';
+import { RastaError } from '../errors/rasta-error';
 
 /**
  * Automatic tenant scoping at the data layer.
@@ -11,7 +12,7 @@ import { getOrganizationId, tryGetContext } from '../context/request-context';
  *
  * The important property is the failure mode. If there is no request context,
  * the query **throws** rather than running unscoped. A missing tenant becomes a
- * loud 500 in development instead of a silent cross-tenant read in production.
+ * fixed platform refusal instead of a silent cross-tenant read.
  *
  * Escaping the scope requires calling {@link runUnscoped} with a written
  * reason, which makes every legitimate cross-tenant path greppable.
@@ -29,12 +30,14 @@ const SCOPED_OPERATIONS = new Set([
   'groupBy',
   'update',
   'updateMany',
+  'updateManyAndReturn',
   'delete',
   'deleteMany',
   'upsert',
 ]);
 
-const CREATE_OPERATIONS = new Set(['create', 'createMany']);
+const CREATE_OPERATIONS = new Set(['create', 'createMany', 'createManyAndReturn']);
+const UPDATE_OPERATIONS = new Set(['update', 'updateMany', 'updateManyAndReturn']);
 
 interface UnscopedMarker {
   reason: string;
@@ -52,7 +55,7 @@ const unscopedStorage = new AsyncLocalStorage<UnscopedMarker>();
  */
 export function runUnscoped<T>(reason: string, fn: () => T): T {
   if (!reason || reason.trim().length < 10) {
-    throw new Error('runUnscoped() requires a written reason of at least 10 characters');
+    throw RastaError.forbidden('runUnscoped() requires a written reason of at least 10 characters');
   }
 
   return unscopedStorage.run({ reason }, () => {
@@ -98,7 +101,48 @@ export function currentUnscopedReason(): string | undefined {
   return unscopedStorage.getStore()?.reason;
 }
 
+/** Structural subset of Prisma.dmmf.datamodel; no dependency on a service's generated client. */
+export interface TenantDatamodel {
+  models: readonly {
+    name: string;
+    fields: readonly {
+      name: string;
+      kind: string;
+      type: string;
+      isList: boolean;
+      relationFromFields?: readonly string[];
+    }[];
+  }[];
+}
+
+interface NestedWriteReview {
+  /** Prisma model and relation field, for example Order.lines. */
+  relation: string;
+  reason: string;
+}
+const nestedWriteStorage = new AsyncLocalStorage<NestedWriteReview>();
+
+/**
+ * Opts one call site into one reviewed relation. This does not bypass scoping:
+ * nested data and selectors are still restricted to the acting organization.
+ * Return the query (or await it) here so its lazy execution retains the review.
+ */
+export function runWithNestedTenantWrite<T>(review: NestedWriteReview, fn: () => T): T {
+  if (!review.relation || review.reason.trim().length < 10) {
+    throw RastaError.forbidden('A nested tenant write requires a relation and a reviewed reason');
+  }
+  return nestedWriteStorage.run({ ...review }, () => {
+    const result = fn();
+    if (isThenable(result)) {
+      return new Promise((resolve, reject) => result.then(resolve, reject)) as T;
+    }
+    return result;
+  });
+}
+
 export interface TenantGuardOptions {
+  /** Always pass Prisma.dmmf.datamodel from this service's generated client. */
+  datamodel: TenantDatamodel;
   /**
    * Models carrying an `organizationId` column.
    *
@@ -132,6 +176,145 @@ export function createTenantGuardExtension(options: TenantGuardOptions) {
   const tenantColumn = options.tenantColumn ?? 'organizationId';
   const scoped = new Set(options.scopedModels);
 
+  const models = new Map(options.datamodel.models.map((model) => [model.name, model]));
+  for (const model of scoped) if (!models.has(model)) refuse();
+
+  function writeData(model: string, value: unknown, create: boolean): unknown {
+    if (Array.isArray(value)) {
+      // Empty tenant batches still require context, just like nonempty writes.
+      if (scoped.has(model)) actingOrganization();
+      return value.map((row) => writeData(model, row, create));
+    }
+    let row = record(value);
+    if (scoped.has(model)) {
+      const organizationId = actingOrganization();
+      if (create) {
+        // The same create path protects direct create, bulk create and upsert.
+        row = injectTenantOnCreate({ data: row }, tenantColumn, organizationId).data as Record<
+          string,
+          unknown
+        >;
+      } else {
+        const existing = row[tenantColumn];
+        if (
+          existing !== undefined &&
+          existing !== organizationId &&
+          !(
+            isRecord(existing) &&
+            Object.keys(existing).length === 1 &&
+            existing.set === organizationId
+          )
+        ) {
+          refuse();
+        }
+      }
+    }
+    const result = { ...row };
+    const metadata = models.get(model);
+    if (!metadata) refuse();
+    for (const field of metadata.fields) {
+      if (field.kind !== 'object' || row[field.name] === undefined) continue;
+      const relation = `${model}.${field.name}`;
+      const tenantTarget = scoped.has(field.type);
+      if (tenantTarget) {
+        actingOrganization();
+        if (nestedWriteStorage.getStore()?.relation !== relation) refuse();
+      }
+      const actions = record(row[field.name]);
+      const rewritten: Record<string, unknown> = {};
+      for (const [action, input] of Object.entries(actions)) {
+        if (input === undefined) continue;
+        // An inverse to-one replacement may clear a previous tenant's child
+        // FK before linking the new child. Its incoming selector cannot scope
+        // that implicit write. Even an owning FK can evict another parent
+        // through a unique relation, so its ownership alone is not proof.
+        if (
+          (tenantTarget || scoped.has(model)) &&
+          !field.isList &&
+          ['create', 'createMany', 'connect', 'connectOrCreate', 'upsert'].includes(action)
+        ) {
+          refuse();
+        }
+        rewritten[action] = nestedAction(field.type, action, input, field.isList);
+      }
+      result[field.name] = rewritten;
+    }
+    return result;
+  }
+
+  function selector(model: string, input: unknown): Record<string, unknown> {
+    const where = record(input);
+    return scoped.has(model)
+      ? (injectTenantFilter({ where }, tenantColumn, actingOrganization()).where as Record<
+          string,
+          unknown
+        >)
+      : where;
+  }
+
+  function nestedAction(model: string, action: string, input: unknown, isList: boolean): unknown {
+    // set also disconnects omitted existing children, including foreign ones;
+    // even an empty set has effects that its input cannot tenant-constrain.
+    if (action === 'set' && scoped.has(model)) refuse();
+    if (Array.isArray(input)) return input.map((item) => nestedAction(model, action, item, isList));
+    switch (action) {
+      case 'create':
+        return writeData(model, input, true);
+      case 'createMany': {
+        const envelope = record(input);
+        return { ...envelope, data: writeData(model, envelope.data, true) };
+      }
+      case 'connect':
+      case 'set':
+      case 'deleteMany':
+        return selector(model, input);
+      case 'delete':
+      case 'disconnect':
+        // Boolean to-one mutations have no selector. Refuse on tenant targets;
+        // callers can supply a where input or use a separate guarded operation.
+        if (typeof input === 'boolean' && !scoped.has(model)) return input;
+        return selector(model, input);
+      case 'connectOrCreate': {
+        const envelope = record(input);
+        return {
+          ...envelope,
+          where: selector(model, envelope.where),
+          create: writeData(model, envelope.create, true),
+        };
+      }
+      case 'upsert': {
+        const envelope = record(input);
+        return {
+          ...envelope,
+          where: selector(model, envelope.where ?? {}),
+          create: writeData(model, envelope.create, true),
+          update: writeData(model, envelope.update, false),
+        };
+      }
+      case 'update': {
+        const envelope = record(input);
+        if (!('data' in envelope) && !isList) {
+          return { where: selector(model, {}), data: writeData(model, envelope, false) };
+        }
+        return {
+          ...envelope,
+          where: selector(model, envelope.where ?? {}),
+          data: writeData(model, envelope.data, false),
+        };
+      }
+      case 'updateMany': {
+        const envelope = record(input);
+        return {
+          ...envelope,
+          where: selector(model, envelope.where ?? {}),
+          data: writeData(model, envelope.data, false),
+        };
+      }
+      default:
+        return refuse();
+    }
+  }
+
   return {
     name: 'rasta-tenant-guard',
     query: {
@@ -139,33 +322,69 @@ export function createTenantGuardExtension(options: TenantGuardOptions) {
         async $allOperations(params: QueryExtensionArgs): Promise<unknown> {
           const { model, operation, args, query } = params;
 
-          if (!scoped.has(model)) {
-            return query(args);
-          }
-
           const unscopedReason = currentUnscopedReason();
           if (unscopedReason !== undefined) {
             options.onUnscopedQuery?.({ model, operation, reason: unscopedReason });
             return query(args);
           }
 
+          if (!models.has(model)) refuse();
+          if (
+            scoped.has(model) &&
+            !CREATE_OPERATIONS.has(operation) &&
+            !SCOPED_OPERATIONS.has(operation)
+          ) {
+            refuse();
+          }
+          // Inspect write data even under platform models (User -> Membership).
+          // JSON/scalar fields never participate: only DMMF relation fields do.
+          let next = args;
           if (CREATE_OPERATIONS.has(operation)) {
-            return query(injectTenantOnCreate(args, tenantColumn, getOrganizationId()));
+            next = { ...args, data: writeData(model, args.data, true) };
+          } else if (UPDATE_OPERATIONS.has(operation)) {
+            next = { ...args, data: writeData(model, args.data, false) };
+          } else if (operation === 'upsert') {
+            next = {
+              ...args,
+              create: writeData(model, args.create, true),
+              update: writeData(model, args.update, false),
+            };
           }
-
-          if (!SCOPED_OPERATIONS.has(operation)) {
-            return query(args);
+          if (scoped.has(model) && !CREATE_OPERATIONS.has(operation)) {
+            next = injectTenantFilter(next, tenantColumn, actingOrganization());
           }
-
-          // findUnique accepts non-unique filters alongside the unique field
-          // since Prisma 5 (extendedWhereUnique), so the same injection works
-          // for every read operation without rewriting the operation itself.
-          const organizationId = getOrganizationId();
-          return query(injectTenantFilter(args, tenantColumn, organizationId));
+          return query(next);
         },
       },
     },
   };
+}
+
+function refuse(): never {
+  throw new RastaError(
+    'TENANT_MISMATCH',
+    'Tenant write boundary refused the operation; cross-tenant writes are never implicit. Use runUnscoped() only for reviewed platform operations.',
+  );
+}
+
+function actingOrganization(): string {
+  const context = tryGetContext();
+  if (!context || (!context.organizationId && context.authType !== 'SERVICE')) {
+    throw RastaError.internal(
+      'No RequestContext tenant: tenant-scoped data was accessed without an acting organization',
+    );
+  }
+  // Preserve ADR-035's actionable refusal for service calls lacking org_id.
+  return getOrganizationId();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) refuse();
+  return value;
 }
 
 export function injectTenantFilter(
@@ -180,10 +399,7 @@ export function injectTenantFilter(
   // be the leak itself.
   const existing = where[column];
   if (existing !== undefined && existing !== organizationId) {
-    throw new Error(
-      `Query specified ${column}="${String(existing)}" but the request acts for ` +
-        `"${organizationId}". Use runUnscoped() if this is intentional.`,
-    );
+    refuse();
   }
 
   return { ...args, where: { ...where, [column]: organizationId } };
@@ -217,10 +433,7 @@ function applyTenant(
 ): Record<string, unknown> {
   const existing = row[column];
   if (existing !== undefined && existing !== organizationId) {
-    throw new Error(
-      `Attempted to create a row with ${column}="${String(existing)}" while acting for ` +
-        `"${organizationId}". Cross-tenant writes are never implicit.`,
-    );
+    refuse();
   }
   return { ...row, [column]: organizationId };
 }
@@ -239,16 +452,13 @@ export function assertTenantOwned<T extends Record<string, unknown>>(
 ): asserts entity is T {
   if (!entity) {
     // Handled by the caller's notFound path; this only narrows the type.
-    throw new Error(`${resourceName} not found`);
+    throw RastaError.notFound(resourceName);
   }
 
   const context = tryGetContext();
   if (!context?.organizationId) return;
 
   if (entity[column] !== context.organizationId) {
-    throw new Error(
-      `Tenant boundary violation: ${resourceName} belongs to "${String(entity[column])}" ` +
-        `but the request acts for "${context.organizationId}".`,
-    );
+    throw new RastaError('TENANT_MISMATCH', 'Tenant boundary violation');
   }
 }

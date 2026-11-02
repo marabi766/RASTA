@@ -206,10 +206,10 @@ not a complete application deployment.
 ### Optional infrastructure profiles
 
 ```bash
-docker compose --profile tools up -d          # Kafka UI, Temporal UI, Mailpit
-docker compose --profile search up -d         # OpenSearch
-docker compose --profile observability up -d  # OpenTelemetry, Prometheus, Grafana
-docker compose --profile all up -d             # every optional local component
+COMPOSE_PROFILES=tools pnpm infra:up          # Kafka UI, Temporal UI, Mailpit
+COMPOSE_PROFILES=search pnpm infra:up         # OpenSearch
+COMPOSE_PROFILES=observability pnpm infra:up  # OpenTelemetry, Prometheus, Grafana
+COMPOSE_PROFILES=all pnpm infra:up             # every optional local component
 ```
 
 The gateway is available at `http://localhost:3000` after application services start. Implemented services expose liveness

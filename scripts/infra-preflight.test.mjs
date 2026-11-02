@@ -573,7 +573,14 @@ test('standalone audit split: the same credential step as every service — both
 test('standalone split: `public` is handed to the migrator before any revoke and before the ledger (Codex round 4)', () => {
   const { status, calls } = runWithStubPsql(SPLIT, {}, { args: ['construction'] });
   assert.equal(status, 0);
-  const at = (text) => calls.findIndex((call) => call.includes(text));
+  // Positions in the whole stream of SQL: REASSIGN and the schema handoff are
+  // one call, one transaction (#540 r3 R3-1).
+  const stream = calls.join('\n');
+  const at = (text) => {
+    const position = stream.indexOf(text);
+    assert.ok(position >= 0, `never sent: ${text}`);
+    return position;
+  };
   const owner = at('ALTER SCHEMA public OWNER TO rasta_construction_migrator');
   assert.ok(owner > at('REASSIGN OWNED BY rasta_construction TO rasta_construction_migrator'));
   assert.ok(owner < at('REVOKE ALL ON SCHEMA public FROM PUBLIC'));

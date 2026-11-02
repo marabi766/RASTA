@@ -257,7 +257,8 @@ export const CLI_CONTRACT = Object.freeze({
       '-v',
     ],
   },
-  'scripts/check-db-runtime-privileges.mjs': { other: ['-X', '-d', '-q', '-tA', '-v'] },
+  // psqlRows (#540 r2 R2-2): the check's one way to run psql.
+  'scripts/check-db-runtime-privileges-lib.mjs': { other: ['-X', '-d', '-q', '-tA', '-v'] },
   // Docker command lines read from Dockerfiles and compose files, never run.
   'scripts/check-dockerfile-pins-lib.mjs': {
     other: [
@@ -384,6 +385,10 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'scripts/disposable-broker.mjs': { positionals: ['script'] },
   'scripts/infra-preflight-lib.mjs': { other: ['-service'] },
+  'scripts/kafka-init-gate.mjs': {
+    positionals: ['enum'],
+    other: ['--all', '--quiet', '--format', '-d'],
+  },
   'scripts/kafka-acl.mjs': { accepts: { '--profile': 'enum' }, positionals: ['enum'] },
   'scripts/kafka-outbox-tables.mjs': { positionals: ['script'] },
   // `temporal workflow` options; the address is TEMPORAL_ADDRESS's, never an argument here.

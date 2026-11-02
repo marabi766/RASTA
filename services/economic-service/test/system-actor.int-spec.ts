@@ -265,7 +265,7 @@ describe('a system actor', () => {
       // about another tenant's data that this caller is not entitled to learn.
       await expect(
         asSystem(() => wiring.ledgerRepository.accountsByIds(ids, org.a), org.c),
-      ).rejects.toThrow(/acts for/);
+      ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
     });
   });
 
