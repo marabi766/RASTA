@@ -382,20 +382,6 @@ const ADVERSARIAL_LENGTH = 16_384;
 const TIME_BOUND_MS = 50;
 
 /**
- * The least wall time `run` takes in three tries: what one call blocks the
- * event loop for, less what a preemption or GC pause on one try adds (r5 L2).
- */
-const elapsedMs = (run: () => unknown): number => {
-  let least = Infinity;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const start = performance.now();
-    run();
-    least = Math.min(least, performance.now() - start);
-  }
-  return least;
-};
-
-/**
  * CPU time `run` takes, in milliseconds. Not wall time: on a runner busy with
  * other jobs the process is preempted, and a longer sample is preempted more
  * often — CI measured a linear 16k/4k ratio of 23 by the wall clock.
@@ -408,24 +394,52 @@ const cpuMs = (run: () => unknown): number => {
 };
 
 /**
- * How much more `long` costs than `short`: the least CPU time of `samples`
- * runs of `calls` back-to-back calls each, the two sampled in turn.
+ * The least CPU time `run` takes in three tries: what one call keeps the event
+ * loop busy for, less what a preemption or GC pause on one try adds (r5 L2).
+ * Not wall time: on a runner busy with other jobs a preempted call reads long.
  */
-function costRatio(
-  short: () => unknown,
-  long: () => unknown,
-  { samples, calls } = { samples: 15, calls: 10 },
-): number {
-  const repeated = (run: () => unknown) => () => {
-    for (let call = 0; call < calls; call++) run();
+const elapsedMs = (run: () => unknown): number => {
+  let least = Infinity;
+  for (let attempt = 0; attempt < 3; attempt++) least = Math.min(least, cpuMs(run));
+  return least;
+};
+
+/** CPU time each sample of {@link costPerCharacterRatio} aims at: far above the timer's step and one stall's skew. */
+const SAMPLE_CPU_MS = 20;
+
+/**
+ * How much more each character of `long` costs than each of `short`, where
+ * `long` is `scale` times the text: 1 for work linear in the text, `scale` for
+ * work quadratic in it. Both sides of a sample do the same volume of work
+ * (`scale` calls of `short` against one of `long`) and run for about
+ * {@link SAMPLE_CPU_MS}, so a stall or a slow patch of the CPU weighs on
+ * both alike; the two are sampled in turn, and the median of the samples'
+ * ratios is the answer — no single sample, fast or slow, decides it.
+ */
+function costPerCharacterRatio(short: () => unknown, long: () => unknown, scale: number): number {
+  // The least of three calls, so one stalled call cannot call the work slow.
+  // Work that is quadratic takes too long to repeat: one call, fewer samples.
+  const callMs = elapsedMs(long);
+  const slow = callMs >= SAMPLE_CPU_MS;
+  const calls = slow ? 1 : Math.min(Math.ceil(SAMPLE_CPU_MS / Math.max(callMs, 0.001)), 20_000);
+  const repeated = (run: () => unknown, count: number) => () => {
+    for (let call = 0; call < count; call++) run();
   };
-  let leastShort = Infinity;
-  let leastLong = Infinity;
-  for (let sample = 0; sample < samples; sample++) {
-    leastShort = Math.min(leastShort, cpuMs(repeated(short)));
-    leastLong = Math.min(leastLong, cpuMs(repeated(long)));
+  const ratios: number[] = [];
+  for (let sample = 0; sample < (slow ? 3 : 11); sample++) {
+    let shortMs: number;
+    let longMs: number;
+    if (sample % 2 === 0) {
+      shortMs = cpuMs(repeated(short, calls * scale));
+      longMs = cpuMs(repeated(long, calls));
+    } else {
+      longMs = cpuMs(repeated(long, calls));
+      shortMs = cpuMs(repeated(short, calls * scale));
+    }
+    ratios.push(longMs / shortMs);
   }
-  return leastLong / leastShort;
+  ratios.sort((x, y) => x - y);
+  return ratios[Math.floor(ratios.length / 2)]!;
 }
 
 /**
@@ -478,17 +492,19 @@ describe('redaction is linear in the text, and bounded (r4 F1)', () => {
         uncapped(short);
         uncapped(long);
       }
-      // Work that is quadratic takes long enough to time in one call — and too
-      // long to time in 150. Told by the least CPU time of three calls, not
-      // one call's wall time: a pause in that one call must not decide it (r5 L2).
-      const slow = Math.min(...[0, 1, 2].map(() => cpuMs(() => uncapped(long)))) >= TIME_BOUND_MS;
-      const ratio = costRatio(
+      // Four times the text, the same cost per character: linear measures 1,
+      // quadratic 4. The bound sits between, with 2x room each way for the
+      // noise a loaded runner adds to a median of CPU-time samples (FU-010:
+      // the old least-of-15 of 1-3 ms samples measured 8.0056 for ~4).
+      const ratio = costPerCharacterRatio(
         () => uncapped(short),
         () => uncapped(long),
-        slow ? { samples: 3, calls: 1 } : undefined,
+        long.length / short.length,
       );
-      expect(ratio).toBeLessThan(8);
+      expect(ratio).toBeLessThan(2);
     },
+    // 11 samples of ~40 ms of CPU, several times that on a runner shared with other jobs.
+    30_000,
   );
 
   it.each(ADVERSARIAL)('%s: each character is read a bounded number of times', (_, make) => {
