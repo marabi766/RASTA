@@ -341,6 +341,26 @@ export const BUILTIN_READERS = new Map([
     },
   ],
   [
+    'scripts/exchange-deadline-rule.mjs',
+    {
+      why:
+        'the rule keys its allowances on a file’s canonical repository path, so it resolves symlinks of the ' +
+        'linted file and of the checkout root and checks that the linted path is a file; it reads no file content',
+      builtins: { fs: ['realpathSync', 'statSync'] },
+      buildsPrograms: false,
+      reads: [
+        {
+          surface: 'linted-files',
+          why: '`fs.realpathSync(file)` and `fs.statSync(real).isFile()`: the linted file’s real path and kind',
+        },
+        {
+          surface: 'location-only',
+          why: '`fs.realpathSync(ROOT)`: the checkout directory, resolved and not read',
+        },
+      ],
+    },
+  ],
+  [
     'scripts/testing-dev-only.mjs',
     {
       why:
@@ -2769,6 +2789,7 @@ test('exceptions: the real table is exact, and every excepted module is loaded a
   assert.deepEqual(
     [...BUILTIN_READERS.keys()].sort(),
     [
+      'scripts/exchange-deadline-rule.mjs',
       'scripts/internal-token-parser.mjs',
       'scripts/internal-token-source-rule.mjs',
       'scripts/testing-dev-only.mjs',
@@ -2795,6 +2816,13 @@ test('exceptions: the real table is exact, and every excepted module is loaded a
       [
         'scripts/internal-token-source-rule.mjs',
         { fs: ['realpathSync'] },
+        false,
+        null,
+        ['linted-files', 'location-only'],
+      ],
+      [
+        'scripts/exchange-deadline-rule.mjs',
+        { fs: ['realpathSync', 'statSync'] },
         false,
         null,
         ['linted-files', 'location-only'],
