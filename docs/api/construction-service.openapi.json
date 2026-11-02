@@ -2431,6 +2431,129 @@
         }
       }
     },
+    "/v1/internal/projects/{id}/completion": {
+      "get": {
+        "description": "Only contract-service with a SERVICE token in X-Internal-Token, signed for the project owner. Every user and every other service is refused (403); a missing signed tenant or a conflicting X-Organization-Id is 403. Missing and other-tenant projects answer the same 404. Returns ids, status, version and, only for COMPLETED, completedAt and completedBy from the stored status transition. Every other status has null completion fields and proves no completion. Covers configured project.completion approvals and the interim 100% progress path. Consumers must compare the project, tenant, status and completion metadata with the event before acting; projectId and version identify the source fact. No money or project content is returned. This read writes nothing. The gateway does not route /v1/internal/.",
+        "operationId": "InternalProjectController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "projectId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "organizationId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "DRAFT",
+                        "PENDING_APPROVAL",
+                        "CHANGES_REQUESTED",
+                        "APPROVED",
+                        "IN_PROGRESS",
+                        "COMPLETED",
+                        "CANCELLED"
+                      ]
+                    },
+                    "version": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "completedAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    },
+                    "completedBy": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "projectId",
+                    "organizationId",
+                    "status",
+                    "version",
+                    "completedAt",
+                    "completedBy"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or a token that is expired, unverifiable or issued for another audience.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Every user token and every service except contract-service is refused. A missing signed tenant or a conflicting organization header is SERVICE_TENANT_CONTEXT_INVALID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Project not found in the signed tenant; the same response for missing and other-tenant projects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Read the project completion source fact (internal, D-081)",
+        "tags": ["construction-internal"],
+        "security": [
+          {
+            "internalToken": []
+          }
+        ]
+      }
+    },
     "/v1/projects/{id}/approvals": {
       "post": {
         "description": "Copies the steps of the active project.execution policy that apply to the estimate into a new round and asks the first. Refused (422) with no active policy or no applicable step — the platform never approves by default — and without the preconditions CONSTRUCTION_APPROVAL_MIN_SUBMITTED_NEEDS and CONSTRUCTION_APPROVAL_REQUIRES_ESTIMATE (Q-68). Publishes PROJECT_STATUS_CHANGED and APPROVAL_REQUESTED.",
@@ -17280,6 +17403,11 @@
         "scheme": "bearer",
         "bearerFormat": "JWT",
         "type": "http"
+      },
+      "internalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Internal-Token"
       }
     },
     "schemas": {
