@@ -95,11 +95,6 @@ describe('responses serialised without the bigint shim', () => {
   });
 
   afterAll(async () => {
-    await runUnscoped('the suite removes the rules it created', () =>
-      harness.prisma.client.rewardRule.deleteMany({
-        where: { organizationId: { in: [org, otherOrg] } },
-      }),
-    );
     await cleanup(harness.prisma, [org, otherOrg, payee]);
     await harness.close();
   });

@@ -179,6 +179,18 @@ const reviewedClockTemplates: readonly {
   template: string;
   expressions: string | null;
 }[] = [
+  // Task 1201: legacy occurrence evidence, and fixed data in an isolated migration schema.
+  // Fact-time boundaries intentionally use owner timestamps, not a live eligibility clock.
+  {
+    file: 'services/economic-service/test/reward-correctness.int-spec.ts',
+    template: '2e111b4f6aff086216c7238d1bae673f5f3b549379dcd26ad175f45f788df161',
+    expressions: 'd0abc914a811413167a984745bd9943f1acbe4593eb1f61fe4b1c87b5e4acb90',
+  },
+  {
+    file: 'services/economic-service/test/reward-status-migration.int-spec.ts',
+    template: 'c9b73aefc6ef271e3e8bd37928a51de68cd24684332aa92210052f0624fbb704',
+    expressions: null,
+  },
   // The procurement digest's trigger path as the runtime role (#421 r1 nit H): a
   // window opened two hours and closed one hour ago by the database clock, ended
   // and its empty digest written — far from any eligibility boundary; rolled back.
