@@ -373,13 +373,12 @@ describe('an answer keeps the first send’s body (addendum E)', () => {
   it('order: the values sent first, whatever a later answer carries', () => {
     const order = jest.requireActual<typeof import('./unresolved-order')>('./unresolved-order');
     const first = { submissionId: K1, values: { offerId: 'OFR_1', quantity: '3' } };
-    expect(order.saveUnresolvedOrder('PRD_1', { ...first, correlationId: null }, inA)).toBe(
-      'SAVED',
-    );
+    const saved = order.saveUnresolvedOrder('PRD_1', { ...first, correlationId: null }, inA);
+    if (saved.outcome !== 'SAVED') throw new Error(saved.outcome);
     const late = { submissionId: K1, values: { offerId: 'OFR_2', quantity: '9' } };
-    expect(order.answerUnresolvedOrder('PRD_1', { ...late, correlationId: 'COR' }, inA)).toBe(
-      'SAVED',
-    );
+    expect(
+      order.answerUnresolvedOrder('PRD_1', { ...late, correlationId: 'COR' }, inA, saved.attempt),
+    ).toBe('SAVED');
     expect(order.restoreUnresolvedOrder('PRD_1', inA, 3600)?.order).toMatchObject({
       submissionId: K1,
       values: { offerId: 'OFR_1', quantity: '3' },
@@ -398,13 +397,16 @@ describe('an answer keeps the first send’s body (addendum E)', () => {
       replay,
     });
     const stamp = { token: 'stamp', until: Date.now() + 60_000 };
-    expect(dispute.saveUnresolvedDispute('TXN_1', entry('متن نخست اعتراض', stamp), inA)).toBe(
-      'SAVED',
-    );
+    const saved = dispute.saveUnresolvedDispute('TXN_1', entry('متن نخست اعتراض', stamp), inA);
+    if (saved.outcome !== 'SAVED') throw new Error(saved.outcome);
     // The server said the deadline passed: the stamp is withdrawn …
-    expect(dispute.answerUnresolvedDispute('TXN_1', entry('متن دیگر', null), inA)).toBe('SAVED');
+    expect(
+      dispute.answerUnresolvedDispute('TXN_1', entry('متن دیگر', null), inA, saved.attempt),
+    ).toBe('SAVED');
     // … and a later answer carrying one does not bring it back, nor its text.
-    expect(dispute.answerUnresolvedDispute('TXN_1', entry('متن سوم', stamp), inA)).toBe('SAVED');
+    expect(
+      dispute.answerUnresolvedDispute('TXN_1', entry('متن سوم', stamp), inA, saved.attempt),
+    ).toBe('SAVED');
     expect(dispute.restoreUnresolvedDispute('TXN_1', inA, 3600)?.dispute).toMatchObject({
       values: { reason: 'متن نخست اعتراض' },
       replay: null,

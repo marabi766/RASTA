@@ -13,6 +13,7 @@ import {
   type PlaceOrderFormValues,
 } from '@/lib/place-order-fields';
 import {
+  advanceUnresolvedOrder,
   answerUnresolvedOrder,
   clearUnresolvedOrder,
   restoreUnresolvedOrder,
@@ -26,6 +27,7 @@ import {
 import type { Offer } from '@/server/marketplace';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 
 import { submitPlaceOrder } from './place-order-actions';
 import {
@@ -161,6 +163,8 @@ function OrderForm({
             ? null
             : { ...view, viewOnly: true };
         },
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        advance: () => advanceUnresolvedOrder(productId, submissionId, binding),
         send: () => submitPlaceOrder(previous, form),
         // The call itself failed — a lost response after the order may have
         // committed, or the portal's own gate answering 401 JSON to an action POST
@@ -173,8 +177,9 @@ function OrderForm({
             ? { kind: 'UNCONFIRMED', ...unsent, sessionEnded: true }
             : { kind: 'UNCONFIRMED', ...unsent };
         },
-        answer: (state) => answerUnresolvedOrder(productId, state, binding),
-        settle: () => settleUnresolvedOrder(productId, submissionId, binding),
+        answer: (state, attempt) => answerUnresolvedOrder(productId, state, binding, attempt),
+        settle: (attempt, settlement) =>
+          settleUnresolvedOrder(productId, submissionId, binding, attempt, settlement),
         held: { kind: 'HELD' },
         unavailable: { kind: 'STORAGE_UNAVAILABLE' },
       });
@@ -400,8 +405,7 @@ function UnconfirmedOrder({
         {/* A full navigation: the page mints a fresh submission id. Forgets the unresolved order first. */}
         <a
           href={newOrderHref}
-          onClick={onStartNew}
-          onAuxClick={onStartNew}
+          {...setAsideOnOpen(onStartNew)}
           className="underline self-center text-sm"
         >
           شروع سفارش تازه

@@ -145,6 +145,7 @@ it('memory holds (storage refusing the set-aside) follow the same lifecycle', as
       'PRD_ELSEWHERE',
       { submissionId: id, values: { offerId: 'OFR_1', quantity: '3' }, correlationId: 'COR' },
       ACCOUNT,
+      null,
     );
   const refuse = () =>
     jest.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
