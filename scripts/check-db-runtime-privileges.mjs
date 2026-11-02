@@ -30,7 +30,6 @@
 // `TimeZone = 'UTC'` (lib/session-timezone.bash), and no per-database override
 // says otherwise — what still holds when a pooler drops the client's option.
 // -----------------------------------------------------------------------------
-import { spawnSync } from 'node:child_process';
 import {
   CONNECTABLE_DATABASES_SQL,
   FINDINGS_SQL,
@@ -39,30 +38,12 @@ import {
   classifyServices,
   foreignVerdict,
   matrix,
+  parseDatabases,
+  psqlRows as rows,
+  shownDatabase,
   timezoneVerdict,
   verdict,
 } from './check-db-runtime-privileges-lib.mjs';
-
-function rows(database, sql, variables) {
-  const result = spawnSync(
-    'psql',
-    [
-      '-X',
-      '-q',
-      '-tA',
-      '-v',
-      'ON_ERROR_STOP=1',
-      ...Object.entries(variables).flatMap(([name, value]) => ['-v', `${name}=${value}`]),
-      '-d',
-      database,
-    ],
-    { input: sql, encoding: 'utf8' },
-  );
-  if (result.status !== 0) {
-    throw new Error(`${database}: the catalogue query failed\n${result.stderr}`);
-  }
-  return result.stdout.split('\n').filter(Boolean);
-}
 
 const entries = classifyServices();
 let failed = 0;
@@ -82,13 +63,15 @@ for (const entry of entries) {
 }
 // Every database, every runtime role but its own: the whole matrix. A service
 // database that does not accept connections fails here, unchecked.
+// The database list is one JSON value, every name a string in it (#540 r2
+// R2-2); each visit connects to the name literally and checks it got there.
 for (const { database, runtime, problem } of matrix(
   entries,
-  rows('postgres', CONNECTABLE_DATABASES_SQL, {}),
+  parseDatabases(rows('postgres', CONNECTABLE_DATABASES_SQL, {}).join('\n')),
 )) {
   report([
     problem
-      ? { ok: false, line: `${database}: ${problem}` }
+      ? { ok: false, line: `${shownDatabase(database)}: ${problem}` }
       : foreignVerdict(database, rows(database, FOREIGN_FINDINGS_SQL, { runtime })),
   ]);
 }

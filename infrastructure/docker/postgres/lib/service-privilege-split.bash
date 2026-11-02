@@ -74,6 +74,10 @@
 #     `statement_timeout` (lib/session-statement-timeout.bash): only when
 #     POSTGRES_STATEMENT_TIMEOUT_MS_<SVC> is set — the way to have one behind
 #     PgBouncer, which drops the services' own startup option (#268 r4).
+#   * It fails, and never reports success, when any statement fails (#540 r2
+#     R2-1), and ends by reading the catalogue back: nothing forbidden is held
+#     (assert_no_forbidden_rights) and everything above is in place
+#     (assert_split_end_state).
 #
 # ## Upgrading an existing database — the order matters
 #
@@ -92,9 +96,37 @@
 # JIT off: the privilege queries read a few thousand catalogue rows, and
 # compiling them costs a second each for nothing (as
 # scripts/check-db-runtime-privileges-lib.mjs NO_JIT).
+#
+# Every call's status is passed on explicitly — `… || return 1`, never left to
+# errexit (#540 r2 R2-1): the standalone split runs under
+# `upgrade_service_split … || exit 1`, and bash switches errexit off for
+# everything a `||` tests, so an unchecked failure here was ignored and the
+# split went on to report success. scripts/service-privilege-split-faults.test.mjs
+# fails every psql call of every entry point in turn and requires the run to
+# stop there and fail.
 _svc_split_psql() {
   printf '%s\n' "$2" | PGOPTIONS="${PGOPTIONS:-} -c jit=off" \
     psql -v ON_ERROR_STOP=1 -X -q --username "$POSTGRES_USER" --dbname "$1" -f -
+}
+
+# _split_names <service> <database>
+#
+# The split spells the service's roles and database into SQL unquoted, and
+# hands the database to psql as `--dbname`, which libpq reads as a connection
+# string when it holds `=` or starts `postgres://` (#540 r2 R2-2). So both are
+# plain lower-case identifiers — a letter or `_`, then letters, digits and `_`,
+# the roles within PostgreSQL's 63 bytes — and anything else is refused, never
+# interpreted. assert_split_end_state then checks current_database() too.
+_split_names() {
+  local svc="$1" db="$2"
+  if [[ ! "${svc}" =~ ^[a-z][a-z0-9_]{0,44}$ ]]; then
+    printf 'unsupported service name %q: the split takes [a-z][a-z0-9_]{0,44} only\n' "${svc}" >&2
+    return 1
+  fi
+  if [[ ! "${db}" =~ ^[a-z_][a-z0-9_]{0,62}$ ]]; then
+    printf 'unsupported database name %q: the split takes [a-z_][a-z0-9_]{0,62} only\n' "${db}" >&2
+    return 1
+  fi
 }
 
 # shellcheck source=session-timezone.bash
@@ -260,7 +292,13 @@ rotate_and_verify_split_logins() {
   local runtime="rasta_${svc}" migrator="rasta_${svc}_migrator"
   local host="${PGHOST:-127.0.0.1}" port="${PGPORT:-5432}" role failed=0
   [[ "${host}" == /* ]] && host=127.0.0.1
-  _svc_split_psql postgres "ALTER ROLE ${runtime} WITH LOGIN PASSWORD '${ROLE_PASSWORDS[$runtime]}'"
+  _split_names "${svc}" "${db}" || return 1
+  # Checked itself (#540 r2 R2-1): an older password equal to the supplied one
+  # would still let both logins below succeed.
+  if ! _svc_split_psql postgres "ALTER ROLE ${runtime} WITH LOGIN PASSWORD '${ROLE_PASSWORDS[$runtime]}'"; then
+    echo "setting ${runtime}'s password FAILED; its older one may still be in force" >&2
+    return 1
+  fi
   for role in "${runtime}" "${migrator}"; do
     if ! PGPASSWORD="${ROLE_PASSWORDS[$role]}" psql -X -q -tA -h "${host}" -p "${port}" \
       --username "${role}" --dbname "${db}" -c 'SELECT 1' >/dev/null 2>&1; then
@@ -294,8 +332,8 @@ grant_service_tables() {
     # database's runtime role held ALL as their owner, and REASSIGN does not
     # carry a former owner's rights over as grants — but say it rather than
     # rely on it.
-    _svc_split_psql "${db}" "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${runtime}"
-    _svc_split_psql "${db}" "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${runtime}"
+    _svc_split_psql "${db}" "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${runtime}" || return 1
+    _svc_split_psql "${db}" "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${runtime}" || return 1
     _svc_split_psql "${db}" "DO \$\$
       DECLARE g record;
       BEGIN
@@ -342,7 +380,7 @@ _runtime_dangerous_sql() {
 # this deliberately conservative closure also includes non-inherited memberships.
 _runtime_reachable_sql() {
   local sql
-  sql="$(cat "$(dirname "${BASH_SOURCE[0]}")/runtime-reachable.sql")"
+  sql="$(cat "$(dirname "${BASH_SOURCE[0]}")/runtime-reachable.sql")" || return 1
   printf '%s' "${sql//RUNTIME_ROLE/\'${1}\'}"
 }
 
@@ -408,8 +446,9 @@ _runtime_functions_sql() {
 # or the function list malformed: call it as
 # `sql="$(_runtime_forbidden_sql …)" || return 1`.
 _runtime_forbidden_sql() {
-  local lib forbidden foreign allowlist functions entries dangerous exceptions runtimes
+  local lib forbidden foreign allowlist functions entries dangerous exceptions runtimes reachable
   lib="$(dirname "${BASH_SOURCE[0]}")"
+  reachable="$(_runtime_reachable_sql "${1}")" || return 1
   forbidden="$(cat "${lib}/runtime-forbidden.sql")" || return 1
   foreign="$(cat "${lib}/runtime-foreign.sql")" || return 1
   entries="$(cat "${lib}/runtime-acl-entries.sql")" || return 1
@@ -424,7 +463,7 @@ _runtime_forbidden_sql() {
   foreign="${foreign//RUNTIME_ROLES/${runtimes}}"
   foreign="${foreign//RUNTIME_ROLE/\'${1}\'}"
   printf 'WITH reachable AS (%s), allowlist AS (%s), runtime_functions AS (%s), acl_entries AS (%s), dangerous AS (%s), foreign_exceptions AS (%s), own_rights AS (%s), foreign_rights AS (%s), forbidden AS (SELECT * FROM own_rights UNION ALL SELECT * FROM foreign_rights)' \
-    "$(_runtime_reachable_sql "${1}")" "${allowlist}" "${functions}" "${entries}" "${dangerous}" \
+    "${reachable}" "${allowlist}" "${functions}" "${entries}" "${dangerous}" \
     "${exceptions}" "${forbidden}" "${foreign}"
 }
 
@@ -449,8 +488,21 @@ _runtime_forbidden_sql() {
 # split, is. 'extension' is separate so every mode runs it AFTER application
 # table grants; 'foreign' is the other services' runtime roles' entries here,
 # each row naming its grantee (never this runtime role's).
+#
+# <scopes> is one scope or several, comma-separated. <phase> `objects` leaves
+# out every entry on the database or a schema itself: a grantor that lost
+# USAGE on a schema can no longer name the objects in it it still has to
+# revoke, and that holds ACROSS scopes — the general cleanup removing a
+# grantor's USAGE before the extension or the foreign cleanup needs it
+# (#540 r2 R2-4). So each scope runs with `objects`, and the database's and the
+# schemas' own entries are revoked only once every scope's objects are done
+# (_split_containers: `all`, every scope at once, containers last).
 _restrict_reachable_acl() {
-  local db="$1" runtime="$2" migrator="$3" scope="$4" policy="$5" forbidden
+  local db="$1" runtime="$2" migrator="$3" scope="$4" policy="$5" phase="${6:-objects}" forbidden
+  if [[ "${phase}" != objects && "${phase}" != all ]] || [[ ! "${scope}" =~ ^[a-z]+(,[a-z]+)*$ ]]; then
+    echo "_restrict_reachable_acl: scopes '${scope}', phase '${phase}' (objects|all)" >&2
+    return 1
+  fi
   forbidden="$(_runtime_forbidden_sql "${runtime}" "${migrator}" "${policy}")" || return 1
   _svc_split_psql "${db}" "DO \$\$
     DECLARE
@@ -459,10 +511,11 @@ _restrict_reachable_acl() {
           SELECT DISTINCT a.grantor, a.grantee, f.privilege, f.acl, f.owner,
             f.privilege_sql, f.revoke_prefix, f.revoke_what, f.revoke_on
           FROM forbidden f CROSS JOIN LATERAL aclexplode(f.acl) a
-          WHERE f.scope = '${scope}' AND a.privilege_type = f.privilege
+          WHERE f.scope = ANY (string_to_array('${scope}', ',')) AND a.privilege_type = f.privilege
             AND (a.is_grantable OR NOT f.grant_option)
             AND a.grantee = ANY (coalesce(f.grantees, ARRAY(SELECT oid FROM reachable)))
-            AND (NOT f.public_only OR a.grantee = 0))
+            AND (NOT f.public_only OR a.grantee = 0)
+            AND ('${phase}' = 'all' OR f.revoke_on !~ '^(SCHEMA|DATABASE) '))
         SELECT pg_get_userbyid(e.grantor) AS grantor,
           format('%sREVOKE %s ON %s FROM %s CASCADE', e.revoke_prefix, e.revoke_what,
             e.revoke_on, CASE WHEN e.grantee = 0 THEN 'PUBLIC'
@@ -559,16 +612,186 @@ restrict_foreign_access() {
 }
 
 # restrict_extension_relations <database> <runtime> [migrator] [policy]
-# (Every policy allows the same on extensions: SELECT.)
+# (Every policy allows the same on extensions: SELECT.) Objects only: the
+# containers wait for _split_containers (#540 r2 R2-4).
 restrict_extension_relations() {
-  _restrict_reachable_acl "$1" "$2" "${3:-${2}_migrator}" extension "${4:-default}"
+  _restrict_reachable_acl "$1" "$2" "${3:-${2}_migrator}" extension "${4:-default}" objects
 }
 
 # restrict_service_functions_and_rights <database> <runtime> <migrator> <policy>
+# Objects only, as above.
 restrict_service_functions_and_rights() {
   local db="$1" runtime="$2" migrator="$3" policy="$4"
   _svc_split_psql "${db}" "ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC" || return 1
-  _restrict_reachable_acl "${db}" "${runtime}" "${migrator}" general "${policy}" || return 1
+  _restrict_reachable_acl "${db}" "${runtime}" "${migrator}" general "${policy}" objects || return 1
+}
+
+# _split_containers <database> <runtime> <migrator> <policy> <schema>
+#
+# The database's and the schemas' own ACLs, once every scope's objects are
+# done (#540 r2 R2-4): until then a grantor still has the USAGE it needs to
+# name what it has to revoke — PUBLIC's included, which the explicit revokes
+# here used to take before any object cleanup. Then PUBLIC and the runtime
+# role keep nothing on the database or on `public` (and <schema>) but the
+# runtime role's CONNECT and its USAGE on <schema> — each REVOKE and its GRANT
+# in one transaction, so the runtime role is never without them — and the
+# cleanup runs once more over every scope with containers included, last.
+_split_containers() {
+  local db="$1" runtime="$2" migrator="$3" policy="$4" schema="$5" each revokes=""
+  _svc_split_psql postgres "BEGIN;
+    REVOKE ALL ON DATABASE ${db} FROM PUBLIC;
+    REVOKE ALL ON DATABASE ${db} FROM ${runtime};
+    GRANT CONNECT ON DATABASE ${db} TO ${runtime};
+    COMMIT;" || return 1
+  # USAGE only — no CREATE, so it cannot add objects it would own; nothing in
+  # `public` when its schema is another (audit).
+  for each in public "${schema}"; do
+    revokes+="REVOKE ALL ON SCHEMA ${each} FROM PUBLIC; REVOKE ALL ON SCHEMA ${each} FROM ${runtime}; "
+  done
+  _svc_split_psql "${db}" "BEGIN;
+    ${revokes}
+    GRANT USAGE ON SCHEMA ${schema} TO ${runtime};
+    COMMIT;" || return 1
+  _restrict_reachable_acl "${db}" "${runtime}" "${migrator}" general,extension,foreign "${policy}" all
+}
+
+# assert_split_end_state <service> <database> <runtime> <migrator> <schema> <mode> <policy>
+#
+# What the split promises beyond "no forbidden right" (assert_no_forbidden_rights),
+# read back from the catalogue as the split's last step (#540 r2 R2-1): a
+# statement that failed — or, through some path not yet known, did nothing —
+# fails the split here rather than leaving it to report success. Checked: the
+# session is on <database>; neither role is missing and the migrator logs in;
+# the runtime role has no SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS or
+# REPLICATION; the migrator owns the database, `public` and <schema>; the runtime
+# role owns nothing here or cluster-wide; no role is a member of it, and no
+# service's runtime role is a member of a runtime-dangerous-roles.sql role; no
+# stored setting reaches its sessions (runtime-settings.sql); it holds CONNECT
+# and USAGE on <schema> — in default mode its policy's table, sequence and
+# default grants, and EXECUTE on each listed function that exists; the ledger
+# exists, is the migrator's and grants PUBLIC and the runtime role nothing;
+# UTC is the database's, both roles' and both roles' in-database default; and
+# the statement_timeout asked for is set. Each failure is named — a setting by
+# its parameter and scope, never its value (#540 r2 R2-3).
+assert_split_end_state() {
+  local svc="$1" db="$2" runtime="$3" migrator="$4" schema="$5" mode="$6" policy="$7"
+  local dangerous settings allowlist functions runtimes variable timeout=""
+  dangerous="$(_runtime_dangerous_sql)" || return 1
+  settings="$(cat "$(dirname "${BASH_SOURCE[0]}")/runtime-settings.sql")" || return 1
+  settings="${settings//RUNTIME_ROLE/\'${runtime}\'}"
+  allowlist="$(_runtime_allowlist_sql)" || return 1
+  functions="$(_runtime_functions_sql)" || return 1
+  runtimes="$(_runtime_roles_sql)"
+  variable="$(runtime_statement_timeout_variable "${svc}")"
+  # Already refused unless whole milliseconds in range (ensure_runtime_statement_timeout).
+  [[ -n "${!variable:-}" ]] && timeout="$((10#${!variable}))"
+  _svc_split_psql "${db}" "DO \$\$
+    DECLARE left_over text;
+    BEGIN
+      WITH rt AS (SELECT * FROM pg_roles WHERE rolname = '${runtime}'),
+      mg AS (SELECT * FROM pg_roles WHERE rolname = '${migrator}'),
+      here AS (SELECT oid, datdba FROM pg_database WHERE datname = current_database()),
+      dangerous AS (${dangerous}),
+      allowlist AS (${allowlist}),
+      runtime_functions AS (${functions}),
+      stored_settings AS (${settings}),
+      runtimes AS (
+        SELECT r.oid FROM pg_roles r
+         WHERE r.rolname = '${runtime}' OR r.rolname = ANY (${runtimes})
+            OR EXISTS (SELECT 1 FROM pg_roles m WHERE m.rolname = r.rolname || '_migrator')
+      ),
+      ledger AS (SELECT c.* FROM pg_class c WHERE c.oid = to_regclass('${schema}._prisma_migrations')),
+      problems (problem) AS (
+        SELECT format('connected to database %s, not ${db}', quote_ident(current_database()))
+         WHERE current_database() <> '${db}'
+        UNION ALL SELECT 'role ${runtime} does not exist' WHERE NOT EXISTS (SELECT 1 FROM rt)
+        UNION ALL SELECT 'role ${migrator} does not exist or cannot log in'
+         WHERE NOT EXISTS (SELECT 1 FROM mg WHERE mg.rolcanlogin)
+        UNION ALL SELECT '${runtime} keeps ' || v.attribute
+          FROM rt, LATERAL (VALUES (rt.rolsuper, 'SUPERUSER'), (rt.rolcreatedb, 'CREATEDB'),
+            (rt.rolcreaterole, 'CREATEROLE'), (rt.rolbypassrls, 'BYPASSRLS'),
+            (rt.rolreplication, 'REPLICATION')) v(held, attribute)
+         WHERE v.held
+        UNION ALL SELECT format('database ${db} is owned by %s, not ${migrator}', pg_get_userbyid(here.datdba))
+          FROM here WHERE here.datdba IS DISTINCT FROM (SELECT oid FROM mg)
+        UNION ALL SELECT format('schema %s is owned by %s, not ${migrator}', s.name,
+                                coalesce(pg_get_userbyid(n.nspowner), 'nobody: it does not exist'))
+          FROM (SELECT DISTINCT unnest(ARRAY['public', '${schema}']) AS name) s
+          LEFT JOIN pg_namespace n ON n.nspname = s.name
+         WHERE n.nspowner IS DISTINCT FROM (SELECT oid FROM mg)
+        UNION ALL SELECT format('${runtime} still owns %s', pg_describe_object(d.classid, d.objid, d.objsubid))
+          FROM pg_shdepend d
+         WHERE d.refclassid = 'pg_authid'::regclass AND d.deptype = 'o'
+           AND d.refobjid = (SELECT oid FROM rt) AND d.dbid IN (0, (SELECT oid FROM here))
+        UNION ALL SELECT format('%s is a member of ${runtime}', pg_get_userbyid(am.member))
+          FROM pg_auth_members am WHERE am.roleid = (SELECT oid FROM rt)
+        UNION ALL SELECT format('%s is a member of %s', pg_get_userbyid(am.member), pg_get_userbyid(am.roleid))
+          FROM pg_auth_members am
+         WHERE am.member IN (SELECT oid FROM runtimes)
+           AND EXISTS (SELECT 1 FROM dangerous d WHERE pg_has_role(am.roleid, d.oid, 'MEMBER'))
+        UNION ALL SELECT label FROM stored_settings
+        UNION ALL SELECT '${runtime} lacks CONNECT on database ${db}'
+         WHERE NOT has_database_privilege('${runtime}', current_database(), 'CONNECT')
+        UNION ALL SELECT '${runtime} lacks USAGE on schema ${schema}'
+         WHERE CASE WHEN to_regnamespace('${schema}') IS NULL THEN true
+                    ELSE NOT has_schema_privilege('${runtime}', to_regnamespace('${schema}'), 'USAGE') END
+        UNION ALL SELECT format('${runtime} lacks %s on %s %s', priv, a.class, c.oid::regclass)
+          FROM allowlist a CROSS JOIN unnest(a.privileges) priv
+          JOIN pg_namespace n ON n.nspname = split_part(a.object, '.', 1)
+          JOIN pg_class c ON c.relnamespace = n.oid
+         WHERE '${mode}' = 'default' AND a.policy = 'default' AND a.object LIKE '%.*'
+           AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass
+                             AND d.objid = c.oid AND d.deptype = 'e')
+           -- One CASE, so a privilege is only ever asked of its own kind.
+           AND CASE WHEN a.class = 'sequence' AND c.relkind = 'S'
+                      THEN NOT has_sequence_privilege('${runtime}', c.oid, priv)
+                    WHEN a.class = 'relation' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                         AND c.relname <> '_prisma_migrations'
+                      THEN NOT has_table_privilege('${runtime}', c.oid, priv)
+                    ELSE false END
+        UNION ALL SELECT format('${migrator} grants ${runtime} no default %s on new %s of %s',
+                                priv, substr(a.class, 9), a.object)
+          FROM allowlist a CROSS JOIN unnest(a.privileges) priv
+         WHERE '${mode}' = 'default' AND a.policy = 'default'
+           AND a.class IN ('default tables', 'default sequences')
+           AND NOT EXISTS (
+             SELECT 1 FROM pg_default_acl da CROSS JOIN LATERAL aclexplode(da.defaclacl) x
+              WHERE da.defaclrole = (SELECT oid FROM mg)
+                AND da.defaclnamespace = to_regnamespace(a.object)
+                AND da.defaclobjtype = CASE a.class WHEN 'default tables' THEN 'r' ELSE 'S' END::\"char\"
+                AND x.grantee = (SELECT oid FROM rt) AND x.privilege_type = priv)
+        UNION ALL SELECT format('${runtime} lacks EXECUTE on %s', f.signature)
+          FROM runtime_functions f
+         WHERE f.service = '${svc}' AND to_regprocedure(f.signature) IS NOT NULL
+           AND NOT has_function_privilege('${runtime}', to_regprocedure(f.signature), 'EXECUTE')
+        UNION ALL SELECT 'the migration ledger ${schema}._prisma_migrations does not exist'
+         WHERE NOT EXISTS (SELECT 1 FROM ledger)
+        UNION ALL SELECT format('the migration ledger is owned by %s, not ${migrator}', pg_get_userbyid(l.relowner))
+          FROM ledger l WHERE l.relowner IS DISTINCT FROM (SELECT oid FROM mg)
+        UNION ALL SELECT format('the migration ledger grants %s to %s', x.privilege_type,
+                                CASE WHEN x.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(x.grantee) END)
+          FROM ledger l CROSS JOIN LATERAL aclexplode(l.relacl) x
+         WHERE x.grantee = 0 OR x.grantee = (SELECT oid FROM rt)
+        UNION ALL SELECT 'no TimeZone = UTC default for ' || w.what
+          FROM (SELECT 'database ${db}' AS what, 0::oid AS role, (SELECT oid FROM here) AS db
+                UNION ALL SELECT 'role ' || r.rolname, r.oid, 0::oid
+                  FROM pg_roles r WHERE r.rolname IN ('${runtime}', '${migrator}')
+                UNION ALL SELECT 'role ' || r.rolname || ' in database ${db}', r.oid, (SELECT oid FROM here)
+                  FROM pg_roles r WHERE r.rolname IN ('${runtime}', '${migrator}')) w
+         WHERE NOT EXISTS (SELECT 1 FROM pg_db_role_setting st, unnest(st.setconfig) cfg
+                            WHERE st.setrole = w.role AND st.setdatabase = w.db
+                              AND lower(cfg) = 'timezone=utc')
+        UNION ALL SELECT 'no statement_timeout = ${timeout}ms for ${runtime} on ${db}'
+         WHERE '${timeout}' <> '' AND NOT EXISTS (
+           SELECT 1 FROM pg_db_role_setting st, unnest(st.setconfig) cfg
+            WHERE st.setrole = (SELECT oid FROM rt) AND st.setdatabase = (SELECT oid FROM here)
+              AND cfg = 'statement_timeout=${timeout}ms')
+      )
+      SELECT string_agg(problem, '; ' ORDER BY problem) INTO left_over FROM problems;
+      IF left_over IS NOT NULL THEN
+        RAISE EXCEPTION 'the split did not reach its end state: %', left_over;
+      END IF;
+    END \$\$;"
 }
 
 # Repair grants stripped by pre-407 splitters, even when migrations are already
@@ -618,6 +841,87 @@ restore_runtime_function_grants() {
   done <<< "${rows}"
 }
 
+# _split_database <service> <database> <default|migration> <policy> <schema>
+#
+# The split itself, for both entry points below: <schema> is where the
+# service's tables and its ledger live (`public`; audit's `audit`). In order:
+#
+#   1. the migrator exists, logs in with its password; the runtime role loses
+#      every attribute; the database, everything the runtime role owned and the
+#      schemas become the migrator's; no back door through membership; no
+#      stored setting;
+#   2. every scope's OBJECT entries: general, then the function repair and the
+#      table grants, then extension, then foreign — the database's and the
+#      schemas' own entries wait (#540 r2 R2-4);
+#   3. the containers (_split_containers), every scope at once;
+#   4. the ledger, UTC, the optional statement_timeout;
+#   5. the two end-state checks: nothing forbidden is held
+#      (assert_no_forbidden_rights) and everything promised is in place
+#      (assert_split_end_state).
+#
+# Every step's failure is passed on (#540 r2 R2-1).
+_split_database() {
+  local svc="$1" db="$2" mode="$3" policy="$4" schema="$5"
+  local runtime="rasta_${svc}" migrator="rasta_${svc}_migrator" password
+  _split_names "${svc}" "${db}" || return 1
+  password="${ROLE_PASSWORDS[$migrator]:-}"
+  if [[ -z "${password}" ]]; then
+    echo "the ${migrator} password was not resolved (is ${svc} in PRIVILEGE_SPLIT_SERVICES?)" >&2
+    return 1
+  fi
+
+  _svc_split_psql postgres "DO \$\$ BEGIN
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${migrator}') THEN
+        CREATE ROLE ${migrator} LOGIN CREATEDB;
+      END IF;
+    END \$\$;" || return 1
+  _svc_split_psql postgres "ALTER ROLE ${migrator} WITH LOGIN PASSWORD '${password}'" || return 1
+
+  # The runtime role can no longer create — or, owning none, drop — a database.
+  _svc_split_psql postgres "ALTER ROLE ${runtime} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION" || return 1
+
+  _svc_split_psql postgres "ALTER DATABASE ${db} OWNER TO ${migrator}" || return 1
+
+  # Tables, sequences, types, functions, the ledger, and `public` itself if a
+  # pre-15 cluster made the runtime role its owner.
+  _svc_split_psql "${db}" "REASSIGN OWNED BY ${runtime} TO ${migrator}" || return 1
+
+  # `public` whoever owns it — REASSIGN moves only what the runtime role owned.
+  # On a cluster upgraded from PostgreSQL 14 or older the superuser owns it,
+  # and once the grants below are revoked the migrator would hold no CREATE
+  # there: it could neither create the ledger nor run a migration (Codex round
+  # 4 on #176). Before the revokes and the ledger. <schema> too, created if an
+  # older cluster lacks it (audit).
+  _svc_split_psql "${db}" "ALTER SCHEMA public OWNER TO ${migrator}" || return 1
+  if [[ "${schema}" != public ]]; then
+    _svc_split_psql "${db}" "CREATE SCHEMA IF NOT EXISTS ${schema} AUTHORIZATION ${migrator};
+      ALTER SCHEMA ${schema} OWNER TO ${migrator};" || return 1
+  fi
+
+  # No back door: no membership in the migrator or any other owner.
+  revoke_owner_memberships "${db}" "${runtime}" || return 1
+  reset_runtime_settings "${db}" "${runtime}" || return 1
+
+  # Objects, scope by scope; the containers after all of them.
+  restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
+  restore_runtime_function_grants "${svc}" "${db}" "${runtime}" "${migrator}" || return 1
+  grant_service_tables "${svc}" "${db}" "${mode}" || return 1
+  restrict_extension_relations "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
+  restrict_foreign_access "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
+  _split_containers "${db}" "${runtime}" "${migrator}" "${policy}" "${schema}" || return 1
+
+  # The migration ledger is the migrator's alone, from before the first
+  # migration: a runtime role that could write it could mark a guard-creating
+  # migration as already applied. After the grants, so they cannot reach it.
+  own_migration_ledger "${db}" "${schema}" "${migrator}" "${runtime}" || return 1
+
+  ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}" || return 1
+  ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
+
+  assert_no_forbidden_rights "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
+  assert_split_end_state "${svc}" "${db}" "${runtime}" "${migrator}" "${schema}" "${mode}" "${policy}" || return 1
+}
+
 # split_service_privileges <service> [database] [default|migration] [policy]
 #
 # The runtime role is held to runtime-allowlist.sql's policy: `default` in
@@ -630,70 +934,14 @@ split_service_privileges() {
   local mode="${3:-default}"
   [[ "${svc}" == analytics ]] && mode=migration
   local policy="${4:-$([[ "${mode}" == default ]] && echo default || echo "${svc}")}"
-  local runtime="rasta_${svc}"
-  local migrator="rasta_${svc}_migrator"
-  local password="${ROLE_PASSWORDS[$migrator]:?the ${migrator} password was not resolved (is ${svc} in PRIVILEGE_SPLIT_SERVICES?)}"
 
   if [[ "${mode}" != default && "${mode}" != migration ]]; then
     echo "grants mode must be 'default' or 'migration', not '${mode}'" >&2
     return 1
   fi
+  _split_database "${svc}" "${db}" "${mode}" "${policy}" public || return 1
 
-  _svc_split_psql postgres "DO \$\$ BEGIN
-      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${migrator}') THEN
-        CREATE ROLE ${migrator} LOGIN CREATEDB;
-      END IF;
-    END \$\$;"
-  _svc_split_psql postgres "ALTER ROLE ${migrator} WITH LOGIN PASSWORD '${password}'"
-
-  # The runtime role can no longer create — or, owning none, drop — a database.
-  _svc_split_psql postgres "ALTER ROLE ${runtime} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION"
-
-  _svc_split_psql postgres "ALTER DATABASE ${db} OWNER TO ${migrator}"
-
-  # Tables, sequences, types, functions, the ledger, and `public` itself if a
-  # pre-15 cluster made the runtime role its owner.
-  _svc_split_psql "${db}" "REASSIGN OWNED BY ${runtime} TO ${migrator}"
-
-  # `public` whoever owns it — REASSIGN moves only what the runtime role owned.
-  # On a cluster upgraded from PostgreSQL 14 or older the superuser owns it,
-  # and once the grants below are revoked the migrator would hold no CREATE
-  # there: it could neither create the ledger nor run a migration (Codex round
-  # 4 on #176). Before the revokes and the ledger.
-  _svc_split_psql "${db}" "ALTER SCHEMA public OWNER TO ${migrator}"
-
-  # No back door: no membership in the migrator or any other owner.
-  revoke_owner_memberships "${db}" "${runtime}" || return 1
-  reset_runtime_settings "${db}" "${runtime}" || return 1
-
-  # Database level: CONNECT, nothing more. TEMP and CREATE are withdrawn.
-  _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM PUBLIC"
-  _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM ${runtime}"
-  _svc_split_psql postgres "GRANT CONNECT ON DATABASE ${db} TO ${runtime}"
-
-  # Schema level: USAGE only — no CREATE, so it cannot add objects it would own.
-  _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA public FROM PUBLIC"
-  _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA public FROM ${runtime}"
-  _svc_split_psql "${db}" "GRANT USAGE ON SCHEMA public TO ${runtime}"
-
-  restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
-  restore_runtime_function_grants "${svc}" "${db}" "${runtime}" "${migrator}" || return 1
-
-  grant_service_tables "${svc}" "${db}" "${mode}" || return 1
-  restrict_extension_relations "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
-  restrict_foreign_access "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
-
-  # The migration ledger is the migrator's alone, from before the first
-  # migration: a runtime role that could write it could mark a guard-creating
-  # migration as already applied. Last, so the grants above cannot reach it.
-  own_migration_ledger "${db}" public "${migrator}" "${runtime}"
-
-  assert_no_forbidden_rights "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
-
-  ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
-  ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
-
-  echo "    - ${db}: owned by ${migrator}; ${runtime} has CONNECT, USAGE on public, no CREATEDB, no direct definer/trigger EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights; sessions default to UTC"
+  echo "    - ${db}: owned by rasta_${svc}_migrator; rasta_${svc} has CONNECT, USAGE on public, no CREATEDB, no direct definer/trigger EXECUTE, grants: ${mode}; ledger pre-created, no runtime rights; sessions default to UTC"
 }
 
 # split_audit_database_privileges [database] [service]
@@ -707,53 +955,18 @@ split_service_privileges() {
 # `audit`, if an older cluster lacks them — and leaves the runtime role CONNECT
 # on the database and USAGE on `audit`: no CREATE, no TEMP, nothing in
 # `public`, no CREATEDB, no membership in an owner. The table grants stay where
-# they are, in audit's migrations. `service` (default `audit`) names the roles
-# — `rasta_<service>` and `rasta_<service>_migrator` — so a throwaway pair can
-# be split the same way in a test.
+# they are, in audit's migrations (migration mode), and its migrations run with
+# `?schema=audit`, so that is where Prisma keeps the ledger. Held to the
+# `audit` policy of runtime-allowlist.sql, whatever `service` is: `service`
+# (default `audit`) names the roles — `rasta_<service>` and
+# `rasta_<service>_migrator` — so a throwaway pair can be split the same way in
+# a test.
 split_audit_database_privileges() {
   local db="${1:-rasta_audit}"
   local svc="${2:-audit}"
-  local runtime="rasta_${svc}"
-  local migrator="rasta_${svc}_migrator"
-  local password="${ROLE_PASSWORDS[$migrator]:?the ${migrator} password was not resolved}"
+  _split_database "${svc}" "${db}" migration audit audit || return 1
 
-  _svc_split_psql postgres "DO \$\$ BEGIN
-      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${migrator}') THEN
-        CREATE ROLE ${migrator} LOGIN CREATEDB;
-      END IF;
-    END \$\$;"
-  _svc_split_psql postgres "ALTER ROLE ${migrator} WITH LOGIN PASSWORD '${password}'"
-  _svc_split_psql postgres "ALTER ROLE ${runtime} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION"
-  _svc_split_psql postgres "ALTER DATABASE ${db} OWNER TO ${migrator}"
-  _svc_split_psql "${db}" "REASSIGN OWNED BY ${runtime} TO ${migrator}"
-  # Both schemas whoever owns them (see split_service_privileges).
-  _svc_split_psql "${db}" "ALTER SCHEMA public OWNER TO ${migrator}"
-  _svc_split_psql "${db}" "CREATE SCHEMA IF NOT EXISTS audit AUTHORIZATION ${migrator}"
-  _svc_split_psql "${db}" "ALTER SCHEMA audit OWNER TO ${migrator}"
-  revoke_owner_memberships "${db}" "${runtime}" || return 1
-  reset_runtime_settings "${db}" "${runtime}" || return 1
-  _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM PUBLIC"
-  _svc_split_psql postgres "REVOKE ALL ON DATABASE ${db} FROM ${runtime}"
-  _svc_split_psql postgres "GRANT CONNECT ON DATABASE ${db} TO ${runtime}"
-  _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA public FROM PUBLIC"
-  _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA public FROM ${runtime}"
-  # USAGE on `audit` and nothing more, as the bootstrap grants it: no CREATE.
-  _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA audit FROM PUBLIC"
-  _svc_split_psql "${db}" "REVOKE ALL ON SCHEMA audit FROM ${runtime}"
-  _svc_split_psql "${db}" "GRANT USAGE ON SCHEMA audit TO ${runtime}"
-  # Held to the `audit` policy of runtime-allowlist.sql, whatever `service` is.
-  restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" audit || return 1
-  restrict_extension_relations "${db}" "${runtime}" "${migrator}" audit || return 1
-  restrict_foreign_access "${db}" "${runtime}" "${migrator}" audit || return 1
-  # Its migrations run with `?schema=audit`, so that is where Prisma keeps the
-  # ledger; the same pre-creation, so it never holds a runtime grant either.
-  own_migration_ledger "${db}" audit "${migrator}" "${runtime}"
-  assert_no_forbidden_rights "${db}" "${runtime}" "${migrator}" audit || return 1
-
-  ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}"
-  ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
-
-  echo "    - ${db}: database, public and audit owned by ${migrator}; ${runtime} has CONNECT and USAGE on audit, no CREATEDB; ledger pre-created; sessions default to UTC"
+  echo "    - ${db}: database, public and audit owned by rasta_${svc}_migrator; rasta_${svc} has CONNECT and USAGE on audit, no CREATEDB; ledger pre-created; sessions default to UTC"
 }
 
 # upgrade_service_split <service> <database> <default|migration|audit>

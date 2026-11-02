@@ -257,7 +257,8 @@ export const CLI_CONTRACT = Object.freeze({
       '-v',
     ],
   },
-  'scripts/check-db-runtime-privileges.mjs': { other: ['-X', '-d', '-q', '-tA', '-v'] },
+  // psqlRows (#540 r2 R2-2): the check's one way to run psql.
+  'scripts/check-db-runtime-privileges-lib.mjs': { other: ['-X', '-d', '-q', '-tA', '-v'] },
   // Docker command lines read from Dockerfiles and compose files, never run.
   'scripts/check-dockerfile-pins-lib.mjs': {
     other: [

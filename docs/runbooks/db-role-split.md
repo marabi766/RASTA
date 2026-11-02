@@ -381,8 +381,21 @@ statement_timeout = '<ms>ms'`، هرگز روی مهاجر. همان اسکری�
   grant beyond PostgreSQL's built-in privileges on a catalogue, parameter, tablespace, large object,
   FDW, server, type, language or extension routine. The split revokes it (a parameter or tablespace
   grant is cluster-wide: any service's split does).
-- **`a stored setting reaches its sessions: …`:** rerun the split (it resets it), or `ALTER ROLE …
-RESET <parameter>` / `ALTER DATABASE … RESET <parameter>` by hand.
+- **`a stored setting reaches its sessions: <parameter> (<scope>)`:** rerun the split (it resets it), or
+  `ALTER ROLE … RESET <parameter>` / `ALTER DATABASE … RESET <parameter>` by hand. Only the parameter
+  and its scope are printed, never the stored value, which may be a secret (#540 r2 R2-3); read it in
+  `pg_db_role_setting` if you need it.
+- **`the split did not reach its end state: …`** (#540 r2 R2-1): the split's last step read the
+  catalogue back and something it promises is missing — an attribute still held, an object the runtime
+  role still owns, a schema or the database not the migrator's, CONNECT/USAGE or a default-mode grant
+  missing, the ledger missing or granted, UTC or the configured `statement_timeout` not set, a stored
+  setting or a membership left. Each is named. Every statement's failure also stops the split where it
+  happened (psql's error is the line above), so fix that cause and rerun; the split is idempotent.
+- **`unsupported database name …` / `unsupported service name …`** (split) and **`unsupported database
+name`, `unreadable database record`, `connected to database …, not the one asked for`** (check) (#540
+  r2 R2-2): the split takes plain lower-case names only (`[a-z_][a-z0-9_]*`), and refuses any other
+  rather than let libpq read it as a connection string. The check connects to every database by its
+  literal name and stops if the session is not in it.
 - **`the ACL column … is not modeled`:** this PostgreSQL has an ACL the inventory does not know. Model it
   in `lib/runtime-acl-entries.sql` (and its unit test) before running the split again; it refuses
   until then.

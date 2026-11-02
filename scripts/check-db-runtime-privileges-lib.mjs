@@ -390,9 +390,117 @@ foreign_rights AS (${foreignSql})
 SELECT DISTINCT label FROM foreign_rights WHERE held ORDER BY label;
 `;
 
-/** Every database of the cluster, `name|t` when it accepts connections, `name|f` when not. */
+/**
+ * Every database of the cluster as ONE JSON array of `{"name", "connectable"}`
+ * records (#540 r2 R2-2): a name is a JSON string, so a newline or a `|` in
+ * it is a character of the name — it can never forge a second row. Read with
+ * parseDatabases.
+ */
 export const CONNECTABLE_DATABASES_SQL =
-  "SELECT datname || '|' || CASE WHEN datallowconn THEN 't' ELSE 'f' END FROM pg_database ORDER BY 1;";
+  "SELECT coalesce(jsonb_agg(jsonb_build_object('name', datname, 'connectable', datallowconn) ORDER BY datname), '[]') FROM pg_database;";
+
+/** PostgreSQL's NAMEDATALEN - 1: no database name is longer, in bytes. */
+const MAX_NAME_BYTES = 63;
+
+/**
+ * CONNECTABLE_DATABASES_SQL's output → `[{ name, connectable }]`, or a throw:
+ * anything but an array of records with exactly a non-empty string `name` of
+ * at most 63 bytes and no NUL, and a boolean `connectable`, each name once, is
+ * refused rather than guessed at (#540 r2 R2-2). Every name PostgreSQL can
+ * hold passes: psqlRows hands it to libpq as a quoted value, never as a
+ * connection string.
+ */
+export function parseDatabases(text) {
+  let records;
+  try {
+    records = JSON.parse(text);
+  } catch {
+    throw new Error('unreadable database list: not JSON');
+  }
+  if (!Array.isArray(records)) throw new Error('unreadable database list: not an array');
+  const seen = new Set();
+  return records.map((record) => {
+    const keys = record !== null && typeof record === 'object' ? Object.keys(record).sort() : [];
+    if (
+      keys.join(',') !== 'connectable,name' ||
+      typeof record.name !== 'string' ||
+      typeof record.connectable !== 'boolean'
+    ) {
+      throw new Error(`unreadable database record: ${JSON.stringify(record)}`);
+    }
+    const { name } = record;
+    if (name === '' || name.includes('\0') || Buffer.byteLength(name) > MAX_NAME_BYTES) {
+      throw new Error(`unsupported database name: ${JSON.stringify(name)}`);
+    }
+    if (seen.has(name)) throw new Error(`database listed twice: ${JSON.stringify(name)}`);
+    seen.add(name);
+    return { name, connectable: record.connectable };
+  });
+}
+
+/**
+ * A database name for a report line: as it is when it is plain, else as a
+ * JSON string — a newline in a name cannot write a line of its own (an `ok`
+ * the check never gave).
+ */
+export function shownDatabase(name) {
+  return /^[A-Za-z0-9_.-]+$/.test(name) ? name : JSON.stringify(name);
+}
+
+/**
+ * libpq's `-d` takes a connection string when the value holds `=` or starts
+ * `postgres://` / `postgresql://` — a database named `dbname=postgres` would
+ * be connected to `postgres` (#540 r2 R2-2). So the name always goes in as
+ * the quoted value of `dbname=` — `'` and `\` escaped — which libpq takes
+ * literally and never expands again.
+ */
+export function databaseConnectionString(name) {
+  return `dbname='${name.replace(/[\\']/g, (c) => `\\${c}`)}'`;
+}
+
+/**
+ * Prepended to every query the check runs in a database: the session must be
+ * in the database it asked for (psql variable `expected_database`), or the
+ * query fails — whatever libpq, a service file or the environment did with
+ * the name (#540 r2 R2-2).
+ */
+export const SAME_DATABASE_SQL = String.raw`SET rasta.expected_database = :'expected_database';
+DO $$ BEGIN
+  IF current_database() <> current_setting('rasta.expected_database') THEN
+    RAISE EXCEPTION 'connected to database %, not the one asked for: %',
+      quote_ident(current_database()), quote_ident(current_setting('rasta.expected_database'));
+  END IF;
+END $$;
+`;
+
+/**
+ * Runs `sql` in `database` as psql on stdin (`variables` as `-v`), the name
+ * passed literally and the connected database verified first; returns the
+ * output's non-empty lines. A failure throws. `run` is spawnSync's shape (a
+ * test passes its own).
+ */
+export function psqlRows(database, sql, variables = {}, run = spawnSync) {
+  const result = run(
+    'psql',
+    [
+      '-X',
+      '-q',
+      '-tA',
+      '-v',
+      'ON_ERROR_STOP=1',
+      '-v',
+      `expected_database=${database}`,
+      ...Object.entries(variables).flatMap(([name, value]) => ['-v', `${name}=${value}`]),
+      '-d',
+      databaseConnectionString(database),
+    ],
+    { input: SAME_DATABASE_SQL + sql, encoding: 'utf8' },
+  );
+  if (result.status !== 0) {
+    throw new Error(`${shownDatabase(database)}: the catalogue query failed\n${result.stderr}`);
+  }
+  return result.stdout.split('\n').filter(Boolean);
+}
 
 /**
  * The (database, own runtime role) visits that cover every (database, runtime
@@ -401,18 +509,15 @@ export const CONNECTABLE_DATABASES_SQL =
  * judges all the others there. A database that accepts none cannot hold a
  * foreign right over a connection; a service database among them is still a
  * problem (it is not checked), and so is a service database that is missing.
- * `lines` are CONNECTABLE_DATABASES_SQL's rows.
+ * `databases` are parseDatabases' records.
  */
-export function matrix(entries, lines) {
+export function matrix(entries, databases) {
   const owners = new Map(entries.map(({ database, runtime }) => [database, runtime]));
   const seen = new Set();
   const visits = [];
-  for (const line of lines) {
-    const match = /^(.+)\|([tf])$/.exec(line);
-    if (!match) throw new Error(`unreadable database row: ${line}`);
-    const [, database, connectable] = match;
+  for (const { name: database, connectable } of databases) {
     seen.add(database);
-    if (connectable === 't') visits.push({ database, runtime: owners.get(database) ?? '' });
+    if (connectable) visits.push({ database, runtime: owners.get(database) ?? '' });
     else if (owners.has(database)) {
       visits.push({ database, problem: 'accepts no connections, so it cannot be checked' });
     }
@@ -425,12 +530,13 @@ export function matrix(entries, lines) {
 
 /** The verdict for one database's foreign runtime roles, from FOREIGN_FINDINGS_SQL's rows. */
 export function foreignVerdict(database, findings) {
+  const shown = shownDatabase(database);
   if (findings.length === 0) {
-    return { ok: true, line: `${database}: no other service's runtime role holds anything` };
+    return { ok: true, line: `${shown}: no other service's runtime role holds anything` };
   }
   return {
     ok: false,
-    line: `${database}: another service's runtime role holds:\n${findings
+    line: `${shown}: another service's runtime role holds:\n${findings
       .map((f) => `    - ${f}`)
       .join('\n')}`,
   };
