@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import { Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
@@ -13,6 +14,16 @@ import {
 } from './identity-fixtures';
 import { id, tenants } from './helpers';
 import { readTableCatalogue } from './table-catalogue';
+import {
+  measurePairedTimings,
+  median,
+  timingFailures,
+  TIMING_FLOOR_MS,
+  TIMING_MIN_DETECTABLE_MS,
+  TIMING_WARM_UP_PAIRS,
+  type TimingCell,
+  type TimingRun,
+} from './timing-comparison';
 import { IdentityService } from '../src/identity/identity.service';
 import type { SubmitRegistrationDto } from '../src/identity/dto';
 
@@ -555,97 +566,191 @@ describe('public registration answers the same, and does the same, whoever alrea
    * the database) is no database operation. So the time to the answer is
    * measured too, and per case: for each entry point (service; HTTP, with the
    * pipeline) and each of the four held cases (email held; username held;
-   * email, and username, held by a removed user) 30 interleaved pairs of a
-   * fresh and a held submission after 5 warm-up pairs, the order of each pair
-   * alternating. Each case has its own fresh baseline and its own verdict, so a
-   * delay on one of them is not diluted by the others, nor a delay at HTTP by
-   * the service.
+   * email, and username, held by a removed user), pairs of a fresh and a held
+   * submission. Each case is its own verdict, so a delay on one is not diluted
+   * by the others, nor a delay at HTTP by the service.
    *
-   * The bound is on the difference of the two medians: less than the larger of
-   * 5 ms and a quarter of the fresh median. A ratio is not used: the answer
-   * takes a few milliseconds, and the ratio of two such medians moved to 1.48
-   * on a loaded runner with the product unchanged (main CI 41028991378). The
-   * difference of the medians of 30 pairs never exceeded 2.2 ms in any of the
-   * eight cases: 30 runs beside eight busy loops (load average 5–12) and 24
-   * beside thirty-two (load average 20–36), 432 cells, 0 over the bound.
-   * The floor is 5 ms because the old ratio's own false failure (1.48 of a
-   * 3 ms answer) was a gap of under 2 ms, so no bound below that holds on a
-   * shared runner; a gap that small is for the exact statements above. A
-   * delay on only some of the held answers moves a median by little, so each
-   * case is measured with all of its held answers delayed, as a mechanism
-   * that decides by identity would.
+   * The verdict is `classifyTimings`, the loop `measurePairedTimings`
+   * (timing-comparison.ts, with its own spec), and it has THREE values. A case
+   * passes only as `equivalent`: the distribution-free interval for its
+   * median `held − fresh` lies inside ±5 ms (`TIMING_MIN_DETECTABLE_MS`, the
+   * smallest delay on every answer of one kind this guard MUST see), so a
+   * delay of 5 ms or more would have been missed with probability ≤ 1e-5.
+   * `different` (nearly every pair on one side — fair coins: < 1 in a million
+   * — and 2 ms apart) fails. `inconclusive` is not taken for equal: the cell
+   * is measured on, 100 pairs at a time up to 600, and still inconclusive
+   * there it fails, saying the run was too noisy to show a 5 ms delay would be
+   * seen. The pair order is random, the rounds go through the unsettled cells
+   * in a random order, and nothing about the sample size is the test's to
+   * choose: the helper judges 100, 200 … 600 pairs and refuses anything else.
+   *
+   * Controls, in the same run and the same interleaving, per entry point:
+   * fresh against fresh (negative: must be `equivalent` like the cases — its
+   * row is the run's noise), and fresh against fresh with a wait of 5 ms
+   * inside `receiveRegistration` (positive: must be `different`, the held
+   * side slower). The
+   * positive control is what makes Δ a measured fact of the run rather than a
+   * claim: on whatever noise this runner had, a 5 ms delay in the service was
+   * seen. Δ itself comes from CI's noise (run 41408789150: 10–90 % of the pair
+   * differences within about ±4.5 ms at the service, ±8.5 ms over HTTP; the
+   * helper's spec shows 5 ms is seen in every one of 2000 simulated cells up
+   * to twice that HTTP noise, and that a louder run fails as inconclusive
+   * instead of passing). Two medians of 30 were used before task 302 and
+   * failed main CI twice with the product unchanged (runs 41398014058 and
+   * 41392580518); PR #560's first rule accepted "not enough pairs on one
+   * side" as equal (r1 F1).
+   *
+   * And no verdict from a measurement that did not happen (r1 F2): every
+   * submission is counted when its answer has come back (202, checked), a
+   * pair only once both of its submissions have, and the count must match
+   * the pairs measured, the intake rows the run wrote, and the rows it then
+   * deletes.
    */
-  it('the time to the answer does not say whether the identity is held, for each case at the service and over HTTP: medians of 30 interleaved pairs within max(5 ms, 25 % of fresh)', async () => {
+  it('the time to the answer does not say whether the identity is held, for each case at the service and over HTTP: equivalent within ±5 ms, beside fresh-against-fresh controls that must be equivalent and a 5 ms delay that must be seen', async () => {
     const org = tenants();
     const identities = await identityCases(org, 'TIME');
-    const ROUNDS = 30;
-    const WARM_UP = 5;
-    const median = (values: number[]) => {
-      const sorted = [...values].sort((a, b) => a - b);
-      const middle = sorted.length >> 1;
-      return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
-    };
     const { fresh: newIdentity, ...heldCases } = identities;
+    const POSITIVE = 'tpos';
+    const delayed = () => fresh(POSITIVE);
 
-    const results: Array<{
-      entryPoint: string;
-      held: string;
-      fresh: number;
-      heldMedian: number;
-      gap: number;
-      bound: number;
-    }> = [];
-    for (const [entryPoint, submit] of Object.entries(entryPoints(org))) {
-      for (const [held, heldIdentity] of Object.entries(heldCases)) {
-        const times: Record<'fresh' | 'held', number[]> = { fresh: [], held: [] };
-        for (let round = 0; round < ROUNDS + WARM_UP; round += 1) {
-          // Alternating which goes first, so drift and warm-up fall on both alike.
-          const order =
-            round % 2 === 0 ? (['fresh', 'held'] as const) : (['held', 'fresh'] as const);
-          const took: Record<'fresh' | 'held', number> = { fresh: 0, held: 0 };
-          for (const kind of order) {
-            const identity = kind === 'fresh' ? newIdentity() : heldIdentity();
-            const started = performance.now();
-            await submit(identity);
-            took[kind] = performance.now() - started;
-          }
-          if (round < WARM_UP) continue;
-          times.fresh.push(took.fresh);
-          times.held.push(took.held);
-        }
-        const fresh = median(times.fresh);
-        const heldMedian = median(times.held);
-        results.push({
-          entryPoint,
-          held,
-          fresh,
-          heldMedian,
-          gap: heldMedian - fresh,
-          bound: Math.max(5, 0.25 * fresh),
-        });
+    // The positive control's delay: a wait of Δ inside the service, for its
+    // tagged identities only — what a call to something outside would be,
+    // the hardest kind of delay to see (a computation of Δ on a busy runner
+    // takes longer than Δ). Asleep until 1 ms before, then yielding to the
+    // event loop until exactly Δ, so only a caller that awaits the answer sees
+    // it. A busy runner can wake it late, as it would a real call; that is part
+    // of what a Δ wait costs there, and is not taken off. (Measured on this
+    // path: a spin of Δ on the clock instead, under load, moves the median by
+    // less than Δ — the scheduler takes back the time it lost — so it is not
+    // a faithful Δ.)
+    const service = harness.moduleRef.get(IdentityService);
+    const receive = IdentityService.prototype.receiveRegistration;
+    const injected: number[] = [];
+    const waitExactly = async (ms: number) => {
+      const started = performance.now();
+      const deadline = started + ms;
+      for (let left = ms; left > 1; left = deadline - performance.now())
+        await new Promise((resolve) => setTimeout(resolve, left - 1));
+      while (performance.now() < deadline) await new Promise((resolve) => setImmediate(resolve));
+      return performance.now() - started;
+    };
+    const spy = jest
+      .spyOn(service, 'receiveRegistration')
+      .mockImplementation(async (dto: SubmitRegistrationDto) => {
+        if (dto.username.startsWith(`${POSITIVE}-`))
+          injected.push(await waitExactly(TIMING_MIN_DETECTABLE_MS));
+        return receive.call(service, dto);
+      });
+
+    type Cell = TimingCell & {
+      heldIdentity: () => { username: string; email: string };
+      submit: ReturnType<typeof entryPoints>[keyof ReturnType<typeof entryPoints>];
+    };
+    const cells: Cell[] = Object.entries(entryPoints(org)).flatMap(([entryPoint, submit]) => [
+      {
+        name: `${entryPoint} control: fresh against fresh`,
+        expect: 'equivalent' as const,
+        heldIdentity: newIdentity,
+        submit,
+      },
+      ...Object.entries(heldCases).map(([held, heldIdentity]) => ({
+        name: `${entryPoint} ${held}`,
+        expect: 'equivalent' as const,
+        heldIdentity,
+        submit,
+      })),
+      {
+        name: `${entryPoint} control: fresh against fresh + ${TIMING_MIN_DETECTABLE_MS} ms`,
+        expect: 'held slower' as const,
+        heldIdentity: delayed,
+        submit,
+      },
+    ]);
+    // Fisher–Yates with a real random source: a schedule that repeats can
+    // meet a periodic stall every time.
+    const shuffle = <T>(items: readonly T[]): T[] => {
+      const out = [...items];
+      for (let i = out.length - 1; i > 0; i -= 1) {
+        const j = randomInt(i + 1);
+        [out[i], out[j]] = [out[j]!, out[i]!];
       }
+      return out;
+    };
+    const ofThisRun = (query: 'count' | 'delete') =>
+      runUnscoped(`test ${query === 'count' ? 'counts' : 'discards'} the timing submissions`, () =>
+        query === 'count'
+          ? harness.prisma.client.$queryRaw<Array<{ rows: number }>>`
+              SELECT count(*)::int AS rows FROM registration_intake
+              WHERE submission->>'requestedOrganizationId' = ${org.a}`.then(([row]) => row!.rows)
+          : harness.prisma.client.$executeRaw`
+              DELETE FROM registration_intake WHERE submission->>'requestedOrganizationId' = ${org.a}`,
+      );
+
+    const intakeBefore = await ofThisRun('count');
+    let answered = 0;
+    let run: TimingRun<Cell>;
+    try {
+      run = await measurePairedTimings(
+        cells,
+        async (cell, kind) => {
+          const injectedBefore = injected.length;
+          await cell.submit(kind === 'fresh' ? newIdentity() : cell.heldIdentity());
+          answered += 1;
+          // The delay ran for this submission exactly when it had to, once.
+          expect(injected.length - injectedBefore).toBe(
+            cell.expect === 'held slower' && kind === 'held' ? 1 : 0,
+          );
+        },
+        { now: () => performance.now(), shuffle },
+      );
+    } finally {
+      spy.mockRestore();
     }
-    // Nothing of this is worth processing: 480 submissions, 240 of them fresh.
-    await runUnscoped(
-      'test discards the timing submissions',
-      () =>
-        harness.prisma.client.$executeRaw`
-        DELETE FROM registration_intake WHERE submission->>'requestedOrganizationId' = ${org.a}`,
-    );
+    const intakeWritten = (await ofThisRun('count')) - intakeBefore;
+    const discarded = await ofThisRun('delete');
 
     // eslint-disable-next-line no-console
     console.info(
-      'registration acknowledgement, median of 30 interleaved pairs, held minus fresh (ms):\n' +
-        results
-          .map(
-            (r) =>
-              `  ${r.entryPoint.padEnd(7)} ${r.held.padEnd(34)} fresh ${r.fresh.toFixed(2)} ` +
-              `held ${r.heldMedian.toFixed(2)} gap ${r.gap.toFixed(2)} (bound ${r.bound.toFixed(2)})`,
-          )
+      `registration acknowledgement, held minus fresh, ms (Δ = ${TIMING_MIN_DETECTABLE_MS}: "equivalent" = the interval ` +
+        `for the median inside ±Δ; "different" = enough pairs on one side and |median| ≥ ${TIMING_FLOOR_MS}); ` +
+        `positive control's wait: median ${median(injected).toFixed(3)} ms over ${injected.length}:\n` +
+        run.outcomes
+          .map(({ cell, fresh: f, held, differences, final }) => {
+            const spread = [...differences].sort((a, b) => a - b);
+            const at = (q: number) => spread[Math.floor(spread.length * q)]!.toFixed(1);
+            return (
+              `  ${cell.name.padEnd(48)} ${final.verdict.padEnd(12)} pairs ${String(final.pairs).padStart(3)} ` +
+              `fresh ${median(f).toFixed(2)} held ${median(held).toFixed(2)} ` +
+              `median ${final.medianDifferenceMs.toFixed(2)} interval ${final.intervalMs[0].toFixed(2)}…${final.intervalMs[1].toFixed(2)} ` +
+              `(10–90 % of pairs ${at(0.1)}…${at(0.9)}) held slower in ${final.slower}, faster in ${final.faster}`
+            );
+          })
           .join('\n'),
     );
-    expect(
-      results.filter((r) => Math.abs(r.gap) >= r.bound).map((r) => `${r.entryPoint}: ${r.held}`),
-    ).toEqual([]);
-  }, 120_000);
+
+    // Measured, all of it: every submission answered, warm-up and both of
+    // every pair, each one an intake row, each row deleted.
+    const expected = run.outcomes.reduce(
+      (sum, outcome) => sum + 2 * (TIMING_WARM_UP_PAIRS + outcome.differences.length),
+      0,
+    );
+    expect(run.outcomes).toHaveLength(12);
+    // At least 100 pairs per cell, said here and not read from the helper:
+    // no setting of the helper's can make this test judge fewer.
+    expect(Math.min(...run.outcomes.map((o) => o.differences.length))).toBeGreaterThanOrEqual(100);
+    expect({ answered, counted: run.submissions, intakeWritten, discarded }).toEqual({
+      answered: expected,
+      counted: expected,
+      intakeWritten: expected,
+      discarded: expected,
+    });
+    // The positive control's delay happened, once per delayed submission, and was at least Δ.
+    const delayedSubmissions = run.outcomes
+      .filter((o) => o.cell.expect === 'held slower')
+      .reduce((sum, o) => sum + TIMING_WARM_UP_PAIRS + o.differences.length, 0);
+    expect(injected).toHaveLength(delayedSubmissions);
+    expect(Math.min(...injected)).toBeGreaterThanOrEqual(TIMING_MIN_DETECTABLE_MS);
+    // Every case equivalent, both negative controls equivalent, both positive controls different, held slower.
+    expect(timingFailures(run)).toEqual([]);
+  }, 600_000);
 });
