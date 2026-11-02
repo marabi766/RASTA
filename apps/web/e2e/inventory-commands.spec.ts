@@ -19,6 +19,7 @@ import {
   type ProvisionedPerson,
 } from './live-session';
 import { provisionPerson, provisionedAccessToken } from './provisioned-people';
+import { withContext } from '../src/lib/page-context';
 
 /**
  * Inventory's operator commands through the real stack (EXP-004 criterion 1
@@ -89,12 +90,16 @@ async function expectAccessible(page: Page): Promise<void> {
 async function as(
   browser: Browser,
   who: LivePersona | ProvisionedPerson,
-): Promise<{ page: Page; close: () => Promise<void> }> {
+): Promise<{ page: Page; close: () => Promise<void>; at: (path: string) => string }> {
   const context = await browser.newContext({ locale: 'fa-IR', timezoneId: 'Asia/Tehran' });
-  if (typeof who === 'string') await installLiveSession(context, who);
-  else await installProvisionedSession(context, who);
+  const session =
+    typeof who === 'string'
+      ? await installLiveSession(context, who)
+      : await installProvisionedSession(context, who);
   const page = await context.newPage();
-  return { page, close: () => context.close() };
+  // A URL with a query, bound to the organization THIS person acts for (`server/page-context.ts`):
+  // another organization's tag would make the page read no query at all.
+  return { page, close: () => context.close(), at: (path) => withContext(session.context, path) };
 }
 
 // Under CI the job sets both flags; a skip there would be a green job with no evidence.
@@ -118,6 +123,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
 
   let owner: ProvisionedPerson;
   let warehousePath = '';
+  let warehouseId = '';
   let shipmentPath = '';
 
   test.beforeAll(async () => {
@@ -147,7 +153,8 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
       // The landing carries the page's context tag (`server/page-context.ts`): kept, or the
       // warehouse in the query would be read as no query at all.
       const landed = new URL(page.url()).searchParams;
-      warehousePath = `/inventory?warehouse=${landed.get('warehouse')}&ctx=${landed.get('ctx')}`;
+      warehouseId = landed.get('warehouse') ?? '';
+      warehousePath = `/inventory?warehouse=${warehouseId}&ctx=${landed.get('ctx')}`;
       await expect(page.getByText(INVENTORY_DONE_MESSAGES.CREATE_WAREHOUSE)).toBeVisible();
       await expect(page.getByRole('link', { name: WAREHOUSE_NAME })).toBeVisible();
       // Nothing in it yet: a receipt is offered, an adjustment waits for stock.
@@ -257,7 +264,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
     browser,
   }) => {
     expect(shipmentPath).not.toBe('');
-    const { page, close } = await as(browser, 'orgAdminB');
+    const { page, close, at } = await as(browser, 'orgAdminB');
     try {
       await page.goto(shipmentPath);
       await expect(page.getByRole('heading', { level: 1 })).toHaveText('اطلاعات محموله');
@@ -270,7 +277,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
       await page.goto('/inventory');
       expect(await mainText(page)).toContain(shipmentPath.split('/').pop());
       expect(await mainText(page)).not.toContain(WAREHOUSE_NAME);
-      await page.goto(warehousePath);
+      await page.goto(at(`/inventory?warehouse=${warehouseId}`));
       await expect(page.getByText('انبار یافت نشد')).toBeVisible();
       await expect(
         page.getByRole('form', { name: INVENTORY_COMMAND_LABELS.RECEIVE_STOCK }),
@@ -283,7 +290,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
   test('a third organization finds the shipment exactly as it finds an id that does not exist', async ({
     browser,
   }) => {
-    const { page, close } = await as(browser, 'orgAdmin');
+    const { page, close, at } = await as(browser, 'orgAdmin');
     try {
       await page.goto(shipmentPath);
       await expect(page.getByText('این محموله پیدا نشد')).toBeVisible();
@@ -291,7 +298,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
       await page.goto(`/inventory/shipments/${MISSING_SHIPMENT}`);
       expect(await mainText(page)).toBe(foreign);
       expect(foreign).not.toContain(WAREHOUSE_NAME);
-      await page.goto(warehousePath);
+      await page.goto(at(`/inventory?warehouse=${warehouseId}`));
       await expect(page.getByText('انبار یافت نشد')).toBeVisible();
       await expectAccessible(page);
     } finally {
