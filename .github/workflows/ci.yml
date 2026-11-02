@@ -1335,15 +1335,15 @@ jobs:
     # moved out (#198), 50 as #273's stopgap until this split.
     # 82 minutes: the job must hold every step at its own limit, one after
     # the other (scripts/ci-integration-split-lib.mjs, JOB_SETUP_MINUTES):
-    # the steps' limits sum to 74 (Integration tests 21, six 5-minute guards
-    # 30 and the 17-minute runtime-role split suite, the three 2-minute
+    # the steps' limits sum to 75 (Integration tests 21, six 5-minute guards
+    # 30 and the 18-minute runtime-role split suite, the three 2-minute
     # PostgreSQL connection steps 6) and the
     # steps without a limit of their own took up to 298 s over the last 20
     # green runs, which is 8 minutes at x 1.5. The job itself took up to
-    # 1359 s (p50 1210 s), so 82 (74 + 8, #540 r2) is a ceiling that no
+    # 1359 s (p50 1210 s), so 83 (75 + 8, #540 r3) is a ceiling that no
     # healthy run comes near; the sharding PR returns the Integration tests
     # step, and with it this job, to its smaller size.
-    timeout-minutes: 82
+    timeout-minutes: 83
     needs: quality
 
     services:
@@ -1872,10 +1872,12 @@ jobs:
         # clean, its rows intact and its trigger out of the runtime role's reach.
         # And #540 r1's exploits, each planted, reported, revoked and refused
         # (check-db-runtime-privileges-boundary.pg.test.mjs).
-        # 17 = ceil(641 s x 1.5 / 60). Measured on one host: 64e1b76e's suite
-        # 772 s there against 296 s here (x 2.6); this branch's two files
-        # 1632 s there, + ~35 s for the stored-settings test, so ~641 s here.
-        timeout-minutes: 17
+        # 18 = ceil(710 s x 1.5 / 60), an estimate (#540 r3): 709012e7's three
+        # files took 640 s here (CI run 41381414879); the R3-1 fixtures add
+        # ~125 s locally to the end-state file, and every split two psql
+        # calls (~0.6 s of ~8 s locally): ~70 s here at the x 2.6 ratio
+        # measured before (64e1b76e: 772 s locally against 296 s here).
+        timeout-minutes: 18
         run: pnpm run test:db-runtime-privileges
         env:
           PGHOST: localhost

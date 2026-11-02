@@ -317,7 +317,9 @@ psql URL بی گذرواژه می‌گیرد و گذرواژه را از `PGPASS
 
    هیچ داده‌ای جابه‌جا نمی‌شود؛ مالکیت با `REASSIGN OWNED` منتقل می‌شود و دفتر Migration موجود حق نقش اجرا را از دست
    می‌دهد. Idempotent است. در حالت `default` نقش اجرا
-   بلافاصله DML روی جدول‌های موجود دارد، پس سرویس قطع نمی‌شود. (supplier و analytics، حالت `migration`: تا گام ۳ حق جدول ندارند.)
+   بلافاصله DML روی جدول‌های موجود دارد، پس سرویس قطع نمی‌شود: CONNECT نقش اجرا در همان تراکنشی داده می‌شود که
+   مالکیت پایگاه داده را منتقل می‌کند، و USAGE و Grantهای جدول در همان تراکنش `REASSIGN OWNED` و انتقال Schema (#540 r3
+   R3-1)؛ پس اگر تقسیم پس از آن بایستد هم نقش اجرا بی‌دسترسی نمی‌ماند. (supplier و analytics، حالت `migration`: تا گام ۳ حق جدول ندارند.)
 
 3. **Migration با مهاجر:** `pnpm --filter @rasta/<svc>-service db:migrate` (اسکریپت `DATABASE_URL_<SVC>_MIGRATOR` را
    ترجیح می‌دهد و حق نقش اجرا روی `_prisma_migrations` را می‌گیرد).
@@ -388,9 +390,23 @@ statement_timeout = '<ms>ms'`، هرگز روی مهاجر. همان اسکری�
 - **`the split did not reach its end state: …`** (#540 r2 R2-1): the split's last step read the
   catalogue back and something it promises is missing — an attribute still held, an object the runtime
   role still owns, a schema or the database not the migrator's, CONNECT/USAGE or a default-mode grant
-  missing, the ledger missing or granted, UTC or the configured `statement_timeout` not set, a stored
+  missing, the migrator without USAGE or CREATE on its schema, lent schema access not returned, the
+  ledger missing or granted, UTC or the configured `statement_timeout` not set, a stored
   setting or a membership left. Each is named. Every statement's failure also stops the split where it
   happened (psql's error is the line above), so fix that cause and rerun; the split is idempotent.
+- **Schema `rasta_split_lent` in a service database / `schema access the split lent is not all returned`**
+  (#540 r3 R3-1): the split acts as other roles — each grantor revokes its own grants, the migrator
+  repairs function grants — and a role names an object only through a schema it has USAGE on. When the
+  split itself took that USAGE (a membership it revoked, a schema it handed to the migrator or took from
+  another service's runtime role), it lends USAGE on that schema to that exact role just before it acts,
+  records the loan in `rasta_split_lent.namespace_usage`, and revokes exactly that entry at its very
+  end, then drops the schema. A run that stopped in between leaves the schema and its loans: rerun the
+  split; it returns them. Do not drop the schema by hand while it lists loans. The split refuses a
+  `rasta_split_lent` that is not a superuser's or holds anything else (`… is not a superuser's` /
+  `… holds something besides the split's own ledger`): inspect and remove it, then rerun.
+- **`the split cannot tell which schemas … names`** (#540 r3 R3-1): a grant on an object kind the loan
+  does not model. Model it in `rasta_split_lent.lend` (lib/service-privilege-split.bash) first; the
+  split refuses rather than act without the access it needs.
 - **`unsupported database name …` / `unsupported service name …`** (split) and **`unsupported database
 name`, `unreadable database record`, `connected to database …, not the one asked for`** (check) (#540
   r2 R2-2): the split takes plain lower-case names only (`[a-z_][a-z0-9_]*`), and refuses any other

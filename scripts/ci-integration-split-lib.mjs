@@ -184,11 +184,12 @@ export const STEP_INVENTORY = Object.freeze({
     'pnpm run test:supplier-privilege-split',
   ),
   'Runtime roles own nothing (D-045)': postgresGuard('pnpm run check:db-runtime-privileges'),
-  // 17 = ceil(641 s x 1.5 / 60): 64e1b76e's suite took 772 s on one host and
-  // 296 s in CI (x 2.6); #540 r2's two files took 1632 s + ~35 s there.
+  // 18 = ceil(710 s x 1.5 / 60), an estimate (#540 r3): the three files took
+  // 640 s in CI at 709012e7; the R3-1 fixtures and the two psql calls each
+  // split adds come to ~70 s more there (ci.yml has the arithmetic).
   'Runtime-role check and the generic split, on a throwaway database': {
     ...postgresGuard('pnpm run test:db-runtime-privileges'),
-    timeout: 17,
+    timeout: 18,
   },
   'Every database session runs in UTC (L7-37)': postgresGuard('pnpm run test:db-session-utc'),
   'The runtime pool and statement timeout come from configuration': postgresGuard(

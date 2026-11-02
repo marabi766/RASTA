@@ -321,10 +321,32 @@ rotate_and_verify_split_logins() {
 # `schema.*` relation and sequence rows (GRANT … ON ALL … IN SCHEMA) and its
 # default-privilege rows (ALTER DEFAULT PRIVILEGES FOR ROLE the migrator) — and
 # refuses a row of any other class, so what is granted is what is allowed. The
-# schema's USAGE is the split's own statement.
+# schema's USAGE is the split's own statement. One transaction, so the
+# runtime role is never between the REVOKE and the GRANT; the split has
+# already added the same grants in its ownership handoff.
 grant_service_tables() {
-  local svc="$1" db="$2" mode="$3"
-  local runtime="rasta_${svc}" migrator="rasta_${svc}_migrator" allowlist
+  local svc="$1" db="$2" mode="$3" sql
+  sql="$(_service_table_grants_sql "${svc}" "${mode}")" || return 1
+  [[ -n "${sql}" ]] || return 0
+  # One transaction: the runtime role is never between the REVOKE and the
+  # GRANT (#540 r3 R3-1).
+  _svc_split_psql "${db}" "BEGIN;
+    ${sql}
+    COMMIT;"
+}
+
+# _service_table_grants_sql <service> <default|migration> [exact|additive]
+#
+# grant_service_tables' statements, nothing in migration mode. `additive`
+# grants the policy and revokes nothing: the split runs it inside the
+# ownership handoff's transaction (_split_database), so the runtime role that
+# owned its tables keeps DML on them throughout (#540 r3 R3-1) — and it cannot
+# fail there on a grant the runtime role passed on under a grant option, which
+# the cleanup removes later. `exact` (the default) is the policy and nothing
+# else, after the cleanup.
+_service_table_grants_sql() {
+  local svc="$1" mode="$2" how="${3:-exact}"
+  local runtime="rasta_${svc}" migrator="rasta_${svc}_migrator" allowlist revokes=""
   [[ "${svc}" == analytics ]] && mode=migration
   if [[ "${mode}" == default ]]; then
     allowlist="$(_runtime_allowlist_sql)" || return 1
@@ -332,9 +354,10 @@ grant_service_tables() {
     # database's runtime role held ALL as their owner, and REASSIGN does not
     # carry a former owner's rights over as grants — but say it rather than
     # rely on it.
-    _svc_split_psql "${db}" "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${runtime}" || return 1
-    _svc_split_psql "${db}" "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${runtime}" || return 1
-    _svc_split_psql "${db}" "DO \$\$
+    [[ "${how}" == exact ]] && revokes="REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${runtime};
+    REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${runtime};"
+    printf '%s' "${revokes}
+    DO \$\$
       DECLARE g record;
       BEGIN
         FOR g IN WITH allowlist AS (${allowlist})
@@ -352,7 +375,7 @@ grant_service_tables() {
             RAISE EXCEPTION 'runtime-allowlist.sql: the split grants no % row in policy default', g.class;
           END IF;
         END LOOP;
-      END \$\$;" || return 1
+      END \$\$;"
   fi
 }
 
@@ -467,6 +490,141 @@ _runtime_forbidden_sql() {
     "${exceptions}" "${forbidden}" "${foreign}"
 }
 
+# ## Namespace access for whoever acts (#540 r3 R3-1)
+#
+# The split acts AS other roles: the cleanup revokes each entry as its grantor
+# (and lends a grant option as the object's owner), and the function repair
+# grants as the migrator. A role names an object only through a schema it has
+# USAGE on, and the split itself takes that USAGE away — not only by revoking a
+# schema's ACL entry (which _split_containers delays), but by revoking a
+# membership it came through (revoke_owner_memberships), by handing a schema
+# the role owned to the migrator (REASSIGN OWNED, the runtime role's own) or
+# taking it from another service's runtime role (reassign_foreign_ownership).
+# So, whatever took it, the role is given USAGE on every schema the statement
+# names just before it acts (rasta_split_lent.lend): granted to that exact
+# role, recorded in a ledger of loans in the same transaction, and revoked —
+# that entry only — at the very end (_return_lent_namespaces). A run that fails
+# before the end leaves the ledger; the next run's end returns what it lists.
+#
+# The ledger is schema `rasta_split_lent` in the database being split: a
+# superuser's, granted to no one, with nothing in it but its table and the
+# function; it is refused if it exists otherwise, and gone once the split ends.
+_namespace_ledger_sql() {
+  # One statement (a DO block is one transaction), so a caller that runs the
+  # captured SQL statement by statement runs it whole.
+  printf '%s' "DO \$ledger\$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner
+                  WHERE n.nspname = 'rasta_split_lent' AND NOT r.rolsuper) THEN
+        RAISE EXCEPTION 'schema rasta_split_lent exists and is not a superuser''s: the split will not use it';
+      END IF;
+      CREATE SCHEMA IF NOT EXISTS rasta_split_lent;
+      REVOKE ALL ON SCHEMA rasta_split_lent FROM PUBLIC;
+      IF to_regclass('rasta_split_lent.namespace_usage') IS NULL THEN
+        CREATE TABLE rasta_split_lent.namespace_usage (
+          namespace oid NOT NULL, grantee oid NOT NULL, PRIMARY KEY (namespace, grantee));
+      END IF;
+    -- lend(principal, target): USAGE on every schema <target> — a REVOKE's
+    -- ON clause, as runtime-acl-entries.sql spells it — names that
+    -- <principal> cannot use; returns how many were lent. A target of a kind
+    -- it does not know fails, never lends nothing.
+    CREATE OR REPLACE FUNCTION rasta_split_lent.lend(principal name, target text)
+      RETURNS integer LANGUAGE plpgsql AS \$f\$
+    DECLARE
+      kind text := substring(target FROM '^(TABLE|SEQUENCE|ROUTINE|TYPE|DOMAIN) ');
+      named text := substr(target, length(coalesce(kind, '')) + 2);
+      who oid := (SELECT oid FROM pg_roles WHERE rolname = principal);
+      needed oid[];
+      nsp oid;
+      lent integer := 0;
+    BEGIN
+      IF who IS NULL THEN
+        RAISE EXCEPTION 'the split cannot lend schema access to %: no such role', principal;
+      ELSIF kind IN ('TABLE', 'SEQUENCE') THEN
+        needed := ARRAY(SELECT c.relnamespace FROM pg_class c WHERE c.oid = named::regclass);
+      ELSIF kind = 'ROUTINE' THEN
+        -- Its argument types' schemas too: the signature names them.
+        needed := ARRAY(SELECT p.pronamespace FROM pg_proc p WHERE p.oid = named::regprocedure
+                        UNION
+                        SELECT t.typnamespace FROM pg_proc p
+                          CROSS JOIN LATERAL unnest(p.proargtypes::oid[]) a(type)
+                          JOIN pg_type t ON t.oid = a.type
+                         WHERE p.oid = named::regprocedure);
+      ELSIF kind IN ('TYPE', 'DOMAIN') THEN
+        needed := ARRAY(SELECT t.typnamespace FROM pg_type t WHERE t.oid = named::regtype);
+      ELSIF target ~ '^(DATABASE|SCHEMA|LANGUAGE|LARGE OBJECT|FOREIGN DATA WRAPPER|FOREIGN SERVER|TABLESPACE|PARAMETER) '
+         OR target IN ('TABLES', 'SEQUENCES', 'FUNCTIONS', 'TYPES', 'SCHEMAS') THEN
+        -- Named without a schema (a default ACL's IN SCHEMA is not checked).
+        RETURN 0;
+      ELSE
+        RAISE EXCEPTION 'the split cannot tell which schemas % names', target;
+      END IF;
+      IF cardinality(needed) = 0 THEN
+        RAISE EXCEPTION 'the split cannot find %', target;
+      END IF;
+      FOREACH nsp IN ARRAY needed LOOP
+        CONTINUE WHEN has_schema_privilege(who, nsp, 'USAGE');
+        EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I',
+                       (SELECT nspname FROM pg_namespace WHERE oid = nsp), principal);
+        INSERT INTO rasta_split_lent.namespace_usage VALUES (nsp, who) ON CONFLICT DO NOTHING;
+        lent := lent + 1;
+      END LOOP;
+      RETURN lent;
+    END \$f\$;
+    REVOKE ALL ON FUNCTION rasta_split_lent.lend(name, text) FROM PUBLIC;
+      IF EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspname = 'rasta_split_lent'
+                   AND EXISTS (SELECT 1 FROM aclexplode(n.nspacl) x WHERE x.grantee <> n.nspowner))
+         OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner
+                     WHERE c.relnamespace = 'rasta_split_lent'::regnamespace
+                       AND (NOT r.rolsuper
+                            OR c.relname NOT IN ('namespace_usage', 'namespace_usage_pkey')
+                            OR EXISTS (SELECT 1 FROM aclexplode(c.relacl) x
+                                                       WHERE x.grantee <> c.relowner)))
+         OR EXISTS (SELECT 1 FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+                     WHERE p.pronamespace = 'rasta_split_lent'::regnamespace
+                       AND (NOT r.rolsuper OR p.oid <> 'rasta_split_lent.lend(name, text)'::regprocedure
+                            OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) x WHERE x.grantee <> p.proowner)))
+      THEN
+        RAISE EXCEPTION 'schema rasta_split_lent holds something besides the split''s own ledger, or grants it';
+      END IF;
+    END \$ledger\$;"
+}
+
+# _open_namespace_ledger <database>
+_open_namespace_ledger() {
+  _svc_split_psql "$1" "$(_namespace_ledger_sql)"
+}
+
+# _return_lent_namespaces <database>
+#
+# Every loan the ledger lists is revoked — the entry the loan made (the schema
+# owner's grant of USAGE to that role) and nothing else — except a loan to a
+# role that has since become the schema's owner (the migrator, lent USAGE on
+# another service's runtime role's schema in the general cleanup, then handed
+# it by reassign_foreign_ownership): an owner keeps its USAGE. The runtime
+# role's USAGE on its own schema is never a loan: the handoff grants it first.
+# Then the ledger is dropped, object by object (a CASCADE could take what is
+# not the split's). One statement, one transaction: the loans and their
+# record go together.
+_return_lent_namespaces() {
+  local db="$1"
+  _svc_split_psql "${db}" "DO \$return\$
+    DECLARE loan record;
+    BEGIN
+      FOR loan IN SELECT n.nspname, r.rolname, n.nspowner = r.oid AS owns
+                    FROM rasta_split_lent.namespace_usage u
+                    JOIN pg_namespace n ON n.oid = u.namespace
+                    JOIN pg_roles r ON r.oid = u.grantee
+                   ORDER BY 1, 2
+      LOOP
+        CONTINUE WHEN loan.owns;
+        EXECUTE format('REVOKE USAGE ON SCHEMA %I FROM %I', loan.nspname, loan.rolname);
+      END LOOP;
+      DROP FUNCTION rasta_split_lent.lend(name, text);
+      DROP TABLE rasta_split_lent.namespace_usage;
+      DROP SCHEMA rasta_split_lent;
+    END \$return\$;"
+}
+
 # Revoke actual ACL entries as THEIR grantor: PG16 object REVOKE GRANTED BY
 # cannot name a different current_user, so the privileged session switches to
 # each grantor, then resets. CASCADE takes dependent grant chains with it — and
@@ -481,8 +639,14 @@ _runtime_forbidden_sql() {
 #     revoked, and its grantor can revoke it no more — is revoked with the
 #     option lent by the object's owner and taken back at once, in the same
 #     transaction, so the grantor ends with exactly what it had;
+#   * before the grantor — or the owner lending — acts, it is lent USAGE on
+#     every schema the statement names that it cannot use
+#     (rasta_split_lent.lend, #540 r3 R3-1): a membership revoked, an ownership
+#     handed over or a schema entry revoked earlier must not leave it unable to
+#     name what it still has to revoke;
 #   * each REVOKE must remove its own entry, so the loop ends within as many
-#     passes as there were entries; it fails closed if one does not.
+#     passes as there were entries (plus one per loan, which may add an entry
+#     of its own); it fails closed if one does not.
 #
 # The loop ending is not convergence: assert_no_forbidden_rights, last in the
 # split, is. 'extension' is separate so every mode runs it AFTER application
@@ -528,6 +692,7 @@ _restrict_reachable_acl() {
                  THEN 'REVOKE GRANT OPTION FOR %s ON %s FROM %I CASCADE'
                  ELSE 'REVOKE %s ON %s FROM %I CASCADE' END,
             e.privilege_sql, e.revoke_on, pg_get_userbyid(e.grantor)) AS take_back,
+          e.revoke_on AS target,
           e.revoke_prefix = '' AND e.grantor <> e.owner AS lendable,
           -- A schema's or the database's entry last: a grantor that lost USAGE
           -- on the schema could no longer name the objects it still has to
@@ -549,6 +714,9 @@ _restrict_reachable_acl() {
             '${scope}', item.command, item.grantor;
         END IF;
         passes := passes - 1;
+        -- The grantor can name the object, however it lost its schema (#540
+        -- r3 R3-1); a loan may add an entry this cleanup then revokes.
+        passes := passes + rasta_split_lent.lend(item.grantor, item.target);
         BEGIN
           EXECUTE format('SET LOCAL ROLE %I', item.grantor);
           EXECUTE item.command;
@@ -558,6 +726,7 @@ _restrict_reachable_acl() {
         END;
         EXECUTE still INTO STRICT remains USING item.grantor, item.command;
         IF remains AND item.lendable THEN
+          passes := passes + rasta_split_lent.lend(item.owner, item.target);
           EXECUTE format('SET LOCAL ROLE %I', item.owner);
           EXECUTE item.lend;
           EXECUTE format('SET LOCAL ROLE %I', item.grantor);
@@ -670,6 +839,8 @@ _split_containers() {
 # and USAGE on <schema> — in default mode its policy's table, sequence and
 # default grants, and EXECUTE on each listed function that exists; the ledger
 # exists, is the migrator's and grants PUBLIC and the runtime role nothing;
+# the migrator holds USAGE and CREATE on <schema>; every schema access lent to
+# a role the split acted as is returned (no rasta_split_lent left);
 # UTC is the database's, both roles' and both roles' in-database default; and
 # the statement_timeout asked for is set. Each failure is named — a setting by
 # its parameter and scope, never its value (#540 r2 R2-3).
@@ -735,6 +906,12 @@ assert_split_end_state() {
         UNION ALL SELECT '${runtime} lacks USAGE on schema ${schema}'
          WHERE CASE WHEN to_regnamespace('${schema}') IS NULL THEN true
                     ELSE NOT has_schema_privilege('${runtime}', to_regnamespace('${schema}'), 'USAGE') END
+        UNION ALL SELECT format('${migrator} lacks %s on schema ${schema}', priv)
+          FROM unnest(ARRAY['USAGE', 'CREATE']) priv
+         WHERE to_regnamespace('${schema}') IS NOT NULL AND EXISTS (SELECT 1 FROM mg)
+           AND NOT has_schema_privilege('${migrator}', to_regnamespace('${schema}'), priv)
+        UNION ALL SELECT 'schema access the split lent is not all returned: rasta_split_lent is left'
+         WHERE to_regnamespace('rasta_split_lent') IS NOT NULL
         UNION ALL SELECT format('${runtime} lacks %s on %s %s', priv, a.class, c.oid::regclass)
           FROM allowlist a CROSS JOIN unnest(a.privileges) priv
           JOIN pg_namespace n ON n.nspname = split_part(a.object, '.', 1)
@@ -834,6 +1011,7 @@ restore_runtime_function_grants() {
             AND d.objid = p.oid AND d.deptype = 'e')) THEN
           RAISE EXCEPTION 'required runtime function has unsafe ownership or definition';
         END IF;
+        PERFORM rasta_split_lent.lend('${migrator}', 'ROUTINE ' || fn::regprocedure);
         EXECUTE format('SET LOCAL ROLE %I', '${migrator}');
         EXECUTE format('GRANT EXECUTE ON ROUTINE %s TO %I', fn::regprocedure, '${runtime}');
         EXECUTE 'RESET ROLE';
@@ -848,13 +1026,16 @@ restore_runtime_function_grants() {
 #
 #   1. the migrator exists, logs in with its password; the runtime role loses
 #      every attribute; the database, everything the runtime role owned and the
-#      schemas become the migrator's; no back door through membership; no
+#      schemas become the migrator's — the runtime role keeping CONNECT and its
+#      USAGE in the same transactions; no back door through membership; no
 #      stored setting;
 #   2. every scope's OBJECT entries: general, then the function repair and the
-#      table grants, then extension, then foreign — the database's and the
+#      table grants (exact; step 1 added them), then extension, then foreign — the database's and the
 #      schemas' own entries wait (#540 r2 R2-4);
 #   3. the containers (_split_containers), every scope at once;
-#   4. the ledger, UTC, the optional statement_timeout;
+#   4. the ledger, UTC, the optional statement_timeout; then every schema
+#      access lent since the ledger of loans was opened (after step 1) is
+#      returned (#540 r3 R3-1);
 #   5. the two end-state checks: nothing forbidden is held
 #      (assert_no_forbidden_rights) and everything promised is in place
 #      (assert_split_end_state).
@@ -862,7 +1043,7 @@ restore_runtime_function_grants() {
 # Every step's failure is passed on (#540 r2 R2-1).
 _split_database() {
   local svc="$1" db="$2" mode="$3" policy="$4" schema="$5"
-  local runtime="rasta_${svc}" migrator="rasta_${svc}_migrator" password
+  local runtime="rasta_${svc}" migrator="rasta_${svc}_migrator" password tables
   _split_names "${svc}" "${db}" || return 1
   password="${ROLE_PASSWORDS[$migrator]:-}"
   if [[ -z "${password}" ]]; then
@@ -880,27 +1061,57 @@ _split_database() {
   # The runtime role can no longer create — or, owning none, drop — a database.
   _svc_split_psql postgres "ALTER ROLE ${runtime} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION" || return 1
 
-  _svc_split_psql postgres "ALTER DATABASE ${db} OWNER TO ${migrator}" || return 1
+  # The handoffs, each with the access the runtime role needs in the same
+  # transaction (#540 r3 R3-1): an owner's rights are not grants, so the
+  # runtime role that owned the database or <schema> — or reached it through a
+  # membership revoked below — would otherwise be locked out from here until
+  # _split_containers, and for good if the split stopped in between. A grant
+  # made BEFORE the handoff would not survive it: ALTER … OWNER rewrites the
+  # old owner's entries as the new owner's.
+  _svc_split_psql postgres "BEGIN;
+    ALTER DATABASE ${db} OWNER TO ${migrator};
+    GRANT CONNECT ON DATABASE ${db} TO ${runtime};
+    COMMIT;" || return 1
 
   # Tables, sequences, types, functions, the ledger, and `public` itself if a
-  # pre-15 cluster made the runtime role its owner.
-  _svc_split_psql "${db}" "REASSIGN OWNED BY ${runtime} TO ${migrator}" || return 1
-
-  # `public` whoever owns it — REASSIGN moves only what the runtime role owned.
-  # On a cluster upgraded from PostgreSQL 14 or older the superuser owns it,
-  # and once the grants below are revoked the migrator would hold no CREATE
-  # there: it could neither create the ledger nor run a migration (Codex round
-  # 4 on #176). Before the revokes and the ledger. <schema> too, created if an
-  # older cluster lacks it (audit).
-  _svc_split_psql "${db}" "ALTER SCHEMA public OWNER TO ${migrator}" || return 1
+  # pre-15 cluster made the runtime role its owner. Then `public` whoever owns
+  # it — REASSIGN moves only what the runtime role owned. On a cluster upgraded
+  # from PostgreSQL 14 or older the superuser owns it, and once the grants
+  # below are revoked the migrator would hold no CREATE there: it could neither
+  # create the ledger nor run a migration (Codex round 4 on #176). Before the
+  # revokes and the ledger. <schema> too, created if an older cluster lacks it
+  # (audit). The migrator, now its owner, holds USAGE and CREATE on <schema>:
+  # an owner can revoke its own rights, and a former owner's revoked ones pass
+  # to it as they are. In default mode the runtime role's table and sequence
+  # grants are in the same transaction too (added; grant_service_tables makes
+  # them exact after the cleanup): the tables it owned are the migrator's from
+  # the same instant, and it never stands without DML on them.
+  tables="$(_service_table_grants_sql "${svc}" "${mode}" additive)" || return 1
+  local handoff="REASSIGN OWNED BY ${runtime} TO ${migrator};
+    ALTER SCHEMA public OWNER TO ${migrator};"
   if [[ "${schema}" != public ]]; then
-    _svc_split_psql "${db}" "CREATE SCHEMA IF NOT EXISTS ${schema} AUTHORIZATION ${migrator};
-      ALTER SCHEMA ${schema} OWNER TO ${migrator};" || return 1
+    handoff+="
+    CREATE SCHEMA IF NOT EXISTS ${schema} AUTHORIZATION ${migrator};
+    ALTER SCHEMA ${schema} OWNER TO ${migrator};"
   fi
+  _svc_split_psql "${db}" "BEGIN;
+    ${handoff}
+    GRANT USAGE ON SCHEMA ${schema} TO ${runtime};
+    DO \$\$ BEGIN
+      IF NOT has_schema_privilege('${migrator}', '${schema}', 'USAGE')
+         OR NOT has_schema_privilege('${migrator}', '${schema}', 'CREATE') THEN
+        GRANT USAGE, CREATE ON SCHEMA ${schema} TO ${migrator};
+      END IF;
+    END \$\$;
+    ${tables}
+    COMMIT;" || return 1
 
   # No back door: no membership in the migrator or any other owner.
   revoke_owner_memberships "${db}" "${runtime}" || return 1
   reset_runtime_settings "${db}" "${runtime}" || return 1
+
+  # Every role the split acts as from here gets the schema access it needs.
+  _open_namespace_ledger "${db}" || return 1
 
   # Objects, scope by scope; the containers after all of them.
   restrict_service_functions_and_rights "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
@@ -917,6 +1128,9 @@ _split_database() {
 
   ensure_utc_session_defaults "${db}" "${runtime}" "${migrator}" || return 1
   ensure_runtime_statement_timeout "${svc}" "${db}" "${runtime}" || return 1
+
+  # The very end: every schema access lent above is taken back.
+  _return_lent_namespaces "${db}" || return 1
 
   assert_no_forbidden_rights "${db}" "${runtime}" "${migrator}" "${policy}" || return 1
   assert_split_end_state "${svc}" "${db}" "${runtime}" "${migrator}" "${schema}" "${mode}" "${policy}" || return 1
