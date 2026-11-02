@@ -2,7 +2,7 @@
 
 - **وضعیت:** **Proposed** — فقط طراحی (RUN-002 گام ۰)؛ هیچ استقرار، هیچ تغییر زیرساخت میزبان و هیچ کدی در این PR نیست
 - **تاریخ:** 2026-10-25؛ دور ۲ (بازبینی Codex r1، F1–F7): 2026-10-27؛ دور ۳ (بازبینی Codex r2، R2-1 تا R2-6): 2026-10-28 —
-  نگاشت در §§ «تغییرات r2» و «تغییرات r3»
+  دور ۴ (R3-1 تا R3-6): 2026-11-02؛ نگاشت در § «تغییرات r4»
 - **تصمیم‌گیرنده:** معماری پلتفرم؛ تصمیم‌های مالک در § «Open» (O-1 تا O-8) باز می‌مانند تا مالک پاسخ دهد. شماره‌ی ADR طبق
   `docs/26` قاعده‌ی ۴ وارسی شد: `ADR-072` روی شاخه‌ی #362 و `ADR-073` روی شاخه‌ی #368 گرفته شده‌اند؛ `ADR-074` روی `origin/main`
   و همه‌ی شاخه‌های باز آزاد بود. هیچ `Q-NN` یا `D-NNN` در این سند واگذار نمی‌شود.
@@ -14,6 +14,10 @@
 - **برنامه‌ی اجرا:** [ADR-074 implementation plan](ADR-074-implementation-plan.md)
 
 ## Context
+
+**نسخه‌ی شاهد کد:** نشانی‌های `path:line` و توصیف وضعیت موجود در این ADR از Snapshot ـِ بازبینی `ebe30a8d` اند،
+نه ادعای وضعیت `main` پس از Merge ـِ این دور. منبع بیرونی پیوند مستقل دارد؛ نشانی‌های نقشه‌ی r2 در `c432c56f` اند.
+وارسی Citation باید همین نسخه‌ی نام‌برده را بخواند؛ اختلاف با `main` در STATUS جدا گزارش می‌شود.
 
 ### معیارهای پذیرش و تصمیم‌های مالک
 
@@ -182,10 +186,10 @@ PostgreSQL/Redis/Kafka/Keycloak/MinIO/Temporal) جمعاً ۴٬۷۸۴ MiB است
      Worker. **هر نشانه با یک نمونه کافی است (r3)**، تا کران تشخیص با نمونه‌برداری واقعاً برقرار باشد: Container ـِ تازه
      بیرون از فهرست؛ `MemAvailable` زیر `R_host`؛ یا افزایش شمارنده‌ی تجمعی `full total=` ـِ `/proc/pressure/memory` نسبت به
      نمونه‌ی **قبلی** (میانگین `avg10`/`avg60` هموارشده است و برای تشخیص به کار نمی‌رود). رخدادی که در بازه‌ی `(t_i, t_{i+1}]`
-     آغاز شود در نمونه‌ی `t_{i+1}` دیده می‌شود؛ پس **`T_detect ≤ T_poll + T_read`** (`T_read` = مهلت هر خواندن؛ گذشتن از آن
+     آغاز شود در نمونه‌ی `t_{i+1}` دیده می‌شود؛ پس **`T_detect ≤ T_poll + T_read`** (`T_read` = مهلت کل Snapshot، با همه‌ی خواندن‌ها؛ گذشتن از آن
      خودش نشانه‌ی توقف است). ورود همین قاعده را دارد: `full total=` در `W_obs` (پیشنهاد ۶۰ ثانیه، O-8) بی‌تغییر.
-   - پس هم‌پوشانی Staging با کار تازه حداکثر `T_detect + T_fence + T_stop` است — `T_fence` حصار § ۱۴ بند ۵ و `T_stop` **کل
-     برنامه‌ی توقف** (بند ۴، نه بزرگ‌ترین مهلت تنها) — و در آن بازه Staging از `E_mem` بیشتر نمی‌گیرد. **ادعا نمی‌شود** که
+   - پس هم‌پوشانی Staging با کار تازه حداکثر `T_detect + T_fence + T_stop + T_reconcile` است — `T_fence` حصار § ۱۴ بند ۵ و `T_stop` **کل
+     برنامه‌ی توقف** و آشتیِ تأییدشده (بند ۴، مشروط به کرانِ اثبات‌شده، نه بزرگ‌ترین مهلت تنها) — و در آن بازه Staging از `E_mem` بیشتر نمی‌گیرد. **ادعا نمی‌شود** که
      Worker در این بازه هرگز Swap نمی‌گیرد؛ ادعا این است که Staging آن را طولانی نمی‌کند.
    - **گزینه‌ی هم‌زمان (O-3) فقط با بودجه‌ی Worker ـِ اجباری، و بودجه ویژگی Slice است نه هر Launch (r3).** r2 نوشته بود
      `systemd-run … -p MemoryMax=W_a`؛ آن Property سقف همان **یک** Unit ـِ تازه است، پس دو Launch تا `2 × W_a` می‌گیرند. درست:
@@ -211,7 +215,7 @@ PostgreSQL/Redis/Kafka/Keycloak/MinIO/Temporal) جمعاً ۴٬۷۸۴ MiB است
    | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
    | Log ـِ Container            | `max-size × max-file` (Driver ـِ `local`)                                                                                                                                                | سخت                                                  |
    | لایه‌ی نوشتنی Container     | `read_only: true`؛ `tmpfs` در سقف حافظه                                                                                                                                                  | سخت؛ استثناهای `services.json` زیر Monitor           |
-   | Pull ـِ تصویر               | **رزرو پیش از Pull**: `P` = جمع اندازه‌ی لایه‌های فشرده از Manifest ـِ Registry (`docker manifest inspect -v`، بی Pull) × `k` ـِ باز شدن (M-2)؛ ورود رد اگر آزاد < `F_admit + P`         | رزرو + Monitor (Pull فرزند فرمان است و متوقف می‌شود) |
+   | Pull ـِ تصویر               | **رزرو پیش از Pull**: `P` = جمع اندازه‌ی لایه‌های فشرده از Manifest ـِ Registry (`docker manifest inspect -v`، بی Pull) × `k` ـِ باز شدن (M-2)؛ ورود رد اگر آزاد < `F_admit`             | رزرو تا تأیید پایان Pull؛ مرگ CLI پایان نیست (§ ۱۴). |
    | تصویرهای انتشار             | فقط N و N−1؛ N−2 پس از استقرار موفق، با Digest و فقط اگر هیچ Container به آن ارجاع ندهد، حذف                                                                                             | سخت با شمار؛ کران ۲ × M-2                            |
    | PostgreSQL: داده            | بی سهمیه                                                                                                                                                                                 | Monitor + توقف (رشد: M-3)                            |
    | PostgreSQL: WAL و Temp      | `max_wal_size` (نرم)؛ Bootstrap هر Replication Slot را رد می‌کند و `max_slot_wal_keep_size` صریح است؛ `archive_mode=off`؛ `temp_file_limit` برای هر جلسه (سخت)                           | نیمه‌سخت + Monitor                                   |
@@ -221,51 +225,49 @@ PostgreSQL/Redis/Kafka/Keycloak/MinIO/Temporal) جمعاً ۴٬۷۸۴ MiB است
    | MinIO                       | سهمیه‌ی سخت Bucket                                                                                                                                                                       | سخت                                                  |
    | ClamAV (Signatureها)        | اندازه‌ی Upstream                                                                                                                                                                        | Monitor                                              |
    | Mailpit                     | `MP_MAX_MESSAGES`                                                                                                                                                                        | سخت با شمار                                          |
-   | Backup (`pg_dump -Fc`)      | **رزرو پیش از Backup**: دو برابر Dump ـِ قبلی همان پایگاه، یا `pg_database_size` اگر نیست؛ بودجه‌ی کل `B_total` (O-3)؛ قدیمی‌ترین فقط پس از Dump ـِ موفقِ تازه حذف می‌شود                | رزرو + بودجه                                         |
+   | Backup (`pg_dump -Fc`)      | **رزرو پیش از Backup**: دو برابر Dump ـِ قبلی، یا `pg_database_size` اگر نیست؛ بودجه‌ی کل `B_backup_0` از O-8، نهایی از O-3؛ قدیمی‌ترین فقط پس از Dump ـِ موفقِ تازه حذف می‌شود          | رزرو + بودجه                                         |
    | شاهد (`staging/evidence/`)  | بودجه‌ی بایتی؛ نوشتن بالای آن رد                                                                                                                                                         | سخت                                                  |
    | Build                       | Staging نمی‌سازد، فقط Pull                                                                                                                                                               | صفر                                                  |
-   | قفل، Journal و وضعیت (§ ۱۴) | چند کیلوبایت                                                                                                                                                                             | ناچیز                                                |
+   | قفل، Journal و وضعیت (§ ۱۴) | بودجه‌ی سخت و فضای رزرو در `D_meta` (§ ۳)                                                                                                                                                | رزرو پیش از ارسال؛ پرشدن = رد                        |
 
-   **برنامه‌ی کامل توقف (r3).** توقف اضطراری گروه‌ها را **پشت سر هم** متوقف می‌کند، و هر گروه تا کندترین عضوش طول می‌کشد:
-   `g1` Edge و `web`؛ `g2` سرویس‌های دامنه (موازی)؛ `g3` Kafka، Temporal، Keycloak، Redis، MinIO، ClamAV و Mailpit (موازی)؛
-   `g4` PostgreSQL. پس `T_stop` = `Σ_g (max_{c∈g} stop_grace_period_c + ε)`، با `ε` = سربار API ـِ هر گروه (O-8)؛ **نه**
-   بزرگ‌ترین مهلت تنها (r2). PostgreSQL در **تمام** این مدت می‌نویسد (Checkpoint و WAL ـِ نویسنده‌هایی که هنوز ایستاده‌اند)، و
-   هر نویسنده‌ی دیگر تا پایان گروه خودش؛ پس کرانِ امن فرض می‌کند **همه** تا پایان `g4` با `R_max` می‌نویسند. کل بازه از رخداد
-   تا ایستادن آخرین نویسنده: `T_total` = `T_detect + T_fence + T_stop` = `T_poll + T_read + T_fence + T_stop`.
-
-   **دو آستانه، به بایت:** `F_stop` = `R_max × T_total × 2 + max_wal_size + D_meta` — ضریب ۲ حاشیه است؛ Checkpoint ـِ خاموشی
-   PostgreSQL و فراداده‌ی Docker (`D_meta`) هم جا می‌خواهند. **حساب، با عددهای نمونه (اندازه‌گیری نیستند):** `T_poll` ۱۰،
-   `T_read` ۲، `T_fence` ۳۰ (§ ۱۴ بند ۵)، `ε` ۵، مهلت‌ها `g1` ۱۰، `g2` ۳۳ (قاعده‌ی § ۱۵ با پیش‌فرض‌ها)، `g3` ۳۰، `g4` ۶۰ ثانیه:
-   `T_stop` = ۱۵ + ۳۸ + ۳۵ + ۶۵ = **۱۵۳** ثانیه؛ `T_total` = ۱۰ + ۲ + ۳۰ + ۱۵۳ = **۱۹۵** ثانیه؛ با `R_max` = ۵۰ MiB/s:
-   `F_stop` = ۵۰ × ۱۹۵ × ۲ = ۱۹٬۵۰۰ MiB + `max_wal_size` + `D_meta`. فرمول r2 (`T_poll` + بزرگ‌ترین مهلت = ۱۰ + ۶۰) همین را
-   ۷٬۰۰۰ MiB می‌داد — کم‌شماری ۶۴٪. مثال بازبین هم با همین قاعده می‌خواند: چهار گروه ۳۰ ثانیه‌ای و `T_poll` ۱۰ یعنی دست‌کم
-   ۱۰ + ۱۲۰ = ۱۳۰ ثانیه، نه ۴۰.
+   **مدل واحد عملیات (r4، منبع: `services.json` در S4a).** هر Service و Helper دارای `writes` (Volume، لایه، Log، شاهد،
+   فراداده)، سقف نرخ/حافظه، `stopGroup` و Grace است؛ هر عملیات مجموعه‌های هم‌زمان Helper، درخواست‌های مجاز و رزروهای
+   دارای شناسه‌ی یکتا را اعلام می‌کند. سازنده از همین مدل `H(op)`، مجموعه‌ی نویسنده‌ها، `R_max` و برنامه‌ی توقف را می‌سازد؛
+   شیء زنده یا نوع جهشِ بدون مدل = رد. Snapshot ـِ عملیات قطع‌شده می‌ماند؛ هر Helper ـِ باقی‌مانده در پاکت و بودجه‌ی بازیابی شمرده می‌شود؛ بی جا، Helper تازه رد.
+   گروه‌ها: `g1` Edge و web؛ `g2` سرویس‌های دامنه و Helperهای عملیات؛ `g3` زیرساخت، شامل **`clamav-freshclam`**؛ `g4` PostgreSQL.
+   وابستگی Helper به زیرساخت تعیین‌کننده‌ی ترتیب است؛ سیاست هر نویسنده‌ی بی گروه یا ترتیب ناسازگار را رد می‌کند.
+   `T_stop(op) = Σ_g (max_{c∈g(op)} grace_c + ε)`؛ مجموعه‌ی `g(op)` از ماندگارها و همه‌ی Helperهای ممکنِ همان عملیات می‌آید.
+   `T_reconcile(op) = T_ack + T_stop(op) + T_settle + 2 × T_read` شامل انتظار پاسخ نهاییِ درخواست‌های پذیرفته‌شده، **یک دور کامل
+   دیگر** برای توقف منابع دیررسیده و دو خواندن تأیید نهایی است. پس از حصار هیچ درخواست تازه‌ای جز جبران ثبت‌شده مجاز نیست؛
+   پاسخ جبران نیز باید نهایی باشد؛ هر Snapshot شامل همه‌ی Inspectها، با مهلت کل `T_read` است. `T_ack` کرانِ اثبات‌شده‌ی کل پاسخ‌ها و جبران‌هاست، نه Timeout ـِ CLI (§ ۱۴).
+   `T_total(op) = T_poll + T_read + T_fence + T_stop(op) + T_reconcile(op)`؛ کران پذیرش، بیشینه روی عملیات‌های مجاز است.
+   `F_stop = 2 × R_max × max_op T_total(op) + max_wal_size + D_meta`؛ همه‌ی نویسنده‌ها محافظه‌کارانه تا پایان می‌نویسند.
+   `D_meta` باید کران Dirty Pageهای همه‌ی نویسنده‌ها/Helperها و فراداده‌ی Daemon/Journal را هم بپوشاند؛ نبود کران = رد.
+   **مهلت سپری‌شده اثبات پایان نیست:** اگر پاسخ نهایی در کران ثابت نشود، حالت `UNRESOLVED` است؛ ادعای کران دیسک/توقف
+   برقرار نیست و پذیرش تازه بسته می‌ماند. O-8 باید پیش از فاز M امکان این کران و ناظر پایدار § ۱۴ را تعیین کند؛ فعلاً تأیید نشده‌اند.
 
    **نرخ نوشتن، کران‌دار با Kernel:** کنترلر `io` در `system.slice` روشن است و هر Container `io.max` دارد (خوانده 2026-10-28)؛ پس
    هر نویسنده‌ی Staging `device_write_bps` ـِ صریح روی دیسک ریشه (`/dev/sda`، `8:0`) در `services.json` دارد و `staging-policy`
-   نبودنش را رد می‌کند. آنگاه `R_max ≤ Σ device_write_bps` با Kernel نگه داشته می‌شود (ext4 نوشتن بافرشده را با Writeback ـِ
+   نبودنش را رد می‌کند. آنگاه `R_max = Σ device_write_bps` (بیشینه‌ی مجموعه‌ی هم‌زمانِ مدل، نه نرخ مشاهده‌شده‌ی کمتر) با Kernel نگه داشته می‌شود (ext4 نوشتن بافرشده را با Writeback ـِ
    cgroup به همان Container نسبت می‌دهد؛ صفحه‌های کثیف درون سقف حافظه‌ی همان Container اند و سقف را فقط تا اندازه‌ی آن موقتاً
    جلو می‌زنند — `D_meta` آن را می‌پوشاند). این **نرخ** را کران‌دار می‌کند، نه **ظرفیت** را: کنترل ظرفیت دیسک همچنان
    **مبتنی بر پایش است، نه سهمیه‌ی سخت**.
 
-   `F_admit` = `F_stop + P + B + G_window` (`P` و `B` فقط اگر همان فرمان Pull یا Backup می‌کند؛ `G_window` = رشد یک پنجره،
-   M-3). آزاد < `F_admit` ← هیچ فرمان تازه‌ای (استقرار، Pull، Backup) پذیرفته نمی‌شود و آنچه در حال اجراست می‌ماند. آزاد <
+   `F_admit` = `F_stop + P + B + G_window + E_remaining` (`P` و `B` فقط اگر همان فرمان Pull یا Backup می‌کند؛ `G_window` = رشد یک پنجره،
+   M-3؛ رشد و رزروهای مستقل باید فضای مشترک را دوباره نشمارند؛ `E_remaining` = بودجه‌ی شاهد منهای بایت مصرف‌شده). دفتر رزرو از مدل عملیات، هر شناسه را دقیقاً یک بار
+   می‌شمارد؛ `P` و `B` در `F_admit` اند و دوباره به آن افزوده نمی‌شوند. آزاد < `F_admit` ← هیچ فرمان تازه‌ای (استقرار، Pull، Backup) پذیرفته نمی‌شود و آنچه در حال اجراست می‌ماند. آزاد <
    `F_stop` ← Watchdog **نویسنده‌های فعال را متوقف می‌کند** با حصار و آشتی § ۱۴ بند ۵، سپس گروه‌ها را به ترتیب بالا با همان
    مهلت § ۱۵ (بی `kill`، بی کوتاه کردن مهلت). Staging خاموش می‌ماند تا `up` بعدی از ورود بگذرد. پیشنهاد ۸۵٪ ـِ دور ۱ فقط کرانی
    پایین برای `F_admit` است: هرکدام بزرگ‌تر باشد. **همین `T_total`، `H(op)` و `E_mem`** در اندازه‌گیری، Probe، استقرار، چرخش،
    Backup و توقف اضطراری به کار می‌روند؛ هیچ مسیری فرمول جدا ندارد.
 
-5. **Watchdog.** `up` آن را با `systemd-run --user --unit=rasta-staging-watchdog` بالا می‌آورد (بی root؛ `systemctl --user
-status` خواناست) و اگر نتواند، `up` رد می‌کند. هر `T_poll` (پیشنهاد ۱۰ ثانیه، O-8 سپس O-3) فضای آزاد ریشه (`statvfs`)،
-   `MemAvailable`، PSI ـِ حافظه، Containerهای در حال اجرا و پاکت بند ۲ را می‌خواند، هر خواندن با مهلت `T_read`؛ هر خواندن
-   ناموفق یا دیرکرده = نشانه‌ی توقف. Unit با `ExecStopPost` ـِ «توقف اضطراری Staging» (همان حصار و آشتی § ۱۴ بند ۵) و
-   `-p TimeoutStopSec` ≥ `T_fence + T_stop + T_settle` اجرا می‌شود — پیش‌فرض مدیر کاربر ۹۰ ثانیه است
-   (`DefaultTimeoutStopUSec`، خوانده 2026-10-28) و با `T_stop` ـِ بند ۴ کوتاه است؛ پس **Staging از Watchdog ـِ خود بیشتر زنده
-   نمی‌ماند**: مرگ Watchdog به هر دلیل، Staging را متوقف می‌کند (Fail Closed). مدیر کاربر با بسته شدن **آخرین** نشست
-   `rasta` می‌ایستد (`Linger=no`، خوانده 2026-10-28) و آنگاه همان `ExecStopPost` اجرا می‌شود؛ این Fail Closed است، نه نشت.
-   `loginctl enable-linger rasta` برای کاربر خودش بی root مجاز است (Policy ـِ `set-self-linger` نصب‌شده: `allow_any=yes`) ولی
-   تغییر میزبان است و تصمیمش با PM (O-8). Watchdog در کار عادی قفل § ۱۴ را نمی‌گیرد (وگرنه هیچ استقراری در پنجره ممکن نبود)؛
-   در توقف اضطراری **می‌گیرد** و نگه می‌دارد (§ ۱۴ بند ۵).
+5. **Watchdog و طول عمر ناظر (r4).** نمونه‌برداری هر `T_poll` از دیسک، حافظه، PSI ـِ حافظه و پاکت Containerها، هر خواندن با
+   `T_read`؛ خطا یا دیرکرد = حصار § ۱۴. Watchdog ـِ کاربر و `ExecStopPost` فقط محرک حصارند؛ **ضمانت طول عمر نیستند**.
+   `TimeoutStopSec ≥ T_fence + max_op(T_stop + T_reconcile)` از همان مدل محاسبه می‌شود؛ انقضایش `UNRESOLVED` می‌گذارد.
+   [systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html#TimeoutStopSec=) توقف را
+   کران می‌دهد، نه تکمیل درخواست Docker را. مرگ Watchdog یا خروج مدیر کاربر نباید ناظر § ۱۴ را از بین ببرد؛ پیش از نخستین
+   جهش، زنده بودن و بازیابی مستقل آن باید آزموده شود. `Linger` به‌تنهایی این تضمین را نمی‌دهد؛ انتخاب/تأمین ناظر مستقل از
+   مدیر کاربر (مثلاً Unit ـِ سیستمی که شخص دارای root نصب کند) **پرسش باز O-8** است؛ تا اثبات آن `up` رد می‌شود. این PR میزبان را تغییر نمی‌دهد.
 6. **کار پنجره‌ای و `stop`، نه `down`.** Staging برای تأیید یک انتشار یا Demo روشن و پس از آن با `stop` ـِ Staging خاموش
    می‌شود — **هرگز** `down` (§ ۱۰ بند ۸: `docker volume prune` ـِ Volume ـِ Containerهای حذف‌شده را پاک می‌کند). همیشه‌روشن
    شدن تصمیم O-3 است و فقط با گزینه‌ی هم‌زمان بند ۳.
@@ -282,33 +284,63 @@ M): در پنجره‌ی انحصاری، زیر قفل و Watchdog.
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------- |
 | `R_host_0`                          | ۶٬۱۴۴ MiB (هسته، نشست PM و خود Watchdog، با هم)                                                                                                                 | ثابت؛ پیش از شروع با `MemAvailable` سنجیده می‌شود                                                                               | O-3             |
 | سقف‌های موقت و `H_max_0`            | جمع ≤ `MemTotal − R_host_0` (حدود ۹٬۴۶۹ MiB)؛ اگر Stack ـِ کامل جا نشود، فاز M در **زیرمجموعه‌ها** اجرا می‌شود (Smoke فقط روی مسیری که همه‌ی سرویس‌هایش بالاست) | Kernel هر سقف را نگه می‌دارد؛ برخورد به سقف (`memory.events`) = اندازه‌ی نامعتبر و تکرار با سقف بالاتر زیر همان جمع، یا BLOCKED | M-1 ← S8m       |
-| `k_0`                               | ۵ (نسبت باز شدن لایه‌ها)                                                                                                                                        | Pull فرزند فرمان است و `F_stop_0` در طول آن پاییده می‌شود                                                                       | M-2 ← S8m       |
-| `device_write_bps_0` و `R_max_0`    | PostgreSQL ۲۰، Kafka ۱۰، هر نویسنده‌ی دیگر ۲ MiB/s؛ `R_max_0` = جمع آن‌ها                                                                                       | Kernel (`io.max`، بند ۴)؛ برخورد به سقف (`io.pressure` ـِ Container) = اندازه‌ی نامعتبر                                         | M-3 ← S8m       |
+| `k_0`                               | ۵ (نسبت باز شدن لایه‌ها)                                                                                                                                        | رزرو تا پاسخ نهایی؛ `F_stop_0` در طول Pull پاییده می‌شود                                                                        | M-2 ← S8m       |
+| `device_write_bps_0` و `R_max_0`    | PostgreSQL ۲۰، Kafka ۱۰، هر نویسنده‌ی دیگر ۲ MiB/s؛ `R_max_0` = جمع آن‌ها                                                                                       | Kernel (`io.max`، بند ۴)؛ آزمون اشباع M-3؛ PSI فقط مشاهده است                                                                   | M-3 ← S8m       |
 | `G_window_0`                        | ۱۰ GiB، و طول هر پنجره‌ی فاز M ≤ ۲ ساعت                                                                                                                         | فقط راحتی ورود است؛ ایمنی با `F_stop_0` است                                                                                     | M-3 ← S8m       |
-| مهلت‌های توقف `grace_0`             | سرویس‌ها: قاعده‌ی § ۱۵ (۳۳ ثانیه)؛ `web` و Edge ۱۰؛ Kafka، Temporal، Keycloak ۶۰؛ Redis، MinIO، ClamAV، Mailpit ۳۰؛ PostgreSQL ۱۲۰ ثانیه                        | گشاد نسبت به پیش‌فرض‌ها؛ کد خروج ۱۳۷ در فاز M = شکست و تکرار با مهلت بیشتر                                                      | M-6 ← S8m       |
-| زمان‌های Watchdog                   | `T_poll` ۱۰، `T_read` ۲، `T_fence` ۳۰، `ε` ۵، `T_settle` ۶۰، `W_obs` ۶۰ ثانیه                                                                                   | ثابت                                                                                                                            | O-3             |
+| مهلت‌های توقف `grace_0`             | سرویس‌ها: قاعده‌ی § ۱۵ (۳۳ ثانیه)؛ `web` و Edge ۱۰؛ Kafka، Temporal، Keycloak ۶۰؛ Redis/MinIO/ClamAV/freshclam/Mailpit ۳۰؛ PostgreSQL ۱۲۰؛ Helper از مدل        | گشاد نسبت به پیش‌فرض‌ها؛ کد خروج ۱۳۷ در فاز M = شکست و تکرار با مهلت بیشتر                                                      | M-6 ← S8m       |
+| زمان‌های Watchdog                   | `T_poll` ۱۰، `T_read` ۲، `T_fence` ۳۰، `ε` ۵، `T_settle` ۶۰، `W_obs` ۶۰ ثانیه؛ `T_ack` فقط با اثبات § ۱۴                                                        | ثابت                                                                                                                            | O-3             |
 | `T_stop_0`، `F_stop_0`، `F_admit_0` | از ردیف‌های بالا با فرمول‌های بند ۴، در خود فایل محاسبه و ثبت                                                                                                   | حاصل ورودی‌های کران‌دار                                                                                                         | S8m و O-3       |
 | `D_meta_0`، `max_wal_size_0`        | ۲ GiB؛ ۱ GiB                                                                                                                                                    | ثابت                                                                                                                            | O-3             |
 
-**حساب همین پیشنهادها:** نویسنده‌های دارای Volume: PostgreSQL، Kafka و پنج دیگر (MinIO، ClamAV، `clamav-freshclam`، Mailpit،
-Redis) ← `R_max_0` = ۲۰ + ۱۰ + ۵ × ۲ = ۴۰ MiB/s؛ `T_stop_0` = (۱۰+۵) + (۳۳+۵) + (۶۰+۵) + (۱۲۰+۵) = ۲۴۳ ثانیه؛ `T_total_0` =
-۱۰ + ۲ + ۳۰ + ۲۴۳ = ۲۸۵ ثانیه؛ `F_stop_0` = ۴۰ × ۲۸۵ × ۲ = ۲۲٬۸۰۰ MiB + ۱ GiB + ۲ GiB ≈ **۲۵٫۳ GiB**؛ `F_admit_0` ≈ ۳۵٫۳ GiB +
-`P`. دیسک امروز ۴۴G آزاد دارد (`df /`، 2026-10-28 05:19 UTC)؛ پس فاز M فقط وقتی پذیرفته می‌شود که `P` (فشرده × ۵) کمتر از
-حدود ۸٫۷ GiB باشد — وگرنه پیش از فاز M، پیشنهادهای پاک‌سازی پایین (با تأیید PM) لازم‌اند یا O-8 کران‌های دیگری برمی‌گزیند.
-این حساب دلیل نیست که عددها را کوچک‌تر حدس بزنیم؛ دلیل است که O-8 پیش از فاز M تصمیم بگیرد.
+**حساب r3 (۲۵٫۳ GiB) دیگر کران پذیرش نیست:** Helperهای زنده و آشتی را کم می‌شمرد. S8p باید با مدل کامل بالا همه‌ی
+عددهای مشتق را بازحساب کند؛ مقدار ثابت جای آن نمی‌نشیند. فضای ۴۴G گزارش‌شده در 2026-10-28 مشاهده‌ی تاریخی است، نه فضای
+آزاد امروز؛ ورود از `statvfs` ـِ تازه می‌خواند. اگر کران کامل جا نشود، فاز M اجرا نمی‌شود؛ پاک‌سازی یا تغییر کران‌ها تصمیم O-8 است.
+
+**شاهد و Backup پیش از M:** `B_backup_0` کران کل Backup ـِ فاز M است (مقدار پرسش O-8، بی مقدار رد)؛
+`B_evidence_0` پیشنهاد ۲۵۶ MiB (پرسش O-8)، سقف سخت کل فایل‌های موقت و نهایی شاهد، با رد پیش از نوشتن؛
+`E_remaining` در رزرو ورود می‌آید. Journal ـِ بازیابی پوشه‌ی جدا، سقف جدا در `D_meta` و فضای ازپیش‌رزروشده دارد؛ پر شدن شاهد
+نباید ثبت `UNRESOLVED` را از کار بیندازد. بودجه‌ی نهایی O-3 پس از M فقط تنگ‌تر می‌شود.
+
+**Schema ـِ پیکربندی نخستین اجرا (r4):** این Schema منبع کلیدهای اجباری `bootstrap-params.json` ـِ آینده در S8p است؛
+Checker خصوصی همین بلوک را می‌خواند، نه زیررشته‌ی نام پارامترها. این بلوک JSON فشرده است؛ S8p باید Schema اجرایی را از این قرارداد بسازد؛ نبود، کلید
+ناشناخته، نوع/واحد غلط، مقدار نامتناهی یا ناسازگاری مشتق با مدل = رد. `T_ack` و `supervisor_contract` با عدد دلخواه معتبر نمی‌شوند.
+
+```text
+{
+  "$id": "ADR-074/bootstrap-v4",
+  "additionalProperties": false,
+  "required": ["R_host_0", "container_caps_0", "H_max_0", "k_0", "R_max_0", "device_write_bps_0", "G_window_0", "window_seconds_0", "grace_0", "T_poll", "T_read", "T_fence", "ε", "T_settle", "W_obs", "T_ack", "D_meta_0", "max_wal_size_0", "B_evidence_0", "supervisor_contract", "T_stop_0", "T_reconcile_0", "T_total_0", "F_stop_0", "F_admit_0", "T_cancel", "T_term", "B_backup_0"],
+  "x-producer": "O-8",
+  "x-consumers": ["S8p", "فاز M"],
+  "x-derived-required": ["T_stop_0", "T_reconcile_0", "T_total_0", "F_stop_0", "F_admit_0"],
+  "x-derived-producer": "S8p",
+  "x-derived-consumers": ["فاز M"],
+  "type": "object",
+  "properties": {"R_host_0": {"type": "number", "exclusiveMinimum": 0}, "container_caps_0": {"type": "object"}, "H_max_0": {"type": "number", "exclusiveMinimum": 0}, "k_0": {"type": "number", "exclusiveMinimum": 0}, "R_max_0": {"type": "number", "exclusiveMinimum": 0}, "device_write_bps_0": {"type": "object"}, "G_window_0": {"type": "number", "exclusiveMinimum": 0}, "window_seconds_0": {"type": "number", "exclusiveMinimum": 0}, "grace_0": {"type": "object"}, "T_poll": {"type": "number", "exclusiveMinimum": 0}, "T_read": {"type": "number", "exclusiveMinimum": 0}, "T_fence": {"type": "number", "exclusiveMinimum": 0}, "ε": {"type": "number", "exclusiveMinimum": 0}, "T_settle": {"type": "number", "exclusiveMinimum": 0}, "W_obs": {"type": "number", "exclusiveMinimum": 0}, "T_ack": {"type": "number", "exclusiveMinimum": 0}, "D_meta_0": {"type": "number", "exclusiveMinimum": 0}, "max_wal_size_0": {"type": "number", "exclusiveMinimum": 0}, "B_evidence_0": {"type": "number", "exclusiveMinimum": 0}, "supervisor_contract": {"type": "object"}, "T_stop_0": {"type": "number", "exclusiveMinimum": 0}, "T_reconcile_0": {"type": "number", "exclusiveMinimum": 0}, "T_total_0": {"type": "number", "exclusiveMinimum": 0}, "F_stop_0": {"type": "number", "exclusiveMinimum": 0}, "F_admit_0": {"type": "number", "exclusiveMinimum": 0}, "T_cancel": {"type": "number", "exclusiveMinimum": 0}, "T_term": {"type": "number", "exclusiveMinimum": 0}, "B_backup_0": {"type": "number", "exclusiveMinimum": 0}}
+}
+```
 
 `up` و Watchdog هر ورودیِ نبوده یا ناخوانا در این فایل را **رد** می‌کنند (Fail Closed)؛ پس فاز M نه بی O-8 اجرا می‌شود و نه
 عددی جعل می‌کند. Containerی که به سقف موقتش بخورد (`memory.events` ـِ `max` یا `oom_kill` ناصفر) اندازه‌اش **نامعتبر** است و
 دوباره، با سقفی بالاتر ولی همچنان زیر همان جمع، اندازه گرفته می‌شود یا BLOCKED می‌ماند.
 
-| شناسه | چه                                                   | روش                                                                                                                                                                                                                                            |
-| ----- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| M-1   | حافظه‌ی هر Container ـِ Staging در بار Smoke و E2E   | هر ۱۰ ثانیه `memory.current` و در پایان `memory.peak`، `memory.stat` (`anon` جدا از `file`) و `memory.events` از `/sys/fs/cgroup/system.slice/docker-<id>.scope/`؛ سقف = Peak ـِ `anon` + حاشیه‌ی O-3                                          |
-| M-2   | اندازه‌ی مجموعه‌ی تصویرهای یک انتشار؛ ضریب `k`       | اندازه‌ی فشرده از Manifest ـِ Registry پیش از Pull و فضای مصرف‌شده‌ی واقعی پس از آن (`df` پیش و پس، و `docker system df`)؛ `k` = نسبت این دو؛ دیسک لازم در استقرار = ۲ × مجموعه (انتشار قبلی تا Rollback می‌ماند)                              |
-| M-3   | رشد Volumeها در یک پنجره؛ بیشینه‌ی نرخ نوشتن `R_max` | `docker system df -v` پیش و پس از هر پنجره برای Volumeهای `rasta-staging_*`؛ و هر ۱۰ ثانیه `wbytes` ـِ `io.stat` ـِ cgroup هر Container، جمع روی همه، بیشینه‌ی نرخ؛ `io.pressure` ـِ ناصفر = برخورد به `device_write_bps_0` و اندازه‌ی نامعتبر |
-| M-4   | سهم Workerها در اوج — فقط برای گزینه‌ی هم‌زمان       | PM در یک روز پرکار هر ۶۰ ثانیه `memory.current` و `memory.peak` ـِ Containerهای هر Worker (نام‌های `wN-*`) و Scopeهای نشست را ثبت کند؛ `sysstat` فقط کل میزبان را دارد                                                                         |
-| M-5   | فهرست Listenerهای هر Image                           | از فضای نام شبکه‌ی هر Container (Probe با `--network container:<id>`) خواندن `/proc/net/tcp`، `tcp6`، `udp`، `udp6`؛ هر Listener ـِ بیرون از `services.json` یا با پیکربندی بسته می‌شود یا باقی‌مانده‌ی O-6 است (§ ۴)                          |
-| M-6   | زمان خاموشی هر Container و هر گروه                   | `stop` ـِ Staging با مهلت § ۱۵ و ترتیب گروه‌های بند ۴؛ زمان SIGTERM تا خروج و کد خروج هر Container، و زمان هر گروه (برای `ε` و `T_stop`)؛ ۱۳۷ (SIGKILL) = شکست                                                                                 |
+| شناسه | چه                                                   | روش                                                                                                                                                                                                                                 |
+| ----- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M-1   | حافظه‌ی هر Container ـِ Staging در بار Smoke و E2E   | هر ۱۰ ثانیه `memory.current` و در پایان `memory.peak`، `memory.stat` (`anon` جدا از `file`) و `memory.events` از `/sys/fs/cgroup/system.slice/docker-<id>.scope/`؛ سقف = Peak ـِ `anon` + حاشیه‌ی O-3                               |
+| M-2   | اندازه‌ی مجموعه‌ی تصویرهای یک انتشار؛ ضریب `k`       | اندازه‌ی فشرده از Manifest ـِ Registry پیش از Pull و فضای مصرف‌شده‌ی واقعی پس از آن (`df` پیش و پس، و `docker system df`)؛ `k` = نسبت این دو؛ دیسک لازم در استقرار = ۲ × مجموعه (انتشار قبلی تا Rollback می‌ماند)                   |
+| M-3   | رشد Volumeها در یک پنجره؛ بیشینه‌ی نرخ نوشتن `R_max` | `docker system df -v` پیش و پس از هر پنجره برای Volumeهای `rasta-staging_*`؛ و هر ۱۰ ثانیه `wbytes` ـِ `io.stat` ـِ cgroup هر Container، جمع روی همه، بیشینه‌ی نرخ؛ اشباع با قاعده‌ی زیر سنجیده می‌شود؛ PSI دلیل برخورد به سقف نیست |
+| M-4   | سهم Workerها در اوج — فقط برای گزینه‌ی هم‌زمان       | PM در یک روز پرکار هر ۶۰ ثانیه `memory.current` و `memory.peak` ـِ Containerهای هر Worker (نام‌های `wN-*`) و Scopeهای نشست را ثبت کند؛ `sysstat` فقط کل میزبان را دارد                                                              |
+| M-5   | فهرست Listenerهای هر Image                           | از فضای نام شبکه‌ی هر Container (Probe با `--network container:<id>`) خواندن `/proc/net/tcp`، `tcp6`، `udp`، `udp6`؛ هر Listener ـِ بیرون از `services.json` یا با پیکربندی بسته می‌شود یا باقی‌مانده‌ی O-6 است (§ ۴)               |
+| M-6   | زمان خاموشی هر Container و هر گروه                   | `stop` ـِ Staging با مهلت § ۱۵ و ترتیب گروه‌های بند ۴؛ زمان SIGTERM تا خروج و کد خروج هر Container، و زمان هر گروه (برای `ε` و `T_stop`)؛ ۱۳۷ (SIGKILL) = شکست                                                                      |
+
+**M-3 — قاعده‌ی اشباع (r4):** [PSI](https://docs.kernel.org/accounting/psi.html) زمان انتظار Task را می‌سنجد؛ فقط
+دلتاهایش شاهد مشاهده‌اند. [cgroup v2: IO](https://docs.kernel.org/admin-guide/cgroup-v2.html#io) برای `io.stat` بایت و برای
+`io.max` سقف با Burst موقت تعریف می‌کند، نه شمارنده‌ی عمومی Throttle-hit. طی `W_obs` ـِ ۶۰ ثانیه، هر ۱۰ ثانیه با ساعت
+Monotonic، دلتاهای `wbytes` روی دستگاهِ همان `io.max` و صف نوشتنِ عرضه‌شده ثبت می‌شوند. نرخ ≥ ۹۵٪ سقف در سه بازه‌ی متوالی
+به‌همراه Backlog پیوسته = **اشباع محتمل و اندازه‌ی نامعتبر**؛ اثبات Throttle فقط با Trace ـِ قابل‌اعتبارسنجیِ تأخیر ناشی از
+`io.max` در همان cgroup/بازه. نبود قابلیت مشاهده یا بازنشانی شمارنده = نتیجه‌ی نامعلوم، نه نمونه‌ی معتبر برای تنگ کردن سقف.
+S8m: Fixture با I/O عادی زیر ۵۰٪ سقف و fsync (حتی با PSI افزاینده) باید بدون برچسب اشباع بگذرد؛ بار عمدی بالای سقف با
+Backlog باید نامعتبر شود؛ خواندن Trace اگر نیازمند دسترسی بیشتر باشد پرسش O-8 است. درصدها پیشنهاد فنی برای O-8 اند.
 
 **پاک‌سازی یا سقف — فقط پیشنهاد، هیچ چیز پاک نشد:**
 
@@ -674,7 +706,7 @@ RUN-003):
 | 4   | E2E (`tests/e2e/src/target-guard.ts:13-25`، `:29-41`)                                               | «Loopback = یک‌بارمصرف» روی این میزبان نادرست است: Edge ـِ Staging روی `127.0.0.1` است؛ دفاع فقط نشان Realm است                            | آزمون منفی: Realm ـِ بی نشان رد می‌شود؛ رد صریح Realm با `rasta.staging_stack`                                                           |
 | 5   | هر Launcher ـِ Docker ـِ مخزن (فهرست کامل پایین)                                                    | `COMPOSE_PROJECT_NAME`/`COMPOSE_FILE`/`DOCKER_CONTEXT` در Shell هدف را عوض می‌کند ← `down`، `down -v`، نوشتن در پایگاه، یا Log روی Staging | مرز واحد انتخاب هدف (پایین) برای **همه**، نه فقط `infra-preflight`                                                                       |
 | 6   | تمرین Backup (`backup-restore-drill.md:18-20`، `:160-161`)                                          | پروژه‌ی یکتا، `.env` را رد می‌کند، Stack ـِ مشترک را Reset نمی‌کند                                                                         | بی تغییر؛ Backup ـِ Staging ابزار جداست                                                                                                  |
-| 7   | Kafka ACL (`scripts/kafka-acl.mjs`)                                                                 | `--profile development` روی Broker ـِ Staging Principalهای آزمون را باز می‌کرد                                                             | admin ـِ Staging فقط در فایل Secret ـِ Staging؛ Broker ـِ Staging از میزبان در دسترس نیست                                                |
+| 7   | Kafka ACL (`scripts/kafka-acl.mjs`)                                                                 | `--profile development` روی Broker ـِ Staging Principalهای آزمون را باز می‌کرد                                                             | admin ـِ Staging جدا؛ Guard هویت از اتصال واقعی، حتی از میزبان به IP پل                                                                  |
 | 8   | `docker system prune --volumes` / `docker volume prune` (عادت اپراتور، نه در مخزن)                  | Volume ـِ Containerهای حذف‌شده پاک می‌شود                                                                                                  | Staging با `stop` خاموش می‌شود نه `down`؛ قاعده‌ی برگه‌ی PM: Prune فقط با `--filter label!=com.rasta.environment=staging`                |
 | 9   | آزمون‌های محلی Worker (Testcontainers، `wN-*`)                                                      | نام و پورت جدا؛ هیچ‌کدام Staging را نمی‌شناسد                                                                                              | قاعده‌ی PM: هیچ `docker rm`/`stop` با الگو؛ فقط نام خود Worker                                                                           |
 | 10  | **وارونه:** فرمان‌های Staging روی توسعه                                                             | —                                                                                                                                          | همان مرز، با محیط مورد انتظار `staging`                                                                                                  |
@@ -736,45 +768,53 @@ Migration).
 | **آزمون Build ـِ `.dockerignore`** (تازه در r3)                                    | `scripts/container-scope.test.mjs:550`                                                                                                           | `buildx build --network=none` با خروجی محلی (Build Cache)   | مال همین اجرا: وارسی ۱؛ هیچ Container، شبکه یا Volume نمی‌سازد      |
 | تمرین Backup، شاهد Aggregation، Grafana ـِ زنده                                    | بالا                                                                                                                                             | منابع خودشان                                                | مال همین اجرا                                                       |
 | فرمان‌های Staging (`up`، `stop`، `deploy`، `rollback`، `rotate`، `restore`، Probe) | PR S8a–S8d، S9a                                                                                                                                  | همه                                                         | `staging`                                                           |
-| **فرمان‌های کپی‌پذیر مستندات** (۶۵ خط در ۱۶ فایل)                                  | پایین                                                                                                                                            | دستی: `down -v`، `volume rm`، `rm -sf`، `exec`، `run`، `up` | `development`، **از راه همان مرز** (`pnpm docker:dev -- …`، PR S7c) |
+| **فرمان‌های کپی‌پذیر مستندات** (خروجی Scanner ـِ S7c)                              | پایین                                                                                                                                            | دستی: `down -v`، `volume rm`، `rm -sf`، `exec`، `run`، `up` | `development`، **از راه همان مرز** (`pnpm docker:dev -- …`، PR S7c) |
 | **پیام‌های راهنمای آزمون‌ها** که فرمان چاپ می‌کنند (تازه در r3)                    | `services/notification-service/test/mailpit.ts:37`، `services/document-service/test/clamav-scan.int-spec.ts:53`، `tests/e2e/src/keycloak.ts:229` | دستی                                                        | همان شکل `pnpm docker:dev -- …`                                     |
 
-**فرمان‌های کپی‌پذیر — فهرست کامل** (خط‌هایی که با `docker` آغاز می‌شوند): `docs/runbooks/database-bootstrap.md:42`، `:58`،
-`:61`، `:64`، `:68`، `:83-85` (`down -v`)، `:102`، `:549-550` (`down -v`)، `:614`؛ `docs/runbooks/kafka-credential-rotation.md:65`،
-`:70`، `:79`، `:110`، `:119`، `:136-138` (`rm -sf`، `volume rm rasta_kafka-tls`)، `:161`، `:175`، `:178`، `:188-190` (`volume rm
-rasta_kafka-data`)؛ `docs/runbooks/outbox-stuck.md:50-51`، `:58`، `:83`؛ `docs/runbooks/notification-provider-outage.md:67`؛
-`docs/runbooks/replay-dlq.md:148`، `:194`، `:441`؛ `docs/runbooks/audit-gap-detected.md:208`، `:210`، `:214`، `:218`؛
-`docs/runbooks/audit-ingestion-lag.md:131`، `:133`، `:135`؛ `docs/runbooks/infrastructure-image-update.md:54-55`، `:69`؛
-`docs/runbooks/base-image-update.md:30`، `:45`؛ `docs/runbooks/outbox-b2-backfill.md:135`؛ `docs/deployment/README.md:31-34`، `:53`؛
-`README.md:209-212`؛ `CLAUDE.md:84-85`؛ `docs/12-deployment-architecture.md:54-57`؛ `docs/14-testing-strategy.md:1155`، `:1157`؛
-`docs/22-developer-handoff.md:78`. فرمان‌های `pnpm infra:*`/`pnpm db:*` همین مستندات (مثلاً `CLAUDE.md:80-83`،
-`README.md:186-190`، `docs/deployment/README.md:23-24`) از راه `package.json` از همان مرز می‌گذرند. **بیرون از جاروب، با دلیل:**
-`docs/evidence/**` (سوابق تاریخ‌دار اجراهای گذشته، نه روند)؛ متن ADRها (توصیف تصمیم، نه بلوک اجرایی)؛ Workflowهای
-`.github/workflows/` (روی Runner ـِ GitHub؛ آزمون جاروب **می‌سنجد** که هر `runs-on` میزبان GitHub است، پس این استثنا
-اجرایی است نه ادعا)؛ و `docker` ـِ ساختگی آزمون‌ها (مثل `scripts/session-statement-timeout.test.mjs:183-190`، که در PATH ـِ
-موقت خود آزمون است).
+**فهرست Launcher — منبع واحد S7c:** همان Scanner ـِ Gate خروجی `path:line، argv/verb، handler، purpose` تولید می‌کند؛
+S7a/S7c فقط وقتی تمام‌اند که **هر** رکورد یا Handler آزموده داشته باشد یا فرمان بازنویسی شود و جاروب دوباره بی نقض باشد.
+جاروب Markdown با Parser، همه‌ی بلوک‌ها **و Spanهای درون جمله** را می‌خواند؛ ۶۵ خطِ آغازشونده با Docker شمارش تاریخی ناقص بود.
+Fixtureها شامل همه‌ی محل‌های درون‌خطی بازبین‌اند: `docs/13-observability.md:532`، `docs/14-testing-strategy.md:1020`،
+`docs/17-mvp-scope.md:21`، `docs/18-day-10-plan.md:111`، `docs/22-developer-handoff.md:210`، `:212`، `:283`،
+`docs/23-risks-and-tradeoffs.md:347`، `:532`، `:540-541`، `docs/runbooks/audit-ingestion-lag.md:180` و
+`tests/e2e/README.md:126`؛ شمار و مجموعه‌ی واقعی از Scanner می‌آید، نه این مثال‌ها.
+`pnpm infra:*`/`db:*` از `package.json` ردیابی می‌شوند. استثناها: `docs/evidence/**` سابقه است؛ متن توصیفی ADR اجرا نیست
+ولی بلوک/Span اجرایی آن همچنان اسکن می‌شود؛ Workflow فقط اگر Gate ثابت کند **همه‌ی** `runs-on`ها GitHub-hosted اند؛
+Docker ـِ ساختگی فقط با مسیر Fixture ـِ آزموده. دستور پویا یا شکلِ تجزیه‌نشده بدون Handler = رد، نه خروج از فهرست.
 
-**مسیرهای Endpoint، نه Docker:** آزمون‌های `scripts/*.pg.test.mjs` و `scripts/*.broker.test.mjs` جز آزمون Topicها از `docker`
-استفاده نمی‌کنند و به Endpoint ـِ پیکربندی‌شده وصل می‌شوند. PostgreSQL و Broker ـِ Staging هیچ پورتی روی میزبان ندارند
-(`staging-policy` و وارسی زنده‌ی § ۴: فقط `127.0.0.1:14443` ـِ Edge)، پس از میزبان دست‌نیافتنی‌اند؛ و نگهبان Broker (§ ۱۰ ردیف ۳)
-`CLUSTER_ID` را از **همان** اتصالی می‌خواند که آزمون با آن می‌نویسد.
+**مسیرهای Endpoint نیز Writer اند:** [Docker bridge](https://docs.docker.com/engine/network/drivers/bridge/) از میزبان
+به پورت منتشرنشده هم دسترسی می‌دهد. S7b باید همه‌ی ورودی‌های اتصالِ نویسنده در اسکریپت‌ها/آزمون‌ها و Helper مشترک را
+با Scanner ـِ Import/Call شناسایی کند؛ شناسه‌ی PostgreSQL/Broker/Realm از **همان اتصال واقعیِ مورد استفاده** خوانده و با
+نشان یک‌بارمصرفِ مورد انتظار همان اجرا مقایسه شود؛ اتصال/Pool تازه نیز دوباره همین Guard، پیش از DDL/DML یا Admin.
+بازشدن مهاجر Staging مجوز آزمون توسعه نیست. `outbox-b2-backfill.pg.test.mjs`، `outbox-b2-vacuum.pg.test.mjs` و
+`outbox-b3-protocol.pg.test.mjs` از `scripts/outbox-b2-fixture.mjs`، تابع `createOutboxSchema` با `DROP SCHEMA`/`CREATE SCHEMA`
+استفاده می‌کنند: افزودن Guard به Helper و **همه‌ی** Call Siteها گام اجرایی S7b است؛ این PR آن فایل‌ها را عوض نمی‌کند.
+Mutant: URL مهاجر Staging روی IP پل، هنگام پنجره‌ی مهاجر؛ هیچ DDL نباید ارسال شود. نشانِ غایب/ناخوانا، Pool با مقصد متفاوت
+و Guard ـِ حذف‌شده در هر Entry Point باید رد شوند؛ Env یا نام میزبان اثبات هویت نیست.
 
 **آزمون Broker ـِ Topicها — وارسی روی منبعی که واقعاً انتخاب شده.** آزمون امروز هر `KAFKA_CONTAINER_NAME` را می‌پذیرد و با
 نشان یک‌بارمصرف (`RASTA_DISPOSABLE_BROKER=1`) درون آن Container، با `/tmp/admin.properties` ـِ خود Container
 (`infrastructure/docker/kafka/broker-entrypoint.sh:141`)، پیش‌فرض‌های کل Broker را عوض می‌کند. وارسی Endpoint ـِ جداگانه‌ای
 (مثلاً `KAFKA_BROKERS` ـِ میزبان) این را نمی‌بندد، چون اثر به Container ـِ Docker می‌رود. پس S7a: (الف) آزمون پیش از نخستین
-`exec`، `docker-target.mjs resolve --launcher create-topics-broker-test --container "$KAFKA_CONTAINER_NAME"` را می‌زند که نام را
+`exec` ـِ تغییردهنده، `docker-target.mjs resolve --launcher create-topics-broker-test --container "$KAFKA_CONTAINER_NAME"` را می‌زند که نام را
 **یک بار** به شناسه‌ی Container تبدیل می‌کند و همه‌ی `exec`های بعدی **با همان شناسه**اند، نه نام (پس نام را نمی‌توان میانه‌ی
 آزمون به Container ـِ دیگری داد)؛ (ب) همان Container باید `com.rasta.environment=ci` داشته باشد (که `ci-up.sh` می‌گذارد، ردیف
 ۱۱)؛ (ج) شناسه‌ی Cluster از **درون همان Container** خوانده می‌شود (`meta.properties` ـِ `log.dirs` با `exec` روی همان شناسه)
-و آغاز با `rasta-staging-` یا نابرابری با `CLUSTER_ID` ـِ CI ← رد پیش از هر نوشتن. همان قاعده برای هر آزمون یا ابزار آینده‌ای
+؛ این `exec` فقط خواندنِ هویت است، خروجی‌اش خصوصی و اجرای فرمانش ثابت؛ و آغاز با `rasta-staging-` یا نابرابری با `CLUSTER_ID` ـِ CI ← رد پیش از هر نوشتن. همان قاعده برای هر آزمون یا ابزار آینده‌ای
 که درون Container ـِ نام‌برده‌ای `exec` کند.
 
 **`pnpm docker:dev` (PR S7c).** تنها شکل مستند فرمان Docker ـِ دستی: `node scripts/docker-target.mjs dev -- <args>`. ماژول
 فعل‌ها را با فهرست سفید می‌پذیرد (`compose <زیرفرمان>` با `-p rasta --file docker-compose.yml` ـِ تحمیلی، `volume rm <نام>`،
-`exec`، `logs`)، هر منبعی را که Argumentها نام می‌برند (Container، Volume، سرویس Compose) با وارسی‌های ۱–۴ برای `development`
+`exec`، `logs`، `run`، `build` و `buildx build` با Handlerهای پایین)، هر منبعی را که Argumentها نام می‌برند (Container، Volume، سرویس Compose) با وارسی‌های ۱–۴ برای `development`
 می‌سنجد، و فعل یا Flag ـِ ناشناخته را رد می‌کند. پس `docker volume rm rasta_kafka-data` ـِ امروز، با `COMPOSE_PROJECT_NAME`
 ـِ ارثی یا روی Volume ـِ برچسب `staging`، پیش از اثر رد می‌شود.
+
+**Handler ـِ هر Verb:** جدول Dispatch از خروجی همان Scanner پوشش می‌گیرد؛ برای `run` انتخاب Daemon، Image ـِ Digestدار،
+نام/برچسب تازه‌ی development و تمام Mount/Network/Volumeها پیش از ساخت وارسی می‌شوند؛ `--privileged`، Host namespace،
+Socket ـِ Docker و Mount ـِ خارج از Root ـِ مجاز رد. `build` و `buildx build` فقط Builder ـِ اختصاصی همان اجرا، Context و
+Output زیر Root ـِ همان اجرا، `--network=none`، بی `--push`/Entitlement/SSH/Secret و بی Cache مشترک؛ پیش از ساخت Builder
+هم Guard. شکل ناسازگار با این قرارداد در S7c بازنویسی یا حذف می‌شود. سه `run`، یک `build` و سه `buildx` ـِ بازبینی باید
+Fixture جدا داشته باشند؛ `compose build` نیز همین Handler را می‌خواهد. Verb/Flag یا Target ـِ بی Handler = رد.
 
 PR S7a و S7c برای **هر** سطر آزمون منفی دارند: Env رو به Staging (`COMPOSE_PROJECT_NAME=rasta-staging`، `COMPOSE_FILE` ـِ Staging،
 `DOCKER_CONTEXT` ـِ دیگر، `KAFKA_CONTAINER_NAME` = نام Broker ـِ Staging یا Container ـِ بی برچسب `ci`، و Container ـِ با برچسب
@@ -782,8 +822,7 @@ PR S7a و S7c برای **هر** سطر آزمون منفی دارند: Env رو 
 می‌پذیرد. **آزمون جاروب (S7a، گسترده در S7c)** چهار منبع را با فهرست ثبت‌شده در ماژول مقایسه می‌کند و هر Launcher ـِ تازه‌ی
 نگذشته از مرز CI را قرمز می‌کند: (۱) `git grep` ـِ `docker`/`docker compose` در اسکریپت‌ها؛ (۲) **AST** ـِ هر `*.mjs`/`*.ts`
 (جز `node_modules`): هر `spawn`/`spawnSync`/`execFile`/`execFileSync`/`exec` که Argument ـِ نخستش `'docker'` (یا متغیری با آن
-مقدار) است و از `docker-target.mjs` نمی‌گذرد؛ (۳) هر بلوک کد و Span ـِ کد در `*.md` (جز استثناهای بالا) که با `docker`
-آغاز شود؛ (۴) هر رشته‌ی ثابت در کد که با `docker ` آغاز شود (پیام راهنما). Fixtureهای جاروب: یک `spawn('docker', …)` ـِ تازه
+مقدار) است و از `docker-target.mjs` نمی‌گذرد؛ (۳) هر بلوک کد و Span ـِ کد در `*.md` (جز استثناهای بالا) که فرمان `docker` در آن باشد (حتی درون جمله)؛ (۴) هر رشته‌ی فرمان در کد که `docker ` داشته باشد (پیام راهنما؛ فرمان درون جمله هم). `exec` ـِ Shell و فرمان‌های ساخته‌شده نیز تجزیه می‌شوند؛ اگر گذر از مرز یا Docker نبودن ثابت نشود، رد. Fixtureهای جاروب: یک `spawn('docker', …)` ـِ تازه
 در یک آزمون، یک خط `docker compose down -v` ـِ تازه در یک Runbook، یک `execFileSync('docker', …)` با متغیر، و یک `runs-on:
 self-hosted` ← هرکدام قرمز.
 
@@ -812,16 +851,18 @@ S1 به آن دست نمی‌زند.
 
 RUN-002 فقط وقتی پذیرفته است که این‌ها **روی Stack ـِ مستقرشده** سنجیده شوند (PRهای S9a و S9b)، نه فقط در CI:
 
-1. **ماتریس شبکه — تولیدشده، نه نمونه (r2):** Probe ها با `docker run --rm --network container:<id>` و Image ـِ سنجاق‌شده‌ی
+1. **ماتریس شبکه — منبع مستقل Listenerها (r4):** Probe ها با `docker run --rm --network container:<id>` و Image ـِ سنجاق‌شده‌ی
    `staging-bootstrap` اجرا می‌شوند، پس از **فضای نام شبکه‌ی همان Container** می‌سنجند و به ابزار درون Image ـِ زیرساختی
    نیاز ندارند. مجموعه‌ی آزمون حاصل‌ضرب کامل است: **مبدأ** = هر Container ـِ پروژه، یک‌بارمصرف‌ها هم؛ **مقصد** = هر نشانی هر
    Container ـِ دیگر در هر شبکه‌اش (از `docker network inspect` ـِ زنده، که باید با `services.json` برابر باشد)، به‌اضافه‌ی
-   نشانی Gateway ـِ هر شبکه (یعنی خود میزبان) و یک IP عمومی؛ **پورت** = هر Listener ـِ واقعی مقصد (`/proc/net/tcp` و `tcp6` ـِ
-   فضای نام مقصد، M-5) و برای میزبان، Listenerهای `ss -tlnH`.
+   نشانی Gateway ـِ هر شبکه (یعنی خود میزبان) و یک IP عمومی؛ **پورت** = Listenerهای **الزامی `services.json`** با Protocol، Port، خانواده و Bind (IP نمادینِ شبکه یا Loopback)؛
+   کشف `/proc/net/tcp*` و `udp*` فقط واقعیت را با آن مقایسه می‌کند. هر Listener ـِ اعلام‌شده باید وجود داشته و کنترل مثبتش
+   موفق باشد؛ **جداگانه** هر Listener ـِ مشاهده‌شده‌ی اضافی رد می‌شود. M-5 اختلاف را گزارش می‌کند و هرگز غیبت را از انتظار
+   حذف نمی‌کند. برای میزبان Listenerهای `ss -tlnH`؛ انتظارهای Container از کشف زنده ساخته نمی‌شوند.
    **انتظار از نشانی Bind، نه فقط از پورت (r3).** r2 برای هر سه‌تایی «بسته» از فضای نام مقصد اتصالِ موفق به **همان** نشانی و
    پورت می‌خواست؛ ولی asset درست فقط روی نشانی `to-asset` اش گوش می‌دهد، پس نشانی `idp` اش روی ۳۱۰۳ از درون خودش هم بسته است و
    سه‌تایی «نامعتبر» می‌شد — همین برای هر سرویس مقید و هر Listener ـِ فقط Loopback. پس مولد برای هر مقصد `d` هر Listener را با
-   **نشانی Bind** اش از `/proc/net/tcp*` نگه می‌دارد و هر جفت (نشانی `a` ـِ `d`، پورت `p`) را یکی از سه رده می‌کند:
+   **نشانی Bind** اش از `services.json` نگه می‌دارد و حضورش را زنده اثبات می‌کند و هر جفت (نشانی `a` ـِ `d`، پورت `p`) را یکی از سه رده می‌کند:
    - **زنده:** Listenerی روی `a:p` یا روی `0.0.0.0`/`::` با پورت `p`.
    - **بی‌Listener ـِ عمدی:** `a:p` که هیچ Listener ـِ آن را نمی‌پوشاند (مثل `idp`ِ asset روی ۳۱۰۳). انتظار از **هر** مبدأ:
      `ECONNREFUSED` اگر مبدأ با `a` شبکه‌ی مشترک دارد، و `ENETUNREACH`/`EHOSTUNREACH`/مهلت اگر ندارد — «بسته»، **نه
@@ -847,7 +888,7 @@ RUN-002 فقط وقتی پذیرفته است که این‌ها **روی Stack 
      **آزمون مولد و اجراکننده (PR S9a)، روی پروژه‌ی Docker ـِ یک‌بارمصرف در CI:** توپولوژی سالمِ محدود — سرویسی که فقط روی نشانی
      `to-<svc>` اش گوش می‌دهد و نشانی دومی در `idp` دارد، فراخواننده‌ی اعلام‌شده، Sink ـِ بی Egress (Listener روی شبکه‌اش، بی یال
      بیرون‌رونده)، Listener ـِ فقط Loopback، و یک مبدأ یک‌بارمصرف در حالت `hold` — باید **قبول** بدهد با صفر «نامعتبر». Mutantها،
-     هرکدام ← **شکست**: Listener ـِ سرویس کشته (مرده)؛ Listener ـِ Loopback کشته؛ Listener ـِ Sink کشته؛ سرویس به `0.0.0.0`
+     هرکدام **پیش از کشف** ← **شکست**: تک‌تک Listenerهای الزامی کشته (شامل Loopback، Sink، Interface-bound و هر پورت Multi-listener)؛ Listener ـِ اضافی؛ سرویس به `0.0.0.0`
      برگشته (نشانی `idp` زنده و از اعضای `idp` باز)؛ شبکه‌ی اعلام‌نشده به یک مبدأ وصل شده؛ Helper در فضای نام دیگر (نشانی‌ها
      نابرابر).
 2. **مستاجر و نقش:** از راه Edge و Gateway با دو مستاجر مصنوعی: A داده‌ی B را نمی‌خواند و تغییر نمی‌دهد (`AGENTS.md:118-119`)؛
@@ -901,37 +942,33 @@ URL ـِ اتصال، Dump، Payload ـِ رویداد، Export ـِ Realm، Log
    سپس هر فرمانی جز `status` و بازیابی همان عملیات (`rotate --resume`، `deploy --resume` یا `rollback`) را رد می‌کند تا Journal
    بسته شود. Containerهای نیمه‌کاره (`created`، `restarting`، `removing`) هم همین حالت را می‌سازند، چون Daemon ممکن است
    درخواستی را پس از مرگ CLI تمام کند.
-5. **Watchdog و قفل — توقف اضطراری یک حصار تأییدشده است، نه یک نشان (r3).** نشان `abort` ـِ r2 فقط **خبر** می‌داد: عملیات
-   Docker ـِ کندی (`create`/`start`) که پیش از آن به Daemon رسیده بود، پس از توقف Watchdog تمام می‌شد و Container را روشن
-   می‌کرد، و خواندن `abort` پس از آن اثر را پس نمی‌گرفت؛ `ExecStopPost` هم همین مسابقه را داشت. Watchdog در کار عادی قفل
-   نمی‌گیرد؛ توقف اضطراری‌اش (و `ExecStopPost`، با **همان** روال) این است و تا پایانش «متوقف» اعلام نمی‌شود:
-   1. **ثبت:** `abort` با زمان `T_a` (UTC، `fsync`) در همان پوشه؛ Journal ـِ Watchdog: `FENCING`.
-   2. **حصار جهش‌های تازه:** هر فرمان Staging هر جهش Docker را (`create`، `start`، `restart`، `up`، `rm`، `network`/`volume
-create`، و ساختن Helper) فقط از **یک** تابع می‌فرستد که درست پیش از ارسال `abort` را می‌خواند؛ با `abort` جهش نمی‌فرستد،
-      Journal را `INTERRUPTED` می‌کند و بیرون می‌رود (آزاد شدن قفل). Watchdog قفل § ۱۴ را با **انتظار کران‌دار** `T_cancel`
-      می‌گیرد (`flock -w`). اگر دارنده در آن بازه بیرون نرفت: **لغو کران‌دار** — SIGTERM به گروه فرایند دارنده که در
-      `lock.owner` ثبت است (PID و `starttime` باید هنوز برابر باشند؛ فرایندی که خود ابزار Staging ساخته، هرگز با الگو)، پس از
-      `T_term` SIGKILL؛ Kernel قفل را با مرگ آخرین Descriptor آزاد می‌کند و Watchdog آن را می‌گیرد. `T_fence` = `T_cancel +
-T_term` (پیشنهاد ۲۰ + ۱۰ = ۳۰ ثانیه، O-8). از این لحظه **Watchdog دارنده‌ی قفل است** و هر فرمان تازه با `flock -n` رد
-      می‌شود؛ پس هیچ جهش تازه‌ای از ابزار Staging فرستاده نمی‌شود. (Daemon درخواستی را که CLI ـِ مرده پیش‌تر فرستاده ممکن است
-      هنوز تمام کند؛ آن را گام ۴ می‌گیرد.)
-   3. **توقف:** گروه‌های § ۳ بند ۴ به ترتیب، با مهلت کامل § ۱۵.
-   4. **آشتی وضعیت Daemon:** فهرست **همه‌ی** Containerهای پروژه در هر وضعیت (`ps -a` با برچسب پروژه) و برای هرکدام
-      `State.StartedAt`: هرچه `running` یا `restarting` است با مهلت کامل متوقف می‌شود، Helper ـِ `created` ـِ اجرانشده بی `-f`
-      حذف می‌شود، و هرچه `StartedAt > T_a` دارد — یعنی **پس از Abort روشن شده** — با نام و زمان در Journal و شاهد خصوصی
-      «روشن‌شده پس از Abort» گزارش می‌شود. این گام تکرار می‌شود تا دو فهرست پیاپی به فاصله‌ی `T_settle` (پیشنهاد ۶۰ ثانیه، O-8)
-      هیچ Container ـِ روشن و هیچ `StartedAt` ـِ تازه‌ای نداشته باشند.
-   5. **اعلام:** فقط پس از گام ۴: Journal ـِ `STOPPED` با شمار «روشن‌شده پس از Abort» و آزاد کردن قفل. Watchdog **بیرون نمی‌رود**:
-      در حالت `STOPPED` همچنان هر `T_poll` می‌خواند و هر Container ـِ پروژه را که روشن ببیند وقتی هیچ دارنده‌ی قفلی نیست
-      (عملیات دیررسیده‌ی Daemon پس از `T_settle`) با همان گام‌های ۲ تا ۴ متوقف و گزارش می‌کند؛ `up` ـِ بعدی پس از ورود آن را
-      با Watchdog ـِ تازه جایگزین می‌کند. مرگ آن در هر گام ← `ExecStopPost` همین روال را از گام ۱ اجرا می‌کند.
-      **آزمون (PR S8b):** Daemon ـِ ساختگی (Shim ـِ API با تأخیر کنترل‌شده) و `deploy` ـِ در حال `start` ـِ یک سرویس؛ (الف) Daemon
-      `start` را **پس از** گام ۳ ـِ Watchdog تمام می‌کند ← گام ۴ آن را با `StartedAt > T_a` می‌یابد، متوقف و گزارش می‌کند و
-      `STOPPED` پیش از آن نوشته نمی‌شود؛ (ب) Daemon `start` را **پیش از** نخستین فهرست تمام می‌کند ← Container در گروه خودش
-      متوقف می‌شود و گزارش هم می‌شود (`StartedAt > T_a`)؛ (ج) دارنده `abort` را نمی‌خواند ← پس از `T_cancel` گروه فرایندش SIGTERM
-      و پس از `T_term` SIGKILL می‌گیرد و درخواست معلقِ Daemon در (الف) یا (ب) می‌افتد؛ (د) تکمیل Daemon پس از `STOPPED` ← حالت
-      `STOPPED` آن را متوقف و گزارش می‌کند؛ (هـ) `kill -9` ـِ Watchdog میان گام ۲ و ۴ ← `ExecStopPost` همان نتیجه‌ی (الف) و (ب) را
-      می‌دهد؛ و در هر حالت، فرمان دومی که در طول حصار قفل بخواهد ← رد. استقرار بعدی از حالت ناتمام بند ۴ می‌گذرد.
+5. **حصار و تکمیل تأییدشده (r4).** منبع واحد: Ledger ـِ پایدارِ درخواست‌ها در `state/`؛ `flock` قفل پذیرش است، نه اثبات
+   تکمیل Daemon. ناظر مستقلِ § ۳ تنها فرستنده‌ی جهش Docker است؛ پیش از ارسال، `(operationId, generation, requestSeq,
+kind, resourceId, desiredState)` را با `fsync` ثبت می‌کند و پاسخ نهایی و نتیجه‌ی تطبیق را پس از دریافت ثبت می‌کند.
+   `create/start/restart`، اجزای `compose up`، Pull، Helperها، و **همه‌ی جهش‌های Network/Volume** از همین مسیرند؛ Compose
+   مبهم که نتوان درخواست‌هایش را حساب کرد رد می‌شود. Timeout، مرگ CLI یا فقدان پاسخ = `UNRESOLVED`، هرگز «انجام نشد».
+   1. Abort، Generation را با ثبت پایدار جلو می‌برد؛ ارسال و پیش‌برد Generation زیر **همان** قفل داخلی ناظر سریالی‌اند.
+      ارسال پیش از Abort در مجموعه‌ی معلق می‌ماند؛ ارسال پس از Abort رد. UTC فقط برای نمایش است؛ ترتیب فقط Sequence/Generation.
+   2. ناظر پذیرش عادی را می‌بندد؛ دارنده‌ی `flock` تا `T_cancel` فرصت خروج دارد، سپس فقط گروه فرایندِ ساخته‌شده‌ی ابزار،
+      با PID و `starttime` برابر رکورد، SIGTERM و پس از `T_term` SIGKILL می‌گیرد (`T_fence = T_cancel + T_term`). این لغو
+      CLI درخواست پذیرفته‌شده‌ی Daemon را لغو تلقی نمی‌کند. Containerها همواره Grace ـِ کامل § ۱۵ می‌گیرند.
+   3. برنامه‌ی توقف از مدل § ۳ اجرا می‌شود؛ هر درخواست قدیمی تا **پاسخ نهایی** و تطبیق نتیجه زیر شناسه‌ی خودش معلق است.
+      پاسخ `create` با شناسه‌ی منبع، پاسخ `start/restart` با وضعیت همان شناسه؛ جبرانِ ثبت‌شده با پاسخ نهایی و تأیید توقف.
+      Network/Volume بر اساس ID، مالکیت، اتصال‌ها و Desired State تطبیق می‌شوند؛ Volume ـِ داده خودکار حذف نمی‌شود.
+      اسکن آرام، Event stream یا `StartedAt` به‌تنهایی Acknowledgment نیست. پاسخ گم‌شده را از غیبت منبع نتیجه نمی‌گیریم؛
+      بازیابی فقط با اثبات پایانِ درخواست پذیرفته‌شده و حالت نهایی مجاز است؛ نبود چنین شاهدی `UNRESOLVED` می‌ماند.
+   4. `STOPPED` فقط با Ledger ـِ بی درخواست معلق در **همه‌ی** Generationها، همه‌ی جبران‌ها تأییدشده و دو Snapshot ـِ
+      همسانِ منابع Container/Network/Volume به فاصله‌ی `T_settle` نوشته می‌شود. `ExecStopPost` می‌تواند در مهلت محدود خارج
+      شود ولی Ledger پاک نمی‌شود و ناظر مستقل ادامه می‌دهد؛ مرگ/تعویض ناظر از Ledger بازیابی می‌کند، بدون ارسال دوباره‌ی
+      درخواست نامعلوم. O-8 باید طول عمر مستقل و بازیابی هنگام خروج مدیر کاربر را ثابت کند؛ بی آن هیچ `up` مجاز نیست.
+   5. تکمیل دیررس حتی هنگام دارنده‌ی تازه‌ی قفل، اولویت حصار دارد: ناظر Generation ـِ تازه را هم می‌بندد، به همان روال لغو
+      و تطبیق می‌رود؛ انتظار آزادشدن داوطلبانه‌ی قفل نظارت را معلق نمی‌کند. در حالت معلق فقط `status` و بازیابی همان عملیات
+      مجازند؛ Lock holder بعدی مجوز Generation ـِ قدیمی را احیا نمی‌کند. عبور از `T_ack`/مهلت کل = گزارش نقض کران و
+      `UNRESOLVED`، نه `STOPPED`؛ Deadline به‌تنهایی تضمین بازیابی Docker نیست.
+      **آزمون S8b (طرح، نه کد موجود):** Shim ـِ Daemon پاسخ/اثر را جدا کنترل کند: تکمیل پیش/پس از توقف گروه؛ تکمیل **پس از پایان
+      `ExecStopPost` و خروج مدیر کاربر**؛ تکمیل هنگام Lock holder بعدی؛ ساعت UTC رو به عقب؛ مرگ Watchdog/ناظر و Replay ـِ Ledger؛
+      پاسخ گم‌شده؛ جهش دیررس Network/Volume؛ هر بار تا تأیید نهایی `STOPPED` ممنوع، پذیرش تازه رد و Helper/Writer دیررس با Grace
+      کامل جبران شود. Mutant ـِ حذف ثبت پیش از ارسال، حذف هر Guard یا تبدیل Timeout به Ack باید هرکدام آزمون را قرمز کند.
 
 ### ۱۵. مهلت توقف (r2)
 
@@ -946,7 +983,7 @@ T_term` (پیشنهاد ۲۰ + ۱۰ = ۳۰ ثانیه، O-8). از این لحظ
    می‌خواند — از فایل Env ـِ غیرمحرمانه‌ی همان سرویس در `services.json`، یا پیش‌فرض اگر نیست — نه عدد ثابت ۲۵. با پیش‌فرض‌ها:
    ۳۳ ثانیه.
 2. **Containerهای دیگر:** `web` (Next، بی مرز خاموشی در مخزن)، Edge، PostgreSQL، Kafka، Keycloak، Temporal، Redis، MinIO و
-   ClamAV هرکدام `stop_grace_period` ـِ صریح با دلیل در `services.json` دارند؛ پیش‌فرض ندارد و M-6 آن را می‌سنجد.
+   ClamAV، `clamav-freshclam` و Helperهای زنده هرکدام `stop_grace_period` ـِ صریح با دلیل در `services.json` دارند؛ پیش‌فرض ندارد و M-6 آن را می‌سنجد.
 3. **اجبار:** `staging-policy` (PR S4b) Compose ـِ بی `stop_grace_period` یا کمتر از قاعده‌ی بند ۱ را رد می‌کند. فرمان‌های
    Staging هرگز `-t`/`--timeout` به `stop`، `up`، `down`، `restart` یا `rm` نمی‌دهند، و هرگز `docker kill` یا `rm -f` روی
    Container ـِ در حال اجرا ندارند؛ آزمون Recorder ـِ PR S8a تا S8d این را برای هر فرمان می‌سنجد. توقف اضطراری Watchdog هم
@@ -986,7 +1023,7 @@ T_term` (پیشنهاد ۲۰ + ۱۰ = ۳۰ ثانیه، O-8). از این لحظ
 | O-4   | دید GHCR (عمومی/خصوصی)؛ اجباری بودن Attestation؛ دوره‌ی چرخش Secret                                                                                                                                                                                                                                                                                                                                                                                                                    | عمومی؛ اجباری؛ فقط با محرک                                                                                                                      |
 | O-5   | جداسازی واقعی: کاربر جدا و Docker بی‌ریشه (نصب `uidmap` با root) یا ماشین دوم — پیش‌شرط RUN-004                                                                                                                                                                                                                                                                                                                                                                                        | نیست؛ § ۲                                                                                                                                       |
 | O-6   | پذیرش انحراف‌ها: بی mTLS (S-03)، بی NetworkPolicy ـِ Object (جایش چهار لایه‌ی § ۴)، بی HA، Pull به‌جای خودکار؛ و **باقی‌مانده‌ی دسترسی هم‌تا** ـِ § ۴ (PostgreSQL ← Keycloak/Temporal بی Extension ـِ اتصال؛ سطح مسیر Keycloak برای اعضای `idp`؛ هر Listener ـِ M-5 که بسته نشود)                                                                                                                                                                                                      | پذیرفته برای Staging، نه Production؛ باقی‌مانده‌ی تازه‌ی M-5 بی تأیید مالک = پذیرش شکست                                                         |
-| O-8   | (تازه در r3) **پیکربندی پیش از اندازه‌گیری:** همه‌ی ورودی‌های نخستین `up` ـِ فاز M — `R_host_0`، سقف‌های موقت و `H_max_0`، `k_0`، `device_write_bps_0`/`R_max_0`، `G_window_0` و طول پنجره، `grace_0`، `T_poll`/`T_read`/`T_fence`/`ε`/`T_settle`/`W_obs`، `D_meta_0`، `max_wal_size_0` (§ ۳ «پیکربندی پیش از اندازه‌گیری»)؛ و `loginctl enable-linger rasta` (بی root، تغییر میزبان)                                                                                                  | جدول § ۳؛ بی O-8 فاز M اجرا نمی‌شود؛ با ۴۴G آزاد امروز، پاک‌سازی پیش از فاز M لازم است مگر `P` کوچک باشد                                        |
+| O-8   | (بازنگری r4) پیکربندی نخستین اجرا: همه‌ی کلیدهای Schema ـِ § ۳؛ پاسخ به ناظر مستقل، کران `T_ack`، بودجه‌ی شاهد/Backup و مشاهده‌ی اشباع؛ Linger به‌تنهایی کافی نیست                                                                                                                                                                                                                                                                                                                     | بی پاسخ و اثبات، فاز M اجرا نمی‌شود؛ مقدارهای جدول فقط پیشنهادند                                                                                |
 | O-7   | Temporal: همان `temporalio/auto-setup` ـِ سنجاق‌شده (`docker-compose.yml:444`) یا Server و Schema ـِ جدا؛ و (r2) اگر پورت‌های داخلی Temporal با پیکربندی auto-setup به Loopback نروند، Image ـِ جدا یا باقی‌مانده‌ی O-6                                                                                                                                                                                                                                                                | همان Image؛ انحراف ثبت‌شده؛ پورت‌های داخلی پس از M-5                                                                                            |
 
 ## آنچه ادعا نمی‌شود
@@ -1000,15 +1037,14 @@ T_term` (پیشنهاد ۲۰ + ۱۰ = ۳۰ ثانیه، O-8). از این لحظ
   کران‌دار می‌کند و `F_stop` از کل برنامه‌ی توقف ساخته می‌شود (§ ۳ بند ۴)؛ ولی نویسنده‌ای بیرون از Staging (کار Worker) یا
   نرخی بالاتر از `R_max` ـِ اعلام‌شده (مثلاً Log ـِ Daemon، که در cgroup ـِ Container نیست و فقط با `max-size × max-file` سخت است)
   می‌تواند دیسک را پیش از توقف پر کند؛ ادعا نمی‌شود که دیسک هرگز پر نمی‌شود.
-- ادعا نمی‌شود که Daemon درخواستی را که پیش از حصار § ۱۴ بند ۵ گرفته **تمام نمی‌کند**؛ ادعا این است که هر Container ـِ
-  روشن‌شده پس از Abort دیده، متوقف و گزارش می‌شود.
+- ادعا نمی‌شود که Daemon درخواستی را که پیش از حصار § ۱۴ بند ۵ گرفته **تمام نمی‌کند**؛ پایان فقط با Ledger ـِ تطبیق‌یافته و ناظر مستقل اثبات می‌شود؛ بی آن حالت نامعلوم است و پذیرش بسته (§ ۱۴).
 - سقف جمعی Kernel برای Containerهای Worker ادعا نمی‌شود (root لازم است، O-3).
 - Staging روی این میزبان در برابر عامل‌هایی که همین کاربر را دارند امن نیست (§ ۲) و ادعای آن هم نمی‌شود.
 - تمرین Restore ـِ موجود بازیابی توزیع‌شده را ثابت نمی‌کند (§ ۹).
 
-## تغییرات r2 (بازبینی Codex r1 بر #428)
+## تغییرات r2 (بازبینی Codex r1 بر #428؛ نشانی‌ها در `c432c56f`)
 
-سطرها، سطرهای همین Commit اند. هر یافته پیش از اصلاح با کد و میزبان (فقط خواندن) وارسی شد و **هر هفت درست بودند**؛ اصلاح اضافه‌ی کمیسیون هم درست بود.
+نشانی‌های خطی این بخش فقط در نسخه‌ی `c432c56f` اند؛ مرجع جاری بخش/گام است. در دور r2 هر هفت یافته و اصلاح کمیسیون وارسی و پذیرفته شدند.
 
 | یافته                                      | کجا (ADR / برنامه)                                                                                                                                                                                      |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1027,14 +1063,14 @@ T_term` (پیشنهاد ۲۰ + ۱۰ = ۳۰ ثانیه، O-8). از این لحظ
 | E چرخش پس از نوشتن ناقص                    | § ۵ بند ۴ گام‌های ۱، ۵ و ۶                                                                                                                                                                              |
 | F کنترل مثبت Probe                         | § ۱۲ بند ۱                                                                                                                                                                                              |
 | G افشا در ابزارها                          | § ۱۰ «افشا»؛ § ۱۳                                                                                                                                                                                       |
-| H نشانی درست کمیسیون                       | § ۱۱: `services/economic-service/src/config/env.ts:420-439` روی `main` ـِ کنونی (بازه‌ی `424-436` ـِ بازبینی مال `c4e2a482` بود)                                                                        |
+| H نشانی درست کمیسیون                       | § ۱۱: `services/economic-service/src/config/env.ts:420-439` روی `c432c56f` (بازه‌ی `424-436` ـِ بازبینی مال `c4e2a482` بود)                                                                             |
 
-همچنین: همه‌ی نشانی‌های `file:line` روی `main` ـِ کنونی دوباره وارسی و جابه‌جاشده‌ها اصلاح شدند؛ و املای معیار (قاعده‌ی ۱۹
+همچنین: همه‌ی نشانی‌های `file:line` روی `c432c56f` دوباره وارسی و جابه‌جاشده‌ها اصلاح شدند؛ و املای معیار (قاعده‌ی ۱۹
 ـِ چک‌لیست، تصمیم مالک B) در متن افزوده‌شده اعمال شد (`تأیید`، `متأثر`، `منشأ`).
 
 ## تغییرات r3 (بازبینی Codex r2 بر #428)
 
-سطرها، سطرهای همین Commit اند. هر شش یافته پیش از اصلاح با متن r2، کد و میزبان (فقط خواندن) وارسی شد و **هر شش درست بودند**؛
+این سابقه‌ی دور r3 است؛ نشانی‌ها در `ebe30a8d` اند. مرجع جاری بخش/گام است، با اصلاح‌های r4 پایین. هر شش یافته پیش از اصلاح با متن r2، کد و میزبان (فقط خواندن) وارسی شد و **هر شش درست بودند**؛
 اصلاح برای هر **دسته** است، نه فقط نمونه‌ی بازبین. F6 و F7 در r2 در سطح طراحی بسته شدند و این دور به آن‌ها دست نمی‌زند.
 
 | یافته                             | کجا (ADR / برنامه)                                                                                                                                                                                                                                                                                                                      |
@@ -1049,3 +1085,10 @@ T_term` (پیشنهاد ۲۰ + ۱۰ = ۳۰ ثانیه، O-8). از این لحظ
 تصمیم‌های مالک: **O-8 تازه** (پیکربندی پیش از اندازه‌گیری)؛ **O-3 بازنگری‌شده** (بودجه‌ی Slice؛ بخش Container نیازمند root؛
 فقط تنگ‌تر از O-8). وارسی گراف تازه دو شکاف واقعی در جدول r2 یافت که بازبین نام نبرده بود و بسته شدند: S9b ستون «مالک» ـِ O-1 را
 داشت ولی O-1 پیش‌نیازش نبود، و S10b همین را با O-6.
+
+## تغییرات r4 (بازبینی R3، 2026-11-02)
+
+منبع جاری R3-1 مدل عملیات § ۳؛ R3-2 Ledger ـِ § ۱۴؛ R3-3 Scanner/Dispatch و اتصال واقعی § ۱۰؛ R3-4 Listenerهای الزامی
+§ ۱۲؛ R3-5 Schema ـِ § ۳ و جدول پارامترهای برنامه؛ R3-6 قاعده‌ی اشباع M-3 است. پیاده‌سازی و آزمون‌ها در S4a، S7a–S7c،
+S8a–S8m و S9a اند؛ این PR فقط طرح است. O-8 بازنگری شده: ناظر مستقل، کران پاسخ، بودجه‌ی شاهد/Backup و مشاهده‌ی اشباع
+پرسش‌های بازند، بی پاسخ/اثبات فاز M رد می‌شود. F6/F7، Subnet و Slice ـِ Worker حفظ شده‌اند؛ تصمیم مالک ساخته نشده است.
