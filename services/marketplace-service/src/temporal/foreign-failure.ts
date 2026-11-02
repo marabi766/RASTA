@@ -13,13 +13,53 @@ export interface ForeignFailure {
 }
 
 export function foreignFailure(error: unknown): ForeignFailure {
-  // A class name is the library's; its shape is checked all the same.
-  const type =
-    error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
-      ? error.name
-      : 'unknown';
-  const code = (error as { code?: unknown } | null | undefined)?.code;
-  if (typeof code === 'number' && Number.isInteger(code)) return { type, code };
-  if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) return { type, code };
-  return { type };
+  // Closed sets, not identifier-shaped strings: credentials can have that shape too.
+  const names = new Set([
+    'Error',
+    'TypeError',
+    'TransportError',
+    'ServiceError',
+    'ConnectionError',
+    'WorkflowExecutionAlreadyStartedError',
+    'WorkflowNotFoundError',
+    'ShutdownError',
+    'ApplicationFailure',
+    'CancelledFailure',
+    'TimeoutFailure',
+  ]);
+  const codes = new Set([
+    'CANCELLED',
+    'UNKNOWN',
+    'INVALID_ARGUMENT',
+    'DEADLINE_EXCEEDED',
+    'NOT_FOUND',
+    'ALREADY_EXISTS',
+    'PERMISSION_DENIED',
+    'RESOURCE_EXHAUSTED',
+    'FAILED_PRECONDITION',
+    'ABORTED',
+    'OUT_OF_RANGE',
+    'UNIMPLEMENTED',
+    'INTERNAL',
+    'UNAVAILABLE',
+    'DATA_LOSS',
+    'UNAUTHENTICATED',
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'ENOTFOUND',
+    'ETIMEDOUT',
+  ]);
+  try {
+    const candidate = error as { name?: unknown; code?: unknown } | null;
+    const name = candidate?.name;
+    const type = typeof name === 'string' && names.has(name) ? name : 'unknown';
+    const code = candidate?.code;
+    if (typeof code === 'number' && Number.isInteger(code) && code >= 0 && code <= 16) {
+      return { type, code };
+    }
+    if (typeof code === 'string' && codes.has(code)) return { type, code };
+    return { type };
+  } catch {
+    return { type: 'unknown' };
+  }
 }

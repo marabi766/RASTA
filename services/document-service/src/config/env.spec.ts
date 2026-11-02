@@ -243,3 +243,25 @@ describe('enum settings are refused without the value written (#385 r2 F2)', () 
     );
   });
 });
+
+describe('S3 endpoint refusal before SDK diagnostics', () => {
+  it.each([
+    'data:private-sentinel-79:JZ97-another-secret',
+    `http://${['private-sentinel-79', 'JZ97-another-secret'].join(':')}@localhost:9000`,
+    'http://localhost:bad/private-sentinel-79/JZ97-another-secret',
+  ])('refuses by registered name only: %s', (endpoint) => {
+    let failure: unknown;
+    try {
+      load({ ...SOCKET, S3_ENDPOINT: endpoint });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toContain('S3_ENDPOINT');
+    expect(JSON.stringify(failure)).not.toMatch(/sentinel|JZ97|another.secret/i);
+    expect((failure as Error).stack).not.toMatch(/sentinel|JZ97|another.secret/i);
+  });
+  it.each(['http://localhost:9000', 'https://s3.example.com'])('accepts %s', (endpoint) => {
+    expect(load({ ...SOCKET, S3_ENDPOINT: endpoint }).S3_ENDPOINT).toBe(endpoint);
+  });
+});
