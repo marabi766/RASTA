@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 
 import { SUBMISSION_FIELD } from '@/lib/form-fields';
 import type { SupplierFormState } from './supplier-form-state';
-import { NON_STANDARD_SPELLING } from '@/test/orthography';
+import { nonStandardSpelling } from '@/test/orthography';
 
 /**
  * The forms and the notice for an unresolved supplier write, with the real
@@ -130,6 +130,6 @@ describe('the notice', () => {
 
   it('uses the standard orthography in what it says', () => {
     const { container } = render(notice({ inFlight: true }, null));
-    expect(container.textContent ?? '').not.toMatch(NON_STANDARD_SPELLING);
+    expect(nonStandardSpelling(container.textContent ?? '')).toBeNull();
   });
 });

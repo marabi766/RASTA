@@ -32,7 +32,7 @@ import {
 } from './[id]/ProjectForms';
 import type { ProjectFormState } from './[id]/project-form-state';
 import type { CreateProjectFormState } from './form-state';
-import { NON_STANDARD_SPELLING } from '@/test/orthography';
+import { nonStandardSpelling } from '@/test/orthography';
 
 /**
  * The project write screens with the real `useActionState`: only the server
@@ -235,7 +235,7 @@ describe.each(FORMS)('the $name form', (form) => {
     const { container } = form.render();
     await send(container);
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).not.toMatch(NON_STANDARD_SPELLING);
+    expect(nonStandardSpelling(alert.textContent)).toBeNull();
   });
 
   it('says a refusal the service put on no field in a message, with no axe violation', async () => {
@@ -668,7 +668,7 @@ describe('the authority’s inbox', () => {
     const { container } = draw(ok([], true));
     expect(container).not.toHaveTextContent('تصمیمی منتظر شما نیست');
     expect(container).toHaveTextContent('خوانده نشد');
-    expect(container.textContent).not.toMatch(NON_STANDARD_SPELLING);
+    expect(nonStandardSpelling(container.textContent)).toBeNull();
     expect(await axe(container)).toHaveNoViolations();
   });
 

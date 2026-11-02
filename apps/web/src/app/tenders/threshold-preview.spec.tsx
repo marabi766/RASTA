@@ -5,7 +5,7 @@ import * as messages from '@/lib/procurement-threshold-fields';
 import { PENDING_REQUEST, TENDER_ID } from '@/test/owner-fixtures';
 import { ThresholdPreviewView, RequestView } from './[id]/OwnerSections';
 import { AuthorityScreen } from './[id]/AuthoritySections';
-import { NON_STANDARD_SPELLING } from '@/test/orthography';
+import { nonStandardSpelling } from '@/test/orthography';
 
 describe('procurement threshold pre-decision visibility', () => {
   it.each([
@@ -23,7 +23,7 @@ describe('procurement threshold pre-decision visibility', () => {
       />,
     );
     expect(screen.getByText(message)).toBeVisible();
-    expect(container.textContent).not.toMatch(NON_STANDARD_SPELLING);
+    expect(nonStandardSpelling(container.textContent)).toBeNull();
     expect(await axe(container)).toHaveNoViolations();
   });
   it('does not present a stale preview as current', () => {
@@ -104,7 +104,6 @@ describe('procurement threshold pre-decision visibility', () => {
     expect(PUBLICATION_REFUSAL_TEXT.PROCUREMENT_AMOUNT_OUTSIDE_RANGE).toContain('پیکربندی‌شده');
   });
   it('all fixed threshold messages use the standard orthography', () => {
-    for (const message of Object.values(messages))
-      expect(message).not.toMatch(NON_STANDARD_SPELLING);
+    for (const message of Object.values(messages)) expect(nonStandardSpelling(message)).toBeNull();
   });
 });

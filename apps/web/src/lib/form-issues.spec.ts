@@ -9,7 +9,7 @@ import { legacyParse, type LegacyIssue } from '@rasta/contracts';
 
 import { firstIssuePerField, formIssueMessage, GENERIC_FIELD_MESSAGE } from './form-issues';
 import { legacyFormResolver } from './form-resolver';
-import { NON_STANDARD_SPELLING } from '@/test/orthography';
+import { nonStandardSpelling } from '@/test/orthography';
 
 /**
  * The portal's one Persian boundary for local validation (`form-issues.ts`).
@@ -58,7 +58,7 @@ describe('formIssueMessage', () => {
       const message = formIssueMessage(issueOf(schema, value));
       expect(message).toBe(expected);
       expect(message).not.toMatch(LATIN_LETTER);
-      expect(message).not.toMatch(NON_STANDARD_SPELLING);
+      expect(nonStandardSpelling(message)).toBeNull();
     },
   );
 

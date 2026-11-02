@@ -32,7 +32,7 @@ import {
   type ProjectField,
 } from './project-commands';
 import { SESSION_REFUSAL_MESSAGES } from './session-refusal';
-import { NON_STANDARD_SPELLING } from '@/test/orthography';
+import { nonStandardSpelling } from '@/test/orthography';
 
 const VALID = {
   title: 'بازسازی پل',
@@ -275,8 +275,8 @@ describe('the words', () => {
   }
 
   it('uses the standard orthography in anything this module exports', () => {
-    const offending = strings(Object.entries(commands)).filter((text) =>
-      NON_STANDARD_SPELLING.test(text),
+    const offending = strings(Object.entries(commands)).filter(
+      (text) => nonStandardSpelling(text) !== null,
     );
     expect(offending).toEqual([]);
   });
@@ -287,6 +287,6 @@ describe('the words', () => {
       IN_PROGRESS_WRITE_MESSAGE,
       ...Object.values(SESSION_REFUSAL_MESSAGES),
     ];
-    expect(shared.filter((text) => NON_STANDARD_SPELLING.test(text))).toEqual([]);
+    expect(shared.filter((text) => nonStandardSpelling(text) !== null)).toEqual([]);
   });
 });

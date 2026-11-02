@@ -18,7 +18,7 @@ import {
 
 import { TendersScreen, formatBidWindow, type TendersView } from './TendersScreen';
 import { OpenTenderDetailScreen, OwnTenderDetailScreen } from './[id]/TenderDetailScreen';
-import { NON_STANDARD_SPELLING } from '@/test/orthography';
+import { nonStandardSpelling } from '@/test/orthography';
 import { TEST_CONTEXT } from '@/test/page-context';
 import { withContext } from '@/lib/page-context';
 import { actingAccessToken } from '@/test/session-token';
@@ -129,7 +129,7 @@ it('shows the persisted procurement threshold warning on the tender screen', () 
   );
   expect(screen.getByRole('alert')).toHaveTextContent('هشدار مبلغ و نوع فرایند');
   expect(screen.getByRole('alert')).toHaveTextContent('پیکربندی‌شده');
-  expect(screen.getByRole('alert').textContent).not.toMatch(NON_STANDARD_SPELLING);
+  expect(nonStandardSpelling(screen.getByRole('alert').textContent)).toBeNull();
   expect(screen.getByRole('alert')).toHaveTextContent('انتخاب نوع فرایند دستی است');
 });
 

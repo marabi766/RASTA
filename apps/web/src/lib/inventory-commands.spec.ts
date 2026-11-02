@@ -33,6 +33,7 @@ import {
   type InventoryBody,
   type InventoryCommand,
 } from './inventory-commands';
+import { nonStandardSpelling } from '@/test/orthography';
 
 /**
  * Reading the inventory forms: every field of every typed command, what it
@@ -554,9 +555,8 @@ describe('fixed words', () => {
    * neither is the combining hamza above (U+0654) on alef, waw or yeh. The
    * ezafe «ـهٔ» stays allowed.
    */
-  const HAMZA_LESS = /تایید|تامین|تاخیر|تاثیر|تاکید|مامور|ماخذ|تالیف|مساله|مسوول|رییس|جزییات/;
-  const COMBINING_ON_LETTER = new RegExp('[\u0627\u0648\u06CC\u064A]\u0654');
-  const nonStandard = (text: string) => HAMZA_LESS.test(text) || COMBINING_ON_LETTER.test(text);
+  // The shared matcher (`test/orthography.ts`), not a second copy of its dictionary.
+  const nonStandard = (text: string) => nonStandardSpelling(text) !== null;
 
   function strings(value: unknown, into: string[] = []): string[] {
     if (typeof value === 'string') into.push(value);

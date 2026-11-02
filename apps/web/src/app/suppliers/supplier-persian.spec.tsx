@@ -9,7 +9,7 @@ import * as supplierFields from '@/lib/supplier-fields';
 import * as unconfirmed from '@/lib/unconfirmed-write';
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import type { SupplierFormState } from './supplier-form-state';
-import { NON_STANDARD_SPELLING } from '@/test/orthography';
+import { nonStandardSpelling } from '@/test/orthography';
 
 /**
  * Persian wording (docs/16 § ۱۶٫۱۱, pre-review-checklist item 19): nothing the
@@ -54,7 +54,7 @@ describe('the exported wording of the supplier screens', () => {
     ['lib/session-refusal messages', SESSION_REFUSAL_MESSAGES],
     ['app/nav (the shared navigation)', nav],
   ])('%s uses the standard orthography', (_name, exported) => {
-    const offending = strings(exported).filter((text) => NON_STANDARD_SPELLING.test(text));
+    const offending = strings(exported).filter((text) => nonStandardSpelling(text) !== null);
     expect(offending).toEqual([]);
   });
 });
@@ -82,7 +82,7 @@ describe('the source of the touched screens', () => {
   });
 
   it.each(files.map((file) => [path.relative(root, file), file]))('%s', (_name, file) => {
-    expect(readFileSync(file as string, 'utf8')).not.toMatch(NON_STANDARD_SPELLING);
+    expect(nonStandardSpelling(readFileSync(file as string, 'utf8'))).toBeNull();
   });
 });
 
@@ -127,7 +127,7 @@ describe('the forms, in every state', () => {
   it.each([false, true])('use the standard orthography (held: %s)', (held) => {
     for (const element of draw(held)) {
       const { container, unmount } = render(element);
-      expect(container.textContent ?? '').not.toMatch(NON_STANDARD_SPELLING);
+      expect(nonStandardSpelling(container.textContent ?? '')).toBeNull();
       unmount();
     }
   });
@@ -161,7 +161,7 @@ describe('the forms, in every state', () => {
         await act(async () => {
           container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true }));
         });
-        expect(container.textContent ?? '').not.toMatch(NON_STANDARD_SPELLING);
+        expect(nonStandardSpelling(container.textContent ?? '')).toBeNull();
         unmount();
       }
     },
@@ -201,7 +201,7 @@ describe('the shared navigation both supplier screens render', () => {
       const { container, unmount } = render(
         <PortalSidebar session={sessionWith(roles)} currentHref="/suppliers" />,
       );
-      expect(container.textContent ?? '').not.toMatch(NON_STANDARD_SPELLING);
+      expect(nonStandardSpelling(container.textContent ?? '')).toBeNull();
       unmount();
     },
   );
