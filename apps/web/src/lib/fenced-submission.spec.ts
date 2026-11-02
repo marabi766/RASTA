@@ -1,0 +1,487 @@
+import { act, renderHook } from '@testing-library/react';
+import { startTransition } from 'react';
+
+import { submitThroughSlot, useSlotActionState, type SlotSubmission } from './fenced-submission';
+import { SESSION_PROBE_DEADLINE_MS } from './session-refusal';
+import { type Attempt, type Settlement, type StartOutcome } from './unresolved-tenancy';
+
+/**
+ * The one submit boundary of the fenced forms (PR 405 review 4): what is
+ * refused before anything leaves finalizes with no answer and no record
+ * (addendum D); every completion after the send — returned or thrown, a first
+ * send or a re-send — goes through the same finalization (R5); a key already
+ * unresolved is never sent as a first send, nor settled by its answer (R4).
+ *
+ * Review 5, R6: a failed call is kept and its view returned before
+ * `/auth/session` is asked; the probe's answer never answers again, and a 401
+ * reaches only the very view that send returned (`useSlotActionState`).
+ */
+
+type State =
+  | { readonly kind: 'IDLE' }
+  | { readonly kind: 'HELD' }
+  | { readonly kind: 'STORAGE_UNAVAILABLE' }
+  | { readonly kind: 'REFUSED' }
+  | { readonly kind: 'INVALID' }
+  | {
+      readonly kind: 'UNCONFIRMED';
+      readonly submissionId: string;
+      readonly note?: string;
+      readonly viewOnly?: true;
+    };
+
+const K1 = 'sub_FIRSTKEYFIRSTKEYFIRS';
+const K2 = 'sub_SECONDKEYSECONDKEYSE';
+const UNCONFIRMED = (submissionId: string, note?: string): State => ({
+  kind: 'UNCONFIRMED',
+  submissionId,
+  ...(note ? { note } : {}),
+});
+
+const redirect = () =>
+  Object.assign(new Error('NEXT_REDIRECT'), { digest: 'NEXT_REDIRECT;push;/x;307;' });
+
+let sessionStatus: number | 'NETWORK' = 204;
+
+/** Lets every settled promise run its callbacks. */
+const flush = () => act(async () => undefined);
+
+beforeEach(() => {
+  sessionStatus = 204;
+  global.fetch = (async () => {
+    if (sessionStatus === 'NETWORK') throw new TypeError('fetch failed');
+    return { status: sessionStatus };
+  }) as unknown as typeof fetch;
+});
+
+/** A send identity, as the slot would mint it (`fencedSlot`): only its equality matters here. */
+const send = (n: number) => n.toString(16).padStart(32, '0') as Attempt;
+const FIRST = send(1);
+
+type Remembered = StartOutcome['outcome'] | StartOutcome | null;
+
+function harness(overrides: Partial<SlotSubmission<State>> & { remembered?: Remembered } = {}) {
+  const calls = { answer: [] as State[], settle: 0, send: 0, remember: 0 };
+  /** Which send each answer and settlement named, and the re-sends' generations (PR 363 r3). */
+  const sends = {
+    advanced: 0,
+    answered: [] as Array<Attempt | null>,
+    settled: [] as Array<[Attempt, Settlement]>,
+  };
+  const { remembered = 'SAVED', ...rest } = overrides;
+  const outcome: StartOutcome | null =
+    remembered === null || typeof remembered === 'object'
+      ? remembered
+      : remembered === 'SAVED'
+        ? { outcome: 'SAVED', attempt: FIRST }
+        : { outcome: remembered };
+  const submission: SlotSubmission<State> = {
+    submissionId: K1,
+    retrying: null,
+    stored: () => null,
+    remember: () => {
+      calls.remember += 1;
+      return outcome;
+    },
+    admitRetry: () => null,
+    advance: () => {
+      sends.advanced += 1;
+      return send(1 + sends.advanced);
+    },
+    send: async () => {
+      calls.send += 1;
+      return UNCONFIRMED(K1, 'returned');
+    },
+    failed: (ended) => ({
+      kind: 'UNCONFIRMED',
+      submissionId: K1,
+      note: ended ? 'ended' : 'thrown',
+    }),
+    answer: (state, attempt) => {
+      calls.answer.push(state);
+      sends.answered.push(attempt);
+    },
+    settle: (attempt, settlement) => {
+      calls.settle += 1;
+      sends.settled.push([attempt, settlement]);
+    },
+    held: { kind: 'HELD' },
+    unavailable: { kind: 'STORAGE_UNAVAILABLE' },
+    ...rest,
+  };
+  return { submission, calls, sends };
+}
+
+describe('before anything leaves: unsent, no answer, no record (addendum D)', () => {
+  it.each([
+    ['HELD', { kind: 'HELD' }],
+    ['UNAVAILABLE', { kind: 'STORAGE_UNAVAILABLE' }],
+  ] as const)('remember says %s', async (outcome, expected) => {
+    const { submission, calls } = harness({ remembered: outcome });
+    await expect(submitThroughSlot(submission)).resolves.toEqual(expected);
+    expect(calls).toEqual({ answer: [], settle: 0, send: 0, remember: 1 });
+  });
+
+  it('another submission holds the slot: held, nothing remembered or sent', async () => {
+    const { submission, calls } = harness({
+      stored: () => ({ submissionId: K2, state: UNCONFIRMED(K2) }),
+    });
+    await expect(submitThroughSlot(submission)).resolves.toEqual({ kind: 'HELD' });
+    expect(calls).toEqual({ answer: [], settle: 0, send: 0, remember: 0 });
+  });
+
+  it('the slot already keeps this very key: its kept view, never a first send (R4)', async () => {
+    const kept = UNCONFIRMED(K1, 'kept');
+    const { submission, calls } = harness({ stored: () => ({ submissionId: K1, state: kept }) });
+    await expect(submitThroughSlot(submission)).resolves.toBe(kept);
+    expect(calls).toEqual({ answer: [], settle: 0, send: 0, remember: 0 });
+  });
+
+  it('the store says UNRESOLVED (written since the check): the kept view, unsent', async () => {
+    const kept = UNCONFIRMED(K1, 'kept');
+    let reads = 0;
+    const { submission, calls } = harness({
+      remembered: 'UNRESOLVED',
+      stored: () => (reads++ === 0 ? null : { submissionId: K1, state: kept }),
+    });
+    await expect(submitThroughSlot(submission)).resolves.toBe(kept);
+    expect(calls.send).toBe(0);
+    expect(calls.answer).toEqual([]);
+    expect(calls.settle).toBe(0);
+  });
+
+  it('UNRESOLVED and nothing readable: held, unsent', async () => {
+    const { submission, calls } = harness({ remembered: 'UNRESOLVED' });
+    await expect(submitThroughSlot(submission)).resolves.toEqual({ kind: 'HELD' });
+    expect(calls.send).toBe(0);
+  });
+
+  it('a form the page refuses first: nothing remembered or sent', async () => {
+    const { submission, calls } = harness({ check: () => ({ kind: 'INVALID' }) });
+    await expect(submitThroughSlot(submission)).resolves.toEqual({ kind: 'INVALID' });
+    expect(calls).toEqual({ answer: [], settle: 0, send: 0, remember: 0 });
+  });
+
+  it('a re-send the form does not admit comes back as it is, unsent and unanswered', async () => {
+    const view = UNCONFIRMED(K1);
+    const refused = { ...view, viewOnly: true } as State;
+    const { submission, calls } = harness({
+      retrying: view as Extract<State, { kind: 'UNCONFIRMED' }>,
+      admitRetry: () => refused,
+    });
+    await expect(submitThroughSlot(submission)).resolves.toBe(refused);
+    expect(calls).toEqual({ answer: [], settle: 0, send: 0, remember: 0 });
+  });
+});
+
+describe('every completion goes through one finalization (R5)', () => {
+  const retrying = UNCONFIRMED(K1) as Extract<State, { kind: 'UNCONFIRMED' }>;
+
+  it.each([
+    ['a first send answered UNCONFIRMED', {}, 'returned'],
+    ['a re-send answered UNCONFIRMED', { retrying }, 'returned'],
+    [
+      'a first send whose call fails',
+      { send: async () => Promise.reject(new Error('lost')) },
+      'thrown',
+    ],
+    [
+      'a re-send whose call fails',
+      { retrying, send: async () => Promise.reject(new Error('lost')) },
+      'thrown',
+    ],
+  ] as const)('%s: answered, never settled', async (_label, overrides, note) => {
+    const { submission, calls } = harness(overrides as Partial<SlotSubmission<State>>);
+    const result = await submitThroughSlot(submission);
+    expect(result).toMatchObject({ kind: 'UNCONFIRMED', note });
+    expect(calls.answer).toEqual([result]);
+    expect(calls.settle).toBe(0);
+  });
+
+  it.each([
+    ['204', 204],
+    ['503', 503],
+    ['a network failure', 'NETWORK'],
+    ['401', 401],
+  ] as const)(
+    'a failed call with /auth/session %s: returned uncertain and answered once, as it was (addendum F, R6)',
+    async (_label, status) => {
+      sessionStatus = status;
+      const { submission, calls } = harness({
+        send: async () => Promise.reject(new Error('lost')),
+      });
+      await expect(submitThroughSlot(submission)).resolves.toMatchObject({
+        kind: 'UNCONFIRMED',
+        note: 'thrown',
+      });
+      await flush();
+      expect(calls.answer).toEqual([UNCONFIRMED(K1, 'thrown')]);
+      expect(calls.settle).toBe(0);
+    },
+  );
+
+  it('a definite answer to a first send this send wrote: settled, not answered', async () => {
+    const { submission, calls } = harness({ send: async () => ({ kind: 'REFUSED' }) });
+    await expect(submitThroughSlot(submission)).resolves.toEqual({ kind: 'REFUSED' });
+    expect(calls.settle).toBe(1);
+    expect(calls.answer).toEqual([]);
+  });
+
+  it('a definite answer to a re-send settles nothing: it proves nothing about the first send', async () => {
+    const { submission, calls } = harness({ retrying, send: async () => ({ kind: 'REFUSED' }) });
+    await submitThroughSlot(submission);
+    expect(calls.settle).toBe(0);
+    expect(calls.answer).toEqual([]);
+  });
+
+  it('a definite answer to a first send that was never remembered settles nothing', async () => {
+    const { submission, calls } = harness({
+      remembered: null,
+      send: async () => ({ kind: 'INVALID' }),
+    });
+    await submitThroughSlot(submission);
+    expect(calls.settle).toBe(0);
+  });
+
+  it('a redirect is the command done: settled, rethrown', async () => {
+    const error = redirect();
+    const { submission, calls } = harness({ send: async () => Promise.reject(error) });
+    await expect(submitThroughSlot(submission)).rejects.toBe(error);
+    expect(calls.settle).toBe(1);
+    expect(calls.answer).toEqual([]);
+  });
+
+  it('a failed call of a first send that was never remembered is rethrown: nothing in doubt to keep', async () => {
+    const error = new Error('lost');
+    const { submission, calls } = harness({
+      remembered: null,
+      send: async () => Promise.reject(error),
+    });
+    await expect(submitThroughSlot(submission)).rejects.toBe(error);
+    expect(calls.answer).toEqual([]);
+    expect(calls.settle).toBe(0);
+  });
+});
+
+describe('every answer names its send: the identity the slot wrote (PR 363 reviews 3 and 4)', () => {
+  const retrying = UNCONFIRMED(K1) as Extract<State, { kind: 'UNCONFIRMED' }>;
+
+  it('a re-send records its identity before it leaves, and its answers carry it', async () => {
+    let advancedBeforeSend = false;
+    const made = harness({
+      retrying,
+      send: async () => {
+        advancedBeforeSend = made.sends.advanced === 1;
+        return UNCONFIRMED(K1, 'returned');
+      },
+    });
+    const { submission, sends } = made;
+    await submitThroughSlot(submission);
+    expect(advancedBeforeSend).toBe(true);
+    expect(sends.answered).toEqual([send(2)]);
+  });
+
+  it('an identity that cannot be recorded: nothing is sent, the uncertainty view as it was', async () => {
+    const { submission, calls, sends } = harness({ retrying, advance: () => null });
+    await expect(submitThroughSlot(submission)).resolves.toBe(retrying);
+    expect(calls).toEqual({ answer: [], settle: 0, send: 0, remember: 0 });
+    expect(sends.settled).toEqual([]);
+  });
+
+  it('a re-send refused by its own admission records no identity', async () => {
+    const shown = { ...retrying, viewOnly: true as const };
+    const { submission, sends, calls } = harness({ retrying, admitRetry: () => shown });
+    await expect(submitThroughSlot(submission)).resolves.toBe(shown);
+    expect(sends.advanced).toBe(0);
+    expect(calls.send).toBe(0);
+  });
+
+  it("a first send's definite answer settles as REFUSED under the identity remember returned", async () => {
+    const { submission, sends } = harness({ send: async () => ({ kind: 'REFUSED' }) });
+    await submitThroughSlot(submission);
+    expect(sends).toEqual({ advanced: 0, answered: [], settled: [[FIRST, 'REFUSED']] });
+  });
+
+  it('review 4: two first sends of one key carry the identities their own records got — never a constant', async () => {
+    const older = harness({
+      remembered: { outcome: 'SAVED', attempt: send(0xa1) },
+      send: async () => ({ kind: 'REFUSED' }),
+    });
+    const newer = harness({
+      remembered: { outcome: 'SAVED', attempt: send(0xb2) },
+      send: async () => UNCONFIRMED(K1, 'returned'),
+    });
+    await submitThroughSlot(newer.submission);
+    await submitThroughSlot(older.submission);
+    expect(newer.sends.answered).toEqual([send(0xb2)]);
+    expect(older.sends.settled).toEqual([[send(0xa1), 'REFUSED']]);
+  });
+
+  it('a first send nothing remembered: its answer in doubt names no send (null), its refusal settles nothing', async () => {
+    const doubt = harness({ remembered: null });
+    await submitThroughSlot(doubt.submission);
+    expect(doubt.sends.answered).toEqual([null]);
+    const refused = harness({ remembered: null, send: async () => ({ kind: 'REFUSED' }) });
+    await submitThroughSlot(refused.submission);
+    expect(refused.sends.settled).toEqual([]);
+    const redirected = harness({ remembered: null, send: async () => Promise.reject(redirect()) });
+    await expect(submitThroughSlot(redirected.submission)).rejects.toThrow('NEXT_REDIRECT');
+    expect(redirected.sends.settled).toEqual([]);
+  });
+
+  it("a re-send's definite answer settles nothing", async () => {
+    const { submission, sends } = harness({ retrying, send: async () => ({ kind: 'REFUSED' }) });
+    await submitThroughSlot(submission);
+    expect(sends.settled).toEqual([]);
+  });
+
+  it.each([
+    ['a first send', {}, FIRST],
+    ['a re-send', { retrying }, send(2)],
+  ] as const)('%s redirected: settled as CONFIRMED under its own identity', async (_l, o, g) => {
+    const { submission, sends } = harness({
+      ...o,
+      send: async () => Promise.reject(redirect()),
+    });
+    await expect(submitThroughSlot(submission)).rejects.toThrow('NEXT_REDIRECT');
+    expect(sends.settled).toEqual([[g, 'CONFIRMED']]);
+  });
+});
+
+describe('R6: kept and shown first, the session asked after', () => {
+  const retrying = UNCONFIRMED(K1) as Extract<State, { kind: 'UNCONFIRMED' }>;
+  let session: { resolve: (status: number) => void; reject: () => void; asked: number };
+  let order: string[];
+
+  beforeEach(() => {
+    order = [];
+    let resolve: (status: number) => void = () => undefined;
+    let reject: () => void = () => undefined;
+    session = { resolve: (s) => resolve(s), reject: () => reject(), asked: 0 };
+    global.fetch = (() => {
+      session.asked += 1;
+      order.push('probe');
+      return new Promise((res, rej) => {
+        resolve = (status) => res({ status });
+        reject = () => rej(new TypeError('fetch failed'));
+      });
+    }) as unknown as typeof fetch;
+  });
+
+  const failing = (overrides: Partial<SlotSubmission<State>> = {}) => {
+    const made = harness({
+      send: async () => Promise.reject(new Error('lost')),
+      ...overrides,
+    });
+    const answer = made.submission.answer;
+    made.submission = {
+      ...made.submission,
+      answer: (state, attempt) => {
+        order.push('answer');
+        answer(state, attempt);
+      },
+    };
+    return made;
+  };
+
+  it.each([
+    ['a first send', {}],
+    ['a re-send', { retrying }],
+  ] as const)(
+    '%s whose call fails: answered and returned while /auth/session never answers',
+    async (_label, overrides) => {
+      const { submission, calls } = failing(overrides as Partial<SlotSubmission<State>>);
+      await expect(submitThroughSlot(submission)).resolves.toEqual(UNCONFIRMED(K1, 'thrown'));
+      expect(order).toEqual(['answer', 'probe']);
+      expect(calls.answer).toHaveLength(1);
+    },
+  );
+
+  it('a redirect and an unsent refusal ask nothing (addendum A)', async () => {
+    const redirected = harness({ send: async () => Promise.reject(redirect()) });
+    await expect(submitThroughSlot(redirected.submission)).rejects.toBeDefined();
+    const unsent = harness({ remembered: null, send: async () => Promise.reject(new Error('x')) });
+    await expect(submitThroughSlot(unsent.submission)).rejects.toBeDefined();
+    const held = harness({ remembered: 'HELD' });
+    await submitThroughSlot(held.submission);
+    expect(session.asked).toBe(0);
+    expect(redirected.calls.settle).toBe(1);
+    expect([redirected.calls.answer, unsent.calls.answer, held.calls.answer]).toEqual([[], [], []]);
+  });
+
+  /** A form holding its state through the hook, its action the boundary. */
+  function form(made: ReturnType<typeof failing>) {
+    const action = () => submitThroughSlot(made.submission);
+    const hook = renderHook(() => useSlotActionState<State>(action, { kind: 'IDLE' }));
+    const press = () =>
+      act(async () => {
+        startTransition(() => hook.result.current[1](new FormData()));
+      });
+    return { hook, press, shown: () => hook.result.current[0] };
+  }
+
+  it('a 401 later: the view it returned shows the session ended — answered once, nothing written again', async () => {
+    const made = failing();
+    const { press, shown } = form(made);
+    await press();
+    expect(shown()).toEqual(UNCONFIRMED(K1, 'thrown'));
+    await act(async () => session.resolve(401));
+    expect(shown()).toEqual(UNCONFIRMED(K1, 'ended'));
+    expect(made.calls.answer).toEqual([UNCONFIRMED(K1, 'thrown')]);
+  });
+
+  it.each([
+    ['204', () => session.resolve(204)],
+    ['503', () => session.resolve(503)],
+    ['a network failure', () => session.reject()],
+    ['no answer within the deadline', () => jest.advanceTimersByTime(SESSION_PROBE_DEADLINE_MS)],
+  ] as const)('%s: the view stays uncertain, answered once', async (_label, settle) => {
+    jest.useFakeTimers();
+    try {
+      const made = failing();
+      const { press, shown } = form(made);
+      await press();
+      await act(async () => settle());
+      // A 401 after the deadline is ignored too.
+      await act(async () => session.resolve(401));
+      expect(shown()).toEqual(UNCONFIRMED(K1, 'thrown'));
+      expect(made.calls.answer).toHaveLength(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('a newer press out when the 401 arrives: not shown on it, nor on what it returns', async () => {
+    const made = failing();
+    const { press, shown, hook } = form(made);
+    await press();
+    // The same view sent again; its answer is still out when the first probe says 401.
+    let answerRetry: (state: State) => void = () => undefined;
+    made.submission = {
+      ...made.submission,
+      retrying,
+      send: () =>
+        new Promise<State>((resolve) => {
+          answerRetry = resolve;
+        }),
+    };
+    await press();
+    expect(hook.result.current[2]).toBe(true);
+    await act(async () => session.resolve(401));
+    expect(shown()).toEqual(UNCONFIRMED(K1, 'thrown'));
+    await act(async () => answerRetry(UNCONFIRMED(K1, 'returned')));
+    expect(shown()).toEqual(UNCONFIRMED(K1, 'returned'));
+  });
+
+  it('another form drawn anew never shows another view’s verdict', async () => {
+    const made = failing();
+    const first = form(made);
+    await first.press();
+    const second = renderHook(() =>
+      useSlotActionState<State>(async () => ({ kind: 'IDLE' }), UNCONFIRMED(K1, 'thrown')),
+    );
+    await act(async () => session.resolve(401));
+    expect(first.shown()).toEqual(UNCONFIRMED(K1, 'ended'));
+    expect(second.result.current[0]).toEqual(UNCONFIRMED(K1, 'thrown'));
+  });
+});

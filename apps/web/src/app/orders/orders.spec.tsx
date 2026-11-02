@@ -14,6 +14,8 @@ import {
 import { OrdersScreen, formatOrderAmount } from './OrdersScreen';
 import { OrderDetailScreen } from './[id]/OrderDetailScreen';
 import type { OrderCommandFormState } from './[id]/form-state';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * What `/orders` and `/orders/[id]` render.
@@ -361,11 +363,17 @@ describe('the list', () => {
   });
 
   it('marks the side being shown, and links to the other', () => {
-    render(<OrdersScreen demoMode="REAL" result={page([ORDER])} query={{ role: 'SUPPLIER' }} />);
+    render(
+      <OrdersScreen
+        demoMode="REAL"
+        result={page([ORDER])}
+        query={{ context: TEST_CONTEXT, role: 'SUPPLIER' }}
+      />,
+    );
     expect(screen.getByRole('link', { current: 'page' })).toHaveTextContent('به ما داده شده');
     expect(screen.getByRole('link', { name: 'سفارش‌هایی که ثبت کرده‌ایم' })).toHaveAttribute(
       'href',
-      '/orders?role=BUYER',
+      withContext(TEST_CONTEXT, '/orders?role=BUYER'),
     );
   });
 
@@ -374,7 +382,7 @@ describe('the list', () => {
       <OrdersScreen
         demoMode="REAL"
         result={page([{ ...ORDER, availableActions: ['CONFIRM_RECEIPT'] }])}
-        query={{ role: 'BUYER' }}
+        query={{ context: TEST_CONTEXT, role: 'BUYER' }}
       />,
     );
     expect(screen.getByText('اقدامی از سوی شما لازم است')).toBeInTheDocument();
@@ -382,7 +390,13 @@ describe('the list', () => {
   });
 
   it('tells an empty supplier list from an empty buyer list', () => {
-    render(<OrdersScreen demoMode="REAL" result={page([])} query={{ role: 'SUPPLIER' }} />);
+    render(
+      <OrdersScreen
+        demoMode="REAL"
+        result={page([])}
+        query={{ context: TEST_CONTEXT, role: 'SUPPLIER' }}
+      />,
+    );
     expect(screen.getByText('هنوز سفارشی به این سازمان داده نشده است.')).toBeInTheDocument();
   });
 });
@@ -432,7 +446,7 @@ describe('accessibility', () => {
       <OrdersScreen
         demoMode="REAL"
         result={{ kind: 'OK', data: { items: [ORDER], nextCursor: null } }}
-        query={{ role: 'BUYER' }}
+        query={{ context: TEST_CONTEXT, role: 'BUYER' }}
       />,
     );
     expect(await axe(container)).toHaveNoViolations();
@@ -507,7 +521,7 @@ describe('the order page while the provider is unknown (Q-14)', () => {
     render(
       <OrdersScreen
         result={{ kind: 'OK', data: { items: [ORDER], nextCursor: null } }}
-        query={{ role: 'BUYER' }}
+        query={{ context: TEST_CONTEXT, role: 'BUYER' }}
         demoMode="UNKNOWN"
       />,
     );
@@ -520,7 +534,7 @@ describe('the order list and the order page: «حالت نمایشی» (Q-14)', 
     render(
       <OrdersScreen
         result={{ kind: 'OK', data: { items: [ORDER], nextCursor: null } }}
-        query={{ role: 'BUYER' }}
+        query={{ context: TEST_CONTEXT, role: 'BUYER' }}
         demoMode="SIMULATED"
       />,
     );
@@ -531,7 +545,7 @@ describe('the order list and the order page: «حالت نمایشی» (Q-14)', 
     render(
       <OrdersScreen
         result={{ kind: 'OK', data: { items: [ORDER], nextCursor: null } }}
-        query={{ role: 'BUYER' }}
+        query={{ context: TEST_CONTEXT, role: 'BUYER' }}
         demoMode="REAL"
       />,
     );

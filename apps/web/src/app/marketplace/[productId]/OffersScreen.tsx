@@ -15,6 +15,8 @@ import { formatMoney, toPersianDigits } from '@/lib/format';
 import type { OffersPage, Product, ReadResult } from '@/server/marketplace';
 
 import { PlaceOrderForm } from './PlaceOrderForm';
+import type { Binding } from '@/lib/unresolved-tenancy';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * `/marketplace/[productId]` — مقایسه پیشنهادها (docs/16 § ۱۶٫۶, role
@@ -35,6 +37,8 @@ import { PlaceOrderForm } from './PlaceOrderForm';
 const APPROVED_OFFER_LABEL = 'تأییدشده';
 
 export interface OffersScreenProps {
+  /** The organization tag this page's URLs carry (`server/page-context.ts`). */
+  readonly context: string;
   readonly product: ReadResult<Product>;
   readonly offers: ReadResult<OffersPage>;
   readonly productId: string;
@@ -52,7 +56,7 @@ export interface OffersScreenProps {
     readonly mintSubmissionId: () => string;
     readonly organizationId: string | null;
     /** One-way tags of this login, so a form can recognise its own remembered order (`submissionBinding`). */
-    readonly binding: { readonly owner: string; readonly session: string };
+    readonly binding: Binding;
     /** The session's lifetime: a remembered unresolved order is not kept longer than that. */
     readonly sessionMaxAgeSeconds: number;
   };
@@ -63,7 +67,15 @@ const CONTROL =
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ' +
   'focus-visible:outline-focus';
 
-function SortControl({ productId, sort }: { productId: string; sort?: string }) {
+function SortControl({
+  productId,
+  sort,
+  context,
+}: {
+  productId: string;
+  sort?: string;
+  context: string;
+}) {
   return (
     <form
       method="get"
@@ -71,6 +83,7 @@ function SortControl({ productId, sort }: { productId: string; sort?: string }) 
       className="flex flex-wrap items-end gap-4"
       aria-label="ترتیب پیشنهادها"
     >
+      <ContextField context={context} />
       <label htmlFor="filter-sort" className="flex flex-col gap-1 text-sm text-content-muted">
         ترتیب
         <select id="filter-sort" name="sort" defaultValue={sort ?? ''} className={CONTROL}>
@@ -195,6 +208,7 @@ function OrderSection({
 }
 
 export function OffersScreen({
+  context,
   product,
   offers,
   productId,
@@ -241,7 +255,7 @@ export function OffersScreen({
 
       {product.kind === 'OK' ? (
         <Section headingId="offers" title="پیشنهادهای تأمین‌کنندگان">
-          <SortControl productId={productId} sort={sort} />
+          <SortControl productId={productId} sort={sort} context={context} />
 
           {offers.kind === 'FORBIDDEN' ? <NoAccessState /> : null}
           {offers.kind === 'UNAVAILABLE' ? (

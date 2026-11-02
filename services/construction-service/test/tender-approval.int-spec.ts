@@ -1089,6 +1089,10 @@ describe('the approval gates of a tender', () => {
 
     const insertTender = async (a: string, tenderId: string, status: string) => {
       const row = await ownTenderRow(a, tenderId);
+      // One instant for every timestamp: ck_tender_timestamps_ordered needs
+      // status_changed_at and updated_at >= created_at, and three `new Date()`
+      // calls straddling a millisecond tick break it.
+      const now = new Date();
       return runUnscoped('the suite inserts a tender as the runtime role', () =>
         w.prisma.client.tender.create({
           data: {
@@ -1098,12 +1102,12 @@ describe('the approval gates of a tender', () => {
             title: 'Inserted',
             scopeOfWork: 'Inserted',
             status: status as 'DRAFT',
-            statusChangedAt: new Date(),
+            statusChangedAt: now,
             statusChangedBy: 'USR_X',
-            createdAt: new Date(),
+            createdAt: now,
             createdBy: 'USR_X',
             createdCorrelationId: 'c',
-            updatedAt: new Date(),
+            updatedAt: now,
             updatedBy: 'USR_X',
           },
         }),
@@ -1148,6 +1152,7 @@ describe('the approval gates of a tender', () => {
       const [one, two] = await stepRows(tenderId, 'tender.publication');
 
       // Inserted GRANTED: the step is written asked, never decided.
+      const now = new Date();
       await expect(
         runUnscoped('the suite inserts a decided step', () =>
           w.prisma.client.approval.create({
@@ -1166,10 +1171,10 @@ describe('the approval gates of a tender', () => {
               authorityRole: 'ORGANIZATION_ADMIN',
               authorityLabel: 'Fake',
               status: 'GRANTED',
-              requestedAt: new Date(),
-              decidedAt: new Date(),
+              requestedAt: now,
+              decidedAt: now,
               decidedBy: 'USR_X',
-              createdAt: new Date(),
+              createdAt: now,
               createdCorrelationId: 'c',
             },
           }),

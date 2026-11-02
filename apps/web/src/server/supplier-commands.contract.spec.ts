@@ -58,6 +58,7 @@ import {
   provenUnwritten,
   registerSupplier,
 } from './supplier-commands';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * What the supplier write screens depend on, pinned to supplier-service's
@@ -265,7 +266,7 @@ describe('the request bodies', () => {
       `plainText().min(1).max(${MAX_STATEMENT_LENGTH}).optional()`,
     );
     expect(prop('submitQualificationSchema', 'evidence')).toBe(
-      `z.array(qualificationEvidenceInputSchema).max(${MAX_EVIDENCE_ITEMS}).default([])`,
+      `z.array(qualificationEvidenceInputSchema).max(${MAX_EVIDENCE_ITEMS}).prefault([])`,
     );
     expect(prop('qualificationEvidenceInputSchema', 'documentId')).toBe('identifier');
     expect(prop('qualificationEvidenceInputSchema', 'label')).toBe(
@@ -437,7 +438,7 @@ describe('what the service refuses with a sentence, and how the portal says it',
           subject: 's',
           username: 'u',
           organizationId: 'O',
-          accessToken: 'a',
+          accessToken: actingAccessToken('O'),
           accessTokenExpiresAt: 9e9,
           refreshToken: 'r',
           csrfToken: 'c',
@@ -500,7 +501,7 @@ describe('what the service refuses with a sentence, and how the portal says it',
         subject: 's',
         username: 'u',
         organizationId: 'O',
-        accessToken: 'a',
+        accessToken: actingAccessToken('O'),
         accessTokenExpiresAt: 9e9,
         refreshToken: 'r',
         csrfToken: 'c',

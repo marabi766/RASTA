@@ -1,10 +1,11 @@
 'use client';
 
-import { useActionState, useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
-import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import { draftFormLines, parseDraft, rowsOfLines } from '@/lib/statement-draft';
 import {
   EMPTY_LINE,
@@ -19,14 +20,19 @@ import {
   type StatementLineValues,
 } from '@/lib/statement-fields';
 import {
+  advanceUnresolvedStatement,
+  answerUnresolvedStatement,
   clearUnresolvedStatement,
   restoreUnresolvedStatement,
   saveUnresolvedStatement,
+  settleUnresolvedStatement,
   type ReplayStamp,
   type RestoredStatement,
   type StatementScope,
+  statementQuarantine,
 } from '@/lib/unresolved-statement';
 import type { Binding } from '@/lib/unresolved-order';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 
 import { submitStatementCommand, submitStatementDraft } from './statement-actions';
 import {
@@ -35,6 +41,7 @@ import {
   type StatementFormState,
   type UnconfirmedStatement,
 } from './statement-form-state';
+import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
  * One statement command this viewer may issue — drafting a statement of the
@@ -144,7 +151,33 @@ function rowCount(rows: readonly StatementLineValues[]): number {
   return Math.min(FORM_LINE_ROWS, Math.max(FIRST_ROWS, last + 1));
 }
 
-export function StatementCommandForm({
+/**
+ * The form, drawn the one way every fenced form is (`UnresolvedForm`): behind
+ * the device's quarantine of this kind, and — every time it mounts — from what
+ * `sessionStorage` keeps of its own submission, if anything: its uncertainty
+ * view, never a blank form under a key whose outcome is unknown.
+ */
+export function StatementCommandForm(props: StatementCommandFormProps) {
+  const { scope, submissionId, binding, sessionMaxAgeSeconds } = props;
+  const restore = () => {
+    const restored = restoreUnresolvedStatement(scope, binding, sessionMaxAgeSeconds);
+    return restored?.entry.submissionId === submissionId
+      ? { submissionId, state: unconfirmedFrom(restored) }
+      : null;
+  };
+  return (
+    <UnresolvedForm
+      source={statementQuarantine}
+      account={binding}
+      scope={`${scope.contractId}.${scope.statementId ?? 'draft'}`}
+      restore={restore}
+    >
+      {(restored) => <StatementCommandFormBody {...props} initial={restored ?? props.initial} />}
+    </UnresolvedForm>
+  );
+}
+
+function StatementCommandFormBody({
   scope,
   command,
   csrfToken,
@@ -158,57 +191,55 @@ export function StatementCommandForm({
   heldBy = null,
 }: StatementCommandFormProps) {
   const send = useCallback(
-    async (previous: StatementFormState, form: FormData): Promise<StatementFormState> => {
-      const firstSend = previous.kind !== 'UNCONFIRMED';
+    (previous: StatementFormState, form: FormData): Promise<StatementFormState> => {
+      const retrying = previous.kind === 'UNCONFIRMED' ? previous : null;
       const sent = form.get(SUBMISSION_FIELD);
-      const sentId = firstSend ? (typeof sent === 'string' ? sent : '') : previous.submissionId;
-      if (firstSend) {
+      const submissionId = retrying ? retrying.submissionId : typeof sent === 'string' ? sent : '';
+      // Remembered BEFORE it is sent; not sent if it cannot be remembered.
+      const unsent = retrying ? null : pendingFrom(form, command, replay);
+      return submitThroughSlot<StatementFormState>({
+        submissionId,
+        retrying,
         // Another submission's outcome is unknown here: nothing is sent, and its
         // record is not touched.
-        const holder = restoreUnresolvedStatement(scope, binding, sessionMaxAgeSeconds);
-        if (holder && holder.entry.submissionId !== sentId) return { kind: 'HELD' };
-      } else {
+        stored: () => {
+          const stored = restoreUnresolvedStatement(scope, binding, sessionMaxAgeSeconds);
+          return stored
+            ? { submissionId: stored.entry.submissionId, state: unconfirmedFrom(stored) }
+            : null;
+        },
+        remember: () => (unsent ? saveUnresolvedStatement(scope, unsent, binding) : null),
         // A replay only while the service still holds its key, and only from
         // the login it is bound to. Past that, never re-sent.
-        const stored = restoreUnresolvedStatement(scope, binding, sessionMaxAgeSeconds);
-        if (stored?.kind !== 'RETRYABLE' || stored.entry.submissionId !== previous.submissionId) {
-          return { ...previous, viewOnly: true };
-        }
-      }
-
-      // Remembered BEFORE it is sent; not sent if it cannot be remembered.
-      const unsent = firstSend ? pendingFrom(form, command, replay) : null;
-      const saved = unsent ? saveUnresolvedStatement(scope, unsent, binding) : null;
-      if (saved === 'HELD') return { kind: 'HELD' };
-      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
-
-      let next: StatementFormState;
-      try {
-        next =
+        admitRetry: (view) => {
+          const stored = restoreUnresolvedStatement(scope, binding, sessionMaxAgeSeconds);
+          return stored?.kind === 'RETRYABLE' && stored.entry.submissionId === view.submissionId
+            ? null
+            : { ...view, viewOnly: true };
+        },
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        advance: () => advanceUnresolvedStatement(scope, submissionId, binding),
+        send: () =>
           scope.statementId === null
-            ? await submitStatementDraft(scope.contractId, previous, form)
-            : await submitStatementCommand(scope.contractId, scope.statementId, previous, form);
-      } catch (error) {
-        // Done: the action redirects to the statement.
-        if (isRedirect(error)) {
-          clearUnresolvedStatement(scope, sentId);
-          throw error;
-        }
-        const ended = await sessionHasEnded();
-        if (!firstSend) return withRetryNote(previous, ended ? 'sessionEnded' : 'retryUnknown');
-        if (unsent) return ended ? { ...unsent, sessionEnded: true } : unsent;
-        throw error;
-      }
-
-      // Still in doubt: kept. A definite answer to THIS submission's first send:
-      // its own record is dropped — never another's.
-      if (next.kind === 'UNCONFIRMED') saveUnresolvedStatement(scope, next, binding);
-      else if (firstSend) clearUnresolvedStatement(scope, sentId);
-      return next;
+            ? submitStatementDraft(scope.contractId, previous, form)
+            : submitStatementCommand(scope.contractId, scope.statementId, previous, form),
+        failed: (ended) => {
+          if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
+          if (!unsent) return null;
+          return ended ? { ...unsent, sessionEnded: true } : unsent;
+        },
+        // Still in doubt: kept. A definite answer to THIS submission's first send:
+        // its own record is dropped — never another's.
+        answer: (state, attempt) => answerUnresolvedStatement(scope, state, binding, attempt),
+        settle: (attempt, settlement) =>
+          settleUnresolvedStatement(scope, submissionId, binding, attempt, settlement),
+        held: { kind: 'HELD' },
+        unavailable: { kind: 'STORAGE_UNAVAILABLE' },
+      });
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds],
   );
-  const [state, action, pending] = useActionState(send, initial);
+  const [state, action, pending] = useSlotActionState(send, initial);
   const headingId = `statement-command-${command}`;
 
   if (state.kind === 'UNCONFIRMED') {
@@ -220,7 +251,7 @@ export function StatementCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         pageHref={pageHref}
-        onForget={() => clearUnresolvedStatement(scope, state.submissionId)}
+        onForget={() => clearUnresolvedStatement(scope, state.submissionId, binding)}
       />
     );
   }
@@ -553,7 +584,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the statements again and offers what they allow. */}
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

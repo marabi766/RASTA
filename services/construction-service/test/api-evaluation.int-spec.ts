@@ -1,5 +1,7 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import {
   reasonsOf,
   actor,
@@ -59,10 +61,9 @@ describe('evaluation API', () => {
       bids.push({ bidder, bidId: view.bidId });
     }
     await runUnscoped('the suite lets the deadline pass', () =>
-      w.prisma.client.$executeRawUnsafe(
-        `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-           "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
-      ),
+      w.prisma.client
+        .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+           "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`),
     );
     await w.tenderClose.close({ organizationId: owner, tenderId });
     await asAdmin(owner, () => w.tenderOpen.open(tenderId));
@@ -423,8 +424,8 @@ describe('evaluation API', () => {
       content: { priceMinor: '1250000000' },
       evaluation: { decision: null, completed: false, totalScaled: null },
     });
-    expect(JSON.stringify(res.body)).not.toContain(second.bidId);
-    expect(JSON.stringify(res.body)).not.toContain('1300000000');
+    // No independently verified path exemption: generated values stay searched (#452).
+    expectNotDisclosed(res.body, [second.bidId, '1300000000']);
 
     const other = await http()
       .get(path)

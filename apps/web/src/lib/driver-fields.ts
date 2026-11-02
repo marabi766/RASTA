@@ -35,6 +35,32 @@ export const EMPTY_CREATE_DRIVER_FORM: CreateDriverFormValues = {
   notes: '',
 };
 
+/**
+ * What the form says when fleet-service refuses the person as not a live member
+ * of this organization (`server/drivers.ts` maps the refusal to it). One
+ * sentence for every way of not being one; here, not in the server module, so
+ * the browser suite can read it too.
+ */
+export const NOT_A_MEMBER_TEXT =
+  'این کاربر عضو فعال این سازمان نیست. تنها عضو این سازمان را می‌توان راننده ثبت کرد.';
+
+/**
+ * How the registration form asks *who* (task 095). `PICK`: the members of this
+ * organization who are not yet drivers, every one of them (`server/
+ * driver-roster.ts`). `ID`: the id field, for a person who may not list the
+ * members (`NOT_ALLOWED`) or when the list could not be read whole. Either way
+ * fleet-service decides on the POST whether the person is a member.
+ */
+export interface DriverPickerOption {
+  readonly userId: string;
+  readonly name: string;
+  readonly username: string;
+}
+
+export type DriverPicker =
+  | { readonly kind: 'PICK'; readonly candidates: readonly DriverPickerOption[] }
+  | { readonly kind: 'ID'; readonly reason: 'NOT_ALLOWED' | 'INCOMPLETE' | 'UNAVAILABLE' };
+
 // ---------------------------------------------------------------------------
 // Edit a driver
 // ---------------------------------------------------------------------------

@@ -81,8 +81,8 @@ pnpm infra:up          # بالا آوردن
 pnpm infra:down        # خاموش کردن
 pnpm infra:reset       # ⚠️ حذف حجم‌ها و راه‌اندازی از صفر
 pnpm infra:logs        # دنبال کردن Log
-docker compose --profile tools up -d           # Kafka UI, Temporal UI, Mailpit
-docker compose --profile observability up -d   # OTel, Prometheus, Grafana
+COMPOSE_PROFILES=tools pnpm infra:up           # Kafka UI, Temporal UI, Mailpit
+COMPOSE_PROFILES=observability pnpm infra:up   # OTel, Prometheus, Grafana
 ```
 
 ### پایگاه داده

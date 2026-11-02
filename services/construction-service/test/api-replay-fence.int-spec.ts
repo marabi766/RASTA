@@ -2,6 +2,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import request from 'supertest';
 import { runUnscoped } from '@rasta/nest-common';
+import { errorEnvelope, expectNotDisclosed } from '@rasta/testing';
 import { apiTenant, orgAdmin, startApi, type ApiHarness } from './api-helpers';
 import { PROJECT, cleanup } from './helpers';
 
@@ -137,8 +138,12 @@ describe('Idempotency-Replay-Deadline (real HTTP)', () => {
       .send(PROJECT)
       .expect(400);
     expect(response.body.code).toBe('VALIDATION_FAILED');
-    // Nothing of the limit, the clock or any stored value is in the body.
-    expect(JSON.stringify(response.body)).not.toContain(tenYears);
+    // Nothing of the limit, the clock or any stored value is in the body: the deadline sent is
+    // looked for once the envelope's correlation ULID and timestamp are set aside (#452).
+    expectNotDisclosed(response.body, [tenYears], {
+      metadata: errorEnvelope({ headers: response.headers }),
+      input: { 'idempotency-replay-deadline': tenYears },
+    });
     expect(JSON.stringify(response.body)).toContain('Idempotency-Replay-Deadline');
     expect({ projects: (await projects()).length, keys: (await keyRows()).length }).toEqual(before);
   });

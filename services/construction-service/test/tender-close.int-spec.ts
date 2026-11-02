@@ -1,5 +1,8 @@
+import { eligibilityClockSql } from '@rasta/testing';
+import { setEligibilityFixture } from '@rasta/testing';
 import { eventEnvelopeSchema } from '@rasta/contracts';
 import { runUnscoped } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import { ulid } from 'ulid';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { TenderCloseRepository } from '../src/tender/tender-close.repository';
@@ -65,7 +68,7 @@ describe('tender close sweeper', () => {
   const makeOverdue = (tenderId: string) =>
     sql(
       'the suite lets the deadline pass',
-      `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+      eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
          "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
     );
 
@@ -99,17 +102,14 @@ describe('tender close sweeper', () => {
     expect(mine).toBeDefined();
     await sql(
       'the suite gives back the claims it did not mean to take',
-      `UPDATE "tender" SET "close_lease_until" = NULL, "close_fence" = NULL
+      eligibilityClockSql`UPDATE "tender" SET "close_lease_until" = NULL, "close_fence" = NULL
         WHERE "close_fence" = '${fence}' AND "id" <> '${tenderId}'`,
     );
     return mine!;
   };
 
   const expireLease = (tenderId: string) =>
-    sql(
-      'the suite lets a lease run out',
-      `UPDATE "tender" SET "close_lease_until" = now() - interval '1 second' WHERE "id" = '${tenderId}'`,
-    );
+    setEligibilityFixture(w.prisma, 'tenderExpired', [tenderId]);
 
   /** Waits (bounded, on the database's own clock) for a tender's deadline to pass. */
   const untilDeadlinePassed = async (tenderId: string, timeoutMs = 10_000) => {
@@ -199,7 +199,8 @@ describe('tender close sweeper', () => {
       const [event] = await closedEvents(owner);
       const payload = eventEnvelopeSchema.parse(event!.payload).payload;
       expect(payload).toMatchObject({ bidCount: 1 });
-      expect(JSON.stringify(event!.payload)).not.toMatch(/1250000000|Mobilisation|bidder/i);
+      // No independently verified path exemption: generated values stay searched (#452).
+      expectNotDisclosed(event!.payload, [/1250000000|Mobilisation|bidder/i]);
     });
 
     it('leaves a tender whose deadline has not passed alone', async () => {
@@ -239,7 +240,7 @@ describe('tender close sweeper', () => {
       // The deadline is moved out after the claim: the claim was a first cut, not the decision.
       await sql(
         'the owner moves the deadline out',
-        `UPDATE "tender" SET "bid_closing_at" = now() + interval '1 hour' WHERE "id" = '${tenderId}'`,
+        eligibilityClockSql`UPDATE "tender" SET "bid_closing_at" = now() + interval '1 hour' WHERE "id" = '${tenderId}'`,
       );
 
       expect(await w.tenderClose.close({ organizationId: owner, tenderId, fence })).toBe('NOT_DUE');
@@ -387,7 +388,7 @@ describe('tender close sweeper', () => {
       await claimOnly(tenderId, ulid());
       await sql(
         'the suite schedules a retry',
-        `UPDATE "tender" SET "close_attempts" = 3, "close_next_attempt_at" = now() + interval '1 hour'
+        eligibilityClockSql`UPDATE "tender" SET "close_attempts" = 3, "close_next_attempt_at" = now() + interval '1 hour'
           WHERE "id" = '${tenderId}'`,
       );
 
@@ -431,16 +432,12 @@ describe('tender close sweeper', () => {
       expect(swept.map((c) => c.id)).not.toContain(failing.tenderId);
       await sql(
         'the suite gives the claims back',
-        `UPDATE "tender" SET "close_lease_until" = NULL, "close_fence" = NULL
+        eligibilityClockSql`UPDATE "tender" SET "close_lease_until" = NULL, "close_fence" = NULL
           WHERE "id" IN ('${waiting.tenderId}')`,
       );
 
       // Due again once the backoff has passed.
-      await sql(
-        'the suite lets the backoff pass',
-        `UPDATE "tender" SET "close_next_attempt_at" = now() - interval '1 second'
-          WHERE "id" = '${failing.tenderId}'`,
-      );
+      await setEligibilityFixture(w.prisma, 'tenderDue', [failing.tenderId]);
       await w.tenderCloseSweeper.runOnce();
       expect(await rowOf(failing.tenderId)).toMatchObject({
         status: 'CLOSED',
@@ -465,7 +462,7 @@ describe('tender close sweeper', () => {
       for (let i = 0; i < 4; i += 1) {
         await sql(
           'the suite makes the tender claimable',
-          `UPDATE "tender" SET "close_next_attempt_at" = NULL WHERE "id" = '${tenderId}'`,
+          eligibilityClockSql`UPDATE "tender" SET "close_next_attempt_at" = NULL WHERE "id" = '${tenderId}'`,
         );
         const claim = await claimOnly(tenderId, ulid());
         await w.tenderClose.recordFailure(
@@ -490,7 +487,7 @@ describe('tender close sweeper', () => {
       await makeOverdue(tenderId);
       await sql(
         'the suite records many failures',
-        `UPDATE "tender" SET "close_attempts" = 9, "close_next_attempt_at" = now() + interval '1 hour'
+        eligibilityClockSql`UPDATE "tender" SET "close_attempts" = 9, "close_next_attempt_at" = now() + interval '1 hour'
           WHERE "id" = '${tenderId}'`,
       );
 
@@ -655,7 +652,7 @@ describe('tender close sweeper', () => {
       const { owner, bidder, tenderId } = await setup();
       await sql(
         'the deadline is one second away',
-        `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+        eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
            "bid_closing_at" = now() + interval '1 second' WHERE "id" = '${tenderId}'`,
       );
       const decided = deferred();

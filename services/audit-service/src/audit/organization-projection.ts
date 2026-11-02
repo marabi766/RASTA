@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
-import { declaredFieldNames } from './refusal-diagnostics';
+import { declaredFieldNames, parseOrRefuse } from './refusal-diagnostics';
 
 /**
  * The consumer-side contract for the three organization events that carry
@@ -300,10 +300,10 @@ export function isOrganizationProjectionEvent(
  * worse than an outage — and a hierarchy that is wrong is a
  * cross-tenant read.
  *
- * The `ZodError` itself never leaves the consumer: its message carries Zod's
- * own messages, which can quote a received value. `DomainProjectorConsumer`
- * rethrows a refusal built from issue codes and the paths of
- * {@link ORGANIZATION_PROJECTION_FIELD_NAMES} only (PR #378 r1 F3).
+ * A payload that fails its schema throws a `SchemaRefusedError` carrying the
+ * parse's zod 3 refusal (PR #444 r1 F1). It never leaves the consumer as it
+ * is: `DomainProjectorConsumer` rethrows a refusal built from issue codes and
+ * the paths of {@link ORGANIZATION_PROJECTION_FIELD_NAMES} only (PR #378 r1 F3).
  */
 export function toOrganizationProjection(
   envelope: EventEnvelope,
@@ -315,7 +315,7 @@ export function toOrganizationProjection(
 
   switch (envelope.eventName) {
     case ORGANIZATION_PROJECTION_EVENTS.CREATED: {
-      const payload = organizationCreated.parse(envelope.payload);
+      const payload = parseOrRefuse(organizationCreated, envelope.payload);
       return {
         kind: 'CREATED',
         organizationId: payload.organizationId,
@@ -329,7 +329,7 @@ export function toOrganizationProjection(
     }
 
     case ORGANIZATION_PROJECTION_EVENTS.MOVED: {
-      const payload = organizationMoved.parse(envelope.payload);
+      const payload = parseOrRefuse(organizationMoved, envelope.payload);
       return {
         kind: 'MOVED',
         organizationId: payload.organizationId,
@@ -341,7 +341,7 @@ export function toOrganizationProjection(
     }
 
     case ORGANIZATION_PROJECTION_EVENTS.STATUS_CHANGED: {
-      const payload = organizationStatusChanged.parse(envelope.payload);
+      const payload = parseOrRefuse(organizationStatusChanged, envelope.payload);
       // The subject is always included even when the producer left it out of
       // the cascade: a status change that did not change the subject's own
       // status is not a status change, and inferring it here costs nothing.

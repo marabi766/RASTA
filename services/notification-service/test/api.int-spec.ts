@@ -199,11 +199,12 @@ describe('notification read API (real application)', () => {
       userId: me,
       readAt: new Date(),
     });
+    const now = new Date();
     const dismissed = await seedNotification(api.prisma, {
       organizationId: org,
       userId: me,
-      readAt: new Date(),
-      dismissedAt: new Date(),
+      readAt: now,
+      dismissedAt: now,
     });
     const expired = await seedNotification(api.prisma, {
       organizationId: org,
@@ -326,7 +327,9 @@ describe('notification read API (real application)', () => {
       (await get('/v1/notifications/unread-count', userToken(me, org))).body,
     ];
     const text = JSON.stringify(bodies);
-    expect(text).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+    // No address: not even an '@', which every address needs and no generated id or instant can
+    // hold — so, unlike an address-shaped pattern, the run's ids cannot decide this check (#452).
+    expect(text).not.toContain('@');
     for (const key of [
       'userId',
       'organizationId',

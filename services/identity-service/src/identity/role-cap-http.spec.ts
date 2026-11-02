@@ -118,9 +118,15 @@ describe('role lists at the HTTP boundary are capped at the platform role count'
 
       expect(response.status).toBe(400);
       expect(response.body.code).toBe('VALIDATION_FAILED');
-      expect(response.body.details).toContainEqual(
-        expect.objectContaining({ path: field, code: 'too_big' }),
-      );
+      // One detail, the length: no element was parsed (zod 3 added one issue per
+      // element after it — 1,001 here — which is GHSA-mrhx-c7xc-m3w5).
+      expect(response.body.details).toEqual([
+        {
+          path: field,
+          code: 'too_big',
+          message: `Array must contain at most ${PLATFORM_ROLES.length} element(s)`,
+        },
+      ]);
       expect(service).not.toHaveBeenCalled();
     });
   });

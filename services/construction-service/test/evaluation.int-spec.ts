@@ -1,3 +1,4 @@
+import { eligibilityClockSql, expectNotDisclosed } from '@rasta/testing';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -343,7 +344,7 @@ describe('evaluating the opened bids of a tender', () => {
 
       await sql(
         'the suite lets the deadline pass',
-        `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+        eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
            "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
       );
       await w.tenderClose.close({ organizationId: owner, tenderId });
@@ -556,8 +557,8 @@ describe('evaluating the opened bids of a tender', () => {
           .digest('hex'),
         scoredAt: at.toISOString(),
       });
-      // 8500 as a number of its own: the payload's ULIDs, UUIDs and digest can contain it by chance.
-      expect(JSON.stringify(payloadOf(event!))).not.toMatch(/(?<![\w-])8500(?![\w-])/);
+      // The event's ids and digest have no independent exemption: keep them searched.
+      expectNotDisclosed(payloadOf(event!), ['8500']);
     });
 
     it.each([

@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { globalFetchStub } from '@rasta/testing';
 import { KeycloakAdminClient } from '../../src/keycloak/keycloak.client';
+import type { KeycloakWriteFence } from '../../src/keycloak/keycloak-write-fence';
 import type { PlatformAttributes } from '../../src/keycloak/platform-attributes';
 import { assertDisposableTarget } from './live-target-guard';
 
@@ -18,7 +20,9 @@ import { assertDisposableTarget } from './live-target-guard';
  * projection's `PUT` is held on a gate **after** its `GET` has returned. While
  * it is held, an administrator — the same Admin API the console uses, on a
  * `fetch` the gate never sees — makes the concurrent change. Then the gate
- * opens and the assertion is on what Keycloak holds.
+ * opens and the assertion is on what Keycloak holds. Both senders refuse every
+ * redirect (Q-155, PR #492 r2 F2): `KEYCLOAK_URL` comes from the environment,
+ * and the admin password grant and bearer must never follow a 307/308.
  *
  * Run by the `e2e` CI job, which has the Keycloak (`pnpm --filter
  * @rasta/identity-service test:keycloak-live`, with
@@ -29,7 +33,11 @@ import { assertDisposableTarget } from './live-target-guard';
  * authentication and one realm read. No user is touched before all pass.
  */
 
-const realFetch = globalThis.fetch;
+/**
+ * The global `fetch` as the suite found it, guarded: the administrator's
+ * requests go out on `fetchStub.send`, never through the gate.
+ */
+const fetchStub = globalFetchStub();
 
 function required(name: string, fallback?: string): string {
   const value = process.env[name]?.trim() || fallback;
@@ -61,23 +69,26 @@ interface KeycloakUser {
 let adminToken: { value: string; expiresAt: number } | undefined;
 
 /** The concurrent writer: the realm administrator, on a `fetch` the gate never holds. */
-async function admin(path: string, init: RequestInit = {}): Promise<Response> {
+async function admin(path: string, init: Omit<RequestInit, 'redirect'> = {}): Promise<Response> {
   if (!adminToken || adminToken.expiresAt < Date.now() + 10_000) {
-    const response = await realFetch(`${config.url}/realms/master/protocol/openid-connect/token`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'password',
-        client_id: 'admin-cli',
-        username: config.admin,
-        password: config.adminPassword,
-      }),
-    });
+    const response = await fetchStub.send(
+      `${config.url}/realms/master/protocol/openid-connect/token`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'password',
+          client_id: 'admin-cli',
+          username: config.admin,
+          password: config.adminPassword,
+        }),
+      },
+    );
     if (!response.ok) throw new Error(`Keycloak refused an admin token: ${response.status}`);
     const body = (await response.json()) as { access_token: string; expires_in: number };
     adminToken = { value: body.access_token, expiresAt: Date.now() + body.expires_in * 1000 };
   }
-  const response = await realFetch(`${config.url}/admin/realms/${config.realm}${path}`, {
+  const response = await fetchStub.send(`${config.url}/admin/realms/${config.realm}${path}`, {
     ...init,
     headers: {
       ...init.headers,
@@ -96,6 +107,19 @@ const read = async (id: string) => (await (await admin(`/users/${id}`)).json()) 
 /** A change the way the console makes it: only the fields it names. */
 const change = (id: string, fields: Partial<KeycloakUser>) =>
   admin(`/users/${id}`, { method: 'PUT', body: JSON.stringify(fields) });
+
+/**
+ * The fence of one write. Here there is no identity database — this suite is
+ * about Keycloak's own behaviour — so it records nothing and carries only the
+ * client's deadline; the fence itself is proven against PostgreSQL in
+ * `keycloak-write-fence.int-spec.ts` (D-069).
+ */
+const unfenced: KeycloakWriteFence = async () => ({
+  id: 'KWA_LIVE',
+  signal: AbortSignal.timeout(10_000),
+  assertDispatchable() {},
+  observeReply: () => false,
+});
 
 function platform(userId: string, roles: string[]): PlatformAttributes {
   return {
@@ -116,15 +140,15 @@ function holdNextWrite(keycloakId: string) {
   const open = new Promise<void>((resolve) => (release = resolve));
   const parked = new Promise<void>((resolve) => (reached = resolve));
   let held = false;
-  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+  fetchStub.replace(async (input, init) => {
     const url = String(input);
     if (!held && init?.method === 'PUT' && url.endsWith(`/users/${keycloakId}`)) {
       held = true;
       reached();
       await open;
     }
-    return realFetch(input, init);
-  }) as typeof fetch;
+    return fetchStub.send(input, init);
+  });
   return { reached: parked, release };
 }
 
@@ -152,8 +176,17 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
     });
   });
 
-  /** An account exactly as identity-service provisions one. */
-  async function provisioned(): Promise<{ keycloakId: string; userId: string }> {
+  /**
+   * An account exactly as identity-service provisions one (D-069 addendum D):
+   * created disabled with its provenance alone, then — after the user row
+   * commits — its grants written and the account enabled once, by the same
+   * two writes the projector makes.
+   */
+  async function provisioned(): Promise<{
+    keycloakId: string;
+    userId: string;
+    asCreated: unknown;
+  }> {
     const suffix = randomUUID().slice(0, 8);
     const userId = `USR_LIVE_${suffix.toUpperCase()}`;
     const keycloakId = await client.createUser({
@@ -161,12 +194,16 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
       email: `live.race.${suffix}@example.test`,
       firstName: 'آزمون',
       lastName: 'مسابقه',
-      attributes: platform(userId, ['OPERATOR']),
-      enabled: true,
+      userId,
     });
     if (!keycloakId) throw new Error('createUser returned no id');
     created.push(keycloakId);
-    return { keycloakId, userId };
+    const asCreated = await read(keycloakId);
+    await client.replacePlatformAttributes(keycloakId, platform(userId, ['OPERATOR']), {
+      fence: unfenced,
+    });
+    await client.activateAccount(keycloakId, userId, { fence: unfenced });
+    return { keycloakId, userId, asCreated };
   }
 
   /** Projects new roles, with `concurrently` run while the write is held after its read. */
@@ -177,18 +214,20 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
   ): Promise<void> {
     const gate = holdNextWrite(keycloakId);
     try {
-      const projection = client.replacePlatformAttributes(keycloakId, attributes);
+      const projection = client.replacePlatformAttributes(keycloakId, attributes, {
+        fence: unfenced,
+      });
       await gate.reached;
       await concurrently();
       gate.release();
       await projection;
     } finally {
-      globalThis.fetch = realFetch;
+      fetchStub.restore();
     }
   }
 
   afterEach(() => {
-    globalThis.fetch = realFetch;
+    fetchStub.restore();
   });
 
   afterAll(async () => {
@@ -196,7 +235,15 @@ describe('Keycloak projection vs a concurrent change (live Keycloak, ADR-060 § 
   });
 
   it('provisions the account the way the tests below assume', async () => {
-    const { keycloakId, userId } = await provisioned();
+    const { keycloakId, userId, asCreated } = await provisioned();
+    // Created harmless: disabled, and nothing but its provenance.
+    expect(asCreated).toMatchObject({
+      enabled: false,
+      attributes: { rasta_user_id: [userId] },
+    });
+    expect((asCreated as { attributes: Record<string, unknown> }).attributes).not.toHaveProperty(
+      'organization_roles',
+    );
     const user = await read(keycloakId);
     expect(user.requiredActions).toEqual(['UPDATE_PASSWORD']);
     expect(user.enabled).toBe(true);

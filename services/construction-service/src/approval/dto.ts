@@ -63,7 +63,7 @@ export const createPolicySchema = z
     /** Why — a governance setting without a rationale is unauditable. */
     rationale: z.string().trim().min(8).max(2000),
     /** Demo data: «نمونه — نیازمند تصویب» (ADR-023). */
-    isSample: z.boolean().default(false),
+    isSample: z.boolean().prefault(false),
     /** In order: the first is asked first (Q-70: strictly sequential). */
     steps: z.array(policyStepInput).min(1).max(MAX_POLICY_STEPS),
   })
@@ -128,7 +128,7 @@ export const decisionSchema = z
 export type DecisionDto = z.infer<typeof decisionSchema>;
 
 export const inboxQuerySchema = cursorPaginationSchema
-  .extend({ status: z.enum(APPROVAL_STATES).default('PENDING') })
+  .extend({ status: z.enum(APPROVAL_STATES).prefault('PENDING') })
   .strict();
 export type InboxQuery = z.infer<typeof inboxQuerySchema>;
 

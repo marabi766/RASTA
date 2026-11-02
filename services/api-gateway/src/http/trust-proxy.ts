@@ -67,7 +67,7 @@ export const TRUSTED_PROXY_REFUSED =
  */
 export const trustedProxiesSchema = z
   .string()
-  .default('')
+  .prefault('')
   .transform((raw) =>
     raw
       .split(',')

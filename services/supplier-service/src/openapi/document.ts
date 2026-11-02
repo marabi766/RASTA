@@ -1,6 +1,11 @@
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { z } from 'zod';
-import { toJsonSchema } from '@rasta/nest-common';
+import {
+  isOptionalField,
+  objectShapeOf,
+  publishedApiErrorSchema,
+  toJsonSchema,
+} from '@rasta/nest-common';
 import {
   approveQualificationSchema,
   listQualifiedForQuerySchema,
@@ -34,15 +39,6 @@ import {
  * against it might assume the directory already shows them what the queue does.
  * The document says which is which.
  */
-
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
-  })
-  .strict();
 
 const cursorPageOf = (item: z.ZodTypeAny) =>
   z.object({
@@ -131,7 +127,7 @@ const ERROR_DESCRIPTIONS: Record<number, string> = {
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
-  document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
   // The standing routes are not bearer-authenticated: construction-service reaches them
   // with a signed internal service token (ADR-020/035), signed for no tenant. Publishing
   // them under the bearer scheme would describe a door that does not exist and hide the
@@ -224,7 +220,7 @@ function isOperation(value: unknown): value is MutableOperation {
  * no parameters at all, and the failure is invisible because the document is
  * still valid.
  */
-function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
+function toQueryParameters(schema: z.ZodType): unknown[] {
   const shape = objectShapeOf(schema);
   if (!shape) return [];
 
@@ -233,36 +229,8 @@ function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
     return {
       name,
       in: 'query',
-      required: !member.isOptional(),
+      required: !isOptionalField(member),
       schema: jsonSchema,
     };
   });
-}
-
-function objectShapeOf(schema: z.ZodTypeAny): z.ZodRawShape | undefined {
-  // JUSTIFIED-ANY: zod's `_def` is untyped across its type-kinds, and the walk
-  // below re-checks the kind before reading a field.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = schema;
-
-  for (let depth = 0; depth < 10; depth += 1) {
-    const typeName = current?._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-      return (current as z.ZodObject<z.ZodRawShape>).shape;
-    }
-    if (typeName === z.ZodFirstPartyTypeKind.ZodEffects) {
-      current = current._def.schema;
-      continue;
-    }
-    if (
-      typeName === z.ZodFirstPartyTypeKind.ZodOptional ||
-      typeName === z.ZodFirstPartyTypeKind.ZodDefault
-    ) {
-      current = current._def.innerType;
-      continue;
-    }
-    return undefined;
-  }
-
-  return undefined;
 }

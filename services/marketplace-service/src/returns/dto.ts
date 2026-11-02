@@ -79,9 +79,9 @@ export const listReturnsQuerySchema = z
      * Which side of the request the caller is asking about — explicit, as for orders: an
      * organization is a buyer in one order and a seller in the next.
      */
-    role: z.enum(['BUYER', 'SUPPLIER']).default('BUYER'),
+    role: z.enum(['BUYER', 'SUPPLIER']).prefault('BUYER'),
     cursor: z.string().optional(),
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 

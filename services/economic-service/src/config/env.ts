@@ -43,7 +43,7 @@ export const economicEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * The organization that plays the platform operator role.
@@ -55,7 +55,7 @@ export const economicEnvSchema = baseEnvSchema
      * "the union" here would be exactly the structural assumption
      * `PROJECT_MEMORY` § 1 forbids.
      */
-    ECONOMIC_PLATFORM_ORGANIZATION_ID: z.string().min(1).default('ORG-PLATFORM'),
+    ECONOMIC_PLATFORM_ORGANIZATION_ID: z.string().min(1).prefault('ORG-PLATFORM'),
 
     /**
      * Which payment provider is wired in.
@@ -70,7 +70,7 @@ export const economicEnvSchema = baseEnvSchema
      * because a silent fallback to a simulated provider in an environment that
      * expected a real one is the worst possible failure here.
      */
-    ECONOMIC_PAYMENT_PROVIDER: z.enum(['mock']).default('mock'),
+    ECONOMIC_PAYMENT_PROVIDER: z.enum(['mock']).prefault('mock'),
 
     /**
      * Deterministic simulated latency for the mock provider, in milliseconds.
@@ -79,7 +79,7 @@ export const economicEnvSchema = baseEnvSchema
      * the loading states real. It is a fixed delay, never a random one — a
      * random delay makes a test flaky rather than realistic.
      */
-    ECONOMIC_MOCK_PAYMENT_LATENCY_MS: z.coerce.number().int().min(0).max(10_000).default(0),
+    ECONOMIC_MOCK_PAYMENT_LATENCY_MS: z.coerce.number().int().min(0).max(10_000).prefault(0),
 
     /**
      * How long a refund in flight is left alone before its reconciliation task
@@ -98,7 +98,7 @@ export const economicEnvSchema = baseEnvSchema
       .int()
       .min(30)
       .max(86_400)
-      .default(300),
+      .prefault(300),
 
     /**
      * The payment reconciler (ADR-064 step B2): an in-process sweeper over
@@ -113,36 +113,36 @@ export const economicEnvSchema = baseEnvSchema
       .int()
       .min(5)
       .max(3600)
-      .default(60),
+      .prefault(60),
     /** Tasks claimed per sweep. With the provider timeout, the bound on one sweep. */
-    ECONOMIC_PAYMENT_RECONCILER_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+    ECONOMIC_PAYMENT_RECONCILER_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
     /** How long a claim holds before another sweeper may take the task back. */
     ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS: z.coerce
       .number()
       .int()
       .min(10)
       .max(3600)
-      .default(120),
+      .prefault(120),
     /** Delay after the first unresolved attempt; doubles per attempt up to the maximum. */
     ECONOMIC_PAYMENT_RECONCILER_BACKOFF_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(60),
+      .prefault(60),
     ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(3600),
+      .prefault(3600),
     /**
      * After this many unresolved attempts, or this long since the task was
      * opened, it is escalated to a person with `PAYMENT_RECONCILIATION_ESCALATED`.
      * The hold stays: escalation changes who decides, not where the money is.
      */
-    ECONOMIC_PAYMENT_RECONCILER_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(12),
-    ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(720).default(72),
+    ECONOMIC_PAYMENT_RECONCILER_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).prefault(12),
+    ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(720).prefault(72),
 
     /**
      * The deadline on the refund-side provider calls — `refund` and
@@ -158,7 +158,7 @@ export const economicEnvSchema = baseEnvSchema
      */
     ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES: z
       .string()
-      .default('SYSTEM_ADMIN')
+      .prefault('SYSTEM_ADMIN')
       .transform((value) =>
         value
           .split(',')
@@ -180,7 +180,7 @@ export const economicEnvSchema = baseEnvSchema
       .int()
       .min(100)
       .max(60_000)
-      .default(10_000),
+      .prefault(10_000),
 
     /**
      * Cashback rewards.
@@ -227,7 +227,9 @@ export const economicEnvSchema = baseEnvSchema
      */
     ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: z.preprocess(
       (value) => (value === '' ? undefined : value),
-      booleanEnv(false).optional(),
+      // Unset stays unset (decided by NODE_ENV below). Not `booleanEnv(false).optional()`:
+      // zod 4's optional hands an absent value to a defaulted schema, which answers false.
+      z.union([z.undefined(), booleanEnv(false)]),
     ),
 
     /**
@@ -261,14 +263,14 @@ export const economicEnvSchema = baseEnvSchema
     ),
 
     /** One source read, body included. A timeout is retried, never acted on. */
-    ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+    ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).prefault(3000),
 
     /**
      * Where a union administrator's subtree is confirmed (docs/24 Q-136):
      * organization-service, the owner of the hierarchy (A-13), asked as
      * construction-service and contract-service ask it.
      */
-    ORGANIZATION_SERVICE_URL: serviceUrlSchema.default('http://localhost:3102'),
+    ORGANIZATION_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3102'),
 
     /**
      * How long that question may take, body included. It is asked under the
@@ -281,10 +283,10 @@ export const economicEnvSchema = baseEnvSchema
       .int()
       .min(100)
       .max(30_000)
-      .default(3000),
+      .prefault(3000),
 
     /** How long a stored idempotency key is honoured (docs/06 § 6.8). */
-    ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
 
     /**
      * Whether this instance runs the ledger/wallet reconciliation.
@@ -305,10 +307,10 @@ export const economicEnvSchema = baseEnvSchema
       .int()
       .min(30)
       .max(86_400)
-      .default(3600),
+      .prefault(3600),
 
     /** How many wallets one reconciliation pass checks. Bounds the query. */
-    ECONOMIC_BALANCE_AUDIT_BATCH_SIZE: z.coerce.number().int().min(1).max(5000).default(500),
+    ECONOMIC_BALANCE_AUDIT_BATCH_SIZE: z.coerce.number().int().min(1).max(5000).prefault(500),
   })
   .superRefine((env, ctx) => {
     // The grace keeps the reconciler off a refund whose provider call is still

@@ -5,6 +5,8 @@ import type { DemoMode } from '@/lib/demo-mode';
 import type { Offer, OffersPage, Product, ReadResult } from '@/server/marketplace';
 
 import { OffersScreen } from './OffersScreen';
+import { bindingOf } from '@/test/unresolved-binding';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * The order section of the offers screen: who it is shown to, which offers it
@@ -40,7 +42,7 @@ const ORDERING = {
   csrfToken: 'csrf-token-for-this-session',
   mintSubmissionId: () => 'sub_AAAAAAAAAAAAAAAAAAAA',
   organizationId: 'ORG-DEH-0001',
-  binding: { owner: 'owner-tag', session: 'session-tag' },
+  binding: bindingOf('owner-tag', 'session-tag'),
   sessionMaxAgeSeconds: 3600,
 };
 
@@ -52,6 +54,7 @@ function screen(
 ) {
   return render(
     <OffersScreen
+      context={TEST_CONTEXT}
       demoMode={demoMode}
       product={product}
       offers={offers}

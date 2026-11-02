@@ -11,6 +11,7 @@
  */
 
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { boundQuery } from '@/test/page-context';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -172,7 +173,9 @@ async function detail(
   mockAnswers['fetchExecutionPolicy'] = options.policy ?? OPEN;
   return DetailPage({
     params: Promise.resolve({ id: 'PRJ_1' }),
-    searchParams: Promise.resolve(options.flash ? { flash: options.flash } : {}),
+    searchParams: Promise.resolve(
+      boundQuery(mockSession.current, options.flash ? { flash: options.flash } : {}),
+    ),
   });
 }
 
@@ -415,7 +418,10 @@ describe('/projects', () => {
     };
     return ListPage({
       searchParams: Promise.resolve(
-        options.flash ? { ...options.search, flash: options.flash } : (options.search ?? {}),
+        boundQuery(
+          mockSession.current,
+          options.flash ? { ...options.search, flash: options.flash } : (options.search ?? {}),
+        ),
       ),
     });
   }

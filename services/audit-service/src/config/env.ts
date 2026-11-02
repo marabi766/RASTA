@@ -53,7 +53,7 @@ export const DEFAULT_PORT = '3115';
  */
 export const expectedActiveProducersSchema = z
   .string()
-  .default('')
+  .prefault('')
   .transform((raw, context): readonly AuditSourceService[] => {
     if (raw.trim().length === 0) return Object.freeze([]);
 
@@ -99,7 +99,7 @@ export const auditEnvSchema = baseEnvSchema
   .merge(kafkaEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * The widest `from`..`to` an audit query may cover, in days.
@@ -121,7 +121,7 @@ export const auditEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(366)
-      .default(DEFAULT_MAX_QUERY_WINDOW_DAYS),
+      .prefault(DEFAULT_MAX_QUERY_WINDOW_DAYS),
 
     /**
      * The most chain records one verification may walk (AUD-003).
@@ -154,7 +154,7 @@ export const auditEnvSchema = baseEnvSchema
       .int()
       .min(1_000)
       .max(5_000_000)
-      .default(DEFAULT_MAX_VERIFICATION_RECORDS),
+      .prefault(DEFAULT_MAX_VERIFICATION_RECORDS),
 
     /**
      * Producers whose audit silence `RastaAuditProducerSilent` may report.
@@ -173,7 +173,7 @@ export const auditEnvSchema = baseEnvSchema
      * delivery resolves in seconds; one still open after this is a lost or
      * withheld event, and the externally held head is behind because of it.
      */
-    AUDIT_TENDER_GAP_ALERT_SECONDS: z.coerce.number().int().min(1).max(86_400).default(300),
+    AUDIT_TENDER_GAP_ALERT_SECONDS: z.coerce.number().int().min(1).max(86_400).prefault(300),
     /**
      * How far back the D-046 detective check looks for payment-reconciliation
      * audit rows without their evidence row, in hours (default 7 days). A
@@ -187,7 +187,7 @@ export const auditEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(2_160)
-      .default(168),
+      .prefault(168),
   });
 
 export const AUDIT_ENV_MESSAGES = seal();

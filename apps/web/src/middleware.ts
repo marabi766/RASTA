@@ -2,8 +2,10 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { webServerEnv } from '@/server/env';
 import { refuseBeforeBody } from '@/server/request-gate';
 import { renewSession, type SessionRenewal } from '@/server/session-refresh';
-import { SESSION_COOKIE, sessionCookieOptions } from '@/server/session';
-import { REFRESH_UNAVAILABLE, SESSION_STATE_HEADER } from '@/server/session-state';
+import { SESSION_COOKIE, openSession, sessionCookieOptions } from '@/server/session';
+import { sessionOrganization } from '@/server/session-organization';
+import { NO_ORGANIZATION, REFRESH_UNAVAILABLE, SESSION_STATE_HEADER } from '@/server/session-state';
+import { NO_ORGANIZATION_PATH, tenantGate, type TenantGate } from '@/server/tenant-gate';
 
 /**
  * Security headers on every response (docs/09 § 302-306, docs/16 § 356-368).
@@ -42,6 +44,10 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   if (refusal) return refused(refusal);
 
   const renewal = await renewSessionCookie(request);
+  // After the renewal, on the session the route would see (`tenant-gate.ts`):
+  // one acting for no organization never reaches a tenant-bound route.
+  const gate = tenantGateFor(request);
+  if (gate === 'HIDE') request.cookies.delete(SESSION_COOKIE);
 
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
   const isDev = process.env.NODE_ENV === 'development';
@@ -75,8 +81,12 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // session, so a marked request that still has one is unaffected.
   requestHeaders.delete(SESSION_STATE_HEADER);
   if (renewal.kind === 'REFUSED') requestHeaders.set(SESSION_STATE_HEADER, REFRESH_UNAVAILABLE);
+  if (gate === 'HIDE') requestHeaders.set(SESSION_STATE_HEADER, NO_ORGANIZATION);
 
-  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  const response =
+    gate === 'REDIRECT'
+      ? NextResponse.redirect(noOrganizationUrl(request))
+      : NextResponse.next({ request: { headers: requestHeaders } });
   applyRenewal(response, renewal);
   response.headers.set('Content-Security-Policy', csp);
   response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -128,14 +138,43 @@ async function renewSessionCookie(request: NextRequest): Promise<SessionRenewal>
   if (!sealed) return { kind: 'NONE' };
 
   const renewal = await renewSession(sealed, { env: webServerEnv() });
-  if (renewal.kind === 'RENEWED') request.cookies.set(SESSION_COOKIE, renewal.sealed);
+  if (renewal.kind === 'RENEWED' || renewal.kind === 'ORGANIZATION_LOST') {
+    request.cookies.set(SESSION_COOKIE, renewal.sealed);
+  }
   if (renewal.kind === 'ENDED') request.cookies.delete(SESSION_COOKIE);
   if (renewal.kind === 'REFUSED' && !renewal.usable) request.cookies.delete(SESSION_COOKIE);
   return renewal;
 }
 
+/**
+ * The tenant gate for this request, judged on the cookie the route would read
+ * — after the renewal above rewrote or removed it. Only a session that opens
+ * and acts for no organization is ever stopped; the environment is read only
+ * when there is a cookie.
+ */
+function tenantGateFor(request: NextRequest): TenantGate {
+  const sealed = request.cookies.get(SESSION_COOKIE)?.value;
+  if (!sealed) return 'PASS';
+  const session = openSession(sealed, webServerEnv().WEB_SESSION_SECRET);
+  return tenantGate({
+    pathname: request.nextUrl.pathname,
+    method: request.method,
+    organization: session ? sessionOrganization(session) : undefined,
+  });
+}
+
+/** This origin's `/account/no-organization`, with no query carried over. */
+function noOrganizationUrl(request: NextRequest) {
+  const target = request.nextUrl.clone();
+  target.pathname = NO_ORGANIZATION_PATH;
+  target.search = '';
+  return target;
+}
+
 function applyRenewal(response: NextResponse, renewal: SessionRenewal): void {
-  if (renewal.kind === 'RENEWED') {
+  // A lost organization's renewal is written back like any other: it holds the
+  // rotated tokens (`session-refresh.ts`).
+  if (renewal.kind === 'RENEWED' || renewal.kind === 'ORGANIZATION_LOST') {
     const env = webServerEnv();
     response.cookies.set(
       SESSION_COOKIE,

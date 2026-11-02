@@ -7,10 +7,13 @@ import { parse as parseYaml } from 'yaml';
 import {
   AGGREGATE_JOB,
   ALLOWED_CONDITIONS,
+  JOB_FLOOR_MINUTES,
+  JOB_SETUP_MINUTES,
   SPLIT_STEPS,
   STEP_INVENTORY,
   checkIntegrationSplit,
   checkIntegrationSplitText,
+  jobBudgetProblems,
 } from './ci-integration-split-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -46,7 +49,15 @@ test('the parser sees the split it is meant to check', () => {
   assert.equal(workflow.jobs[AGGREGATE_JOB].name, 'Integration and security tests');
   for (const name of SPLIT_STEPS) assert.ok(jobRunning(workflow, name), name);
   assert.ok(workflow.jobs.containers.needs.includes(AGGREGATE_JOB));
-  assert.deepEqual(ALLOWED_CONDITIONS, []);
+  // Only the connection report may carry a condition, and never a step of the inventory.
+  assert.deepEqual(
+    ALLOWED_CONDITIONS.map((entry) => [entry.job, entry.step, entry.if]),
+    [
+      ['integration-suites', 'PostgreSQL connection peak', 'always()'],
+      ['integration-security', 'PostgreSQL connection peak', 'always()'],
+    ],
+  );
+  for (const entry of ALLOWED_CONDITIONS) assert.ok(!SPLIT_STEPS.includes(entry.step));
 });
 
 test('a split job the aggregate does not need is refused', () => {
@@ -158,6 +169,17 @@ test('comments and blank lines in a run are not commands', () => {
   assert.deepEqual(checkIntegrationSplit(workflow), []);
 });
 
+test('the connection report may be always(); nothing else may carry that condition', () => {
+  const workflow = real();
+  assert.equal(stepNamed(workflow, 'PostgreSQL connection peak').if, 'always()');
+  const other = real();
+  stepNamed(other, 'PostgreSQL connection peak').if = 'failure()';
+  fails(other, /"PostgreSQL connection peak" has if: failure\(\), which can skip it/);
+  const sibling = real();
+  stepNamed(sibling, 'Watch PostgreSQL connections').if = 'always()';
+  fails(sibling, /"Watch PostgreSQL connections" has if: always\(\), which can skip it/);
+});
+
 test('a test step that may skip, be forgiven or run in another shell is refused', () => {
   for (const name of SPLIT_STEPS) {
     const conditional = real();
@@ -222,17 +244,242 @@ test('a test step without its time limit, or above it, is refused', () => {
     fails(workflow, new RegExp(`"${escape(name)}" has no timeout-minutes`));
   }
   const raised = real();
-  stepNamed(raised, 'Construction coverage gate')['timeout-minutes'] = 9;
-  fails(raised, /"Construction coverage gate" has timeout-minutes 9, above its 8/);
+  stepNamed(raised, 'Construction coverage gate')['timeout-minutes'] = 12;
+  fails(raised, /"Construction coverage gate" has timeout-minutes 12, above its 11/);
+  const raisedOther = real();
+  stepNamed(raisedOther, 'Contract coverage gate')['timeout-minutes'] = 9;
+  fails(raisedOther, /"Contract coverage gate" has timeout-minutes 9, above its 8/);
   const expression = real();
   stepNamed(expression, 'Construction coverage gate')['timeout-minutes'] = '${{ 600 }}';
   fails(expression, /"Construction coverage gate" has no timeout-minutes/);
   const aboveJob = real();
   aboveJob.jobs['integration-suites']['timeout-minutes'] = 10;
-  fails(aboveJob, /"Integration tests" has timeout-minutes 16, above its job's 10/);
+  fails(aboveJob, /"Integration tests" has timeout-minutes 21, above its job's 10/);
   const tightened = real();
   stepNamed(tightened, 'Construction coverage gate')['timeout-minutes'] = 7;
   assert.deepEqual(checkIntegrationSplit(tightened), []);
+});
+
+const limitedSteps = (job) => job.steps.filter((step) => 'timeout-minutes' in step);
+const stepSum = (job) =>
+  limitedSteps(job).reduce((total, step) => total + step['timeout-minutes'], 0);
+
+test('every job holds its steps one after the other: step limits plus setup fit the job limit', () => {
+  const jobs = Object.entries(PARSED.jobs).filter(([, job]) => limitedSteps(job).length > 0);
+  assert.deepEqual(
+    jobs.map(([id]) => id).sort(),
+    Object.keys(JOB_SETUP_MINUTES).sort(),
+    'a job with step limits has a setup allowance, and an allowance belongs to such a job',
+  );
+  assert.deepEqual(
+    Object.fromEntries(jobs.map(([id, job]) => [id, stepSum(job) + JOB_SETUP_MINUTES[id]])),
+    {
+      'integration-suites': 83,
+      'integration-security': 37,
+      'integration-coverage-critical': 35,
+      'integration-coverage': 80,
+      'integration-backup-drill': 8,
+      'migration-reversibility-chain': 17,
+      'migration-guards': 18,
+      'trivy-db': 21,
+    },
+  );
+  for (const [id, job] of jobs) {
+    assert.ok(stepSum(job) + JOB_SETUP_MINUTES[id] <= job['timeout-minutes'], id);
+  }
+});
+
+test('a job whose step limits plus setup exceed its own limit is refused', () => {
+  for (const [id, job] of Object.entries(PARSED.jobs)) {
+    if (limitedSteps(job).length === 0) continue;
+    const needed = stepSum(job) + JOB_SETUP_MINUTES[id];
+    const message = new RegExp(
+      `^${id}: its steps' timeout-minutes sum to ${stepSum(job)} .* ${needed} in all, above the job's timeout-minutes ${needed - 1}$`,
+    );
+    const short = real();
+    short.jobs[id]['timeout-minutes'] = needed - 1;
+    fails(short, message);
+    const exact = real();
+    exact.jobs[id]['timeout-minutes'] = needed;
+    assert.deepEqual(checkIntegrationSplit(exact), [], id);
+    // One more minute on any step with a limit of its own overruns the job it has.
+    if (job['timeout-minutes'] === needed) {
+      const over = real();
+      limitedSteps(over.jobs[id]).at(-1)['timeout-minutes'] += 1;
+      fails(over, new RegExp(`^${id}: its steps' timeout-minutes sum to ${stepSum(job) + 1} `));
+    }
+  }
+  // The steps of a split job that are not in the inventory count as well.
+  const peak = real();
+  const connections = peak.jobs['integration-suites'].steps.find(
+    (step) => step.name === 'PostgreSQL connection ceiling',
+  );
+  connections['timeout-minutes'] += 1;
+  fails(peak, /^integration-suites: its steps' timeout-minutes sum to 76 .* 84 in all/);
+});
+
+test('a job outside the split is held to its cumulative budget too', () => {
+  const extra = real();
+  extra.jobs['some-new-job'] = {
+    'runs-on': 'ubuntu-latest',
+    'timeout-minutes': 10,
+    steps: [{ name: 'slow', run: 'true', 'timeout-minutes': 5 }],
+  };
+  fails(extra, /^some-new-job has step time limits \(5 minutes in all\) but no setup allowance/);
+  const unbounded = real();
+  delete unbounded.jobs['prometheus-rules']['timeout-minutes'];
+  fails(unbounded, /^prometheus-rules has no timeout-minutes/);
+  const unknown = real();
+  const [step] = limitedSteps(unknown.jobs['trivy-db']);
+  step['timeout-minutes'] = '${{ vars.MINUTES }}';
+  fails(
+    unknown,
+    /^trivy-db: ".*" has a timeout-minutes that is not a positive whole number of minutes/,
+  );
+  const gone = real();
+  delete gone.jobs['migration-guards'];
+  fails(gone, /^migration-guards has a declared time budget but is not a job/);
+});
+
+// Every name Object.prototype gives a plain object: a lookup by job id into the
+// budget tables must not find any of them (N1 of the review of #499).
+const INHERITED_KEYS = Object.getOwnPropertyNames(Object.prototype);
+
+const jobWithId = (workflow, id, job) => {
+  // `workflow.jobs[id] = ...` would set the prototype for `__proto__`.
+  Object.defineProperty(workflow.jobs, id, {
+    value: job,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+};
+
+test('a job named like an inherited property has no setup allowance and is refused', () => {
+  assert.equal(INHERITED_KEYS.length, 12, INHERITED_KEYS.join(', '));
+  for (const id of INHERITED_KEYS) {
+    const workflow = real();
+    jobWithId(workflow, id, {
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 1,
+      steps: [{ name: 'Slow', run: 'true', 'timeout-minutes': 2 }],
+    });
+    fails(
+      workflow,
+      new RegExp(`^${escape(id)} has step time limits \\(2 minutes in all\\) but no setup`),
+    );
+  }
+});
+
+test('a job named like an inherited property is not given a floor either', () => {
+  for (const id of INHERITED_KEYS) {
+    const workflow = real();
+    jobWithId(workflow, id, { 'runs-on': 'ubuntu-latest', 'timeout-minutes': 1, steps: [] });
+    const problems = checkIntegrationSplit(workflow);
+    assert.ok(
+      !problems.some((problem) => /floor|below its/.test(problem)),
+      `${id}: ${JSON.stringify(problems)}`,
+    );
+  }
+});
+
+test('a budget entry that is not a whole number of minutes is a problem, not a pass', () => {
+  const jobs = {
+    slow: { 'timeout-minutes': 5, steps: [{ name: 'a', run: 'true', 'timeout-minutes': 4 }] },
+  };
+  // `undefined` is an own entry that is declared and wrong, not an absent one (N2 of the #509 r1 review).
+  for (const bad of [() => 'x', 'x', null, undefined, NaN, Infinity, 0, -1, 0.5, 1.5, {}]) {
+    const setup = jobBudgetProblems(jobs, [], { slow: bad }, {});
+    assert.ok(
+      setup.some((problem) =>
+        /^slow has a setup allowance .* not a positive whole number of minutes/.test(problem),
+      ),
+      String(bad),
+    );
+    const floor = jobBudgetProblems(jobs, [], { slow: 1 }, { slow: bad });
+    assert.ok(
+      floor.some((problem) =>
+        /^slow has a floor .* not a positive whole number of minutes/.test(problem),
+      ),
+      String(bad),
+    );
+  }
+  assert.deepEqual(jobBudgetProblems(jobs, [], { slow: 1 }, { slow: 5 }), []);
+  // The tables are checked whether or not a job uses the entry: a job without step limits has
+  // no use for a setup allowance, and a floor does not need the allowance.
+  const bare = { slow: { 'timeout-minutes': 5, steps: [] } };
+  assert.deepEqual(jobBudgetProblems(bare, [], { slow: undefined }, {}), [
+    'slow has a setup allowance in JOB_SETUP_MINUTES that is not a positive whole number of minutes',
+  ]);
+  // Declared and wrong is one problem, not also "no allowance".
+  assert.deepEqual(jobBudgetProblems(jobs, [], { slow: undefined }, {}), [
+    'slow has a setup allowance in JOB_SETUP_MINUTES that is not a positive whole number of minutes',
+  ]);
+  assert.deepEqual(jobBudgetProblems(jobs, [], { slow: 1 }, { slow: undefined }), [
+    'slow has a floor in JOB_FLOOR_MINUTES that is not a positive whole number of minutes',
+  ]);
+});
+
+test('minutes are positive whole numbers everywhere: a fraction is refused, not accepted', () => {
+  const mutations = {
+    'the aggregate timeout': (w) => (w.jobs[AGGREGATE_JOB]['timeout-minutes'] = 0.5),
+    'a split job timeout': (w) => (w.jobs['integration-suites']['timeout-minutes'] = 70.5),
+    'another job timeout': (w) => (w.jobs['prometheus-rules']['timeout-minutes'] = 0.5),
+    'an inventoried step timeout': (w) =>
+      (stepNamed(w, 'Integration tests')['timeout-minutes'] = 0.5),
+    'a non-inventoried step timeout': (w) =>
+      (w.jobs['integration-suites'].steps.find(
+        (step) => step.name === 'PostgreSQL connection ceiling',
+      )['timeout-minutes'] = 0.5),
+    'a step timeout past its job limit': (w) =>
+      (stepNamed(w, 'Integration tests')['timeout-minutes'] = 20.5),
+    'a job timeout above an integer floor': (w) => (w.jobs.quality['timeout-minutes'] = 37.5),
+  };
+  for (const [what, mutate] of Object.entries(mutations)) {
+    const workflow = real();
+    mutate(workflow);
+    assert.notDeepEqual(checkIntegrationSplit(workflow), [], what);
+  }
+  const jobs = {
+    slow: { 'timeout-minutes': 5.5, steps: [{ name: 'a', run: 'true', 'timeout-minutes': 4 }] },
+  };
+  assert.ok(jobBudgetProblems(jobs, [], { slow: 1 }, {}).length > 0);
+  assert.ok(jobBudgetProblems(jobs, [], { slow: 1.5 }, {}).length > 0);
+  assert.ok(jobBudgetProblems(jobs, [], { slow: 1 }, { slow: 1.5 }).length > 0);
+});
+
+test('a step named like an inherited property is an ordinary step, not a crash', () => {
+  assert.equal(INHERITED_KEYS.length, 12, INHERITED_KEYS.join(', '));
+  for (const name of INHERITED_KEYS) {
+    const workflow = real();
+    workflow.jobs['integration-suites'].steps.push({ name, run: 'true' });
+    assert.deepEqual(checkIntegrationSplit(workflow), [], name);
+    // And it is not mistaken for an inventory entry: dropping a real one is still reported.
+    dropStep(workflow.jobs[jobRunning(workflow, 'Audit coverage gate')], 'Audit coverage gate');
+    fails(workflow, /no integration-\* job runs "Audit coverage gate"/);
+  }
+  // A name that is not a string never matches the inventory either (an array
+  // of one name used to coerce to it and then miss the table that counts it).
+  for (const name of [['Audit coverage gate'], { toString: 'x' }, 7, null, true]) {
+    const workflow = real();
+    workflow.jobs['integration-suites'].steps.push({ name, run: 'true' });
+    assert.deepEqual(checkIntegrationSplit(workflow), [], JSON.stringify(name));
+  }
+});
+
+test('a job whose measured runtime needed its limit may not go back below it', () => {
+  assert.deepEqual(JOB_FLOOR_MINUTES, { quality: 37, 'web-browser': 37 });
+  for (const [id, floor] of Object.entries(JOB_FLOOR_MINUTES)) {
+    const back = real();
+    back.jobs[id]['timeout-minutes'] = floor - 1;
+    fails(back, new RegExp(`^${id} has timeout-minutes ${floor - 1}, below its ${floor}`));
+    const missing = real();
+    delete missing.jobs[id]['timeout-minutes'];
+    fails(missing, new RegExp(`^${id} has no timeout-minutes`));
+    const raised = real();
+    raised.jobs[id]['timeout-minutes'] = floor + 1;
+    assert.deepEqual(checkIntegrationSplit(raised), [], id);
+  }
 });
 
 test('a test step that loses a declared variable, or changes a pinned one, is refused', () => {

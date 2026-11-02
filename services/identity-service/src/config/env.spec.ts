@@ -37,9 +37,11 @@ const BASE: NodeJS.ProcessEnv = {
   AUDIT_SERVICE_URL: 'http://localhost:3115',
 };
 
+// NODE_ENV=test: `false` is honoured only where it is named explicitly (D-064).
 const load = (value?: string) =>
   loadIdentityEnv({
     ...BASE,
+    NODE_ENV: 'test',
     ...(value === undefined ? {} : { KEYCLOAK_SYNC_ENABLED: value }),
   });
 
@@ -66,6 +68,59 @@ describe('KEYCLOAK_SYNC_ENABLED', () => {
 
   it.each(['maybe', 'sync', '2'])('refuses %p rather than guessing', (value) => {
     expect(() => load(value)).toThrow(EnvValidationError);
+  });
+});
+
+/**
+ * D-064 — the two switches that would let a narrowing change commit without
+ * reaching Keycloak are honoured only with NODE_ENV named as development or
+ * test; an unset NODE_ENV, which the schema defaults to development, does not
+ * count.
+ */
+describe('narrowing cannot be switched off outside development and test (D-064)', () => {
+  const at = (nodeEnv: string | undefined, values: NodeJS.ProcessEnv) =>
+    loadIdentityEnv({
+      ...BASE,
+      ...(nodeEnv === undefined ? {} : { NODE_ENV: nodeEnv }),
+      ...values,
+    });
+
+  it.each([
+    ['KEYCLOAK_SYNC_ENABLED', { KEYCLOAK_SYNC_ENABLED: 'false' }],
+    ['MEMBERSHIP_EXPIRY_SCAN_ENABLED', { MEMBERSHIP_EXPIRY_SCAN_ENABLED: 'false' }],
+  ])('%s=false is refused in production, staging and with NODE_ENV unset', (name, values) => {
+    for (const nodeEnv of ['production', 'staging', undefined]) {
+      expect(() => at(nodeEnv, values)).toThrow(EnvValidationError);
+      expect(() => at(nodeEnv, values)).toThrow(new RegExp(`${name}: may be false only`));
+    }
+  });
+
+  it.each(['development', 'test'])('both may be false with NODE_ENV=%s', (nodeEnv) => {
+    expect(
+      at(nodeEnv, { KEYCLOAK_SYNC_ENABLED: 'false', MEMBERSHIP_EXPIRY_SCAN_ENABLED: 'false' }),
+    ).toMatchObject({ KEYCLOAK_SYNC_ENABLED: false, MEMBERSHIP_EXPIRY_SCAN_ENABLED: false });
+  });
+
+  it('both on is accepted everywhere', () => {
+    expect(at('production', {})).toMatchObject({
+      KEYCLOAK_SYNC_ENABLED: true,
+      MEMBERSHIP_EXPIRY_SCAN_ENABLED: true,
+    });
+  });
+
+  it('KEYCLOAK_WRITE_SETTLE_SECONDS defaults to 120, above the 10 s client deadline, and is bounded', () => {
+    expect(at('production', {}).KEYCLOAK_WRITE_SETTLE_SECONDS).toBe(120);
+    expect(
+      at('production', { KEYCLOAK_WRITE_SETTLE_SECONDS: '15' }).KEYCLOAK_WRITE_SETTLE_SECONDS,
+    ).toBe(15);
+    expect(
+      at('production', { KEYCLOAK_WRITE_SETTLE_SECONDS: '900' }).KEYCLOAK_WRITE_SETTLE_SECONDS,
+    ).toBe(900);
+    for (const value of ['14', '901', '1.5', '-1', 'soon']) {
+      expect(() => at('production', { KEYCLOAK_WRITE_SETTLE_SECONDS: value })).toThrow(
+        EnvValidationError,
+      );
+    }
   });
 });
 

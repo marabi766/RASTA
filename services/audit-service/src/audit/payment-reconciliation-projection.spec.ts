@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { join } from 'node:path';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, legacyParse, type EventEnvelope, type LegacyRefusal } from '@rasta/contracts';
 import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common';
 import {
   ECONOMIC_TOPIC,
@@ -529,11 +529,16 @@ describe('refusal messages name schema fields only (Codex on #204, MED 2)', () =
   it('masks any path segment that is not a schema field, whatever produced it', () => {
     // zod builds these paths from the schema, so a payload key cannot reach
     // one today; the mask is what keeps it so if a schema ever records keys.
-    const error = new z.ZodError([
-      { code: z.ZodIssueCode.custom, path: [KEY_WITH_TEXT, 'x'], message: KEY_WITH_TEXT },
-      { code: z.ZodIssueCode.custom, path: ['walletId', KEY_WITH_TEXT], message: 'm' },
-      { code: z.ZodIssueCode.custom, path: [3], message: 'm' },
-    ]);
-    expect(describeIssues(error)).toBe('(payload) custom; walletId custom; (payload) custom');
+    const refused = legacyParse(
+      z.unknown().superRefine((_value, ctx) => {
+        ctx.addIssue({ code: 'custom', path: [KEY_WITH_TEXT, 'x'], message: KEY_WITH_TEXT });
+        ctx.addIssue({ code: 'custom', path: ['walletId', KEY_WITH_TEXT], message: 'm' });
+        ctx.addIssue({ code: 'custom', path: [3], message: 'm' });
+      }),
+      null,
+    );
+    expect(describeIssues(refused.refusal as LegacyRefusal)).toBe(
+      '(payload) custom; walletId custom; (payload) custom',
+    );
   });
 });

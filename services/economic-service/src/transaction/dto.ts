@@ -3,8 +3,9 @@ import {
   amountMinorSchema,
   businessLineSchema,
   currencySchema,
-  organizationIdSchema,
+  isoDateTime,
   numberInput,
+  organizationIdSchema,
 } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
 import { cursorQueryParameter } from '../shared/cursor';
@@ -76,7 +77,7 @@ export const createTransactionSchema = z
     businessLine: businessLineSchema.optional(),
     counterpartyOrganizationId: organizationIdSchema.optional(),
     grossAmountMinor: amountMinorSchema,
-    currency: currencySchema.default('IRR'),
+    currency: currencySchema.prefault('IRR'),
     /**
      * When the underlying business event happened.
      *
@@ -84,7 +85,7 @@ export const createTransactionSchema = z
      * transaction recorded late is still charged the rate that was in force
      * when it occurred (docs/10 § 10.7). Defaults to now.
      */
-    occurredAt: z.string().datetime().optional(),
+    occurredAt: z.string().check(isoDateTime()).optional(),
     /**
      * The owning service's identifier space — an order id, a statement id.
      * Reserved types are refused below (`recorded-sources.ts`).
@@ -98,7 +99,7 @@ export const createTransactionSchema = z
      * together, or there is a window in which the money is still spendable
      * (docs/10 § 10.5).
      */
-    holdFunds: z.boolean().default(false),
+    holdFunds: z.boolean().prefault(false),
     /** Mirrors the `Idempotency-Key` header onto the row, for tracing. */
     idempotencyKey: z.string().trim().min(8).max(128).optional(),
   })
@@ -128,8 +129,8 @@ export const listTransactionsQuerySchema = z
      */
     sourceType: z.string().trim().min(1).max(64).optional(),
     sourceReference: z.string().trim().min(1).max(128).optional(),
-    from: z.string().datetime().optional(),
-    to: z.string().datetime().optional(),
+    from: z.string().check(isoDateTime()).optional(),
+    to: z.string().check(isoDateTime()).optional(),
     /**
      * Include transactions where this organization is the payee.
      *
@@ -147,7 +148,7 @@ export const listTransactionsQuerySchema = z
      */
     includeIncoming: queryBoolean(false),
     cursor: cursorQueryParameter,
-    limit: numberInput(z.number().int().min(1).max(100)).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 

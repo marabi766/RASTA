@@ -23,6 +23,7 @@ describe('FLEET_ASSET_SYNC_TRANSACTION_TIMEOUT_MS', () => {
     INTERNAL_TOKEN_SECRET: 'x'.repeat(48),
     ASSET_SERVICE_URL: 'http://localhost:3102',
     MAINTENANCE_SERVICE_URL: 'http://localhost:3106',
+    IDENTITY_SERVICE_URL: 'http://localhost:3101',
   };
 
   it('defaults to 14.2 s and a 500 ms start wait, which cover three calls at the default upstream timeout and fit a delivery in the session (r12)', () => {

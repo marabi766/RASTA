@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { codePointLength } from '../openapi/zod-schema';
 import { RastaError } from '../errors/rasta-error';
 import { zodPipe } from './zod-validation.pipe';
@@ -10,7 +11,9 @@ import { zodPipe } from './zod-validation.pipe';
  * one succeeds.
  *
  * The snapshot beside this file was recorded under **zod 3.25.76** and is the
- * oracle B is measured against: codes, declared paths, `*` for client-chosen
+ * oracle B is measured against (B changed only what the zod 4 API forces in the
+ * schemas below — `error` for `errorMap`, `continue: false` for `fatal`, a
+ * record's key schema, `isoDateTime()` for `.datetime()` — never the snapshot): codes, declared paths, `*` for client-chosen
  * segments, rebuilt enum and unknown-key messages, the echo backstop, schema
  * messages (Persian included) kept as written. Never re-record it (`-u`) to
  * make a migration pass: a difference is a behaviour change, fixed in the code.
@@ -22,7 +25,7 @@ import { zodPipe } from './zod-validation.pipe';
 
 type Outcome = { parsed: unknown } | { status: number; code: string; details: unknown };
 
-function outcome(schema: z.ZodTypeAny, input: unknown): Outcome {
+function outcome(schema: z.ZodType, input: unknown): Outcome {
   try {
     return { parsed: zodPipe(schema).transform(input, { type: 'body' }) };
   } catch (error) {
@@ -33,7 +36,7 @@ function outcome(schema: z.ZodTypeAny, input: unknown): Outcome {
   }
 }
 
-const cases = (schema: z.ZodTypeAny, inputs: Record<string, unknown>) =>
+const cases = (schema: z.ZodType, inputs: Record<string, unknown>) =>
   Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, outcome(schema, input)]));
 
 const SENTINEL = 'sentinel-input-value';
@@ -75,9 +78,15 @@ describe('zod-3 golden: the pipe’s issue details', () => {
       .object({
         email: z.string().email().optional(),
         url: z.string().url().optional(),
-        instant: z.string().datetime().optional(),
-        offsetInstant: z.string().datetime({ offset: true }).optional(),
-        localInstant: z.string().datetime({ offset: false }).optional(),
+        instant: z.string().check(isoDateTime()).optional(),
+        offsetInstant: z
+          .string()
+          .check(isoDateTime({ offset: true }))
+          .optional(),
+        localInstant: z
+          .string()
+          .check(isoDateTime({ offset: false }))
+          .optional(),
         day: z.string().date().optional(),
         code: z
           .string()
@@ -201,7 +210,7 @@ describe('zod-3 golden: the pipe’s issue details', () => {
   it('unknown keys, records, catchall and array paths', () => {
     const schema = z
       .object({
-        metadata: z.record(z.number()).optional(),
+        metadata: z.record(z.string(), z.number()).optional(),
         labels: z.object({ fixed: z.string() }).catchall(z.number()).optional(),
         items: z.array(z.object({ quantity: z.number().int().positive() }).strict()).optional(),
       })
@@ -229,19 +238,14 @@ describe('zod-3 golden: the pipe’s issue details', () => {
           .optional(),
         echoing: z
           .string()
-          .refine(
-            () => false,
-            (v) => ({ message: `"${v}" is not allowed` }),
-          )
+          .refine(() => false, { error: (issue) => `"${String(issue.input)}" is not allowed` })
           .optional(),
-        persian: z
-          .enum(['A', 'B'], { errorMap: () => ({ message: 'یکی از گزینه‌ها را برگزینید' }) })
-          .optional(),
-        persianType: z.string({ errorMap: () => ({ message: 'متن لازم است' }) }).optional(),
+        persian: z.enum(['A', 'B'], { error: 'یکی از گزینه‌ها را برگزینید' }).optional(),
+        persianType: z.string({ error: 'متن لازم است' }).optional(),
         fatal: z
           .string()
           .superRefine((_v, ctx) => {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'stopped here', fatal: true });
+            ctx.addIssue({ code: 'custom', message: 'stopped here', continue: false });
           })
           .refine(() => false, 'never reached')
           .optional(),
@@ -254,7 +258,7 @@ describe('zod-3 golden: the pipe’s issue details', () => {
           .preprocess((v) => (typeof v === 'string' ? v.trim() : v), z.string().min(2))
           .optional(),
         caught: z.number().catch(0).optional(),
-        defaulted: z.number().default(5),
+        defaulted: z.number().prefault(5),
         lazy: z.lazy(() => z.object({ leaf: z.string() }).strict()).optional(),
       })
       .strict()
@@ -291,7 +295,7 @@ describe('zod-3 golden: the pipe’s issue details', () => {
     const schema = z
       .object({
         bag: z
-          .record(z.string())
+          .record(z.string(), z.string())
           .refine(() => false, 'a fixed schema message')
           .optional(),
       })

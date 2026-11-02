@@ -15,6 +15,7 @@ import {
   EXCEPTION_FILTER_LOGGER,
   InternalTokenService,
   RequestContextMiddleware,
+  getContext,
   RolesGuard,
   type AuthGuardOptions,
   type TokenVerifier,
@@ -29,6 +30,7 @@ import { IdentityService } from './identity.service';
 import { IdentityRepository } from './identity.repository';
 import { KeycloakAdminClient } from '../keycloak/keycloak.client';
 import { KeycloakProjector } from '../keycloak/keycloak.projector';
+import { KeycloakWriteFences } from '../keycloak/keycloak-write-fence';
 import { TEST_ORG_A } from '@rasta/testing';
 import { DEFAULT_ROLE_GRANT_POLICY, ROLE_GRANT_POLICY } from './role-grants';
 import { DEFAULT_PROVISIONING_SCOPE_POLICY, PROVISIONING_SCOPE_POLICY } from './provisioning-scope';
@@ -256,6 +258,14 @@ let registrationStatus: string = 'PENDING';
 /** Whether `REGISTRATION` exists at all — `false` simulates an unknown id. */
 let registrationExists = true;
 
+/** The caller's roles as the database holds them now; null: as the token says. */
+let liveRoles: string[] | null = null;
+/** Provisioning intents by key (F6). */
+const intents: Record<string, Record<string, unknown>> = {};
+let keySeq = 0;
+/** A fresh `Idempotency-Key`: every provisioning in this suite is a new request. */
+const nextKey = () => `itest-key-${++keySeq}`;
+
 const repository = {
   client: {
     ...tx,
@@ -265,7 +275,8 @@ const repository = {
     },
   },
   transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(tx),
-  lockUserMemberships: async () => ({ activeOrganizationId: ORG_A, now: new Date() }),
+  lockUserMemberships: async () => ({ activeOrganizationId: ORG_A }),
+  databaseNow: async () => new Date(),
   // The request row lock a registration decision takes (#219 r2), on the status set per test.
   lockRegistrationRequest: async () =>
     registrationExists ? { status: registrationStatus, userId: TARGET_USER } : null,
@@ -279,7 +290,29 @@ const repository = {
   findUserWithMemberships: async () => null,
   findMembership: async () => (lookups.membership ? membershipRow('MBR_x', ['DRIVER']) : null),
   findMembershipById: async (id: string) => membershipRow(id, memberships.get(id) ?? ['DRIVER']),
+  // A revocation also reads an ended membership (sent again, it answers as it did).
+  findMembershipByIdIncludingRevoked: async (id: string) =>
+    membershipRow(id, memberships.get(id) ?? ['DRIVER']),
   listMembershipsForUser: async () => [],
+  // The caller's live roles (task 117, F1): what the token says, unless a
+  // test has the database disagree (`liveRoles`).
+  findLiveRoles: async () =>
+    liveRoles ?? getContext().roles.filter((role) => role !== 'SYSTEM_ADMIN'),
+  findLiveMembership: async () => (lookups.membership ? membershipRow('MBR_x', ['DRIVER']) : null),
+  lockUsersInOrder: async (_tx: unknown, targets: string[]) =>
+    new Map(targets.map((target) => [target, { activeOrganizationId: ORG_A }])),
+  // A direct provisioning's intent (F6), one per key.
+  claimProvisioningIntent: async (_tx: unknown, input: Record<string, unknown>) =>
+    (intents[String(input.idempotencyKey)] ??= { ...input, completedAt: null, responseBody: null }),
+  lockProvisioningIntent: async (_tx: unknown, _actor: string, key: string) => intents[key] ?? null,
+  completeProvisioningIntent: async (
+    _tx: unknown,
+    _actor: string,
+    key: string,
+    response: unknown,
+  ) => {
+    intents[key] = { ...intents[key], completedAt: new Date(), responseBody: response };
+  },
   findOrganizationRefs: async () => [],
   listUsersInOrganization: async () => ({
     users: [],
@@ -309,6 +342,8 @@ const keycloak = {
   providers: [
     { provide: IdentityRepository, useValue: repository },
     { provide: KeycloakAdminClient, useValue: keycloak },
+    // With sync off nothing is ever fenced (D-069); a stand-in for the fence pool.
+    { provide: KeycloakWriteFences, useValue: {} },
     KeycloakProjector,
     // The shipped default, not a test-only ladder: these tests assert what a
     // deployment that configures nothing actually does.
@@ -369,6 +404,7 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
     keycloakCreates.length = 0;
     lookups.user = true;
     lookups.membership = false;
+    liveRoles = null;
   });
 
   const server = () => app.getHttpServer();
@@ -424,6 +460,7 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
     it('refuses the same escalation through user creation', async () => {
       const response = await request(server())
         .post('/v1/users')
+        .set('idempotency-key', nextKey())
         .set('authorization', orgAdmin())
         .send(newUser(['SYSTEM_ADMIN']));
 
@@ -625,6 +662,7 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
     it('lets an ORGANIZATION_ADMIN create a user and add a membership with grantable roles', async () => {
       const created = await request(server())
         .post('/v1/users')
+        .set('idempotency-key', nextKey())
         .set('authorization', orgAdmin())
         .send(newUser(['DRIVER']));
       expect(created.status).toBe(201);
@@ -662,6 +700,7 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
       // not permitted is the organization, and before this nothing looked.
       const response = await request(server())
         .post('/v1/users')
+        .set('idempotency-key', nextKey())
         .set('authorization', orgAdmin())
         .send({ ...newUser(['FLEET_MANAGER']), organizationId: ORG_B });
 
@@ -690,6 +729,7 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
       // any organization on the platform". One environment value widens it.
       const response = await request(server())
         .post('/v1/users')
+        .set('idempotency-key', nextKey())
         .set('authorization', unionAdmin())
         .send({ ...newUser(['FLEET_MANAGER']), organizationId: ORG_B });
 
@@ -700,6 +740,7 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
     it('lets a SYSTEM_ADMIN provision across organizations', async () => {
       const response = await request(server())
         .post('/v1/users')
+        .set('idempotency-key', nextKey())
         .set('authorization', systemAdmin())
         .send({ ...newUser(['FLEET_MANAGER']), organizationId: ORG_B });
 
@@ -933,6 +974,7 @@ describe('privilege escalation through role assignment (docs/09 threat I2)', () 
     it('lets an ORGANIZATION_ADMIN create a user in their own organization', async () => {
       const response = await request(server())
         .post('/v1/users')
+        .set('idempotency-key', nextKey())
         .set('authorization', orgAdmin())
         .send(newUser(['FLEET_MANAGER']));
 

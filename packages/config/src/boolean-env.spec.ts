@@ -30,7 +30,7 @@ describe('the trap this replaces', () => {
     // Kept as an executable demonstration rather than a comment, so nobody
     // "simplifies" `booleanEnv` back to the coercion.
     // eslint-disable-next-line no-restricted-syntax -- the coercion being demonstrated
-    const coerced = z.object({ FLAG: z.coerce.boolean().default(true) });
+    const coerced = z.object({ FLAG: z.coerce.boolean().prefault(true) });
     expect(coerced.parse({ FLAG: 'false' }).FLAG).toBe(true);
     expect(booleanEnv(true).parse('false')).toBe(false);
   });

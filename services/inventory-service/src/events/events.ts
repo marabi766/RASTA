@@ -1,11 +1,14 @@
 import { z } from 'zod';
 import {
-  INVENTORY_RETURN_DISPATCH_EVENTS,
   INVENTORY_RETURN_DISPATCH_EVENT_SCHEMAS,
-  INVENTORY_RETURN_EVENTS,
+  INVENTORY_RETURN_DISPATCH_EVENTS,
   INVENTORY_RETURN_EVENT_SCHEMAS,
-  INVENTORY_SHIPMENT_EVENTS,
+  INVENTORY_RETURN_EVENTS,
   INVENTORY_SHIPMENT_EVENT_SCHEMAS,
+  INVENTORY_SHIPMENT_EVENTS,
+  isoDateTime,
+  describeLegacyRefusal,
+  legacyParse,
 } from '@rasta/contracts';
 
 /**
@@ -51,7 +54,7 @@ export type InventoryEventName = keyof typeof INVENTORY_EVENTS;
 
 const id = z.string().min(1).max(128);
 /** ISO 8601 in UTC, the form every event of the platform carries a time in. */
-const instant = z.string().datetime({ offset: false });
+const instant = z.string().check(isoDateTime({ offset: false }));
 const quantity = z.number().int().min(1);
 const balance = z.number().int().min(0);
 const reference = z
@@ -180,10 +183,10 @@ export function validateInventoryPayload<N extends InventoryEventName>(
   eventName: N,
   payload: unknown,
 ): InventoryEventPayload<N> {
-  const parsed = INVENTORY_EVENT_SCHEMAS[eventName].safeParse(payload);
+  const parsed = legacyParse(INVENTORY_EVENT_SCHEMAS[eventName], payload);
   if (!parsed.success) {
     throw new Error(
-      `${eventName} payload does not match its published contract: ${parsed.error.message}`,
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
     );
   }
   return parsed.data as InventoryEventPayload<N>;

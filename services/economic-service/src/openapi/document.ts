@@ -164,6 +164,9 @@ const IDEMPOTENT_ROUTES = new Set([
   'POST /v1/rewards/participation-rules',
   // The same for levels and badges: one version in force for everyone.
   'POST /v1/rewards/recognition-rules',
+  // A retried monetised rule was a second rule paying for the same fact
+  // (economic audit F1). Required by the service, as the two above.
+  'POST /v1/rewards/rules',
 ]);
 
 /**

@@ -22,6 +22,8 @@ import {
 } from '@/test/contract-command-fixtures';
 
 import { contractCommandOffers } from './contract-offers';
+import { pinnedOrganizationFor } from '@/server/session-organization';
+import { pinnedTokens } from '@/test/session-token';
 
 /**
  * Which contract forms the page draws for whom — the eligibility copies put
@@ -52,7 +54,8 @@ function sessionFor(token: string): WebSession {
   return {
     subject: 'user-1',
     username: 'person',
-    organizationId: EMPLOYER,
+    // The stored copy is the token's, as in every stored session.
+    organizationId: pinnedOrganizationFor(token),
     accessToken: token,
     accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
     refreshToken: 'refresh',
@@ -94,7 +97,7 @@ async function offersFor(
   const session = sessionFor(token);
   const offers = await contractCommandOffers(
     session,
-    contractCallerOf(token),
+    contractCallerOf(pinnedTokens(token)),
     contract,
     amendmentPage,
     milestonePage,

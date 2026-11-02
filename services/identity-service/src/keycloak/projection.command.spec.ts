@@ -5,6 +5,24 @@ import { isClean, runProjectionCommand } from './projection.command';
  * the guard that reads `org_roles` does not ship while it shows any
  * divergence — so what it counts, and what makes it unclean, is asserted.
  */
+/** No write fence anywhere: what every test below but the drain's assumes. */
+const noFences = () => ({
+  owners: jest.fn(async () => [] as string[]),
+  counts: jest.fn(async () => ({
+    live: 0,
+    due: 0,
+    accountMissing: 0,
+    overdue: 0,
+    expired: 0,
+    total: 0,
+    at: new Date(),
+  })),
+  recoverOwed: jest.fn(async () => 0),
+});
+
+/** No recovery projection left running when the command stops them. */
+const noRecoveries = () => jest.fn(async () => 0);
+
 describe('runProjectionCommand', () => {
   const pages = [['USR_1', 'USR_2'], ['USR_3'], []];
   const repository = {
@@ -18,8 +36,18 @@ describe('runProjectionCommand', () => {
 
   it('walks every page of accounts', async () => {
     const project = jest.fn(async (_userId: string) => 'projected' as const);
-    const projector = { project, reconcile: jest.fn(), repairOrphan: jest.fn() };
-    const report = await runProjectionCommand('backfill', { repository, projector, keycloak });
+    const projector = {
+      project,
+      reconcile: jest.fn(),
+      repairOrphan: jest.fn(),
+      cancelRecoveries: noRecoveries(),
+    };
+    const report = await runProjectionCommand('backfill', {
+      repository,
+      projector,
+      keycloak,
+      fences: noFences(),
+    });
     expect(project.mock.calls.map(([userId]) => userId)).toEqual(['USR_1', 'USR_2', 'USR_3']);
     expect(report).toMatchObject({ accounts: 3, projected: 3, failed: [] });
     expect(isClean(report)).toBe(true);
@@ -34,11 +62,13 @@ describe('runProjectionCommand', () => {
         activationPending: false,
       })),
       repairOrphan: jest.fn(),
+      cancelRecoveries: noRecoveries(),
     };
     const report = await runProjectionCommand('reconcile', {
       repository,
       projector: projector as never,
       keycloak,
+      fences: noFences(),
     });
     expect(projector.project).not.toHaveBeenCalled();
     expect(report.divergent).toEqual([{ userId: 'USR_2', attributes: ['organization_roles'] }]);
@@ -53,8 +83,14 @@ describe('runProjectionCommand', () => {
       }),
       reconcile: jest.fn(),
       repairOrphan: jest.fn(),
+      cancelRecoveries: noRecoveries(),
     };
-    const report = await runProjectionCommand('backfill', { repository, projector, keycloak });
+    const report = await runProjectionCommand('backfill', {
+      repository,
+      projector,
+      keycloak,
+      fences: noFences(),
+    });
     expect(report).toMatchObject({ accounts: 3, projected: 2, failed: ['USR_1'] });
     expect(isClean(report)).toBe(false);
   });
@@ -76,6 +112,7 @@ describe('runProjectionCommand', () => {
       project: jest.fn(),
       reconcile: jest.fn(),
       repairOrphan: jest.fn(async () => 'repaired' as const),
+      cancelRecoveries: noRecoveries(),
     };
     beforeEach(() => projector.repairOrphan.mockClear());
     const grants = (organizations: string[]) => ({
@@ -101,6 +138,7 @@ describe('runProjectionCommand', () => {
         repository: noAccounts,
         projector,
         keycloak,
+        fences: noFences(),
       });
       expect(report.orphans).toEqual([
         { userId: 'USR_P1', keycloakId: 'kc-1', enabled: true, grants: true, repaired: false },
@@ -120,6 +158,7 @@ describe('runProjectionCommand', () => {
         repository: noAccounts,
         projector,
         keycloak,
+        fences: noFences(),
       });
       expect(projector.repairOrphan).toHaveBeenCalledWith('USR_P1', 'pending-one');
       expect(report.orphans).toEqual([
@@ -139,6 +178,7 @@ describe('runProjectionCommand', () => {
         repository: noAccounts,
         projector,
         keycloak,
+        fences: noFences(),
       });
       expect(owned.orphans[0]).toMatchObject({ repaired: false });
       expect(isClean(owned)).toBe(false);
@@ -148,6 +188,7 @@ describe('runProjectionCommand', () => {
         repository: noAccounts,
         projector,
         keycloak,
+        fences: noFences(),
       });
       expect(failed.failed).toEqual(['USR_P1']);
       expect(isClean(failed)).toBe(false);
@@ -163,13 +204,19 @@ describe('runProjectionCommand', () => {
         repository: noAccounts,
         projector,
         keycloak,
+        fences: noFences(),
       });
       expect(report.orphans).toEqual([
         { userId: 'USR_P2', keycloakId: 'kc-2', enabled: false, grants: false, repaired: false },
       ]);
       expect(isClean(report)).toBe(true);
       // Harmless as it is: backfill does not touch it either.
-      await runProjectionCommand('backfill', { repository: noAccounts, projector, keycloak });
+      await runProjectionCommand('backfill', {
+        repository: noAccounts,
+        projector,
+        keycloak,
+        fences: noFences(),
+      });
       expect(projector.repairOrphan).not.toHaveBeenCalled();
     });
 
@@ -181,6 +228,7 @@ describe('runProjectionCommand', () => {
         repository: noAccounts,
         projector,
         keycloak,
+        fences: noFences(),
       });
       expect(report.orphans).toContainEqual(
         expect.objectContaining({ userId: 'USR_P3', grants: true }),
@@ -200,6 +248,7 @@ describe('runProjectionCommand', () => {
         repository: noAccounts,
         projector,
         keycloak,
+        fences: noFences(),
       });
       expect(report.orphans).toEqual([]);
     });
@@ -215,6 +264,7 @@ describe('runProjectionCommand', () => {
         repository: noAccounts,
         projector,
         keycloak,
+        fences: noFences(),
       });
       expect(report.failed).toEqual(['USR_P1']);
       expect(report.orphans.map((orphan) => orphan.userId)).toEqual(['USR_P3']);
@@ -232,9 +282,15 @@ describe('runProjectionCommand', () => {
         enabledDivergent: null,
       })),
       repairOrphan: jest.fn(),
+      cancelRecoveries: noRecoveries(),
     };
     const keycloak = { findAccountByUsername: jest.fn(async () => null) };
-    const report = await runProjectionCommand('reconcile', { repository, projector, keycloak });
+    const report = await runProjectionCommand('reconcile', {
+      repository,
+      projector,
+      keycloak,
+      fences: noFences(),
+    });
     expect(report.activationPending).toEqual(['USR_3']);
     expect(report.divergent).toEqual([]);
     expect(isClean(report)).toBe(false);
@@ -251,13 +307,252 @@ describe('runProjectionCommand', () => {
           userId === 'USR_2' ? { keycloakEnabled: false, platformStatus: 'ACTIVE' } : null,
       })),
       repairOrphan: jest.fn(),
+      cancelRecoveries: noRecoveries(),
     };
     const keycloak = { findAccountByUsername: jest.fn(async () => null) };
-    const report = await runProjectionCommand('reconcile', { repository, projector, keycloak });
+    const report = await runProjectionCommand('reconcile', {
+      repository,
+      projector,
+      keycloak,
+      fences: noFences(),
+    });
     expect(report.enabledDivergent).toEqual([
       { userId: 'USR_2', keycloakEnabled: false, platformStatus: 'ACTIVE' },
     ]);
     expect(report.divergent).toEqual([]);
     expect(isClean(report)).toBe(false);
+  });
+
+  it('writes the late writes’ owed fresh fences (D-070 D) before it counts, and is unclean while any is still owed', async () => {
+    const order: string[] = [];
+    const fences = {
+      owners: jest.fn(async () => [] as string[]),
+      recoverOwed: jest.fn(async () => {
+        order.push('recoverOwed');
+        return 1;
+      }),
+      counts: jest.fn(async () => {
+        order.push('counts');
+        return {
+          live: 0,
+          due: 0,
+          accountMissing: 0,
+          overdue: 0,
+          expired: 0,
+          total: 0,
+          at: new Date(),
+        };
+      }),
+    };
+    const report = await runProjectionCommand('backfill', {
+      repository,
+      projector: {
+        project: jest.fn(async () => 'projected' as const),
+        reconcile: jest.fn(),
+        repairOrphan: jest.fn(),
+        cancelRecoveries: noRecoveries(),
+      },
+      keycloak,
+      fences,
+    });
+    expect(order).toEqual(['recoverOwed', 'counts']);
+    expect(report.fences).toMatchObject({ owed: 1, outstanding: 0 });
+    expect(isClean(report)).toBe(false);
+  });
+
+  it('cancels the recovery projections still running before it flushes and counts (#458 r1 F2): one still unwinding is reported, and unclean', async () => {
+    const order: string[] = [];
+    const fences = {
+      ...noFences(),
+      recoverOwed: jest.fn(async () => {
+        order.push('recoverOwed');
+        return 0;
+      }),
+    };
+    const cancelRecoveries = jest.fn(async (options: { deadlineAt?: number }) => {
+      order.push('cancelRecoveries');
+      expect(options.deadlineAt).toEqual(expect.any(Number));
+      return 1;
+    });
+    const report = await runProjectionCommand('backfill', {
+      repository,
+      projector: {
+        project: jest.fn(async () => 'projected' as const),
+        reconcile: jest.fn(),
+        repairOrphan: jest.fn(),
+        cancelRecoveries,
+      },
+      keycloak,
+      fences,
+    });
+    // Stopped first: a cancelled recovery's own late write is owed, and flushed after.
+    expect(order).toEqual(['cancelRecoveries', 'recoverOwed']);
+    expect(report.fences).toMatchObject({ recoveriesAbandoned: 1, owed: 0, outstanding: 0 });
+    expect(isClean(report)).toBe(false);
+    expect(isClean({ ...report, fences: { ...report.fences, recoveriesAbandoned: 0 } })).toBe(true);
+  });
+
+  describe('the fence drain (D-069, #402 r2 F3)', () => {
+    /**
+     * Fence owners on more than one page (the page is 200): two unlinked
+     * users — no account, so neither the account pass nor the orphan sweep
+     * projects them — a linked user whose fence waits out a retry, and a
+     * user whose fence is terminal; the table the fake keeps is what the
+     * projections leave.
+     */
+    function table() {
+      const owners = new Map<string, number>();
+      for (let index = 0; index < 205; index += 1)
+        owners.set(`USR_U${String(index).padStart(3, '0')}`, 1);
+      owners.set('USR_RETRY', 1);
+      owners.set('USR_TERMINAL', 1);
+      const sorted = () => [...owners.keys()].sort();
+      return {
+        owners,
+        fences: {
+          owners: jest.fn(async (after: string | null, take: number) =>
+            sorted()
+              .filter((userId) => after === null || userId > after)
+              .slice(0, take),
+          ),
+          counts: jest.fn(async () => ({
+            live: 0,
+            due: owners.size - (owners.has('USR_TERMINAL') ? 1 : 0),
+            accountMissing: owners.has('USR_TERMINAL') ? 1 : 0,
+            overdue: 0,
+            expired: 0,
+            total: [...owners.values()].reduce((sum, n) => sum + n, 0),
+            at: new Date(),
+          })),
+          recoverOwed: jest.fn(async () => 0),
+        },
+      };
+    }
+    const noAccounts = {
+      listUserIdsWithAccount: jest.fn(async () => [] as string[]),
+      listUsersWithoutAccount: jest.fn(async () => [] as { id: string; username: string }[]),
+    };
+
+    it('projects every fence owner, past the first page and whether linked or not, and is clean only once COUNT(*) is 0', async () => {
+      const { owners, fences } = table();
+      // Each projection takes the user's due fences over — but the terminal
+      // one's account is still missing, so its fence stays.
+      const project = jest.fn(async (userId: string) => {
+        if (userId === 'USR_TERMINAL') return 'account_missing' as const;
+        owners.delete(userId);
+        return 'projected' as const;
+      });
+      const projector = {
+        project,
+        reconcile: jest.fn(),
+        repairOrphan: jest.fn(),
+        cancelRecoveries: noRecoveries(),
+      };
+      const report = await runProjectionCommand('backfill', {
+        repository: noAccounts,
+        projector,
+        keycloak,
+        fences,
+      });
+      expect(project).toHaveBeenCalledTimes(207);
+      expect(project).toHaveBeenCalledWith('USR_U204', 'command');
+      expect(project).toHaveBeenCalledWith('USR_RETRY', 'command');
+      expect(report.fences).toEqual({
+        drained: 207,
+        owed: 0,
+        recoveriesAbandoned: 0,
+        outstanding: 1,
+        live: 0,
+        due: 0,
+        accountMissing: 1,
+      });
+      expect(isClean(report)).toBe(false);
+
+      // The account restored: the next backfill drains it, and only now is it clean.
+      project.mockImplementation(async (userId: string) => {
+        owners.delete(userId);
+        return 'projected' as const;
+      });
+      const again = await runProjectionCommand('backfill', {
+        repository: noAccounts,
+        projector,
+        keycloak,
+        fences,
+      });
+      expect(again.fences.outstanding).toBe(0);
+      expect(isClean(again)).toBe(true);
+    });
+
+    it('decides on the explicit count, not on the owners it walked: rows it could not see keep it unclean', async () => {
+      const projector = {
+        project: jest.fn(async () => 'projected' as const),
+        reconcile: jest.fn(),
+        repairOrphan: jest.fn(),
+        cancelRecoveries: noRecoveries(),
+      };
+      const fences = {
+        owners: jest.fn(async () => [] as string[]),
+        counts: jest.fn(async () => ({
+          live: 1,
+          due: 0,
+          accountMissing: 0,
+          overdue: 0,
+          expired: 0,
+          total: 1,
+          at: new Date(),
+        })),
+        recoverOwed: jest.fn(async () => 0),
+      };
+      const report = await runProjectionCommand('backfill', {
+        repository: noAccounts,
+        projector,
+        keycloak,
+        fences,
+      });
+      expect(report.fences).toMatchObject({ drained: 0, outstanding: 1, live: 1 });
+      expect(isClean(report)).toBe(false);
+    });
+
+    it('a fence owner that cannot be projected is reported as failed, and the drain goes on', async () => {
+      const { owners, fences } = table();
+      const project = jest.fn(async (userId: string) => {
+        if (userId === 'USR_U000') throw new Error('keycloak unreachable');
+        owners.delete(userId);
+        return 'projected' as const;
+      });
+      const report = await runProjectionCommand('backfill', {
+        repository: noAccounts,
+        projector: {
+          project,
+          reconcile: jest.fn(),
+          repairOrphan: jest.fn(),
+          cancelRecoveries: noRecoveries(),
+        },
+        keycloak,
+        fences,
+      });
+      expect(report.failed).toEqual(['USR_U000']);
+      expect(report.fences.drained).toBe(207);
+      expect(isClean(report)).toBe(false);
+    });
+
+    it('reconcile drains nothing, and counts every fence', async () => {
+      const { fences } = table();
+      const projector = {
+        project: jest.fn(),
+        reconcile: jest.fn(async () => null),
+        repairOrphan: jest.fn(),
+        cancelRecoveries: noRecoveries(),
+      };
+      const report = await runProjectionCommand('reconcile', {
+        repository: noAccounts,
+        projector,
+        keycloak,
+        fences,
+      });
+      expect(projector.project).not.toHaveBeenCalled();
+      expect(report.fences).toMatchObject({ drained: 0, outstanding: 207 });
+      expect(isClean(report)).toBe(false);
+    });
   });
 });

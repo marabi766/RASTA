@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -100,7 +101,7 @@ describe('identity-service outbox purge (D-052)', () => {
   /** Times come from the database clock, as the purge's own cutoff does. */
   const seed = async (id: string, row: Seed): Promise<string> => {
     await runtime.client.$executeRawUnsafe(
-      `INSERT INTO outbox_message
+      eligibilityClockSql`INSERT INTO outbox_message
          (id, aggregate_type, aggregate_id, event_name, event_version, topic, partition_key,
           payload, headers, organization_id, correlation_id, created_at, published_at,
           attempts, last_error, claim_token, claim_owner, claim_expires_at, claim_count, stream_seq)
@@ -200,7 +201,7 @@ describe('identity-service outbox purge (D-052)', () => {
            TO "${runtimeRole()}"`,
       );
     } finally {
-      await owner.onModuleDestroy();
+      await owner.stop();
     }
     runtime = new PrismaService(schemaUrl());
     holder = new PrismaService(schemaUrl());
@@ -217,13 +218,13 @@ describe('identity-service outbox purge (D-052)', () => {
   });
 
   afterAll(async () => {
-    await runtime?.onModuleDestroy();
-    await holder?.onModuleDestroy();
+    await runtime?.stop();
+    await holder?.stop();
     const owner = new PrismaService(ownerUrl());
     try {
       await owner.client.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${SCHEMA}" CASCADE`);
     } finally {
-      await owner.onModuleDestroy();
+      await owner.stop();
     }
   });
 
@@ -396,7 +397,7 @@ describe('identity-service outbox purge (D-052)', () => {
     } finally {
       letGo();
       await holding;
-      await starved.onModuleDestroy();
+      await starved.stop();
     }
     // The pool free again, the same row goes.
     expect(await purge().runOnce()).toMatchObject({ outcome: 'completed', deleted: 1 });

@@ -1,3 +1,5 @@
+import { eligibilityClockWrite } from '@rasta/testing';
+import { eligibilityClockSql } from '@rasta/testing';
 import { ulid } from 'ulid';
 import type { PrismaClient } from '../src/generated/prisma';
 import { runtimeClient } from './helpers';
@@ -91,7 +93,7 @@ describe('the RFQ guards (database)', () => {
     const { rfq } = await issued();
 
     await refused(
-      (tx) => tx.$executeRaw`
+      (tx) => eligibilityClockWrite(tx)`
         UPDATE rfq SET quotation_closing_at = quotation_closing_at + interval '1 day', version = version + 1
          WHERE id = ${rfq.id}`,
       /ck_rfq_origin_immutable/,
@@ -107,7 +109,7 @@ describe('the RFQ guards (database)', () => {
       /ck_rfq_cancelled/,
     );
 
-    await db.$executeRaw`
+    await eligibilityClockWrite(db)`
       UPDATE rfq SET sweep_lease_until = now(), sweep_fence = 'F', sweep_attempts = 1 WHERE id = ${rfq.id}`;
     const [row] = await db.$queryRaw<{ version: number; status: string }[]>`
       SELECT version, status FROM rfq WHERE id = ${rfq.id}`;
@@ -178,7 +180,10 @@ describe('the RFQ guards (database)', () => {
 
   it('an RFQ is born only PUBLISHED, of a READY aggregation, with that aggregation moving to RFQ_ISSUED in the same transaction', async () => {
     const { organizationId, aggregation } = await h.readyAggregation();
-    const insert = (tx: PrismaClient, status = 'PUBLISHED') => tx.$executeRaw`
+    const insert = (
+      tx: PrismaClient,
+      status = eligibilityClockSql`PUBLISHED`,
+    ) => eligibilityClockWrite(tx)`
       INSERT INTO rfq (id, organization_id, aggregation_id, product_id, total_quantity, procurement_nature,
                        status, quotation_closing_at, criteria_count, criteria_digest, invitation_count,
                        key_id, public_key_pem, kek_id, wrap_nonce, wrapped_private_key, wrap_tag,
@@ -202,7 +207,7 @@ describe('the RFQ guards (database)', () => {
          WHERE organization_id = ${organizationId} AND status = 'OPEN'`
     )[0]!;
     await refused(
-      (tx) => tx.$executeRaw`
+      (tx) => eligibilityClockWrite(tx)`
         INSERT INTO rfq (id, organization_id, aggregation_id, product_id, total_quantity, procurement_nature,
                          status, quotation_closing_at, criteria_count, criteria_digest, invitation_count,
                          key_id, public_key_pem, kek_id, wrap_nonce, wrapped_private_key, wrap_tag,

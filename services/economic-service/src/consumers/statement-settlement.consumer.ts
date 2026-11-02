@@ -1,5 +1,5 @@
 import { Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   createSystemContext,
   invalidPayloadError,
@@ -122,9 +122,9 @@ export class StatementSettlementConsumer implements OnModuleInit, OnApplicationS
 
     // A producer defect no retry fixes: dead-lettered at once, before the
     // processed marker, naming fields only (S-09, L7-26).
-    const parsed = statementApprovedSchema.safeParse(envelope.payload);
+    const parsed = legacyParse(statementApprovedSchema, envelope.payload);
     if (!parsed.success) {
-      throw invalidPayloadError(envelope, parsed.error, STATEMENT_APPROVED_FIELDS);
+      throw invalidPayloadError(envelope, parsed.refusal, STATEMENT_APPROVED_FIELDS);
     }
     const payload = parsed.data;
 

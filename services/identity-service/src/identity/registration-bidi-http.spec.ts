@@ -70,7 +70,7 @@ describe('a registration request carrying a bidi control in a document reference
       .post('/v1/registration-requests')
       .send({ ...BODY, documentRefs: ['DOC_01J8', 'DOC_01J9'] });
 
-    expect(response.status).toBe(201);
+    expect(response.status).toBe(202);
     expect(identity.submitRegistration).toHaveBeenCalledWith(
       expect.objectContaining({ documentRefs: ['DOC_01J8', 'DOC_01J9'] }),
     );

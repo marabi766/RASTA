@@ -19,6 +19,7 @@ import {
   parseCheckArgs,
   recordProblem,
   REPLAY_TRANSACTION_TIMEOUT_MS,
+  ReplayFailure,
   replayExecutedRecord,
   replayIdFor,
   replayMessage,
@@ -701,6 +702,77 @@ test('an event its record cannot state is refused by name before anything is sen
   );
   assert.equal(recordProblem(replayable().summary, contracts), null);
 });
+
+// ---- zod 3's codes in the record's own refusal (PR #444 r1 F1) -----------
+
+/**
+ * A record that breaks its contract is refused naming paths and zod 3's codes,
+ * as audit's ops-replay mapper names them for the same record. The expected
+ * messages were recorded on main 745d0434 (zod 3.25.76) with the same inputs
+ * (~/worker2/session/t109/scripts/replay-record.mjs); the r1 head printed zod
+ * 4's `invalid_format` for two of them.
+ */
+const RECORD_SUMMARY = {
+  eventId: 'EVT_1',
+  eventName: 'USAGE_RECORDED',
+  tenantId: 'ORG_1',
+  dlq: 'rasta.fleet.v1.dlq',
+  dlqPartition: 0,
+  dlqOffset: '12',
+  target: 'rasta.fleet.v1.retry',
+  stale: false,
+};
+const RECORD_OPTIONS = {
+  reportId: REPORT,
+  operator: 'ops.alice',
+  landed: { partition: 1, offset: '40' },
+  eventId: 'EVT_RECORD_1',
+  occurredAt: '2026-09-30T08:00:00.000Z',
+};
+for (const [name, summary, options, zod3] of [
+  [
+    'operator a number',
+    {},
+    { operator: 7 },
+    'the replay record breaks its contract: operator invalid_type, actor.id invalid_type',
+  ],
+  [
+    'occurredAt not an instant',
+    {},
+    { occurredAt: 'yesterday' },
+    'the replay record breaks its contract: occurredAt invalid_string',
+  ],
+  [
+    'stale not a boolean',
+    { stale: 'no' },
+    {},
+    'the replay record breaks its contract: stale invalid_union',
+  ],
+  [
+    'empty event id and report id',
+    {},
+    { eventId: '', reportId: '' },
+    'the replay record breaks its contract: reportId invalid_string, eventId too_small, aggregateId too_small, correlationId too_small',
+  ],
+  [
+    'dlq partition a fraction',
+    { dlqPartition: 0.5 },
+    {},
+    'the replay record breaks its contract: dlq.partition invalid_type',
+  ],
+]) {
+  test(`a replay record (${name}) is refused in zod 3's words`, () => {
+    assert.throws(
+      () =>
+        replayExecutedRecord(
+          { summary: { ...RECORD_SUMMARY, ...summary } },
+          { ...RECORD_OPTIONS, ...options },
+          contracts,
+        ),
+      (error) => error instanceof ReplayFailure && error.message === zod3,
+    );
+  });
+}
 
 // ---- --check-marker (round 3 on #166) ------------------------------------
 

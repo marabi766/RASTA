@@ -19,6 +19,7 @@ import {
 import type { ProjectListQuery, ProjectPage, ProjectSummary, ReadResult } from '@/server/projects';
 import { DemoModeNotice } from '@/app/DemoModeNotice';
 import type { DemoMode } from '@/lib/demo-mode';
+import { withContext, type InContext } from '@/lib/page-context';
 
 /**
  * The project list (docs/16 § ۱۶٫۶, `/projects`).
@@ -34,21 +35,21 @@ import type { DemoMode } from '@/lib/demo-mode';
 
 export interface ProjectsScreenProps {
   readonly result: ReadResult<ProjectPage>;
-  readonly query: ProjectListQuery;
+  readonly query: InContext<ProjectListQuery>;
   /** What the provider says (`fetchDemoMode`, Q-14), over the estimates. Nothing here moves money. */
   readonly demoMode: DemoMode;
 }
 
-function hrefWith(query: ProjectListQuery, changes: Partial<ProjectListQuery>): string {
+function hrefWith(query: InContext<ProjectListQuery>, changes: Partial<ProjectListQuery>): string {
   const merged = { ...query, ...changes };
   const params = new URLSearchParams();
   if (merged.status) params.set('status', merged.status);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const text = params.toString();
-  return text ? `/projects?${text}` : '/projects';
+  return withContext(query.context, text ? `/projects?${text}` : '/projects');
 }
 
-function StatusFilter({ query }: { query: ProjectListQuery }) {
+function StatusFilter({ query }: { query: InContext<ProjectListQuery> }) {
   const items: readonly (ProjectStatus | undefined)[] = [undefined, ...PROJECT_STATUSES];
   return (
     <nav aria-label="وضعیت پروژه" className="flex flex-wrap gap-2">

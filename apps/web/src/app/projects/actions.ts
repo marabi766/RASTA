@@ -28,6 +28,9 @@ import {
   RELEASE_FIELD,
   type CreateProjectFormState,
 } from './form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
+import { pageHref } from '@/server/page-context';
 
 /**
  * The `/projects` create form's server action.
@@ -138,7 +141,10 @@ export async function submitCreateProject(
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
     // form must carry a fresh submission id.
     redirect(
-      `/projects/${encodeURIComponent(result.data.id)}?${FLASH_PARAM}=${mintFlash(session, result.data.id, 'created')}`,
+      withContext(
+        pageContext(session),
+        `/projects/${encodeURIComponent(result.data.id)}?${FLASH_PARAM}=${mintFlash(session, result.data.id, 'created')}`,
+      ),
     );
   }
 
@@ -225,6 +231,8 @@ export async function releaseUnresolvedCreate(form: FormData): Promise<void> {
     form.get(RELEASE_FIELD),
   );
   redirect(
-    outcome === 'RELEASED' || outcome === 'GONE' ? '/projects' : `/projects?release=${outcome}`,
+    outcome === 'RELEASED' || outcome === 'GONE'
+      ? '/projects'
+      : pageHref(session, '/projects', { release: outcome }),
   );
 }

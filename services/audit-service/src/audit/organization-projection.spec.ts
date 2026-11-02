@@ -1,4 +1,4 @@
-import { ZodError } from 'zod';
+import { SchemaRefusedError } from './refusal-diagnostics';
 import type { EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import {
@@ -163,7 +163,7 @@ describe('ORGANIZATION_CREATED', () => {
           envelope(ORGANIZATION_PROJECTION_EVENTS.CREATED, payload),
           ORG_DELIVERY,
         ),
-      ).toThrow(ZodError);
+      ).toThrow(SchemaRefusedError);
     },
   );
 
@@ -179,7 +179,7 @@ describe('ORGANIZATION_CREATED', () => {
         }),
         ORG_DELIVERY,
       ),
-    ).toThrow(ZodError);
+    ).toThrow(SchemaRefusedError);
   });
 
   it('refuses an identifier that does not fit the column', () => {
@@ -193,7 +193,7 @@ describe('ORGANIZATION_CREATED', () => {
         }),
         ORG_DELIVERY,
       ),
-    ).toThrow(ZodError);
+    ).toThrow(SchemaRefusedError);
   });
 
   it('bounds an oversized path rather than dead-lettering the event', () => {
@@ -222,8 +222,10 @@ describe('ORGANIZATION_CREATED', () => {
       );
       throw new Error('expected a validation failure');
     } catch (error) {
-      expect(error).toBeInstanceOf(ZodError);
-      expect(JSON.stringify((error as ZodError).issues)).not.toContain('ORG-SECRET-NAME');
+      expect(error).toBeInstanceOf(SchemaRefusedError);
+      expect(JSON.stringify((error as SchemaRefusedError).refusal)).not.toContain(
+        'ORG-SECRET-NAME',
+      );
     }
   });
 });
@@ -265,7 +267,7 @@ describe('ORGANIZATION_MOVED', () => {
           envelope(ORGANIZATION_PROJECTION_EVENTS.MOVED, payload),
           ORG_DELIVERY,
         ),
-      ).toThrow(ZodError);
+      ).toThrow(SchemaRefusedError);
     },
   );
 
@@ -278,7 +280,7 @@ describe('ORGANIZATION_MOVED', () => {
         }),
         ORG_DELIVERY,
       ),
-    ).toThrow(ZodError);
+    ).toThrow(SchemaRefusedError);
   });
 });
 
@@ -348,7 +350,7 @@ describe('ORGANIZATION_STATUS_CHANGED', () => {
           envelope(ORGANIZATION_PROJECTION_EVENTS.STATUS_CHANGED, payload),
           ORG_DELIVERY,
         ),
-      ).toThrow(ZodError);
+      ).toThrow(SchemaRefusedError);
     },
   );
 

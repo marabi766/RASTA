@@ -14,6 +14,7 @@ import {
   tenderDoorsFor,
   tenderSidesFor,
 } from './portal-nav';
+import { pinnedTokens } from '@/test/session-token';
 
 /**
  * Who is shown the Projects link. It mirrors construction-service's defaults
@@ -325,7 +326,7 @@ describe('portalNavForSession — drawn from the access token', () => {
    * A token resolving to `ORG` with these `org_roles` and realm roles. With no
    * organization role at all it carries no `org_id`, as for a platform
    * administrator acting for none: the guard would refuse an `org_id` it grants
-   * nothing in (`tokenAuthority`).
+   * nothing in (`sessionAuthority`).
    */
   const tokenFor = (member: string[], realm: string[] = []): string =>
     jwt({
@@ -335,7 +336,7 @@ describe('portalNavForSession — drawn from the access token', () => {
       realm_access: { roles: realm },
     });
   const nav = (member: string[], realm: string[] = []): string[] =>
-    hrefs(portalNavForSession({ accessToken: tokenFor(member, realm) }));
+    hrefs(portalNavForSession(pinnedTokens(tokenFor(member, realm))));
 
   beforeEach(() => {
     Object.assign(process.env, {
@@ -375,7 +376,7 @@ describe('portalNavForSession — drawn from the access token', () => {
     });
 
     it('is not drawn from a token whose roles cannot be read', () => {
-      expect(hrefs(portalNavForSession({ accessToken: 'opaque' }))).not.toContain('/contracts');
+      expect(hrefs(portalNavForSession(pinnedTokens('opaque')))).not.toContain('/contracts');
     });
   });
 
@@ -475,7 +476,7 @@ describe('portalNavForSession — drawn from the access token', () => {
     });
 
     it('is not drawn from a token whose roles cannot be read', () => {
-      expect(hrefs(portalNavForSession({ accessToken: 'opaque' }))).not.toContain('/inventory');
+      expect(hrefs(portalNavForSession(pinnedTokens('opaque')))).not.toContain('/inventory');
     });
   });
 
@@ -538,7 +539,7 @@ describe('portalNavForSession — drawn from the access token', () => {
         settlements: false,
       },
     ])('$name', ({ roles, claims, projects, settlements }) => {
-      const items = hrefs(portalNavForSession(withClaims(roles, claims)));
+      const items = hrefs(portalNavForSession(pinnedTokens(withClaims(roles, claims).accessToken)));
       expect(items.includes('/projects')).toBe(projects);
       expect(items.includes('/settlements')).toBe(settlements);
     });
@@ -555,7 +556,7 @@ describe('portalNavForSession — drawn from the access token', () => {
       accessToken: jwt({ org_id: ORG, org_ids: [ORG], org_roles: [] }),
     },
   ])('hides the gated links, and keeps the rest, for $name', ({ accessToken }) => {
-    const items = hrefs(portalNavForSession({ accessToken }));
+    const items = hrefs(portalNavForSession(pinnedTokens(accessToken)));
     expect(items).not.toContain('/projects');
     expect(items).not.toContain('/tenders');
     expect(items).not.toContain('/contracts');
@@ -592,7 +593,7 @@ describe('portalNavForSession — drawn from the access token', () => {
         org_ids: [ORG, 'ORG_2'],
         org_roles: [`${ORG}:DRIVER`, 'ORG_2:ORGANIZATION_ADMIN'],
       });
-      expect(hrefs(portalNavForSession({ accessToken }))).not.toContain('/projects');
+      expect(hrefs(portalNavForSession(pinnedTokens(accessToken)))).not.toContain('/projects');
     });
   });
 });

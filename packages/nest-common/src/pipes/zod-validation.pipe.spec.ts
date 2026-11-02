@@ -1,6 +1,7 @@
 import type { ArgumentMetadata, ArgumentsHost } from '@nestjs/common';
 import type { Logger } from '@rasta/logging';
 import { z, type ZodTypeAny } from 'zod';
+import { LegacyContextError, legacyParse } from '@rasta/contracts';
 import { AllExceptionsFilter } from '../filters/exception.filter';
 import { RastaError } from '../errors/rasta-error';
 import {
@@ -40,10 +41,11 @@ function refusal(schema: ZodTypeAny, input: unknown): RastaError {
   throw new Error('the pipe accepted the input');
 }
 
+/** zod's own issue list, in the zod 3 vocabulary the pipe reads (whose enum message quotes the value). */
 function rawZodText(schema: ZodTypeAny, input: unknown): string {
-  const result = schema.safeParse(input);
+  const result = legacyParse(schema, input);
   if (result.success) throw new Error('zod accepted the input');
-  return JSON.stringify(result.error.issues.map(({ path, message }) => ({ path, message })));
+  return JSON.stringify(result.refusal.issues.map(({ path, message }) => ({ path, message })));
 }
 
 /** Every echoing case: the schema, an input carrying the sentinel, the issue code, the detail expected. */
@@ -106,10 +108,9 @@ const CASES: {
   {
     name: 'custom: a refine message that interpolates the value',
     schema: z.object({
-      reference: z.string().refine(
-        (v) => v.startsWith('REF-'),
-        (v) => ({ message: `${v} is not a reference` }),
-      ),
+      reference: z.string().refine((v) => v.startsWith('REF-'), {
+        error: (issue) => `${String(issue.input)} is not a reference`,
+      }),
     }),
     input: { reference: SENTINEL },
     expected: { path: 'reference', code: 'custom', message: 'Invalid input' },
@@ -131,20 +132,20 @@ const CASES: {
     expected: { path: 'window', code: 'custom', message: 'Invalid input' },
   },
   {
-    name: 'invalid_type: a custom errorMap that interpolates the data',
+    name: 'invalid_type: a custom error map that interpolates the data',
     schema: z.object({
       amount: z.number({
-        errorMap: (_issue, ctx) => ({ message: `bad amount ${String(ctx.data)}` }),
+        error: (issue) => `bad amount ${String(issue.input)}`,
       }),
     }),
     input: { amount: SENTINEL },
     expected: { path: 'amount', code: 'invalid_type', message: 'Expected number, received string' },
   },
   {
-    name: 'invalid_string: a regex errorMap that interpolates the data',
+    name: 'invalid_string: a regex error map that interpolates the data',
     schema: z.object({
       code: z
-        .string({ errorMap: (_issue, ctx) => ({ message: `"${String(ctx.data)}" is malformed` }) })
+        .string({ error: (issue) => `"${String(issue.input)}" is malformed` })
         .regex(/^[A-Z]{3}$/),
     }),
     input: { code: SENTINEL },
@@ -160,6 +161,28 @@ describe('ZodValidationPipe details (S-09)', () => {
     const error = refusal(schema, input);
     expect(error.code).toBe('VALIDATION_FAILED');
     expect(error.details).toEqual([expected]);
+    expect(dump(error)).not.toContain('SENTINEL');
+  });
+
+  it('a refinement restored after a failed .int() is masked like any other issue (PR #444 r3)', () => {
+    // zod 4 stopped at the integer, so this refinement never ran; the patched zod
+    // runs it as zod 3 did, and its client-chosen key and echoing message reach
+    // the same backstop.
+    const schema = z
+      .object({ count: z.number().int(), tags: z.record(z.string(), z.string()) })
+      .superRefine((value, ctx) => {
+        for (const [key, tag] of Object.entries(value.tags)) {
+          ctx.addIssue({ code: 'custom', path: ['tags', key], message: `tag ${tag} is refused` });
+        }
+      });
+    const input = { count: 0.5, tags: { [SENTINEL]: SENTINEL } };
+    expect(rawZodText(schema, input)).toContain(SENTINEL);
+
+    const error = refusal(schema, input);
+    expect(error.details).toEqual([
+      { path: 'count', code: 'invalid_type', message: 'Expected integer, received float' },
+      { path: `tags.${REDACTED_SEGMENT}`, code: 'custom', message: 'Invalid input' },
+    ]);
     expect(dump(error)).not.toContain('SENTINEL');
   });
 
@@ -218,7 +241,7 @@ describe('what the details keep', () => {
 
   it('a static message that merely contains a short input — below the backstop length', () => {
     const schema = z.object({
-      size: z.enum(['S', 'M'], { errorMap: () => ({ message: 'Pick S or M' }) }),
+      size: z.enum(['S', 'M'], { error: 'Pick S or M' }),
     });
     const error = refusal(schema, { size: 'M!' });
     expect(error.details).toEqual([
@@ -239,7 +262,7 @@ describe('safePath: which segments the schema declares', () => {
         .object({ inner: z.string() })
         .optional()
         .nullable()
-        .default({ inner: 'x' })
+        .prefault({ inner: 'x' })
         .transform((v) => v),
       list: z.array(z.record(z.string(), z.object({ leaf: z.string() }))),
       either: z.union([z.object({ a: z.string() }), z.object({ b: z.string() })]),
@@ -295,12 +318,16 @@ describe('safePath: which segments the schema declares', () => {
     expect(safePath(schema, path)).toEqual(shown);
   });
 
-  it('needs the schema: the exported converter takes it', () => {
+  it('needs the schema: the exported converter takes the refusal of the parse, which carries it', () => {
     const schema = z.object({ tags: z.record(z.string(), z.number()) });
-    const result = schema.safeParse({ tags: { [SENTINEL]: 'x' } });
+    const result = legacyParse(schema, { tags: { [SENTINEL]: 'x' } });
     if (result.success) throw new Error('accepted');
-    expect(toErrorDetails(result.error, schema, { tags: { [SENTINEL]: 'x' } })[0]?.path).toBe(
-      `tags.${REDACTED_SEGMENT}`,
-    );
+    expect(toErrorDetails(result.refusal)[0]?.path).toBe(`tags.${REDACTED_SEGMENT}`);
+  });
+
+  it('refuses a bare zod error: the converter cannot be reached without the schema (r1 F1)', () => {
+    const schema = z.object({ tags: z.record(z.string(), z.number()) });
+    const bare = schema.safeParse({ tags: { [SENTINEL]: 'x' } }).error;
+    expect(() => toErrorDetails(bare as never)).toThrow(LegacyContextError);
   });
 });

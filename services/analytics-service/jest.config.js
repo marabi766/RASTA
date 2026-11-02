@@ -1,4 +1,5 @@
 const swcOptions = require('../../jest.swc.cjs');
+const disclosureGuard = require('../../jest.disclosure-guard.cjs');
 const swcTransform = { '^.+\.(t|j)s$': ['@swc/jest', swcOptions] };
 
 const setupFiles = [require.resolve('./jest.setup.cjs')];
@@ -21,6 +22,7 @@ module.exports = {
   projects: [
     {
       displayName: 'unit',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: __dirname,
       roots: ['<rootDir>/src'],
       testEnvironment: 'node',
@@ -33,6 +35,7 @@ module.exports = {
     {
       // Every suite under `test/` needs a real PostgreSQL with this service's migration applied.
       displayName: 'integration',
+      setupFilesAfterEnv: [disclosureGuard],
       testPathIgnorePatterns: ['runtime-privileges[.]int-spec[.]ts$'],
       rootDir: __dirname,
       roots: ['<rootDir>/test'],
@@ -45,6 +48,7 @@ module.exports = {
     },
     {
       displayName: 'db-privileges',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: __dirname,
       roots: ['<rootDir>/test'],
       testEnvironment: 'node',

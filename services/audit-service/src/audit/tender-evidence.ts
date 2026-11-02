@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import type { EventEnvelope } from '@rasta/contracts';
 
 /**
@@ -17,7 +18,7 @@ export const CONSTRUCTION_TOPIC = 'rasta.construction.v1';
 
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 const identifier = z.string().min(1).max(128);
-const instant = z.string().datetime();
+const instant = z.string().check(isoDateTime());
 
 /**
  * Not `.strict()` on the way in, unlike the producer's own schema: this consumer

@@ -24,8 +24,9 @@ import {
 } from '@/lib/supplier-commands';
 import { SUPPLIER_CAPABILITIES, type SupplierCapability } from '@/lib/supplier-fields';
 
-import { tokenAuthority, tokenMemberships } from './realm-roles';
+import { tokenMemberships } from './realm-roles';
 import type { WebSession } from './session';
+import { sessionAuthority, type SessionTokens } from './session-organization';
 import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 
@@ -92,13 +93,13 @@ export interface SupplierActor {
   readonly memberships: readonly string[];
 }
 
-export function supplierActor(accessToken: string): SupplierActor | null {
-  const authority = tokenAuthority(accessToken);
+export function supplierActor(session: SessionTokens): SupplierActor | null {
+  const authority = sessionAuthority(session);
   if (!authority) return null;
   return {
     roles: authority.roles,
     organizationId: authority.organizationId,
-    memberships: tokenMemberships(accessToken),
+    memberships: tokenMemberships(session.accessToken),
   };
 }
 

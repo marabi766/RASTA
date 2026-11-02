@@ -1,4 +1,17 @@
 /**
+ * What {@link internalFetch} throws for a redirect: a transport failure, never
+ * an answer. Typed, so a caller that must tell "refused" from "may have been
+ * applied" can (identity's Keycloak client: a write redirected after it was
+ * sent is of unknown outcome). Carries no URL, Location, body or token.
+ */
+export class RedirectRefusedError extends Error {
+  constructor() {
+    super('Internal service redirect refused');
+    this.name = 'RedirectRefusedError';
+  }
+}
+
+/**
  * Authenticated internal exchanges must never send credentials to a redirect
  * target, including one on the same origin. Token issuance, method, deadlines
  * and non-redirect status semantics remain the caller's responsibility.
@@ -20,7 +33,7 @@ export async function internalFetch(
     // Cleanup must not delay the unavailable verdict past the caller's deadline.
     void response.body?.cancel().catch(() => undefined);
     // No URL, Location, body, token or upstream message in the error.
-    throw new Error('Internal service redirect refused');
+    throw new RedirectRefusedError();
   }
   return response;
 }

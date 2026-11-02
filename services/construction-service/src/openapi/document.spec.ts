@@ -55,7 +55,9 @@ describe('the committed OpenAPI document', () => {
 
     expect(operations.map((o) => o.key).sort()).toEqual(Object.keys(RESPONSE_BODIES).sort());
     for (const { key, operation } of operations) {
-      expect(operation.security).toEqual([{ bearer: [] }]);
+      expect(operation.security).toEqual(
+        key.startsWith('GET /v1/internal/') ? [{ internalToken: [] }] : [{ bearer: [] }],
+      );
       const success = RESPONSE_BODIES[key]?.status;
       expect(operation.responses[success ?? 'missing']).toBeDefined();
       const other = success === '201' ? '200' : '201';

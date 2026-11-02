@@ -7,7 +7,7 @@ import { maintenanceOperationBudgets } from './operation-budgets';
  * due-date scan.
  *
  * This flag was never a `z.coerce.boolean()`; it was a hand-rolled
- * `z.string().default('true').transform((v) => v !== 'false')`, which is the
+ * `z.string().prefault('true').transform((v) => v !== 'false')`, which is the
  * same defect wearing a different coat. `false` worked, but `FALSE`, `0`,
  * `no` and `off` all came back `true`, and `MAINTENANCE_DUE_SCAN_ENABLD=x`
  * — a typo — silently enabled the scan instead of failing the boot.
