@@ -208,3 +208,36 @@ evidence, like the other append-only configuration histories. Against an empty
 history it removes the additions and migration record; existing grants, journals
 and stored keys remain. A code rollback can leave this additive schema intact;
 it must keep old reward consumers/rule writers drained.
+
+### Recovery serialization and retained fingerprints (task 1209, PR #545 r2)
+
+Under the subject balance lock, a grant first looks up the unique rule/source
+identity and validates tenant, subject and trigger. A committed grant resumes as
+a duplicate before eligibility, reward totals or wallet capacity are checked.
+The unique-insert handler remains the fallback for concurrent identities; all
+financial writes still share one grant transaction.
+
+Rule create and PATCH take an exclusive transaction advisory lock in the reward
+configuration namespace. Selection and the durable source-evaluation claim take
+the shared form of that same lock in one transaction, including NO_RULE claims.
+This platform-wide boundary covers both tenant and global rules without requiring
+a pre-existing rule row. Readers can run together; configuration writers serialize
+across tenants. It is held only through the durable decision, never through grant
+transactions or source-owner network calls. A writer committed first is visible
+to selection; a selection claimed first keeps its saved rules on recovery.
+
+New rule-create request hashes carry a `reward-v2:` prefix in the existing TEXT
+column. Retained unprefixed records use the frozen pre-F5 condition parser and
+canonicalizer in a replay-only path after current route authorization. The same
+tenant, bound actor and legacy canonical body can recover the stored response, including
+legacy JSON-number operands; that parser can never create a rule. New requests
+still use strict string operands and exact numeric normalization. Expired records
+remain subject to ordinary retention. An old record with no actor binding is refused
+with a generic conflict because the caller cannot be proven identical. No migration
+or retention reset is needed.
+
+Evidence: `reward-recovery.int-spec.ts` covers committed grants at all three
+balance boundaries, a period cap and a changed cashback flag; configuration
+interleavings cover both triggers, tenant/global rules and both lock orderings.
+`reward-rule-canonical.int-spec.ts` covers the four legacy fingerprint classes,
+nested predicates, different bodies, different actors and revoked route roles.

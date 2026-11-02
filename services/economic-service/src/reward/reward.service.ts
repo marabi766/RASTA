@@ -22,6 +22,7 @@ import { rewardsGrantedTotal, rewardsSkippedTotal } from '../observability/metri
 import { ENV } from '../tokens';
 import { SERVICE_NAME, type EconomicEnv } from '../config/env';
 import { Prisma } from '../generated/prisma';
+import { lockRewardConfiguration } from './configuration-lock';
 import type { CreateRewardRuleDto, UpdateRewardRuleDto } from './dto';
 
 /**
@@ -149,18 +150,39 @@ export class RewardService {
   }): Promise<GrantOutcome> {
     const { rule } = input;
 
-    if (rule.rewardType === 'CASHBACK' && !this.env.ECONOMIC_REWARD_CASHBACK_ENABLED) {
-      // Refused rather than silently skipped. A rule that exists, is ACTIVE,
-      // and quietly does nothing is a control claiming something it does not
-      // have (docs/24 Q-07).
-      rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'cashback_disabled' });
-      return { kind: 'SKIPPED', reason: 'cashback_disabled', ruleId: rule.id };
-    }
-
     try {
       return await this.prisma.transaction(async (tx) => {
         await this.ensureBalanceRow(tx, input.organizationId, input.userId);
         const balance = await this.lockBalance(tx, input.organizationId, input.userId);
+
+        // A committed grant wins over every mutable eligibility/capacity guard.
+        // Scope by the unique identity first, then validate all attribution.
+        const existing = await runUnscoped('validate a grant replay under the subject lock', () =>
+          tx.reward.findUnique({
+            where: {
+              ruleId_sourceReference: { ruleId: rule.id, sourceReference: input.sourceReference },
+            },
+          }),
+        );
+        if (existing) {
+          if (
+            existing.organizationId !== input.organizationId ||
+            existing.userId !== input.userId ||
+            existing.triggerEvent !== input.triggerEvent
+          ) {
+            throw RastaError.idempotencyKeyReused();
+          }
+          rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'duplicate' });
+          return { kind: 'SKIPPED', reason: 'duplicate', ruleId: rule.id } as GrantOutcome;
+        }
+
+        if (rule.rewardType === 'CASHBACK' && !this.env.ECONOMIC_REWARD_CASHBACK_ENABLED) {
+          // Refused rather than silently skipped. A rule that exists, is ACTIVE,
+          // and quietly does nothing is a control claiming something it does not
+          // have (docs/24 Q-07).
+          rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'cashback_disabled' });
+          return { kind: 'SKIPPED', reason: 'cashback_disabled', ruleId: rule.id };
+        }
 
         const periodKey = periodKeyFor(rule.periodType, input.occurredAt);
         const alreadyGranted = await this.pointsInPeriod(
@@ -490,18 +512,32 @@ export class RewardService {
     organizationId: string,
     triggerEvent: string,
     occurredAt: Date,
+    tx: ExtendedPrismaClient = this.prisma.client,
   ): Promise<string[]> {
-    const rules = await this.candidateRules(organizationId, triggerEvent, occurredAt);
+    const rules = await this.candidateRules(organizationId, triggerEvent, occurredAt, tx);
     return applicableRules(rules as RewardRuleView[], organizationId, triggerEvent, occurredAt)
       .map((rule) => rule.id)
       .sort();
   }
 
-  private candidateRules(organizationId: string, triggerEvent: string, occurredAt: Date) {
+  /** Hold through selection AND the durable claim, never through grant transactions. */
+  async withRuleSelection<T>(work: (tx: ExtendedPrismaClient) => Promise<T>): Promise<T> {
+    return this.prisma.transaction(async (tx) => {
+      await lockRewardConfiguration(tx, 'read');
+      return work(tx);
+    });
+  }
+
+  private candidateRules(
+    organizationId: string,
+    triggerEvent: string,
+    occurredAt: Date,
+    tx: ExtendedPrismaClient = this.prisma.client,
+  ) {
     return runUnscoped(
       'reward rules are platform-wide or organization-specific; the OR below is the scope',
       () =>
-        this.prisma.client.rewardRule.findMany({
+        tx.rewardRule.findMany({
           where: {
             triggerEvent,
             OR: [{ organizationId: null }, { organizationId }],
@@ -577,6 +613,7 @@ export class RewardService {
     };
 
     return this.prisma.transaction(async (tx) => {
+      await lockRewardConfiguration(tx, 'write');
       const created = await runUnscoped(
         'a reward rule may be platform-wide, which no tenant scope can express',
         () => tx.rewardRule.create({ data }),
@@ -612,6 +649,7 @@ export class RewardService {
     const actor = getContext().userId ?? SERVICE_NAME;
 
     return this.prisma.transaction(async (tx) => {
+      await lockRewardConfiguration(tx, 'write');
       const locked = await runUnscoped(
         'reward rules may be platform-wide',
         () =>

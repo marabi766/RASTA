@@ -151,6 +151,52 @@ export const createRewardRuleSchema = z
     path: ['periodCap'],
   });
 
+/** Frozen pre-F5 fingerprint input, for retained records only. Never used to create. */
+const legacyOperand = z.union([z.string(), z.number(), z.boolean()]);
+const legacyLeaf = conditionLeaf.extend({ value: legacyOperand.optional() });
+type LegacyNode = z.infer<typeof legacyLeaf> | { all: LegacyNode[] } | { any: LegacyNode[] };
+const legacyConditionSchema: z.ZodType<LegacyNode> = withCanonicalForm(
+  z.lazy(() =>
+    z.union([
+      legacyLeaf,
+      z.object({ all: z.array(legacyConditionSchema).min(1).max(10) }).strict(),
+      z.object({ any: z.array(legacyConditionSchema).min(1).max(10) }).strict(),
+    ]),
+  ),
+  legacyCanonicalCondition,
+);
+
+function legacyCanonicalCondition(node: unknown): unknown {
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return node;
+  const copy = { ...(node as Record<string, unknown>) };
+  for (const branch of ['all', 'any'] as const) {
+    const children = copy[branch];
+    if (Array.isArray(children)) copy[branch] = children.map(legacyCanonicalCondition);
+  }
+  if (
+    typeof copy.op === 'string' &&
+    (NUMERIC_COMPARISONS as readonly string[]).includes(copy.op) &&
+    Object.prototype.hasOwnProperty.call(copy, 'value')
+  ) {
+    copy.value = canonicalWithin(legacyOperand, copy.value, canonicalDecimal);
+  }
+  return copy;
+}
+
+export const legacyCreateRewardRuleSchema = z
+  .object({
+    ...createRewardRuleSchema.shape,
+    condition: legacyConditionSchema.optional(),
+  })
+  .strict()
+  .refine((dto) => (dto.periodCap === undefined) === (dto.periodType === undefined), {
+    message: 'periodCap and periodType must be supplied together',
+    path: ['periodCap'],
+  });
+
+// Kept in the TEXT request_hash itself: old unprefixed hashes are version 1.
+export const REWARD_FINGERPRINT_VERSION = 'reward-v2';
+
 export type CreateRewardRuleDto = z.infer<typeof createRewardRuleSchema>;
 
 /**
