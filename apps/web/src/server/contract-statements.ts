@@ -12,9 +12,10 @@ import {
 } from '@/lib/statement-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential, sessionAuthority, type SessionTokens } from './session-organization';
 import { webServerEnv } from './env';
 import { utcInstant } from './instant';
-import { tokenAuthority, tokenPerson } from './realm-roles';
+import { tokenPerson } from './realm-roles';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
@@ -131,7 +132,7 @@ async function read<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
     const parsed = schema.safeParse(response.data);
     if (!parsed.success) return { kind: 'MALFORMED', correlationId: response.correlationId };
@@ -195,9 +196,9 @@ export interface StatementCaller {
   readonly platformUser: boolean;
 }
 
-export function statementCallerOf(accessToken: string): StatementCaller {
-  const authority = tokenAuthority(accessToken);
-  const person = tokenPerson(accessToken);
+export function statementCallerOf(session: SessionTokens): StatementCaller {
+  const authority = sessionAuthority(session);
+  const person = tokenPerson(session.accessToken);
   return {
     organizationId: authority?.organizationId ?? null,
     roles: authority?.roles ?? null,

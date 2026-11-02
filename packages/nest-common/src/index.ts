@@ -358,3 +358,4 @@ export type {
 export { clientFailureCode } from './database/client-failure';
 export { DatabaseConnectionError, createSafePrismaClient } from './database/safe-prisma-client';
 export type { RuntimeDatabaseSetting } from './database/safe-prisma-client';
+export { assertConsumerHealth, consumerFailures } from './consumer/consumer-health';

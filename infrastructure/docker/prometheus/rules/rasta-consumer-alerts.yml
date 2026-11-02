@@ -1,0 +1,84 @@
+groups:
+  - name: rasta-consumer-health
+    rules:
+      - record: rasta:consumer_expected:enabled
+        expr: max by (service, group, topic) (rasta_consumer_expected == 1)
+      - alert: RastaConsumerCrash
+        expr: sum by (service, group, reason)
+          (increase(rasta_consumer_crashes_total[5m])) > 0 or sum by (service,
+          group, reason) ((rasta_consumer_crashes_total > 0) and on (job,
+          instance) (time() - rasta_process_start_time_seconds < 300)) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Kafka consumer {{ $labels.group }} crashed ({{ $labels.reason }})
+          description: Inspect the consumer crash log. A terminal crash exits non-zero
+            without committing the failed record; KafkaJS restarts retriable
+            crashes.
+          runbook: docs/runbooks/consumer-crash-loop.md
+      - alert: RastaConsumerServiceRestartLoop
+        expr: sum by (job)
+          (changes(rasta_process_start_time_seconds{job=~"identity-service|asset-service|fleet-service|maintenance-service|economic-service|notification-service|construction-service|contract-service|marketplace-service|supplier-service|audit-service|analytics-service"}[30m]))
+          > 2
+        labels:
+          severity: warning
+        annotations:
+          summary: Consumer service {{ $labels.job }} restarted repeatedly
+          description: More than two observed process start changes in 30 minutes. Inspect
+            supervisor history and consumer crash logs; repair before source
+            retention expires.
+          runbook: docs/runbooks/consumer-crash-loop.md
+      - alert: RastaConsumerServiceMetricsUnavailable
+        expr: min by (job)
+          (up{job=~"identity-service|asset-service|fleet-service|maintenance-service|economic-service|notification-service|construction-service|contract-service|marketplace-service|supplier-service|audit-service|analytics-service"})
+          == 0 or absent(up{job="identity-service"}) or
+          absent(up{job="asset-service"}) or absent(up{job="fleet-service"}) or
+          absent(up{job="maintenance-service"}) or
+          absent(up{job="economic-service"}) or
+          absent(up{job="notification-service"}) or
+          absent(up{job="construction-service"}) or
+          absent(up{job="contract-service"}) or
+          absent(up{job="marketplace-service"}) or
+          absent(up{job="supplier-service"}) or absent(up{job="audit-service"})
+          or absent(up{job="analytics-service"})
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Consumer service {{ $labels.job }} metrics unavailable
+          description: A consumer service scrape has been down or absent for two minutes.
+            Crash counters and process restart observations are incomplete.
+          runbook: docs/runbooks/consumer-crash-loop.md
+      - alert: RastaConsumerLag
+        expr: sum by (group, topic) (clamp_min(label_replace(kafka_consumergroup_lag,
+          "group", "$1", "consumergroup", "(.+)"), 0)) > 0 and on (group, topic)
+          rasta:consumer_expected:enabled
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Consumer {{ $labels.group }} has persistent lag on {{ $labels.topic }}
+          description: The enabled expected consumer has lagged for five minutes. Inspect
+            all assigned partitions; never skip or shift an offset.
+          runbook: docs/runbooks/consumer-crash-loop.md
+      - alert: RastaConsumerOffsetsMissing
+        expr: ( ( (rasta:consumer_expected:enabled unless on (group, topic)
+          label_replace(kafka_consumergroup_lag, "group", "$1", "consumergroup",
+          "(.+)")) and on (topic) (sum by (topic)
+          (clamp_min(kafka_topic_partition_current_offset -
+          kafka_topic_partition_oldest_offset, 0)) > 0) ) or
+          (rasta:consumer_expected:enabled and on (group, topic)
+          ((label_replace(kafka_consumergroup_lag, "group", "$1",
+          "consumergroup", "(.+)") < 0) and on (topic, partition)
+          (clamp_min(kafka_topic_partition_current_offset -
+          kafka_topic_partition_oldest_offset, 0) > 0))) ) and on ()
+          (min(up{job="kafka-exporter"}) == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Consumer {{ $labels.group }} has unknown offsets on {{ $labels.topic }}
+          description: An enabled expected subscription has retained source records but no
+            trustworthy committed offsets for five minutes. Empty topics do not
+            fire. Inspect the consumer; never reset offsets.
+          runbook: docs/runbooks/consumer-crash-loop.md

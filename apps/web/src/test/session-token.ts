@@ -5,9 +5,10 @@
  * platform-wide token with no organization. Never verified in the portal; the
  * gateway and the service do that.
  *
- * A test session's `organizationId` must be this token's, as every stored
- * session's is (`storedOrganizationFor`): `readSession()` refuses one whose
- * copy disagrees with its token, and nothing may be drawn or sent for it.
+ * A test session is pinned to this organization (`organizationId`), as a
+ * sign-in pins it (`pinnedOrganizationFor`): `readSession()` refuses a session
+ * whose token grants its pinned organization no role, and nothing may be drawn
+ * or sent for it.
  */
 export function actingAccessToken(
   organizationId: string | null,
@@ -25,4 +26,26 @@ export function actingAccessToken(
         };
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
   return `${encode({ alg: 'none' })}.${encode(claims)}.signature`;
+}
+
+/**
+ * The token half of a session, pinned as a sign-in would pin it — for the
+ * server helpers that read a session's authority (`sessionAuthority`) and are
+ * tested with a bare token.
+ */
+export function pinnedTokens(accessToken: string): {
+  readonly accessToken: string;
+  readonly organizationId: string | null;
+} {
+  const payload = accessToken.split('.')[1];
+  let organizationId: string | null = null;
+  try {
+    const claims = JSON.parse(Buffer.from(payload ?? '', 'base64url').toString('utf8')) as {
+      org_id?: unknown;
+    };
+    organizationId = typeof claims.org_id === 'string' ? claims.org_id : null;
+  } catch {
+    organizationId = null;
+  }
+  return { accessToken, organizationId };
 }

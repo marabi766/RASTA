@@ -11,7 +11,7 @@
  *    forms. (`@AuditorSelfService` also admits it; no route a portal write form
  *    posts to carries it.)
  * 2. **The administrator is admitted to every route that names roles.**
- *    `SYSTEM_ADMIN` — scoped, or the global realm role `tokenRoles` adds —
+ *    `SYSTEM_ADMIN` — scoped, or the global realm role `sessionRoles` adds —
  *    passes whatever `required` lists.
  * 3. Otherwise any one of the `required` roles.
  *

@@ -21,6 +21,10 @@ import {
 import { EMPTY_ASSIGN_WORKSHOP_FORM, EMPTY_CANCEL_REQUEST_FORM } from '@/lib/maintenance-fields';
 import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * Referring a request to a workshop, approving its cost, cancelling it.
@@ -34,7 +38,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -357,7 +361,7 @@ describe('writing', () => {
       );
       expect(calls[0].method).toBe('POST');
       expect(calls[0].headers['idempotency-key']).toBe('sub_abc');
-      expect(calls[0].headers['authorization']).toBe('Bearer access-token-value');
+      expect(calls[0].headers['authorization']).toBe(`Bearer ${ACCESS_TOKEN_VALUE}`);
     },
   );
 

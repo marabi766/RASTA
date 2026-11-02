@@ -44,20 +44,23 @@ import {
  * ## Bound to the session
  *
  * The id carries a MAC, keyed from the server's session secret, over the
- * session's subject, its CSRF token, **the organization the access token acts
- * for** and the id's own nonce. A well-formed id this server never issued,
+ * session's subject, its CSRF token, **the organization the session acts for**
+ * and the id's own nonce. A well-formed id this server never issued,
  * another person's id, an id minted under an earlier login, and an id minted
  * while the token acted for another organization are all refused before
  * anything reaches the gateway.
  *
- * The organization is the one the access token acts for, read through
- * `session-organization.ts` like every other consumer: after the person
- * switches their active organization elsewhere the next refresh sends every
- * write for the new one (task 095). A form drawn for the old organization — a
- * member picked from its list, a record of its own — is then refused as stale
- * (`REFUSED`, `SUBMISSION`: refresh the page), never sent for the new one. A
- * refresh that keeps the organization keeps every form valid. A session whose
- * organization cannot be told mints no id and verifies none (task 100).
+ * The organization is the one the session acts for — the one it was pinned to
+ * at sign-in, read through `session-organization.ts` like every other
+ * consumer, and the one every gateway call names in `X-Organization-Id`
+ * (task 118). A switch of the account's active organization made elsewhere
+ * does not move it, so a form drawn for A stays a form for A and is sent for A.
+ * An id minted while the session acted for another organization — another
+ * sign-in of the same person, or a session that has since lost its
+ * organization — is refused as stale (`REFUSED`, `SUBMISSION`: refresh the
+ * page), never sent. A session that acts for no organization, or whose
+ * organization cannot be told, mints no id and verifies none: every form
+ * writes a tenant's data, and such a session has no tenant to write for.
  *
  * Every form uses this pair. There used to be a second, shape-only pair (a
  * random id and a regular-expression check) that proved an id was the right
@@ -88,11 +91,11 @@ const KEY_PURPOSE = 'rasta-web/submission-id/v2';
 
 function macFor(session: WebSession, nonce: string): Buffer | null {
   const organizationId = sessionOrganization(session);
-  if (organizationId === undefined) return null;
+  // No organization (pinned to none) and none that can be told both bind nothing.
+  if (organizationId === undefined || organizationId === null) return null;
   const key = createHmac('sha256', webServerEnv().WEB_SESSION_SECRET).update(KEY_PURPOSE).digest();
-  const organization = organizationId ?? '';
   return createHmac('sha256', key)
-    .update(`${session.subject}\n${session.csrfToken}\n${organization}\n${nonce}`)
+    .update(`${session.subject}\n${session.csrfToken}\n${organizationId}\n${nonce}`)
     .digest()
     .subarray(0, MAC_BYTES);
 }
@@ -107,9 +110,10 @@ function macFor(session: WebSession, nonce: string): Buffer | null {
 export function mintSubmissionId(session: WebSession): string {
   const nonce = randomBytes(NONCE_BYTES).toString('base64url');
   const mac = macFor(session, nonce);
-  // `readSession()` refuses such a session; a caller that got one anyway draws no form.
+  // `readSession()` refuses one, `tenant-gate.ts` keeps the other from every
+  // form's page; a caller that got one anyway draws no form.
   if (mac === null)
-    throw new Error('No submission id for a session whose organization is unknown.');
+    throw new Error('No submission id for a session that acts for no known organization.');
   return `${PREFIX}${nonce}${mac.toString('base64url')}`;
 }
 
@@ -152,8 +156,8 @@ const BINDING_PURPOSE = 'rasta-web/unresolved-submission-binding/v1';
  *
  * - `person`: this person, whichever organization they act for. An entry of
  *   another person is removed on this person's first page (an account boundary).
- * - `owner`: this person acting for **this** organization — the one the access
- *   token acts for (`actingOrganizationId`). Entries are kept, and keyed, per
+ * - `owner`: this person acting for **this** organization — the one the session
+ *   is pinned to and acts for (`actingOrganizationId`). Entries are kept, and keyed, per
  *   owner: an entry of the same person for another organization stays in
  *   storage untouched, but is neither shown nor resolved here, so after a
  *   switch from A to B nothing of A's appears on B's pages, and back on A it is

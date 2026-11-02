@@ -74,10 +74,12 @@ import type { AccountTags } from '@/lib/unresolved-tenancy';
  *   its kind on this device until the person acknowledges the duplicate risk
  *   (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`).
  * - **Another organization is not another person.** Entries are kept per
- *   person and organization (`lib/unresolved-tenancy.ts`): after a switch from
- *   A to B nothing of A's is removed here, and none of it is shown or resolved
- *   on B's pages — each store reads only the page's own organization — so back
- *   on A every unresolved request of A's is still there to reconcile (task 100).
+ *   person and organization (`lib/unresolved-tenancy.ts`): after a change from
+ *   A to B — a new sign-in, since a session never leaves the organization it
+ *   was pinned to (task 118) — nothing of A's is removed here, and none of it
+ *   is shown or resolved on B's pages — each store reads only the page's own
+ *   organization — so back on A every unresolved request of A's is still there
+ *   to reconcile, under the key it was sent with (task 100).
  *
  * - **Nothing is written after a logout starts.** The purge also sets an in-memory
  *   flag that `saveUnresolvedOrder` honours, so the answer to a send still in

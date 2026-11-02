@@ -3,6 +3,10 @@
  */
 import { fetchSupplier, fetchSuppliers } from './suppliers';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_OWNER');
 
 /**
  * Reading suppliers. The cases that would be silent if wrong: an actor id or
@@ -15,7 +19,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'owner',
   organizationId: 'ORG_OWNER',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',

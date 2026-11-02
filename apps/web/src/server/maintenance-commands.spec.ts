@@ -11,6 +11,10 @@ import {
 import { EMPTY_REPORT_REQUEST_FORM } from '@/lib/maintenance-fields';
 import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * Parsing and writing a maintenance request.
@@ -25,7 +29,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'operator',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -293,7 +297,7 @@ describe('writing a report', () => {
     expect(calls[0].url).toBe('http://gateway.test:3000/v1/maintenance-requests');
     expect(calls[0].method).toBe('POST');
     expect(calls[0].headers['idempotency-key']).toBe('sub_abc');
-    expect(calls[0].headers['authorization']).toBe('Bearer access-token-value');
+    expect(calls[0].headers['authorization']).toBe(`Bearer ${ACCESS_TOKEN_VALUE}`);
     expect(calls[0].body).toEqual(REQUEST);
   });
 
