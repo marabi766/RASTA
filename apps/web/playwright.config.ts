@@ -83,15 +83,21 @@ export default defineConfig({
   ],
   webServer: [
     {
-      // A production build in CI, the dev server locally. They are different
-      // programs: the dev server compiles on demand and tolerates things the
-      // build refuses, so a browser job running against it would pass on code
-      // that could not ship. Locally the compile-on-demand is what makes the
-      // suite usable while writing a screen.
-      command: process.env.CI ? 'pnpm run start' : 'pnpm run dev',
+      // Production mode everywhere, from ONE `next build`. The layout suite's
+      // portal below is always `next start`, and `next dev` empties `.next`
+      // (BUILD_ID included) when it starts: a dev server here made the second
+      // portal unable to start on any local run (PR #574 review, F1). So
+      // locally this entry builds first and then starts, and CI, which has
+      // already built, only starts. Both portals thus read the same finished
+      // build. A hand-run `pnpm dev` beside this suite has the same effect:
+      // stop it first, or the layout portal reports a missing production build.
+      // The price is a build per local run instead of compile-on-demand; the
+      // gain is that the suite checks the code that ships.
+      command: process.env.CI ? 'pnpm run start' : 'pnpm run build && pnpm run start',
       url: 'http://localhost:3200',
       reuseExistingServer: !process.env.CI,
-      timeout: 120_000,
+      // A cold build is part of a local start.
+      timeout: process.env.CI ? 120_000 : 360_000,
     },
     {
       // The fixture gateway for the layout suite: populated pages, no live stack.
@@ -103,8 +109,9 @@ export default defineConfig({
     },
     {
       // A second copy of the portal, pointed at the fixture gateway. Always a
-      // production start (it needs `next build`, which CI has already run): two
-      // dev servers cannot share one `.next`.
+      // production start on the build the entry above provides (CI has already
+      // run it; locally that entry builds): it shares `.next` with the first
+      // portal, so neither may be a dev server.
       command: `pnpm exec next start --port ${LAYOUT_PORT}`,
       url: `${LAYOUT_ORIGIN}/login`,
       env: {
