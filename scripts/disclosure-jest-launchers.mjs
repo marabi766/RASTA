@@ -49,7 +49,7 @@ export const JEST_LAUNCHERS = {
     reaches: 'Spawns Kafka/Docker tools; pnpm test strings are usage diagnostics, not executed.',
     sha256: {
       'scripts/kafka-acl.broker.test.mjs':
-        'f4890cd53818a94d5911cb90f20d3c21abf0962a685b86ed73ec0654039bd4db',
+        '084f45efeeedb4a2ec1ebba2167cfa423fdf920414c25f8334fe36462431872d',
     },
   },
   'scripts/no-zod-default-rule.test.mjs': {
@@ -86,10 +86,10 @@ export const JEST_LAUNCHERS = {
   'scripts/disposable-broker.test.mjs': {
     kind: 'non-jest',
     reaches:
-      'Spawns Node broker-guard probes and pnpm test:kafka-limits-broker with the disposable declaration absent: exits before tests; no Jest.',
+      'Spawns Node broker-guard probes and pnpm test:kafka-limits-broker, test:replay-dlq-broker and test:kafka-acl-broker with invalid disposable declarations: exits before broker I/O; no Jest.',
     sha256: {
       'scripts/disposable-broker.test.mjs':
-        'f52656a48f260fae58277a8e26e101eb612cebe73a030b199a4cd61fa6fd3ede',
+        'b587bfa1392097490cbb847a835809d93a7a51ce5dde6adc029ab0beb4fddaf9',
     },
   },
   'scripts/replay-dlq.broker.test.mjs': {
@@ -97,7 +97,7 @@ export const JEST_LAUNCHERS = {
     reaches: 'Spawns the replay Node CLI and an inline Kafka transaction probe; no Jest.',
     sha256: {
       'scripts/replay-dlq.broker.test.mjs':
-        '335fd8f0b9db69437598b51e042938522c8522682daad56558e7d01a307c0a9e',
+        '148568b06c5edb894d5b6359dc3b6cdbd3095c1162ec53cd68b6eb0b3e7680a1',
     },
   },
   'scripts/outbox-purge-turbo-env.test.mjs': {
