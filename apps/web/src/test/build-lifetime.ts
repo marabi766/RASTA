@@ -74,6 +74,42 @@ const groupAbsent = (group: number): boolean => {
   }
 };
 
+const positiveInteger = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+
+/**
+ * The ONE schema check for the controller's events: a non-null plain object, a known
+ * `kind` and its required fields typed (group ids and command ids positive safe integers).
+ * Anything else is `undefined`, which the receiver turns into LOST; this never throws.
+ */
+export type ControllerEvent =
+  | { kind: 'READY'; group: number }
+  | { kind: 'ACK'; id: number; acted: boolean }
+  | { kind: 'FINAL' | 'NORMAL_END' };
+export function decodeEvent(line: string): ControllerEvent | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const message = value as Record<string, unknown>;
+  switch (message.kind) {
+    case 'READY':
+      return positiveInteger(message.group) ? { kind: 'READY', group: message.group } : undefined;
+    case 'ACK':
+      return positiveInteger(message.id) && typeof message.acted === 'boolean'
+        ? { kind: 'ACK', id: message.id, acted: message.acted }
+        : undefined;
+    case 'FINAL':
+    case 'NORMAL_END':
+      return { kind: message.kind };
+    default:
+      return undefined;
+  }
+}
+
 /** The controller's command channel, next to its event channel `path`. */
 export const commandPath = (path: string): string => `${path}.commands`;
 
@@ -110,16 +146,20 @@ export function supervisorEndpoint(deadlineMs = 5_000): {
   const wake = (): void => {
     for (const listener of listeners) listener();
   };
+  let absence: ReturnType<typeof setTimeout> | undefined;
+  // Bytes after the last newline. A frame still incomplete at EOF is a decode failure.
+  let buffer = '';
   const settle = (result: Completion): void => {
     if (outcome) return;
     outcome = result;
+    clearTimeout(absence);
     onEnded(result);
     wake();
   };
   const lose = (): void => settle('LOST');
   const eof = (): void => {
     if (outcome) return;
-    if (!announced || group === undefined) return lose();
+    if (!announced || group === undefined || buffer !== '') return lose();
     // Announced ending: confirm the group is gone within the deadline (observation only).
     const owned = group;
     const deadline = performance.now() + deadlineMs;
@@ -127,7 +167,7 @@ export function supervisorEndpoint(deadlineMs = 5_000): {
       if (outcome) return;
       if (groupAbsent(owned)) return settle('COMPLETED');
       if (performance.now() >= deadline) return lose();
-      setTimeout(check, 10);
+      absence = setTimeout(check, 10);
     };
     check();
   };
@@ -136,27 +176,20 @@ export function supervisorEndpoint(deadlineMs = 5_000): {
     connected = true;
     socket = incoming;
     onConnected();
-    let buffer = '';
-    incoming.on('data', (data) => {
+    incoming.setEncoding('utf8');
+    incoming.on('data', (data: string) => {
       buffer += data;
       while (buffer.includes('\n')) {
         const end = buffer.indexOf('\n');
-        const line = buffer.slice(0, end);
+        const message = decodeEvent(buffer.slice(0, end));
         buffer = buffer.slice(end + 1);
-        let message: { kind?: unknown; id?: unknown; acted?: unknown; group?: unknown };
-        try {
-          message = JSON.parse(line) as typeof message;
-        } catch {
-          message = {};
-        }
-        if (message.kind === 'READY' && group === undefined && Number.isInteger(message.group))
-          group = message.group as number;
-        else if (message.kind === 'ACK' && typeof message.id === 'number')
-          acknowledgements.set(message.id, message.acted === true);
-        else if (message.kind === 'FINAL' || message.kind === 'NORMAL_END') announced = true;
+        if (message?.kind === 'READY' && group === undefined) group = message.group;
+        else if (message?.kind === 'ACK') acknowledgements.set(message.id, message.acted);
+        else if (message?.kind === 'FINAL' || message?.kind === 'NORMAL_END') announced = true;
         else {
+          // Undecodable, unknown or repeated: fail closed, and read nothing further.
           lose();
-          incoming.destroy();
+          return incoming.destroy();
         }
         wake();
       }

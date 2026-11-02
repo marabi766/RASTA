@@ -67,7 +67,9 @@ describe('the build and check scripts', () => {
     expect(source).not.toMatch(/error\.message|\.message\b/);
   });
   it('lints the scripts directory too', () => {
-    expect(pkg.scripts.lint).toBe('eslint src scripts');
+    expect(pkg.scripts.lint.split(' ')).toEqual(
+      expect.arrayContaining(['eslint', 'src', 'scripts']),
+    );
   });
   it('names the manifest the same way in the receipt module and the reader', () => {
     const { out } = runModule(

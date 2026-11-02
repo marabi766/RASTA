@@ -458,7 +458,8 @@ const worker = path.join(__dirname, '../build/worker.js');
     else cp.spawn(process.execPath, args, { stdio: 'ignore', detached: Boolean(plan.linger.detached) }).unref();
     // The scenario requires an initialized writer. Root exit must never race its
     // startup, including the asynchronous descendant left by a synchronous child.
-    while (!fs.existsSync(path.join(dir, 'linger.pid'))) await new Promise((r) => setTimeout(r, 10));
+    for (let i = 0; i < 3000 && !fs.existsSync(path.join(dir, 'linger.pid')); i += 1) await new Promise((r) => setTimeout(r, 10));
+    if (!fs.existsSync(path.join(dir, 'linger.pid'))) process.exit(71); // Bounded: never wait forever.
   }
   if (plan.unresponsive) process.on('SIGTERM', () => {});
   if (plan.unresponsive) fs.writeFileSync('unresponsive.ready', '');

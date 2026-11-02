@@ -82,6 +82,14 @@ export default tseslint.config(
     rules: { 'internal/token-source': 'off' },
   },
   {
+    // Build-time Node scripts (`scripts/*.mjs`, `*.cjs`): plain JavaScript run by `next build`
+    // and CI, never bundled into the portal and handed no credential. The rule needs type
+    // information to follow a token to its source and so refuses every untyped file; they are
+    // still linted by every other rule (merge of PR #503 with the scripts lint of this PR).
+    files: ['scripts/**'],
+    rules: { 'internal/token-source': 'off' },
+  },
+  {
     // Production source only, as in the services: specs and test helpers
     // build credential sentinels against local fakes.
     files: ['src/**/*.{ts,tsx}'],

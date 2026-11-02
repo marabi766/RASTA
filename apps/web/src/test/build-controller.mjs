@@ -11,6 +11,7 @@
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { connect } from 'node:net';
+import { constants } from 'node:os';
 import process from 'node:process';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -19,6 +20,25 @@ async function open(path) {
   await new Promise((resolve, reject) => socket.once('connect', resolve).once('error', reject));
   socket.on('error', () => socket.destroy());
   return socket;
+}
+
+// The ONE schema check for the test's commands: a non-null plain object with a positive
+// safe-integer `id`, and either `group` or `root` with a known signal name. Anything else
+// is `undefined` (a refused command); this never throws.
+function decodeCommand(line) {
+  let value;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const { id, target, signal } = value;
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) return undefined;
+  if (target === 'group') return { id, target };
+  if (target === 'root' && typeof signal === 'string' && Object.hasOwn(constants.signals, signal))
+    return { id, target, signal };
+  return undefined;
 }
 
 export async function supervise(socketPath, supervisorUrl, importDelayMs = 0) {
@@ -65,19 +85,27 @@ export async function supervise(socketPath, supervisorUrl, importDelayMs = 0) {
     return true;
   };
 
+  // A refused command (undecodable, unknown, or an incomplete frame at EOF) is never acted
+  // on: it ends the event channel without an announcement, so the test side reads LOST.
+  const refuse = () => {
+    commands.destroy();
+    socket.destroy();
+  };
   let buffer = '';
   const onData = (data) => {
     buffer += data;
     while (buffer.includes('\n')) {
       const end = buffer.indexOf('\n');
-      const { id, target, signal } = JSON.parse(buffer.slice(0, end));
+      const command = decodeCommand(buffer.slice(0, end));
       buffer = buffer.slice(end + 1);
+      if (command === undefined) return refuse();
+      const { id, target, signal } = command;
       if (target === 'group') {
         // Use the SAME production IPC handler. Only the live leader self-signals.
         pendingAck = id;
         process.emit('message', { kind: 'kill' });
         if (pendingAck === id) send([]);
-      } else if (target === 'root') {
+      } else {
         // This controller is the root's parent. Until Node reaps it, its PID cannot
         // be reused. Node records exitCode/signalCode in that same event-loop turn;
         // no await/probe occurs between this gate and ChildProcess.kill().
@@ -85,7 +113,7 @@ export async function supervise(socketPath, supervisorUrl, importDelayMs = 0) {
           root && root.exitCode === null && root.signalCode === null && root.kill(signal),
         );
         send([{ kind: 'ACK', id, acted }]);
-      } else socket.destroy(); // Protocol error: unannounced EOF, so LOST.
+      }
     }
   };
   // The supervisor module installs its handler during evaluation, then never resolves
@@ -97,7 +125,9 @@ export async function supervise(socketPath, supervisorUrl, importDelayMs = 0) {
     process.off('newListener', installed);
     process.nextTick(() => {
       send([{ kind: 'READY', group: process.pid }]);
+      commands.setEncoding('utf8');
       commands.on('data', onData);
+      commands.once('end', () => buffer !== '' && refuse());
     });
   });
   // Test-only widening of the startup window (R6-1 regression); 0 in every other case.
