@@ -204,18 +204,15 @@ const base = tseslint.config(
     // transports (AUDITED_TRANSPORTS in the rule) no raw HTTP primitive at all,
     // however it is reached. `transport` is the second layer: a module that
     // spells a credential must name the redirect-refusing transport.
-    // `exchange-deadline` keeps the abort timer in the shared boundary (#507).
+    // `exchange-deadline` keeps the abort timer in the shared boundary (#507). The
+    // rule exempts that one file by its exact canonical repository path
+    // (SHARED_BOUNDARY): no config override by suffix, so a same-named file in
+    // another workspace is checked like any other (#536 r1 F2).
     rules: {
       'internal/transport': 'error',
       'internal/raw-http': 'error',
       'internal/exchange-deadline': 'error',
     },
-  },
-  {
-    // The shared boundary is where the timer lives: it is the one place an
-    // abort timer is written, so that no caller has to (PR #507 r1 F2).
-    files: ['**/http/exchange-deadline.ts'],
-    rules: { 'internal/exchange-deadline': 'off' },
   },
   ...INTERNAL_TOKEN_SOURCE,
   {
