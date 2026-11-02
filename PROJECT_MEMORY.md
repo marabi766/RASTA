@@ -1812,6 +1812,16 @@ INCONCLUSIVE=2`، `probe_tps: n=2 available=0 unavailable=2 min=n/a median=n/a m
 
 ## ۳. Current Verified State
 
+Consumer crash recovery — task 865, 2026-11-01 (local verification; see PR STATUS for CI):
+
+| Scope                  | Verified evidence                                                                                                                                                                                                                         |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Terminal KafkaJS crash | nest-common: 1,237 tests; twelve consumer services: 10,268 unit and 5,413 integration tests; HTTP 503 probes; three economic child-process restart/replay proofs; 173 E2E scenarios.                                                      |
+| Crash visibility       | Prometheus config and 99 rule scenarios across seven files; 20 lifecycle/health/alert mutants killed and restored. Supervisor restart/backoff is a deployment requirement; between-scrape process incarnations remain a visibility limit. |
+
+These are scoped task results, not a replacement for the historical CI counts below.
+The broker limits gate and PR CI results are recorded in task 865's PR STATUS.
+
 ### به‌روزرسانی 2026-09-18 — شمارش واقعی از اجرای سبز `35364991343` (`f7252d3`)
 
 اعداد زیر از Log همان اجرا برداشته شده‌اند، نه از حافظه و نه از اجرای محلی.
@@ -2959,6 +2969,17 @@ aggregateId, tenantId, correlationId, causationId, traceparent, actor, payload`.
 ---
 
 ## ۱۳. Outbox / DLQ
+
+Terminal consumer recovery (task 865, 2026-11-01): KafkaJS `CRASH` with
+`restart=false` makes `EventConsumer.isRunning()` false and both probes return 503,
+counts a closed reason, and starts existing graceful shutdown with exit 1 within
+`SHUTDOWN_TIMEOUT_MS`. STOP/DISCONNECT before a retriable crash do not request exit.
+All 22 consumers in twelve services use the shared wrapper; replay protection is
+inventoried in the PR, including six consumers using natural keys/convergent writes
+without event markers. Fleet's parked-DLQ outbox is unchanged. Recovery never skips
+or commits the failed record and remains limited by source retention. See the
+[consumer crash-loop runbook](docs/runbooks/consumer-crash-loop.md) and deployment
+requirements in [docs/12](docs/12-deployment-architecture.md).
 
 - **Producer:** `buildOutboxRow` + جدول `outbox_message` در همان Transaction
   نوشتن دامنه؛ `OutboxRelay` با Polling، `FOR UPDATE SKIP LOCKED`، منتشر به
