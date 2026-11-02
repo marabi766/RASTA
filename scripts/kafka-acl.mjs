@@ -2,7 +2,7 @@
 /**
  * Applies the generated principals' ACLs to the broker (RUN-006, ADR-061 § 3).
  *
- *   node scripts/kafka-acl.mjs apply --profile development|deployment
+ *   node scripts/kafka-acl.mjs apply|check --profile development|deployment
  *
  * The profile is required (review of #131, #5): `development` adds the
  * development-only principals (test observer, Kafka UI, exporter) and exists
@@ -22,7 +22,7 @@
  * `pnpm infra:up` exported to `infrastructure/docker/kafka/.tls/ca.pem`.
  *
  * Development: `pnpm infra:up` (and `pnpm kafka:acl:apply:dev`) run it on the
- * host after `docker compose up -d` with the bootstrap-only env file
+ * host after `node scripts/kafka-init-gate.mjs` confirms provisioning, with the bootstrap-only env file
  * (`infrastructure/docker/kafka/bootstrap.env`, from its committed example) —
  * the admin's password is never in the services' `.env` — so nothing beyond
  * Node and pnpm is needed. There is no profile-less command (review of #131).
@@ -50,9 +50,14 @@ const {
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const [command, flag, profile] = process.argv.slice(2);
 const PROFILES = ['development', 'deployment'];
-if (command !== 'apply' || flag !== '--profile' || !PROFILES.includes(profile)) {
+if (
+  !['apply', 'check'].includes(command) ||
+  flag !== '--profile' ||
+  !PROFILES.includes(profile) ||
+  process.argv.length !== 5
+) {
   process.stderr.write(
-    'usage: node scripts/kafka-acl.mjs apply --profile development|deployment\n',
+    'usage: node scripts/kafka-acl.mjs apply|check --profile development|deployment\n',
   );
   process.exit(2);
 }
@@ -111,36 +116,44 @@ try {
   await admin.connect();
   const { add, remove } = diffAcls(spec.acls, await current());
 
-  if (remove.length > 0) {
-    await admin.deleteAcls({
-      filters: remove.map((binding) =>
-        binding.unexpected
-          ? {
-              resourceType: binding.raw.resource.resourceType,
-              resourceName: binding.raw.resource.resourceName,
-              resourcePatternType: binding.raw.resource.resourcePatternType,
-              principal: binding.raw.acl.principal,
-              host: binding.raw.acl.host,
-              operation: binding.raw.acl.operation,
-              permissionType: binding.raw.acl.permissionType,
-            }
-          : toKafkajsAcl(binding),
-      ),
-    });
-  }
-  if (add.length > 0) await admin.createAcls({ acl: add.map(toKafkajsAcl) });
-
-  const after = diffAcls(spec.acls, await current());
-  if (after.add.length > 0 || after.remove.length > 0) {
-    process.stderr.write(
-      `kafka acl: the broker does not hold the generated ACLs (${after.add.length} missing, ${after.remove.length} extra)\n`,
+  // Retained-broker verification must never repair drift or write marker records.
+  if (command === 'check') {
+    if (add.length || remove.length) throw new Error('ACL_DRIFT');
+    process.stdout.write(
+      `kafka acl: ${profile}: authenticated; generated ACLs confirmed (read only)\n`,
     );
-    process.exit(1);
+  } else {
+    if (remove.length > 0) {
+      await admin.deleteAcls({
+        filters: remove.map((binding) =>
+          binding.unexpected
+            ? {
+                resourceType: binding.raw.resource.resourceType,
+                resourceName: binding.raw.resource.resourceName,
+                resourcePatternType: binding.raw.resource.resourcePatternType,
+                principal: binding.raw.acl.principal,
+                host: binding.raw.acl.host,
+                operation: binding.raw.acl.operation,
+                permissionType: binding.raw.acl.permissionType,
+              }
+            : toKafkajsAcl(binding),
+        ),
+      });
+    }
+    if (add.length > 0) await admin.createAcls({ acl: add.map(toKafkajsAcl) });
+
+    const after = diffAcls(spec.acls, await current());
+    if (after.add.length > 0 || after.remove.length > 0) {
+      process.stderr.write(
+        `kafka acl: the broker does not hold the generated ACLs (${after.add.length} missing, ${after.remove.length} extra)\n`,
+      );
+      process.exit(1);
+    }
+    process.stdout.write(
+      `kafka acl: ${profile}: ${spec.acls.length} bindings for ${spec.principals.length} principals in place ` +
+        `(${add.length} added, ${remove.length} removed)\n`,
+    );
   }
-  process.stdout.write(
-    `kafka acl: ${profile}: ${spec.acls.length} bindings for ${spec.principals.length} principals in place ` +
-      `(${add.length} added, ${remove.length} removed)\n`,
-  );
 } catch (error) {
   // The broker's or the client's failure by category, never its text (#385 r6).
   process.stderr.write(

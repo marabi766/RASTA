@@ -1,6 +1,6 @@
 /**
  * The disposable-broker declaration (PR #378 r5 F2, disposable-broker.mjs):
- * both broker tests that change a broker beyond topics of their own refuse to
+ * all four broker suites that change a broker beyond topics of their own refuse to
  * start without RASTA_DISPOSABLE_BROKER=1 — run directly, under `node --test`
  * and through their package command — with a non-zero exit, before any Docker
  * command or Kafka connection. No broker needed: `docker` is a recorder on
@@ -10,6 +10,7 @@
  *
  *   node --test scripts/disposable-broker.test.mjs
  */
+import YAML from 'yaml';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -24,6 +25,8 @@ const DECLARATION = 'RASTA_DISPOSABLE_BROKER';
 const FILES = [
   'scripts/create-topics.broker.test.mjs',
   'scripts/dead-letter-escape.broker.test.mjs',
+  'scripts/replay-dlq.broker.test.mjs',
+  'scripts/kafka-acl.broker.test.mjs',
 ];
 const read = (path) => readFileSync(resolve(ROOT, path), 'utf8');
 
@@ -106,8 +109,16 @@ for (const file of FILES) {
     assertRefused(process.execPath, ['--test', file], undefined));
 }
 
-test('the package command test:kafka-limits-broker, undeclared: both files refused, non-zero', () =>
-  assertRefused('pnpm', ['run', '--silent', 'test:kafka-limits-broker'], undefined, FILES.length));
+for (const [command, files] of [
+  ['test:kafka-limits-broker', 2],
+  ['test:replay-dlq-broker', 1],
+  ['test:kafka-acl-broker', 1],
+]) {
+  for (const declared of [undefined, '', '0', 'true', ' 1', '1 ']) {
+    test(`package ${command}, declaration ${JSON.stringify(declared)}: refuses before Docker/network`, () =>
+      assertRefused('pnpm', ['run', '--silent', command], declared, files));
+  }
+}
 
 test('each broker test imports the declaration first, before anything else it runs', () => {
   for (const file of FILES) {
@@ -127,26 +138,34 @@ test('declared exactly "1", the guard lets the file go on (the refusals above ar
   assert.match(output, /went on/);
 });
 
-test('CI declares it once, in the broker-authorisation step that runs the limits tests; no committed env file or package script does', () => {
-  const ci = read('.github/workflows/ci.yml');
-  const lines = ci
-    .split('\n')
-    .filter((line) => line.includes(DECLARATION) && !line.trim().startsWith('#'));
-  assert.deepEqual(
-    lines.map((line) => line.trim()),
-    [`${DECLARATION}=1 pnpm run test:kafka-limits-broker`],
-  );
+test('CI declares it once for all four suites in the broker step alone; no env file/package script does', () => {
+  const ci = YAML.parse(read('.github/workflows/ci.yml'));
+  assert.ok(!Object.hasOwn(ci.env ?? {}, DECLARATION), 'no workflow-level declaration');
+  const declarations = [];
+  for (const [name, job] of Object.entries(ci.jobs)) {
+    assert.ok(!Object.hasOwn(job.env ?? {}, DECLARATION), `${name} job-level declaration`);
+    for (const step of job.steps ?? []) {
+      if (Object.hasOwn(step.env ?? {}, DECLARATION)) declarations.push({ name, step });
+      assert.ok(!step.run?.includes(`${DECLARATION}=`), 'no inline/default declaration');
+    }
+  }
+  assert.equal(declarations.length, 1);
+  const [{ name, step }] = declarations;
+  assert.equal(name, 'broker-authorisation');
+  assert.equal(step.env[DECLARATION], '1');
+  for (const command of [
+    'test:replay-dlq-broker',
+    'test:kafka-acl-broker',
+    'test:kafka-limits-broker',
+  ]) {
+    assert.ok(step.run.includes(`pnpm run ${command}`));
+  }
+  assert.ok(!read('scripts/replay-dlq.broker.test.mjs').includes('REPLAY_TEST_DISPOSABLE_BROKER'));
   for (const path of [
     'infrastructure/docker/kafka/bootstrap.env.example',
     '.env.example',
     'package.json',
   ]) {
-    let text;
-    try {
-      text = read(path);
-    } catch {
-      continue;
-    }
-    assert.ok(!text.includes(DECLARATION), `${path} declares ${DECLARATION}`);
+    assert.ok(!read(path).includes(DECLARATION), `${path} declares ${DECLARATION}`);
   }
 });

@@ -161,7 +161,7 @@
 
 ### زیرساخت
 
-- [ ] `docker compose up` محیط کامل توسعه
+- [ ] `pnpm infra:up` محیط کامل توسعه
 - [ ] Helm Chart برای Staging و Production
 - [ ] CI/CD کامل با دروازه‌های امنیتی
 - [ ] Backup و **Restore تست‌شده**

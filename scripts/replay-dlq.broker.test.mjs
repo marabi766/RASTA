@@ -24,10 +24,11 @@
  *
  * The last test deletes records from one rasta.fleet.v1 partition, as
  * retention would — irreversibly. It runs only on a broker declared
- * disposable (`REPLAY_TEST_DISPOSABLE_BROKER=1`, which CI's fresh broker job
- * sets), and even there it deletes nothing unless every record it would
- * delete was written by this run; anywhere else it is skipped, and says so.
+ * disposable (`RASTA_DISPOSABLE_BROKER=1`, required for the entire suite),
+ * and even there it deletes nothing unless every record it would delete was
+ * written by this run. The shared guard is the first import, before any I/O.
  */
+import './disposable-broker.mjs';
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -55,8 +56,6 @@ const RETRY = 'rasta.fleet.v1.retry';
 const OPS_REPLAY = 'rasta.ops.replay.v1';
 const DLQ = 'rasta.maintenance.v1.dlq';
 const OPERATOR = 'replay-itest';
-/** Records may be deleted only on a broker declared throwaway (CI's fresh one). */
-const DISPOSABLE_BROKER = process.env.REPLAY_TEST_DISPOSABLE_BROKER === '1';
 
 const configuredCa = process.env.KAFKA_SSL_CA_FILE?.trim();
 const CA =
@@ -858,14 +857,7 @@ describe('one Kafka transaction per replay and its record (round 1 on #166)', ()
 });
 
 describe('retention past the original offset (Codex round 1 on #144, H1)', () => {
-  test('a newer record for the key that retention took leaves staleness unknown, never "not stale"', async (t) => {
-    if (!DISPOSABLE_BROKER) {
-      t.skip(
-        'deletes rasta.fleet.v1 records, as retention would: runs only with ' +
-          'REPLAY_TEST_DISPOSABLE_BROKER=1 on a throwaway broker (CI sets it)',
-      );
-      return;
-    }
+  test('a newer record for the key that retention took leaves staleness unknown, never "not stale"', async () => {
     const before = replay(['--event-id', ids.expired]);
     assert.equal(before.status, 0, before.stderr);
     const [line] = before.records;
