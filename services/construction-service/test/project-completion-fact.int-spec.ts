@@ -204,7 +204,6 @@ describe('the internal project completion source read (D-081)', () => {
     expect(operation.security).toEqual([{ internalToken: [] }]);
     expect(Object.keys(operation.responses).sort()).toEqual([
       '200',
-      '400',
       '401',
       '403',
       '404',
