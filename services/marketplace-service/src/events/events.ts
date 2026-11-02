@@ -300,10 +300,9 @@ export const orderDisputeResolvedPayload = z.object({
 /**
  * A buyer reviewed a completed order.
  *
- * `rating` only, with an optional comment. There is no computed score here:
- * supplier performance scoring belongs to supplier-service, which does not
- * exist, and a rating average produced here would be a second authority for a
- * number that service will own (ADR-041).
+ * `rating` is general satisfaction; optional `qualityRating` is the separate
+ * buyer quality answer (Q-56 / ADR-052 step 1-d). Absence means no QUALITY fact.
+ * Performance scores are computed only by supplier-service.
  */
 export const reviewSubmittedPayload = z.object({
   reviewId: z.string(),
@@ -311,6 +310,7 @@ export const reviewSubmittedPayload = z.object({
   buyerOrganizationId: z.string(),
   supplierOrganizationId: z.string(),
   rating: z.number().int().min(1).max(5),
+  qualityRating: z.number().int().min(1).max(5).optional(),
   submittedAt: isoTimestamp,
 });
 

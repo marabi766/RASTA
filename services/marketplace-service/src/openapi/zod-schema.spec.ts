@@ -90,6 +90,8 @@ describe('zod to JSON Schema', () => {
         Record<string, unknown>
       >;
       expect(props.rating).toMatchObject({ type: 'integer', minimum: 1, maximum: 5 });
+      expect(props.qualityRating).toMatchObject({ type: 'integer', minimum: 1, maximum: 5 });
+      expect(toJsonSchema(submitReviewSchema).required).not.toContain('qualityRating');
     });
   });
 
