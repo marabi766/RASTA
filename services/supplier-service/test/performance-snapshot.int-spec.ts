@@ -589,7 +589,7 @@ describe('score snapshots (ADR-052 step 4)', () => {
 
       await expect(
         asSupplier(a, () => prisma.transaction((tx) => snapshots.insert(tx, published(b)))),
-      ).rejects.toThrow(/Cross-tenant writes are never implicit/);
+      ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
       expect(await snapshotCount(b)).toBe(0);
     });
   });
