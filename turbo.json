@@ -59,7 +59,26 @@
       "env": ["DATABASE_URL", "DATABASE_URL_*", "RASTA_ALLOW_DEMO_SEED"]
     },
     "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
+    // Every file an eslint.config.* loads outside its own workspace (rules, their
+    // helpers, a shared config) must be hashed by the task that applies to that
+    // workspace — this one, a "<pkg>#lint" here, or the workspace turbo.json.
+    // scripts/lint-scripts-registration.test.mjs (run by lint:scripts) follows the
+    // imports (a fixed loading grammar, anything else fails) and then asks turbo
+    // itself: `turbo run lint --dry=json` lists each task's hashed files, and a
+    // loaded file missing from that list fails. List rule files as plain paths:
+    // turbo accepts an @(…), +(…) or !(…) pattern and hashes nothing for it.
+    // A rule module that imports fs, child_process or os needs its own exact-path
+    // entry (BUILTIN_READERS in that test) and what it reads must be hashed here too.
+    //
+    // The task is NOT cached (PR #524 r8, D-109). eslint's parser builds TypeScript programs
+    // (scripts/internal-token-parser.mjs), and a program reads whatever its imports,
+    // `extends`/`references` chains (any file name), external configs and generated
+    // declarations reach: no list of hashed inputs can be complete, so there is no cached
+    // green to replay. The test asserts exactly this: every lint task that loads a
+    // program-building module is `"cache": false` (programBuildProblems). The inputs below are
+    // kept so the loaded-file model stays accurate if a lint task is ever cached again.
     "lint": {
+      "cache": false,
       "dependsOn": ["^build"],
       "inputs": [
         "$TURBO_DEFAULT$",
