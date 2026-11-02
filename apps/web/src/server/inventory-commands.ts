@@ -22,7 +22,7 @@ import {
 } from '@/lib/inventory-commands';
 
 import { webServerEnv } from './env';
-import { tokenAuthority } from './realm-roles';
+import { sessionAuthority, type SessionTokens } from './session-organization';
 import type { WebSession } from './session';
 import type { ShipmentSummary } from './inventory';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
@@ -48,8 +48,9 @@ import { writeThroughGateway, type FieldMapping, type WriteResult } from './writ
  * No inventory view says what the caller may do (there is no
  * `availableActions`), so the forms a page draws are copies of the service's
  * own checks (`InventoryAccess.assertOperator`, `shipment.state-machine.ts`),
- * from the roles **the access token** carries for the organization it resolves
- * to (`tokenAuthority`): a role of the operator set (`WEB_INVENTORY_ROLES`,
+ * from the roles the access token grants **in the organization the session is
+ * pinned to** (`sessionAuthority`, never the token's own active organization,
+ * which a switch made elsewhere moves — task 118): a role of the operator set (`WEB_INVENTORY_ROLES`,
  * mirroring `INVENTORY_OPERATOR_ROLES`) and neither `AUDITOR` nor
  * `SYSTEM_ADMIN`; a shipment is moved only by an operator of the organization
  * that owns its origin warehouse, and only from the status the move needs.
@@ -68,14 +69,21 @@ import { writeThroughGateway, type FieldMapping, type WriteResult } from './writ
 // Who may
 // ---------------------------------------------------------------------------
 
-/** Who is asking, from the access token: the organization it acts for and its roles there. */
+/**
+ * Who is asking: the organization the session acts for and the roles its token
+ * grants there (`sessionAuthority`). A session that acts for none, or cannot
+ * act at all, is drawn nothing — every inventory write is tenant-scoped.
+ */
 export interface InventoryCaller {
   readonly organizationId: string | null;
   readonly roles: readonly string[];
 }
 
-export function inventoryCallerOf(accessToken: string): InventoryCaller {
-  return tokenAuthority(accessToken) ?? { organizationId: null, roles: [] };
+export function inventoryCallerOf(session: SessionTokens): InventoryCaller {
+  const authority = sessionAuthority(session);
+  return authority?.organizationId
+    ? { organizationId: authority.organizationId, roles: authority.roles }
+    : { organizationId: null, roles: [] };
 }
 
 /** The roles `InventoryAccess` refuses whatever the configuration says. */

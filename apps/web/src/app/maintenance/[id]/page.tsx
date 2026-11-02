@@ -2,7 +2,6 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchDemoMode } from '@/server/demo-mode';
-import { tokenWriteRoles } from '@/server/realm-roles';
 import { fetchMaintenanceRequest, fetchRepairOrder } from '@/server/maintenance';
 import { canManageMaintenance, sealApprovalBaseline } from '@/server/maintenance-commands';
 import { isRepairOrderId, sealRepairOrderBaseline } from '@/server/repair-order-commands';
@@ -26,7 +25,11 @@ import {
   RecordPartForm,
   StartRepairForm,
 } from './RepairOrderForms';
-import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import {
+  actingOrganizationLabel,
+  actingScope,
+  sessionWriteRoles,
+} from '@/server/session-organization';
 import { pageParams } from '@/server/page-context';
 
 /**
@@ -53,10 +56,10 @@ export default async function MaintenanceRequestPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/maintenance/${id}`)}`);
   const query = await pageParams(session, searchParams);
-  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  // What the forms are offered on: the token's roles in the pinned organization (`sessionWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
-  const roles = tokenWriteRoles(session.accessToken);
+  const roles = sessionWriteRoles(session);
 
   const result = await fetchMaintenanceRequest(session, id);
 

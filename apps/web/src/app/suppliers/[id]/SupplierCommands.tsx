@@ -82,7 +82,7 @@ export function supplierCommandsFor(
    * open a path (a form drawn "open" by default).
    */
   held: boolean,
-  actor: SupplierActor | null = supplierActor(session.accessToken),
+  actor: SupplierActor | null = supplierActor(session),
 ): SupplierCommandsView {
   if (!actor) return NO_COMMANDS;
 

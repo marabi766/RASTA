@@ -422,7 +422,8 @@ test('no inline directive switches the transport rules off, except the one pinne
     }
   }
   assert.deepEqual(found, [
-    // In the page, not the runner: the browser's own same-origin form post (Q-155 scope).
-    'apps/web/e2e/usage.spec.ts: internal/raw-http, internal/transport',
+    // In the page, not the runner: the browser's own same-origin form post (Q-155 scope),
+    // the one transport every spec that proves an action's outcome uses (PR #541 r1 F1).
+    'apps/web/e2e/action-outcome.ts: internal/raw-http',
   ]);
 });

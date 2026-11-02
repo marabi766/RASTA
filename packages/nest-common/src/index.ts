@@ -354,3 +354,5 @@ export type {
   PublishedErrorResponse,
   PublishedSchema,
 } from './openapi/published-body';
+
+export { assertConsumerHealth, consumerFailures } from './consumer/consumer-health';

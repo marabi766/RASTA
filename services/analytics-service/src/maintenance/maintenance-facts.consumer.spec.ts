@@ -242,6 +242,8 @@ describe('MaintenanceFactsConsumer lifecycle', () => {
     /** The REAL EventConsumer from the real factory; only the kafkajs client is a fake. */
     function realConsumer(disconnect: 'stalls' | 'fails', lines: string[]) {
       const kafka = {
+        events: { CRASH: 'consumer.crash' },
+        on: () => () => undefined,
         disconnects: 0,
         connect: async () => undefined,
         subscribe: async () => undefined,

@@ -65,7 +65,7 @@ export default async function ShipmentPage({
     fetchShipmentTracking(session, id),
   ]);
 
-  const caller = inventoryCallerOf(session.accessToken);
+  const caller = inventoryCallerOf(session);
   const offered: OfferedInventoryCommand[] =
     shipment.kind === 'OK'
       ? shipmentMovesFor(caller, shipment.data).map((command) => ({

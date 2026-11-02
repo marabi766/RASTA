@@ -6,14 +6,17 @@ import { DISPUTE_COMMANDS } from '@/lib/transaction-dispute-fields';
 import { currentSession } from '@/server/current-session';
 import { webServerEnv } from '@/server/env';
 import { readFlash } from '@/server/flash';
-import { tokenAuthority } from '@/server/realm-roles';
 import { mintDisputeSubmission } from '@/server/dispute-replay';
 import { submissionBinding } from '@/server/submission';
 import { disputeCommandsFor, fetchTransaction } from '@/server/transactions';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { TransactionDetailScreen } from './TransactionDetailScreen';
-import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import {
+  actingOrganizationLabel,
+  actingScope,
+  sessionAuthority,
+} from '@/server/session-organization';
 import { pageParams } from '@/server/page-context';
 
 /**
@@ -24,7 +27,7 @@ import { pageParams } from '@/server/page-context';
  * screen renders both the same way. Which dispute forms are drawn is
  * `disputeCommandsFor`'s mirror of what the service would refuse, from the
  * roles **the access token itself** carries for the organization it resolves to
- * (`tokenAuthority`) — the set economic-service decides on, which the
+ * (`sessionAuthority`) — the set economic-service decides on, which the
  * membership rows `/v1/users/me` reports can differ from until the token is
  * refreshed (PR 319 review 1, finding 1). UX only; the service decides again.
  *
@@ -57,7 +60,7 @@ export default async function TransactionPage({
 
   // A token that cannot be read offers no form: a form that leads to a refusal
   // is the worse mistake, and the record still shows.
-  const authority = tokenAuthority(session.accessToken);
+  const authority = sessionAuthority(session);
   const commands =
     result.kind === 'OK'
       ? disputeCommandsFor(result.data, {

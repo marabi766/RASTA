@@ -11,12 +11,13 @@ import { expiryTransactionTimeoutMs } from '../config/operation-budgets';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { inventoryReservationsExpiredTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
-import { transactionNow } from '../shared/clock';
+import { databaseClock } from '../shared/clock';
 import { boundLockWaits, expiryKeyHash } from '../shared/command';
 import { reservationFacts, stockFacts } from '../stock/facts';
 import { StockRepository, type StockItemRow } from '../stock/stock.repository';
 import { ENV } from '../tokens';
-import { ReservationRepository } from './reservation.repository';
+import { ReservationRepository, type ReservationRow } from './reservation.repository';
+import { isDue } from './reservation.state-machine';
 
 /** Who ends a reservation that expired: this service, not a person. */
 export const EXPIRY_ACTOR = SERVICE_NAME;
@@ -81,9 +82,11 @@ export class ExpiryBacklog extends RastaError {
  *   2. by the **sweeper** (`ReservationSweeper`), which bounds how long a due reservation of an
  *      item nobody touches keeps its stock.
  *
- * Due means `expires_at <= now()` by the database's clock, in the transaction. A release, an
- * issue and an expiry of one reservation are serialised by the item's lock and decided by its
- * ACTIVE status: whichever runs first ends it, the other finds it ended.
+ * Due means `expires_at <= at`, with `at` sampled once from clock_timestamp() AFTER all stock
+ * and bounded reservation locks (including the issue/release target) are held. Commands and
+ * sweeper use that same rule, including equality, and reuse that instant for rows and events.
+ * Transaction-start now() is stale after a lock wait. Refused commands roll their expiry back;
+ * a later batch persists it. Reads never derive an EXPIRED status.
  *
  * ## A batch, never the whole backlog
  *
@@ -122,6 +125,16 @@ export class ReservationExpiry {
     @Inject(ENV) private readonly env: InventoryEnv,
   ) {}
 
+  /** Called after stock locking, BEFORE the single decision instant is sampled. */
+  async lockCandidates(tx: ExtendedPrismaClient, item: StockItemRow): Promise<ReservationRow[]> {
+    return this.reservations.lockExpirable(
+      tx,
+      item.organizationId,
+      item.id,
+      this.env.INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE + 1,
+    );
+  }
+
   /**
    * Expires one batch of the due reservations of a stock item **the caller has locked**, and
    * reports the item as it then stands, whether a backlog remains and what it holds.
@@ -132,10 +145,11 @@ export class ReservationExpiry {
     at: Date,
     correlationId: string,
     path: 'command' | 'sweeper',
+    candidates: readonly ReservationRow[],
   ): Promise<ExpiryBatch> {
     const size = this.env.INVENTORY_RESERVATION_EXPIRY_BATCH_SIZE;
-    // One more than the batch, to learn whether a backlog remains.
-    const due = await this.reservations.dueOf(tx, item.organizationId, item.id, at, size + 1);
+    // Candidates were locked before at; no reservation lock may wait after the clock sample.
+    const due = candidates.filter((reservation) => isDue(reservation, at));
     const context = expiryContext(item.organizationId, correlationId);
     let current = item;
     let expired = 0;
@@ -200,12 +214,13 @@ export class ReservationExpiry {
       this.prisma.transaction(
         async (tx) => {
           await boundLockWaits(tx, lockTimeoutMs);
-          const at = await transactionNow(tx);
           const item = await this.stock.lock(tx, organizationId, stockItemId, {
             skipLocked: true,
           });
           if (!item) return null;
-          return this.expireDue(tx, item, at, correlationId, path);
+          const candidates = await this.lockCandidates(tx, item);
+          const at = await databaseClock(tx);
+          return this.expireDue(tx, item, at, correlationId, path, candidates);
         },
         { timeoutMs: expiryTransactionTimeoutMs(lockTimeoutMs), maxWaitMs: lockTimeoutMs },
       ),

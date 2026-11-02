@@ -148,7 +148,7 @@ function writeView(
   selection: InventorySelection | null,
   notice: InventoryWriteView['notice'],
 ): InventoryWriteView {
-  const canOperate = mayOperateInventory(inventoryCallerOf(session.accessToken));
+  const canOperate = mayOperateInventory(inventoryCallerOf(session));
   const chosen = selection?.warehouse.kind === 'OK' ? selection.warehouse.data.id : null;
   const hasStock = selection?.stock?.kind === 'OK' && selection.stock.data.items.length > 0;
   const offer = (

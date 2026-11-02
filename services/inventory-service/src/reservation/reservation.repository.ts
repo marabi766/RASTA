@@ -110,21 +110,21 @@ export class ReservationRepository {
   }
 
   /**
-   * At most `limit` ACTIVE reservations of a **locked** stock item whose `expiresAt` is at or
-   * before `at`, locked, the longest overdue first. Never all of them: a backlog is worked off
-   * in batches (`ReservationExpiry`).
+   * Lock at most `limit` expirable ACTIVE reservations of a **locked** stock item, earliest
+   * deadline first. Do not filter by a pre-lock time: a deadline may pass while these locks
+   * wait. The caller samples the decision clock after ALL candidates are locked, then filters.
+   * Null deadlines never expire. The parent stock lock serialises every reservation writer.
    */
-  async dueOf(
+  async lockExpirable(
     tx: ExtendedPrismaClient,
     organizationId: string,
     stockItemId: string,
-    at: Date,
     limit: number,
   ): Promise<ReservationRow[]> {
     return tx.$queryRaw<ReservationRow[]>`
       SELECT ${COLUMNS} FROM "stock_reservation"
        WHERE "organization_id" = ${organizationId} AND "stock_item_id" = ${stockItemId}
-         AND "status" = 'ACTIVE' AND "expires_at" <= ${at}
+         AND "status" = 'ACTIVE' AND "expires_at" IS NOT NULL
        ORDER BY "expires_at", "id"
        LIMIT ${limit}::integer
        FOR UPDATE`;

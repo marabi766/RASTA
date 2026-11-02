@@ -56,13 +56,24 @@ const KNOWN_ROLES: ReadonlySet<string> = new Set([
 const ORGANIZATION_ID = /^[A-Za-z0-9_-]+$/;
 
 /**
- * What a backend service will act on for a request carrying this access token:
- * the organization it resolves to and the roles it holds there.
+ * What a backend service will act on for a request carrying this access token
+ * **for `organizationId`**: that organization and the roles the token holds
+ * there, or null when the guard would refuse it.
  *
- * The portal sends no `X-Organization-Id`, so the guard resolves the token's
- * own `org_id`; the roles are that organization's `org_roles` pairs (read as
- * strictly as `parseOrganizationRoles` does: exactly `ORG_ID:ROLE`, a known
- * role, anything else ignored) plus the global realm roles — `rolesForRequest`.
+ * The portal pins every request to its session's organization with
+ * `X-Organization-Id` (`session-organization.ts`), and the guard checks the
+ * header against the token: the organization must be one of its memberships
+ * (`org_ids`) and hold a role there (`org_roles`), or the request is
+ * `TENANT_MISMATCH` (`resolveOrganization`, `assertHoldsRoles`). The token's own
+ * active organization (`org_id`) does not enter into it: a header naming A is
+ * accepted from a token active in B when the token grants A something, and an
+ * A it grants nothing is refused, never answered for B. The roles are A's
+ * `org_roles` pairs (read as strictly as `parseOrganizationRoles` does: exactly
+ * `ORG_ID:ROLE`, a known role, anything else ignored) plus the global realm
+ * roles — `rolesForRequest`.
+ *
+ * `organizationId` null: a request that sends no header and, in this portal,
+ * reads nothing of any tenant — only the global realm roles, no organization.
  *
  * **Why the token and not `/v1/users/me`.** identity-service reports the
  * membership rows *now*; the service decides on the claims the token was
@@ -72,57 +83,38 @@ const ORGANIZATION_ID = /^[A-Za-z0-9_-]+$/;
  * refuses (PR 319 review 1, finding 1). Drawing from the token keeps what is
  * drawn and what is decided the same thing.
  *
- * With no `org_id` the request resolves to no organization and only the
- * global realm roles remain, as in the guard. Null when the token cannot be
- * read, or names an organization it is not a member of (`org_ids`) or holds no
- * role in — the guard answers both `TENANT_MISMATCH`. Not verified
- * here — the result only chooses what to draw; the gateway and the service
- * verify the token on every request.
+ * Not verified here — the result only chooses what to draw and whether to
+ * send; the gateway and the service verify the token on every request.
+ * Callers outside `session-organization.ts` never name the organization
+ * themselves: they ask for the session's (`sessionAuthority`).
  */
-/**
- * The organization a request carrying this access token acts for: its `org_id`
- * claim as written, or null when there is none or it cannot be read. Unlike
- * {@link tokenAuthority} it does not ask whether the token grants anything
- * there — it says *where*, for a form that must not be sent anywhere else than
- * where it was drawn (`submission.ts`). Not verified here.
- */
-export function tokenOrganization(accessToken: string): string | null {
-  const payload = accessToken.split('.')[1];
-  if (!payload) return null;
-  try {
-    const claims: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!claims || typeof claims !== 'object' || Array.isArray(claims)) return null;
-    const organizationId = (claims as Record<string, unknown>)['org_id'];
-    return typeof organizationId === 'string' && ORGANIZATION_ID.test(organizationId)
-      ? organizationId
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 export interface TokenAuthority {
   readonly organizationId: string | null;
   readonly roles: readonly string[];
 }
 
-export function tokenAuthority(accessToken: string): TokenAuthority | null {
+function claimsOf(accessToken: string): Record<string, unknown> | null {
   const payload = accessToken.split('.')[1];
   if (!payload) return null;
-  let claims: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    claims = parsed as Record<string, unknown>;
+    return parsed as Record<string, unknown>;
   } catch {
     return null;
   }
+}
 
-  const organizationId = claims['org_id'];
-  if (organizationId === undefined) {
+export function tokenAuthority(
+  accessToken: string,
+  organizationId: string | null,
+): TokenAuthority | null {
+  const claims = claimsOf(accessToken);
+  if (!claims) return null;
+  if (organizationId === null) {
     return { organizationId: null, roles: globalRealmRoles(accessToken) };
   }
-  if (typeof organizationId !== 'string' || !ORGANIZATION_ID.test(organizationId)) return null;
+  if (!ORGANIZATION_ID.test(organizationId)) return null;
   const memberships = Array.isArray(claims['org_ids']) ? (claims['org_ids'] as unknown[]) : [];
   if (!memberships.includes(organizationId)) return null;
 
@@ -149,27 +141,24 @@ export function tokenAuthority(accessToken: string): TokenAuthority | null {
 }
 
 /**
- * The roles every screen in this portal draws from: the token's own role set
- * for the organization it resolves to ({@link tokenAuthority}) — never the
- * membership rows `/v1/users/me` reports, which disagree with what the service
- * decides on until the token is refreshed. Null when the token cannot be read
- * or the guard would refuse it outright; a screen then offers nothing gated.
+ * The token's own active organization (`org_id`) as the guard reads it when a
+ * request sends **no** header: `{ organizationId }` when it is written and
+ * readable (null when there is none), or null when the claim is malformed or
+ * the token unreadable. Read in two places only, both in
+ * `session-organization.ts`: once at sign-in, to choose the organization the
+ * session is pinned to, and for a session pinned to none, whose header-less
+ * requests the guard resolves to it. Never an organization to act for after
+ * sign-in.
  */
-export function tokenRoles(accessToken: string): readonly string[] | null {
-  return tokenAuthority(accessToken)?.roles ?? null;
-}
-
-/**
- * The roles a write form is offered on: {@link tokenRoles}, but only for a
- * token that resolves to an organization. Every write the portal sends is
- * tenant-scoped — the service acts for the request's organization
- * (`getOrganizationId`) and cannot act for none — so a token with no `org_id`,
- * a platform administrator's included, is offered no write form; the role rule
- * itself is `rolesGuardAdmits`.
- */
-export function tokenWriteRoles(accessToken: string): readonly string[] | null {
-  const authority = tokenAuthority(accessToken);
-  return authority?.organizationId ? authority.roles : null;
+export function tokenActiveOrganization(
+  accessToken: string,
+): { readonly organizationId: string | null } | null {
+  const claims = claimsOf(accessToken);
+  if (!claims) return null;
+  const organizationId = claims['org_id'];
+  if (organizationId === undefined) return { organizationId: null };
+  if (typeof organizationId !== 'string' || !ORGANIZATION_ID.test(organizationId)) return null;
+  return { organizationId };
 }
 
 /**

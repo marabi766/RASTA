@@ -39,6 +39,8 @@ const { SESSION_COOKIE, openSession } =
   require('@/server/session') as typeof import('@/server/session');
 const { actingAccessToken } =
   require('@/test/session-token') as typeof import('@/test/session-token');
+const { sessionOrganization } =
+  require('@/server/session-organization') as typeof import('@/server/session-organization');
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 async function signIn(): Promise<import('@/server/session').WebSession | null> {
@@ -65,10 +67,21 @@ it('stores none for a platform-wide token', async () => {
   expect(await signIn()).toMatchObject({ organizationId: null });
 });
 
-it('stores none for a token that does not resolve — which no reader then takes for a session', async () => {
+it('pins the organization a token names even when it grants nothing there — and no reader takes that for a session', async () => {
   // org_id it does not list as a membership: the guard says TENANT_MISMATCH.
   accessToken = actingAccessToken('ORG_A', ['OPERATOR'], { org_ids: ['ORG_B'] });
-  expect(await signIn()).toMatchObject({ organizationId: null });
+  const session = await signIn();
+  expect(session).toMatchObject({ organizationId: 'ORG_A' });
+  // Recovered, never acted for — and never for B, which it does grant.
+  expect(sessionOrganization(session!)).toBeUndefined();
+});
+
+it('pins the access token’s active organization for the session’s whole life (task 118)', async () => {
+  accessToken = actingAccessToken('ORG_B', ['OPERATOR'], {
+    org_ids: ['ORG_A', 'ORG_B'],
+    org_roles: ['ORG_A:OPERATOR', 'ORG_B:OPERATOR'],
+  });
+  expect(await signIn()).toMatchObject({ organizationId: 'ORG_B' });
 });
 
 export {};

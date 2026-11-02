@@ -1,0 +1,194 @@
+rule_files:
+  - ../rules/rasta-consumer-alerts.yml
+  - ../rules/rasta-audit-alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: rasta_consumer_crashes_total{service="fleet-service",group="fleet-service.asset-sync",reason="other"}
+        values: 0 0 1 1
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaConsumerCrash",alertstate="firing"}
+        eval_time: 2m
+        exp_samples:
+          - labels: '{__name__="ALERTS",alertname="RastaConsumerCrash",alertstate="firing",service="fleet-service",group="fleet-service.asset-sync",reason="other",severity="warning"}'
+            value: 1
+  - interval: 1m
+    input_series:
+      - series: rasta_process_start_time_seconds{job="economic-service",instance="one"}
+        values: 100 100 200 200 300 300 400
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaConsumerServiceRestartLoop",alertstate="firing"}
+        eval_time: 5m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaConsumerServiceRestartLoop",alertstate="firing"}
+        eval_time: 6m
+        exp_samples:
+          - labels: '{__name__="ALERTS",alertname="RastaConsumerServiceRestartLoop",alertstate="firing",job="economic-service",severity="warning"}'
+            value: 1
+  - interval: 1m
+    input_series:
+      - series: rasta_consumer_expected{service="fleet-service",group="fleet-service.asset-sync",topic="rasta.asset.v1"}
+        values: 1+0x10
+      - series: kafka_consumergroup_lag{consumergroup="fleet-service.asset-sync",topic="rasta.asset.v1",partition="0"}
+        values: 5+0x10
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaConsumerLag",alertstate="firing"}
+        eval_time: 4m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaConsumerLag",alertstate="firing"}
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="ALERTS",alertname="RastaConsumerLag",alertstate="firing",group="fleet-service.asset-sync",topic="rasta.asset.v1",severity="warning"}'
+            value: 1
+  - interval: 1m
+    input_series:
+      - series: rasta_consumer_expected{service="fleet-service",group="fleet-service.asset-sync",topic="rasta.asset.v1"}
+        values: 1+0x10
+      - series: up{job="kafka-exporter"}
+        values: 1+0x10
+      - series: kafka_topic_partition_current_offset{topic="rasta.asset.v1",partition="0"}
+        values: 10+0x10
+      - series: kafka_topic_partition_oldest_offset{topic="rasta.asset.v1",partition="0"}
+        values: 0+0x10
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaConsumerOffsetsMissing",alertstate="firing"}
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="ALERTS",alertname="RastaConsumerOffsetsMissing",alertstate="firing",service="fleet-service",group="fleet-service.asset-sync",topic="rasta.asset.v1",severity="warning"}'
+            value: 1
+  - interval: 1m
+    input_series:
+      - series: rasta_consumer_expected{service="fleet-service",group="fleet-service.asset-sync",topic="rasta.asset.v1"}
+        values: 1+0x10
+      - series: up{job="kafka-exporter"}
+        values: 1+0x10
+      - series: kafka_topic_partition_current_offset{topic="rasta.asset.v1",partition="0"}
+        values: 10+0x10
+      - series: kafka_topic_partition_oldest_offset{topic="rasta.asset.v1",partition="0"}
+        values: 0+0x10
+      - series: kafka_consumergroup_lag{consumergroup="fleet-service.asset-sync",topic="rasta.asset.v1",partition="0"}
+        values: -1+0x10
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaConsumerOffsetsMissing",alertstate="firing"}
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="ALERTS",alertname="RastaConsumerOffsetsMissing",alertstate="firing",service="fleet-service",group="fleet-service.asset-sync",topic="rasta.asset.v1",severity="warning"}'
+            value: 1
+  - interval: 1m
+    input_series:
+      - series: rasta_consumer_expected{service="fleet-service",group="fleet-service.asset-sync",topic="rasta.asset.v1"}
+        values: 1+0x10
+      - series: up{job="kafka-exporter"}
+        values: 1+0x10
+      - series: kafka_consumergroup_lag{consumergroup="fleet-service.asset-sync",topic="rasta.asset.v1",partition="0"}
+        values: -1+0x10
+      - series: kafka_topic_partition_current_offset{topic="rasta.asset.v1",partition="0"}
+        values: 0+0x10
+      - series: kafka_topic_partition_oldest_offset{topic="rasta.asset.v1",partition="0"}
+        values: 0+0x10
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaConsumerOffsetsMissing",alertstate="firing"}
+        eval_time: 7m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaConsumerLag",alertstate="firing"}
+        eval_time: 7m
+        exp_samples: []
+  - interval: 1m
+    input_series:
+      - series: kafka_consumergroup_lag{consumergroup="ephemeral-test",topic="rasta.asset.v1",partition="0"}
+        values: 100+0x10
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaConsumerLag",alertstate="firing"}
+        eval_time: 7m
+        exp_samples: []
+      - expr: ALERTS{alertname="RastaConsumerOffsetsMissing",alertstate="firing"}
+        eval_time: 7m
+        exp_samples: []
+  - interval: 1m
+    input_series:
+      - series: rasta_consumer_expected{service="fleet-service",group="fleet-service.asset-sync",topic="rasta.asset.v1"}
+        values: 1+0x10
+      - series: up{job="kafka-exporter"}
+        values: 0+0x10
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaConsumerOffsetsMissing",alertstate="firing"}
+        eval_time: 7m
+        exp_samples: []
+  - interval: 1m
+    input_series: []
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="RastaConsumerServiceMetricsUnavailable",alertstate="firing"})
+        eval_time: 2m
+        exp_samples:
+          - labels: '{}'
+            value: 12
+  - interval: 1m
+    input_series: []
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="RastaKafkaExporterUnavailable",alertstate="firing"})
+        eval_time: 2m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  - interval: 1m
+    input_series:
+      - series: rasta_consumer_crashes_total{service="asset-service",group="asset-service.timeline",reason="other",job="asset-service",instance="one"}
+        values: 1+0x10
+      - series: rasta_process_start_time_seconds{job="asset-service",instance="one"}
+        values: 0+0x10
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="RastaConsumerCrash",alertstate="firing"})
+        eval_time: 1m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+      - expr: ALERTS{alertname="RastaConsumerCrash",alertstate="firing"}
+        eval_time: 6m
+        exp_samples: []
+  - interval: 1m
+    input_series:
+      - series: rasta_consumer_expected{service="fleet-service",group="fleet-service.asset-sync",topic="rasta.asset.v1"}
+        values: 1+0x10
+      - series: up{job="kafka-exporter"}
+        values: 1+0x10
+      - series: kafka_consumergroup_lag{consumergroup="fleet-service.asset-sync",topic="rasta.asset.v1",partition="0"}
+        values: 0+0x10
+      - series: kafka_consumergroup_lag{consumergroup="fleet-service.asset-sync",topic="rasta.asset.v1",partition="1"}
+        values: -1+0x10
+      - series: kafka_topic_partition_current_offset{topic="rasta.asset.v1",partition="0"}
+        values: 10+0x10
+      - series: kafka_topic_partition_oldest_offset{topic="rasta.asset.v1",partition="0"}
+        values: 0+0x10
+      - series: kafka_topic_partition_current_offset{topic="rasta.asset.v1",partition="1"}
+        values: 0+0x10
+      - series: kafka_topic_partition_oldest_offset{topic="rasta.asset.v1",partition="1"}
+        values: 0+0x10
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaConsumerOffsetsMissing",alertstate="firing"}
+        eval_time: 7m
+        exp_samples: []
+  - interval: 1m
+    input_series:
+      - series: rasta_consumer_expected{service="fleet-service",group="fleet-service.asset-sync",topic="rasta.asset.v1"}
+        values: 1+0x10
+      - series: up{job="kafka-exporter"}
+        values: 1+0x10
+      - series: kafka_consumergroup_lag{consumergroup="fleet-service.asset-sync",topic="rasta.asset.v1",partition="0"}
+        values: 0+0x10
+      - series: kafka_consumergroup_lag{consumergroup="fleet-service.asset-sync",topic="rasta.asset.v1",partition="1"}
+        values: -1+0x10
+      - series: kafka_topic_partition_current_offset{topic="rasta.asset.v1",partition="0"}
+        values: 10+0x10
+      - series: kafka_topic_partition_oldest_offset{topic="rasta.asset.v1",partition="0"}
+        values: 0+0x10
+      - series: kafka_topic_partition_current_offset{topic="rasta.asset.v1",partition="1"}
+        values: 3+0x10
+      - series: kafka_topic_partition_oldest_offset{topic="rasta.asset.v1",partition="1"}
+        values: 0+0x10
+    promql_expr_test:
+      - expr: ALERTS{alertname="RastaConsumerOffsetsMissing",alertstate="firing"}
+        eval_time: 7m
+        exp_samples:
+          - labels: '{__name__="ALERTS",alertname="RastaConsumerOffsetsMissing",alertstate="firing",service="fleet-service",group="fleet-service.asset-sync",topic="rasta.asset.v1",severity="warning"}'
+            value: 1

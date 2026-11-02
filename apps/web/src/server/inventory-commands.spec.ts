@@ -13,7 +13,7 @@ import {
 /**
  * Who the portal draws the inventory forms for — a copy of the service's own
  * checks (`InventoryAccess.assertOperator`, the shipment state machine), read
- * from the access token's roles — and the requests the forms post.
+ * from the roles the token grants in the session's pinned organization — and the requests the forms post.
  */
 
 Object.assign(process.env, {
@@ -35,22 +35,54 @@ const caller = (roles: string[], organizationId: string | null = 'ORG-A'): Inven
 });
 
 describe('inventoryCallerOf', () => {
-  it('reads the organization and the roles the token carries for it', () => {
-    expect(
-      inventoryCallerOf(
-        token({
-          org_id: 'ORG-A',
-          org_ids: ['ORG-A', 'ORG-B'],
-          org_roles: ['ORG-A:ORGANIZATION_ADMIN', 'ORG-B:AUDITOR'],
-        }),
-      ),
-    ).toEqual({ organizationId: 'ORG-A', roles: ['ORGANIZATION_ADMIN'] });
+  const session = (claims: Record<string, unknown>, organizationId: string | null) => ({
+    accessToken: token(claims),
+    organizationId,
   });
 
-  it('a token that cannot be read, or that the service would refuse, draws nothing', () => {
-    expect(inventoryCallerOf('opaque')).toEqual({ organizationId: null, roles: [] });
+  it('reads the roles the token grants in the organization the session is pinned to', () => {
+    const claims = {
+      org_id: 'ORG-A',
+      org_ids: ['ORG-A', 'ORG-B'],
+      org_roles: ['ORG-A:ORGANIZATION_ADMIN', 'ORG-B:AUDITOR'],
+    };
+    expect(inventoryCallerOf(session(claims, 'ORG-A'))).toEqual({
+      organizationId: 'ORG-A',
+      roles: ['ORGANIZATION_ADMIN'],
+    });
+    // Switched to B elsewhere: the token's active organization moved, the pin did not.
+    expect(inventoryCallerOf(session({ ...claims, org_id: 'ORG-B' }, 'ORG-A'))).toEqual({
+      organizationId: 'ORG-A',
+      roles: ['ORGANIZATION_ADMIN'],
+    });
+    expect(inventoryCallerOf(session(claims, 'ORG-B'))).toEqual({
+      organizationId: 'ORG-B',
+      roles: ['AUDITOR'],
+    });
+  });
+
+  it('a session that cannot act, or acts for none, draws nothing', () => {
+    expect(inventoryCallerOf({ accessToken: 'opaque', organizationId: 'ORG-A' })).toEqual({
+      organizationId: null,
+      roles: [],
+    });
     expect(
-      inventoryCallerOf(token({ org_id: 'ORG-A', org_ids: ['ORG-B'], org_roles: [] })),
+      inventoryCallerOf(session({ org_id: 'ORG-A', org_ids: ['ORG-B'], org_roles: [] }, 'ORG-A')),
+    ).toEqual({ organizationId: null, roles: [] });
+    // Pinned to an organization the token no longer grants a role in.
+    expect(
+      inventoryCallerOf(
+        session({ org_id: 'ORG-B', org_ids: ['ORG-B'], org_roles: ['ORG-B:AUDITOR'] }, 'ORG-A'),
+      ),
+    ).toEqual({ organizationId: null, roles: [] });
+    // Pinned to none: every inventory write is tenant-scoped.
+    expect(
+      inventoryCallerOf(
+        session(
+          { org_id: 'ORG-A', org_ids: ['ORG-A'], org_roles: ['ORG-A:ORGANIZATION_ADMIN'] },
+          null,
+        ),
+      ),
     ).toEqual({ organizationId: null, roles: [] });
   });
 });
