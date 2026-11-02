@@ -823,7 +823,8 @@ for (const path of ['client', 'worker']) {
       (async () => {
         if ('${path}' === 'client') {
           const { OrderSagaClient } = require('./services/marketplace-service/dist/temporal/saga.client');
-          await new OrderSagaClient(env).start('order');
+          // Probe transport directly; durable claim delivery is tested with PostgreSQL.
+          assert.equal(await new OrderSagaClient(env, {}).deliver('order'), false);
         } else {
           const { OrderSagaWorker } = require('./services/marketplace-service/dist/temporal/worker');
           await new OrderSagaWorker(env, {}, {}).onApplicationBootstrap();
@@ -1036,8 +1037,8 @@ for (const path of ['client', 'worker']) {
       (async () => {
         if ('${path}' === 'client') {
           const { OrderSagaClient } = require('./services/marketplace-service/dist/temporal/saga.client');
-          const client = new OrderSagaClient(env);
-          await client.start('test-order');
+          const client = new OrderSagaClient(env, {});
+          assert.equal(await client.deliver('test-order'), false);
           await client.onModuleDestroy();
         } else {
           const { OrderSagaWorker } = require('./services/marketplace-service/dist/temporal/worker');
