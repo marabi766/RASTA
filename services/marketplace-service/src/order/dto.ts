@@ -152,6 +152,7 @@ export type CancelOrderDto = z.infer<typeof cancelOrderSchema>;
 export const submitReviewSchema = z
   .object({
     rating: z.number().int().min(1).max(5),
+    qualityRating: z.number().int().min(1).max(5).optional(),
     comment: plainText().max(2000).optional(),
   })
   .strict();

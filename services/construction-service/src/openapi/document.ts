@@ -23,6 +23,8 @@ import type { OpeningRefusal } from '../tender/tender-open.service';
 import type { EvaluationRefusal } from '../tender/evaluation.service';
 import { AWARD_REFUSALS, type AwardRefusal } from '../tender/award.service';
 import type { TenderApprovalRefusal } from '../tender/tender-approval.errors';
+import { InternalProjectController } from '../project/internal-project.controller';
+import { ProjectCompletionService, projectCompletionFactSchema } from '../project/completion-fact';
 import { ProjectController } from '../project/project.controller';
 import { ProjectService } from '../project/project.service';
 import { NeedService } from '../project/need.service';
@@ -197,6 +199,10 @@ export const RESPONSE_BODIES: Record<
 > = {
   'POST /v1/projects': { status: '201', schema: projectViewSchema },
   'GET /v1/projects': { status: '200', schema: cursorPageOf(projectSummaryViewSchema) },
+  'GET /v1/internal/projects/{id}/completion': {
+    status: '200',
+    schema: projectCompletionFactSchema,
+  },
   'GET /v1/projects/{id}': { status: '200', schema: projectViewSchema },
   'PATCH /v1/projects/{id}': { status: '200', schema: projectViewSchema },
   'POST /v1/projects/{id}/cancel': { status: '200', schema: projectViewSchema },
@@ -739,6 +745,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
       .setDescription(DESCRIPTION)
       .setVersion(CONTRACT_VERSION)
       .addBearerAuth()
+      .addApiKey({ type: 'apiKey', in: 'header', name: 'X-Internal-Token' }, 'internalToken')
       .build(),
   );
   return enrichOpenApiDocument(document);
@@ -751,6 +758,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
 @Module({
   controllers: [
     ProjectController,
+    InternalProjectController,
     ProjectLifecycleController,
     PolicyController,
     ApprovalController,
@@ -772,6 +780,7 @@ export function buildConstructionOpenApiDocument(app: INestApplication): OpenAPI
     { provide: AwardService, useValue: {} },
     { provide: TenderApprovalService, useValue: {} },
     { provide: ProjectService, useValue: {} },
+    { provide: ProjectCompletionService, useValue: {} },
     { provide: TenderService, useValue: {} },
     { provide: CriteriaService, useValue: {} },
     { provide: NeedService, useValue: {} },
@@ -803,7 +812,9 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       // `addBearerAuth()` declares the scheme; it does not apply it. Without
       // this the contract would describe endpoints anybody can call.
-      operation.security ??= [{ bearer: [] }];
+      operation.security ??= path.startsWith('/v1/internal/')
+        ? [{ internalToken: [] }]
+        : [{ bearer: [] }];
 
       // The header is read with `@Headers`, which Nest documents as a required
       // parameter with no schema. Replaced with the truth: optional, bounded.
@@ -875,6 +886,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       }
 
       for (const [status, description] of Object.entries(ERROR_DESCRIPTIONS)) {
+        if (status === '400' && path.startsWith('/v1/internal/')) continue;
         // A route with no `{id}` names no existing row, so it cannot answer 404.
         if (status === '404' && !path.includes('{id}')) continue;
         if (
@@ -896,7 +908,12 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
           continue;
         }
         operation.responses[status] ??= {
-          description,
+          description:
+            path.startsWith('/v1/internal/') && status === '403'
+              ? 'Every user token and every service except contract-service is refused. A missing signed tenant or a conflicting organization header is SERVICE_TENANT_CONTEXT_INVALID.'
+              : path.startsWith('/v1/internal/') && status === '404'
+                ? 'Project not found in the signed tenant; the same response for missing and other-tenant projects.'
+                : description,
           ...(status === '409' && IDEMPOTENT.has(key)
             ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
             : {}),

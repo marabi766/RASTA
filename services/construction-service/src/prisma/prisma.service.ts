@@ -1,3 +1,4 @@
+import { createSafePrismaClient } from '@rasta/nest-common';
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { SERVICE_NAME } from '../config/env';
 import {
@@ -83,14 +84,18 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     databaseUrl: string,
     readonly transactionTimeoutMs: number,
   ) {
-    this.base = new PrismaClient({
-      datasources: { db: { url: databaseUrl } },
-      log: [
-        { emit: 'event', level: 'warn' },
-        { emit: 'event', level: 'error' },
-      ],
-      transactionOptions: { timeout: transactionTimeoutMs },
-    });
+    this.base = createSafePrismaClient(
+      () =>
+        new PrismaClient({
+          datasources: { db: { url: databaseUrl } },
+          log: [
+            { emit: 'event', level: 'warn' },
+            { emit: 'event', level: 'error' },
+          ],
+          transactionOptions: { timeout: transactionTimeoutMs },
+        }),
+      'DATABASE_URL_CONSTRUCTION',
+    );
     this.client = this.buildClient();
   }
 

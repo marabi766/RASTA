@@ -148,6 +148,8 @@ jobs:
           pnpm run test:replay-dlq-lib
           pnpm run test:kafka-topic-limits-lib
           pnpm run test:disposable-broker-guard
+          pnpm run test:broker-default
+          pnpm run test:kafka-init-gate
           pnpm run check:kafka-topic-limits
 
       - name: Role passwords are distinct and checked before any role changes
@@ -1333,16 +1335,17 @@ jobs:
     # the guards 28 s), when the suites carried their own 12.
     # History of the single job's limit: 60 (#197), 35 once reversibility
     # moved out (#198), 50 as #273's stopgap until this split.
-    # 70 minutes: the job must hold every step at its own limit, one after
+    # 82 minutes: the job must hold every step at its own limit, one after
     # the other (scripts/ci-integration-split-lib.mjs, JOB_SETUP_MINUTES):
-    # the steps' limits sum to 62 (Integration tests 21, the seven 5-minute
-    # guards 35, the three 2-minute PostgreSQL connection steps 6) and the
+    # the steps' limits sum to 75 (Integration tests 21, six 5-minute guards
+    # 30 and the 18-minute runtime-role split suite, the three 2-minute
+    # PostgreSQL connection steps 6) and the
     # steps without a limit of their own took up to 298 s over the last 20
     # green runs, which is 8 minutes at x 1.5. The job itself took up to
-    # 1359 s (p50 1210 s), so 70 is a ceiling that no healthy run comes near;
-    # the sharding PR returns the Integration tests step, and with it this
-    # job, to its smaller size.
-    timeout-minutes: 70
+    # 1359 s (p50 1210 s), so 83 (75 + 8, #540 r3) is a ceiling that no
+    # healthy run comes near; the sharding PR returns the Integration tests
+    # step, and with it this job, to its smaller size.
+    timeout-minutes: 83
     needs: quality
 
     services:
@@ -1851,7 +1854,7 @@ jobs:
         # A service's runtime database role must hold DML and nothing more: no
         # ownership of its database, a schema, a table, a function or a type;
         # no CREATE; no TRUNCATE, REFERENCES or TRIGGER; nothing on the
-        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
+        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS, REPLICATION or SUPERUSER.
         # Owning a table is what lets SQL running as the service ALTER TABLE
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service
@@ -1869,7 +1872,14 @@ jobs:
         # unsplit service is — owned by its runtime role — must be reported in
         # full; after lib/service-privilege-split.bash it must be reported
         # clean, its rows intact and its trigger out of the runtime role's reach.
-        timeout-minutes: 5
+        # And #540 r1's exploits, each planted, reported, revoked and refused
+        # (check-db-runtime-privileges-boundary.pg.test.mjs).
+        # 18 = ceil(710 s x 1.5 / 60), an estimate (#540 r3): 709012e7's three
+        # files took 640 s here (CI run 41381414879); the R3-1 fixtures add
+        # ~125 s locally to the end-state file, and every split two psql
+        # calls (~0.6 s of ~8 s locally): ~70 s here at the x 2.6 ratio
+        # measured before (64e1b76e: 772 s locally against 296 s here).
+        timeout-minutes: 18
         run: pnpm run test:db-runtime-privileges
         env:
           PGHOST: localhost
@@ -3294,7 +3304,7 @@ jobs:
         # A service's runtime database role must hold DML and nothing more: no
         # ownership of its database, a schema, a table, a function or a type;
         # no CREATE; no TRUNCATE, REFERENCES or TRIGGER; nothing on the
-        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
+        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS, REPLICATION or SUPERUSER.
         # Owning a table is what lets SQL running as the service ALTER TABLE
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service
@@ -3521,7 +3531,7 @@ jobs:
         # A service's runtime database role must hold DML and nothing more: no
         # ownership of its database, a schema, a table, a function or a type;
         # no CREATE; no TRUNCATE, REFERENCES or TRIGGER; nothing on the
-        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS or SUPERUSER.
+        # migration ledger; no CREATEDB, CREATEROLE, BYPASSRLS, REPLICATION or SUPERUSER.
         # Owning a table is what lets SQL running as the service ALTER TABLE
         # … DISABLE TRIGGER and lift an integrity guard. Runs against every
         # service database this job bootstrapped and migrated; every service
@@ -3569,7 +3579,7 @@ jobs:
   #
   # RUN-006's broker tests and the DLQ replay tool's, apart from every other
   # suite: a fresh broker, which nothing but these tests writes, declared
-  # throwaway (REPLAY_TEST_DISPOSABLE_BROKER), so the replay test may delete
+  # throwaway (RASTA_DISPOSABLE_BROKER), so the replay test may delete
   # the records retention would — only records it wrote itself, which it
   # checks before deleting any (round 2 on #144). Their allowed writes are
   # marker records on real topics; no other suite runs here to read them.
@@ -3626,7 +3636,7 @@ jobs:
         # default message.max.bytes and puts back what was there — and the
         # known escape (i) pinned: a GZIP level-9 record whose dead letter
         # does not fit leaves the consumer crashed with its offset uncommitted
-        # (it leaves that record on rasta.organization.v1). Those two refuse
+        # (it leaves that record on rasta.organization.v1). All four refuse
         # to start without RASTA_DISPOSABLE_BROKER=1, declared here only: this
         # job's broker is its own (ci-up.sh), thrown away with the runner.
         # All refuse to run without the bootstrap's environment rather than
@@ -3635,10 +3645,11 @@ jobs:
           kafka_credentials="$(bash infrastructure/docker/kafka/kafka-credentials.sh admin)"
           eval "${kafka_credentials}"
           pnpm exec turbo run build --filter=@rasta/nest-common
-          REPLAY_TEST_DISPOSABLE_BROKER=1 pnpm run test:replay-dlq-broker
+          pnpm run test:replay-dlq-broker
           pnpm run test:kafka-acl-broker
-          RASTA_DISPOSABLE_BROKER=1 pnpm run test:kafka-limits-broker
+          pnpm run test:kafka-limits-broker
         env:
+          RASTA_DISPOSABLE_BROKER: '1'
           KAFKA_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-secrets
           KAFKA_ADMIN_SECRETS_DIR: ${{ runner.temp }}/rasta-kafka-admin-secrets
 

@@ -707,6 +707,7 @@ export class OrderService {
             orderId: order.id,
             supplierOrganizationId: order.supplierOrganizationId,
             rating: dto.rating,
+            qualityRating: dto.qualityRating ?? null,
             comment: dto.comment ?? null,
             submittedBy: context.userId ?? SERVICE_NAME,
           },
@@ -723,6 +724,7 @@ export class OrderService {
           buyerOrganizationId: order.organizationId,
           supplierOrganizationId: order.supplierOrganizationId,
           rating: dto.rating,
+          ...(dto.qualityRating !== undefined ? { qualityRating: dto.qualityRating } : {}),
           submittedAt: new Date().toISOString(),
         },
       });

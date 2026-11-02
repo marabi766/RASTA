@@ -272,3 +272,18 @@ describe('an offer update must change something', () => {
     expect(updateOfferSchema.safeParse({ unitPriceMinor: '1', version: 9 }).success).toBe(false);
   });
 });
+
+describe('the separate optional quality answer (Q-56)', () => {
+  it.each([0, 6, 2.5, '3', null])('refuses qualityRating %s without coercion', (qualityRating) => {
+    expect(submitReviewSchema.safeParse({ rating: 4, qualityRating }).success).toBe(false);
+  });
+  it.each([1, 2, 3, 4, 5])('accepts qualityRating %s independently of rating', (qualityRating) => {
+    expect(submitReviewSchema.parse({ rating: 4, qualityRating })).toEqual({
+      rating: 4,
+      qualityRating,
+    });
+  });
+  it('keeps old review requests valid without inventing a quality answer', () => {
+    expect(submitReviewSchema.parse({ rating: 4 })).toEqual({ rating: 4 });
+  });
+});

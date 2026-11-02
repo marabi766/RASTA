@@ -75,7 +75,10 @@ function currentGrantStep(mode: 'configured' | 'default'): string {
   return result.stdout;
 }
 
-function currentExtensionStep(): string {
+/** The split's extension cleanup as it runs it: with the ledger of lent schema
+ * access opened before and returned after (#540 r3 R3-1) — the cleanup refuses
+ * to act without it. One statement per psql call, in order. */
+function currentExtensionStep(): string[] {
   const result = spawnSync(
     'bash',
     [
@@ -83,14 +86,19 @@ function currentExtensionStep(): string {
       '-c',
       `
     source infrastructure/docker/postgres/lib/service-privilege-split.bash
-    _svc_split_psql() { printf '%s;\\n' "$2"; }
+    _svc_split_psql() { printf '%s\\x1e' "$2"; }
+    _open_namespace_ledger ignored
     restrict_extension_relations ignored rasta_analytics
+    _return_lent_namespaces ignored
   `,
     ],
     { encoding: 'utf8', cwd: repositoryRoot },
   );
   if (result.status !== 0) throw new Error(`extension step failed: ${result.stderr}`);
-  return result.stdout;
+  return result.stdout
+    .split('\x1e')
+    .map((statement) => statement.trim())
+    .filter(Boolean);
 }
 
 // Separate databases, not the integration database: both realistic provisioning
@@ -215,9 +223,10 @@ describe.each(['fresh', 'upgraded'] as const)('%s migration-managed runtime gran
       expect(
         await runtime.$queryRaw`SELECT has_any_column_privilege('spatial_ref_sys', 'UPDATE') AS forbidden`,
       ).toEqual([{ forbidden: true }]);
-      // psql accepts the DO block as one statement; Prisma sends that block atomically too.
-      const cleanup = currentExtensionStep().trim().replace(/;$/, '');
-      if (cleanup) await extensionAdmin.$executeRawUnsafe(cleanup);
+      // psql accepts each DO block as one statement; Prisma sends each atomically too.
+      const steps = currentExtensionStep();
+      expect(steps).toHaveLength(3);
+      for (const step of steps) await extensionAdmin.$executeRawUnsafe(step);
       expect(
         await runtime.$queryRaw`SELECT has_any_column_privilege('spatial_ref_sys', 'UPDATE') AS forbidden`,
       ).toEqual([{ forbidden: false }]);
