@@ -51,13 +51,15 @@ import { parse as parseYaml } from 'yaml';
  *    own matcher decides what a glob, `@(…)`, `!(…)`, a hidden path or an
  *    exclusion means, so the guard has no glob semantics to get wrong. If turbo
  *    cannot run the test FAILS; it never skips.
- *  - The TYPESCRIPT COMPILER'S READS are not discovered at all (PR #524 r7, F5). The lint parser
- *    builds TypeScript programs; a program reads whatever its imports, type imports, triple-slash
- *    references, `extends`/`references` chains and nested package projects reach, so any tracked
- *    source, declaration, script or JSON file. The `lint` task therefore hashes ALL of them
- *    (globs in turbo.json) and depends on `^build`, or is not cached; compilerReadProblems
- *    asserts that against turbo's resolved inputs of every lint task, whichever module is the
- *    cause, so a new module that builds programs needs nothing listed.
+ *  - The TYPESCRIPT COMPILER'S READS are neither discovered nor hashed (PR #524 r8, D-109). A module
+ *    that makes eslint build TypeScript programs (internal-token-parser.mjs does, through
+ *    typescript-eslint) lets the compiler read whatever its imports, `extends`/`references` chains,
+ *    external configs and generated declarations reach, and no list of inputs can be complete
+ *    (r7's superset was not: `.jsonc`/`.json5`/extensionless `extends` targets, absolute external
+ *    configs, untracked generated `.d.ts`). So the lint task of every workspace that loads such a
+ *    module must be `"cache": false`; programBuildProblems asserts exactly that. A module is such
+ *    a module when its BUILTIN_READERS entry says `buildsPrograms: true` or when it names a
+ *    program-building option or call (PROGRAM_NAMES), whether or not it has an entry.
  *  - DISCOVERY is a supported GRAMMAR for MODULE LOADING, failing closed. In an
  *    eslint config and every module it loads, the only loading forms are a
  *    static `import`, `export … from`, a literal `import()` or a literal
@@ -274,6 +276,10 @@ export const ALLOWED_BUILTINS = new Set([
  *  - `exports` (optional): the only names a lint-time importer may take from the module.
  *    Its other exports (an image check that spawns docker, say) are then unreachable from
  *    the eslint config, so they are not part of what the rule reads.
+ *  - `buildsPrograms` (required, true or false): whether loading the module makes eslint build
+ *    TypeScript programs. True makes the lint task of every workspace that loads it
+ *    `"cache": false` (programBuildProblems). The guard also detects the options and calls itself
+ *    (PROGRAM_NAMES), so an entry that says false while the module uses one is a contradiction.
  *  - `reads`: what the module reads, as surfaces of the closed vocabulary below. For every
  *    lint workspace that loads the module, every file of every surface must be in the hashed
  *    inputs turbo resolves for that workspace's lint task (`turbo run lint --dry=json`), or
@@ -284,12 +290,10 @@ export const ALLOWED_BUILTINS = new Set([
  *      location-only      resolves a path (a realpath, the running script) and reads no content
  *    An entry with no surface, or a surface outside this list, fails.
  *
- * There is deliberately NO surface for the TypeScript compiler's reads (PR #524 r7, F5). A module
- * that builds TypeScript programs (internal-token-parser.mjs does, through typescript-eslint) lets
- * the compiler read whatever its import graph, `extends`/`references` chains and nested package
- * projects reach, and that graph cannot be listed without racing the compiler. It is closed
- * structurally instead, for EVERY lint task whether or not a listed module is the cause: see
- * compilerReadProblems.
+ * There is deliberately NO surface for the TypeScript compiler's reads (PR #524 r7/r8, F5). The
+ * graph a program reads cannot be listed completely (D-109), so a module that builds programs
+ * does not declare what the compiler reads: it declares `buildsPrograms: true`, and the lint task
+ * of every workspace that loads it is uncached (programBuildProblems).
  *
  * Residual (D-094): a module may still read an UNDECLARED path through a declared member
  * (`readFileSync('../rules.json')`); the table names the intended reads and the guard checks
@@ -304,8 +308,9 @@ export const BUILTIN_READERS = new Map([
         'so it looks for the workspace manifest and tsconfig and compares the file on disk with the text eslint passes',
       builtins: { fs: ['existsSync', 'readFileSync'] },
       // The TypeScript program the wrapped parser then builds reads far more than this module
-      // names (imports, type imports, references, nested projects): that is not a surface of
-      // this table but a property of every lint task, asserted by compilerReadProblems.
+      // names (imports, references, external configs, generated declarations) and that cannot be
+      // listed: not a surface of this table but a reason for an uncached lint task.
+      buildsPrograms: true,
       reads: [
         {
           surface: 'linted-files',
@@ -325,6 +330,7 @@ export const BUILTIN_READERS = new Map([
         'the rule keys its allowances on a file’s canonical repository path, so it resolves symlinks ' +
         'of the linted file and of the checkout root; it reads no file content',
       builtins: { fs: ['realpathSync'] },
+      buildsPrograms: false,
       reads: [
         { surface: 'linted-files', why: '`fs.realpathSync(file)`: the linted file’s real path' },
         {
@@ -354,6 +360,7 @@ export const BUILTIN_READERS = new Map([
         ],
         os: ['tmpdir'],
       },
+      buildsPrograms: false,
       exports: ['REPO_ROOT'],
       reads: [
         {
@@ -405,6 +412,11 @@ export const exceptionTableProblems = (exceptions) => {
       !(Array.isArray(entry.exports) && entry.exports.every(nonEmpty))
     ) {
       bad('has an `exports` that is not a list of names');
+    }
+    if (typeof entry.buildsPrograms !== 'boolean') {
+      bad(
+        'does not say whether the module makes eslint build TypeScript programs (`buildsPrograms`: true or false)',
+      );
     }
     if (!Array.isArray(entry.reads) || entry.reads.length === 0) bad('declares no `reads`');
     for (const read of Array.isArray(entry.reads) ? entry.reads : []) {
@@ -460,6 +472,24 @@ const KEY_KINDS = new Set([
   ts.SyntaxKind.EnumMember,
 ]);
 
+/**
+ * Names that make typescript-eslint (or the compiler) build a TypeScript program: the parser options
+ * `project`, `projectService`, `programs` and `EXPERIMENTAL_useProjectService`, and the compiler API
+ * calls that create one. A module that names one as a property key, a member or a literal element
+ * key builds programs, listed in BUILTIN_READERS or not (programBuildProblems). By name, not by
+ * value: a spread or computed key is the D-094 residual, caught in review.
+ */
+export const PROGRAM_NAMES = new Set([
+  'project',
+  'projectService',
+  'programs',
+  'EXPERIMENTAL_useProjectService',
+  'createProgram',
+  'createWatchProgram',
+  'createIncrementalProgram',
+  'createProjectService',
+]);
+
 const isLiteral = (node) =>
   node !== undefined && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node));
 
@@ -479,6 +509,8 @@ const analyze = (path, source) => {
   const sf = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
   const specifiers = new Set();
   const errors = [];
+  /** PROGRAM_NAMES the module names (keys, members, literal element keys). */
+  const programNames = new Set();
   /** specifier → the names taken from it (`'*'`: a namespace, default or non-static load). */
   const importNames = new Map();
   /** built-in (without `node:`) → the members used by name; `opaque` when they cannot be listed. */
@@ -545,6 +577,20 @@ const analyze = (path, source) => {
   }
 
   const visit = (node) => {
+    if (KEY_KINDS.has(node.kind) || ts.isShorthandPropertyAssignment(node)) {
+      const { name } = node;
+      if ((ts.isIdentifier(name) || isLiteral(name)) && PROGRAM_NAMES.has(name.text)) {
+        programNames.add(name.text);
+      }
+    } else if (ts.isPropertyAccessExpression(node) && PROGRAM_NAMES.has(node.name.text)) {
+      programNames.add(node.name.text);
+    } else if (
+      ts.isElementAccessExpression(node) &&
+      isLiteral(node.argumentExpression) &&
+      PROGRAM_NAMES.has(node.argumentExpression.text)
+    ) {
+      programNames.add(node.argumentExpression.text);
+    }
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
       if (node.moduleSpecifier !== undefined) {
         if (isLiteral(node.moduleSpecifier)) {
@@ -640,7 +686,7 @@ const analyze = (path, source) => {
     ts.forEachChild(node, visit);
   };
   visit(sf);
-  return { specifiers, errors, builtinUse, importNames };
+  return { specifiers, errors, builtinUse, importNames, programNames };
 };
 
 /**
@@ -773,6 +819,8 @@ export const dependencyClosure = (
   const errors = [];
   /** The loaded modules that have an exact-path built-in exception. */
   const excepted = new Set();
+  /** The loaded modules that make eslint build TypeScript programs: file → why. */
+  const builders = new Map();
   const queue = [...entries];
   const bare = (file, specifier) => {
     const name = specifier.startsWith('@')
@@ -796,9 +844,26 @@ export const dependencyClosure = (
       errors.push(`${file} cannot be read, so what it loads is unknown.`);
       continue;
     }
-    const { specifiers, errors: found, builtinUse, importNames } = analyzeModule(file, source);
+    const {
+      specifiers,
+      errors: found,
+      builtinUse,
+      importNames,
+      programNames,
+    } = analyzeModule(file, source);
     errors.push(...found);
     const entry = exceptions.get(file);
+    if (programNames.size > 0) {
+      builders.set(file, `it names ${[...programNames].map((n) => `\`${n}\``).join(', ')}`);
+      if (entry !== undefined && entry.buildsPrograms !== true) {
+        errors.push(
+          `${file} names ${[...programNames].join(', ')}, which makes eslint build TypeScript programs, but its ` +
+            'BUILTIN_READERS entry does not say `buildsPrograms: true`: declare it so the entry tells the truth.',
+        );
+      }
+    } else if (entry?.buildsPrograms === true) {
+      builders.set(file, 'its BUILTIN_READERS entry says `buildsPrograms: true`');
+    }
     const usedBuiltins = new Set();
     for (const specifier of specifiers) {
       if (/^\.\.?([/\\]|$)/.test(specifier)) {
@@ -893,7 +958,7 @@ export const dependencyClosure = (
       }
     }
   }
-  return { files, errors, excepted };
+  return { files, errors, excepted, builders };
 };
 
 // ---------------------------------------------------------------------------
@@ -995,7 +1060,7 @@ export const discover = ({ tracked, read, exceptions = BUILTIN_READERS }) => {
       );
       continue;
     }
-    const { files, errors, excepted } = dependencyClosure(configs, {
+    const { files, errors, excepted, builders } = dependencyClosure(configs, {
       tracked,
       read,
       localNames,
@@ -1003,7 +1068,7 @@ export const discover = ({ tracked, read, exceptions = BUILTIN_READERS }) => {
     });
     for (const config of configs) used.add(config);
     for (const error of errors) if (!problems.includes(error)) problems.push(error);
-    found.push({ ...workspace, files, excepted });
+    found.push({ ...workspace, files, excepted, builders });
   }
   for (const file of tracked) {
     if (/^eslint\.config\./.test(file) || !/(^|\/)eslint\.config\.[cm]?[jt]s$/.test(file)) continue;
@@ -1130,66 +1195,41 @@ export const inputProblems = ({ tracked, read, hashed, exceptions }) => {
 };
 
 /**
- * Every file a TypeScript program can read from the repository, by extension: sources and
- * declarations (`.ts .tsx .mts .cts`, `.d.ts` included), scripts (`.js .jsx .mjs .cjs`, read under
- * `allowJs`/`checkJs` and by module resolution) and JSON (`tsconfig*.json`, `package.json`, a
- * resolved `.json` module). Whatever the program's import graph, triple-slash references,
- * `extends` chains, `references` or nested package projects reach, it is one of these.
+ * The TypeScript compiler's reads, closed by NOT caching (PR #524 r8, D-109; r7's hashed superset of
+ * "everything a program can read" could never be complete: `.jsonc`/`.json5`/extensionless `extends`
+ * targets, absolute external configs and untracked generated declarations are all ordinary reads).
+ * The lint task of every workspace that loads a module making eslint build TypeScript programs
+ * (`buildsPrograms: true` in its BUILTIN_READERS entry, or a PROGRAM_NAMES option or call in its
+ * source) must be `"cache": false`: there is no stale green to replay. Nothing is asked about what
+ * the compiler reads, so there is nothing to enumerate and nothing to race.
  */
-export const COMPILER_READ_FILE = /\.(?:[cm]?[jt]sx?|json)$/;
-
-/**
- * The TypeScript compiler's reads, closed structurally (PR #524 r7, F5; no discovery, so no race
- * with the compiler). The lint parser builds TypeScript programs, and a program may read any
- * tracked file of the repository. So EVERY lint task that turbo may replay from cache must
- * either not be cached at all, or hash all of them and depend on `^build` (the untracked build
- * output the programs resolve @rasta/* imports to). The check does not ask which module builds
- * programs: a new one is covered the day it appears.
- */
-export const compilerReadProblems = ({ workspaces: found, tracked }, hashed) => {
+export const programBuildProblems = ({ workspaces: found }, hashed) => {
   const problems = [];
-  const byMissing = new Map();
+  const byBuilders = new Map();
   for (const workspace of found) {
+    if (workspace.builders.size === 0) continue;
     const task = hashed.tasks.get(`${workspace.name}#lint`);
-    // a missing task is reported by coverageProblems; an uncached one always re-runs
+    // a missing task is reported by coverageProblems
     if (task === undefined || !task.cache) continue;
-    if (!task.dependsOn.includes('^build')) {
-      problems.push(
-        `${workspace.name}'s lint task is cached but does not depend on \`^build\`: the TypeScript programs ` +
-          'the lint parser builds read dependency build output (.d.ts), so a change to it would replay a cached lint green.',
-      );
-    }
-    const missing = unhashedCompilerReads(tracked, task, hashed);
-    if (missing.length === 0) continue;
-    const key = missing.join('\0');
-    const entry = byMissing.get(key) ?? { missing, packages: [] };
-    entry.packages.push(workspace.name);
-    byMissing.set(key, entry);
+    const key = [...workspace.builders].map(([file, why]) => `${file} (${why})`).join(', ');
+    byBuilders.set(key, [...(byBuilders.get(key) ?? []), workspace.name]);
   }
-  for (const { missing, packages } of byMissing.values()) {
+  for (const [builders, packages] of byBuilders) {
     problems.push(
-      `The lint task of ${packages.join(', ')} is cached, but ${missing.length} tracked source, declaration, script ` +
-        `or JSON files that a TypeScript program may read are not in turbo's resolved hashed inputs ` +
-        `(\`turbo run lint --dry=json\`), e.g. ${missing.slice(0, 3).join(', ')}: a change to one would replay a ` +
-        'cached lint green although the type-aware rules read it. Hash all of them in the `lint` task ' +
-        '(`$TURBO_ROOT$/**/*.ts`, `*.tsx`, `*.mts`, `*.cts`, `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `*.json`, with the ' +
-        'node_modules, dist and .next exclusions) or set `"cache": false` on it. Do not narrow this to the trees ' +
-        'a tsconfig names: imports, type imports, references and nested projects reach outside them.',
+      `The lint task of ${packages.join(', ')} is cached, but it loads ${builders}, which makes eslint build ` +
+        'TypeScript programs. A program reads whatever its imports, `extends`/`references` chains, external ' +
+        'configs and generated declarations reach, and no list of hashed inputs is complete (D-109), so a ' +
+        'change to one would replay a cached lint green. Set `"cache": false` on the lint task ' +
+        "(`lint`, a `<pkg>#lint` override or the workspace turbo.json); do not try to list the compiler's inputs.",
     );
   }
   return problems;
 };
 
-/** The tracked files a TypeScript program may read that `task` does not hash (sorted). */
-export const unhashedCompilerReads = (tracked, task, hashed) =>
-  [...tracked]
-    .filter((f) => COMPILER_READ_FILE.test(f) && !task.files.has(f) && !hashed.global.has(f))
-    .sort();
-
-/** The whole guard: what eslint loads, what excepted modules read, and what the compiler may read. */
+/** The whole guard: what eslint loads, what excepted modules read, and whether programs are cached. */
 export const guardProblems = (args) => [
   ...inputProblems(args),
-  ...compilerReadProblems(discover(args), args.hashed),
+  ...programBuildProblems(discover(args), args.hashed),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1204,7 +1244,6 @@ export const parseDryRun = (json) => {
     if (!task.taskId.endsWith('#lint') || task.command === '<NONEXISTENT>') continue;
     tasks.set(task.taskId, {
       cache: task.resolvedTaskDefinition?.cache !== false,
-      dependsOn: task.resolvedTaskDefinition?.dependsOn ?? [],
       files: new Set(
         Object.keys(task.inputs ?? {}).map((f) => posix.normalize(posix.join(task.directory, f))),
       ),
@@ -1342,24 +1381,15 @@ const withText = (state, replacements) => ({
 });
 
 /**
- * The compiler-read inputs of the real `lint` task (the globs and exclusions turbo.json carries for
- * compilerReadProblems). They subsume every plain-path rule input, so the mutants that test the
- * loaded-file model strip them first; the compiler mutants keep them.
+ * turbo's answer for the real repository with a changed copy of the root turbo.json. The real lint
+ * task is `"cache": false` (D-109), and the coverage checks skip uncached tasks, so the copy is
+ * CACHED unless a mutant says otherwise: the hashed-input model stays tested and no mutant is vacuous.
  */
-const COMPILER_INPUT =
-  /^!?\$TURBO_ROOT\$\/\*\*\/(?:\*\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|json)|node_modules\/\*\*|dist\/\*\*|\.next\/\*\*)$/;
-const withoutCompilerInputs = (doc) => {
-  for (const [key, def] of Object.entries(doc.tasks ?? {})) {
-    if ((key === 'lint' || key.endsWith('#lint')) && Array.isArray(def.inputs)) {
-      def.inputs = def.inputs.filter((i) => !COMPILER_INPUT.test(i));
-    }
-  }
-};
-
-/** turbo's answer for the real repository with a changed copy of the root turbo.json. */
-const mutatedSnapshot = async (change, { keepCompilerInputs = false } = {}) => {
+const mutatedSnapshot = async (change) => {
   const doc = parseJsonc(readDisk('turbo.json'));
-  if (!keepCompilerInputs) withoutCompilerInputs(doc);
+  for (const [key, def] of Object.entries(doc.tasks ?? {})) {
+    if (key === 'lint' || key.endsWith('#lint')) delete def.cache;
+  }
   change(doc);
   const dir = mkdtempSync(join(tmpdir(), 'lint-input-guard-turbo-'));
   try {
@@ -2722,6 +2752,7 @@ const READER_PATH = 'scripts/helper-b.mjs';
 const reader = (extra = {}) => ({
   why: 'a fixture reader',
   builtins: { fs: ['readFileSync'] },
+  buildsPrograms: false,
   reads: [{ surface: 'linted-files', why: 'the linted file' }],
   ...extra,
 });
@@ -2746,9 +2777,10 @@ test('exceptions: the real table is exact, and every excepted module is loaded a
   );
   // What each entry declares is reviewed data: changing it is a change to this list too.
   assert.deepEqual(
-    [...BUILTIN_READERS].map(([path, { builtins, exports, reads }]) => [
+    [...BUILTIN_READERS].map(([path, { builtins, buildsPrograms, exports, reads }]) => [
       path,
       builtins,
+      buildsPrograms,
       exports ?? null,
       reads.map((read) => read.surface),
     ]),
@@ -2756,12 +2788,14 @@ test('exceptions: the real table is exact, and every excepted module is loaded a
       [
         'scripts/internal-token-parser.mjs',
         { fs: ['existsSync', 'readFileSync'] },
+        true,
         null,
         ['linted-files', 'workspace-manifest'],
       ],
       [
         'scripts/internal-token-source-rule.mjs',
         { fs: ['realpathSync'] },
+        false,
         null,
         ['linted-files', 'location-only'],
       ],
@@ -2780,6 +2814,7 @@ test('exceptions: the real table is exact, and every excepted module is loaded a
           ],
           os: ['tmpdir'],
         },
+        false,
         ['REPO_ROOT'],
         ['location-only'],
       ],
@@ -2930,6 +2965,8 @@ test('exceptions: a malformed table is rejected', () => {
     'a name that is no built-in': [[READER_PATH, reader({ builtins: { nothing: ['x'] } })]],
     'no members': [[READER_PATH, reader({ builtins: { fs: [] } })]],
     'no reads': [[READER_PATH, reader({ reads: [] })]],
+    'no buildsPrograms': [[READER_PATH, reader({ buildsPrograms: undefined })]],
+    'a buildsPrograms that is no boolean': [[READER_PATH, reader({ buildsPrograms: 'yes' })]],
     'an unknown surface': [[READER_PATH, reader({ reads: [{ surface: 'everything', why: 'x' }] })]],
     'a surface without a reason': [[READER_PATH, reader({ reads: [{ surface: 'linted-files' }] })]],
     'a bad exports': [[READER_PATH, reader({ exports: 'y' })]],
@@ -3131,296 +3168,212 @@ test('mutant: a real excepted module’s read surface that turbo stops hashing f
 });
 
 // ---------------------------------------------------------------------------
-// The TypeScript compiler's reads, closed structurally (PR #524 r7, F5).
+// Programs: the TypeScript compiler's reads, closed by not caching (PR #524 r8, D-109).
 // ---------------------------------------------------------------------------
 
-/** The compiler-read globs and exclusions the real turbo.json carries (the one source of truth). */
-const realCompilerInputs = () => {
-  const found = parseJsonc(readDisk('turbo.json')).tasks.lint.inputs.filter((i) =>
-    COMPILER_INPUT.test(i),
-  );
-  assert.equal(found.length, 12, `expected nine globs and three exclusions, found ${found}`);
-  return found;
-};
-
-/** The review's three escapes plus a read of every extension, in a repository turbo can hash. */
-const COMPILER_PROBE_EXTENSIONS = [
-  'ts',
-  'd.ts',
-  'tsx',
-  'mts',
-  'cts',
-  'js',
-  'jsx',
-  'mjs',
-  'cjs',
-  'json',
-];
-const compilerFiles = () => ({
-  ...baseFiles(),
-  'pnpm-lock.yaml':
-    "lockfileVersion: '9.0'\n\nimporters:\n  .: {}\n  apps/ref: {}\n  apps/web: {}\n",
-  // 1. a type dependency outside every configured tree (the review's reproduction)
-  'apps/web/tsconfig.json': '{"files":["src/a.ts"],"references":[{"path":"../ref"}]}',
-  'apps/web/src/a.ts':
-    "import type { Header } from '../../../shared/header';\ndeclare const key: Header;\nexport const headers = { [key]: 'token' };\n",
-  'shared/header.d.ts': "export type Header = 'x-other';\n",
-  // 2. a nested package project the parser picks for its own files, extending an unhashed config
-  'apps/web/nested/package.json': '{"name":"nested"}',
-  'apps/web/nested/tsconfig.json': '{"extends":"../../../shared/tsconfig.nested.json"}',
-  'apps/web/nested/n.ts': 'export {};\n',
-  'shared/tsconfig.nested.json': '{"compilerOptions":{"strict":true}}',
-  // 3. a referenced project whose own `extends` is outside every tree
-  'apps/ref/tsconfig.json': '{"extends":"../../shared/ref-base.json"}',
-  'shared/ref-base.json': '{"compilerOptions":{"strict":true}}',
-  // a read of every extension from outside every workspace
-  ...Object.fromEntries(
-    COMPILER_PROBE_EXTENSIONS.map((ext) => [`shared/probe.${ext}`, 'export {};\n']),
-  ),
-  'shared/notes.md': 'not a compiler input\n',
-});
-const compilerTurbo = (inputs, extra = {}) =>
-  JSON.stringify({ tasks: { lint: { dependsOn: ['^build'], inputs, ...extra } } });
-const ESCAPED_READS = [
-  'shared/header.d.ts',
-  'shared/tsconfig.nested.json',
-  'shared/ref-base.json',
-  ...COMPILER_PROBE_EXTENSIONS.map((ext) => `shared/probe.${ext}`),
-];
-
-/** Run the whole guard on a fixture repository with a real turbo and the given `lint` definition. */
-const fixtureGuard = (files, turbo) =>
+const PROGRAM_SOURCE =
+  "export const y = { languageOptions: { parserOptions: { project: ['./tsconfig.json'] } } };\n";
+const programTurbo = (task = {}, extra = {}) =>
+  JSON.stringify({
+    ...extra,
+    tasks: { lint: { dependsOn: ['^build'], inputs: BASE_INPUTS, ...task } },
+  });
+/** The whole guard on a fixture repository, with a real turbo and the given turbo.json. */
+const programGuard = (files, turbo, exceptions) =>
   withFixtureRepo({ ...files, 'turbo.json': turbo }, (dir) => {
     const state = memoryState({ ...files, 'turbo.json': turbo });
     const hashed = turboSnapshot({ cwd: dir });
     return {
-      problems: guardProblems({ ...state, hashed }),
-      legacy: inputProblems({ ...state, hashed }),
+      problems: guardProblems({ ...state, exceptions, hashed }),
+      inputs: inputProblems({ ...state, exceptions, hashed }),
       hashed,
-      state,
     };
   });
-
-test('compiler reads: the extensions a TypeScript program can read, and only those', () => {
-  for (const file of [
-    'a.ts',
-    'a.d.ts',
-    'a.tsx',
-    'a.mts',
-    'a.cts',
-    'a.d.mts',
-    'a.js',
-    'a.jsx',
-    'a.mjs',
-    'a.cjs',
-    'package.json',
-    'tsconfig.base.json',
-    'x/y/tsconfig.test.json',
-  ]) {
-    assert.ok(COMPILER_READ_FILE.test(file), `${file} must count as a compiler read`);
-  }
-  for (const file of [
-    'a.md',
-    'a.yaml',
-    'a.ts.map',
-    'a.tsbuildinfo',
-    'a.sql',
-    'Dockerfile',
-    'a.json5',
-  ]) {
-    assert.ok(!COMPILER_READ_FILE.test(file), `${file} is not read by the compiler`);
-  }
+/** A hand-made turbo answer: every workspace's lint task cached or not, nothing hashed. */
+const taskState = (names, cache) => ({
+  tasks: new Map(names.map((name) => [`${name}#lint`, { cache, files: new Set() }])),
+  global: new Set(),
 });
 
-test('compiler reads: the real lint tasks hash every file a program may read, and depend on ^build', () => {
+test('programs: the real lint tasks that load a program-building module are uncached', async () => {
   const state = realState();
   const found = discover(state);
   const hashed = realHashed();
-  assert.deepEqual(compilerReadProblems(found, hashed), []);
-  // not vacuous: the tasks are cached and the readable set is the whole repository's
-  const cached = found.workspaces.filter((w) => hashed.tasks.get(`${w.name}#lint`)?.cache);
-  assert.equal(cached.length, found.workspaces.length, 'a lint task is no longer cached');
-  const readable = [...state.tracked].filter((f) => COMPILER_READ_FILE.test(f));
-  assert.ok(readable.length >= 1000, `expected the whole repository, found ${readable.length}`);
-  for (const w of cached) {
-    const task = hashed.tasks.get(`${w.name}#lint`);
-    assert.deepEqual(unhashedCompilerReads(state.tracked, task, hashed), [], w.name);
-    assert.ok(task.dependsOn.includes('^build'), w.name);
-    // the globs must not walk dependencies or build output: tens of thousands of files, minutes of hashing
-    const walked = [...task.files].filter((f) => /(^|\/)node_modules\//.test(f));
-    assert.deepEqual(walked.slice(0, 3), [], `${w.name} hashes node_modules`);
+  assert.deepEqual(found.problems, []);
+  const builders = found.workspaces.filter((w) => w.builders.size > 0);
+  // not vacuous: the parser is loaded, declared and detected, by every lint workspace
+  assert.equal(builders.length, found.workspaces.length, 'every lint workspace loads the parser');
+  for (const w of builders) {
+    const why = w.builders.get('scripts/internal-token-parser.mjs');
+    assert.ok(why?.includes('`project`'), `${w.name}: ${why}`);
+    assert.equal(hashed.tasks.get(`${w.name}#lint`)?.cache, false, `${w.name} lint is cached`);
   }
+  assert.deepEqual(programBuildProblems(found, hashed), []);
+  // the plain-path input model stays true for the day a lint task is cached again
+  const cached = await mutatedSnapshot(() => {});
+  for (const w of found.workspaces) assert.equal(cached.tasks.get(`${w.name}#lint`).cache, true);
+  assert.deepEqual(inputProblems({ ...state, hashed: cached }), []);
 });
 
-test('compiler reads: the review’s three escapes and every extension are caught, and closed by the globs', () => {
-  const files = compilerFiles();
-  // the old guard (loaded files + excepted reads) passes while a type dependency is unhashed: the escape
-  const open = fixtureGuard(files, compilerTurbo(BASE_INPUTS));
-  assert.deepEqual(open.legacy, [], 'the escape: the older checks cannot see these reads');
-  const task = open.hashed.tasks.get('@rasta/web#lint');
-  assert.deepEqual(
-    ESCAPED_READS.filter(
-      (f) => !unhashedCompilerReads(open.state.tracked, task, open.hashed).includes(f),
-    ),
-    [],
-    'every escaped read must be reported',
-  );
-  assert.equal(open.problems.length, 1, fail(open.problems));
-  assert.ok(
-    open.problems[0].includes('@rasta/web') && open.problems[0].includes('cached'),
-    open.problems[0],
-  );
-  // with the compiler-read inputs of the real turbo.json the same repository passes
-  const closed = fixtureGuard(files, compilerTurbo([...BASE_INPUTS, ...realCompilerInputs()]));
-  assert.deepEqual(closed.problems, [], fail(closed.problems));
-  // global dependencies are hashed by every task: naming the reads there closes them too
-  const viaGlobals = fixtureGuard(
-    files,
-    JSON.stringify({
-      globalDependencies: Object.keys(files).filter((f) => COMPILER_READ_FILE.test(f)),
-      tasks: { lint: { dependsOn: ['^build'], inputs: BASE_INPUTS } },
-    }),
-  );
-  assert.deepEqual(viaGlobals.problems, [], fail(viaGlobals.problems));
-  // an uncached lint task re-runs every time: nothing to hash
-  assert.deepEqual(fixtureGuard(files, compilerTurbo(BASE_INPUTS, { cache: false })).problems, []);
-  // a cached task without ^build, an exclusion of a tree, a narrower glob: each fails
-  const noBuild = fixtureGuard(
-    files,
-    JSON.stringify({ tasks: { lint: { inputs: [...BASE_INPUTS, ...realCompilerInputs()] } } }),
-  );
-  assert.ok(
-    noBuild.problems.some((p) => p.includes('does not depend on `^build`')),
-    fail(noBuild.problems),
-  );
-  const excluded = fixtureGuard(
-    files,
-    compilerTurbo([...BASE_INPUTS, ...realCompilerInputs(), '!$TURBO_ROOT$/shared/**']),
-  );
-  assert.equal(excluded.problems.length, 1, fail(excluded.problems));
-  assert.ok(excluded.problems[0].includes('shared/header.d.ts'), excluded.problems[0]);
-  const narrow = fixtureGuard(
-    files,
-    compilerTurbo([...BASE_INPUTS, '$TURBO_ROOT$/apps/**/*.ts', '$TURBO_ROOT$/apps/**/*.json']),
-  );
-  assert.equal(narrow.problems.length, 1, fail(narrow.problems));
-});
-
-test('compiler reads: a module that builds TypeScript programs is covered without being listed', () => {
-  // a new rule module that sets the parser's `project` itself: no built-in, no BUILTIN_READERS entry,
-  // so nothing in the table or the loading grammar mentions the compiler
-  const files = {
-    ...compilerFiles(),
-    'scripts/helper-b.mjs':
-      "export const y = { languageOptions: { parserOptions: { project: ['./tsconfig.json'], tsconfigRootDir: import.meta.dirname } } };\n",
-  };
-  const open = fixtureGuard(files, compilerTurbo(BASE_INPUTS));
-  assert.deepEqual(open.legacy, []);
-  assert.equal(open.problems.length, 1, fail(open.problems));
-  const closed = fixtureGuard(files, compilerTurbo([...BASE_INPUTS, ...realCompilerInputs()]));
-  assert.deepEqual(closed.problems, []);
-});
-
-test('compiler reads: turbo’s own lint hash changes with any file a program may read, and not with others', () => {
-  const files = compilerFiles();
-  const lintHash = (dir, turbo) => {
-    writeFileSync(join(dir, 'turbo.json'), turbo);
-    const { bin, args, options } = turboCommand({ cwd: dir });
-    const dry = JSON.parse(
-      execFileSync(bin, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] }),
-    );
-    return dry.tasks.find((t) => t.taskId === '@rasta/web#lint').hash;
-  };
-  const probes = [...ESCAPED_READS, 'shared/notes.md'];
-  for (const [what, turbo, changes] of [
-    ['without the compiler inputs', compilerTurbo(BASE_INPUTS), false],
-    ['with the compiler inputs', compilerTurbo([...BASE_INPUTS, ...realCompilerInputs()]), true],
-  ]) {
-    withFixtureRepo({ ...files, 'turbo.json': turbo }, (dir) => {
-      const before = lintHash(dir, turbo);
-      for (const file of probes) {
-        const original = readFileSync(join(dir, file), 'utf8');
-        writeFileSync(join(dir, file), `${original}// changed\n`);
-        const after = lintHash(dir, turbo);
-        writeFileSync(join(dir, file), original);
-        const expected = changes && file !== 'shared/notes.md';
-        assert.equal(after !== before, expected, `${what}: changing ${file}`);
-      }
-    });
-  }
-});
-
-test('mutant: weakening the real compiler-read inputs fails naming the lint tasks', async () => {
+test('programs: a cached lint task that loads the parser module fails the guard', async () => {
   const state = realState();
   const found = discover(state);
-  const run = async (change) =>
-    guardProblems({
-      ...state,
-      hashed: await mutatedSnapshot(change, { keepCompilerInputs: true }),
-    });
-  assert.deepEqual(await run(() => {}), [], 'the real configuration passes unchanged');
-  // each glob on its own: the extension it covers becomes an unhashed read. An extension with no
-  // tracked file (.cts today) has nothing to miss, so removing its glob is an equivalent mutant
-  // here; it fails the day such a file is added (the fixture test above has one of every kind).
-  const globs = realCompilerInputs().filter((i) => !i.startsWith('!'));
-  let killed = 0;
-  await inParallel(globs, async (glob) => {
-    const hashed = await mutatedSnapshot(
-      (doc) => {
-        doc.tasks.lint.inputs = doc.tasks.lint.inputs.filter((i) => i !== glob);
-      },
-      { keepCompilerInputs: true },
-    );
-    const problems = guardProblems({ ...state, hashed });
-    const ext = glob.slice(glob.lastIndexOf('.'));
-    const tracked = [...state.tracked].filter((f) => f.endsWith(ext)).sort();
-    if (tracked.length === 0) return assert.deepEqual(problems, [], glob);
-    killed += 1;
-    // a workspace still hashes its own files (turbo's default inputs): what goes unhashed is that
-    // extension outside the workspace, and nothing of any other extension
-    let lost = 0;
-    for (const workspace of found.workspaces) {
-      const task = hashed.tasks.get(`${workspace.name}#lint`);
-      const missing = unhashedCompilerReads(state.tracked, task, hashed);
-      lost += missing.length;
-      assert.ok(
-        missing.every((f) => f.endsWith(ext)),
-        `${glob}: ${workspace.name}: ${missing.filter((f) => !f.endsWith(ext)).slice(0, 3)}`,
-      );
-    }
-    assert.ok(lost > 0, `${glob}: no workspace lost a file`);
-    assert.ok(startsWith(problems, 'The lint task of ').length >= 1, fail(problems));
-  });
-  assert.ok(killed >= 6, `expected most extensions to be tracked, killed ${killed}`);
-  // an exclusion that reaches tracked files
-  const excluded = await run((doc) => {
-    doc.tasks.lint.inputs.push('!$TURBO_ROOT$/packages/**');
-  });
-  assert.ok(
-    excluded.some((p) => p.includes('packages/')),
-    fail(excluded),
-  );
-  // no ^build
-  const noBuild = await run((doc) => {
-    doc.tasks.lint.dependsOn = [];
-  });
-  assert.equal(
-    noBuild.filter((p) => p.includes('does not depend on `^build`')).length,
-    found.workspaces.length,
-    fail(noBuild),
-  );
-  // one workspace overriding the task with narrower inputs
-  const override = await run((doc) => {
-    doc.tasks['@rasta/web#lint'] = { dependsOn: ['^build'], inputs: ['$TURBO_DEFAULT$'] };
-  });
-  assert.ok(
-    override.some((p) => p.includes('@rasta/web') && p.includes('may read')),
-    fail(override),
-  );
-  // an uncached lint task is the other accepted closure (it re-runs every time)
-  const uncached = await mutatedSnapshot((doc) => {
+  // the real turbo.json with its `cache: false` taken away: the review’s case, which hashed inputs
+  // cannot close (the older checks see nothing wrong)
+  const cached = await mutatedSnapshot(() => {});
+  assert.deepEqual(inputProblems({ ...state, hashed: cached }), []);
+  const problems = programBuildProblems(found, cached);
+  assert.equal(problems.length, 1, fail(problems));
+  assert.ok(problems[0].includes('scripts/internal-token-parser.mjs'), problems[0]);
+  assert.ok(problems[0].includes('"cache": false'), problems[0]);
+  for (const w of found.workspaces) assert.ok(problems[0].includes(w.name), w.name);
+  assert.deepEqual(guardProblems({ ...state, hashed: cached }), problems);
+  // one workspace overriding the uncached task back to cached is named alone
+  const override = await mutatedSnapshot((doc) => {
     doc.tasks.lint.cache = false;
+    doc.tasks['@rasta/web#lint'] = { dependsOn: ['^build'], cache: true };
   });
-  assert.equal(uncached.tasks.get('@rasta/web#lint').cache, false);
-  assert.deepEqual(compilerReadProblems(found, uncached), []);
+  const one = programBuildProblems(found, override);
+  assert.equal(one.length, 1, fail(one));
+  assert.ok(one[0].startsWith('The lint task of @rasta/web is cached'), one[0]);
+});
+
+test('programs: a cached task fails and an uncached one passes, whatever the compiler reads', () => {
+  const files = {
+    ...baseFiles(),
+    [READER_PATH]: PROGRAM_SOURCE,
+    // the review’s r7 case: a tracked tsconfig extending a shared `.jsonc` that no input names
+    'apps/web/tsconfig.json': '{"extends":"../../shared/compiler.jsonc","files":["src/a.ts"]}',
+    'shared/compiler.jsonc': '// paths select a declaration\n{"compilerOptions":{"strict":true}}\n',
+  };
+  const cached = programGuard(files, programTurbo());
+  assert.deepEqual(cached.inputs, [], 'the older checks cannot see it');
+  assert.equal(cached.problems.length, 1, fail(cached.problems));
+  assert.ok(cached.problems[0].includes('@rasta/web'), cached.problems[0]);
+  assert.ok(cached.problems[0].includes(READER_PATH), cached.problems[0]);
+  assert.deepEqual(programGuard(files, programTurbo({ cache: false })).problems, []);
+  // nothing the compiler might read matters: no input list is asked about it
+  const noInputs = programGuard(files, programTurbo({ cache: false, inputs: ['$TURBO_DEFAULT$'] }));
+  assert.ok(
+    noInputs.problems.every((p) => !p.includes('compiler.jsonc')),
+    fail(noInputs.problems),
+  );
+  // a repository that builds no program may keep its cache (no over-claim)
+  assert.deepEqual(programGuard(baseFiles(), programTurbo()).problems, []);
+});
+
+test('programs: a workspace turbo.json can neither cache nor uncache around the rule', () => {
+  const files = { ...baseFiles(), [READER_PATH]: PROGRAM_SOURCE };
+  const web = (task) => ({
+    'apps/web/turbo.json': JSON.stringify({ extends: ['//'], tasks: { lint: task } }),
+  });
+  // the root says uncached, the workspace says cached again: the resolved definition is what counts
+  const back = programGuard({ ...files, ...web({ cache: true }) }, programTurbo({ cache: false }));
+  assert.equal(back.problems.length, 1, fail(back.problems));
+  assert.ok(back.problems[0].includes('@rasta/web'), back.problems[0]);
+  // the root says cached, the workspace uncaches itself: accepted
+  const down = programGuard({ ...files, ...web({ cache: false }) }, programTurbo());
+  assert.deepEqual(down.problems, []);
+});
+
+test('programs: a module is a program builder by its entry or by the names it uses', () => {
+  const names = ['@rasta/web'];
+  const cachedAll = taskState(names, true);
+  const builders = (files, exceptions) =>
+    discover({ ...memoryState(files), exceptions }).workspaces[0].builders;
+  // detected without any entry: every option and call in PROGRAM_NAMES, in every spelling
+  const spellings = {
+    'a key': 'export const y = { project: ["./tsconfig.json"] };',
+    'a string key': 'export const y = { "projectService": true };',
+    'a shorthand key': 'const programs = []; export const y = { programs };',
+    'a method key': 'export const y = { project() { return 1; } };',
+    'a member': 'export const y = (o) => { o.project = "x"; return o; };',
+    'a literal element':
+      'export const y = (o) => { o["EXPERIMENTAL_useProjectService"] = true; return o; };',
+    'a compiler call':
+      'import ts from "typescript"; export const y = (f) => ts.createProgram(f, {});',
+    'an incremental call':
+      'import ts from "typescript"; export const y = (f) => ts.createIncrementalProgram(f);',
+    'a service call':
+      'import * as t from "typescript-estree"; export const y = () => t.createProjectService();',
+    'a watch call':
+      'import ts from "typescript"; export const y = (f) => ts.createWatchProgram(f);',
+  };
+  for (const [what, source] of Object.entries(spellings)) {
+    const files = { ...baseFiles(), [READER_PATH]: `${source}\n` };
+    assert.ok(builders(files).has(READER_PATH), `${what} is not detected`);
+    const problems = programBuildProblems(discover({ ...memoryState(files) }), cachedAll);
+    assert.equal(problems.length, 1, `${what}: ${fail(problems)}`);
+    assert.deepEqual(
+      programBuildProblems(discover({ ...memoryState(files) }), taskState(names, false)),
+      [],
+    );
+  }
+  // names that merely look alike are not
+  for (const source of [
+    'export const y = { program: 1, projects: 2, projectDir: 3 };',
+    'export const y = (o) => o.projectName + o["programs2"];',
+    'const project = 1; export const y = { [project]: 2 };',
+  ]) {
+    const files = { ...baseFiles(), [READER_PATH]: `${source}\n` };
+    assert.equal(builders(files).size, 0, source);
+  }
+  // declared without any name in the source: the entry alone makes it a builder
+  const declared = exceptionsOf([READER_PATH, reader({ buildsPrograms: true })]);
+  const files = withReader();
+  assert.ok(builders(files, declared).has(READER_PATH));
+  assert.equal(
+    programBuildProblems(discover({ ...memoryState(files), exceptions: declared }), cachedAll)
+      .length,
+    1,
+  );
+  // the entry that says false for a module that names `project` contradicts itself
+  const liar = exceptionsOf([READER_PATH, reader({ buildsPrograms: false })]);
+  const lying = discover({
+    ...memoryState({
+      ...baseFiles(),
+      [READER_PATH]: `import { readFileSync } from "node:fs";\nexport const y = { project: readFileSync };\n`,
+    }),
+    exceptions: liar,
+  });
+  assert.ok(
+    lying.problems.some(
+      (p) => p.startsWith(`${READER_PATH} names project`) && p.includes('buildsPrograms: true'),
+    ),
+    fail(lying.problems),
+  );
+});
+
+test('mutant: the real parser entry cannot stop saying it builds programs, nor its source stop naming them', () => {
+  const state = realState();
+  const parser = 'scripts/internal-token-parser.mjs';
+  const cached = taskState(
+    discover(state).workspaces.map((w) => w.name),
+    true,
+  );
+  // the entry says false: a contradiction with the source, and the module is still a builder
+  const entry = { ...BUILTIN_READERS.get(parser), buildsPrograms: false };
+  const lying = discover({ ...state, exceptions: new Map([...BUILTIN_READERS, [parser, entry]]) });
+  assert.ok(
+    lying.problems.some(
+      (p) => p.startsWith(`${parser} names `) && p.includes('buildsPrograms: true'),
+    ),
+    fail(lying.problems),
+  );
+  assert.equal(programBuildProblems(lying, cached).length, 1);
+  // the names disguised so the detector sees none: the entry alone keeps every task flagged
+  const hidden = withText(state, {
+    [parser]: (text) => text.replace(/\b(projectService|programs|project)\b/g, '$1Hidden'),
+  });
+  const found = discover(hidden);
+  assert.ok(
+    found.workspaces.every((w) => w.builders.get(parser)?.includes('`buildsPrograms: true`')),
+  );
+  assert.equal(programBuildProblems(found, cached).length, 1);
+  // the entry and the names both gone: nothing flags it (what the table pin test exists for)
+  const gone = discover({
+    ...hidden,
+    exceptions: new Map([...BUILTIN_READERS, [parser, entry]]),
+  });
+  assert.deepEqual(programBuildProblems(gone, cached), []);
 });
