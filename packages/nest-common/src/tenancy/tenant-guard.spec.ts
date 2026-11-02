@@ -8,6 +8,10 @@ import {
 } from './tenant-guard.extension';
 import { runWithContext, type RequestContext } from '../context/request-context';
 
+const datamodel = {
+  models: ['Asset', 'UsageRecord', 'Role'].map((name) => ({ name, fields: [] })),
+};
+
 const ORG_A = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YA';
 const ORG_B = 'ORG_01JBQ8Z4K7M2N5P8R1T3V6X9YB';
 
@@ -83,7 +87,10 @@ describe('injectTenantOnCreate', () => {
 });
 
 describe('createTenantGuardExtension', () => {
-  const extension = createTenantGuardExtension({ scopedModels: ['Asset', 'UsageRecord'] });
+  const extension = createTenantGuardExtension({
+    datamodel,
+    scopedModels: ['Asset', 'UsageRecord'],
+  });
   const allOperations = extension.query.$allModels.$allOperations;
 
   it('scopes a read against a tenant-scoped model', async () => {
@@ -150,7 +157,11 @@ describe('createTenantGuardExtension', () => {
   it('honours an explicit unscoped block and reports it', async () => {
     const query = jest.fn().mockResolvedValue([]);
     const onUnscopedQuery = jest.fn();
-    const auditing = createTenantGuardExtension({ scopedModels: ['Asset'], onUnscopedQuery });
+    const auditing = createTenantGuardExtension({
+      datamodel,
+      scopedModels: ['Asset'],
+      onUnscopedQuery,
+    });
 
     await runWithContext(contextFor(ORG_A), () =>
       runUnscoped('platform-wide asset census for the governance dashboard', () =>
@@ -237,5 +248,18 @@ describe('assertTenantOwned', () => {
         /Tenant boundary violation/,
       );
     });
+  });
+});
+
+it('assertTenantOwned uses a platform refusal without echoing either tenant', () => {
+  runWithContext(contextFor(ORG_A), () => {
+    try {
+      assertTenantOwned({ organizationId: ORG_B }, 'Asset');
+      throw new Error('expected refusal');
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'TENANT_MISMATCH' });
+      expect((error as Error).message).not.toContain(ORG_A);
+      expect((error as Error).message).not.toContain(ORG_B);
+    }
   });
 });
