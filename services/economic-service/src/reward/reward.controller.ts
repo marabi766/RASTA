@@ -31,6 +31,8 @@ import {
   createParticipationRuleSchema,
   createRecognitionRuleSchema,
   createRewardRuleSchema,
+  legacyCreateRewardRuleSchema,
+  REWARD_FINGERPRINT_VERSION,
   listRewardRulesQuerySchema,
   myParticipationQuerySchema,
   myRecognitionQuerySchema,
@@ -38,7 +40,6 @@ import {
   updateRewardRuleSchema,
   type CreateParticipationRuleDto,
   type CreateRecognitionRuleDto,
-  type CreateRewardRuleDto,
   type MyParticipationQuery,
   type MyRecognitionQuery,
   type ListRewardRulesQuery,
@@ -280,14 +281,26 @@ export class RewardController {
   })
   async createRule(
     @Headers('idempotency-key') idempotencyKey: string | undefined,
-    // Canonical first (the amount, the instants, the label's line endings, the
-    // condition's numeric operands), so a retry that says the same thing
-    // differently replays rather than 409s.
-    @Body(canonicalPipe(createRewardRuleSchema), zodPipe(createRewardRuleSchema))
-    dto: CreateRewardRuleDto,
+    @Body() raw: unknown,
   ) {
     assertNotAuditor();
     const key = requireIdempotencyKey(idempotencyKey);
+
+    const retained = await this.idempotency.replayLegacy(
+      'POST /v1/rewards/rules',
+      key,
+      () =>
+        zodPipe(legacyCreateRewardRuleSchema).transform(
+          canonicalPipe(legacyCreateRewardRuleSchema).transform(raw, { type: 'body' }),
+          { type: 'body' },
+        ),
+      async () => undefined,
+    );
+    if (retained) return retained.body;
+    const dto = zodPipe(createRewardRuleSchema).transform(
+      canonicalPipe(createRewardRuleSchema).transform(raw, { type: 'body' }),
+      { type: 'body' },
+    );
 
     return this.idempotency.run(
       'POST /v1/rewards/rules',
@@ -300,7 +313,7 @@ export class RewardController {
       // as the caller now is; a system administrator reaches every rule
       // (PATCH /v1/rewards/rules/{id} reads by id alone). The record answers
       // only the actor who made it (`IdempotencyStore`).
-      { mayReplay: async () => undefined },
+      { mayReplay: async () => undefined, fingerprintVersion: REWARD_FINGERPRINT_VERSION },
     );
   }
 

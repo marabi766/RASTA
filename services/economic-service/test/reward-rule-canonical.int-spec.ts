@@ -100,9 +100,6 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
   });
 
   afterAll(async () => {
-    await runUnscoped('the suite removes the rules it created', () =>
-      harness.prisma.client.rewardRule.deleteMany({ where: { organizationId: org } }),
-    );
     await cleanup(harness.prisma, [org]);
     await harness.close();
   });
@@ -178,6 +175,43 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
     expect(await rulesOf(marker)).toHaveLength(1);
   });
 
+  it.each(['9007199254740993', '9007199254740991.1', '1.00000000000000001', '7'])(
+    'F5 refuses raw JSON numeric operand %s before creating a rule',
+    async (lexeme) => {
+      const marker = `unsafe-number-${ulid()}`;
+      const json = JSON.stringify(
+        body(marker, { condition: { field: 'hours', op: 'gte', value: '__NUMBER__' } }),
+      ).replace('"__NUMBER__"', lexeme);
+      await createRaw(json, id('unsafe-number')).expect(400);
+      expect(await rulesOf(marker)).toHaveLength(0);
+    },
+  );
+
+  it('F5 trims a numeric field before canonicalizing equality for the idempotency hash', async () => {
+    const marker = `trim-field-${ulid()}`;
+    const key = id('trim-field');
+    const first = await createRule(
+      body(marker, { condition: { field: ' hours ', op: 'eq', value: '07.50' } }),
+      key,
+    ).expect(201);
+    expect(first.body.condition).toEqual({ field: 'hours', op: 'eq', value: '7.5' });
+    const replay = await createRule(
+      body(marker, { condition: { field: 'hours', op: 'eq', value: '7.5' } }),
+      key,
+    ).expect(201);
+    expect(replay.body.id).toBe(first.body.id);
+    expect(await rulesOf(marker)).toHaveLength(1);
+  });
+
+  it('F5 field whitespace cannot canonicalize invalid minor-unit grammar into an integer', async () => {
+    const marker = `trim-minor-${ulid()}`;
+    const created = await createRule(
+      body(marker, { condition: { field: ' totalCostMinor ', op: 'gte', value: '1.0' } }),
+      id('trim-minor'),
+    ).expect(201);
+    expect(created.body.condition).toEqual({ field: 'totalCostMinor', op: 'gte', value: '1.0' });
+  });
+
   describe('the condition’s numeric operands (Codex PR-480 r2, R2)', () => {
     const leaf = (op: string, value: string) => ({ field: 'hours', op, value });
     const shapes: [string, (node: unknown) => unknown][] = [
@@ -185,7 +219,7 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
       ['under all → any', (node) => ({ all: [{ field: 'x', op: 'present' }, { any: [node] }] })],
       ['under any → all', (node) => ({ any: [{ all: [{ field: 'x', op: 'absent' }, node] }] })],
     ];
-    const combos = (['gt', 'gte', 'lt', 'lte'] as const).flatMap((op) =>
+    const combos = (['gt', 'gte', 'lt', 'lte', 'eq', 'neq'] as const).flatMap((op) =>
       shapes.map(([where, shape]) => [op, where, shape] as const),
     );
 
@@ -234,12 +268,12 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
       async (op) => {
         const marker = `canon-cond-eq-${ulid()}`;
         const key = id('canon-cond-eq');
-        const condition = { all: [{ any: [leaf(op, '7.50')] }] };
+        const condition = { all: [{ any: [{ field: 'type', op, value: '7.50' }] }] };
         const first = await createRule(body(marker, { condition }), key).expect(201);
         expect(first.body.condition).toEqual(condition);
 
         const refused = await createRule(
-          body(marker, { condition: { all: [{ any: [leaf(op, '7.5')] }] } }),
+          body(marker, { condition: { all: [{ any: [{ field: 'type', op, value: '7.5' }] }] } }),
           key,
         ).expect(409);
 
@@ -249,6 +283,134 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
     );
   });
 
+  describe('R3: retained pre-F5 fingerprints', () => {
+    const forms = [
+      ['leaf', (leaf: unknown) => leaf],
+      ['nested all/any', (leaf: unknown) => ({ all: [{ any: [leaf] }] })],
+    ] as const;
+    const cases = [
+      ['numeric eq', { field: 'hours', op: 'eq', value: '07.50' }, '07.50'],
+      ['numeric neq', { field: 'hours', op: 'neq', value: '07.50' }, '07.50'],
+      ['integer ordering', { field: 'totalCostMinor', op: 'gte', value: '1.0' }, '1'],
+      ['long decimal', { field: 'hours', op: 'gte', value: '0'.repeat(260) + '7.50' }, '7.5'],
+      ['JSON number', { field: 'hours', op: 'gte', value: 7.5 }, 7.5],
+    ] as const;
+    it.each(
+      cases.flatMap(([name, leaf, oldValue]) =>
+        forms.map(([where, shape]) => [name, where, leaf, oldValue, shape] as const),
+      ),
+    )(
+      '%s %s replays the stored pre-deploy response, with no create',
+      async (_, __, leaf, oldValue, shape) => {
+        const marker = `legacy-f5-${ulid()}`;
+        const key = id('legacy-f5');
+        const sent = body(marker, { condition: shape(leaf) });
+        // Build a completed pre-deploy row. This oracle explicitly reproduces
+        // v1 defaults/instant/condition, independently of the compatibility parser.
+        const oldCondition = shape({ ...leaf, value: oldValue });
+        const oldBody = {
+          ...sent,
+          rewardType: 'POINTS',
+          status: 'ACTIVE',
+          validFrom: '2027-01-01T12:00:00.000Z',
+          condition: oldCondition,
+        };
+        const first = await createRule(body(marker), key).expect(201);
+        const stored = { ...first.body, condition: oldCondition };
+        await runUnscoped('seed only this tenant retained deployment record', () =>
+          harness.prisma.client.idempotencyKey.update({
+            where: {
+              organizationId_endpoint_key: {
+                organizationId: org,
+                endpoint: 'POST /v1/rewards/rules',
+                key,
+              },
+            },
+            data: { requestHash: hashRequestBody(oldBody), responseBody: stored },
+          }),
+        );
+        const replay = await createRule(sent, key).expect(201);
+        expect(replay.body).toEqual(stored);
+        expect(await rulesOf(marker)).toHaveLength(1);
+        expect(await storedHash(key)).toBe(hashRequestBody(oldBody));
+        const different = await createRule({ ...sent, points: 4 }, key).expect(409);
+        expect(different.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+        const other = `Bearer ${bearer({
+          sub: 'another-subject',
+          rastaUserId: 'USR-another',
+          organizationId: org,
+          organizationIds: [org],
+          roles: ['SYSTEM_ADMIN'],
+        })}`;
+        const refused = await request(http)
+          .post('/v1/rewards/rules')
+          .set('authorization', other)
+          .set('idempotency-key', key)
+          .send(sent)
+          .expect(409);
+        expect(refused.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+        await request(http)
+          .post('/v1/rewards/rules')
+          .set(
+            'authorization',
+            `Bearer ${bearer({
+              sub: `sub-${person}`,
+              rastaUserId: `USR-${person}`,
+              organizationId: org,
+              organizationIds: [org],
+              roles: ['OPERATOR'],
+            })}`,
+          )
+          .set('idempotency-key', key)
+          .send(sent)
+          .expect(403);
+      },
+    );
+  });
+
+  it.each(['IN_PROGRESS', 'EXPIRED', 'UNBOUND_ACTOR'] as const)(
+    'R3: a retained %s numeric request never executes legacy work',
+    async (state) => {
+      const marker = `legacy-state-${ulid()}`;
+      const key = id('legacy-state');
+      const condition = { field: 'hours', op: 'gte', value: 7 };
+      const sent = body(marker, { condition });
+      const oldBody = {
+        ...sent,
+        rewardType: 'POINTS',
+        status: 'ACTIVE',
+        validFrom: '2027-01-01T12:00:00.000Z',
+      };
+      await createRule(body(marker), key).expect(201);
+      await runUnscoped('seed only this tenant legacy lifecycle', () =>
+        harness.prisma.client.idempotencyKey.update({
+          where: {
+            organizationId_endpoint_key: {
+              organizationId: org,
+              endpoint: 'POST /v1/rewards/rules',
+              key,
+            },
+          },
+          data: {
+            requestHash: hashRequestBody(oldBody),
+            ...(state === 'IN_PROGRESS'
+              ? { state: 'IN_PROGRESS' }
+              : state === 'UNBOUND_ACTOR'
+                ? { actorHash: null }
+                : {
+                    createdAt: new Date('1999-12-31T00:00:00Z'),
+                    expiresAt: new Date('2000-01-01T00:00:00Z'),
+                  }),
+          },
+        }),
+      );
+      const refused = await createRule(sent, key).expect(state === 'EXPIRED' ? 400 : 409);
+      if (state === 'IN_PROGRESS') expect(refused.body.code).toBe('CONFLICT');
+      if (state === 'UNBOUND_ACTOR') expect(refused.body.code).toBe('IDEMPOTENCY_KEY_REUSED');
+      expect(await rulesOf(marker)).toHaveLength(1);
+    },
+  );
+
   describe('keys stored before this change (rollout)', () => {
     it('a canonical body hashed the same before: its retry replays', async () => {
       const marker = `canon-old-same-${ulid()}`;
@@ -256,7 +418,7 @@ describe('the reward rule create, canonical before it is hashed (real HTTP)', ()
       const sent = body(marker, { validFrom: '2027-01-01T12:00:00.000Z' });
       const first = await createRule(sent, key).expect(201);
 
-      expect(await storedHash(key)).toBe(hashBeforeTheChange(sent));
+      expect(await storedHash(key)).toBe(`reward-v2:${hashBeforeTheChange(sent)}`);
       const replay = await createRule(sent, key).expect(201);
       expect(replay.body.id).toBe(first.body.id);
     });

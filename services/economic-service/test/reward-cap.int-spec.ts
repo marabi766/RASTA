@@ -160,6 +160,16 @@ describe('rewards (real database)', () => {
         }),
       );
 
+      await runUnscoped('seed the historical ACTIVE evidence for this pre-check rule', () =>
+        prisma.client.rewardRuleStatusHistory.create({
+          data: {
+            ruleId,
+            status: 'ACTIVE',
+            effectiveAt: new Date(Date.now() - 60_000),
+          },
+        }),
+      );
+
       const failure = await grant(`USG_${ulid()}`).then(
         () => null,
         (error: unknown) => error,
