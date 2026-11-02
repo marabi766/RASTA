@@ -12,6 +12,10 @@ import {
   parseOrderCommand,
 } from './orders';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_BUYER');
 
 /**
  * Reading orders and turning one form into one command's body.
@@ -26,7 +30,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'buyer',
   organizationId: 'ORG_BUYER',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',

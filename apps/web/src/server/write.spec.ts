@@ -11,6 +11,10 @@ import {
   type FieldMapping,
 } from './write';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * Writing through the gateway: what reaches the wire, and what comes back
@@ -26,7 +30,7 @@ process.env.OIDC_CLIENT_ID ??= 'rasta-web';
 process.env.WEB_PUBLIC_ORIGIN ??= 'http://localhost:3200';
 process.env.WEB_SESSION_SECRET ??= 'a-secret-that-is-long-enough-to-be-a-key';
 
-const session = { accessToken: 'access-token-value' } as WebSession;
+const session = { accessToken: ACCESS_TOKEN_VALUE, organizationId: 'ORG-DEH-0001' } as WebSession;
 
 type Field = 'hours' | 'periodEnd';
 
@@ -82,7 +86,7 @@ describe('what reaches the gateway', () => {
     expect(url).toBe('http://gateway.test:3000/v1/usage-records');
     expect(init.method).toBe('POST');
     expect(headers['idempotency-key']).toBe('sub_AAAAAAAAAAAAAAAAAAAA');
-    expect(headers.authorization).toBe('Bearer access-token-value');
+    expect(headers.authorization).toBe(`Bearer ${ACCESS_TOKEN_VALUE}`);
     expect(headers['x-correlation-id']).toEqual(expect.any(String));
   });
 

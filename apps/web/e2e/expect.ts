@@ -39,5 +39,6 @@ export type {
   BrowserContext,
   Locator,
   Page,
+  Request,
   Route,
 } from '@playwright/test';

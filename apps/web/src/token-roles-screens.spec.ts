@@ -328,10 +328,21 @@ describe.each(SCREENS)(
       expect(offered(await run(path, params))).toBe(false);
     });
 
-    it('the global SYSTEM_ADMIN alone, acting for no organization: not offered — the write is tenant-scoped', async () => {
+    it('the global SYSTEM_ADMIN alone, acting for no organization: nothing is drawn or sent — the page is tenant-bound (task 118)', async () => {
       mockSession.current = withClaims({ realm_access: { roles: ['SYSTEM_ADMIN'] } });
       identityReports([admitted]);
-      expect(offered(await run(path, params))).toBe(false);
+      // `tenant-gate.ts` keeps such a session from the page. Were it reached
+      // anyway, it offers no form — or, where the page mints a submission id
+      // or reads through the gateway, throws before anything is sent.
+      const outcome = await run(path, params).then(
+        (tree) => ({ offered: offered(tree) }),
+        (error: unknown) => ({ refused: String(error) }),
+      );
+      expect(
+        'offered' in outcome
+          ? outcome.offered === false
+          : /acts for no (known )?organization/.test(outcome.refused),
+      ).toBe(true);
     });
   },
 );

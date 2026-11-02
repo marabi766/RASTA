@@ -24,7 +24,7 @@ import {
 } from './SupplierForms';
 import { SuppliersScreen } from './SuppliersScreen';
 import type { SupplierFormState } from './supplier-form-state';
-import { storedOrganizationFor } from '@/server/session-organization';
+import { pinnedOrganizationFor } from '@/server/session-organization';
 import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
@@ -372,7 +372,7 @@ const sessionFor = (token: string): WebSession => ({
   subject: 'user-1',
   username: 'u',
   // The copy every stored session carries: the token's own organization.
-  organizationId: storedOrganizationFor(token),
+  organizationId: pinnedOrganizationFor(token),
   accessToken: token,
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
@@ -503,9 +503,12 @@ describe('who is drawn which form on a supplier', () => {
     expect(screen.getByText(/سازمان شما صاحب این پرونده است/)).toBeInTheDocument();
   });
 
-  it('a platform administrator with no organization decides too: no decision names a tenant', () => {
-    drawn(DETAIL, null, ['SYSTEM_ADMIN']);
-    expect(screen.getByText('تایید صلاحیت…')).toBeInTheDocument();
+  it('a platform administrator whose session acts for no organization is drawn no form at all (task 118)', () => {
+    // Such a session never reaches this page (`tenant-gate.ts` sends it to
+    // `/account/no-organization`), and every form here is bound to an
+    // organization: none is minted for it, so nothing could be sent
+    // header-less and answered for the token's active organization.
+    expect(() => drawn(DETAIL, null, ['SYSTEM_ADMIN'])).toThrow(/no known organization/);
   });
 
   it.each([

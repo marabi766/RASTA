@@ -75,7 +75,7 @@ export default async function ReturnPage({
   // What inventory lists is a claim; only shipments borne out by this request
   // are its goods (`isShipmentOfRequest`, PR 336 review 1, finding 1).
   const shipments = result.kind === 'OK' && listed ? assessShipments(result.data, listed) : null;
-  const caller = returnCallerOf(session.accessToken);
+  const caller = returnCallerOf(session);
 
   const productNames =
     order?.kind === 'OK'

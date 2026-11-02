@@ -3,17 +3,22 @@
  */
 
 /**
- * One organization per request, across a switch (PR 405 review 1, F1).
+ * One organization per session, across a change of organization (PR 405
+ * review 1, F1; task 118).
  *
- * The person signs in acting for A, switches to B elsewhere, and the next
- * request's refresh brings a token for B — run here through the real
- * `renewSession`, the real cookie seal and the real pages against a fake
- * gateway. What the pages are handed afterwards is what middleware hands the
- * render: the renewed cookie, opened.
+ * A session is pinned to the organization it signed in for, and a refresh
+ * never moves it (`session-tenant-pinning.spec.ts` drives that through the
+ * real refresh). A session acts for another organization only by being
+ * another sign-in: here the person signed in acting for A, and the same person
+ * is then signed in pinned to B — sealed through the real cookie seal and run
+ * through the real pages against a fake gateway. Everything drawn, bound,
+ * remembered or carried in a URL for A must be B's or nothing in B: the label,
+ * the self-order filter, the profile read, forms, flashes, cursors.
  *
- * Before task 100 the refresh kept the login's `organizationId`, so the label
- * said A, the marketplace hid A's offers as "our own", and the organizations
- * page read A's profile beside B's members — while every request acted for B.
+ * Before task 100 the refresh kept the login's `organizationId` while every
+ * request acted for the token's B; task 100 then moved the label to B with the
+ * token, silently. Neither happens now: the session stays A, and B is a new
+ * sign-in.
  */
 
 import { isValidElement, type ReactElement } from 'react';
@@ -53,8 +58,10 @@ const page = (path: string): Page => (require(path) as { default: Page }).defaul
 const { TopBar } = require('@/ui') as typeof import('@/ui');
 const { OffersScreen } =
   require('./marketplace/[productId]/OffersScreen') as typeof import('./marketplace/[productId]/OffersScreen');
-const { forgetSharedRefreshes, renewSession } =
+const { forgetSharedRefreshes } =
   require('@/server/session-refresh') as typeof import('@/server/session-refresh');
+const { pinnedOrganizationFor } =
+  require('@/server/session-organization') as typeof import('@/server/session-organization');
 const { openSession, sealSession } =
   require('@/server/session') as typeof import('@/server/session');
 const { isBoundSubmissionId, mintSubmissionId, submissionBinding } =
@@ -71,7 +78,12 @@ const B = 'ORG-DEH-0002';
 const ROLES = ['ORGANIZATION_ADMIN'];
 
 /** Every request a page made: path and bearer. */
-let asked: { path: string; authorization: string | null; search?: string }[] = [];
+let asked: {
+  path: string;
+  authorization: string | null;
+  organization: string | null;
+  search?: string;
+}[] = [];
 let answer: (path: string) => { status: number; body?: unknown } = () => ({ status: 404 });
 const originalFetch = globalThis.fetch;
 
@@ -84,6 +96,7 @@ beforeEach(() => {
     asked.push({
       path: url.pathname,
       authorization: new Headers(init?.headers).get('authorization'),
+      organization: new Headers(init?.headers).get('x-organization-id'),
       ...(url.search ? { search: url.search } : {}),
     });
     const { status, body } = answer(url.pathname);
@@ -114,25 +127,25 @@ function signedInForA(): WebSession {
   };
 }
 
-/** The session the render reads after middleware refreshed A's into B's. */
-async function refreshedIntoB(inA: WebSession): Promise<WebSession> {
-  const renewal = await renewSession(sealSession(inA, SECRET), {
-    env: {
-      OIDC_ISSUER_URL: 'http://keycloak.test/realms/rasta',
-      OIDC_CLIENT_ID: 'rasta-web',
-      WEB_SESSION_SECRET: SECRET,
-      WEB_SESSION_MAX_AGE_SECONDS: 43_200,
-    },
-    refresh: async () => ({
-      access_token: actingAccessToken(B, ROLES),
-      refresh_token: 'refresh-b',
-      id_token: 'id-b',
-      expires_in: 900,
-      token_type: 'Bearer',
-    }),
+/**
+ * The same person, signed in pinned to B — as `auth/callback` pins it — and
+ * opened from the real seal. The CSRF token is kept from A's sign-in on
+ * purpose: what tells A's forms, tags and flashes from B's must then be the
+ * organization alone.
+ */
+function signedInForB(inA: WebSession): WebSession {
+  const accessToken = actingAccessToken(B, ROLES, {
+    org_ids: [A, B],
+    org_roles: [...ROLES.map((role) => `${A}:${role}`), ...ROLES.map((role) => `${B}:${role}`)],
   });
-  if (renewal.kind !== 'RENEWED') throw new Error(`expected a refresh, got ${renewal.kind}`);
-  return openSession(renewal.sealed, SECRET)!;
+  const inB: WebSession = {
+    ...inA,
+    organizationId: pinnedOrganizationFor(accessToken),
+    accessToken,
+    accessTokenExpiresAt: now() + 900,
+    refreshToken: 'refresh-b',
+  };
+  return openSession(sealSession(inB, SECRET), SECRET)!;
 }
 
 function elements(node: unknown, out: ReactElement[] = []): ReactElement[] {
@@ -184,13 +197,13 @@ let inB: WebSession;
 
 beforeEach(async () => {
   inA = signedInForA();
-  inB = await refreshedIntoB(inA);
+  inB = signedInForB(inA);
   mockSession.current = inB;
 });
 
-it('the refreshed session acts for B, in its token and in its stored copy', () => {
+it('the sign-in for B is pinned to B', () => {
   expect(inB.organizationId).toBe(B);
-  expect(inB.accessToken).toBe(actingAccessToken(B, ROLES));
+  expect(inA.organizationId).toBe(A);
 });
 
 it.each([
@@ -233,7 +246,7 @@ it('the marketplace’s self-order filter is B’s: A’s offer is orderable, B�
   expect(html).not.toMatch(/value="OFR_B"/);
 });
 
-it('the organizations page reads B’s profile and B’s members, both with B’s token, and never A’s', async () => {
+it('the organizations page reads B’s profile and B’s members, both with B’s token and B named, and never A’s', async () => {
   answer = () => ({ status: 503 });
   await run('./organizations/page');
   const bearer = `Bearer ${inB.accessToken}`;
@@ -242,6 +255,7 @@ it('the organizations page reads B’s profile and B’s members, both with B’
   expect(made).toContainEqual({ path: '/v1/users', authorization: bearer });
   expect(asked.map(({ path }) => path)).not.toContain(`/v1/organizations/${A}`);
   expect(asked.every(({ authorization }) => authorization === bearer)).toBe(true);
+  expect(asked.every(({ organization }) => organization === B)).toBe(true);
 });
 
 it('a form drawn for A is refused in B; one drawn for B is accepted', () => {
@@ -264,7 +278,7 @@ it('remembered submissions are tagged per organization: the same person, another
  * confirmation — is A's. Reloaded after the refresh into B it must be reset
  * before any read, never applied to B's.
  */
-describe('a URL drawn for A, reloaded in B', () => {
+describe('a URL drawn for A, reloaded in the sign-in for B', () => {
   /* eslint-disable @typescript-eslint/no-require-imports */
   const { mintFlash, readFlash } = require('@/server/flash') as typeof import('@/server/flash');
   const { signPayload, verifyPayload } =

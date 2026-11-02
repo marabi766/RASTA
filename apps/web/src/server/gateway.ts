@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 import { credentialFetch } from './credential-fetch';
+import { credentialHeaders, type GatewayCredential } from './session-organization';
 import { MAX_REQUEST_TIMEOUT_MS } from './unresolved-request-policy';
 
 /**
@@ -152,7 +153,16 @@ export function gatewayUrl(baseUrl: string, path: string): string {
 export interface GatewayCall {
   readonly baseUrl: string;
   readonly path: string;
-  readonly accessToken: string;
+  /**
+   * The bearer **and** the organization this call acts for, minted from the
+   * session by `tenantCredential` (or, for the person's own record only,
+   * `personalCredential`) in `session-organization.ts` — never a bare token.
+   * Sent as `Authorization` and `X-Organization-Id`, so the guard acts for the
+   * organization the session is pinned to and refuses the call if the token
+   * no longer grants it; it is never answered for the token's active
+   * organization instead (audit F2, task 118).
+   */
+  readonly credential: GatewayCredential;
   readonly method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   readonly body?: unknown;
   /** Reused when the caller already has one; a fresh one otherwise. */
@@ -202,6 +212,9 @@ export interface GatewayResponse<T> {
  */
 export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse<T>> {
   const url = gatewayUrl(call.baseUrl, call.path);
+  // Before anything else: a credential this portal did not mint is refused
+  // here, not sent.
+  const identity = credentialHeaders(call.credential);
   if (
     call.replayDeadline !== undefined &&
     (call.idempotencyKey === undefined ||
@@ -224,7 +237,7 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
         method: call.method ?? 'GET',
         headers: {
           accept: 'application/json',
-          authorization: `Bearer ${call.accessToken}`,
+          ...identity,
           'x-correlation-id': correlationId,
           ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
           ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),

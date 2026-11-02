@@ -2,6 +2,7 @@ import { test } from './expect';
 import { expect } from './expect';
 
 import { SUBMISSION_FIELD } from '../src/lib/form-fields';
+import { expectActionSucceeded, logStep, postFromPage } from './action-outcome';
 import { installLiveSession } from './live-session';
 
 /**
@@ -103,32 +104,28 @@ test.describe('a usage write through the live stack', () => {
     const submissionId = await usageForm.locator(`input[name="${SUBMISSION_FIELD}"]`).inputValue();
 
     // Two simultaneous native-form payloads from one render exercise the
-    // service's unique clientReference race. The ordinary click immediately
-    // afterwards is a third replay and proves the user-visible redirect too.
-    const replayStatuses = await usageForm.evaluate(async (element) => {
-      const form = element as HTMLFormElement;
-      const submit = async (): Promise<number> => {
-        // In the page, not the runner: the browser's own same-origin form post, a browser
-        // flow outside the API transport (Q-155). The one pinned disable (raw-http tests).
-        // eslint-disable-next-line internal/raw-http, internal/transport -- browser form replay
-        const response = await fetch(form.action, {
-          method: 'POST',
-          body: new FormData(form),
-          credentials: 'same-origin',
-          redirect: 'follow',
-        });
-        await response.arrayBuffer();
-        return response.status;
-      };
-      return Promise.all([submit(), submit()]);
-    });
-    expect(replayStatuses).toEqual([200, 200]);
+    // service's unique clientReference race. Each must SUCCEED — the action's
+    // redirect to the record it created, the same record for both — not merely
+    // answer 200, which a refusal rendered in place does too (PR #541 r1 F1).
+    // The ordinary click immediately afterwards is a third replay and proves
+    // the user-visible redirect too.
+    const concurrent = await postFromPage(usageForm, [{ form: 'native' }, { form: 'native' }]);
+    const concurrentIds = await Promise.all(
+      concurrent.map(async (sent) =>
+        (await expectActionSucceeded(sent, { path: '/usage', query: { created: /^USG_/ } })).get(
+          'created',
+        )!,
+      ),
+    );
 
     await usageForm.getByRole('button', { name: 'ثبت کارکرد' }).click();
     await expect(page).toHaveURL(/\/usage\?created=USG_/);
     await expect(page.getByText(/کارکرد ثبت شد/)).toBeVisible();
     const createdId = new URL(page.url()).searchParams.get('created');
     expect(createdId).toMatch(/^USG_/);
+    // One record: both concurrent attempts and the click were answered with it.
+    expect(concurrentIds).toEqual([createdId, createdId]);
+    logStep(`usage: both concurrent posts answered 303 → /usage?created=${createdId}`);
 
     // Verification goes straight to fleet-service from the test runner. The
     // portal itself still talks only to the gateway; this black-box read asks

@@ -92,7 +92,7 @@ export default async function ContractPage({
     result.kind === 'OK'
       ? await contractCommandOffers(
           session,
-          contractCallerOf(session.accessToken),
+          contractCallerOf(session),
           result.data,
           amendments,
           milestones,
@@ -100,7 +100,7 @@ export default async function ContractPage({
       : null;
 
   const draft =
-    result.kind === 'OK' && canDraftStatement(statementCallerOf(session.accessToken), result.data)
+    result.kind === 'OK' && canDraftStatement(statementCallerOf(session), result.data)
       ? {
           offered: [
             {

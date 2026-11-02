@@ -60,7 +60,7 @@ export default async function OrderPage({
   let returns: OrderDetailScreenProps['returns'] = null;
   if (result.kind === 'OK') {
     const order = result.data;
-    const caller = returnCallerOf(session.accessToken);
+    const caller = returnCallerOf(session);
     const side = sideOf(caller, order);
     if (side !== null) {
       const requests = await fetchReturnsOfOrder(session, order.id, side);

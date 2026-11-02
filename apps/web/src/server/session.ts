@@ -43,10 +43,11 @@ export const sessionSchema = z.object({
   /** For display in the shell. Never used for a decision. */
   username: z.string().min(1),
   /**
-   * The stored copy of the organization the access token acts for, written
-   * with every token (`session-organization.ts`). Nothing outside the session
-   * boundary reads it: consumers ask `actingOrganizationId`, which refuses a
-   * copy that disagrees with its token.
+   * The organization this session is pinned to: the access token's active one
+   * at sign-in, never moved by a refresh, and named in `X-Organization-Id` on
+   * every gateway call (`session-organization.ts`, task 118). Null: pinned to
+   * none. Nothing outside the session boundary reads it: consumers ask
+   * `actingOrganizationId`, which refuses it once the token grants it no role.
    */
   organizationId: z.string().min(1).nullable(),
   /**

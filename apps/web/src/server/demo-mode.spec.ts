@@ -4,6 +4,10 @@
 import { demoModeOf, type DemoMode } from '@/lib/demo-mode';
 import { fetchDemoMode } from './demo-mode';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /** The flag is the provider's own (Q-14): never a constant, and a failed read is UNKNOWN, never "not simulated". */
 
@@ -11,7 +15,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -71,7 +75,7 @@ describe('fetchDemoMode', () => {
     expect(asked).toEqual([
       {
         url: 'http://gateway.test:3000/v1/wallets/provider/disclosure',
-        authorization: 'Bearer access-token-value',
+        authorization: `Bearer ${ACCESS_TOKEN_VALUE}`,
       },
     ]);
   });
