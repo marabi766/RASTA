@@ -371,6 +371,10 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/database-services.mjs': { other: ['-service'] },
   'scripts/disposable-broker.mjs': { positionals: ['script'] },
   'scripts/infra-preflight-lib.mjs': { other: ['-service'] },
+  'scripts/kafka-init-gate.mjs': {
+    positionals: ['enum'],
+    other: ['--all', '--quiet', '--format', '-d'],
+  },
   'scripts/kafka-acl.mjs': { accepts: { '--profile': 'enum' }, positionals: ['enum'] },
   'scripts/kafka-outbox-tables.mjs': { positionals: ['script'] },
   // `temporal workflow` options; the address is TEMPORAL_ADDRESS's, never an argument here.

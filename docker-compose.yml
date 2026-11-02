@@ -1,11 +1,11 @@
 # =============================================================================
 # Rasta — local development infrastructure
 #
-#   docker compose up -d                           core stack (default)
-#   docker compose --profile search up -d          + OpenSearch
-#   docker compose --profile observability up -d   + OTel / Prometheus / Grafana
-#   docker compose --profile tools up -d           + Kafka UI, Temporal UI, Mailpit
-#   docker compose --profile all up -d             everything
+#   pnpm infra:up                           core stack (default)
+#   COMPOSE_PROFILES=search pnpm infra:up          + OpenSearch
+#   COMPOSE_PROFILES=observability pnpm infra:up   + OTel / Prometheus / Grafana
+#   COMPOSE_PROFILES=tools pnpm infra:up           + Kafka UI, Temporal UI, Mailpit
+#   COMPOSE_PROFILES=all pnpm infra:up             everything
 #
 # Every credential below is a throwaway development value (see .env.example).
 # =============================================================================
