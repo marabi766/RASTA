@@ -51,7 +51,8 @@
 #                    USAGE, SELECT on every sequence in `public`, now and — by
 #                    ALTER DEFAULT PRIVILEGES FOR ROLE the migrator — on every
 #                    table and sequence it creates later. Never TRUNCATE,
-#                    REFERENCES or TRIGGER.
+#                    REFERENCES or TRIGGER, and nothing on the ledger or an
+#                    extension's relations and sequences.
 #       migration  — nothing here: each table's grant is in the service's own
 #                    migrations (supplier-service grants less than DML on its
 #                    append-only and insert-only tables).
@@ -318,12 +319,16 @@ rotate_and_verify_split_logins() {
 # default explicitly. A split re-run must never reopen baseline INSERT.
 #
 # Default mode grants the `default` policy of runtime-allowlist.sql — its
-# `schema.*` relation and sequence rows (GRANT … ON ALL … IN SCHEMA) and its
-# default-privilege rows (ALTER DEFAULT PRIVILEGES FOR ROLE the migrator) — and
-# refuses a row of any other class, so what is granted is what is allowed. The
-# schema's USAGE is the split's own statement. One transaction, so the
-# runtime role is never between the REVOKE and the GRANT; the split has
-# already added the same grants in its ownership handoff.
+# `schema.*` relation and sequence rows and its default-privilege rows (ALTER
+# DEFAULT PRIVILEGES FOR ROLE the migrator) — and refuses a row of any other
+# class, so what is granted is what is allowed. A `schema.*` row is granted
+# object by object, on exactly what the check expects it to cover — never the
+# migration ledger, an extension's relations or its sequences (#540 r4 R4-1):
+# each phase commits, so a grant beyond the policy would stand until a later
+# step removed it, and for good if the split stopped first. The schema's
+# USAGE is the split's own statement. One transaction, so the runtime role is
+# never between the REVOKE and the GRANT; the split has already added the
+# same grants in its ownership handoff.
 grant_service_tables() {
   local svc="$1" db="$2" mode="$3" sql
   sql="$(_service_table_grants_sql "${svc}" "${mode}")" || return 1
@@ -358,16 +363,32 @@ _service_table_grants_sql() {
     REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${runtime};"
     printf '%s' "${revokes}
     DO \$\$
-      DECLARE g record;
+      DECLARE g record; o record;
       BEGIN
         FOR g IN WITH allowlist AS (${allowlist})
           SELECT class, object, array_to_string(privileges, ', ') AS privileges FROM allowlist
            WHERE policy = 'default' ORDER BY class, object
         LOOP
           IF g.class IN ('relation', 'sequence') AND g.object LIKE '%.*' THEN
-            EXECUTE format('GRANT %s ON ALL %s IN SCHEMA %I TO %I', g.privileges,
-              CASE g.class WHEN 'relation' THEN 'TABLES' ELSE 'SEQUENCES' END,
-              split_part(g.object, '.', 1), '${runtime}');
+            -- Each object the row covers, one by one (#540 r4 R4-1) — never
+            -- GRANT … ON ALL … IN SCHEMA, which also reaches the migration
+            -- ledger and an extension's relations and sequences, and would be
+            -- committed before anything could take it back. The objects are
+            -- the check's (allowed_objects in check-db-runtime-privileges-lib.mjs):
+            -- the row's class and schema, no _prisma_migrations, no extension member.
+            FOR o IN SELECT format('%I.%I', n.nspname, c.relname) AS target
+                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = split_part(g.object, '.', 1)
+                 AND CASE g.class WHEN 'sequence' THEN c.relkind = 'S'
+                                  ELSE c.relkind IN ('r', 'p', 'v', 'm', 'f') END
+                 AND c.relname <> '_prisma_migrations'
+                 AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass
+                                   AND d.objid = c.oid AND d.deptype = 'e')
+               ORDER BY 1
+            LOOP
+              EXECUTE format('GRANT %s ON %s %s TO %I', g.privileges,
+                CASE g.class WHEN 'relation' THEN 'TABLE' ELSE 'SEQUENCE' END, o.target, '${runtime}');
+            END LOOP;
           ELSIF g.class IN ('default tables', 'default sequences') THEN
             EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT %s ON %s TO %I',
               '${migrator}', g.object, g.privileges, upper(substr(g.class, 9)), '${runtime}');
@@ -1080,12 +1101,17 @@ _split_database() {
   # below are revoked the migrator would hold no CREATE there: it could neither
   # create the ledger nor run a migration (Codex round 4 on #176). Before the
   # revokes and the ledger. <schema> too, created if an older cluster lacks it
-  # (audit). The migrator, now its owner, holds USAGE and CREATE on <schema>:
-  # an owner can revoke its own rights, and a former owner's revoked ones pass
-  # to it as they are. In default mode the runtime role's table and sequence
-  # grants are in the same transaction too (added; grant_service_tables makes
-  # them exact after the cleanup): the tables it owned are the migrator's from
-  # the same instant, and it never stands without DML on them.
+  # (audit). The migrator, now its owner, is granted USAGE and CREATE on
+  # <schema> directly, always: an owner can revoke its own rights, a former
+  # owner's revoked ones pass to it as they are, and access it has only
+  # through PUBLIC, the runtime role or another role is what the cleanup
+  # below takes away before own_migration_ledger acts as it (#540 r4 R4-2).
+  # In default mode the runtime role's table and sequence grants are in the
+  # same transaction too (added; grant_service_tables makes them exact after
+  # the cleanup): the tables it owned are the migrator's from the same
+  # instant, and it never stands without DML on them. Only the policy's
+  # objects, never the ledger or an extension's (#540 r4 R4-1): this commits
+  # before anything later could take a grant back.
   tables="$(_service_table_grants_sql "${svc}" "${mode}" additive)" || return 1
   local handoff="REASSIGN OWNED BY ${runtime} TO ${migrator};
     ALTER SCHEMA public OWNER TO ${migrator};"
@@ -1097,12 +1123,7 @@ _split_database() {
   _svc_split_psql "${db}" "BEGIN;
     ${handoff}
     GRANT USAGE ON SCHEMA ${schema} TO ${runtime};
-    DO \$\$ BEGIN
-      IF NOT has_schema_privilege('${migrator}', '${schema}', 'USAGE')
-         OR NOT has_schema_privilege('${migrator}', '${schema}', 'CREATE') THEN
-        GRANT USAGE, CREATE ON SCHEMA ${schema} TO ${migrator};
-      END IF;
-    END \$\$;
+    GRANT USAGE, CREATE ON SCHEMA ${schema} TO ${migrator};
     ${tables}
     COMMIT;" || return 1
 

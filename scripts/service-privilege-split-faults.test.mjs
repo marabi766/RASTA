@@ -200,7 +200,7 @@ const ENTRIES = [
       ...SPLIT_FAMILIES,
       ...STANDALONE_FAMILIES,
       'table-grant preparation': /REVOKE ALL ON ALL TABLES IN SCHEMA public FROM rasta_economic/,
-      'table grants': /GRANT %s ON ALL %s IN SCHEMA %I TO %I/,
+      'table grants': /GRANT %s ON %s %s TO %I/,
       'runtime function repair': /required runtime function has unsafe ownership/,
       'statement timeout': /SET statement_timeout = '70000ms'/,
     },
