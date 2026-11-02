@@ -22,6 +22,7 @@ import { toPersianDigits } from '@/lib/format';
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import {
+  advanceUnresolvedBid,
   answerUnresolvedBid,
   clearUnresolvedBid,
   restoreUnresolvedBid,
@@ -40,6 +41,7 @@ import {
   type UnconfirmedBid,
 } from './bid-form-state';
 import type { Binding } from '@/lib/unresolved-tenancy';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
@@ -185,6 +187,8 @@ function BidCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        advance: () => advanceUnresolvedBid(tenderId, submissionId, account),
         send: () => submitBidCommand(tenderId, previous, form),
         failed: (ended) => {
           if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
@@ -214,13 +218,15 @@ function BidCommandFormBody({
         },
         // Still in doubt: kept. A definite answer to THIS submission's first send:
         // its own record is dropped — never another's.
-        answer: (state) =>
+        answer: (state, attempt) =>
           answerUnresolvedBid(
             tenderId,
             { command, submissionId: state.submissionId, correlationId: state.correlationId },
             account,
+            attempt,
           ),
-        settle: () => settleUnresolvedBid(tenderId, submissionId, account),
+        settle: (attempt, settlement) =>
+          settleUnresolvedBid(tenderId, submissionId, account, attempt, settlement),
         held: { kind: 'HELD' },
         unavailable: { kind: 'STORAGE_UNAVAILABLE' },
       });
@@ -569,7 +575,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the bid again and offers what it allows. */}
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             رسید پیشنهاد را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

@@ -457,7 +457,7 @@ it('one slot per tender: another submission’s record is never replaced, the fo
       TENDER_ID,
       { command: 'OPEN_BIDS', submissionId: KEY, correlationId: null },
       ACCOUNT,
-    ),
+    ).outcome,
   ).toBe('HELD');
 });
 
@@ -506,7 +506,7 @@ it('logout writes nothing more; another person’s page removes the record', () 
       'TND_OTHER',
       { command: 'PUBLISH', submissionId: OTHER, correlationId: null },
       ACCOUNT,
-    ),
+    ).outcome,
   ).toBe('UNAVAILABLE');
   purgeForeignUnresolvedOwnerCommands({ person: OTHER_PERSON, legacy: [] });
   expect(stored()).toBeNull();

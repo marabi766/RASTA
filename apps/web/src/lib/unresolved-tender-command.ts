@@ -5,7 +5,7 @@ import {
   type SaveOutcome,
   type UnresolvedMarker,
 } from './unresolved-marker';
-import type { AccountTags, Binding } from './unresolved-tenancy';
+import type { AccountTags, Attempt, Binding, Settlement } from './unresolved-tenancy';
 import type { ReplayStamp } from './unresolved-statement';
 
 export type { AnswerOutcome, ReplayStamp, SaveOutcome };
@@ -61,15 +61,25 @@ export const answerUnresolvedOwnerCommand = (
   tenderId: string,
   entry: Omit<UnresolvedOwnerCommand, 'savedAt'>,
   binding: Binding,
+  attempt: Attempt | null,
   now?: number,
-): AnswerOutcome => store.answer(tenderId, entry, binding, now);
+): AnswerOutcome => store.answer(tenderId, entry, binding, attempt, now);
 
 /** A definite answer to `submissionId`: its record, and only that one, goes. */
 export const settleUnresolvedOwnerCommand = (
   tenderId: string,
   submissionId: string,
   binding: Binding,
-): void => store.settle(tenderId, submissionId, binding);
+  attempt: Attempt,
+  settlement: Settlement,
+): void => store.settle(tenderId, submissionId, binding, attempt, settlement);
+
+/** Before a re-send: a new send identity, recorded — or null, and nothing is sent. */
+export const advanceUnresolvedOwnerCommand = (
+  tenderId: string,
+  submissionId: string,
+  binding: Binding,
+): Attempt | null => store.advance(tenderId, submissionId, binding);
 
 export const clearUnresolvedOwnerCommand = (
   tenderId: string,

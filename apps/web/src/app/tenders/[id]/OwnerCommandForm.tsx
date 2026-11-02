@@ -39,6 +39,7 @@ import {
   type ScoringCell,
 } from '@/lib/tender-owner-input';
 import {
+  advanceUnresolvedOwnerCommand,
   answerUnresolvedOwnerCommand,
   clearUnresolvedOwnerCommand,
   restoreUnresolvedOwnerCommand,
@@ -57,6 +58,7 @@ import {
   type UnconfirmedOwnerCommand,
 } from './owner-form-state';
 import type { Binding } from '@/lib/unresolved-tenancy';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
@@ -217,6 +219,8 @@ function OwnerCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        advance: () => advanceUnresolvedOwnerCommand(tenderId, submissionId, account),
         send: () => submitOwnerCommand(tenderId, previous, form),
         failed: (ended) => {
           if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
@@ -243,13 +247,15 @@ function OwnerCommandFormBody({
                 ...(ended ? { sessionEnded: true as const } : {}),
               };
         },
-        answer: (state) =>
+        answer: (state, attempt) =>
           answerUnresolvedOwnerCommand(
             tenderId,
             { command, submissionId: state.submissionId, correlationId: state.correlationId },
             account,
+            attempt,
           ),
-        settle: () => settleUnresolvedOwnerCommand(tenderId, submissionId, account),
+        settle: (attempt, settlement) =>
+          settleUnresolvedOwnerCommand(tenderId, submissionId, account, attempt, settlement),
         held: { kind: 'HELD' },
         unavailable: { kind: 'STORAGE_UNAVAILABLE' },
       });
@@ -683,7 +689,7 @@ function UnconfirmedCommand({
       ) : null}
       {canForget ? (
         <div>
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت مناقصه را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

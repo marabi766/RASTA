@@ -18,6 +18,7 @@ import { DisputeCommands } from './[id]/DisputeCommands';
 import type { DisputeFormState } from './[id]/form-state';
 import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
 import { QUARANTINE_TITLE } from '@/app/UnresolvedQuarantine';
+import { savedAttempt } from '@/test/unresolved-stores';
 
 /**
  * The unconfirmed path with the real `useActionState`: only the action's own
@@ -406,8 +407,8 @@ describe('remembered across a reload (finding 2)', () => {
   it('keeps the first send’s time across the answer, so the lifetime runs from the first send', () => {
     const first = Date.now() - 10_000;
     const dispute = remembered({ correlationId: null });
-    saveUnresolvedDispute('TXN_1', dispute, BINDING, first);
-    answerUnresolvedDispute('TXN_1', { ...dispute, correlationId: 'COR_LATER' }, BINDING);
+    const saved = savedAttempt(saveUnresolvedDispute('TXN_1', dispute, BINDING, first));
+    answerUnresolvedDispute('TXN_1', { ...dispute, correlationId: 'COR_LATER' }, BINDING, saved);
     expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)).toMatchObject({
       kind: 'RETRYABLE',
       dispute: { savedAt: first, correlationId: 'COR_LATER' },
@@ -471,18 +472,21 @@ describe('never silently forgotten: the outcome-unknown marker (PR 319 review 2,
   });
 
   it('a marker is never turned back into something that can be re-sent', () => {
-    saveUnresolvedDispute(
-      'TXN_1',
-      remembered(),
-      BINDING,
-      Date.now() - (SESSION_MAX_AGE + 1) * 1000,
+    const sent = savedAttempt(
+      saveUnresolvedDispute(
+        'TXN_1',
+        remembered(),
+        BINDING,
+        Date.now() - (SESSION_MAX_AGE + 1) * 1000,
+      ),
     );
     expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)?.dispute.marker).toBe(true);
 
     // Neither a first send of the same submission (it is not one: review 4, R4) nor
-    // a late answer to it makes the marker re-sendable.
-    expect(saveUnresolvedDispute('TXN_1', remembered(), BINDING)).toBe('UNRESOLVED');
-    expect(answerUnresolvedDispute('TXN_1', remembered(), BINDING)).toBe('SAVED');
+    // a late answer to it — its own send's included — makes the marker re-sendable: a
+    // marker keeps no send identity, so no answer touches it (PR 363 reviews 3 and 4).
+    expect(saveUnresolvedDispute('TXN_1', remembered(), BINDING).outcome).toBe('UNRESOLVED');
+    expect(answerUnresolvedDispute('TXN_1', remembered(), BINDING, sent)).toBe('SUPERSEDED');
     expect(restoreUnresolvedDispute('TXN_1', BINDING, SESSION_MAX_AGE)).toMatchObject({
       kind: 'VIEW_ONLY',
       dispute: { marker: true, replay: null },
