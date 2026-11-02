@@ -1,5 +1,5 @@
 import { Runtime, type Logger as TemporalLogger, type RuntimeOptions } from '@temporalio/worker';
-import { createRequire } from 'node:module';
+import { setLogger, setLogVerbosity, logVerbosity } from '@grpc/grpc-js';
 import { assertTemporalDiagnosticsSafe } from '@rasta/config';
 import { createLogger, type Logger } from '@rasta/logging';
 import { foreignFailure } from './foreign-failure';
@@ -93,14 +93,9 @@ export function temporalRuntimeOptions(base: Logger): RuntimeOptions {
 
 let installed = false;
 
-interface GrpcDiagnostics {
-  setLogger(logger: { error(): void; info(): void; debug(): void }): void;
-  setLogVerbosity(level: number): void;
-  logVerbosity: { ERROR: number };
-}
-
-/** Resolve from each SDK owner, rather than assuming a hoisted grpc-js instance.
- * NativeConnection uses Core (forwarded above); worker-side JS also uses grpc-js.
+/** The declared grpc-js dependency is the same instance both Temporal owners
+ * resolve (verified by the real-SDK regressions, including the native path).
+ * NativeConnection uses Core, whose separate diagnostics are forwarded above.
  * Reinstall before every connection, even when Runtime was already installed.
  */
 function installGrpcDiagnostics(base: Logger): void {
@@ -112,14 +107,10 @@ function installGrpcDiagnostics(base: Logger): void {
     }
   };
   try {
-    for (const owner of ['@temporalio/client', '@temporalio/worker/lib/connection']) {
-      const sdkRequire = createRequire(require.resolve(owner));
-      const grpc = sdkRequire('@grpc/grpc-js') as GrpcDiagnostics;
-      grpc.setLogger({ error: report, info: report, debug: report });
-      grpc.setLogVerbosity(grpc.logVerbosity.ERROR);
-    }
+    setLogger({ error: report, info: report, debug: report });
+    setLogVerbosity(logVerbosity.ERROR);
   } catch {
-    // A changed SDK layout must refuse connection without exposing resolution details.
+    // An unavailable SDK logging API must refuse connection without its diagnostics.
     throw new Error('TEMPORAL_ADDRESS: gRPC diagnostic boundary unavailable');
   }
 }

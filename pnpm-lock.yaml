@@ -1679,6 +1679,9 @@ importers:
 
   services/marketplace-service:
     dependencies:
+      '@grpc/grpc-js':
+        specifier: 1.14.5
+        version: 1.14.5
       '@nestjs/common':
         specifier: ^11.0.0
         version: 11.2.3(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1)

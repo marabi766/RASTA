@@ -932,6 +932,7 @@ for (const owner of ['@temporalio/client', '@temporalio/worker/lib/connection'])
         const clientReq = createRequire(req.resolve('@temporalio/client'));
         const nativeReq = createRequire(req.resolve('@temporalio/worker/lib/connection'));
         assert.equal(clientReq.resolve('@grpc/grpc-js'), nativeReq.resolve('@grpc/grpc-js'));
+        assert.equal(req.resolve('@grpc/grpc-js'), clientReq.resolve('@grpc/grpc-js'));
         const grpc = sdkReq('@grpc/grpc-js');
         const grpcReq = createRequire(sdkReq.resolve('@grpc/grpc-js'));
         const logging = grpcReq('./logging');
@@ -1044,7 +1045,7 @@ for (const path of ['client', 'worker']) {
           await worker.onApplicationBootstrap();
           await worker.onModuleDestroy();
         }
-        assert.equal(installed, 2);
+        assert.equal(installed, 1);
         grpc.Metadata.fromHttp2Headers({'${USER}':'${PASSWORD}\\n'});
       })().catch(error => { console.error(error); process.exitCode = 3; })
           .finally(async () => { await req('@temporalio/worker').Runtime.instance().shutdown(); });
@@ -1058,16 +1059,15 @@ for (const path of ['client', 'worker']) {
 test('Temporal refuses a missing grpc boundary with a fixed diagnostic', () => {
   sdkProbe(`
     const assert = require('node:assert/strict');
-    const Module = require('node:module');
+    const { createRequire } = require('node:module');
+    const req = createRequire(require('node:path').resolve('services/marketplace-service/package.json'));
+    const grpc = req('@grpc/grpc-js');
     const { installTemporalRuntimeLogger } = require('./services/marketplace-service/dist/temporal/runtime-logger');
-    const original = Module._resolveFilename;
-    Module._resolveFilename = function(id, ...args) {
-      if (id === '@grpc/grpc-js') throw new Error('${USER} ${PASSWORD}');
-      return original.call(this, id, ...args);
-    };
+    const original = grpc.setLogger;
+    grpc.setLogger = () => { throw new Error('${USER} ${PASSWORD}'); };
     try {
       assert.throws(() => installTemporalRuntimeLogger({NODE_ENV:'test',LOG_LEVEL:'info',SERVICE_VERSION:'1'}),
         error => error.message === 'TEMPORAL_ADDRESS: gRPC diagnostic boundary unavailable' && error.cause === undefined);
-    } finally { Module._resolveFilename = original; }
+    } finally { grpc.setLogger = original; }
   `);
 });
