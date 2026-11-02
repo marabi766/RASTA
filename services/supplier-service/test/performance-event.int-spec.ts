@@ -528,7 +528,7 @@ describe('performance-event store (ADR-052 step 3)', () => {
 
       await expect(
         asSupplier(a, () => prisma.transaction((tx) => events.record(tx, rating(b)))),
-      ).rejects.toThrow(/Cross-tenant writes are never implicit/);
+      ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
       expect(
         await asSupplier(b, () => events.listInWindow(new Date(0), new Date('2100-01-01'))),
       ).toEqual([]);

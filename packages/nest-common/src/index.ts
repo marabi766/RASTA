@@ -147,6 +147,7 @@ export {
 // Tenancy --------------------------------------------------------------------
 export {
   createTenantGuardExtension,
+  runWithNestedTenantWrite,
   runUnscoped,
   isUnscoped,
   currentUnscopedReason,

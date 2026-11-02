@@ -4,7 +4,7 @@ import {
   createTenantGuardExtension,
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
-import { PrismaClient } from '../generated/prisma';
+import { Prisma, PrismaClient } from '../generated/prisma';
 
 /**
  * Models carrying an `organizationId` and therefore scoped automatically (AGENTS.md A-04).
@@ -50,6 +50,7 @@ export class PrismaService implements OnModuleInit, OnApplicationShutdown {
     return this.base.$extends(
       createTenantGuardExtension({
         scopedModels: TENANT_SCOPED_MODELS,
+        datamodel: Prisma.dmmf.datamodel,
         onUnscopedQuery: ({ model, operation, reason }) => {
           // Every deliberate boundary crossing is recorded with its written reason, so an
           // auditor can enumerate them (ADR-011).

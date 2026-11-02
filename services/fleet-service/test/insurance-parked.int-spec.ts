@@ -7,7 +7,7 @@ import {
   type EventConsumer,
   type OutboxRow,
 } from '@rasta/nest-common';
-import { PrismaService } from '../src/prisma/prisma.service';
+import type { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { AssignmentService } from '../src/fleet/assignment.service';
 import {
@@ -673,7 +673,7 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
           },
         }),
       ),
-    ).rejects.toThrow(/Cross-tenant writes are never implicit/);
+    ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
     // The transfer's handler marks by machine, whichever tenant parked.
     expect(
       await repository.transaction((tx) => repository.markParkedInsuranceDue(tx, assetOfA)),
