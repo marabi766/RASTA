@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import { Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
@@ -13,6 +14,7 @@ import {
 } from './identity-fixtures';
 import { id, tenants } from './helpers';
 import { readTableCatalogue } from './table-catalogue';
+import { compareTimings, median, TIMING_FLOOR_MS } from './timing-comparison';
 import { IdentityService } from '../src/identity/identity.service';
 import type { SubmitRegistrationDto } from '../src/identity/dto';
 
@@ -555,77 +557,79 @@ describe('public registration answers the same, and does the same, whoever alrea
    * the database) is no database operation. So the time to the answer is
    * measured too, and per case: for each entry point (service; HTTP, with the
    * pipeline) and each of the four held cases (email held; username held;
-   * email, and username, held by a removed user) 30 interleaved pairs of a
-   * fresh and a held submission after 5 warm-up pairs, the order of each pair
-   * alternating. Each case has its own fresh baseline and its own verdict, so a
-   * delay on one of them is not diluted by the others, nor a delay at HTTP by
-   * the service.
+   * email, and username, held by a removed user), 100 pairs of a fresh and a
+   * held submission after 10 warm-up pairs. Each case is its own verdict, so a
+   * delay on one is not diluted by the others, nor a delay at HTTP by the
+   * service.
    *
-   * The bound is on the difference of the two medians: less than the larger of
-   * 5 ms and a quarter of the fresh median. A ratio is not used: the answer
-   * takes a few milliseconds, and the ratio of two such medians moved to 1.48
-   * on a loaded runner with the product unchanged (main CI 41028991378). The
-   * difference of the medians of 30 pairs never exceeded 2.2 ms in any of the
-   * eight cases: 30 runs beside eight busy loops (load average 5–12) and 24
-   * beside thirty-two (load average 20–36), 432 cells, 0 over the bound.
-   * The floor is 5 ms because the old ratio's own false failure (1.48 of a
-   * 3 ms answer) was a gap of under 2 ms, so no bound below that holds on a
-   * shared runner; a gap that small is for the exact statements above. A
-   * delay on only some of the held answers moves a median by little, so each
-   * case is measured with all of its held answers delayed, as a mechanism
-   * that decides by identity would.
+   * The verdict is `compareTimings` (timing-comparison.ts, with its own spec):
+   * on the pairs' differences, not on two medians. The order inside a pair is
+   * random, and the rounds go through all the cases in a random order, so that
+   * a slow stretch of the runner falls on every case alike. A difference is
+   * reported only when nearly every pair (75 of 100) has the held answer on
+   * the same side — which fair coins do less than once in two million times,
+   * for any noise — and the median difference is at least 2 ms. Two medians of
+   * 30 were used before (within max(5 ms, 25 %)) and failed main CI twice
+   * (runs 41398014058 and 41392580518) with the product unchanged: the held
+   * answer was the FASTER one, by 6–7 ms, in a different case each time. The
+   * work is one INSERT whoever holds what (the three tests above), so that was
+   * the runner. Measured on this machine with and without 24 busy loops
+   * beside the service (load average 18–33; 40 cells of 100 pairs each): the
+   * old rule condemned a fresh-against-fresh control, the new one condemned no
+   * cell with equal work (the largest same-side count was 60 of 100, against
+   * the 75 needed); with 5 ms added to every held answer the new rule saw it
+   * in 40/40 cells on a quiet machine and 27/40 through the load, and 10 ms in
+   * 40/40 in both. A delay on only some of the held answers is not what this
+   * can see (the median difference stays near 0): the exact statements above
+   * are for that. A fresh-against-fresh control runs beside the real cases,
+   * for each entry point: it must pass like them, and its row is the noise
+   * of the run.
    */
-  it('the time to the answer does not say whether the identity is held, for each case at the service and over HTTP: medians of 30 interleaved pairs within max(5 ms, 25 % of fresh)', async () => {
+  it('the time to the answer does not say whether the identity is held, for each case at the service and over HTTP: 100 pairs in random order per case, nearly all on one side and 2 ms apart to differ', async () => {
     const org = tenants();
     const identities = await identityCases(org, 'TIME');
-    const ROUNDS = 30;
-    const WARM_UP = 5;
-    const median = (values: number[]) => {
-      const sorted = [...values].sort((a, b) => a - b);
-      const middle = sorted.length >> 1;
-      return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
-    };
+    const PAIRS = 100;
+    const WARM_UP = 10;
     const { fresh: newIdentity, ...heldCases } = identities;
+    const cases = { 'control: fresh against fresh': newIdentity, ...heldCases };
 
-    const results: Array<{
-      entryPoint: string;
-      held: string;
-      fresh: number;
-      heldMedian: number;
-      gap: number;
-      bound: number;
-    }> = [];
-    for (const [entryPoint, submit] of Object.entries(entryPoints(org))) {
-      for (const [held, heldIdentity] of Object.entries(heldCases)) {
-        const times: Record<'fresh' | 'held', number[]> = { fresh: [], held: [] };
-        for (let round = 0; round < ROUNDS + WARM_UP; round += 1) {
-          // Alternating which goes first, so drift and warm-up fall on both alike.
-          const order =
-            round % 2 === 0 ? (['fresh', 'held'] as const) : (['held', 'fresh'] as const);
-          const took: Record<'fresh' | 'held', number> = { fresh: 0, held: 0 };
-          for (const kind of order) {
-            const identity = kind === 'fresh' ? newIdentity() : heldIdentity();
-            const started = performance.now();
-            await submit(identity);
-            took[kind] = performance.now() - started;
-          }
-          if (round < WARM_UP) continue;
-          times.fresh.push(took.fresh);
-          times.held.push(took.held);
+    const cells = Object.entries(entryPoints(org)).flatMap(([entryPoint, submit]) =>
+      Object.entries(cases).map(([held, heldIdentity]) => ({
+        entryPoint,
+        held,
+        submit,
+        heldIdentity,
+        fresh: [] as number[],
+        heldTimes: [] as number[],
+        differences: [] as number[],
+      })),
+    );
+    // Fisher–Yates with a real random source: a schedule that repeats can
+    // meet a periodic stall every time.
+    const shuffled = <T>(items: readonly T[]): T[] => {
+      const out = [...items];
+      for (let i = out.length - 1; i > 0; i -= 1) {
+        const j = randomInt(i + 1);
+        [out[i], out[j]] = [out[j]!, out[i]!];
+      }
+      return out;
+    };
+    for (let round = 0; round < PAIRS + WARM_UP; round += 1) {
+      for (const cell of shuffled(cells)) {
+        const took: Record<'fresh' | 'held', number> = { fresh: 0, held: 0 };
+        for (const kind of shuffled(['fresh', 'held'] as const)) {
+          const identity = kind === 'fresh' ? newIdentity() : cell.heldIdentity();
+          const started = performance.now();
+          await cell.submit(identity);
+          took[kind] = performance.now() - started;
         }
-        const fresh = median(times.fresh);
-        const heldMedian = median(times.held);
-        results.push({
-          entryPoint,
-          held,
-          fresh,
-          heldMedian,
-          gap: heldMedian - fresh,
-          bound: Math.max(5, 0.25 * fresh),
-        });
+        if (round < WARM_UP) continue;
+        cell.fresh.push(took.fresh);
+        cell.heldTimes.push(took.held);
+        cell.differences.push(took.held - took.fresh);
       }
     }
-    // Nothing of this is worth processing: 480 submissions, 240 of them fresh.
+    // Nothing of this is worth processing: 2 200 submissions, half of them fresh.
     await runUnscoped(
       'test discards the timing submissions',
       () =>
@@ -633,19 +637,33 @@ describe('public registration answers the same, and does the same, whoever alrea
         DELETE FROM registration_intake WHERE submission->>'requestedOrganizationId' = ${org.a}`,
     );
 
+    const results = cells.map((cell) => ({
+      entryPoint: cell.entryPoint,
+      held: cell.held,
+      fresh: median(cell.fresh),
+      heldMedian: median(cell.heldTimes),
+      spread: [...cell.differences].sort((a, b) => a - b),
+      verdict: compareTimings(cell.differences),
+    }));
     // eslint-disable-next-line no-console
     console.info(
-      'registration acknowledgement, median of 30 interleaved pairs, held minus fresh (ms):\n' +
+      `registration acknowledgement, ${PAIRS} pairs per case in random order, held minus fresh ` +
+        `(ms; "differs" = ≥ ${results[0]!.verdict.required} pairs on one side and |median| ≥ ${TIMING_FLOOR_MS}):\n` +
         results
           .map(
             (r) =>
-              `  ${r.entryPoint.padEnd(7)} ${r.held.padEnd(34)} fresh ${r.fresh.toFixed(2)} ` +
-              `held ${r.heldMedian.toFixed(2)} gap ${r.gap.toFixed(2)} (bound ${r.bound.toFixed(2)})`,
+              `  ${r.entryPoint.padEnd(7)} ${r.held.padEnd(40)} fresh ${r.fresh.toFixed(2)} ` +
+              `held ${r.heldMedian.toFixed(2)} median ${r.verdict.medianDifferenceMs.toFixed(2)} ` +
+              `(10–90 % of pairs ${r.spread[Math.floor(PAIRS * 0.1)]!.toFixed(1)}…${r.spread[Math.floor(PAIRS * 0.9)]!.toFixed(1)}) ` +
+              `held slower in ${r.verdict.slower}, faster in ${r.verdict.faster}`,
           )
           .join('\n'),
     );
+    // Eight cases and two controls, every one with all its pairs: not vacuous.
+    expect(results).toHaveLength(10);
+    expect(results.map((r) => r.verdict.pairs)).toEqual(Array(10).fill(PAIRS));
     expect(
-      results.filter((r) => Math.abs(r.gap) >= r.bound).map((r) => `${r.entryPoint}: ${r.held}`),
+      results.filter((r) => r.verdict.differs).map((r) => `${r.entryPoint}: ${r.held}`),
     ).toEqual([]);
-  }, 120_000);
+  }, 240_000);
 });
