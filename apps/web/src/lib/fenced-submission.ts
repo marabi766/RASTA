@@ -1,12 +1,7 @@
 import { useActionState, useSyncExternalStore } from 'react';
 
 import { isRedirect, sessionHasEnded } from '@/lib/session-refusal';
-import {
-  FIRST_ATTEMPT,
-  type Attempt,
-  type Settlement,
-  type StartOutcome,
-} from '@/lib/unresolved-tenancy';
+import { type Attempt, type Settlement, type StartOutcome } from '@/lib/unresolved-tenancy';
 
 /**
  * The one submit path of every form whose request is kept in a fenced slot
@@ -25,9 +20,14 @@ import {
  *   form decides (`admitRetry`): a withdrawn, unrepeatable or set-aside one
  *   comes back as it is, unsent.
  *
- * - **Every re-send first advances its entry's generation** (`advance`,
- *   `lib/unresolved-tenancy.ts`) — before it leaves. If that cannot be
- *   written, nothing is sent and the uncertainty view comes back as it was.
+ * - **Every send carries the identity the slot wrote for it** (`Attempt`,
+ *   `lib/unresolved-tenancy.ts`): a first send the one `remember` returns
+ *   with its new entry, every re-send a new one `advance` writes before it
+ *   leaves. This path holds no identity of its own — none is assumed, counted
+ *   or reused — so an answer of a send whose record has since been set aside
+ *   and made again under the same key matches nothing (PR 363 review 4). If
+ *   the identity cannot be written, nothing is sent and the view comes back as
+ *   it was.
  *
  * Everything returned before the send is an unsent refusal: it finalizes with
  * no `answer` and no new quarantine record (PM addendum D).
@@ -37,13 +37,14 @@ import {
  * boundary (R5). In doubt: `answer` (its own entry updated while the slot
  * still holds it, else kept aside — the warning shown at once). A definite
  * answer: the entry is settled only when this very send wrote it **and no
- * re-send has started since** (its generation is still the entry's — a first
+ * other send has written it since** (its identity is still the entry's — a first
  * send's refusal arriving after a re-send left says nothing about the re-send,
- * which may have committed: PR 363 review 3); a re-send's definite answer
+ * which may have committed: PR 363 review 3 — and no other record has been
+ * made under the key since: review 4); a re-send's definite answer
  * settles nothing (a re-send is answered in doubt, and only the redirect below
  * ends it). A redirect is the command done: settled, as `CONFIRMED`, again only
- * while its send is the newest. Every answer carries its send's generation, so
- * a late answer in doubt never rewrites a later send's entry either.
+ * while its send wrote the entry. Every answer carries its send's identity, so
+ * a late answer in doubt never rewrites another send's entry either.
  *
  * ## A failed call: kept and shown first, the session asked after (review 5, R6)
  *
@@ -73,18 +74,24 @@ export interface SlotSubmission<S extends { readonly kind: string }> {
   readonly stored: () => { readonly submissionId: string; readonly state: S } | null;
   /** A first send the form refuses before anything is remembered (an invalid form). */
   readonly check?: () => S | null;
-  /** Remembers a first send before it leaves; null when the action refuses it unsent. */
+  /**
+   * Remembers a first send before it leaves — `SAVED` with that send's identity
+   * (`fencedSlot.start`); null when the action refuses it unsent.
+   */
   readonly remember: () => StartOutcome | null;
   /** A re-send: null when it may go; otherwise what is shown instead, unsent. */
   readonly admitRetry: (retrying: Uncertain<S>) => S | null;
-  /** Before an admitted re-send leaves: its generation, written into its entry; null — nothing is sent. */
+  /** Before an admitted re-send leaves: its new identity, written into its entry; null — nothing is sent. */
   readonly advance: () => Attempt | null;
   readonly send: () => Promise<S>;
   /** The view of a send whose call itself failed; `ended` only for `/auth/session` 401. */
   readonly failed: (ended: boolean) => Uncertain<S> | null;
-  /** An answer still in doubt to send `attempt`: kept (`fencedSlot.answer`). */
-  readonly answer: (state: Uncertain<S>, attempt: Attempt) => void;
-  /** A definite answer to send `attempt`: its own entry, and only that, goes — if no later send started. */
+  /**
+   * An answer still in doubt to send `attempt` — null: a send nothing
+   * remembered, which touches no entry — kept (`fencedSlot.answer`).
+   */
+  readonly answer: (state: Uncertain<S>, attempt: Attempt | null) => void;
+  /** A definite answer to send `attempt`: the entry that send wrote, and only that, goes — if no other send wrote it since. */
   readonly settle: (attempt: Attempt, settlement: Settlement) => void;
   readonly held: S;
   readonly unavailable: S;
@@ -98,8 +105,8 @@ export async function submitThroughSlot<S extends { readonly kind: string }>(
   submission: SlotSubmission<S>,
 ): Promise<S> {
   const { submissionId, retrying, stored } = submission;
-  let wrote = false;
-  let attempt: Attempt = FIRST_ATTEMPT;
+  /** The identity of this very send, as the slot wrote it; null while none was written. */
+  let attempt: Attempt | null = null;
 
   if (retrying === null) {
     const holder = stored();
@@ -108,27 +115,36 @@ export async function submitThroughSlot<S extends { readonly kind: string }>(
     const refused = submission.check?.() ?? null;
     if (refused !== null) return refused;
     const remembered = submission.remember();
-    if (remembered === 'HELD') return submission.held;
-    if (remembered === 'UNAVAILABLE') return submission.unavailable;
-    if (remembered === 'UNRESOLVED') {
+    if (remembered?.outcome === 'HELD') return submission.held;
+    if (remembered?.outcome === 'UNAVAILABLE') return submission.unavailable;
+    if (remembered?.outcome === 'UNRESOLVED') {
       const again = stored();
       return again !== null && again.submissionId === submissionId ? again.state : submission.held;
     }
-    wrote = remembered === 'SAVED';
+    // Null: not remembered — the action refuses such a form before sending.
+    attempt = remembered?.outcome === 'SAVED' ? remembered.attempt : null;
   } else {
     const refused = submission.admitRetry(retrying);
     if (refused !== null) return refused;
     // Recorded BEFORE it leaves: an earlier send's late answer can then tell it
-    // is not the newest. Not recorded: not sent, the uncertainty as it was.
+    // is not this one. Not recorded: not sent, the uncertainty as it was.
     const advanced = submission.advance();
     if (advanced === null) return retrying;
     attempt = advanced;
   }
 
+  /**
+   * This send's own identity: a first send's from `remember`, a re-send's from
+   * `advance`; null for a first send nothing remembered, which matches no entry.
+   */
+  const sent = attempt;
+  /** A first send that wrote its entry — the only send whose refusal settles it. */
+  const wrote = retrying === null && sent !== null;
+
   /** The one boundary every completion goes through. */
   const finalize = (next: S): S => {
-    if (isUncertain(next)) submission.answer(next, attempt);
-    else if (wrote) submission.settle(attempt, 'REFUSED');
+    if (isUncertain(next)) submission.answer(next, sent);
+    else if (wrote && sent !== null) submission.settle(sent, 'REFUSED');
     return next;
   };
 
@@ -140,7 +156,7 @@ export async function submitThroughSlot<S extends { readonly kind: string }>(
   } catch (error) {
     // Done: the action redirects to the outcome. Nothing is unresolved now.
     if (isRedirect(error)) {
-      submission.settle(attempt, 'CONFIRMED');
+      if (sent !== null) submission.settle(sent, 'CONFIRMED');
       throw error;
     }
     // Nothing was remembered, so nothing is in doubt to keep: the action refuses

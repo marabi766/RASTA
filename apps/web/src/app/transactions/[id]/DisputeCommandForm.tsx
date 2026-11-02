@@ -31,6 +31,7 @@ import {
 
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 import { submitDisputeCommand } from './actions';
 import {
   IDLE_DISPUTE_FORM,
@@ -200,7 +201,7 @@ function DisputeCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
-        // Its generation recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
         advance: () => advanceUnresolvedDispute(transactionId, submissionId, binding),
         send: () => submitDisputeCommand(transactionId, previous, form),
         // The call itself failed. A lost response after the command may have
@@ -440,12 +441,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the transaction again and offers what it allows. */}
-          <a
-            href={transactionHref}
-            onClick={onForget}
-            onAuxClick={onForget}
-            className="text-sm underline"
-          >
+          <a href={transactionHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت تراکنش را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

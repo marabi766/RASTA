@@ -91,38 +91,52 @@
  *   only that one key; another organization's entry, an old-format entry of
  *   another submission and every quarantined record stay.
  *
- * ## Which send an answer belongs to: the attempt generation (PR 363 review 3)
+ * ## Which send an answer belongs to: the send's identity (PR 363 reviews 3 and 4)
  *
  * A re-send goes under the same key as the first send, so the submission id
- * cannot tell their answers apart — and the first send's answer can arrive
- * **after** a re-send left: navigate away while it is out, come back, send the
- * same request again. If the service refused the first send and released its
- * key, the re-send may commit with its answer lost; the first send's refusal,
+ * cannot tell their answers apart — and an earlier send's answer can arrive
+ * **after** a later send left: navigate away while it is out, come back, send
+ * the same request again. If the service refused the earlier send and released
+ * its key, the later one may commit with its answer lost; the earlier refusal,
  * arriving last, would then have removed the record of a request that did
  * commit, and the next page would offer a fresh key — the same stock moved
- * twice. So every entry carries the generation of the newest send of its
- * submission (`attempt`, written by this slot and nothing else):
+ * twice.
  *
- * - `start` writes generation 1 with the first send's entry.
- * - `advance`, before **every** re-send, writes the next generation into the
- *   entry and reads it back. Only that field changes: the body, the stamp (and
- *   so the server's replay deadline), the time it was saved — so its expiry —
- *   and every other byte stay the first send's. If it cannot be written,
- *   nothing is sent: the uncertainty stays as it was.
- * - `answer` and `settle` take the generation of the send they answer. Only
- *   that very generation may touch the entry: a late answer of an earlier send
- *   leaves a later send's entry exactly as it is (`SUPERSEDED` — the entry
- *   already says the outcome is unknown), and a definite answer of an earlier
- *   send removes nothing. Equality is necessary, not sufficient: which
- *   definite answers may settle at all is the boundary's rule
- *   (`lib/fenced-submission.ts`) — the first send's own refusal, or a
- *   confirmed success; never a re-send's refusal, a session refusal of a
- *   re-send or a passed replay deadline.
- * - An entry without a generation — reduced to a marker (logout, expiry), or
- *   written before generations existed — matches no answer, so no answer
- *   removes or rewrites it. A re-send from an old entry (never from a marker)
- *   first writes generation 2 into it; only that re-send's own answers may then
- *   touch it.
+ * The same holds when the record went in between: set aside (the person's
+ * "set it aside", a middle-click included, which keeps this document alive) or
+ * settled, and then made again under the same key — a form drawn from cached
+ * props still carries that key and its stamp. A count that starts again at 1
+ * for every new record cannot tell the new record's first send from the old
+ * one's (PR 363 review 4). So every send has an identity of its own
+ * (`Attempt`): 128 random bits, **minted by this slot and nothing else**, kept
+ * in the entry it wrote, and returned to the one submit path
+ * (`lib/fenced-submission.ts`), which hands it back with that send's answer.
+ * No identity is derived from a count, a key or a time, so none is ever
+ * reused — not across a re-send, a release, a settle or a new record:
+ *
+ * - `start` mints the first send's identity, writes it with the entry, reads
+ *   the entry back and returns it (`StartOutcome`). Nothing written, or not
+ *   read back: nothing is sent.
+ * - `advance`, before **every** re-send, mints a new identity, writes it into
+ *   the entry and reads it back. Only that field changes: the body, the stamp
+ *   (and so the server's replay deadline), the time it was saved — so its
+ *   expiry — and every other byte stay the first send's. If it cannot be
+ *   written, nothing is sent: the uncertainty stays as it was.
+ * - `answer` and `settle` take the identity of the send they answer. Only the
+ *   entry that send wrote — the very same identity — may be touched: a late
+ *   answer of any other send, an earlier re-send or a send of a record that
+ *   has since been set aside or settled and made again, leaves the entry
+ *   exactly as it is (`SUPERSEDED` — the entry already says the outcome is
+ *   unknown), and a definite answer of any other send removes nothing.
+ *   Equality is necessary, not sufficient: which definite answers may settle
+ *   at all is the boundary's rule (`lib/fenced-submission.ts`) — the first
+ *   send's own refusal, or a confirmed success; never a re-send's refusal, a
+ *   session refusal of a re-send or a passed replay deadline.
+ * - An entry without an identity — reduced to a marker (logout, expiry), or
+ *   written before identities existed (a number, or none) — matches no answer,
+ *   so no answer removes or rewrites it. A re-send from an old entry (never
+ *   from a marker) first writes a fresh identity into it; only that re-send's
+ *   own answers may then touch it.
  * - Once a confirmed success removed an entry, a late answer in doubt of the
  *   same submission, from the same login, is moot — the request is known to
  *   have committed — and is dropped (this document's memory) instead of kept
@@ -617,33 +631,42 @@ export function ownedHere(binding: Binding, legacy: boolean, entryOwner: string)
 // The fenced slot: every store's save, answer, settle and release (R1)
 
 /**
- * The generation of one send of a submission: 1 for the first send, one more
- * for each re-send (`advance`). Only the slot and the boundary make one.
+ * The identity of one send of a submission: 128 random bits as 32 lowercase
+ * hex digits, minted by the slot (`start`, `advance`) and by nothing else.
  */
-export type Attempt = number & { readonly __attempt: 'Attempt' };
+export type Attempt = string & { readonly __attempt: 'Attempt' };
 
-/** The first send's generation (`start` writes it). */
-export const FIRST_ATTEMPT = 1 as Attempt;
-
-/** Where an entry's generation is kept; written by the slot only. */
+/** Where an entry's send identity is kept; written by the slot only. */
 const ATTEMPT_FIELD = 'attempt';
+const ATTEMPT_TEXT = /^[0-9a-f]{32}$/;
 
-/** The generation an entry's text carries, or null (a marker, an entry written before generations). */
-function attemptOf(raw: string): number | null {
+/**
+ * A send identity no send has had: 128 bits from the platform's
+ * cryptographic generator. Throws when there is none — then nothing is
+ * written and nothing is sent (`start`, `advance` answer `UNAVAILABLE`/null).
+ */
+function mintAttempt(): Attempt {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  const text = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  if (!ATTEMPT_TEXT.test(text)) throw new Error('no send identity');
+  return text as Attempt;
+}
+
+/** The send identity an entry's text carries, or null (a marker, an entry written before identities). */
+function attemptOf(raw: string): Attempt | null {
   try {
     const value: unknown = JSON.parse(raw);
     if (typeof value !== 'object' || value === null) return null;
     const attempt = (value as Record<string, unknown>)[ATTEMPT_FIELD];
-    return typeof attempt === 'number' && Number.isSafeInteger(attempt) && attempt >= 1
-      ? attempt
-      : null;
+    return typeof attempt === 'string' && ATTEMPT_TEXT.test(attempt) ? (attempt as Attempt) : null;
   } catch {
     return null;
   }
 }
 
-/** `text` with its generation set to `attempt` — every other field as it was; null when it is not an object. */
-function withAttempt(text: string, attempt: number): string | null {
+/** `text` with its send identity set to `attempt` — every other field as it was; null when it is not an object. */
+function withAttempt(text: string, attempt: Attempt): string | null {
   try {
     const value: unknown = JSON.parse(text);
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
@@ -665,7 +688,8 @@ export interface SlotEntry {
 }
 
 /**
- * `SAVED`: stored. `HELD`: another submission's entry holds this slot, or a
+ * `SAVED`: stored, under the first send's identity (`attempt`) — the one its
+ * answers must carry. `HELD`: another submission's entry holds this slot, or a
  * quarantined record holds this kind for this person — nothing was written and
  * this submission must not be sent. `UNRESOLVED`: the slot already keeps this
  * very submission, its outcome unknown — it is not a first send, whatever the
@@ -674,7 +698,16 @@ export interface SlotEntry {
  * its kept body, and a definite answer to such a send proves nothing about
  * the first. `UNAVAILABLE`: storage refused it, or a logout has started.
  */
-export type StartOutcome = 'SAVED' | 'HELD' | 'UNRESOLVED' | 'UNAVAILABLE';
+export type StartOutcome =
+  | { readonly outcome: 'SAVED'; readonly attempt: Attempt }
+  | { readonly outcome: 'HELD' | 'UNRESOLVED' | 'UNAVAILABLE' };
+
+/** The outcomes of a start that wrote nothing — and so must send nothing. */
+export const NOT_STARTED = {
+  HELD: { outcome: 'HELD' },
+  UNRESOLVED: { outcome: 'UNRESOLVED' },
+  UNAVAILABLE: { outcome: 'UNAVAILABLE' },
+} as const satisfies Record<string, StartOutcome>;
 
 /**
  * `SAVED`: the slot's entry of this submission is updated. `SUPERSEDED`: the
@@ -708,19 +741,21 @@ export interface FencedSlot<E extends SlotEntry> {
     binding: Binding,
     scope: string,
     submissionId: string,
-    attempt: Attempt,
+    /** The send it answers; null — a send nothing remembered — matches no entry. */
+    attempt: Attempt | null,
     compose: (earlier: E) => string | null,
     now?: number,
   ): AnswerOutcome;
   /**
-   * Before a re-send of `submissionId`: the next generation, written into its
+   * Before a re-send of `submissionId`: a new send identity, written into its
    * entry and read back — or null, and then nothing may be sent.
    */
   advance(binding: Binding, scope: string, submissionId: string): Attempt | null;
   /**
    * A definite answer to send `attempt` of `submissionId`, from the login it was
-   * sent under: its entry, and only that, goes — only while no later send of it
-   * has started.
+   * sent under: the entry that send wrote, and only that, goes — only while no
+   * other send (a re-send, or a new record under the same key) has written it
+   * since.
    */
   settle(
     binding: Binding,
@@ -798,10 +833,10 @@ export function fencedSlot<E extends SlotEntry>(
     quarantine: quarantineOf(prefix, parse),
 
     start(binding, scope, submissionId, compose) {
-      if (hooks.closing()) return 'UNAVAILABLE';
+      if (hooks.closing()) return NOT_STARTED.UNAVAILABLE;
       try {
         const store = sessionStore();
-        if (!store) return 'UNAVAILABLE';
+        if (!store) return NOT_STARTED.UNAVAILABLE;
         const held = occupant(store, binding, scope);
         // Another submission's entry — even a marker — is never replaced; nor is an
         // old-format entry, which is only ever shown (it may be another organization's).
@@ -811,23 +846,27 @@ export function fencedSlot<E extends SlotEntry>(
             held.entry.submissionId !== submissionId ||
             !sameLogin(held.entry, binding))
         ) {
-          return 'HELD';
+          return NOT_STARTED.HELD;
         }
         // This very submission is already unresolved here: a re-send, never a first
         // one — its entry is not rewritten, and nothing new goes out under its key.
-        if (held !== null) return 'UNRESOLVED';
-        if (!mayStartFresh(store, prefix, binding, parse)) return 'HELD';
+        if (held !== null) return NOT_STARTED.UNRESOLVED;
+        if (!mayStartFresh(store, prefix, binding, parse)) return NOT_STARTED.HELD;
         const composed = compose();
-        const text = composed === null ? null : withAttempt(composed, FIRST_ATTEMPT);
-        if (text === null) return 'UNAVAILABLE';
+        // A new record is a new incarnation: its own identity, never one an earlier
+        // record of the same key had — whatever answer of that one is still out.
+        const attempt = mintAttempt();
+        const text = composed === null ? null : withAttempt(composed, attempt);
+        if (text === null) return NOT_STARTED.UNAVAILABLE;
         const key = tenantKey(prefix, binding, scope);
         // Never written over: whatever else the key holds is moved aside first.
         freeOwnKey(store, prefix, key, binding, parse);
         store.setItem(key, text);
+        if (store.getItem(key) !== text) return NOT_STARTED.UNAVAILABLE;
         changed();
-        return 'SAVED';
+        return { outcome: 'SAVED', attempt };
       } catch {
-        return 'UNAVAILABLE';
+        return NOT_STARTED.UNAVAILABLE;
       }
     },
 
@@ -839,9 +878,11 @@ export function fencedSlot<E extends SlotEntry>(
           const held = answerable(store, binding, scope, submissionId);
           own = held !== null;
           if (held !== null) {
-            // A later send's entry, or one without a generation (a marker): this
-            // earlier answer neither rewrites nor recreates anything.
-            if (held.attempt !== attempt) return 'SUPERSEDED';
+            // Another send's entry — a re-send, or a record made again under this key
+            // since — or one without an identity (a marker): this answer neither
+            // rewrites nor recreates anything.
+            // A null answer — a send nothing remembered — never matches one either.
+            if (held.attempt === null || held.attempt !== attempt) return 'SUPERSEDED';
             const composed = compose(held.entry);
             if (composed !== null) {
               const text = withAttempt(composed, attempt);
@@ -876,13 +917,13 @@ export function fencedSlot<E extends SlotEntry>(
         // Whether it may be sent again at all is the form's `admitRetry`, asked first:
         // a reduced marker never is.
         if (!store || held === null) return null;
-        const next = (held.attempt ?? FIRST_ATTEMPT) + 1;
+        const next = mintAttempt();
         const text = withAttempt(held.raw, next);
         if (text === null) return null;
         store.setItem(held.key, text);
         if (store.getItem(held.key) !== text) return null;
         changed();
-        return next as Attempt;
+        return next;
       } catch {
         return null;
       }
@@ -892,8 +933,9 @@ export function fencedSlot<E extends SlotEntry>(
       try {
         const store = sessionStore();
         const held = store ? answerable(store, binding, scope, submissionId) : null;
-        // Only the newest send's answer: an earlier send's says nothing about a
-        // later one, which may have committed.
+        // Only the answer of the send that wrote this entry: another send's — an
+        // earlier one, or one of a record set aside and made again since — says
+        // nothing about it, and it may have committed.
         if (!store || held === null || held.attempt !== attempt) return;
         store.removeItem(held.key);
         if (settlement === 'CONFIRMED') confirmed.add(confirmedId(held.key, submissionId, binding));

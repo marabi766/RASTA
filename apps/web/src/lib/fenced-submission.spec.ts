@@ -3,12 +3,7 @@ import { startTransition } from 'react';
 
 import { submitThroughSlot, useSlotActionState, type SlotSubmission } from './fenced-submission';
 import { SESSION_PROBE_DEADLINE_MS } from './session-refusal';
-import {
-  FIRST_ATTEMPT,
-  type Attempt,
-  type Settlement,
-  type StartOutcome,
-} from './unresolved-tenancy';
+import { type Attempt, type Settlement, type StartOutcome } from './unresolved-tenancy';
 
 /**
  * The one submit boundary of the fenced forms (PR 405 review 4): what is
@@ -59,29 +54,39 @@ beforeEach(() => {
   }) as unknown as typeof fetch;
 });
 
-function harness(
-  overrides: Partial<SlotSubmission<State>> & { remembered?: StartOutcome | null } = {},
-) {
+/** A send identity, as the slot would mint it (`fencedSlot`): only its equality matters here. */
+const send = (n: number) => n.toString(16).padStart(32, '0') as Attempt;
+const FIRST = send(1);
+
+type Remembered = StartOutcome['outcome'] | StartOutcome | null;
+
+function harness(overrides: Partial<SlotSubmission<State>> & { remembered?: Remembered } = {}) {
   const calls = { answer: [] as State[], settle: 0, send: 0, remember: 0 };
   /** Which send each answer and settlement named, and the re-sends' generations (PR 363 r3). */
   const sends = {
     advanced: 0,
-    answered: [] as Attempt[],
+    answered: [] as Array<Attempt | null>,
     settled: [] as Array<[Attempt, Settlement]>,
   };
   const { remembered = 'SAVED', ...rest } = overrides;
+  const outcome: StartOutcome | null =
+    remembered === null || typeof remembered === 'object'
+      ? remembered
+      : remembered === 'SAVED'
+        ? { outcome: 'SAVED', attempt: FIRST }
+        : { outcome: remembered };
   const submission: SlotSubmission<State> = {
     submissionId: K1,
     retrying: null,
     stored: () => null,
     remember: () => {
       calls.remember += 1;
-      return remembered;
+      return outcome;
     },
     admitRetry: () => null,
     advance: () => {
       sends.advanced += 1;
-      return (FIRST_ATTEMPT + sends.advanced) as Attempt;
+      return send(1 + sends.advanced);
     },
     send: async () => {
       calls.send += 1;
@@ -258,10 +263,10 @@ describe('every completion goes through one finalization (R5)', () => {
   });
 });
 
-describe('every answer names its send: the attempt generation (PR 363 review 3)', () => {
+describe('every answer names its send: the identity the slot wrote (PR 363 reviews 3 and 4)', () => {
   const retrying = UNCONFIRMED(K1) as Extract<State, { kind: 'UNCONFIRMED' }>;
 
-  it('a re-send records its generation before it leaves, and its answers carry it', async () => {
+  it('a re-send records its identity before it leaves, and its answers carry it', async () => {
     let advancedBeforeSend = false;
     const made = harness({
       retrying,
@@ -273,17 +278,17 @@ describe('every answer names its send: the attempt generation (PR 363 review 3)'
     const { submission, sends } = made;
     await submitThroughSlot(submission);
     expect(advancedBeforeSend).toBe(true);
-    expect(sends.answered).toEqual([2]);
+    expect(sends.answered).toEqual([send(2)]);
   });
 
-  it('a generation that cannot be recorded: nothing is sent, the uncertainty view as it was', async () => {
+  it('an identity that cannot be recorded: nothing is sent, the uncertainty view as it was', async () => {
     const { submission, calls, sends } = harness({ retrying, advance: () => null });
     await expect(submitThroughSlot(submission)).resolves.toBe(retrying);
     expect(calls).toEqual({ answer: [], settle: 0, send: 0, remember: 0 });
     expect(sends.settled).toEqual([]);
   });
 
-  it('a re-send refused by its own admission records no generation', async () => {
+  it('a re-send refused by its own admission records no identity', async () => {
     const shown = { ...retrying, viewOnly: true as const };
     const { submission, sends, calls } = harness({ retrying, admitRetry: () => shown });
     await expect(submitThroughSlot(submission)).resolves.toBe(shown);
@@ -291,10 +296,37 @@ describe('every answer names its send: the attempt generation (PR 363 review 3)'
     expect(calls.send).toBe(0);
   });
 
-  it("a first send's definite answer settles as REFUSED at generation 1; it records none", async () => {
+  it("a first send's definite answer settles as REFUSED under the identity remember returned", async () => {
     const { submission, sends } = harness({ send: async () => ({ kind: 'REFUSED' }) });
     await submitThroughSlot(submission);
-    expect(sends).toEqual({ advanced: 0, answered: [], settled: [[1, 'REFUSED']] });
+    expect(sends).toEqual({ advanced: 0, answered: [], settled: [[FIRST, 'REFUSED']] });
+  });
+
+  it('review 4: two first sends of one key carry the identities their own records got — never a constant', async () => {
+    const older = harness({
+      remembered: { outcome: 'SAVED', attempt: send(0xa1) },
+      send: async () => ({ kind: 'REFUSED' }),
+    });
+    const newer = harness({
+      remembered: { outcome: 'SAVED', attempt: send(0xb2) },
+      send: async () => UNCONFIRMED(K1, 'returned'),
+    });
+    await submitThroughSlot(newer.submission);
+    await submitThroughSlot(older.submission);
+    expect(newer.sends.answered).toEqual([send(0xb2)]);
+    expect(older.sends.settled).toEqual([[send(0xa1), 'REFUSED']]);
+  });
+
+  it('a first send nothing remembered: its answer in doubt names no send (null), its refusal settles nothing', async () => {
+    const doubt = harness({ remembered: null });
+    await submitThroughSlot(doubt.submission);
+    expect(doubt.sends.answered).toEqual([null]);
+    const refused = harness({ remembered: null, send: async () => ({ kind: 'REFUSED' }) });
+    await submitThroughSlot(refused.submission);
+    expect(refused.sends.settled).toEqual([]);
+    const redirected = harness({ remembered: null, send: async () => Promise.reject(redirect()) });
+    await expect(submitThroughSlot(redirected.submission)).rejects.toThrow('NEXT_REDIRECT');
+    expect(redirected.sends.settled).toEqual([]);
   });
 
   it("a re-send's definite answer settles nothing", async () => {
@@ -304,9 +336,9 @@ describe('every answer names its send: the attempt generation (PR 363 review 3)'
   });
 
   it.each([
-    ['a first send', {}, 1],
-    ['a re-send', { retrying }, 2],
-  ] as const)('%s redirected: settled as CONFIRMED at its own generation', async (_l, o, g) => {
+    ['a first send', {}, FIRST],
+    ['a re-send', { retrying }, send(2)],
+  ] as const)('%s redirected: settled as CONFIRMED under its own identity', async (_l, o, g) => {
     const { submission, sends } = harness({
       ...o,
       send: async () => Promise.reject(redirect()),

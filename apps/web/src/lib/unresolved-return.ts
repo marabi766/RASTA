@@ -8,6 +8,7 @@ import {
 } from './return-fields';
 import type { ReturnRequestBody } from './return-request';
 import {
+  NOT_STARTED,
   fencedSlot,
   keysUnder,
   locate,
@@ -380,7 +381,7 @@ export function saveUnresolvedReturn(
   binding: Binding,
   now: number = Date.now(),
 ): SaveOutcome {
-  if (!belongs(scopeOf(scope), entry.command)) return 'UNAVAILABLE';
+  if (!belongs(scopeOf(scope), entry.command)) return NOT_STARTED.UNAVAILABLE;
   return slot.start(binding, scopeOf(scope), entry.submissionId, () =>
     recordOf(scope, entry, null, binding, now),
   );
@@ -395,7 +396,7 @@ export function answerUnresolvedReturn(
   scope: ReturnScope,
   entry: Omit<UnresolvedReturn, 'savedAt' | 'marker'>,
   binding: Binding,
-  attempt: Attempt,
+  attempt: Attempt | null,
   now: number = Date.now(),
 ): AnswerOutcome {
   return slot.answer(
@@ -419,7 +420,7 @@ export function settleUnresolvedReturn(
   slot.settle(binding, scopeOf(scope), submissionId, attempt, settlement);
 }
 
-/** Before a re-send of `submissionId`: its next generation, recorded — or null, and nothing is sent (`lib/unresolved-tenancy.ts`). */
+/** Before a re-send of `submissionId`: a new send identity, recorded — or null, and nothing is sent (`lib/unresolved-tenancy.ts`). */
 export function advanceUnresolvedReturn(
   scope: ReturnScope,
   submissionId: string,

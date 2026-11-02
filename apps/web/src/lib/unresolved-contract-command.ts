@@ -7,6 +7,7 @@ import {
 } from './contract-command-fields';
 import { isCommandInput, type CommandInput } from './contract-command-input';
 import {
+  NOT_STARTED,
   fencedSlot,
   keysUnder,
   locate,
@@ -363,7 +364,7 @@ export function saveUnresolvedContractCommand(
   binding: Binding,
   now: number = Date.now(),
 ): SaveOutcome {
-  if (!fits(scope, entry.command)) return 'UNAVAILABLE';
+  if (!fits(scope, entry.command)) return NOT_STARTED.UNAVAILABLE;
   return slot.start(binding, scopeText(scope), entry.submissionId, () =>
     recordOf(entry, null, binding, now),
   );
@@ -378,7 +379,7 @@ export function answerUnresolvedContractCommand(
   scope: ContractScope,
   entry: Omit<UnresolvedContractCommand, 'savedAt' | 'marker'>,
   binding: Binding,
-  attempt: Attempt,
+  attempt: Attempt | null,
   now: number = Date.now(),
 ): AnswerOutcome {
   return slot.answer(
@@ -402,7 +403,7 @@ export function settleUnresolvedContractCommand(
   slot.settle(binding, scopeText(scope), submissionId, attempt, settlement);
 }
 
-/** Before a re-send of `submissionId`: its next generation, recorded — or null, and nothing is sent (`lib/unresolved-tenancy.ts`). */
+/** Before a re-send of `submissionId`: a new send identity, recorded — or null, and nothing is sent (`lib/unresolved-tenancy.ts`). */
 export function advanceUnresolvedContractCommand(
   scope: ContractScope,
   submissionId: string,

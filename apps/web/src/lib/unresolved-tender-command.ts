@@ -61,7 +61,7 @@ export const answerUnresolvedOwnerCommand = (
   tenderId: string,
   entry: Omit<UnresolvedOwnerCommand, 'savedAt'>,
   binding: Binding,
-  attempt: Attempt,
+  attempt: Attempt | null,
   now?: number,
 ): AnswerOutcome => store.answer(tenderId, entry, binding, attempt, now);
 
@@ -74,7 +74,7 @@ export const settleUnresolvedOwnerCommand = (
   settlement: Settlement,
 ): void => store.settle(tenderId, submissionId, binding, attempt, settlement);
 
-/** Before a re-send: its next generation, recorded — or null, and nothing is sent. */
+/** Before a re-send: a new send identity, recorded — or null, and nothing is sent. */
 export const advanceUnresolvedOwnerCommand = (
   tenderId: string,
   submissionId: string,

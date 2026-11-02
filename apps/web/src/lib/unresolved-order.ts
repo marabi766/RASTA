@@ -264,7 +264,7 @@ export function answerUnresolvedOrder(
   productId: string,
   order: Omit<UnresolvedOrder, 'savedAt'>,
   binding: Binding,
-  attempt: Attempt,
+  attempt: Attempt | null,
   now: number = Date.now(),
 ): AnswerOutcome {
   return slot.answer(
@@ -288,7 +288,7 @@ export function settleUnresolvedOrder(
   slot.settle(binding, productId, submissionId, attempt, settlement);
 }
 
-/** Before a re-send of `submissionId`: its next generation, recorded — or null, and nothing is sent (`lib/unresolved-tenancy.ts`). */
+/** Before a re-send of `submissionId`: a new send identity, recorded — or null, and nothing is sent (`lib/unresolved-tenancy.ts`). */
 export function advanceUnresolvedOrder(
   productId: string,
   submissionId: string,

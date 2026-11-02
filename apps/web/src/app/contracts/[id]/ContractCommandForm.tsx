@@ -39,6 +39,7 @@ import {
   contractCommandQuarantine,
 } from '@/lib/unresolved-contract-command';
 import type { Binding } from '@/lib/unresolved-order';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 
 import { submitContractCommand } from './contract-actions';
 import {
@@ -229,7 +230,7 @@ function ContractCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
-        // Its generation recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
         advance: () => advanceUnresolvedContractCommand(scope, submissionId, binding),
         send: () => submitContractCommand(scope, previous, form),
         failed: (ended) => {
@@ -595,7 +596,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the contract again and offers what it allows. */}
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

@@ -9,6 +9,7 @@ import {
   type InventoryScope,
 } from './inventory-commands';
 import {
+  NOT_STARTED,
   fencedSlot,
   keysUnder,
   locate,
@@ -60,9 +61,10 @@ export type { AnswerOutcome };
  * refused (`HELD`) and the form is not sent — a submission already in doubt is
  * never sent again as a first send (`UNRESOLVED`), and a record is cleared only
  * by the submission it belongs to: a definite answer of the very send that
- * wrote it while no re-send has started since, a confirmed outcome of the
- * newest send, or the person (the shared slot, `lib/unresolved-tenancy.ts`:
- * per person and organization, and fenced to the send's generation). Every
+ * wrote it while no other send has written it since, a confirmed outcome of
+ * that send, or the person (the shared slot, `lib/unresolved-tenancy.ts`:
+ * per person and organization, and fenced to the send's own identity — never
+ * reused, not even by a record made again under the same key). Every
  * change is announced to the page's other forms (`subscribeUnresolvedInventory`),
  * which stay view-only while another command holds the slot.
  *
@@ -397,7 +399,7 @@ export function saveUnresolvedInventory(
   binding: Binding,
   now: number = Date.now(),
 ): SaveOutcome {
-  if (!belongs(scopeOf(scope), entry.command)) return 'UNAVAILABLE';
+  if (!belongs(scopeOf(scope), entry.command)) return NOT_STARTED.UNAVAILABLE;
   return slot.start(binding, scopeOf(scope), entry.submissionId, () =>
     roundTrips(entry.command, entry.body) ? recordOf(scope, entry, null, binding, now) : null,
   );
@@ -413,7 +415,7 @@ export function answerUnresolvedInventory(
   scope: InventoryScope,
   entry: Omit<UnresolvedInventory, 'savedAt' | 'marker'>,
   binding: Binding,
-  attempt: Attempt,
+  attempt: Attempt | null,
   now: number = Date.now(),
 ): AnswerOutcome {
   return slot.answer(
@@ -426,7 +428,7 @@ export function answerUnresolvedInventory(
   );
 }
 
-/** Before a re-send of `submissionId`: its next generation, recorded — or null, and nothing is sent. */
+/** Before a re-send of `submissionId`: a new send identity, recorded — or null, and nothing is sent. */
 export function advanceUnresolvedInventory(
   scope: InventoryScope,
   submissionId: string,

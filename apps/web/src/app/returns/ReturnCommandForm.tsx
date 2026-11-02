@@ -36,6 +36,7 @@ import {
   type ReturnScope,
   returnQuarantine,
 } from '@/lib/unresolved-return';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 
 import { submitReturnCommand, submitReturnRequest } from './return-actions';
 import {
@@ -229,7 +230,7 @@ function ReturnCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
-        // Its generation recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
         advance: () => advanceUnresolvedReturn(scope, submissionId, binding),
         send: () =>
           scope.kind === 'ORDER'
@@ -562,7 +563,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the requests again and offers what they allow. */}
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

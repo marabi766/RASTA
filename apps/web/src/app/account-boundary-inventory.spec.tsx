@@ -61,7 +61,7 @@ it('logout reduces the entry to a marker: no body, no stamp, no login tag', () =
 it('nothing is stored once a logout has started', () => {
   const view = page(PERSON);
   fireEvent.submit(view.getByTestId('logout'));
-  expect(saveUnresolvedInventory(WAREHOUSE, ENTRY, BINDING)).toBe('UNAVAILABLE');
+  expect(saveUnresolvedInventory(WAREHOUSE, ENTRY, BINDING).outcome).toBe('UNAVAILABLE');
   expect(stored()).toBeNull();
 });
 

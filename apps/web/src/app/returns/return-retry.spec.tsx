@@ -276,7 +276,7 @@ describe('never silently gone', () => {
 
   it('nothing is stored once a logout has started', () => {
     purgeAllUnresolvedReturns();
-    expect(saveUnresolvedReturn(RETURN_SCOPE, entry, BINDING)).toBe('UNAVAILABLE');
+    expect(saveUnresolvedReturn(RETURN_SCOPE, entry, BINDING).outcome).toBe('UNAVAILABLE');
   });
 
   it('from another login it is shown, never re-sent; another person’s page removes it', () => {
@@ -466,14 +466,14 @@ describe('one unresolved command per return request', () => {
       correlationId: 'COR',
       replay: AUTHORIZE_STAMP,
     };
-    expect(saveUnresolvedReturn(RETURN_SCOPE, authorize, BINDING)).toBe('SAVED');
+    expect(saveUnresolvedReturn(RETURN_SCOPE, authorize, BINDING).outcome).toBe('SAVED');
     for (const other of ['REJECT', 'CANCEL'] as const) {
       expect(
         saveUnresolvedReturn(
           RETURN_SCOPE,
           { ...authorize, command: other, submissionId: REJECT_KEY },
           BINDING,
-        ),
+        ).outcome,
       ).toBe('HELD');
     }
     clearUnresolvedReturn(RETURN_SCOPE, REJECT_KEY, BINDING);
@@ -499,7 +499,7 @@ describe('one unresolved command per return request', () => {
           replay: STAMP,
         },
         BINDING,
-      ),
+      ).outcome,
     ).toBe('SAVED');
     // And a command is never kept in the other kind of slot.
     expect(
@@ -507,7 +507,7 @@ describe('one unresolved command per return request', () => {
         ORDER_SCOPE,
         { command: 'CANCEL', submissionId: KEY, body: null, correlationId: null, replay: STAMP },
         BINDING,
-      ),
+      ).outcome,
     ).toBe('UNAVAILABLE');
   });
 });

@@ -32,6 +32,7 @@ import {
   statementQuarantine,
 } from '@/lib/unresolved-statement';
 import type { Binding } from '@/lib/unresolved-order';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 
 import { submitStatementCommand, submitStatementDraft } from './statement-actions';
 import {
@@ -216,7 +217,7 @@ function StatementCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
-        // Its generation recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
         advance: () => advanceUnresolvedStatement(scope, submissionId, binding),
         send: () =>
           scope.statementId === null
@@ -583,7 +584,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the statements again and offers what they allow. */}
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

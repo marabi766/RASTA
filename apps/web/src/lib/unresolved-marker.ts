@@ -75,10 +75,10 @@ export interface MarkerStore<C extends string> {
     scope: string,
     entry: Omit<UnresolvedMarker<C>, 'savedAt'>,
     binding: Binding,
-    attempt: Attempt,
+    attempt: Attempt | null,
     now?: number,
   ): AnswerOutcome;
-  /** Before a re-send: its next generation, recorded — or null, and nothing is sent. */
+  /** Before a re-send: a new send identity, recorded — or null, and nothing is sent. */
   advance(scope: string, submissionId: string, binding: Binding): Attempt | null;
   /** A definite answer to send `attempt`: this submission's record, and only that, goes — if no later send started. */
   settle(
@@ -132,7 +132,7 @@ export function markerStore<C extends string>(
     }
     if (typeof value !== 'object' || value === null) return null;
     const entry = value as Record<string, unknown>;
-    // `attempt` is the slot's generation of the newest send (`lib/unresolved-tenancy.ts`).
+    // `attempt` is the identity of the send that last wrote it (`lib/unresolved-tenancy.ts`).
     const keys = Object.keys(entry)
       .filter((key) => key !== 'attempt')
       .sort()

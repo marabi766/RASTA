@@ -3,6 +3,7 @@
  */
 import { fetchMovements, fetchShipment, fetchShipmentTracking, fetchShipments } from './inventory';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * Reading the ledger and the shipments: what is kept (and what is not — a
@@ -14,7 +15,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'owner',
   organizationId: 'ORG_OWNER',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_OWNER'),
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',

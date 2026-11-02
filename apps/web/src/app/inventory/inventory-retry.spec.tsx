@@ -20,7 +20,7 @@ import {
   saveUnresolvedInventory,
   type ReplayStamp,
 } from '@/lib/unresolved-inventory';
-import { FIRST_ATTEMPT } from '@/lib/unresolved-tenancy';
+import { savedAttempt } from '@/test/unresolved-stores';
 import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
 
 import { InventoryCommandForm } from './InventoryCommandForm';
@@ -341,7 +341,7 @@ describe('never silently gone', () => {
 
   it('nothing is stored once a logout has started', () => {
     purgeAllUnresolvedInventory();
-    expect(saveUnresolvedInventory(WAREHOUSE, entry, BINDING)).toBe('UNAVAILABLE');
+    expect(saveUnresolvedInventory(WAREHOUSE, entry, BINDING).outcome).toBe('UNAVAILABLE');
   });
 
   it('from another login it is shown, never re-sent; another person’s page reduces it to a held marker', () => {
@@ -422,7 +422,7 @@ describe('never silently gone', () => {
             replay: STAMP,
           },
           BINDING,
-        ),
+        ).outcome,
       ).toBe('HELD');
     }
   });
@@ -534,7 +534,7 @@ describe('one unresolved command per warehouse', () => {
       correlationId: 'COR',
       replay: STAMP,
     };
-    expect(saveUnresolvedInventory(WAREHOUSE, receipt, BINDING)).toBe('SAVED');
+    expect(saveUnresolvedInventory(WAREHOUSE, receipt, BINDING).outcome).toBe('SAVED');
     expect(
       saveUnresolvedInventory(
         WAREHOUSE,
@@ -545,7 +545,7 @@ describe('one unresolved command per warehouse', () => {
           body: { stockItemId: ITEM_ID, quantityDelta: -5, sourceReference: null },
         },
         BINDING,
-      ),
+      ).outcome,
     ).toBe('HELD');
     clearUnresolvedInventory(WAREHOUSE, ADJUST_KEY, BINDING);
     expect(slot()).toMatchObject({ submissionId: RECEIVE_KEY, command: 'RECEIVE_STOCK' });
@@ -576,7 +576,7 @@ describe('one unresolved command per warehouse', () => {
           replay: STAMP,
         },
         BINDING,
-      ),
+      ).outcome,
     ).toBe('SAVED');
     expect(
       saveUnresolvedInventory(
@@ -589,7 +589,7 @@ describe('one unresolved command per warehouse', () => {
           replay: STAMP,
         },
         BINDING,
-      ),
+      ).outcome,
     ).toBe('UNAVAILABLE');
   });
 });
@@ -979,22 +979,18 @@ describe('a page brought back from the browser history', () => {
       correlationId: null,
       replay: STAMP,
     };
-    expect(saveUnresolvedInventory(WAREHOUSE, entry, BINDING)).toBe('SAVED');
+    const sent = savedAttempt(saveUnresolvedInventory(WAREHOUSE, entry, BINDING));
     const first = window.sessionStorage.getItem(WAREHOUSE_SLOT);
     expect(
-      saveUnresolvedInventory(WAREHOUSE, { ...entry, body: { ...RECEIPT, quantity: 5 } }, BINDING),
+      saveUnresolvedInventory(WAREHOUSE, { ...entry, body: { ...RECEIPT, quantity: 5 } }, BINDING)
+        .outcome,
     ).toBe('UNRESOLVED');
-    expect(saveUnresolvedInventory(WAREHOUSE, { ...entry, submissionId: OTHER }, BINDING)).toBe(
-      'HELD',
-    );
+    expect(
+      saveUnresolvedInventory(WAREHOUSE, { ...entry, submissionId: OTHER }, BINDING).outcome,
+    ).toBe('HELD');
     expect(window.sessionStorage.getItem(WAREHOUSE_SLOT)).toBe(first);
     expect(
-      answerUnresolvedInventory(
-        WAREHOUSE,
-        { ...entry, correlationId: 'COR' },
-        BINDING,
-        FIRST_ATTEMPT,
-      ),
+      answerUnresolvedInventory(WAREHOUSE, { ...entry, correlationId: 'COR' }, BINDING, sent),
     ).toBe('SAVED');
     expect(stored()).toMatchObject({ submissionId: KEY, body: RECEIPT, correlationId: 'COR' });
   });
@@ -1009,7 +1005,7 @@ describe('a page brought back from the browser history', () => {
  * not clear K's record, or the next page offers a fresh key and the same
  * adjustment is applied twice. Only the newest send's own answer may clear.
  */
-describe('a late answer of an earlier send (attempt generations)', () => {
+describe('a late answer of an earlier send (send identities, PR 363 reviews 3 and 4)', () => {
   const RECEIVE_KEY = 'sub_RECEIVEKEYRECEIVEKEY';
   const ADJUST_KEY = 'sub_ADJUSTKEYADJUSTKEYADJ';
   const KEYS = { receive: RECEIVE_KEY, adjust: ADJUST_KEY };
@@ -1055,12 +1051,13 @@ describe('a late answer of an earlier send (attempt generations)', () => {
     }
   }
 
-  /** The adjustment K / −5 sent from the warehouse page, its answer still out; then the page is left. */
-  async function adjustmentOut() {
-    const first = deferred<InventoryFormState>();
-    submit.mockImplementationOnce(() => first.promise);
-    const view = renderWarehouseCommands(KEYS);
+  const IDENTITY = /^[0-9a-f]{32}$/;
+  const identity = () => (stored() as { attempt?: unknown } | null)?.attempt;
+
+  /** The adjustment form drawn under K, filled with −5 and sent. */
+  async function sendAdjustment() {
     const form = await screen.findByRole('form', { name: ADJUST_LABEL });
+    expect(form.querySelector('input[name="submission"]')).toHaveValue(ADJUST_KEY);
     fireEvent.change(form.querySelector(`[name="${STOCK_ITEM_FIELD}"]`)!, {
       target: { value: ITEM_ID },
     });
@@ -1071,10 +1068,20 @@ describe('a late answer of an earlier send (attempt generations)', () => {
       target: { value: '5' },
     });
     await send(form);
+  }
+
+  /** The adjustment K / −5 sent from the warehouse page, its answer still out; then the page is left. */
+  async function adjustmentOut() {
+    const first = deferred<InventoryFormState>();
+    submit.mockImplementationOnce(() => first.promise);
+    const view = renderWarehouseCommands(KEYS);
+    await sendAdjustment();
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(stored()).toMatchObject({ submissionId: ADJUST_KEY, body: ADJUSTMENT, attempt: 1 });
+    const sent = identity();
+    expect(sent).toMatch(IDENTITY);
+    expect(stored()).toMatchObject({ submissionId: ADJUST_KEY, body: ADJUSTMENT, attempt: sent });
     view.unmount();
-    return first;
+    return { ...first, sent };
   }
 
   /** The page drawn again: the record brings back K's retry, which is pressed. */
@@ -1095,7 +1102,9 @@ describe('a late answer of an earlier send (attempt generations)', () => {
   it("Codex's sequence: the first refusal, arriving after the retry committed unseen, leaves K's record", async () => {
     const first = await adjustmentOut();
     const view = await retryAfterRemount(() => Promise.reject(lostResponse()));
-    expect(stored()).toMatchObject({ submissionId: ADJUST_KEY, attempt: 2 });
+    expect(stored()).toMatchObject({ submissionId: ADJUST_KEY });
+    expect(identity()).toMatch(IDENTITY);
+    expect(identity()).not.toBe(first.sent);
     const before = window.sessionStorage.getItem(WAREHOUSE_SLOT);
 
     await act(async () => first.resolve(REFUSAL));
@@ -1125,8 +1134,9 @@ describe('a late answer of an earlier send (attempt generations)', () => {
     const first = await adjustmentOut();
     await retryAfterRemount(async () => doubt('COR_RETRY'));
     const before = window.sessionStorage.getItem(WAREHOUSE_SLOT);
-    // The newer send's own answer in doubt did update it, at its generation.
-    expect(JSON.parse(before!)).toMatchObject({ attempt: 2, correlationId: 'COR_RETRY' });
+    // The newer send's own answer in doubt did update it, under its own identity.
+    expect(JSON.parse(before!)).toMatchObject({ correlationId: 'COR_RETRY' });
+    expect(identity()).not.toBe(first.sent);
     await act(async () => first.resolve(doubt('COR_FIRST')));
     expect(window.sessionStorage.getItem(WAREHOUSE_SLOT)).toBe(before);
   });
@@ -1150,7 +1160,8 @@ describe('a late answer of an earlier send (attempt generations)', () => {
       correlationId: null,
       retryRefused: true,
     }));
-    expect(stored()).toMatchObject({ submissionId: ADJUST_KEY, attempt: 2 });
+    expect(stored()).toMatchObject({ submissionId: ADJUST_KEY });
+    expect(identity()).not.toBe(first.sent);
     // The person sets it aside — what «وضعیت را دیدم؛ این درخواست را کنار بگذار» calls.
     // (React entangles the two sends' transitions, so the view under it is still
     // drawn as sending until the first send settles.)
@@ -1175,7 +1186,49 @@ describe('a late answer of an earlier send (attempt generations)', () => {
     expect(window.sessionStorage.getItem(WAREHOUSE_SLOT)).toBe(marker);
   });
 
-  it('a retry whose generation cannot be recorded is not sent, and K stays as it was', async () => {
+  it("review 4's sequence: K set aside, made again from the cached page and lost — the first send's late refusal keeps the new record", async () => {
+    // 1. K sent; its refusal is delayed. The page is left.
+    const first = await adjustmentOut();
+    try {
+      // 2–3. Back on the page, the person sets K aside — what the link calls; a middle
+      // click on it keeps this document, and the first send, alive.
+      const back = renderWarehouseCommands(KEYS);
+      expect(await screen.findByRole('button', { name: RETRY_LABEL })).toBeInTheDocument();
+      clearUnresolvedInventory(WAREHOUSE, ADJUST_KEY, BINDING);
+      expect(stored()).toBeNull();
+      back.unmount();
+      // 4. The cached page still carries K and its stamp: K is sent again as a first
+      // send, and this time it commits with its response lost.
+      submit.mockRejectedValueOnce(lostResponse());
+      const cached = renderWarehouseCommands(KEYS);
+      await sendAdjustment();
+      expect(submit).toHaveBeenCalledTimes(2);
+      expect(String(submit.mock.calls[1]![2].get('submission'))).toBe(ADJUST_KEY);
+      // (React entangles this send's transition with the first, still out, so its view
+      // is drawn once that settles; the record is written and answered already.)
+      const recreated = window.sessionStorage.getItem(WAREHOUSE_SLOT);
+      expect(JSON.parse(recreated!)).toMatchObject({ submissionId: ADJUST_KEY, body: ADJUSTMENT });
+      expect(identity()).toMatch(IDENTITY);
+      expect(identity()).not.toBe(first.sent);
+
+      // 5. The first send's refusal arrives: it says nothing of the new send.
+      await act(async () => first.resolve(REFUSAL));
+      expect(window.sessionStorage.getItem(WAREHOUSE_SLOT)).toBe(recreated);
+      expect(await screen.findByRole('button', { name: RETRY_LABEL })).toBeInTheDocument();
+      cached.unmount();
+
+      // A reload: K's uncertainty view, under K — no fresh key over a request that may have committed.
+      const { container } = renderWarehouseCommands({ receive: FRESH, adjust: OTHER });
+      expect(await screen.findByRole('button', { name: RETRY_LABEL })).toBeInTheDocument();
+      expect(container.querySelector('input[name="submission"]')).toHaveValue(ADJUST_KEY);
+      expect(container.querySelector(`input[value="${OTHER}"]`)).toBeNull();
+    } finally {
+      // Settled whatever happens, so a failure cannot leave a send out for the next test.
+      await act(async () => first.resolve(REFUSAL));
+    }
+  });
+
+  it('a retry whose identity cannot be recorded is not sent, and K stays as it was', async () => {
     // The first send's answer was lost: K in doubt, nothing out.
     const view = renderWarehouseCommands(KEYS);
     const form = await screen.findByRole('form', { name: ADJUST_LABEL });
@@ -1192,7 +1245,10 @@ describe('a late answer of an earlier send (attempt generations)', () => {
     await send(form);
     view.unmount();
     const before = window.sessionStorage.getItem(WAREHOUSE_SLOT);
-    expect(JSON.parse(before!)).toMatchObject({ submissionId: ADJUST_KEY, attempt: 1 });
+    expect(JSON.parse(before!)).toMatchObject({
+      submissionId: ADJUST_KEY,
+      attempt: expect.stringMatching(IDENTITY),
+    });
 
     renderWarehouseCommands(KEYS);
     const retry = await screen.findByRole('button', { name: RETRY_LABEL });

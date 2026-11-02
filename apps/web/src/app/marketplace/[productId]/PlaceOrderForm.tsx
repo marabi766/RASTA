@@ -27,6 +27,7 @@ import {
 import type { Offer } from '@/server/marketplace';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 
 import { submitPlaceOrder } from './place-order-actions';
 import {
@@ -162,7 +163,7 @@ function OrderForm({
             ? null
             : { ...view, viewOnly: true };
         },
-        // Its generation recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
         advance: () => advanceUnresolvedOrder(productId, submissionId, binding),
         send: () => submitPlaceOrder(previous, form),
         // The call itself failed — a lost response after the order may have
@@ -404,8 +405,7 @@ function UnconfirmedOrder({
         {/* A full navigation: the page mints a fresh submission id. Forgets the unresolved order first. */}
         <a
           href={newOrderHref}
-          onClick={onStartNew}
-          onAuxClick={onStartNew}
+          {...setAsideOnOpen(onStartNew)}
           className="underline self-center text-sm"
         >
           شروع سفارش تازه

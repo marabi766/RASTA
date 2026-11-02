@@ -58,6 +58,7 @@ import {
   type UnconfirmedOwnerCommand,
 } from './owner-form-state';
 import type { Binding } from '@/lib/unresolved-tenancy';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
@@ -218,7 +219,7 @@ function OwnerCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
-        // Its generation recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
         advance: () => advanceUnresolvedOwnerCommand(tenderId, submissionId, account),
         send: () => submitOwnerCommand(tenderId, previous, form),
         failed: (ended) => {
@@ -688,7 +689,7 @@ function UnconfirmedCommand({
       ) : null}
       {canForget ? (
         <div>
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت مناقصه را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

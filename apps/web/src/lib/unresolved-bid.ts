@@ -85,7 +85,7 @@ export const answerUnresolvedBid = (
   tenderId: string,
   entry: Omit<UnresolvedBid, 'savedAt'>,
   binding: Binding,
-  attempt: Attempt,
+  attempt: Attempt | null,
   now?: number,
 ): AnswerOutcome => store.answer(tenderId, entry, binding, attempt, now);
 
@@ -98,7 +98,7 @@ export const settleUnresolvedBid = (
   settlement: Settlement,
 ): void => store.settle(tenderId, submissionId, binding, attempt, settlement);
 
-/** Before a re-send: its next generation, recorded — or null, and nothing is sent. */
+/** Before a re-send: a new send identity, recorded — or null, and nothing is sent. */
 export const advanceUnresolvedBid = (
   tenderId: string,
   submissionId: string,

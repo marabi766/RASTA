@@ -12,7 +12,6 @@ import {
   QUARANTINE_TITLE,
   QuarantineGate,
 } from './UnresolvedQuarantine';
-import { FIRST_ATTEMPT } from '@/lib/unresolved-tenancy';
 
 /**
  * The gate's admission lifecycle (PR 405 review 4, R4; PM addendum E): the
@@ -146,7 +145,7 @@ it('memory holds (storage refusing the set-aside) follow the same lifecycle', as
       'PRD_ELSEWHERE',
       { submissionId: id, values: { offerId: 'OFR_1', quantity: '3' }, correlationId: 'COR' },
       ACCOUNT,
-      FIRST_ATTEMPT,
+      null,
     );
   const refuse = () =>
     jest.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {

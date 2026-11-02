@@ -345,7 +345,7 @@ export function answerUnresolvedDispute(
   transactionId: string,
   dispute: Omit<UnresolvedDispute, 'savedAt' | 'marker'>,
   binding: Binding,
-  attempt: Attempt,
+  attempt: Attempt | null,
   now: number = Date.now(),
 ): AnswerOutcome {
   return slot.answer(
@@ -369,7 +369,7 @@ export function settleUnresolvedDispute(
   slot.settle(binding, transactionId, submissionId, attempt, settlement);
 }
 
-/** Before a re-send of `submissionId`: its next generation, recorded — or null, and nothing is sent (`lib/unresolved-tenancy.ts`). */
+/** Before a re-send of `submissionId`: a new send identity, recorded — or null, and nothing is sent (`lib/unresolved-tenancy.ts`). */
 export function advanceUnresolvedDispute(
   transactionId: string,
   submissionId: string,

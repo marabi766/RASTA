@@ -48,6 +48,7 @@ import {
   type ReplayStamp,
   type RestoredInventory,
 } from '@/lib/unresolved-inventory';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 import { submitInventoryCommand } from './inventory-actions';
@@ -78,9 +79,11 @@ import {
  * back from the browser's history — starts from that record (`UnresolvedForm`
  * restores it on every mount), and its send path checks again: a matching id
  * alone is never a first send. Every send goes through the one boundary
- * (`lib/fenced-submission.ts`): a re-send records its generation before it
- * leaves, and only the newest send's definite answer may clear the record —
- * a first send's refusal arriving after a re-send left clears nothing.
+ * (`lib/fenced-submission.ts`): every send carries an identity of its own,
+ * recorded before it leaves, and only the definite answer of the send that
+ * wrote the record may clear it — a first send's refusal arriving after a
+ * re-send left, or after the record was set aside and made again under the
+ * same key, clears nothing.
  *
  * ## One unresolved command per slot
  *
@@ -257,7 +260,7 @@ function InventoryCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
-        // Its generation recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
         advance: () => advanceUnresolvedInventory(scope, submissionId, binding),
         send: () => submitInventoryCommand(scope, previous, form),
         failed: (ended) => {
@@ -265,8 +268,8 @@ function InventoryCommandFormBody({
           if (!unsent) return null;
           return ended ? { ...unsent, sessionEnded: true } : unsent;
         },
-        // Still in doubt: kept, at this send's generation. A definite answer: only
-        // the newest send's own, and only a first send's refusal or a confirmed
+        // Still in doubt: kept, under this send's identity. A definite answer: only
+        // that send's own, and only a first send's refusal or a confirmed
         // success, drops the record (`lib/fenced-submission.ts`).
         answer: (state, attempt) => answerUnresolvedInventory(scope, state, binding, attempt),
         settle: (attempt, settlement) =>
@@ -819,7 +822,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the warehouse or shipment again and offers what it allows. */}
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

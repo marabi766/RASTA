@@ -41,6 +41,7 @@ import {
   type UnconfirmedBid,
 } from './bid-form-state';
 import type { Binding } from '@/lib/unresolved-tenancy';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
@@ -186,7 +187,7 @@ function BidCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
-        // Its generation recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
         advance: () => advanceUnresolvedBid(tenderId, submissionId, account),
         send: () => submitBidCommand(tenderId, previous, form),
         failed: (ended) => {
@@ -574,7 +575,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the bid again and offers what it allows. */}
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             رسید پیشنهاد را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>
