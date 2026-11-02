@@ -84,12 +84,14 @@ const GROUP = `${TAG}_group`;
 // role with a `_migrator` beside it is one) — both sort before every migrator.
 const MEMBER = `aaa${TAG}m`;
 const FOREIGN = `aaa${TAG}f`;
+// R4-2: a role both the migrator and the runtime role are members of.
+const INHERITED = `aaa${TAG}i`;
 const ROLES = [
   ...[A, U, B, M].flatMap((svc) => [svc.runtime, svc.migrator]),
   FOREIGN,
   `${FOREIGN}_migrator`,
 ];
-const PLAIN_ROLES = [GRANTOR, OUTSIDER, PUBLIC_GRANTOR, GROUP, MEMBER];
+const PLAIN_ROLES = [GRANTOR, OUTSIDER, PUBLIC_GRANTOR, GROUP, MEMBER, INHERITED];
 /** Databases whose names libpq or a line reader would misread (R2-2). */
 const ODD_DATABASES = [
   `dbname=postgres application_name=${TAG}`,
@@ -217,6 +219,7 @@ before(() => {
     `CREATE ROLE ${GRANTOR} NOLOGIN; CREATE ROLE ${OUTSIDER} NOLOGIN;
      CREATE ROLE ${PUBLIC_GRANTOR} NOLOGIN; CREATE ROLE ${GROUP} NOLOGIN;
      CREATE ROLE ${MEMBER} NOLOGIN; CREATE ROLE ${FOREIGN} NOLOGIN;
+     CREATE ROLE ${INHERITED} NOLOGIN;
      CREATE ROLE ${FOREIGN}_migrator NOLOGIN;`,
     { database: 'postgres' },
   );
@@ -301,13 +304,13 @@ const NOOP_CASES = [
   {
     family: 'table grants',
     plant: `REVOKE INSERT ON public.r2_table FROM ${A.runtime}`,
-    drop: 'GRANT %s ON ALL %s IN SCHEMA',
+    drop: 'GRANT %s ON %s %s TO %I',
     expect: new RegExp(`${A.runtime} lacks INSERT on relation (public\\.)?r2_table`),
   },
   {
     family: 'default privileges',
     plant: `ALTER DEFAULT PRIVILEGES FOR ROLE ${A.migrator} IN SCHEMA public REVOKE INSERT ON TABLES FROM ${A.runtime}`,
-    drop: 'GRANT %s ON ALL %s IN SCHEMA',
+    drop: 'GRANT %s ON %s %s TO %I',
     expect: new RegExp(
       `${A.migrator} grants ${A.runtime} no default INSERT on new tables of public`,
     ),
@@ -566,6 +569,49 @@ const nspacl = (svc, schema) =>
 const can = (svc, sql) => ok(`SELECT (${sql})::text`, { database: svc.db });
 const noLedgerLeft = (svc) =>
   assert.equal(can(svc, "to_regnamespace('rasta_split_lent') IS NULL"), 'true');
+
+/**
+ * #540 r4 R4-1: what default mode's grants must never reach, whatever step a
+ * run stopped at — the migration ledger, and (when the fixture made them) an
+ * extension's relation and sequence. Read as privileges, and the ledger also
+ * by writing it as the runtime role.
+ */
+function assertBeyondPolicyNotHeld(svc) {
+  const schema = SCHEMA(svc);
+  const ledger = `${schema}._prisma_migrations`;
+  for (const privilege of ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) {
+    assert.equal(
+      can(svc, `has_table_privilege('${svc.runtime}', '${ledger}', '${privilege}')`),
+      'false',
+      `${svc.runtime} holds ${privilege} on ${ledger}`,
+    );
+  }
+  const write = psql(
+    `INSERT INTO ${ledger} (id, checksum, migration_name) VALUES ('r4', 'x', 'r4_forged')`,
+    { role: svc.runtime, database: svc.db },
+  );
+  assert.notEqual(write.status, 0, `${svc.runtime} wrote ${ledger}`);
+  assert.match(write.stderr, /permission denied for table _prisma_migrations/);
+  if (can(svc, `to_regclass('${schema}.r4_ext_table') IS NOT NULL`) === 'true') {
+    for (const privilege of ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) {
+      assert.equal(
+        can(svc, `has_table_privilege('${svc.runtime}', '${schema}.r4_ext_table', '${privilege}')`),
+        'false',
+        `${svc.runtime} holds ${privilege} on extension relation r4_ext_table`,
+      );
+    }
+    for (const privilege of ['USAGE', 'UPDATE']) {
+      assert.equal(
+        can(
+          svc,
+          `has_sequence_privilege('${svc.runtime}', '${schema}.r4_ext_seq', '${privilege}')`,
+        ),
+        'false',
+        `${svc.runtime} holds ${privilege} on extension sequence r4_ext_seq`,
+      );
+    }
+  }
+}
 
 for (const svc of [A, M, U]) {
   const schema = SCHEMA(svc);
@@ -896,10 +942,134 @@ test('R3-1 ledger: a run that stops leaves its loans recorded; the next returns 
   const crowded = split(A);
   assert.notEqual(crowded.status, 0);
   assert.match(crowded.stderr, /holds something besides the split's own ledger/);
+  // Refused after the handoff committed (#540 r4 R4-1): it granted the policy's
+  // objects only, so the runtime role still cannot write migration history.
+  assertBeyondPolicyNotHeld(A);
   ok('DROP SCHEMA rasta_split_lent CASCADE');
   splitOk(A);
   assert.deepEqual(findings(A), []);
 });
+
+// ---------------------------------------------------------------------------
+// R4-1: the grants commit, phase by phase, so neither the handoff nor the
+// exact table grants may give the runtime role anything beyond its policy —
+// a run stopped after either must leave the ledger and an extension's
+// relations and sequences out of its reach.
+// ---------------------------------------------------------------------------
+test("R4-1: a run stopped after the handoff (a refused ledger) or after the exact table grants leaves the runtime role nothing on the migration ledger or an extension's relation and sequence; it keeps DML on its tables", () => {
+  ok(
+    `CREATE TABLE public.r4_ext_table (id integer); CREATE SEQUENCE public.r4_ext_seq;
+     ALTER EXTENSION pgcrypto ADD TABLE public.r4_ext_table;
+     ALTER EXTENSION pgcrypto ADD SEQUENCE public.r4_ext_seq;`,
+  );
+  try {
+    assertBeyondPolicyNotHeld(A);
+    // The handoff commits; opening the loan ledger is then refused.
+    ok('CREATE SCHEMA rasta_split_lent; CREATE TABLE rasta_split_lent.other (id integer)');
+    const refused = split(A);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /holds something besides the split's own ledger/);
+    assertBeyondPolicyNotHeld(A);
+    ok('DROP SCHEMA rasta_split_lent CASCADE');
+    // The exact grants commit; the next step, the extension cleanup, fails.
+    const stopped = split(A, { fail: "string_to_array\\('extension', ','\\)" });
+    assert.match(stopped.wrapped, /failed/, 'the injected failure did not happen');
+    assert.notEqual(stopped.status, 0);
+    assertBeyondPolicyNotHeld(A);
+    for (const privilege of ['SELECT', 'INSERT', 'UPDATE', 'DELETE']) {
+      assert.equal(
+        can(A, `has_table_privilege('${A.runtime}', 'public.r2_table', '${privilege}')`),
+        'true',
+      );
+    }
+    splitOk(A);
+    assert.deepEqual(findings(A), []);
+    assertBeyondPolicyNotHeld(A);
+  } finally {
+    ok(
+      `ALTER EXTENSION pgcrypto DROP TABLE public.r4_ext_table;
+       ALTER EXTENSION pgcrypto DROP SEQUENCE public.r4_ext_seq;
+       DROP TABLE public.r4_ext_table; DROP SEQUENCE public.r4_ext_seq;`,
+    );
+    psql('DROP SCHEMA IF EXISTS rasta_split_lent CASCADE');
+  }
+  splitOk(A);
+  assert.deepEqual(findings(A), []);
+});
+
+// ---------------------------------------------------------------------------
+// R4-2: the migrator's access to its schema is its own, not borrowed — access
+// through PUBLIC, the runtime role or another role is what the cleanup removes
+// before the ledger is created as the migrator. In every mode.
+// ---------------------------------------------------------------------------
+const MIGRATOR_ACCESS = [
+  {
+    through: 'PUBLIC',
+    plant: (svc, schema) => [`GRANT USAGE, CREATE ON SCHEMA ${schema} TO PUBLIC`],
+    gone: (svc, schema) => `NOT has_schema_privilege('public', '${schema}', 'CREATE')`,
+  },
+  {
+    through: 'its membership in the runtime role',
+    plant: (svc, schema) => [
+      `GRANT USAGE, CREATE ON SCHEMA ${schema} TO ${svc.runtime}`,
+      `GRANT ${svc.runtime} TO ${svc.migrator}`,
+    ],
+    gone: (svc) => `NOT pg_has_role('${svc.migrator}', '${svc.runtime}', 'MEMBER')`,
+  },
+  {
+    through: 'a role it inherits, which the runtime role is a member of too',
+    plant: (svc, schema) => [
+      `GRANT ${INHERITED} TO ${svc.migrator}`,
+      `GRANT ${INHERITED} TO ${svc.runtime}`,
+      `GRANT USAGE, CREATE ON SCHEMA ${schema} TO ${INHERITED}`,
+    ],
+    gone: (svc, schema) => `NOT has_schema_privilege('${INHERITED}', '${schema}', 'USAGE')`,
+    after: (svc) => `REVOKE ${INHERITED} FROM ${svc.migrator}, ${svc.runtime}`,
+  },
+];
+const directMigratorAccess = (svc, schema) =>
+  ok(
+    `SELECT count(*) FROM pg_namespace n, aclexplode(n.nspacl) x
+      WHERE n.nspname = '${schema}' AND x.grantee = '${svc.migrator}'::regrole
+        AND x.privilege_type IN ('USAGE', 'CREATE')`,
+    { database: svc.db },
+  );
+
+for (const svc of [A, M, U]) {
+  const schema = SCHEMA(svc);
+  for (const access of MIGRATOR_ACCESS) {
+    test(`R4-2 (${MODE(svc)} split): the migrator owns ${schema} and revoked its own USAGE and CREATE, holding both only through ${access.through}; the cleanup takes that away, and the ledger is still created as the migrator`, () => {
+      ok(`REVOKE USAGE, CREATE ON SCHEMA ${schema} FROM ${svc.migrator}`, { database: svc.db });
+      for (const statement of access.plant(svc, schema)) ok(statement, { database: svc.db });
+      // Effective access, none of it the migrator's own entry.
+      assert.equal(directMigratorAccess(svc, schema), '0');
+      for (const privilege of ['USAGE', 'CREATE']) {
+        assert.equal(
+          can(svc, `has_schema_privilege('${svc.migrator}', '${schema}', '${privilege}')`),
+          'true',
+        );
+      }
+      splitOk(svc);
+      assert.deepEqual(findings(svc), []);
+      assert.equal(can(svc, access.gone(svc, schema)), 'true', 'the cleanup left the access');
+      assert.equal(directMigratorAccess(svc, schema), '2');
+      assert.equal(
+        can(
+          svc,
+          `(SELECT relowner FROM pg_class WHERE oid = '${schema}._prisma_migrations'::regclass) = '${svc.migrator}'::regrole`,
+        ),
+        'true',
+      );
+      assert.equal(
+        can(svc, `has_schema_privilege('${svc.runtime}', '${schema}', 'USAGE')`),
+        'true',
+      );
+      noLedgerLeft(svc);
+      if (access.after) ok(access.after(svc), { database: svc.db });
+      assert.deepEqual(findings(svc), []);
+    });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // R2-3: the value of a stored setting is never printed.
