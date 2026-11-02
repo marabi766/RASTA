@@ -1,3 +1,4 @@
+import { setTenantEligibilityFixture } from '@rasta/testing';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
 import { Connection } from '@temporalio/client';
 import { Worker } from '@temporalio/worker';
@@ -57,9 +58,7 @@ it('a cancelled order recovered after missed start completes once without creati
     expect(ack).toHaveBeenCalledTimes(1);
     expect(ack.mock.calls[0]?.[1]).toBe(true);
     ack.mockRestore();
-    await prisma.client
-      .$executeRaw`UPDATE "order" SET saga_start_claim_expires_at = clock_timestamp() - interval '1 second'
-      WHERE id = ${order.id} AND organization_id = ${org.buyer}`;
+    await setTenantEligibilityFixture(prisma, 'sagaStartExpired', org.buyer, [order.id]);
     // The actual server now answers AlreadyStarted, and the DB records it.
     await asActor({ organizationId: org.buyer }, () => client.start(order.id));
     expect(

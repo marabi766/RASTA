@@ -103,6 +103,9 @@ export async function setEligibilityFixture(
 // Fixtures of tables keyed by something other than `id`, always restricted to
 // one organization: $1 is the organization, $2 the keys.
 const tenantFixtures = {
+  // Saga-start retries preserve the claim pair; only an existing lease is aged.
+  sagaStartDueAndExpired: `UPDATE "order" SET saga_start_next_attempt_at = now() - interval '1 second', saga_start_claim_expires_at = CASE WHEN saga_start_claim_token IS NULL THEN NULL ELSE now() - interval '1 second' END WHERE organization_id = $1 AND id = ANY($2::text[])`,
+  sagaStartExpired: `UPDATE "order" SET saga_start_claim_expires_at = now() - interval '1 second' WHERE organization_id = $1 AND id = ANY($2::text[]) AND saga_start_claim_token IS NOT NULL`,
   // asset_transfer_fence: one per machine, keyed by asset_id.
   transferFenceExpired: `UPDATE asset_transfer_fence SET expires_at = now() - interval '1 second' WHERE organization_id = $1 AND asset_id = ANY($2::text[])`,
   // notification_dedupe, keyed by dedupe_key: aged past retention, keeping
