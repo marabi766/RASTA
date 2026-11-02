@@ -182,3 +182,22 @@ it('cancellation listeners are removed when the transport exits', async () => {
   expect(add).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
   expect(remove).toHaveBeenCalledWith('abort', add?.mock.calls[0]?.[1]);
 });
+
+it('an always-ready chunk stream cannot starve the body deadline timer', async () => {
+  let chunks = 0;
+  jest.spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          chunks++;
+          controller.enqueue(Uint8Array.of(32));
+        },
+      }),
+      { status: 200 },
+    ),
+  );
+  await expect(client('http://economic.test', 10).createObligation(INPUT)).rejects.toMatchObject({
+    code: 'UPSTREAM_UNAVAILABLE',
+  });
+  expect(chunks).toBeLessThan(ECONOMIC_RESPONSE_MAX_BYTES);
+});

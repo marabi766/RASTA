@@ -41,7 +41,7 @@ import { economicCallDuration, economicCallsTotal } from '../observability/metri
 /** Transport ceiling, including error envelopes and paged obligation lookups. */
 export const ECONOMIC_RESPONSE_MAX_BYTES = 1024 * 1024;
 
-async function readEconomicJson(response: Response): Promise<unknown> {
+async function readEconomicJson(response: Response, deadlineAt: number): Promise<unknown> {
   const length = response.headers.get('content-length');
   if (length !== null && Number(length) > ECONOMIC_RESPONSE_MAX_BYTES) {
     throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
@@ -55,6 +55,8 @@ async function readEconomicJson(response: Response): Promise<unknown> {
   let size = 0;
   try {
     for (;;) {
+      // Always-ready microtasks can delay the abort timer's event-loop slot.
+      if (performance.now() >= deadlineAt) throw RastaError.upstreamUnavailable(ECONOMIC_SERVICE);
       const { done, value } = await reader.read();
       if (done) break;
       if (value.byteLength > ECONOMIC_RESPONSE_MAX_BYTES - size)
@@ -592,7 +594,7 @@ export class EconomicClient {
             signal,
           }),
         async (response) => {
-          const parsed = await readEconomicJson(response);
+          const parsed = await readEconomicJson(response, deadlineAt);
           // JSON parsing is synchronous; check the monotonic deadline again
           // before accepting it, even if parsing delayed the timer callback.
           if (performance.now() >= deadlineAt)
