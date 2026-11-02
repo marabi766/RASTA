@@ -357,6 +357,11 @@ describe('EventConsumer startup failure', () => {
   type FailurePoint = 'none' | 'subscribe' | 'run';
 
   class FakeKafkaConsumer {
+    readonly events = { CRASH: 'consumer.crash' };
+    on(): () => void {
+      return () => undefined;
+    }
+
     connects = 0;
     disconnects = 0;
     runs = 0;

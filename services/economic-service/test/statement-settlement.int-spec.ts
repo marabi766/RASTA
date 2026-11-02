@@ -1323,6 +1323,8 @@ async function brokerOver(
   );
   (consumer as unknown as { kafka: unknown }).kafka = {
     consumer: () => ({
+      events: { CRASH: 'consumer.crash' },
+      on: () => () => undefined,
       connect: async () => undefined,
       subscribe: async () => undefined,
       disconnect: async () => undefined,

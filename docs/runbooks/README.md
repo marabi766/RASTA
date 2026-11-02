@@ -171,3 +171,5 @@ Runbook ناموجود حساب نکند. تاریخ‌ها از [`../20-day-30-
 3. **هرگز داده مالی را دستی اصلاح نکن.** اصلاح فقط با Reversal Entry از راه API.
 4. **همه‌چیز را ثبت کن.** `correlationId`، زمان، اقدام، نتیجه.
 5. **پس از رفع، علت ریشه‌ای را بنویس** و به Backlog اضافه کن.
+
+- [Consumer crash loop](consumer-crash-loop.md): terminal consumer exit, supervisor backoff, lag gaps and source retention.

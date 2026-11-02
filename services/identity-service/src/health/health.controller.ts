@@ -1,6 +1,6 @@
 import { Controller, Get, HttpCode, HttpStatus, Res, VERSION_NEUTRAL } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Public } from '@rasta/nest-common';
+import { Public, assertConsumerHealth } from '@rasta/nest-common';
 import { metricsText, metricsContentType } from '@rasta/observability';
 import type { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
@@ -39,6 +39,7 @@ export class HealthController {
   @Public('Liveness probe; exposed only on the internal network')
   @ApiOperation({ summary: 'Process liveness' })
   live() {
+    assertConsumerHealth(SERVICE_NAME);
     return {
       status: 'ok',
       service: SERVICE_NAME,
@@ -53,6 +54,7 @@ export class HealthController {
     // The database is the only hard dependency: without it every request
     // fails. Kafka being down delays event publication but the outbox retains
     // the events, so it must not take the service out of rotation (ADR-021).
+    assertConsumerHealth(SERVICE_NAME);
     const database = await this.prisma.isHealthy();
 
     const checks = { database, kafka: await this.publisher.isHealthy() };

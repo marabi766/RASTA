@@ -21,10 +21,13 @@ import {
   isLegacyRefusal,
   legacyParse,
   RETRY_TOPIC_SUFFIX,
+  TOPIC_CONSUMERS,
   type DlqReason,
   type EventEnvelope,
 } from '@rasta/contracts';
-import { dlqMessagesTotal } from '@rasta/observability';
+import { dlqMessagesTotal, consumerCrashesTotal, consumerExpected } from '@rasta/observability';
+import { consumerFailures } from './consumer-health';
+import { fatalShutdown } from '../lifecycle/fatal-shutdown';
 import { createSystemContext, runWithContext } from '../context/request-context';
 import { RastaError } from '../errors/rasta-error';
 import { LOG_TEXT_MAX, safeLogText } from '../errors/safe-log-text';
@@ -59,13 +62,16 @@ import { withinDeadline, type OutboxStopOptions } from '../outbox/outbox';
  * What it deliberately does not do is commit an offset it could not account
  * for. If even the dead-letter write fails, the error propagates and nothing
  * is committed past the message. A retriable failure (a broker away) is
- * retried by kafkajs and the partition stalls meanwhile. A non-retriable one —
+ * retried by kafkajs; consumption pauses while it restarts the runner. A non-retriable one —
  * MESSAGE_TOO_LARGE, a dead letter its topic refuses — crashes the kafkajs
  * consumer, which kafkajs does not restart: every partition this consumer
  * reads stops until the service restarts and meets the message again, and
- * {@link EventConsumer.isRunning} does not notice. Either is visible in lag
- * (where lag is alerted on) and recoverable while the source topic retains
- * the message; a silently skipped financial event is neither. Which dead
+ * {@link EventConsumer.isRunning} becomes false. Every crash is counted with
+ * a closed reason; a terminal crash makes both health probes red and requests the existing
+ * bounded graceful shutdown with exit code 1. The supervisor must restart with
+ * backoff. No offset is skipped: replay remains possible only while the source
+ * retains the record. Retriable crashes stay running through KafkaJS reconnects;
+ * STOP/DISCONNECT alone do not request an exit. Which dead
  * letters can still be refused is stated in `@rasta/contracts`
  * dead-letter-size.ts (known escapes; PR #378 r4).
  *
@@ -317,11 +323,40 @@ interface ConsumerRun {
   deadlineAt?: number;
   /** Set when the stop gave up waiting at its deadline. */
   abandoned: boolean;
+  terminalReason?: ConsumerCrashReason;
+  failedDelivery?: { topic: string; partition: number; offset: string };
   /**
    * Present while a stop is waiting for the disconnect: re-reads `deadlineAt`, so a later,
    * earlier deadline ends the wait at that one (PR #493 r1, F1).
    */
   rearm?: () => void;
+}
+
+/** Finite classification, even when an arbitrary thrown error has a payload in its name. */
+export const CONSUMER_CRASH_REASONS = [
+  'message_too_large',
+  'protocol_error',
+  'connection_error',
+  'other',
+] as const;
+export type ConsumerCrashReason = (typeof CONSUMER_CRASH_REASONS)[number];
+
+function crashReason(error: unknown): ConsumerCrashReason {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as Error & { type?: unknown; cause?: unknown };
+    if (candidate.type === 'MESSAGE_TOO_LARGE') return 'message_too_large';
+    if (candidate.cause === undefined) break;
+    current = candidate.cause;
+  }
+  if (current instanceof Error) {
+    if (current.name === 'KafkaJSProtocolError') return 'protocol_error';
+    if (['KafkaJSConnectionError', 'KafkaJSConnectionClosedError'].includes(current.name))
+      return 'connection_error';
+  }
+  return 'other';
 }
 
 export class EventConsumer {
@@ -386,6 +421,18 @@ export class EventConsumer {
       logLevel: 1, // ERROR — kafkajs is extremely chatty at INFO
     });
     this.initializeDlqSeries();
+    for (const reason of CONSUMER_CRASH_REASONS) {
+      consumerCrashesTotal.inc({ service: this.serviceName(), group: options.groupId, reason }, 0);
+    }
+    const declaredService = consumerGroupService(options.groupId);
+    if (declaredService && isDeclaredConsumer(declaredService)) {
+      const groups: readonly string[] = TOPIC_CONSUMERS[declaredService].groups;
+      if (groups.includes(options.groupId)) {
+        for (const topic of subscribedTopics(options.topics)) {
+          consumerExpected.set({ service: declaredService, group: options.groupId, topic }, 1);
+        }
+      }
+    }
   }
 
   /**
@@ -411,8 +458,18 @@ export class EventConsumer {
     }
   }
 
+  private serviceName(): string {
+    return consumerGroupService(this.options.groupId) ?? this.options.clientId;
+  }
+
+  /** The terminal classification survives stop(); recovery requires a new process. */
+  failureReason(): ConsumerCrashReason | undefined {
+    return this.run.terminalReason;
+  }
+
   async start(): Promise<void> {
     if (this.running) return;
+    if (this.run.terminalReason) throw new Error('CONSUMER_TERMINAL_CRASH');
     const run: ConsumerRun = { stopRequested: false, abandoned: false };
     this.run = run;
     this.stopping = undefined;
@@ -424,6 +481,30 @@ export class EventConsumer {
       // that would only make the backlog worse.
       sessionTimeout: CONSUMER_SESSION_TIMEOUT_MS,
       allowAutoTopicCreation: false,
+    });
+
+    // KafkaJS emits STOP and DISCONNECT before CRASH, including for retriable crashes.
+    // They cannot decide terminality. stop() itself owns normal shutdown state.
+    consumer.on(consumer.events.CRASH, ({ payload }) => {
+      if (this.run !== run || run.stopRequested || run.terminalReason) return;
+      const reason = crashReason(payload.error);
+      consumerCrashesTotal.inc({
+        service: this.serviceName(),
+        group: this.options.groupId,
+        reason,
+      });
+      if (payload.restart) return;
+      run.terminalReason = reason;
+      this.running = false;
+      consumerFailures.report(this.serviceName());
+      const at = run.failedDelivery;
+      this.logger.error(
+        `Consumer terminal crash: service=${logField(this.serviceName())} group=${logField(this.options.groupId)} reason=${reason}` +
+          (at
+            ? ` topic=${logField(at.topic)} partition=${at.partition} offset=${logField(at.offset)}`
+            : ''),
+      );
+      fatalShutdown.request();
     });
 
     await consumer.connect();
@@ -448,16 +529,22 @@ export class EventConsumer {
         // reason the producer sets a partition key; processing concurrently
         // inside a partition would throw it away.
         eachMessage: async ({ topic, partition, message, heartbeat }) => {
-          await this.handleMessage(
-            topic,
-            partition,
-            message.value,
-            message.headers,
-            message.offset,
-            message.key,
-            heartbeat,
-            run,
-          );
+          try {
+            await this.handleMessage(
+              topic,
+              partition,
+              message.value,
+              message.headers,
+              message.offset,
+              message.key,
+              heartbeat,
+              run,
+            );
+            run.failedDelivery = undefined;
+          } catch (error) {
+            run.failedDelivery = { topic, partition, offset: message.offset };
+            throw error;
+          }
           // kafkajs resolves the offset as soon as this returns. A message
           // the stop gave up on at its deadline must not return, however it
           // ended — a handler or a dead letter that finished late included:
@@ -472,10 +559,12 @@ export class EventConsumer {
     }
 
     this.consumer = consumer;
-    this.running = true;
-    this.logger.log(
-      `Consuming ${subscribedTopics(this.options.topics).join(', ')} as group ${this.options.groupId}`,
-    );
+    this.running = !run.terminalReason && !run.stopRequested;
+    if (this.running) {
+      this.logger.log(
+        `Consuming ${subscribedTopics(this.options.topics).join(', ')} as group ${this.options.groupId}`,
+      );
+    }
   }
 
   /**
