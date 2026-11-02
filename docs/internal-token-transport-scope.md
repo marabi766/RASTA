@@ -338,22 +338,42 @@ followed the timer's callback). Outside the shared boundary itself:
   error unless the file is in `TIMER_ABORT_MODULES`;
 - **C** — a member of the global object **read** by a computed name that is not a
   constant (`new globalThis[key]()`) is an error too (it could be either): fail
-  closed, same exemption as A. One read/write classifier and one key classifier serve
-  member access and destructuring alike (#536 r3 N1/N2):
+  closed, same exemption as A. One value resolver, one read/write classifier and one key
+  classifier serve member access and destructuring alike (#536 r3 N1/N2, r4 N1):
+  - _Values_ (the resolver). One function says what an expression can be and what a
+    destructuring target is handed, each in terms of the other, so a value is followed the
+    same way wherever it is read: a name (a variable holds **every** value written to it —
+    `let g; g = globalThis` too), the right side of a declaration or assignment, a
+    **chain** of assignments (`({ [k]: C } = g = globalThis)`), a sequence, a conditional,
+    a logical expression, a type assertion, a spread copy, a member of a literal object or
+    array (`box.g[k]`, `list[0][k]`), a member of the global that is itself a global object
+    (`globalThis.global`), a default (`function f({ [k]: C } = globalThis)`, a parameter
+    `g = globalThis`), a `for…of` head over a literal array, a nested pattern over a
+    literal object or array, an object pattern over a literal **array** by index
+    (`({ 0: { [k]: C } } = [globalThis])`) and a **rest** element, which takes the rest of
+    the array (`([...[{ [k]: C }]] = [globalThis])`).
+  - _Never a silent pass._ The resolver stops at 64 levels or 2000 steps; running out
+    counts as "could be the global object" and is refused (a provably different leaf at
+    depth 12 is still resolved exactly). For a **pattern** with a computed key, any source
+    the resolver cannot prove is not the global object is refused too: a parameter with no
+    default (a default does not prove it, the caller may pass a value), a rest parameter, a
+    catch clause, a call, `new`, `await`, `this`, an import, an ambient declaration, an
+    iterator, `Object.assign({}, globalThis)`, `Reflect.get(…)`. To read a computed key from
+    such a value, use a key that is provably numeric or a symbol, or name the property. A
+    **member read** `x[k]` is refused when `x` resolves to the global object, or the resolver
+    gave up, but not when `x` is simply unknown (indexing is everywhere).
   - _Reads_ (refused): a plain use, a call or `.member`; every compound and logical
-    assignment (`+=`, `||=`, `??=`, …) and `++`/`--`; a destructuring declaration; a
-    destructuring **assignment** (`({ [k]: C } = globalThis)`, with defaults, nested
-    over a literal source, array form); a parameter pattern defaulting to the global
-    (`function f({ [k]: C } = globalThis)`); a default inside a pattern; a `for…of`
-    head over a literal array. _Pure writes_ (not refused, nothing is read): `g[k] = v`
+    assignment (`+=`, `||=`, `??=`, …) and `++`/`--`; a destructuring declaration, assignment,
+    default, parameter, loop head. _Pure writes_ (not refused, nothing is read): `g[k] = v`
     (also through a type assertion), a destructuring-assignment target (`[g[k]] = xs`,
     `({ a: g[k] = 1 } = o)`, rest targets), a `for…in`/`for…of` target, `delete g[k]`.
   - _Keys_: excluded only when **provably** a number, bigint or symbol — numeric/bigint
     literals, unary `+ - ~` and arithmetic/bitwise of provable numerics, `NaN`,
-    `Infinity`, `Number(…)`, `BigInt(…)` (these four only when they resolve to the
-    unshadowed global), `Symbol(…)`, `Symbol.for(…)`, `Symbol.<x>`, a constant alias of
-    any of them, a conditional whose branches both are. Anything else (`x - 1`, `-x`,
-    `Math.floor(x)`, a shadowed `Number`) is treated as possibly naming a global.
+    `Infinity`, `Number(…)`, `BigInt(…)`, `Math.<fn>(…)`, `Number.parseInt/parseFloat(…)`,
+    `Math.PI`-style and `Number.MAX_SAFE_INTEGER`-style constants (each only when the name
+    resolves to the unshadowed global), `Symbol(…)`, `Symbol.for(…)`, `Symbol.<x>`, a
+    constant alias of any of them, a conditional whose branches both are. Anything else
+    (`x - 1`, `-x`, `String(1)`, a shadowed `Number`) is treated as possibly naming a global.
 
 The shared boundary is exempt by its **exact canonical repository path**,
 `packages/nest-common/src/http/exchange-deadline.ts` (real path relative to the real
@@ -368,20 +388,22 @@ readiness) and shutdown/client-close controllers with no timer.
 **Trust model (PM decision D-095, with D-086/D-088/D-094).** The rule guards against an
 _accidental_ early-clear deadline; deliberately obfuscated code is caught by PR review.
 These forms are accepted residual and produce **no diagnostic** (each is pinned by a
-test, so this list cannot drift): a global object reached by anything but a name or a
-direct alias of one (nested `globalThis.global.AbortController`, a destructured
-`const { global: g } = globalThis`, an alias made by assignment, `Reflect.get(globalThis,
-'setTimeout')`, a host handed in as a parameter, a qualified type annotation
-`globalThis.AbortController`, `timers[key]`, a timer inside a dynamic-import callback); an
-abort not reached by a member or binding named `abort` (`Reflect.get(c, 'abort')`, a
-constant enum/object member, a constant conditional, a constant chain longer than the
-folding depth, a name read from data); a timer and a controller that both come from
-other modules into one that owns neither (the module that owns either is the one
-refused); and, for rule C, a computed read whose global object or destructuring source is
-not named or directly aliased — a parameter that merely defaults to the global
-(`function f(g = globalThis) { g[k] }`), the global inside a logical or conditional
-expression, a spread copy, a pattern fed by a handed-in value (a parameter with no
-default, a catch clause, a call, a `for…of` over a variable).
+test, so this list cannot drift): a timer or controller host reached by `Reflect.get(globalThis,
+'setTimeout')`, handed in as a parameter (`h.setTimeout(…)`), returned by a call, or named by
+a qualified type annotation `globalThis.AbortController`; `timers[key]`; a timer inside a
+dynamic-import callback; an abort not reached by a member or binding named `abort`
+(`Reflect.get(c, 'abort')`, a constant enum/object member, a constant conditional, a
+constant chain longer than the folding depth, a name read from data); a timer and a
+controller that both come from other modules into one that owns neither (the module that
+owns either is the one refused); and, for rule C, a computed **member read** whose object the
+resolver does not prove is the global object: a call result (`getGlobal()[k]`,
+`Object.assign({}, globalThis)[k]`, `[globalThis].at(0)[k]`), a parameter with no default, an
+import, the global reached through `Reflect.get`, or a member added to a literal container
+after it was written (`box.g = globalThis`, `list.push(globalThis)`, `Object.assign(box, …)`). The resolver follows variables of the
+module only, treats an undeclared name other than `globalThis`, `window`, `self`, `global`,
+`frames` as a platform name (`process`), and ignores getters and proxies. A computed key in a
+destructuring **pattern** over such a value is not residual: it is refused (see above) — except
+through such an added member.
 
 The two boundaries compose (merge of #502/#507 into PR #492): `internalGet` sends on the
 `InternalHttpClient` sender, which is `internalFetch` with redirects refused, inside
