@@ -503,6 +503,7 @@ test('each migration-managed policy is exactly what its migrations grant', () =>
     'INSERT',
     'DELETE',
   ]);
+  assert.deepEqual(allowed('audit', 'audit.rfq_receipt_pending'), ['SELECT', 'INSERT', 'DELETE']);
   assert.ok(!rows.some((r) => /audit_event_/.test(r.object) && r.cls === 'relation'));
   assert.deepEqual(
     rows.filter((r) => r.cls === 'type').map((r) => `${r.policy} ${r.object}`),

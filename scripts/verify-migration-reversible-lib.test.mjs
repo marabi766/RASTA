@@ -200,9 +200,16 @@ test('the audit entry names every object AUD-003 adds', () => {
     'ix_bid_access_evidence_tender',
     // D-046's evidence, added by 20261003120000_payment_reconciliation_evidence.
     'ix_payment_reconciliation_evidence_intent',
+    'ix_rfq_receipt_pending_held',
     // The held receipts, added by 20261001130000_tender_receipt_pending.
     'ix_tender_receipt_pending_held',
     'ux_payment_reconciliation_evidence_audit_event',
+    // The RFQ-evidence projection (20261102100000_rfq_evidence), in sorted position.
+    'ux_rfq_receipt_link_event',
+    'ux_rfq_receipt_link_previous',
+    'ux_rfq_receipt_link_receipt',
+    'ux_rfq_receipt_pending_previous',
+    'ux_rfq_receipt_pending_receipt',
     'ux_tender_receipt_link_event',
     'ux_tender_receipt_link_previous',
     'ux_tender_receipt_link_receipt',
@@ -217,6 +224,7 @@ test('the audit entry names every object AUD-003 adds', () => {
     'payment_reconciliation_evidence_append_only',
     'refuse_chain_head_regression',
     'refuse_mutation',
+    'rfq_evidence_append_only',
     'tender_evidence_append_only',
   ]);
 

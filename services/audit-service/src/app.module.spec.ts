@@ -13,11 +13,13 @@ import { PrismaService } from './prisma/prisma.service';
 import { DomainProjectorConsumer } from './consumers/domain-projector.consumer';
 import { AuditTrailConsumer } from './consumers/audit-trail.consumer';
 import { OpsReplayConsumer } from './consumers/ops-replay.consumer';
+import { RfqEvidenceConsumer } from './consumers/rfq-evidence.consumer';
 import { TenderEvidenceConsumer } from './consumers/tender-evidence.consumer';
 import { OPS_REPLAY_CONSUMER } from './audit/ops-replay.mapper';
 import { AuditRepository } from './audit/audit.repository';
 import { AuditController } from './audit/audit.controller';
 import { AuditInternalController } from './audit/audit-internal.controller';
+import { RfqEvidenceController } from './audit/rfq-evidence.controller';
 import { TenderEvidenceController } from './audit/tender-evidence.controller';
 import {
   AuditEventDetailQueryPipe,
@@ -172,6 +174,7 @@ describe('audit-service composition root', () => {
       AuditController,
       AuditInternalController,
       TenderEvidenceController,
+      RfqEvidenceController,
     ]);
   });
 
@@ -435,6 +438,7 @@ describe('audit-service composition root', () => {
       startable('trail', order) as unknown as AuditTrailConsumer,
       startable('replay', order) as unknown as OpsReplayConsumer,
       startable('evidence', order) as unknown as TenderEvidenceConsumer,
+      startable('rfqEvidence', order) as unknown as RfqEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       asMigrator,
@@ -451,6 +455,7 @@ describe('audit-service composition root', () => {
       startable('trail', order) as unknown as AuditTrailConsumer,
       startable('replay', order) as unknown as OpsReplayConsumer,
       startable('evidence', order) as unknown as TenderEvidenceConsumer,
+      startable('rfqEvidence', order) as unknown as RfqEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -459,7 +464,7 @@ describe('audit-service composition root', () => {
     await module.onModuleInit();
     await module.onApplicationShutdown();
 
-    expect(order).toEqual(['projector', 'trail', 'replay', 'evidence']);
+    expect(order).toEqual(['projector', 'trail', 'replay', 'evidence', 'rfqEvidence']);
   });
 
   it('fails startup when the audit-trail consumer cannot start', async () => {
@@ -472,6 +477,7 @@ describe('audit-service composition root', () => {
       startable('trail', order, true) as unknown as AuditTrailConsumer,
       startable('replay', order) as unknown as OpsReplayConsumer,
       startable('evidence', order) as unknown as TenderEvidenceConsumer,
+      startable('rfqEvidence', order) as unknown as RfqEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -492,6 +498,7 @@ describe('audit-service composition root', () => {
       startable('trail', order) as unknown as AuditTrailConsumer,
       startable('replay', order, true) as unknown as OpsReplayConsumer,
       startable('evidence', order) as unknown as TenderEvidenceConsumer,
+      startable('rfqEvidence', order) as unknown as RfqEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -501,6 +508,27 @@ describe('audit-service composition root', () => {
     await module.onApplicationShutdown();
 
     expect(order).toEqual(['projector', 'trail', 'replay']);
+  });
+
+  it('fails startup when the RFQ-evidence consumer cannot start', async () => {
+    // The externally held quotation head silently absent would let an opening compare
+    // against nothing while every other path looked healthy.
+    const order: string[] = [];
+    const module = new AppModule(
+      startable('projector', order) as unknown as DomainProjectorConsumer,
+      startable('trail', order) as unknown as AuditTrailConsumer,
+      startable('replay', order) as unknown as OpsReplayConsumer,
+      startable('evidence', order) as unknown as TenderEvidenceConsumer,
+      startable('rfqEvidence', order, true) as unknown as RfqEvidenceConsumer,
+      idleRepository,
+      providerFor(ENV).useFactory?.() as AuditEnv,
+      runtimeRole,
+    );
+
+    await expect(module.onModuleInit()).rejects.toThrow(/does not host this topic-partition/);
+    await module.onApplicationShutdown();
+
+    expect(order).toEqual(['projector', 'trail', 'replay', 'evidence', 'rfqEvidence']);
   });
 
   it('stops its capacity sampler on shutdown', async () => {
@@ -514,6 +542,7 @@ describe('audit-service composition root', () => {
       startable('trail', order) as unknown as AuditTrailConsumer,
       startable('replay', order) as unknown as OpsReplayConsumer,
       startable('evidence', order) as unknown as TenderEvidenceConsumer,
+      startable('rfqEvidence', order) as unknown as RfqEvidenceConsumer,
       idleRepository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -541,6 +570,7 @@ describe('audit-service composition root', () => {
       startable('trail', order) as unknown as AuditTrailConsumer,
       startable('replay', order) as unknown as OpsReplayConsumer,
       startable('evidence', order) as unknown as TenderEvidenceConsumer,
+      startable('rfqEvidence', order) as unknown as RfqEvidenceConsumer,
       repository,
       providerFor(ENV).useFactory?.() as AuditEnv,
       runtimeRole,
@@ -565,7 +595,7 @@ describe('audit-service composition root', () => {
     });
 
     it('injects the validated environment by its token', () => {
-      expect(Reflect.getMetadata('self:paramtypes', AppModule)).toEqual([{ index: 5, param: ENV }]);
+      expect(Reflect.getMetadata('self:paramtypes', AppModule)).toEqual([{ index: 6, param: ENV }]);
     });
 
     it('exports nothing for producer silence under the default empty set', async () => {
@@ -577,6 +607,7 @@ describe('audit-service composition root', () => {
         startable('trail', order) as unknown as AuditTrailConsumer,
         startable('replay', order) as unknown as OpsReplayConsumer,
         startable('evidence', order) as unknown as TenderEvidenceConsumer,
+        startable('rfqEvidence', order) as unknown as RfqEvidenceConsumer,
         idleRepository,
         providerFor(ENV).useFactory?.() as AuditEnv,
         runtimeRole,
@@ -607,6 +638,7 @@ describe('audit-service composition root', () => {
         recording('trail') as unknown as AuditTrailConsumer,
         recording('replay') as unknown as OpsReplayConsumer,
         recording('evidence') as unknown as TenderEvidenceConsumer,
+        recording('rfqEvidence') as unknown as RfqEvidenceConsumer,
         idleRepository,
         providerFor(ENV).useFactory?.() as AuditEnv,
         runtimeRole,
