@@ -22,10 +22,10 @@
 //
 // So no step's failure is swallowed, whichever step it is: the attribute
 // reset, REASSIGN, ownership, the migrator and its password, memberships,
-// settings, the ACL cleanups, the table grants, the function repair, the
-// database and schema grants and revokes, the ledger, UTC, the
-// statement_timeout, the end-state checks, the runtime password and the
-// logins. Each family is named below and must be among the calls, so the
+// settings, the ledger of lent schema access, the ACL cleanups, the table
+// grants, the function repair, the database and schema grants and revokes, the
+// ledger, UTC, the return of the lent schema access, the statement_timeout,
+// the end-state checks, the runtime password and the logins. Each family is named below and must be among the calls, so the
 // enumeration cannot silently shrink.
 // -----------------------------------------------------------------------------
 import { test, after } from 'node:test';
@@ -170,6 +170,7 @@ const SPLIT_FAMILIES = {
   'schema owner': /ALTER SCHEMA public OWNER TO/,
   memberships: /REVOKE %I FROM %I GRANTED BY %I CASCADE/,
   'stored settings': /the split cannot reset/,
+  'namespace ledger': /CREATE SCHEMA IF NOT EXISTS rasta_split_lent/,
   'general ACL cleanup': /string_to_array\('general', ','\)/,
   'extension ACL cleanup': /string_to_array\('extension', ','\)/,
   'foreign ownership': /another service''s runtime role/,
@@ -179,6 +180,7 @@ const SPLIT_FAMILIES = {
     /REVOKE ALL ON SCHEMA public FROM PUBLIC[\s\S]*GRANT USAGE ON SCHEMA/,
   'container ACL cleanup': /string_to_array\('general,extension,foreign', ','\)/,
   'ledger creation': /CREATE TABLE IF NOT EXISTS "\w+"\."_prisma_migrations"/,
+  'lent schema access returned': /DROP SCHEMA rasta_split_lent;/,
   'UTC setup': /SET TimeZone = 'UTC'/,
   'forbidden-rights assertion': /the split did not converge/,
   'end-state assertion': /the split did not reach its end state/,

@@ -14,6 +14,13 @@
 //   * R2-4 — a grantor keeps the schema USAGE it needs until every scope's
 //     objects are revoked: general → extension, general → foreign, and the
 //     initial PUBLIC revokes → general, in both entry points.
+//   * R3-1 — whoever the split acts as can name what it must revoke, however
+//     it lost its schema: a membership the split revokes, the runtime role's
+//     own schema handed to the migrator, another service's runtime role's
+//     schema taken — each in the generic, the migration and the audit split.
+//     The schema access lent for it is returned exactly, and the handoff
+//     never leaves the runtime role without CONNECT or USAGE, even when the
+//     split stops right after it.
 //   * R2-3 — a stored setting's value never reaches the check's report or the
 //     split's error: a sentinel secret is stored, and looked for.
 //   * R2-2 — the check visits a database by its literal name: names that libpq
@@ -28,7 +35,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,17 +62,34 @@ const service = (suffix) => {
   PASSWORD[migrator] = `mg_${randomBytes(12).toString('hex')}`;
   return { service: name, db: runtime, runtime, migrator };
 };
-/** Split as a default-grants service; `U` as audit; `B` is another service. */
+/** Split as a default-grants service; `U` as audit; `M` in migration mode (supplier's policy); `B` is another service. */
 const A = service('a');
 const U = service('u');
 const B = service('b');
+const M = service('m');
+const POLICY = new Map([
+  [A, 'default'],
+  [U, 'audit'],
+  [B, 'default'],
+  [M, 'supplier'],
+]);
+const SCHEMA = (svc) => (svc === U ? 'audit' : 'public');
+const MODE = (svc) => (svc === U ? 'audit' : svc === M ? 'migration' : 'generic');
 // `aaa…` sorts before every other grantor, so its REVOKE is tried first.
 const GRANTOR = `aaa${TAG}g`;
 const OUTSIDER = `aaa${TAG}x`;
 const PUBLIC_GRANTOR = `aaa${TAG}p`;
 const GROUP = `${TAG}_group`;
-const ROLES = [A.runtime, A.migrator, U.runtime, U.migrator, B.runtime, B.migrator];
-const PLAIN_ROLES = [GRANTOR, OUTSIDER, PUBLIC_GRANTOR, GROUP];
+// R3-1: a member of the runtime role, and another service's runtime role (a
+// role with a `_migrator` beside it is one) — both sort before every migrator.
+const MEMBER = `aaa${TAG}m`;
+const FOREIGN = `aaa${TAG}f`;
+const ROLES = [
+  ...[A, U, B, M].flatMap((svc) => [svc.runtime, svc.migrator]),
+  FOREIGN,
+  `${FOREIGN}_migrator`,
+];
+const PLAIN_ROLES = [GRANTOR, OUTSIDER, PUBLIC_GRANTOR, GROUP, MEMBER];
 /** Databases whose names libpq or a line reader would misread (R2-2). */
 const ODD_DATABASES = [
   `dbname=postgres application_name=${TAG}`,
@@ -113,6 +137,9 @@ if [[ " $* " == *" -f - "* ]]; then
   if [[ -n "\${DROP_SQL:-}" && "$sql" =~ $DROP_SQL ]]; then
     echo dropped >> "${WRAPPER}/dropped"; exit 0
   fi
+  if [[ -n "\${FAIL_SQL:-}" && "$sql" =~ $FAIL_SQL ]]; then
+    echo failed >> "${WRAPPER}/dropped"; echo "psql: injected failure" >&2; exit 3
+  fi
   args=("$@")
   if [[ -n "\${REDIRECT_SQL:-}" && "$sql" =~ $REDIRECT_SQL ]]; then
     for i in "\${!args[@]}"; do [[ "\${args[$i]}" == --dbname ]] && args[$((i + 1))]=postgres; done
@@ -125,17 +152,23 @@ exec "${REAL_PSQL}" "$@"
 );
 chmodSync(join(WRAPPER, 'psql'), 0o755);
 
-/** Runs a split of `svc` (audit's when `audit`), through the wrapper when `drop`/`redirect` are set. */
-function split(svc, { audit = false, drop, redirect, env = {} } = {}) {
+/**
+ * Runs a split of `svc` — audit's for `U` (or `audit`), migration mode under
+ * supplier's policy for `M`, default grants otherwise — through the wrapper
+ * when `drop`/`redirect`/`fail` are set, from `lib` when given.
+ */
+function split(svc, { audit = svc === U, drop, redirect, fail, lib = LIB, env = {} } = {}) {
   rmSync(join(WRAPPER, 'dropped'), { force: true });
   const call = audit
     ? `split_audit_database_privileges ${svc.db} ${svc.service}`
-    : `split_service_privileges ${svc.service} ${svc.db} default`;
+    : svc === M
+      ? `split_service_privileges ${svc.service} ${svc.db} migration ${POLICY.get(M)}`
+      : `split_service_privileges ${svc.service} ${svc.db} default`;
   const result = spawnSync(
     'bash',
     [
       '-c',
-      `source "${join(LIB, 'service-privilege-split.bash')}"
+      `source "${join(lib, 'service-privilege-split.bash')}"
        declare -gA ROLE_PASSWORDS=([${svc.migrator}]=${PASSWORD[svc.migrator]})
        ${call} || exit 1`,
     ],
@@ -143,8 +176,9 @@ function split(svc, { audit = false, drop, redirect, env = {} } = {}) {
       env: {
         ...process.env,
         POSTGRES_USER: SUPERUSER,
-        ...(drop || redirect ? { PATH: `${WRAPPER}:${process.env.PATH}` } : {}),
+        ...(drop || redirect || fail ? { PATH: `${WRAPPER}:${process.env.PATH}` } : {}),
         ...(drop ? { DROP_SQL: drop } : {}),
+        ...(fail ? { FAIL_SQL: fail } : {}),
         ...(redirect ? { REDIRECT_SQL: redirect } : {}),
         ...env,
       },
@@ -164,7 +198,7 @@ function splitOk(svc, options) {
 }
 
 const findings = (svc) =>
-  psqlRows(svc.db, FINDINGS_SQL, { runtime: svc.runtime, policy: svc === U ? 'audit' : 'default' });
+  psqlRows(svc.db, FINDINGS_SQL, { runtime: svc.runtime, policy: POLICY.get(svc) });
 const foreign = (database, runtime, of) =>
   psqlRows(database, FOREIGN_FINDINGS_SQL, { runtime }).filter((line) =>
     line.startsWith(of.runtime),
@@ -172,16 +206,18 @@ const foreign = (database, runtime, of) =>
 
 before(() => {
   assert.ok(SUPERUSER, 'PGUSER must name a superuser');
-  for (const svc of [A, U, B]) {
+  for (const svc of [A, U, B, M]) {
     ok(`CREATE ROLE ${svc.runtime} LOGIN PASSWORD '${PASSWORD[svc.runtime]}'`, {
       database: 'postgres',
     });
     ok(`CREATE DATABASE ${svc.db} OWNER ${svc.runtime}`, { database: 'postgres' });
-    splitOk(svc, { audit: svc === U });
+    splitOk(svc);
   }
   ok(
     `CREATE ROLE ${GRANTOR} NOLOGIN; CREATE ROLE ${OUTSIDER} NOLOGIN;
-     CREATE ROLE ${PUBLIC_GRANTOR} NOLOGIN; CREATE ROLE ${GROUP} NOLOGIN;`,
+     CREATE ROLE ${PUBLIC_GRANTOR} NOLOGIN; CREATE ROLE ${GROUP} NOLOGIN;
+     CREATE ROLE ${MEMBER} NOLOGIN; CREATE ROLE ${FOREIGN} NOLOGIN;
+     CREATE ROLE ${FOREIGN}_migrator NOLOGIN;`,
     { database: 'postgres' },
   );
   ok('CREATE EXTENSION IF NOT EXISTS pgcrypto');
@@ -192,12 +228,13 @@ before(() => {
     { role: A.migrator },
   );
   ok(`CREATE TABLE audit.r2_table (id integer PRIMARY KEY)`, { role: U.migrator, database: U.db });
-  for (const svc of [A, U, B]) assert.deepEqual(findings(svc), [], svc.service);
+  ok(`CREATE TABLE public.r2_table (id integer PRIMARY KEY)`, { role: M.migrator, database: M.db });
+  for (const svc of [A, U, B, M]) assert.deepEqual(findings(svc), [], svc.service);
 });
 
 after(() => {
   rmSync(WRAPPER, { recursive: true, force: true });
-  for (const db of [A.db, U.db, B.db, ...ODD_DATABASES]) {
+  for (const db of [A.db, U.db, B.db, M.db, ...ODD_DATABASES]) {
     psql(`DROP DATABASE IF EXISTS ${quoteIdent(db)} WITH (FORCE)`, { database: 'postgres' });
   }
   const existing = [...ROLES, ...PLAIN_ROLES].filter(
@@ -258,7 +295,7 @@ const NOOP_CASES = [
   {
     family: 'schema grant (USAGE)',
     plant: `REVOKE USAGE ON SCHEMA public FROM ${A.runtime}`,
-    drop: 'GRANT USAGE ON SCHEMA',
+    drop: 'GRANT USAGE ON SCHEMA public TO',
     expect: new RegExp(`${A.runtime} lacks USAGE on schema public`),
   },
   {
@@ -327,6 +364,20 @@ const NOOP_CASES = [
     expect: new RegExp(`no statement_timeout = 5000ms for ${A.runtime} on ${A.db}`),
     after: `ALTER ROLE ${A.runtime} IN DATABASE ${A.db} RESET statement_timeout`,
     afterDatabase: 'postgres',
+  },
+  {
+    // The handoff's grant to the migrator, and the ledger creation it would
+    // otherwise fail on — the end state still names what is missing.
+    family: "the migrator's USAGE and CREATE on its schema",
+    plant: `REVOKE USAGE, CREATE ON SCHEMA public FROM ${A.migrator}`,
+    drop: 'GRANT USAGE, CREATE ON SCHEMA|SET LOCAL ROLE [a-z0-9_]+;[[:space:]]+CREATE TABLE IF NOT EXISTS',
+    expect: new RegExp(`${A.migrator} lacks CREATE on schema public`),
+  },
+  {
+    family: 'lent schema access returned',
+    plant: 'SELECT 1',
+    drop: 'DROP SCHEMA rasta_split_lent',
+    expect: /schema access the split lent is not all returned: rasta_split_lent is left/,
   },
   {
     family: 'audit schema ownership',
@@ -502,6 +553,353 @@ for (const svc of [A, U]) {
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// R3-1: the split acts as a role that has lost its schema — through a
+// membership it revokes, an ownership it hands over or one it takes — and
+// must still name what that role has to revoke. In every mode.
+// ---------------------------------------------------------------------------
+const nspacl = (svc, schema) =>
+  ok(`SELECT coalesce(nspacl::text, 'NULL') FROM pg_namespace WHERE nspname = '${schema}'`, {
+    database: svc.db,
+  });
+const can = (svc, sql) => ok(`SELECT (${sql})::text`, { database: svc.db });
+const noLedgerLeft = (svc) =>
+  assert.equal(can(svc, "to_regnamespace('rasta_split_lent') IS NULL"), 'true');
+
+for (const svc of [A, M, U]) {
+  const schema = SCHEMA(svc);
+  const mode = MODE(svc);
+
+  test(`R3-1 membership (${mode} split): a grantor whose ${schema} USAGE came only through its membership in the runtime role revokes its grant once the membership is gone; the loan is returned`, () => {
+    ok(`GRANT ${svc.runtime} TO ${MEMBER}`, { database: 'postgres' });
+    ok(`GRANT TRUNCATE ON ${schema}.r2_table TO ${MEMBER} WITH GRANT OPTION`, {
+      role: svc.migrator,
+      database: svc.db,
+    });
+    ok(`SET ROLE ${MEMBER}; GRANT TRUNCATE ON ${schema}.r2_table TO ${svc.runtime}`, {
+      database: svc.db,
+    });
+    // Its access is the membership's alone: neither it nor PUBLIC is in the ACL.
+    const before = nspacl(svc, schema);
+    assert.ok(!before.includes(MEMBER) && !/[{,]=/.test(before), before);
+    assert.equal(can(svc, `has_schema_privilege('${MEMBER}', '${schema}', 'USAGE')`), 'true');
+    assert.ok(findings(svc).some((f) => f.includes('TRUNCATE')));
+    splitOk(svc);
+    assert.deepEqual(findings(svc), []);
+    assert.equal(
+      ok(`SELECT count(*) FROM pg_auth_members WHERE roleid = '${svc.runtime}'::regrole`, {
+        database: svc.db,
+      }),
+      '0',
+    );
+    assert.equal(
+      can(svc, `has_table_privilege('${svc.runtime}', '${schema}.r2_table', 'TRUNCATE')`),
+      'false',
+    );
+    // The loan is gone, exactly: the ACL is what it was, and the grantor keeps
+    // what the split had no reason to take.
+    assert.equal(nspacl(svc, schema), before);
+    assert.equal(can(svc, `has_schema_privilege('${MEMBER}', '${schema}', 'USAGE')`), 'false');
+    assert.equal(
+      can(
+        svc,
+        `has_table_privilege('${MEMBER}', '${schema}.r2_table', 'TRUNCATE WITH GRANT OPTION')`,
+      ),
+      'true',
+    );
+    noLedgerLeft(svc);
+    ok(`REVOKE ALL ON ${schema}.r2_table FROM ${MEMBER} CASCADE`, {
+      role: svc.migrator,
+      database: svc.db,
+    });
+  });
+
+  test(`R3-1 own ownership (${mode} split): the runtime role owned the database, ${schema} and another schema, and granted from both; the handoff keeps its CONNECT and ${schema} USAGE even when the split stops right after it, and its grants are revoked`, () => {
+    // The runtime role owns the database, its schema and `spare`; PUBLIC has
+    // neither CONNECT nor USAGE (the earlier split took them).
+    ok(`ALTER DATABASE ${svc.db} OWNER TO ${svc.runtime}`, { database: 'postgres' });
+    ok(
+      `ALTER SCHEMA ${schema} OWNER TO ${svc.runtime};
+       CREATE SCHEMA spare AUTHORIZATION ${svc.runtime};
+       CREATE TABLE spare.r3_table (id integer PRIMARY KEY);
+       ALTER TABLE spare.r3_table OWNER TO ${svc.migrator};
+       GRANT TRUNCATE ON ${schema}.r2_table TO ${svc.runtime} WITH GRANT OPTION;
+       GRANT TRUNCATE ON spare.r3_table TO ${svc.runtime} WITH GRANT OPTION;`,
+      { database: svc.db },
+    );
+    ok(
+      `SET ROLE ${svc.runtime};
+       GRANT TRUNCATE ON ${schema}.r2_table TO PUBLIC; GRANT TRUNCATE ON spare.r3_table TO PUBLIC;`,
+      { database: svc.db },
+    );
+    assert.equal(
+      can(svc, `has_database_privilege('public', current_database(), 'CONNECT')`),
+      'false',
+    );
+    // Default mode: a table the runtime role owns, its DML an owner's right.
+    if (svc === A) {
+      ok(
+        `CREATE TABLE public.r3_owned (id integer PRIMARY KEY);
+         ALTER TABLE public.r3_owned OWNER TO ${svc.runtime};`,
+        { database: svc.db },
+      );
+    }
+    assert.equal(can(svc, `has_schema_privilege('public', '${schema}', 'USAGE')`), 'false');
+
+    // Stopped at the first cleanup, after the handoffs committed: the
+    // migrator owns everything, and the runtime role still connects and
+    // still reaches its schema.
+    const stopped = split(svc, { fail: "string_to_array\\('general', ','\\)" });
+    assert.match(stopped.wrapped, /failed/, 'the injected failure did not happen');
+    assert.notEqual(stopped.status, 0);
+    assert.equal(
+      can(
+        svc,
+        `(SELECT datdba FROM pg_database WHERE datname = current_database()) = '${svc.migrator}'::regrole`,
+      ),
+      'true',
+    );
+    assert.equal(
+      can(
+        svc,
+        `(SELECT nspowner FROM pg_namespace WHERE nspname = '${schema}') = '${svc.migrator}'::regrole`,
+      ),
+      'true',
+    );
+    assert.equal(
+      can(svc, `has_database_privilege('${svc.runtime}', current_database(), 'CONNECT')`),
+      'true',
+    );
+    assert.equal(can(svc, `has_schema_privilege('${svc.runtime}', '${schema}', 'USAGE')`), 'true');
+    assert.equal(
+      ok('SELECT current_user', { role: svc.runtime, database: svc.db }),
+      svc.runtime,
+      'the runtime role cannot log in',
+    );
+    if (svc === A) {
+      // The migrator's now, and still the runtime role's to write: the grants
+      // are in the handoff's transaction.
+      assert.equal(
+        can(
+          svc,
+          `(SELECT relowner FROM pg_class WHERE oid = 'public.r3_owned'::regclass) = '${svc.migrator}'::regrole`,
+        ),
+        'true',
+      );
+      assert.equal(
+        ok('INSERT INTO public.r3_owned VALUES (1) RETURNING id', {
+          role: svc.runtime,
+          database: svc.db,
+        }),
+        '1',
+      );
+    }
+    assert.equal(can(svc, `has_schema_privilege('${svc.runtime}', 'spare', 'USAGE')`), 'false');
+
+    // The real split: the runtime role's grant on `spare`, which it no longer
+    // owns, is revoked as the runtime role (it sorts before the migrator).
+    splitOk(svc);
+    assert.deepEqual(findings(svc), []);
+    for (const table of [`${schema}.r2_table`, 'spare.r3_table']) {
+      assert.equal(can(svc, `has_table_privilege('public', '${table}', 'TRUNCATE')`), 'false');
+      assert.equal(
+        can(svc, `has_table_privilege('${svc.runtime}', '${table}', 'TRUNCATE')`),
+        'false',
+      );
+    }
+    assert.equal(can(svc, `has_schema_privilege('${svc.runtime}', 'spare', 'USAGE')`), 'false');
+    assert.equal(can(svc, `has_schema_privilege('${svc.runtime}', '${schema}', 'USAGE')`), 'true');
+    assert.equal(
+      can(svc, `has_database_privilege('${svc.runtime}', current_database(), 'CONNECT')`),
+      'true',
+    );
+    assert.equal(
+      can(svc, `has_schema_privilege('${svc.migrator}', '${schema}', 'CREATE')`),
+      'true',
+    );
+    noLedgerLeft(svc);
+    ok('DROP SCHEMA spare CASCADE; DROP TABLE IF EXISTS public.r3_owned', { database: svc.db });
+  });
+
+  test(`R3-1 foreign ownership (${mode} split): another service's runtime role owned a schema and granted on a table there; it revokes its grant after the schema is taken; the loan is returned`, () => {
+    ok(
+      `CREATE SCHEMA fvault AUTHORIZATION ${FOREIGN};
+       CREATE TABLE fvault.r3_table (id integer PRIMARY KEY);
+       ALTER TABLE fvault.r3_table OWNER TO ${svc.migrator};
+       GRANT SELECT ON fvault.r3_table TO ${FOREIGN} WITH GRANT OPTION;`,
+      { database: svc.db },
+    );
+    ok(`SET ROLE ${FOREIGN}; GRANT SELECT ON fvault.r3_table TO ${B.runtime}`, {
+      database: svc.db,
+    });
+    assert.ok(foreign(svc.db, svc.runtime, B).some((f) => f.includes('fvault.r3_table')));
+    assert.equal(can(svc, `has_schema_privilege('${svc.migrator}', 'fvault', 'USAGE')`), 'false');
+    splitOk(svc);
+    assert.deepEqual(findings(svc), []);
+    assert.deepEqual(foreign(svc.db, svc.runtime, B), []);
+    assert.deepEqual(foreign(svc.db, svc.runtime, { runtime: FOREIGN }), []);
+    assert.equal(
+      can(
+        svc,
+        `(SELECT nspowner FROM pg_namespace WHERE nspname = 'fvault') = '${svc.migrator}'::regrole`,
+      ),
+      'true',
+    );
+    assert.equal(
+      can(svc, `has_table_privilege('${B.runtime}', 'fvault.r3_table', 'SELECT')`),
+      'false',
+    );
+    assert.equal(can(svc, `has_schema_privilege('${FOREIGN}', 'fvault', 'USAGE')`), 'false');
+    noLedgerLeft(svc);
+    ok('DROP SCHEMA fvault CASCADE', { database: svc.db });
+  });
+}
+
+test("R3-1 a loan to a role that then becomes the owner: the migrator, lent USAGE on a foreign-owned schema in the general cleanup, keeps an owner's USAGE once it takes the schema", () => {
+  ok(
+    `CREATE SCHEMA fvault AUTHORIZATION ${FOREIGN};
+     CREATE TABLE fvault.r3_table (id integer PRIMARY KEY);
+     ALTER TABLE fvault.r3_table OWNER TO ${A.migrator};
+     GRANT TRUNCATE ON fvault.r3_table TO ${A.runtime};`,
+  );
+  assert.equal(can(A, `has_schema_privilege('${A.migrator}', 'fvault', 'USAGE')`), 'false');
+  splitOk(A);
+  assert.deepEqual(findings(A), []);
+  assert.equal(
+    can(A, `has_table_privilege('${A.runtime}', 'fvault.r3_table', 'TRUNCATE')`),
+    'false',
+  );
+  assert.equal(
+    can(
+      A,
+      `(SELECT nspowner FROM pg_namespace WHERE nspname = 'fvault') = '${A.migrator}'::regrole`,
+    ),
+    'true',
+  );
+  assert.equal(can(A, `has_schema_privilege('${A.migrator}', 'fvault', 'USAGE')`), 'true');
+  noLedgerLeft(A);
+  ok('DROP SCHEMA fvault CASCADE');
+});
+
+test('R3-1 an orphaned column grant: its grantor and the owner lending it the grant option are both lent USAGE on a schema neither can use; both loans are returned', () => {
+  ok(
+    `CREATE SCHEMA fvault AUTHORIZATION ${FOREIGN};
+     CREATE TABLE fvault.r3_table (id integer PRIMARY KEY);
+     ALTER TABLE fvault.r3_table OWNER TO ${A.migrator};
+     GRANT SELECT ON fvault.r3_table TO ${GRANTOR} WITH GRANT OPTION;
+     GRANT USAGE ON SCHEMA fvault TO ${GRANTOR};
+     SET ROLE ${GRANTOR}; GRANT SELECT (id) ON fvault.r3_table TO ${A.runtime}; RESET ROLE;
+     REVOKE GRANT OPTION FOR SELECT ON fvault.r3_table FROM ${GRANTOR} CASCADE;
+     REVOKE USAGE ON SCHEMA fvault FROM ${GRANTOR};`,
+  );
+  // PostgreSQL kept the column grant; its grantor can no longer revoke it.
+  assert.equal(
+    can(A, `has_column_privilege('${A.runtime}', 'fvault.r3_table', 'id', 'SELECT')`),
+    'true',
+  );
+  assert.equal(can(A, `has_schema_privilege('${A.migrator}', 'fvault', 'USAGE')`), 'false');
+  splitOk(A);
+  assert.deepEqual(findings(A), []);
+  assert.equal(
+    can(A, `has_column_privilege('${A.runtime}', 'fvault.r3_table', 'id', 'SELECT')`),
+    'false',
+  );
+  assert.equal(can(A, `has_schema_privilege('${GRANTOR}', 'fvault', 'USAGE')`), 'false');
+  assert.equal(
+    can(A, `has_table_privilege('${GRANTOR}', 'fvault.r3_table', 'SELECT WITH GRANT OPTION')`),
+    'false',
+  );
+  noLedgerLeft(A);
+  ok('DROP SCHEMA fvault CASCADE');
+});
+
+test('R3-1 function repair: the migrator grants EXECUTE on a listed function whose argument type lives in a schema it cannot use; the loan is returned', () => {
+  // A copy of the library whose list names a function of A's.
+  const lib = mkdtempSync(join(tmpdir(), 'rasta-split-lib-'));
+  try {
+    cpSync(LIB, lib, { recursive: true });
+    const signature = 'public.r3_fn(r3_kinds.kind)';
+    writeFileSync(
+      join(lib, 'runtime-function-grants.txt'),
+      `${A.service}|${signature}|20260101000000_r3_fn\n`,
+    );
+    ok(
+      `CREATE SCHEMA r3_kinds; CREATE TYPE r3_kinds.kind AS ENUM ('x');
+       CREATE FUNCTION public.r3_fn(r3_kinds.kind) RETURNS integer LANGUAGE sql AS 'SELECT 1';
+       ALTER FUNCTION public.r3_fn(r3_kinds.kind) OWNER TO ${A.migrator};
+       REVOKE ALL ON FUNCTION public.r3_fn(r3_kinds.kind) FROM PUBLIC;`,
+    );
+    assert.equal(can(A, `has_schema_privilege('${A.migrator}', 'r3_kinds', 'USAGE')`), 'false');
+    const result = split(A, { lib });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(
+      can(A, `has_function_privilege('${A.runtime}', '${signature}', 'EXECUTE')`),
+      'true',
+    );
+    assert.equal(can(A, `has_schema_privilege('${A.migrator}', 'r3_kinds', 'USAGE')`), 'false');
+    noLedgerLeft(A);
+  } finally {
+    rmSync(lib, { recursive: true, force: true });
+    ok('DROP SCHEMA IF EXISTS r3_kinds CASCADE');
+  }
+  splitOk(A);
+  assert.deepEqual(findings(A), []);
+});
+
+test('R3-1 migrator: the new owner of a schema whose former owner had revoked its own USAGE and CREATE holds both — it creates the ledger there as itself', () => {
+  ok(
+    `ALTER SCHEMA public OWNER TO ${A.runtime};
+     REVOKE USAGE, CREATE ON SCHEMA public FROM ${A.runtime};`,
+  );
+  assert.equal(can(A, `has_schema_privilege('${A.runtime}', 'public', 'CREATE')`), 'false');
+  splitOk(A);
+  assert.deepEqual(findings(A), []);
+  for (const privilege of ['USAGE', 'CREATE']) {
+    assert.equal(can(A, `has_schema_privilege('${A.migrator}', 'public', '${privilege}')`), 'true');
+  }
+  assert.equal(can(A, `has_schema_privilege('${A.runtime}', 'public', 'USAGE')`), 'true');
+  noLedgerLeft(A);
+});
+
+test('R3-1 ledger: a run that stops leaves its loans recorded; the next returns them; a ledger schema the split did not make is refused', () => {
+  ok(`GRANT ${A.runtime} TO ${MEMBER}`, { database: 'postgres' });
+  ok(`GRANT TRUNCATE ON public.r2_table TO ${MEMBER} WITH GRANT OPTION`, { role: A.migrator });
+  ok(`SET ROLE ${MEMBER}; GRANT TRUNCATE ON public.r2_table TO ${A.runtime}`);
+  const before = nspacl(A, 'public');
+  // Stopped after the loan, at the extension cleanup.
+  const stopped = split(A, { fail: "string_to_array\\('extension', ','\\)" });
+  assert.notEqual(stopped.status, 0);
+  assert.equal(
+    ok(`SELECT count(*) FROM rasta_split_lent.namespace_usage
+         WHERE grantee = '${MEMBER}'::regrole AND namespace = 'public'::regnamespace`),
+    '1',
+  );
+  assert.equal(can(A, `has_schema_privilege('${MEMBER}', 'public', 'USAGE')`), 'true');
+  // A target whose schemas it cannot tell is refused, never lent nothing.
+  const unknown = psql(`SELECT rasta_split_lent.lend('${MEMBER}', 'OPERATOR public.+(int, int)')`);
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /the split cannot tell which schemas OPERATOR public/);
+  splitOk(A);
+  assert.equal(nspacl(A, 'public'), before);
+  assert.equal(can(A, `has_schema_privilege('${MEMBER}', 'public', 'USAGE')`), 'false');
+  noLedgerLeft(A);
+  ok(`REVOKE ALL ON public.r2_table FROM ${MEMBER} CASCADE`, { role: A.migrator });
+  // Not a superuser's: refused before anything is lent.
+  ok(`CREATE SCHEMA rasta_split_lent AUTHORIZATION ${A.migrator}`);
+  const refused = split(A);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /schema rasta_split_lent exists and is not a superuser's/);
+  ok('DROP SCHEMA rasta_split_lent');
+  // A superuser's, with something else in it: refused too.
+  ok('CREATE SCHEMA rasta_split_lent; CREATE TABLE rasta_split_lent.other (id integer)');
+  const crowded = split(A);
+  assert.notEqual(crowded.status, 0);
+  assert.match(crowded.stderr, /holds something besides the split's own ledger/);
+  ok('DROP SCHEMA rasta_split_lent CASCADE');
+  splitOk(A);
+  assert.deepEqual(findings(A), []);
+});
 
 // ---------------------------------------------------------------------------
 // R2-3: the value of a stored setting is never printed.
