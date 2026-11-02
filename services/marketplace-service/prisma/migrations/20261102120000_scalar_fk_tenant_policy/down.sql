@@ -9,4 +9,5 @@ ALTER TABLE "offer_price_history" DROP CONSTRAINT "fk_offer_price_history_tenant
 DROP INDEX "uq_review_tenant_order";
 DROP INDEX "uq_order_tenant_id";
 DROP INDEX "uq_offer_tenant_id";
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261102120000_scalar_fk_tenant_policy';
 COMMIT;
