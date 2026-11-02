@@ -224,6 +224,15 @@ model Order {
 
   status OrderStatus @default(PENDING)
 
+  /// Durable start intent (ADR-039/050). Null requestedAt denotes a legacy
+  /// order: its first possible Temporal start is conservatively createdAt.
+  sagaStartRequestedAt DateTime? @map("saga_start_requested_at")
+  sagaStartAttemptedAt DateTime? @map("saga_start_attempted_at")
+  sagaStartDeliveredAt DateTime? @map("saga_start_delivered_at")
+  sagaStartNextAttemptAt DateTime @default(now()) @map("saga_start_next_attempt_at")
+  sagaStartClaimToken String? @db.Uuid @map("saga_start_claim_token")
+  sagaStartClaimExpiresAt DateTime? @map("saga_start_claim_expires_at")
+
   /// Recomputed from the lines, never accumulated (the maintenance-service
   /// lesson): a total that drifts from its lines is a total nobody can audit.
   totalAmountMinor BigInt @map("total_amount_minor")

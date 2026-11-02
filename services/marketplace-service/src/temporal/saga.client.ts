@@ -6,41 +6,28 @@ import {
   WorkflowIdReusePolicy,
   WorkflowNotFoundError,
 } from '@temporalio/client';
+import { getOrganizationId, type OutboxStopOptions } from '@rasta/nest-common';
+import { SagaStartStore, type StartClaim } from './saga-start.store';
+import {
+  sagaStartBacklogAge,
+  sagaStartBacklogCount,
+  sagaStartDeliveries,
+} from '../observability/metrics';
+import { SERVICE_NAME } from '../config/env';
 import { ENV } from '../tokens';
 import type { MarketplaceEnv } from '../config/env';
 import { foreignFailure } from './foreign-failure';
 import { installTemporalRuntimeLogger } from './runtime-logger';
 
-/**
- * Starts and signals `OrderSagaWorkflow`.
- *
- * ## Why the database is written first and the signal sent second
- *
- * Every command applies its state change and commits it, and only then tells
- * the workflow. If the signal fails, the order is still correct and the
- * workflow re-reads on its next wake-up. The other order — signal first —
- * would leave a workflow that believes something the database does not, and
- * the workflow is the thing driving money.
- *
- * A failed signal is therefore logged and swallowed rather than raised: the
- * user's command succeeded, and telling them it failed would invite a retry
- * that changes nothing.
- *
- * ## Why `workflowId` is the order id
- *
- * Temporal refuses to start a second workflow with an id that is already
- * running. That makes "one saga per order" structural rather than a rule the
- * code has to keep — even if two requests race to start one.
- *
- * "Already running" was not enough on its own. `POST /orders` calls
- * {@link start} on every request, replays included, so that a retry can start
- * a saga whose first start failed. A replay arriving after the first saga had
- * **closed** therefore started a second saga for the same order. The start
- * now uses `REJECT_DUPLICATE`, so an id that has ever been used is refused
- * for as long as the namespace keeps its history. That is longer than a key
- * can be replayed. The saga also decides from the order row, not from its
- * own memory, so even a duplicate run would find the order finished and stop.
+/** Durable, at-least-once saga start delivery (ADR-039/050).
+ * Receipt is persisted only after acceptance or AlreadyStarted. Signals remain
+ * best effort: the workflow always re-reads the committed order.
  */
+const START_RPC_TIMEOUT_MS = 5000;
+const START_CONNECT_TIMEOUT_MS = 1000;
+const RETENTION_MARGIN_MS = 60_000;
+const START_POLL_INTERVAL_MS = 10_000;
+
 @Injectable()
 export class OrderSagaClient implements OnModuleDestroy {
   private readonly logger = new Logger(OrderSagaClient.name);
@@ -48,7 +35,78 @@ export class OrderSagaClient implements OnModuleDestroy {
   private connection?: Connection;
   private connecting?: Promise<Client>;
 
-  constructor(@Inject(ENV) private readonly env: MarketplaceEnv) {}
+  private timer?: NodeJS.Timeout;
+  private ticking?: Promise<void>;
+  private stopped = false;
+  private readonly abort = new AbortController();
+  private readonly active = new Set<Promise<void>>();
+
+  constructor(
+    @Inject(ENV) private readonly env: MarketplaceEnv,
+    private readonly store: SagaStartStore,
+  ) {}
+
+  startPolling(): void {
+    if (this.timer || this.stopped) return;
+    void this.tick();
+    this.timer = setInterval(() => void this.tick(), START_POLL_INTERVAL_MS);
+    this.timer.unref();
+  }
+
+  /** Fast path after commit; a failure never changes the placement response. */
+  async start(orderId: string): Promise<void> {
+    if (!this.env.MARKETPLACE_TEMPORAL_ENABLED) return;
+    await this.track(async () => {
+      const claims = await this.store.claim({ id: orderId, organizationId: getOrganizationId() });
+      await Promise.all(claims.map((claim) => this.track(() => this.dispatch(claim))));
+    });
+  }
+
+  /** One indexed keyset batch. Deferred failures move behind other due rows. */
+  tick(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.ticking) return this.ticking;
+    this.ticking = this.track(async () => {
+      const claims = this.env.MARKETPLACE_TEMPORAL_ENABLED ? await this.store.claim() : [];
+      await Promise.all(claims.map((claim) => this.track(() => this.dispatch(claim))));
+      if (this.stopped) return;
+      const backlog = await this.store.backlog();
+      sagaStartBacklogCount.set({ service: SERVICE_NAME }, backlog.count);
+      sagaStartBacklogAge.set({ service: SERVICE_NAME }, backlog.age);
+    }).finally(() => {
+      this.ticking = undefined;
+    });
+    return this.ticking;
+  }
+
+  private track(fn: () => Promise<void>): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    const task = fn()
+      .catch((error: unknown) => {
+        this.logger.error(
+          { failure: foreignFailure(error) },
+          'Saga start delivery will be retried',
+        );
+      })
+      .finally(() => {
+        this.active.delete(task);
+      });
+    this.active.add(task);
+    return task;
+  }
+
+  private async dispatch(claim: StartClaim): Promise<void> {
+    if (this.stopped) return;
+    const accepted = await this.deliver(claim.id, claim.age_ms);
+    if (!this.stopped) await this.store.finish(claim, accepted);
+  }
+
+  async stop(_options?: OutboxStopOptions): Promise<void> {
+    this.stopped = true;
+    if (this.timer) clearInterval(this.timer);
+    this.abort.abort();
+    await Promise.all([...this.active]);
+  }
 
   private async getClient(): Promise<Client> {
     if (this.client) return this.client;
@@ -56,7 +114,10 @@ export class OrderSagaClient implements OnModuleDestroy {
 
     this.connecting = (async () => {
       installTemporalRuntimeLogger(this.env);
-      const connection = await Connection.connect({ address: this.env.TEMPORAL_ADDRESS });
+      const connection = await Connection.connect({
+        address: this.env.TEMPORAL_ADDRESS,
+        connectTimeout: START_CONNECT_TIMEOUT_MS,
+      });
       this.connection = connection;
       const client = new Client({ connection, namespace: this.env.TEMPORAL_NAMESPACE });
       this.client = client;
@@ -78,47 +139,68 @@ export class OrderSagaClient implements OnModuleDestroy {
     return `order-${orderId}`;
   }
 
-  /**
-   * Starts the saga for a freshly placed order.
-   *
-   * Failure is logged rather than raised: the order exists and is `PENDING`,
-   * which is a visible state an operator can act on. Failing the HTTP request
-   * would tell the buyer their order did not happen when it did.
+  /** Only explicit Temporal acceptance acknowledges a claim.
+   * Once history could have expired, an absent execution is ambiguous. Ask
+   * the namespace for its actual retention; never restart from absence then.
    */
-  async start(orderId: string): Promise<void> {
-    if (!this.env.MARKETPLACE_TEMPORAL_ENABLED) {
-      this.logger.warn(`Temporal is disabled; order ${orderId} stays PENDING until a worker runs`);
-      return;
-    }
+  async deliver(orderId: string, possibleStartAgeMs = 0): Promise<boolean> {
+    if (!this.env.MARKETPLACE_TEMPORAL_ENABLED || this.stopped) return false;
 
     try {
       const client = await this.getClient();
-      await client.workflow.start('orderSaga', {
-        taskQueue: this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE,
-        workflowId: OrderSagaClient.workflowIdFor(orderId),
-        workflowIdReusePolicy: WorkflowIdReusePolicy.REJECT_DUPLICATE,
-        args: [
+      return await client.connection.withAbortSignal(this.abort.signal, () =>
+        client.connection.withDeadline(Date.now() + START_RPC_TIMEOUT_MS, async () => {
           {
-            orderId,
-            fulfillmentWindowDays: this.env.MARKETPLACE_FULFILLMENT_WINDOW_DAYS,
-            receiptWindowDays: this.env.MARKETPLACE_RECEIPT_WINDOW_DAYS,
-            reminderIntervalDays: this.env.MARKETPLACE_REMINDER_INTERVAL_DAYS,
-            recheckIntervalHours: this.env.MARKETPLACE_SAGA_RECHECK_HOURS,
-          },
-        ],
-      });
+            const namespace = await client.workflowService.describeNamespace({
+              namespace: this.env.TEMPORAL_NAMESPACE,
+            });
+            const retention =
+              Number(namespace.config?.workflowExecutionRetentionTtl?.seconds ?? 0) * 1000;
+            // Age comes from the DB clock; the margin covers expiry during this bounded call.
+            if (!Number.isFinite(retention) || retention <= RETENTION_MARGIN_MS) return false;
+            if (possibleStartAgeMs >= retention - RETENTION_MARGIN_MS) {
+              try {
+                await client.workflow.getHandle(OrderSagaClient.workflowIdFor(orderId)).describe();
+                return true; // Includes failed/closed workflows: never restart them.
+              } catch (error) {
+                if (!(error instanceof WorkflowNotFoundError)) throw error;
+                sagaStartDeliveries.inc({ service: SERVICE_NAME, outcome: 'ambiguous' });
+                return false;
+              }
+            }
+          }
+          await client.workflow.start('orderSaga', {
+            taskQueue: this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE,
+            workflowId: OrderSagaClient.workflowIdFor(orderId),
+            workflowIdReusePolicy: WorkflowIdReusePolicy.REJECT_DUPLICATE,
+            args: [
+              {
+                orderId,
+                fulfillmentWindowDays: this.env.MARKETPLACE_FULFILLMENT_WINDOW_DAYS,
+                receiptWindowDays: this.env.MARKETPLACE_RECEIPT_WINDOW_DAYS,
+                reminderIntervalDays: this.env.MARKETPLACE_REMINDER_INTERVAL_DAYS,
+                recheckIntervalHours: this.env.MARKETPLACE_SAGA_RECHECK_HOURS,
+              },
+            ],
+          });
+          sagaStartDeliveries.inc({ service: SERVICE_NAME, outcome: 'accepted' });
+          return true;
+        }),
+      );
     } catch (error) {
       if (error instanceof WorkflowExecutionAlreadyStartedError) {
         // A replayed placement: this order's saga is running or has already
         // run. That is the one outcome here that is not a problem.
         this.logger.debug({ orderId }, 'The order saga was already started');
-        return;
+        return true;
       }
       // By class and code only: the failure's own text may quote the address.
       this.logger.error(
         { orderId, failure: foreignFailure(error) },
         'Could not start the order saga',
       );
+      sagaStartDeliveries.inc({ service: SERVICE_NAME, outcome: 'retry' });
+      return false;
     }
   }
 
@@ -146,6 +228,7 @@ export class OrderSagaClient implements OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    await this.stop();
     await this.connection?.close();
   }
 }

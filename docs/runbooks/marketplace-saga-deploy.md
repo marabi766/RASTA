@@ -93,3 +93,39 @@ Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی�
 استقراری در مخزن نیست)، پس Gate فعلاً گامی دستی است. هر خط استقرار که ساخته شود باید همین اسکریپت را میان گام ۲ و ۴
 اجرا کند و با هر کد خروج غیرصفر متوقف شود. رفتار Gate را `scripts/marketplace-saga-drain-check.test.mjs` در Job `quality`
 ـِ CI می‌آزماید (`pnpm run test:marketplace-saga-drain-check`).
+
+## Durable start delivery (task 1214 A)
+
+Placement commits its start intent on the order row. The immediate post-commit
+start and the ten-second reconciliation sweep share the same fenced claim.
+Each sweep claims at most four due rows in `(next_attempt_at, id)` order,
+using the partial due index and `SKIP LOCKED`; retries advance their due key
+by thirty seconds so one failed order cannot monopolize the head. A thirty-second
+lease exceeds the bounded start RPC (five seconds, plus a one-second connect).
+An expired claimant cannot acknowledge a newer claim. The receipt is retained
+with the order; neither idempotency expiry nor outbox purge removes it.
+
+Only accepted starts and `AlreadyStarted` acknowledge delivery. Disabled Temporal
+and transport failures leave an intent pending. Recovery includes `CANCELLING`:
+the workflow reads the committed cancellation, checks for an existing obligation,
+and cancels without first creating a hold. Started-but-failed workflows require
+operator reconciliation; the starter never deliberately creates a replacement.
+
+Legacy rows have no requested timestamp. Their first possible start is conservatively
+the order creation time. For any unacknowledged start older than the namespace's
+current history retention (queried from Temporal, with a one-minute safety margin),
+the starter describes the deterministic workflow id. Intent age is measured by the
+database clock, so a worker clock skew cannot turn expired history into proof of absence. An existing execution, including
+a closed/failed one, establishes delivery. Missing history is ambiguous and stays
+pending: do not clear an intent or invent a receipt to silence the alert. Reconcile
+Temporal archival/deployment records and economic ownership before an operator
+chooses a recovery. The same protection covers acceptance followed by a crash before
+acknowledgment, including a crash lasting beyond history retention. A deployment
+that shortens retention after deleting older history also requires operator review.
+
+`rasta_marketplace_saga_start_backlog` and
+`rasta_marketplace_saga_start_backlog_age_seconds` expose counts/age only.
+`RastaMarketplaceSagaStartBacklogAging` fires after age exceeds five minutes for
+two minutes. Local Prometheus loads the rule; external notification routing remains
+a deployment responsibility. Starter shutdown aborts active RPCs, joins database
+work and stops polling before Prisma disconnects.

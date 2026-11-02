@@ -291,3 +291,23 @@ describe('enum settings are refused without the value written (#385 r2 F2)', () 
     );
   });
 });
+
+it('refuses a shutdown deadline shorter than the starter database stop budget', () => {
+  const result = marketplaceEnvSchema.safeParse({
+    ...BASE,
+    SERVICE_NAME: 'marketplace-service',
+    PORT: '3106',
+    KAFKA_CLIENT_ID: 'marketplace-service',
+    SHUTDOWN_TIMEOUT_MS: '4499',
+  });
+  expect(result.success).toBe(false);
+  if (!result.success)
+    expect(result.error.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: ['SHUTDOWN_TIMEOUT_MS'],
+          message: 'SHUTDOWN_TIMEOUT_MS must cover the saga starter database stop budget',
+        }),
+      ]),
+    );
+});
