@@ -8,14 +8,14 @@ import { z } from 'zod';
  * colon (`+0330` is refused). zod 3 accepted both, so a client, a stored value
  * or a signed form written today could stop parsing after the bump, with no
  * type error to notice. The zod 3 pattern below is copied from zod 3.25.76
- * (`src/v3/types.ts`, `datetimeRegex`), and the golden fixtures in
+ * (`src/v3/types.ts`, `datetimeRegex`) with bounded offsets and a finite parse check; the golden fixtures in
  * `zod-golden.spec.ts` (recorded under zod 3) pin it.
  *
  * Use it where `.datetime()` was: `z.string().check(isoDateTime())`,
  * `z.string().check(isoDateTime({ offset: true }))`. It is zod 4's own datetime
  * format with the pattern swapped, so the issue (`invalid_format`, format
  * `datetime`, zod 3's "Invalid datetime") and the OpenAPI `format: date-time`
- * are unchanged.
+ * are unchanged. Invalid numeric offsets and unparseable instants are refused.
  */
 
 const DATE_SOURCE = `((\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-((0[13578]|1[02])-(0[1-9]|[12]\\d|3[01])|(0[469]|11)-(0[1-9]|[12]\\d|30)|(02)-(0[1-9]|1\\d|2[0-8])))`;
@@ -39,10 +39,10 @@ export interface IsoDateTimeOptions {
   message?: string;
 }
 
-/** zod 3's `datetimeRegex`. */
+/** The legacy datetime syntax, with numeric offsets bounded to ±14:00. */
 export function legacyDatetimeRegex(options: IsoDateTimeOptions = {}): RegExp {
   const zones = [options.local ? 'Z?' : 'Z'];
-  if (options.offset) zones.push(`([+-]\\d{2}:?\\d{2})`);
+  if (options.offset) zones.push(`([+-](?:(?:0\\d|1[0-3]):?[0-5]\\d|14:?00))`);
   return new RegExp(`^${DATE_SOURCE}T${timeSource(options.precision)}(${zones.join('|')})$`);
 }
 
@@ -56,5 +56,17 @@ export function isoDateTime(options: IsoDateTimeOptions = {}): z.core.$ZodCheck<
     ...(message === undefined ? {} : { message }),
     pattern: legacyDatetimeRegex(rule),
   } as z.core.$ZodISODateTimeParams;
-  return z.core._isoDateTime(z.ZodISODateTime, params);
+  const check = z.core._isoDateTime(z.ZodISODateTime, params);
+  const pattern = legacyDatetimeRegex(rule);
+  check._zod.check = (payload) => {
+    if (pattern.test(payload.value) && Number.isFinite(Date.parse(payload.value))) return;
+    payload.issues.push({
+      code: 'invalid_format',
+      format: 'datetime',
+      input: payload.value,
+      inst: check,
+      continue: true,
+    });
+  };
+  return check;
 }
