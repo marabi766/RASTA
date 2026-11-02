@@ -64,20 +64,19 @@ export function StatementCommands({
   const [checked, setChecked] = useState<{ readonly restored: RestoredStatement | null } | null>(
     null,
   );
-  const { owner, session } = binding;
 
   useEffect(() => {
     const read = () =>
       setChecked({
         restored: restoreUnresolvedStatement(
           { contractId, statementId },
-          { owner, session },
+          binding,
           sessionMaxAgeSeconds,
         ),
       });
     read();
     return subscribeUnresolvedStatements(read);
-  }, [contractId, statementId, owner, session, sessionMaxAgeSeconds]);
+  }, [contractId, statementId, binding, sessionMaxAgeSeconds]);
 
   if (checked === null) return null;
   const scope = { contractId, statementId };

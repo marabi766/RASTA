@@ -123,8 +123,15 @@ export class IdempotencyStore {
    * the key, or the key in flight — because they are errors rather than
    * outcomes.
    */
-  async claim(endpoint: string, key: string, body: unknown): Promise<Claim> {
-    const requestHash = this.hash(body);
+  async claim(
+    endpoint: string,
+    key: string,
+    body: unknown,
+    fingerprintVersion?: string,
+  ): Promise<Claim> {
+    const requestHash = fingerprintVersion
+      ? `${fingerprintVersion}:${this.hash(body)}`
+      : this.hash(body);
     const actorHash = this.hash(requestActor());
     const deadline = Date.now() + CLAIM_WAIT_MS;
     for (let attempt = 1; attempt <= CLAIM_ATTEMPTS; attempt += 1) {
@@ -134,6 +141,38 @@ export class IdempotencyStore {
     // Every attempt found the key vanishing under it: other requests are
     // churning it right now. The same answer as a key in flight.
     throw inFlight(endpoint);
+  }
+
+  /** Replay-only compatibility: no claim, deletion, or work under an old algorithm.
+   * The caller supplies the frozen legacy parser, and current route authorization
+   * must already have run. New versioned records use the ordinary run path.
+   */
+  async replayLegacy<T>(
+    endpoint: string,
+    key: string,
+    legacyBody: () => unknown,
+    mayReplay: ReplayGuard<T>,
+  ): Promise<{ body: T } | null> {
+    const organizationId = getOrganizationId();
+    const existing = await this.prisma.client.idempotencyKey.findUnique({
+      where: { organizationId_endpoint_key: { organizationId, endpoint, key } },
+    });
+    if (!existing || existing.expiresAt <= new Date() || existing.requestHash.includes(':'))
+      return null;
+    // An unbound historical actor cannot prove this is the same caller.
+    if (
+      existing.actorHash !== this.hash(requestActor()) ||
+      existing.requestHash !== this.hash(legacyBody())
+    ) {
+      throw RastaError.idempotencyKeyReused();
+    }
+    if (existing.state === 'IN_PROGRESS') throw inFlight(endpoint);
+    await mayReplay(existing.responseBody as T);
+    if ((existing.responseStatus ?? 200) >= REFUSAL_STATUS_FLOOR) {
+      throw RastaError.internal('Legacy compatibility expects a stored success');
+    }
+    idempotentReplaysTotal.inc({ service: SERVICE_NAME, endpoint });
+    return { body: existing.responseBody as T };
   }
 
   /**
@@ -328,11 +367,12 @@ export class IdempotencyStore {
     work: (answer: IdempotentAnswer<T>) => Promise<unknown>,
     options: {
       mayReplay: ReplayGuard<T>;
+      fingerprintVersion?: string;
       terminalRefusals?: TerminalRefusals;
       stored?: (answer: T) => T;
     },
   ): Promise<T> {
-    const claim = await this.claim(endpoint, key, body);
+    const claim = await this.claim(endpoint, key, body, options.fingerprintVersion);
     if (claim.kind === 'REPLAY') {
       const refused = claim.status >= REFUSAL_STATUS_FLOOR;
       // Before anything of the record leaves: what a fresh request would be

@@ -1,8 +1,14 @@
 import { isBidCommand, type BidCommand } from './bid-fields';
-import { markerStore, type SaveOutcome, type UnresolvedMarker } from './unresolved-marker';
+import {
+  markerStore,
+  type AnswerOutcome,
+  type SaveOutcome,
+  type UnresolvedMarker,
+} from './unresolved-marker';
+import type { AccountTags, Binding } from './unresolved-tenancy';
 import type { ReplayStamp } from './unresolved-statement';
 
-export type { ReplayStamp, SaveOutcome };
+export type { AnswerOutcome, ReplayStamp, SaveOutcome };
 
 /**
  * A bid command whose outcome is unknown, remembered in `sessionStorage` so a
@@ -37,9 +43,11 @@ export type { ReplayStamp, SaveOutcome };
  * A tender's submit, replace and withdraw forms share one slot: a new
  * submission never replaces another's record (saving it is refused, `HELD`,
  * and the form is not sent), and a record is cleared only by the submission it
- * belongs to. Another person's page drops every entry of anyone else
- * (`purgeForeignUnresolvedBids`); a logout writes nothing more and leaves the
- * markers, which hold nothing of the bid.
+ * belongs to. Another person's page reduces every entry of anyone else to a
+ * content-free marker (`purgeForeignUnresolvedBids`); a logout writes nothing
+ * more and leaves the markers, which hold nothing of the bid. A record that
+ * cannot be attributed holds every fresh bid command on this device until
+ * acknowledged (`bidQuarantine`, `lib/unresolved-tenancy.ts`).
  */
 
 /** A fresh submission id for one bid form, with its signed replay deadline. */
@@ -59,23 +67,44 @@ export const subscribeUnresolvedBids = (listener: () => void): (() => void) =>
 
 export const markBidsOpen = (): void => store.markOpen();
 
-/** Logout: nothing is saved from here on; unreadable entries are removed, markers stay. */
+/** Logout: nothing is saved from here on; every record stays. */
 export const purgeAllUnresolvedBids = (): void => store.purgeAll();
 
-/** A page for `owner`: entries of anyone else, and unreadable ones, are removed. */
-export const purgeForeignUnresolvedBids = (owner: string): void => store.purgeForeign(owner);
+/** A page for this person: entries of anyone else are reduced to content-free markers; nothing is removed. */
+export const purgeForeignUnresolvedBids = (tags: AccountTags): void => store.purgeForeign(tags);
 
 export const saveUnresolvedBid = (
   tenderId: string,
   entry: Omit<UnresolvedBid, 'savedAt'>,
-  owner: string,
+  binding: Binding,
   now?: number,
-): SaveOutcome => store.save(tenderId, entry, owner, now);
+): SaveOutcome => store.save(tenderId, entry, binding, now);
+
+/** An answer still in doubt: updates its own record, or is kept aside (`lib/unresolved-tenancy.ts`). */
+export const answerUnresolvedBid = (
+  tenderId: string,
+  entry: Omit<UnresolvedBid, 'savedAt'>,
+  binding: Binding,
+  now?: number,
+): AnswerOutcome => store.answer(tenderId, entry, binding, now);
+
+/** A definite answer to `submissionId`: its record, and only that one, goes. */
+export const settleUnresolvedBid = (
+  tenderId: string,
+  submissionId: string,
+  binding: Binding,
+): void => store.settle(tenderId, submissionId, binding);
 
 /** Forgets the record of `submissionId` — and only that one. */
-export const clearUnresolvedBid = (tenderId: string, submissionId: string): void =>
-  store.clear(tenderId, submissionId);
+export const clearUnresolvedBid = (
+  tenderId: string,
+  submissionId: string,
+  binding: Binding,
+): void => store.clear(tenderId, submissionId, binding);
 
 /** The unresolved bid command on this tender, if this person has one; anything else is removed. */
-export const restoreUnresolvedBid = (tenderId: string, owner: string): UnresolvedBid | null =>
-  store.restore(tenderId, owner);
+export const restoreUnresolvedBid = (tenderId: string, binding: Binding): UnresolvedBid | null =>
+  store.restore(tenderId, binding);
+
+/** What holds a fresh command of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
+export const bidQuarantine = store.quarantine;

@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '../packages/testing/src/eligibility-clock.ts';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -236,7 +237,7 @@ export const DOCUMENT_DATA_ROLLBACK = {
     },
     {
       label: 'up again: a worker lease cannot be attached to a document that is not pending',
-      sql: `UPDATE "document" SET scan_lease_owner = 'worker-1',
+      sql: eligibilityClockSql`UPDATE "document" SET scan_lease_owner = 'worker-1',
               scan_lease_expires_at = NOW() + INTERVAL '1 minute'
              WHERE id = 'DOC_MIGCHECK_INFECTED';`,
       mustFail: 'ck_document_scan_lease_only_when_pending',
@@ -1261,11 +1262,21 @@ const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
 
 const PARTICIPATION_RULE = '20261016190000_participation_rule';
 
-/** A reward evaluation row; `subject` adds the two columns this migration brings. */
-const EVALUATION_MIGCHECK = (sourceReference, outcome, subject) => `
+/**
+ * A reward evaluation row; `subject` adds the two columns this migration
+ * brings. `occurred_at` is compared with the database clock (the participation
+ * window), so the row with it is its own static, reviewed probe.
+ */
+const EVALUATION_MIGCHECK = (sourceReference, outcome, subject) =>
+  subject
+    ? eligibilityClockSql`
 INSERT INTO "reward_source_evaluation"
-  ("organization_id", "trigger_event", "source_reference", "origin", "event_id", "outcome"${subject ? ', "subject_user_id", "occurred_at"' : ''})
-VALUES ('ORG-MIGCHECK', 'USAGE_RECORDED', '${sourceReference}', 'EVENT', 'EVT-${sourceReference}', '${outcome}'${subject ? `, '${subject}', now()` : ''});`;
+  ("organization_id", "trigger_event", "source_reference", "origin", "event_id", "outcome", "subject_user_id", "occurred_at")
+VALUES ('ORG-MIGCHECK', 'USAGE_RECORDED', '${sourceReference}', 'EVENT', 'EVT-${sourceReference}', '${outcome}', '${subject}', now());`
+    : `
+INSERT INTO "reward_source_evaluation"
+  ("organization_id", "trigger_event", "source_reference", "origin", "event_id", "outcome")
+VALUES ('ORG-MIGCHECK', 'USAGE_RECORDED', '${sourceReference}', 'EVENT', 'EVT-${sourceReference}', '${outcome}');`;
 
 const PARTICIPATION_RULE_MIGCHECK = (id, version) => `
 INSERT INTO "participation_rule" ("id", "version", "window_days", "contributions", "created_by")
@@ -1301,7 +1312,7 @@ const PARTICIPATION_RULE_STEPS = [
   },
   {
     label: 'participation: a subject without an instant is refused',
-    sql: `UPDATE "reward_source_evaluation" SET occurred_at = NULL WHERE source_reference = 'USG_MIGCHECK_NEW';`,
+    sql: eligibilityClockSql`UPDATE "reward_source_evaluation" SET occurred_at = NULL WHERE source_reference = 'USG_MIGCHECK_NEW';`,
     mustFail: 'ck_reward_source_evaluation_subject',
   },
   {
@@ -1556,7 +1567,7 @@ export const ECONOMIC_DATA_ROLLBACK = {
     },
     {
       label: 'up again: an intent cannot have a second open task',
-      sql: `INSERT INTO "payment_reconciliation_task"
+      sql: eligibilityClockSql`INSERT INTO "payment_reconciliation_task"
               ("id", "organization_id", "payment_intent_id", "kind", "next_attempt_at",
                "correlation_id", "created_at", "updated_at")
             VALUES ('PRT_MIGCHECK_SECOND', 'ORG-MIGCHECK', 'PAY_MIGCHECK_REFUND', 'REFUND',
@@ -3128,16 +3139,31 @@ export const EXPECTED = {
     // D-045: the runtime role owns nothing and lost CREATEDB, so the scratch schema is created —
     // and migrated — as the migrator, which owns rasta_analytics.
     connectAs: 'migrator',
-    tables: ['fact_maintenance', 'processed_event'],
+    tables: ['fact_maintenance', 'processed_event', 'projection_coverage'],
     types: [],
     triggers: [
       'tg_fact_maintenance_append_only',
       'tg_fact_maintenance_no_truncate',
       'tg_fact_maintenance_recorded_at',
+      // Q-154: the projection's coverage start is stamped by the database and never moved.
+      'tg_projection_coverage_append_only',
+      'tg_projection_coverage_no_truncate',
+      'tg_projection_coverage_started_at',
     ],
-    functions: ['fact_maintenance_append_only', 'fact_recorded_at_now'],
-    indexes: ['fact_maintenance_pkey', 'ix_fact_maintenance_org_completed', 'processed_event_pkey'],
+    functions: [
+      'fact_maintenance_append_only',
+      'fact_recorded_at_now',
+      'projection_coverage_append_only',
+      'projection_coverage_started_now',
+    ],
+    indexes: [
+      'fact_maintenance_pkey',
+      'ix_fact_maintenance_org_completed',
+      'processed_event_pkey',
+      'projection_coverage_pkey',
+    ],
     constraints: [
+      'ck_projection_coverage_name',
       'ck_processed_event_ids',
       'ck_fact_maintenance_ids',
       'ck_fact_maintenance_type',

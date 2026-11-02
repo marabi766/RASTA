@@ -299,7 +299,9 @@ describe('L1-03: anonymous rate limits key on the client, not the ingress', () =
         forwardedFor ? { 'x-forwarded-for': forwardedFor } : {},
         'POST',
       );
-      const key = gateway.keys.find((entry) => entry.scope === 'ip:registration-requests');
+      const key = gateway.keys.find(
+        (entry) => entry.scope === 'ip:registration-requests:collection-post',
+      );
       if (!key) throw new Error('no anonymous budget was consumed');
       return key.identifier;
     } finally {

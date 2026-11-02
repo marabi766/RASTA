@@ -235,6 +235,19 @@ export class SettlementService {
     // payer's spendable balance has to cover it now. Checked under the lock,
     // so the answer is still true when the journal posts.
     if (!hold) {
+      // A new debit, so only from an ACTIVE wallet: FROZEN means "no new
+      // debits or holds", and CLOSED takes none either (schema.prisma,
+      // `WalletStatus`; economic audit F2). Read from the row locked above, so
+      // a freeze that committed first is the status seen here. Settling an
+      // existing hold, below, is the allowance the schema names — money
+      // already committed to escrow still resolves. The payee's credit is not
+      // gated: a freeze stops money leaving a wallet, not arriving in it.
+      if (payer.status !== 'ACTIVE') {
+        throw RastaError.businessRule(
+          'The paying wallet is not active; a settlement with no funds held cannot debit it',
+          { transactionId, walletId: payer.id, walletStatus: payer.status },
+        );
+      }
       assertSufficient(
         payer.id,
         balancesFrom(payer.availableBalanceMinor, payer.pendingBalanceMinor),

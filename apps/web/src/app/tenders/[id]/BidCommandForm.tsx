@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState, useCallback } from 'react';
+import { useCallback } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import {
@@ -19,13 +19,17 @@ import {
 import { bidFormValues, parseBid, type BidFormValues } from '@/lib/bid-input';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { toPersianDigits } from '@/lib/format';
-import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import {
+  answerUnresolvedBid,
   clearUnresolvedBid,
   restoreUnresolvedBid,
   saveUnresolvedBid,
+  settleUnresolvedBid,
   type ReplayStamp,
   type UnresolvedBid,
+  bidQuarantine,
 } from '@/lib/unresolved-bid';
 
 import { submitBidCommand } from './bid-actions';
@@ -35,6 +39,8 @@ import {
   type BidFormState,
   type UnconfirmedBid,
 } from './bid-form-state';
+import type { Binding } from '@/lib/unresolved-tenancy';
+import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
  * One bid command this contractor may issue on a tender — submitting the
@@ -77,8 +83,8 @@ export interface BidCommandFormProps {
   readonly submissionId: string;
   /** That submission id's signed replay deadline; null for a restored record. */
   readonly replay: ReplayStamp | null;
-  /** This person's one-way tag (`submissionBinding`). */
-  readonly owner: string;
+  /** This person's one-way tags for this organization (`submissionBinding`). */
+  readonly account: Binding;
   /** The page that shows the outcome — reloaded to read the bid's receipt. */
   readonly pageHref: string;
   readonly initial?: BidFormState;
@@ -114,62 +120,82 @@ function sendable(form: FormData, command: BidCommand): BidFormValues | 'WITHDRA
   return parseBid(values).ok ? values : null;
 }
 
-export function BidCommandForm({
+/**
+ * The form, drawn the one way every fenced form is (`UnresolvedForm`): behind
+ * the device's quarantine of this kind, and — every time it mounts — from what
+ * `sessionStorage` keeps of its own submission, if anything. The store keeps a
+ * marker only, never what was sent, so a form drawn anew over it is the
+ * view-only marker (`unconfirmedFrom`), never a blank form under its key; a
+ * mounted form keeps its own state, the sent content included.
+ */
+export function BidCommandForm(props: BidCommandFormProps) {
+  const { tenderId, submissionId, account } = props;
+  const restore = () => {
+    const restored = restoreUnresolvedBid(tenderId, account);
+    return restored?.submissionId === submissionId
+      ? { submissionId, state: unconfirmedFrom(restored) }
+      : null;
+  };
+  return (
+    <UnresolvedForm source={bidQuarantine} account={account} scope={tenderId} restore={restore}>
+      {(restored) => <BidCommandFormBody {...props} initial={restored ?? props.initial} />}
+    </UnresolvedForm>
+  );
+}
+
+function BidCommandFormBody({
   tenderId,
   command,
   criteria,
   csrfToken,
   submissionId,
   replay,
-  owner,
+  account,
   pageHref,
   initial = IDLE_BID_FORM,
   heldBy = null,
 }: BidCommandFormProps) {
   const send = useCallback(
-    async (previous: BidFormState, form: FormData): Promise<BidFormState> => {
-      const firstSend = previous.kind !== 'UNCONFIRMED';
+    (previous: BidFormState, form: FormData): Promise<BidFormState> => {
+      const retrying = previous.kind === 'UNCONFIRMED' ? previous : null;
       const sent = form.get(SUBMISSION_FIELD);
-      const sentId = firstSend ? (typeof sent === 'string' ? sent : '') : previous.submissionId;
-      if (firstSend) {
+      const submissionId = retrying ? retrying.submissionId : typeof sent === 'string' ? sent : '';
+      // Remembered BEFORE it is sent; not sent if it cannot be remembered.
+      const unsent = retrying ? null : sendable(form, command);
+      return submitThroughSlot<BidFormState>({
+        submissionId,
+        retrying,
         // Another submission's outcome is unknown here: nothing is sent, and its
         // record is not touched.
-        const holder = restoreUnresolvedBid(tenderId, owner);
-        if (holder && holder.submissionId !== sentId) return { kind: 'HELD' };
-      } else if (previous.viewOnly || previous.restored) {
-        return previous;
-      } else if (restoreUnresolvedBid(tenderId, owner)?.submissionId !== previous.submissionId) {
-        // The record was set aside elsewhere: this view no longer re-sends.
-        return { ...previous, viewOnly: true };
-      }
-
-      // Remembered BEFORE it is sent; not sent if it cannot be remembered.
-      const unsent = firstSend ? sendable(form, command) : null;
-      const saved = unsent
-        ? saveUnresolvedBid(tenderId, { command, submissionId: sentId, correlationId: null }, owner)
-        : null;
-      if (saved === 'HELD') return { kind: 'HELD' };
-      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
-
-      let next: BidFormState;
-      try {
-        next = await submitBidCommand(tenderId, previous, form);
-      } catch (error) {
-        // Done: the action redirects to the tender.
-        if (isRedirect(error)) {
-          clearUnresolvedBid(tenderId, sentId);
-          throw error;
-        }
-        const ended = await sessionHasEnded();
-        if (!firstSend) return withRetryNote(previous, ended ? 'sessionEnded' : 'retryUnknown');
-        if (unsent) {
+        stored: () => {
+          const stored = restoreUnresolvedBid(tenderId, account);
+          return stored
+            ? { submissionId: stored.submissionId, state: unconfirmedFrom(stored) }
+            : null;
+        },
+        remember: () =>
+          unsent
+            ? saveUnresolvedBid(tenderId, { command, submissionId, correlationId: null }, account)
+            : null,
+        // A view-only record — restored, withdrawn, or a replacement or withdrawal
+        // that is never repeated — is never sent again; nor one set aside elsewhere.
+        admitRetry: (view) => {
+          if (view.viewOnly || view.restored) return view;
+          return restoreUnresolvedBid(tenderId, account)?.submissionId === view.submissionId
+            ? null
+            : { ...view, viewOnly: true };
+        },
+        send: () => submitBidCommand(tenderId, previous, form),
+        failed: (ended) => {
+          if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
+          if (!unsent) return null;
           const values = unsent === 'WITHDRAW' ? null : unsent;
           return UNREPEATABLE_BID_COMMANDS.includes(command)
             ? {
                 kind: 'UNCONFIRMED',
                 command,
                 correlationId: null,
-                submissionId: sentId,
+                submissionId,
                 values,
                 replay: null,
                 viewOnly: true,
@@ -180,31 +206,28 @@ export function BidCommandForm({
                 kind: 'UNCONFIRMED',
                 command,
                 correlationId: null,
-                submissionId: sentId,
+                submissionId,
                 values,
                 replay,
                 ...(ended ? { sessionEnded: true as const } : {}),
               };
-        }
-        throw error;
-      }
-
-      // Still in doubt: kept. A definite answer to THIS submission's first send:
-      // its own record is dropped — never another's.
-      if (next.kind === 'UNCONFIRMED') {
-        saveUnresolvedBid(
-          tenderId,
-          { command, submissionId: next.submissionId, correlationId: next.correlationId },
-          owner,
-        );
-      } else if (firstSend) {
-        clearUnresolvedBid(tenderId, sentId);
-      }
-      return next;
+        },
+        // Still in doubt: kept. A definite answer to THIS submission's first send:
+        // its own record is dropped — never another's.
+        answer: (state) =>
+          answerUnresolvedBid(
+            tenderId,
+            { command, submissionId: state.submissionId, correlationId: state.correlationId },
+            account,
+          ),
+        settle: () => settleUnresolvedBid(tenderId, submissionId, account),
+        held: { kind: 'HELD' },
+        unavailable: { kind: 'STORAGE_UNAVAILABLE' },
+      });
     },
-    [tenderId, command, replay, owner],
+    [tenderId, command, replay, account],
   );
-  const [state, action, pending] = useActionState(send, initial);
+  const [state, action, pending] = useSlotActionState(send, initial);
   const headingId = `bid-command-${command}`;
 
   if (state.kind === 'UNCONFIRMED') {
@@ -216,7 +239,7 @@ export function BidCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         pageHref={pageHref}
-        onForget={() => clearUnresolvedBid(tenderId, state.submissionId)}
+        onForget={() => clearUnresolvedBid(tenderId, state.submissionId, account)}
       />
     );
   }

@@ -48,7 +48,7 @@ export interface OrderDetailScreenProps {
   readonly mintSubmissionId: () => string;
   /** The command that just succeeded, from the redirect's query flag. */
   readonly done?: OrderCommand;
-  /** The order was just placed from the offers page (`?placed=1`). */
+  /** The order was just placed from the offers page (its signed flash, `server/flash.ts`). */
   readonly placed?: boolean;
   /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
   readonly demoMode: DemoMode;

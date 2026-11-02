@@ -1,3 +1,4 @@
+import { setEligibilityFixture } from '@rasta/testing';
 import { runUnscoped, runWithContext, type RequestContext } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { IdentityRepository } from '../src/identity/identity.repository';
@@ -39,8 +40,16 @@ describe('which organizations a user belongs to — on the database clock', () =
       (membership) => membership.organizationId,
     );
 
-  const member = (organizationId: string, extra: Record<string, unknown> = {}) =>
-    runUnscoped('test fixture spans organizations', () =>
+  /**
+   * A membership whose validity window, when not the default (from the
+   * database's now(), open-ended), is set by the database clock that judges it.
+   */
+  const member = async (
+    organizationId: string,
+    extra: Record<string, unknown> = {},
+    window?: Parameters<typeof setEligibilityFixture>[1],
+  ) => {
+    const created = await runUnscoped('test fixture spans organizations', () =>
       prisma.client.membership.create({
         data: {
           id: id('MBR-LIVE'),
@@ -53,6 +62,12 @@ describe('which organizations a user belongs to — on the database clock', () =
         },
       }),
     );
+    if (window)
+      await runUnscoped('test fixture dates a membership window', () =>
+        setEligibilityFixture(prisma, window, [created.id]),
+      );
+    return created;
+  };
 
   beforeAll(async () => {
     prisma = newPrisma();
@@ -112,7 +127,7 @@ describe('which organizations a user belongs to — on the database clock', () =
   });
 
   it('judges the end of a window on the database clock too, and leaves out the revoked', async () => {
-    await member(org.b, { validUntil: new Date(Date.now() - 60_000) });
+    await member(org.b, {}, 'membershipEndedMinuteAgo');
     await member(orgC, { status: 'REVOKED', deletedAt: new Date() });
     const answer = await asConstruction(() => service.getMemberships(userId));
     expect(answer).toMatchObject({ memberships: [{ organizationId: org.a }] });
@@ -121,19 +136,16 @@ describe('which organizations a user belongs to — on the database clock', () =
 
   it('answers the interval from an instant to the database’s own: wider than live, ended only by a revocation', async () => {
     const hourAgo = new Date(Date.now() - 3_600_000);
-    const longAgo = new Date(Date.now() - 86_400_000);
-    // Member of D from two days ago to ten minutes ago; revoked from E half an hour ago.
+    // Member of D from two days ago to ten minutes ago; of E from a day ago, revoked
+    // half an hour ago.
     const orgD = `ORG-ITEST-D-${ulid().slice(-10)}`;
     const orgE = `ORG-ITEST-E-${ulid().slice(-10)}`;
-    await member(orgD, {
-      validFrom: new Date(longAgo.getTime() - 86_400_000),
-      validUntil: new Date(Date.now() - 600_000),
-    });
-    await member(orgE, {
-      status: 'REVOKED',
-      validFrom: longAgo,
-      deletedAt: new Date(Date.now() - 1_800_000),
-    });
+    await member(orgD, {}, 'membershipHeldTwoDaysToTenMinutesAgo');
+    await member(
+      orgE,
+      { status: 'REVOKED', deletedAt: new Date(Date.now() - 1_800_000) },
+      'membershipStartedDayAgo',
+    );
 
     // From an hour ago: everything that held at any point since, ended or not.
     const sinceHourAgo = await asConstruction(() => service.getMemberships(userId, hourAgo));

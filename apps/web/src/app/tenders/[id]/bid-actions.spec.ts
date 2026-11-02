@@ -17,6 +17,7 @@ import {
 import { BID_ID, RECEIPT, REVISED, TENDER_ID, WITHDRAWN } from '@/test/bid-fixtures';
 
 import { IDLE_BID_FORM, type BidFormState, type UnconfirmedBid } from './bid-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The bid commands' write path — the order of checks every portal write keeps,
@@ -54,7 +55,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'contractor',
   organizationId: 'ORG-CON-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-CON-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

@@ -6,6 +6,7 @@ import type { Offer } from '@/server/marketplace';
 
 import { PlaceOrderForm } from './PlaceOrderForm';
 import type { PlaceOrderFormState } from './place-order-form-state';
+import { bindingOf } from '@/test/unresolved-binding';
 
 /**
  * `PlaceOrderForm`, in every state its own action can put it in. Same technique
@@ -54,7 +55,7 @@ function renderForm(state: PlaceOrderFormState = { kind: 'IDLE' }, isPending = f
       submissionId={SUBMISSION}
       newOrderHref="/marketplace/PRD_1"
       productId="PRD_1"
-      binding={{ owner: 'owner-tag', session: 'session-tag' }}
+      binding={bindingOf('owner-tag', 'session-tag')}
       sessionMaxAgeSeconds={3600}
     />,
   );

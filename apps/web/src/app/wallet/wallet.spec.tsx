@@ -11,6 +11,8 @@ import type {
   TransactionPage,
   Wallet,
 } from '@/server/wallet';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * `WalletScreen`, composing four independent reads. Mirrors
@@ -90,7 +92,7 @@ function render_(
     holds?: ReadResult<HoldsPage>;
     transactions?: ReadResult<TransactionPage>;
     provider?: ReadResult<PaymentProviderDisclosure>;
-    query?: { status?: string; transactionType?: string; cursor?: string };
+    query?: { context?: string; status?: string; transactionType?: string; cursor?: string };
   } = {},
 ) {
   return render(
@@ -99,7 +101,7 @@ function render_(
       holds={overrides.holds ?? { kind: 'OK', data: HOLDS }}
       transactions={overrides.transactions ?? { kind: 'OK', data: TRANSACTIONS }}
       provider={overrides.provider ?? { kind: 'OK', data: PROVIDER }}
-      query={overrides.query ?? {}}
+      query={{ context: TEST_CONTEXT, ...overrides.query }}
       csrfToken="csrf-token-for-this-session"
       submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
     />,
@@ -239,7 +241,10 @@ describe('transaction history', () => {
     const unfiltered = render_({ transactions: empty });
     expect(unfiltered.getByText('هیچ تراکنشی ثبت نشده')).toBeInTheDocument();
 
-    const filtered = render_({ transactions: empty, query: { status: 'DISPUTED' } });
+    const filtered = render_({
+      transactions: empty,
+      query: { context: TEST_CONTEXT, status: 'DISPUTED' },
+    });
     expect(filtered.getByText('چیزی با این پالایش پیدا نشد')).toBeInTheDocument();
   });
 
@@ -249,11 +254,11 @@ describe('transaction history', () => {
 
     const { getByRole } = render_({
       transactions: { kind: 'OK', data: { ...TRANSACTIONS, hasMore: true, nextCursor: 'CUR_2' } },
-      query: { status: 'SETTLED' },
+      query: { context: TEST_CONTEXT, status: 'SETTLED' },
     });
     expect(getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      '/wallet?status=SETTLED&cursor=CUR_2',
+      withContext(TEST_CONTEXT, '/wallet?status=SETTLED&cursor=CUR_2'),
     );
   });
 

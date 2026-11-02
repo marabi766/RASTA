@@ -1,3 +1,4 @@
+import { eligibilityClockTag } from '@rasta/testing';
 import { createHash } from 'node:crypto';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -100,7 +101,9 @@ describe('database constraints (ADR-054 § 4, § 10)', () => {
     it('refuses a retry scheduled on a closed delivery', async () => {
       await expect(
         sql(
-          Prisma.sql`UPDATE "notification_delivery" SET "next_attempt_at" = now() WHERE "id" = ${deliveryId}`,
+          eligibilityClockTag(
+            Prisma.sql,
+          )`UPDATE "notification_delivery" SET "next_attempt_at" = now() WHERE "id" = ${deliveryId}`,
         ),
       ).rejects.toEqual(constraint('ck_delivery_next_attempt_only_when_open'));
     });
@@ -245,7 +248,9 @@ describe('database constraints (ADR-054 § 4, § 10)', () => {
       );
       await expect(
         sql(
-          Prisma.sql`UPDATE "notification_intent" SET "claim_token" = 't', "claim_owner" = 'o', "claim_expires_at" = now() WHERE "id" = ${intentId}`,
+          eligibilityClockTag(
+            Prisma.sql,
+          )`UPDATE "notification_intent" SET "claim_token" = 't', "claim_owner" = 'o', "claim_expires_at" = now() WHERE "id" = ${intentId}`,
         ),
       ).rejects.toEqual(constraint('ck_intent_claim_only_when_pending'));
     });
@@ -275,7 +280,9 @@ describe('database constraints (ADR-054 § 4, § 10)', () => {
       ).rejects.toEqual(constraint('ck_dedupe_seen_count_positive'));
       await expect(
         sql(
-          Prisma.sql`UPDATE "notification_dedupe" SET "expires_at" = "first_seen_at" WHERE "dedupe_key" = ${key}`,
+          eligibilityClockTag(
+            Prisma.sql,
+          )`UPDATE "notification_dedupe" SET "expires_at" = "first_seen_at" WHERE "dedupe_key" = ${key}`,
         ),
       ).rejects.toEqual(constraint('ck_dedupe_window_ordered'));
     });
@@ -299,7 +306,11 @@ describe('database constraints (ADR-054 § 4, § 10)', () => {
       // deferred; an immediate check would have refused the first statement.
       await runUnscoped('constraint probe exercises the deferred foreign key', () =>
         w.prisma.transaction(async (tx) => {
-          await tx.$executeRaw`INSERT INTO "notification_dedupe" ("dedupe_key","organization_id","intent_id","expires_at") VALUES (${key}, ${organizationId}, ${phantom}, now() + interval '1 day')`;
+          await tx.$executeRaw(
+            eligibilityClockTag(
+              Prisma.sql,
+            )`INSERT INTO "notification_dedupe" ("dedupe_key","organization_id","intent_id","expires_at") VALUES (${key}, ${organizationId}, ${phantom}, now() + interval '1 day')`,
+          );
           await tx.$executeRaw`INSERT INTO "notification_intent" ("id","organization_id","source_event_id","source_event_name","source_topic","source_partition_key","occurred_at","correlation_id","rule_key","template_key","severity","classification","subject_type","subject_id","dedupe_key","context_data")
             VALUES (${phantom}, ${organizationId}, ${`EVT_${ulid()}`}, 'X', 't', 'k', now(), 'c', 'r', 't', 'INFO', 'ROUTINE', 's', 'i', ${key}, '{}')`;
         }),
@@ -308,7 +319,11 @@ describe('database constraints (ADR-054 § 4, § 10)', () => {
       await expect(
         runUnscoped('constraint probe exercises the deferred foreign key', () =>
           w.prisma.transaction(async (tx) => {
-            await tx.$executeRaw`INSERT INTO "notification_dedupe" ("dedupe_key","organization_id","intent_id","expires_at") VALUES (${absentKey}, ${organizationId}, ${`NTI_${ulid()}`}, now() + interval '1 day')`;
+            await tx.$executeRaw(
+              eligibilityClockTag(
+                Prisma.sql,
+              )`INSERT INTO "notification_dedupe" ("dedupe_key","organization_id","intent_id","expires_at") VALUES (${absentKey}, ${organizationId}, ${`NTI_${ulid()}`}, now() + interval '1 day')`,
+            );
           }),
         ),
       ).rejects.toEqual(

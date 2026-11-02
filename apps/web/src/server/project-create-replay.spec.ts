@@ -9,6 +9,7 @@ import {
   mintCreateSubmission,
 } from './project-create-replay';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The create form's replay deadline: the service's mirrored retention less the
@@ -19,7 +20,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'owner',
   organizationId: 'ORG_OWNER',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_OWNER'),
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',

@@ -18,6 +18,7 @@ import {
 } from '@/test/return-fixtures';
 
 import { IDLE_RETURN_FORM, type UnconfirmedReturn } from './return-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The return commands' write path — the order of checks every portal write
@@ -56,7 +57,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'supplier',
   organizationId: SUPPLIER,
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken(SUPPLIER),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

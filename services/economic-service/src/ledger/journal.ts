@@ -57,33 +57,27 @@ export function deltaByCurrency(entries: readonly DraftEntry[]): Map<string, big
  *   - fewer than two entries is not double-entry bookkeeping at all;
  *   - a non-positive amount asserts nothing and balances nothing;
  *   - a non-zero delta in any currency is the classic unbalanced journal;
- *   - and each is reported with the figure, because "unbalanced" without the
- *     delta is a message that sends an operator to the database anyway.
+ *   - and each is reported by its reason code and the journal id, never the
+ *     figure: the error's context is logged, and an imbalance is an amount
+ *     (AGENTS.md S-09; economic audit F9). The journal id is the handle to the
+ *     entries, which are in the database under authorization.
  *
  * Throws `LEDGER_UNBALANCED` (422), the platform error code that exists for
  * exactly this (`packages/contracts/src/common/errors.ts`).
  */
 export function assertBalanced(journalId: string, entries: readonly DraftEntry[]): void {
   if (entries.length < 2) {
-    throw RastaError.ledgerUnbalanced(
-      journalId,
-      `journal has ${entries.length} entries; double-entry needs at least two`,
-    );
+    throw RastaError.ledgerUnbalanced(journalId, 'TOO_FEW_ENTRIES');
   }
 
   for (const entry of entries) {
     if (entry.amountMinor <= 0n) {
-      throw RastaError.ledgerUnbalanced(
-        journalId,
-        `entry on account ${entry.accountId} has a non-positive amount`,
-      );
+      throw RastaError.ledgerUnbalanced(journalId, 'NON_POSITIVE_ENTRY');
     }
   }
 
-  for (const [currency, delta] of deltaByCurrency(entries)) {
-    if (delta !== 0n) {
-      throw RastaError.ledgerUnbalanced(journalId, `${currency}: ${delta.toString()}`);
-    }
+  for (const [, delta] of deltaByCurrency(entries)) {
+    if (delta !== 0n) throw RastaError.ledgerUnbalanced(journalId, 'DEBITS_NOT_CREDITS');
   }
 }
 

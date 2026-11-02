@@ -7,6 +7,7 @@ import {
   type RefreshCoordinator,
 } from './refresh-coordinator';
 import { openSession, sealSession, sessionSecondsLeft, type WebSession } from './session';
+import { sessionOrganization } from './session-organization';
 
 /**
  * Keeping a session's tokens usable, at the one point where the result can
@@ -52,6 +53,30 @@ import { openSession, sealSession, sessionSecondsLeft, type WebSession } from '.
  * Until then only this render stops using a session whose access token has
  * already run out. Without the terminal rule a revoked session kept its
  * cookie, and re-asked the provider, until its absolute lifetime ran out.
+ *
+ * ## The organization stays where the session was pinned (task 118)
+ *
+ * The session's `organizationId` is the organization it was pinned to at
+ * sign-in (`session-organization.ts`), and a refresh never moves it: the new
+ * token is kept beside the same organization, and every gateway call carries
+ * that organization as `X-Organization-Id`. The person may have switched their
+ * active organization elsewhere since — another session, identity's API — and
+ * the new token's `org_id` then names another one; that changes nothing here
+ * while the token still grants the pinned organization a role (audit F2).
+ *
+ * Two outcomes are kept apart:
+ *
+ *   - **Definitive loss**: the refresh succeeded and the new token grants the
+ *     pinned organization nothing — the membership or every role in it was
+ *     removed. The rotated tokens are written back (the old refresh token is
+ *     spent), the organization is not, and the session can no longer act:
+ *     `readSession()` refuses it and the person is sent to
+ *     `/account/recovery`, which says so (`ORGANIZATION_LOST`). Never adopted
+ *     silently: only a new sign-in pins another organization.
+ *   - **Transient failure** — no answer, a refusal within the grace, an
+ *     expired token, a cookie race: exactly as before (above). The stored
+ *     organization is untouched there too; nothing ever falls back to the
+ *     token's active organization.
  */
 
 /**
@@ -68,14 +93,29 @@ export type SessionRenewal =
   | { readonly kind: 'NONE' }
   /** A usable session that needs no change. */
   | { readonly kind: 'VALID' }
-  /** Refreshed: write this cookie back, living no longer than `maxAgeSeconds`. */
+  /**
+   * Refreshed, for the same organization: write this cookie back, living no
+   * longer than `maxAgeSeconds`.
+   */
   | { readonly kind: 'RENEWED'; readonly sealed: string; readonly maxAgeSeconds: number }
+  /**
+   * Refreshed, but the new token grants the pinned organization nothing: write
+   * this cookie back too — it holds the rotated tokens and the same, now
+   * unusable, organization — and the session is recovered, not continued
+   * (`/account/recovery`). Never moved to the token's organization.
+   */
+  | {
+      readonly kind: 'ORGANIZATION_LOST';
+      readonly sealed: string;
+      readonly maxAgeSeconds: number;
+    }
   /**
    * The refresh was refused or went unanswered. Leave the browser's cookie
    * alone (see above); `usable` says whether this request may still act on
    * the session — true while its access token has not yet expired, judged by
-   * the clock once the refresh settled. Either way the failure may pass: the
-   * login itself is not known to have ended (`session-state.ts`).
+   * the clock once the refresh settled, and its token still grants the pinned
+   * organization a role. Either way the failure may pass: the login itself is
+   * not known to have ended (`session-state.ts`).
    */
   | { readonly kind: 'REFUSED'; readonly usable: boolean }
   /**
@@ -147,6 +187,8 @@ export async function renewSession(
   const secondsLeft = sessionSecondsLeft(session, env.WEB_SESSION_MAX_AGE_SECONDS, now);
   if (secondsLeft <= 0) return { kind: 'ENDED' };
 
+  // The token is used as it is. Whether it still grants the pinned
+  // organization is `readSession()`'s question, asked on every read.
   if (!isExpiring(session, now)) return { kind: 'VALID' };
 
   const refresh =
@@ -162,7 +204,11 @@ export async function renewSession(
   const outcome = await coordinator.refresh(session.refreshToken, refresh);
   // Read after the await: the token may have run out while the refresh was out.
   const settledAt = deps.clock?.() ?? deps.now ?? Date.now();
-  const usable = session.accessTokenExpiresAt > Math.floor(settledAt / 1000);
+  // A session that cannot act for its organization is not used by this render
+  // either (`readSession()` would refuse it in any case).
+  const usable =
+    session.accessTokenExpiresAt > Math.floor(settledAt / 1000) &&
+    sessionOrganization(session) !== undefined;
   if (outcome.kind === 'REFUSED') return { kind: 'REFUSED', usable };
   if (outcome.kind === 'REJECTED') {
     // Terminal for the token — once the grace has passed with no rotation of
@@ -178,16 +224,24 @@ export async function renewSession(
     accessToken: tokens.access_token,
     accessTokenExpiresAt: Math.floor(now / 1000) + tokens.expires_in,
     refreshToken: tokens.refresh_token,
-    // `issuedAt` is carried over untouched by the spread: a refresh extends
-    // the access token, never the session.
+    // `organizationId` is carried over untouched by the spread: the session
+    // acts for the organization it was pinned to, whichever one the new token's
+    // `org_id` names (audit F2). `issuedAt` likewise: a refresh extends the
+    // access token, never the session.
   };
-
-  return {
-    kind: 'RENEWED',
+  const sealedRenewal = {
     sealed: sealSession(renewed, env.WEB_SESSION_SECRET),
     // The cookie lives no longer than the session it carries.
     maxAgeSeconds: secondsLeft,
   };
+
+  // Definitive: the provider minted this token, and it grants the pinned
+  // organization no role. Kept for what it is — a session that cannot act —
+  // rather than continued, or moved to the token's organization.
+  if (sessionOrganization(renewed) === undefined && renewed.organizationId !== null) {
+    return { kind: 'ORGANIZATION_LOST', ...sealedRenewal };
+  }
+  return { kind: 'RENEWED', ...sealedRenewal };
 }
 
 // ---------------------------------------------------------------------------

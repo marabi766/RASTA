@@ -11,6 +11,8 @@ import type {
 } from '@/server/inventory';
 
 import { InventoryScreen, inventoryHref, type InventorySelection } from './InventoryScreen';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * What `/inventory` renders: every outcome the server reads can hand back
@@ -97,11 +99,17 @@ describe('quantities', () => {
 
 describe('the warehouse list', () => {
   it('shows each warehouse with a link that chooses it, and its Jalali creation date', () => {
-    render(<InventoryScreen warehouses={warehouses([WAREHOUSE])} selection={null} query={{}} />);
+    render(
+      <InventoryScreen
+        warehouses={warehouses([WAREHOUSE])}
+        selection={null}
+        query={{ context: TEST_CONTEXT }}
+      />,
+    );
 
     expect(screen.getByRole('link', { name: 'انبار مرکزی' })).toHaveAttribute(
       'href',
-      `/inventory?warehouse=${WAREHOUSE_ID}`,
+      withContext(TEST_CONTEXT, `/inventory?warehouse=${WAREHOUSE_ID}`),
     );
     expect(screen.getByText(/۱۴۰۵/)).toBeInTheDocument();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
@@ -112,44 +120,61 @@ describe('the warehouse list', () => {
       <InventoryScreen
         warehouses={warehouses([WAREHOUSE], 'w2')}
         selection={null}
-        query={{ warehouse: WAREHOUSE_ID, cursor: 's3' }}
+        query={{ context: TEST_CONTEXT, warehouse: WAREHOUSE_ID, cursor: 's3' }}
       />,
     );
     expect(screen.getByRole('link', { name: 'انبارهای بعدی' })).toHaveAttribute(
       'href',
-      `/inventory?warehouse=${WAREHOUSE_ID}&wcursor=w2&cursor=s3`,
+      withContext(TEST_CONTEXT, `/inventory?warehouse=${WAREHOUSE_ID}&wcursor=w2&cursor=s3`),
     );
   });
 
   it('says so when there are none', () => {
-    render(<InventoryScreen warehouses={warehouses([])} selection={null} query={{}} />);
+    render(
+      <InventoryScreen
+        warehouses={warehouses([])}
+        selection={null}
+        query={{ context: TEST_CONTEXT }}
+      />,
+    );
     expect(screen.getByText('این سازمان هنوز انباری ثبت نکرده است.')).toBeInTheDocument();
   });
 
   it('renders a refusal as no access', () => {
-    render(<InventoryScreen warehouses={{ kind: 'FORBIDDEN' }} selection={null} query={{}} />);
+    render(
+      <InventoryScreen
+        warehouses={{ kind: 'FORBIDDEN' }}
+        selection={null}
+        query={{ context: TEST_CONTEXT }}
+      />,
+    );
     expect(screen.getByText('انبارهای این سازمان در اختیار شما نیست.')).toBeInTheDocument();
   });
 
   it.each([UNAVAILABLE, MALFORMED])(
     'renders a degraded read ($kind) with the correlation id and fixed text',
     (result) => {
-      render(<InventoryScreen warehouses={result} selection={null} query={{}} />);
+      render(
+        <InventoryScreen warehouses={result} selection={null} query={{ context: TEST_CONTEXT }} />,
+      );
       expect(screen.getByText(/فهرست انبارها خوانده نشد/)).toBeInTheDocument();
       expect(screen.getByText(/corr-1/)).toBeInTheDocument();
     },
   );
 
   it('builds links from the query alone', () => {
-    expect(inventoryHref({}, {})).toBe('/inventory');
-    expect(inventoryHref({ warehouse: WAREHOUSE_ID, cursor: 'c' }, { warehouse: undefined })).toBe(
-      '/inventory?cursor=c',
-    );
+    expect(inventoryHref({ context: TEST_CONTEXT }, {})).toBe('/inventory');
+    expect(
+      inventoryHref(
+        { context: TEST_CONTEXT, warehouse: WAREHOUSE_ID, cursor: 'c' },
+        { warehouse: undefined },
+      ),
+    ).toBe(`/inventory?cursor=c&ctx=${TEST_CONTEXT}`);
   });
 });
 
 describe('the stock of the chosen warehouse', () => {
-  const query = { warehouse: WAREHOUSE_ID };
+  const query = { context: TEST_CONTEXT, warehouse: WAREHOUSE_ID };
 
   it('shows on hand, reserved and available per item as Persian digits', () => {
     render(
@@ -182,7 +207,7 @@ describe('the stock of the chosen warehouse', () => {
     );
     expect(screen.getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      `/inventory?warehouse=${WAREHOUSE_ID}&cursor=SKI_2`,
+      withContext(TEST_CONTEXT, `/inventory?warehouse=${WAREHOUSE_ID}&cursor=SKI_2`),
     );
   });
 
@@ -264,7 +289,7 @@ describe('the stock of the chosen warehouse', () => {
 // All sixteen in one test overran the 5 s default on a loaded CI runner (main
 // run 38715938220), while one state takes about a tenth of a second here.
 describe('accessibility', () => {
-  const query = { warehouse: WAREHOUSE_ID };
+  const query = { context: TEST_CONTEXT, warehouse: WAREHOUSE_ID };
   const chosen = (picked: InventorySelection): Parameters<typeof InventoryScreen>[0] => ({
     warehouses: warehouses([WAREHOUSE]),
     selection: picked,
@@ -274,13 +299,32 @@ describe('accessibility', () => {
   it.each<[string, Parameters<typeof InventoryScreen>[0]]>([
     [
       'warehouses, more to page',
-      { warehouses: warehouses([WAREHOUSE], 'w2'), selection: null, query: {} },
+      {
+        warehouses: warehouses([WAREHOUSE], 'w2'),
+        selection: null,
+        query: { context: TEST_CONTEXT },
+      },
     ],
-    ['no warehouses', { warehouses: warehouses([]), selection: null, query: {} }],
-    ['warehouses refused', { warehouses: { kind: 'FORBIDDEN' }, selection: null, query: {} }],
-    ['warehouses not found', { warehouses: { kind: 'NOT_FOUND' }, selection: null, query: {} }],
-    ['warehouses unavailable', { warehouses: UNAVAILABLE, selection: null, query: {} }],
-    ['warehouses malformed', { warehouses: MALFORMED, selection: null, query: {} }],
+    [
+      'no warehouses',
+      { warehouses: warehouses([]), selection: null, query: { context: TEST_CONTEXT } },
+    ],
+    [
+      'warehouses refused',
+      { warehouses: { kind: 'FORBIDDEN' }, selection: null, query: { context: TEST_CONTEXT } },
+    ],
+    [
+      'warehouses not found',
+      { warehouses: { kind: 'NOT_FOUND' }, selection: null, query: { context: TEST_CONTEXT } },
+    ],
+    [
+      'warehouses unavailable',
+      { warehouses: UNAVAILABLE, selection: null, query: { context: TEST_CONTEXT } },
+    ],
+    [
+      'warehouses malformed',
+      { warehouses: MALFORMED, selection: null, query: { context: TEST_CONTEXT } },
+    ],
     ['stock, more to page', chosen(selection(OK_WAREHOUSE, stock([ITEM], 'SKI_2')))],
     ['no stock', chosen(selection(OK_WAREHOUSE, stock([])))],
     ['stock refused', chosen(selection(OK_WAREHOUSE, { kind: 'FORBIDDEN' }))],

@@ -331,19 +331,21 @@ describe('zod-3 golden: reward rule conditions (recursive)', () => {
       points: 10,
       condition,
     });
-    const leaf = { field: 'hours', op: 'gte', value: 4 };
+    // F5/task 1201 requires exact numeric strings at creation. These remain
+    // the recursive grammar oracle; raw numeric-token refusals have HTTP tests.
+    const leaf = { field: 'hours', op: 'gte', value: '4' };
     const nest = (depth: number): unknown =>
       depth === 0 ? leaf : { all: [nest(depth - 1), { field: 'kind', op: 'present' }] };
     expect(
       cases(createRewardRuleSchema, {
         noCondition: rule(undefined),
-        leaf: rule({ field: ' hours ', op: 'gte', value: 4 }),
+        leaf: rule({ field: ' hours ', op: 'gte', value: '4' }),
         anyOfLeaves: rule({ any: [leaf, { field: 'kind', op: 'eq', value: 'TRIP' }] }),
         deep: rule(nest(4)),
         emptyAll: rule({ all: [] }),
         elevenAny: rule({ any: Array.from({ length: 11 }, () => leaf) }),
-        unknownOp: rule({ field: 'hours', op: 'between', value: 4 }),
-        leafExtraKey: rule({ field: 'hours', op: 'gte', value: 4, unit: 'h' }),
+        unknownOp: rule({ field: 'hours', op: 'between', value: '4' }),
+        leafExtraKey: rule({ field: 'hours', op: 'gte', value: '4', unit: 'h' }),
         badNestedLeaf: rule({ all: [leaf, { any: [{ field: '', op: 'eq' }] }] }),
         bothAllAndAny: rule({ all: [leaf], any: [leaf] }),
         objectValue: rule({ field: 'hours', op: 'eq', value: { n: 4 } }),

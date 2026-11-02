@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { DemoMode } from '@/lib/demo-mode';
 import { callGateway } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import type { WebSession } from './session';
 
@@ -27,7 +28,7 @@ export async function fetchDemoMode(session: WebSession): Promise<DemoMode> {
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: '/v1/wallets/provider/disclosure',
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
     const parsed = disclosureSchema.safeParse(response.data);
     return parsed.success ? (parsed.data.simulated ? 'SIMULATED' : 'REAL') : 'UNKNOWN';

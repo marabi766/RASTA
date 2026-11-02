@@ -441,6 +441,7 @@ describe('refusals and defaults', () => {
     await request(http)
       .post('/v1/rewards/rules')
       .set('authorization', `Bearer ${token}`)
+      .set('idempotency-key', id('api-reward-rule'))
       .send({
         organizationId: org,
         triggerEvent: 'MAINTENANCE_COMPLETED',

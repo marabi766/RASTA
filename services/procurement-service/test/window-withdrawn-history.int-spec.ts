@@ -1,3 +1,4 @@
+import { eligibilityClockWrite } from '@rasta/testing';
 import type { ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { PrismaClient } from '../src/generated/prisma';
 import { WindowSweepService } from '../src/demand/window-sweep.service';
@@ -121,7 +122,7 @@ describe("a window's withdrawn history", () => {
         await tx.$executeRawUnsafe(
           'ALTER TABLE "demand_request" DISABLE TRIGGER "tg_demand_request_totals_check"',
         );
-        await tx.$executeRaw`
+        await eligibilityClockWrite(tx)`
           INSERT INTO demand_aggregation
             (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
              min_quantity, shortfall_policy, setting_version, total_quantity, demand_count,

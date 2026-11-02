@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState, useCallback } from 'react';
+import { useCallback } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import {
@@ -24,14 +24,18 @@ import {
   type ContractFormValues,
 } from '@/lib/contract-command-input';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
-import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import {
+  answerUnresolvedContractCommand,
   clearUnresolvedContractCommand,
   restoreUnresolvedContractCommand,
   saveUnresolvedContractCommand,
+  settleUnresolvedContractCommand,
   type ContractScope,
   type ReplayStamp,
   type RestoredContractCommand,
+  contractCommandQuarantine,
 } from '@/lib/unresolved-contract-command';
 import type { Binding } from '@/lib/unresolved-order';
 
@@ -42,6 +46,7 @@ import {
   type ContractFormState,
   type UnconfirmedContractCommand,
 } from './contract-form-state';
+import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
  * One contract command this viewer may issue — signing or cancelling the
@@ -154,7 +159,33 @@ function titleOf(
   return parts.join(' — ');
 }
 
-export function ContractCommandForm({
+/**
+ * The form, drawn the one way every fenced form is (`UnresolvedForm`): behind
+ * the device's quarantine of this kind, and — every time it mounts — from what
+ * `sessionStorage` keeps of its own submission, if anything: its uncertainty
+ * view, never a blank form under a key whose outcome is unknown.
+ */
+export function ContractCommandForm(props: ContractCommandFormProps) {
+  const { scope, submissionId, binding, sessionMaxAgeSeconds } = props;
+  const restore = () => {
+    const restored = restoreUnresolvedContractCommand(scope, binding, sessionMaxAgeSeconds);
+    return restored?.entry.submissionId === submissionId
+      ? { submissionId, state: unconfirmedFrom(restored) }
+      : null;
+  };
+  return (
+    <UnresolvedForm
+      source={contractCommandQuarantine}
+      account={binding}
+      scope={`${scope.contractId}.${scope.slot}.${scope.subjectId ?? '-'}`}
+      restore={restore}
+    >
+      {(restored) => <ContractCommandFormBody {...props} initial={restored ?? props.initial} />}
+    </UnresolvedForm>
+  );
+}
+
+function ContractCommandFormBody({
   scope,
   command,
   side = null,
@@ -171,54 +202,49 @@ export function ContractCommandForm({
   heldBy = null,
 }: ContractCommandFormProps) {
   const send = useCallback(
-    async (previous: ContractFormState, form: FormData): Promise<ContractFormState> => {
-      const firstSend = previous.kind !== 'UNCONFIRMED';
+    (previous: ContractFormState, form: FormData): Promise<ContractFormState> => {
+      const retrying = previous.kind === 'UNCONFIRMED' ? previous : null;
       const sent = form.get(SUBMISSION_FIELD);
-      const sentId = firstSend ? (typeof sent === 'string' ? sent : '') : previous.submissionId;
-      if (firstSend) {
+      const submissionId = retrying ? retrying.submissionId : typeof sent === 'string' ? sent : '';
+      // Remembered BEFORE it is sent; not sent if it cannot be remembered.
+      const unsent = retrying ? null : pendingFrom(form, command, replay);
+      return submitThroughSlot<ContractFormState>({
+        submissionId,
+        retrying,
         // Another submission's outcome is unknown here: nothing is sent, and its
         // record is not touched.
-        const holder = restoreUnresolvedContractCommand(scope, binding, sessionMaxAgeSeconds);
-        if (holder && holder.entry.submissionId !== sentId) return { kind: 'HELD' };
-      } else {
+        stored: () => {
+          const stored = restoreUnresolvedContractCommand(scope, binding, sessionMaxAgeSeconds);
+          return stored
+            ? { submissionId: stored.entry.submissionId, state: unconfirmedFrom(stored) }
+            : null;
+        },
+        remember: () => (unsent ? saveUnresolvedContractCommand(scope, unsent, binding) : null),
         // A replay only while the service still holds its key, and only from
         // the login it is bound to. Past that, never re-sent.
-        const stored = restoreUnresolvedContractCommand(scope, binding, sessionMaxAgeSeconds);
-        if (stored?.kind !== 'RETRYABLE' || stored.entry.submissionId !== previous.submissionId) {
-          return { ...previous, viewOnly: true };
-        }
-      }
-
-      // Remembered BEFORE it is sent; not sent if it cannot be remembered.
-      const unsent = firstSend ? pendingFrom(form, command, replay) : null;
-      const saved = unsent ? saveUnresolvedContractCommand(scope, unsent, binding) : null;
-      if (saved === 'HELD') return { kind: 'HELD' };
-      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
-
-      let next: ContractFormState;
-      try {
-        next = await submitContractCommand(scope, previous, form);
-      } catch (error) {
-        // Done: the action redirects to the contract.
-        if (isRedirect(error)) {
-          clearUnresolvedContractCommand(scope, sentId);
-          throw error;
-        }
-        const ended = await sessionHasEnded();
-        if (!firstSend) return withRetryNote(previous, ended ? 'sessionEnded' : 'retryUnknown');
-        if (unsent) return ended ? { ...unsent, sessionEnded: true } : unsent;
-        throw error;
-      }
-
-      // Still in doubt: kept. A definite answer to THIS submission's first send:
-      // its own record is dropped — never another's.
-      if (next.kind === 'UNCONFIRMED') saveUnresolvedContractCommand(scope, next, binding);
-      else if (firstSend) clearUnresolvedContractCommand(scope, sentId);
-      return next;
+        admitRetry: (view) => {
+          const stored = restoreUnresolvedContractCommand(scope, binding, sessionMaxAgeSeconds);
+          return stored?.kind === 'RETRYABLE' && stored.entry.submissionId === view.submissionId
+            ? null
+            : { ...view, viewOnly: true };
+        },
+        send: () => submitContractCommand(scope, previous, form),
+        failed: (ended) => {
+          if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
+          if (!unsent) return null;
+          return ended ? { ...unsent, sessionEnded: true } : unsent;
+        },
+        // Still in doubt: kept. A definite answer to THIS submission's first send:
+        // its own record is dropped — never another's.
+        answer: (state) => answerUnresolvedContractCommand(scope, state, binding),
+        settle: () => settleUnresolvedContractCommand(scope, submissionId, binding),
+        held: { kind: 'HELD' },
+        unavailable: { kind: 'STORAGE_UNAVAILABLE' },
+      });
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds],
   );
-  const [state, action, pending] = useActionState(send, initial);
+  const [state, action, pending] = useSlotActionState(send, initial);
   const headingId = `contract-command-${command}-${scope.subjectId ?? 'contract'}`;
   const title = titleOf(command, side, subjectLabel);
 
@@ -232,7 +258,7 @@ export function ContractCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         pageHref={pageHref}
-        onForget={() => clearUnresolvedContractCommand(scope, state.submissionId)}
+        onForget={() => clearUnresolvedContractCommand(scope, state.submissionId, binding)}
       />
     );
   }

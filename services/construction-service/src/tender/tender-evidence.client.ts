@@ -1,6 +1,6 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
+import { InternalTokenService, RastaError, getContext, upstreamExchange } from '@rasta/nest-common';
 import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
 import { ENV } from '../tokens';
@@ -79,52 +79,53 @@ export class TenderEvidenceClient implements TenderEvidenceSource {
 
   /** `organizationId` is the tender **owner's**: the organization the bids are stored under. */
   async fetchChain(organizationId: string, tenderId: string): Promise<TenderChain> {
-    const token = await this.tokens.issue(SERVICE_NAME, AUDIT_SERVICE, 'SERVICE', organizationId);
+    const sender = await new InternalHttpClient(this.tokens).authorize({
+      from: SERVICE_NAME,
+      to: AUDIT_SERVICE,
+      purpose: 'SERVICE',
+      organizationId,
+    });
     const url =
       `${this.env.AUDIT_SERVICE_URL.replace(/\/+$/, '')}` +
       `/v1/internal/tender-evidence/${encodeURIComponent(tenderId)}/chain`;
 
     const timeoutMs = this.env.CONSTRUCTION_AUDIT_REQUEST_TIMEOUT_MS;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await internalFetch(url, {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          'x-internal-token': token,
-          'x-correlation-id': safeCorrelationId(),
-        },
-        signal: controller.signal,
-      });
-      if (response.status !== 200) {
-        await response.body?.cancel().catch(() => undefined);
-        this.logger.warn(`audit-service answered ${response.status} to the chain read`);
-        throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
-      }
-      const text = await readCapped(response, MAX_CHAIN_BYTES);
-      if (text === null) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
+    return upstreamExchange(
+      AUDIT_SERVICE,
+      timeoutMs,
+      (signal) =>
+        sender.send(url, {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            'x-correlation-id': safeCorrelationId(),
+          },
+          signal,
+        }),
+      async (response) => {
+        if (response.status !== 200) {
+          await response.body?.cancel().catch(() => undefined);
+          this.logger.warn(`audit-service answered ${response.status} to the chain read`);
+          throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
+        }
+        const text = await readCapped(response, MAX_CHAIN_BYTES);
+        if (text === null) throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
 
-      let body: unknown;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        body = undefined;
-      }
-      const parsed = tenderChainSchema.safeParse(body);
-      // The shape, never the content, is logged. A chain for another tender is no answer.
-      if (!parsed.success || parsed.data.tenderId !== tenderId) {
-        this.logger.warn('audit-service answered a chain that is not the contract');
-        throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
-      }
-      return parsed.data;
-    } catch (error) {
-      if (error instanceof RastaError) throw error;
-      if (controller.signal.aborted) throw RastaError.upstreamTimeout(AUDIT_SERVICE, timeoutMs);
-      throw RastaError.upstreamUnavailable(AUDIT_SERVICE, error);
-    } finally {
-      clearTimeout(timer);
-    }
+        let body: unknown;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = undefined;
+        }
+        const parsed = tenderChainSchema.safeParse(body);
+        // The shape, never the content, is logged. A chain for another tender is no answer.
+        if (!parsed.success || parsed.data.tenderId !== tenderId) {
+          this.logger.warn('audit-service answered a chain that is not the contract');
+          throw RastaError.upstreamUnavailable(AUDIT_SERVICE);
+        }
+        return parsed.data;
+      },
+    );
   }
 }
 

@@ -2,6 +2,7 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { FleetRepository } from '../src/fleet/fleet.repository';
 import { DriverService } from '../src/fleet/driver.service';
 import { asActor, cleanup, id, newPrisma, tenants } from './helpers';
+import { everyoneIsAMember } from './membership-source.fake';
 
 /**
  * Driver profile edits, against a real database.
@@ -25,7 +26,7 @@ describe('driver profile updates', () => {
     prisma = newPrisma();
     await prisma.onModuleInit();
     repository = new FleetRepository(prisma);
-    service = new DriverService(repository);
+    service = new DriverService(repository, everyoneIsAMember());
     await cleanup(prisma, [org.a, org.b]);
   });
 

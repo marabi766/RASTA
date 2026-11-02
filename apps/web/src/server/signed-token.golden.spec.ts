@@ -12,6 +12,7 @@ import {
 import { mintFlash, readFlash } from './flash';
 import { signPayload, verifyPayload } from './signed-payload';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * Golden fixtures for the zod 4 migration (GHSA-mrhx-c7xc-m3w5, PR B): tokens
@@ -24,13 +25,19 @@ import type { WebSession } from './session';
  * the snapshot beside this file what each verifies to — both recorded under
  * **zod 3.25.76**, the oracle B is measured against. Never re-record either to
  * make a migration pass: a difference is a behaviour change, fixed in the code.
+ *
+ * PR 405 binds every MAC to the organization the session's token acts for
+ * (`signed-payload.ts`, key label v2; ADR-059 § 4): the session below carries
+ * a token that names ORG_1, and `ISSUED`'s MACs are that binding's, minted
+ * under zod 3.25.76 on that branch. The payload halves, and the snapshot of
+ * what each verifies to, are the ones recorded before it — unchanged.
  */
 
 const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_1', ['ORGANIZATION_ADMIN']),
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -108,31 +115,31 @@ const ENVELOPES: Record<string, Record<string, unknown>> = {
 };
 
 const ISSUED: Record<string, string> = {
-  sign: 'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1zaWduIiwiY29tbWFuZCI6IlNJR04iLCJpc3N1ZWRBdCI6MTgwMDAwMDAwMDAwMCwidW50aWwiOjE4MDAwODU4MDAwMDAsImV4cGVjdGVkVmVyc2lvbiI6Mywic2lkZSI6IkVNUExPWUVSIiwiZXhwIjoxODAwMDg1ODAwfQ.ZKteYajdiO7Zn4aFrX9ANG9Ot4iU3QNE3nCYC4zr660',
+  sign: 'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1zaWduIiwiY29tbWFuZCI6IlNJR04iLCJpc3N1ZWRBdCI6MTgwMDAwMDAwMDAwMCwidW50aWwiOjE4MDAwODU4MDAwMDAsImV4cGVjdGVkVmVyc2lvbiI6Mywic2lkZSI6IkVNUExPWUVSIiwiZXhwIjoxODAwMDg1ODAwfQ.V4aytYv91N5ZhUi-04lRCuPQzFtWjwEjGm7ujttQ1kE',
   cancel:
-    'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1jYW5jZWwiLCJjb21tYW5kIjoiQ0FOQ0VMIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOjEsInNpZGUiOm51bGwsImV4cCI6MTgwMDA4NTgwMH0.uQ2XufelD-c9f8V95eVeT8K31tbY3PNsxovABgIXrKE',
+    'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1jYW5jZWwiLCJjb21tYW5kIjoiQ0FOQ0VMIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOjEsInNpZGUiOm51bGwsImV4cCI6MTgwMDA4NTgwMH0.zFcmTZG7lxz2HIYlYa_mrudluG0Pd_iGiipkIpcyzso',
   proposeAmendment:
-    'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1wcm9wb3NlQW1lbmRtZW50IiwiY29tbWFuZCI6IlBST1BPU0VfQU1FTkRNRU5UIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOjQsInNpZGUiOm51bGwsImV4cCI6MTgwMDA4NTgwMH0.twMd9FjMqr8544mpEhrknpMnUseSk_gyhwv-cDtFOG0',
+    'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1wcm9wb3NlQW1lbmRtZW50IiwiY29tbWFuZCI6IlBST1BPU0VfQU1FTkRNRU5UIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOjQsInNpZGUiOm51bGwsImV4cCI6MTgwMDA4NTgwMH0.PsleXlN1CXAtz3c_3Pz16ae4ciqEfBAzMOTaaIRci5A',
   signAmendment:
-    'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOiJBTUQtMSIsInN1Ym1pc3Npb25JZCI6IlNVQi1zaWduQW1lbmRtZW50IiwiY29tbWFuZCI6IlNJR05fQU1FTkRNRU5UIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOjEsInNpZGUiOiJDT05UUkFDVE9SIiwiZXhwIjoxODAwMDg1ODAwfQ.dH86rxD31BuOCDweWN-Qyn4JmQ9vgOLn_va_ULVhjgg',
+    'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOiJBTUQtMSIsInN1Ym1pc3Npb25JZCI6IlNVQi1zaWduQW1lbmRtZW50IiwiY29tbWFuZCI6IlNJR05fQU1FTkRNRU5UIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOjEsInNpZGUiOiJDT05UUkFDVE9SIiwiZXhwIjoxODAwMDg1ODAwfQ.lB0WaVC7Hn9zlBM5dKOZsg_pbiafzdDrqdEheUF9bdg',
   planMilestone:
-    'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1wbGFuTWlsZXN0b25lIiwiY29tbWFuZCI6IlBMQU5fTUlMRVNUT05FIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOm51bGwsInNpZGUiOm51bGwsImV4cCI6MTgwMDA4NTgwMH0.jAq2ZWYnsq7rh0eYC90omL2osI2jAioL7bU3JRj-m8I',
+    'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOm51bGwsInN1Ym1pc3Npb25JZCI6IlNVQi1wbGFuTWlsZXN0b25lIiwiY29tbWFuZCI6IlBMQU5fTUlMRVNUT05FIiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAwMDAsInVudGlsIjoxODAwMDg1ODAwMDAwLCJleHBlY3RlZFZlcnNpb24iOm51bGwsInNpZGUiOm51bGwsImV4cCI6MTgwMDA4NTgwMH0.WdZ09WIt6sI8Qv-747c09I-lo563IUP61M0oCzMkUac',
   changeMilestone:
-    'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOiJNTFMtMSIsInN1Ym1pc3Npb25JZCI6IlNVQi1jaGFuZ2VNaWxlc3RvbmUiLCJjb21tYW5kIjoiQ0hBTkdFX01JTEVTVE9ORSIsImlzc3VlZEF0IjoxODAwMDAwMDAwMDAwLCJ1bnRpbCI6MTgwMDA4NTgwMDAwMCwiZXhwZWN0ZWRWZXJzaW9uIjo3LCJzaWRlIjpudWxsLCJleHAiOjE4MDAwODU4MDB9.QNS0Pqua_PysuMY9xx3CtUBoc4lD738TCdZvQY7Ki3c',
+    'eyJjb250cmFjdElkIjoiQ1RSLTEiLCJzdWJqZWN0SWQiOiJNTFMtMSIsInN1Ym1pc3Npb25JZCI6IlNVQi1jaGFuZ2VNaWxlc3RvbmUiLCJjb21tYW5kIjoiQ0hBTkdFX01JTEVTVE9ORSIsImlzc3VlZEF0IjoxODAwMDAwMDAwMDAwLCJ1bnRpbCI6MTgwMDA4NTgwMDAwMCwiZXhwZWN0ZWRWZXJzaW9uIjo3LCJzaWRlIjpudWxsLCJleHAiOjE4MDAwODU4MDB9.SGaOGtANT38i8otSkbnj6CbtB_suYRY0lXBvq676Xs4',
   flash:
-    'eyJzdWJqZWN0IjoiQ1RSLTEiLCJhY3Rpb24iOiJTSUdORUQiLCJleHAiOjE4MDAwMDAxMjB9.79fsX_i77otj0CUp-1aHPvNVUreoi_eZyEIIACRm6Po',
+    'eyJzdWJqZWN0IjoiQ1RSLTEiLCJhY3Rpb24iOiJTSUdORUQiLCJleHAiOjE4MDAwMDAxMjB9.2VdA0DyBkxKlMQU8ZBI6mAHot5ZcDDjWifun9Idgtr8',
   exact:
-    'eyJpZCI6IkFTVC0xIiwidmVyc2lvbiI6Miwibm90ZSI6bnVsbCwiZXhwIjoxODAwMDAzNjAwfQ.5ea02EJgxuQ2JoK_V_J-JsMl7IWcS9G2A_BosToKL7U',
+    'eyJpZCI6IkFTVC0xIiwidmVyc2lvbiI6Miwibm90ZSI6bnVsbCwiZXhwIjoxODAwMDAzNjAwfQ.CQeR72fAulQdDLzOQfrbMtxrRQNE5NKJHQQLCKXCiqY',
   persian:
-    'eyJpZCI6IkFTVC3bsSIsInZlcnNpb24iOjEsIm5vdGUiOiLbjNin2K_Yr9in2LTYqiIsImV4cCI6MTgwMDAwMzYwMH0.svYyqC5a7jvstqCQMcBsItIC4ebL8S-5NZAhAiBUwDU',
+    'eyJpZCI6IkFTVC3bsSIsInZlcnNpb24iOjEsIm5vdGUiOiLbjNin2K_Yr9in2LTYqiIsImV4cCI6MTgwMDAwMzYwMH0.Qv4C_y5fCM6SnkpLY5ZEES9H8ML90YrAjuTIyfqWPqQ',
   extraKey:
-    'eyJpZCI6IkFTVC0xIiwidmVyc2lvbiI6Miwibm90ZSI6bnVsbCwiaW5qZWN0ZWQiOnRydWUsImV4cCI6MTgwMDAwMzYwMH0.WzaK_RgbdSRikSEv3O69X7VTZdBmGP9_V8I1M-NIFuQ',
+    'eyJpZCI6IkFTVC0xIiwidmVyc2lvbiI6Miwibm90ZSI6bnVsbCwiaW5qZWN0ZWQiOnRydWUsImV4cCI6MTgwMDAwMzYwMH0.-zWhn9QRDpSWzYBg-QrWGV1j43IKQSo7wyD_for6bzA',
   missingNullable:
-    'eyJpZCI6IkFTVC0xIiwidmVyc2lvbiI6MiwiZXhwIjoxODAwMDAzNjAwfQ.3Ec-B_980hPxhI0P9zfHbe1dqML7lmVQICzVvHuRnpk',
+    'eyJpZCI6IkFTVC0xIiwidmVyc2lvbiI6MiwiZXhwIjoxODAwMDAzNjAwfQ.3DQWh5F5g95HDIp8q0h9FTA1GjCR3naMbxCKDgoef-c',
   fractionalVersion:
-    'eyJpZCI6IkFTVC0xIiwidmVyc2lvbiI6Mi41LCJub3RlIjpudWxsLCJleHAiOjE4MDAwMDM2MDB9.5viWham_k3Gzc4J0WW3YRm3l15PPuaVFbM7_4dn_Wo8',
+    'eyJpZCI6IkFTVC0xIiwidmVyc2lvbiI6Mi41LCJub3RlIjpudWxsLCJleHAiOjE4MDAwMDM2MDB9.niJc-OHwL6Ir9t69jWIP37QVKDNyKy2VSpEQeTvEexY',
   textVersion:
-    'eyJpZCI6IkFTVC0xIiwidmVyc2lvbiI6IjIiLCJub3RlIjpudWxsLCJleHAiOjE4MDAwMDM2MDB9.wL-jvy88yVAZsjcF128_QSUejFZh0t71cwUr3MMvsEY',
+    'eyJpZCI6IkFTVC0xIiwidmVyc2lvbiI6IjIiLCJub3RlIjpudWxsLCJleHAiOjE4MDAwMDM2MDB9.jz6sRIOuBF0eNU9vO-C5qmQaX5JxUak6bwEZO3gSbkI',
 };
 
 const BASELINE = z.object({

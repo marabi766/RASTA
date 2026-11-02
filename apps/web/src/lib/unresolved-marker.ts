@@ -14,9 +14,32 @@
  *
  * One record per scope, never replaced: saving another submission's record
  * over it is refused (`HELD`), and a record is cleared only by the submission
- * it belongs to. A page for another person drops every entry of anyone else; a
- * logout writes nothing more and leaves the markers.
+ * it belongs to — a late answer of a submission whose record was set aside
+ * and replaced is kept aside, never written over the replacement
+ * (`fencedSlot`, PR 405 review 3, R1). Records are kept per person and organization
+ * (`lib/unresolved-tenancy.ts`): a page for another organization of the same
+ * person neither shows nor clears them, a page for another person reduces
+ * every entry of anyone else to a content-free marker, and a logout writes
+ * nothing more and leaves the markers. Nothing that cannot be attributed — a
+ * record from an organization this person's token no longer lists, one that
+ * does not read — is removed: it holds every fresh command of its kind on this
+ * device until the person acknowledges the duplicate risk (`quarantine`; PR
+ * 405 review 2, F1).
  */
+
+import {
+  fencedSlot,
+  locate,
+  ownedHere,
+  purgeForeign,
+  type AccountTags,
+  type AnswerOutcome,
+  type Binding,
+  type QuarantineSource,
+  type StartOutcome,
+} from './unresolved-tenancy';
+
+export type { AnswerOutcome };
 
 const VERSION = 1;
 const SUBMISSION_ID = /^sub_[A-Za-z0-9_-]{8,128}$/;
@@ -31,26 +54,34 @@ export interface UnresolvedMarker<C extends string> {
   readonly savedAt: number;
 }
 
-/**
- * `SAVED`: stored. `HELD`: another submission's record holds this scope — it
- * is left exactly as it was, and this one must not be sent. `UNAVAILABLE`:
- * storage refused it, or a logout has started.
- */
-export type SaveOutcome = 'SAVED' | 'HELD' | 'UNAVAILABLE';
+/** What a save before the first send says (`StartOutcome`, `lib/unresolved-tenancy.ts`). */
+export type SaveOutcome = StartOutcome;
 
 export interface MarkerStore<C extends string> {
   subscribe(listener: () => void): () => void;
   markOpen(): void;
   purgeAll(): void;
-  purgeForeign(owner: string): void;
+  purgeForeign(tags: AccountTags): void;
   save(
     scope: string,
     entry: Omit<UnresolvedMarker<C>, 'savedAt'>,
-    owner: string,
+    binding: Binding,
     now?: number,
   ): SaveOutcome;
-  clear(scope: string, submissionId: string): void;
-  restore(scope: string, owner: string): UnresolvedMarker<C> | null;
+  /** An answer still in doubt (`fencedSlot.answer`). */
+  answer(
+    scope: string,
+    entry: Omit<UnresolvedMarker<C>, 'savedAt'>,
+    binding: Binding,
+    now?: number,
+  ): AnswerOutcome;
+  /** A definite answer: this submission's record, and only that, goes. */
+  settle(scope: string, submissionId: string, binding: Binding): void;
+  /** The person sets this submission's record aside — and only that one. */
+  clear(scope: string, submissionId: string, binding: Binding): void;
+  restore(scope: string, binding: Binding): UnresolvedMarker<C> | null;
+  /** What holds a fresh command of this kind (`lib/unresolved-tenancy.ts`). */
+  readonly quarantine: QuarantineSource;
 }
 
 type Stored<C extends string> = UnresolvedMarker<C> & {
@@ -80,7 +111,6 @@ export function markerStore<C extends string>(
   const changed = (): void => {
     for (const listener of [...listeners]) listener();
   };
-  const keyOf = (scope: string): string => `${keyPrefix}${scope}`;
 
   function parse(raw: string): Stored<C> | null {
     let value: unknown;
@@ -115,16 +145,31 @@ export function markerStore<C extends string>(
     };
   }
 
-  function ownKeys(store: Storage): string[] {
-    const keys: string[] = [];
-    for (let index = 0; index < store.length; index += 1) {
-      const key = store.key(index);
-      if (key !== null && key.startsWith(keyPrefix)) keys.push(key);
-    }
-    return keys;
-  }
+  const parseEntry = (raw: string): Stored<C> | null => parse(raw);
+  const slot = fencedSlot(keyPrefix, parseEntry, { closing: () => accountClosing, changed });
+
+  /** The record for `entry`; the first send's command and time when the slot already keeps it. */
+  const recordOf = (
+    entry: Omit<UnresolvedMarker<C>, 'savedAt'>,
+    earlier: Stored<C> | null,
+    binding: Binding,
+    now: number,
+  ): string => {
+    const record: Stored<C> = {
+      v: VERSION,
+      command: earlier ? earlier.command : entry.command,
+      submissionId: entry.submissionId,
+      correlationId: entry.correlationId,
+      // The entry dates from the first send.
+      savedAt: earlier ? earlier.savedAt : now,
+      owner: binding.owner,
+    };
+    return JSON.stringify(record);
+  };
 
   return {
+    quarantine: slot.quarantine,
+
     subscribe(listener) {
       listeners.add(listener);
       return () => {
@@ -136,84 +181,55 @@ export function markerStore<C extends string>(
       accountClosing = false;
     },
 
+    // Markers hold nothing of what was sent: a logout only stops more being
+    // written, and leaves every record — readable or not — where it is.
     purgeAll() {
       accountClosing = true;
-      try {
-        const store = storage();
-        if (!store) return;
-        for (const key of ownKeys(store)) {
-          const raw = store.getItem(key);
-          if (raw === null || parse(raw) === null) store.removeItem(key);
-        }
-      } catch {
-        // Unavailable storage holds nothing to purge.
-      }
       changed();
     },
 
-    purgeForeign(owner) {
+    purgeForeign(tags) {
       try {
         const store = storage();
         if (!store) return;
-        for (const key of ownKeys(store)) {
-          const raw = store.getItem(key);
-          const entry = raw === null ? null : parse(raw);
-          if (!entry || entry.owner !== owner) store.removeItem(key);
-        }
+        purgeForeign(store, keyPrefix, tags, parseEntry);
       } catch {
         // See above.
       }
     },
 
-    save(scope, entry, owner, now = Date.now()) {
-      if (accountClosing) return 'UNAVAILABLE';
-      try {
-        const store = storage();
-        if (!store) return 'UNAVAILABLE';
-        const previous = store.getItem(keyOf(scope));
-        const parsed = previous === null ? null : parse(previous);
-        const earlier = parsed?.owner === owner ? parsed : null;
-        if (earlier !== null && earlier.submissionId !== entry.submissionId) return 'HELD';
-        const record: Stored<C> = {
-          v: VERSION,
-          command: entry.command,
-          submissionId: entry.submissionId,
-          correlationId: entry.correlationId,
-          // The entry dates from the first send.
-          savedAt: earlier?.savedAt ?? now,
-          owner,
-        };
-        store.setItem(keyOf(scope), JSON.stringify(record));
-        changed();
-        return 'SAVED';
-      } catch {
-        return 'UNAVAILABLE';
-      }
+    save(scope, entry, binding, now = Date.now()) {
+      return slot.start(binding, scope, entry.submissionId, () =>
+        recordOf(entry, null, binding, now),
+      );
     },
 
-    clear(scope, submissionId) {
-      try {
-        const store = storage();
-        const raw = store?.getItem(keyOf(scope));
-        if (!store || raw === null || raw === undefined) return;
-        if (parse(raw)?.submissionId !== submissionId) return;
-        store.removeItem(keyOf(scope));
-      } catch {
-        return;
-      }
-      changed();
+    answer(scope, entry, binding, now = Date.now()) {
+      return slot.answer(
+        binding,
+        scope,
+        entry.submissionId,
+        (earlier) => recordOf(entry, earlier, binding, now),
+        now,
+      );
     },
 
-    restore(scope, owner) {
+    settle(scope, submissionId, binding) {
+      slot.settle(binding, scope, submissionId);
+    },
+
+    clear(scope, submissionId, binding) {
+      slot.release(binding, scope, submissionId);
+    },
+
+    restore(scope, binding) {
       try {
         const store = storage();
-        const raw = store?.getItem(keyOf(scope));
-        if (!store || raw === null || raw === undefined) return null;
-        const entry = parse(raw);
-        if (!entry || entry.owner !== owner) {
-          store.removeItem(keyOf(scope));
-          return null;
-        }
+        const found = store ? locate(store, keyPrefix, binding, scope) : null;
+        if (!store || found === null) return null;
+        const entry = parse(found.raw);
+        // Not this person's, or does not read: none here, and left as it is (quarantined).
+        if (!entry || !ownedHere(binding, found.legacy, entry.owner)) return null;
         const { command, submissionId, correlationId, savedAt } = entry;
         return { command, submissionId, correlationId, savedAt };
       } catch {

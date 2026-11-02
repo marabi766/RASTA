@@ -12,6 +12,8 @@
  */
 
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { boundQuery } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -128,6 +130,9 @@ const offered = (tree: ReactNode): string[] =>
     (element.props as { offered: { command: string }[] }).offered.map(({ command }) => command),
   );
 
+/** `href` as the page draws it for the signed-in session: bound to its organization. */
+const bound = (href: string) => withContext(boundQuery(mockSession.current).ctx as string, href);
+
 function run(
   view?: string,
   flash?: string,
@@ -135,11 +140,13 @@ function run(
 ): Promise<ReactElement> {
   return TenderPage({
     params: Promise.resolve({ id: 'TND_1' }),
-    searchParams: Promise.resolve({
-      ...(view ? { view } : {}),
-      ...(flash ? { flash } : {}),
-      ...more,
-    }),
+    searchParams: Promise.resolve(
+      boundQuery(mockSession.current, {
+        ...(view ? { view } : {}),
+        ...(flash ? { flash } : {}),
+        ...more,
+      }),
+    ),
   });
 }
 
@@ -321,8 +328,11 @@ it('an inbox page that fails is never an absence: what was found, the correlatio
   expect(ofType(found, OwnTenderDetailScreen)).toHaveLength(0);
   const [screen] = ofType(found, AuthorityScreen);
   expect(screen?.props).toMatchObject({
-    failure: { correlationId: 'corr-9', retryHref: '/tenders/TND_1?view=own&inbox=APR_NEXT' },
-    restartHref: '/tenders/TND_1?view=own',
+    failure: {
+      correlationId: 'corr-9',
+      retryHref: bound('/tenders/TND_1?view=own&inbox=APR_NEXT'),
+    },
+    restartHref: bound('/tenders/TND_1?view=own'),
   });
   expect((screen?.props as { steps: unknown[] }).steps).toHaveLength(1);
   // Nothing found before the very first page failed: still the failure, retried from the top.
@@ -340,7 +350,7 @@ it('an inbox page that fails is never an absence: what was found, the correlatio
   const [failed] = ofType(none, AuthorityScreen);
   expect(failed?.props).toMatchObject({
     steps: [],
-    failure: { correlationId: 'corr-9', retryHref: '/tenders/TND_1?view=own' },
+    failure: { correlationId: 'corr-9', retryHref: bound('/tenders/TND_1?view=own') },
     restartHref: null,
   });
 });
@@ -358,7 +368,7 @@ it('an inbox longer than the walk is never an absence: the warning, and a way to
   expect(screen?.props).toMatchObject({
     steps: [],
     truncated: true,
-    continueHref: '/tenders/TND_1?view=own&inbox=APR_NEXT',
+    continueHref: bound('/tenders/TND_1?view=own&inbox=APR_NEXT'),
     restartHref: null,
   });
   // Going on: the walk resumes from the service's cursor; at its end the page still offers the
@@ -373,7 +383,7 @@ it('an inbox longer than the walk is never an absence: the warning, and a way to
   expect(resumed?.props).toMatchObject({
     truncated: false,
     continueHref: null,
-    restartHref: '/tenders/TND_1?view=own',
+    restartHref: bound('/tenders/TND_1?view=own'),
   });
   // A cursor that is not the service's kind starts from the top.
   await run('own', undefined, { inbox: 'not a cursor' });

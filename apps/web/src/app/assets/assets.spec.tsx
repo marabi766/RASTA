@@ -4,6 +4,8 @@ import { axe } from 'jest-axe';
 import { AssetsScreen } from './AssetsScreen';
 import { DossierScreen } from './[id]/DossierScreen';
 import type { AssetDossier, AssetPage, ReadResult } from '@/server/assets';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The two asset screens, in every state the server can put them in.
@@ -33,7 +35,9 @@ const page = (overrides: Partial<AssetPage> = {}): ReadResult<AssetPage> => ({
 
 describe('the machinery list', () => {
   it('shows a row per asset, linking to its dossier', () => {
-    const { getByRole } = render(<AssetsScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <AssetsScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(getByRole('link', { name: 'لودر کوماتسو' })).toHaveAttribute('href', '/assets/AST_1');
   });
 
@@ -41,7 +45,9 @@ describe('the machinery list', () => {
     // CLAUDE.md: the label is presentation; the value stays Latin everywhere
     // a comparison or a filter could see it. Scoped to the table, because the
     // filter above it offers every label as an option too.
-    const { getByRole } = render(<AssetsScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <AssetsScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     const row = getByRole('row', { name: /لودر کوماتسو/ });
     expect(row).toHaveTextContent('لودر');
     expect(row).toHaveTextContent('فعال');
@@ -51,26 +57,31 @@ describe('the machinery list', () => {
 
   it('shows an unknown status as it arrived, rather than hiding it', () => {
     const { getByText } = render(
-      <AssetsScreen result={page({ items: [{ ...ASSET, status: 'IMPOUNDED' }] })} query={{}} />,
+      <AssetsScreen
+        result={page({ items: [{ ...ASSET, status: 'IMPOUNDED' }] })}
+        query={{ context: TEST_CONTEXT }}
+      />,
     );
     expect(getByText('IMPOUNDED')).toBeInTheDocument();
   });
 
   it('offers the next page only when there is one', () => {
-    const { queryByRole } = render(<AssetsScreen result={page()} query={{}} />);
+    const { queryByRole } = render(
+      <AssetsScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(queryByRole('link', { name: 'صفحهٔ بعد' })).toBeNull();
 
     const { getByRole } = render(
       <AssetsScreen
         result={page({ hasMore: true, nextCursor: 'CUR_2' })}
-        query={{ status: 'ACTIVE' }}
+        query={{ context: TEST_CONTEXT, status: 'ACTIVE' }}
       />,
     );
     // The filter travels with the cursor: a second page of a filtered list is
     // still that filtered list.
     expect(getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      '/assets?status=ACTIVE&cursor=CUR_2',
+      withContext(TEST_CONTEXT, '/assets?status=ACTIVE&cursor=CUR_2'),
     );
   });
 
@@ -79,22 +90,26 @@ describe('the machinery list', () => {
     // name that does not match is a small lie with a real cost.
     const empty = page({ items: [] });
 
-    const unfiltered = render(<AssetsScreen result={empty} query={{}} />);
+    const unfiltered = render(<AssetsScreen result={empty} query={{ context: TEST_CONTEXT }} />);
     expect(unfiltered.getByText('هنوز ماشین‌آلاتی ثبت نشده')).toBeInTheDocument();
 
-    const filtered = render(<AssetsScreen result={empty} query={{ q: 'چیزی' }} />);
+    const filtered = render(
+      <AssetsScreen result={empty} query={{ context: TEST_CONTEXT, q: 'چیزی' }} />,
+    );
     expect(filtered.getByText('چیزی با این پالایش پیدا نشد')).toBeInTheDocument();
     expect(filtered.getByRole('link', { name: 'نمایش همه' })).toHaveAttribute('href', '/assets');
   });
 
   it('renders a refusal as a refusal and an outage as an outage', () => {
-    const forbidden = render(<AssetsScreen result={{ kind: 'FORBIDDEN' }} query={{}} />);
+    const forbidden = render(
+      <AssetsScreen result={{ kind: 'FORBIDDEN' }} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(forbidden.getByText('دسترسی ندارید')).toBeInTheDocument();
 
     const down = render(
       <AssetsScreen
         result={{ kind: 'UNAVAILABLE', status: 503, correlationId: 'COR_9' }}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
       />,
     );
     // docs/16 § 16.11: the correlation id is on screen so support can find the
@@ -105,14 +120,18 @@ describe('the machinery list', () => {
   it('filters through the URL, with no javascript', () => {
     // A filtered list is then a link somebody can send to a colleague, which a
     // client-side filter never is.
-    const { getByRole } = render(<AssetsScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <AssetsScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     const form = getByRole('form', { name: 'پالایش فهرست' });
     expect(form).toHaveAttribute('method', 'get');
     expect(form).toHaveAttribute('action', '/assets');
   });
 
   it('has no accessibility violations', async () => {
-    const { container } = render(<AssetsScreen result={page()} query={{}} />);
+    const { container } = render(
+      <AssetsScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 
@@ -121,7 +140,7 @@ describe('the machinery list', () => {
 
     it('puts the form under its own heading, before the filters, when it is handed one', () => {
       const { getByRole, getByText } = render(
-        <AssetsScreen result={page()} query={{}} registerForm={form} />,
+        <AssetsScreen result={page()} query={{ context: TEST_CONTEXT }} registerForm={form} />,
       );
       const heading = getByRole('heading', { name: 'ثبت ماشین' });
       expect(getByText('فرم نمونهٔ ثبت ماشین')).toBeInTheDocument();
@@ -132,17 +151,23 @@ describe('the machinery list', () => {
     });
 
     it('shows nothing where it was not handed one — no empty section, no dead heading', () => {
-      const { queryByRole } = render(<AssetsScreen result={page()} query={{}} />);
+      const { queryByRole } = render(
+        <AssetsScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+      );
       expect(queryByRole('heading', { name: 'ثبت ماشین' })).toBeNull();
     });
 
     it('still lists the machines when the person cannot register one', () => {
-      const { getByRole } = render(<AssetsScreen result={page()} query={{}} />);
+      const { getByRole } = render(
+        <AssetsScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+      );
       expect(getByRole('link', { name: 'لودر کوماتسو' })).toBeInTheDocument();
     });
 
     it('has no accessibility violations with the slot filled', async () => {
-      const { container } = render(<AssetsScreen result={page()} query={{}} registerForm={form} />);
+      const { container } = render(
+        <AssetsScreen result={page()} query={{ context: TEST_CONTEXT }} registerForm={form} />,
+      );
       expect(await axe(container)).toHaveNoViolations();
     });
   });
@@ -195,7 +220,13 @@ describe('the electronic dossier', () => {
 
     it('puts the form under its own heading when it is handed one', () => {
       const { getByRole, getByText } = render(
-        <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" editForm={form} />,
+        <DossierScreen
+          context={TEST_CONTEXT}
+          demoMode="REAL"
+          result={ok()}
+          assetId="AST_1"
+          editForm={form}
+        />,
       );
       expect(getByRole('heading', { name: 'ویرایش مشخصات' })).toBeInTheDocument();
       expect(getByText('فرم نمونهٔ ویرایش')).toBeInTheDocument();
@@ -203,14 +234,20 @@ describe('the electronic dossier', () => {
 
     it('shows nothing where it was not handed one', () => {
       const { queryByRole } = render(
-        <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" />,
+        <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok()} assetId="AST_1" />,
       );
       expect(queryByRole('heading', { name: 'ویرایش مشخصات' })).toBeNull();
     });
 
     it('has no accessibility violations with the slot filled', async () => {
       const { container } = render(
-        <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" editForm={form} />,
+        <DossierScreen
+          context={TEST_CONTEXT}
+          demoMode="REAL"
+          result={ok()}
+          assetId="AST_1"
+          editForm={form}
+        />,
       );
       expect(await axe(container)).toHaveNoViolations();
     });
@@ -221,7 +258,13 @@ describe('the electronic dossier', () => {
 
     it('puts the controls under their own heading when it is handed some', () => {
       const { getByRole, getByText } = render(
-        <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" lifecycle={controls} />,
+        <DossierScreen
+          context={TEST_CONTEXT}
+          demoMode="REAL"
+          result={ok()}
+          assetId="AST_1"
+          lifecycle={controls}
+        />,
       );
       expect(getByRole('heading', { name: 'وضعیت و چرخهٔ حیات' })).toBeInTheDocument();
       expect(getByText('کنترل‌های نمونهٔ چرخهٔ حیات')).toBeInTheDocument();
@@ -229,20 +272,22 @@ describe('the electronic dossier', () => {
 
     it('shows nothing where it was not handed any — no empty section, no dead heading', () => {
       const { queryByRole } = render(
-        <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" />,
+        <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok()} assetId="AST_1" />,
       );
       expect(queryByRole('heading', { name: 'وضعیت و چرخهٔ حیات' })).toBeNull();
     });
 
     it('says a decommissioned machine is final, to everybody who can read it', () => {
       const gone = ok({ ...DOSSIER, asset: { ...ASSET, status: 'DECOMMISSIONED' } });
-      const { getByText } = render(<DossierScreen demoMode="REAL" result={gone} assetId="AST_1" />);
+      const { getByText } = render(
+        <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={gone} assetId="AST_1" />,
+      );
       expect(getByText('این دارایی اسقاط شده است')).toBeInTheDocument();
     });
 
     it('does not say so about a machine that is still in the fleet', () => {
       const { queryByText } = render(
-        <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" />,
+        <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok()} assetId="AST_1" />,
       );
       expect(queryByText('این دارایی اسقاط شده است')).toBeNull();
     });
@@ -250,6 +295,7 @@ describe('the electronic dossier', () => {
     it('has no accessibility violations with the slot filled', async () => {
       const { container } = render(
         <DossierScreen
+          context={TEST_CONTEXT}
           demoMode="REAL"
           result={ok()}
           assetId="AST_1"
@@ -266,7 +312,13 @@ describe('the electronic dossier', () => {
 
     it('draws the records the page built, below the compliance box and above the cost', () => {
       const { getByLabelText, getByText } = render(
-        <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" records={records} />,
+        <DossierScreen
+          context={TEST_CONTEXT}
+          demoMode="REAL"
+          result={ok()}
+          assetId="AST_1"
+          records={records}
+        />,
       );
       const slot = getByLabelText('records-slot');
       const compliance = getByText('آمادگی بهره‌برداری').closest('section')!;
@@ -283,7 +335,13 @@ describe('the electronic dossier', () => {
       [{ kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' }],
     ] as const)('draws no records on a page whose read failed (%j)', (failed) => {
       const { queryByLabelText } = render(
-        <DossierScreen demoMode="REAL" result={failed} assetId="AST_X" records={records} />,
+        <DossierScreen
+          context={TEST_CONTEXT}
+          demoMode="REAL"
+          result={failed}
+          assetId="AST_X"
+          records={records}
+        />,
       );
       expect(queryByLabelText('records-slot')).toBeNull();
     });
@@ -300,7 +358,13 @@ describe('the electronic dossier', () => {
       ['inspectionRecorded', 'معاینهٔ فنی ثبت شد.'],
     ] as const)('confirms %s', (notice, words) => {
       const { getByText } = render(
-        <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" notice={notice} />,
+        <DossierScreen
+          context={TEST_CONTEXT}
+          demoMode="REAL"
+          result={ok()}
+          assetId="AST_1"
+          notice={notice}
+        />,
       );
       // A confirmation is `status`, which waits for a pause in the screen
       // reader; found by its words because the page carries other status
@@ -310,7 +374,13 @@ describe('the electronic dossier', () => {
 
     it('says that an edit was not saved because the machine changed, as a warning', () => {
       const { getByText } = render(
-        <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" notice="conflict" />,
+        <DossierScreen
+          context={TEST_CONTEXT}
+          demoMode="REAL"
+          result={ok()}
+          assetId="AST_1"
+          notice="conflict"
+        />,
       );
       const words = getByText(/ویرایش شما ذخیره نشد/);
       expect(words).toBeInTheDocument();
@@ -321,7 +391,13 @@ describe('the electronic dossier', () => {
 
     it('says a lifecycle command found the machine changed, as a warning that nothing was written this time', () => {
       const { getByText } = render(
-        <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" notice="lifecycleConflict" />,
+        <DossierScreen
+          context={TEST_CONTEXT}
+          demoMode="REAL"
+          result={ok()}
+          assetId="AST_1"
+          notice="lifecycleConflict"
+        />,
       );
       const words = getByText(/این بار چیزی نوشته نشد/);
       expect(words.closest('[role="status"]')).toBeNull();
@@ -330,7 +406,7 @@ describe('the electronic dossier', () => {
 
     it('says nothing when the page was opened without one', () => {
       const { queryByText } = render(
-        <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" />,
+        <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok()} assetId="AST_1" />,
       );
       expect(queryByText(/ماشین ثبت شد|مشخصات ماشین ذخیره شد/)).toBeNull();
     });
@@ -343,25 +419,35 @@ describe('the electronic dossier', () => {
       // Even a genuine flash must not put a confirmation in front of a machine
       // the viewer cannot read.
       const { queryByText } = render(
-        <DossierScreen demoMode="REAL" result={failed} assetId="AST_X" notice="created" />,
+        <DossierScreen
+          context={TEST_CONTEXT}
+          demoMode="REAL"
+          result={failed}
+          assetId="AST_X"
+          notice="created"
+        />,
       );
       expect(queryByText(/ماشین ثبت شد/)).toBeNull();
     });
   });
 
   it('links to the report form with this machine already filled in', () => {
-    const { getByRole } = render(<DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" />);
+    const { getByRole } = render(
+      <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok()} assetId="AST_1" />,
+    );
     expect(getByRole('link', { name: 'ثبت درخواست نگهداری' })).toHaveAttribute(
       'href',
-      '/maintenance?assetId=AST_1#report-request',
+      withContext(TEST_CONTEXT, '/maintenance?assetId=AST_1#report-request'),
     );
   });
 
   it('percent-encodes the machine id in that link', () => {
-    const { getByRole } = render(<DossierScreen demoMode="REAL" result={ok()} assetId="AST/1 x" />);
+    const { getByRole } = render(
+      <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok()} assetId="AST/1 x" />,
+    );
     expect(getByRole('link', { name: 'ثبت درخواست نگهداری' })).toHaveAttribute(
       'href',
-      '/maintenance?assetId=AST%2F1%20x#report-request',
+      withContext(TEST_CONTEXT, '/maintenance?assetId=AST%2F1%20x#report-request'),
     );
   });
 
@@ -370,7 +456,9 @@ describe('the electronic dossier', () => {
   it('lists every reason the asset cannot be dispatched', () => {
     // asset-service answers with all of them on purpose; a screen that showed
     // the first would send an operator back a second time.
-    const { getByText } = render(<DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" />);
+    const { getByText } = render(
+      <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok()} assetId="AST_1" />,
+    );
     expect(getByText('قابل اعزام نیست')).toBeInTheDocument();
     expect(getByText('وضعیت دارایی «خارج از سرویس» است')).toBeInTheDocument();
     expect(getByText('بیمه‌نامهٔ معتبری ندارد')).toBeInTheDocument();
@@ -378,7 +466,9 @@ describe('the electronic dossier', () => {
   });
 
   it('says an expiry has passed rather than showing a negative number', () => {
-    const { getByText } = render(<DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" />);
+    const { getByText } = render(
+      <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok()} assetId="AST_1" />,
+    );
     expect(getByText(/۳۰ روز از انقضا گذشته/)).toBeInTheDocument();
   });
 
@@ -391,7 +481,7 @@ describe('the electronic dossier', () => {
       },
     };
     const { getByText } = render(
-      <DossierScreen demoMode="REAL" result={ok(soon)} assetId="AST_1" />,
+      <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok(soon)} assetId="AST_1" />,
     );
     expect(getByText(/۱۲ روز مانده/)).toBeInTheDocument();
   });
@@ -400,7 +490,7 @@ describe('the electronic dossier', () => {
     // docs/16 § 16.3: the data stays Latin — the fixture above holds 2018 and
     // 7 — and the conversion happens here, in the page, and nowhere earlier.
     const { container, getByText } = render(
-      <DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" />,
+      <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok()} assetId="AST_1" />,
     );
     expect(getByText('۲۰۱۸')).toBeInTheDocument();
     expect(getByText(/بر پایهٔ ۷ رویداد/)).toBeInTheDocument();
@@ -416,7 +506,9 @@ describe('the electronic dossier', () => {
   });
 
   it('labels the latest inspection’s result in Persian', () => {
-    const { getByText } = render(<DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" />);
+    const { getByText } = render(
+      <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok()} assetId="AST_1" />,
+    );
     expect(getByText('قبول')).toBeInTheDocument();
   });
 
@@ -426,7 +518,7 @@ describe('the electronic dossier', () => {
       compliance: { ...DOSSIER.compliance, operable: true, blockers: [] },
     };
     const { getByText } = render(
-      <DossierScreen demoMode="REAL" result={ok(clear)} assetId="AST_1" />,
+      <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok(clear)} assetId="AST_1" />,
     );
     expect(getByText('آمادهٔ بهره‌برداری است')).toBeInTheDocument();
   });
@@ -435,7 +527,12 @@ describe('the electronic dossier', () => {
     // A distinct "exists but not yours" would confirm the id to somebody who
     // should not learn it. asset-service answers 404 for both, and so does this.
     const { getByText } = render(
-      <DossierScreen demoMode="REAL" result={{ kind: 'NOT_FOUND' }} assetId="AST_X" />,
+      <DossierScreen
+        context={TEST_CONTEXT}
+        demoMode="REAL"
+        result={{ kind: 'NOT_FOUND' }}
+        assetId="AST_X"
+      />,
     );
     expect(getByText('این دارایی پیدا نشد')).toBeInTheDocument();
   });
@@ -443,13 +540,15 @@ describe('the electronic dossier', () => {
   it('shows an empty history as empty, not as an error', () => {
     const quiet: AssetDossier = { ...DOSSIER, recentActivity: [] };
     const { getByText } = render(
-      <DossierScreen demoMode="REAL" result={ok(quiet)} assetId="AST_1" />,
+      <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok(quiet)} assetId="AST_1" />,
     );
     expect(getByText('رویدادی ثبت نشده')).toBeInTheDocument();
   });
 
   it('has no accessibility violations', async () => {
-    const { container } = render(<DossierScreen demoMode="REAL" result={ok()} assetId="AST_1" />);
+    const { container } = render(
+      <DossierScreen context={TEST_CONTEXT} demoMode="REAL" result={ok()} assetId="AST_1" />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 });
@@ -463,7 +562,12 @@ describe('stored dossier text with a bidi override (#220)', () => {
       recentActivity: [{ ...DOSSIER.recentActivity[0]!, description: `خارج از ${RLO}سرویس` }],
     };
     const { container } = render(
-      <DossierScreen demoMode="REAL" result={{ kind: 'OK', data: dossier }} assetId="AST_1" />,
+      <DossierScreen
+        context={TEST_CONTEXT}
+        demoMode="REAL"
+        result={{ kind: 'OK', data: dossier }}
+        assetId="AST_1"
+      />,
     );
     expect(container.textContent).not.toContain(RLO);
     const isolated = [...container.querySelectorAll('bdi')].map((bdi) => bdi.textContent);
@@ -484,6 +588,7 @@ describe('the dossier: «حالت نمایشی» over its costs and insurance (Q
   ] as const)('draws %s’s notice, above the costs and the records', (demoMode, shown, hidden) => {
     const { getByText, queryByText } = render(
       <DossierScreen
+        context={TEST_CONTEXT}
         demoMode={demoMode}
         result={{ kind: 'OK', data: DOSSIER }}
         assetId="AST_1"
@@ -499,6 +604,7 @@ describe('the dossier: «حالت نمایشی» over its costs and insurance (Q
   it('draws none once the provider is real', () => {
     const { queryByText } = render(
       <DossierScreen
+        context={TEST_CONTEXT}
         demoMode="REAL"
         result={{ kind: 'OK', data: DOSSIER }}
         assetId="AST_1"

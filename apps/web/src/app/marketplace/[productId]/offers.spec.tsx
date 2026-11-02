@@ -5,6 +5,7 @@ import { axe } from 'jest-axe';
 import { OffersScreen } from './OffersScreen';
 import { formatMoney } from '@/lib/format';
 import type { Offer, OffersPage, Product, ReadResult } from '@/server/marketplace';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * The offer-comparison screen, in every state the two independent reads it
@@ -43,6 +44,7 @@ function render_(
 ) {
   return render(
     <OffersScreen
+      context={TEST_CONTEXT}
       product={product}
       offers={offers}
       productId="PRD_1"

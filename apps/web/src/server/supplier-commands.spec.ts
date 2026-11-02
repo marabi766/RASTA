@@ -30,6 +30,7 @@ import {
   type SupplierActor,
 } from './supplier-commands';
 import type { WebSession } from './session';
+import { pinnedTokens } from '@/test/session-token';
 
 /**
  * The supplier commands against a fake gateway: the path, the method and the
@@ -62,7 +63,7 @@ function tokenFor(organizationId: string | null, roles: string[], memberships?: 
   });
 }
 
-const session = (accessToken = 'access-token-value'): WebSession => ({
+const session = (accessToken = tokenFor('ORG-A', ['ORGANIZATION_ADMIN'])): WebSession => ({
   subject: 'user-1',
   username: 'u',
   organizationId: 'ORG-A',
@@ -74,7 +75,7 @@ const session = (accessToken = 'access-token-value'): WebSession => ({
 });
 
 const actorOf = (organizationId: string | null, roles: string[], memberships?: string[]) =>
-  supplierActor(tokenFor(organizationId, roles, memberships)) as SupplierActor;
+  supplierActor(pinnedTokens(tokenFor(organizationId, roles, memberships))) as SupplierActor;
 
 describe('who is offered which form', () => {
   const SUPPLIER_ORG = 'ORG-SUP';
@@ -144,8 +145,8 @@ describe('who is offered which form', () => {
   });
 
   it('offers nothing for a token that cannot be read', () => {
-    expect(supplierActor('not-a-jwt')).toBeNull();
-    expect(supplierActor(tokenOf({ org_id: 'ORG-A', org_ids: [] }))).toBeNull();
+    expect(supplierActor(pinnedTokens('not-a-jwt'))).toBeNull();
+    expect(supplierActor(pinnedTokens(tokenOf({ org_id: 'ORG-A', org_ids: [] })))).toBeNull();
   });
 });
 
@@ -376,7 +377,7 @@ describe('what is sent to the gateway', () => {
       expect(seen[0]!.url).toBe(`http://gateway.test:3000${call.path}`);
       expect(seen[0]!.method).toBe('POST');
       expect(seen[0]!.body).toEqual(call.body);
-      expect(seen[0]!.headers.get('authorization')).toBe('Bearer access-token-value');
+      expect(seen[0]!.headers.get('authorization')).toBe(`Bearer ${session().accessToken}`);
       expect(seen[0]!.headers.has('idempotency-key')).toBe(false);
     },
   );

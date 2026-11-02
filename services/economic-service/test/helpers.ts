@@ -11,6 +11,7 @@ import { TransactionRepository } from '../src/transaction/transaction.repository
 import { TransactionService } from '../src/transaction/transaction.service';
 import { CommissionService } from '../src/commission/commission.service';
 import { RewardService } from '../src/reward/reward.service';
+import { IdempotentAnswer } from '../src/shared/idempotency';
 import { SettlementService } from '../src/settlement/settlement.service';
 import { PaymentReconciliationRepository } from '../src/payment/payment-reconciliation.repository';
 import { loadEconomicEnv, type EconomicEnv } from '../src/config/env';
@@ -314,6 +315,19 @@ export function asActor<T>(options: ActorOptions, fn: () => Promise<T>): Promise
   return runWithContext(context, async () => fn());
 }
 
+/**
+ * The answer a service-level call stores nowhere: for a suite that drives
+ * `RewardService.createRule` directly, with no request and no key. The route
+ * always passes a real one (`IdempotencyStore.run`), so this is a test-only
+ * way past the requirement, never a default the service has.
+ */
+export function unanswered<T>(): IdempotentAnswer<T> {
+  return new IdempotentAnswer<T>(
+    async () => undefined,
+    async () => undefined,
+  );
+}
+
 export function id(prefix: string): string {
   return `${prefix}_${ulid()}`;
 }
@@ -579,6 +593,21 @@ export async function cleanup(
     const historyOwner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
     try {
       await historyOwner.$transaction(async (tx) => {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL is bounded by the owner transaction.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE reward_rule_status_history DISABLE TRIGGER trg_reward_rule_status_append_only',
+        );
+        await tx.$executeRawUnsafe(
+          `DELETE FROM reward_rule_status_history WHERE rule_id IN (
+            SELECT id FROM reward_rule WHERE organization_id LIKE ANY($1::text[]) OR created_by LIKE $2)`,
+          orgs,
+          author,
+        );
+        // ISOLATION-ALLOW-UNBOUNDED: as above.
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE reward_rule_status_history ENABLE TRIGGER trg_reward_rule_status_append_only',
+        );
+
         // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this transaction.
         await tx.$executeRawUnsafe(
           'ALTER TABLE commission DISABLE TRIGGER trg_commission_append_only',
@@ -760,4 +789,30 @@ export async function waitFor<T>(
     `Timed out after ${timeoutMs}ms waiting for ${description}` +
       (last ? `; last error: ${String(last)}` : ''),
   );
+}
+
+/** Owner-only cleanup of explicitly named rule fixtures, including immutable history. */
+export async function removeRewardRules(ruleIds: readonly string[]): Promise<void> {
+  const owner = new PrismaClient({ datasources: { db: { url: ownerDatabaseUrl() } } });
+  try {
+    await owner.$transaction(async (tx) => {
+      // ISOLATION-ALLOW-UNBOUNDED: DDL is bounded by this owner transaction.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE reward_rule_status_history DISABLE TRIGGER trg_reward_rule_status_append_only',
+      );
+      await tx.$executeRawUnsafe(
+        'DELETE FROM reward_rule_status_history WHERE rule_id = ANY($1::text[])',
+        [...ruleIds],
+      );
+      // ISOLATION-ALLOW-UNBOUNDED: as above.
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE reward_rule_status_history ENABLE TRIGGER trg_reward_rule_status_append_only',
+      );
+      await tx.$executeRawUnsafe('DELETE FROM reward_rule WHERE id = ANY($1::text[])', [
+        ...ruleIds,
+      ]);
+    });
+  } finally {
+    await owner.$disconnect();
+  }
 }

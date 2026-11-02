@@ -5,6 +5,7 @@ import { authorizationDenialsTotal, normalizeRoute } from '@rasta/observability'
 import type { Request, Response } from 'express';
 import { ClientCancelledError, ProxyService, type ProxyResponse } from './proxy.service';
 import { RateLimiter } from './rate-limiter';
+import { isSafeMethod, rateLimitFor } from './rate-limit-rule';
 import { resolveRoute, type RouteRule } from '../config/routes';
 import { assertCanonicalPath, assertNoFragment } from '../http/canonical-path';
 import { SERVICE_NAME, type GatewayEnv } from '../config/env';
@@ -60,7 +61,7 @@ export class GatewayController {
       throw RastaError.unauthenticated('This endpoint requires authentication');
     }
 
-    await this.enforceRateLimit(request, route, response);
+    await this.enforceRateLimit(request, route, path, response);
     this.enforceIdempotencyKey(request, route);
     this.enforceRouteRoles(request, route, context.roles);
 
@@ -100,6 +101,7 @@ export class GatewayController {
   private async enforceRateLimit(
     request: Request,
     route: RouteRule,
+    path: string,
     response: Response,
   ): Promise<void> {
     const context = getContext();
@@ -109,16 +111,13 @@ export class GatewayController {
       windowSeconds: Math.ceil(this.env.GATEWAY_RATE_LIMIT_WINDOW_MS / 1000),
     };
 
-    // A route override marked `unsafeMethodsOnly` caps the operations that
-    // create work and leaves reads on the platform default. `docs/06` § 6.9
-    // limits operations — twenty document *uploads* an hour — while the
-    // routing table matches on a prefix, so applying such a cap to GET as well
-    // would lock a user out of their own listing screen for an hour.
-    const override = route.rateLimit;
-    const rule =
-      override && !(override.unsafeMethodsOnly && isSafeMethod(request.method))
-        ? override
-        : platformDefault;
+    // A route override caps the operations it names (`appliesTo`) and leaves
+    // every other request on the platform default, each in a bucket of its
+    // own. `docs/06` § 6.9 limits operations — twenty document *uploads* an
+    // hour — while the routing table matches on a prefix, so applying such a
+    // cap to GET as well would lock a user out of their own listing screen for
+    // an hour (`rateLimitFor`).
+    const { bucket, rule } = rateLimitFor(route, request.method, path, platformDefault);
 
     // Anonymous traffic is limited by IP; there is no better identifier, and
     // this is the one surface reachable without a token.
@@ -132,11 +131,7 @@ export class GatewayController {
           windowSeconds: rule.windowSeconds,
         };
 
-    const result = await this.rateLimiter.consume(
-      `${scope}:${route.prefix}`,
-      identifier,
-      effectiveRule,
-    );
+    const result = await this.rateLimiter.consume(`${scope}:${bucket}`, identifier, effectiveRule);
 
     response.setHeader('X-RateLimit-Limit', String(result.limit));
     response.setHeader('X-RateLimit-Remaining', String(result.remaining));
@@ -145,7 +140,7 @@ export class GatewayController {
     if (!result.allowed) {
       response.setHeader('Retry-After', String(Math.max(1, result.retryAfterSeconds)));
       throw new RastaError('RATE_LIMIT_EXCEEDED', 'Too many requests', {
-        internalContext: { scope, route: route.prefix },
+        internalContext: { scope, route: bucket },
       });
     }
 
@@ -227,14 +222,4 @@ export function clientCancellation(
   }
   response.once('close', onClose);
   return { signal: controller.signal, dispose: () => response.off('close', onClose) };
-}
-
-/**
- * Whether a method only reads.
- *
- * One definition, used by both the idempotency requirement and the rate-limit
- * scoping, so the two cannot drift into disagreeing about what a write is.
- */
-function isSafeMethod(method: string): boolean {
-  return ['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase());
 }

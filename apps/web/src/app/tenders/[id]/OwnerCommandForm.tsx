@@ -1,11 +1,12 @@
 'use client';
 
-import { useActionState, useCallback, type ReactNode } from 'react';
+import { useCallback, type ReactNode } from 'react';
 
 import { Alert, Button, Field, Identifier, IsolatedText, controlClassName } from '@/ui';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { formatScaledDecimal, toPersianDigits } from '@/lib/format';
-import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import {
   DISQUALIFICATION_REASON_LABELS,
   DISQUALIFY_TEXT_MAX,
@@ -38,11 +39,14 @@ import {
   type ScoringCell,
 } from '@/lib/tender-owner-input';
 import {
+  answerUnresolvedOwnerCommand,
   clearUnresolvedOwnerCommand,
   restoreUnresolvedOwnerCommand,
   saveUnresolvedOwnerCommand,
+  settleUnresolvedOwnerCommand,
   type ReplayStamp,
   type UnresolvedOwnerCommand,
+  ownerCommandQuarantine,
 } from '@/lib/unresolved-tender-command';
 
 import { submitOwnerCommand } from './owner-actions';
@@ -52,6 +56,8 @@ import {
   type OwnerFormState,
   type UnconfirmedOwnerCommand,
 } from './owner-form-state';
+import type { Binding } from '@/lib/unresolved-tenancy';
+import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 /**
  * One command the owner's side may issue on a tender — publish, decide a
@@ -101,7 +107,8 @@ export interface OwnerCommandFormProps {
   readonly replay: ReplayStamp | null;
   /** The body the stamp binds by digest, posted beside it (a score's criteria, an award's terms). */
   readonly binding?: string;
-  readonly owner: string;
+  /** This person's one-way tags for this organization (`submissionBinding`). */
+  readonly account: Binding;
   readonly pageHref: string;
   readonly initial?: OwnerFormState;
   readonly heldBy?: string | null;
@@ -129,7 +136,35 @@ export function ownerLabel(command: OwnerCommand, execute = false): string {
 
 const idPart = (value: string): string => value.replace(/[^A-Za-z0-9_-]/g, '_');
 
-export function OwnerCommandForm({
+/**
+ * The form, drawn the one way every fenced form is (`UnresolvedForm`): behind
+ * the device's quarantine of this kind, and — every time it mounts — from what
+ * `sessionStorage` keeps of its own submission, if anything. The store keeps a
+ * marker only, never what was sent, so a form drawn anew over it is the
+ * view-only marker (`unconfirmedFrom`), never a blank form under its key; a
+ * mounted form keeps its own state, the sent content included.
+ */
+export function OwnerCommandForm(props: OwnerCommandFormProps) {
+  const { tenderId, submissionId, account } = props;
+  const restore = () => {
+    const restored = restoreUnresolvedOwnerCommand(tenderId, account);
+    return restored?.submissionId === submissionId
+      ? { submissionId, state: unconfirmedFrom(restored) }
+      : null;
+  };
+  return (
+    <UnresolvedForm
+      source={ownerCommandQuarantine}
+      account={account}
+      scope={tenderId}
+      restore={restore}
+    >
+      {(restored) => <OwnerCommandFormBody {...props} initial={restored ?? props.initial} />}
+    </UnresolvedForm>
+  );
+}
+
+function OwnerCommandFormBody({
   tenderId,
   command,
   execute = false,
@@ -141,7 +176,7 @@ export function OwnerCommandForm({
   submissionId,
   replay,
   binding,
-  owner,
+  account,
   pageHref,
   initial = IDLE_OWNER_FORM,
   heldBy = null,
@@ -149,51 +184,49 @@ export function OwnerCommandForm({
   const scoring = scoreRows?.map(({ cell }) => cell) ?? null;
   const context = ownerFormContext({ scoring, award: award ?? null });
   const send = useCallback(
-    async (previous: OwnerFormState, form: FormData): Promise<OwnerFormState> => {
-      const firstSend = previous.kind !== 'UNCONFIRMED';
+    (previous: OwnerFormState, form: FormData): Promise<OwnerFormState> => {
+      const retrying = previous.kind === 'UNCONFIRMED' ? previous : null;
       const sent = form.get(SUBMISSION_FIELD);
-      const sentId = firstSend ? (typeof sent === 'string' ? sent : '') : previous.submissionId;
-      if (firstSend) {
-        const holder = restoreUnresolvedOwnerCommand(tenderId, owner);
-        if (holder && holder.submissionId !== sentId) return { kind: 'HELD' };
-      } else if (previous.viewOnly || previous.restored) {
-        return previous;
-      } else if (
-        restoreUnresolvedOwnerCommand(tenderId, owner)?.submissionId !== previous.submissionId
-      ) {
-        return { ...previous, viewOnly: true };
-      }
-
+      const submissionId = retrying ? retrying.submissionId : typeof sent === 'string' ? sent : '';
       // A form the action would refuse unsent is not remembered.
       const parsed = parseOwnerForm(command, ownerValuesOf(command, form, context), context);
-      const sendable = firstSend && parsed.ok;
-      const saved = sendable
-        ? saveUnresolvedOwnerCommand(
-            tenderId,
-            { command, submissionId: sentId, correlationId: null },
-            owner,
-          )
-        : null;
-      if (saved === 'HELD') return { kind: 'HELD' };
-      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
-
-      let next: OwnerFormState;
-      try {
-        next = await submitOwnerCommand(tenderId, previous, form);
-      } catch (error) {
-        if (isRedirect(error)) {
-          clearUnresolvedOwnerCommand(tenderId, sentId);
-          throw error;
-        }
-        const ended = await sessionHasEnded();
-        if (!firstSend) return withRetryNote(previous, ended ? 'sessionEnded' : 'retryUnknown');
-        if (sendable) {
+      const sendable = !retrying && parsed.ok;
+      return submitThroughSlot<OwnerFormState>({
+        submissionId,
+        retrying,
+        stored: () => {
+          const stored = restoreUnresolvedOwnerCommand(tenderId, account);
+          return stored
+            ? { submissionId: stored.submissionId, state: unconfirmedFrom(stored) }
+            : null;
+        },
+        remember: () =>
+          sendable
+            ? saveUnresolvedOwnerCommand(
+                tenderId,
+                { command, submissionId, correlationId: null },
+                account,
+              )
+            : null,
+        // A view-only record — restored, or a command never repeated — is never
+        // sent again; nor one set aside elsewhere.
+        admitRetry: (view) => {
+          if (view.viewOnly || view.restored) return view;
+          return restoreUnresolvedOwnerCommand(tenderId, account)?.submissionId ===
+            view.submissionId
+            ? null
+            : { ...view, viewOnly: true };
+        },
+        send: () => submitOwnerCommand(tenderId, previous, form),
+        failed: (ended) => {
+          if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
+          if (!sendable) return null;
           return UNREPEATABLE_OWNER_COMMANDS.includes(command)
             ? {
                 kind: 'UNCONFIRMED',
                 command,
                 correlationId: null,
-                submissionId: sentId,
+                submissionId,
                 values: null,
                 replay: null,
                 viewOnly: true,
@@ -204,31 +237,28 @@ export function OwnerCommandForm({
                 kind: 'UNCONFIRMED',
                 command,
                 correlationId: null,
-                submissionId: sentId,
+                submissionId,
                 values: parsed.ok ? parsed.values : null,
                 replay,
                 ...(ended ? { sessionEnded: true as const } : {}),
               };
-        }
-        throw error;
-      }
-
-      if (next.kind === 'UNCONFIRMED') {
-        saveUnresolvedOwnerCommand(
-          tenderId,
-          { command, submissionId: next.submissionId, correlationId: next.correlationId },
-          owner,
-        );
-      } else if (firstSend) {
-        clearUnresolvedOwnerCommand(tenderId, sentId);
-      }
-      return next;
+        },
+        answer: (state) =>
+          answerUnresolvedOwnerCommand(
+            tenderId,
+            { command, submissionId: state.submissionId, correlationId: state.correlationId },
+            account,
+          ),
+        settle: () => settleUnresolvedOwnerCommand(tenderId, submissionId, account),
+        held: { kind: 'HELD' },
+        unavailable: { kind: 'STORAGE_UNAVAILABLE' },
+      });
     },
     // `context` is the props' own: a new one each render says nothing new.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tenderId, command, replay, owner, scoreRows, award],
+    [tenderId, command, replay, account, scoreRows, award],
   );
-  const [state, action, pending] = useActionState(send, initial);
+  const [state, action, pending] = useSlotActionState(send, initial);
   const headingId = `owner-command-${command}${scope ? `-${idPart(scope)}` : ''}`;
   const label = ownerLabel(command, execute);
   const heading = (
@@ -255,7 +285,7 @@ export function OwnerCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         pageHref={pageHref}
-        onForget={() => clearUnresolvedOwnerCommand(tenderId, state.submissionId)}
+        onForget={() => clearUnresolvedOwnerCommand(tenderId, state.submissionId, account)}
       />
     );
   }

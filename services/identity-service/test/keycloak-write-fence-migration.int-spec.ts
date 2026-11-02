@@ -1,3 +1,4 @@
+import { eligibilityClockWrite } from '@rasta/testing';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { withUtcSession } from '@rasta/config';
@@ -114,13 +115,13 @@ describe('the fence migration refuses to roll back over outstanding fences (D-06
   });
 
   it('down is refused while a fence is outstanding, and drops nothing; once none is, it reverses and up re-applies', async () => {
-    await scratch.$executeRawUnsafe(`
+    await eligibilityClockWrite(scratch)`
       INSERT INTO keycloak_write_attempt
              (attempt_id, user_id, keycloak_id, operation,
               started_at, deadline_at, takeover_at, next_reassert_at)
       VALUES ('KWA_MIGRATION', 'USR_MIGRATION', 'kc-migration', 'replace_attributes',
               now(), now() + interval '10 seconds', now() + interval '130 seconds',
-              now() + interval '130 seconds')`);
+              now() + interval '130 seconds')`;
 
     const refused = apply(schema, join(migrations, MIGRATION, 'down.sql'));
     expect(refused.ok).toBe(false);
@@ -134,10 +135,10 @@ describe('the fence migration refuses to roll back over outstanding fences (D-06
     ).toHaveLength(1);
 
     // A terminal fence is outstanding too: an account an operator has not seen to.
-    await scratch.$executeRawUnsafe(
-      `UPDATE keycloak_write_attempt SET account_missing_at = now(),
-              deadline_at = started_at, takeover_at = started_at`,
-    );
+    await eligibilityClockWrite(
+      scratch,
+    )`UPDATE keycloak_write_attempt SET account_missing_at = now(),
+              deadline_at = started_at, takeover_at = started_at`;
     expect(apply(schema, join(migrations, MIGRATION, 'down.sql')).ok).toBe(false);
 
     await scratch.$executeRawUnsafe('DELETE FROM keycloak_write_attempt');

@@ -2,8 +2,25 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 import globals from 'globals';
+import exchangeDeadline from './scripts/exchange-deadline-rule.mjs';
 import internalTokenTransport from './scripts/internal-token-transport-rule.mjs';
+import internalTokenSource from './scripts/internal-token-source-rule.mjs';
+import { typedOrUntypedParser } from './scripts/internal-token-parser.mjs';
+import rawHttpBoundary from './scripts/raw-http-boundary-rule.mjs';
 import noZodDefault from './scripts/no-zod-default-rule.mjs';
+
+/**
+ * The internal rules, one plugin object for every block that turns them on
+ * (flat config refuses a plugin name defined twice with different objects).
+ */
+export const internalPlugin = {
+  rules: {
+    transport: internalTokenTransport,
+    'raw-http': rawHttpBoundary,
+    'token-source': internalTokenSource,
+    'exchange-deadline': exchangeDeadline,
+  },
+};
 
 const NO_ZOD_COERCE = [
   {
@@ -15,6 +32,69 @@ const NO_ZOD_COERCE = [
     selector: "ImportDeclaration[source.value=/^zod/] ImportSpecifier[imported.name='coerce']",
     message:
       'z.coerce converts unchecked input (a TypeError is a 500). Use numberInput from @rasta/contracts.',
+  },
+];
+
+/**
+ * The internal-token source boundary (PR #423 follow-up 1): on every file ESLint
+ * lints, typed through the file's own workspace project where one covers it.
+ * Its only exceptions are named here and tested in
+ * scripts/internal-token-source-workspace.test.mjs.
+ */
+export const INTERNAL_TOKEN_SOURCE = [
+  {
+    files: ['**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    languageOptions: { parser: typedOrUntypedParser(tseslint.parser) },
+    plugins: { internal: internalPlugin },
+    rules: {
+      'internal/token-source': [
+        'error',
+        {
+          allow: [
+            // The E2E harness has no nest-common dependency: its transport sets
+            // the header in send(), behind the same redirect hand guard, and its
+            // token factory signs the wire format itself (src/internal.ts).
+            { file: 'tests/e2e/src/http.ts', function: 'send', kinds: ['header'] },
+            { file: 'tests/e2e/src/internal.ts', function: 'mintInternalToken', kinds: ['signer'] },
+            // …and reads the secret by name from its environment (src/env.ts).
+            { file: 'tests/e2e/src/env.ts', function: 'e2eConfig', kinds: ['signer'] },
+            // The test-only signer the services' test factories use (PR #514); its
+            // package is a devDependency only, which scripts/testing-dev-only.mjs
+            // enforces in source, in the production dependency graph and in images.
+            {
+              file: 'packages/testing/src/internal-token.ts',
+              function: 'mintTestInternalToken',
+              kinds: ['signer'],
+            },
+            // The rule names the secret it refuses.
+            {
+              file: 'scripts/internal-token-source-rule.mjs',
+              function: 'secretName',
+              kinds: ['signer'],
+            },
+            // The transport rule lists the header among the credentials it
+            // holds to a redirect-refusing transport (Q-155).
+            {
+              file: 'scripts/internal-token-transport-rule.mjs',
+              function: 'credentialNames',
+              kinds: ['header'],
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // Test token factories: specs and test/ trees mint and send tokens to test
+    // the services' guards. Nothing else is exempt.
+    files: [
+      '**/*.spec.{ts,tsx}',
+      '**/*.int-spec.ts',
+      '**/*.e2e-spec.ts',
+      '**/*.test.{ts,tsx,mjs}',
+      '**/test/**',
+    ],
+    rules: { 'internal/token-source': 'off' },
   },
 ];
 
@@ -103,7 +183,12 @@ const base = tseslint.config(
   },
   {
     // Workspaces re-export this config, so paths must match from their cwd too.
-    files: ['**/src/**/*.ts', '**/dev/**/*.ts', '**/prisma/**/*.ts', 'scripts/**/*.{js,mjs,cjs}'],
+    files: [
+      '**/src/**/*.{ts,js,mjs,cjs}',
+      '**/dev/**/*.{ts,js,mjs,cjs}',
+      '**/prisma/**/*.{ts,js,mjs,cjs}',
+      'scripts/**/*.{js,mjs,cjs}',
+    ],
     ignores: [
       '**/*.spec.ts',
       '**/*.test.ts',
@@ -111,9 +196,33 @@ const base = tseslint.config(
       '**/*.int-spec.ts',
       '**/*.e2e-spec.ts',
       '**/test/**',
+      // Test-only helpers too: child-process fixtures and fakes, never deployed.
+      '**/__tests__/**',
     ],
-    plugins: { internal: { rules: { transport: internalTokenTransport } } },
-    rules: { 'internal/transport': 'error' },
+    plugins: { internal: internalPlugin },
+    // Two layers (Q-155). `raw-http` is the boundary: outside the audited
+    // transports (AUDITED_TRANSPORTS in the rule) no raw HTTP primitive at all,
+    // however it is reached. `transport` is the second layer: a module that
+    // spells a credential must name the redirect-refusing transport.
+    // `exchange-deadline` keeps the abort timer in the shared boundary (#507). The
+    // rule exempts that one file by its exact canonical repository path
+    // (SHARED_BOUNDARY): no config override by suffix, so a same-named file in
+    // another workspace is checked like any other (#536 r1 F2).
+    rules: {
+      'internal/transport': 'error',
+      'internal/raw-http': 'error',
+      'internal/exchange-deadline': 'error',
+    },
+  },
+  ...INTERNAL_TOKEN_SOURCE,
+  {
+    // Live suites aim at an endpoint the environment names (KEYCLOAK_URL), with
+    // real credentials — an admin password grant, an admin bearer — so they get
+    // the boundary too (PR #492 r2 F2): they send through guardedFetch, or
+    // globalFetchStub when they replace the global (@rasta/testing).
+    files: ['**/*.live-spec.ts'],
+    plugins: { internal: internalPlugin },
+    rules: { 'internal/raw-http': 'error' },
   },
   {
     // @rasta/config's URL reader is plain CommonJS so the scripts can import

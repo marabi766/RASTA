@@ -135,6 +135,17 @@ Namespace: rasta-{env}
 
 ### الگوی Deployment
 
+The Deployment and probes below are **examples**, not executable manifests in this
+repository. A terminal Kafka consumer crash fails readiness and uses the service's
+existing bounded graceful shutdown to exit non-zero. Liveness alone is not the restart
+mechanism. Deploy each consumer service with Docker `restart: on-failure` or Kubernetes
+`restartPolicy: Always` and supervisor backoff; configure a restart budget and escalation
+(for example a service-manager delay of 30 seconds and a start limit). Docker marks an
+unhealthy container but does not restart it for that reason. Keep the supervisor grace
+period longer than `SHUTDOWN_TIMEOUT_MS`. Never commit or skip a poison record to bound
+restarts. See [consumer crash loop](runbooks/consumer-crash-loop.md) for the signals,
+retention deadline and replay limits.
+
 ```yaml
 spec:
   replicas: 2
@@ -143,6 +154,7 @@ spec:
     rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } # بدون قطعی
   template:
     spec:
+      restartPolicy: Always
       serviceAccountName: asset-service
       securityContext:
         runAsNonRoot: true
@@ -333,7 +345,8 @@ Consumer مشترک کرش می‌کند و تا ری‌استارت سرویس 
 
 Runbookها: [`runbooks/restore-database.md`](runbooks/restore-database.md) ·
 [`runbooks/disaster-recovery.md`](runbooks/disaster-recovery.md) ·
-[`runbooks/backup-restore-drill.md`](runbooks/backup-restore-drill.md) (تمرین محلی با گزارش JSON)
+[`runbooks/backup-restore-drill.md`](runbooks/backup-restore-drill.md) (تمرین محلی با گزارش JSON؛
+اجرای ماهانهٔ CI روی داده ساختگی، نه بازیابی production)
 
 ### سناریوهای فاجعه
 

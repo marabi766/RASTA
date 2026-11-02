@@ -14,6 +14,8 @@ import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import type { WriteResult } from '@/server/write';
 
 import type { RequestCommandFormState } from './form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The one path every command on `/maintenance/[id]` takes, whether it is about
@@ -131,7 +133,10 @@ export async function run<V, B, F extends string, C = undefined>(
     // Redirect, not state: a refreshed page must not resubmit, and the page the
     // person lands on reads the request again, so it shows what the command did.
     redirect(
-      `/maintenance/${encodeURIComponent(requestId)}?${FLASH_PARAM}=${mintFlash(session, requestId, command.notice)}`,
+      withContext(
+        pageContext(session),
+        `/maintenance/${encodeURIComponent(requestId)}?${FLASH_PARAM}=${mintFlash(session, requestId, command.notice)}`,
+      ),
     );
   }
 
@@ -140,7 +145,10 @@ export async function run<V, B, F extends string, C = undefined>(
       const again = command.lookAgain?.(result.message);
       if (again) {
         redirect(
-          `/maintenance/${encodeURIComponent(requestId)}?${FLASH_PARAM}=${mintFlash(session, requestId, again)}`,
+          withContext(
+            pageContext(session),
+            `/maintenance/${encodeURIComponent(requestId)}?${FLASH_PARAM}=${mintFlash(session, requestId, again)}`,
+          ),
         );
       }
       return {

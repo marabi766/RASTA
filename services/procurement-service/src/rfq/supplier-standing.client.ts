@@ -1,6 +1,6 @@
-import { internalFetch } from '@rasta/nest-common';
+import { InternalHttpClient } from '@rasta/nest-common';
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { InternalTokenService, RastaError, getContext } from '@rasta/nest-common';
+import { InternalTokenService, RastaError, getContext, upstreamExchange } from '@rasta/nest-common';
 import { z } from 'zod';
 import { isoDateTime } from '@rasta/contracts';
 import { ENV } from '../tokens';
@@ -85,58 +85,55 @@ export class SupplierStandingClient implements SupplierStandingSource {
   ) {}
 
   async fetchStanding(organizationId: string): Promise<StandingOfOrganization> {
-    const token = await this.tokens.issue(SERVICE_NAME, SUPPLIER_SERVICE, 'SERVICE');
+    const sender = await new InternalHttpClient(this.tokens).authorize({
+      from: SERVICE_NAME,
+      to: SUPPLIER_SERVICE,
+      purpose: 'SERVICE',
+    });
     const url =
       `${this.env.SUPPLIER_SERVICE_URL.replace(/\/+$/, '')}` +
       `/v1/suppliers/standing-snapshot/${encodeURIComponent(organizationId)}`;
 
     const timeoutMs = this.env.PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await internalFetch(url, {
-        method: 'GET',
-        headers: {
-          accept: 'application/json',
-          'x-internal-token': token,
-          'x-correlation-id': correlationId(),
-        },
-        signal: controller.signal,
-      });
-
-      if (response.status !== 200) {
-        await response.body?.cancel().catch(() => undefined);
-        this.logger.warn(`supplier-service answered ${response.status} to a standing read`);
-        throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
-      }
-      const text = await readCapped(response, MAX_STANDING_BYTES);
-      if (text === null) {
-        this.logger.warn('supplier-service answered a standing over the size bound');
-        throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
-      }
-      let body: unknown;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        body = undefined;
-      }
-      const parsed = standingOfOrganizationSchema.safeParse(body);
-      // An answer about somebody else is not an answer about this invitee.
-      if (!parsed.success || parsed.data.organizationId !== organizationId) {
-        // The shape, never the content, is logged.
-        this.logger.warn('supplier-service answered a standing that is not the contract');
-        throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
-      }
-      return parsed.data;
-    } catch (error) {
-      if (error instanceof RastaError) throw error;
-      if (controller.signal.aborted) {
-        throw RastaError.upstreamTimeout(SUPPLIER_SERVICE, timeoutMs);
-      }
-      throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE, error);
-    } finally {
-      clearTimeout(timer);
-    }
+    return upstreamExchange(
+      SUPPLIER_SERVICE,
+      timeoutMs,
+      (signal) =>
+        sender.send(url, {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            'x-correlation-id': correlationId(),
+          },
+          signal,
+        }),
+      async (response) => {
+        if (response.status !== 200) {
+          await response.body?.cancel().catch(() => undefined);
+          this.logger.warn(`supplier-service answered ${response.status} to a standing read`);
+          throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
+        }
+        const text = await readCapped(response, MAX_STANDING_BYTES);
+        if (text === null) {
+          this.logger.warn('supplier-service answered a standing over the size bound');
+          throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
+        }
+        let body: unknown;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = undefined;
+        }
+        const parsed = standingOfOrganizationSchema.safeParse(body);
+        // An answer about somebody else is not an answer about this invitee.
+        if (!parsed.success || parsed.data.organizationId !== organizationId) {
+          // The shape, never the content, is logged.
+          this.logger.warn('supplier-service answered a standing that is not the contract');
+          throw RastaError.upstreamUnavailable(SUPPLIER_SERVICE);
+        }
+        return parsed.data;
+      },
+    );
   }
 }
 

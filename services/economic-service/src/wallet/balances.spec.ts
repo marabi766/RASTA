@@ -120,18 +120,24 @@ describe('assertSufficient', () => {
     );
   });
 
-  it('keeps the balance out of the client-facing message', () => {
+  it('keeps the balance out of the message and out of the logged context', () => {
     // A caller probing another organization's wallet must not learn its
-    // balance from an error (AGENTS.md S-09). The figures go to
-    // `internalContext`, which the exception filter never serialises.
+    // balance from an error (AGENTS.md S-09), and the exception filter logs
+    // `internalContext` at debug — so the figures go into neither (economic
+    // audit F9). The wallet id and a fixed reason are the handle.
     try {
       assertSufficient('WLT_1', wallet, 5_000_000n);
       throw new Error('expected a refusal');
     } catch (error) {
       const thrown = error as { message: string; internalContext?: Record<string, unknown> };
       expect(thrown.message).toBe('Insufficient available balance');
-      expect(thrown.message).not.toContain('1000000');
-      expect(thrown.internalContext).toMatchObject({ available: '1000000', requested: '5000000' });
+      expect(thrown.internalContext).toEqual({
+        walletId: 'WLT_1',
+        reason: 'AVAILABLE_BELOW_REQUESTED',
+      });
+      const said = JSON.stringify({ message: thrown.message, context: thrown.internalContext });
+      expect(said).not.toContain('1000000');
+      expect(said).not.toContain('5000000');
     }
   });
 });

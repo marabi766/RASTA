@@ -76,6 +76,13 @@ overrides:
   # @opentelemetry/auto-instrumentations-node pulls in (packages/observability);
   # they still resolve an affected release of their range.
   '@grpc/grpc-js@>=1.14.0 <1.14.5': '1.14.5'
+  # GHSA-3f7j-7jwc-fxfj (high, 2026-10-29 in CI) — systeminformation <5.33.16:
+  # Windows command injection in services() through Unicode quotation marks.
+  # Reached only through @opentelemetry/instrumentation-host-metrics (pulled in
+  # by auto-instrumentations-node in packages/observability); every service runs
+  # on Linux and nothing calls services(), but the audit gate is version-based.
+  # 5.33.16 (2026-10-19) is past the seven-day minimum release age.
+  'systeminformation@<5.33.16': '5.33.16'
   # GHSA-jqcg-44mw-7w3h (critical) — proxy-addr <2.0.8. Reached through express
   # (@nestjs/platform-express) in every service and the gateway, where it decides
   # the client address behind a proxy. Express still resolves 2.0.7.
