@@ -377,7 +377,8 @@ test('REPLICATION — held, or reached through a member role — reported by the
 // ---------------------------------------------------------------------------
 test('a stored session_replication_role — the role, the role in its database, the database — reported, reset by the split, refused (#540 r1 F1)', () => {
   const label = (scope) =>
-    `a stored setting reaches its sessions: session_replication_role=replica (${scope})`;
+    // The parameter and its scope, never its value (#540 r2 R2-3).
+    `a stored setting reaches its sessions: session_replication_role (${scope})`;
   for (const [store, scope] of [
     [
       `ALTER ROLE ${A.runtime} SET session_replication_role = replica`,

@@ -8,6 +8,11 @@ import { fileURLToPath } from 'node:url';
 import {
   CONNECTABLE_DATABASES_SQL,
   FINDINGS_SQL,
+  SAME_DATABASE_SQL,
+  databaseConnectionString,
+  parseDatabases,
+  psqlRows,
+  shownDatabase,
   FOREIGN_FINDINGS_SQL,
   FUNCTION_GRANT_LINE,
   TIMEZONE_FINDINGS_SQL,
@@ -232,9 +237,10 @@ test('role attributes, ownership and membership: REPLICATION, every owned class,
   ]) {
     assert.ok(dangerous.includes(fragment), fragment);
   }
+  // One split core (_split_database) for both entry points (#540 r2): one reset.
   assert.equal(
     split.match(/NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION/g)?.length,
-    2,
+    1,
   );
   assert.match(split, /runtime-dangerous-roles\.sql/);
   assert.match(split, /OR am\.roleid = '\$\{runtime\}'::regrole/);
@@ -246,8 +252,18 @@ test('the matrix visits every database that accepts connections, with its own ru
     { database: 'rasta_audit', runtime: 'rasta_audit' },
     { database: 'rasta_economic', runtime: 'rasta_economic' },
   ];
+  const records = (...rows) => rows.map(([name, connectable]) => ({ name, connectable }));
   assert.deepEqual(
-    matrix(entries, ['postgres|t', 'rasta_audit|t', 'rasta_economic|t', 'template0|f', 'x|t']),
+    matrix(
+      entries,
+      records(
+        ['postgres', true],
+        ['rasta_audit', true],
+        ['rasta_economic', true],
+        ['template0', false],
+        ['x', true],
+      ),
+    ),
     [
       { database: 'postgres', runtime: '' },
       { database: 'rasta_audit', runtime: 'rasta_audit' },
@@ -255,11 +271,10 @@ test('the matrix visits every database that accepts connections, with its own ru
       { database: 'x', runtime: '' },
     ],
   );
-  assert.deepEqual(matrix(entries, ['rasta_audit|f']), [
+  assert.deepEqual(matrix(entries, records(['rasta_audit', false])), [
     { database: 'rasta_audit', problem: 'accepts no connections, so it cannot be checked' },
     { database: 'rasta_economic', problem: 'does not exist' },
   ]);
-  assert.throws(() => matrix(entries, ['rasta_audit']), /unreadable database row/);
   assert.match(CONNECTABLE_DATABASES_SQL, /FROM pg_database/);
   assert.equal(foreignVerdict('rasta_audit', []).ok, true);
   const failed = foreignVerdict('rasta_audit', [
@@ -293,9 +308,14 @@ test('the split and the check read one foreign-access rule set and one runtime-r
   }
   assert.match(
     split,
-    /restrict_foreign_access "\$\{db\}" "\$\{runtime\}" "\$\{migrator\}" "\$\{policy\}"/,
+    /restrict_foreign_access "\$\{db\}" "\$\{runtime\}" "\$\{migrator\}" "\$\{policy\}" \|\| return 1/,
   );
-  assert.match(split, /restrict_foreign_access "\$\{db\}" "\$\{runtime\}" "\$\{migrator\}" audit/);
+  // Both entry points run that one core: audit under its own policy.
+  assert.match(split, /_split_database "\$\{svc\}" "\$\{db\}" migration audit audit \|\| return 1/);
+  assert.match(
+    split,
+    /_split_database "\$\{svc\}" "\$\{db\}" "\$\{mode\}" "\$\{policy\}" public \|\| return 1/,
+  );
   assert.match(split, /for svc in "\$\{RASTA_SERVICES\[@\]\}"; do list\+=/);
 });
 
@@ -306,12 +326,12 @@ test('the split and the check read one stored-settings rule, and both splits res
   const settings = readFileSync(new URL('runtime-settings.sql', lib), 'utf8');
   assert.ok(FINDINGS_SQL.includes(settings.replaceAll('RUNTIME_ROLE', ":'runtime'")));
   assert.ok(split.includes('runtime-settings.sql'));
-  // Both splits, each right after the membership cleanup.
+  // The one split core both entry points run, right after the membership cleanup.
   assert.equal(
     split.split(
       'revoke_owner_memberships "${db}" "${runtime}" || return 1\n  reset_runtime_settings "${db}" "${runtime}" || return 1',
     ).length,
-    3,
+    2,
   );
   // The allowed parameters: exactly the three the bootstrap stores.
   assert.match(
@@ -709,4 +729,100 @@ test('the disposable analytics superuser stays in its two dedicated test tasks',
   ]);
   assert.ok(!steps.some((step) => step.env?.DATABASE_URL_ANALYTICS_TEST_ADMIN));
   assert.ok(!steps.find((step) => step.name === 'Integration tests').env.TEST_ANALYTICS_ADMIN_URL);
+});
+
+// #540 r2 R2-2: the database list is structured, and a name is a value.
+test('the database list is one JSON array of records; anything else is refused, never guessed at', () => {
+  assert.match(
+    CONNECTABLE_DATABASES_SQL,
+    /jsonb_agg\(jsonb_build_object\('name', datname, 'connectable', datallowconn\)/,
+  );
+  // The review's spoof: a newline and `|t` inside one name stay one record.
+  assert.deepEqual(
+    parseDatabases(
+      '[{"name": "postgres|t\\npostgres", "connectable": true}, {"name": "x", "connectable": false}]',
+    ),
+    [
+      { name: 'postgres|t\npostgres', connectable: true },
+      { name: 'x', connectable: false },
+    ],
+  );
+  assert.deepEqual(parseDatabases('[]'), []);
+  for (const [text, pattern] of [
+    ['postgres|t', /not JSON/],
+    ['{"name": "x", "connectable": true}', /not an array/],
+    ['[{"name": "x"}]', /unreadable database record/],
+    ['[{"name": "x", "connectable": "t"}]', /unreadable database record/],
+    ['[{"name": 7, "connectable": true}]', /unreadable database record/],
+    ['[{"name": "x", "connectable": true, "extra": 1}]', /unreadable database record/],
+    ['[null]', /unreadable database record/],
+    ['["x|t"]', /unreadable database record/],
+    ['[{"name": "", "connectable": true}]', /unsupported database name/],
+    ['[{"name": "a\\u0000b", "connectable": true}]', /unsupported database name/],
+    [`[{"name": "${'é'.repeat(32)}", "connectable": true}]`, /unsupported database name/],
+    ['[{"name": "x", "connectable": true}, {"name": "x", "connectable": false}]', /listed twice/],
+  ]) {
+    assert.throws(() => parseDatabases(text), pattern, text);
+  }
+  // 63 bytes is PostgreSQL's longest name, and is accepted.
+  assert.equal(parseDatabases(`[{"name": "${'a'.repeat(63)}", "connectable": true}]`).length, 1);
+});
+
+test('a database name reaches libpq as a quoted literal, and the session must be in it', () => {
+  assert.equal(databaseConnectionString('rasta_audit'), "dbname='rasta_audit'");
+  assert.equal(databaseConnectionString('dbname=postgres'), "dbname='dbname=postgres'");
+  assert.equal(
+    databaseConnectionString('postgresql://h/postgres'),
+    "dbname='postgresql://h/postgres'",
+  );
+  assert.equal(databaseConnectionString("it's \\ x"), "dbname='it\\'s \\\\ x'");
+  // What psql is given: the quoted name as -d, the expected name as a
+  // variable, and the identity check ahead of the query.
+  let seen;
+  const fake = (command, args, options) => {
+    seen = { command, args, options };
+    return { status: 0, stdout: 'a\n\nb\n', stderr: '' };
+  };
+  assert.deepEqual(psqlRows('dbname=postgres', 'SELECT 1;', { runtime: 'r' }, fake), ['a', 'b']);
+  assert.equal(seen.command, 'psql');
+  assert.equal(seen.args.at(-2), '-d');
+  assert.equal(seen.args.at(-1), "dbname='dbname=postgres'");
+  assert.ok(seen.args.includes('expected_database=dbname=postgres'));
+  assert.ok(seen.args.includes('runtime=r'));
+  assert.ok(seen.options.input.startsWith(SAME_DATABASE_SQL));
+  assert.ok(seen.options.input.endsWith('SELECT 1;'));
+  assert.match(
+    SAME_DATABASE_SQL,
+    /current_database\(\) <> current_setting\('rasta\.expected_database'\)/,
+  );
+  assert.match(SAME_DATABASE_SQL, /RAISE EXCEPTION/);
+  assert.throws(
+    () => psqlRows('x\ny', 'SELECT 1;', {}, () => ({ status: 3, stdout: '', stderr: 'boom' })),
+    /^Error: "x\\ny": the catalogue query failed\nboom/,
+  );
+  // A report line names an odd database as a JSON string: no forged lines.
+  assert.equal(shownDatabase('rasta_audit'), 'rasta_audit');
+  assert.equal(shownDatabase('postgres|t\nok   x'), '"postgres|t\\nok   x"');
+  assert.doesNotMatch(foreignVerdict('a\nok   b', []).line, /\n/);
+  // The check itself connects only through psqlRows.
+  const cli = readFileSync(new URL('./check-db-runtime-privileges.mjs', import.meta.url), 'utf8');
+  assert.match(cli, /psqlRows as rows/);
+  assert.doesNotMatch(cli, /spawnSync|'-d'/);
+  assert.match(cli, /parseDatabases\(rows\('postgres', CONNECTABLE_DATABASES_SQL/);
+});
+
+// #540 r2 R2-3: a stored setting is named by parameter and scope, never value.
+test('the stored-settings rule never selects a value, so neither the check nor the split can print one', () => {
+  const settings = readFileSync(
+    new URL('../infrastructure/docker/postgres/lib/runtime-settings.sql', import.meta.url),
+    'utf8',
+  );
+  const body = settings.replace(/--[^\n]*/g, '');
+  assert.match(
+    body,
+    /format\('a stored setting reaches its sessions: %s \(%s\)', s\.name, s\.scope\) AS label/,
+  );
+  // cfg (name=value) is read only through split_part(cfg, '=', 1).
+  assert.equal(body.match(/\bcfg\b/g).length, body.match(/split_part\(cfg, '=', 1\)/g).length + 1);
+  assert.match(body, /unnest\(st\.setconfig\) cfg/);
 });

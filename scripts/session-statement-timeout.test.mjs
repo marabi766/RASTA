@@ -124,8 +124,8 @@ test('the split (every service, audit included) and the rotation apply it; never
     split.match(
       /ensure_runtime_statement_timeout "\$\{svc\}" "\$\{db\}" "\$\{runtime\}" \|\| return 1/g,
     )?.length,
-    2,
-    'split_service_privileges and split_audit_database_privileges, each passing a failure on',
+    1,
+    '_split_database, which split_service_privileges and split_audit_database_privileges both run',
   );
   const rotate = readFileSync(join(LIB, 'rotate-role-passwords.bash'), 'utf8');
   assert.match(
