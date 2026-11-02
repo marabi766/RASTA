@@ -36,7 +36,7 @@
     "test:url-parsing-guard": "node --test scripts/url-parsing-guard.test.mjs",
     "test:unit-step-concurrency": "node --test scripts/check-unit-step-concurrency.test.mjs && node scripts/check-unit-step-concurrency.mjs",
     "test:credential-fetch": "node --test scripts/credential-fetch.test.mjs",
-    "test:config-disclosure": "node --test scripts/config-disclosure.test.mjs",
+    "test:config-disclosure": "node --test scripts/config-disclosure.test.mjs scripts/command-disclosure.test.mjs",
     "test:service-boundaries-lib": "node --test scripts/check-service-boundaries.test.mjs",
     "check:service-boundaries": "node scripts/check-service-boundaries.mjs",
     "kafka:acl:generate": "pnpm --filter @rasta/contracts build && node scripts/kafka-acl-generate.mjs",
