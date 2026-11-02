@@ -56,7 +56,12 @@ jobs:
     # 25, and train run 40936057488 was cancelled at the limit. Every
     # integration job needs this one, so no limit downstream can save a
     # cancelled train. 37 is ceil(1446 s x 1.5 / 60).
-    timeout-minutes: 37
+    # 56 minutes (2026-11-02, same measurement): the job grew to up to
+    # 2216 s (p50 2071 s), 100 % of 37; main ec5ef32 run 41496157174 and
+    # train run 41512869238 were cancelled at the limit with every step
+    # green. 56 is ceil(2216 s x 1.5 / 60). Splitting the job is the fix;
+    # this only stops the limit from cancelling healthy runs.
+    timeout-minutes: 56
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
