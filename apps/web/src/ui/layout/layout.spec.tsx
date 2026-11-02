@@ -1,5 +1,6 @@
 import { axe } from 'jest-axe';
-import { screen } from '@testing-library/react';
+import { fireEvent, screen } from '@testing-library/react';
+import { renderToString } from 'react-dom/server';
 
 import { itSnapshotsInBothDirections, renderInDirection } from '@/test/directions';
 
@@ -87,6 +88,84 @@ describe('Sidebar', () => {
   itSnapshotsInBothDirections('with a current item', () => (
     <Sidebar items={ITEMS} currentHref="/assets" />
   ));
+});
+
+describe('Sidebar on a phone (demo run 2026-10-24: a 16-item menu filled every first screen)', () => {
+  const MANY = Array.from({ length: 16 }, (_, index) => ({
+    href: `/page-${index}`,
+    label: `صفحه ${index}`,
+  }));
+  const list = () => document.getElementById('sidebar-links') as HTMLElement;
+
+  it('starts collapsed behind a button with a name, aria-expanded and aria-controls', () => {
+    renderInDirection(<Sidebar items={MANY} />, 'rtl');
+    const button = screen.getByRole('button', { name: 'منوی ناوبری' });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    expect(button).toHaveAttribute('aria-controls', 'sidebar-links');
+    // `hidden` is display:none below `md`; `md:flex` puts the list back from md up.
+    expect(list()).toHaveClass('hidden', 'md:flex');
+    // The button itself is not drawn from md up.
+    expect(button).toHaveClass('md:hidden');
+  });
+
+  it('opens and closes with the button, and keeps every link in either state', () => {
+    renderInDirection(<Sidebar items={MANY} currentHref="/page-3" />, 'rtl');
+    const button = screen.getByRole('button', { name: 'منوی ناوبری' });
+    const hrefs = () =>
+      Array.from(list().querySelectorAll('a')).map((anchor) => anchor.getAttribute('href'));
+    const closedHrefs = hrefs();
+
+    fireEvent.click(button);
+    expect(button).toHaveAttribute('aria-expanded', 'true');
+    expect(list()).not.toHaveClass('hidden');
+    expect(hrefs()).toEqual(closedHrefs);
+    expect(closedHrefs).toEqual(MANY.map((item) => item.href));
+    expect(screen.getByRole('link', { name: 'صفحه 3' })).toHaveAttribute('aria-current', 'page');
+
+    fireEvent.click(button);
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    expect(list()).toHaveClass('hidden');
+  });
+
+  it('closes on Escape from a link in the list and puts focus back on the button', () => {
+    renderInDirection(<Sidebar items={MANY} />, 'rtl');
+    const button = screen.getByRole('button', { name: 'منوی ناوبری' });
+    fireEvent.click(button);
+    const link = screen.getByRole('link', { name: 'صفحه 5' });
+    link.focus();
+    expect(link).toHaveFocus();
+
+    fireEvent.keyDown(link, { key: 'Escape' });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    expect(list()).toHaveClass('hidden');
+    expect(button).toHaveFocus();
+  });
+
+  it('ignores Escape while closed and every other key', () => {
+    renderInDirection(<Sidebar items={MANY} />, 'rtl');
+    const button = screen.getByRole('button', { name: 'منوی ناوبری' });
+    fireEvent.keyDown(button, { key: 'Escape' });
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(button);
+    fireEvent.keyDown(button, { key: 'Enter' });
+    expect(button).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  // Without JavaScript nothing can open a closed menu, so the server's HTML must
+  // already be the whole list: visible, reachable, and with no dead button.
+  it('is a plain visible list in the HTML the server sends', () => {
+    const html = renderToString(<Sidebar items={MANY} currentHref="/page-1" />);
+    expect(html).not.toContain('<button');
+    expect(html).not.toMatch(/class="[^"]*\bhidden\b/);
+    for (const item of MANY) expect(html).toContain(`href="${item.href}"`);
+  });
+
+  it('has no accessibility violations, closed or open', async () => {
+    const { container } = renderInDirection(<Sidebar items={MANY} />, 'rtl');
+    expect(await axe(container)).toHaveNoViolations();
+    fireEvent.click(screen.getByRole('button', { name: 'منوی ناوبری' }));
+    expect(await axe(container)).toHaveNoViolations();
+  });
 });
 
 describe('PageHeader', () => {

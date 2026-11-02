@@ -2,7 +2,7 @@
 
 import { useActionState } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, controlClassName, JalaliDateInput } from '@/ui';
 import { withoutBidiControls } from '@/lib/format';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
@@ -160,7 +160,7 @@ export function NewDriverForm({
 
         <Field label={LABELS.licenceValidTo} error={errors.licenceValidTo}>
           {(control) => (
-            <input
+            <JalaliDateInput
               {...control}
               type="date"
               name="licenceValidTo"

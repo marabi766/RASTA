@@ -6,6 +6,7 @@ import {
   NoAccessState,
   PageHeader,
   Section,
+  TableScroll,
 } from '@/ui';
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
 import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
@@ -40,6 +41,16 @@ import { ContextField } from '@/app/ContextField';
  * so this screen does not follow that change.
  */
 const APPROVED_OFFER_LABEL = 'تأییدشده';
+
+/**
+ * What the column says while marketplace-service has no answer to give
+ * (`UNAVAILABLE` on every offer, ADR-041 § 1). It names the **check**, not the
+ * supplier: «هنوز فعال نیست» read as a warning about each supplier in the demo
+ * run (2026-10-24, defect 9), and it also implied a state that will change.
+ * The check did not run, so the words say neither approved nor rejected nor
+ * lacking — only that the marketplace's check is not available.
+ */
+export const UNAVAILABLE_OFFER_LABEL = 'بررسی بازار در دسترس نیست';
 
 export interface OffersScreenProps {
   /** The organization tag this page's URLs carry (`server/page-context.ts`). */
@@ -114,57 +125,59 @@ function OfferRows({ offers }: { offers: OffersPage }) {
   }
 
   return (
-    <table className="w-full border-collapse text-sm">
-      <caption className="sr-only">فهرست پیشنهادهای تأمین‌کنندگان</caption>
-      <thead>
-        <tr className="border-b border-border text-start text-content-muted">
-          <th scope="col" className="p-3 text-start font-medium">
-            تأمین‌کننده
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            قیمت واحد
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            موجودی
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            حداقل سفارش
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            زمان تحویل
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            احراز صلاحیت
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {offers.items.map((offer) => (
-          <tr key={offer.id} className="border-b border-border">
-            <td className="p-3">
-              <Identifier>{offer.supplierOrganizationId}</Identifier>
-            </td>
-            <td className="p-3">{formatMoney(offer.unitPriceMinor)}</td>
-            <td className="p-3 text-content-muted">
-              {toPersianDigits(String(offer.availableQuantity))}
-            </td>
-            <td className="p-3 text-content-muted">
-              {toPersianDigits(String(offer.minimumQuantity))}
-            </td>
-            <td className="p-3 text-content-muted">
-              {toPersianDigits(String(offer.leadTimeDays))} روز
-            </td>
-            <td className="p-3 text-content-muted">
-              {offer.supplierQualification === 'UNAVAILABLE'
-                ? 'هنوز فعال نیست'
-                : offer.supplierQualification === 'APPROVED'
-                  ? APPROVED_OFFER_LABEL
-                  : qualificationStateLabel(offer.supplierQualification)}
-            </td>
+    <TableScroll label="فهرست پیشنهادهای تأمین‌کنندگان">
+      <table className="w-full border-collapse text-sm">
+        <caption className="sr-only">فهرست پیشنهادهای تأمین‌کنندگان</caption>
+        <thead>
+          <tr className="border-b border-border text-start text-content-muted">
+            <th scope="col" className="p-3 text-start font-medium">
+              تأمین‌کننده
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              قیمت واحد
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              موجودی
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              حداقل سفارش
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              زمان تحویل
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              احراز صلاحیت
+            </th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {offers.items.map((offer) => (
+            <tr key={offer.id} className="border-b border-border">
+              <td className="p-3">
+                <Identifier>{offer.supplierOrganizationId}</Identifier>
+              </td>
+              <td className="p-3">{formatMoney(offer.unitPriceMinor)}</td>
+              <td className="p-3 text-content-muted">
+                {toPersianDigits(String(offer.availableQuantity))}
+              </td>
+              <td className="p-3 text-content-muted">
+                {toPersianDigits(String(offer.minimumQuantity))}
+              </td>
+              <td className="p-3 text-content-muted">
+                {toPersianDigits(String(offer.leadTimeDays))} روز
+              </td>
+              <td className="p-3 text-content-muted">
+                {offer.supplierQualification === 'UNAVAILABLE'
+                  ? UNAVAILABLE_OFFER_LABEL
+                  : offer.supplierQualification === 'APPROVED'
+                    ? APPROVED_OFFER_LABEL
+                    : qualificationStateLabel(offer.supplierQualification)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableScroll>
   );
 }
 

@@ -2,7 +2,7 @@
 
 import { useCallback } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, controlClassName, JalaliDateInput } from '@/ui';
 import {
   AMENDMENT_REASON_MAX,
   CANCEL_NOTE_MAX,
@@ -383,7 +383,7 @@ function CommandFields({
               }
               if (field === 'plannedDate') {
                 return (
-                  <input
+                  <JalaliDateInput
                     {...control}
                     type="date"
                     name={field}
