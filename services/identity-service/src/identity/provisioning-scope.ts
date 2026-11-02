@@ -96,6 +96,7 @@ export const PROVISIONING_SCOPE_POLICY = Symbol('PROVISIONING_SCOPE_POLICY');
 export function assertMayProvisionInto(
   organizationId: string,
   policy: ProvisioningScopePolicy,
+  actorRoles?: readonly string[],
 ): void {
   const context = getContext();
 
@@ -103,7 +104,7 @@ export function assertMayProvisionInto(
     throw RastaError.forbidden('Only a signed-in user may provision an account');
   }
 
-  if (isWithinProvisioningScope(organizationId, policy)) return;
+  if (isWithinProvisioningScope(organizationId, policy, actorRoles)) return;
 
   throw RastaError.tenantMismatch(
     organizationId,
@@ -118,10 +119,14 @@ export function assertMayProvisionInto(
  * probeable signal — `approveRegistration` folds this into the same `404`
  * used for a registration that does not exist at all, rather than a `403`
  * that would still tell an outsider the id belongs to somebody.
+ *
+ * `actorRoles`: the token's roles when absent (the early refusal), the
+ * caller's live roles under the lock when given (`live-authority.ts`).
  */
 export function isWithinProvisioningScope(
   organizationId: string,
   policy: ProvisioningScopePolicy,
+  actorRoles?: readonly string[],
 ): boolean {
   const context = getContext();
 
@@ -131,7 +136,8 @@ export function isWithinProvisioningScope(
   // not depend on staying unreachable to stay correct.
   if (context.authType !== 'USER') return false;
 
-  if (policy.crossOrgRoles.some((role) => context.roles.includes(role))) return true;
+  const roles = actorRoles ?? context.roles;
+  if (policy.crossOrgRoles.some((role) => roles.includes(role))) return true;
 
   // Their *active* organization — the one this request acts for — not the set
   // they belong to. A caller who belongs to several chooses which one they are

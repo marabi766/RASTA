@@ -2,10 +2,14 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   closeSync,
+  constants,
+  fstatSync,
   fsyncSync,
+  lstatSync,
   openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeSync,
@@ -344,19 +348,18 @@ function checkLines(evidence, database) {
           end,
           text.indexOf('\n', end) < 0 ? text.length : text.indexOf('\n', end),
         );
-        // A whole physical line, not an arbitrary fragment of a statement, is permitted.
-        if (
-          /^[ \t]*$/.test(prefix) &&
-          /^[ \t]*,?[ \t]*$/.test(suffix) &&
-          !text.slice(token.start, end).includes('\n')
-        ) {
+        // Whole physical lines, not an arbitrary fragment of a statement, are permitted: the
+        // constraint starts a line and ends one. PostgreSQL prints a CASE expression over several
+        // lines, so a constraint may own more than one; each of them carries its identity.
+        if (/^[ \t]*$/.test(prefix) && /^[ \t]*,?[ \t]*$/.test(suffix)) {
           const identity = JSON.stringify([
             database,
             schema.value,
             table.value,
             statement[i + 1].value,
           ]);
-          checks.set(line, identity);
+          const last = lineAt.get(text.lastIndexOf('\n', end - 1) + 1);
+          for (let owned = line; owned <= last; owned++) checks.set(owned, identity);
           identities.push(identity);
         }
       }
@@ -391,11 +394,15 @@ export function checkSourceReference(source, reference, database) {
     throw new Error('SOURCE/REF CHECK identity or line count differs');
   let checkLinesDifferent = 0;
   const checkConstraints = [];
+  const reported = new Set();
   for (let i = 0; i < a.lines.length; i++) {
     if (a.lines[i] === b.lines[i]) continue;
     if (!a.checks.has(i) || a.checks.get(i) !== b.checks.get(i))
       throw new Error('SOURCE/REF non-CHECK difference');
     checkLinesDifferent++;
+    // Once per constraint, however many of its lines differ and wherever they sit in its span.
+    if (reported.has(a.checks.get(i))) continue;
+    reported.add(a.checks.get(i));
     const [, schema, table, name] = JSON.parse(a.checks.get(i));
     checkConstraints.push({ schema, table, name });
   }
@@ -822,23 +829,154 @@ VALUES ('HLD_DRILL', 'ORG-RESTORE-DRILL', 'WLT_DRILL', 2500, 'IRR', 'DRILL', 'RE
 COMMIT;
 `;
 
-const reportFs = { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync };
+const reportFs = {
+  openSync,
+  writeSync,
+  fsyncSync,
+  closeSync,
+  renameSync,
+  unlinkSync,
+  fstatSync,
+  lstatSync,
+};
+
+/**
+ * Ownership of a path is established ONCE, by the descriptor that created it (`identityOf` of a
+ * bigint fstat), and every later removal or publication of that path proves it still names the
+ * same object (`assertSameObject`, `removeIdentified`): a pathname is not an identity. The first
+ * line of defence is the directory (assertPrivateDirectory in recovery.mjs: nobody else can
+ * replace a name in it); this is the second, for the window between a check and the call that
+ * follows it. Device and inode alone are not enough: a deleted file's inode number is handed to
+ * the next file created (ext4 and tmpfs do it at once), so the object's kind and its birth time
+ * (statx btime, constant for the life of the inode, 0 where a file system has none) belong to it.
+ */
+export const identityOf = (stat) => ({
+  dev: stat.dev,
+  ino: stat.ino,
+  kind: stat.isDirectory() ? 'directory' : stat.isSymbolicLink() ? 'link' : 'file',
+  birth: stat.birthtimeNs,
+});
+/**
+ * An identity as it is persisted (the report and the recovery journal, both outside the tree they
+ * guard): every number a decimal string, because JSON has no bigint. `parseIdentity` is the strict
+ * inverse: anything but exactly these four fields, in these shapes, is `null` (malformed).
+ */
+export const serializeIdentity = (identity) => ({
+  dev: String(identity.dev),
+  ino: String(identity.ino),
+  kind: identity.kind,
+  birth: String(identity.birth),
+});
+const IDENTITY_NUMBER = /^\d{1,20}$/;
+export function parseIdentity(value) {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    !isDeepStrictEqual(Object.keys(value).sort(), ['birth', 'dev', 'ino', 'kind']) ||
+    !['directory', 'file', 'link'].includes(value.kind) ||
+    ![value.dev, value.ino, value.birth].every(
+      (field) => typeof field === 'string' && IDENTITY_NUMBER.test(field),
+    )
+  )
+    return null;
+  return {
+    dev: BigInt(value.dev),
+    ino: BigInt(value.ino),
+    kind: value.kind,
+    birth: BigInt(value.birth),
+  };
+}
+/** The identity of what `path` names right now (no link followed). */
+export const identityAt = (path) => identityOf(lstatSync(path, { bigint: true }));
+
+/** The object at a path is not the one this drill created: it is left in place and reported. */
+export class ForeignArtifact extends Error {
+  constructor(
+    message = 'an artifact of the drill was replaced by another actor and was left in place',
+  ) {
+    super(message);
+    this.name = 'ForeignArtifact';
+  }
+}
+
+/**
+ * 'present' when `path` still names the object `identity` was taken from, 'gone' when nothing is
+ * there, ForeignArtifact otherwise (another object, or a path that cannot be inspected). No
+ * identity, no proof: it never answers 'present' for an object this drill did not create.
+ * `lstat(path, { bigint: true })` may be replaced (tests).
+ */
+export function assertSameObject(path, identity, { lstat = lstatSync, message } = {}) {
+  if (!identity) throw new ForeignArtifact(message);
+  let now;
+  try {
+    now = identityOf(lstat(path, { bigint: true }));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return 'gone';
+    throw new ForeignArtifact(message);
+  }
+  if (!isDeepStrictEqual(now, identity)) throw new ForeignArtifact(message);
+  return 'present';
+}
+
+/**
+ * Unlinks `path` only when it is still the object `identity` was taken from (the descriptor that
+ * created it, or the one that read the file a decision was made on). Returns 'removed' or 'gone';
+ * an `undefined` identity means nothing was created (the exclusive open itself failed: whatever
+ * is there belongs to somebody else) and nothing is touched; a replaced path throws
+ * ForeignArtifact and is left alone. A failing unlink of our own object is not an
+ * error here (the caller reports the failure that started the rollback).
+ */
+export function removeIdentified(
+  path,
+  identity,
+  { lstat = lstatSync, unlink = unlinkSync, message } = {},
+) {
+  if (identity === undefined) return 'gone';
+  if (assertSameObject(path, identity, { lstat, message }) === 'gone') return 'gone';
+  try {
+    unlink(path);
+  } catch {
+    /* already gone, or not removable: the caller reports its own failure */
+  }
+  return 'removed';
+}
+
+/**
+ * The sibling an atomic write goes through, and the one pattern that recognises it: both live here,
+ * so the report-path namespace check (recovery.mjs) cannot drift from what this module creates.
+ */
+export const ATOMIC_TEMP_PATTERN = /\.[0-9a-f]{16}\.tmp$/;
+export const atomicTempPath = (path) => `${path}.${randomBytes(8).toString('hex')}.tmp`;
 
 /**
  * Replace the report in one step: a random sibling is created exclusively (never through a
  * symlink) with mode 0600, written, fsynced and renamed over the destination, so a kill at any
- * point leaves the previous complete report or the new one. A failure removes the sibling and
- * keeps the previous report. `durable` additionally fsyncs the parent directory. The result is
- * true only when that fsync succeeded: only then may a caller claim the rename survives power
- * loss. A failed directory fsync leaves the complete new report in place and returns false.
- * Errors never quote the path.
+ * point leaves the previous complete report or the new one. A failure removes the sibling, but
+ * only when it is still the object this call created (its identity was taken from the descriptor)
+ * and keeps the previous report: a sibling somebody replaced is neither renamed nor removed, and
+ * the failure is a ForeignArtifact. A sibling whose exclusive creation failed was never ours and
+ * is never touched. `onCreated(identity)` receives the created object's identity (it survives
+ * the rename), for callers that remove the published file later. `durable` additionally fsyncs the
+ * parent directory. The result is true only when that fsync succeeded: only then may a caller
+ * claim the rename survives power loss. A failed directory fsync leaves the complete new report
+ * in place and returns false. Errors never quote the path.
  */
-export function writeReportAtomically(path, report, { durable = false, fs = reportFs } = {}) {
+export function writeReportAtomically(
+  path,
+  report,
+  { durable = false, fs: injected, onCreated } = {},
+) {
+  const fs = { ...reportFs, ...injected };
   const bytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
-  const sibling = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+  const sibling = atomicTempPath(path);
+  const foreign = 'Could not write report (foreign artifact left in place)';
   let fd;
+  let identity;
   try {
     fd = fs.openSync(sibling, 'wx', 0o600);
+    identity = identityOf(fs.fstatSync(fd, { bigint: true }));
+    onCreated?.(identity);
     for (let offset = 0; offset < bytes.length;) {
       const written = fs.writeSync(fd, bytes, offset, bytes.length - offset, offset);
       if (!written) throw new Error('Could not write report');
@@ -848,6 +986,8 @@ export function writeReportAtomically(path, report, { durable = false, fs = repo
     const closing = fd;
     fd = undefined;
     fs.closeSync(closing);
+    // Never publish what somebody swapped in for the sibling.
+    assertSameObject(sibling, identity, { lstat: fs.lstatSync, message: foreign });
     fs.renameSync(sibling, path);
   } catch (error) {
     if (fd !== undefined)
@@ -856,11 +996,12 @@ export function writeReportAtomically(path, report, { durable = false, fs = repo
       } catch {
         /* the write error is the one to report */
       }
-    try {
-      fs.unlinkSync(sibling);
-    } catch {
-      /* never created, or already renamed */
-    }
+    removeIdentified(sibling, identity, {
+      lstat: fs.lstatSync,
+      unlink: fs.unlinkSync,
+      message: foreign,
+    });
+    if (error instanceof ForeignArtifact) throw error;
     throw new Error(`Could not write report (${error?.code ?? 'failed'})`);
   }
   if (!durable) return false;
@@ -879,6 +1020,68 @@ export function writeReportAtomically(path, report, { durable = false, fs = repo
       } catch {
         /* nothing more to report */
       }
+  }
+}
+
+/** The largest report any tool of the drill will read (a full report is a few MiB). */
+export const MAX_REPORT_BYTES = 256 * 1024 * 1024;
+
+/** Why `readRegularFile` refused: a closed vocabulary, never a path or a message from the OS. */
+export class InputFileError extends Error {
+  constructor(kind) {
+    super(`input file refused: ${kind}`);
+    this.name = 'InputFileError';
+    this.kind = kind;
+  }
+}
+
+/**
+ * The one way the drill's tools read a file somebody else could have substituted (the report, its
+ * recovery marker, journal and Compose definition, the summary's report and progress file).
+ * The open never blocks (`O_NONBLOCK`: a FIFO has no writer to wait for) and, when asked, never
+ * follows a link; the kind is checked on the DESCRIPTOR, so only a regular file is read, and the
+ * read is bounded by `maxBytes` whatever the file claims or grows to. `inspect(stat)` may refuse
+ * further (owner, mode) and receives the descriptor's identity as its second argument (identityOf);
+ * whatever it throws propagates. Throws InputFileError otherwise:
+ * `missing`, `open`, `not-file`, `too-large`, `read`.
+ */
+export function readRegularFile(path, { maxBytes, noFollow = false, inspect } = {}) {
+  let fd;
+  try {
+    fd = openSync(
+      path,
+      constants.O_RDONLY | constants.O_NONBLOCK | (noFollow ? constants.O_NOFOLLOW : 0),
+    );
+  } catch (error) {
+    throw new InputFileError(error?.code === 'ENOENT' ? 'missing' : 'open');
+  }
+  try {
+    let stat;
+    try {
+      stat = fstatSync(fd);
+    } catch {
+      throw new InputFileError('read');
+    }
+    if (!stat.isFile()) throw new InputFileError('not-file');
+    inspect?.(stat, identityOf(fstatSync(fd, { bigint: true })));
+    // The buffer holds one byte more than the cap (or than the file): a file over the cap, or one
+    // that grew while being read, fills it and is refused.
+    const buffer = Buffer.allocUnsafe(Math.min(stat.size, maxBytes) + 1);
+    let length = 0;
+    try {
+      for (;;) {
+        const count = readSync(fd, buffer, length, buffer.length - length, null);
+        if (!count) break;
+        length += count;
+        if (length === buffer.length) break;
+      }
+    } catch {
+      throw new InputFileError('read');
+    }
+    if (length === buffer.length) throw new InputFileError('too-large');
+    return buffer.toString('utf8', 0, length);
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -1227,4 +1430,266 @@ export async function finalizeCleanup({ runner, report, teardown }) {
     !torn.unverified.length &&
     !report.orphanProcessGroups?.length;
   return { passed, leftovers: torn.leftovers, unverified: torn.unverified, orphanRetry };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Scheduled-run summary (backup-drill-monthly.yml). The CLI's report and stdout carry table
+// names, ledger amounts and, on failure, bounded subprocess output; a public job log and step
+// summary may carry none of it. So the summary is BUILT from an allowlist: every value below is
+// a boolean, a bounded integer, a name this drill generates or a stage from a closed pattern.
+// Nothing is copied from the report by key, so a new report field cannot leak by being added.
+// ---------------------------------------------------------------------------------------------
+
+/** Gate names, in the order the summary prints them. Each is pass/fail and nothing else. */
+export const SUMMARY_GATES = Object.freeze([
+  'database-coverage',
+  'rows-and-digests',
+  'migrations',
+  'database-and-object-state',
+  'schema-dump',
+  'reference-allowance',
+  'fixed-point',
+  'ledger-equality',
+  'wallet-escrow-and-holds',
+  'beyond-safe-integer-amount',
+  'cleanup',
+  'acceptance',
+]);
+
+// The stages the CLI prints, by name. The per-service ones are built from the service registry
+// (infrastructure/docker/postgres/lib/role-passwords.bash, the same list the CLI iterates), never
+// matched by a suffix pattern: a report or progress line cannot make the summary print a value.
+const FIXED_STAGES = [
+  'preflight',
+  'scratch drop',
+  'build seed dependencies serially',
+  'start disposable source PostgreSQL',
+  'install synthetic postings fixture',
+  'start fresh restore PostgreSQL',
+  'cleanup owned containers, networks and volumes',
+];
+
+/** The databases and stages that exist, from the registry's service names (empty = none). */
+export function summaryRegistry(services) {
+  const names = Array.isArray(services) ? services.filter((s) => typeof s === 'string' && s) : [];
+  return {
+    services: names,
+    databases: new Set(names.map((service) => `rasta_${service}`)),
+    stages: new Set([
+      ...FIXED_STAGES,
+      ...names.flatMap((service) => [
+        `migrate ${service}`,
+        `generate and demo seed ${service}`,
+        `dump rasta_${service}`,
+        `restore and compare rasta_${service}`,
+      ]),
+    ]),
+  };
+}
+const SAFE_NUMBER = /^\d{1,18}$/;
+const PER_DATABASE_FLAGS = [
+  'tablesEqual',
+  'migrationsEqual',
+  'databaseStateEqual',
+  'objectStateEqual',
+  'schemaDumpEqual',
+  'referenceChecked',
+  'allowanceChecked',
+  'fixedPointEqual',
+];
+
+/** A stage the drill prints, or null: anything else (a diagnostic, a payload) is not repeated. */
+export function allowedStage(value, registry) {
+  return typeof value === 'string' && registry?.stages.has(value) ? value : null;
+}
+
+/** The last progress line of the CLI's stderr that names a stage of the registry. */
+export function lastAllowedStage(stderrText, registry) {
+  const prefix = '[backup-restore-drill] ';
+  let last = null;
+  for (const line of String(stderrText).split('\n')) {
+    if (line.startsWith(prefix)) last = allowedStage(line.slice(prefix.length), registry) ?? last;
+  }
+  return last;
+}
+
+function safeCount(value) {
+  const text = typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value;
+  return typeof text === 'string' && SAFE_NUMBER.test(text) ? BigInt(text) : null;
+}
+function sumCounts(values) {
+  let total = 0n;
+  for (const value of values) {
+    const next = safeCount(value);
+    if (next === null) return null;
+    total += next;
+  }
+  return total;
+}
+function attempt(check) {
+  try {
+    return check() === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The allowlisted view of a drill run. `report` is untrusted JSON (possibly absent or partial);
+ * `exitCode` is the CLI's own status. A gate is true only on positive evidence in the report.
+ * Never returns a ledger value, amount, table name, SQL, path, project name or diagnostic.
+ */
+export function summarizeDrillReport(
+  report,
+  { exitCode = null, lastStage = null, services = [] } = {},
+) {
+  const registry = summaryRegistry(services);
+  const readable = report !== null && typeof report === 'object' && !Array.isArray(report);
+  const r = readable ? report : {};
+  const databases = Array.isArray(r.databases)
+    ? r.databases.filter((db) => db && typeof db === 'object')
+    : [];
+  // Coverage is judged against the registry, not against a list the report carries itself.
+  const expected = registry.databases.size;
+  const reported = new Set(databases.map((db) => db.database));
+  const every = (flag) => databases.length > 0 && databases.every((db) => db[flag] === true);
+  const gates = {
+    'database-coverage':
+      expected > 0 &&
+      databases.length === expected &&
+      reported.size === expected &&
+      [...registry.databases].every((name) => reported.has(name)),
+    'rows-and-digests': every('tablesEqual'),
+    migrations: every('migrationsEqual'),
+    'database-and-object-state': every('databaseStateEqual') && every('objectStateEqual'),
+    'schema-dump': every('schemaDumpEqual'),
+    'reference-allowance': every('referenceChecked') && every('allowanceChecked'),
+    'fixed-point': every('fixedPointEqual'),
+    // Source and restored ledgers equal, including the per-currency totals.
+    'ledger-equality': attempt(() => compareLedgers(r.sourceLedger, r.restoredLedger)),
+    // Balanced journals, wallet = WALLET postings, pending = ESCROW = ACTIVE holds, non-empty.
+    'wallet-escrow-and-holds': attempt(() => ledgerPassed(r.restoredLedger)),
+    'beyond-safe-integer-amount':
+      r.sourceLedger?.fixtureAmount === '9007199254740993' &&
+      r.restoredLedger?.fixtureAmount === '9007199254740993',
+    cleanup: r.cleanup?.passed === true,
+  };
+  // The gates above split drillPassed (same flags, same ledger predicates; a test holds them
+  // equal), so the verdict needs the CLI's own status and word to agree with the evidence.
+  gates.acceptance =
+    exitCode === 0 &&
+    r.passed === true &&
+    r.interrupted !== true &&
+    SUMMARY_GATES.filter((name) => name !== 'acceptance').every((name) => gates[name] === true);
+
+  const text = (value) => (value === null ? null : value.toString());
+  // Only strings are parsed: an object with its own toString must not run code or throw here.
+  const instant = (value) => (typeof value === 'string' ? Date.parse(value) : Number.NaN);
+  const started = instant(r.startedAt);
+  const finished = instant(r.finishedAt);
+  const failure = r.error && typeof r.error === 'object' ? r.error : null;
+  return {
+    reportReadable: readable,
+    exitCode: Number.isInteger(exitCode) ? exitCode : null,
+    passed: Object.values(gates).every(Boolean),
+    gates,
+    counts: {
+      databases: databases.length,
+      expectedDatabases: expected,
+      tables: text(sumCounts(databases.map((db) => Object.keys(db.before?.tables ?? {}).length))),
+      applicationRows: text(
+        sumCounts(databases.map((db) => db.before?.summary?.application?.rows)),
+      ),
+      migrationRows: text(sumCounts(databases.map((db) => db.before?.summary?.migration?.rows))),
+      journals: text(safeCount(r.restoredLedger?.journalsChecked)),
+      entries: text(safeCount(r.restoredLedger?.entriesChecked)),
+      wallets: text(safeCount(r.restoredLedger?.walletsChecked)),
+      journalMismatches: text(safeCount(r.restoredLedger?.journalMismatches)),
+      walletMismatches: text(safeCount(r.restoredLedger?.walletMismatches)),
+    },
+    durations: {
+      totalSeconds:
+        Number.isFinite(started) && Number.isFinite(finished) && finished >= started
+          ? Math.round((finished - started) / 1000)
+          : null,
+      schemaDumpMilliseconds: text(
+        sumCounts(
+          databases.flatMap((db) => [
+            db.before?.schemaDump?.milliseconds,
+            db.after?.schemaDump?.milliseconds,
+          ]),
+        ),
+      ),
+      referenceAndFixedPointMilliseconds: text(
+        sumCounts(databases.map((db) => db.before?.reference?.milliseconds)),
+      ),
+    },
+    failingDatabases: databases
+      .filter((db) => PER_DATABASE_FLAGS.some((flag) => db[flag] !== true))
+      .map((db) => db.database)
+      .filter((name) => registry.databases.has(name)),
+    failure: failure
+      ? {
+          stage: allowedStage(failure.stage, registry),
+          database: registry.databases.has(failure.database) ? failure.database : null,
+          commandExitCode:
+            Number.isInteger(failure.exitCode) && failure.exitCode >= 0 && failure.exitCode <= 255
+              ? failure.exitCode
+              : null,
+        }
+      : null,
+    lastStage: allowedStage(lastStage, registry),
+  };
+}
+
+/** Markdown for the job summary and the log: only what summarizeDrillReport allows. */
+export function renderDrillSummary(summary) {
+  const value = (v) => (v === null || v === undefined ? 'n/a' : String(v));
+  const lines = [
+    `## Monthly backup/restore drill: ${summary.passed ? 'PASSED' : 'FAILED'}`,
+    '',
+    'Synthetic data only, in a cluster this job created. Not a production restore.',
+    '',
+    `CLI exit code: ${value(summary.exitCode)}`,
+    '',
+    '| Gate | Result |',
+    '| --- | --- |',
+    ...SUMMARY_GATES.map(
+      (name) => `| ${name} | ${summary.gates[name] === true ? 'pass' : 'FAIL'} |`,
+    ),
+    '',
+    '| Count | Value |',
+    '| --- | --- |',
+    ...Object.entries(summary.counts).map(([name, v]) => `| ${name} | ${value(v)} |`),
+    '',
+    '| Duration | Value |',
+    '| --- | --- |',
+    `| total seconds | ${value(summary.durations.totalSeconds)} |`,
+    `| schema dump milliseconds (sum) | ${value(summary.durations.schemaDumpMilliseconds)} |`,
+    `| reference and fixed point milliseconds (sum) | ${value(summary.durations.referenceAndFixedPointMilliseconds)} |`,
+  ];
+  if (!summary.passed) {
+    lines.push(
+      '',
+      `Failing gates: ${SUMMARY_GATES.filter((name) => summary.gates[name] !== true).join(', ')}`,
+    );
+    if (summary.failingDatabases.length)
+      lines.push(`Failing databases: ${summary.failingDatabases.join(', ')}`);
+    if (summary.failure)
+      lines.push(
+        `Failed stage: ${value(summary.failure.stage)}` +
+          (summary.failure.database ? ` (${summary.failure.database})` : '') +
+          (summary.failure.commandExitCode !== null
+            ? `, command exit ${summary.failure.commandExitCode}`
+            : ''),
+      );
+    if (summary.lastStage) lines.push(`Last stage started: ${summary.lastStage}`);
+    if (!summary.reportReadable) lines.push('The drill left no readable report.');
+    lines.push(
+      '',
+      'Details are deliberately not printed or uploaded (they can hold synthetic financial',
+      'values). Re-run locally: scripts/backup-restore-drill --report <new file>.',
+    );
+  }
+  return `${lines.join('\n')}\n`;
 }

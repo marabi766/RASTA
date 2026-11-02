@@ -93,8 +93,16 @@ export {
   MIGRATOR_CREDENTIAL_PATTERN,
   MigratorCredentialInServiceError,
   REGISTERED_MIGRATOR_CREDENTIALS,
+  RUNTIME_DATABASE_ROLES,
   assertNoMigratorCredentials,
   migratorCredentialsIn,
+  privilegedDatabaseUrlsIn,
 } from './owner-credentials';
 
 export { UNREADABLE_URL, UnreadableUrlError, readUrl, tryReadUrl } from './url-reader';
+
+export {
+  assertRedisDiagnosticsSafe,
+  assertTemporalDiagnosticsSafe,
+  protectRedisReadyCheck,
+} from './sdk-diagnostics';

@@ -11,20 +11,27 @@
  *   unavailable right now (`server/session-state.ts`): the login may still come
  *   back, so the person is told to try again shortly, not that they were
  *   signed out.
+ * - `NO_ORGANIZATION` — the session is signed in but acts for no organization
+ *   (`server/tenant-gate.ts`): nothing tenant-bound runs for it, and the
+ *   person is told to sign in with an organization rather than to retry.
  *
  * The action decides which (`missingSessionReason` in
  * `server/current-session.ts`); nothing was sent in either case.
  */
-export type SessionRefusal = 'NO_SESSION' | 'SESSION_UNAVAILABLE';
+export type SessionRefusal = 'NO_SESSION' | 'SESSION_UNAVAILABLE' | 'NO_ORGANIZATION';
 
 export const SESSION_REFUSAL_MESSAGES: Readonly<Record<SessionRefusal, string>> = {
   NO_SESSION: 'نشست شما پایان یافته است. دوباره وارد شوید و فرم را بفرستید.',
   SESSION_UNAVAILABLE:
     'نشست شما همین حالا در دسترس نیست و درخواست ارسال نشد. چند لحظه بعد دوباره بفرستید؛ اگر باز هم نشد، دوباره وارد شوید.',
+  NO_ORGANIZATION:
+    'برای این ورود هیچ سازمانی انتخاب نشده است و درخواست ارسال نشد. برای کار با داده‌های یک سازمان، خارج شوید و با عضویت در آن سازمان دوباره وارد شوید.',
 };
 
 export function isSessionRefusal(reason: string): reason is SessionRefusal {
-  return reason === 'NO_SESSION' || reason === 'SESSION_UNAVAILABLE';
+  return (
+    reason === 'NO_SESSION' || reason === 'SESSION_UNAVAILABLE' || reason === 'NO_ORGANIZATION'
+  );
 }
 
 /**
@@ -46,7 +53,8 @@ export const SESSION_PROBE_DEADLINE_MS = 5_000;
  *
  * Bounded: the timer is cleared on every path, the request is aborted at the
  * deadline, and an answer that arrives after it — even from a `fetch` that
- * ignores the abort — is ignored. It never rejects.
+ * ignores the abort — is ignored. The answer's body is never read and is
+ * cancelled on every path. It never rejects.
  */
 export function sessionHasEnded(deadlineMs: number = SESSION_PROBE_DEADLINE_MS): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
@@ -71,7 +79,13 @@ export function sessionHasEnded(deadlineMs: number = SESSION_PROBE_DEADLINE_MS):
           signal: controller.signal,
         }),
       ).then(
-        (response) => finish(response.status === 401),
+        (response) => {
+          // Only the status is read. The body is given up here, on every path
+          // — an answer after the deadline too — so a portal that stalls or
+          // trickles it holds no connection once the timer is cleared (#507 r1 F1).
+          void response.body?.cancel().catch(() => undefined);
+          finish(response.status === 401);
+        },
         () => finish(false),
       );
     } catch {

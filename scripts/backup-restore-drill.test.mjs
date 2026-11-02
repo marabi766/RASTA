@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
@@ -7,10 +8,12 @@ import {
   statSync,
   writeFileSync,
   rmSync,
+  symlinkSync,
 } from 'node:fs';
 import * as realFs from 'node:fs';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,12 +37,40 @@ import {
   compareLedgers,
   checkDatabaseCoverage,
   summarizeTables,
+  ForeignArtifact,
+  InputFileError,
+  readRegularFile,
   writeReportAtomically,
   reapProcessGroup,
   createProcessRunner,
   finalizeCleanup,
   verifyResourceKinds,
+  KILL_CONFIRMATION_DEADLINE_MS,
 } from './backup-restore-drill-lib.mjs';
+import {
+  adoptGroup,
+  adoptPid,
+  disposeOwned,
+  hasLiveProcesses,
+  holdUntil,
+  leakedFixtures,
+  ownedDirectory,
+  ownerSettings,
+  recordOwned,
+  runOwned,
+  pollUntil,
+  signalProbe,
+  spawnOwned,
+  stopOwned,
+  waitForGroup,
+  waitForPid,
+} from './backup-restore-drill-test-support.mjs';
+import {
+  shellLoops,
+  spawnViolations,
+  stringValues,
+  waitViolations,
+} from './backup-restore-drill-test-shell.mjs';
 
 const SUFFIX = '0123456789abcdef';
 const REF_DB = `drill_ref_${SUFFIX}`;
@@ -468,6 +499,91 @@ test('SOURCE/REF allowance scopes identities by database/schema/table/name and p
     assert.throws(() => checkSourceReference(source, evidence(body), 'rasta_test'));
 });
 
+// PostgreSQL prints a CASE expression over several physical lines (a real one: identity's
+// registration-intake actor constraint) and deparses `ANY ((ARRAY[...])::text[])` differently in
+// the reference. The constraint owns every one of its physical lines, and only those.
+const caseBody = `CREATE TABLE "public"."intake" (
+    "kind" character varying(16) NOT NULL,
+    CONSTRAINT "ck_actor" CHECK (
+CASE
+    WHEN (("kind")::"text" = 'A'::"text") THEN true
+    WHEN (("kind")::"text" = ANY ((ARRAY['B'::character varying, 'C'::character varying])::"text"[])) THEN false
+    ELSE false
+END),
+    CONSTRAINT "ck_other" CHECK (("kind" <> ''::"text"))
+);
+`;
+test('a multi-line CHECK may differ on its own lines only, once per constraint', () => {
+  const source = evidence(caseBody);
+  const ref = evidence(
+    caseBody.replace(
+      `ANY ((ARRAY['B'::character varying, 'C'::character varying])::"text"[])`,
+      `ANY (ARRAY[('B'::character varying)::"text", ('C'::character varying)::"text"])`,
+    ),
+  );
+  assert.deepEqual(checkSourceReference(source, ref, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 1,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  // Two of its lines differ: still one constraint.
+  const two = evidence(
+    caseBody.replace('THEN true', 'THEN (true)').replace(`'B'::character varying, 'C'`, `'B', 'C'`),
+  );
+  assert.deepEqual(checkSourceReference(source, two, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 2,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  // Separated differences (the first WHEN and the ELSE, the line between them unchanged): still
+  // one entry, as adjacent ones are.
+  const separated = evidence(
+    caseBody.replace('THEN true', 'THEN (true)').replace('ELSE false', 'ELSE (false)'),
+  );
+  assert.deepEqual(checkSourceReference(source, separated, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 2,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  // Every line of the span, with and without gaps: one entry.
+  const everyOther = evidence(
+    caseBody
+      .replace('THEN true', 'THEN (true)')
+      .replace(`'B'::character varying, 'C'`, `'B', 'C'`)
+      .replace('ELSE false', 'ELSE (false)'),
+  );
+  assert.deepEqual(checkSourceReference(source, everyOther, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 3,
+    checkConstraints: [{ schema: 'public', table: 'intake', name: 'ck_actor' }],
+  });
+  // Two ADJACENT constraints that both changed (the last line of one, the line of the next):
+  // two entries, one per constraint.
+  const neighbours = evidence(
+    caseBody
+      .replace('END),\n', 'END ),\n')
+      .replace(`CHECK (("kind" <> ''::"text"))`, `CHECK ("kind" <> ''::"text")`),
+  );
+  assert.deepEqual(checkSourceReference(source, neighbours, 'rasta_test'), {
+    database: 'rasta_test',
+    checkLinesDifferent: 2,
+    checkConstraints: [
+      { schema: 'public', table: 'intake', name: 'ck_actor' },
+      { schema: 'public', table: 'intake', name: 'ck_other' },
+    ],
+  });
+  for (const body of [
+    // outside the constraint: the column, the closing line
+    caseBody.replace('character varying(16)', 'character varying(17)'),
+    caseBody.replace('\n);\n', '\n) WITH (fillfactor=50);\n'),
+    // the structure of the constraint: fewer lines, another name
+    caseBody.replace('END),\n', 'END),\n\n'),
+    caseBody.replace('    ELSE false\nEND)', '    ELSE false END)'),
+    caseBody.replace('"ck_actor"', '"ck_renamed"'),
+  ])
+    assert.throws(() => checkSourceReference(source, evidence(body), 'rasta_test'));
+});
+
 test('CHECK-looking lines in functions, comments, COMMENT strings and nested SQL never qualify', () => {
   const forged = '    CONSTRAINT "same_name" CHECK ((amount >= 0))';
   for (const body of [
@@ -839,6 +955,151 @@ test('open, write, fsync and rename failures keep the previous report and never 
   }
 });
 
+// --- ownership is an identity, not a pathname (#512 r1 F1) -------------------------------------
+// The kernel stamps inodes with a coarse clock (a few milliseconds): a replacement made within the
+// same tick as the original, with a recycled inode number, would carry the same birth time. A real
+// replacement happens later; the tests wait that long so they model one.
+const tick = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
+/** Replaces whatever is at `path` with a different file, as another actor with directory access. */
+const replaceFile = (path, text = 'theirs') => {
+  tick();
+  rmSync(path);
+  writeFileSync(path, text, { mode: 0o600 });
+};
+const siblingsOf = (directory) => readdirSync(directory).filter((name) => name.endsWith('.tmp'));
+
+test('an exclusive open that fails because the sibling exists unlinks nothing (the file is not ours)', () => {
+  const { directory, path } = reportPaths();
+  try {
+    writeReportAtomically(path, provisional);
+    const unlinked = [];
+    const fs = {
+      ...realFs,
+      // Somebody else holds the name we were about to create exclusively.
+      openSync: (name, ...rest) => {
+        if (rest[0] === 'wx') {
+          writeFileSync(name, 'theirs', { mode: 0o600 });
+          throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+        }
+        return realFs.openSync(name, ...rest);
+      },
+      unlinkSync: (name) => {
+        unlinked.push(name);
+        return realFs.unlinkSync(name);
+      },
+    };
+    assert.throws(
+      () => writeReportAtomically(path, complete, { fs }),
+      /^Error: Could not write report \(EEXIST\)$/,
+    );
+    assert.deepEqual(unlinked, [], 'nothing was unlinked');
+    const [theirs] = siblingsOf(directory);
+    assert.equal(readFileSync(join(directory, theirs), 'utf8'), 'theirs');
+    assert.deepEqual(readReport(path), provisional);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a sibling replaced after it was created is neither published nor removed: the failure is foreign', () => {
+  // Each stage is a different boundary between the open and the unlink/rename that follows it.
+  for (const stage of ['close', 'fsync', 'before-rename']) {
+    const { directory, path } = reportPaths();
+    try {
+      writeReportAtomically(path, provisional);
+      let sibling;
+      const swap = () => replaceFile(sibling);
+      const fs = {
+        ...realFs,
+        openSync: (name, ...rest) => {
+          const fd = realFs.openSync(name, ...rest);
+          if (rest[0] === 'wx') sibling = name;
+          return fd;
+        },
+        fsyncSync: (fd) => {
+          realFs.fsyncSync(fd);
+          if (stage === 'fsync') {
+            swap();
+            throw Object.assign(new Error('fsync'), { code: 'EIO' });
+          }
+        },
+        closeSync: (fd) => {
+          realFs.closeSync(fd);
+          if (stage === 'close') {
+            swap();
+            throw Object.assign(new Error('close'), { code: 'EIO' });
+          }
+          if (stage === 'before-rename') swap();
+        },
+      };
+      assert.throws(
+        () => writeReportAtomically(path, complete, { fs }),
+        (error) =>
+          error instanceof ForeignArtifact &&
+          /foreign artifact left in place/.test(error.message) &&
+          !error.message.includes(directory),
+        stage,
+      );
+      assert.equal(readFileSync(sibling, 'utf8'), 'theirs', `${stage}: the replacement survives`);
+      assert.deepEqual(readReport(path), provisional, `${stage}: the previous report is kept`);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a sibling replaced by a symlink is left alone too', () => {
+  const { directory, path } = reportPaths();
+  try {
+    const target = join(directory, 'target');
+    writeFileSync(target, 'precious');
+    let sibling;
+    const fs = {
+      ...realFs,
+      openSync: (name, ...rest) => {
+        sibling = name;
+        return realFs.openSync(name, ...rest);
+      },
+      closeSync: (fd) => {
+        realFs.closeSync(fd);
+        rmSync(sibling);
+        symlinkSync(target, sibling);
+        throw Object.assign(new Error('close'), { code: 'EIO' });
+      },
+    };
+    assert.throws(() => writeReportAtomically(path, complete, { fs }), ForeignArtifact);
+    assert.equal(realFs.lstatSync(sibling).isSymbolicLink(), true);
+    assert.equal(readFileSync(target, 'utf8'), 'precious');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a failure with the sibling still ours removes it and reports the plain error; onCreated sees the identity', () => {
+  const { directory, path } = reportPaths();
+  try {
+    let created;
+    assert.throws(
+      () =>
+        writeReportAtomically(path, complete, {
+          fs: faulty('fsync'),
+          onCreated: (identity) => (created = identity),
+        }),
+      /^Error: Could not write report \(EIO\)$/,
+    );
+    assert.equal(typeof created.ino, 'bigint');
+    assert.deepEqual(siblingsOf(directory), []);
+    writeReportAtomically(path, complete, { onCreated: (identity) => (created = identity) });
+    assert.equal(
+      statSync(path, { bigint: true }).ino,
+      created.ino,
+      'the published file is the created one',
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('a directory fsync failure leaves the complete new report and is not reported as durable', () => {
   const { directory, path } = reportPaths();
   try {
@@ -891,7 +1152,9 @@ writeReportAtomically(path, ${JSON.stringify(complete)}, { fs: {
 } });
 `,
       );
-      const result = spawnSync(process.execPath, [join(directory, 'child.mjs'), path, stage]);
+      const result = spawnSync(process.execPath, [join(directory, 'child.mjs'), path, stage], {
+        timeout: 60_000, // the child kills itself with SIGKILL; the runner’s own bound ends with SIGTERM
+      });
       assert.equal(result.signal, 'SIGKILL', stage);
       const report = readReport(path);
       assert.deepEqual(report, expected, stage);
@@ -931,20 +1194,2451 @@ test('process groups: nothing left is gone; members are killed and confirmed; su
   assert.equal(waits.length, 1 + 3);
 });
 
+// A stub that holds a process group with a `sleep` inside a shell loop forks a child every poll,
+// and a recovery inspecting that group can catch the child mid-exec (its environment reads empty),
+// call the group unproven and refuse it: a failure of the stub, not of the drill (#478 follow-up,
+// task 278). holdUntil (backup-restore-drill-test-support.mjs) is the one wait that stays a
+// single process, and the boundary is the BEHAVIOUR: every fixture source (the test files, the
+// support module and the guard itself) is read through its decoded string values, so no spelling
+// of a forking poll gets past it.
+const FIXTURE_SOURCE = /^backup-restore-drill(?:.*\.test|-test-[a-z]+)\.mjs$/;
+const HOLDER_FILE = 'backup-restore-drill-test-support.mjs';
+
+test('no fixture source polls with a forking shell loop, and none starts a child except through the owner', () => {
+  const names = readdirSync(new URL('.', import.meta.url)).filter((name) =>
+    FIXTURE_SOURCE.test(name),
+  );
+  for (const expected of [
+    'backup-restore-drill.test.mjs',
+    'backup-restore-drill-cli.test.mjs',
+    'backup-restore-drill-recovery.test.mjs',
+    'backup-restore-drill-summary.test.mjs',
+    'backup-restore-drill-workflow.test.mjs',
+    'backup-restore-drill.pg.test.mjs',
+    HOLDER_FILE,
+    'backup-restore-drill-test-shell.mjs',
+  ])
+    assert.ok(names.includes(expected), `${expected} is read (${names.join(', ')})`);
+  for (const name of names) {
+    const source = readFileSync(new URL(`./${name}`, import.meta.url), 'utf8');
+    assert.deepEqual(waitViolations(source, { holder: name === HOLDER_FILE }), [], name);
+    assert.deepEqual(spawnViolations(source, { owner: name === HOLDER_FILE }), [], name);
+  }
+});
+
+// --- the second accepted residual of the owner (header of backup-restore-drill-test-support.mjs):
+// --- a grandchild forked into the background whose parent exits before the owner has looked is not
+// --- provably the fixture's. Nothing here prevents that; it makes the day a fixture does it a
+// --- failing test instead of a silent change.
+//
+// A fixture text is a decoded string value (the guard's own reading) that starts a background
+// command (`&`) or detaches one (the three shell words spelled in DETACH). It must keep its parent
+// alive after that: `exec`, `wait`, a `sleep` of half a second or more, or holdUntil (a bare
+// substitution as the last command: the one wait the guard allows). Detaching and exiting is
+// refused outright. A text that forks and exits is allowed only if acknowledged below by id: each
+// is a stub (or an input to the guard) that the DRILL under test runs in a process group of its
+// own, which the drill reaps and its test asserts, not one the owner starts.
+const DETACH = /\b(?:setsid|nohup|disown)\b/;
+// `setsid -f` forks by itself: what it detaches is the command up to the next separator.
+const SETSID_FORKS = /\bsetsid\s+(?:-[a-z]*f[a-z]*|--fork)\b[^;\n]*/;
+const joinedLines = (text) => text.replace(/\\\r?\n/g, '');
+function forkFindings(text) {
+  const joined = joinedLines(text);
+  let end = -1;
+  // a word, then `&`, but not `&&`, `>&`, `&>`, `|&`, `<&`
+  for (const match of joined.matchAll(/[^\s&>|<]\s*&(?![&>])/g))
+    end = match.index + match[0].length;
+  const forking = SETSID_FORKS.exec(joined);
+  if (forking) end = Math.max(end, forking.index + forking[0].length);
+  const detaches = DETACH.test(joined);
+  // Detached but in the foreground (`nohup cmd`): the parent waits for it.
+  if (end < 0) return detaches ? { detaches, forksAndExits: false } : null;
+  const rest = joined.slice(end);
+  const holds =
+    /\b(?:exec|wait)\b/.test(rest) ||
+    /;\s*\$\{\}\s*$/.test(rest) ||
+    [...rest.matchAll(/\bsleep\s+(\d+(?:\.\d+)?|\$\{\})/g)].some(
+      (match) => match[1] === '${}' || Number(match[1]) >= 0.5,
+    );
+  return { detaches, forksAndExits: !holds };
+}
+const textId = (text) => createHash('sha1').update(joinedLines(text)).digest('hex').slice(0, 10);
+const FORK_AND_EXIT = new Map([
+  [
+    'eb359e50d1',
+    'cli docker stub of drill-orphan-test (without the redirect): the drill reaps the group; waitGone(pgid), kill(orphan, 0) ESRCH',
+  ],
+  [
+    '24574f1ef2',
+    'cli docker stub of drill-orphan-test (with the redirect): the drill reaps the group; waitGone(pgid), kill(orphan, 0) ESRCH',
+  ],
+  [
+    '626385143c',
+    'cli docker stub of the parallel resource checks: reapedProcessGroups recorded; descendants polled gone',
+  ],
+  [
+    '5c816d760d',
+    'cli docker stub of --cleanup-from settles every check: descendants polled gone before the exit',
+  ],
+  ['37d527f709', 'an input to waitViolations (what stays allowed); never run'],
+  ['a106952e3c', 'an input to forkFindings, composed from pieces in its own test; never run'],
+  ['745c86ce3d', 'an input to forkFindings (a continued line), composed from pieces; never run'],
+  ['8385c60a4c', 'the runner test: reapedProcessGroups.length 1, becomesGone(descendant)'],
+]);
+function forkingFixtures() {
+  const found = [];
+  const directory = new URL('.', import.meta.url);
+  for (const name of readdirSync(directory).filter((file) => FIXTURE_SOURCE.test(file)))
+    for (const value of stringValues(readFileSync(new URL(`./${name}`, directory), 'utf8'))) {
+      const findings = forkFindings(value);
+      if (findings) found.push({ name, id: textId(value), value, ...findings });
+    }
+  return found;
+}
+
+test('what counts as a fixture that forks into the background, detaches, or exits after doing so', () => {
+  // Built from pieces: this file is a fixture source and is read by the check itself.
+  const amp = '&';
+  const word = (text) => text.replaceAll('·', '');
+  const cases = [
+    [['sleep 600', amp, 'echo $! > f'], { detaches: false, forksAndExits: true }],
+    [['sleep 600', amp, 'echo $! > f; sleep 0.5'], { detaches: false, forksAndExits: false }],
+    [['sleep 600', amp, 'echo $! > f; sleep 0.1'], { detaches: false, forksAndExits: true }],
+    [['sleep 600', amp, 'echo $! > f; exec sleep 9'], { detaches: false, forksAndExits: false }],
+    [['sleep 600', amp, 'wait'], { detaches: false, forksAndExits: false }],
+    [['sleep 600', amp, 'echo $! > f; ${}'], { detaches: false, forksAndExits: false }],
+    [['sleep 600', amp, "echo '${}'"], { detaches: false, forksAndExits: true }],
+    [
+      [word('se·tsid sleep 600 </dev/null >/dev/null 2>'), `1 ${amp} echo 1`],
+      { detaches: true, forksAndExits: true },
+    ],
+    [
+      [word('se·tsid sleep 600 >/dev/null 2>'), `1 ${amp} echo 1; exec sleep 9`],
+      { detaches: true, forksAndExits: false },
+    ],
+    [[word('no·hup sleep 600'), amp], { detaches: true, forksAndExits: true }],
+    [[word('no·hup sleep 600')], { detaches: true, forksAndExits: false }],
+    [[word('se·tsid -f sleep 600; echo done')], { detaches: true, forksAndExits: true }],
+    [[word('se·tsid --fork sleep 600; sleep 5')], { detaches: true, forksAndExits: false }],
+  ];
+  for (const [pieces, expected] of cases)
+    assert.deepEqual(forkFindings(pieces.join(' ')), expected, pieces.join(' '));
+  for (const none of [
+    'a && b',
+    'cmd 2>&1',
+    'cmd &> out',
+    'cmd >&2',
+    'sleep 1; touch done',
+    'exec sleep 30',
+    'waiting for the record to name the group',
+  ])
+    assert.equal(forkFindings(none), null, none);
+  // a continued line is one line to the shell
+  assert.deepEqual(forkFindings('sleep 9 \\\n' + amp + ' echo 1'), {
+    detaches: false,
+    forksAndExits: true,
+  });
+});
+
+test('no drill fixture detaches a descendant and lets its parent go; those that fork and exit are the drill’s own stubs', () => {
+  const found = forkingFixtures();
+  assert.ok(found.length >= 10, `the scan finds the known fixtures (${found.length})`);
+  const detachedAndGone = found.filter((fixture) => fixture.detaches && fixture.forksAndExits);
+  assert.deepEqual(
+    detachedAndGone.map(({ name, id }) => `${name} ${id}`),
+    [],
+    'a fixture that detaches a process and exits leaves nothing the owner could prove is ours',
+  );
+  const unacknowledged = found.filter(
+    (fixture) => fixture.forksAndExits && !FORK_AND_EXIT.has(fixture.id),
+  );
+  assert.deepEqual(
+    unacknowledged.map(({ name, id, value }) => `${name} ${id}: ${JSON.stringify(value)}`),
+    [],
+    'a fixture forks into the background and exits: hold its parent (holdUntil, wait, exec) or acknowledge it in FORK_AND_EXIT with the test that proves its descendant gone',
+  );
+  const stale = [...FORK_AND_EXIT.keys()].filter(
+    (id) => !found.some((fixture) => fixture.id === id && fixture.forksAndExits),
+  );
+  assert.deepEqual(stale, [], 'an acknowledged fixture no longer exists (or no longer exits)');
+});
+
+test('the shell-loop guard reads what the shell would run, not how the text is spelled', async () => {
+  // The same shell text written into JS source three ways: a quoted string (escapes written out),
+  // a template with raw line breaks, and a template with a substitution after it.
+  // This file is itself a fixture source and is read by the guard: the loops it must refuse are
+  // spelled with a marker inside `do`, which is taken out here, so that no string of this file is
+  // a loop.
+  const unmark = (text) => text.replaceAll('·', '');
+  const spellings = (text) => [
+    `const stub = ${JSON.stringify(text)};`,
+    'const stub = `' + text.replace(/[\\`]|\$\{/g, (m) => `\\${m}`) + '`;',
+    'const stub = `#!/bin/sh\n' + text.replace(/[\\`]|\$\{/g, (m) => `\\${m}`) + '\n${extra}`;',
+  ];
+  const forms = {
+    'the original polling loop': 'wh·ile [ ! -f f ]; d·o sleep 0.05; d·one',
+    'a no-op before the sleep': 'wh·ile [ ! -f f ]; d·o :; sleep 0.05; d·one',
+    'a line break after do': 'wh·ile [ ! -f f ]; d·o\n  sleep 0.05\nd·one',
+    'a continued line': 'wh·ile [ ! -f f ]; d·o \\\n sleep 0.05; d·one',
+    until: 'unt·il [ -f f ]; d·o sleep 1; d·one',
+    'a for loop': 'f·or i in 1 2 3; d·o sleep 1; d·one',
+    'another binary': 'wh·ile ! test -f f; d·o ls /; d·one',
+    'a command substitution': 'wh·ile [ ! -f f ]; d·o read -t 1 $(sleep 1); d·one',
+    'a loop in a nested shell': "sh -c 'wh·ile true; d·o sleep 1; d·one'",
+    'a loop in eval': 'eval "unt·il [ -f f ]; d·o :; sleep 1; d·one"',
+    'a loop after then': 'if true; then wh·ile [ ! -f f ]; d·o sleep 1; d·one; fi',
+    'a loop in a group': '{ wh·ile [ ! -f f ]; d·o sleep 1; d·one; }',
+  };
+  for (const [name, marked] of Object.entries(forms))
+    for (const source of spellings(unmark(marked))) {
+      assert.ok(waitViolations(source).length > 0, `${name}: refused in a test file (${source})`);
+      assert.ok(
+        waitViolations(source, { holder: true }).some((message) => /forks/.test(message)),
+        `${name}: refused even in the holder, whose loop may only run builtins (${source})`,
+      );
+    }
+  // The shell joins a continued line INSIDE a word: a builtin split that way is still the builtin,
+  // and a binary split that way is still the binary.
+  const continued = (command) => `wh·ile [ ! -f f ]; d·o ${command}; d·one`;
+  const split = (word) => `${word.slice(0, 2)}\\\n${word.slice(2)}`;
+  assert.deepEqual(
+    waitViolations(spellings(unmark(continued(`${split('read')} -t 0.05 -u 9 _ || :`)))[0], {
+      holder: true,
+    }),
+    [],
+  );
+  assert.match(
+    waitViolations(spellings(unmark(continued(`${split('sleep')} 1`)))[0], { holder: true }).join(),
+    /runs sleep,/,
+  );
+  // What stays allowed: single waits that are not loops, and holdUntil's own text.
+  for (const fine of [
+    'exec sleep 30',
+    'sleep 60 & echo $! > pid',
+    'sleep 1; touch done',
+    'waiting for the record to name the group',
+  ])
+    for (const source of spellings(fine)) assert.deepEqual(waitViolations(source), [], fine);
+  const directory = ownedDirectory('drill-guard-holder-');
+  try {
+    const held = holdUntil(directory, join(directory, 'release'));
+    for (const source of spellings(held)) {
+      assert.deepEqual(waitViolations(source, { holder: true }), [], source);
+      assert.equal(waitViolations(source).length, 1, 'a test file may not spell it out itself');
+    }
+    assert.equal(shellLoops(held).length, 1);
+    assert.deepEqual(shellLoops(held)[0].commands.sort(), [':', '[', 'read']);
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('the shell-loop guard reads composed text and quoted substitutions as the shell would (PR-515-r2/r3/r4 R3)', () => {
+  // This file is a fixture source: the examples are JS source held in strings, with a marker
+  // inside every loop word so that no string of this file is a loop (or a part of one).
+  const unmark = (text) => text.replaceAll('·', '');
+  const refused = {
+    // a substitution inside double quotes still runs
+    'a quoted substitution':
+      'const s = "wh·ile [ ! -f f ]; d·o read -t 1 \\"$(sleep 1)\\"; d·one";',
+    'a quoted substitution in the condition':
+      'const s = \'wh·ile [ "$(cat f)" = x ]; d·o :; d·one\';',
+    'a quoted backtick substitution':
+      'const s = \'wh·ile [ ! -f f ]; d·o read "`sleep 1`"; d·one\';',
+    'a substitution around text': 'const s = \'wh·ile :; d·o read -t 1 "a$(sleep 1)b"; d·one\';',
+    // a loop written in parts
+    'a plus': "const s = 'wh·ile [ ! -f f ]; ' + 'd·o sleep 1; d·one';",
+    'a plus chain': "const s = 'wh·ile [ ! -f f ];' + ' ' + 'd·o sleep 1;' + ' d·one';",
+    'a template with a constant part': "const s = `wh·ile [ ! -f f ]; ${'d·o'} sleep 1; d·one`;",
+    'a concat': "const s = 'wh·ile [ ! -f f ]; '.concat('d·o sleep 1; d·one');",
+    'a join': "const s = ['wh·ile [ ! -f f ];', 'd·o sleep 1;', 'd·one'].join(' ');",
+    'names bound to the parts':
+      "const head = 'wh·ile [ ! -f f ]; '; const body = 'd·o sleep 1; d·one'; run(head + body);",
+    'a name extended later': "let s = 'wh·ile [ ! -f f ]; '; s += 'd·o sleep 1; d·one';",
+    'a name assigned later': "let s; s = 'wh·ile [ ! -f f ]; ' + 'd·o sleep 1; d·one';",
+    'a part from a call': "const s = 'wh·ile [ ! -f f ]; ' + pick() + ' sleep 1; d·one';",
+    // parts the guard cannot join are refused as parts
+    'parts in an object':
+      "const p = { head: 'wh·ile [ ! -f f ]; ', body: 'd·o sleep 1; d·one' }; run(p.head + p.body);",
+    'parts in an array':
+      "const p = ['wh·ile [ ! -f f ]; ', 'd·o sleep 1; d·one']; run(p[0] + p[1]);",
+    'a head alone': "const s = 'wh·ile [ ! -f f ]; ' + tail;",
+    'a body alone': "const s = head + ' d·o sleep 1; d·one';",
+  };
+  for (const [name, marked] of Object.entries(refused)) {
+    const source = unmark(marked);
+    assert.ok(waitViolations(source).length > 0, `${name}: refused in a test file (${source})`);
+    assert.ok(
+      waitViolations(source, { holder: true }).length > 0,
+      `${name}: refused in the holder`,
+    );
+  }
+  // The holder's own loop may be written in parts, as long as it runs builtins only.
+  const held = unmark("const s = 'wh·ile [ ! -f f ]; ' + 'd·o read -t 0.05 -u 9 _ || :; d·one';");
+  assert.deepEqual(waitViolations(held, { holder: true }), []);
+  assert.equal(waitViolations(held).length, 1);
+  // Every way of composing the holder's loop reads as the whole loop, not as parts of one: allowed
+  // there with builtins, refused there with a command that forks.
+  for (const [name, compose] of Object.entries({
+    concat: (command) => `const s = 'wh·ile [ ! -f f ]; '.concat('d·o ${command}; ', 'd·one');`,
+    join: (command) => `const s = ['wh·ile [ ! -f f ];', 'd·o ${command};', 'd·one'].join(' ');`,
+    template: (command) => `const s = \`wh·ile [ ! -f f ]; \${'d·o'} ${command}; d·one\`;`,
+  })) {
+    assert.deepEqual(waitViolations(unmark(compose(':')), { holder: true }), [], name);
+    assert.match(
+      waitViolations(unmark(compose('sleep 1')), { holder: true }).join(),
+      /runs sleep,/,
+      name,
+    );
+  }
+  // A name extended in steps is read as the text it ends with where it is used; its steps, like the
+  // parts of a name used in a plus, are parts of a loop in themselves, which the holder may not write.
+  const stepped = stringValues(
+    unmark("let s = 'wh·ile :; '; s += 'd·o :; '; s += 'd·one'; run(s + ' ');"),
+  );
+  assert.ok(stepped.includes(unmark('wh·ile :; d·o :; d·one ')), JSON.stringify(stepped));
+  assert.ok(
+    waitViolations(unmark("let s = 'wh·ile :; '; s += 'd·o :; d·one';"), { holder: true }).length >
+      0,
+  );
+  // Text that is not a loop stays fine, however it is composed.
+  for (const fine of [
+    "const s = 'exec ' + 'sleep 30';",
+    'const s = `touch ${dir}/done; echo done`;',
+    "const s = 'waiting ' + 'for the record' + ' to name the group';",
+    "const s = ['a', 'b'].join(' ');",
+    "const s = 'cmd 2>&1; ' + 'echo done';",
+  ])
+    assert.deepEqual(waitViolations(fine), [], fine);
+  // The composed value is what is read: a composed text is one value, not two halves.
+  const joined = stringValues(unmark("const s = 'wh·ile :; ' + 'd·o :; d·one';"));
+  assert.ok(joined.includes(unmark('wh·ile :; d·o :; d·one')), JSON.stringify(joined));
+});
+
+test('the spawn guard refuses a module named by composition or by anything but a constant string', () => {
+  // The module name is spelled in pieces here for the same reason as above: this file is read too.
+  const cp = ['child', 'process'].join('_');
+  const refused = [
+    `const m = await import('node:' + '${cp}');`,
+    `const m = await import('${'child_'}' + 'process');`,
+    `const name = 'node:${cp}'; const m = await import(name);`,
+    `const m = await import(['node', '${cp}'].join(':'));`,
+    `const m = await import('node:'.concat('${cp}'));`,
+    `const m = await import(\`node:\${'${cp}'}\`);`,
+    `const m = require('child_' + 'process');`,
+    `const r = createRequire(import.meta.url); const m = r('node:${cp}');`,
+    `const m = createRequire(import.meta.url)('child_' + 'process');`,
+    `export { spawn } from 'node:${cp}';`,
+    `export * from '${cp}';`,
+    `import cluster from 'node:cluster';`,
+    // not a constant string: the module cannot be shown to be another one
+    'const m = await import(moduleName);',
+    'const m = await import(`node:${which}`);',
+    'const m = await import(base + name);',
+    'const m = await import(new URL("./x.mjs", import.meta.url));',
+    'const m = require(name);',
+    'const r = createRequire(import.meta.url); const m = r(name);',
+    'const m = createRequire(import.meta.url)(name);',
+    'const m = module.require(name);',
+    'process.binding("process_wrap");',
+    // code made from text, or text no reader can read
+    "import vm from 'node:vm';",
+    'const s = String.fromCharCode(119, 104, 105, 108, 101);',
+    'const s = String.fromCodePoint(119);',
+    'const s = atob(encoded);',
+    'eval(code);',
+    'new Function("return process")();',
+    'Function("return process")();',
+  ];
+  for (const source of refused) assert.ok(spawnViolations(source).length > 0, source);
+  for (const source of [
+    "const { readFileSync } = await import('node:fs');",
+    "const fs = await import('node:' + 'fs');",
+    "const name = 'node:path'; const path = await import(name);",
+    "const require = createRequire(import.meta.url); const x = require('node:fs');",
+    `import { execFileSync, spawnSync } from 'node:${cp}';`,
+    `export { execFileSync } from 'node:${cp}';`,
+    'const r = createRequire(import.meta.url);',
+  ])
+    assert.deepEqual(spawnViolations(source), [], source);
+  assert.deepEqual(spawnViolations(refused[0], { owner: true }), []);
+});
+
+test('a name the guard cannot evaluate every write of is uncertain, and a module it names is refused (PR-532 R2)', () => {
+  const cp = ['child', 'process'].join('_');
+  const load = 'const m = await import(name); m.spawn("x", [], { detached: true });';
+  const refused = {
+    // the review's reproduction: the old constant stayed authoritative after an unknown write
+    'an unknown reassignment': `let name = 'node:fs'; name = process.env.MODULE; ${load}`,
+    'an unknown +=': `let name = 'node:'; name += process.env.MODULE; ${load}`,
+    'an unknown +=, read before it in the source': `${load} let name = 'node:'; name += suffix;`,
+    'an unknown ||=': `let name = 'node:fs'; name ||= process.env.MODULE; ${load}`,
+    'an increment': `let name = 'node:fs'; name++; ${load}`,
+    'a destructuring assignment': `let name = 'node:fs'; [name] = names; ${load}`,
+    'a for-of head': `let name = 'node:fs'; ${'f·or'.replace('·', '')} (name of names) {} ${load}`,
+    'an unknown declaration of the same name': `const name = 'node:fs'; { const name = pick(); } ${load}`,
+    'a parameter of the same name': `const name = 'node:fs'; function f(name) {} ${load}`,
+  };
+  for (const [what, source] of Object.entries(refused))
+    assert.match(spawnViolations(source).join(), /not a constant string/, what);
+  for (const source of [
+    `let name = 'node:fs'; name = 'node:path'; ${load}`,
+    `let name = 'node:'; name += 'fs'; ${load}`,
+    "let out = ''; out += chunk; out += chunk;",
+  ])
+    assert.deepEqual(spawnViolations(source), [], source);
+  assert.match(
+    spawnViolations(`let name = 'node:fs'; name = 'node:${cp}'; ${load}`).join(),
+    /child_process reached by a call/,
+  );
+  // In the shell check: a holder loop with a part the guard cannot read is refused, not read as
+  // the builtin it starts with (`: ; sleep 1` would fork).
+  const unmark = (text) => text.replaceAll('·', '');
+  for (const write of ['body += extra;', 'body = extra;']) {
+    const source = unmark(
+      `let body = ':'; ${write} const s = 'wh·ile [ ! -f f ]; d·o ' + body + '; d·one';`,
+    );
+    assert.match(
+      waitViolations(source, { holder: true }).join(),
+      /holdUntil's loop has a part the guard cannot read/,
+      write,
+    );
+    assert.ok(waitViolations(source).length > 0, write);
+  }
+  assert.deepEqual(
+    waitViolations(
+      unmark("let body = ':'; const s = 'wh·ile [ ! -f f ]; d·o ' + body + '; d·one';"),
+      {
+        holder: true,
+      },
+    ),
+    [],
+  );
+});
+
+test('more alternatives than the guard keeps are refused, not cut to the first ones (PR-532 R2)', () => {
+  const cp = ['child', 'process'].join('_');
+  // Twelve two-way choices: 4096 distinct values, exactly what the guard keeps.
+  const choices = (n) =>
+    '`' + Array.from({ length: n }, (_, at) => `\${f${at} ? 'a' : 'b'}`).join('') + '`';
+  assert.deepEqual(spawnViolations(`const s = ${choices(12)};`), []);
+  assert.deepEqual(waitViolations(`const s = ${choices(12)};`), []);
+  // One more choice, in an expression or in a name: refused by both checks.
+  for (const source of [
+    `const s = ${choices(13)};`,
+    `let name = ${choices(12)}; name = 'node:fs'; const m = await import(name);`,
+  ]) {
+    assert.match(spawnViolations(source).join(), /more than 4096 alternatives/, source);
+    assert.match(waitViolations(source).join(), /more than 4096 alternatives/, source);
+  }
+  // What the old cut dropped: the value written last, past the cap.
+  assert.match(
+    spawnViolations(
+      `let name = ${choices(12)}; name = 'node:${cp}'; const m = await import(name);`,
+    ).join(),
+    /more than 4096 alternatives/,
+  );
+});
+
+test('every write to a name makes it uncertain: parenthesised targets, patterns at any depth, loop heads (PR-532 r2 R2)', () => {
+  // The words of a loop head carry a marker (here and below): this file is read by the guards too.
+  const unmark = (text) => text.replaceAll('·', '');
+  const load = 'const m = await import(name); m.spawn("x", [], { detached: true });';
+  const around = (write) => unmark(`var name = 'node:fs'; ${write} ${load}`);
+  // The twelve bypasses of the review: each returned no violation before.
+  const review = {
+    'a parenthesised =': '(name) = process.env.MODULE;',
+    'a parenthesised +=': '(name) += process.env.MODULE;',
+    'a parenthesised &&=': '(name) &&= process.env.MODULE;',
+    'an array target of a for-of': 'f·or ([name] of suppliedValues) {}',
+    'an object target of a for-of': 'f·or ({ name } of suppliedValues) {}',
+    'a parenthesised target of a for-of': 'f·or ((name) of suppliedValues) {}',
+    'a declaration in a for-of': 'f·or (var name of suppliedValues) {}',
+    'a declaration in a for-in': 'f·or (var name in suppliedValues) {}',
+    'a declaration in a for-await-of': 'f·or await (var name of suppliedValues) {}',
+    'an array declaration in a for-await-of': 'f·or await (var [name] of suppliedValues) {}',
+    'an object declaration in a for-await-of': 'f·or await (var { name } of suppliedValues) {}',
+  };
+  // ... and the siblings of each shape: every other operator, wrapper, pattern and head.
+  const siblings = {
+    'a doubly parenthesised =': '((name)) = process.env.MODULE;',
+    'a parenthesised -=': '(name) -= 1;',
+    'a parenthesised ||=': '(name) ||= process.env.MODULE;',
+    'a parenthesised ??=': '(name) ??= process.env.MODULE;',
+    'a parenthesised **=': '(name) **= 2;',
+    'a parenthesised postfix ++': '(name)++;',
+    'a parenthesised prefix --': '--(name);',
+    'a plain &&=': 'name &&= process.env.MODULE;',
+    'a plain ??=': 'name ??= process.env.MODULE;',
+    'a nested array target': '[[name]] = suppliedValues;',
+    'a skipped element': '[, name] = suppliedValues;',
+    'a rest target': '[first, ...name] = suppliedValues;',
+    'a nested rest target': '[first, ...[name]] = suppliedValues;',
+    'a default in an array target': "[name = 'node:fs'] = suppliedValues;",
+    'a parenthesised element': '[(name)] = suppliedValues;',
+    'a renamed object target': '({ key: name } = suppliedValues);',
+    'a deep object target': '({ key: { inner: [name] } } = suppliedValues);',
+    'a shorthand with a default': "({ name = 'node:fs' } = suppliedValues);",
+    'an object rest target': '({ ...name } = suppliedValues);',
+    'a parenthesised renamed target': '({ key: (name) } = suppliedValues);',
+    'an array target of a for-in': 'f·or ([name] in suppliedValues) {}',
+    'an object target of a for-in': 'f·or ({ name } in suppliedValues) {}',
+    'a parenthesised target of a for-in': 'f·or ((name) in suppliedValues) {}',
+    'a bare target of a for-in': 'f·or (name in suppliedValues) {}',
+    'a bare target of a for-of': 'f·or (name of suppliedValues) {}',
+    'a bare target of a for-await-of': 'f·or await (name of suppliedValues) {}',
+    'an array target of a for-await-of': 'f·or await ([name] of suppliedValues) {}',
+    'an object target of a for-await-of': 'f·or await ({ name } of suppliedValues) {}',
+    'a parenthesised target of a for-await-of': 'f·or await ((name) of suppliedValues) {}',
+    'a let declaration in a for-of': 'f·or (let name of suppliedValues) {}',
+    'a const declaration in a for-in': 'f·or (const name in suppliedValues) {}',
+    'a deep declaration in a for-of': 'f·or (const { key: [first, ...name] } of suppliedValues) {}',
+    'a declaration with a default in a for-of':
+      "f·or (const [name = 'node:fs'] of suppliedValues) {}",
+    'an array declaration in a for-in': 'f·or (var [name] in suppliedValues) {}',
+    'a destructuring declaration': 'var [name] = suppliedValues;',
+    'an object destructuring declaration': 'var { name } = suppliedValues;',
+    'a rest parameter': 'function f(...name) {}',
+    'a destructured parameter': 'function f({ key: [name] }) {}',
+    'an arrow parameter with a default': "const f = (name = 'node:fs') => 0;",
+    'a catch variable': 'try {} catch (name) {}',
+    'a destructured catch variable': 'try {} catch ({ name }) {}',
+    'a function expression of the name': 'const f = function name() {};',
+    'a class expression of the name': 'const C = class name {};',
+    'a function declaration of the name': 'function name() {}',
+    'an import of the name': "import name from 'x';",
+    'a namespace import of the name': "import * as name from 'x';",
+    'an import specifier of the name': "import { key as name } from 'x';",
+    'a class declaration of the name': 'class name {}',
+    'a destructured parameter with a default': "function f({ key: [name] = ['node:fs'] }) {}",
+    'a destructured arrow parameter': 'const f = ([name]) => 0;',
+  };
+  for (const [what, write] of Object.entries({ ...review, ...siblings }))
+    assert.match(spawnViolations(around(write)).join(), /not a constant string/, what);
+  // The same writes in the shell check: a holder loop with a part the guard cannot read.
+  const holder = (write) =>
+    unmark(`let body = ':'; ${write} const s = 'wh·ile [ ! -f f ]; d·o ' + body + '; d·one';`);
+  assert.deepEqual(waitViolations(holder(''), { holder: true }), []);
+  for (const write of [
+    'f·or ([body] of extra) {}',
+    'f·or (var body of extra) {}',
+    'f·or await ({ body } of extra) {}',
+    '(body) = extra;',
+    '(body) += extra;',
+    '[[body]] = extra;',
+  ]) {
+    assert.match(
+      waitViolations(holder(write), { holder: true }).join(),
+      /holdUntil's loop has a part the guard cannot read/,
+      write,
+    );
+    assert.ok(waitViolations(holder(write)).length > 0, write);
+  }
+  // Controls: a name nothing but constants is written stays known, whatever the wrapper; a write
+  // to a property is not a write to the name.
+  const cp = ['child', 'process'].join('_');
+  for (const write of [
+    "(name) = 'node:path';",
+    "[name] = ['node:path'];".replace('[name] = [', 'name = (').replace('];', ');'),
+    'obj.name = process.env.MODULE;',
+    'obj[name] = process.env.MODULE;',
+    '({ key: obj.name } = suppliedValues);',
+    '[obj.name] = suppliedValues;',
+    'f·or (obj.name of suppliedValues) {}',
+    'f·or (const key of suppliedValues) {}',
+  ])
+    assert.deepEqual(spawnViolations(around(write)), [], write);
+  assert.match(
+    spawnViolations(around(`(name) = 'node:${cp}';`)).join(),
+    /child_process reached by a call/,
+  );
+});
+
+test('the review reproduction: a for-of target replaces the module a name stood for (PR-532 r2 R2)', () => {
+  const unmark = (text) => text.replaceAll('·', '');
+  const source = unmark(`
+    let name = 'node:fs';
+    f·or ([name] of suppliedValues) {
+      const cp = await import(name);
+      cp.spawn('sleep', ['600'], { detached: true });
+    }
+  `);
+  assert.match(spawnViolations(source).join(), /import\(\) names a module by something/);
+  // ... and with the head removed the module is the constant it was written as.
+  assert.deepEqual(
+    spawnViolations(
+      source.replace(unmark('f·or ([name] of suppliedValues)'), 'if (suppliedValues)'),
+    ),
+    [],
+  );
+});
+
+test('uncertainty reaches every name that builds on another, however long the chain, and a chain that does not settle is refused (PR-532 r2 R2)', () => {
+  const cp = ['child', 'process'].join('_');
+  // The review's shape: setters declared in the order name=b, b=c, c=d, ..., the unknown written to
+  // the last name, the setters called in the reverse order. Two or three passes over the source
+  // cannot carry the unknown to `name`; a fixed point does, at any depth.
+  const chain = (depth, last) => {
+    const at = (index) => (index === 0 ? 'name' : `link${index}`);
+    const names = Array.from({ length: depth + 1 }, (_, index) => at(index));
+    const setters = names
+      .slice(0, depth)
+      .map((one, index) => `function set${index}() { ${one} = ${at(index + 1)}; }`);
+    const calls = names.slice(0, depth).map((_, index) => `set${depth - 1 - index}();`);
+    return [
+      `var ${names.map((one) => `${one} = 'node:fs'`).join(', ')};`,
+      ...setters,
+      `${at(depth)} = ${last};`,
+      ...calls,
+      'const m = await import(name); m.spawn("x", [], { detached: true });',
+    ].join('\n');
+  };
+  for (const depth of [1, 2, 3, 4, 5, 9, 25, 100]) {
+    assert.match(
+      spawnViolations(chain(depth, 'process.env.MODULE')).join(),
+      /not a constant string/,
+      `depth ${depth}`,
+    );
+    assert.match(
+      spawnViolations(chain(depth, `'node:${cp}'`)).join(),
+      /child_process reached by a call/,
+      `depth ${depth}`,
+    );
+    assert.deepEqual(spawnViolations(chain(depth, "'node:path'")), [], `depth ${depth}`);
+  }
+  // The same chain in the shell check.
+  const unmark = (text) => text.replaceAll('·', '');
+  const loop = unmark(
+    "var body = ':', one = ':', two = ':'; function a() { body = one; } function b() { one = two; } two = extra; b(); a(); const s = 'wh·ile [ ! -f f ]; d·o ' + body + '; d·one';",
+  );
+  assert.match(
+    waitViolations(loop, { holder: true }).join(),
+    /holdUntil's loop has a part the guard cannot read/,
+  );
+  // Names that depend on each other in a cycle settle when the cycle adds nothing new ...
+  assert.deepEqual(
+    spawnViolations("var a = 'node:fs', b = 'node:path'; a = b; b = a; await import(a);"),
+    [],
+  );
+  assert.match(
+    spawnViolations(
+      "var a = 'node:fs', b; a = b; b = a; a = process.env.X; await import(b);",
+    ).join(),
+    /not a constant string/,
+  );
+  // ... and are refused when each round adds something: the text never stops growing.
+  for (const source of [
+    "var a = 'node:fs', b = ''; a = b + 'x'; b = a + 'y'; await import(a);",
+    "var a = 'node:fs'; a = a + 'x'; await import(a);",
+    "var a = 'x', b = 'y', c = 'z'; a = b + c; b = c + a; c = a + b;",
+  ]) {
+    assert.match(spawnViolations(source).join(), /writes to \w+ do not settle/, source);
+    assert.match(waitViolations(source).join(), /writes to \w+ do not settle/, source);
+  }
+  // A name appended to by itself is a different thing: each `+=` is applied once, and settles.
+  assert.deepEqual(spawnViolations("var a = 'node:'; a += 'f'; a += 's'; await import(a);"), []);
+});
+
+// --- PR-539 r2 (D-096): the guard fails CLOSED. What it cannot prove it refuses, and every probe
+// --- program of the review (PR-539-r1.md) is a regression here.
+
+// Five ways to load a module by a name, so a fix is proved for each, not for the one reproduced.
+const LOADS = {
+  'a dynamic import': (name) => `const cp = await import(${name});`,
+  require: (name) => `const cp = require(${name});`,
+  '.require': (name) => `const cp = module.require(${name});`,
+  'a createRequire result': (name) =>
+    `const load = createRequire(import.meta.url); const cp = load(${name});`,
+  'a direct createRequire call': (name) => `const cp = createRequire(import.meta.url)(${name});`,
+};
+const START = "cp.spawn('sleep', ['600'], { detached: true });";
+
+test('a += that can run more than once, or out of source order, makes the name unknown (PR-539 r2 F1)', () => {
+  const unmark = (text) => text.replaceAll('·', '');
+  const cp = ['child', 'process'].join('_');
+  // The name is one letter short of the child-process module: `s` added any number of times (the
+  // appends below run twice or once, in the order the program calls them) completes it.
+  const base = `let name = 'node:${cp.slice(0, -1)}';`;
+  const repeated = {
+    'a for loop': "f·or (let i = 0; i < 2; i++) name += 's';",
+    'a while loop': "let i = 0; wh·ile (i++ < 2) name += 's';",
+    'a do loop': "let i = 0; d·o { name += 's'; } wh·ile (i++ < 2);",
+    'a for-of loop': "f·or (const x of [1, 2]) name += 's';",
+    'a for-in loop': "f·or (const x in { a: 1 }) name += 's';",
+    'a for-await-of loop': "f·or await (const x of source) name += 's';",
+    'a loop with a block': "f·or (let i = 0; i < 2; i++) { if (i) { name += 's'; } }",
+    'a callback': "[1, 2].forEach(() => { name += 's'; });",
+    'an async callback': "await Promise.all([1, 2].map(async () => { name += 's'; }));",
+    'a function called twice': "function add() { name += 's'; } add(); add();",
+    'a recursion': "function add(n) { if (n > 0) { name += 's'; add(n - 1); } } add(2);",
+    'an arrow with an expression body': "const add = () => (name += 's'); add(); add();",
+    'a method': "const o = { add() { name += 's'; } }; o.add(); o.add();",
+    'a getter': "const o = { get add() { name += 's'; return 1; } }; o.add; o.add;",
+    'a class field': "class K { x = (name += 's'); } new K(); new K();",
+    'a constructor': "class K { constructor() { name += 's'; } } new K(); new K();",
+    'a static block': "class K { static { name += 's'; } }",
+    'a default parameter': "function add(x = (name += 's')) {} add(); add();",
+    'a generator': "function* add() { name += 's'; } [...add(), ...add()];",
+  };
+  for (const [form, load] of Object.entries(LOADS))
+    for (const [what, append] of Object.entries(repeated))
+      assert.match(
+        spawnViolations(unmark(`${base} ${append} ${load('name')} ${START}`)).join(),
+        /not a constant string/,
+        `${what} / ${form}`,
+      );
+  // The review's reordered setters: the append of 'process' is declared first and called last.
+  const reordered = (load) =>
+    `let name = 'node:'; function second() { name += 'process'; } function first() { name += 'child_'; } first(); second(); ${load('name')} ${START}`;
+  for (const [form, load] of Object.entries(LOADS))
+    assert.match(spawnViolations(reordered(load)).join(), /not a constant string/, form);
+  // Appends in different functions, in either order, and one function plus the top level.
+  for (const source of [
+    "let name = 'node:'; const a = () => { name += 'child_'; }; const b = () => { name += 'process'; }; b(); a(); await import(name);",
+    "let name = 'node:'; name += 'child_'; function b() { name += 'process'; } b(); await import(name);",
+  ])
+    assert.match(spawnViolations(source).join(), /not a constant string/, source);
+  // Controls: appends that run once, in source order, at the top level are still read as the text
+  // they add up to (the module here IS the child-process module: refused for that, not as unknown).
+  assert.match(
+    spawnViolations(
+      `let name = 'node:'; name += 'child_'; name += 'process'; await import(name);`,
+    ).join(),
+    /child_process reached by a call/,
+  );
+  assert.deepEqual(
+    spawnViolations("let name = 'node:'; name += 'p'; name += 'ath'; await import(name);"),
+    [],
+  );
+  // A conditional append is still a top-level append: both outcomes are values of the name.
+  assert.match(
+    spawnViolations(
+      `let name = 'node:child_proces'; if (flag) name += 's'; await import(name);`,
+    ).join(),
+    /child_process reached by a call/,
+  );
+});
+
+test('an accumulated binding value is read as text, and a script assembled out of order reaches no shell (PR-539 r2 F1)', () => {
+  const unmark = (text) => text.replaceAll('·', '');
+  const flag = ['-', 'c'].join('');
+  // The review's program: only literals, `+=` and one identifier use. The accumulated script is
+  // `wh·ile :; d·o sleep 1; d·one`, a loop that forks.
+  const accumulated = unmark(
+    `let s = 'wh·'; s += 'ile :; '; s += 'd·o '; s += 'sleep 1; '; s += 'd·one'; spawnSync('bash', ['${flag}', s]);`,
+  );
+  assert.ok(waitViolations(accumulated).length > 0, 'a loop outside holdUntil');
+  assert.match(
+    waitViolations(accumulated, { holder: true }).join(),
+    /holdUntil's loop runs sleep, which forks/,
+  );
+  assert.ok(
+    stringValues(accumulated).includes(unmark('wh·ile :; d·o sleep 1; d·one')),
+    'the accumulated value is a value',
+  );
+  // ... and the steps of a loop are parts of a loop in themselves, which the holder may not write.
+  const builtins = unmark("let s = 'wh·ile :; '; s += 'd·o :; '; s += 'd·one'; run(s);");
+  assert.ok(waitViolations(builtins, { holder: true }).length > 0);
+  assert.ok(waitViolations(builtins).length > 0);
+  // The same script assembled where the guard cannot follow the order: refused where a shell reads
+  // it, in BOTH guards and in the holder.
+  const assembled = {
+    'a loop': 'f·or (const part of parts) s += part;',
+    'a loop with constants': "f·or (let i = 0; i < 2; i++) s += ': ';",
+    'a while loop': "let i = 0; wh·ile (i++ < 2) s += ': ';",
+    'a callback': 'parts.forEach((part) => { s += part; });',
+    'a function': "function add(part) { s += part; } add('d·o '); add('sleep 1');",
+    'a recursion': "function add(n) { if (n) { s += ': '; add(n - 1); } } add(3);",
+  };
+  const through = {
+    'a name': (s) => `['${flag}', ${s}]`,
+    'a plus': (s) => `['${flag}', 'echo ' + ${s}]`,
+    'a template': (s) => `['${flag}', \`echo \${${s}}\`]`,
+    'a concat': (s) => `['${flag}', 'echo '.concat(${s})]`,
+    'a method': (s) => `['${flag}', ${s}.trim()]`,
+    'a conditional': (s) => `['${flag}', flag ? ${s} : 'true']`,
+    'a cluster': (s) => `['-l${flag.slice(1)}', ${s}]`,
+    'an option between': (s) => `['${flag}', '--', ${s}]`,
+  };
+  for (const [how, write] of Object.entries(assembled))
+    for (const [via, array] of Object.entries(through)) {
+      const source = unmark(`let s = 'wh·ile :; '; ${write} spawnSync('bash', ${array('s')});`);
+      for (const check of [
+        (text) => waitViolations(text),
+        (text) => waitViolations(text, { holder: true }),
+        (text) => spawnViolations(text),
+      ])
+        assert.match(check(source).join(), /cannot read reaches a shell/, `${how} / ${via}`);
+    }
+  // A name made from the assembled one is assembled too, however many steps it is from it. (With
+  // constant text next to it, so that the unknown part is not the whole script.)
+  const looped = "let s = ''; f·or (const p of parts) s += p;";
+  for (const source of [
+    `${looped} const t = s; spawnSync('bash', ['${flag}', 'echo ' + t]);`,
+    `${looped} var t = ''; t = s; spawnSync('bash', ['${flag}', 'echo ' + t]);`,
+    `${looped} const t = s + ';'; const u = \`\${t}\`; spawnSync('bash', ['${flag}', 'echo ' + u]);`,
+    `${looped} const t = flag ? s : 'true'; const u = [t, 'x'].join(' '); spawnSync('bash', ['${flag}', 'echo ' + u]);`,
+    `${looped} const t = ['a', s].join(' '); spawnSync('bash', ['${flag}', 'echo ' + t]);`,
+    `${looped} const t = 'a'.concat(s); spawnSync('bash', ['${flag}', 'echo ' + t]);`,
+    `${looped} const args = ['${flag}', 'echo ' + s]; spawnSync('bash', args);`,
+    `${looped} run(['${flag}', 'echo ' + s]);`,
+    `${looped} const o = { args: ['${flag}', 'echo ' + s] }; spawnSync('bash', o.args);`,
+    `${looped} spawnSync(s, []);`,
+    `${looped} spawnSync('bash', [...flags, s]);`,
+    `${looped} spawnSync('bash', [...s]);`,
+    `${looped} execSync('echo ' + s);`,
+    `${looped} const t = s; execSync(t);`,
+  ])
+    for (const check of [waitViolations, spawnViolations])
+      assert.match(check(unmark(source)).join(), /cannot read reaches a shell/, source);
+  // A name, or a composition of names, that is wholly unknown where a shell reads it: nothing
+  // constant next to the unknown part, or no value at all.
+  for (const [what, source] of Object.entries({
+    'a flag cluster': `const script = make(); spawnSync('bash', ['-l${flag.slice(1)}', script]);`,
+    'an option between': `const script = make(); spawnSync('bash', ['${flag}', '--', script]);`,
+    'a spread after the flag': `spawnSync('bash', ['${flag}', ...parts]);`,
+    'an array bound to a name': `const s = make(); const args = ['${flag}', s]; spawnSync('bash', args);`,
+    'an array handed on': `const s = make(); run(['${flag}', s]);`,
+    'a name written from the environment': `const s = process.env.SCRIPT; spawnSync('bash', ['${flag}', s]);`,
+    'a name no write settles': `let s; s = s; spawnSync('bash', ['${flag}', s]);`,
+    'a name nothing declares': `spawnSync('bash', ['${flag}', script]);`,
+    'a composition of unknowns': `spawnSync('bash', ['${flag}', a + b]);`,
+    'a template of unknowns': `spawnSync('bash', ['${flag}', \`\${a}\${b}\`]);`,
+    'a name one write of which is unknown': `let s = 'true'; s = make(); spawnSync('bash', ['${flag}', s]);`,
+    'execSync of a name': 'execSync(command);',
+    'a shell option': 'spawnSync(command, [], { shell: true });',
+    'a shell option naming a shell': "spawnSync(command, { shell: '/bin/sh' });",
+    'a shorthand shell option': 'spawnSync(command, { shell });',
+  }))
+    for (const check of [waitViolations, spawnViolations])
+      assert.match(check(source).join(), /cannot read reaches a shell/, `${what} (${check.name})`);
+  // Controls: a script the guard reads, the words after it, a flag that is no shell flag, a shell
+  // option that is false, node's own -e, and the text of a call's result or with constant text
+  // around an unknown part (the header's known gaps: `holdUntil(...)` is the sanctioned wait, and
+  // the fixtures template their stubs).
+  for (const source of [
+    `spawnSync('bash', ['${flag}', 'echo hello']);`,
+    `spawnSync('bash', ['${flag}', 'echo "$@"', '--', ...rest]);`,
+    `spawnSync('bash', ['${flag}', 'echo ' + 'hello']);`,
+    `spawnSync('bash', ['${flag}', holdUntil(directory, release)]);`,
+    `spawnSync('bash', ['${flag}', script()]);`,
+    `spawnSync('bash', ['${flag}', \`echo \${thing}; \${holdUntil(directory, release)}\`]);`,
+    `spawnSync('bash', ['${flag}', 'echo ' + thing]);`,
+    `spawnSync('pg_dump', ['-F${flag.slice(1)}', '-d', database]);`,
+    "spawnSync(process.execPath, ['-e', source, '--', ...args]);",
+    "spawnSync(process.execPath, ['--input-type=module', '-e', source]);",
+    'spawnSync(command, [], { shell: false });',
+    "spawnSync(command, [], { encoding: 'utf8' });",
+    "execSync('echo hello');",
+    'execSync(command());',
+    'cp.execSync(`kill ${pid}`);',
+    're.exec(text);',
+    "let out = ''; child.stdout.on('data', (chunk) => { out += chunk; }); spawnSync('ls', [dir]);",
+  ])
+    for (const check of [waitViolations, spawnViolations])
+      assert.deepEqual(check(source), [], `${source} (${check.name})`);
+  // A false refusal, stated: a flag spelled like the shell's whose next word is a name the scan
+  // cannot read (grep's -c, psql's -c) is refused too. None of the eight fixture sources has one.
+  assert.match(
+    spawnViolations(`spawnSync('grep', ['${flag}', pattern]);`).join(),
+    /cannot read reaches a shell/,
+  );
+});
+
+test('a declaration without an initializer, and a name nothing gives a value, are unknown, never an empty set (PR-539 r2 F2)', () => {
+  const unmark = (text) => text.replaceAll('·', '');
+  const cp = ['child', 'process'].join('_');
+  const holes = {
+    'the review: an unresolved self assignment':
+      "let part; part = part; const name = ['node:child_', part, 'process'].join('');",
+    'a mutual unresolved assignment':
+      "let part, other; part = other; other = part; const name = ['node:child_', part, 'process'].join('');",
+    'a mutual assignment with no declaration':
+      "part = other; other = part; const name = ['node:child_', part, 'process'].join('');",
+    'a declaration only': "let part; const name = ['node:child_', part, 'process'].join('');",
+    'a var declaration only': "var part; const name = ['node:child_', part, 'process'].join('');",
+    'a declaration with a later write':
+      "let part; part = ''; const name = ['node:child_', part, 'process'].join('');",
+    'a classic for initializer':
+      "f·or (let part; ; ) { break; } const name = ['node:child_', part, 'process'].join('');",
+    'a classic for var':
+      "f·or (var part, i = 0; i < 1; i++) {} const name = ['node:child_', part, 'process'].join('');",
+    'a template': 'let part; const name = `node:child_${part}process`;',
+    'a plus': "let part; const name = 'node:child_' + part + 'process';",
+    'a concat': "let part; const name = 'node:child_'.concat(part, 'process');",
+    'a conditional': "let part; const name = 'node:child_' + (flag ? part : part) + 'process';",
+    'a declaration in a function':
+      "function f() { let part; return part; } const part = f(); const name = ['node:child_', part, 'process'].join('');",
+  };
+  for (const [form, load] of Object.entries(LOADS))
+    for (const [what, hole] of Object.entries(holes))
+      assert.match(
+        spawnViolations(unmark(`${hole} ${load('name')} ${START}`)).join(),
+        // The later write is '': one of the values of the name is the child-process module itself.
+        what === 'a declaration with a later write'
+          ? /child_process reached by a call/
+          : /not a constant string/,
+        `${what} / ${form}`,
+      );
+  // Shadowing: an inner `let part;` is a value the outer constants do not describe. The scan is
+  // file-wide, so the outer name is unknown too (more refusals, never fewer): the module below is
+  // the child-process one at run time (part is undefined, which join reads as nothing).
+  for (const [form, load] of Object.entries(LOADS))
+    for (const source of [
+      `const part = 'fs'; function f() { let part; const name = ['node:${cp}', part].join(''); ${load('name')} } f();`,
+      `const part = 'fs'; { let part; const name = ['node:${cp}', part].join(''); ${load('name')} }`,
+      `var part = 'fs'; f·or (let part; ; ) { const name = ['node:${cp}', part].join(''); ${load('name')} break; }`,
+    ])
+      assert.match(
+        spawnViolations(unmark(source)).join(),
+        /not a constant string/,
+        `${form}: ${source}`,
+      );
+  // The loop the review hid behind the same hole, in both checks: the literal part of a join is
+  // still read, next to the unknown one.
+  const parts = (part) => ({
+    'a join': `[${part}, 'wh·ile :; d·o sleep 1; d·one'].join('')`,
+    'a join with the loop first': `['wh·ile :; d·o sleep 1; ', ${part}, 'd·one'].join('')`,
+    'a plus': `${part} + 'wh·ile :; d·o sleep 1; d·one'`,
+    'a template': `\`\${${part}}wh·ile :; d·o sleep 1; d·one\``,
+    'a concat': `''.concat(${part}, 'wh·ile :; d·o sleep 1; d·one')`,
+  });
+  for (const [what, composed] of Object.entries(parts('part')))
+    for (const head of ['let part; part = part;', 'let part;', 'part = part;']) {
+      const source = unmark(`${head} const s = ${composed};`);
+      assert.ok(waitViolations(source).length > 0, `${what} / ${head}`);
+      assert.match(waitViolations(source, { holder: true }).join(), /forks|cannot read/, what);
+    }
+  // Controls: names that have a value stay known, and an unknown that is only a declaration of a
+  // name nothing reads costs nothing.
+  assert.deepEqual(
+    spawnViolations("let part = 'fs'; const name = ['node:', part].join(''); await import(name);"),
+    [],
+  );
+  assert.deepEqual(spawnViolations("let unused; await import('node:fs');"), []);
+  // A false refusal, stated: a name declared without a value and written once before use is
+  // unknown too (the scan does not follow the order). None of the eight fixture sources has one.
+  assert.match(
+    spawnViolations("let part; part = 'fs'; await import('node:' + part);").join(),
+    /not a constant string/,
+  );
+});
+
+test('the fixed point has a budget: exhaustion refuses as such, only a proven growth is called one, and a cycle that settles is read (PR-539 r2 F3)', () => {
+  const quiet = (source, options) => [
+    ...spawnViolations(source, options),
+    ...waitViolations(source, options),
+  ];
+  // The review's example: marker folding makes the values finite; they change in rounds 0-3 and
+  // are stable in round 4, more rounds than names (2) + 1. It settles, so nothing is refused.
+  const settling = "var a = 'x', b = 'y'; a = b + process.env.X; b = process.env.X + a;";
+  assert.deepEqual(quiet(settling), []);
+  // M18's example: the original accepts it, a bound one round shorter refused it.
+  assert.deepEqual(quiet("var a = ''; a = a + process.env.X;"), []);
+  assert.deepEqual(quiet("var a = 'x'; a = process.env.X + a;"), []);
+  // ... and what it settles to is unknown, so a module named by it is refused for THAT.
+  assert.match(spawnViolations(`${settling} await import(a);`).join(), /not a constant string/);
+  assert.doesNotMatch(spawnViolations(`${settling} await import(a);`).join(), /do not settle/);
+  // A budget spent before the values settle refuses, saying so: not a claim of growth.
+  for (const check of [spawnViolations, waitViolations])
+    assert.match(
+      check(settling, { rounds: 1 }).join(),
+      /writes to \w+ do not settle within the budget/,
+    );
+  assert.doesNotMatch(spawnViolations(settling, { rounds: 1 }).join(), /grows without end/);
+  // The budget counts rounds that change something: this one changes in rounds 0-3 and is stable
+  // in round 4, so four rounds are too few and five are enough.
+  assert.match(spawnViolations(settling, { rounds: 4 }).join(), /do not settle within the budget/);
+  assert.deepEqual(quiet(settling, { rounds: 5 }), []);
+  // Growth that is PROVEN: a name written from its own text with a constant added.
+  for (const source of [
+    "var s = 'a'; s = s + 'x';",
+    "var s = 'a'; s = 'x' + s;",
+    "var s = 'a'; s = `${s}x`;",
+    "var s = 'a'; s = (s) + ('x');",
+    "var s = 'a'; s = s + process.env.X + 'x';",
+  ])
+    for (const check of [spawnViolations, waitViolations])
+      assert.match(
+        check(source).join(),
+        /writes to s do not settle \(it is built on its own text/,
+        source,
+      );
+  // ... and what is not proven is not called that: an indirect cycle, a cycle through three names.
+  for (const source of [
+    "var a = 'x', b = ''; a = b + 'x'; b = a + 'y';",
+    "var a = 'x', b = 'y', c = 'z'; a = b + c; b = c + a; c = a + b;",
+  ]) {
+    const problems = spawnViolations(source).join();
+    assert.match(problems, /do not settle within the budget/, source);
+    assert.doesNotMatch(problems, /grows without end/, source);
+  }
+  // A name that reads itself without adding a constant settles.
+  for (const source of [
+    "var s = 'a'; s = s;",
+    "var s = 'a'; s = flag ? s : 'b';",
+    "var s = 'a'; s = s + '';",
+  ])
+    assert.deepEqual(quiet(source), [], source);
+  // A source refused for its names has no values computed: they would be thousands of long texts.
+  const rotating = "var a = 'x', b = 'y', c = 'z'; a = b + c; b = c + a; c = a + b;";
+  assert.deepEqual(stringValues(rotating), []);
+  assert.match(waitViolations(rotating).join(), /more than 4096 alternatives/);
+  // The work is part of the budget: a chain that would settle, but whose texts double at every
+  // name and pass a million characters in all, is refused as spent, not computed to the end.
+  const big = 'x'.repeat(1000);
+  const doubling = Array.from({ length: 12 }, (_, at) => `n${at + 1} = n${at} + n${at}`).join(', ');
+  assert.match(
+    spawnViolations(`var n0 = '${big}', ${doubling};`).join(),
+    /do not settle within the budget/,
+  );
+  // A long chain still settles inside the budget (the budget is four rounds a name plus eight).
+  const chain = Array.from({ length: 150 }, (_, at) => `n${at} = n${at + 1} + 'x';`).join(' ');
+  assert.deepEqual(
+    quiet(`var ${Array.from({ length: 151 }, (_, at) => `n${at} = ''`).join(', ')}; ${chain}`),
+    [],
+  );
+});
+
+test('the spawn guard refuses every route to an asynchronous child that skips the owner', () => {
+  for (const source of [
+    "import { spawn } from 'node:child_process';",
+    "import { exec, execFileSync } from 'child_process';",
+    "import { spawn as launch } from 'node:child_process';",
+    "import { fork } from 'node:child_process';",
+    "import * as cp from 'node:child_process';",
+    "import cp from 'node:child_process';",
+    "const cp = await import('node:child_process');",
+    "const cp = createRequire(import.meta.url)('child_process');",
+  ])
+    assert.ok(spawnViolations(source).length > 0, source);
+  for (const source of [
+    "import { execFileSync, spawnSync } from 'node:child_process';",
+    "import { spawnSync as run } from 'node:child_process';",
+    "const name = 'node:child_process';",
+  ])
+    assert.deepEqual(spawnViolations(source), [], source);
+  assert.deepEqual(
+    spawnViolations("import { spawn } from 'node:child_process';", { owner: true }),
+    [],
+  );
+});
+
+test('waitForPid returns only a whole pid line; an empty or partial file is not a pid', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-support-pid-'));
+  try {
+    const path = join(directory, 'pid');
+    // `echo $$ > file` creates the file before it writes: both states must keep the wait going.
+    writeFileSync(path, '');
+    await assert.rejects(waitForPid(path, 150), /timed out after 150 ms waiting for a process id/);
+    writeFileSync(path, '4242');
+    await assert.rejects(waitForPid(path, 150), /timed out/);
+    writeFileSync(path, '0\n');
+    await assert.rejects(waitForPid(path, 150), /timed out/);
+    const waiting = waitForPid(path);
+    await sleep(60);
+    writeFileSync(path, '4242\n');
+    assert.equal(await waiting, 4242);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('holdUntil keeps its process group at ONE process while it waits, then exits 0 when the file appears', async () => {
+  const directory = ownedDirectory('drill-support-hold-');
+  try {
+    const release = join(directory, 'release');
+    const members = (pgid) =>
+      spawnSync('ps', ['-eo', 'pid=,pgid='], { encoding: 'utf8' })
+        .stdout.split('\n')
+        .filter((line) => Number(line.trim().split(/\s+/)[1]) === pgid).length;
+    const holder = spawnOwned(directory, '/bin/bash', ['-c', holdUntil(directory, release)], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    const exited = new Promise((resolve) => holder.once('exit', (code) => resolve(code)));
+    await new Promise((resolve) => holder.once('spawn', resolve));
+    // A forking poll would put a short-lived `sleep` into the group every 50 ms: sample across
+    // many polls (about a second) and never see a second member.
+    let most = 0;
+    for (let sample = 0; sample < 40; sample++) {
+      most = Math.max(most, members(holder.pid));
+      await sleep(25);
+    }
+    assert.equal(most, 1, 'the waiting group is the shell alone');
+    writeFileSync(release, '');
+    assert.equal(await exited, 0, 'the status of the last timed-out read is not the stub’s status');
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('pollUntil accepts a condition only if it is seen within the budget (monotonic deadline)', async () => {
+  // Driven clock: the first reading fixes the deadline (0 + 5), the second follows the check.
+  const clock =
+    (...readings) =>
+    () =>
+      readings.shift();
+  assert.equal(await pollUntil(() => 'seen', 'x', 5, clock(0, 4)), 'seen');
+  await assert.rejects(
+    pollUntil(() => 'seen', 'a late condition', 5, clock(0, 6)),
+    /timed out after 5 ms waiting for a late condition \(seen only after the deadline\)/,
+    'true on the first check, but observed after the deadline',
+  );
+  await assert.rejects(
+    pollUntil(() => 'seen', 'x', 5, clock(0, 5)),
+    /timed out/,
+    'the deadline itself is already late',
+  );
+  // The reviewed case on the real clock: false at first, true at the next check, which comes one
+  // 25 ms tick later, past a 5 ms budget.
+  let checks = 0;
+  await assert.rejects(
+    pollUntil(() => ++checks === 2, 'a second look', 5),
+    /timed out after 5 ms waiting for a second look \(seen only after the deadline\)/,
+  );
+  assert.equal(checks, 2);
+  // Never true: the budget message without the late-observation suffix.
+  await assert.rejects(
+    pollUntil(() => false, 'nothing', 30),
+    /waiting for nothing$/,
+  );
+  // A check that throws is not swallowed.
+  await assert.rejects(
+    pollUntil(() => {
+      throw new RangeError('boom');
+    }, 'x'),
+    RangeError,
+  );
+  assert.equal(await pollUntil(() => 7, 'x'), 7, 'the default budget accepts a prompt answer');
+});
+
+// --- the fixture owner (task 283: every process a fixture starts, stopped and confirmed gone
+// --- BEFORE its directory is removed) --------------------------------------------------------
+test('the fixture owner records a child at spawn and stops it, confirmed, before the directory goes', async () => {
+  const directory = ownedDirectory('drill-owner-spawn-');
+  // Nothing about this process names the directory: only the registration made by the spawn can
+  // tell the owner it is the fixture's.
+  const child = spawnOwned(directory, 'sleep', ['60'], { detached: true, stdio: 'ignore' });
+  const pgid = child.pid;
+  assert.equal(
+    hasLiveProcesses(directory),
+    true,
+    'registered by the spawn, before anything awaited',
+  );
+  await disposeOwned(directory);
+  // Nothing of it runs when dispose returns; the zombie this process has yet to reap is not it.
+  await pollUntil(() => !groupExists(pgid), 'the group to be reaped');
+  assert.equal(existsSync(directory), false);
+});
+
+test('the fixture owner also finds a group nobody registered: it descends from a process the fixture owns', async () => {
+  const directory = ownedDirectory('drill-owner-sweep-');
+  const pidFile = join(directory, 'grandchild');
+  // The parent starts a child in a NEW session and group (what a drill-spawned stub is) and holds:
+  // walking parent pids from the registered parent finds it, and it is retained by identity.
+  spawnOwned(
+    directory,
+    '/bin/bash',
+    [
+      '-c',
+      `setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; ${holdUntil(directory, join(directory, 'release'))}`,
+    ],
+    { stdio: 'ignore' },
+  );
+  const grandchild = await waitForPid(pidFile);
+  assert.equal(pidAlive(grandchild), true);
+  await disposeOwned(directory);
+  await pollUntil(() => !pidAlive(grandchild), 'the unregistered member to be reaped', 5_000);
+});
+
+test('a group whose pid a test reads from a file is owned from then on, even after its parent is gone', async () => {
+  const directory = ownedDirectory('drill-owner-adopt-');
+  const pidFile = join(directory, 'leader');
+  // The started shell holds; the group it starts carries nothing of the directory (no environment
+  // variable, no argument). Adopting the pid while the shell lives retains its identity; killing the
+  // shell then re-parents the group to init, where no parent pid leads back to the fixture.
+  const parent = spawnOwned(
+    directory,
+    '/bin/bash',
+    ['-c', `setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; exec sleep 600`],
+    { stdio: 'ignore' },
+  );
+  const leader = await waitForGroup(directory, pidFile);
+  const parentGone = new Promise((resolve) => parent.once('exit', resolve));
+  parent.kill('SIGKILL');
+  await parentGone;
+  assert.equal(pidAlive(leader), true);
+  await disposeOwned(directory);
+  await pollUntil(() => !pidAlive(leader), 'the adopted group to be reaped', 5_000);
+});
+
+test('a fixture that cannot confirm its processes gone keeps its directory and fails', async () => {
+  const directory = ownedDirectory('drill-owner-survivor-');
+  spawnOwned(directory, '/bin/bash', ['-c', holdUntil(directory, join(directory, 'release'))], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  const budget = ownerSettings.stopBudgetMs;
+  try {
+    // No time to confirm anything: the stop is reported unconfirmed and nothing is removed.
+    ownerSettings.stopBudgetMs = 0;
+    await assert.rejects(disposeOwned(directory), /timed out after 0 ms waiting for the fixture/);
+    assert.equal(existsSync(directory), true, 'the directory stays while a process is unconfirmed');
+  } finally {
+    ownerSettings.stopBudgetMs = budget;
+    await disposeOwned(directory);
+  }
+  assert.equal(existsSync(directory), false);
+});
+
+test('a descendant that outlives the command that started it is still the fixture’s', async () => {
+  // In the command's group (found there while it leads it), and in a group of its own (found only
+  // by walking parent pids while the parent lives): either way it is retained by identity.
+  for (const detach of ['', 'setsid ']) {
+    const directory = ownedDirectory('drill-run-orphan-');
+    const system = ownerSettings.system;
+    let looks = 0;
+    try {
+      const pidFile = join(directory, 'descendant');
+      const release = join(directory, 'release');
+      // The shell starts a descendant and holds until the test lets it go; the test lets it go only
+      // after the owner has completed two looks that began once the descendant existed (a counted
+      // process-table read each), however long a loaded machine takes to make them. Then the shell
+      // exits: the descendant is re-parented to init and no parent pid leads back to the fixture.
+      // Only the identity the owner retained while the tree was alive can still show whose it is.
+      ownerSettings.system = { ...system, listPids: () => (looks++, system.listPids()) };
+      const running = runOwned(
+        directory,
+        '/bin/bash',
+        [
+          '-c',
+          `${detach}sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; ${holdUntil(directory, release)}`,
+        ],
+        { timeoutMs: 60_000 },
+      );
+      const descendant = await waitForPid(pidFile);
+      const seen = looks;
+      await pollUntil(() => looks >= seen + 3, 'the owner to look at the tree again');
+      writeFileSync(release, '');
+      const result = await running;
+      assert.equal(result.status, 0);
+      assert.equal(pidAlive(descendant), true);
+      assert.equal(
+        hasLiveProcesses(directory),
+        true,
+        `retained by identity while the tree was alive (${detach || 'same group'})`,
+      );
+      await disposeOwned(directory);
+      await pollUntil(() => !pidAlive(descendant), 'the descendant to be reaped');
+    } finally {
+      ownerSettings.system = system;
+      await disposeOwned(directory);
+    }
+  }
+});
+
+test('the existence probe reads only ESRCH as gone: a process it may not signal exists', () => {
+  assert.equal(signalProbe(process.pid), true);
+  // Init exists whoever asks: permitted or EPERM, never "gone".
+  assert.equal(signalProbe(1), true);
+  // Anything but ESRCH/EPERM is not an answer about the process: it throws, it is not "gone".
+  assert.throws(() => signalProbe('not a pid'), TypeError);
+  // A child that has exited and been reaped is gone.
+  assert.equal(signalProbe(spawnSync(process.execPath, ['-e', '']).pid), false);
+});
+
+// --- ownership is proven by retained identity, and inspection is alive / gone / unknown (r3).
+// --- Injected process tables: the kernel cannot be made to produce these states on demand.
+function fakeSystem(...rows) {
+  const table = new Map(rows.map(([pid, row]) => [pid, { state: 'S', ...row }]));
+  table.set(process.pid, { state: 'S', ppid: 1, pgrp: process.pid, start: '1' });
+  const system = {
+    table,
+    signals: [],
+    unreadable: new Set(), // stat (and status, unless listed below) answers EACCES
+    statusReadable: new Set(), // ... but these still say who their parent is
+    garbage: new Set(),
+    failFrom: new Map(), // pid -> the stat read (1-based, counted in `reads`) from which it answers EACCES
+    reads: new Map(), // pid -> stat reads so far
+    afterRead: undefined, // (pid, n) called after the n-th stat read of pid was answered
+    real: new Set(), // pids whose group a signal also reaches for real (a real child among fake rows)
+    asked: [],
+    listPids: () => [...table.keys()],
+    readProcFile(pid, name) {
+      system.asked.push([pid, name]);
+      const fail = (code) => Object.assign(new Error(code), { code });
+      if (name === 'status') {
+        if (system.unreadable.has(pid) && !system.statusReadable.has(pid)) throw fail('EACCES');
+        const row = table.get(pid);
+        if (!row) throw fail('ENOENT');
+        return `Name:\tx\nPPid:\t${row.ppid}\n`;
+      }
+      if (name === 'stat') {
+        const count = (system.reads.get(pid) ?? 0) + 1;
+        system.reads.set(pid, count);
+        if (system.unreadable.has(pid) || count >= (system.failFrom.get(pid) ?? Infinity))
+          throw fail('EACCES');
+      }
+      const row = table.get(pid);
+      if (!row) throw fail('ENOENT');
+      if (name !== 'stat') return row.mentions ?? ''; // environ / cmdline: never evidence of ownership
+      if (system.garbage.has(pid)) return 'not a stat line';
+      const text = `${pid} (a b)) ${[row.state, row.ppid, row.pgrp, ...Array(16).fill(0), row.start].join(' ')} 0`;
+      system.afterRead?.(pid, system.reads.get(pid));
+      return text;
+    },
+    signal(target, name) {
+      system.signals.push([target, name]);
+      if (system.real.has(-target)) process.kill(target, name);
+      const died = new Set();
+      for (const [pid, row] of [...table])
+        if (pid === target || (target < 0 && row.pgrp === -target && pid !== process.pid)) {
+          if (name === 'SIGKILL') {
+            table.delete(pid);
+            died.add(pid);
+          } else if (name === 'SIGSTOP') row.state = 'T';
+        }
+      // Like the kernel: the children of what died are adopted by init, alive and unsignalled.
+      for (const row of table.values()) if (died.has(row.ppid)) row.ppid = 1;
+    },
+  };
+  return system;
+}
+async function withSystem(system, body) {
+  const saved = { ...ownerSettings };
+  ownerSettings.system = system;
+  ownerSettings.stopBudgetMs = 400;
+  try {
+    return await body();
+  } finally {
+    Object.assign(ownerSettings, saved);
+  }
+}
+const killed = (system) =>
+  system.signals.filter(([, name]) => name === 'SIGKILL').map(([target]) => target);
+
+test('a foreign process that merely names the fixture is neither signalled nor counted as a leak', async () => {
+  const directory = ownedDirectory('drill-owner-foreign-');
+  // Another session runs `tail -f <directory>/report.json`: its command line AND its environment
+  // name the directory. Neither is evidence that this test started it.
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [
+      900,
+      {
+        ppid: 1,
+        pgrp: 900,
+        start: '90',
+        mentions: `tail\0-f\0${directory}/report.json\0PATH=${directory}:/bin\0`,
+      },
+    ],
+  );
+  await withSystem(system, async () => {
+    recordOwned(directory, 100);
+    system.table.delete(100); // the fixture's own process ended
+    assert.equal(hasLiveProcesses(directory), false, 'the foreigner is not a leak');
+    await disposeOwned(directory);
+    assert.deepEqual(system.signals, [], 'nothing was signalled');
+    assert.equal(system.table.has(900), true);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('a registration without a readable identity is refused, and the pid is never accepted later', async () => {
+  const directory = ownedDirectory('drill-owner-noidentity-');
+  const system = fakeSystem([77, { ppid: 1, pgrp: 77, start: '70' }]);
+  await withSystem(system, async () => {
+    system.unreadable.add(77);
+    assert.throws(() => recordOwned(directory, 77), /no readable identity \(unknown\)/);
+    system.garbage.add(77);
+    system.unreadable.delete(77);
+    assert.throws(() => recordOwned(directory, 77), /no readable identity \(unknown\)/);
+    assert.throws(() => recordOwned(directory, 78), /no readable identity \(gone\)/);
+    system.garbage.delete(77);
+    // The number now answers, as somebody else's process: it was never registered.
+    assert.equal(hasLiveProcesses(directory), false);
+    await disposeOwned(directory);
+    assert.deepEqual(system.signals, []);
+  });
+});
+
+// A real child among fake rows: the first stat read of a pid the fake table does not know is the
+// owner asking about the child it just spawned. The read waits (synchronously: nothing else of this
+// process runs, the child does) until the child has started a descendant of its group, then answers
+// "no such process", so the registration fails with that descendant already running.
+function waitSync(file, what) {
+  const cell = new Int32Array(new SharedArrayBuffer(4));
+  for (let waited = 0; !/^\d+\n$/.test(readFileOrEmpty(file)); waited += 20) {
+    assert.ok(waited < 20_000, `${what} never appeared`);
+    Atomics.wait(cell, 0, 0, 20);
+  }
+}
+const readFileOrEmpty = (file) => (existsSync(file) ? readFileSync(file, 'utf8') : '');
+function failingRegistration(directory, { reach, seconds }) {
+  const descendantFile = join(directory, 'descendant');
+  const system = fakeSystem();
+  const read = system.readProcFile;
+  system.readProcFile = (pid, name) => {
+    if (name === 'stat' && !system.table.has(pid)) {
+      system.child = pid;
+      if (reach) system.real.add(pid);
+      waitSync(descendantFile, 'the descendant');
+    }
+    return read(pid, name);
+  };
+  // The child starts a descendant in its own group, then holds for a while on its own: whatever a
+  // failed test leaves of either ends by itself.
+  const start = () =>
+    spawnOwned(
+      directory,
+      '/bin/bash',
+      [
+        '-c',
+        `sleep ${seconds} </dev/null >/dev/null 2>&1 & echo $! > '${descendantFile}'; sleep ${seconds}`,
+      ],
+      { stdio: 'ignore' },
+    );
+  return { system, start, descendantFile };
+}
+
+test('a spawn whose identity cannot be read fails, and the whole group of the child it started is killed and confirmed empty', async () => {
+  const directory = ownedDirectory('drill-owner-spawn-noidentity-');
+  const { system, start, descendantFile } = failingRegistration(directory, {
+    reach: true,
+    seconds: 30,
+  });
+  await withSystem(system, async () => {
+    assert.throws(start, /no readable identity \(gone\)/);
+    // The group was signalled as a group, by the number of the child the owner holds the handle of.
+    assert.deepEqual(system.signals, [[-system.child, 'SIGKILL']]);
+    // Registration failed, so the child has no identity; the group stays on the books until empty.
+    assert.equal(hasLiveProcesses(directory), true, 'a killed group is not yet a confirmed one');
+  });
+  const descendant = Number(readFileSync(descendantFile, 'utf8'));
+  await pollUntil(
+    () => !pidAlive(descendant),
+    'the descendant of the failed registration to die',
+    10_000,
+  );
+  await disposeOwned(directory); // returns only once the group is seen empty
+  assert.equal(existsSync(directory), false);
+});
+
+test('a group killed after a failed registration keeps the stop from confirming until it is empty', async () => {
+  const directory = ownedDirectory('drill-owner-spawn-condemned-');
+  // Nothing reaches the kernel here: the group survives its "kill" and ends on its own, after the
+  // verdict has been read while it was still there.
+  const { system, start, descendantFile } = failingRegistration(directory, {
+    reach: false,
+    seconds: 8,
+  });
+  await withSystem(system, async () => {
+    assert.throws(start, /no readable identity \(gone\)/);
+    await assert.rejects(
+      stopOwned(directory, 300),
+      new RegExp(`groups of a failed registration not yet empty: \\[${system.child}\\]`),
+    );
+    assert.equal(existsSync(directory), true);
+  });
+  // Nothing is signalled to end it: the stub's own sleeps do, and the owner sees it empty.
+  const descendant = Number(readFileSync(descendantFile, 'utf8'));
+  await pollUntil(() => !pidAlive(descendant), 'the survivor to end', 20_000);
+  await pollUntil(() => !hasLiveProcesses(directory), 'the group to be empty', 20_000);
+  await disposeOwned(directory);
+});
+
+test('every child the owner starts leads a process group of its own, whatever options were passed', async () => {
+  const directory = ownedDirectory('drill-owner-leads-');
+  try {
+    const child = spawnOwned(directory, 'sleep', ['60'], { stdio: 'ignore' });
+    // A number names a group only if some process has it as its group id: only the child can.
+    assert.equal(groupExists(child.pid), true, 'the child leads its own group');
+    const hidden = spawnOwned(directory, 'sleep', ['60'], { stdio: 'ignore', detached: false });
+    assert.equal(groupExists(hidden.pid), true, 'an explicit detached: false is not honoured');
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('a group is never signalled by its number once its registered leader is gone', async () => {
+  for (const leaderNow of [null, { state: 'S', ppid: 1, pgrp: 100, start: '99' }]) {
+    const directory = ownedDirectory('drill-owner-leadergone-');
+    const system = fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [120, { ppid: 100, pgrp: 100, start: '12' }],
+    );
+    await withSystem(system, async () => {
+      recordOwned(directory, 100, { leads: true });
+      recordOwned(directory, 120);
+      // The leader exits; the number is led by nobody, or by a different process (reused); other
+      // processes sit in a group of that number that this fixture never owned.
+      system.table.delete(100);
+      if (leaderNow) system.table.set(100, leaderNow);
+      system.table.set(150, { state: 'S', ppid: 1, pgrp: 100, start: '15' });
+      system.table.set(160, { state: 'S', ppid: 1, pgrp: 100, start: '16' });
+      await disposeOwned(directory);
+      assert.deepEqual(killed(system), [120], `only the registered member, by pid (${leaderNow})`);
+      assert.equal(
+        system.signals.some(([target]) => target < 0),
+        false,
+        'no group signal',
+      );
+      assert.deepEqual(
+        [...system.table.keys()].filter((pid) => pid > 100 && pid < 1000).sort(),
+        [150, 160],
+      );
+    });
+  }
+});
+
+test('a group whose registered leader is still there is signalled as a group', async () => {
+  const directory = ownedDirectory('drill-owner-leaderhere-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [120, { ppid: 100, pgrp: 100, start: '12' }], // found by walking parent pids, never registered
+  );
+  await withSystem(system, async () => {
+    recordOwned(directory, 100, { leads: true });
+    await disposeOwned(directory);
+    assert.deepEqual(killed(system), [-100]);
+    assert.equal(system.table.has(120), false);
+  });
+});
+
+test('what could still start a child is frozen before anything is killed', async () => {
+  const directory = ownedDirectory('drill-owner-freeze-');
+  const system = fakeSystem([100, { ppid: process.pid, pgrp: 100, start: '10' }]);
+  // A parent that gets one more child out between being looked at and being killed, unless it has
+  // been stopped first. The child is re-parented to init at once, so only a parent that was
+  // frozen while the owner still saw it can be kept from leaving one nobody can prove is ours.
+  const signal = system.signal;
+  system.signal = (target, name) => {
+    if (name !== 'SIGSTOP' && system.table.get(target)?.state !== 'T' && target === 100)
+      system.table.set(130, { state: 'S', ppid: 1, pgrp: 130, start: '13' });
+    signal(target, name);
+  };
+  await withSystem(system, async () => {
+    recordOwned(directory, 100);
+    await disposeOwned(directory);
+    assert.equal(system.signals[0][1], 'SIGSTOP');
+    assert.equal(system.table.has(130), false, 'no unproven child was left behind');
+  });
+});
+
+test('an unreadable /proc entry is unknown, not gone: ownership and directory are kept, then the stop fails', async () => {
+  const directory = ownedDirectory('drill-owner-unknown-');
+  const system = fakeSystem([200, { ppid: process.pid, pgrp: 200, start: '20' }]);
+  await withSystem(system, async () => {
+    recordOwned(directory, 200);
+    system.unreadable.add(200);
+    assert.equal(hasLiveProcesses(directory), true, 'not provably gone is not gone');
+    await assert.rejects(disposeOwned(directory), /state unknown: \[200 \(EACCES\)\]/);
+    assert.equal(existsSync(directory), true, 'the directory stays');
+    assert.deepEqual(system.signals, [], 'nothing can be signalled by identity while unreadable');
+    // A malformed stat is no better.
+    system.unreadable.delete(200);
+    system.garbage.add(200);
+    await assert.rejects(disposeOwned(directory), /state unknown: \[200 \(unreadable stat\)\]/);
+    assert.equal(existsSync(directory), true);
+    // Readable again within a retry: stopped by identity, then the directory goes.
+    system.garbage.delete(200);
+    await disposeOwned(directory);
+    assert.deepEqual(killed(system), [200]);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('an unreadable process table is unknown too: the stop retries within its budget, then fails', async () => {
+  const directory = ownedDirectory('drill-owner-table-');
+  const system = fakeSystem();
+  await withSystem(system, async () => {
+    const list = system.listPids;
+    system.listPids = () => {
+      throw Object.assign(new Error('EMFILE'), { code: 'EMFILE' });
+    };
+    await assert.rejects(disposeOwned(directory), /state unknown: \[0 \(process table: EMFILE\)\]/);
+    assert.equal(existsSync(directory), true);
+    system.listPids = list;
+    await disposeOwned(directory);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('the leader of a group is signalled as a group only while it is the process that was registered', async () => {
+  const rows = () => [
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [120, { ppid: 100, pgrp: 100, start: '12' }], // found by walking parent pids
+  ];
+  // Control run: how many stat reads of the leader precede the first SIGKILL. The last of them is
+  // the re-read that decides between a group signal and signalling members one by one.
+  let readsBeforeKill;
+  {
+    const directory = ownedDirectory('drill-owner-leaderswap-control-');
+    const system = fakeSystem(...rows());
+    const signal = system.signal;
+    system.signal = (target, name) => {
+      if (name === 'SIGKILL') readsBeforeKill ??= system.reads.get(100);
+      signal(target, name);
+    };
+    await withSystem(system, async () => {
+      recordOwned(directory, 100, { leads: true });
+      system.reads.clear();
+      await disposeOwned(directory);
+      assert.deepEqual(killed(system), [-100]);
+    });
+  }
+  assert.ok(readsBeforeKill >= 2, 'the leader is read again before the group is signalled');
+  // The same run, but the process at the leader's number is a different one by the time of that
+  // re-read: other start time, same group number, running.
+  for (const [what, replacement, expected] of [
+    ['a stranger at the number', { state: 'S', ppid: 1, pgrp: 100, start: '99' }, [120]],
+    [
+      'the registered process, now a zombie',
+      { state: 'Z', ppid: 1, pgrp: 100, start: '10' },
+      [120],
+    ],
+    // Still the registered process, but it no longer leads the group: it is signalled for what it
+    // is, a process, and the group of that number is not its own to take down.
+    [
+      'the registered process, out of its group',
+      { state: 'S', ppid: 1, pgrp: 555, start: '10' },
+      [100, 120],
+    ],
+  ]) {
+    const directory = ownedDirectory('drill-owner-leaderswap-');
+    const system = fakeSystem(...rows());
+    await withSystem(system, async () => {
+      recordOwned(directory, 100, { leads: true });
+      system.reads.clear();
+      system.afterRead = (pid, count) => {
+        if (pid === 100 && count === readsBeforeKill - 1) system.table.set(100, { ...replacement });
+      };
+      await disposeOwned(directory);
+      assert.deepEqual(killed(system), expected, `members by identity only (${what})`);
+      assert.equal(
+        system.signals.some(([target]) => target < 0),
+        false,
+        `${what}: no group is signalled`,
+      );
+      assert.equal(
+        system.table.has(100),
+        expected.includes(100) ? false : true,
+        `${what}: a process that was not registered is left alone`,
+      );
+    });
+  }
+});
+
+test('a registered pid that turns unreadable only on the last look is unknown: kept, retried, then named', async () => {
+  const directory = ownedDirectory('drill-owner-latelook-');
+  const system = fakeSystem([200, { ppid: process.pid, pgrp: 200, start: '20' }]);
+  await withSystem(system, async () => {
+    recordOwned(directory, 200);
+    system.reads.clear();
+    // Readable for the two reads the look makes first (the table, the walk), unreadable for the
+    // one that decides what it reports: a verdict reached before the walk ended is not final.
+    system.failFrom.set(200, 3);
+    await assert.rejects(disposeOwned(directory), /state unknown: \[200 \(EACCES\)\]/);
+    assert.equal(existsSync(directory), true, 'the directory stays');
+    assert.deepEqual(system.signals, [], 'nothing is signalled on an identity it cannot confirm');
+    system.failFrom.clear();
+    await disposeOwned(directory);
+    assert.deepEqual(killed(system), [200]);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('an unreadable row nobody registered is unknown when it could descend from the fixture, and only then', async () => {
+  const fixture = () => [
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }], // registered, readable
+    [300, { ppid: 100, pgrp: 300, start: '30' }], // its child, in a group of its own: not registered
+  ];
+  const cases = [
+    { what: 'its status names a parent the fixture owns', unknown: 300 },
+    {
+      what: 'its status cannot be read either',
+      unknown: 300,
+      arrange: (system) => system.statusReadable.delete(300),
+    },
+    {
+      what: 'its parent chain goes through a row the fixture does not own, to a process it does',
+      unknown: 300,
+      arrange: (system) => {
+        // 335 is only a name in the chain: its own parent (100) is unreadable, so nothing walks to it.
+        system.table.set(335, { state: 'S', ppid: 100, pgrp: 335, start: '33' });
+        system.table.get(300).ppid = 335;
+        system.unreadable.add(100);
+        system.statusReadable.add(100);
+      },
+      expect: /state unknown: \[[^\]]*300 \(unreadable row: EACCES\)/,
+    },
+    {
+      what: 'its parent is a process of the fixture that outlives every signal',
+      unknown: 300,
+      arrange: (system) => {
+        const signal = system.signal;
+        system.signal = () => {};
+        system.restore = () => (system.signal = signal);
+      },
+      expect: /state unknown: \[300 \(unreadable row: EACCES\)\]/,
+    },
+    {
+      what: 'it belongs to a stranger (status says init)',
+      unknown: undefined,
+      arrange: (system) => (system.table.get(300).ppid = 1),
+    },
+    {
+      what: 'it belongs to a stranger (the chain reaches init through rows nobody here owns)',
+      unknown: undefined,
+      arrange: (system) => {
+        system.table.set(900, { state: 'S', ppid: 901, pgrp: 900, start: '90' });
+        system.table.set(901, { state: 'S', ppid: 1, pgrp: 901, start: '91' });
+        system.table.get(300).ppid = 900;
+      },
+    },
+  ];
+  for (const { what, unknown, arrange, expect } of cases) {
+    const directory = ownedDirectory('drill-owner-rowunknown-');
+    const system = fakeSystem(...fixture());
+    system.unreadable.add(300);
+    system.statusReadable.add(300);
+    await withSystem(system, async () => {
+      recordOwned(directory, 100);
+      arrange?.(system);
+      if (unknown === undefined) {
+        // Not ours: it neither blocks the stop nor is signalled, and the fixture's own is stopped.
+        assert.equal(hasLiveProcesses(directory), true, `${what}: the registered one is alive`);
+        await disposeOwned(directory);
+        assert.equal(system.table.has(300), true, `${what}: left alone`);
+        assert.equal(
+          system.signals.some(([target]) => target === 300 || target === -300),
+          false,
+          what,
+        );
+        return;
+      }
+      await assert.rejects(
+        disposeOwned(directory),
+        expect ?? new RegExp(`state unknown: \\[${unknown} \\(unreadable row: EACCES\\)\\]`),
+        what,
+      );
+      assert.equal(existsSync(directory), true, `${what}: the directory stays`);
+      assert.equal(
+        system.signals.some(([target]) => target === 300 || target === -300),
+        false,
+        `${what}: what cannot be identified is not signalled`,
+      );
+      // The row ends (nothing is unreadable any more): the stop completes.
+      system.restore?.();
+      system.table.delete(300);
+      system.unreadable.delete(300);
+      system.unreadable.delete(100);
+      await disposeOwned(directory);
+    });
+    assert.equal(existsSync(directory), false, what);
+  }
+});
+
+// --- a candidate belongs to the scope, not to one look (PR-515-r4 R2, task 290). A row seen once as
+// --- unidentified and possibly the fixture's stays so after its parent was killed and the kernel
+// --- re-parented it: re-parenting is what a surviving child of the fixture looks like.
+// A refusal only has to outlast one look, so it may use a short budget. A success must not race its
+// deadline (a stalled scheduler would make it "seen only after the deadline"): it gets the long one.
+const REFUSAL_MS = 150;
+const GENEROUS_MS = 15_000;
+async function withBudget(ms, body) {
+  const saved = ownerSettings.stopBudgetMs;
+  ownerSettings.stopBudgetMs = ms;
+  try {
+    return await body();
+  } finally {
+    ownerSettings.stopBudgetMs = saved;
+  }
+}
+const refuses = (directory, pattern, what) =>
+  withBudget(REFUSAL_MS, () => assert.rejects(disposeOwned(directory), pattern, what));
+const signalledAt = (system, pid) =>
+  system.signals.filter(([target]) => target === pid || target === -pid);
+
+async function reparentedCandidate({ ancestry, shared, fault }) {
+  const directory = ownedDirectory('drill-owner-candidate-');
+  const system = fakeSystem([100, { ppid: process.pid, pgrp: 100, start: '10' }]);
+  const group = (pid) => (shared ? 100 : pid);
+  if (ancestry === 'intermediate')
+    system.table.set(335, { state: 'S', ppid: 100, pgrp: group(335), start: '33' });
+  system.table.set(300, {
+    state: 'S',
+    ppid: ancestry === 'intermediate' ? 335 : 100,
+    pgrp: group(300),
+    start: '30',
+  });
+  const spoil = () => {
+    if (fault === 'malformed') system.garbage.add(300);
+    else {
+      system.unreadable.add(300);
+      if (fault === 'EACCES') system.statusReadable.add(300); // else: its status cannot be read either
+    }
+  };
+  const mend = () => {
+    system.garbage.delete(300);
+    system.unreadable.delete(300);
+  };
+  const reason = fault === 'malformed' ? 'unreadable stat' : 'EACCES';
+  await withSystem(system, async () => {
+    ownerSettings.stopBudgetMs = GENEROUS_MS;
+    recordOwned(directory, 100, { leads: true });
+    spoil();
+    // First look: 300 is unidentified and may be the fixture's. Its parent is killed (by identity;
+    // no group signal while 300 is unknown) and the kernel hands 300 to init.
+    await refuses(
+      directory,
+      new RegExp(`state unknown: \\[300 \\(unreadable row: ${reason}\\)\\]`),
+    );
+    assert.equal(system.table.has(100), false, 'the confirmed parent was stopped');
+    assert.equal(system.table.get(300).ppid, 1, 'and 300 was re-parented to init, alive');
+    assert.equal(hasLiveProcesses(directory), true, 'a re-parented candidate is still a candidate');
+    // Look again, as many times as it takes: it is not forgotten, and never signalled unidentified.
+    await refuses(directory, /state unknown: \[300 /);
+    assert.equal(existsSync(directory), true, 'the directory stays');
+    assert.equal(signalledAt(system, 300).length, 0, 'an unidentified candidate is not signalled');
+    assert.equal(system.table.has(300), true);
+  });
+  return { directory, system, mend };
+}
+
+test('a candidate seen before its parent died is kept across looks and re-parenting: 16 combinations', async () => {
+  for (const ancestry of ['direct', 'intermediate'])
+    for (const shared of [true, false])
+      for (const fault of ['EACCES', 'malformed'])
+        for (const after of ['unreadable', 'readable']) {
+          const what = `${ancestry} ancestry, ${shared ? 'shared' : 'separate'} group, ${fault}, ${after} after re-parenting`;
+          const made = await reparentedCandidate({ ancestry, shared, fault });
+          const { directory, system, mend } = made;
+          await withSystem(system, async () => {
+            ownerSettings.stopBudgetMs = GENEROUS_MS;
+            if (after === 'readable') {
+              mend();
+              // Readable now, but its identity was not readable while its ancestry was (PR-532 R1,
+              // D-092): the process at 300 now cannot be told from one that took the number since.
+              // It stays a candidate, named and never signalled, until the kernel reports it absent.
+              await refuses(
+                directory,
+                /state unknown: \[300 \(unreadable row: [^;]+; readable now, but it was never identified while it descended from the fixture\)\]/,
+                what,
+              );
+              assert.equal(signalledAt(system, 300).length, 0, `${what}: never signalled`);
+              system.table.delete(300);
+              await disposeOwned(directory);
+            } else {
+              await refuses(directory, /state unknown: \[300 /, what);
+              assert.equal(signalledAt(system, 300).length, 0, `${what}: never signalled`);
+              // The kernel reports it absent: the candidate is settled and the stop completes.
+              system.table.delete(300);
+              mend();
+              await disposeOwned(directory);
+            }
+            assert.equal(
+              system.signals.some(([target]) => target < 0),
+              false,
+              `${what}: no group was signalled while 300 was unknown`,
+            );
+          });
+          assert.equal(existsSync(directory), false, what);
+        }
+});
+
+test('the after-hook names a candidate that survived its parent, and keeps the directory', async () => {
+  const directory = ownedDirectory('drill-owner-candidate-hook-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [300, { ppid: 100, pgrp: 300, start: '30' }],
+  );
+  system.unreadable.add(300);
+  system.statusReadable.add(300);
+  await withSystem(system, async () => {
+    ownerSettings.stopBudgetMs = GENEROUS_MS;
+    recordOwned(directory, 100);
+    await refuses(directory, /state unknown: \[300 /); // 100 stopped, 300 to init
+    const leaked = await withBudget(REFUSAL_MS, leakedFixtures);
+    assert.equal(leaked.length, 1);
+    assert.match(leaked[0], /state unknown: \[300 \(unreadable row: EACCES\)\]/);
+    assert.equal(existsSync(directory), true);
+    assert.equal(signalledAt(system, 300).length, 0);
+    system.table.delete(300);
+    system.unreadable.delete(300);
+    assert.deepEqual(await leakedFixtures(), []);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('a candidate whose ancestry was never read is kept and named, readable or not, and never signalled', async () => {
+  for (const after of ['unreadable', 'readable']) {
+    const { directory, system, mend } = await reparentedCandidate({
+      ancestry: 'direct',
+      shared: false,
+      fault: 'status-too',
+    });
+    await withSystem(system, async () => {
+      ownerSettings.stopBudgetMs = GENEROUS_MS;
+      if (after === 'readable') mend();
+      if (after === 'readable')
+        await refuses(
+          directory,
+          /state unknown: \[300 \(unreadable row: EACCES; readable now, but never shown to descend from the fixture\)\]/,
+        );
+      else await refuses(directory, /state unknown: \[300 \(unreadable row/);
+      assert.equal(existsSync(directory), true, `${after}: the directory stays`);
+      assert.equal(signalledAt(system, 300).length, 0, `${after}: nothing is signalled`);
+      assert.equal(hasLiveProcesses(directory), true);
+      system.table.delete(300); // absent: settled
+      mend();
+      await disposeOwned(directory);
+    });
+    assert.equal(existsSync(directory), false);
+  }
+});
+
+test('a readable row below an unidentified candidate is a candidate too, and nothing is identified through a candidate', async () => {
+  const build = () =>
+    fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [335, { ppid: 100, pgrp: 335, start: '33' }],
+      [300, { ppid: 335, pgrp: 300, start: '30' }],
+    );
+  // 335 cannot be identified. Whether or not its status names the fixture's 100 as its parent, 300
+  // below it is as unidentified as 335 (PR-532 R1, D-092: a candidate is never evidence), and both
+  // stay so after 100 is stopped and they go to init, readable or not, until they are absent.
+  for (const statusKnown of [true, false]) {
+    for (const after of ['absent', 'readable']) {
+      const what = `335's status ${statusKnown ? 'readable' : 'unreadable'}, then ${after}`;
+      const directory = ownedDirectory('drill-owner-candidate-below-');
+      const system = build();
+      await withSystem(system, async () => {
+        ownerSettings.stopBudgetMs = GENEROUS_MS;
+        recordOwned(directory, 100);
+        system.unreadable.add(335);
+        if (statusKnown) system.statusReadable.add(335);
+        // ONE look (a budget of nothing allows exactly one) already finds the row below.
+        await assert.rejects(
+          stopOwned(directory, 0),
+          /state unknown: \[335 \(unreadable row: EACCES\),300 \(descends from 335, which cannot be identified\)\]/,
+          what,
+        );
+        await refuses(
+          directory,
+          /state unknown: \[335 \(unreadable row: EACCES\),300 \(descends from 335, which cannot be identified\)\]/,
+          what,
+        );
+        assert.equal(system.table.has(100), false, `${what}: the fixture's 100 was stopped`);
+        assert.equal(system.table.get(300).ppid, 335, `${what}: 300 is still below 335`);
+        const untouched = () =>
+          assert.equal(
+            signalledAt(system, 335).length + signalledAt(system, 300).length,
+            0,
+            `${what}: neither is ever signalled`,
+          );
+        untouched();
+        if (after === 'absent') {
+          system.table.delete(335);
+          system.unreadable.delete(335);
+          system.table.get(300).ppid = 1; // 335 ended, 300 was re-parented
+          await refuses(directory, /state unknown: \[300 \(descends from 335/, what);
+          untouched();
+          system.table.delete(300);
+        } else {
+          system.unreadable.delete(335);
+          await refuses(
+            directory,
+            statusKnown
+              ? /state unknown: \[335 \(unreadable row: EACCES; readable now, but it was never identified while it descended from the fixture\),300 \(descends from 335/
+              : /state unknown: \[335 \(unreadable row: EACCES; readable now, but never shown to descend from the fixture\),300 \(descends from 335/,
+            what,
+          );
+          untouched();
+          system.table.delete(335);
+          system.table.delete(300);
+        }
+        await disposeOwned(directory);
+        untouched();
+      });
+      assert.equal(existsSync(directory), false, what);
+    }
+  }
+});
+
+test('a candidate that turns readable while its parent of the fixture lives is freshly proven, and stopped', async () => {
+  // The only way out of candidacy besides absence: a walk from a live process of the fixture reaches
+  // it again, child read first, parent confirmed after (and the row below it the same way).
+  const directory = ownedDirectory('drill-owner-candidate-proven-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [335, { ppid: 100, pgrp: 335, start: '33' }],
+    [300, { ppid: 335, pgrp: 300, start: '30' }],
+  );
+  await withSystem(system, async () => {
+    ownerSettings.stopBudgetMs = GENEROUS_MS;
+    recordOwned(directory, 100);
+    system.unreadable.add(335);
+    system.statusReadable.add(335);
+    assert.equal(hasLiveProcesses(directory), true, 'a candidate (a read: nothing is signalled)');
+    assert.deepEqual(system.signals, []);
+    system.unreadable.delete(335);
+    await disposeOwned(directory);
+    assert.deepEqual(killed(system).sort(), [100, 300, 335]);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('a row that appears below a candidate later is a candidate too, whether or not the candidate is readable by then', async () => {
+  const directory = ownedDirectory('drill-owner-candidate-later-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [335, { ppid: 100, pgrp: 335, start: '33' }],
+  );
+  await withSystem(system, async () => {
+    ownerSettings.stopBudgetMs = GENEROUS_MS;
+    recordOwned(directory, 100);
+    system.unreadable.add(335); // nothing is known of 335's ancestry: it stays unproven
+    await refuses(directory, /state unknown: \[335 /);
+    assert.equal(system.table.get(335).ppid, 1, '335 was re-parented');
+    system.unreadable.delete(335); // readable now, still a candidate, parent init
+    // 335 forks: the child's stat cannot be read, its status says 335. Its chain reaches init
+    // through a readable row nobody registered, which proves nothing: 335 is a candidate.
+    system.table.set(300, { state: 'S', ppid: 335, pgrp: 300, start: '30' });
+    system.unreadable.add(300);
+    system.statusReadable.add(300);
+    // ... and a readable one below it is the same.
+    system.table.set(301, { state: 'S', ppid: 335, pgrp: 301, start: '31' });
+    await assert.rejects(
+      stopOwned(directory, 0),
+      /state unknown: \[335 \(unreadable row: EACCES; readable now[^\]]*\),300 \(unreadable row: EACCES\),301 \(descends from 335, which cannot be identified\)\]/,
+    );
+    assert.equal(signalledAt(system, 335).length + signalledAt(system, 300).length, 0);
+    assert.equal(signalledAt(system, 301).length, 0);
+    system.table.delete(335);
+    system.table.delete(300);
+    system.table.delete(301);
+    system.unreadable.delete(300);
+    await disposeOwned(directory);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('a candidate is settled when the number answers as another process, or as a zombie', async () => {
+  for (const [what, replacement, child] of [
+    ['another process at the number', { state: 'S', ppid: 1, pgrp: 300, start: '99' }],
+    ['a zombie', { state: 'Z', ppid: 1, pgrp: 300, start: '30' }],
+    // Checked against the table BEFORE anything is read as being below it (PR-532 R1): the child
+    // of the process that took the number is not below the candidate, and is not one itself.
+    [
+      'another process at the number, with a child',
+      { state: 'S', ppid: 1, pgrp: 300, start: '99' },
+      { state: 'S', ppid: 300, pgrp: 300, start: '98' },
+    ],
+  ]) {
+    const directory = ownedDirectory('drill-owner-candidate-settled-');
+    const system = fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [335, { ppid: 100, pgrp: 335, start: '33' }],
+      [300, { ppid: 335, pgrp: 300, start: '30' }],
+    );
+    await withSystem(system, async () => {
+      ownerSettings.stopBudgetMs = GENEROUS_MS;
+      recordOwned(directory, 100);
+      system.unreadable.add(335); // its status cannot be read either: 300 below it is unproven
+      await refuses(directory, /state unknown/);
+      system.table.delete(335);
+      system.unreadable.delete(335);
+      system.table.set(300, { ...replacement });
+      if (child) system.table.set(301, { ...child });
+      await disposeOwned(directory);
+      assert.equal(signalledAt(system, 300).length, 0, `${what}: not the fixture's, not signalled`);
+      assert.equal(signalledAt(system, 301).length, 0, `${what}: nor its child`);
+      assert.equal(system.table.has(300), true);
+    });
+    assert.equal(existsSync(directory), false, what);
+  }
+});
+
+test('a candidate whose identity was never read authorizes nothing: what takes its number is left alone (PR-532 R1)', async () => {
+  // The review's first counterexample. One inspection sees 300 below the fixture's 100, its stat
+  // unreadable, its status naming 100. Before the next one, both exit and the number 300 goes to a
+  // process that is not the fixture's (and, in the second case, has a child of its own).
+  for (const [what, arrange] of [
+    [
+      'an unrelated process takes the number',
+      (system) => system.table.set(300, { state: 'S', ppid: 1, pgrp: 300, start: '99' }),
+    ],
+    [
+      'an unrelated process with a child of its own takes the number',
+      (system) => {
+        system.table.set(300, { state: 'S', ppid: 1, pgrp: 300, start: '99' });
+        system.table.set(301, { state: 'S', ppid: 300, pgrp: 300, start: '98' });
+      },
+    ],
+  ]) {
+    const directory = ownedDirectory('drill-owner-candidate-replaced-');
+    const system = fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [300, { ppid: 100, pgrp: 300, start: '30' }],
+    );
+    system.unreadable.add(300);
+    system.statusReadable.add(300);
+    await withSystem(system, async () => {
+      ownerSettings.stopBudgetMs = GENEROUS_MS;
+      recordOwned(directory, 100, { leads: true });
+      assert.equal(hasLiveProcesses(directory), true, `${what}: 300 is a candidate`);
+      system.table.delete(100);
+      system.table.delete(300);
+      system.unreadable.delete(300);
+      system.statusReadable.delete(300);
+      arrange(system);
+      const outcome = await withBudget(REFUSAL_MS, () =>
+        disposeOwned(directory).then(
+          () => null,
+          (error) => error,
+        ),
+      );
+      assert.deepEqual(signalledAt(system, 300), [], `${what}: no SIGSTOP, no SIGKILL to 300`);
+      assert.deepEqual(signalledAt(system, 301), [], `${what}: nor to its child`);
+      assert.match(
+        `${outcome?.message}`,
+        /state unknown: \[300 \(unreadable row: EACCES; readable now, but it was never identified while it descended from the fixture\)/,
+        what,
+      );
+      // It ends on its own: the candidate is settled and the stop completes, having signalled nothing.
+      system.table.delete(300);
+      system.table.delete(301);
+      await disposeOwned(directory);
+      assert.deepEqual(system.signals, [], `${what}: nothing was ever signalled`);
+    });
+    assert.equal(existsSync(directory), false, what);
+  }
+});
+
+test('a scope read from one process table is neither read nor signalled under another (PR-532 R1)', async () => {
+  // The review's second counterexample: a candidate of table A, then table B, where 300 is
+  // unrelated and has a child 301, and where even the fixture's number 100 answers with the start
+  // time recorded in A. Nothing of A may reach any of them.
+  const directory = ownedDirectory('drill-owner-table-');
+  const first = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [300, { ppid: 100, pgrp: 300, start: '30' }],
+  );
+  first.unreadable.add(300);
+  first.statusReadable.add(300);
+  await withSystem(first, async () => {
+    recordOwned(directory, 100, { leads: true });
+    assert.equal(hasLiveProcesses(directory), true);
+  });
+  const second = fakeSystem(
+    [100, { ppid: 1, pgrp: 100, start: '10' }],
+    [300, { ppid: 1, pgrp: 300, start: '30' }],
+    [301, { ppid: 300, pgrp: 300, start: '31' }],
+  );
+  await withSystem(second, async () => {
+    const outcome = await disposeOwned(directory).then(
+      () => null,
+      (error) => error,
+    );
+    assert.deepEqual(second.signals, [], '301 (and 300, and 100) neither promoted nor signalled');
+    assert.match(
+      `${outcome?.message}`,
+      /state unknown: \[0 \(recorded in another process table: nothing of it is inspected or signalled in this one\)\]/,
+    );
+    assert.equal(hasLiveProcesses(directory), true, 'not provably gone');
+    assert.throws(() => recordOwned(directory, 301), /recorded in another process table/);
+    assert.throws(() => adoptPid(directory, 301), /recorded in another process table/);
+    assert.deepEqual(second.signals, [], '301 (and 300, and 100) neither promoted nor signalled');
+    assert.deepEqual(second.asked, [], 'not one row of this table was read on the scope’s behalf');
+    assert.equal(existsSync(directory), true, 'the directory stays');
+  });
+  // The after-hook under yet another table (the real one, after a test): reported once, nothing
+  // read or signalled there, the directory kept.
+  const spy = {
+    listPids: () => assert.fail('the table was listed'),
+    readProcFile: () => assert.fail('a row was read'),
+    signal: () => assert.fail('a signal was sent'),
+  };
+  await withSystem(spy, async () => {
+    const leaked = await leakedFixtures();
+    assert.equal(leaked.length, 1);
+    assert.match(leaked[0], /recorded in another process table/);
+    assert.deepEqual(await leakedFixtures(), [], 'reported once');
+  });
+  assert.equal(existsSync(directory), true);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test('a scope stays usable in its own table: back in it, its processes are stopped there', async () => {
+  const directory = ownedDirectory('drill-owner-table-back-');
+  const first = fakeSystem([100, { ppid: process.pid, pgrp: 100, start: '10' }]);
+  const second = fakeSystem([100, { ppid: 1, pgrp: 100, start: '10' }]);
+  await withSystem(first, async () => recordOwned(directory, 100));
+  await withSystem(second, async () => {
+    await assert.rejects(disposeOwned(directory), /recorded in another process table/);
+    assert.deepEqual(second.signals, []);
+  });
+  await withSystem(first, async () => {
+    await disposeOwned(directory);
+    assert.deepEqual(killed(first), [100]);
+  });
+  assert.equal(existsSync(directory), false);
+});
+
+test('a link of the walk is proven at the time it is used: a number taken over during a look proves nothing', async () => {
+  // 100 is the fixture's; 335 its child, 300 below 335. During one look the process table changes
+  // under the walk in three ways; each time 300 (and what took 335's number) is somebody else's.
+  const cases = [
+    {
+      what: '335 is replaced right after the snapshot read it',
+      // the walk's fresh read of 335 shows the stranger (its parent is init)
+      at: [335, 1],
+      change: (system) => {
+        system.table.set(335, { state: 'S', ppid: 1, pgrp: 335, start: '99' });
+      },
+    },
+    {
+      what: '300 was read while 335 was a stranger, then the fixture’s child took the number 335',
+      order: [100, 300, 335],
+      initial: (system) => {
+        system.table.set(335, { state: 'S', ppid: 1, pgrp: 335, start: '99' });
+      },
+      at: [300, 1],
+      change: (system) => {
+        // the stranger exits (300 goes to init), the fixture's 100 forks a child that gets 335
+        system.table.get(300).ppid = 1;
+        system.table.set(335, { state: 'S', ppid: 100, pgrp: 335, start: '33' });
+      },
+      fixtureOwns: [335],
+    },
+    {
+      what: '335 and 300 are replaced after the walk read 335 afresh',
+      at: [335, 2],
+      change: (system) => {
+        system.table.set(335, { state: 'S', ppid: 1, pgrp: 335, start: '99' });
+        system.table.set(300, { state: 'S', ppid: 335, pgrp: 300, start: '97' });
+      },
+    },
+  ];
+  for (const { what, order, initial, at, change, fixtureOwns = [] } of cases) {
+    const directory = ownedDirectory('drill-owner-walk-');
+    const system = fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [335, { ppid: 100, pgrp: 335, start: '33' }],
+      [300, { ppid: 335, pgrp: 300, start: '30' }],
+    );
+    if (order) {
+      const list = system.listPids;
+      system.listPids = () => [...order, ...list().filter((pid) => !order.includes(pid))];
+    }
+    initial?.(system);
+    await withSystem(system, async () => {
+      recordOwned(directory, 100);
+      system.reads.clear();
+      let done = false;
+      system.afterRead = (pid, count) => {
+        if (!done && pid === at[0] && count === at[1]) {
+          done = true;
+          change(system);
+        }
+      };
+      await disposeOwned(directory);
+      assert.deepEqual(signalledAt(system, 300), [], `${what}: 300 is not signalled`);
+      if (!fixtureOwns.includes(335))
+        assert.deepEqual(signalledAt(system, 335), [], `${what}: the stranger at 335 is not`);
+      assert.equal(system.table.has(300), true, `${what}: 300 is left alone`);
+      assert.equal(killed(system).includes(100), true, `${what}: the fixture's 100 is stopped`);
+    });
+    assert.equal(existsSync(directory), false, what);
+  }
+});
+
+test('an adopted pid is proven by a chain read twice: a number taken over in between proves nothing', async () => {
+  // A test learns of 301. When it is read, 301 is the child of a stranger at 300; then the stranger
+  // exits (301 goes to init) and the fixture's 100 forks a child that gets the number 300. Read
+  // once, the chain 301 -> 300 -> 100 looks like the fixture's.
+  const directory = ownedDirectory('drill-owner-adopt-chain-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [300, { ppid: 1, pgrp: 300, start: '99' }],
+    [301, { ppid: 300, pgrp: 301, start: '31' }],
+  );
+  await withSystem(system, async () => {
+    recordOwned(directory, 100);
+    system.reads.clear();
+    system.afterRead = (pid, count) => {
+      if (pid === 301 && count === 2) {
+        system.table.get(301).ppid = 1;
+        system.table.set(300, { state: 'S', ppid: 100, pgrp: 300, start: '30' });
+      }
+    };
+    assert.throws(() => adoptPid(directory, 301), /cannot be shown to descend/);
+    system.afterRead = undefined;
+    await disposeOwned(directory);
+    assert.deepEqual(signalledAt(system, 301), [], '301 is not the fixture’s and is not signalled');
+    assert.equal(system.table.has(301), true);
+  });
+});
+
+test('while anything of the fixture is unknown no group is signalled: only confirmed members, one by one', async () => {
+  for (const [unknownPid, make] of [
+    // a registered member that cannot be read
+    [120, (system) => system.unreadable.add(120)],
+    // a row nobody registered that could descend from the fixture
+    [
+      300,
+      (system) => {
+        system.table.set(300, { state: 'S', ppid: 100, pgrp: 300, start: '30' });
+        system.unreadable.add(300);
+        system.statusReadable.add(300);
+      },
+    ],
+  ]) {
+    const directory = ownedDirectory('drill-owner-unknowngroup-');
+    const system = fakeSystem(
+      [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+      [120, { ppid: 100, pgrp: 100, start: '12' }],
+    );
+    await withSystem(system, async () => {
+      recordOwned(directory, 100, { leads: true });
+      recordOwned(directory, 120);
+      make(system);
+      await assert.rejects(disposeOwned(directory), new RegExp(`state unknown: \\[${unknownPid} `));
+      assert.equal(existsSync(directory), true);
+      assert.equal(
+        system.signals.some(([target]) => target < 0),
+        false,
+        'no group signal while a member of the group cannot be told from a stranger',
+      );
+      assert.equal(killed(system).includes(100), true, 'the confirmed leader, by its pid');
+      assert.equal(system.table.has(100), false);
+      assert.equal(
+        system.signals.some(([target]) => target === unknownPid),
+        false,
+        'the unknown one is not signalled',
+      );
+      // Readable again: stopped by identity, the directory goes.
+      system.unreadable.clear();
+      system.table.delete(300);
+      await disposeOwned(directory);
+      assert.equal(existsSync(directory), false);
+    });
+  }
+});
+
+test('a pid is adopted only if it descends from the fixture; otherwise it is refused and left alone', async () => {
+  const directory = ownedDirectory('drill-owner-adoption-');
+  const system = fakeSystem(
+    [100, { ppid: process.pid, pgrp: 100, start: '10' }],
+    [110, { ppid: 105, pgrp: 100, start: '11' }],
+    [105, { ppid: 100, pgrp: 100, start: '10.5' }],
+    [500, { ppid: 1, pgrp: 500, start: '50' }],
+  );
+  await withSystem(system, async () => {
+    recordOwned(directory, 100);
+    adoptPid(directory, 110); // through an unregistered parent
+    assert.throws(() => adoptPid(directory, 500), /cannot be shown to descend from a process of/);
+    assert.throws(() => adoptGroup(directory, 500), /cannot be shown to descend/);
+    adoptPid(directory, 999); // not there: nothing to own, nothing to fail
+    await disposeOwned(directory);
+    assert.equal(killed(system).includes(500), false, 'the refused pid was never signalled');
+    assert.equal(killed(system).includes(110), true);
+  });
+});
+
+test('a directory the owner did not create cannot hold or start anything', () => {
+  const stranger = mkdtempSync(join(tmpdir(), 'drill-owner-stranger-'));
+  try {
+    assert.throws(() => holdUntil(stranger, join(stranger, 'r')), /not created by ownedDirectory/);
+    assert.throws(() => spawnOwned(stranger, 'true', []), /not created by ownedDirectory/);
+    return assert.rejects(stopOwned(stranger), /not created by ownedDirectory/);
+  } finally {
+    rmSync(stranger, { recursive: true, force: true });
+  }
+});
+
+test('the after-hook fails a test that ends with a fixture process alive, and stops that process', async () => {
+  const directory = ownedDirectory('drill-hook-');
+  try {
+    const support = new URL('./backup-restore-drill-test-support.mjs', import.meta.url).href;
+    const pidFile = join(directory, 'pid');
+    writeFileSync(
+      join(directory, 'leak.test.mjs'),
+      `import { test } from 'node:test';
+import { holdUntil, ownedDirectory, spawnOwned, waitForPid } from ${JSON.stringify(support)};
+test('leaks a held process', async () => {
+  const fixture = ownedDirectory('drill-hook-leak-');
+  spawnOwned(fixture, '/bin/bash', ['-c', "echo $$ > '${pidFile}'; " + holdUntil(fixture, fixture + '/release')], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  await waitForPid(${JSON.stringify(pidFile)});
+});
+test('a test that disposes is not blamed', async () => {});
+`,
+    );
+    // The nested runner goes through the owner like everything else: its tree is followed, and a
+    // timeout would stop it by identity and confirm it before the directory is touched.
+    const result = await runOwned(
+      directory,
+      process.execPath,
+      ['--test', '--test-reporter=tap', join(directory, 'leak.test.mjs')],
+      {
+        timeoutMs: 60_000,
+        // Inside a test run this variable makes a nested `node --test` skip its files.
+        env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+      },
+    );
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /not ok 1 - leaks a held process/);
+    assert.match(result.stdout, /the test left processes of its fixture running/);
+    assert.match(result.stdout, /\nok 2 - a test that disposes is not blamed/);
+    const leaked = Number(readFileSync(pidFile, 'utf8'));
+    assert.ok(leaked > 0);
+    await pollUntil(() => !pidAlive(leaked), 'the leaked process to be reaped');
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('a command run through the owner that outlives its timeout is stopped with its whole tree, confirmed, before it rejects', async () => {
+  const directory = ownedDirectory('drill-run-timeout-');
+  try {
+    const pidFile = join(directory, 'descendant');
+    // The shell starts a descendant in its own session, then holds: killing the shell alone (what
+    // a synchronous runner's timeout does) would leave the descendant running.
+    await assert.rejects(
+      runOwned(
+        directory,
+        '/bin/bash',
+        [
+          '-c',
+          `setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > '${pidFile}'; ${holdUntil(directory, join(directory, 'release'))}`,
+        ],
+        { timeoutMs: 1_500 },
+      ),
+      /timed out after 1500 ms; its processes were stopped/,
+    );
+    const descendant = Number(readFileSync(pidFile, 'utf8'));
+    assert.ok(descendant > 0);
+    // Confirmed by the owner, not merely signalled: only a zombie this process has yet to reap may remain.
+    assert.equal(hasLiveProcesses(directory), false);
+    await pollUntil(() => !pidAlive(descendant), 'the descendant to be reaped');
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
 // The process lifecycle boundary: real children for what the kernel decides, a fake spawn for
 // the orderings a real child cannot be forced into.
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const pidAlive = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
+const groupExists = (pgid) => signalProbe(-pgid);
+const pidAlive = (pid) => signalProbe(pid);
 async function becomesGone(pid) {
-  for (let attempt = 0; attempt < 200 && pidAlive(pid); attempt++) await sleep(25);
-  return !pidAlive(pid);
+  await pollUntil(() => !pidAlive(pid), `process ${pid} to exit`);
+  return true;
 }
 function fakeChild(pid) {
   const child = new EventEmitter();
@@ -962,38 +3656,42 @@ function fakeChild(pid) {
   };
   return child;
 }
-const realRunner = (overrides = {}) =>
+// Real children are started through the fixture owner of `directory`, so a test that fails before
+// its own cleanup leaves nothing running.
+const realRunner = (directory, overrides = {}) =>
   createProcessRunner({
     report: {},
     persist: () => {},
     cwd: tmpdir(),
     env: { PATH: process.env.PATH },
     drainMilliseconds: 200,
+    spawn: (command, args, options) => spawnOwned(directory, command, args, options),
     ...overrides,
   });
 
 test('a leader that exits 0 while a descendant holds stdout/stderr is reaped long before the timeout and recorded', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-runner-'));
-  let descendant;
+  const directory = ownedDirectory('drill-runner-');
   try {
     const report = {};
-    const runner = realRunner({ report });
+    const runner = realRunner(directory, { report });
     const started = Date.now();
     const output = await runner.run(
       '/bin/sh',
       ['-c', `sleep 60 & echo $! > '${directory}/pid'; echo leader-output`],
-      { timeout: 20_000 },
+      { timeout: 60_000 },
     );
-    descendant = Number(readFileSync(join(directory, 'pid'), 'utf8'));
+    const descendant = Number(readFileSync(join(directory, 'pid'), 'utf8'));
+    adoptPid(directory, descendant);
     assert.equal(output, 'leader-output');
-    assert.ok(Date.now() - started < 5000, 'reaped by the drain bound, not the 20 s timeout');
+    // The drain bound is 200 ms and the timeout a minute: half the timeout still tells them apart
+    // by two orders of magnitude, so a loaded machine cannot turn a pass into a failure.
+    assert.ok(Date.now() - started < 30_000, 'reaped by the drain bound, not the 60 s timeout');
     assert.equal(report.reapedProcessGroups.length, 1);
     assert.equal(report.orphanProcessGroups, undefined);
     assert.deepEqual(report.processGroups, []);
     assert.ok(await becomesGone(descendant), 'the descendant holding the pipes is gone');
   } finally {
-    if (descendant && pidAlive(descendant)) process.kill(descendant, 'SIGKILL');
-    rmSync(directory, { recursive: true, force: true });
+    await disposeOwned(directory);
   }
 });
 
@@ -1034,31 +3732,36 @@ test('a timeout is a failure whatever exit code follows the kill', async () => {
 });
 
 test('a persist failure right after spawn still reaps the group and confirms it is gone', async () => {
-  const reaped = [];
-  const failed = [];
-  const report = {};
-  const runner = realRunner({
-    report,
-    persist: () => {
-      throw new Error('Could not write report (ENOSPC)');
-    },
-    persistFailed: (stage) => failed.push(stage),
-    currentStage: () => 'migrate identity',
-    reap: (pgid) => {
-      reaped.push(pgid);
-      return reapProcessGroup(pgid);
-    },
-  });
-  await assert.rejects(
-    runner.run('/bin/sh', ['-c', 'sleep 60 & wait']),
-    /Could not record process group/,
-  );
-  assert.equal(reaped.length, 1, 'the group went through the reap, not a single kill');
-  assert.deepEqual(failed, ['migrate identity']);
-  assert.equal(runner.groups.size, 0);
-  assert.deepEqual(report.processGroups, []);
-  // The group, whatever it had forked by then, is confirmed gone.
-  assert.throws(() => process.kill(-reaped[0], 0), /ESRCH/);
+  const directory = ownedDirectory('drill-runner-persist-');
+  try {
+    const reaped = [];
+    const failed = [];
+    const report = {};
+    const runner = realRunner(directory, {
+      report,
+      persist: () => {
+        throw new Error('Could not write report (ENOSPC)');
+      },
+      persistFailed: (stage) => failed.push(stage),
+      currentStage: () => 'migrate identity',
+      reap: (pgid) => {
+        reaped.push(pgid);
+        return reapProcessGroup(pgid);
+      },
+    });
+    await assert.rejects(
+      runner.run('/bin/sh', ['-c', 'sleep 60 & wait']),
+      /Could not record process group/,
+    );
+    assert.equal(reaped.length, 1, 'the group went through the reap, not a single kill');
+    assert.deepEqual(failed, ['migrate identity']);
+    assert.equal(runner.groups.size, 0);
+    assert.deepEqual(report.processGroups, []);
+    // The group, whatever it had forked by then, is confirmed gone.
+    assert.throws(() => process.kill(-reaped[0], 0), /ESRCH/);
+  } finally {
+    await disposeOwned(directory);
+  }
 });
 
 test('a group that survives the kill after a persist failure stays owned and is reported', async () => {
@@ -1497,7 +4200,12 @@ for (const [name, start, reason, extra = {}] of stopReasons) {
     assert.equal(barrier, false, 'the deadline has not expired yet');
     await rejection;
     await waiting;
-    assert.ok(Date.now() - started < NEVER_EXITS * 10, 'released by the deadline, not by a timer');
+    // The injected deadline (150 ms), not the default one (10 s): half the default still tells
+    // them apart by a factor of 30 without a machine-speed assumption.
+    assert.ok(
+      Date.now() - started < KILL_CONFIRMATION_DEADLINE_MS / 2,
+      'released by the injected deadline, not the default one',
+    );
     assert.ok(kills.includes(424900));
     // The group stays owned and unconfirmed: report list, signal set, retry set.
     assert.deepEqual(report.unconfirmedProcessGroups, [{ pgid: 424900, stage: 'cleanup', reason }]);
@@ -1607,4 +4315,77 @@ test('a leader that exited before the deadline is settled by the drain and reap,
   });
   await assert.rejects(runner.run('slow', [], { timeout: 10 }), /Command timed out \(exit 137\)/);
   assert.equal(report.unconfirmedProcessGroups, undefined);
+});
+
+// --- readRegularFile: the one reader of files somebody else could have substituted -------------
+test('readRegularFile reads a regular file within its bound and refuses everything else by kind', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'drill-read-regular-'));
+  try {
+    const file = join(directory, 'f');
+    writeFileSync(file, 'héllo', { mode: 0o600 });
+    assert.equal(readRegularFile(file, { maxBytes: 100 }), 'héllo');
+    writeFileSync(join(directory, 'empty'), '');
+    assert.equal(readRegularFile(join(directory, 'empty'), { maxBytes: 0 }), '');
+    const kind = (action) => {
+      try {
+        action();
+      } catch (error) {
+        assert.ok(error instanceof InputFileError);
+        assert.doesNotMatch(error.message, new RegExp(directory));
+        return error.kind;
+      }
+      return 'accepted';
+    };
+    // Exactly the cap is fine; one byte more is refused, on the descriptor's size.
+    assert.equal(readRegularFile(file, { maxBytes: 6 }), 'héllo');
+    assert.equal(
+      kind(() => readRegularFile(file, { maxBytes: 5 })),
+      'too-large',
+    );
+    assert.equal(
+      kind(() => readRegularFile(join(directory, 'absent'), { maxBytes: 9 })),
+      'missing',
+    );
+    assert.equal(
+      kind(() => readRegularFile(directory, { maxBytes: 9 })),
+      'not-file',
+    );
+    symlinkSync(file, join(directory, 'link'));
+    assert.equal(readRegularFile(join(directory, 'link'), { maxBytes: 9 }), 'héllo');
+    assert.equal(
+      kind(() => readRegularFile(join(directory, 'link'), { maxBytes: 9, noFollow: true })),
+      'open',
+    );
+    // The caller's own refusal (owner, mode) propagates untouched.
+    assert.throws(
+      () =>
+        readRegularFile(file, {
+          maxBytes: 9,
+          inspect: () => {
+            throw new RangeError('mine');
+          },
+        }),
+      RangeError,
+    );
+    // A FIFO is refused by kind, and the open itself does not wait for a writer: the child has a
+    // deadline, so a blocking open fails here instead of hanging the suite.
+    const fifo = join(directory, 'fifo');
+    execFileSync('mkfifo', [fifo]);
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `import { readRegularFile } from ${JSON.stringify(new URL('./backup-restore-drill-lib.mjs', import.meta.url).href)};
+         try { readRegularFile(process.argv[1], { maxBytes: 9 }); console.log('accepted'); } catch (e) { console.log(e.kind); }`,
+        '--',
+        fifo,
+      ],
+      { encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL' },
+    );
+    assert.equal(child.signal, null, 'the open blocked on a FIFO');
+    assert.equal(child.stdout.trim(), 'not-file');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

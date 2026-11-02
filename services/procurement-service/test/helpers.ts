@@ -1,3 +1,4 @@
+import { eligibilityClockWrite } from '@rasta/testing';
 import { readUrl, withUtcSession } from '@rasta/config';
 import { ulid } from 'ulid';
 import { PrismaClient } from '../src/generated/prisma';
@@ -96,7 +97,7 @@ export async function seedOpenWindow(input: {
         for (const trigger of lifted) {
           await tx.$executeRawUnsafe(`ALTER TABLE "demand_request" DISABLE TRIGGER "${trigger}"`);
         }
-        await tx.$executeRaw`
+        await eligibilityClockWrite(tx)`
           INSERT INTO demand_aggregation
             (id, organization_id, product_id, status, opened_at, closes_at, window_hours,
              min_quantity, shortfall_policy, setting_version, total_quantity, demand_count,

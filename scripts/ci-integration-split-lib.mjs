@@ -42,7 +42,17 @@
  *     instead of skipping) in a job without a mailpit service container, or a
  *     mailpit container no step of the job reads;
  *   - a test run outside turbo with nothing having built the packages its
- *     suites resolve to their dist.
+ *     suites resolve to their dist;
+ *   - any job, split or not, whose steps' time limits cannot all be spent: the
+ *     limits of its steps that have one, plus the setup allowance for the
+ *     steps that have none (JOB_SETUP_MINUTES), must fit inside the job's own
+ *     `timeout-minutes`, or the job deadline cancels a later step that is
+ *     still within its own limit. Every limit and every budget entry is a
+ *     positive whole number of minutes (a fraction, zero, a string, an
+ *     expression or an entry declared as `undefined` is refused); so are a job
+ *     with step limits and no declared allowance, and a job with no
+ *     `timeout-minutes`; and a job whose measured runtime needed more than it
+ *     had (JOB_FLOOR_MINUTES) may not go back.
  *
  * Workflow text (or its parsed object) in, problems out. The one side effect
  * is running the verdict script under bash from a temporary file, memoised per
@@ -105,10 +115,10 @@ const withKafka = (principal, ...commands) => [
   'eval "${kafka_credentials}"',
   ...commands,
 ];
-const coverageGate = (service, env = {}) => ({
+const coverageGate = (service, env = {}, timeout = 8) => ({
   run: withKafka('tests', `pnpm --filter @rasta/${service}-service run test:coverage`),
   env: { ...KAFKA_TESTS, ...databases(service.toUpperCase()), ...env },
-  timeout: 8,
+  timeout,
 });
 const postgresGuard = (command) => ({ run: [command], env: POSTGRES, timeout: 5 });
 
@@ -129,7 +139,8 @@ export const STEP_INVENTORY = Object.freeze({
       ...MAILPIT,
     },
     // Stopgap until the integration step is sharded (owner, 2026-10-24); back to 12 then.
-    timeout: 16,
+    // 21 = ceil(806 s x 1.5 / 60): the slowest of the last 20 green runs took 806 s.
+    timeout: 21,
   },
   'Backup restore SQL on a disposable database': postgresGuard(
     'pnpm run test:backup-restore-drill-pg',
@@ -138,7 +149,8 @@ export const STEP_INVENTORY = Object.freeze({
   'Marketplace coverage gate': coverageGate('marketplace'),
   'Document coverage gate': coverageGate('document', { ...BUCKET, ...SCANNER }),
   'Supplier coverage gate': coverageGate('supplier'),
-  'Construction coverage gate': coverageGate('construction'),
+  // 11 = ceil(429 s x 1.5 / 60): the slowest of the last 20 green runs took 429 s.
+  'Construction coverage gate': coverageGate('construction', {}, 11),
   'Contract coverage gate': coverageGate('contract'),
   'Inventory coverage gate': coverageGate('inventory'),
   'Audit coverage gate': coverageGate('audit'),
@@ -215,6 +227,37 @@ export const ALLOWED_CONDITIONS = Object.freeze([
   },
 ]);
 
+/**
+ * Minutes a job needs for its steps that carry no `timeout-minutes` of their
+ * own (checkout, install, build, migrations, broker start-up, the runner's
+ * set-up and completion): ceil(max x 1.5 / 60), where max is the most any run
+ * of the job took in those steps over the last 20 green CI runs on main and
+ * `mq/train-*` (2026-10-29, GitHub job listings). A job that has step limits
+ * is refused here without an entry, rather than assumed to need no setup.
+ * Measured maxima, in seconds: suites 298, security 309, critical 281,
+ * coverage 310, backup drill 92, migration chain 135 (per shard), migration
+ * guards 253, trivy-db 5.
+ */
+export const JOB_SETUP_MINUTES = Object.freeze({
+  'integration-suites': 8,
+  'integration-security': 8,
+  'integration-coverage-critical': 8,
+  'integration-coverage': 8,
+  'integration-backup-drill': 3,
+  'migration-reversibility-chain': 4,
+  'migration-guards': 7,
+  'trivy-db': 1,
+});
+
+/**
+ * The least `timeout-minutes` a job may have where the runtime itself, not
+ * the sum of its step limits, set it: the slowest of the last 20 green runs
+ * took more than 80 % of the old limit, so the new one is ceil(max x 1.5 / 60).
+ * `quality` took up to 1446 s (old limit 25, 96 %) and cancelled train run
+ * 40936057488; `web-browser` took up to 1462 s (old limit 30, 81 %).
+ */
+export const JOB_FLOOR_MINUTES = Object.freeze({ quality: 37, 'web-browser': 37 });
+
 /** The keys a test step may have: nothing that skips it, forgives it or changes its shell. */
 const STEP_KEYS = new Set(['name', 'run', 'env', 'timeout-minutes']);
 /** The verdict's, which must also name the shell it is run with here. */
@@ -256,13 +299,41 @@ const TURBO_BUILDS = /\bpnpm run test:integration\b/;
 
 const isMapping = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const listOf = (value) => (Array.isArray(value) ? value : typeof value === 'string' ? [value] : []);
-const squash = (value) => String(value).replace(/\s+/g, ' ').trim();
+/**
+ * A workflow value as text. `String()` throws on `{toString: x}`, which YAML
+ * can say, and a checker that throws turns a malformed value into a crash
+ * instead of a problem.
+ */
+export const textOf = (value) => {
+  if (typeof value === 'string') return value;
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'object') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '[object]';
+  }
+};
+const squash = (value) => textOf(value).replace(/\s+/g, ' ').trim();
 const commandLines = (run) =>
-  String(run ?? '')
+  textOf(run)
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '' && !line.startsWith('#'));
-const isMinutes = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0;
+/** A positive whole number of minutes: the one definition every limit and budget is held to. */
+const isMinutes = (value) => Number.isSafeInteger(value) && value > 0;
+const MINUTES = 'a positive whole number of minutes';
+/**
+ * A budget table as a Map of its own entries, so that a name taken from the
+ * workflow can only find what the table declares (`table['constructor']` or
+ * `table['__proto__']` is a function or an object, which makes
+ * `sum + setup > limit` false and so accepts the overrun), and so that an
+ * entry's presence stays apart from its value (`{ slow: undefined }` is
+ * declared, and wrong, not absent).
+ */
+const budgetTable = (table) => new Map(Object.entries(table));
+/** The inventory by step name; a step's name comes from the workflow, so no plain-object lookup. */
+const INVENTORY = new Map(Object.entries(STEP_INVENTORY));
 
 export function checkIntegrationSplitText(text) {
   let workflow;
@@ -290,7 +361,7 @@ export function checkIntegrationSplit(workflow) {
       if (key in job) problems.push(`${id} sets ${key}: ${why}`);
     }
     if (!isMinutes(job['timeout-minutes'])) {
-      problems.push(`${id} has no timeout-minutes (a positive number)`);
+      problems.push(`${id} has no timeout-minutes (${MINUTES})`);
     }
   };
 
@@ -330,12 +401,12 @@ export function checkIntegrationSplit(workflow) {
     const services = isMapping(job.services) ? job.services : {};
     const steps = Array.isArray(job.steps) ? job.steps.filter(isMapping) : [];
     const env = (step) => (isMapping(step.env) ? step.env : {});
-    const run = (step) => String(step.run ?? '');
+    const run = (step) => textOf(step.run);
     const indexOf = (name) => steps.findIndex((step) => step.name === name);
     const uses = (key) => steps.some((step) => key in env(step));
 
     steps.forEach((step, index) => {
-      const label = `${id}: "${step.name ?? step.uses ?? step.run ?? `step ${index + 1}`}"`;
+      const label = `${id}: "${textOf(step.name ?? step.uses ?? step.run ?? `step ${index + 1}`)}"`;
       if ('continue-on-error' in step && step['continue-on-error'] !== false) {
         problems.push(`${label} sets continue-on-error: its failure would not fail the job`);
       }
@@ -343,9 +414,9 @@ export function checkIntegrationSplit(workflow) {
         const allowed = ALLOWED_CONDITIONS.some(
           (entry) => entry.job === id && entry.step === step.name && entry.if === step.if,
         );
-        if (!allowed) problems.push(`${label} has if: ${step.if}, which can skip it`);
+        if (!allowed) problems.push(`${label} has if: ${textOf(step.if)}, which can skip it`);
       }
-      const declared = STEP_INVENTORY[step.name];
+      const declared = INVENTORY.get(step.name);
       if (declared) {
         seen.get(step.name).push(id);
         problems.push(...testStepProblems(label, step, declared, job['timeout-minutes']));
@@ -356,7 +427,8 @@ export function checkIntegrationSplit(workflow) {
         return at >= 0 && at < index;
       };
       const needsInfra = (condition, what, present) => {
-        if (condition && !present) problems.push(`${id}: "${step.name}" runs without ${what}`);
+        if (condition && !present)
+          problems.push(`${id}: "${textOf(step.name)}" runs without ${what}`);
       };
       const vars = Object.keys(env(step));
       needsInfra(vars.includes('KAFKA_BROKERS'), `"${KAFKA_STEP}" before it`, before(KAFKA_STEP));
@@ -395,7 +467,7 @@ export function checkIntegrationSplit(workflow) {
           .some((earlier) => earlier.name === BUILD_STEP || TURBO_BUILDS.test(run(earlier)));
         if (!built) {
           problems.push(
-            `${id}: "${step.name}" needs the packages built before it ("${BUILD_STEP}")`,
+            `${id}: "${textOf(step.name)}" needs the packages built before it ("${BUILD_STEP}")`,
           );
         }
       }
@@ -410,9 +482,78 @@ export function checkIntegrationSplit(workflow) {
     unused('redis' in services, 'REDIS_URL', 'Redis');
     unused('mailpit' in services, 'REQUIRE_MAILPIT', 'Mailpit');
   }
+  problems.push(...jobBudgetProblems(jobs, splitIds));
   for (const [name, where] of seen) {
     if (where.length === 0) problems.push(`no ${SPLIT_PREFIX}* job runs "${name}"`);
     if (where.length > 1) problems.push(`"${name}" runs in more than one job: ${where.join(', ')}`);
+  }
+  return problems;
+}
+
+/**
+ * Every job's cumulative time budget. A step's own `timeout-minutes` only
+ * bounds that step: the steps run one after the other under the job's, so
+ * limits that sum to more than the job's leave a later step cancelled by the
+ * job deadline while it is still within its own limit. The sum of the step
+ * limits plus the setup allowance for the steps without one must fit.
+ */
+export function jobBudgetProblems(
+  jobs,
+  splitIds,
+  setupMinutes = JOB_SETUP_MINUTES,
+  floorMinutes = JOB_FLOOR_MINUTES,
+) {
+  const setups = budgetTable(setupMinutes);
+  const floors = budgetTable(floorMinutes);
+  // The one place a table's values are validated, whether or not a job uses them.
+  const problems = [
+    ...[...setups].flatMap(([id, value]) =>
+      isMinutes(value)
+        ? []
+        : [`${id} has a setup allowance in JOB_SETUP_MINUTES that is not ${MINUTES}`],
+    ),
+    ...[...floors].flatMap(([id, value]) =>
+      isMinutes(value) ? [] : [`${id} has a floor in JOB_FLOOR_MINUTES that is not ${MINUTES}`],
+    ),
+  ];
+  for (const [id, job] of Object.entries(jobs)) {
+    if (!isMapping(job)) continue;
+    const limit = job['timeout-minutes'];
+    // The split jobs and the aggregate are refused by jobLevel() already.
+    if (!isMinutes(limit) && !splitIds.includes(id) && id !== AGGREGATE_JOB) {
+      problems.push(`${id} has no timeout-minutes (${MINUTES})`);
+    }
+    const floor = floors.get(id);
+    if (isMinutes(floor) && isMinutes(limit) && limit < floor) {
+      problems.push(
+        `${id} has timeout-minutes ${limit}, below its ${floor}: its slowest green runs needed it`,
+      );
+    }
+    const steps = Array.isArray(job.steps) ? job.steps.filter(isMapping) : [];
+    const limited = steps.filter((step) => 'timeout-minutes' in step);
+    if (limited.length === 0) continue;
+    const unknown = limited.filter((step) => !isMinutes(step['timeout-minutes']));
+    for (const step of unknown) {
+      problems.push(
+        `${id}: "${textOf(step.name ?? step.uses ?? step.run)}" has a timeout-minutes that is not ${MINUTES}, so its share of the job's budget is unknown`,
+      );
+    }
+    if (unknown.length > 0) continue;
+    const sum = limited.reduce((total, step) => total + step['timeout-minutes'], 0);
+    const setup = setups.get(id);
+    if (!setups.has(id)) {
+      problems.push(
+        `${id} has step time limits (${sum} minutes in all) but no setup allowance in JOB_SETUP_MINUTES`,
+      );
+    } else if (isMinutes(setup) && isMinutes(limit) && sum + setup > limit) {
+      problems.push(
+        `${id}: its steps' timeout-minutes sum to ${sum} and the steps without one need ${setup} more, ${sum + setup} in all, above the job's timeout-minutes ${limit}`,
+      );
+    }
+  }
+  for (const id of new Set([...setups.keys(), ...floors.keys()])) {
+    if (!Object.hasOwn(jobs, id) || !isMapping(jobs[id]))
+      problems.push(`${id} has a declared time budget but is not a job`);
   }
   return problems;
 }
@@ -446,7 +587,7 @@ function testStepProblems(label, step, declared, jobMinutes) {
   }
   const minutes = step['timeout-minutes'];
   if (!isMinutes(minutes)) {
-    problems.push(`${label} has no timeout-minutes (at most ${declared.timeout})`);
+    problems.push(`${label} has no timeout-minutes (${MINUTES}, at most ${declared.timeout})`);
   } else {
     if (minutes > declared.timeout) {
       problems.push(`${label} has timeout-minutes ${minutes}, above its ${declared.timeout}`);
@@ -505,7 +646,7 @@ function verdictProblems(aggregate, needs) {
     problems.push(`${label}'s verdict run has an expression; pass it through env`);
   }
   const env = isMapping(step.env) ? step.env : {};
-  const expressions = Object.entries(env).filter(([, value]) => String(value).includes('${{'));
+  const expressions = Object.entries(env).filter(([, value]) => textOf(value).includes('${{'));
   const needsVar =
     expressions.length === 1 && squash(expressions[0][1]) === NEEDS_EXPRESSION
       ? expressions[0][0]
@@ -590,7 +731,7 @@ function runVerdictCases(script, options, env, needsVar, needs) {
     const outcome = spawnSync('bash', [...options, script], {
       env: {
         PATH: process.env.PATH,
-        ...Object.fromEntries(Object.entries(env).map(([key, value]) => [key, String(value)])),
+        ...Object.fromEntries(Object.entries(env).map(([key, value]) => [key, textOf(value)])),
         [needsVar]: JSON.stringify(context, null, 2),
       },
       stdio: 'ignore',

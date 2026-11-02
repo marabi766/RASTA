@@ -3,8 +3,10 @@
  *
  * The image build and Trivy scan used to run only after merge, so a broken or
  * vulnerable image was found on `main`, not on the pull request that caused
- * it. On a pull request the job now builds exactly the images the change can
- * affect; on a push to `main` it builds every one, as before.
+ * it. They now run where the merge is decided (owner decision 2026-10-24):
+ * on a merge-train run (a pull request whose head is `mq/train-N`) the job
+ * builds exactly the images the change can affect, and on a push to `main` it
+ * builds every one. An ordinary pull request builds none (see `classifyRun`).
  *
  * Every Dockerfile copies the whole repository into its build stage and then
  * builds one package with its workspace dependencies, so:
@@ -125,4 +127,113 @@ export function servicesToBuild(services, changed, workflowUnchanged = false) {
   return services.filter((service) =>
     paths.some((path) => path.startsWith(`services/${service}/`)),
   );
+}
+
+const hasControlCharacter = (text) =>
+  [...text].some((char) => char.charCodeAt(0) < 0x20 || char.charCodeAt(0) === 0x7f);
+
+/**
+ * Which kind of run this is, from the event alone (never from labels):
+ *
+ *  - `main`    a push to refs/heads/main: every image;
+ *  - `train`   a pull request from this repository whose head is `mq/train-N`
+ *              (the PM merge train; its run is the scan evidence for what it merges):
+ *              the affected images, ALL on any classification error;
+ *  - `pr`      any other pull request: no image (built on the train);
+ *  - `unknown` anything else — another event or branch, missing or malformed
+ *              metadata, a fork or malformed name inside the reserved `mq/`
+ *              namespace: every image. Unknown never means fewer.
+ *
+ * Inputs are the workflow's environment (EVENT_NAME, REF, HEAD_REF, HEAD_REPO,
+ * REPOSITORY), passed through `env:` and never interpolated into a script: a
+ * branch name is attacker-controlled text.
+ *
+ * @param {Record<string, string | undefined>} env
+ * @returns {{ mode: 'main' | 'train' | 'pr' | 'unknown', reason?: string }}
+ */
+export function classifyRun(env) {
+  const {
+    EVENT_NAME: event,
+    REF: ref,
+    HEAD_REF: head,
+    HEAD_REPO: headRepo,
+    REPOSITORY: repo,
+  } = env;
+  if (event === 'push') {
+    return ref === 'refs/heads/main'
+      ? { mode: 'main' }
+      : { mode: 'unknown', reason: 'push to a branch other than main' };
+  }
+  if (event !== 'pull_request') return { mode: 'unknown', reason: 'unrecognised event' };
+  if (!repo || !headRepo || !head || hasControlCharacter(head)) {
+    return { mode: 'unknown', reason: 'missing or malformed pull request metadata' };
+  }
+  if (/^mq\//i.test(head)) {
+    return /^mq\/train-[1-9][0-9]*$/.test(head) && headRepo.toLowerCase() === repo.toLowerCase()
+      ? { mode: 'train' }
+      : {
+          mode: 'unknown',
+          reason: 'reserved mq/ branch that is not a merge-train branch of this repository',
+        };
+  }
+  return { mode: 'pr' };
+}
+
+export const IMAGES_ON_TRAIN_NOTE =
+  'Images are built and scanned on the merge train (mq/train-*) and on main, not on ordinary pull requests.';
+
+/**
+ * The verdict of the one aggregate check, "Images built and scanned", from
+ * the `needs` context of its job (toJSON(needs)). Success only when
+ *
+ *  - an ordinary pull request selected no image (and says so), or
+ *  - every selected image's build and scan job succeeded, or
+ *  - a merge-train run selected none, which `servicesToBuild` allows only for
+ *    docs/ and tests/ (the reviewed exemption) — the image job must have been
+ *    skipped, not failed or cancelled.
+ *
+ * A skipped, cancelled, failed or missing image job fails a run that selected
+ * images, and so does anything unreadable. A required check counts "skipped"
+ * as passing, so this job runs always() and decides itself.
+ *
+ * @returns {{ ok: boolean, message: string }}
+ */
+export function imagesGateVerdict(needs) {
+  const fail = (message) => ({ ok: false, message });
+  const scope = needs?.['container-scope'];
+  const containers = needs?.containers;
+  if (scope?.result !== 'success') {
+    return fail(`image selection did not succeed (${String(scope?.result ?? 'missing')})`);
+  }
+  if (typeof containers?.result !== 'string') return fail('the image job is missing from needs');
+  const { mode, services: raw } = scope.outputs ?? {};
+  let services;
+  try {
+    services = JSON.parse(raw);
+  } catch {
+    return fail('image selection output is not JSON');
+  }
+  if (!Array.isArray(services) || services.some((name) => typeof name !== 'string' || !name)) {
+    return fail('image selection output is malformed');
+  }
+  const noneBuilt = containers.result === 'skipped';
+  if (mode === 'pr') {
+    return services.length === 0 && noneBuilt
+      ? { ok: true, message: IMAGES_ON_TRAIN_NOTE }
+      : fail('an ordinary pull request must select and build no image');
+  }
+  if (mode !== 'main' && mode !== 'train' && mode !== 'unknown') {
+    return fail('image selection mode is missing or unknown');
+  }
+  if (services.length === 0) {
+    return mode === 'train' && noneBuilt
+      ? { ok: true, message: 'No image is affected by this change (docs/ and tests/ only).' }
+      : fail(`${mode} run selected no image`);
+  }
+  return containers.result === 'success'
+    ? {
+        ok: true,
+        message: `Built and scanned ${services.length} image(s) (${mode} run): ${services.join(', ')}.`,
+      }
+    : fail(`the image job ${containers.result} for ${services.length} selected image(s)`);
 }

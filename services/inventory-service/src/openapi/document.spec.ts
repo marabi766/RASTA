@@ -7,7 +7,8 @@ import {
   buildInventoryOpenApiDocument,
   formatDocument,
 } from './document';
-import { REFUSAL_REASONS } from '../shared/refusal';
+import { REFUSAL_REASONS, refusal, type ReasonOf, type RefusalArea } from '../shared/refusal';
+import { errorEnvelopeProblems } from '@rasta/nest-common';
 
 /**
  * The committed contract is exactly what the generator produces.
@@ -219,5 +220,13 @@ describe('the committed OpenAPI document', () => {
       expect([key, op.responses['201'] !== undefined]).toEqual([key, created]);
       expect([key, op.responses['200'] !== undefined]).toEqual([key, !created]);
     }
+  });
+
+  it('accepts the error bodies the shared filter really sends, typed refusals included (audit 10-26 F3)', () => {
+    const refusalOf = (area: string, code: string) =>
+      refusal(area as RefusalArea, code as ReasonOf<RefusalArea>, 'Refused');
+    expect(
+      errorEnvelopeProblems(buildInventoryOpenApiDocument(app), { refusal: refusalOf }),
+    ).toEqual([]);
   });
 });

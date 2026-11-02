@@ -1,4 +1,5 @@
-import { expireClaim, makeDue } from '@rasta/testing';
+import { eligibilityClockSql } from '@rasta/testing';
+import { expireClaim, makeDue, setEligibilityFixture } from '@rasta/testing';
 import {
   claimPendingSql,
   OutboxRelay,
@@ -116,6 +117,13 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
     await expect(setEligibility(a, ['EXISTING_FIXTURE', 'WRONG_ID'])).rejects.toThrow(
       'must update every requested fixture',
     );
+  });
+
+  it('the named outbox fixture refuses a missing id by its affected count', async () => {
+    await seedRow(a, 'COUNTED_FIXTURE', { attempts: 1 });
+    await expect(
+      setEligibilityFixture(a, 'outboxRetryPast', ['COUNTED_FIXTURE', 'WRONG_ID']),
+    ).rejects.toThrow('setEligibilityFixture must update every requested fixture');
   });
 
   // -- 3 ---------------------------------------------------------------------
@@ -859,11 +867,11 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
       'ck_outbox_attempts_nonneg',
     );
     await refuse(
-      `UPDATE outbox_message SET next_attempt_at=now() WHERE id='CK'`,
+      eligibilityClockSql`UPDATE outbox_message SET next_attempt_at=now() WHERE id='CK'`,
       'ck_outbox_next_attempt_requires_failure',
     );
     await refuse(
-      `UPDATE outbox_message
+      eligibilityClockSql`UPDATE outbox_message
           SET published_at=now(), claim_token='t', claim_owner='o',
               claim_expires_at=now()+interval '1 minute'
         WHERE id='CK'`,
@@ -987,30 +995,13 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
             attempts: kind === 'retry' || kind === 'paired' ? 1 : 0,
           });
           if (kind === 'lease') {
-            await a.client.$executeRawUnsafe(
-              `UPDATE outbox_message
-                  SET claim_token='old', claim_owner='old',
-                      claim_expires_at = now() - interval '1 minute'
-                WHERE id = $1`,
-              id,
-            );
+            await setEligibilityFixture(a, 'outboxLeasedPast', [id]);
           }
           if (kind === 'retry') {
-            await a.client.$executeRawUnsafe(
-              `UPDATE outbox_message SET next_attempt_at = now() - interval '1 minute'
-                WHERE id = $1`,
-              id,
-            );
+            await setEligibilityFixture(a, 'outboxRetryPast', [id]);
           }
           if (kind === 'paired') {
-            await a.client.$executeRawUnsafe(
-              `UPDATE outbox_message
-                  SET claim_token='old', claim_owner='old',
-                      claim_expires_at = now() - interval '1 minute',
-                      next_attempt_at  = now() - interval '1 minute'
-                WHERE id = $1`,
-              id,
-            );
+            await setEligibilityFixture(a, 'outboxPairedPast', [id]);
           }
           made.push(id);
           n += 1;
@@ -1068,14 +1059,14 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
       );
       await seedRow(a, 'NO_LIVE_LEASE', { createdAt: new Date(base + 6_500) });
       await a.client.$executeRawUnsafe(
-        `UPDATE outbox_message
+        eligibilityClockSql`UPDATE outbox_message
             SET claim_token='live', claim_owner='live',
                 claim_expires_at = now() + interval '10 minutes'
           WHERE id = 'NO_LIVE_LEASE'`,
       );
       await seedRow(a, 'NO_FUTURE_RETRY', { createdAt: new Date(base + 7_500), attempts: 1 });
       await a.client.$executeRawUnsafe(
-        `UPDATE outbox_message SET next_attempt_at = now() + interval '10 minutes'
+        eligibilityClockSql`UPDATE outbox_message SET next_attempt_at = now() + interval '10 minutes'
           WHERE id = 'NO_FUTURE_RETRY'`,
       );
 
@@ -1235,7 +1226,7 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
         expect(clock).toEqual([{ active: true }]);
         for (const [index, testCase] of CASES.entries()) {
           await tx.$executeRawUnsafe(
-            `INSERT INTO outbox_message
+            eligibilityClockSql`INSERT INTO outbox_message
                (id, aggregate_type, aggregate_id, event_name, event_version, topic,
                 partition_key, payload, headers, correlation_id, created_at, attempts,
                 claim_count, claim_token, claim_owner, claim_expires_at, next_attempt_at,

@@ -43,6 +43,7 @@ import { FENCE_POOL_CONNECTIONS, KeycloakWriteFences } from './keycloak/keycloak
 import { IdentityRepository } from './identity/identity.repository';
 import { IdentityService } from './identity/identity.service';
 import { MembershipExpiryScanner } from './identity/membership-expiry.scanner';
+import { RegistrationIntakeWorker } from './identity/registration-intake.worker';
 import { KeycloakFenceSampler, pooledFenceSampleSource } from './keycloak/keycloak-fence-sampler';
 import {
   MembershipController,
@@ -198,6 +199,15 @@ export const LOGGER = Symbol('IDENTITY_LOGGER');
           projector,
           fences,
         ),
+    },
+    {
+      provide: RegistrationIntakeWorker,
+      inject: [ENV, IdentityRepository, IdentityService],
+      useFactory: (env: IdentityEnv, repository: IdentityRepository, identity: IdentityService) =>
+        new RegistrationIntakeWorker(repository, identity, {
+          intervalSeconds: env.REGISTRATION_INTAKE_INTERVAL_SECONDS,
+          batchSize: env.REGISTRATION_INTAKE_BATCH_SIZE,
+        }),
     },
 
     // The fence and lapse gauges, sampled on their own timers and their own
@@ -379,7 +389,8 @@ export const LOGGER = Symbol('IDENTITY_LOGGER');
         }),
     },
     {
-      // D-052: both relays, the purge, the expiry scanner, the Keycloak
+      // D-052: both relays, the purge, the expiry scanner, the registration
+      // intake worker (task 130), the Keycloak
       // projection consumer, the projector's recovery projections (D-070 D,
       // #458 r1 F2: a request's recovery has no other owner), the fence
       // sampler and the outbox gauges stop together in the destroy phase, by
@@ -397,6 +408,7 @@ export const LOGGER = Symbol('IDENTITY_LOGGER');
         OutboxPurgeScheduler,
         SECURITY_EVENT_RELAY,
         MembershipExpiryScanner,
+        RegistrationIntakeWorker,
         KeycloakProjectionConsumer,
         KeycloakProjector,
         KeycloakFenceSampler,
@@ -412,6 +424,7 @@ export const LOGGER = Symbol('IDENTITY_LOGGER');
         purge: OutboxPurgeScheduler,
         securityRelay: OutboxRelay,
         scanner: MembershipExpiryScanner,
+        intake: RegistrationIntakeWorker,
         projection: KeycloakProjectionConsumer,
         projector: KeycloakProjector,
         sampler: KeycloakFenceSampler,
@@ -425,7 +438,7 @@ export const LOGGER = Symbol('IDENTITY_LOGGER');
         new OutboxShutdown({
           relay,
           purge,
-          workers: [securityRelay, scanner, projection, projector, sampler, gauges],
+          workers: [securityRelay, scanner, intake, projection, projector, sampler, gauges],
           // Closed once the drain has returned, by the same deadline (D-052 phase 4b).
           publishers: [publisher],
           // Last of all, by the same deadline: each waits for its transactions

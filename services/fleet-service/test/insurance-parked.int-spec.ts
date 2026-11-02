@@ -1,3 +1,4 @@
+import { eligibilityClockWrite } from '@rasta/testing';
 import type { EventEnvelope } from '@rasta/contracts';
 import {
   OutboxRelay,
@@ -203,7 +204,7 @@ describe('parked INSURANCE_RECORDED (#240 r8)', () => {
 
   /** Makes a parked row, and its last attempt, an hour old by the database's clock. */
   const age = (eventId: string) =>
-    prisma.client.$executeRaw`
+    eligibilityClockWrite(prisma.client)`
       UPDATE insurance_pending_verification
          SET first_seen_at = now() - interval '1 hour',
              last_attempt_at = CASE WHEN last_attempt_at IS NULL THEN NULL

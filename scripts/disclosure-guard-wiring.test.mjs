@@ -471,7 +471,12 @@ test('specs take test and expect only from guarded harnesses, including test.exp
       source,
       /export const expect = playwrightExpect\.extend\(guardedAbsenceMatchers\(playwrightExpect\)\);/,
     );
-    assert.match(source, /export const test = withGuard\(base\.extend\(\{\}\)\);/);
+    assert.match(source, /export const test = withGuard\(\s*base\.extend[^]*?\),\s*\);/);
+    // Main's redirect refusal and the PR's recursive assertion guard both remain wired.
+    assert.match(
+      source,
+      /request: async \(\{ request \}, provide\) => provide\(guardRequestContext\(request\)\),/,
+    );
   }
   const api = readFileSync(join(root, 'tests/e2e/src/api.ts'), 'utf8');
   assert.match(api, /Object\.assign\(test, \{ expect \}\);/);

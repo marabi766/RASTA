@@ -233,6 +233,29 @@ model RegistrationRequest {
   @@map("registration_request")
 }
 
+/// A public registration as received (task 130, PR #483 r1 R5): one row per
+/// valid submission, written and committed before anything that depends on
+/// whether the username or the email is held, so every submission costs the
+/// same. The registration worker turns it into a user and a
+/// `RegistrationRequest` (under this id) or discards it as a duplicate, and
+/// deletes it either way. Migration 20261029130000.
+model RegistrationIntake {
+  id            String   @id @db.VarChar(64)
+  /// The validated `SubmitRegistrationDto`: personal data, kept only until handled.
+  submission    Json
+  receivedAt    DateTime @default(now()) @map("received_at")
+  attempts      Int      @default(0)
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at")
+  /// The submitting request's verified principal (`USER` | `SERVICE`), or `ANONYMOUS` (no id) when unauthenticated. Never from the body.
+  actorType     String   @map("actor_type") @db.VarChar(16)
+  actorId       String?  @map("actor_id") @db.VarChar(256)
+  /// The submitting request's correlation id, carried to REGISTRATION_SUBMITTED.
+  correlationId String   @map("correlation_id") @db.VarChar(128)
+
+  @@index([nextAttemptAt, id], map: "ix_registration_intake_due")
+  @@map("registration_intake")
+}
+
 enum RegistrationStatus {
   PENDING
   APPROVED
@@ -471,6 +494,31 @@ model AuditCorrectionCommand {
 
   @@id([actorId, idempotencyKey])
   @@map("audit_correction_command")
+}
+
+/// A direct provisioning's intent (`POST /v1/users`, task 117 F6): written and
+/// committed before the Keycloak account is created, with the stable user id
+/// the account carries as `rasta_user_id`. A retry with the same actor, key,
+/// acting organization and body creates under that id or adopts the account an
+/// earlier attempt created; once the user committed, it replays the answer.
+/// Not tenant-scoped: keyed by the verified actor, like `AuditCorrectionCommand`.
+model UserProvisioningIntent {
+  actorId              String    @map("actor_id") @db.VarChar(256)
+  idempotencyKey       String    @map("idempotency_key") @db.VarChar(255)
+  actingOrganizationId String?   @map("acting_organization_id") @db.VarChar(64)
+  /// SHA-256 of the normalised request body — never the body itself.
+  requestHash          String    @map("request_hash") @db.Char(64)
+  userId               String    @unique(map: "ux_user_provisioning_intent_user") @map("user_id") @db.VarChar(64)
+  membershipId         String    @map("membership_id") @db.VarChar(64)
+  createdAt            DateTime  @default(now()) @map("created_at")
+  completedAt          DateTime? @map("completed_at")
+  /// The answer a retry replays once the user committed.
+  responseBody         Json?     @map("response_body")
+
+  // SQL-only (migration 20261029120000): CHECK completed_at and response_body
+  // are both null or both set.
+  @@id([actorId, idempotencyKey])
+  @@map("user_provisioning_intent")
 }
 
 /// One Keycloak write attempt of a user that may still land (D-069, ADR-060

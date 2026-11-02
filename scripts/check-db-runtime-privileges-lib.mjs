@@ -13,26 +13,42 @@ const reachableSql = readFileSync(
   new URL('runtime-reachable.sql', privilegeLibrary),
   'utf8',
 ).replaceAll('RUNTIME_ROLE', ":'runtime'");
-export const requiredRuntimeFunctions = readFileSync(
-  new URL('runtime-function-grants.txt', privilegeLibrary),
+/** The rights the runtime role may never hold: the same file the split revokes from. */
+const forbiddenSql = readFileSync(
+  new URL('runtime-forbidden.sql', privilegeLibrary),
   'utf8',
-)
-  .split('\n')
-  .filter((line) => line && !line.startsWith('#'))
-  .map((line) => {
-    const parts = line.split('|');
-    if (
-      parts.length !== 2 ||
-      !/^[a-z]+$/.test(parts[0]) ||
-      !/^public\.[a-z_]+\([a-zA-Z",]+\)$/.test(parts[1])
-    ) {
-      throw new Error('malformed required runtime function list');
-    }
-    return parts;
-  });
-const requiredFunctionValues = requiredRuntimeFunctions
-  .map(([service, signature]) => `('${service}', '${signature}')`)
-  .join(',\n');
+).replaceAll('MIGRATOR_ROLE', "(:'runtime' || '_migrator')");
+
+// The split reads the list with the same three patterns (restore_runtime_function_grants).
+const SERVICE = /^[a-z][a-z0-9]*$/;
+const SIGNATURE = /^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*\([A-Za-z0-9_.",]*\)$/;
+const MIGRATION = /^[0-9]{14}_[a-z0-9_]+$/;
+
+/**
+ * runtime-function-grants.txt: `[service, signature, migration]` per line —
+ * the last one too, newline or not; a malformed line throws.
+ */
+export function parseRequiredRuntimeFunctions(text) {
+  return text
+    .split('\n')
+    .filter((line) => line && !line.startsWith('#'))
+    .map((line) => {
+      const parts = line.split('|');
+      if (
+        parts.length !== 3 ||
+        !SERVICE.test(parts[0]) ||
+        !SIGNATURE.test(parts[1]) ||
+        !MIGRATION.test(parts[2])
+      ) {
+        throw new Error('malformed required runtime function list');
+      }
+      return parts;
+    });
+}
+
+export const requiredRuntimeFunctions = parseRequiredRuntimeFunctions(
+  readFileSync(new URL('runtime-function-grants.txt', privilegeLibrary), 'utf8'),
+);
 
 /**
  * Every service's place in the split: `split` (lib/service-privilege-split.bash)
@@ -79,19 +95,31 @@ export function classifyServices({
  *
  *   * role attributes: SUPERUSER, CREATEDB, CREATEROLE, BYPASSRLS;
  *   * owns the database, any non-system schema, relation, function or type;
- *   * CREATE on the database or on any non-system schema;
- *   * TRUNCATE, REFERENCES or TRIGGER on any table;
  *   * membership in any role that owns something here, is named `*_migrator`,
- *     or is superuser-capable;
- *   * extension relation writes, including inherited/PUBLIC and column grants;
- *   * any right on the migration ledger `_prisma_migrations`, table or column.
+ *     or is superuser-capable, and in the predefined roles that read or write
+ *     everything or the server's files;
+ *   * a required runtime function (runtime-function-grants.txt) it cannot run;
+ *   * every right of runtime-forbidden.sql — the rules the split revokes by:
+ *     CREATE or TEMPORARY on the database, CREATE on a schema, TRUNCATE,
+ *     REFERENCES or TRIGGER on a table, view or foreign table (a column's
+ *     REFERENCES too), UPDATE on a sequence, any right on the migration ledger,
+ *     EXECUTE on a definer or trigger function, PUBLIC EXECUTE on a migrator
+ *     function, a default privilege that would grant any of these to a later
+ *     object, and writes on an extension's relations and sequences.
+ *
+ * `required` is the list to hold the role to (a test passes its own).
  */
-export const FINDINGS_SQL = String.raw`
+export function findingsSql(required = requiredRuntimeFunctions) {
+  const requiredFunctionValues = required
+    .map(([service, signature]) => `('${service}', '${signature}')`)
+    .join(',\n');
+  return String.raw`
 WITH me AS (
   SELECT oid, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
     FROM pg_roles WHERE rolname = :'runtime'
 ),
 reachable AS (${reachableSql}),
+forbidden AS (${forbiddenSql}),
 required_functions AS MATERIALIZED (
   SELECT signature FROM (VALUES ${requiredFunctionValues}) v(service, signature)
   WHERE :'runtime' = 'rasta_' || service
@@ -105,10 +133,8 @@ user_tables AS (
   SELECT c.oid, n.nspname, c.relname, c.relkind, c.relowner FROM pg_class c
     JOIN user_ns n ON n.oid = c.relnamespace
 )
-SELECT finding FROM (
-  SELECT 'role does not exist' AS finding WHERE NOT EXISTS (SELECT 1 FROM me)
-  UNION ALL
-  SELECT 'is ' || a FROM me,
+SELECT DISTINCT finding FROM (
+  SELECT 'is ' || a AS finding FROM me,
     LATERAL (VALUES ('SUPERUSER', rolsuper), ('CREATEDB', rolcreatedb),
                     ('CREATEROLE', rolcreaterole), ('BYPASSRLS', rolbypassrls)) v(a, held)
    WHERE held
@@ -116,14 +142,8 @@ SELECT finding FROM (
   SELECT 'owns database ' || d.datname FROM pg_database d, me
    WHERE d.datname = current_database() AND pg_has_role(me.oid, d.datdba, 'MEMBER')
   UNION ALL
-  SELECT 'CREATE on database ' || current_database() FROM me
-   WHERE EXISTS (SELECT 1 FROM reachable r WHERE r.oid <> 0 AND has_database_privilege(r.oid, current_database(), 'CREATE'))
-  UNION ALL
   SELECT 'owns schema ' || n.nspname FROM user_ns n, me
    WHERE pg_has_role(me.oid, n.nspowner, 'MEMBER')
-  UNION ALL
-  SELECT 'CREATE on schema ' || n.nspname FROM user_ns n, me
-   WHERE EXISTS (SELECT 1 FROM reachable r WHERE r.oid <> 0 AND has_schema_privilege(r.oid, n.oid, 'CREATE'))
   UNION ALL
   SELECT 'owns ' || CASE t.relkind WHEN 'S' THEN 'sequence' WHEN 'i' THEN 'index'
                        WHEN 'I' THEN 'index' WHEN 'v' THEN 'view'
@@ -139,25 +159,7 @@ SELECT finding FROM (
     JOIN user_ns n ON n.oid = ty.typnamespace, me
    WHERE ty.typrelid = 0 AND ty.typelem = 0 AND pg_has_role(me.oid, ty.typowner, 'MEMBER')
   UNION ALL
-  SELECT priv || ' on ' || t.nspname || '.' || t.relname
-    FROM user_tables t, me, unnest(ARRAY['TRUNCATE', 'REFERENCES', 'TRIGGER']) priv
-   WHERE t.relkind IN ('r', 'p') AND EXISTS (SELECT 1 FROM reachable r WHERE r.oid <> 0 AND has_table_privilege(r.oid, t.oid, priv))
-  UNION ALL
-  SELECT priv || ' on extension relation ' || t.nspname || '.' || t.relname
-    FROM user_tables t, me,
-         unnest(ARRAY['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) priv
-   WHERE t.relkind IN ('r', 'p', 'v', 'm', 'f')
-     AND EXISTS (SELECT 1 FROM pg_depend d
-                  WHERE d.classid = 'pg_class'::regclass AND d.objid = t.oid AND d.deptype = 'e')
-     AND (EXISTS (SELECT 1 FROM reachable r WHERE r.oid <> 0 AND has_table_privilege(r.oid, t.oid, priv))
-          OR (priv IN ('INSERT', 'UPDATE', 'REFERENCES') AND EXISTS (SELECT 1 FROM reachable r WHERE r.oid <> 0 AND has_any_column_privilege(r.oid, t.oid, priv))))
-  UNION ALL
-  SELECT priv || ' on extension sequence ' || t.nspname || '.' || t.relname
-    FROM user_tables t, me, unnest(ARRAY['USAGE', 'UPDATE']) priv
-   WHERE t.relkind = 'S'
-     AND EXISTS (SELECT 1 FROM pg_depend d
-                  WHERE d.classid = 'pg_class'::regclass AND d.objid = t.oid AND d.deptype = 'e')
-     AND EXISTS (SELECT 1 FROM reachable r WHERE r.oid <> 0 AND has_sequence_privilege(r.oid, t.oid, priv))
+  SELECT f.label FROM forbidden f WHERE f.held
   UNION ALL
   SELECT 'member of ' || m.rolname || ' (could SET ROLE to an owner or superuser-capable role)'
     FROM pg_roles m, me
@@ -169,31 +171,10 @@ SELECT finding FROM (
           OR EXISTS (SELECT 1 FROM user_ns n WHERE n.nspowner = m.oid)
           OR EXISTS (SELECT 1 FROM user_tables t WHERE t.relowner = m.oid))
   UNION ALL
-  SELECT 'a right on ' || t.nspname || '._prisma_migrations' FROM user_tables t, me
-   WHERE t.relname = '_prisma_migrations'
-     AND (EXISTS (SELECT 1 FROM reachable r WHERE r.oid <> 0 AND has_table_privilege(r.oid, t.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'))
-          OR EXISTS (SELECT 1 FROM reachable r WHERE r.oid <> 0 AND has_any_column_privilege(r.oid, t.oid, 'SELECT, INSERT, UPDATE, REFERENCES')))
-  UNION ALL
   SELECT 'member of predefined role ' || r.rolname FROM pg_roles r
     JOIN reachable h ON h.oid = r.oid
    WHERE r.rolname IN ('pg_write_all_data', 'pg_read_all_data', 'pg_write_server_files',
      'pg_read_server_files', 'pg_execute_server_program', 'pg_maintain')
-  UNION ALL
-  SELECT 'PUBLIC EXECUTE on migrator function ' || p.oid::regprocedure::text
-    FROM pg_proc p JOIN pg_roles owner ON owner.oid = p.proowner,
-      LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
-   WHERE owner.rolname = :'runtime' || '_migrator' AND a.grantee = 0
-     AND a.privilege_type = 'EXECUTE'
-     AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass
-       AND d.objid = p.oid AND d.deptype = 'e')
-  UNION ALL
-  SELECT 'reachable EXECUTE on definer/trigger function ' || p.oid::regprocedure::text
-    FROM pg_proc p JOIN user_ns n ON n.oid = p.pronamespace
-   WHERE (p.prosecdef OR p.prorettype IN ('trigger'::regtype, 'event_trigger'::regtype))
-     AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass
-       AND d.objid = p.oid AND d.deptype = 'e')
-     AND EXISTS (SELECT 1 FROM reachable r WHERE r.oid <> 0
-       AND has_function_privilege(r.oid, p.oid, 'EXECUTE'))
   UNION ALL
   SELECT 'missing required runtime EXECUTE on ' || f.signature FROM required_functions f, me
    WHERE to_regprocedure(f.signature) IS NULL
@@ -201,6 +182,9 @@ SELECT finding FROM (
 ) f
 ORDER BY finding;
 `;
+}
+
+export const FINDINGS_SQL = findingsSql();
 
 /** The verdict for one service, from its findings: any finding fails. */
 export function verdict({ service }, findings) {

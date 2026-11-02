@@ -146,4 +146,35 @@ export const JEST_LAUNCHERS = {
         '67bd3962244fdf7c909bfb93ce1f07d7ab3643203570f87d3af1d36900ee8795',
     },
   },
+  'scripts/exchange-deadline-rule.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns ESLint with stdin fixtures; Jest references are rule fixtures, never a Jest launch.',
+    sha256: {
+      'scripts/exchange-deadline-rule.test.mjs':
+        'b9bff678cb2ab86c5663e6fce48198b99359a3b0322ade28858180ff5314a3df',
+    },
+  },
+  'scripts/testing-dev-only.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns offline pnpm install, production dependency graph queries and Node checker probes; no Jest launch.',
+    sha256: {
+      'scripts/testing-dev-only.test.mjs':
+        'dc670876ab27e52357d85322a890ff18b06301c8b5fdf5817d2d31e55ee8d89a',
+      'scripts/testing-dev-only.mjs':
+        '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
+      'scripts/testing-dev-only-source.mjs':
+        '34e94e8bdacc74c3a7289a2036f9768c170a587e74e488003bcf523a32588d0f',
+    },
+  },
+  'scripts/lint-scripts-registration.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Spawns git fixture commands and Turbo lint --dry=json snapshots; test runner names are registration fixtures, never executed.',
+    sha256: {
+      'scripts/lint-scripts-registration.test.mjs':
+        '90f8b760685f446aa47d26ea57690220b35c87e73c38b02825098d6e1ff3e7a6',
+    },
+  },
 };

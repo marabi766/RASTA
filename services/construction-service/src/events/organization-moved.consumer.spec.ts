@@ -108,6 +108,8 @@ describe('the ORGANIZATION_MOVED consumer', () => {
     const subscribed: string[] = [];
     let eachMessage: ((message: unknown) => Promise<void>) | undefined;
     const fake = {
+      events: { CRASH: 'consumer.crash' },
+      on: () => () => undefined,
       connect: async () => undefined,
       disconnect: async () => undefined,
       subscribe: async ({ topic }: { topic: string }) => void subscribed.push(topic),

@@ -15,6 +15,8 @@ export async function withRedirectProbe(
   options: {
     body: unknown;
     status?: number;
+    /** What the redirect target answers with (default 200): a following client would read it. */
+    targetStatus?: number;
     sameOrigin?: boolean;
     /** Successful first page, followed by a redirect on the second exchange. */
     firstPage?: unknown;
@@ -38,7 +40,7 @@ export async function withRedirectProbe(
         target.push({ headers: req.headers });
         req.resume();
         res
-          .writeHead(200, { 'content-type': 'application/json' })
+          .writeHead(options.targetStatus ?? 200, { 'content-type': 'application/json' })
           .end(JSON.stringify(options.body));
       }),
     );
@@ -48,7 +50,7 @@ export async function withRedirectProbe(
           req.resume();
           target.push({ headers: req.headers });
           res
-            .writeHead(200, { 'content-type': 'application/json' })
+            .writeHead(options.targetStatus ?? 200, { 'content-type': 'application/json' })
             .end(JSON.stringify(options.body));
           return;
         }

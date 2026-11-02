@@ -3,6 +3,8 @@ import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey, type KeyLike } fro
 import { z } from 'zod';
 import { legacyParse } from '@rasta/contracts';
 
+import { CredentialRedirectRefusedError, credentialFetch } from './credential-fetch';
+
 /**
  * The four OIDC steps this portal needs, on the server (ADR-059 § 2).
  *
@@ -145,7 +147,8 @@ const TOKEN_ENDPOINT_TIMEOUT_MS = 10_000;
 async function postForm(
   endpoint: string,
   body: Record<string, string>,
-  fetchImpl: typeof fetch,
+  // Absent: credentialFetch's own fetch, the only raw one (Q-155 boundary).
+  fetchImpl: typeof fetch | undefined,
   timeoutMs: number = TOKEN_ENDPOINT_TIMEOUT_MS,
 ): Promise<TokenResponse> {
   // One deadline for the whole exchange, body included: the signal stays
@@ -155,14 +158,29 @@ async function postForm(
 
   let response: Response;
   try {
-    response = await fetchImpl(endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-      body: new URLSearchParams(body).toString(),
-      cache: 'no-store',
-      signal,
-    });
-  } catch {
+    // Never follows a redirect: a 307/308 would resend this form — the code
+    // and its PKCE verifier, or the refresh token — to wherever the Location
+    // points, and a followed answer is not the provider's (Q-155).
+    response = await credentialFetch(
+      endpoint,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          accept: 'application/json',
+        },
+        body: new URLSearchParams(body).toString(),
+        cache: 'no-store',
+        signal,
+      },
+      fetchImpl,
+    );
+  } catch (error) {
+    // A redirect says nothing about the grant: never INVALID_GRANT, so a
+    // refresh it answers leaves the session as any unanswered one does.
+    if (error instanceof CredentialRedirectRefusedError) {
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider answered with a redirect');
+    }
     // The error object is not forwarded: it can carry the request body, and
     // the request body is a refresh token or an authorization code.
     throw new OidcError(
@@ -238,7 +256,7 @@ export interface ExchangeRequest {
 
 export function exchangeCode(
   request: ExchangeRequest,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
 ): Promise<TokenResponse> {
   return postForm(
     request.endpoints.token,
@@ -262,7 +280,7 @@ export function refreshTokens(
     /** Overrides {@link TOKEN_ENDPOINT_TIMEOUT_MS}. Exists for tests. */
     timeoutMs?: number;
   },
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
 ): Promise<TokenResponse> {
   return postForm(
     request.endpoints.token,

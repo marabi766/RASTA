@@ -1,4 +1,5 @@
 import Redis from 'ioredis';
+import { assertRedisDiagnosticsSafe, protectRedisReadyCheck } from '@rasta/config';
 import type { WebServerEnv } from './env';
 import { endpointsFor, refreshTokens, type TokenResponse } from './oidc';
 import {
@@ -7,7 +8,7 @@ import {
   type RefreshCoordinator,
 } from './refresh-coordinator';
 import { openSession, sealSession, sessionSecondsLeft, type WebSession } from './session';
-import { storedOrganizationFor } from './session-organization';
+import { sessionOrganization } from './session-organization';
 
 /**
  * Keeping a session's tokens usable, at the one point where the result can
@@ -54,16 +55,29 @@ import { storedOrganizationFor } from './session-organization';
  * already run out. Without the terminal rule a revoked session kept its
  * cookie, and re-asked the provider, until its absolute lifetime ran out.
  *
- * ## The organization goes with the token
+ * ## The organization stays where the session was pinned (task 118)
  *
- * The session's `organizationId` is the stored copy of the organization its
- * access token acts for (`session-organization.ts`). A refresh writes the new
- * token's, and a cookie whose copy disagrees with its token — sealed before
- * the copy was kept in step — is resealed with the token's here, before the
- * route runs, when its token needs no refresh. Where the cookie cannot be
- * written (a refused refresh, below) such a session is hidden from the render
- * instead: no page may draw it for one organization while it acts for another
- * (PR 405 review 1, F1).
+ * The session's `organizationId` is the organization it was pinned to at
+ * sign-in (`session-organization.ts`), and a refresh never moves it: the new
+ * token is kept beside the same organization, and every gateway call carries
+ * that organization as `X-Organization-Id`. The person may have switched their
+ * active organization elsewhere since — another session, identity's API — and
+ * the new token's `org_id` then names another one; that changes nothing here
+ * while the token still grants the pinned organization a role (audit F2).
+ *
+ * Two outcomes are kept apart:
+ *
+ *   - **Definitive loss**: the refresh succeeded and the new token grants the
+ *     pinned organization nothing — the membership or every role in it was
+ *     removed. The rotated tokens are written back (the old refresh token is
+ *     spent), the organization is not, and the session can no longer act:
+ *     `readSession()` refuses it and the person is sent to
+ *     `/account/recovery`, which says so (`ORGANIZATION_LOST`). Never adopted
+ *     silently: only a new sign-in pins another organization.
+ *   - **Transient failure** — no answer, a refusal within the grace, an
+ *     expired token, a cookie race: exactly as before (above). The stored
+ *     organization is untouched there too; nothing ever falls back to the
+ *     token's active organization.
  */
 
 /**
@@ -81,18 +95,28 @@ export type SessionRenewal =
   /** A usable session that needs no change. */
   | { readonly kind: 'VALID' }
   /**
-   * Refreshed — or, with the same tokens, resealed so its stored organization
-   * is its token's: write this cookie back, living no longer than
-   * `maxAgeSeconds`.
+   * Refreshed, for the same organization: write this cookie back, living no
+   * longer than `maxAgeSeconds`.
    */
   | { readonly kind: 'RENEWED'; readonly sealed: string; readonly maxAgeSeconds: number }
+  /**
+   * Refreshed, but the new token grants the pinned organization nothing: write
+   * this cookie back too — it holds the rotated tokens and the same, now
+   * unusable, organization — and the session is recovered, not continued
+   * (`/account/recovery`). Never moved to the token's organization.
+   */
+  | {
+      readonly kind: 'ORGANIZATION_LOST';
+      readonly sealed: string;
+      readonly maxAgeSeconds: number;
+    }
   /**
    * The refresh was refused or went unanswered. Leave the browser's cookie
    * alone (see above); `usable` says whether this request may still act on
    * the session — true while its access token has not yet expired, judged by
-   * the clock once the refresh settled, and its stored organization is its
-   * token's (the cookie cannot be resealed here). Either way the failure may pass: the
-   * login itself is not known to have ended (`session-state.ts`).
+   * the clock once the refresh settled, and its token still grants the pinned
+   * organization a role. Either way the failure may pass: the login itself is
+   * not known to have ended (`session-state.ts`).
    */
   | { readonly kind: 'REFUSED'; readonly usable: boolean }
   /**
@@ -164,22 +188,9 @@ export async function renewSession(
   const secondsLeft = sessionSecondsLeft(session, env.WEB_SESSION_MAX_AGE_SECONDS, now);
   if (secondsLeft <= 0) return { kind: 'ENDED' };
 
-  if (!isExpiring(session, now)) {
-    if (inStep(session)) return { kind: 'VALID' };
-    // Same tokens, the token's organization: no refresh is spent, so nothing
-    // can race this write. The copy it replaces is kept, to recognise what was
-    // remembered under it (`formerOrganizationId`).
-    const resealed: WebSession = {
-      ...session,
-      organizationId: storedOrganizationFor(session.accessToken),
-      formerOrganizationId: formerCopyOf(session),
-    };
-    return {
-      kind: 'RENEWED',
-      sealed: sealSession(resealed, env.WEB_SESSION_SECRET),
-      maxAgeSeconds: secondsLeft,
-    };
-  }
+  // The token is used as it is. Whether it still grants the pinned
+  // organization is `readSession()`'s question, asked on every read.
+  if (!isExpiring(session, now)) return { kind: 'VALID' };
 
   const refresh =
     deps.refresh ??
@@ -194,9 +205,11 @@ export async function renewSession(
   const outcome = await coordinator.refresh(session.refreshToken, refresh);
   // Read after the await: the token may have run out while the refresh was out.
   const settledAt = deps.clock?.() ?? deps.now ?? Date.now();
-  // A copy that disagrees with its token cannot be resealed on a refusal (the
-  // cookie is left alone), so this render does not use it either.
-  const usable = session.accessTokenExpiresAt > Math.floor(settledAt / 1000) && inStep(session);
+  // A session that cannot act for its organization is not used by this render
+  // either (`readSession()` would refuse it in any case).
+  const usable =
+    session.accessTokenExpiresAt > Math.floor(settledAt / 1000) &&
+    sessionOrganization(session) !== undefined;
   if (outcome.kind === 'REFUSED') return { kind: 'REFUSED', usable };
   if (outcome.kind === 'REJECTED') {
     // Terminal for the token — once the grace has passed with no rotation of
@@ -212,37 +225,24 @@ export async function renewSession(
     accessToken: tokens.access_token,
     accessTokenExpiresAt: Math.floor(now / 1000) + tokens.expires_in,
     refreshToken: tokens.refresh_token,
-    // The new token's organization, never the login's: the person may have
-    // switched organization since, and the token is what every service reads.
-    organizationId: storedOrganizationFor(tokens.access_token),
-    // A copy that was out of step is kept, to recognise what was remembered under it.
-    ...(inStep(session) ? {} : { formerOrganizationId: formerCopyOf(session) }),
-    // `issuedAt` is carried over untouched by the spread: a refresh extends
-    // the access token, never the session.
+    // `organizationId` is carried over untouched by the spread: the session
+    // acts for the organization it was pinned to, whichever one the new token's
+    // `org_id` names (audit F2). `issuedAt` likewise: a refresh extends the
+    // access token, never the session.
   };
-
-  return {
-    kind: 'RENEWED',
+  const sealedRenewal = {
     sealed: sealSession(renewed, env.WEB_SESSION_SECRET),
     // The cookie lives no longer than the session it carries.
     maxAgeSeconds: secondsLeft,
   };
-}
 
-/** True when the session's stored organization is the one its token acts for. */
-function inStep(session: WebSession): boolean {
-  return session.organizationId === storedOrganizationFor(session.accessToken);
-}
-
-/**
- * The copy an out-of-step cookie is brought into step from: the first one
- * only — a cookie is out of step only once, as sealed by the build before
- * task 100, whose copy was the login's organization for its whole life.
- */
-function formerCopyOf(session: WebSession): string | null {
-  return session.formerOrganizationId !== undefined
-    ? session.formerOrganizationId
-    : session.organizationId;
+  // Definitive: the provider minted this token, and it grants the pinned
+  // organization no role. Kept for what it is — a session that cannot act —
+  // rather than continued, or moved to the token's organization.
+  if (sessionOrganization(renewed) === undefined && renewed.organizationId !== null) {
+    return { kind: 'ORGANIZATION_LOST', ...sealedRenewal };
+  }
+  return { kind: 'RENEWED', ...sealedRenewal };
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +281,7 @@ function defaultCoordinator(env: RenewalDependencies['env']): RefreshCoordinator
     return coordinator;
   }
 
+  assertRedisDiagnosticsSafe();
   const redis = new Redis(env.WEB_REDIS_URL, {
     // Bounded, not instant: a command may wait for the connection being
     // established — the first refresh after a start or a reconnect would
@@ -294,6 +295,7 @@ function defaultCoordinator(env: RenewalDependencies['env']): RefreshCoordinator
   });
   // A connection error is reported per command; the client's own event would
   // otherwise be an unhandled 'error' and take the process down.
+  protectRedisReadyCheck(redis);
   redis.on('error', () => undefined);
 
   coordinator = redisRefreshCoordinator({

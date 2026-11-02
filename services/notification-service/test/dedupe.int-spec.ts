@@ -1,3 +1,4 @@
+import { setTenantEligibilityFixture } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import {
@@ -182,16 +183,12 @@ describe('semantic deduplication against PostgreSQL', () => {
     ).resolves.toBe('SKIPPED');
 
     // Age the window past its retention, as the NTF-005 sweep will one day
-    // find it, then replay again.
+    // find it, then replay again. By the database clock, which the decision
+    // reads (`expires_at <= now()`), and exactly this organization's one window.
     await runUnscoped('the test ages a dedupe window to simulate retention passing', () =>
-      w.prisma.client.notificationDedupe.updateMany({
-        where: { organizationId },
-        data: {
-          firstSeenAt: new Date(Date.now() - 46 * 86_400_000),
-          lastSeenAt: new Date(Date.now() - 46 * 86_400_000),
-          expiresAt: new Date(Date.now() - 86_400_000),
-        },
-      }),
+      setTenantEligibilityFixture(w.prisma, 'dedupeWindowExpired', organizationId, [
+        first.dedupeKey,
+      ]),
     );
     await expect(
       deliver(w, insuranceExpiring({ organizationId, policyId, daysRemaining: 18 })),

@@ -1,4 +1,4 @@
-import { request } from './src/expect';
+import { newApiContext } from './src/expect';
 import { Kafka, logLevel } from 'kafkajs';
 import { e2eConfig } from './src/env';
 import { accessToken, ensureTenantBUser, E2E_USERS, verifyDisposableRealm } from './src/keycloak';
@@ -32,7 +32,7 @@ export default async function globalSetup(): Promise<void> {
   assertDisposableE2eTarget(config);
   const started = Date.now();
 
-  const context = await request.newContext();
+  const context = await newApiContext();
   try {
     // ---- economic-service ---------------------------------------------------
     // Its readiness probe reports the database and the broker separately, so a

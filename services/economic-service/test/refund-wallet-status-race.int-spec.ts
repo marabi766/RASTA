@@ -1,5 +1,6 @@
 import { ulid } from 'ulid';
 import { runUnscoped } from '@rasta/nest-common';
+import { setEligibilityFixture } from '@rasta/testing';
 import {
   asActor,
   cleanup,
@@ -97,14 +98,27 @@ describe('a refund whose wallet stops being ACTIVE while the provider is asked (
       env,
     ).runOnce();
 
-  const makeDue = (paymentIntentId: string) =>
-    runUnscoped('the suite makes its task due', () =>
-      prisma.client.$executeRawUnsafe(
-        `UPDATE payment_reconciliation_task SET next_attempt_at = now() - interval '1 second'
-          WHERE payment_intent_id = $1 AND status = 'PENDING'`,
-        paymentIntentId,
-      ),
+  /** The intent's reconciliation task ids, those in `status` only when given. */
+  const taskIds = async (paymentIntentId: string, status?: 'PENDING') =>
+    (
+      await runUnscoped('the suite reads its task ids', () =>
+        prisma.client.$queryRawUnsafe<{ id: string }[]>(
+          `SELECT id FROM payment_reconciliation_task
+            WHERE payment_intent_id = $1 AND ($2::text IS NULL OR status::text = $2)`,
+          paymentIntentId,
+          status ?? null,
+        ),
+      )
+    ).map((row) => row.id);
+
+  /** Its PENDING task due, by the database clock; none pending, nothing to make due. */
+  const makeDue = async (paymentIntentId: string) => {
+    const pending = await taskIds(paymentIntentId, 'PENDING');
+    if (pending.length === 0) return;
+    await runUnscoped('the suite makes its task due', () =>
+      setEligibilityFixture(prisma, 'paymentPendingDue', pending),
     );
+  };
 
   const tasksOf = (paymentIntentId: string) =>
     runUnscoped('the suite reads the tasks', () =>
@@ -390,12 +404,15 @@ describe('a refund whose wallet stops being ACTIVE while the provider is asked (
     await runUnscoped('the suite ages the task past the limit', () =>
       prisma.client.$executeRawUnsafe(
         `UPDATE payment_reconciliation_task
-            SET created_at = now() - make_interval(hours => $2::int + 1),
-                next_attempt_at = now() - interval '1 second'
+            SET created_at = now() - make_interval(hours => $2::int + 1)
           WHERE payment_intent_id = $1`,
         made.intentId,
         env.ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS,
       ),
+    );
+    const aged = await taskIds(made.intentId);
+    await runUnscoped('the suite makes the aged task due', () =>
+      setEligibilityFixture(prisma, 'paymentDue', aged),
     );
     await sweep();
     expect(await tasksOf(made.intentId)).toEqual([

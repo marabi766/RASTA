@@ -146,6 +146,13 @@ export class OrderSagaClient implements OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
-    await this.connection?.close();
+    try {
+      await this.connection?.close();
+    } catch (error) {
+      const failure = foreignFailure(error);
+      throw new Error(
+        `TEMPORAL_ADDRESS: Temporal close failed (${failure.type}, code ${failure.code ?? 'unknown'})`,
+      );
+    }
   }
 }

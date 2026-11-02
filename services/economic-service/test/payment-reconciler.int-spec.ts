@@ -1,3 +1,5 @@
+import { eligibilityClockSql } from '@rasta/testing';
+import { setEligibilityFixture } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import {
@@ -127,13 +129,25 @@ describe('the payment reconciler (real database)', () => {
       ),
     );
 
+  const fixtureTaskIds = async (
+    paymentIntentId: string,
+    pendingOnly = false,
+  ): Promise<string[]> => {
+    const ids = (await tasksOf(paymentIntentId))
+      .filter((task) => !pendingOnly || task.status === 'PENDING')
+      .map((task) => task.id);
+    // After the filter: a fixture that matches nothing must not pass silently.
+    expect(ids.length).toBeGreaterThan(0);
+    return ids;
+  };
+
   /** Makes the intent's pending task due now: the grace is what a test skips. */
   const makeDue = (paymentIntentId: string) =>
-    runUnscoped('the suite makes its task due', () =>
-      prisma.client.$executeRawUnsafe(
-        `UPDATE payment_reconciliation_task SET next_attempt_at = now() - interval '1 second'
-          WHERE payment_intent_id = $1 AND status = 'PENDING'`,
-        paymentIntentId,
+    runUnscoped('the suite makes its task due', async () =>
+      setEligibilityFixture(
+        prisma,
+        'paymentPendingDue',
+        await fixtureTaskIds(paymentIntentId, true),
       ),
     );
 
@@ -284,8 +298,9 @@ describe('the payment reconciler (real database)', () => {
       ]);
       expect(await deviations()).toEqual([]);
 
-      // A second sweep finds nothing to do and moves nothing again.
-      await makeDue(made.intentId);
+      // A second sweep finds nothing to do and moves nothing again. The task is
+      // DONE (above), so there is no pending task to make due: the old
+      // makeDue here matched no row and passed silently (PR-432 r1 F3).
       await sweeperWith().runOnce();
       expect(await reversalsOf(made.intentId)).toBe(1);
     });
@@ -572,12 +587,8 @@ describe('the payment reconciler (real database)', () => {
       expect((await wiring.paymentReconciliation.backlog()).escalated).toBeGreaterThanOrEqual(1);
 
       // Escalated is a person's: no sweep takes it again, due or not.
-      await runUnscoped('the suite backdates the task', () =>
-        prisma.client.$executeRawUnsafe(
-          `UPDATE payment_reconciliation_task SET next_attempt_at = now() - interval '1 hour'
-            WHERE payment_intent_id = $1`,
-          made.intentId,
-        ),
+      await runUnscoped('the suite backdates the task', async () =>
+        setEligibilityFixture(prisma, 'paymentDue', await fixtureTaskIds(made.intentId)),
       );
       const ask = jest.spyOn(restarted, 'getRefundStatus');
       await sweeperWith(limits, restarted).runOnce();
@@ -712,12 +723,8 @@ describe('the payment reconciler (real database)', () => {
       await asking;
 
       // A's lease lapses; B takes the task and resolves it.
-      await runUnscoped('the suite expires the lease', () =>
-        prisma.client.$executeRawUnsafe(
-          `UPDATE payment_reconciliation_task SET lease_until = now() - interval '1 second'
-            WHERE payment_intent_id = $1`,
-          made.intentId,
-        ),
+      await runUnscoped('the suite expires the lease', async () =>
+        setEligibilityFixture(prisma, 'paymentExpired', await fixtureTaskIds(made.intentId)),
       );
       await sweeperWith().runOnce();
       await expectRecordedRefund(made);
@@ -807,7 +814,7 @@ describe('the payment reconciler (real database)', () => {
       }
       await runUnscoped('the suite escalates one task and pushes the other out', () =>
         prisma.client.$executeRawUnsafe(
-          `UPDATE payment_reconciliation_task
+          eligibilityClockSql`UPDATE payment_reconciliation_task
               SET status = CASE WHEN payment_intent_id = $2 THEN 'ESCALATED'::"PaymentReconciliationStatus"
                                 ELSE status END,
                   escalated_at = CASE WHEN payment_intent_id = $2 THEN now() ELSE escalated_at END,
@@ -925,7 +932,7 @@ describe('the payment reconciler (real database)', () => {
           data: { failureReason: null },
         });
         await prisma.client.$executeRawUnsafe(
-          `UPDATE payment_reconciliation_task SET next_attempt_at = now() + interval '1 hour'
+          eligibilityClockSql`UPDATE payment_reconciliation_task SET next_attempt_at = now() + interval '1 hour'
             WHERE payment_intent_id = $1`,
           made.intentId,
         );
@@ -986,13 +993,8 @@ describe('the payment reconciler (real database)', () => {
       jest.spyOn(wiring.paymentReconciliation, 'retryLater').mockResolvedValueOnce(0);
       expect((await sweeperWith({}, restarted).runOnce()).lost).toBeGreaterThanOrEqual(1);
 
-      await runUnscoped('the suite frees the lease', () =>
-        prisma.client.$executeRawUnsafe(
-          `UPDATE payment_reconciliation_task
-              SET lease_until = NULL, lease_token = NULL, next_attempt_at = now() - interval '1 second'
-            WHERE payment_intent_id = $1`,
-          made.intentId,
-        ),
+      await runUnscoped('the suite frees the lease', async () =>
+        setEligibilityFixture(prisma, 'paymentReleasedDue', await fixtureTaskIds(made.intentId)),
       );
       const real = wiring.paymentReconciliation.ownershipOf.bind(wiring.paymentReconciliation);
       jest.spyOn(wiring.paymentReconciliation, 'ownershipOf').mockImplementation((task) => ({

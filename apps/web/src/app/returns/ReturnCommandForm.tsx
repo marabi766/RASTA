@@ -25,6 +25,7 @@ import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import type { Binding } from '@/lib/unresolved-order';
 import {
+  advanceUnresolvedReturn,
   answerUnresolvedReturn,
   clearUnresolvedReturn,
   restoreUnresolvedReturn,
@@ -35,6 +36,7 @@ import {
   type ReturnScope,
   returnQuarantine,
 } from '@/lib/unresolved-return';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 
 import { submitReturnCommand, submitReturnRequest } from './return-actions';
 import {
@@ -228,6 +230,8 @@ function ReturnCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        advance: () => advanceUnresolvedReturn(scope, submissionId, binding),
         send: () =>
           scope.kind === 'ORDER'
             ? submitReturnRequest(scope.orderId, previous, form)
@@ -239,8 +243,9 @@ function ReturnCommandFormBody({
         },
         // Still in doubt: kept. A definite answer to THIS submission's first send:
         // its own record is dropped — never another's.
-        answer: (state) => answerUnresolvedReturn(scope, state, binding),
-        settle: () => settleUnresolvedReturn(scope, submissionId, binding),
+        answer: (state, attempt) => answerUnresolvedReturn(scope, state, binding, attempt),
+        settle: (attempt, settlement) =>
+          settleUnresolvedReturn(scope, submissionId, binding, attempt, settlement),
         held: { kind: 'HELD' },
         unavailable: { kind: 'STORAGE_UNAVAILABLE' },
       });
@@ -558,7 +563,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the requests again and offers what they allow. */}
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

@@ -1118,12 +1118,10 @@ describe('economic consumers', () => {
     sources.recorded(payload, { recordedBy: 'USR-RACE' });
     const event = envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
 
-    // Two deliveries of one event, interleaved at the worst point. Delivery A
-    // found no evaluation, looked up [first], and its claim commits while
-    // delivery B is between its own lookup and its insert. Between the two
-    // lookups an administrator activates a backdated rule, so B's lookup sees
-    // both. B is the handle() below; A is what the stub writes just before
-    // B's lookup returns.
+    // Delivery A claimed [first] before a second backdated rule was created.
+    // Delivery B now sees both rules but must use A's durable snapshot. Writers
+    // finish before B's selection lock: an in-lock config write is now fenced.
+    await ruleIn(tenant, 40);
     const lookup = wiring.rewards.applicableRuleIds.bind(wiring.rewards);
     const spy = jest
       .spyOn(wiring.rewards, 'applicableRuleIds')
@@ -1141,7 +1139,6 @@ describe('economic consumers', () => {
             },
           }),
         );
-        await ruleIn(tenant, 40);
         const seen = await lookup(...args);
         expect(seen).toHaveLength(2);
         return seen;

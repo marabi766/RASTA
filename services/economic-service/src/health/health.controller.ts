@@ -1,6 +1,6 @@
 import { Controller, Get, HttpCode, HttpStatus, Res, VERSION_NEUTRAL } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Public } from '@rasta/nest-common';
+import { Public, assertConsumerHealth } from '@rasta/nest-common';
 import { metricsText, metricsContentType } from '@rasta/observability';
 import type { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
@@ -37,6 +37,7 @@ export class HealthController {
   @Public('Liveness probe; exposed only on the internal network')
   @ApiOperation({ summary: 'Process liveness' })
   live() {
+    assertConsumerHealth(SERVICE_NAME);
     return {
       status: 'ok',
       service: SERVICE_NAME,
@@ -53,6 +54,7 @@ export class HealthController {
     // writes a journal. Kafka being down delays event publication, but the
     // outbox retains what has not gone out and no financial state is lost —
     // that is the whole point of ADR-021. Degraded, not unready.
+    assertConsumerHealth(SERVICE_NAME);
     const database = await this.prisma.isHealthy();
 
     const checks = { database, kafka: await this.publisher.isHealthy() };

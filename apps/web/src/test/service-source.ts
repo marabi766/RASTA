@@ -89,13 +89,28 @@ export function decoratorOf(
     .find((call) => call.expression.getText() === name);
 }
 
-/** The string literals a `@Roles(...)` decorator names; anything else is refused. */
-export function rolesOf(controller: ts.SourceFile, method: string): string[] {
+/**
+ * The roles a `@Roles(...)` decorator names: string literals, or the spread of
+ * a top-level `const` array of literals in `constants` — the module the
+ * controller imports it from (identity's `@Roles(...MEMBERSHIP_ADMIN_ROLES)`,
+ * one list the service's guard and its live check both use). Anything else is
+ * refused.
+ */
+export function rolesOf(
+  controller: ts.SourceFile,
+  method: string,
+  constants?: ts.SourceFile,
+): string[] {
   const roles = decoratorOf(controller, method, 'Roles');
   if (!roles) throw new Error(`\`${method}\` has no @Roles`);
-  return roles.arguments.map((argument) => {
-    if (!ts.isStringLiteral(argument)) throw new Error('a role that is not a literal');
-    return argument.text;
+  return roles.arguments.flatMap((argument) => {
+    if (ts.isStringLiteral(argument)) return [argument.text];
+    if (ts.isSpreadElement(argument) && ts.isIdentifier(argument.expression) && constants) {
+      const names = literalsOf(topLevelConst(constants, argument.expression.text).getText());
+      if (names.length === 0) throw new Error(`\`${argument.expression.text}\` names no role`);
+      return names;
+    }
+    throw new Error('a role that is not a literal');
   });
 }
 

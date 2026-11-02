@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
@@ -13,10 +13,28 @@ import {
   readdirSync,
   symlinkSync,
   statSync,
+  renameSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
+import {
+  adoptGroup,
+  adoptPid,
+  disposeOwned,
+  hasLiveProcesses,
+  holdUntil,
+  ownedDirectory,
+  pollUntil,
+  runOwned,
+  spawnOwned,
+  signalProbe,
+  stopOwned,
+  waitForFile as waitFor,
+  waitForGroup,
+  waitForPid,
+  waitForRecordedGroup,
+} from './backup-restore-drill-test-support.mjs';
 
 const cli = new URL('./backup-restore-drill.mjs', import.meta.url);
 const repo = new URL('..', import.meta.url).pathname;
@@ -43,34 +61,41 @@ function fixture(directory) {
   }
   return root;
 }
-async function waitFor(path) {
-  for (let attempt = 0; attempt < 400 && !existsSync(path); attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  assert.ok(existsSync(path), path);
-}
+// Another actor with write access to the report's directory takes the lock claim's name. The
+// claim is the glob's one match, so no loop is needed (a stub may not contain one).
+const CLAIM_REPLACED = (directory) =>
+  `set -- '${directory}'/report.json.lock.*; rm -f "$1"; echo theirs > "$1"; `;
 function start(directory, root, extra = {}, executable = cli.pathname) {
-  const child = spawn(process.execPath, [executable, '--report', join(directory, 'report.json')], {
-    env: {
-      ...process.env,
-      PATH: `${directory}:${process.env.PATH}`,
-      TMPDIR: directory,
-      RASTA_DRILL_ROOT: root,
-      DOCKER_CONTEXT: 'remote',
-      DOCKER_HOST: 'ssh://unwanted',
-      ...extra,
+  const child = spawnOwned(
+    directory,
+    process.execPath,
+    [executable, '--report', join(directory, 'report.json')],
+    {
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        TMPDIR: directory,
+        RASTA_DRILL_ROOT: root,
+        DOCKER_CONTEXT: 'remote',
+        DOCKER_HOST: 'ssh://unwanted',
+        ...extra,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  );
   child.stdout.resume();
   child.stderr.resume();
   return child;
 }
 
-test('early mkdtemp failure writes a nonempty failure report', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-early-test-'));
+test('early mkdtemp failure writes a nonempty failure report', async (t) => {
+  // A private root the user cannot write: the startup checks pass, the directory cannot be made.
+  if (process.getuid() === 0) return t.skip('root can write anywhere');
+  const directory = ownedDirectory('drill-early-test-');
   try {
-    const child = start(directory, fixture(directory), { TMPDIR: join(directory, 'missing') });
+    const unwritable = join(directory, 'unwritable');
+    mkdirSync(unwritable, { mode: 0o500 });
+    const child = start(directory, fixture(directory), { TMPDIR: unwritable });
     const [code] = await once(child, 'exit');
     assert.equal(code, 1);
     const evidence = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
@@ -78,12 +103,12 @@ test('early mkdtemp failure writes a nonempty failure report', async () => {
     assert.equal(evidence.error.stage, 'preflight');
     assert.equal(evidence.cleanup.passed, true);
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    await disposeOwned(directory);
   }
 });
 
 test('operator root with local .env still refuses before setup', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-env-test-'));
+  const directory = ownedDirectory('drill-env-test-');
   try {
     const root = fixture(directory);
     writeFileSync(join(root, '.env'), 'SYNTHETIC_TEST=true\n');
@@ -98,19 +123,20 @@ test('operator root with local .env still refuses before setup', async () => {
     const raw = readFileSync(join(directory, 'report.json'), 'utf8');
     assert.ok(raw.indexOf('"project"') < raw.indexOf('"databases"'));
     assert.ok(raw.indexOf('"temporary"') < raw.indexOf('"databases"'));
-    // No sibling residue of the atomic rewrite survives a normal run.
+    // No sibling residue of the atomic rewrite survives a normal run; the only file beside the
+    // report is the journal whose checkpoint licensed the directory's removal.
     assert.deepEqual(
       readdirSync(directory).filter((name) => name.startsWith('report.json.')),
-      [],
+      ['report.json.recovery-journal.json'],
     );
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    await disposeOwned(directory);
   }
 });
 
 test('schema coverage fails in both directions before any setup or fixture writes', async () => {
   for (const direction of ['missing', 'extra']) {
-    const directory = mkdtempSync(join(tmpdir(), 'drill-coverage-cli-'));
+    const directory = ownedDirectory('drill-coverage-cli-');
     try {
       const root = fixture(directory);
       if (direction === 'missing') {
@@ -138,27 +164,27 @@ test('schema coverage fails in both directions before any setup or fixture write
         false,
       );
     } finally {
-      rmSync(directory, { recursive: true, force: true });
+      await disposeOwned(directory);
     }
   }
 });
 
 for (const stoppedLeftover of [false, true]) {
   test(`SIGHUP, second signal and broken stderr complete teardown; stopped leftover=${stoppedLeftover}`, async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'drill-signal-test-'));
+    const directory = ownedDirectory('drill-signal-test-');
     let child;
     try {
       const root = fixture(directory);
       writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
       writeFileSync(
         join(directory, 'docker'),
-        `#!/bin/sh
+        `#!/bin/bash
 [ "$DOCKER_CONTEXT" = default ] && [ "$DOCKER_HOST" = unix:///var/run/docker.sock ] || exit 99
 case "$*" in
   *'up -d'*) touch '${directory}/started'; exec sleep 30 ;;
   *'down --volumes'*)
     touch '${directory}/cleaning'
-    while [ ! -f '${directory}/release' ]; do sleep 0.05; done
+    ${holdUntil(directory, `${directory}/release`)}
     touch '${directory}/cleaned' ;;
   'container ls -a '*) ${stoppedLeftover ? 'echo stopped-owned-container' : ':'} ;;
 esac
@@ -193,14 +219,13 @@ esac
           false,
         );
     } finally {
-      child?.kill('SIGTERM');
-      rmSync(directory, { recursive: true, force: true });
+      await disposeOwned(directory);
     }
   });
 }
 
 test('bounded command diagnostics redact database URLs and retain synthetic stdout honestly', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-diagnostic-test-'));
+  const directory = ownedDirectory('drill-diagnostic-test-');
   try {
     const root = fixture(directory);
     writeFileSync(
@@ -217,13 +242,13 @@ test('bounded command diagnostics redact database URLs and retain synthetic stdo
     assert.doesNotMatch(evidence.error.message, /postgresql:|demo:example/);
     assert.equal(evidence.cleanup.passed, true);
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    await disposeOwned(directory);
   }
 });
 
 for (const direction of ['missing', 'extra', 'empty']) {
   test(`.env.example ${direction} service refuses before setup`, async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'drill-env-coverage-'));
+    const directory = ownedDirectory('drill-env-coverage-');
     try {
       const root = fixture(directory);
       const path = join(root, '.env.example');
@@ -248,14 +273,14 @@ for (const direction of ['missing', 'extra', 'empty']) {
       );
       assert.equal(existsSync(join(directory, 'side-effect')), false);
     } finally {
-      rmSync(directory, { recursive: true, force: true });
+      await disposeOwned(directory);
     }
   });
 }
 
 for (const mode of ['failed', 'empty', 'truncated', 'complete']) {
   test(`schema dump subprocess ${mode}: byte preservation and private failure diagnostics`, async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'drill-dump-command-'));
+    const directory = ownedDirectory('drill-dump-command-');
     try {
       const root = fixture(directory);
       for (const entry of readdirSync(join(root, 'services'))) {
@@ -320,7 +345,7 @@ esac
       assert.doesNotMatch(JSON.stringify(evidence), /PRIVATE_FUNCTION_BODY|PRIVATE_ERROR/);
       assert.equal(evidence.cleanup.passed, true);
     } finally {
-      rmSync(directory, { recursive: true, force: true });
+      await disposeOwned(directory);
     }
   });
 }
@@ -342,7 +367,9 @@ async function referenceCliFixture(directory, mode) {
   mkdirSync(copied);
   for (const name of [
     'backup-restore-drill.mjs',
+    'backup-restore-drill-main.mjs',
     'backup-restore-drill-lib.mjs',
+    'backup-restore-drill-recovery.mjs',
     'infra-preflight-lib.mjs',
     'check-kafka-credential-scope-lib.mjs',
     'database-services.mjs',
@@ -355,7 +382,7 @@ async function referenceCliFixture(directory, mode) {
   symlinkSync(join(repo, 'node_modules'), join(copied, 'node_modules'), 'dir');
   const path = join(copied, 'backup-restore-drill.mjs');
   const target = ['bypass-ref', 'ignore-input'].includes(mode)
-    ? path
+    ? join(copied, 'backup-restore-drill-main.mjs')
     : join(copied, 'backup-restore-drill-lib.mjs');
   let implementation = readFileSync(target, 'utf8');
   const replacements = {
@@ -407,7 +434,7 @@ exit 0
   };
   writeFileSync(
     join(directory, 'docker'),
-    `#!/bin/sh
+    `#!/bin/bash
 printf '%s\\n' "$*" >> '${directory}/commands'
 case "$*" in
   *'port source 5432'*) echo 127.0.0.1:54321 ;;
@@ -445,7 +472,7 @@ case "$*" in
       *'WITH namespaces AS'*) echo '{"schemas":[{"name":"public","owner":"rasta"}],"relations":[{"name":"public.fixture","owner":"rasta"}],"defaultPrivileges":[]}' ;;
       *'row_to_json(t)'*) echo '{"name":"public.fixture","rows":"1","kind":"application","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' ;;
     esac ;;
-  *'down --volumes'*) ${mode === 'cleanup-write-fails' ? `chmod 755 '${directory}'; ` : ''}touch '${directory}/cleaned'${mode === 'final-write-fails' ? `; chmod 555 '${directory}'` : ''} ;;
+  *'down --volumes'*) ${mode === 'cleanup-write-fails' ? `${holdUntil(directory, `${directory}/writable`)}; ` : mode === 'claim-replaced' ? CLAIM_REPLACED(directory) : ''}touch '${directory}/cleaned' ;;
 esac
 `,
     { mode: 0o700 },
@@ -473,7 +500,7 @@ for (const mode of [
   'signal-fixed',
 ]) {
   test(`full CLI reference acceptance and scratch cleanup: ${mode}`, async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'drill-reference-cli-'));
+    const directory = ownedDirectory('drill-reference-cli-');
     let child;
     try {
       const { root, path } = await referenceCliFixture(directory, mode);
@@ -586,36 +613,20 @@ for (const mode of [
         );
       }
     } finally {
-      child?.kill('SIGTERM');
-      rmSync(directory, { recursive: true, force: true });
+      await disposeOwned(directory);
     }
   });
 }
 
-const alive = (pgid) => {
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-const pidExists = (pid) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
+const alive = (pgid) => signalProbe(-pgid);
+const pidExists = (pid) => signalProbe(pid);
 async function waitGone(pgid) {
-  for (let attempt = 0; attempt < 200 && alive(pgid); attempt++)
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  return !alive(pgid);
+  await pollUntil(() => !alive(pgid), `process group ${pgid} to stop`);
+  return true;
 }
 
 test('SIGKILL leaves a provisional private report naming the project, directory and live process groups', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-sigkill-test-'));
+  const directory = ownedDirectory('drill-sigkill-test-');
   let child;
   let pgid;
   try {
@@ -623,10 +634,10 @@ test('SIGKILL leaves a provisional private report naming the project, directory 
     // The migration child's argv never contains the project name: pgrep -f <project> cannot find it.
     writeFileSync(
       join(directory, 'pnpm'),
-      `#!/bin/sh
+      `#!/bin/bash
 echo $$ > '${directory}/migrate-pgid'
 touch '${directory}/migrating'
-while [ ! -f '${directory}/release' ]; do sleep 0.05; done
+${holdUntil(directory, `${directory}/release`)}
 touch '${directory}/migrate-released'
 `,
       { mode: 0o700 },
@@ -644,13 +655,10 @@ esac
     const exited = once(child, 'exit');
     await waitFor(join(directory, 'migrating'));
     pgid = Number(readFileSync(join(directory, 'migrate-pgid'), 'utf8'));
+    adoptGroup(directory, pgid);
     // The child is blocked until `release`: its group must be recorded while it still runs. The
     // record is written right after spawn, so wait for it instead of racing the child's start.
-    for (let attempt = 0; attempt < 400; attempt++) {
-      const recorded = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
-      if (recorded.processGroups?.includes(pgid)) break;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await waitForRecordedGroup(join(directory, 'report.json'), pgid, 'processGroups');
     child.kill('SIGKILL');
     const [code, signal] = await exited;
     assert.equal(code, null);
@@ -676,10 +684,9 @@ esac
       false,
     );
   } finally {
-    child?.kill('SIGKILL');
-    if (pgid) process.kill(-pgid, 'SIGKILL');
+    await disposeOwned(directory);
+    // A killed member can still answer `kill(-pgid, 0)` until this process reaps it: wait.
     if (pgid) assert.ok(await waitGone(pgid), 'orphan group stopped');
-    rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -688,7 +695,7 @@ for (const holdsPipes of [false, true]) {
     `a group member that outlives its leader is killed, recorded and never ignored; holds stdout/stderr=${holdsPipes}`,
     { timeout: 60_000 },
     async () => {
-      const directory = mkdtempSync(join(tmpdir(), 'drill-orphan-test-'));
+      const directory = ownedDirectory('drill-orphan-test-');
       let child;
       let orphan;
       try {
@@ -713,6 +720,7 @@ esac
         assert.ok(Date.now() - started < 30_000, 'reaped by the drain bound, not the timeout');
         assert.equal(code, 1);
         orphan = Number(readFileSync(join(directory, 'orphan-pid'), 'utf8'));
+        adoptPid(directory, orphan);
         const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
         assert.equal(report.reapedProcessGroups.length, 1);
         assert.match(report.reapedProcessGroups[0].stage, /start disposable source PostgreSQL/);
@@ -722,15 +730,7 @@ esac
         assert.ok(await waitGone(report.reapedProcessGroups[0].pgid), 'reaped group is gone');
         assert.throws(() => process.kill(orphan, 0), /ESRCH/);
       } finally {
-        child?.kill('SIGKILL');
-        if (orphan) {
-          try {
-            process.kill(orphan, 'SIGKILL');
-          } catch {
-            /* already gone */
-          }
-        }
-        rmSync(directory, { recursive: true, force: true });
+        await disposeOwned(directory);
       }
     },
   );
@@ -738,7 +738,7 @@ esac
 
 test('a failed final report write keeps the provisional report and its cleanup ownership', async (t) => {
   if (process.getuid?.() === 0) return t.skip('root ignores directory permissions');
-  const directory = mkdtempSync(join(tmpdir(), 'drill-writefail-test-'));
+  const directory = ownedDirectory('drill-writefail-test-');
   let child;
   try {
     const root = fixture(directory);
@@ -778,26 +778,41 @@ esac
     for (const name of readdirSync(directory).filter((entry) => entry.startsWith('report.json.')))
       assert.equal(statSync(join(directory, name)).mode & 0o777, 0o600);
   } finally {
-    child?.kill('SIGKILL');
     try {
       chmodSync(directory, 0o755);
     } catch {
       /* removed already */
     }
-    rmSync(directory, { recursive: true, force: true });
+    await disposeOwned(directory);
   }
 });
 
 test('a full passing drill whose final report write fails is never reported as passed', async (t) => {
   if (process.getuid?.() === 0) return t.skip('root ignores directory permissions');
-  const directory = mkdtempSync(join(tmpdir(), 'drill-final-write-'));
+  const directory = ownedDirectory('drill-final-write-');
   const scratch = mkdtempSync(join(tmpdir(), 'drill-final-write-tmp-'));
   let child;
   try {
     const { root, path } = await referenceCliFixture(directory, 'final-write-fails');
-    // Temporary files live elsewhere, so cleanup itself succeeds; only the report directory
-    // turns read-only (after Compose is down), making the sibling creation fail.
-    child = start(directory, root, { TMPDIR: scratch }, path);
+    // Temporary files live elsewhere, so cleanup itself succeeds (the checkpoint is written and
+    // the directory removed); only the replacement of the report fails, after the removal.
+    child = start(
+      directory,
+      root,
+      {
+        TMPDIR: scratch,
+        ...faultEnv({
+          rm: { mode: 'after', times: 0 },
+          rename: {
+            match: join(directory, 'report.json'),
+            exact: true,
+            afterRm: true,
+            times: 1000,
+          },
+        }),
+      },
+      path,
+    );
     let stdout = '',
       stderr = '';
     child.stdout.on('data', (chunk) => {
@@ -822,20 +837,18 @@ test('a full passing drill whose final report write fails is never reported as p
     assert.equal(statSync(join(directory, 'report.json')).mode & 0o777, 0o600);
     assert.equal(readdirSync(scratch).length, 0, 'temporary files were still removed');
   } finally {
-    child?.kill('SIGKILL');
     try {
       chmodSync(directory, 0o755);
     } catch {
       /* removed already */
     }
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(scratch, { recursive: true, force: true });
+    await disposeOwned(directory, scratch);
   }
 });
 
 test('a report write that fails while cleanup starts is never forgotten: the run cannot pass', async (t) => {
   if (process.getuid?.() === 0) return t.skip('root ignores directory permissions');
-  const directory = mkdtempSync(join(tmpdir(), 'drill-cleanup-write-'));
+  const directory = ownedDirectory('drill-cleanup-write-');
   const scratch = mkdtempSync(join(tmpdir(), 'drill-cleanup-write-tmp-'));
   let child;
   try {
@@ -852,6 +865,17 @@ test('a report write that fails while cleanup starts is never forgotten: the run
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
     });
+    // `compose down` is held until the drill has REPORTED the write it could not make: a stub that
+    // made the directory writable the moment it started raced the parent, which records the
+    // group right after the spawn, and a loaded machine let the stub win.
+    // (The whole drill runs before this point, hence the long budget.)
+    await pollUntil(
+      () => /a report write failed/.test(stderr),
+      'the drill to report the failed cleanup write',
+      300_000,
+    );
+    chmodSync(directory, 0o755);
+    writeFileSync(join(directory, 'writable'), '');
     const [code] = await once(child, 'close');
     chmodSync(directory, 0o755);
     assert.equal(code, 1);
@@ -873,20 +897,19 @@ test('a report write that fails while cleanup starts is never forgotten: the run
     );
     assert.equal(readdirSync(scratch).length, 0, 'temporary files were removed');
   } finally {
-    child?.kill('SIGKILL');
     try {
       chmodSync(directory, 0o755);
+      writeFileSync(join(directory, 'writable'), '');
     } catch {
       /* removed already */
     }
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(scratch, { recursive: true, force: true });
+    await disposeOwned(directory, scratch);
   }
 });
 
 test('a failed process-group record stops the child, confirms it is gone and still cleans up', async (t) => {
   if (process.getuid?.() === 0) return t.skip('root ignores directory permissions');
-  const directory = mkdtempSync(join(tmpdir(), 'drill-record-fails-'));
+  const directory = ownedDirectory('drill-record-fails-');
   const scratch = mkdtempSync(join(tmpdir(), 'drill-record-fails-tmp-'));
   let child;
   let leader;
@@ -913,6 +936,7 @@ esac
     assert.equal(code, 1);
     if (existsSync(join(directory, 'up-pid'))) {
       leader = Number(readFileSync(join(directory, 'up-pid'), 'utf8'));
+      adoptGroup(directory, leader);
       assert.ok(await waitGone(leader), 'the unrecorded group was stopped');
     }
     const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
@@ -923,26 +947,17 @@ esac
     assert.ok(existsSync(join(directory, 'cleaned')));
     assert.equal(report.cleanup.passed, true);
   } finally {
-    child?.kill('SIGKILL');
-    if (leader) {
-      try {
-        process.kill(-leader, 'SIGKILL');
-      } catch {
-        /* already gone */
-      }
-    }
     try {
       chmodSync(directory, 0o755);
     } catch {
       /* removed already */
     }
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(scratch, { recursive: true, force: true });
+    await disposeOwned(directory, scratch);
   }
 });
 
 test('a failing container check while volume and network still run: no final report until both settled and their groups are reaped', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-parallel-check-'));
+  const directory = ownedDirectory('drill-parallel-check-');
   const scratch = mkdtempSync(join(tmpdir(), 'drill-parallel-check-tmp-'));
   const descendants = [];
   let child;
@@ -979,6 +994,7 @@ esac
     assert.equal(code, 1);
     for (const name of ['volume', 'network'])
       descendants.push(Number(readFileSync(join(directory, `${name}-pid`), 'utf8')));
+    adoptPid(directory, descendants.at(-1));
     for (const name of ['volume', 'network'])
       assert.equal(
         readFileSync(join(directory, `${name}-final-seen`), 'utf8').trim(),
@@ -1005,28 +1021,18 @@ esac
     assert.deepEqual(report.processGroups, []);
     assert.equal(report.orphanProcessGroups, undefined);
     for (const pid of descendants) {
-      for (let attempt = 0; attempt < 200 && pidExists(pid); attempt++)
-        await new Promise((resolve) => setTimeout(resolve, 25));
+      await pollUntil(() => !pidExists(pid), `process ${pid} to exit`);
       assert.equal(pidExists(pid), false, 'the descendant is gone');
     }
     assert.doesNotMatch(stderr, new RegExp(directory));
     assert.doesNotMatch(JSON.stringify(report.cleanup), /vol-left/);
   } finally {
-    child?.kill('SIGKILL');
-    for (const pid of descendants) {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {
-        /* already gone */
-      }
-    }
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(scratch, { recursive: true, force: true });
+    await disposeOwned(directory, scratch);
   }
 });
 
 test('a rejected compose down still reaches the final report with a failed cleanup verdict', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'drill-down-rejects-'));
+  const directory = ownedDirectory('drill-down-rejects-');
   const scratch = mkdtempSync(join(tmpdir(), 'drill-down-rejects-tmp-'));
   let child;
   try {
@@ -1051,8 +1057,1697 @@ esac
     assert.equal(report.cleanup.passed, false);
     assert.deepEqual(report.processGroups, []);
   } finally {
-    child?.kill('SIGKILL');
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(scratch, { recursive: true, force: true });
+    await disposeOwned(directory, scratch);
+  }
+});
+
+test("children get PNPM_HOME (the install's store), the run's recovery id and no other inherited variable", async () => {
+  for (const withHome of [true, false]) {
+    const directory = ownedDirectory('drill-env-pass-');
+    try {
+      const root = fixture(directory);
+      writeFileSync(
+        join(directory, 'pnpm'),
+        `#!/bin/sh\nenv | sort > '${directory}/child-env'\nexit 1\n`,
+        {
+          mode: 0o700,
+        },
+      );
+      writeFileSync(join(directory, 'docker'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+      const child = start(directory, root, {
+        PNPM_HOME: withHome ? '/synthetic/pnpm-home' : '',
+        SYNTHETIC_SECRET_TOKEN: 'inherited-secret',
+        DATABASE_URL_ECONOMIC: 'postgresql://real.example/prod',
+        CI: 'true',
+      });
+      const [code] = await once(child, 'exit');
+      assert.equal(code, 1);
+      const lines = readFileSync(join(directory, 'child-env'), 'utf8').split('\n');
+      assert.equal(lines.includes('PNPM_HOME=/synthetic/pnpm-home'), withHome);
+      assert.ok(!lines.some((line) => line.startsWith('PNPM_HOME=')) || withHome);
+      const names = lines.filter(Boolean).map((line) => line.split('=')[0]);
+      for (const name of [
+        'SYNTHETIC_SECRET_TOKEN',
+        'DATABASE_URL_ECONOMIC',
+        'CI',
+        'RASTA_DRILL_ROOT',
+        'TMPDIR',
+      ])
+        assert.ok(!names.includes(name), name);
+      assert.ok(lines.includes('RASTA_ALLOW_DEMO_SEED=true'));
+      // The id the report records is the one every child carries (recovery proves groups by it).
+      const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+      assert.match(report.recoveryId, /^[0-9a-f]{32}$/);
+      assert.ok(lines.includes(`RASTA_DRILL_RECOVERY_ID=${report.recoveryId}`));
+    } finally {
+      await disposeOwned(directory);
+    }
+  }
+});
+
+// --- --cleanup-from ---------------------------------------------------------------------------
+function recover(directory, root, reportPath, extra = {}) {
+  const child = spawnOwned(
+    directory,
+    process.execPath,
+    [cli.pathname, '--cleanup-from', reportPath],
+    {
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        TMPDIR: directory,
+        RASTA_DRILL_ROOT: root,
+        ...extra,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => (stdout += chunk));
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  return once(child, 'close').then(([code]) => ({ code, stdout, stderr }));
+}
+// A docker stand-in that records what it was asked and lists nothing (or what `ls` is told to).
+const recordingDocker = (directory, extra = '') =>
+  writeFileSync(
+    join(directory, 'docker'),
+    `#!/bin/bash
+echo "$*" >> '${directory}/docker-calls'
+${extra}
+`,
+    { mode: 0o700 },
+  );
+
+/**
+ * A genuine record: the CLI is SIGKILLed while its first child (a stand-in `pnpm` that carries
+ * the run's environment) is blocked, so the report, directory, marker, compose.json and the
+ * recorded process group are exactly what a crashed run leaves.
+ */
+async function crashedRun(directory, root, { afterSpawn } = {}) {
+  writeFileSync(
+    join(directory, 'pnpm'),
+    `#!/bin/bash
+echo $$ > '${directory}/blocked-pgid'
+${holdUntil(directory, `${directory}/release`)}
+`,
+    { mode: 0o700 },
+  );
+  writeFileSync(join(directory, 'docker'), '#!/bin/sh\ntouch "' + directory + '/early-docker"\n', {
+    mode: 0o700,
+  });
+  const child = start(directory, root);
+  try {
+    const exited = once(child, 'exit');
+    await afterSpawn?.(child);
+    const pgid = await waitForGroup(directory, join(directory, 'blocked-pgid'));
+    const reportPath = join(directory, 'report.json');
+    await waitForRecordedGroup(reportPath, pgid, 'processGroups');
+    child.kill('SIGKILL');
+    await exited;
+    rmSync(join(directory, 'early-docker'), { force: true });
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    return { child, pgid, reportPath, report };
+  } catch (error) {
+    // A setup that fails never hands its caller the handles to clean up: stop the CLI and the
+    // group it started here, and confirm they are gone, before the failure travels on.
+    await stopOwned(directory);
+    throw error;
+  }
+}
+
+// A crashedRun that fails after its CLI and the held group exist never returns the handles, so the
+// caller cannot clean up: it must leave nothing running. `known`: the group's pid was read (and
+// so registered) before the failure; otherwise only its environment says whose it is.
+for (const known of [true, false]) {
+  test(`a crashedRun whose setup fails leaves no process running (group ${known ? 'registered' : 'never read'})`, async () => {
+    const directory = ownedDirectory('drill-crashed-setup-fails-');
+    let cli;
+    let held;
+    try {
+      const root = fixture(directory);
+      await assert.rejects(
+        crashedRun(directory, root, {
+          afterSpawn: async (child) => {
+            cli = child.pid;
+            const file = join(directory, 'blocked-pgid');
+            held = known ? await waitForGroup(directory, file) : await waitForPid(file);
+            throw new Error('injected setup failure');
+          },
+        }),
+        /injected setup failure/,
+      );
+      assert.ok(held > 0 && cli > 0, 'the failure came after both processes existed');
+      // Gone = nothing of it runs. A killed child is a zombie until its parent (this process, for
+      // the CLI; init, for the group) reaps it, and a zombie still answers `kill(pid, 0)`.
+      assert.ok(await waitGone(held), 'the held group is gone');
+      await pollUntil(() => !pidExists(cli), 'the CLI to be reaped');
+      assert.equal(hasLiveProcesses(directory), false, 'nothing carries the fixture’s directory');
+    } finally {
+      await disposeOwned(directory);
+    }
+  });
+}
+
+test('--cleanup-from recovers a crashed run: its process group, its compose project, its directory; the record is not rewritten', async () => {
+  const directory = ownedDirectory('drill-recover-');
+  let pgid;
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    pgid = run.pgid;
+    assert.ok(alive(pgid), 'the blocked child outlived the CLI');
+    assert.deepEqual(run.report.processGroups, [pgid]);
+    recordingDocker(directory);
+    const before = readFileSync(run.reportPath, 'utf8');
+    const result = await recover(directory, root, run.reportPath);
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(await waitGone(pgid), 'the recorded group was stopped');
+    const calls = readFileSync(join(directory, 'docker-calls'), 'utf8').split('\n').filter(Boolean);
+    assert.ok(
+      calls.some((call) =>
+        call.startsWith(
+          `compose --project-name ${run.report.project} --file ${run.report.temporary}/compose.json down --volumes`,
+        ),
+      ),
+      calls.join('\n'),
+    );
+    for (const kind of ['container', 'volume', 'network'])
+      assert.ok(
+        calls.includes(
+          `${kind} ls${kind === 'container' ? ' -a' : ''} --quiet --filter label=com.docker.compose.project=${run.report.project}`,
+        ),
+        kind,
+      );
+    assert.equal(existsSync(run.report.temporary), false, 'the directory is removed');
+    assert.equal(
+      readFileSync(run.reportPath, 'utf8'),
+      before,
+      'recovery never rewrites the record',
+    );
+    assert.doesNotMatch(result.stderr, new RegExp(directory));
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('--cleanup-from refuses (exit 2) a record it cannot prove, touching nothing', async () => {
+  const directory = ownedDirectory('drill-recover-refuse-');
+  const other = ownedDirectory('drill-recover-refuse-b-');
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    const otherRoot = fixture(other);
+    // A second crashed run, under the same TMPDIR as the first so its directory is a valid shape.
+    const second = await crashedRun(other, otherRoot);
+    recordingDocker(directory);
+    const original = readFileSync(run.reportPath, 'utf8');
+    const keep = (change) =>
+      writeFileSync(run.reportPath, JSON.stringify({ ...run.report, ...change }), { mode: 0o600 });
+    const refusals = {
+      'no ownership': () => writeFileSync(run.reportPath, '{}', { mode: 0o600 }),
+      'unreadable JSON': () => writeFileSync(run.reportPath, '{"project": "res', { mode: 0o600 }),
+      'a mixed record: this project, the other run directory': () => {
+        // Move the other run's directory under this TMPDIR so only the binding is wrong.
+        const moved = join(directory, second.report.temporary.split('/').at(-1));
+        cpSync(second.report.temporary, moved, { recursive: true });
+        // An older report (no persisted identity): the marker's binding is what is wrong. With the
+        // identity the same record is a foreign object, not a refusal (the retry tests below).
+        keep({ temporary: moved, temporaryIdentity: undefined });
+      },
+      'another invocation id': () => keep({ recoveryId: 'b'.repeat(32) }),
+      'a symlinked compose.json': () => {
+        const compose = join(run.report.temporary, 'compose.json');
+        const copy = join(directory, 'compose-copy.json');
+        writeFileSync(copy, readFileSync(compose), { mode: 0o600 });
+        rmSync(compose);
+        symlinkSync(copy, compose);
+        writeFileSync(run.reportPath, original, { mode: 0o600 });
+      },
+    };
+    const restoreCompose = join(directory, 'compose-restore.json');
+    writeFileSync(restoreCompose, readFileSync(join(run.report.temporary, 'compose.json')));
+    for (const [name, arrange] of Object.entries(refusals)) {
+      arrange();
+      const result = await recover(directory, root, run.reportPath);
+      assert.equal(result.code, 2, `${name}: ${result.stderr}`);
+      assert.match(result.stderr, /recovery refused: /, name);
+      assert.doesNotMatch(
+        result.stderr,
+        new RegExp(`${directory}|restore-drill-[0-9a-f]{16}`),
+        name,
+      );
+      assert.equal(
+        existsSync(join(directory, 'docker-calls')),
+        false,
+        `${name}: docker not called`,
+      );
+      assert.ok(alive(run.pgid), `${name}: the recorded group was not signalled`);
+      assert.ok(existsSync(run.report.temporary), `${name}: the directory is intact`);
+      // Put the arranged compose.json back (the symlink case replaced it).
+      const compose = join(run.report.temporary, 'compose.json');
+      rmSync(compose, { force: true });
+      writeFileSync(compose, readFileSync(restoreCompose), { mode: 0o600 });
+      writeFileSync(run.reportPath, original, { mode: 0o600 });
+    }
+    // Missing report: refused as well, not "nothing recorded".
+    const missing = await recover(directory, root, join(directory, 'no-such-report.json'));
+    assert.equal(missing.code, 2);
+    assert.equal(existsSync(join(directory, 'docker-calls')), false);
+    // A compose definition other than the drill's: refused before Compose reads it.
+    const definition = JSON.parse(readFileSync(restoreCompose, 'utf8'));
+    definition.services.source.privileged = true;
+    writeFileSync(join(run.report.temporary, 'compose.json'), JSON.stringify(definition), {
+      mode: 0o600,
+    });
+    const altered = await recover(directory, root, run.reportPath);
+    assert.equal(altered.code, 2);
+    assert.equal(existsSync(join(directory, 'docker-calls')), false);
+  } finally {
+    await disposeOwned(directory, other);
+  }
+});
+
+test('--cleanup-from signals only process groups that carry the run id', async () => {
+  const directory = ownedDirectory('drill-recover-groups-');
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    // A group of someone else (no id in its environment) listed in the record.
+    const stranger = spawnOwned(directory, 'sleep', ['60'], { detached: true, stdio: 'ignore' });
+    await new Promise((resolve) => stranger.once('spawn', resolve));
+    writeFileSync(
+      run.reportPath,
+      JSON.stringify({ ...run.report, processGroups: [run.pgid, stranger.pid] }),
+      { mode: 0o600 },
+    );
+    recordingDocker(directory);
+    const result = await recover(directory, root, run.reportPath);
+    assert.equal(result.code, 1, 'an unproven group fails the cleanup');
+    assert.ok(
+      result.stderr.includes(`process group ${stranger.pid} is not proven to be ours`),
+      'the unproven group is named by id, and only by id',
+    );
+    assert.doesNotMatch(result.stderr, new RegExp(`${directory}|restore-drill-[0-9a-f]{16}`));
+    assert.ok(alive(stranger.pid), 'the stranger was not signalled');
+    assert.ok(await waitGone(run.pgid), 'the group that carries the id was stopped');
+    assert.ok(existsSync(run.report.temporary), 'a failed cleanup keeps the directory');
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('--cleanup-from never reports success for a failed teardown or a leftover resource', async () => {
+  for (const mode of ['down-fails', 'volume-left', 'check-fails']) {
+    const directory = ownedDirectory('drill-recover-fails-');
+    try {
+      const root = fixture(directory);
+      const run = await crashedRun(directory, root);
+      recordingDocker(
+        directory,
+        {
+          'down-fails': 'case "$*" in *"down --volumes"*) exit 1 ;; esac',
+          'volume-left': 'case "$*" in *"volume ls"*) echo vol-secret-id ;; esac',
+          'check-fails': 'case "$*" in *"network ls"*) exit 1 ;; esac',
+        }[mode],
+      );
+      const result = await recover(directory, root, run.reportPath);
+      assert.equal(result.code, 1, mode);
+      assert.ok(existsSync(run.report.temporary), `${mode}: the directory is kept for another try`);
+      assert.doesNotMatch(result.stderr, /vol-secret-id/, mode);
+    } finally {
+      await disposeOwned(directory);
+    }
+  }
+});
+
+test('--cleanup-from settles every resource check before it exits, even when one rejects at once', async () => {
+  const directory = ownedDirectory('drill-recover-settle-');
+  const descendants = [];
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    const slow = (name, seconds) =>
+      `sleep ${seconds}; sleep 60 & echo $! > '${directory}/${name}-pid'; touch '${directory}/${name}-done'`;
+    recordingDocker(
+      directory,
+      `case "$*" in
+  *'container ls'*) exit 1 ;;
+  *'volume ls'*) ${slow('volume', 1)} ;;
+  *'network ls'*) ${slow('network', 2)} ;;
+esac`,
+    );
+    const result = await recover(directory, root, run.reportPath);
+    for (const name of ['volume', 'network']) {
+      assert.ok(existsSync(join(directory, `${name}-done`)), `${name}: finished before the exit`);
+      descendants.push(Number(readFileSync(join(directory, `${name}-pid`), 'utf8')));
+      adoptPid(directory, descendants.at(-1));
+    }
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /unverified: container/);
+    for (const pid of descendants) {
+      await pollUntil(() => !pidExists(pid), `process ${pid} to exit`);
+      assert.equal(pidExists(pid), false, 'the siblings were reaped before the exit');
+    }
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('the normal teardown uses the same compose gate: a definition swapped during the run is never handed to `compose down`', async () => {
+  const directory = ownedDirectory('drill-teardown-gate-');
+  try {
+    const root = fixture(directory);
+    writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    // `up` replaces the project's compose.json with a privileged service, then fails.
+    recordingDocker(
+      directory,
+      `case "$*" in
+  *'up -d'*)
+    file=$(echo "$*" | sed -n 's/.*--file \\([^ ]*\\) .*/\\1/p')
+    printf '%s' '{"services":{"source":{"privileged":true,"container_name":"host"}},"volumes":{}}' > "$file"
+    exit 1 ;;
+esac`,
+    );
+    const child = start(directory, root);
+    let stdout = '';
+    child.stdout.on('data', (chunk) => (stdout += chunk));
+    const [code] = await once(child, 'close');
+    assert.equal(code, 1);
+    const calls = readFileSync(join(directory, 'docker-calls'), 'utf8');
+    assert.doesNotMatch(calls, /down --volumes/, 'compose down never ran on the swapped file');
+    const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+    assert.equal(report.cleanup.passed, false, 'a refused teardown is a failed cleanup');
+    assert.equal(report.passed, false);
+    assert.ok(existsSync(report.temporary), 'the directory is kept for recovery');
+    // ... and recovery refuses the same definition (exit 2) rather than trusting the report.
+    rmSync(join(directory, 'docker-calls'));
+    const result = await recover(directory, root, join(directory, 'report.json'));
+    assert.equal(result.code, 2);
+    assert.equal(existsSync(join(directory, 'docker-calls')), false);
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+// --- recovery is itself recoverable (#478 r3 R1) ---------------------------------------------
+const faultEnv = (spec) => ({
+  NODE_OPTIONS: `--import=${new URL('./backup-restore-drill-fault.mjs', import.meta.url).href}`,
+  DRILL_FAULT: JSON.stringify(spec),
+});
+// Next to the report: outside the directory recovery removes.
+const recoveryJournal = (run) => `${run.reportPath}.recovery-journal.json`;
+function startRecovery(directory, root, reportPath) {
+  return spawnOwned(directory, process.execPath, [cli.pathname, '--cleanup-from', reportPath], {
+    env: {
+      ...process.env,
+      PATH: `${directory}:${process.env.PATH}`,
+      TMPDIR: directory,
+      RASTA_DRILL_ROOT: root,
+    },
+    stdio: 'ignore',
+  });
+}
+/** A docker stand-in whose FIRST `compose down` blocks (recording its group and environment). */
+const blockingFirstDown = (directory) =>
+  recordingDocker(
+    directory,
+    `case "$*" in
+  *'down --volumes'*)
+    if mkdir '${directory}/first-down' 2>/dev/null; then
+      env | grep '^RASTA_DRILL_RECOVERY_ID=' > '${directory}/down-env'
+      echo $$ > '${directory}/down-pgid'
+      ${holdUntil(directory, `${directory}/release-down`)}
+    fi ;;
+esac`,
+  );
+test('a recovery killed mid-command is itself recovered: the next one reaps its blocked child and never reports success while it lives', async () => {
+  const directory = ownedDirectory('drill-recover-twice-');
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    blockingFirstDown(directory);
+    const first = startRecovery(directory, root, run.reportPath);
+    const killed = once(first, 'exit');
+    const downGroup = await waitForGroup(directory, join(directory, 'down-pgid'));
+    // Ownership is on disk while the child runs: the journal names its group, the child carries
+    // the run's id, and the original record is untouched. The journal is written after the spawn,
+    // so wait for it to name the group instead of racing the recovery.
+    await waitForRecordedGroup(recoveryJournal(run), downGroup, 'groups');
+    const journal = JSON.parse(readFileSync(recoveryJournal(run), 'utf8'));
+    assert.ok(journal.groups.includes(downGroup), 'the journal names the recovery child');
+    assert.equal(journal.id, run.report.recoveryId);
+    assert.equal(journal.checkpoint, undefined);
+    assert.equal(
+      readFileSync(join(directory, 'down-env'), 'utf8').trim(),
+      `RASTA_DRILL_RECOVERY_ID=${run.report.recoveryId}`,
+    );
+    const before = readFileSync(run.reportPath, 'utf8');
+    first.kill('SIGKILL');
+    await killed;
+    assert.ok(alive(downGroup), 'the first recovery left its blocked child running');
+    const second = await recover(directory, root, run.reportPath);
+    const stillAlive = alive(downGroup);
+    assert.ok(
+      !(second.code === 0 && stillAlive),
+      'the second recovery reported success while the first one’s child lives',
+    );
+    assert.equal(second.code, 0, second.stderr);
+    assert.equal(stillAlive, false, 'the first recovery’s group was reaped before the exit');
+    assert.equal(existsSync(run.report.temporary), false);
+    assert.equal(
+      readFileSync(run.reportPath, 'utf8'),
+      before,
+      'the original record stays immutable',
+    );
+    assert.doesNotMatch(second.stderr, new RegExp(directory));
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('a recovery that cannot prove its predecessor’s group fails and keeps the directory; the journal keeps the group', async () => {
+  const directory = ownedDirectory('drill-recover-journal-unknown-');
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    // A journal naming a live group that does not carry the run's id (it is not provably ours).
+    const stranger = spawnOwned(directory, 'sleep', ['60'], { detached: true, stdio: 'ignore' });
+    await new Promise((resolve) => stranger.once('spawn', resolve));
+    writeFileSync(
+      recoveryJournal(run),
+      JSON.stringify({
+        version: 1,
+        id: run.report.recoveryId,
+        project: run.report.project,
+        directory: run.report.temporary.split('/').at(-1),
+        groups: [stranger.pid],
+      }),
+      { mode: 0o600 },
+    );
+    recordingDocker(directory);
+    const result = await recover(directory, root, run.reportPath);
+    assert.equal(result.code, 1, result.stderr);
+    assert.ok(alive(stranger.pid), 'the unproven group was not signalled');
+    assert.ok(
+      result.stderr.includes(`process group ${stranger.pid} is not proven to be ours`),
+      result.stderr,
+    );
+    assert.doesNotMatch(result.stderr, new RegExp(`${directory}|restore-drill-[0-9a-f]{16}`));
+    assert.ok(existsSync(run.report.temporary), 'the directory is kept');
+    const journal = JSON.parse(readFileSync(recoveryJournal(run), 'utf8'));
+    assert.ok(journal.groups.includes(stranger.pid), 'the unsettled group stays owned');
+    assert.equal(journal.checkpoint, undefined, 'no recovered checkpoint');
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('the directory is removed only after the recovered checkpoint is on disk; a removal cut short is finished without Docker', async () => {
+  const directory = ownedDirectory('drill-recover-checkpoint-');
+  let locked;
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    recordingDocker(directory);
+    // A subdirectory nobody may enter makes the removal fail after everything else is deleted.
+    locked = join(run.report.temporary, 'locked');
+    mkdirSync(locked);
+    writeFileSync(join(locked, 'f'), 'x');
+    chmodSync(locked, 0o500);
+    const first = await recover(directory, root, run.reportPath);
+    assert.equal(first.code, 1, 'a directory that cannot be removed is not a success');
+    const journal = JSON.parse(readFileSync(recoveryJournal(run), 'utf8'));
+    assert.equal(journal.checkpoint, 'recovered', 'the checkpoint preceded the removal');
+    assert.deepEqual(journal.groups, []);
+    // The removal may have taken the marker with it; the checkpoint stands on its own.
+    chmodSync(locked, 0o700);
+    rmSync(join(directory, 'docker-calls'));
+    const again = await recover(directory, root, run.reportPath);
+    assert.equal(again.code, 0, again.stderr);
+    assert.equal(existsSync(run.report.temporary), false);
+    assert.equal(existsSync(join(directory, 'docker-calls')), false, 'nothing left to ask Docker');
+  } finally {
+    if (locked && existsSync(locked)) chmodSync(locked, 0o700);
+    await disposeOwned(directory);
+  }
+});
+
+test('a journal that cannot be written at all is never a success, and nothing is removed', async () => {
+  const directory = ownedDirectory('drill-recover-journal-write-');
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    recordingDocker(directory);
+    const result = await recover(
+      directory,
+      root,
+      run.reportPath,
+      faultEnv({ rename: { match: 'recovery-journal', times: 1000 } }),
+    );
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(result.stderr, /a journal write failed/);
+    assert.match(result.stderr, /success is not reported/);
+    assert.ok(existsSync(run.report.temporary), 'the directory is kept');
+    // Nothing was published: all the journal holds is the run's own reservation.
+    assert.deepEqual(JSON.parse(readFileSync(recoveryJournal(run), 'utf8')), {
+      version: 1,
+      id: run.report.recoveryId,
+      reservation: true,
+    });
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+// --- one owner at a time, publication that cannot fail silently, a checkpoint that outlives the
+// --- tree (#478 r4 F1/F2) ----------------------------------------------------------------------
+const SHORT_LOCK_WAIT = { RASTA_DRILL_LOCK_WAIT_MS: '1500' };
+function spawnRecovery(directory, root, reportPath, extra = {}) {
+  const child = spawnOwned(
+    directory,
+    process.execPath,
+    [cli.pathname, '--cleanup-from', reportPath],
+    {
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        TMPDIR: directory,
+        RASTA_DRILL_ROOT: root,
+        ...SHORT_LOCK_WAIT,
+        ...extra,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => (stdout += chunk));
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  return { child, done: once(child, 'close').then(([code]) => ({ code, stdout, stderr })) };
+}
+const released = (directory, name) => writeFileSync(join(directory, name), '');
+const calls = (directory) =>
+  existsSync(join(directory, 'docker-calls'))
+    ? readFileSync(join(directory, 'docker-calls'), 'utf8')
+    : '';
+
+for (const order of ['the second starts once the first one’s child runs', 'both start together']) {
+  test(`two recoveries of one report: neither reports success while the other’s child lives (${order})`, async () => {
+    const directory = ownedDirectory('drill-recover-overlap-');
+    try {
+      const root = fixture(directory);
+      const run = await crashedRun(directory, root);
+      blockingFirstDown(directory);
+      const processes = [spawnRecovery(directory, root, run.reportPath)];
+      if (order === 'both start together')
+        processes.push(spawnRecovery(directory, root, run.reportPath));
+      const downGroup = await waitForGroup(directory, join(directory, 'down-pgid'));
+      if (order !== 'both start together')
+        processes.push(spawnRecovery(directory, root, run.reportPath));
+      // Whoever does not own the blocked child ends first, and not with 0.
+      const first = await Promise.race(processes.map((p) => p.done.then((r) => ({ p, r }))));
+      assert.ok(alive(downGroup), 'the other recovery’s child is still running');
+      assert.notEqual(
+        first.r.code,
+        0,
+        `an overlapping recovery reported success: ${first.r.stderr}`,
+      );
+      assert.doesNotMatch(first.r.stderr, new RegExp(`${directory}|restore-drill-[0-9a-f]{16}`));
+      released(directory, 'release-down');
+      const owner = await processes.find((p) => p !== first.p).done;
+      assert.equal(owner.code, 0, owner.stderr);
+      assert.equal(alive(downGroup), false);
+      assert.equal(existsSync(run.report.temporary), false);
+      assert.equal(JSON.parse(readFileSync(recoveryJournal(run), 'utf8')).checkpoint, 'removed');
+      // Once finished, a repeat (the caller never saw the 0) is a success too.
+      const again = await recover(directory, root, run.reportPath);
+      assert.equal(again.code, 0, again.stderr);
+    } finally {
+      await disposeOwned(directory);
+    }
+  });
+}
+
+test('a recovery never signals or removes what a LIVE run still owns', async () => {
+  const directory = ownedDirectory('drill-recover-live-run-');
+  try {
+    const root = fixture(directory);
+    writeFileSync(
+      join(directory, 'pnpm'),
+      `#!/bin/bash\necho $$ > '${directory}/blocked-pgid'\n${holdUntil(directory, `${directory}/release`)}\n`,
+      { mode: 0o700 },
+    );
+    recordingDocker(directory);
+    start(directory, root);
+    const pgid = await waitForGroup(directory, join(directory, 'blocked-pgid'));
+    const reportPath = join(directory, 'report.json');
+    await waitForRecordedGroup(reportPath, pgid, 'processGroups');
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    const result = await recover(directory, root, reportPath, SHORT_LOCK_WAIT);
+    assert.notEqual(result.code, 0, result.stderr);
+    assert.ok(alive(pgid), 'the live run’s child was not signalled');
+    assert.ok(existsSync(report.temporary), 'the live run’s directory was not removed');
+    assert.equal(calls(directory), '', 'Docker was not asked anything');
+    assert.doesNotMatch(result.stderr, new RegExp(`${directory}|restore-drill-[0-9a-f]{16}`));
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('a recovery of a drill whose directory is already gone is journaled too: killed during a listing, the next one reaps it', async () => {
+  const directory = ownedDirectory('drill-recover-absent-');
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    await stopOwned(directory);
+    // What an ordinary successful drill leaves: its directory is gone and its record says so.
+    rmSync(run.report.temporary, { recursive: true, force: true });
+    writeFileSync(
+      run.reportPath,
+      JSON.stringify({ ...run.report, processGroups: [], cleanup: { passed: true } }),
+    );
+    recordingDocker(
+      directory,
+      `case "$*" in
+  *'container ls'*)
+    if mkdir '${directory}/first-ls' 2>/dev/null; then
+      echo $$ > '${directory}/ls-pgid'
+      ${holdUntil(directory, `${directory}/release-ls`)}
+    fi ;;
+esac`,
+    );
+    const first = spawnRecovery(directory, root, run.reportPath);
+    const listing = await waitForGroup(directory, join(directory, 'ls-pgid'));
+    // Kill the first recovery only once its journal names the listing: killed earlier, there is
+    // nothing for the second one to find and the test would prove nothing.
+    await waitForRecordedGroup(recoveryJournal(run), listing, 'groups');
+    first.child.kill('SIGKILL');
+    await first.done;
+    assert.ok(alive(listing), 'the killed recovery left its listing running');
+    const second = await recover(directory, root, run.reportPath);
+    assert.ok(
+      !(second.code === 0 && alive(listing)),
+      'the second recovery reported success while the first one’s listing lives',
+    );
+    assert.equal(second.code, 0, second.stderr);
+    assert.equal(alive(listing), false, 'the listing was reaped before the exit');
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('one failed journal write is never forgotten: later writes succeed, the recovery still does not report success, and a retry does', async () => {
+  const directory = ownedDirectory('drill-recover-transient-');
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    recordingDocker(directory);
+    const failed = await recover(
+      directory,
+      root,
+      run.reportPath,
+      faultEnv({ rename: { match: 'recovery-journal', times: 1 } }),
+    );
+    assert.equal(failed.code, 1, failed.stderr);
+    assert.match(failed.stderr, /a journal write failed/);
+    assert.ok(existsSync(run.report.temporary), 'the directory is kept for the retry');
+    const retry = await recover(directory, root, run.reportPath);
+    assert.equal(retry.code, 0, retry.stderr);
+    assert.equal(existsSync(run.report.temporary), false);
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('a journal write whose directory fsync fails is not a durable checkpoint: nothing is removed, the exit is not 0', async () => {
+  const directory = ownedDirectory('drill-recover-fsync-');
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    recordingDocker(directory);
+    const failed = await recover(
+      directory,
+      root,
+      run.reportPath,
+      faultEnv({ fsyncDirectory: { times: 1000 } }),
+    );
+    assert.equal(failed.code, 1, failed.stderr);
+    assert.ok(existsSync(run.report.temporary), 'no durable checkpoint, so no removal');
+    const retry = await recover(directory, root, run.reportPath);
+    assert.equal(retry.code, 0, retry.stderr);
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+/** A crashed run whose recovery has everything gone (Docker lists nothing). */
+async function recoverable(prefix) {
+  const directory = ownedDirectory(prefix);
+  try {
+    const root = fixture(directory);
+    const run = await crashedRun(directory, root);
+    recordingDocker(directory);
+    return { directory, root, run };
+  } catch (error) {
+    // crashedRun has already stopped what it started; the directory is the only thing left.
+    await disposeOwned(directory);
+    throw error;
+  }
+}
+
+test('a removal interrupted at any step is finished or refused correctly by the next recovery', async () => {
+  const steps = {
+    'checkpoint written, nothing removed': async ({ directory, root, run }) => {
+      const first = await recover(
+        directory,
+        root,
+        run.reportPath,
+        faultEnv({ rm: { mode: 'before' } }),
+      );
+      assert.equal(first.code, 1, first.stderr);
+      assert.ok(existsSync(run.report.temporary));
+    },
+    'the marker, compose.json and everything else already deleted but the directory': async ({
+      directory,
+      root,
+      run,
+    }) => {
+      const first = await recover(
+        directory,
+        root,
+        run.reportPath,
+        faultEnv({ rm: { mode: 'before' } }),
+      );
+      assert.equal(first.code, 1, first.stderr);
+      for (const name of readdirSync(run.report.temporary))
+        rmSync(join(run.report.temporary, name), { recursive: true, force: true });
+    },
+    'the directory gone, the exit lost': async ({ directory, root, run }) => {
+      const first = await recover(
+        directory,
+        root,
+        run.reportPath,
+        faultEnv({ rm: { mode: 'after' } }),
+      );
+      assert.equal(first.code, 1, first.stderr);
+      assert.equal(existsSync(run.report.temporary), false);
+    },
+    'the directory gone, the write that follows lost': async ({ directory, root, run }) => {
+      const first = await recover(
+        directory,
+        root,
+        run.reportPath,
+        faultEnv({
+          rm: { mode: 'after', times: 0 },
+          rename: { match: 'recovery-journal', afterRm: true, times: 1 },
+        }),
+      );
+      assert.equal(first.code, 1, first.stderr);
+      assert.equal(existsSync(run.report.temporary), false);
+    },
+    'a complete success whose exit never reached the caller': async ({ directory, root, run }) => {
+      const first = await recover(directory, root, run.reportPath);
+      assert.equal(first.code, 0, first.stderr);
+    },
+  };
+  for (const [name, interrupt] of Object.entries(steps)) {
+    const context = await recoverable('drill-recover-steps-');
+    try {
+      await interrupt(context);
+      rmSync(join(context.directory, 'docker-calls'), { force: true });
+      const retry = await recover(context.directory, context.root, context.run.reportPath);
+      assert.equal(retry.code, 0, `${name}: ${retry.stderr}`);
+      assert.equal(existsSync(context.run.report.temporary), false, name);
+      assert.equal(calls(context.directory), '', `${name}: nothing left to ask Docker`);
+    } finally {
+      await disposeOwned(context.directory);
+    }
+  }
+});
+
+// --- one deletion boundary for a run's own teardown, recovery and resumption (#478 r5 F2) ---------
+/**
+ * An ordinary run that fails early (the stand-in `docker compose up` exits 1) and so reaches its
+ * own teardown and the removal of its directory. Resolves when the process is gone.
+ */
+async function ordinaryRun(directory, root, extra = {}) {
+  writeFileSync(join(directory, 'pnpm'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  writeFileSync(
+    join(directory, 'docker'),
+    `#!/bin/sh
+case "$*" in
+  *'up -d'*) exit 1 ;;
+esac
+`,
+    { mode: 0o700 },
+  );
+  const child = start(directory, root, extra);
+  const [code, signal] = await once(child, 'close');
+  const reportPath = join(directory, 'report.json');
+  return { code, signal, reportPath, report: JSON.parse(readFileSync(reportPath, 'utf8')) };
+}
+const journalOf = (reportPath) =>
+  JSON.parse(readFileSync(`${reportPath}.recovery-journal.json`, 'utf8'));
+
+test('a run killed during its own directory removal, or before its report is replaced, is finished cleanly by the next recovery', async () => {
+  for (const mode of ['kill-before', 'kill-mid', 'kill-after']) {
+    const directory = ownedDirectory('drill-ordinary-kill-');
+    try {
+      const root = fixture(directory);
+      const run = await ordinaryRun(directory, root, faultEnv({ rm: { mode } }));
+      assert.equal(run.signal, 'SIGKILL', mode);
+      // The provisional report is all the killed run left; the checkpoint is outside the tree.
+      assert.equal(run.report.cleanup.passed, false, mode);
+      assert.equal(journalOf(run.reportPath).checkpoint, 'recovered', mode);
+      assert.equal(existsSync(run.report.temporary), mode !== 'kill-after', mode);
+      recordingDocker(directory);
+      const retry = await recover(directory, root, run.reportPath);
+      assert.equal(retry.code, 0, `${mode}: ${retry.stderr}`);
+      assert.doesNotMatch(retry.stderr, /marker is missing|does not say cleanup finished/, mode);
+      assert.equal(existsSync(run.report.temporary), false, mode);
+      assert.equal(journalOf(run.reportPath).checkpoint, 'removed', mode);
+      assert.equal(calls(directory), '', `${mode}: nothing left to ask Docker`);
+    } finally {
+      await disposeOwned(directory);
+    }
+  }
+});
+
+test('a normal run removes its directory only once the checkpoint is durable', async () => {
+  const directory = ownedDirectory('drill-ordinary-durable-');
+  try {
+    const root = fixture(directory);
+    const run = await ordinaryRun(directory, root, faultEnv({ fsyncDirectory: { times: 1000 } }));
+    assert.equal(run.code, 1);
+    assert.equal(
+      run.report.cleanup.passed,
+      false,
+      'no durable checkpoint, so cleanup did not finish',
+    );
+    assert.equal(existsSync(run.report.temporary), true, 'and the directory was not removed');
+    recordingDocker(directory);
+    const retry = await recover(directory, root, run.reportPath);
+    assert.equal(retry.code, 0, retry.stderr);
+    assert.equal(existsSync(run.report.temporary), false);
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('a checkpoint read back from disk is made durable again before it licenses a removal', async () => {
+  const context = await recoverable('drill-recover-reload-');
+  try {
+    // The "recovered" write renames, then its directory fsync fails: readable, not confirmed.
+    const fault = faultEnv({ fsyncDirectory: { afterCheckpoint: true, times: 1000 } });
+    const first = await recover(context.directory, context.root, context.run.reportPath, fault);
+    assert.equal(first.code, 1, first.stderr);
+    assert.equal(journalOf(context.run.reportPath).checkpoint, 'recovered');
+    assert.equal(existsSync(context.run.report.temporary), true);
+    rmSync(join(context.directory, 'docker-calls'), { force: true });
+    // Retried with the fault still there: the loaded checkpoint proves nothing, so nothing goes.
+    const again = await recover(context.directory, context.root, context.run.reportPath, fault);
+    assert.equal(again.code, 1, again.stderr);
+    assert.equal(existsSync(context.run.report.temporary), true, 'the directory is kept');
+    // The fault gone: it completes, without asking Docker anything.
+    const retry = await recover(context.directory, context.root, context.run.reportPath);
+    assert.equal(retry.code, 0, retry.stderr);
+    assert.equal(existsSync(context.run.report.temporary), false);
+    assert.equal(journalOf(context.run.reportPath).checkpoint, 'removed');
+    assert.equal(calls(context.directory), '');
+  } finally {
+    await disposeOwned(context.directory);
+  }
+});
+
+test('without any checkpoint a vanished directory is still refused, touching nothing', async () => {
+  const context = await recoverable('drill-recover-no-evidence-');
+  try {
+    await stopOwned(context.directory);
+    rmSync(context.run.report.temporary, { recursive: true, force: true });
+    const result = await recover(context.directory, context.root, context.run.reportPath);
+    assert.equal(result.code, 2, result.stderr);
+    assert.equal(calls(context.directory), '');
+  } finally {
+    await disposeOwned(context.directory);
+  }
+});
+
+test('a lock whose owner cannot be proven gone is refused with one fixed line, touching nothing', async () => {
+  const context = await recoverable('drill-recover-lock-unknown-');
+  const held = context.run.pgid;
+  try {
+    // A claim from another pid namespace: its pid means nothing here, so it is neither alive nor gone.
+    writeFileSync(
+      `${context.run.reportPath}.lock.0123456789abcdef`,
+      JSON.stringify({ version: 1, pid: 4242, start: null, boot: null, ns: 'pid:[1]' }),
+      { mode: 0o600 },
+    );
+    const result = await recover(context.directory, context.root, context.run.reportPath);
+    assert.equal(result.code, 2);
+    assert.equal(
+      result.stderr,
+      '[backup-restore-drill] a lock left next to the report cannot be proven stale; nothing was done\n',
+    );
+    assert.equal(calls(context.directory), '');
+    assert.ok(existsSync(context.run.report.temporary));
+    // The same refusal for a normal run on that report path.
+    const run = await new Promise((resolve) => {
+      const child = start(context.directory, context.root);
+      let stderr = '';
+      child.stderr.on('data', (chunk) => (stderr += chunk));
+      child.on('close', (code) => resolve({ code, stderr }));
+    });
+    assert.equal(run.code, 2);
+    assert.match(run.stderr, /cannot be proven stale; nothing was done/);
+  } finally {
+    await disposeOwned(context.directory);
+  }
+  // Both invocations refused, so nothing reaped the crashed run's held group: the fixture did.
+  assert.ok(await waitGone(held), 'the held group does not outlive the test');
+});
+
+// --- the guarded entry (#478 r3 R4) ----------------------------------------------------------
+// A copy of the CLI's own files in a directory with no node_modules above it: `yaml` and the
+// shared URL reader cannot be resolved there, as in a checkout without `pnpm install`.
+function bareCopy(directory, omit = []) {
+  const scripts = join(directory, 'bare', 'scripts');
+  mkdirSync(scripts, { recursive: true });
+  for (const name of [
+    'backup-restore-drill.mjs',
+    'backup-restore-drill-main.mjs',
+    'backup-restore-drill-lib.mjs',
+    'backup-restore-drill-recovery.mjs',
+  ])
+    if (!omit.includes(name)) cpSync(join(repo, 'scripts', name), join(scripts, name));
+  return join(scripts, 'backup-restore-drill.mjs');
+}
+const runEntry = (entry, args, directory) =>
+  new Promise((resolve) => {
+    const child = spawnOwned(directory, process.execPath, [entry, ...args], {
+      env: { PATH: process.env.PATH, TMPDIR: directory },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => (stdout += chunk));
+    child.stderr.on('data', (chunk) => (stderr += chunk));
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+const FIXED_LOAD_FAILURE =
+  '[backup-restore-drill] the command could not run to completion (a module failed to load or an internal error occurred); details are not printed\n';
+
+test('--cleanup-from needs nothing a normal run needs: without yaml or the URL reader it still reaches its own refusal', async () => {
+  const directory = ownedDirectory('drill-bare-');
+  try {
+    const entry = bareCopy(directory);
+    const result = await runEntry(
+      entry,
+      ['--cleanup-from', join(directory, 'nothing.json')],
+      directory,
+    );
+    assert.equal(result.code, 2);
+    assert.equal(result.stderr, '[backup-restore-drill] recovery refused: the report is missing\n');
+    assert.equal(result.stdout, '');
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('a module that cannot be loaded ends in one fixed line: no stack, no path, no module name', async () => {
+  for (const [omit, args] of [
+    ['backup-restore-drill-lib.mjs', ['--cleanup-from', 'x.json']],
+    ['backup-restore-drill-recovery.mjs', ['--cleanup-from', 'x.json']],
+    ['backup-restore-drill-main.mjs', ['--cleanup-from', 'x.json']],
+    ['backup-restore-drill-lib.mjs', ['--report', 'x.json']],
+  ]) {
+    const directory = ownedDirectory('drill-bare-missing-');
+    try {
+      const entry = bareCopy(directory, [omit]);
+      const result = await runEntry(entry, args, directory);
+      assert.equal(result.code, 1, omit);
+      assert.equal(result.stderr, FIXED_LOAD_FAILURE, omit);
+      assert.equal(result.stdout, '');
+    } finally {
+      await disposeOwned(directory);
+    }
+  }
+  // A dependency of a normal run that is missing there is a failed RUN with a private report.
+  const directory = ownedDirectory('drill-bare-run-');
+  try {
+    const entry = bareCopy(directory);
+    const report = join(directory, 'report.json');
+    const result = await runEntry(entry, ['--report', report], directory);
+    assert.equal(result.code, 1);
+    assert.doesNotMatch(
+      result.stderr + result.stdout,
+      /ERR_MODULE_NOT_FOUND|node:internal|yaml|\bat /,
+    );
+    assert.equal(JSON.parse(readFileSync(report, 'utf8')).passed, false);
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+// --- the report's whole artifact namespace is reserved before anything is allocated (#478 r6 F4) ---
+const JOURNAL_REFUSED =
+  '[backup-restore-drill] a recovery journal already exists next to the report path (an earlier run left it, or another report claims the name); remove or archive it together with its report, then start again; nothing was done\n';
+const NAME_REFUSED =
+  '[backup-restore-drill] the --report path ends in a name this drill derives from a report path (.recovery-journal.json, .lock.<hex>, .<hex>.tmp); nothing was done\n';
+/** One invocation (`--report` or `--cleanup-from`) run to its end, output captured. */
+function invoke(directory, root, flag, reportPath, extra = {}) {
+  const child = spawnOwned(directory, process.execPath, [cli.pathname, flag, reportPath], {
+    env: {
+      ...process.env,
+      PATH: `${directory}:${process.env.PATH}`,
+      TMPDIR: directory,
+      RASTA_DRILL_ROOT: root,
+      ...extra,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => (stdout += chunk));
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  return { child, done: once(child, 'close').then(([code]) => ({ code, stdout, stderr })) };
+}
+/** Nothing the refused invocation did is left: no directory, no Docker call, no lock claim. */
+function assertUntouched(directory, before) {
+  assert.deepEqual(readdirSync(directory).sort(), before);
+  assert.equal(calls(directory), '');
+  assert.equal(existsSync(join(directory, 'pnpm-called')), false);
+}
+const stubs = (directory) => {
+  recordingDocker(directory);
+  writeFileSync(join(directory, 'pnpm'), `#!/bin/sh\ntouch '${directory}/pnpm-called'\n`, {
+    mode: 0o700,
+  });
+};
+
+test('a journal left by a finished run refuses the next run on that report path, touching nothing; cleared together with its report the path is free', async () => {
+  const directory = ownedDirectory('drill-reuse-');
+  try {
+    const root = fixture(directory);
+    const a = await ordinaryRun(directory, root);
+    assert.equal(journalOf(a.reportPath).checkpoint, 'removed');
+    // The operator archives A's report only and starts B on the same path.
+    rmSync(a.reportPath);
+    const journal = `${a.reportPath}.recovery-journal.json`;
+    const bytes = readFileSync(journal);
+    stubs(directory);
+    rmSync(join(directory, 'docker-calls'), { force: true });
+    const before = readdirSync(directory).sort();
+    const b = await invoke(directory, root, '--report', a.reportPath).done;
+    assert.equal(b.code, 2, b.stderr);
+    assert.equal(b.stderr, JOURNAL_REFUSED);
+    assert.doesNotMatch(b.stderr, new RegExp(directory));
+    assertUntouched(directory, before);
+    assert.deepEqual(readFileSync(journal), bytes, 'A’s journal is exactly as it was');
+    assert.equal(existsSync(a.reportPath), false, 'no report was created');
+    // Archived together with its report, the path is free, and a run killed after it allocated
+    // is recovered by ITS OWN journal (the original failure: recovery read A's and refused).
+    rmSync(journal);
+    const run = await crashedRun(directory, root);
+    recordingDocker(directory);
+    const recovery = await recover(directory, root, run.reportPath);
+    assert.equal(recovery.code, 0, recovery.stderr);
+    assert.doesNotMatch(recovery.stderr, /does not match the directory/);
+    assert.equal(existsSync(run.report.temporary), false);
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('overlapping names, a live run first: a report named like its journal, lock claim or write sibling is refused and the run’s files stand', async () => {
+  const directory = ownedDirectory('drill-overlap-live-');
+  let live;
+  try {
+    const root = fixture(directory);
+    writeFileSync(
+      join(directory, 'pnpm'),
+      `#!/bin/bash
+echo $$ > '${directory}/blocked-pgid'
+${holdUntil(directory, `${directory}/release`)}
+`,
+      { mode: 0o700 },
+    );
+    writeFileSync(join(directory, 'docker'), '#!/bin/sh\ncase "$*" in *"up -d"*) exit 1;; esac\n', {
+      mode: 0o700,
+    });
+    const reportPath = join(directory, 'report.json');
+    live = invoke(directory, root, '--report', reportPath);
+    // The run records its child's group right after the spawn and then writes nothing until the
+    // child ends: snapshot the directory only once that record (and so its write sibling's
+    // rename) is on disk, not on the child's own marker.
+    await waitForRecordedGroup(
+      reportPath,
+      await waitForGroup(directory, join(directory, 'blocked-pgid')),
+      'processGroups',
+    );
+    const journal = `${reportPath}.recovery-journal.json`;
+    const reserved = readFileSync(journal);
+    const reportBytes = readFileSync(reportPath);
+    const before = readdirSync(directory).sort();
+    for (const name of [
+      `${reportPath}.recovery-journal.json`,
+      `${reportPath}.lock.0123456789abcdef`,
+      `${reportPath}.0123456789abcdef.tmp`,
+      `${journal}.recovery-journal.json`,
+    ])
+      for (const flag of ['--report', '--cleanup-from']) {
+        const result = await invoke(directory, root, flag, name).done;
+        assert.equal(result.code, 2, `${flag} ${name}: ${result.stderr}`);
+        assert.equal(result.stderr, NAME_REFUSED);
+        assert.deepEqual(readdirSync(directory).sort(), before, 'not one file was created');
+      }
+    assert.deepEqual(readFileSync(journal), reserved, 'the live run’s journal is untouched');
+    assert.deepEqual(readFileSync(reportPath), reportBytes);
+    // The live run finishes: its teardown journal is ITS OWN, not overwritten into anything else.
+    writeFileSync(join(directory, 'release'), '');
+    const done = await live.done;
+    assert.equal(done.code, 1, done.stderr);
+    const final = journalOf(reportPath);
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    assert.equal(final.id, report.recoveryId);
+    assert.equal(final.project, report.project);
+    assert.equal(final.checkpoint, 'removed');
+    assert.equal(report.cleanup.passed, true);
+  } finally {
+    // The stub polls for `release` inside the directory: a failed assertion above leaves the live
+    // run blocked there, and the owner stops it (and confirms that) before the directory goes.
+    await disposeOwned(directory);
+  }
+});
+
+test('overlapping names, the journal’s name taken first: the run is refused and what holds the name is not touched', async () => {
+  const directory = ownedDirectory('drill-overlap-first-');
+  try {
+    const root = fixture(directory);
+    stubs(directory);
+    const reportPath = join(directory, 'report.json');
+    const journal = `${reportPath}.recovery-journal.json`;
+    // What an earlier B (report named `<R>.recovery-journal.json`) would hold there, or any file.
+    for (const text of ['{"project":"restore-drill-0123456789abcdef"}', '', 'operator notes']) {
+      writeFileSync(journal, text, { mode: 0o600 });
+      const before = readdirSync(directory).sort();
+      const result = await invoke(directory, root, '--report', reportPath).done;
+      assert.equal(result.code, 2, result.stderr);
+      assert.equal(result.stderr, JOURNAL_REFUSED);
+      assertUntouched(directory, before);
+      assert.equal(readFileSync(journal, 'utf8'), text);
+      rmSync(journal);
+    }
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+// --- the trust boundary is the directory; a replaced artifact is never removed (#512 r1 F1) --------
+const withDirectory = async (prefix, body) => {
+  const directory = ownedDirectory(prefix);
+  try {
+    return await body(directory);
+  } finally {
+    await disposeOwned(directory);
+  }
+};
+const DIRECTORY_LINE =
+  /^\[backup-restore-drill\] the (report|temporary) directory must be private \(a real directory owned by the current user or root that group and others cannot write\); nothing was done\n$/;
+async function runCli(directory, root, args, extra = {}) {
+  const { status, stdout, stderr } = await runOwned(
+    directory,
+    process.execPath,
+    [cli.pathname, ...args],
+    {
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        TMPDIR: directory,
+        RASTA_DRILL_ROOT: root,
+        ...extra,
+      },
+    },
+  );
+  return { code: status, stdout, stderr };
+}
+
+test('a report directory that group or others can write is refused (exit 2, one fixed line) before any artifact exists', async () => {
+  await withDirectory('drill-dir-refused-', async (directory) => {
+    const root = fixture(directory);
+    const scratch = join(directory, 'tmp');
+    mkdirSync(scratch, { mode: 0o700 });
+    for (const bits of [0o770, 0o707, 0o777, 0o1777]) {
+      const shared = join(directory, `shared-${bits}`);
+      mkdirSync(shared);
+      chmodSync(shared, bits);
+      for (const args of [
+        ['--report', join(shared, 'report.json')],
+        ['--cleanup-from', join(shared, 'report.json')],
+      ]) {
+        const result = await runCli(directory, root, args, { TMPDIR: scratch });
+        const label = `${bits.toString(8)} ${args[0]}`;
+        assert.equal(result.code, 2, label);
+        assert.match(result.stderr, DIRECTORY_LINE, label);
+        assert.equal(result.stdout, '', label);
+        assert.deepEqual(readdirSync(shared), [], `${label}: no artifact, no lock, no report`);
+        assert.deepEqual(readdirSync(scratch), [], `${label}: no temporary directory`);
+        assert.ok(!result.stderr.includes(directory), `${label}: no path`);
+      }
+    }
+    // A link to such a directory is resolved, so it is refused as well.
+    const link = join(directory, 'link');
+    symlinkSync(join(directory, 'shared-511'), link);
+    chmodSync(join(directory, 'shared-511'), 0o777);
+    const viaLink = await runCli(directory, root, ['--report', join(link, 'report.json')], {
+      TMPDIR: scratch,
+    });
+    assert.equal(viaLink.code, 2);
+    assert.match(viaLink.stderr, DIRECTORY_LINE);
+    assert.deepEqual(readdirSync(join(directory, 'shared-511')), []);
+  });
+});
+
+test('a temporary-directory parent that others can write is refused before anything exists; a sticky /tmp gets a private subdirectory', async () => {
+  await withDirectory('drill-tmp-refused-', async (directory) => {
+    const root = fixture(directory);
+    const reports = join(directory, 'reports');
+    mkdirSync(reports, { mode: 0o700 });
+    // Writable by others and NOT sticky: a private subdirectory there could be renamed away.
+    const open = join(directory, 'open-tmp');
+    mkdirSync(open);
+    chmodSync(open, 0o777);
+    for (const args of [
+      ['--report', join(reports, 'report.json')],
+      ['--cleanup-from', join(reports, 'report.json')],
+    ]) {
+      const result = await runCli(directory, root, args, { TMPDIR: open });
+      assert.equal(result.code, 2, args[0]);
+      assert.match(result.stderr, DIRECTORY_LINE);
+      assert.match(result.stderr, /the temporary directory/);
+      assert.deepEqual(readdirSync(reports), [], 'no artifact');
+      assert.deepEqual(readdirSync(open), [], 'nothing made in the refused parent');
+    }
+    // Sticky and world-writable (/tmp): the run works in a private subdirectory of it.
+    const sticky = join(directory, 'sticky-tmp');
+    mkdirSync(sticky);
+    chmodSync(sticky, 0o1777);
+    writeFileSync(join(root, '.env'), 'SYNTHETIC_TEST=true\n');
+    const run = await runCli(directory, root, ['--report', join(reports, 'report.json')], {
+      TMPDIR: sticky,
+    });
+    assert.equal(run.code, 1, run.stderr);
+    const report = JSON.parse(readFileSync(join(reports, 'report.json'), 'utf8'));
+    const own = join(sticky, `rasta-restore-drill-root-${process.getuid()}`);
+    assert.deepEqual(readdirSync(sticky), [`rasta-restore-drill-root-${process.getuid()}`]);
+    assert.equal(statSync(own).mode & 0o777, 0o700);
+    assert.equal(report.temporary.startsWith(`${own}/`), true, 'the directory is inside it');
+    assert.equal(report.cleanup.passed, true);
+    assert.deepEqual(readdirSync(own), [], 'and removed from it');
+    // Somebody else made the name first with a wide mode: refused, not adopted.
+    rmSync(own, { recursive: true });
+    mkdirSync(own, { mode: 0o755 });
+    chmodSync(own, 0o755);
+    rmSync(join(reports, 'report.json'));
+    rmSync(join(reports, 'report.json.recovery-journal.json'));
+    const taken = await runCli(directory, root, ['--report', join(reports, 'report.json')], {
+      TMPDIR: sticky,
+    });
+    assert.equal(taken.code, 2);
+    assert.match(taken.stderr, DIRECTORY_LINE);
+    assert.deepEqual(readdirSync(reports), []);
+  });
+});
+
+test('a directory replaced while the checkpoint is published is not removed: the run reports it and fails', async () => {
+  await withDirectory('drill-swap-run-', async (directory) => {
+    const root = fixture(directory);
+    const run = await ordinaryRun(
+      directory,
+      root,
+      faultEnv({ swapDirectory: { parent: directory } }),
+    );
+    assert.equal(run.code, 1);
+    assert.match(run.report.temporary, /rasta-restore-drill-/);
+    assert.equal(
+      readFileSync(join(run.report.temporary, 'theirs'), 'utf8'),
+      'precious',
+      'the replacement survives',
+    );
+    assert.equal(existsSync(`${run.report.temporary}.moved`), true, 'the original was not touched');
+    assert.equal(run.report.cleanup.passed, false);
+    assert.equal(run.report.cleanup.foreign, true);
+    assert.equal(run.report.passed, false);
+  });
+});
+
+test('a recovery whose directory is replaced while the checkpoint is published removes nothing and exits non-zero', async () => {
+  const context = await recoverable('drill-swap-recovery-');
+  try {
+    const { directory, root, run } = context;
+    const result = await recover(
+      directory,
+      root,
+      run.reportPath,
+      faultEnv({ swapDirectory: { parent: directory } }),
+    );
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(
+      result.stderr,
+      /\[backup-restore-drill\] the temporary directory was replaced by another actor and was left in place/,
+    );
+    assert.equal(readFileSync(join(run.report.temporary, 'theirs'), 'utf8'), 'precious');
+    assert.ok(!result.stderr.includes(directory), 'no path');
+  } finally {
+    await disposeOwned(context.directory);
+  }
+});
+
+test('a lock claim replaced while the recovery runs is left in place, reported, and the exit is not 0', async () => {
+  const context = await recoverable('drill-swap-lock-');
+  try {
+    const { directory, root, run } = context;
+    // The Docker stand-in is another actor with write access to the report's directory.
+    recordingDocker(
+      directory,
+      `case "$*" in
+  *'down --volumes'*)
+    ${CLAIM_REPLACED(directory)}
+    ;;
+esac`,
+    );
+    const result = await recover(directory, root, run.reportPath);
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(
+      result.stderr,
+      /\[backup-restore-drill\] a lock file next to the report was replaced by another actor and was left in place/,
+    );
+    assert.ok(!result.stderr.includes(directory), 'no path');
+    const [claim] = readdirSync(directory).filter((name) => name.includes('.lock.'));
+    assert.equal(readFileSync(join(directory, claim), 'utf8'), 'theirs\n');
+  } finally {
+    await disposeOwned(context.directory);
+  }
+});
+
+// --- ownership survives a retry; foreign artifacts reach the published status (#512 r3 F1, F2) -------
+const REPLACED_LINE =
+  /\[backup-restore-drill\] the temporary directory was replaced by another actor and was left in place/;
+const persistedIdentity = (path) => {
+  const stat = statSync(path, { bigint: true });
+  return {
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    kind: 'directory',
+    birth: String(stat.birthtimeNs),
+  };
+};
+// Another actor with write access to the temp root takes the directory's name: the original is
+// moved aside (when still there) and a directory holding the record's marker and `theirs` stands.
+const takeName = (report) => {
+  const { temporary } = report;
+  const forged = {
+    version: 1,
+    id: report.recoveryId,
+    project: report.project,
+    directory: temporary.split('/').at(-1),
+  };
+  const compose = existsSync(join(temporary, 'compose.json'))
+    ? readFileSync(join(temporary, 'compose.json'))
+    : undefined;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30); // a coarse clock gives equal birth times
+  if (existsSync(temporary)) renameSync(temporary, `${temporary}.moved`);
+  mkdirSync(temporary, { mode: 0o700 });
+  writeFileSync(join(temporary, 'recovery.json'), JSON.stringify(forged, null, 2), { mode: 0o600 });
+  if (compose) writeFileSync(join(temporary, 'compose.json'), compose, { mode: 0o600 });
+  writeFileSync(join(temporary, 'theirs'), 'precious');
+};
+const THEIRS_SURVIVES = (report, label) => {
+  assert.equal(readFileSync(join(report.temporary, 'theirs'), 'utf8'), 'precious', label);
+  assert.equal(existsSync(join(report.temporary, 'recovery.json')), true, label);
+};
+
+test('a retry never adopts a replacement of the directory: after a normal cleanup, a recovery, an interrupted or a partial removal', async () => {
+  const stages = {
+    'a crashed run (no checkpoint yet), the replacement carries a forged marker': async (c) => {
+      await takeName(c.run.report);
+    },
+    'a recovery whose removal was refused ("recovered" checkpoint)': async (c) => {
+      const first = await recover(
+        c.directory,
+        c.root,
+        c.run.reportPath,
+        faultEnv({ rm: { mode: 'before' } }),
+      );
+      assert.equal(first.code, 1, first.stderr);
+      assert.equal(journalOf(c.run.reportPath).checkpoint, 'recovered');
+      await takeName(c.run.report);
+    },
+    'a recovery killed in the middle of the removal (marker and compose.json already gone)': async (
+      c,
+    ) => {
+      const first = await recover(
+        c.directory,
+        c.root,
+        c.run.reportPath,
+        faultEnv({ rm: { mode: 'kill-mid' } }),
+      );
+      assert.equal(first.code, null);
+      assert.equal(journalOf(c.run.reportPath).checkpoint, 'recovered');
+      await takeName(c.run.report);
+    },
+    'a complete recovery ("removed" checkpoint), the name taken afterwards': async (c) => {
+      const first = await recover(c.directory, c.root, c.run.reportPath);
+      assert.equal(first.code, 0, first.stderr);
+      assert.equal(journalOf(c.run.reportPath).checkpoint, 'removed');
+      await takeName(c.run.report);
+    },
+  };
+  for (const [name, prepare] of Object.entries(stages)) {
+    const context = await recoverable('drill-retry-owner-');
+    try {
+      await prepare(context);
+      const { directory, root, run } = context;
+      rmSync(join(directory, 'docker-calls'), { force: true });
+      const before = readFileSync(recoveryJournal(run));
+      for (const attempt of ['second', 'third']) {
+        const retry = await recover(directory, root, run.reportPath);
+        assert.equal(retry.code, 1, `${name}, ${attempt}: ${retry.stderr}`);
+        assert.match(retry.stderr, REPLACED_LINE, name);
+        assert.ok(!retry.stderr.includes(directory), `${name}: no path`);
+        THEIRS_SURVIVES(run.report, `${name}, ${attempt}`);
+        assert.equal(
+          calls(directory),
+          '',
+          `${name}: Docker was asked nothing about a foreign object`,
+        );
+        assert.deepEqual(readFileSync(recoveryJournal(run)), before, `${name}: no write`);
+      }
+    } finally {
+      await disposeOwned(context.directory);
+    }
+  }
+});
+
+test('a retry after the run finished its own cleanup finds the name taken: foreign, nothing removed', async () => {
+  const directory = ownedDirectory('drill-retry-owner-run-');
+  try {
+    const root = fixture(directory);
+    const run = await ordinaryRun(directory, root);
+    assert.equal(run.code, 1);
+    assert.equal(journalOf(run.reportPath).checkpoint, 'removed');
+    assert.equal(existsSync(run.report.temporary), false);
+    takeName(run.report);
+    const retry = await recover(directory, root, run.reportPath);
+    assert.equal(retry.code, 1, retry.stderr);
+    assert.match(retry.stderr, REPLACED_LINE);
+    THEIRS_SURVIVES(run.report, 'after the run’s own cleanup');
+  } finally {
+    await disposeOwned(directory);
+  }
+});
+
+test('the identity is persisted outside the tree and carried by every journal write; an older report is adopted only through its marker', async () => {
+  const context = await recoverable('drill-identity-persist-');
+  try {
+    const { directory, root, run } = context;
+    const expected = persistedIdentity(run.report.temporary);
+    assert.deepEqual(run.report.temporaryIdentity, expected, 'the run’s report names the object');
+    // An older report names nothing: the marker proves the directory, and the journal then holds
+    // what was proven, so the next retry is bound to it.
+    const legacy = { ...run.report };
+    delete legacy.temporaryIdentity;
+    writeFileSync(run.reportPath, JSON.stringify(legacy), { mode: 0o600 });
+    const first = await recover(
+      directory,
+      root,
+      run.reportPath,
+      faultEnv({ rm: { mode: 'before' } }),
+    );
+    assert.equal(first.code, 1, first.stderr);
+    assert.deepEqual(journalOf(run.reportPath).identity, expected, 'the "recovered" write');
+    takeName(run.report);
+    const retry = await recover(directory, root, run.reportPath);
+    assert.equal(retry.code, 1, retry.stderr);
+    assert.match(retry.stderr, REPLACED_LINE);
+    THEIRS_SURVIVES(run.report, 'older report');
+  } finally {
+    await disposeOwned(context.directory);
+  }
+});
+
+test('an older report whose checkpoint has no identity to stand on is refused, not adopted', async () => {
+  const context = await recoverable('drill-identity-missing-');
+  try {
+    const { directory, root, run } = context;
+    const first = await recover(
+      directory,
+      root,
+      run.reportPath,
+      faultEnv({ rm: { mode: 'before' } }),
+    );
+    assert.equal(first.code, 1, first.stderr);
+    const legacy = { ...run.report };
+    delete legacy.temporaryIdentity;
+    writeFileSync(run.reportPath, JSON.stringify(legacy), { mode: 0o600 });
+    const journal = journalOf(run.reportPath);
+    delete journal.identity;
+    writeFileSync(recoveryJournal(run), JSON.stringify(journal), { mode: 0o600 });
+    const retry = await recover(directory, root, run.reportPath);
+    assert.equal(retry.code, 2, retry.stderr);
+    assert.match(retry.stderr, /no directory identity to hold the directory to/);
+    assert.equal(existsSync(run.report.temporary), true, 'the directory is left alone');
+  } finally {
+    await disposeOwned(context.directory);
+  }
+});
+
+/** A complete, passing run (every comparison equal) with the stand-ins of the reference fixture. */
+async function passingRun(prefix, mode, extra = {}) {
+  const directory = ownedDirectory(prefix);
+  const { root, path } = await referenceCliFixture(directory, mode);
+  const child = start(directory, root, extra, path);
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => (stdout += chunk));
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  const [code] = await once(child, 'close');
+  const report = JSON.parse(readFileSync(join(directory, 'report.json'), 'utf8'));
+  const summary = JSON.parse(stdout.trim().split('\n').at(-1));
+  return { directory, code, stdout, stderr, report, summary };
+}
+// The published status says "foreign" in the report file AND in the summary on stdout.
+const assertForeignStatus = ({ code, report, summary }, label) => {
+  assert.equal(code, 1, label);
+  for (const [where, status] of [
+    ['report', report],
+    ['summary', summary],
+  ]) {
+    assert.equal(status.passed, false, `${label}: ${where}.passed`);
+    assert.equal(status.cleanup.passed, false, `${label}: ${where}.cleanup.passed`);
+    assert.equal(status.cleanup.foreign, true, `${label}: ${where}.cleanup.foreign`);
+  }
+  assert.ok(report.finishedAt, `${label}: the report on disk is the final one`);
+};
+
+test('a lock claim replaced before the run exits: the report and the summary say foreign, not passed', async () => {
+  const run = await passingRun('drill-claim-replaced-', 'claim-replaced');
+  try {
+    assertForeignStatus(run, 'claim replaced');
+    assert.ok(
+      run.report.databases.every((db) => db.tablesEqual),
+      'every comparison itself passed',
+    );
+    assert.match(
+      run.stderr,
+      /\[backup-restore-drill\] a lock file next to the report was replaced by another actor and was left in place\n/,
+    );
+    const [claim] = readdirSync(run.directory).filter((name) => name.includes('.lock.'));
+    assert.equal(readFileSync(join(run.directory, claim), 'utf8'), 'theirs\n', 'left in place');
+    assert.equal(run.stderr.split(run.directory).length, 1, 'no path');
+  } finally {
+    await disposeOwned(run.directory);
+  }
+});
+
+test('a publication that meets a replaced file is foreign wherever it happens: final report, progress report, directory marker', async () => {
+  const cases = {
+    'the final report’s write sibling': { contains: '"finishedAt"' },
+    'a progress report written while a child runs': { contains: '"processGroups"' },
+    'the directory marker, before the report names the directory': { contains: '"directory":' },
+  };
+  for (const [name, swap] of Object.entries(cases)) {
+    const run = await passingRun(
+      'drill-publication-foreign-',
+      'baseline',
+      faultEnv({ swapSibling: swap }),
+    );
+    try {
+      assertForeignStatus(run, name);
+      assert.match(
+        run.stderr,
+        /\[backup-restore-drill\] Could not write report \(foreign artifact left in place\)\n/,
+        name,
+      );
+      assert.ok(!run.stderr.includes(run.directory), `${name}: no path`);
+      const left = readdirSync(run.directory).filter((entry) => entry.endsWith('.tmp'));
+      assert.equal(
+        left.length,
+        name.includes('marker') ? 0 : 1,
+        `${name}: the replaced sibling stays`,
+      );
+    } finally {
+      await disposeOwned(run.directory);
+    }
+  }
+});
+
+test('a final report write that meets a replaced file is retried once even when an earlier operation already found a foreign artifact: disk and stdout carry the same sealed status', async () => {
+  const earlier = {
+    'a progress report': '"processGroups"',
+    'the directory marker': '"directory":',
+  };
+  for (const [name, contains] of Object.entries(earlier)) {
+    const label = `${name}, then the final report`;
+    const run = await passingRun(
+      'drill-publication-foreign-twice-',
+      'baseline',
+      faultEnv({ swapSibling: [{ contains }, { contains: '"finishedAt"' }] }),
+    );
+    try {
+      assertForeignStatus(run, label);
+      assert.deepEqual(run.report.cleanup, run.summary.cleanup, `${label}: one status`);
+      assert.equal(run.report.passed, run.summary.passed, `${label}: one verdict`);
+      assert.ok(
+        readdirSync(run.directory).filter((entry) => entry.endsWith('.tmp')).length >=
+          (name.includes('marker') ? 1 : 2),
+        `${label}: every replaced sibling stays`,
+      );
+      assert.ok(!run.stderr.includes('the previous report remains'), `${label}: the retry wrote`);
+    } finally {
+      await disposeOwned(run.directory);
+    }
+  }
+});
+
+test('a recovery journal write that meets a replaced file is foreign (the exit and the line), not a generic write failure', async () => {
+  const context = await recoverable('drill-journal-foreign-');
+  try {
+    const { directory, root, run } = context;
+    const result = await recover(
+      directory,
+      root,
+      run.reportPath,
+      faultEnv({ swapSibling: { contains: '"groups"' } }),
+    );
+    assert.equal(result.code, 1, result.stderr);
+    assert.match(
+      result.stderr,
+      /\[backup-restore-drill\] Could not write report \(foreign artifact left in place\)\n/,
+    );
+    assert.equal(existsSync(run.report.temporary), true, 'nothing is removed after it');
+    assert.ok(!result.stderr.includes(directory), 'no path');
+  } finally {
+    await disposeOwned(context.directory);
   }
 });

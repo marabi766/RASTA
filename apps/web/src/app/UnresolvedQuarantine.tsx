@@ -145,7 +145,7 @@ export interface RestoredStart<S> {
 }
 
 /**
- * The one way a fenced form is drawn (all seven kinds): behind its kind's
+ * The one way a fenced form is drawn (all eight kinds): behind its kind's
  * gate, and — **every time it mounts** — starting from what storage keeps of
  * its own submission (`restore`), never from an idle state over a key whose
  * outcome is unknown. A mounted form keeps its state across later holds

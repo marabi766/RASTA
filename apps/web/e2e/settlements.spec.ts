@@ -121,12 +121,12 @@ test.describe('settlements through the live stack', () => {
     return (await page.locator('main').innerText()).trim();
   }
 
-  test.beforeAll(async ({ browser, playwright }) => {
+  test.beforeAll(async ({ browser, newApiContext }) => {
     const context = await browser.newContext();
     const session = await installLiveSession(context, 'orgAdmin');
     await context.close();
 
-    const request = await playwright.request.newContext();
+    const request = await newApiContext();
     try {
       ownId = await settle(request, session.accessToken, OWN_PAYEE);
       thirdId = await settle(request, session.accessToken, THIRD_ORGANIZATION);

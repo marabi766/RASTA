@@ -211,6 +211,13 @@ export const identityEnvSchema = baseEnvSchema
     MEMBERSHIP_EXPIRY_SCAN_INTERVAL_SECONDS: z.coerce.number().int().min(5).max(3600).prefault(60),
     MEMBERSHIP_EXPIRY_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(200),
 
+    // The registration worker (`RegistrationIntakeWorker`, task 130): how
+    // often it turns received public registrations into review requests, and
+    // how many a pass. No switch to turn it off — nothing else would ever
+    // record a registration.
+    REGISTRATION_INTAKE_INTERVAL_SECONDS: z.coerce.number().int().min(1).max(3600).prefault(5),
+    REGISTRATION_INTAKE_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(50),
+
     /**
      * Which roles may provision a user into an organization other than the one
      * they are acting for (`identity/provisioning-scope.ts`, `docs/24` Q-61).

@@ -11,8 +11,9 @@ import { canManageDrivers } from './drivers';
 import { canManageAvailability } from './fleet-availability';
 import { canManageMaintenance, canReportMaintenance } from './maintenance-commands';
 import { canPlaceOrder } from './place-order';
-import { tokenWriteRoles } from './realm-roles';
 import { OVERSIGHT_ROLE, rolesGuardAdmits, SUPER_ROLE } from './roles-guard';
+import { sessionWriteRoles } from './session-organization';
+import { pinnedTokens } from '@/test/session-token';
 
 /**
  * PR 325 review 1, finding 2: every write form's "may this person use it" is
@@ -22,21 +23,27 @@ import { OVERSIGHT_ROLE, rolesGuardAdmits, SUPER_ROLE } from './roles-guard';
  */
 
 const guard = squash(readSource('packages', 'nest-common', 'src', 'guards', 'roles.guard.ts'))!;
+/** The rule itself (task 130): the one predicate `RolesGuard` and identity's live check apply. */
+const rule = squash(readSource('packages', 'nest-common', 'src', 'guards', 'role-admission.ts'))!;
 
 describe('the mirror is the guard', () => {
   it('names the same two roles', () => {
-    expect(guard).toContain(`staticreadonlySUPER_ROLE='${SUPER_ROLE}';`);
-    expect(guard).toContain(`staticreadonlyOVERSIGHT_ROLE='${OVERSIGHT_ROLE}';`);
+    expect(rule).toContain(`exportconstSUPER_ROLE='${SUPER_ROLE}';`);
+    expect(rule).toContain(`exportconstOVERSIGHT_ROLE='${OVERSIGHT_ROLE}';`);
+  });
+
+  it('the guard decides by that rule', () => {
+    expect(guard).toContain('assertRolesAdmitted(context.roles,{required,');
   });
 
   it('refuses the oversight role before it admits the administrator, unless the route names it', () => {
-    const oversight = guard.indexOf('if(context.roles.includes(RolesGuard.OVERSIGHT_ROLE))');
-    const named = guard.indexOf('constnamed=required?.includes(RolesGuard.OVERSIGHT_ROLE)??false;');
-    const admin = guard.indexOf('if(context.roles.includes(RolesGuard.SUPER_ROLE))returntrue;');
+    const oversight = rule.indexOf('if(held.includes(OVERSIGHT_ROLE)){');
+    const named = rule.indexOf('constnamed=required.includes(OVERSIGHT_ROLE);');
+    const admin = rule.indexOf('if(held.includes(SUPER_ROLE))return;');
     expect(oversight).toBeGreaterThan(-1);
     expect(named).toBeGreaterThan(oversight);
     expect(admin).toBeGreaterThan(named);
-    expect(guard).toContain('constgranted=required.some((role)=>context.roles.includes(role));');
+    expect(rule).toContain('if(!required.some((role)=>held.includes(role))){');
   });
 });
 
@@ -98,30 +105,36 @@ describe('tokenWriteRoles — a write needs the organization it is for', () => {
 
   it('a token resolving to an organization: its roles there, with the global ones', () => {
     expect(
-      tokenWriteRoles(
-        jwt({
-          org_id: ORG,
-          org_ids: [ORG],
-          org_roles: [`${ORG}:DRIVER`],
-          realm_access: { roles: ['SYSTEM_ADMIN'] },
-        }),
+      sessionWriteRoles(
+        pinnedTokens(
+          jwt({
+            org_id: ORG,
+            org_ids: [ORG],
+            org_roles: [`${ORG}:DRIVER`],
+            realm_access: { roles: ['SYSTEM_ADMIN'] },
+          }),
+        ),
       ),
     ).toEqual(['DRIVER', 'SYSTEM_ADMIN']);
   });
 
   it('the global administrator with no organization: none — a tenant-scoped write cannot run', () => {
-    expect(tokenWriteRoles(jwt({ realm_access: { roles: ['SYSTEM_ADMIN'] } }))).toBeNull();
+    expect(
+      sessionWriteRoles(pinnedTokens(jwt({ realm_access: { roles: ['SYSTEM_ADMIN'] } }))),
+    ).toBeNull();
   });
 
   it('the global administrator naming an organization it holds no role in: none (TENANT_MISMATCH)', () => {
     expect(
-      tokenWriteRoles(
-        jwt({
-          org_id: ORG,
-          org_ids: [ORG],
-          org_roles: [],
-          realm_access: { roles: ['SYSTEM_ADMIN'] },
-        }),
+      sessionWriteRoles(
+        pinnedTokens(
+          jwt({
+            org_id: ORG,
+            org_ids: [ORG],
+            org_roles: [],
+            realm_access: { roles: ['SYSTEM_ADMIN'] },
+          }),
+        ),
       ),
     ).toBeNull();
   });

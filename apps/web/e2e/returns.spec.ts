@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import AxeBuilder from '@axe-core/playwright';
+import { guardedFetch } from '@rasta/testing';
 import { test, type Browser, type Locator, type Page } from './expect';
 import { expect } from './expect';
 
@@ -118,7 +119,7 @@ function gatewayUrl(path: string): string {
 /** A provisioned person's access token, by the realm's password grant, for its own API calls. */
 async function tokenOf(person: ProvisionedPerson): Promise<string> {
   const issuer = (process.env.OIDC_ISSUER_URL ?? '').replace(/\/+$/, '');
-  const response = await fetch(`${issuer}/protocol/openid-connect/token`, {
+  const response = await guardedFetch(`${issuer}/protocol/openid-connect/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -140,7 +141,7 @@ async function asSupplier(
   token?: string,
 ): Promise<{ id: string; version: number }> {
   const bearer = token ?? (await liveAccessToken('orgAdminB'));
-  const response = await fetch(gatewayUrl(path), {
+  const response = await guardedFetch(gatewayUrl(path), {
     method: 'POST',
     headers: {
       authorization: `Bearer ${bearer}`,
@@ -319,7 +320,7 @@ test.describe.serial('returns, live (EXP-003)', () => {
       { name: `انبار بیگانه ${RUN}` },
       outsiderToken,
     );
-    const refused = await fetch(gatewayUrl('/v1/return-shipments'), {
+    const refused = await guardedFetch(gatewayUrl('/v1/return-shipments'), {
       method: 'POST',
       headers: {
         authorization: `Bearer ${outsiderToken}`,

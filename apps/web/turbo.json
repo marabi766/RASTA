@@ -17,7 +17,10 @@
     "test": {
       "inputs": [
         "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/docs/api/inventory-service.openapi.json",
         "$TURBO_ROOT$/packages/config/src/**",
+        "$TURBO_ROOT$/packages/config/eslint.config.mjs",
+        "$TURBO_ROOT$/packages/config/jest.config.js",
         "$TURBO_ROOT$/packages/contracts/**",
         "$TURBO_ROOT$/packages/testing/**",
         "$TURBO_ROOT$/tsconfig.base.json",
@@ -32,6 +35,7 @@
         "$TURBO_ROOT$/services/economic-service/src/**",
         "$TURBO_ROOT$/services/fleet-service/src/**",
         "$TURBO_ROOT$/services/identity-service/src/identity/identity.controller.ts",
+        "$TURBO_ROOT$/services/identity-service/src/identity/live-authority.ts",
         "$TURBO_ROOT$/services/inventory-service/src/**",
         "$TURBO_ROOT$/services/maintenance-service/src/**",
         "$TURBO_ROOT$/services/marketplace-service/src/**",
@@ -41,7 +45,10 @@
     "test:unit": {
       "inputs": [
         "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/docs/api/inventory-service.openapi.json",
         "$TURBO_ROOT$/packages/config/src/**",
+        "$TURBO_ROOT$/packages/config/eslint.config.mjs",
+        "$TURBO_ROOT$/packages/config/jest.config.js",
         "$TURBO_ROOT$/packages/contracts/**",
         "$TURBO_ROOT$/packages/testing/**",
         "$TURBO_ROOT$/tsconfig.base.json",
@@ -56,6 +63,7 @@
         "$TURBO_ROOT$/services/economic-service/src/**",
         "$TURBO_ROOT$/services/fleet-service/src/**",
         "$TURBO_ROOT$/services/identity-service/src/identity/identity.controller.ts",
+        "$TURBO_ROOT$/services/identity-service/src/identity/live-authority.ts",
         "$TURBO_ROOT$/services/inventory-service/src/**",
         "$TURBO_ROOT$/services/maintenance-service/src/**",
         "$TURBO_ROOT$/services/marketplace-service/src/**",

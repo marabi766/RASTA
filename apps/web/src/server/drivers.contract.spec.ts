@@ -32,6 +32,10 @@ const access = parseSource(readSource(...fleetDir, 'access.ts'));
 const identityController = parseSource(
   readSource('services', 'identity-service', 'src', 'identity', 'identity.controller.ts'),
 );
+/** Where the controller's `@Roles(...MEMBERSHIP_ADMIN_ROLES)` list is declared. */
+const identityRoleLists = parseSource(
+  readSource('services', 'identity-service', 'src', 'identity', 'live-authority.ts'),
+);
 const pagination = parseSource(
   readSource('packages', 'contracts', 'src', 'common', 'pagination.ts'),
 );
@@ -89,7 +93,7 @@ describe('the not-a-member refusal (fleet-service membership.ts)', () => {
 
 describe('the member picker', () => {
   it('is offered to exactly the roles identity-service lets list members (GET /v1/users)', () => {
-    const admitted = rolesOf(identityController, 'list');
+    const admitted = rolesOf(identityController, 'list', identityRoleLists);
     for (const role of EVERY_ROLE) {
       expect({ role, offered: canListMembers([role]) }).toEqual({
         role,

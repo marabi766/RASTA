@@ -18,10 +18,12 @@ describe('TOPIC_CONSUMERS', () => {
   it('declares exactly the subscriptions the services run today', () => {
     expect(TOPIC_CONSUMERS).toEqual({
       'identity-service': {
+        groups: ['identity-service.keycloak-projection'],
         subscribes: ['rasta.identity.v1'],
         deadLetterTopic: 'rasta.identity.v1.dlq',
       },
       'asset-service': {
+        groups: ['asset-service.timeline', 'asset-service.document-removal'],
         subscribes: [
           'rasta.fleet.v1',
           'rasta.maintenance.v1',
@@ -32,25 +34,37 @@ describe('TOPIC_CONSUMERS', () => {
         deadLetterTopic: 'rasta.asset.v1.dlq',
       },
       'fleet-service': {
+        groups: ['fleet-service.asset-sync'],
         subscribes: ['rasta.asset.v1', 'rasta.insurance.v1', 'rasta.maintenance.v1'],
         deadLetterTopic: 'rasta.fleet.v1.dlq',
       },
       'maintenance-service': {
+        groups: ['maintenance-service.usage', 'maintenance-service.asset-sync'],
         subscribes: ['rasta.fleet.v1', 'rasta.asset.v1'],
         deadLetterTopic: 'rasta.maintenance.v1.dlq',
       },
       // CON-003 PR 6b: STATEMENT_APPROVED, confirmed by contract-service before any obligation.
       'economic-service': {
+        groups: [
+          'economic-service.settlement-authority',
+          'economic-service.statement-settlement',
+          'economic-service.reward-trigger',
+        ],
         subscribes: ['rasta.maintenance.v1', 'rasta.fleet.v1', 'rasta.contract.v1'],
         deadLetterTopic: 'rasta.economic.v1.dlq',
       },
       'notification-service': {
+        groups: ['notification-service.dispatcher'],
         subscribes: ['rasta.insurance.v1', 'rasta.maintenance.v1'],
         deadLetterTopic: 'rasta.notification.v1.dlq',
       },
       // Q-83: an ORGANIZATION_MOVED re-checks the policies unions wrote. CON-002:
       // a contractor's qualification and suspension (SUPPLIER_*) are what a bid needs.
       'construction-service': {
+        groups: [
+          'construction-service.organization-moves',
+          'construction-service.supplier-standing',
+        ],
         subscribes: ['rasta.organization.v1', 'rasta.supplier.v1'],
         deadLetterTopic: 'rasta.construction.v1.dlq',
       },
@@ -58,24 +72,38 @@ describe('TOPIC_CONSUMERS', () => {
       // and the signing policy's follow-up to an organization move (ORGANIZATION_MOVED, Q-83).
       // CON-003 PR 6c: SETTLEMENT_COMPLETED, confirmed by economic-service before a statement settles.
       'contract-service': {
+        groups: [
+          'contract-service.organization-moves',
+          'contract-service.tender-awarded',
+          'contract-service.settlement-completed',
+        ],
         subscribes: ['rasta.construction.v1', 'rasta.organization.v1', 'rasta.economic.v1'],
         deadLetterTopic: 'rasta.contract.v1.dlq',
       },
       // RUN-005: the physical half of a return, mirrored onto marketplace's own request.
       'marketplace-service': {
+        groups: ['marketplace-service.return-mirror'],
         subscribes: ['rasta.inventory.v1'],
         deadLetterTopic: 'rasta.marketplace.v1.dlq',
       },
       'supplier-service': {
+        groups: ['supplier-service.performance'],
         subscribes: ['rasta.marketplace.v1'],
         deadLetterTopic: 'rasta.supplier.v1.dlq',
       },
       'audit-service': {
+        groups: [
+          'audit-service.domain-projector',
+          'audit-service.trail',
+          'audit-service.ops-replay',
+          'audit-service.tender-evidence',
+        ],
         subscribes: Object.keys(TOPIC_PRODUCERS),
         deadLetterTopic: 'rasta.audit.v1.dlq',
       },
       // RUN-001 PR 1: the first read model, MAINTENANCE_COMPLETED → fact_maintenance (ADR-071).
       'analytics-service': {
+        groups: ['analytics-service.maintenance-facts'],
         subscribes: ['rasta.maintenance.v1'],
         deadLetterTopic: 'rasta.analytics.v1.dlq',
       },

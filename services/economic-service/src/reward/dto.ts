@@ -1,3 +1,4 @@
+import { NUMERIC_FACT_TYPES, exactComparison } from './exact-comparison';
 import { z } from 'zod';
 import {
   amountMinorSchema,
@@ -55,12 +56,15 @@ export const REWARD_TRIGGER_EVENTS = ['USAGE_RECORDED', 'MAINTENANCE_COMPLETED']
  * rather than granting one to everybody.
  */
 /**
- * The comparisons whose two sides are read as numbers (`conditionMet` in
- * `rule-engine.ts`): only for these is `"7.50"` the same operand as `"7.5"`.
+ * Ordering always requires numeric operands. Equality is also exact for
+ * typed numeric facts; textual equality retains its original spelling.
  */
 export const NUMERIC_COMPARISONS = ['gt', 'gte', 'lt', 'lte'] as const;
 
-const conditionOperand = z.union([z.string(), z.number(), z.boolean()]);
+// JSON parsing can round a fractional token to a safe integer before DTO
+// validation sees it. Exact numeric configuration therefore uses strings;
+// boolean/text equality retains its existing operands (F5, fail closed).
+const conditionOperand = z.union([z.string(), z.boolean()]);
 
 const conditionLeaf = z
   .object({
@@ -84,33 +88,27 @@ const conditionSchema: z.ZodType<ConditionNode> = withCanonicalForm(
   canonicalCondition,
 );
 
-/**
- * A condition with the operand of every numeric comparison (`gt`, `gte`,
- * `lt`, `lte`), at any depth under `all` / `any`, in its exact decimal form
- * (`canonicalDecimal`), before the rule is validated, hashed and stored
- * (Codex PR-480 r2, R2). Rewritten only where the operand as sent and its
- * canonical form both pass the operand's own schema. A JSON number is a
- * number, not a spelling, and is left as it is.
- *
- * `eq` and `neq` are left exactly as sent: they compare the operand as a
- * string (`String(actual) === String(value)`), so `"7.50"` and `"7.5"` are two
- * different rules there, and normalizing them would change which payloads
- * match.
- *
- * Anything that is not a condition node is returned as it is, for the schema
- * to refuse; the request's own objects are never modified.
+/** Canonicalize exact numeric operands, including equality on typed numeric facts.
+ * Text equality stays literal; JSON number operands are refused at creation.
  */
 export function canonicalCondition(node: unknown): unknown {
   if (node === null || typeof node !== 'object' || Array.isArray(node)) return node;
   const copy: Record<string, unknown> = { ...(node as Record<string, unknown>) };
+  // Use the same field name the leaf schema will execute after trimming.
+  const field = typeof copy.field === 'string' ? copy.field.trim() : null;
   for (const branch of ['all', 'any'] as const) {
     const children = copy[branch];
     if (Array.isArray(children)) copy[branch] = children.map(canonicalCondition);
   }
   if (
     typeof copy.op === 'string' &&
-    (NUMERIC_COMPARISONS as readonly string[]).includes(copy.op) &&
-    Object.prototype.hasOwnProperty.call(copy, 'value')
+    ((NUMERIC_COMPARISONS as readonly string[]).includes(copy.op) ||
+      ((copy.op === 'eq' || copy.op === 'neq') &&
+        field !== null &&
+        NUMERIC_FACT_TYPES[field] !== undefined)) &&
+    Object.prototype.hasOwnProperty.call(copy, 'value') &&
+    field !== null &&
+    exactComparison(copy.value, copy.value, field) !== null
   ) {
     copy.value = canonicalWithin(conditionOperand, copy.value, canonicalDecimal);
   }
@@ -152,6 +150,52 @@ export const createRewardRuleSchema = z
       'periodCap and periodType must be supplied together — a cap without a window is not a cap',
     path: ['periodCap'],
   });
+
+/** Frozen pre-F5 fingerprint input, for retained records only. Never used to create. */
+const legacyOperand = z.union([z.string(), z.number(), z.boolean()]);
+const legacyLeaf = conditionLeaf.extend({ value: legacyOperand.optional() });
+type LegacyNode = z.infer<typeof legacyLeaf> | { all: LegacyNode[] } | { any: LegacyNode[] };
+const legacyConditionSchema: z.ZodType<LegacyNode> = withCanonicalForm(
+  z.lazy(() =>
+    z.union([
+      legacyLeaf,
+      z.object({ all: z.array(legacyConditionSchema).min(1).max(10) }).strict(),
+      z.object({ any: z.array(legacyConditionSchema).min(1).max(10) }).strict(),
+    ]),
+  ),
+  legacyCanonicalCondition,
+);
+
+function legacyCanonicalCondition(node: unknown): unknown {
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return node;
+  const copy = { ...(node as Record<string, unknown>) };
+  for (const branch of ['all', 'any'] as const) {
+    const children = copy[branch];
+    if (Array.isArray(children)) copy[branch] = children.map(legacyCanonicalCondition);
+  }
+  if (
+    typeof copy.op === 'string' &&
+    (NUMERIC_COMPARISONS as readonly string[]).includes(copy.op) &&
+    Object.prototype.hasOwnProperty.call(copy, 'value')
+  ) {
+    copy.value = canonicalWithin(legacyOperand, copy.value, canonicalDecimal);
+  }
+  return copy;
+}
+
+export const legacyCreateRewardRuleSchema = z
+  .object({
+    ...createRewardRuleSchema.shape,
+    condition: legacyConditionSchema.optional(),
+  })
+  .strict()
+  .refine((dto) => (dto.periodCap === undefined) === (dto.periodType === undefined), {
+    message: 'periodCap and periodType must be supplied together',
+    path: ['periodCap'],
+  });
+
+// Kept in the TEXT request_hash itself: old unprefixed hashes are version 1.
+export const REWARD_FINGERPRINT_VERSION = 'reward-v2';
 
 export type CreateRewardRuleDto = z.infer<typeof createRewardRuleSchema>;
 

@@ -278,6 +278,161 @@ describe('IdentityHttpRecipientAdapter', () => {
     await expect(slow.resolve(query)).rejects.toMatchObject({ reason: 'TIMEOUT' });
   });
 
+  describe('one deadline covers the body too (#502 r1 F1)', () => {
+    /** Headers at once; then one chunk of a page, and the rest never comes. */
+    const stalledPage = (): Response =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"items":['));
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+
+    /** Headers now, one chunk, and the rest never comes; `cancelled()` says whether it was given up. */
+    const stalledWatched = (status: number) => {
+      let cancelled = false;
+      const response = new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"items":['));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { status },
+      );
+      return { response, cancelled: () => cancelled };
+    };
+
+    it('fails a body that stalls after the headers as TIMEOUT, within the deadline, with the signal aborted', async () => {
+      const signals: AbortSignal[] = [];
+      const adapter = new IdentityHttpRecipientAdapter(
+        { baseUrl: 'http://identity.test', timeoutMs: 30 },
+        tokens,
+        (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+          signals.push(init!.signal!);
+          // Not wired to the signal, like a transport that ignores the abort.
+          return stalledPage();
+        }) as typeof fetch,
+      );
+      const started = Date.now();
+
+      await expect(adapter.resolve(query)).rejects.toMatchObject({
+        name: 'RecipientResolutionError',
+        reason: 'TIMEOUT',
+      });
+
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.aborted).toBe(true);
+    });
+
+    it('fails a body that trickles for ever as TIMEOUT, with the signal aborted', async () => {
+      let trickle: NodeJS.Timeout | undefined;
+      let signal: AbortSignal | undefined;
+      const adapter = new IdentityHttpRecipientAdapter(
+        { baseUrl: 'http://identity.test', timeoutMs: 40 },
+        tokens,
+        (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+          signal = init?.signal ?? undefined;
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              trickle = setInterval(() => controller.enqueue(new TextEncoder().encode(' ')), 5);
+              // What undici does with the request's signal once the body is flowing.
+              init?.signal?.addEventListener('abort', () => {
+                clearInterval(trickle);
+                controller.error(init.signal!.reason);
+              });
+            },
+            cancel() {
+              clearInterval(trickle);
+            },
+          });
+          return new Response(body, { status: 200 });
+        }) as typeof fetch,
+      );
+      try {
+        await expect(adapter.resolve(query)).rejects.toMatchObject({ reason: 'TIMEOUT' });
+      } finally {
+        clearInterval(trickle);
+      }
+      expect(signal?.aborted).toBe(true);
+    });
+
+    it('a stalled body leaves nothing behind: the next resolution on the same adapter answers', async () => {
+      let call = 0;
+      const adapter = new IdentityHttpRecipientAdapter(
+        { baseUrl: 'http://identity.test', timeoutMs: 30 },
+        tokens,
+        (async () => {
+          call += 1;
+          return call === 1
+            ? stalledPage()
+            : jsonResponse({ items: [user('USR_1', ['FLEET_MANAGER'])], hasMore: false });
+        }) as typeof fetch,
+      );
+
+      await expect(adapter.resolve({ ...query, roles: ['FLEET_MANAGER'] })).rejects.toMatchObject({
+        reason: 'TIMEOUT',
+      });
+      await expect(adapter.resolve({ ...query, roles: ['FLEET_MANAGER'] })).resolves.toMatchObject({
+        recipients: [{ userId: 'USR_1' }],
+      });
+    });
+
+    it('a body that ends in time is read in full', async () => {
+      const ok = new IdentityHttpRecipientAdapter(
+        { baseUrl: 'http://identity.test', timeoutMs: 1000 },
+        tokens,
+        (async () =>
+          jsonResponse({
+            items: [user('USR_1', ['FLEET_MANAGER'])],
+            hasMore: false,
+          })) as typeof fetch,
+      );
+      await expect(ok.resolve({ ...query, roles: ['FLEET_MANAGER'] })).resolves.toMatchObject({
+        recipients: [{ userId: 'USR_1' }],
+      });
+    });
+
+    // #507 r1 F1: a refusal's body is never awaited, and never left to a peer that stalls.
+    it.each([
+      [401, 'REFUSED'],
+      [403, 'REFUSED'],
+      [404, 'REFUSED'],
+      [500, 'REFUSED'],
+      [503, 'REFUSED'],
+      // A redirect is refused by the transport itself, as a failure to reach.
+      [302, 'UNREACHABLE'],
+    ])(
+      'a %s with a stalled body is %s at once, its body cancelled and its request aborted, on every retry',
+      async (status, reason) => {
+        const watched = Array.from({ length: 3 }, () => stalledWatched(status));
+        const signals: AbortSignal[] = [];
+        let next = 0;
+        const adapter = new IdentityHttpRecipientAdapter(
+          { baseUrl: 'http://identity.test', timeoutMs: 30_000 },
+          tokens,
+          (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+            signals.push(init!.signal!);
+            return watched[next++]!.response;
+          }) as typeof fetch,
+        );
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const started = Date.now();
+          await expect(adapter.resolve(query)).rejects.toMatchObject({ reason });
+          expect(Date.now() - started).toBeLessThan(5_000);
+          expect(watched[attempt]!.cancelled()).toBe(true);
+          expect(signals[attempt]!.aborted).toBe(true);
+        }
+      },
+    );
+  });
+
   it('classifies a non-JSON or unexpected body as MALFORMED_RESPONSE', async () => {
     const notJson = new IdentityHttpRecipientAdapter(
       { baseUrl: 'http://identity.test', timeoutMs: 1000 },

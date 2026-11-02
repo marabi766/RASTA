@@ -120,12 +120,12 @@ test.describe('transaction disputes through the live stack', () => {
   let orderTransactionId = '';
   const ORDER_ID = `ORD_E2E_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
 
-  test.beforeAll(async ({ browser, playwright }) => {
+  test.beforeAll(async ({ browser, newApiContext }) => {
     const context = await browser.newContext();
     const session = await installLiveSession(context, 'orgAdmin');
     await context.close();
 
-    const request = await playwright.request.newContext();
+    const request = await newApiContext();
     try {
       ownId = await hold(request, session.accessToken, OWN_PAYEE);
       thirdId = await hold(request, session.accessToken, THIRD_ORGANIZATION);

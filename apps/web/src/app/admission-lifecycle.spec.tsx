@@ -26,6 +26,7 @@ import { TENDER_ID as OWNER_TENDER } from '@/test/owner-fixtures';
 import { CONTRACT_ID } from '@/test/statement-fixtures';
 import { LINE_A, LINE_B, ORDER_ID } from '@/test/return-fixtures';
 import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
+import { attemptAt, savedAttempt } from '@/test/unresolved-stores';
 
 import { PlaceOrderForm } from './marketplace/[productId]/PlaceOrderForm';
 import { DisputeCommands } from './transactions/[id]/DisputeCommands';
@@ -199,12 +200,18 @@ const order: Group = {
       'PRD_HOLD',
       { submissionId: id, values: { offerId: 'OFR_1', quantity: '1' }, correlationId: 'COR_H' },
       b,
+      null,
     ),
   release: (id, b = BINDING) => orderStore.clearUnresolvedOrder('PRD_1', id, b),
   remember: (id, b = BINDING) => {
     const entry = { submissionId: id, values: { offerId: 'OFR_1', quantity: '7' } };
-    orderStore.saveUnresolvedOrder('PRD_1', { ...entry, correlationId: null }, b);
-    orderStore.answerUnresolvedOrder('PRD_1', { ...entry, correlationId: 'COR_K2' }, b);
+    const saved = orderStore.saveUnresolvedOrder('PRD_1', { ...entry, correlationId: null }, b);
+    orderStore.answerUnresolvedOrder(
+      'PRD_1',
+      { ...entry, correlationId: 'COR_K2' },
+      b,
+      savedAttempt(saved),
+    );
   },
 };
 
@@ -250,6 +257,7 @@ const dispute: Group = {
         replay: STAMP,
       },
       b,
+      null,
     ),
   release: (id, b = BINDING) => disputeStore.clearUnresolvedDispute('TXN_1', id, b),
   remember: (id, b = BINDING) => {
@@ -259,8 +267,13 @@ const dispute: Group = {
       values: { ...EMPTY_DISPUTE_FORM, reason: REASONS.two },
       replay: STAMP,
     };
-    disputeStore.saveUnresolvedDispute('TXN_1', { ...entry, correlationId: null }, b);
-    disputeStore.answerUnresolvedDispute('TXN_1', { ...entry, correlationId: 'COR_K2' }, b);
+    const saved = disputeStore.saveUnresolvedDispute('TXN_1', { ...entry, correlationId: null }, b);
+    disputeStore.answerUnresolvedDispute(
+      'TXN_1',
+      { ...entry, correlationId: 'COR_K2' },
+      b,
+      savedAttempt(saved),
+    );
   },
 };
 
@@ -313,6 +326,7 @@ const returns: Group = {
         replay: STAMP,
       },
       b,
+      null,
     ),
   release: (id, b = BINDING) => returnStore.clearUnresolvedReturn(RETURN_SCOPE, id, b),
   remember: (id, b = BINDING) => {
@@ -322,8 +336,17 @@ const returns: Group = {
       body: { reason: REASONS.two, lines: [{ orderLineId: LINE_A, quantity: 3 }] },
       replay: STAMP,
     };
-    returnStore.saveUnresolvedReturn(RETURN_SCOPE, { ...entry, correlationId: null }, b);
-    returnStore.answerUnresolvedReturn(RETURN_SCOPE, { ...entry, correlationId: 'COR_K2' }, b);
+    const saved = returnStore.saveUnresolvedReturn(
+      RETURN_SCOPE,
+      { ...entry, correlationId: null },
+      b,
+    );
+    returnStore.answerUnresolvedReturn(
+      RETURN_SCOPE,
+      { ...entry, correlationId: 'COR_K2' },
+      b,
+      savedAttempt(saved),
+    );
   },
 };
 
@@ -366,6 +389,7 @@ const statement: Group = {
       { contractId: 'CTR_HOLD', statementId: 'STM_HOLD' },
       { command: 'SUBMIT', submissionId: id, correlationId: 'COR_H', lines: [], replay: STAMP },
       b,
+      null,
     ),
   release: (id, b = BINDING) => statementStore.clearUnresolvedStatement(DRAFT_SCOPE, id, b),
   remember: (id, b = BINDING) => {
@@ -375,8 +399,17 @@ const statement: Group = {
       lines: [{ description: DESCRIPTION.two, amountMinor: '1100000000' }],
       replay: STAMP,
     };
-    statementStore.saveUnresolvedStatement(DRAFT_SCOPE, { ...entry, correlationId: null }, b);
-    statementStore.answerUnresolvedStatement(DRAFT_SCOPE, { ...entry, correlationId: 'COR_K2' }, b);
+    const saved = statementStore.saveUnresolvedStatement(
+      DRAFT_SCOPE,
+      { ...entry, correlationId: null },
+      b,
+    );
+    statementStore.answerUnresolvedStatement(
+      DRAFT_SCOPE,
+      { ...entry, correlationId: 'COR_K2' },
+      b,
+      savedAttempt(saved),
+    );
   },
 };
 
@@ -435,6 +468,7 @@ const contract: Group = {
       { contractId: 'CTR_HOLD', slot: 'CONTRACT', subjectId: null },
       { command: 'SIGN', submissionId: id, correlationId: 'COR_H', input: null, replay: STAMP },
       b,
+      null,
     ),
   release: (id, b = BINDING) => contractStore.clearUnresolvedContractCommand(NEW_AMENDMENT, id, b),
   remember: (id, b = BINDING) => {
@@ -444,7 +478,7 @@ const contract: Group = {
       input: { deltaMinor: '2000000', reasonCode: 'SCOPE_CHANGE', reasonText: REASON_TEXT.two },
       replay: STAMP,
     };
-    contractStore.saveUnresolvedContractCommand(
+    const saved = contractStore.saveUnresolvedContractCommand(
       NEW_AMENDMENT,
       { ...entry, correlationId: null },
       b,
@@ -453,6 +487,7 @@ const contract: Group = {
       NEW_AMENDMENT,
       { ...entry, correlationId: 'COR_K2' },
       b,
+      savedAttempt(saved),
     );
   },
 };
@@ -501,10 +536,11 @@ const bid: Group = {
       'TND_HOLD',
       { command: 'SUBMIT', submissionId: id, correlationId: 'COR_H' },
       b,
+      null,
     ),
   release: (id, b = BINDING) => bidStore.clearUnresolvedBid(BID_TENDER, id, b),
   remember: (id, b = BINDING) => {
-    bidStore.saveUnresolvedBid(
+    const saved = bidStore.saveUnresolvedBid(
       BID_TENDER,
       { command: 'SUBMIT', submissionId: id, correlationId: null },
       b,
@@ -513,6 +549,7 @@ const bid: Group = {
       BID_TENDER,
       { command: 'SUBMIT', submissionId: id, correlationId: 'COR_K2' },
       b,
+      savedAttempt(saved),
     );
   },
 };
@@ -566,10 +603,11 @@ const owner: Group = {
       'TND_HOLD',
       { command: 'PUBLISH', submissionId: id, correlationId: 'COR_H' },
       b,
+      null,
     ),
   release: (id, b = BINDING) => ownerStore.clearUnresolvedOwnerCommand(OWNER_TENDER, id, b),
   remember: (id, b = BINDING) => {
-    ownerStore.saveUnresolvedOwnerCommand(
+    const saved = ownerStore.saveUnresolvedOwnerCommand(
       OWNER_TENDER,
       { command: 'SCORE', submissionId: id, correlationId: null },
       b,
@@ -578,6 +616,7 @@ const owner: Group = {
       OWNER_TENDER,
       { command: 'SCORE', submissionId: id, correlationId: 'COR_K2' },
       b,
+      savedAttempt(saved),
     );
   },
 };
@@ -675,7 +714,17 @@ describe.each(GROUPS.map((group) => [group.name, group] as const))('%s', (_name,
     // The re-send carries K2's own body, in memory even where only a marker is stored.
     const [first, again] = group.action.mock.calls.map(formOf);
     expect(group.distinct(again!)).toBe(group.distinct(first!));
-    expect(window.sessionStorage.getItem(group.slot())).toBe(k2);
+    // Byte for byte but the send identity, which the re-send wrote anew before it
+    // left (PR 363 reviews 3 and 4) — bids and owner commands keep a marker, whose
+    // text has it too.
+    const firstSend = (JSON.parse(k2!) as { attempt: string }).attempt;
+    const resend = attemptAt(group.slot());
+    expect(firstSend).toMatch(/^[0-9a-f]{32}$/);
+    expect(resend).toMatch(/^[0-9a-f]{32}$/);
+    expect(resend).not.toBe(firstSend);
+    expect(window.sessionStorage.getItem(group.slot())).toBe(
+      k2!.replace(`"attempt":"${firstSend}"}`, `"attempt":"${resend}"}`),
+    );
   });
 
   it('R4: a genuine remount restores K2 from storage — never a blank form under its key', async () => {
@@ -781,6 +830,80 @@ describe.each(GROUPS.map((group) => [group.name, group] as const))('%s', (_name,
     },
   );
 });
+
+/**
+ * PR 363 review 4, mounted, for all seven kinds: a record set aside (bid and
+ * tender owner command: through the restored marker's own link, by a middle
+ * click that keeps this document — and the first send — alive) and made again
+ * under the same key from cached page props. The first send's late refusal must
+ * keep the new record: each record has its own send identity.
+ */
+describe.each(GROUPS.map((group) => [group.name, group] as const))(
+  '%s: a record set aside and made again under the same key (review 4)',
+  (_name, group) => {
+    /** Settled whatever happens, so a failure cannot leave a send out for the next test. */
+    let settleLate: (() => void) | null = null;
+    afterEach(async () => {
+      await act(async () => settleLate?.());
+      settleLate = null;
+    });
+
+    it("the first send's late refusal keeps the new record, which may have committed", async () => {
+      // 1. K1 sent; its refusal is delayed. The page is left.
+      const k1Answer = deferred<unknown>();
+      settleLate = () => k1Answer.resolve(REFUSED);
+      group.action.mockImplementationOnce(() => k1Answer.promise);
+      const first = render(group.page(K1));
+      await waitFor(() => expect(first.container.querySelector('form')).not.toBeNull());
+      group.fill(first.container, 'one');
+      await submitIn(first.container);
+      const oldSend = attemptAt(group.slot());
+      first.unmount();
+
+      // 2–3. Back on the page, the person sets K1 aside.
+      if (group.markerOnly) {
+        const back = render(group.page(K1));
+        const link = await screen.findByRole('link', { name: /این درخواست را کنار بگذار/ });
+        // A right-click — to copy the link — sets nothing aside: auxclick fires for it too.
+        fireEvent(link, new MouseEvent('auxclick', { bubbles: true, button: 2 }));
+        expect(attemptAt(group.slot())).toBe(oldSend);
+        // A middle click opens the page in another tab: set aside, this document alive.
+        fireEvent(link, new MouseEvent('auxclick', { bubbles: true, button: 1 }));
+        expect(window.sessionStorage.getItem(group.slot())).toBeNull();
+        back.unmount();
+      } else {
+        group.release(K1);
+        expect(window.sessionStorage.getItem(group.slot())).toBeNull();
+      }
+
+      // 4. The cached page still carries K1: sent again as a first send, its response lost.
+      group.action.mockImplementationOnce(() => Promise.reject(lostResponse()));
+      const cached = render(group.page(K1));
+      await waitFor(() => expect(cached.container.querySelector('form')).not.toBeNull());
+      group.fill(cached.container, 'one');
+      await submitIn(cached.container);
+      expect(sentIds(group)).toEqual([K1, K1]);
+      const recreated = window.sessionStorage.getItem(group.slot());
+      expect(JSON.parse(recreated!)).toMatchObject({ submissionId: K1 });
+      expect(attemptAt(group.slot())).not.toBe(oldSend);
+
+      // 5. The first send's refusal arrives last: it says nothing of the new send.
+      await act(async () => {
+        k1Answer.resolve(REFUSED);
+        await k1Answer.promise;
+      });
+      expect(window.sessionStorage.getItem(group.slot())).toBe(recreated);
+      expect(setAside()).toEqual([]);
+      cached.unmount();
+
+      // A fresh page offers no fresh key over it.
+      const fresh = render(group.page(K2));
+      await waitFor(() => expect(fresh.container.textContent).not.toBe(''));
+      expect(fresh.container.querySelector(`input[value="${K2}"]`)).toBeNull();
+      expect(window.sessionStorage.getItem(group.slot())).toBe(recreated);
+    });
+  },
+);
 
 describe('order: a retry whose answer is still in doubt goes through the same boundary', () => {
   it('K1 retried, set aside meanwhile and K2 in the slot, the retry answers UNCONFIRMED: K1 shown, K2 byte for byte', async () => {
@@ -889,6 +1012,7 @@ describe('addendum B: command-specific replay prohibitions survive the shared pa
         replay: STAMP,
       },
       BINDING,
+      attemptAt(dispute.slot()),
     );
     expect(JSON.parse(window.sessionStorage.getItem(dispute.slot())!)).toMatchObject({
       replay: null,
@@ -1216,6 +1340,7 @@ describe('R6: a failed call is kept and shown before /auth/session answers', () 
         replay: null,
       },
       BINDING,
+      attemptAt(dispute.slot()),
     );
     const withdrawn = window.sessionStorage.getItem(dispute.slot());
 

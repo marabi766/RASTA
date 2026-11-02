@@ -8,6 +8,7 @@ import {
   RastaError,
   type AuthGuardOptions,
 } from '@rasta/nest-common';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { AppModule, ENV } from '../src/app.module';
 import { withAuthGuardRefusalAudit } from '../src/security-events/auth-guard-refusal';
@@ -62,6 +63,11 @@ const INTERNAL_SECRET = randomBytes(24).toString('hex');
  * exactly as that service would (ADR-020, ADR-035).
  */
 const internalTokens = new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300);
+const tokenKey: TestInternalTokenKey = {
+  secret: INTERNAL_SECRET,
+  issuer: 'rasta-internal',
+  ttlSeconds: 300,
+};
 
 /**
  * Verifies an internal token minted by the booted service, as the service it
@@ -77,7 +83,7 @@ export function serviceToken(
   callerService = 'fleet-service',
   organizationId?: string,
 ): Promise<string> {
-  return internalTokens.issue(callerService, SERVICE_NAME, 'SERVICE', organizationId);
+  return mintTestInternalToken(tokenKey, callerService, SERVICE_NAME, 'SERVICE', organizationId);
 }
 
 export interface TestClaims {
@@ -217,6 +223,9 @@ export async function startIdentityApi(
     KEYCLOAK_SYNC_ENABLED: options.keycloak ? 'true' : 'false',
     // With a Keycloak, no sweep on a timer writing to it behind the suite's back.
     ...(options.keycloak ? { MEMBERSHIP_EXPIRY_SCAN_ENABLED: 'false' } : {}),
+    // Suites drain the registration intake themselves (`processRegistrations`),
+    // so what they assert never races a pass on a timer (task 130).
+    REGISTRATION_INTAKE_INTERVAL_SECONDS: '3600',
     SECURITY_EVENT_CAPTURE_TIMEOUT_MS: String(options.captureTimeoutMs ?? 5000),
     SECURITY_EVENT_FLUSH_INTERVAL_MS: String(options.flushIntervalMs ?? 1000),
     AUDIT_SERVICE_URL: options.auditServiceUrl ?? 'http://127.0.0.1:9',

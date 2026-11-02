@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -293,7 +294,7 @@ describe('each down.sql, run whole with psql --file', () => {
     expect(shape(unused)).toBe(shape(scratch(SIGNING_POLICY)));
   });
 
-  const openTask = `INSERT INTO "policy_reconciliation_task"
+  const openTask = eligibilityClockSql`INSERT INTO "policy_reconciliation_task"
       ("id", "organization_id", "policy_id", "union_id", "source_event_id",
        "moved_organization_id", "correlation_id", "earliest_moved_at", "next_attempt_at",
        "created_at", "updated_at")

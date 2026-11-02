@@ -71,7 +71,7 @@ export default async function StatementPage({
   const offered: OfferedStatementCommand[] = [];
   if (result.kind === 'OK') {
     const statement = result.data;
-    const caller = statementCallerOf(session.accessToken);
+    const caller = statementCallerOf(session);
     const facts = contract?.kind === 'OK' ? contract.data : null;
     const target = { contractId: id, statementId, expectedVersion: statement.version };
     if (facts && canSubmitStatement(caller, facts, statement)) {

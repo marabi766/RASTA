@@ -14,6 +14,7 @@ import {
 } from '../src/keycloak/platform-attributes';
 import { PrismaService, type ExtendedPrismaClient } from '../src/prisma/prisma.service';
 import { asActor, databaseUrl, newFences, newPrisma, tenants } from './helpers';
+import { recordRegistration } from './identity-fixtures';
 
 /**
  * The Keycloak projection and registration approval keep waiting on each
@@ -175,7 +176,7 @@ describe('Keycloak projection and approval transactions outlast the connection s
 
   async function submit(): Promise<{ registrationId: string; userId: string; username: string }> {
     const username = `stmt-${ulid().slice(-12)}`.toLowerCase();
-    const { registrationId } = await service.submitRegistration({
+    const registrationId = await recordRegistration(service, {
       username,
       email: `${username}@example.test`,
       firstName: 'متقاضی',

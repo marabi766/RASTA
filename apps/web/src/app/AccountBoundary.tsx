@@ -18,6 +18,11 @@ import {
   purgeForeignUnresolvedReturns,
 } from '@/lib/unresolved-return';
 import {
+  markInventoryOpen,
+  purgeAllUnresolvedInventory,
+  purgeForeignUnresolvedInventory,
+} from '@/lib/unresolved-inventory';
+import {
   markContractCommandsOpen,
   purgeAllUnresolvedContractCommands,
   purgeForeignUnresolvedContractCommands,
@@ -41,13 +46,14 @@ import type { AccountTags } from '@/lib/unresolved-tenancy';
 
 /**
  * The browser's side of an account boundary: what an unresolved order,
- * dispute command, statement command, return command or contract command left
- * in `sessionStorage` (`lib/unresolved-order.ts`, `lib/unresolved-dispute.ts`,
- * `lib/unresolved-statement.ts`, `lib/unresolved-return.ts`,
+ * dispute command, statement command, return command, inventory command or
+ * contract command left in `sessionStorage` (`lib/unresolved-order.ts`,
+ * `lib/unresolved-dispute.ts`, `lib/unresolved-statement.ts`,
+ * `lib/unresolved-return.ts`, `lib/unresolved-inventory.ts`,
  * `lib/unresolved-contract-command.ts`) must not outlive. All follow the same
- * rules; a statement, return or contract command is reduced to a marker at
- * logout like a dispute command (a draft, a request, an amendment or a
- * milestone repeated under a fresh key is a second one). A bid command's
+ * rules; a statement, return, inventory or contract command is reduced to a
+ * marker at logout like a dispute command (a draft, a request, a receipt, an
+ * amendment or a milestone repeated under a fresh key is a second one). A bid command's
  * record (`lib/unresolved-bid.ts`), and a tender owner's command's
  * (`lib/unresolved-tender-command.ts`), are markers from the start — they never
  * hold what was sent — so a logout only stops them being written again.
@@ -74,10 +80,12 @@ import type { AccountTags } from '@/lib/unresolved-tenancy';
  *   its kind on this device until the person acknowledges the duplicate risk
  *   (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`).
  * - **Another organization is not another person.** Entries are kept per
- *   person and organization (`lib/unresolved-tenancy.ts`): after a switch from
- *   A to B nothing of A's is removed here, and none of it is shown or resolved
- *   on B's pages — each store reads only the page's own organization — so back
- *   on A every unresolved request of A's is still there to reconcile (task 100).
+ *   person and organization (`lib/unresolved-tenancy.ts`): after a change from
+ *   A to B — a new sign-in, since a session never leaves the organization it
+ *   was pinned to (task 118) — nothing of A's is removed here, and none of it
+ *   is shown or resolved on B's pages — each store reads only the page's own
+ *   organization — so back on A every unresolved request of A's is still there
+ *   to reconcile, under the key it was sent with (task 100).
  *
  * - **Nothing is written after a logout starts.** The purge also sets an in-memory
  *   flag that `saveUnresolvedOrder` honours, so the answer to a send still in
@@ -100,6 +108,7 @@ export function AccountBoundary({ account }: { readonly account: AccountTags | n
     markAccountOpen();
     markDisputesOpen();
     markReturnsOpen();
+    markInventoryOpen();
     markStatementsOpen();
     markContractCommandsOpen();
     markBidsOpen();
@@ -107,6 +116,7 @@ export function AccountBoundary({ account }: { readonly account: AccountTags | n
     purgeForeignUnresolvedOrders(tags);
     purgeForeignUnresolvedDisputes(tags);
     purgeForeignUnresolvedReturns(tags);
+    purgeForeignUnresolvedInventory(tags);
     purgeForeignUnresolvedStatements(tags);
     purgeForeignUnresolvedContractCommands(tags);
     purgeForeignUnresolvedBids(tags);
@@ -120,6 +130,7 @@ export function AccountBoundary({ account }: { readonly account: AccountTags | n
         purgeAllUnresolvedOrders();
         purgeAllUnresolvedDisputes();
         purgeAllUnresolvedReturns();
+        purgeAllUnresolvedInventory();
         purgeAllUnresolvedStatements();
         purgeAllUnresolvedContractCommands();
         purgeAllUnresolvedBids();

@@ -18,6 +18,7 @@ import { firstIssuePerField, readFields } from './asset-commands';
 import { localDateToIso } from './drivers';
 import { webServerEnv } from './env';
 import { signPayload, verifyPayload } from './signed-payload';
+import { putToSignedUrl } from './signed-url-upload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 import { rolesGuardAdmits } from './roles-guard';
@@ -549,16 +550,19 @@ export async function uploadDocument(
     sha256: createHash('sha256').update(bytes).digest('hex'),
   };
   try {
-    const stored = await (call.storageFetchImpl ?? fetch)(url, {
-      method: 'PUT',
-      // The type is bound into the signature, so it is sent exactly as declared.
-      headers: { 'content-type': contentType === '' ? 'application/octet-stream' : contentType },
-      body: bytes,
-      // A redirect would carry the signed request to a host nobody chose.
-      redirect: 'error',
-      cache: 'no-store',
-      signal: AbortSignal.timeout(STORAGE_UPLOAD_TIMEOUT_MS),
-    });
+    // A redirect would carry the signed request to a host nobody chose: the
+    // transport refuses it (redirect: 'error').
+    const stored = await putToSignedUrl(
+      url,
+      {
+        // The type is bound into the signature, so it is sent exactly as declared.
+        headers: { 'content-type': contentType === '' ? 'application/octet-stream' : contentType },
+        body: bytes,
+        cache: 'no-store',
+        signal: AbortSignal.timeout(STORAGE_UPLOAD_TIMEOUT_MS),
+      },
+      call.storageFetchImpl,
+    );
     if (!stored.ok) {
       return { kind: 'FAILED', status: stored.status, correlationId: intent.correlationId };
     }
