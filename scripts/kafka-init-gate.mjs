@@ -5,7 +5,7 @@
  * D-066: one operator/provisioner, no concurrent alters or broker-default writes.
  * No retries/recovery here; a timeout leaves the provisioner alone. NEVER reset.
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 const MAX_TIMEOUT_MS = 3_600_000;
@@ -53,6 +53,33 @@ async function main() {
           else resolve(stdout.trim());
         },
       );
+    });
+  const startup = () =>
+    new Promise((resolve, reject) => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return reject(new GateFailure('compose startup timed out', 124));
+      // Pull/progress output is unbounded and may contain foreign diagnostics.
+      // Drain both pipes without accumulating; only metadata uses maxBuffer.
+      const child = spawn('docker', ['compose', 'up', '-d', ...services], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      child.stdout.resume();
+      child.stderr.resume();
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGKILL');
+      }, remaining);
+      child.on('error', () => {
+        clearTimeout(timer);
+        reject(new GateFailure('compose startup command failed'));
+      });
+      child.on('close', (status) => {
+        clearTimeout(timer);
+        if (timedOut) reject(new GateFailure('compose startup timed out', 124));
+        else if (status !== 0) reject(new GateFailure('compose startup command failed'));
+        else resolve();
+      });
     });
   const container = async (optional = false) => {
     const id = await docker('locate kafka-init', [
@@ -104,7 +131,7 @@ async function main() {
     throw new GateFailure('kafka-init already running; another startup may be active (D-066)');
   }
   if (services.length && !services.includes('kafka-init')) services.push('kafka-init');
-  await docker('compose startup', ['compose', 'up', '-d', ...services]);
+  await startup();
   const id = await container();
   const started = await inspect(id);
   if (

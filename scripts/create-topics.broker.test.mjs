@@ -702,6 +702,43 @@ describe('create-topics.sh, max.message.bytes on a real broker', () => {
     });
   });
 
+  // Every caller above uses the same reconciliation boundary; exercise it with
+  // actual broker writes while injecting only the lost response/stale describe.
+  for (const before of [undefined, 1_100_000]) {
+    for (const failure of ['setup', 'work']) {
+      test(`broker restoration after ${failure} with stale describe, original ${before}`, async () => {
+        await withBrokerDefault(before, async () => {
+          let reads = 0;
+          let writes = 0;
+          await assert.rejects(
+            restoreBrokerDefault(
+              3 * MIB,
+              async () => {
+                throw new Error('work failed');
+              },
+              {
+                read: async () => {
+                  reads += 1;
+                  // Snapshot original; first restoration describe is stale.
+                  if (reads <= 2) return before;
+                  return brokerDefault();
+                },
+                set: async (value) => {
+                  writes += 1;
+                  await setBrokerDefault(value);
+                  if (writes === 1 && failure === 'setup') throw new Error('setup response lost');
+                },
+              },
+            ),
+            /setup response lost|work failed/,
+          );
+          assert.equal(writes, 2);
+          assert.equal(await brokerDefault(), before);
+        });
+      });
+    }
+  }
+
   // ------------------------------------------------ the cluster default, restored (r5 F2)
   test('the cluster default message.max.bytes is put back as it was — an absent override deleted again, an existing one re-set — also when the case fails', async () => {
     const initially = await brokerDefault();

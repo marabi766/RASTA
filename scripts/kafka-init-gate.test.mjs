@@ -29,9 +29,16 @@ if (args[0] === 'compose' && args[1] === 'ps') {
 } else if (args[0] === 'compose' && args[1] === 'up') {
   if (data.startFailure) fail();
   data.up = true;
+  data.profiles = process.env.COMPOSE_PROFILES;
+  if (data.noisy) {
+    process.stdout.write('foreign-progress'.repeat(150000));
+    process.stderr.write('foreign-diagnostic'.repeat(150000));
+  }
+  if (data.startTimeout) { save(); setTimeout(() => {}, 5000); return; }
 } else if (args[0] === 'inspect') {
   if (data.inspectFailure || data.finalInspectFailure && data.waited) fail();
-  if (data.malformed) output = '{';
+  if (data.metadataOverflow) output = 'foreign-metadata'.repeat(10000);
+  else if (data.malformed) output = '{';
   else {
     const running = data.up ? !data.waited || data.stillRunning : data.alreadyRunning;
     const state = { Running: !!running, Status: running ? 'running' : 'exited',
@@ -51,7 +58,7 @@ save();
 if (output !== undefined) process.stdout.write(output + '\\n');
 `;
 
-async function probe(scenario = {}, { args = [], timeout = '5000', twice = false } = {}) {
+async function probe(scenario = {}, { args = [], timeout = '5000', twice = false, profiles } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'kafka-init-gate-'));
   try {
     const fixture = join(dir, 'fixture.json');
@@ -63,6 +70,7 @@ async function probe(scenario = {}, { args = [], timeout = '5000', twice = false
       ...process.env,
       PATH: `${dir}${delimiter}${process.env.PATH}`,
       GATE_FIXTURE: fixture,
+      COMPOSE_PROFILES: profiles,
       RASTA_KAFKA_INIT_TIMEOUT_MS: timeout,
     };
     const run = () =>
@@ -86,7 +94,9 @@ async function probe(scenario = {}, { args = [], timeout = '5000', twice = false
         child.on('error', fail);
         child.on('close', (status) => done({ status, output }));
       });
+    const began = performance.now();
     const first = await run();
+    first.elapsed = performance.now() - began;
     if (twice) {
       const data = JSON.parse(readFileSync(fixture));
       writeFileSync(
@@ -133,6 +143,7 @@ for (const [label, scenario, message] of [
   ['inspect fails', { inspectFailure: true }, /inspect kafka-init/],
   ['final inspect fails', { finalInspectFailure: true }, /inspect kafka-init/],
   ['inspect malformed', { malformed: true }, /unreadable kafka-init state/],
+  ['metadata output overflow', { metadataOverflow: true }, /inspect kafka-init/],
   ['wait fails', { waitFailure: true }, /wait for kafka-init/],
   ['wait malformed', { badWait: '0\n0' }, /unreadable kafka-init wait/],
   ['wait out of range', { badWait: '256' }, /unreadable kafka-init wait/],
@@ -153,7 +164,10 @@ for (const [label, scenario, message] of [
     const result = await probe(scenario);
     assert.notEqual(result.status, 0, result.output);
     assert.match(result.output, message);
-    assert.doesNotMatch(result.output, /ACL_RAN|completed successfully|foreign diagnostic/);
+    assert.doesNotMatch(
+      result.output,
+      /ACL_RAN|completed successfully|foreign diagnostic|foreign-metadata/,
+    );
   });
 }
 
@@ -232,3 +246,109 @@ test('rotation and full rebuild instructions require the gate; ACLs are conditio
     input: 'node scripts/kafka-init-gate.mjs kafka kafka-init &&\npnpm kafka:acl:apply:dev\n',
   });
 });
+
+for (const args of [[], ['kafka'], ['kafka-init'], ['kafka-tls', 'kafka', 'kafka-init']]) {
+  for (const exitCode of [0, 37]) {
+    test(`multi-megabyte startup output is drained, args=${args}, initializer=${exitCode}`, async () => {
+      const result = await probe({ noisy: true, exitCode }, { args });
+      assert.equal(result.status, exitCode, result.output);
+      assert.doesNotMatch(result.output, /foreign-progress|foreign-diagnostic/);
+      assert.ok(result.calls.some((call) => call[0] === 'wait'));
+      assert.equal(result.output.includes('ACL_RAN'), exitCode === 0);
+      assert.ok(result.output.length < 500);
+    });
+  }
+}
+test('noisy startup retains the shared deadline and never continues to metadata or ACLs', async () => {
+  const result = await probe({ noisy: true, startTimeout: true }, { timeout: '1200' });
+  assert.equal(result.status, 124, result.output);
+  assert.match(result.output, /compose startup timed out/);
+  assert.ok(result.elapsed < 4000, `startup child exceeded deadline: ${result.elapsed}ms`);
+  assert.doesNotMatch(result.output, /ACL_RAN|foreign-/);
+  assert.ok(!result.calls.some((call) => call[0] === 'wait' || call[0] === 'inspect'));
+});
+
+/** All tracked Markdown plus Compose/script comments: no ungated Kafka/full-stack examples. */
+const composeServices = new Set(Object.keys(YAML.parse(read('docker-compose.yml')).services));
+function ungatedStartups(source) {
+  const text = source.replace(/\\\r?\n/g, ' ');
+  const violations = [];
+  const command = /docker(?:-compose| compose)\b([^`\n]*?\bup\b)([^`\n]*)/g;
+  for (const match of text.matchAll(command)) {
+    const args = (match[1].replace(/\bup$/, '') + match[2].split(/&&|[;|#]/)[0])
+      .replace(
+        /(?:--profile|--file|-f|--project-name|-p|--timeout|--wait-timeout|--pull|--scale)\s+\S+/g,
+        '',
+      )
+      .split(/\s+/)
+      .filter((arg) => arg && !arg.startsWith('-'));
+    const gated = /^[^&;|`\n]*&&\s*(?:#[^\n]*\n\s*)?node scripts\/kafka-init-gate\.mjs/.test(
+      text.slice(match.index + match[0].indexOf('up') + 2, match.index + match[0].length + 150),
+    );
+    if (
+      (!args.length ||
+        args.some((arg) => /^kafka(?:-|$)/.test(arg) || !composeServices.has(arg))) &&
+      !gated
+    ) {
+      violations.push(text.slice(0, match.index).split('\n').length);
+    }
+  }
+  return violations;
+}
+
+test('startup documentation invariant recognises defaults, profiles, targeted Kafka and chained gates', () => {
+  for (const example of [
+    'docker compose up -d',
+    'docker compose --profile tools up -d',
+    '# docker compose --profile all up -d',
+    '# docker compose up -d                         core stack (default)',
+    '* host after `docker compose up -d`',
+    'docker compose up --detach kafka',
+    'docker-compose up -d kafka-init',
+    'docker compose up -d ' + '\\' + '\n  kafka',
+    'docker compose up -d; node scripts/kafka-init-gate.mjs',
+    'docker compose up -d && echo bypass && node scripts/kafka-init-gate.mjs',
+  ])
+    assert.ok(ungatedStartups(example).length, example);
+  for (const example of [
+    'COMPOSE_PROFILES=all pnpm infra:up',
+    'docker compose up -d postgres',
+    'docker compose --profile tools up -d mailpit',
+    'docker compose up -d kafka &&\nnode scripts/kafka-init-gate.mjs kafka-init &&\npnpm kafka:acl:apply:dev',
+  ])
+    assert.deepEqual(ungatedStartups(example), [], example);
+});
+
+test('repository-wide docs and Compose/script comments route Kafka/full-stack startup through the gate', () => {
+  const files = execFileSync('git', ['ls-files', '-z'], { cwd: ROOT, encoding: 'utf8' }).split(
+    '\0',
+  );
+  const failures = [];
+  for (const file of files) {
+    let source;
+    if (file.endsWith('.md')) source = read(file);
+    else if (/compose.*\.ya?ml$/.test(file)) {
+      source = read(file)
+        .split('\n')
+        .map((line) => (/^\s*#/.test(line) ? line : ''))
+        .join('\n');
+    } else if (/\.(mjs|sh)$/.test(file) && !file.includes('.test.')) {
+      source = read(file)
+        .split('\n')
+        .map((line) => (/^\s*(?:\*|\/\/|#)/.test(line) ? line : ''))
+        .join('\n');
+    } else continue;
+    for (const line of ungatedStartups(source)) failures.push(`${file}:${line}`);
+  }
+  assert.deepEqual(failures, [], 'Use infra:up or chain directly into kafka-init-gate before ACLs');
+});
+
+for (const profiles of ['tools', 'search', 'observability', 'all']) {
+  test(`profile ${profiles} inherits its environment and tolerates verbose pulls`, async () => {
+    const result = await probe({ noisy: true }, { profiles });
+    assert.equal(result.status, 0, result.output);
+    assert.equal(result.profiles, profiles);
+    assert.ok(result.calls.some((call) => call[0] === 'wait'));
+    assert.doesNotMatch(result.output, /foreign-/);
+  });
+}

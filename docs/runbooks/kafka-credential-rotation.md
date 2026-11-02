@@ -217,6 +217,40 @@ Topicهای خودش ممکن بود؛ رویدادی که در آن بازه ب
 
 - توسعه: `pnpm kafka:acl:apply:dev` ← «0 added, 0 removed». استقرار: `node scripts/kafka-acl.mjs apply --profile
 deployment` با محیط Secret Store.
-- `pnpm test:kafka-acl-broker` روی Brokerی که چیز دیگری از آن نمی‌خواند (رکورد نشانه روی Topicهای واقعی می‌نویسد).
+- On a retained broker, use the read-only checks below. Do not run a broker test suite or set
+  `RASTA_DISPOSABLE_BROKER=1` there.
+
+```bash
+# Admin authentication and exact generated ACL comparison; refuses drift without repairing it.
+node --env-file-if-exists=.env --env-file=infrastructure/docker/kafka/bootstrap.env.example --env-file-if-exists=infrastructure/docker/kafka/bootstrap.env scripts/kafka-acl.mjs check --profile development
+# Deployment: same check --profile deployment, with credentials and CA from its secret store.
+```
+
+Also authenticate as the rotated principal using its **new** credential, rather than only
+checking the admin connection. From the operator's Kafka CLI environment, use a protected
+client properties file supplied by the secret store (SASL_SSL, SCRAM-SHA-512, current CA and
+that principal's credential; never a password in command arguments):
+
+```bash
+# Example: fleet-service may DESCRIBE its own topic. Substitute an existing topic
+# that the rotated principal is allowed to READ/WRITE/DESCRIBE in the generated profile.
+# This only fetches metadata: no produce, consume, group join, offset commit or topic creation.
+kafka-topics.sh --bootstrap-server "$KAFKA_BROKERS" \
+  --command-config "$ROTATED_PRINCIPAL_PROPERTIES" --describe --topic rasta.fleet.v1
+```
+
+Require success from both checks; authentication failure, unreadable configuration or ACL
+mismatch means rotation is unconfirmed. A metadata check proves authentication and that
+specific DESCRIBE permission; it does not exercise every allowed/denied write. For admin
+rotation, the first check already authenticates the rotated principal.
+
+Destructive authorisation/provisioning/replay suites are separate: create a genuinely fresh
+throwaway broker using `infrastructure/docker/kafka/ci-up.sh`, with a unique `KAFKA_CONTAINER_NAME`, `KAFKA_TLS_DIR` and the two isolated credential
+directories required by that script, run `RASTA_DISPOSABLE_BROKER=1 pnpm test:kafka-acl-broker` (and the other
+broker suites only there), then remove that container and its generated test directories. They write marker
+records on platform topics, alter configuration, and replay retention deletes records. CI
+runs them against its fresh broker. The declaration is an assertion of disposability, never
+permission to use a retained broker.
+
 - سرویس چرخانده‌شده منتشر می‌کند: `rasta_outbox_pending_age_seconds` بالا نمی‌رود ([outbox-stuck](outbox-stuck.md))،
   و Lag گروه‌هایش پس از شروع دوباره به صفر برمی‌گردد.

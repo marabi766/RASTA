@@ -43,7 +43,7 @@ pnpm db:seed
 pnpm dev
 ```
 
-`docker compose up` تا حد امکان محیط کامل را بالا می‌آورد. اجزای سنگین پشت پروفایل‌اند تا
+`pnpm infra:up` تا حد امکان محیط کامل را بالا می‌آورد. اجزای سنگین پشت پروفایل‌اند تا
 لپ‌تاپ توسعه‌دهنده خفه نشود:
 
 ```bash
@@ -286,7 +286,7 @@ Admin اجرا کند. نویسنده‌ی هم‌زمان (PR #378 r5، D-066) 
 در طول اجرا Provisioner دوم، Alter دستی یا تغییر پیش‌فرض Broker نباشد (Compose یک `kafka-init` در هر Stack، هر Job در CI
 Broker خودش).
 
-Detached `docker compose up -d` itself does **not** enforce `kafka-init` completion.
+Detached Compose itself does **not** enforce `kafka-init` completion.
 Use `pnpm infra:up` (also after a full rebuild), or for targeted Kafka startup:
 `node scripts/infra-preflight.mjs && node scripts/kafka-init-gate.mjs kafka kafka-init && pnpm kafka:acl:apply:dev`.
 The wrapper starts Compose, pins the initializer's container ID/start time, and waits

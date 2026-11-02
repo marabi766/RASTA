@@ -82,24 +82,24 @@ Project → Approval → Tender → Bid → Evaluation → Contract → Progress
 
 ## ۱۸٫۳ برنامه روزانه
 
-| روز     | تحویل                                                                 | Definition of Done                                                  |
-| ------- | --------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| **۱**   | Repository Foundation                                                 | `pnpm build/typecheck/lint` سبز · `docker compose up` سالم · CI سبز |
-| **۱**   | ۲۴ سند + ADRها + `AGENTS.md` + `CLAUDE.md`                            | همه فایل‌ها موجود و منسجم                                           |
-| **۲**   | `packages/*` — contracts، config، logging، observability، nest-common | Outbox، TenantContext، Guardها، Error Filter با تست                 |
-| **۲–۳** | `identity-service` + `organization-service`                           | ورود کار می‌کند · نقش‌ها Seed شده · **تست Tenant Isolation سبز**    |
-| **۳**   | `api-gateway`                                                         | JWT، RBAC، Rate Limit، Correlation، Idempotency، مسیریابی           |
-| **۴**   | `asset-service` (+ ماژول insurance)                                   | CRUD، چرخه عمر، پرونده، رویدادها · تست جداسازی سبز                  |
-| **۵**   | `fleet-service`                                                       | راننده، تخصیص، کارکرد · Invariant تخصیص · رویدادها                  |
-| **۵**   | `maintenance-service`                                                 | برنامه، خرابی، دستور تعمیر، تأیید کاربر · منع درخواست تکراری        |
-| **۶**   | `economic-service` — wallet + ledger                                  | **همه تست‌های یکپارچگی مالی سبز**                                   |
-| **۷**   | `economic-service` — payment + commission + reward                    | Mock Provider · قواعد Rule-Based · Saga تسویه                       |
-| **۷**   | `marketplace-service`                                                 | فهرست، پیشنهاد، سفارش، Saga · Idempotency                           |
-| **۸**   | `construction-service`                                                | پروژه، موافقت، مناقصه، پیشنهاد، ارزیابی · Workflow Temporal         |
-| **۸**   | `contract-service`                                                    | قرارداد، امضا، پیشرفت                                               |
-| **۹**   | `apps/web` — Design System + صفحات P0                                 | RTL، سه حالت، صفحات § ۱۶٫۶                                          |
-| **۹**   | `document`، `notification`، `audit` (حداقلی)                          | آپلود، اعلان درون‌برنامه‌ای، سوابق                                  |
-| **۱۰**  | یکپارچه‌سازی + Seed نمایشی + **تست E2E دو سناریو**                    | **هر دو مسیر End-to-End سبز**                                       |
+| روز     | تحویل                                                                 | Definition of Done                                               |
+| ------- | --------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **۱**   | Repository Foundation                                                 | `pnpm build/typecheck/lint` سبز · `pnpm infra:up` سالم · CI سبز  |
+| **۱**   | ۲۴ سند + ADRها + `AGENTS.md` + `CLAUDE.md`                            | همه فایل‌ها موجود و منسجم                                        |
+| **۲**   | `packages/*` — contracts، config، logging، observability، nest-common | Outbox، TenantContext، Guardها، Error Filter با تست              |
+| **۲–۳** | `identity-service` + `organization-service`                           | ورود کار می‌کند · نقش‌ها Seed شده · **تست Tenant Isolation سبز** |
+| **۳**   | `api-gateway`                                                         | JWT، RBAC، Rate Limit، Correlation، Idempotency، مسیریابی        |
+| **۴**   | `asset-service` (+ ماژول insurance)                                   | CRUD، چرخه عمر، پرونده، رویدادها · تست جداسازی سبز               |
+| **۵**   | `fleet-service`                                                       | راننده، تخصیص، کارکرد · Invariant تخصیص · رویدادها               |
+| **۵**   | `maintenance-service`                                                 | برنامه، خرابی، دستور تعمیر، تأیید کاربر · منع درخواست تکراری     |
+| **۶**   | `economic-service` — wallet + ledger                                  | **همه تست‌های یکپارچگی مالی سبز**                                |
+| **۷**   | `economic-service` — payment + commission + reward                    | Mock Provider · قواعد Rule-Based · Saga تسویه                    |
+| **۷**   | `marketplace-service`                                                 | فهرست، پیشنهاد، سفارش، Saga · Idempotency                        |
+| **۸**   | `construction-service`                                                | پروژه، موافقت، مناقصه، پیشنهاد، ارزیابی · Workflow Temporal      |
+| **۸**   | `contract-service`                                                    | قرارداد، امضا، پیشرفت                                            |
+| **۹**   | `apps/web` — Design System + صفحات P0                                 | RTL، سه حالت، صفحات § ۱۶٫۶                                       |
+| **۹**   | `document`، `notification`، `audit` (حداقلی)                          | آپلود، اعلان درون‌برنامه‌ای، سوابق                               |
+| **۱۰**  | یکپارچه‌سازی + Seed نمایشی + **تست E2E دو سناریو**                    | **هر دو مسیر End-to-End سبز**                                    |
 
 ---
 

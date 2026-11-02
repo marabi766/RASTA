@@ -2,18 +2,16 @@
  * The authenticated broker, as bootstrapped (RUN-006, ADR-061 § 3): what each
  * principal may and may not do, asked of the broker itself.
  *
- *   node --test scripts/kafka-acl.broker.test.mjs
+ *   RASTA_DISPOSABLE_BROKER=1 pnpm test:kafka-acl-broker
  *
- * Needs the broker `infrastructure/docker/kafka/ci-up.sh` (CI) or
- * `pnpm infra:up` (locally) starts, and the environment it exports:
- * KAFKA_BROKERS, KAFKA_SSL_CA_FILE and every KAFKA_SASL_PASSWORD_<NAME>. Without
- * them it refuses to run rather than skip — a skipped broker test is a green
- * that proves nothing.
- *
- * Every allowed write here is a real record, `{"aclTest":"<run>"}`, on a real
- * platform topic (a producer's, a dead-letter or a retry topic). A consumer
- * running against the same broker dead-letters it as VALIDATION_FAILED; run
- * this against a broker nothing else is consuming from — CI runs it last.
+ * DESTRUCTIVE: use only a fresh throwaway broker from
+ * `infrastructure/docker/kafka/ci-up.sh`, with its exported environment and
+ * RASTA_DISPOSABLE_BROKER=1. Never declare a retained development broker disposable.
+ * Without the declaration or required credentials it refuses, rather than skips.
+ * Allowed writes are real marker records on platform topics. Replay/provisioning
+ * suites can also delete records or change configuration; remove the broker after testing.
+ * For retained-broker post-rotation verification, use the read-only procedure in
+ * docs/runbooks/kafka-credential-rotation.md (check mode plus principal metadata).
  *
  * The rules under test come from TOPIC_PRODUCERS and TOPIC_CONSUMERS through
  * the generated `broker-acls.development.json` (the profile compose and CI
