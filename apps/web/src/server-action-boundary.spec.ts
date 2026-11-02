@@ -13,8 +13,8 @@ import {
 } from './test/server-action-boundary';
 
 /**
- * A fast local early warning; the authority is the compiler's manifest (checked after
- * `next build` in a separate, stacked change). Not extended per reviewer path.
+ * A fast local early warning; the authority is the compiler's manifest, checked after
+ * `next build` by `scripts/check-server-action-coverage.mjs`. Not extended per reviewer path.
  *
  * The fence around `test/server-action-discovery.ts`: discovery is complete only if the
  * web build cannot compile a source it does not scan. Each failure below names what to do.
@@ -88,6 +88,7 @@ describe('boundary checks (negative control)', () => {
     ['webpack', 'export default { webpack(config) { return config; } };'],
     ['a string key', "export default { 'transpilePackages': [] };"],
     ['a tsconfig path', "export default { typescript: { tsconfigPath: 'tsconfig.build.json' } };"],
+    ['a moved build output', "export default { distDir: 'out' };"],
   ])('finds %s', (_name, source) => {
     expect(reachOptionsIn(source, 'next.config.mjs')).not.toEqual([]);
   });
