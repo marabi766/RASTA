@@ -15,7 +15,9 @@ import {
   storedKeyOf,
   type AccountTags,
   type AnswerOutcome,
+  type Attempt,
   type Binding,
+  type Settlement,
   type StartOutcome,
 } from './unresolved-tenancy';
 
@@ -343,12 +345,14 @@ export function answerUnresolvedDispute(
   transactionId: string,
   dispute: Omit<UnresolvedDispute, 'savedAt' | 'marker'>,
   binding: Binding,
+  attempt: Attempt | null,
   now: number = Date.now(),
 ): AnswerOutcome {
   return slot.answer(
     binding,
     transactionId,
     dispute.submissionId,
+    attempt,
     (earlier) => recordOf(dispute, earlier, binding, now),
     now,
   );
@@ -359,8 +363,19 @@ export function settleUnresolvedDispute(
   transactionId: string,
   submissionId: string,
   binding: Binding,
+  attempt: Attempt,
+  settlement: Settlement,
 ): void {
-  slot.settle(binding, transactionId, submissionId);
+  slot.settle(binding, transactionId, submissionId, attempt, settlement);
+}
+
+/** Before a re-send of `submissionId`: a new send identity, recorded — or null, and nothing is sent (`lib/unresolved-tenancy.ts`). */
+export function advanceUnresolvedDispute(
+  transactionId: string,
+  submissionId: string,
+  binding: Binding,
+): Attempt | null {
+  return slot.advance(binding, transactionId, submissionId);
 }
 
 /**

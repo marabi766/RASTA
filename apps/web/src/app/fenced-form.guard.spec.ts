@@ -24,11 +24,12 @@ const SRC = join(__dirname, '..');
 describe('the tree', () => {
   const sources = readSources(SRC);
 
-  it('finds the seven stores built on fencedSlot, and their seven forms', () => {
+  it('finds the eight stores built on fencedSlot, and their eight forms', () => {
     expect([...fencedModules(sources)].sort()).toEqual([
       'lib/unresolved-bid.ts',
       'lib/unresolved-contract-command.ts',
       'lib/unresolved-dispute.ts',
+      'lib/unresolved-inventory.ts',
       'lib/unresolved-marker.ts',
       'lib/unresolved-order.ts',
       'lib/unresolved-return.ts',
@@ -38,6 +39,7 @@ describe('the tree', () => {
     expect(fencedForms(sources)).toEqual([
       'app/contracts/[id]/ContractCommandForm.tsx',
       'app/contracts/[id]/StatementCommandForm.tsx',
+      'app/inventory/InventoryCommandForm.tsx',
       'app/marketplace/[productId]/PlaceOrderForm.tsx',
       'app/returns/ReturnCommandForm.tsx',
       'app/tenders/[id]/BidCommandForm.tsx',
@@ -48,6 +50,45 @@ describe('the tree', () => {
 
   it('every fenced form submits only through submitThroughSlot, holds its state through useSlotActionState and is drawn only by UnresolvedForm', () => {
     expect(fencedFormViolations(sources)).toEqual([]);
+  });
+  /** Code, not prose: comments may name what they describe. */
+  const code = (text: string) =>
+    text
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((line) => line.replace(/(^|\s)\/\/.*$/, ''))
+      .join('\n');
+
+  it('PR 363 review 4: only the slot makes a send identity — no constant, count or cast anywhere else', () => {
+    const offenders = [...sources]
+      // Test helpers (`src/test/`) only read back what a slot wrote.
+      .filter(([file]) => file !== 'lib/unresolved-tenancy.ts' && !file.startsWith('test/'))
+      .filter(([, text]) => /\bas Attempt\b|\bFIRST_ATTEMPT\b|<Attempt>/.test(code(text)))
+      .map(([file]) => file);
+    expect(offenders).toEqual([]);
+    const tenancy = code(sources.get('lib/unresolved-tenancy.ts')!);
+    // The one mint, and the reading of one an entry already carries.
+    expect(tenancy.match(/\bas Attempt\b/g)).toHaveLength(2);
+    expect(tenancy).toContain('return text as Attempt;');
+    expect(tenancy).toContain('(attempt as Attempt)');
+    expect(tenancy.match(/\bmintAttempt\(\)/g)).toHaveLength(3);
+    expect(tenancy).not.toMatch(/FIRST_ATTEMPT|\+ 1 as Attempt|attempt \?\? /);
+  });
+
+  it('a set-aside link is wired by setAsideOnOpen only: no form handles auxclick itself (a right-click fires it too)', () => {
+    const own = [...sources]
+      .filter(([file]) => file !== 'lib/set-aside-link.ts')
+      .filter(([, text]) => /onAuxClick|auxclick/i.test(code(text)))
+      .map(([file]) => file);
+    expect(own).toEqual([]);
+    const forms = fencedForms(sources);
+    expect(forms).toHaveLength(8);
+    for (const form of forms) {
+      expect({ form, wired: /\{\.\.\.setAsideOnOpen\(/.test(code(sources.get(form)!)) }).toEqual({
+        form,
+        wired: true,
+      });
+    }
   });
 });
 

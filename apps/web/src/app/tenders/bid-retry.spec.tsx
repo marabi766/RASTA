@@ -19,6 +19,7 @@ import type { BidFormState } from './[id]/bid-form-state';
 import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
 import type { Binding } from '@/lib/unresolved-tenancy';
 import { QUARANTINE_TITLE } from '@/app/UnresolvedQuarantine';
+import { savedAttempt } from '@/test/unresolved-stores';
 
 // Each test renders a form and may run jest-axe over it (#341): room to finish.
 jest.setTimeout(20_000);
@@ -154,9 +155,15 @@ describe('a bid sent and not confirmed', () => {
       submissionId: KEY,
       correlationId: 'COR_ORIGINAL',
     });
-    const everything = JSON.stringify(window.sessionStorage);
+    // The send identity is 128 random bits the slot minted (`lib/unresolved-tenancy.ts`),
+    // nothing derived from the bid: it is taken out before looking, so a digit run in
+    // it cannot pass for — or hide — a disclosed amount.
+    const { attempt, ...kept } = stored() as Record<string, unknown>;
+    expect(attempt).toMatch(/^[0-9a-f]{32}$/);
+    const everything = JSON.stringify(window.sessionStorage).split(String(attempt)).join('');
+    expect(everything).not.toMatch(/[0-9a-f]{32}/);
     for (const secret of [PRICE, '4200000000', ANSWER]) {
-      expect(JSON.stringify(stored())).not.toContain(secret);
+      expect(JSON.stringify(kept)).not.toContain(secret);
       expect(everything).not.toContain(secret);
     }
     expect(screen.getByText(/نتوانستیم تأیید کنیم/)).toBeInTheDocument();
@@ -322,18 +329,20 @@ describe('one slot per tender', () => {
   });
 
   it('saving another submission into a held slot is refused, the record left as it was', () => {
-    saveUnresolvedBid(
-      TENDER_ID,
-      { command: 'REVISE', submissionId: OTHER, correlationId: 'COR_OTHER' },
-      ACCOUNT,
-      1000,
+    const sent = savedAttempt(
+      saveUnresolvedBid(
+        TENDER_ID,
+        { command: 'REVISE', submissionId: OTHER, correlationId: 'COR_OTHER' },
+        ACCOUNT,
+        1000,
+      ),
     );
     expect(
       saveUnresolvedBid(
         TENDER_ID,
         { command: 'WITHDRAW', submissionId: KEY, correlationId: null },
         ACCOUNT,
-      ),
+      ).outcome,
     ).toBe('HELD');
     expect(stored()).toEqual({
       v: 1,
@@ -342,6 +351,7 @@ describe('one slot per tender', () => {
       correlationId: 'COR_OTHER',
       savedAt: 1000,
       owner: OWNER,
+      attempt: sent,
     });
     // Its own submission's later answer may update it; the first send's time stays.
     // A first send of it again is not one (review 4, R4): nothing written.
@@ -350,13 +360,14 @@ describe('one slot per tender', () => {
         TENDER_ID,
         { command: 'REVISE', submissionId: OTHER, correlationId: 'COR_2' },
         ACCOUNT,
-      ),
+      ).outcome,
     ).toBe('UNRESOLVED');
     expect(
       answerUnresolvedBid(
         TENDER_ID,
         { command: 'REVISE', submissionId: OTHER, correlationId: 'COR_2' },
         ACCOUNT,
+        sent,
       ),
     ).toBe('SAVED');
     expect(stored()).toMatchObject({ correlationId: 'COR_2', savedAt: 1000 });
@@ -394,7 +405,7 @@ describe('at logout', () => {
         'TND_OTHER',
         { command: 'SUBMIT', submissionId: OTHER, correlationId: null },
         ACCOUNT,
-      ),
+      ).outcome,
     ).toBe('UNAVAILABLE');
   });
 });

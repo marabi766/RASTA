@@ -34,8 +34,10 @@ import {
   purgeForeign,
   type AccountTags,
   type AnswerOutcome,
+  type Attempt,
   type Binding,
   type QuarantineSource,
+  type Settlement,
   type StartOutcome,
 } from './unresolved-tenancy';
 
@@ -73,10 +75,19 @@ export interface MarkerStore<C extends string> {
     scope: string,
     entry: Omit<UnresolvedMarker<C>, 'savedAt'>,
     binding: Binding,
+    attempt: Attempt | null,
     now?: number,
   ): AnswerOutcome;
-  /** A definite answer: this submission's record, and only that, goes. */
-  settle(scope: string, submissionId: string, binding: Binding): void;
+  /** Before a re-send: a new send identity, recorded — or null, and nothing is sent. */
+  advance(scope: string, submissionId: string, binding: Binding): Attempt | null;
+  /** A definite answer to send `attempt`: this submission's record, and only that, goes — if no later send started. */
+  settle(
+    scope: string,
+    submissionId: string,
+    binding: Binding,
+    attempt: Attempt,
+    settlement: Settlement,
+  ): void;
   /** The person sets this submission's record aside — and only that one. */
   clear(scope: string, submissionId: string, binding: Binding): void;
   restore(scope: string, binding: Binding): UnresolvedMarker<C> | null;
@@ -121,7 +132,11 @@ export function markerStore<C extends string>(
     }
     if (typeof value !== 'object' || value === null) return null;
     const entry = value as Record<string, unknown>;
-    const keys = Object.keys(entry).sort().join(',');
+    // `attempt` is the identity of the send that last wrote it (`lib/unresolved-tenancy.ts`).
+    const keys = Object.keys(entry)
+      .filter((key) => key !== 'attempt')
+      .sort()
+      .join(',');
     if (
       keys !== 'command,correlationId,owner,savedAt,submissionId,v' ||
       entry.v !== VERSION ||
@@ -204,18 +219,23 @@ export function markerStore<C extends string>(
       );
     },
 
-    answer(scope, entry, binding, now = Date.now()) {
+    answer(scope, entry, binding, attempt, now = Date.now()) {
       return slot.answer(
         binding,
         scope,
         entry.submissionId,
+        attempt,
         (earlier) => recordOf(entry, earlier, binding, now),
         now,
       );
     },
 
-    settle(scope, submissionId, binding) {
-      slot.settle(binding, scope, submissionId);
+    advance(scope, submissionId, binding) {
+      return slot.advance(binding, scope, submissionId);
+    },
+
+    settle(scope, submissionId, binding, attempt, settlement) {
+      slot.settle(binding, scope, submissionId, attempt, settlement);
     },
 
     clear(scope, submissionId, binding) {
