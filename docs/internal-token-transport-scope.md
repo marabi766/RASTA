@@ -323,16 +323,87 @@ signal is aborted on every exit. The caller leaving can be passed as `cancel`
 in `services/*` and `packages/nest-common` goes through it.
 
 The lint rule `internal/exchange-deadline` (`scripts/exchange-deadline-rule.mjs`,
-same workspace paths as the transport rule) enforces the boundary instead of
-following a caller's control flow: a `setTimeout` whose callback aborts something
-(inline, through a local name, a destructured `abort`, `controller.abort` or its
-`.bind`) is an error everywhere except `exchange-deadline.ts` itself. The earlier
-rule matched `clearTimeout` and body reads by source order, so it missed
-`try { return response.text(); } finally { clearTimeout(t); }` and computed or
-aliased readers, and it flagged an unrelated `clearTimeout`. `AbortSignal.timeout(…)`
-has no timer to clear and stays allowed; a callback imported from another module,
-and a deadline built without an abort (a `Promise.race` against a timer), cannot be
-seen from one file and are not covered.
+same workspace paths as the transport rule, plus `apps/web`) enforces the boundary
+by asking two questions about the **module**, not by following a name through the
+code (#507 r2 F2: a callback wrapper, an alias, an assignment, an object method, a
+renamed destructured `abort`, a timer alias, `.call` / `.apply` / `.bind`, an
+imported timer and a computed method name each walked round the version that
+followed the timer's callback). Outside the shared boundary itself:
+
+- **A** — any reference to the global `AbortController` (`new`, an alias,
+  `globalThis.` member — also through a direct `const` alias of the global object,
+  import, type annotation) is an error unless the file is in `ABORT_OWNERS`;
+- **B** — a module that references `setTimeout` in any form and also mentions an
+  `abort` member or binding anywhere (constant-folded computed names included) is an
+  error unless the file is in `TIMER_ABORT_MODULES`;
+- **C** — a member of the global object **read** by a computed name that is not a
+  constant (`new globalThis[key]()`) is an error too (it could be either): fail
+  closed, same exemption as A. One value resolver, one read/write classifier and one key
+  classifier serve member access and destructuring alike (#536 r3 N1/N2, r4 N1):
+  - _Values_ (the resolver). One function says what an expression can be and what a
+    destructuring target is handed, each in terms of the other, so a value is followed the
+    same way wherever it is read: a name (a variable holds **every** value written to it —
+    `let g; g = globalThis` too), the right side of a declaration or assignment, a
+    **chain** of assignments (`({ [k]: C } = g = globalThis)`), a sequence, a conditional,
+    a logical expression, a type assertion, a spread copy, a member of a literal object or
+    array (`box.g[k]`, `list[0][k]`), a member of the global that is itself a global object
+    (`globalThis.global`), a default (`function f({ [k]: C } = globalThis)`, a parameter
+    `g = globalThis`), a `for…of` head over a literal array, a nested pattern over a
+    literal object or array, an object pattern over a literal **array** by index
+    (`({ 0: { [k]: C } } = [globalThis])`) and a **rest** element, which takes the rest of
+    the array (`([...[{ [k]: C }]] = [globalThis])`).
+  - _Never a silent pass._ The resolver stops at 64 levels or 2000 steps; running out
+    counts as "could be the global object" and is refused (a provably different leaf at
+    depth 12 is still resolved exactly). For a **pattern** with a computed key, any source
+    the resolver cannot prove is not the global object is refused too: a parameter with no
+    default (a default does not prove it, the caller may pass a value), a rest parameter, a
+    catch clause, a call, `new`, `await`, `this`, an import, an ambient declaration, an
+    iterator, `Object.assign({}, globalThis)`, `Reflect.get(…)`. To read a computed key from
+    such a value, use a key that is provably numeric or a symbol, or name the property. A
+    **member read** `x[k]` is refused when `x` resolves to the global object, or the resolver
+    gave up, but not when `x` is simply unknown (indexing is everywhere).
+  - _Reads_ (refused): a plain use, a call or `.member`; every compound and logical
+    assignment (`+=`, `||=`, `??=`, …) and `++`/`--`; a destructuring declaration, assignment,
+    default, parameter, loop head. _Pure writes_ (not refused, nothing is read): `g[k] = v`
+    (also through a type assertion), a destructuring-assignment target (`[g[k]] = xs`,
+    `({ a: g[k] = 1 } = o)`, rest targets), a `for…in`/`for…of` target, `delete g[k]`.
+  - _Keys_: excluded only when **provably** a number, bigint or symbol — numeric/bigint
+    literals, unary `+ - ~` and arithmetic/bitwise of provable numerics, `NaN`,
+    `Infinity`, `Number(…)`, `BigInt(…)`, `Math.<fn>(…)`, `Number.parseInt/parseFloat(…)`,
+    `Math.PI`-style and `Number.MAX_SAFE_INTEGER`-style constants (each only when the name
+    resolves to the unshadowed global), `Symbol(…)`, `Symbol.for(…)`, `Symbol.<x>`, a
+    constant alias of any of them, a conditional whose branches both are. Anything else
+    (`x - 1`, `-x`, `String(1)`, a shadowed `Number`) is treated as possibly naming a global.
+
+The shared boundary is exempt by its **exact canonical repository path**,
+`packages/nest-common/src/http/exchange-deadline.ts` (real path relative to the real
+repository root, decided inside the rule); the workspace config grants nothing by
+suffix, so a same-named file anywhere else gets both diagnostics (#536 r1 F2). A path
+that is not a file of this repository is exempt from nothing. Both lists are decided on
+the same canonical path, are exact files with a reason, and are held by tests to an
+existing file that still needs the entry. `AbortSignal.timeout(…)` has no timer to clear
+and stays allowed; so do timers in a module with no abort (outbox, consumer, shutdown,
+readiness) and shutdown/client-close controllers with no timer.
+
+**Trust model (PM decision D-095, with D-086/D-088/D-094).** The rule guards against an
+_accidental_ early-clear deadline; deliberately obfuscated code is caught by PR review.
+These forms are accepted residual and produce **no diagnostic** (each is pinned by a
+test, so this list cannot drift): a timer or controller host reached by `Reflect.get(globalThis,
+'setTimeout')`, handed in as a parameter (`h.setTimeout(…)`), returned by a call, or named by
+a qualified type annotation `globalThis.AbortController`; `timers[key]`; a timer inside a
+dynamic-import callback; an abort not reached by a member or binding named `abort`
+(`Reflect.get(c, 'abort')`, a constant enum/object member, a constant conditional, a
+constant chain longer than the folding depth, a name read from data); a timer and a
+controller that both come from other modules into one that owns neither (the module that
+owns either is the one refused); and, for rule C, a computed **member read** whose object the
+resolver does not prove is the global object: a call result (`getGlobal()[k]`,
+`Object.assign({}, globalThis)[k]`, `[globalThis].at(0)[k]`), a parameter with no default, an
+import, the global reached through `Reflect.get`, or a member added to a literal container
+after it was written (`box.g = globalThis`, `list.push(globalThis)`, `Object.assign(box, …)`). The resolver follows variables of the
+module only, treats an undeclared name other than `globalThis`, `window`, `self`, `global`,
+`frames` as a platform name (`process`), and ignores getters and proxies. A computed key in a
+destructuring **pattern** over such a value is not residual: it is refused (see above) — except
+through such an added member.
 
 The two boundaries compose (merge of #502/#507 into PR #492): `internalGet` sends on the
 `InternalHttpClient` sender, which is `internalFetch` with redirects refused, inside
