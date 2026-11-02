@@ -23,6 +23,7 @@ import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 import { rolesGuardAdmits } from './roles-guard';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * Writing to maintenance-service through the gateway (ADR-058 § 3, ADR-059 § 3).
@@ -75,7 +76,7 @@ const optionalLocalDate = z.string().transform((raw, ctx) => {
   if (raw.trim() === '') return undefined;
   const iso = localDateToIso(raw);
   if (iso === null) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'تاریخ معتبر نیست' });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: formMessage('تاریخ معتبر نیست') });
     return z.NEVER;
   }
   return iso;
@@ -103,34 +104,39 @@ export const reportRequestFormSchema = z
     assetId: z
       .string()
       .trim()
-      .min(1, 'شناسهٔ ماشین را وارد کنید')
-      .refine((value) => assetId.safeParse(value).success, 'شناسهٔ ماشین معتبر نیست'),
-    type: z.enum(MAINTENANCE_TYPES, { error: 'نوع کار را انتخاب کنید' }),
+      .min(1, formMessage('شناسهٔ ماشین را وارد کنید'))
+      .refine((value) => assetId.safeParse(value).success, formMessage('شناسهٔ ماشین معتبر نیست')),
+    type: z.enum(MAINTENANCE_TYPES, { error: formMessage('نوع کار را انتخاب کنید') }),
     title: z
       .string()
       .transform((raw) => normalizePersianText(raw))
-      .pipe(z.string().min(2, 'عنوان دست‌کم ۲ نویسه باشد').max(200, 'عنوان حداکثر ۲۰۰ نویسه است')),
+      .pipe(
+        z
+          .string()
+          .min(2, formMessage('عنوان دست‌کم ۲ نویسه باشد'))
+          .max(200, formMessage('عنوان حداکثر ۲۰۰ نویسه است')),
+      ),
     description: z
       .string()
       .transform((raw) => normalizePersianText(raw))
-      .pipe(z.string().max(2000, 'شرح حداکثر ۲۰۰۰ نویسه است'))
+      .pipe(z.string().max(2000, formMessage('شرح حداکثر ۲۰۰۰ نویسه است')))
       .transform((value) => (value === '' ? undefined : value)),
     severity: z
       .string()
       .trim()
       .transform((value) => (value === '' ? undefined : value))
-      .pipe(z.enum(SEVERITIES, { error: 'شدت را از فهرست انتخاب کنید' }).optional()),
+      .pipe(z.enum(SEVERITIES, { error: formMessage('شدت را از فهرست انتخاب کنید') }).optional()),
     outOfServiceAt: optionalLocalDate,
     dueDate: optionalLocalDate,
   })
   .strict()
   // The service's own two rules, worded for the person at the form.
   .refine((value) => value.type !== 'CORRECTIVE' || value.severity !== undefined, {
-    message: 'برای خرابی، شدت را مشخص کنید',
+    message: formMessage('برای خرابی، شدت را مشخص کنید'),
     path: ['severity'],
   })
   .refine((value) => value.type !== 'PREVENTIVE' || value.severity === undefined, {
-    message: 'شدت فقط برای خرابی است؛ برای کار برنامه‌ای خالی بگذارید',
+    message: formMessage('شدت فقط برای خرابی است؛ برای کار برنامه‌ای خالی بگذارید'),
     path: ['severity'],
   });
 
@@ -234,7 +240,9 @@ export function canManageMaintenance(roles: readonly string[]): boolean {
  */
 export const MAINTENANCE_DISPLAY_TEXT = DISPLAY_TEXT_PATTERN;
 
-export const DISPLAY_TEXT_MESSAGE = 'فقط حروف فارسی و لاتین، عدد و نشانه‌های ساده مجاز است';
+export const DISPLAY_TEXT_MESSAGE = formMessage(
+  'فقط حروف فارسی و لاتین، عدد و نشانه‌های ساده مجاز است',
+);
 
 const organizationId = seedIdSchema(ID_PREFIXES.organization);
 const requestId = seedIdSchema(ID_PREFIXES.maintenanceRequest);
@@ -253,7 +261,7 @@ export function optionalText(label: string, max: number) {
     .pipe(
       z
         .string()
-        .max(max, `${label} حداکثر ${max} نویسه است`)
+        .max(max, formMessage(`${label} حداکثر ${max} نویسه است`))
         .refine(
           (value) => value === '' || MAINTENANCE_DISPLAY_TEXT.test(value),
           DISPLAY_TEXT_MESSAGE,
@@ -288,15 +296,18 @@ export const assignWorkshopFormSchema = z
     workshopOrganizationId: z
       .string()
       .trim()
-      .min(1, 'شناسهٔ سازمان تعمیرگاه را وارد کنید')
-      .refine((value) => organizationId.safeParse(value).success, 'شناسهٔ سازمان معتبر نیست'),
+      .min(1, formMessage('شناسهٔ سازمان تعمیرگاه را وارد کنید'))
+      .refine(
+        (value) => organizationId.safeParse(value).success,
+        formMessage('شناسهٔ سازمان معتبر نیست'),
+      ),
     workshopName: optionalText('نام تعمیرگاه', 200).refine(
       (value) => value === undefined || value.length >= 2,
-      'نام تعمیرگاه دست‌کم ۲ نویسه باشد',
+      formMessage('نام تعمیرگاه دست‌کم ۲ نویسه باشد'),
     ),
     workSummary: optionalText('شرح کار', 1000).refine(
       (value) => value === undefined || value.length >= 2,
-      'شرح کار دست‌کم ۲ نویسه باشد',
+      formMessage('شرح کار دست‌کم ۲ نویسه باشد'),
     ),
   })
   .strict();
@@ -406,7 +417,7 @@ export const approveRequestFormSchema = z
     expectedTotalCostMinor: z
       .string()
       .trim()
-      .regex(/^\d{1,30}$/, 'مبلغ نمایش‌داده‌شده معتبر نیست؛ صفحه را تازه کنید'),
+      .regex(/^\d{1,30}$/, formMessage('مبلغ نمایش‌داده‌شده معتبر نیست؛ صفحه را تازه کنید')),
     notes: optionalText('یادداشت', 1000),
   })
   .strict();
@@ -544,8 +555,8 @@ export const cancelRequestFormSchema = z
       .pipe(
         z
           .string()
-          .min(3, 'دلیل لغو دست‌کم ۳ نویسه باشد')
-          .max(500, 'دلیل لغو حداکثر ۵۰۰ نویسه است')
+          .min(3, formMessage('دلیل لغو دست‌کم ۳ نویسه باشد'))
+          .max(500, formMessage('دلیل لغو حداکثر ۵۰۰ نویسه است'))
           .refine((value) => MAINTENANCE_DISPLAY_TEXT.test(value), DISPLAY_TEXT_MESSAGE),
       ),
   })

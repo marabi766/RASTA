@@ -25,6 +25,7 @@ import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import { rolesGuardAdmits } from './roles-guard';
+import { formMessage } from '@/lib/form-issues';
 
 export { fetchDriverAssignments } from './assignments';
 export type { AssignmentPage, AssignmentSummary } from './assignments';
@@ -209,7 +210,7 @@ const optionalLocalDate = z
     if (raw.trim() === '') return undefined;
     const iso = localDateToIso(raw);
     if (iso === null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'تاریخ معتبر نیست' });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: formMessage('تاریخ معتبر نیست') });
       return z.NEVER;
     }
     return iso;
@@ -227,7 +228,7 @@ const nullableLocalDate = z.string().transform((raw, ctx) => {
   if (raw.trim() === '') return null;
   const iso = localDateToIso(raw);
   if (iso === null) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'تاریخ معتبر نیست' });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: formMessage('تاریخ معتبر نیست') });
     return z.NEVER;
   }
   return iso;
@@ -258,7 +259,7 @@ const nullableLocalDate = z.string().transform((raw, ctx) => {
  * the forms that take it from this module.
  */
 export { BIDI_CONTROL };
-const BIDI_CONTROL_MESSAGE = 'این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد';
+const BIDI_CONTROL_MESSAGE = formMessage('این فیلد نویسهٔ جهت‌دهی نامرئی نمی‌پذیرد');
 
 const nullableShortText = (max: number, message: string) =>
   z
@@ -271,7 +272,7 @@ const nullableShortText = (max: number, message: string) =>
 const nullableNotes = z
   .string()
   .transform((raw) => normalizePersianText(raw))
-  .pipe(z.string().max(1000, 'یادداشت حداکثر ۱۰۰۰ نویسه است'))
+  .pipe(z.string().max(1000, formMessage('یادداشت حداکثر ۱۰۰۰ نویسه است')))
   .transform((value) => (value === '' ? null : value));
 
 // ---------------------------------------------------------------------------
@@ -300,31 +301,31 @@ export const createDriverFormSchema = z
   .object({
     userId: z
       .string()
-      .min(1, 'شناسهٔ کاربر را وارد کنید')
-      .refine((value) => userId.safeParse(value).success, 'شناسهٔ کاربر معتبر نیست'),
+      .min(1, formMessage('شناسهٔ کاربر را وارد کنید'))
+      .refine((value) => userId.safeParse(value).success, formMessage('شناسهٔ کاربر معتبر نیست')),
     employeeNo: z
       .string()
       .trim()
       .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE)
-      .pipe(z.string().max(64, 'شمارهٔ پرسنلی حداکثر ۶۴ نویسه است'))
+      .pipe(z.string().max(64, formMessage('شمارهٔ پرسنلی حداکثر ۶۴ نویسه است')))
       .transform((value) => (value === '' ? undefined : value)),
     licenceNumber: z
       .string()
       .trim()
       .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE)
-      .pipe(z.string().max(64, 'شمارهٔ گواهینامه حداکثر ۶۴ نویسه است'))
+      .pipe(z.string().max(64, formMessage('شمارهٔ گواهینامه حداکثر ۶۴ نویسه است')))
       .transform((value) => (value === '' ? undefined : value)),
     licenceClass: z
       .string()
       .trim()
       .refine((value) => !BIDI_CONTROL.test(value), BIDI_CONTROL_MESSAGE)
-      .pipe(z.string().max(32, 'پایهٔ گواهینامه حداکثر ۳۲ نویسه است'))
+      .pipe(z.string().max(32, formMessage('پایهٔ گواهینامه حداکثر ۳۲ نویسه است')))
       .transform((value) => (value === '' ? undefined : value)),
     licenceValidTo: optionalLocalDate,
     notes: z
       .string()
       .transform((raw) => normalizePersianText(raw))
-      .pipe(z.string().max(1000, 'یادداشت حداکثر ۱۰۰۰ نویسه است'))
+      .pipe(z.string().max(1000, formMessage('یادداشت حداکثر ۱۰۰۰ نویسه است')))
       .transform((value) => (value === '' ? undefined : value)),
   })
   .strict();
@@ -422,9 +423,9 @@ export function updateDriverFormValues(form: FormData): UpdateDriverFormValues {
  */
 export const updateDriverFormSchema = z
   .object({
-    employeeNo: nullableShortText(64, 'شمارهٔ پرسنلی حداکثر ۶۴ نویسه است'),
-    licenceNumber: nullableShortText(64, 'شمارهٔ گواهینامه حداکثر ۶۴ نویسه است'),
-    licenceClass: nullableShortText(32, 'پایهٔ گواهینامه حداکثر ۳۲ نویسه است'),
+    employeeNo: nullableShortText(64, formMessage('شمارهٔ پرسنلی حداکثر ۶۴ نویسه است')),
+    licenceNumber: nullableShortText(64, formMessage('شمارهٔ گواهینامه حداکثر ۶۴ نویسه است')),
+    licenceClass: nullableShortText(32, formMessage('پایهٔ گواهینامه حداکثر ۳۲ نویسه است')),
     licenceValidTo: nullableLocalDate,
     notes: nullableNotes,
   })
@@ -502,13 +503,18 @@ export function changeStatusFormValues(form: FormData): ChangeStatusFormValues {
 
 export const changeStatusFormSchema = z
   .object({
-    status: z.enum(DRIVER_STATUSES, { error: 'وضعیت را انتخاب کنید' }),
+    status: z.enum(DRIVER_STATUSES, { error: formMessage('وضعیت را انتخاب کنید') }),
     // Required, not optional. A driver barred from work without a recorded
     // reason is a decision nobody can review later (AGENTS.md S-06).
     reason: z
       .string()
       .transform((raw) => normalizePersianText(raw))
-      .pipe(z.string().min(3, 'دلیل را بنویسید').max(500, 'دلیل حداکثر ۵۰۰ نویسه است')),
+      .pipe(
+        z
+          .string()
+          .min(3, formMessage('دلیل را بنویسید'))
+          .max(500, formMessage('دلیل حداکثر ۵۰۰ نویسه است')),
+      ),
   })
   .strict();
 

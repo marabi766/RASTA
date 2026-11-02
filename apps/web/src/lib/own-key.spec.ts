@@ -1,12 +1,21 @@
 /**
  * @jest-environment node
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
-import { discoverModules } from '@/test/module-discovery';
+import ts from 'typescript';
 
+import { discoverModules } from '@/test/module-discovery';
+import { KNOWN_MAPPINGS, resolveMappings } from '@/test/entry-points';
+
+import { forbiddenText as bidForbidden } from '../app/tenders/[id]/BidCommandForm';
+import { forbiddenText as ownerForbidden } from '../app/tenders/[id]/OwnerCommandForm';
+import { forbiddenText as contractForbidden } from '../app/contracts/[id]/ContractCommandForm';
+import { forbiddenText as statementForbidden } from '../app/contracts/[id]/StatementCommandForm';
 import { blockerWording } from './availability-wording';
+import { isProjectWorkflow } from './project-commands';
+import { returnDispositionLabel, returnShipmentStatusLabel } from './return-fields';
+import { OWNER_FORBIDDEN_TEXT } from './tender-owner-fields';
 import { disputeTextLabel } from './labels';
 import { ownText, ownValue } from './own-key';
 import { GENERIC_REFUSAL_MESSAGE, mapProblemToFields, type FieldMapping } from '../server/write';
@@ -97,20 +106,16 @@ describe('the other presentation tables', () => {
 });
 
 describe('every gateway-message mapping dimension', () => {
-  const MAPPINGS = discoverModules({
-    dirs: ['server'],
-    marker: /export const \w+MAPPING\b/,
-  }).flatMap(({ name, exports }) =>
-    Object.entries(exports)
-      .filter(
-        ([key, value]) =>
-          /MAPPING$/.test(key) && typeof value === 'object' && value !== null && 'paths' in value,
-      )
-      .map(([key, value]) => [`${name}.${key}`, value as FieldMapping<string>] as const),
-  );
+  // Every FieldMapping declaration — exported constants, factories and
+  // private constants alike (test/entry-points.ts, PR-439 r1 F4).
+  const RESOLVED = resolveMappings();
+  const MAPPINGS = RESOLVED.mappings;
 
-  it('is found', () => {
-    expect(MAPPINGS.length).toBeGreaterThanOrEqual(20);
+  it('is found: every declaration swept, adapted or excluded with a reason', () => {
+    expect(RESOLVED.unaccounted).toEqual([]);
+    expect(RESOLVED.stale).toEqual([]);
+    expect(RESOLVED.discovered).toEqual(expect.arrayContaining([...KNOWN_MAPPINGS]));
+    expect(MAPPINGS.length).toBeGreaterThanOrEqual(40);
   });
 
   const shownOf = (
@@ -156,64 +161,210 @@ describe('every gateway-message mapping dimension', () => {
   });
 });
 
-describe('no bracket lookup that tolerates an unknown key bypasses own-key.ts', () => {
-  const SRC = join(__dirname, '..');
-  function sources(dir: string): string[] {
-    return readdirSync(dir).flatMap((entry) => {
-      const path = join(dir, entry);
-      if (statSync(path).isDirectory()) return entry === 'test' ? [] : sources(path);
-      return /\.(ts|tsx)$/.test(entry) && !/\.(spec|test)\.|fixture|\.d\.ts$/.test(entry)
-        ? [path]
-        : [];
-    });
-  }
-
-  // A lookup that SAYS what to do for a missing key (`?? fallback`, `=== undefined`,
-  // `!== undefined`) is a lookup by an external key: only an own-key read is safe.
-  // `TABLE[key]` with no fallback is a closed, typed key and is not flagged.
-  const TABLE_FALLBACK =
-    /\b[A-Z][A-Z0-9_]{2,}(?:\)|\?\.)?\[[^\]'"`\d][^\]]*\]\)?\s*(?:\?\?|[!=]==\s*undefined)/;
-  // The four dictionaries of a FieldMapping, read by whatever name the code gives them.
-  const MAPPING_DICTIONARY = /\.(?:messages|byCode|byDetailCode|paths)\??\.?\[[^\]'"`\d]/;
-  // A cast that widens a typed table to look it up by a string.
-  const WIDENED = /\bas\s+(?:Readonly<)?Record<string,[^>]*>>?\)\[[^\]'"`\d]/;
-
-  // Lua in the Redis script and its `ARGV[n]` are not presentation tables.
-  const SKIPPED = new Set(['server/unresolved-request-store.ts']);
-
-  it('finds no raw lookup into a presentation table with an external key', () => {
-    const offenders = sources(SRC).flatMap((file) => {
-      const name = relative(SRC, file);
-      if (SKIPPED.has(name) || name === 'lib/own-key.ts') return [];
-      return readFileSync(file, 'utf8')
-        .split('\n')
-        .map((line, index) => ({ line, at: `${name}:${index + 1}` }))
-        .filter(
-          ({ line }) =>
-            !/^\s*(?:\/\/|\*|\/\*)/.test(line) &&
-            (TABLE_FALLBACK.test(line) || MAPPING_DICTIONARY.test(line) || WIDENED.test(line)),
-        )
-        .map(({ at }) => at);
-    });
-    expect(offenders).toEqual([]);
+describe('the r1 reproductions (Codex PR-439 r1 F2)', () => {
+  it('a gateway 403 detail code named like a prototype member is no known refusal', () => {
+    for (const reasons of [[...INHERITED], ['__proto__', 'constructor']]) {
+      expect(bidForbidden(reasons)).toBeNull();
+      expect(contractForbidden(reasons)).toBeNull();
+      expect(statementForbidden(reasons)).toBeNull();
+      expect(ownerForbidden('PUBLISH', reasons)).toBe(OWNER_FORBIDDEN_TEXT.PUBLISH);
+    }
   });
 
-  it('sees the shapes it exists to catch (a mutant that reverts one lookup fails above)', () => {
-    for (const line of [
-      'return ROLE_LABELS[role] ?? role;',
-      'if (OPEN_WORK_NOTES[status] !== undefined)',
-      'const known = mapping.messages?.[message] ??',
-      'const field = mapping.paths[detail.path];',
-      '(BID_STATUS_LABELS as Readonly<Record<string, string>>)[status]',
-    ]) {
-      expect(TABLE_FALLBACK.test(line) || MAPPING_DICTIONARY.test(line) || WIDENED.test(line)).toBe(
-        true,
-      );
+  it('no inherited name is a project workflow (inbox filter and mayDecide)', () => {
+    for (const key of INHERITED) expect(isProjectWorkflow(key)).toBe(false);
+  });
+
+  it('labels an inherited-name status or disposition as the raw string, never an object', () => {
+    for (const key of INHERITED) {
+      expect(returnShipmentStatusLabel(key)).toBe(key);
+      expect(returnDispositionLabel(key)).toBe(key);
     }
-    for (const line of ['return COLUMNS[columns];', "const a = TABLE['x'] ?? 1;", 'rows[0]']) {
-      expect(TABLE_FALLBACK.test(line) || MAPPING_DICTIONARY.test(line) || WIDENED.test(line)).toBe(
-        false,
+  });
+});
+
+describe('no key that may name an inherited property reaches a plain object (type-checked)', () => {
+  // Codex PR-439 r1 F2: the regex guard trusted any lookup without a fallback
+  // on the same line, so `LOGIN_REASONS[reason]` and `BID_REFUSAL_TEXT[reason]`
+  // passed it. This one asks the type checker instead: an element access or an
+  // `in` test, read or write, on an object (not an array, tuple or Map) whose
+  // key's TYPE admits an Object.prototype name — `string`, `any`, a template
+  // such as `${string}` — is an offender, wherever the key came from and
+  // whatever follows it. A closed union, a number or a literal is not. Allowed:
+  // own-key.ts itself; `Object.hasOwn(R, K) ? R[K] : …`; and an accumulator
+  // created by `Object.create(null)`.
+  const WEB = join(__dirname, '..', '..');
+  const SRC = join(WEB, 'src');
+  const NOT_TABLES = new Set([
+    'Map',
+    'ReadonlyMap',
+    'Set',
+    'ReadonlySet',
+    'Array',
+    'ReadonlyArray',
+  ]);
+
+  function offendersIn(program: ts.Program, include: (file: string) => boolean): string[] {
+    const checker = program.getTypeChecker();
+    const inherited = Object.getOwnPropertyNames(Object.prototype).map((name) =>
+      checker.getStringLiteralType(name),
+    );
+    const mayBeInherited = (type: ts.Type): boolean =>
+      (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 ||
+      inherited.some((name) => checker.isTypeAssignableTo(name, type));
+    const isPlainObject = (type: ts.Type): boolean => {
+      if (type.isUnion()) return type.types.some(isPlainObject);
+      if (checker.isArrayType(type) || checker.isTupleType(type)) return false;
+      const name = type.getSymbol()?.getName();
+      return (type.flags & ts.TypeFlags.Object) !== 0 && !(name && NOT_TABLES.has(name));
+    };
+    const unwrap = (node: ts.Expression): ts.Expression =>
+      ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node)
+        ? unwrap(node.expression)
+        : node;
+    const nullPrototype = (receiver: ts.Expression): boolean => {
+      const symbol = ts.isIdentifier(receiver) ? checker.getSymbolAtLocation(receiver) : undefined;
+      return (symbol?.declarations ?? []).some((declaration) => {
+        if (!ts.isVariableDeclaration(declaration) || !declaration.initializer) return false;
+        const init = unwrap(declaration.initializer);
+        return /^Object\.create\(null\)$/.test(init.getText());
+      });
+    };
+    // A server's `string` cast to a closed union (`status as ReturnStatus`) is
+    // typed closed and is not: the cast, inline or in the key's declaration.
+    const narrowedFromOpen = (key: ts.Expression): boolean => {
+      const castOpen = (node: ts.Expression | undefined): boolean => {
+        const inner = node && ts.isParenthesizedExpression(node) ? node.expression : node;
+        return (
+          inner !== undefined &&
+          (ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner)) &&
+          mayBeInherited(checker.getTypeAtLocation(inner.expression))
+        );
+      };
+      if (castOpen(key)) return true;
+      const symbol = ts.isIdentifier(key) ? checker.getSymbolAtLocation(key) : undefined;
+      return (symbol?.declarations ?? []).some(
+        (declaration) => ts.isVariableDeclaration(declaration) && castOpen(declaration.initializer),
       );
+    };
+    const hasOwnGuarded = (node: ts.ElementAccessExpression): boolean => {
+      const parent = node.parent;
+      if (!ts.isConditionalExpression(parent) || parent.whenTrue !== node) return false;
+      const test = unwrap(parent.condition);
+      return (
+        ts.isCallExpression(test) &&
+        test.expression.getText() === 'Object.hasOwn' &&
+        test.arguments[0]?.getText() === node.expression.getText() &&
+        test.arguments[1]?.getText() === node.argumentExpression.getText()
+      );
+    };
+    const found: string[] = [];
+    for (const source of program.getSourceFiles()) {
+      if (!include(source.fileName)) continue;
+      const visit = (node: ts.Node): void => {
+        let receiver: ts.Expression | undefined;
+        let key: ts.Expression | undefined;
+        if (ts.isElementAccessExpression(node) && !hasOwnGuarded(node)) {
+          receiver = node.expression;
+          key = node.argumentExpression;
+        } else if (
+          ts.isBinaryExpression(node) &&
+          node.operatorToken.kind === ts.SyntaxKind.InKeyword
+        ) {
+          receiver = node.right;
+          key = node.left;
+        }
+        if (
+          receiver &&
+          key &&
+          !ts.isStringLiteralLike(key) &&
+          !ts.isNumericLiteral(key) &&
+          (mayBeInherited(checker.getTypeAtLocation(key)) || narrowedFromOpen(key)) &&
+          isPlainObject(checker.getTypeAtLocation(receiver)) &&
+          !nullPrototype(unwrap(receiver))
+        ) {
+          const { line } = source.getLineAndCharacterOfPosition(node.getStart());
+          found.push(`${relative(SRC, source.fileName)}:${line + 1} ${node.getText()}`);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(source);
     }
+    return found;
+  }
+
+  it('finds none in the portal’s sources', () => {
+    const config = ts.getParsedCommandLineOfConfigFile(
+      join(WEB, 'tsconfig.json'),
+      {},
+      {
+        ...ts.sys,
+        onUnRecoverableConfigFileDiagnostic: (diagnostic) => {
+          throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
+        },
+      },
+    )!;
+    const program = ts.createProgram(config.fileNames, config.options);
+    const offenders = offendersIn(
+      program,
+      (file) =>
+        file.startsWith(`${SRC}/`) &&
+        !/\.(spec|test)\.|\/test\/|\.d\.ts$/.test(file) &&
+        file !== join(SRC, 'lib', 'own-key.ts'),
+    );
+    expect(offenders).toEqual([]);
+  }, 240_000);
+
+  it('sees the shapes it exists to catch, and passes closed keys', () => {
+    const snippets: Record<string, string> = {
+      '/v/bad.ts': [
+        "const LOGIN_REASONS: Record<string, string> = { a: 'x' };",
+        'export const login = (reason: string) => LOGIN_REASONS[reason];',
+        'const TABLE: { [k: string]: string } = {};',
+        'export const both = (r: string) => TABLE[r] ?? r;',
+        "const LABELS = { A: 'a', B: 'b' } as const;",
+        'export const isOne = (k: string) => k in LABELS;',
+        'export const widened = (k: string) => (LABELS as Record<string, string>)[k];',
+        'export const write = (o: Record<string, string>, k: string) => { o[k] = "v"; };',
+        'export const tpl = (o: Record<string, string>, k: `${string}`) => o[k];',
+        "type S = 'A' | 'B';",
+        "const BY_STATUS: Record<S, string> = { A: 'a', B: 'b' };",
+        'export const cast = (status: string) => BY_STATUS[status as S];',
+        'export const castVar = (status: string) => { const s = status as S; return BY_STATUS[s]; };',
+      ].join('\n'),
+      '/v/good.ts': [
+        "type K = 'A' | 'B';",
+        "const LABELS: Record<K, string> = { A: 'a', B: 'b' };",
+        'export const closed = (k: K) => LABELS[k];',
+        'export const row = (rows: string[], i: number) => rows[i];',
+        "export const literal = () => LABELS['A'];",
+        'export const prefixed = (o: Record<string, string>, i: number) => o[`line.${i}.x`];',
+        'export const guarded = (o: Record<string, string>, k: string) =>',
+        '  Object.hasOwn(o, k) ? o[k] : undefined;',
+        'export const acc = (k: string) => {',
+        '  const errors = Object.create(null) as Record<string, string>;',
+        '  errors[k] = "x";',
+        '  return errors;',
+        '};',
+        'export const map = (m: Map<string, string>, k: string) => m.get(k);',
+        'export const suffix = (o: Record<string, string>, k: `${string}.x`) => o[k];',
+      ].join('\n'),
+    };
+    const options: ts.CompilerOptions = {
+      strict: true,
+      target: ts.ScriptTarget.ES2022,
+      noEmit: true,
+    };
+    const host = ts.createCompilerHost(options);
+    const read = host.getSourceFile.bind(host);
+    host.getSourceFile = (name, version) =>
+      name in snippets ? ts.createSourceFile(name, snippets[name]!, version) : read(name, version);
+    host.fileExists = (name) => name in snippets || ts.sys.fileExists(name);
+    const program = ts.createProgram(Object.keys(snippets), options, host);
+    const found = offendersIn(program, (file) => file in snippets).map((line) =>
+      line.replace(/^.*?(bad|good)\.ts/, '$1'),
+    );
+    expect(found.filter((line) => line.startsWith('good'))).toEqual([]);
+    expect(found.filter((line) => line.startsWith('bad'))).toHaveLength(8);
   });
 });

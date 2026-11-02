@@ -4,7 +4,7 @@ import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import { renderableDate } from './instant';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
-import { IRR, MoneyInputError, parseMoneyInput } from '@/lib/format';
+import { IRR, MoneyInputError, moneyInputMessage, parseMoneyInput } from '@/lib/format';
 import { TOP_UP_FIELDS, type TopUpFormField, type TopUpFormValues } from '@/lib/wallet-fields';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
@@ -231,7 +231,7 @@ export function parseTopUpForm(values: TopUpFormValues): ParsedTopUpForm {
     return { ok: true, request: { amountMinor: minor.toString() } };
   } catch (cause) {
     if (cause instanceof MoneyInputError) {
-      return { ok: false, fieldErrors: { amountMinor: cause.message } };
+      return { ok: false, fieldErrors: { amountMinor: moneyInputMessage(cause.failure, IRR) } };
     }
     throw cause;
   }

@@ -1,5 +1,5 @@
 import { AWARD_REFUSAL_TEXT, EVALUATION_REFUSAL_TEXT } from './tender-evaluation-fields';
-import { ownValue } from '@/lib/own-key';
+import { ownText, ownValue } from '@/lib/own-key';
 
 /**
  * The vocabulary of the owner's tender commands on `/tenders/[id]` (EXP-004;
@@ -211,7 +211,7 @@ export function resentOutcome(outcome: OwnerOutcomeDone): OwnerDone {
 export function ownerDoneText(done: OwnerDone): { text: string; resent: boolean } {
   const resent = done.endsWith('_RESENT');
   const outcome = (resent ? done.slice(0, -'_RESENT'.length) : done) as OwnerOutcomeDone;
-  return { text: OWNER_COMMAND_DONE[outcome], resent };
+  return { text: ownText(OWNER_COMMAND_DONE, outcome) ?? '', resent };
 }
 
 /**

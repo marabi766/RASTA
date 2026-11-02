@@ -8,6 +8,7 @@ import {
 } from '@/lib/asset-lifecycle-fields';
 
 import { ActivateAssetForm, ChangeStatusForm, DecommissionAssetForm } from './AssetLifecycleForms';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * What the page offers to do to a machine's life: commission it, change its
@@ -64,7 +65,7 @@ export function LifecycleControls({
   tokens,
 }: LifecycleControlsProps) {
   const targets = statusTargetsFrom(status);
-  const openWork = OPEN_WORK_NOTES[status];
+  const openWork = ownValue(OPEN_WORK_NOTES, status);
 
   return (
     <div className="flex flex-col gap-8">

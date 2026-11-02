@@ -60,6 +60,7 @@ import {
 import type { Binding } from '@/lib/unresolved-tenancy';
 import { setAsideOnOpen } from '@/lib/set-aside-link';
 import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
+import { ownText, ownValue } from '@/lib/own-key';
 
 /**
  * One command the owner's side may issue on a tender — publish, decide a
@@ -372,7 +373,7 @@ const REFUSAL_MESSAGES: Record<Extract<OwnerFormState, { kind: 'REFUSED' }>['rea
 export function forbiddenText(command: OwnerCommand, reasons: readonly string[]): string {
   const table = refusalTextFor(command);
   for (const reason of reasons) {
-    const text = table[reason];
+    const text = ownText(table, reason);
     if (text) return text;
   }
   return OWNER_FORBIDDEN_TEXT[command];
@@ -399,7 +400,7 @@ function CommandFields({
   scoreRows: readonly ScoreRow[];
   award?: AwardFormTerms;
 }) {
-  const typed = (name: string): string | undefined => values?.[name];
+  const typed = (name: string): string | undefined => ownValue(values, name);
   if (REJECTION_COMMANDS.includes(command)) {
     return (
       <Field
@@ -475,7 +476,7 @@ function CommandFields({
               key={cell.criterionCode}
               label={<IsolatedText>{label}</IsolatedText>}
               hint={hint}
-              error={errors[field]}
+              error={ownValue(errors, field)}
             >
               {(control) =>
                 cell.passFail ? (

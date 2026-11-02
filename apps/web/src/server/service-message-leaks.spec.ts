@@ -5,7 +5,7 @@ import * as drivers from './drivers';
 import * as maintenanceCommands from './maintenance-commands';
 import * as orders from './orders';
 import * as usage from './usage';
-import { discoverModules } from '@/test/module-discovery';
+import { KNOWN_MAPPINGS, resolveMappings } from '@/test/entry-points';
 
 import { GENERIC_REFUSAL_MESSAGE, mapProblemToFields, type FieldMapping } from './write';
 
@@ -18,35 +18,28 @@ import { GENERIC_REFUSAL_MESSAGE, mapProblemToFields, type FieldMapping } from '
  * server.
  */
 
-// Every server module that declares a field mapping — found, not listed.
-const MODULES = discoverModules({
-  dirs: ['server'],
-  marker: /export const \w+MAPPING\b/,
-}).map(({ exports }) => exports);
-
-const MAPPINGS: ReadonlyArray<readonly [string, FieldMapping<string>]> = MODULES.flatMap((module) =>
-  Object.entries(module)
-    .filter(
-      ([name, value]) =>
-        /MAPPING$/.test(name) &&
-        typeof value === 'object' &&
-        value !== null &&
-        'paths' in (value as object),
-    )
-    .map(([name, value]) => [name, value as FieldMapping<string>] as const),
-);
+// Every FieldMapping declaration — exported constants, factories and private
+// constants alike, in any directory — found, not listed (test/entry-points.ts).
+const RESOLVED = resolveMappings();
+const MAPPINGS: ReadonlyArray<readonly [string, FieldMapping<string>]> = RESOLVED.mappings;
 
 const LATIN_WORD = /[A-Za-z]{3,}/;
 
 describe('every write module’s mapping', () => {
-  it('is found: the sweep below is not vacuous', () => {
-    expect(MAPPINGS.length).toBeGreaterThanOrEqual(20);
+  it('is found: the sweep below is not vacuous, and nothing is left out (PR-439 r1 F4)', () => {
+    expect(RESOLVED.unaccounted).toEqual([]);
+    expect(RESOLVED.stale).toEqual([]);
+    expect(RESOLVED.discovered).toEqual(expect.arrayContaining([...KNOWN_MAPPINGS]));
+    expect(MAPPINGS.length).toBeGreaterThanOrEqual(40);
     expect(MAPPINGS.map(([name]) => name)).toEqual(
       expect.arrayContaining([
-        'USAGE_FIELD_MAPPING',
-        'ORDER_COMMAND_FIELD_MAPPING',
-        'CREATE_DRIVER_FIELD_MAPPING',
-        'REPORT_REQUEST_FIELD_MAPPING',
+        'server/usage:USAGE_FIELD_MAPPING',
+        'server/orders:ORDER_COMMAND_FIELD_MAPPING',
+        'server/drivers:CREATE_DRIVER_FIELD_MAPPING',
+        'server/maintenance-commands:REPORT_REQUEST_FIELD_MAPPING',
+        'server/fleet-availability:REVOKE_MAPPING',
+        'server/tender-bids:bidFieldMapping#1',
+        'server/tender-owner:mappingFor#0',
       ]),
     );
   });

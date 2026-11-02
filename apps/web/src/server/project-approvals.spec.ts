@@ -249,6 +249,35 @@ describe('the authority’s inbox', () => {
     expect((result as { data: { hasMore: boolean } }).data.hasMore).toBe(true);
   });
 
+  // PR-439 r1 F2, addendum E: membership is by own key now, so a step whose
+  // workflow is named like an Object.prototype member is filtered out like a
+  // tender step — the cursor is still followed and "more" stays honest.
+  const INHERITED = (id: string, workflowKey: string) => ({ ...STEP, id, workflowKey });
+  it('filters a workflow named like a prototype member and still follows the cursor', async () => {
+    const { impl, urls } = pages([
+      {
+        items: [INHERITED('P1', '__proto__'), INHERITED('P2', 'constructor')],
+        nextCursor: 'CUR_2',
+        hasMore: true,
+      },
+      { items: [INHERITED('P3', 'toString'), STEP], nextCursor: null, hasMore: false },
+    ]);
+    const result = await withFetch(impl, () => fetchApprovalInbox(SESSION));
+    expect(urls).toHaveLength(2);
+    expect(ids(result)).toEqual(['APR_1']);
+    expect((result as { data: { hasMore: boolean } }).data.hasMore).toBe(false);
+  });
+
+  it('says more may exist after the page limit of prototype-named workflows', async () => {
+    const { impl, urls } = pages([
+      { items: [INHERITED('P1', '__proto__')], nextCursor: 'CUR_N', hasMore: true },
+    ]);
+    const result = await withFetch(impl, () => fetchApprovalInbox(SESSION));
+    expect(urls).toHaveLength(INBOX_MAX_PAGES);
+    expect(ids(result)).toEqual([]);
+    expect((result as { data: { hasMore: boolean } }).data.hasMore).toBe(true);
+  });
+
   it('is unavailable, not empty, when a later page cannot be read and no project step was found', async () => {
     let call = 0;
     const impl = (async () => {

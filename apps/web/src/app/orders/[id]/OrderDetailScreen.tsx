@@ -22,6 +22,7 @@ import type { Order, ReadResult } from '@/server/orders';
 import { formatOrderAmount } from '../OrdersScreen';
 import { OrderCommandForm } from './OrderCommandForm';
 import { OrderReturns, type OrderReturnsProps } from './OrderReturns';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * One order: where it is, what it contains, and what **this viewer** may do
@@ -219,7 +220,7 @@ export function OrderDetailScreen({
   }
 
   const order = result.data;
-  const branch = BRANCH_EXPLANATIONS[order.status];
+  const branch = ownValue(BRANCH_EXPLANATIONS, order.status);
 
   return (
     <div className="flex flex-col gap-4">

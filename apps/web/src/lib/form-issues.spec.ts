@@ -7,7 +7,12 @@ import { join, relative } from 'node:path';
 import { z } from 'zod';
 import { legacyParse, type LegacyIssue } from '@rasta/contracts';
 
-import { firstIssuePerField, formIssueMessage, GENERIC_FIELD_MESSAGE } from './form-issues';
+import {
+  firstIssuePerField,
+  formIssueMessage,
+  formMessage,
+  GENERIC_FIELD_MESSAGE,
+} from './form-issues';
 import { legacyFormResolver } from './form-resolver';
 
 /**
@@ -63,10 +68,9 @@ describe('formIssueMessage', () => {
     },
   );
 
-  it('shows a message the schema wrote in Persian as written', () => {
-    expect(formIssueMessage(issueOf(z.string().min(1, 'نام سازمان را وارد کنید'), ''))).toBe(
-      'نام سازمان را وارد کنید',
-    );
+  it('shows a Persian message the schema author declared as written', () => {
+    const declared = formMessage('نام سازمان را وارد کنید');
+    expect(formIssueMessage(issueOf(z.string().min(1, declared), ''))).toBe(declared);
   });
 
   it('replaces a message somebody wrote in English, and one that repeats the input', () => {

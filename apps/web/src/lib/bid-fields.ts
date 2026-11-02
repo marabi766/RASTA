@@ -80,8 +80,8 @@ export const BID_ANSWERS_MAX = 50;
 /** The form's fields. A criterion's answer is drawn per row; its code rides beside it. */
 export const PRICE_FIELD = 'priceMinor';
 export const NOTE_FIELD = 'note';
-export const answerField = (row: number): string => `answer.${row}`;
-export const criterionField = (row: number): string => `criterion.${row}`;
+export const answerField = (row: number): `answer.${number}` => `answer.${row}`;
+export const criterionField = (row: number): `criterion.${number}` => `criterion.${row}`;
 
 /**
  * Every closed reason a refused bid names (`BID_REFUSALS`, in `details[].code`

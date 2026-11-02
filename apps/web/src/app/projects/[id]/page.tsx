@@ -45,6 +45,7 @@ import {
   sessionWriteRoles,
 } from '@/server/session-organization';
 import { pageParams } from '@/server/page-context';
+import { setOwn } from '@/lib/own-key';
 
 /**
  * The `/projects/[id]` route — جزئیات پروژه (docs/16 § ۱۶٫۶).
@@ -117,7 +118,7 @@ function decisionTokens(
         digests: null,
       }),
     });
-    tokens[step.id] = { grant: token('grant'), reject: token('reject') };
+    setOwn(tokens, step.id, { grant: token('grant'), reject: token('reject') });
   }
   return tokens;
 }

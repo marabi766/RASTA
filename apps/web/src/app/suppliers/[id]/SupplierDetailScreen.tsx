@@ -23,6 +23,7 @@ import type {
   SupplierDetail,
   SuspensionRecord,
 } from '@/server/suppliers';
+import { ownValue } from '@/lib/own-key';
 
 /**
  * The supplier's private record (docs/16 § ۱۶٫۶, `/suppliers/[id]`):
@@ -217,7 +218,7 @@ function QualificationsSection({
             <QualificationRow
               key={qualification.id}
               qualification={qualification}
-              decision={decisions[qualification.id] ?? null}
+              decision={ownValue(decisions, qualification.id) ?? null}
             />
           ))}
         </ul>

@@ -31,6 +31,7 @@ import {
   sessionWriteRoles,
 } from '@/server/session-organization';
 import { pageParams } from '@/server/page-context';
+import { setOwn } from '@/lib/own-key';
 
 /**
  * The `/maintenance/[id]` route (docs/16 § 16.6).
@@ -131,7 +132,7 @@ export default async function MaintenanceRequestPage({
             break;
         }
       }
-      orderForms[order.id] = forms;
+      setOwn(orderForms, order.id, forms);
     }
   }
 
