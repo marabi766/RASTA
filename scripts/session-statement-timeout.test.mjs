@@ -33,7 +33,9 @@ function withPsql(script, args, env, { psqlStatus = 0 } = {}) {
     writeFileSync(
       psql,
       `#!/bin/bash\nsql="$(cat)"\nprintf '%s\\n' "$sql" >> "${log}"\n` +
-        `[[ "$sql" == *statement_timeout* ]] && exit ${psqlStatus}\nexit 0\n`,
+        // The ALTER that sets it — not any SQL naming it (runtime-settings.sql
+        // allows the parameter by name, #540 r2).
+        `[[ "$sql" == *"SET statement_timeout ="* ]] && exit ${psqlStatus}\nexit 0\n`,
     );
     chmodSync(psql, 0o755);
     const run = spawnSync('bash', ['-c', script, 'test', ...args], {
@@ -122,8 +124,8 @@ test('the split (every service, audit included) and the rotation apply it; never
     split.match(
       /ensure_runtime_statement_timeout "\$\{svc\}" "\$\{db\}" "\$\{runtime\}" \|\| return 1/g,
     )?.length,
-    2,
-    'split_service_privileges and split_audit_database_privileges, each passing a failure on',
+    1,
+    '_split_database, which split_service_privileges and split_audit_database_privileges both run',
   );
   const rotate = readFileSync(join(LIB, 'rotate-role-passwords.bash'), 'utf8');
   assert.match(
