@@ -49,6 +49,7 @@ export class PrismaService implements OnModuleInit, OnApplicationShutdown {
   private buildClient() {
     return this.base.$extends(
       createTenantGuardExtension({
+        scalarFkFamily: 'analytics',
         scopedModels: TENANT_SCOPED_MODELS,
         datamodel: Prisma.dmmf.datamodel,
         onUnscopedQuery: ({ model, operation, reason }) => {

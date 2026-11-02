@@ -3,7 +3,8 @@
 Each service installs the guard with its own `Prisma.dmmf.datamodel`, explicit
 `scopedModels` and existing unscoped-query logger. Metadata is required even when
 a top-level model is platform-wide: `User.update` can mutate `Membership` below it.
-Scalar and JSON fields are never interpreted as relations.
+DMMF owning relations identify their scalar FK columns; JSON values are never
+interpreted as relations.
 
 ## Allowed operations and input matrix
 
@@ -82,8 +83,9 @@ lazy-promise handling and query logging. It permits deliberate cross-tenant ledg
 entries, issued settlement books, asset ownership transfers, background processing
 and platform governance. Nested-write review does not provide that bypass.
 
-Refusals use platform error codes and fixed input-free messages. They happen before
-the query callback. In an interactive transaction, propagate the refusal so Prisma
+Guard refusals use platform error codes and fixed input-free messages before
+the query callback. Composite-FK violations fail the database statement itself.
+In an interactive transaction, propagate the refusal so Prisma
 rolls back preceding domain writes, ledger entries, outbox rows and idempotency
 state; the identity and economic integration regressions assert this rollback.
 
@@ -101,3 +103,25 @@ Bound inserts, cross-party lookups, singleton reference data, worker queues, loc
 clocks and transaction controls have specific reasons. SQL delegated to a constant
 or helper is reviewed at its listed caller; changes to those helpers still need
 ordinary code review. Raw SQL is never made safe by wrapping it in this extension.
+
+## Scalar foreign keys (D-119, staged)
+
+Every installer names its service family. `scalar-relation-policy.ts` explicitly
+lists the remaining legacy relations; its schema/installer test pins that list.
+New or unclassified scalar FK writes refuse, including through nested data and
+both upsert branches. The legacy list is rollout debt, not reviewed safety.
+
+Marketplace classifies all twelve owning relations. `Offer.product` and
+`OrderLine.offer` are reviewed cross-party links (ADR-037/042). Seven same-tenant
+links use additive, validated composite database FKs; returns retain their three
+existing composite FKs. The database checks tenant equality in the write itself,
+including bulk/returning operations and concurrent parent ownership changes.
+Nested creates validate the child tenant then inherit the composite tenant column
+from their guarded parent, as Prisma requires. No ownership SELECT is added.
+
+Deploy the migration before the new generated client/application. Invalid existing
+links abort migration validation without changing rows; operators must reconcile
+those rows explicitly. Rollback drops only the additive constraints/indexes and
+preserves the original ID-only FKs and all data. Index creation and validation
+can lock populated tables: schedule the migration accordingly. Raw-SQL discovery
+(F2/FU-011) remains a separate follow-up.
