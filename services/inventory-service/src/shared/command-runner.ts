@@ -6,7 +6,7 @@ import { inventoryCommandsTotal } from '../observability/metrics';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { ExpiryBacklog, ReservationExpiry } from '../reservation/expiry';
 import { ENV } from '../tokens';
-import { transactionNow } from './clock';
+import { databaseClock, transactionNow } from './clock';
 import { boundLockWaits, translateCommandError } from './command';
 import type { ClaimFence } from './idempotency';
 
@@ -28,9 +28,12 @@ export type CommandName =
 /**
  * The one shape of a command's transaction (ADR-056 § 3):
  *
- *   hold the Idempotency-Key claim → bound every lock wait → read the transaction's instant →
- *   the work (lock, expire due, write balance, movement, reservation — or the warehouse — and
- *   outbox) → store the response on the claim
+ *   hold the Idempotency-Key claim → bound every lock wait → acquire all decision locks →
+ *   sample one database wall-clock instant → expire due and write balance, movement, reservation
+ *   and outbox at that instant → store the response on the claim
+ *
+ * `runLocked` enforces that ordering for expiry decisions. `run` retains transaction-start
+ * metadata time for commands without deadline decisions (warehouse and shipments; CLOCKS.md).
  *
  * — all in one transaction, so the change, its ledger, the event and the replayable answer
  * commit together or not at all. What the database refused is translated once, here
@@ -54,14 +57,39 @@ export class CommandRunner {
     overdrawn: (() => RastaError) | null,
     work: (tx: ExtendedPrismaClient, at: Date) => Promise<T>,
   ): Promise<T> {
+    return this.execute(command, fence, overdrawn, async (tx) =>
+      work(tx, await transactionNow(tx)),
+    );
+  }
+
+  /** All stock locks, the target reservation and bounded expiry candidates precede the clock. */
+  async runLocked<T, Locks>(
+    command: CommandName,
+    fence: ClaimFence<T>,
+    overdrawn: (() => RastaError) | null,
+    lock: (tx: ExtendedPrismaClient) => Promise<Locks>,
+    work: (tx: ExtendedPrismaClient, at: Date, locks: Locks) => Promise<T>,
+  ): Promise<T> {
+    return this.execute(command, fence, overdrawn, async (tx) => {
+      const locks = await lock(tx);
+      const at = await databaseClock(tx);
+      return work(tx, at, locks);
+    });
+  }
+
+  private async execute<T>(
+    command: CommandName,
+    fence: ClaimFence<T>,
+    overdrawn: (() => RastaError) | null,
+    work: (tx: ExtendedPrismaClient) => Promise<T>,
+  ): Promise<T> {
     const lockTimeoutMs = this.env.INVENTORY_LOCK_TIMEOUT_MS;
     try {
       const result = await this.prisma.transaction(
         async (tx) => {
           await fence.hold(tx);
           await boundLockWaits(tx, lockTimeoutMs);
-          const at = await transactionNow(tx);
-          return fence.complete(tx, await work(tx, at));
+          return fence.complete(tx, await work(tx));
         },
         // A command may wait on several items in turn, each bounded by lock_timeout; the whole
         // transaction is bounded too, and so is its wait for a pooled connection.
