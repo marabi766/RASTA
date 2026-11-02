@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import { createSystemContext, runWithContext } from '@rasta/nest-common';
 import { Logger } from '@nestjs/common';
 import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
@@ -495,4 +496,29 @@ describe('starter shutdown', () => {
     expect(backlog).not.toHaveBeenCalled();
     expect(finish).not.toHaveBeenCalled();
   });
+});
+
+test('foreignFailure rejects identifier-shaped secrets in names and codes', () => {
+  const failure = Object.assign(new Error('private-sentinel-79'), {
+    name: 'PrivateSentinel79',
+    code: 'JZ97_ANOTHER_SECRET',
+  });
+  expect(JSON.stringify(foreignFailure(failure))).not.toMatch(/sentinel|JZ97|another.secret/i);
+});
+
+test('Temporal close failures expose fixed diagnostics only', async () => {
+  const { close } = stubTemporal();
+  close.mockRejectedValue(
+    Object.assign(new Error('private-sentinel-79 JZ97-another-secret'), {
+      name: 'PrivateSentinel79',
+      code: 'JZ97_ANOTHER_SECRET',
+      cause: new Error('private-sentinel-79'),
+    }),
+  );
+  const client = new OrderSagaClient(env(), store);
+  await client.deliver('ORD_CLOSE');
+  const failure: unknown = await client.onModuleDestroy().catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(Error);
+  expect(String(failure)).toContain('TEMPORAL_ADDRESS: Temporal close failed');
+  expect(inspect(failure, { showHidden: true, depth: 10 })).not.toMatch(/sentinel|JZ97/i);
 });

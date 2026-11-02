@@ -42,6 +42,7 @@
  *      integration suites open owner connections through that class on purpose.
  */
 
+import { clientFailureCode } from './client-failure';
 import { DemoSeedRefusedError } from '@rasta/config';
 
 /** The one raw-SQL method every generated Prisma client has. */
@@ -200,15 +201,6 @@ export class RuntimeRoleUnverifiedError extends Error {
   }
 }
 
-/** A client's error code, if it is shaped like one (`P1000`, `ECONNREFUSED`); else `unknown`. */
-function clientCode(error: unknown): string {
-  const failure = error as { errorCode?: unknown; code?: unknown } | null | undefined;
-  for (const candidate of [failure?.errorCode, failure?.code]) {
-    if (typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(candidate)) return candidate;
-  }
-  return 'unknown';
-}
-
 /** A client {@link preflightRuntimeRole} can open, ask, and close. */
 export interface RuntimeRolePreflightClient extends RuntimeRoleQueryClient {
   $disconnect(): PromiseLike<void>;
@@ -235,7 +227,7 @@ export async function preflightRuntimeRole(
     return await assertRuntimeRole(client, options);
   } catch (error) {
     if (error instanceof RuntimeRoleRefusedError) throw error;
-    code = clientCode(error);
+    code = clientFailureCode(error);
   } finally {
     // A failed close says no more than a failed connection would.
     await client?.$disconnect().then(undefined, () => undefined);
