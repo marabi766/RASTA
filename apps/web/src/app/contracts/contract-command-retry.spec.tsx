@@ -328,7 +328,7 @@ describe('one slot per object', () => {
           replay: STAMP,
         },
         BINDING,
-      ),
+      ).outcome,
     ).toBe('HELD');
     clearUnresolvedContractCommand(CONTRACT_SLOT, KEY, BINDING);
     expect(stored(CONTRACT_SLOT)).toMatchObject({ submissionId: OTHER, command: 'SIGN' });
@@ -346,7 +346,7 @@ describe('one slot per object', () => {
           replay: STAMP,
         },
         BINDING,
-      ),
+      ).outcome,
     ).toBe('UNAVAILABLE');
     window.sessionStorage.setItem(
       storeKey(CONTRACT_SLOT),
@@ -398,7 +398,9 @@ describe('never silently gone', () => {
 
   it('nothing is stored once a logout has started', () => {
     purgeAllUnresolvedContractCommands();
-    expect(saveUnresolvedContractCommand(CONTRACT_SLOT, entry, BINDING)).toBe('UNAVAILABLE');
+    expect(saveUnresolvedContractCommand(CONTRACT_SLOT, entry, BINDING).outcome).toBe(
+      'UNAVAILABLE',
+    );
   });
 
   it('from another login it is shown, never re-sent; another person’s page reduces it to a content-free marker', () => {

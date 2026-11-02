@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 
 import Redis from 'ioredis';
+import { assertRedisDiagnosticsSafe, protectRedisReadyCheck } from '@rasta/config';
 import { z } from 'zod';
 
 import { webServerEnv } from './env';
@@ -221,6 +222,7 @@ function defaultStore(): UnresolvedStore {
   if (store) return store;
   const env = webServerEnv();
   if (env.WEB_REDIS_URL) {
+    assertRedisDiagnosticsSafe();
     const redis = new Redis(env.WEB_REDIS_URL, {
       // Bounded: a command waits for a connection being made, never past
       // `commandTimeout`; then the action sends nothing.
@@ -229,6 +231,7 @@ function defaultStore(): UnresolvedStore {
       connectTimeout: 2_000,
       commandTimeout: 2_000,
     });
+    protectRedisReadyCheck(redis);
     redis.on('error', () => undefined);
     store = redisUnresolvedStore(redis as unknown as RedisLike);
   } else if (process.env.NODE_ENV !== 'production') {

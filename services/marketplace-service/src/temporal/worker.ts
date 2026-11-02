@@ -89,7 +89,7 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
           'The order saga worker ended with an error',
         );
       });
-      this.logger.log(`Order saga worker polling ${this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE}`);
+      this.logger.log('Order saga worker polling (MARKETPLACE_TEMPORAL_TASK_QUEUE)');
     } catch (error) {
       // A missing Temporal server must not take the API down: existing orders
       // are still readable and the failure is loud in the log.

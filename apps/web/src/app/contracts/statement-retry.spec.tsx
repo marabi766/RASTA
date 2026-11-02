@@ -273,7 +273,7 @@ describe('never silently gone', () => {
 
   it('nothing is stored once a logout has started', () => {
     purgeAllUnresolvedStatements();
-    expect(saveUnresolvedStatement(STATEMENT_SCOPE, entry, BINDING)).toBe('UNAVAILABLE');
+    expect(saveUnresolvedStatement(STATEMENT_SCOPE, entry, BINDING).outcome).toBe('UNAVAILABLE');
   });
 
   it('from another login it is shown, never re-sent; another person’s page removes it', () => {
@@ -457,13 +457,13 @@ describe('one unresolved command per statement', () => {
       correlationId: 'COR',
       replay: APPROVE_STAMP,
     };
-    expect(saveUnresolvedStatement(STATEMENT_SCOPE, approve, BINDING)).toBe('SAVED');
+    expect(saveUnresolvedStatement(STATEMENT_SCOPE, approve, BINDING).outcome).toBe('SAVED');
     expect(
       saveUnresolvedStatement(
         STATEMENT_SCOPE,
         { ...approve, command: 'REJECT', submissionId: REJECT_KEY },
         BINDING,
-      ),
+      ).outcome,
     ).toBe('HELD');
     clearUnresolvedStatement(STATEMENT_SCOPE, REJECT_KEY, BINDING);
     expect(slot()).toMatchObject({ submissionId: APPROVE_KEY, command: 'APPROVE' });

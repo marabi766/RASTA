@@ -20,6 +20,7 @@ import {
   type StatementLineValues,
 } from '@/lib/statement-fields';
 import {
+  advanceUnresolvedStatement,
   answerUnresolvedStatement,
   clearUnresolvedStatement,
   restoreUnresolvedStatement,
@@ -31,6 +32,7 @@ import {
   statementQuarantine,
 } from '@/lib/unresolved-statement';
 import type { Binding } from '@/lib/unresolved-order';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 
 import { submitStatementCommand, submitStatementDraft } from './statement-actions';
 import {
@@ -215,6 +217,8 @@ function StatementCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        advance: () => advanceUnresolvedStatement(scope, submissionId, binding),
         send: () =>
           scope.statementId === null
             ? submitStatementDraft(scope.contractId, previous, form)
@@ -226,8 +230,9 @@ function StatementCommandFormBody({
         },
         // Still in doubt: kept. A definite answer to THIS submission's first send:
         // its own record is dropped — never another's.
-        answer: (state) => answerUnresolvedStatement(scope, state, binding),
-        settle: () => settleUnresolvedStatement(scope, submissionId, binding),
+        answer: (state, attempt) => answerUnresolvedStatement(scope, state, binding, attempt),
+        settle: (attempt, settlement) =>
+          settleUnresolvedStatement(scope, submissionId, binding, attempt, settlement),
         held: { kind: 'HELD' },
         unavailable: { kind: 'STORAGE_UNAVAILABLE' },
       });
@@ -579,7 +584,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the statements again and offers what they allow. */}
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

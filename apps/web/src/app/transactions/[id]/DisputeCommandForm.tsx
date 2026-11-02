@@ -6,6 +6,7 @@ import { Alert, Button, Field, controlClassName } from '@/ui';
 import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { normalizePersianText, toPersianDigits } from '@/lib/format';
 import {
+  advanceUnresolvedDispute,
   answerUnresolvedDispute,
   clearUnresolvedDispute,
   restoreUnresolvedDispute,
@@ -30,6 +31,7 @@ import {
 
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 import { submitDisputeCommand } from './actions';
 import {
   IDLE_DISPUTE_FORM,
@@ -199,6 +201,8 @@ function DisputeCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        advance: () => advanceUnresolvedDispute(transactionId, submissionId, binding),
         send: () => submitDisputeCommand(transactionId, previous, form),
         // The call itself failed. A lost response after the command may have
         // committed; only an authoritative "the session has ended" says more.
@@ -211,8 +215,9 @@ function DisputeCommandFormBody({
         // the deadline, without its stamp for good. Only THIS submission's entry: a
         // late answer for a command set aside after another took the slot is kept
         // aside, the other left as it is.
-        answer: (state) => answerUnresolvedDispute(transactionId, state, binding),
-        settle: () => settleUnresolvedDispute(transactionId, submissionId, binding),
+        answer: (state, attempt) => answerUnresolvedDispute(transactionId, state, binding, attempt),
+        settle: (attempt, settlement) =>
+          settleUnresolvedDispute(transactionId, submissionId, binding, attempt, settlement),
         held: { kind: 'HELD' },
         unavailable: { kind: 'STORAGE_UNAVAILABLE' },
       });
@@ -436,12 +441,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the transaction again and offers what it allows. */}
-          <a
-            href={transactionHref}
-            onClick={onForget}
-            onAuxClick={onForget}
-            className="text-sm underline"
-          >
+          <a href={transactionHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت تراکنش را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>

@@ -166,10 +166,53 @@ describe('the warehouse list', () => {
     expect(inventoryHref({ context: TEST_CONTEXT }, {})).toBe('/inventory');
     expect(
       inventoryHref(
+        { context: TEST_CONTEXT, warehouse: 'WHS_A', cursor: 'c' },
+        { shipmentCursor: 's' },
+      ),
+    ).toBe(`/inventory?warehouse=WHS_A&cursor=c&scursor=s&ctx=${TEST_CONTEXT}`);
+    // Leaving the warehouse leaves its stock cursor too (below).
+    expect(
+      inventoryHref(
         { context: TEST_CONTEXT, warehouse: WAREHOUSE_ID, cursor: 'c' },
         { warehouse: undefined },
       ),
-    ).toBe(`/inventory?cursor=c&ctx=${TEST_CONTEXT}`);
+    ).toBe('/inventory');
+  });
+
+  it("never carries one warehouse's stock or ledger cursor to another", () => {
+    const query = {
+      context: TEST_CONTEXT,
+      warehouse: 'WHS_OLD',
+      cursor: 'SKI_OLD',
+      movementCursor: 'SMV_OLD_PAGE',
+    };
+    expect(inventoryHref(query, { warehouse: 'WHS_NEW' })).toBe(
+      `/inventory?warehouse=WHS_NEW&ctx=${TEST_CONTEXT}`,
+    );
+    expect(inventoryHref(query, { warehouse: undefined })).toBe('/inventory');
+    // Staying on the warehouse keeps its place.
+    expect(inventoryHref(query, { warehouse: 'WHS_OLD', shipmentCursor: 's' })).toBe(
+      `/inventory?warehouse=WHS_OLD&cursor=SKI_OLD&mcursor=SMV_OLD_PAGE&scursor=s&ctx=${TEST_CONTEXT}`,
+    );
+  });
+
+  it('the warehouse links of the list drop the ledger cursor', () => {
+    render(
+      <InventoryScreen
+        warehouses={warehouses([WAREHOUSE])}
+        selection={null}
+        query={{
+          context: TEST_CONTEXT,
+          warehouse: 'WHS_OLD',
+          movementCursor: 'SMV_OLD_PAGE',
+          cursor: 'c',
+        }}
+      />,
+    );
+    const link = screen.getByRole('link', { name: WAREHOUSE.name });
+    expect(link.getAttribute('href')).toBe(
+      `/inventory?warehouse=${WAREHOUSE.id}&ctx=${TEST_CONTEXT}`,
+    );
   });
 });
 

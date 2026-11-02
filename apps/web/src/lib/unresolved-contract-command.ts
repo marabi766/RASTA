@@ -7,6 +7,7 @@ import {
 } from './contract-command-fields';
 import { isCommandInput, type CommandInput } from './contract-command-input';
 import {
+  NOT_STARTED,
   fencedSlot,
   keysUnder,
   locate,
@@ -15,7 +16,9 @@ import {
   storedKeyOf,
   type AccountTags,
   type AnswerOutcome,
+  type Attempt,
   type Binding,
+  type Settlement,
   type StoredKey,
   type StartOutcome,
 } from './unresolved-tenancy';
@@ -361,7 +364,7 @@ export function saveUnresolvedContractCommand(
   binding: Binding,
   now: number = Date.now(),
 ): SaveOutcome {
-  if (!fits(scope, entry.command)) return 'UNAVAILABLE';
+  if (!fits(scope, entry.command)) return NOT_STARTED.UNAVAILABLE;
   return slot.start(binding, scopeText(scope), entry.submissionId, () =>
     recordOf(entry, null, binding, now),
   );
@@ -376,12 +379,14 @@ export function answerUnresolvedContractCommand(
   scope: ContractScope,
   entry: Omit<UnresolvedContractCommand, 'savedAt' | 'marker'>,
   binding: Binding,
+  attempt: Attempt | null,
   now: number = Date.now(),
 ): AnswerOutcome {
   return slot.answer(
     binding,
     scopeText(scope),
     entry.submissionId,
+    attempt,
     (earlier) => recordOf(entry, earlier, binding, now),
     now,
   );
@@ -392,8 +397,19 @@ export function settleUnresolvedContractCommand(
   scope: ContractScope,
   submissionId: string,
   binding: Binding,
+  attempt: Attempt,
+  settlement: Settlement,
 ): void {
-  slot.settle(binding, scopeText(scope), submissionId);
+  slot.settle(binding, scopeText(scope), submissionId, attempt, settlement);
+}
+
+/** Before a re-send of `submissionId`: a new send identity, recorded — or null, and nothing is sent (`lib/unresolved-tenancy.ts`). */
+export function advanceUnresolvedContractCommand(
+  scope: ContractScope,
+  submissionId: string,
+  binding: Binding,
+): Attempt | null {
+  return slot.advance(binding, scopeText(scope), submissionId);
 }
 
 /**

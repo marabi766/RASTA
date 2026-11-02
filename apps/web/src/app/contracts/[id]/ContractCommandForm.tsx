@@ -27,6 +27,7 @@ import { CSRF_FIELD, REPLAY_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
 import {
+  advanceUnresolvedContractCommand,
   answerUnresolvedContractCommand,
   clearUnresolvedContractCommand,
   restoreUnresolvedContractCommand,
@@ -38,6 +39,7 @@ import {
   contractCommandQuarantine,
 } from '@/lib/unresolved-contract-command';
 import type { Binding } from '@/lib/unresolved-order';
+import { setAsideOnOpen } from '@/lib/set-aside-link';
 
 import { submitContractCommand } from './contract-actions';
 import {
@@ -228,6 +230,8 @@ function ContractCommandFormBody({
             ? null
             : { ...view, viewOnly: true };
         },
+        // Its own send identity recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        advance: () => advanceUnresolvedContractCommand(scope, submissionId, binding),
         send: () => submitContractCommand(scope, previous, form),
         failed: (ended) => {
           if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
@@ -236,8 +240,9 @@ function ContractCommandFormBody({
         },
         // Still in doubt: kept. A definite answer to THIS submission's first send:
         // its own record is dropped — never another's.
-        answer: (state) => answerUnresolvedContractCommand(scope, state, binding),
-        settle: () => settleUnresolvedContractCommand(scope, submissionId, binding),
+        answer: (state, attempt) => answerUnresolvedContractCommand(scope, state, binding, attempt),
+        settle: (attempt, settlement) =>
+          settleUnresolvedContractCommand(scope, submissionId, binding, attempt, settlement),
         held: { kind: 'HELD' },
         unavailable: { kind: 'STORAGE_UNAVAILABLE' },
       });
@@ -591,7 +596,7 @@ function UnconfirmedCommand({
       {canForget ? (
         <div>
           {/* A full navigation: the page reads the contract again and offers what it allows. */}
-          <a href={pageHref} onClick={onForget} onAuxClick={onForget} className="text-sm underline">
+          <a href={pageHref} {...setAsideOnOpen(onForget)} className="text-sm underline">
             وضعیت را دیدم؛ این درخواست را کنار بگذار
           </a>
         </div>
