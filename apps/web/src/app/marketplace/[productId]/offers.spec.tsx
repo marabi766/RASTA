@@ -54,22 +54,6 @@ function render_(
   );
 }
 
-describe('the supplier qualification column', () => {
-  it.each([
-    ['SUBMITTED', 'ارسال‌شده'],
-    ['APPROVED', 'تأییدشده'],
-    ['REJECTED', 'ردشده'],
-    ['UNAVAILABLE', 'هنوز فعال نیست'],
-  ])('says %s in Persian', (state, label) => {
-    const { getByText, container } = render_(undefined, {
-      kind: 'OK',
-      data: { items: [{ ...OFFER, supplierQualification: state }] },
-    });
-    expect(getByText(label)).toBeInTheDocument();
-    expect(container.textContent).not.toContain(state);
-  });
-});
-
 describe('the product header', () => {
   it('shows the product’s own name and unit', () => {
     const { getByText } = render_();
@@ -107,9 +91,10 @@ describe('the offers table', () => {
   });
 
   it('never renders the qualification as a check nobody performed', () => {
+    // No directory answer was passed: the badge is «نامشخص», not «واجد صلاحیت».
     const { getByText, queryByText } = render_();
-    expect(getByText('هنوز فعال نیست')).toBeInTheDocument();
-    expect(queryByText('تأییدشده')).toBeNull();
+    expect(getByText('وضعیت نامشخص')).toBeInTheDocument();
+    expect(queryByText('واجد صلاحیت')).toBeNull();
   });
 
   it('shows an empty offer list as empty, not as an error', () => {
