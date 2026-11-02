@@ -46,7 +46,7 @@ const escape = (text) => text.replace(/[()]/g, '\\$&');
 test('disk discovery covers the live partition, including the empty gateway project', () => {
   assert.deepEqual(
     discoverIntegrationPackages(),
-    [...INTEGRATION_PARTITIONS['Integration tests']].sort(),
+    Object.values(INTEGRATION_PARTITIONS).flat().sort(),
   );
   assert.deepEqual(integrationPartitionProblems(), []);
 });
@@ -367,7 +367,7 @@ test('a test step without its time limit, or above it, is refused', () => {
   fails(expression, /"Construction coverage gate" has no timeout-minutes/);
   const aboveJob = real();
   aboveJob.jobs['integration-suites']['timeout-minutes'] = 10;
-  fails(aboveJob, /"Integration tests" has timeout-minutes 21, above its job's 10/);
+  fails(aboveJob, /"Integration tests" has timeout-minutes 13, above its job's 10/);
   const tightened = real();
   stepNamed(tightened, 'Construction coverage gate')['timeout-minutes'] = 7;
   assert.deepEqual(checkIntegrationSplit(tightened), []);
@@ -387,7 +387,10 @@ test('every job holds its steps one after the other: step limits plus setup fit 
   assert.deepEqual(
     Object.fromEntries(jobs.map(([id, job]) => [id, stepSum(job) + JOB_SETUP_MINUTES[id]])),
     {
-      'integration-suites': 83,
+      'integration-suites': 75,
+      'integration-construction': 25,
+      'integration-economic': 24,
+      'integration-contract': 23,
       'integration-security': 37,
       'integration-coverage-critical': 35,
       'integration-coverage': 80,
@@ -428,7 +431,7 @@ test('a job whose step limits plus setup exceed its own limit is refused', () =>
     (step) => step.name === 'PostgreSQL connection ceiling',
   );
   connections['timeout-minutes'] += 1;
-  fails(peak, /^integration-suites: its steps' timeout-minutes sum to 76 .* 84 in all/);
+  fails(peak, /^integration-suites: its steps' timeout-minutes sum to 68 .* 76 in all/);
 });
 
 test('a job outside the split is held to its cumulative budget too', () => {
@@ -842,5 +845,50 @@ test('aggregate rejects backup drill failure, skip and cancellation independentl
       `needs[name].result !== "success" && !(name === "integration-backup-drill" && needs[name].result === "${result}")`,
     );
     fails(workflow, /must fail unless every needed job's result is "success"/);
+  }
+});
+
+test('every suite shard refuses no-op commands, changed filters, missing aggregate dependencies and infrastructure', () => {
+  for (const name of Object.keys(INTEGRATION_PARTITIONS)) {
+    for (const change of [
+      () => 'true',
+      (run) => `echo ${run}`,
+      (run) => `${run} || true`,
+      (run) => run.replace(/--shard=\w+/, '--shard=unknown'),
+    ]) {
+      const workflow = real();
+      const step = stepNamed(workflow, name);
+      step.run = change(step.run);
+      fails(workflow, /must run exactly/);
+    }
+    const workflow = real();
+    const id = jobRunning(workflow, name);
+    workflow.jobs.integration.needs = workflow.jobs.integration.needs.filter((need) => need !== id);
+    fails(workflow, /does not need/);
+    for (const required of [
+      'Start the authenticated Kafka broker',
+      'Start MinIO and create the document bucket',
+      'Start ClamAV on a Unix socket',
+      'Apply migrations',
+      'Provision databases, roles and extensions',
+    ]) {
+      const missing = real();
+      dropStep(missing.jobs[id], required);
+      fails(missing, /runs without/);
+    }
+    for (const service of ['redis', 'mailpit', 'postgres']) {
+      const missing = real();
+      delete missing.jobs[id].services[service];
+      fails(missing, /runs without/);
+    }
+    const extra = real();
+    stepNamed(extra, name).env.UNDECLARED_OPTION = '1';
+    fails(extra, /undeclared env/);
+    for (const [key, value] of Object.entries(STEP_INVENTORY[name].env)) {
+      if (value.includes('${{')) continue;
+      const changed = real();
+      stepNamed(changed, name).env[key] = 'different';
+      fails(changed, /must set/);
+    }
   }
 });

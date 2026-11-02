@@ -1,3 +1,5 @@
+import { INTEGRATION_PARTITIONS } from './integration-partitions.mjs';
+
 /**
  * The two-phase test run: every workspace test task in parallel, then — for
  * `test:integration` — the database stress proofs alone.
@@ -67,16 +69,10 @@ export const CALIBRATION_SCRIPT = 'calibrate:aggregation-stress';
  * machine with no database died there. That was invisible for as long as the
  * workspace phase died first on `DATABASE_URL_ORGANIZATION`.
  *
- * The proofs lose no coverage: CI's `Integration tests` step runs
- * `test:integration` unfiltered, and its `${CI_STEPS.security}` step runs
- * `test:integration -- --testNamePattern=…`, whose `concurren` selects them.
- *
- * `pnpm run test:integration -- --testNamePattern=X` reaches the orchestrator
- * as `test:integration -- --testNamePattern=X`; everything after `--` is
- * forwarded to every phase, so a filtered CI gate filters the exclusive phase
- * exactly as it filters the parallel one. Anything else is refused: a turbo
- * `--filter` here would silently decide whether the stress proofs run, and a
- * filtered workspace run is `pnpm exec turbo run <task> --filter …` by name.
+ * Named CI shards accept exactly one --shard=<name> before `--`. Ownership
+ * expands to exact positive Turbo filters; only the identity shard appends
+ * stress. The unsharded local/security paths still run all workspaces and stress.
+ * Runner arguments after `--` reach both phases, preserving security selection.
  */
 export function planTestRun(argv) {
   const [task, ...rest] = argv;
@@ -87,7 +83,18 @@ export function planTestRun(argv) {
   }
   const separator = rest.indexOf('--');
   const before = separator === -1 ? rest : rest.slice(0, separator);
-  if (before.length > 0) {
+  const shardNames = {
+    identity: 'Integration tests',
+    construction: 'Integration construction',
+    economic: 'Integration economic',
+    contract: 'Integration contract',
+  };
+  const shard =
+    before.length === 1 && before[0].startsWith('--shard=') ? before[0].slice(8) : undefined;
+  const members = Object.hasOwn(shardNames, shard ?? '')
+    ? INTEGRATION_PARTITIONS[shardNames[shard]]
+    : undefined;
+  if (before.length > 0 && (task !== 'test:integration' || !members)) {
     throw new Error(
       'test phases: options before `--` are not accepted (they would decide whether the exclusive ' +
         'phase runs); pass test-runner arguments after `--`, or run `pnpm exec turbo run ' +
@@ -97,8 +104,13 @@ export function planTestRun(argv) {
   }
   const forwarded = separator === -1 ? [] : rest.slice(separator + 1);
   const passthrough = forwarded.length > 0 ? ['--', ...forwarded] : [];
-  const plan = [{ phase: 'workspace', args: ['run', task, ...passthrough] }];
-  if (task === 'test:integration') {
+  const plan = [
+    {
+      phase: 'workspace',
+      args: ['run', task, ...(members ?? []).map((name) => `--filter=${name}`), ...passthrough],
+    },
+  ];
+  if (task === 'test:integration' && (!members || members.includes(EXCLUSIVE_PHASE.package))) {
     plan.push({
       phase: 'exclusive',
       args: ['run', EXCLUSIVE_PHASE.task, `--filter=${EXCLUSIVE_PHASE.package}`, ...passthrough],
@@ -558,17 +570,30 @@ export function validateTestPhases({
   }
 
   // CI: the integration step and the security gate go through the orchestrator.
-  const integrationSteps = workflowStepCommands(ciWorkflow, CI_STEPS.integration);
-  if (integrationSteps.length !== 1) {
-    problems.push(
-      `CI must have exactly one "${CI_STEPS.integration}" step (found ${integrationSteps.length})`,
-    );
-  } else if (
-    !integrationSteps[0].some((line) =>
-      sameWords(lineWords(line), ['pnpm', 'run', 'test:integration']),
-    )
-  ) {
-    problems.push(`CI "${CI_STEPS.integration}" must run \`pnpm run test:integration\``);
+  for (const [name, shard] of [
+    ['Integration tests', 'identity'],
+    ['Integration construction', 'construction'],
+    ['Integration economic', 'economic'],
+    ['Integration contract', 'contract'],
+  ]) {
+    const steps = workflowStepCommands(ciWorkflow, name);
+    if (
+      steps.length !== 1 ||
+      !steps[0].some((line) =>
+        sameWords(lineWords(line), [
+          'pnpm',
+          'run',
+          'test:integration',
+          `--shard=${shard}`,
+          '--',
+          '--verbose',
+        ]),
+      )
+    ) {
+      problems.push(
+        `CI "${name}" must run \`pnpm run test:integration --shard=${shard}\` exactly once`,
+      );
+    }
   }
   const securitySteps = workflowStepCommands(ciWorkflow, CI_STEPS.security);
   if (securitySteps.length !== 1) {
