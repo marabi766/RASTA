@@ -423,6 +423,51 @@ test('process groups: a group that stays after the bounded wait is an orphan; no
     assert.deepEqual(outcome.unknown, [200]);
   }));
 
+test('recovery retries unknown report and journal groups until ownership is proven', async () => {
+  let time = 0;
+  const looks = new Map();
+  const signalled = [];
+  const result = await recoverProcessGroups([50, 60], 'id', {
+    now: () => time,
+    sleep: async (ms) => {
+      time += ms;
+    },
+    inspectGroup: (pgid) => {
+      const count = (looks.get(pgid) ?? 0) + 1;
+      looks.set(pgid, count);
+      assert.ok(!signalled.includes(pgid), 'no signal while inspection is unknown');
+      return count === 1 ? 'unknown' : 'proven';
+    },
+    reap: async (pgid) => {
+      signalled.push(pgid);
+      return 'reaped';
+    },
+  });
+  assert.deepEqual(signalled, [50, 60]);
+  assert.deepEqual(result, { gone: [], reaped: [50, 60], unknown: [], orphan: [] });
+});
+
+test('recovery refuses unknown forever within the monotonic deadline without signalling', async () => {
+  let time = 0;
+  let inspections = 0;
+  const result = await recoverProcessGroups([50], 'id', {
+    now: () => time,
+    sleep: async (ms) => {
+      assert.ok(ms > 0 && ms <= 10);
+      time += ms;
+      assert.ok(time <= 100, 'retry must be bounded');
+    },
+    inspectGroup: () => {
+      inspections += 1;
+      return 'unknown';
+    },
+    reap: async () => assert.fail('unknown must never be signalled'),
+  });
+  assert.ok(inspections > 1, 'unknown must be reinspected');
+  assert.equal(time, 100);
+  assert.deepEqual(result, { gone: [], reaped: [], unknown: [50], orphan: [] });
+});
+
 // --- UNKNOWN is never GONE and never signalled (#478 r3 R2) ----------------------------------
 // The /proc view is injected, so each failure is exactly the one named. `alive` stays true: the
 // group exists, only the inspection fails.
