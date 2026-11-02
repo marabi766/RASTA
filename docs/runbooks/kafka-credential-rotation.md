@@ -116,7 +116,9 @@ docker compose exec kafka /opt/kafka/bin/kafka-configs.sh \
 #    KAFKA_SASL_PASSWORD_ADMIN=<تازه>
 
 # ۳. فقط Container Broker را از نو بساز — Volume داده دست نمی‌خورد
-docker compose up -d --force-recreate --no-deps kafka
+node scripts/infra-preflight.mjs &&
+docker compose up -d --force-recreate --no-deps kafka &&
+node scripts/kafka-init-gate.mjs kafka-init &&
 
 # ۴. تأیید: با گذرواژهٔ تازه، ACLها همان‌اند
 pnpm kafka:acl:apply:dev    # «0 added, 0 removed»
@@ -133,14 +135,23 @@ Exporter فقط `ca.pem` بیرون‌کپی‌شده را سوار می‌کن�
 
 ```bash
 # Containerهایی که Volume کلید را سوار کرده‌اند (توقف و حذف Container، نه Volume داده)
-docker compose rm -sf kafka-ui kafka-exporter kafka kafka-init kafka-tls
-docker volume rm rasta_kafka-tls
-docker compose up -d kafka-tls kafka kafka-init   # CA تازه، ca.pem تازه در infrastructure/docker/kafka/.tls/
+node scripts/infra-preflight.mjs &&
+docker compose rm -sf kafka-ui kafka-exporter kafka kafka-init kafka-tls &&
+docker volume rm rasta_kafka-tls &&
+node scripts/kafka-init-gate.mjs kafka-tls kafka kafka-init &&  # CA تازه، ca.pem تازه در infrastructure/docker/kafka/.tls/
 pnpm kafka:acl:apply:dev                          # «0 added, 0 removed»
 # سرویس‌ها، و Kafka UI / Exporter با Profile خودشان، را دوباره راه بینداز تا CA تازه را بخوانند
 ```
 
 آزموده روی Broker توسعه: CA عوض شد، Broker دوباره Format نشد، Offset Commitشده و ACLها ماندند.
+
+Detached Compose is not a readiness check. Each chain above/below stops before ACLs when
+`kafka-init` fails. The gate owns startup, waits for that invocation and propagates its
+exit status; never continue the procedure after failure. D-066 still requires one
+provisioner and no concurrent manual alters/default changes. On timeout the provisioner
+may still be running: inspect it locally and resolve it before another startup. Waiting
+or retrying does not make concurrent alterations safe. Never use `infra:reset` to recover
+from provisioning failure.
 
 کلید خصوصی CA بلافاصله پس از امضای گواهی Broker پاک می‌شود، پس هیچ گواهی دیگری با آن CA ساخته نمی‌شود.
 
@@ -185,9 +196,10 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
 بسنج. فقط وقتی هر سه پس از توقف برقرارند:
 
 ```bash
-docker compose rm -sf kafka kafka-init
-docker volume rm rasta_kafka-data
-docker compose up -d kafka kafka-init    # Format تازه با اعتبارهای .env و bootstrap.env؛ Topicها دوباره
+node scripts/infra-preflight.mjs &&
+docker compose rm -sf kafka kafka-init &&
+docker volume rm rasta_kafka-data &&
+node scripts/kafka-init-gate.mjs kafka kafka-init &&  # Format تازه؛ Topicها دوباره
 pnpm kafka:acl:apply:dev
 ```
 

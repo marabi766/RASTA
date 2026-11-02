@@ -108,7 +108,7 @@ Project → Approval → Tender → Bid → Evaluation → Contract → Progress
 ### الزامی
 
 - [ ] `pnpm verify` کاملاً سبز (format · lint · typecheck · test · build)
-- [ ] `docker compose up -d` کل زیرساخت را سالم بالا می‌آورد
+- [ ] `pnpm infra:up` کل زیرساخت را سالم بالا می‌آورد
 - [ ] `pnpm db:migrate && pnpm db:seed` بدون خطا
 - [ ] **سناریوی ۱ به‌صورت E2E سبز**
 - [ ] **سناریوی ۲ به‌صورت E2E سبز**

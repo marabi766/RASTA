@@ -29,6 +29,7 @@
  *   - no principal but the admin creates a topic, by request or by producing;
  *   - an idempotent producer needs nothing beyond WRITE on its topic.
  */
+import './disposable-broker.mjs';
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';

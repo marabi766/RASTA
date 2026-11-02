@@ -31,6 +31,7 @@
  * between the real call and its answer, when told to.
  */
 import './disposable-broker.mjs';
+import { withBrokerDefault as restoreBrokerDefault } from './broker-default.mjs';
 import { describe, test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -260,13 +261,7 @@ async function setBrokerDefault(bytes) {
  * re-set, or deleted if there was none — whether `work` passed or threw.
  */
 async function withBrokerDefault(bytes, work) {
-  const before = await brokerDefault();
-  if (bytes !== before) await setBrokerDefault(bytes);
-  try {
-    return await work();
-  } finally {
-    if ((await brokerDefault()) !== before) await setBrokerDefault(before);
-  }
+  return restoreBrokerDefault(bytes, work, { read: brokerDefault, set: setBrokerDefault });
 }
 
 /** Waits until `topic` reports `bytes` as its effective limit. */
