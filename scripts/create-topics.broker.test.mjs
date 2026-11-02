@@ -32,9 +32,12 @@
  */
 import './disposable-broker.mjs';
 import {
-  brokerDefaultDeleteOutcome,
+  BROKER_DEFAULT_ALREADY_ABSENT,
   withBrokerDefault as restoreBrokerDefault,
 } from './broker-default.mjs';
+import { deleteBrokerDefault } from './broker-default-delete.mjs';
+import { connectionFor } from './kafka-acl-lib.mjs';
+import { readFileSync } from 'node:fs';
 import { describe, test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -257,8 +260,10 @@ async function setBrokerDefault(bytes) {
       : ['--add-config', `message.max.bytes=${bytes}`]),
   ];
   if (bytes !== undefined) return kafka('kafka-configs.sh', args);
-  return brokerDefaultDeleteOutcome(
-    await docker(['exec', CONTAINER, `${REAL}/kafka-configs.sh`, ...ADMIN, ...args]),
+  // Incremental DELETE is idempotent and reaches Kafka even when a describe
+  // is stale/absent. It preserves every other broker-default config.
+  return deleteBrokerDefault(
+    connectionFor('admin', process.env, (path) => readFileSync(path, 'utf8')),
   );
 }
 
@@ -712,7 +717,7 @@ describe('create-topics.sh, max.message.bytes on a real broker', () => {
   // Every caller above uses the same reconciliation boundary; exercise it with
   // actual broker writes while injecting only the lost response/stale describe.
   for (const before of [undefined, 1_100_000]) {
-    for (const failure of ['setup', 'work']) {
+    for (const failure of ['setup', 'work', ...(before === undefined ? ['absence-refusal'] : [])]) {
       test(`broker restoration after ${failure} with stale describe, original ${before}`, async () => {
         await withBrokerDefault(before, async () => {
           let reads = 0;
@@ -726,21 +731,28 @@ describe('create-topics.sh, max.message.bytes on a real broker', () => {
               {
                 read: async () => {
                   reads += 1;
-                  // Snapshot original; first restoration describe is stale.
-                  if (reads <= 2) return before;
+                  // Snapshot original; stale once, or throughout the refusal window.
+                  if (reads <= 2 || failure === 'absence-refusal') return before;
                   return brokerDefault();
                 },
                 set: async (value) => {
                   writes += 1;
-                  await setBrokerDefault(value);
+                  const result =
+                    failure === 'absence-refusal' && writes > 1
+                      ? BROKER_DEFAULT_ALREADY_ABSENT
+                      : await setBrokerDefault(value);
                   if (writes === 1 && failure === 'setup') throw new Error('setup response lost');
+                  return result;
                 },
+                pause: failure === 'absence-refusal' ? async () => {} : undefined,
               },
             ),
-            /setup response lost|work failed/,
+            failure === 'absence-refusal'
+              ? /BROKER_DEFAULT restoration UNCONFIRMED/
+              : /setup response lost|work failed/,
           );
-          assert.equal(writes, 2);
-          assert.equal(await brokerDefault(), before);
+          assert.equal(writes, failure === 'absence-refusal' ? 21 : 2);
+          assert.equal(await brokerDefault(), failure === 'absence-refusal' ? 3 * MIB : before);
         });
       });
     }

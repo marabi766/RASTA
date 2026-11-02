@@ -71,7 +71,7 @@ for (const before of [undefined, 1100000]) {
         },
         pause: async () => {},
       }),
-      /restoration unconfirmed/,
+      /BROKER_DEFAULT restoration UNCONFIRMED/,
     );
     assert.equal(current, before);
   });
@@ -139,7 +139,7 @@ for (const before of [undefined, 1100000]) {
           pauses += 1;
         },
       }),
-      /restoration unconfirmed/,
+      /BROKER_DEFAULT restoration UNCONFIRMED/,
     );
     assert.equal(reads, 21);
     assert.equal(pauses, 19);
@@ -160,7 +160,7 @@ test('failed compensation cannot be confirmed by stale matching reads', async ()
       },
       pause: async () => {},
     }),
-    /restoration unconfirmed/,
+    /BROKER_DEFAULT restoration UNCONFIRMED/,
   );
   assert.equal(writes, 21);
   assert.equal(reads, 1);
@@ -185,27 +185,47 @@ test('Kafka deletion recognises only the exact known absence refusal; all other 
     );
 });
 
-test('already absent is confirmed only after the full bounded CLI refusal window and readback', async () => {
-  let writes = 0;
-  let reads = 0;
-  let pauses = 0;
-  await withBrokerDefault(undefined, async () => {}, {
-    read: async () => {
-      reads += 1;
-      return undefined;
-    },
-    set: async () => {
-      writes += 1;
-      return BROKER_DEFAULT_ALREADY_ABSENT;
-    },
-    pause: async () => {
-      pauses += 1;
-    },
+for (const failure of ['committed', 'lost-response', 'no-op setup']) {
+  test(`stale absence for the entire window after ${failure} cannot confirm compensation`, async () => {
+    let current;
+    let writes = 0;
+    let reads = 0;
+    let pauses = 0;
+    let worked = false;
+    await assert.rejects(
+      withBrokerDefault(
+        failure === 'no-op setup' ? undefined : 3145728,
+        async () => {
+          worked = true;
+          current = 3145728;
+        },
+        {
+          // The snapshot, every CLI precheck and every readback stay absent.
+          read: async () => {
+            reads += 1;
+            return undefined;
+          },
+          set: async (value) => {
+            writes += 1;
+            if (value !== undefined) {
+              current = value;
+              if (failure === 'lost-response') throw new Error('setup response lost');
+            } else return BROKER_DEFAULT_ALREADY_ABSENT;
+          },
+          pause: async () => {
+            pauses += 1;
+          },
+        },
+      ),
+      /BROKER_DEFAULT restoration UNCONFIRMED/,
+    );
+    assert.equal(current, 3145728);
+    assert.equal(worked, failure !== 'lost-response');
+    assert.equal(writes, failure === 'no-op setup' ? 20 : 21);
+    assert.equal(reads, 1);
+    assert.equal(pauses, 19);
   });
-  assert.equal(writes, 20);
-  assert.equal(reads, 2);
-  assert.equal(pauses, 19);
-});
+}
 
 test('stale absent CLI refusals never skip deletion when the committed override becomes visible', async () => {
   let current;
@@ -252,8 +272,49 @@ for (const issue of ['unknown-write', 'unreadable', 'override-present', 'wrong-p
         },
         pause: async () => {},
       }),
-      /restoration unconfirmed/,
+      /BROKER_DEFAULT restoration UNCONFIRMED/,
     );
     assert.equal(writes, 20);
   });
 }
+
+// The deletion adapter sends exactly one incremental DELETE, never a describe
+// or a replacement of the complete broker-default map.
+test('direct deletion encodes only message.max.bytes and requires the exact successful resource', async () => {
+  const { deleteRequest } = await import('./broker-default-delete.mjs');
+  const { createRequire } = await import('node:module');
+  const Decoder = createRequire(import.meta.url)('kafkajs/src/protocol/decoder');
+  const request = deleteRequest.request;
+  assert.equal(request.apiKey, 44);
+  assert.equal(request.apiVersion, 0);
+  const wire = new Decoder((await request.encode()).buffer);
+  assert.equal(wire.readInt32(), 1);
+  assert.equal(wire.readInt8(), 4);
+  assert.equal(wire.readString(), '');
+  assert.equal(wire.readInt32(), 1);
+  assert.equal(wire.readString(), 'message.max.bytes');
+  assert.equal(wire.readInt8(), 1);
+  assert.equal(wire.readString(), null);
+  assert.equal(wire.readBoolean(), false);
+  const success = { errorCode: 0, resourceType: 4, resourceName: '' };
+  await deleteRequest.response.parse({ resources: [success] });
+  for (const resources of [
+    [],
+    [success, success],
+    [{ ...success, errorCode: 31 }],
+    [{ ...success, resourceType: 2 }],
+    [{ ...success, resourceName: '0' }],
+  ]) {
+    await assert.rejects(deleteRequest.response.parse({ resources }), /deletion UNCONFIRMED/);
+  }
+});
+
+test('malformed deletion endpoint refuses without retaining configuration input', async () => {
+  const { deleteBrokerDefault } = await import('./broker-default-delete.mjs');
+  await assert.rejects(deleteBrokerDefault({ brokers: ['[invalid-private-endpoint'] }), (error) => {
+    assert.equal(error.message, 'BROKER_DEFAULT endpoint UNCONFIRMED');
+    assert.equal(error.input, undefined);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+});

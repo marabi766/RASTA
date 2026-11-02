@@ -38,31 +38,22 @@ async function restore(before, read, set, pause) {
   // Never let a stale matching describe suppress the compensating write.
   // undefined means DELETE the override, not pin the inherited numeric value.
   let writeConfirmed = false;
-  let absentObservations = 0;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     if (!writeConfirmed) {
       try {
         const result = await set(before);
-        if (before === undefined && result === BROKER_DEFAULT_ALREADY_ABSENT) {
-          // Each refusal includes a fresh CLI provenance read. Never let one
-          // such (possibly stale) observation stand in for reconciliation.
-          absentObservations += 1;
-        } else if (result !== BROKER_DEFAULT_ALREADY_ABSENT) {
-          writeConfirmed = true;
-        }
+        if (result !== BROKER_DEFAULT_ALREADY_ABSENT) writeConfirmed = true;
       } catch {
-        absentObservations = 0;
         // Retry the idempotent compensation. A stale read alone cannot resolve
         // an unconfirmed restoration write any more than an unconfirmed setup.
       }
     }
     try {
-      if ((writeConfirmed || absentObservations === 20) && (await read()) === before) return;
+      if (writeConfirmed && (await read()) === before) return;
     } catch {
-      absentObservations = 0;
       // Transient/unreadable describes are not confirmation; retry boundedly.
     }
     if (attempt < 19) await pause(500);
   }
-  throw new Error('broker default restoration unconfirmed');
+  throw new Error('BROKER_DEFAULT restoration UNCONFIRMED');
 }
