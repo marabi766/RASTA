@@ -19,6 +19,7 @@ import {
   actingOrganizationId,
   actingOrganizationLabel,
   actingScope,
+  sessionRoles,
 } from '@/server/session-organization';
 
 /**
@@ -54,13 +55,19 @@ export default async function HomePage() {
 
   // The organisation's name when the page already has it (the membership the
   // user is acting under); the code stays as secondary text, and is all the
-  // header has before — or without — that read. Acting under: the access
-  // token's organization, the one every request acts for — not identity's
-  // `activeOrganizationId`, which a switch moves before the token follows.
+  // header has before — or without — that read. Acting under: the
+  // organization the session is pinned to, the one every request names — not
+  // identity's `activeOrganizationId`, nor the token's `org_id`, which a switch
+  // made elsewhere moves (task 118).
   const actingOrganization = actingOrganizationId(session);
   const membership =
     result.kind === 'USER' ? membershipIn(result.user, actingOrganization) : undefined;
   const organizationName = membership?.organizationName ?? null;
+  // The roles drawn are the ones every request is decided on: the token's for
+  // the organization this session is pinned to and every call names
+  // (`sessionRoles`, task 118) — not the membership rows, and never the
+  // token's active organization's, which a switch made elsewhere moves.
+  const roles = sessionRoles(session) ?? [];
 
   return (
     <AppShell
@@ -139,11 +146,12 @@ export default async function HomePage() {
           </Section>
 
           <Section headingId="roles" title="دسترسی شما در این سازمان">
-            {/* The acting membership's roles: identity's `effectiveRoles` are
-                its active organization's, which may not be this one yet. */}
-            {(membership?.roles ?? []).length > 0 ? (
+            {/* The acting organization's roles as the token grants them:
+                identity's `effectiveRoles` are its active organization's,
+                which may be another one. */}
+            {roles.length > 0 ? (
               <ul className="flex flex-wrap gap-2">
-                {(membership?.roles ?? []).map((role) => (
+                {roles.map((role) => (
                   <li key={role}>
                     {/* The Persian name; the code (a closed Latin vocabulary) is
                         what the service authorises on and is not for the reader.
@@ -161,7 +169,7 @@ export default async function HomePage() {
             )}
             <p className="mt-4 text-sm text-content-muted">
               {membership
-                ? 'این فهرست از سرویس هویت می‌آید و مرجع مجوزدهی نیست؛ هر درخواست جداگانه در سرور بررسی می‌شود.'
+                ? 'این فهرست از ورود فعلی شما برای همین سازمان خوانده می‌شود و مرجع مجوزدهی نیست؛ هر درخواست جداگانه در سرور بررسی می‌شود.'
                 : 'عضویتی برای سازمان فعال یافت نشد.'}
             </p>
           </Section>

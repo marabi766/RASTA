@@ -14,9 +14,9 @@ import type { ReturnableLine, ReturnRequestBody } from '@/lib/return-request';
 import type { ReadResult } from './assets';
 import { webServerEnv } from './env';
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential, sessionAuthority, type SessionTokens } from './session-organization';
 import { renderableDate } from './instant';
 import type { Order } from './orders';
-import { tokenAuthority } from './realm-roles';
 import { rolesGuardAdmits } from './roles-guard';
 import type { WebSession } from './session';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
@@ -32,7 +32,7 @@ import { writeThroughGateway, type FieldMapping, type WriteResult } from './writ
  * Neither the order nor the return view says what this caller may do with a
  * return (there is no `availableActions` for returns), so the forms a page
  * draws are copies of the service's own checks, from the roles **the access
- * token** carries for the organization it resolves to (`tokenAuthority`), in
+ * token** carries for the organization it resolves to (`sessionAuthority`), in
  * the service's order:
  *
  * 1. `@Roles` of the route (`rolesGuardAdmits`: AUDITOR never, SYSTEM_ADMIN
@@ -142,7 +142,7 @@ async function read<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
     const parsed = schema.safeParse(response.data);
     if (!parsed.success) return { kind: 'MALFORMED', correlationId: response.correlationId };
@@ -499,8 +499,8 @@ export interface ReturnCaller {
   readonly roles: readonly string[];
 }
 
-export function returnCallerOf(accessToken: string): ReturnCaller {
-  const authority = tokenAuthority(accessToken);
+export function returnCallerOf(session: SessionTokens): ReturnCaller {
+  const authority = sessionAuthority(session);
   return authority ?? { organizationId: null, roles: [] };
 }
 

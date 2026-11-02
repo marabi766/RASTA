@@ -15,7 +15,6 @@ import { currentSession } from '@/server/current-session';
 import { readFlash } from '@/server/flash';
 import { canWriteProjects, mayDecide, sealProjectBaseline } from '@/server/project-commands';
 import { webServerEnv } from '@/server/env';
-import { tokenWriteRoles } from '@/server/realm-roles';
 import {
   fetchApprovalInbox,
   fetchProjects,
@@ -33,7 +32,11 @@ import { ApprovalInbox } from './ApprovalInbox';
 import { CreateProjectForm } from './CreateProjectForm';
 import { UnresolvedCreateNotice } from './UnresolvedCreateNotice';
 import { ProjectsScreen } from './ProjectsScreen';
-import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import {
+  actingOrganizationLabel,
+  actingScope,
+  sessionWriteRoles,
+} from '@/server/session-organization';
 import type { DecisionTokens } from './[id]/ProjectApprovals';
 import { pageContext, pageParams } from '@/server/page-context';
 
@@ -49,7 +52,7 @@ export const dynamic = 'force-dynamic';
 function inboxDecisions(session: WebSession, inbox: Inbox): Record<string, DecisionTokens> {
   const tokens: Record<string, DecisionTokens> = {};
   for (const step of inbox.items) {
-    if (!mayDecide(session.accessToken, step)) continue;
+    if (!mayDecide(session, step)) continue;
     const token = (command: 'grant' | 'reject') => ({
       submissionId: mintSubmissionId(session),
       baseline: sealProjectBaseline(session, {
@@ -132,7 +135,7 @@ export default async function ProjectsPage({
           title="ثبت پروژه تازه"
           description="پروژه به صورت پیش‌نویس ساخته می‌شود؛ درخواست موافقت از صفحه خود پروژه است."
         >
-          {canWriteProjects(tokenWriteRoles(session.accessToken), webServerEnv()) ? (
+          {canWriteProjects(sessionWriteRoles(session), webServerEnv()) ? (
             <>
               {releaseRefused ? (
                 <Alert tone="warning">

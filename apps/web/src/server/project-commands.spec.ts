@@ -35,6 +35,7 @@ import {
 import { tokenAuthority } from './realm-roles';
 import type { WebSession } from './session';
 import { signPayload } from './signed-payload';
+import { pinnedTokens } from '@/test/session-token';
 
 /**
  * The project commands against a fake gateway: the path, the method and the
@@ -82,7 +83,8 @@ const session = (accessToken = tokenFor('ORG-A', ['ORGANIZATION_ADMIN'])): WebSe
 describe('who is drawn the project forms', () => {
   const SETTINGS = { WEB_PROJECT_ROLES: ['ORGANIZATION_ADMIN'] };
   const rolesOf = (organizationId: string | null, roles: string[]) => {
-    const authority = tokenAuthority(tokenFor(organizationId, roles));
+    const token = tokenFor(organizationId, roles);
+    const authority = tokenAuthority(token, pinnedTokens(token).organizationId);
     return authority && authority.organizationId ? authority.roles : null;
   };
 
@@ -150,9 +152,9 @@ const STEP = {
 
 describe('who is drawn an authority’s decision', () => {
   it('draws it for the organization and role the step names, on a pending project step', () => {
-    expect(mayDecide(tokenFor('ORG-COUNCIL', ['UNION_ADMIN']), STEP)).toBe(true);
+    expect(mayDecide(pinnedTokens(tokenFor('ORG-COUNCIL', ['UNION_ADMIN'])), STEP)).toBe(true);
     expect(
-      mayDecide(tokenFor('ORG-COUNCIL', ['UNION_ADMIN']), {
+      mayDecide(pinnedTokens(tokenFor('ORG-COUNCIL', ['UNION_ADMIN'])), {
         ...STEP,
         workflowKey: 'project.completion',
       }),
@@ -160,31 +162,37 @@ describe('who is drawn an authority’s decision', () => {
   });
 
   it('draws it for no one else: another organization, another role, no organization', () => {
-    expect(mayDecide(tokenFor('ORG-OTHER', ['UNION_ADMIN']), STEP)).toBe(false);
-    expect(mayDecide(tokenFor('ORG-COUNCIL', ['ORGANIZATION_ADMIN']), STEP)).toBe(false);
-    expect(mayDecide(tokenFor(null, ['UNION_ADMIN']), STEP)).toBe(false);
-    expect(mayDecide('not-a-jwt', STEP)).toBe(false);
+    expect(mayDecide(pinnedTokens(tokenFor('ORG-OTHER', ['UNION_ADMIN'])), STEP)).toBe(false);
+    expect(mayDecide(pinnedTokens(tokenFor('ORG-COUNCIL', ['ORGANIZATION_ADMIN'])), STEP)).toBe(
+      false,
+    );
+    expect(mayDecide(pinnedTokens(tokenFor(null, ['UNION_ADMIN'])), STEP)).toBe(false);
+    expect(mayDecide(pinnedTokens('not-a-jwt'), STEP)).toBe(false);
   });
 
   it('gives the platform administrator no bypass: only a step that names that role', () => {
     const admin = tokenFor('ORG-COUNCIL', ['SYSTEM_ADMIN', 'ORGANIZATION_ADMIN']);
-    expect(mayDecide(admin, STEP)).toBe(false);
-    expect(mayDecide(admin, { ...STEP, authorityRole: 'SYSTEM_ADMIN' })).toBe(true);
+    expect(mayDecide(pinnedTokens(admin), STEP)).toBe(false);
+    expect(mayDecide(pinnedTokens(admin), { ...STEP, authorityRole: 'SYSTEM_ADMIN' })).toBe(true);
   });
 
   it('draws nothing on a step that is not pending, and nothing on a tender’s step', () => {
     for (const status of ['QUEUED', 'GRANTED', 'REJECTED', 'SUPERSEDED']) {
-      expect(mayDecide(tokenFor('ORG-COUNCIL', ['UNION_ADMIN']), { ...STEP, status })).toBe(false);
+      expect(
+        mayDecide(pinnedTokens(tokenFor('ORG-COUNCIL', ['UNION_ADMIN'])), { ...STEP, status }),
+      ).toBe(false);
     }
     for (const workflowKey of ['tender.publication', 'tender.award', 'tender.cancellation']) {
-      expect(mayDecide(tokenFor('ORG-COUNCIL', ['UNION_ADMIN']), { ...STEP, workflowKey })).toBe(
-        false,
-      );
+      expect(
+        mayDecide(pinnedTokens(tokenFor('ORG-COUNCIL', ['UNION_ADMIN'])), { ...STEP, workflowKey }),
+      ).toBe(false);
     }
   });
 
   it('refuses the oversight role whatever else it holds', () => {
-    expect(mayDecide(tokenFor('ORG-COUNCIL', ['UNION_ADMIN', 'AUDITOR']), STEP)).toBe(false);
+    expect(mayDecide(pinnedTokens(tokenFor('ORG-COUNCIL', ['UNION_ADMIN', 'AUDITOR'])), STEP)).toBe(
+      false,
+    );
   });
 });
 

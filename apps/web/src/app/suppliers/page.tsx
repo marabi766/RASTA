@@ -59,7 +59,7 @@ export default async function SuppliersPage({
     // A registration whose answer was lost: it keeps its warning until reconciled.
     readUnresolved(session, supplierWriteScope(null)),
   ]);
-  const actor = supplierActor(session.accessToken);
+  const actor = supplierActor(session);
 
   return (
     <AppShell

@@ -2,7 +2,7 @@ import { cookies, headers } from 'next/headers';
 import { webServerEnv } from './env';
 import { SESSION_COOKIE, openSession, sessionSecondsLeft, type WebSession } from './session';
 import type { SessionRefusal } from '@/lib/session-refusal';
-import { isRefreshUnavailable } from './session-state';
+import { isNoOrganization, isRefreshUnavailable } from './session-state';
 import { sessionOrganization } from './session-organization';
 
 /**
@@ -86,9 +86,13 @@ export async function sessionTemporarilyUnavailable(): Promise<boolean> {
 
 /**
  * Why `currentSession()` found none, for an action's refusal
- * (`lib/session-refusal.ts`): `SESSION_UNAVAILABLE` when the refresh is only
+ * (`lib/session-refusal.ts`): `NO_ORGANIZATION` when middleware hid a session
+ * that acts for no organization from this tenant-bound route
+ * (`tenant-gate.ts`), `SESSION_UNAVAILABLE` when the refresh is only
  * unavailable for now, `NO_SESSION` — the session has ended — otherwise.
  */
 export async function missingSessionReason(): Promise<SessionRefusal> {
-  return (await sessionTemporarilyUnavailable()) ? 'SESSION_UNAVAILABLE' : 'NO_SESSION';
+  const state = await headers();
+  if (isNoOrganization(state)) return 'NO_ORGANIZATION';
+  return isRefreshUnavailable(state) ? 'SESSION_UNAVAILABLE' : 'NO_SESSION';
 }
