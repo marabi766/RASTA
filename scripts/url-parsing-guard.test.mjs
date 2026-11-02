@@ -151,11 +151,7 @@ const ALLOWED = Object.freeze([
 ]);
 
 /** zod `.url()` settings in a service's configuration that stay, and why. */
-const ALLOWED_ZOD_URL_SETTINGS = Object.freeze({
-  S3_ENDPOINT:
-    'read by the AWS SDK (its own HTTP handler, not fetch), and the endpoint is never ' +
-    'printed by document-service',
-});
+const ALLOWED_ZOD_URL_SETTINGS = Object.freeze({});
 
 const sites = (text, file = 'x.mjs') => rawUrlParses(text, file).map((site) => site.kind);
 

@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import { loadGatewayEnv } from '../config/env';
 import { Logger } from '@nestjs/common';
 import { RateLimiter, redisFailure } from './rate-limiter';
@@ -22,12 +23,16 @@ import { RateLimiter, redisFailure } from './rate-limiter';
  * to be the same failure every time, on every machine, with no socket, no
  * reconnect timer and no open handle left behind.
  */
+const construction = jest.fn();
 const evalsha = jest.fn();
 const scriptLoad = jest.fn();
 
 jest.mock('ioredis', () => ({
   __esModule: true,
   default: class {
+    constructor() {
+      construction();
+    }
     on = jest.fn();
     quit = jest.fn().mockResolvedValue('OK');
     ping = jest.fn().mockRejectedValue(new Error('unreachable'));
@@ -175,7 +180,7 @@ describe('what is logged about Redis (#385 r6)', () => {
     warn.mockRestore();
   });
 
-  it('redisFailure keeps a class and a well-formed code, nothing else', () => {
+  it('redisFailure keeps only allowlisted classes and codes', () => {
     expect(redisFailure(Object.assign(new Error('x'), { code: URL_WITH_CREDENTIALS }))).toBe(
       'Error',
     );
@@ -184,4 +189,35 @@ describe('what is logged about Redis (#385 r6)', () => {
     );
     expect(redisFailure(URL_WITH_CREDENTIALS)).toBe('unknown');
   });
+});
+
+test('redisFailure rejects identifier-shaped secrets in names and codes', () => {
+  const failure = Object.assign(new Error('private-sentinel-79'), {
+    name: 'PrivateSentinel79',
+    code: 'JZ97_ANOTHER_SECRET',
+  });
+  expect(JSON.stringify(redisFailure(failure))).not.toMatch(/sentinel|JZ97|another.secret/i);
+});
+
+test('Redis construction and invalid endpoint failures never retain foreign diagnostics', () => {
+  construction.mockImplementationOnce(() => {
+    throw Object.assign(new Error('private-sentinel-79 JZ97-another-secret'), {
+      name: 'PrivateSentinel79',
+      code: 'JZ97_ANOTHER_SECRET',
+      cause: new Error('private-sentinel-79'),
+    });
+  });
+  for (const endpoint of [
+    'redis://localhost:6379',
+    'data:private-sentinel-79:JZ97-another-secret',
+  ]) {
+    let failure: unknown;
+    try {
+      new RateLimiter(endpoint, 'rasta');
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect(inspect(failure, { showHidden: true, depth: 10 })).not.toMatch(/sentinel|JZ97/i);
+  }
 });

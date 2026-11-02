@@ -100,3 +100,9 @@ export {
 } from './owner-credentials';
 
 export { UNREADABLE_URL, UnreadableUrlError, readUrl, tryReadUrl } from './url-reader';
+
+export {
+  assertRedisDiagnosticsSafe,
+  assertTemporalDiagnosticsSafe,
+  protectRedisReadyCheck,
+} from './sdk-diagnostics';
