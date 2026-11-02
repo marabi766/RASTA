@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 
 import { AppShell, Button, PageHeader, TopBar } from '@/ui';
 import { FLASH_PARAM } from '@/lib/form-fields';
+import { withContext } from '@/lib/page-context';
 import { INVENTORY_COMMANDS, type InventoryScope } from '@/lib/inventory-commands';
 import { isWarehouseId } from '@/lib/inventory-fields';
 import { currentSession } from '@/server/current-session';
@@ -27,6 +28,8 @@ import {
   type InventorySelection,
   type InventoryWriteView,
 } from './InventoryScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/inventory` route — انبار (docs/16 § ۱۶٫۶): warehouses, stock, the
@@ -56,7 +59,7 @@ export default async function InventoryPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/inventory');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const chosen = one(params.warehouse);
   // A warehouse id the service could not have issued is dropped, not forwarded
   // to earn a refusal the person cannot act on.
@@ -87,8 +90,9 @@ export default async function InventoryPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -107,7 +111,7 @@ export default async function InventoryPage({
         <InventoryScreen
           warehouses={warehouses}
           selection={selection}
-          query={query}
+          query={{ ...query, context: pageContext(session) }}
           shipments={shipments}
           write={write}
         />
@@ -174,7 +178,10 @@ function writeView(
     selectionForms,
     notice,
     pageHref: query.warehouse
-      ? `/inventory?warehouse=${encodeURIComponent(query.warehouse)}`
+      ? withContext(
+          pageContext(session),
+          `/inventory?warehouse=${encodeURIComponent(query.warehouse)}`,
+        )
       : '/inventory',
   };
 }

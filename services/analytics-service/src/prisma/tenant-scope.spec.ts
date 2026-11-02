@@ -45,16 +45,23 @@ describe('the tenant guard covers this service schema', () => {
     expect([...TENANT_SCOPED_MODELS].sort()).toEqual(shouldBeScoped);
   });
 
-  it('exempts nothing: the idempotency marker carries no organization to scope', () => {
+  it('exempts nothing: the idempotency marker and the coverage start carry no organization to scope', () => {
     expect(TENANT_SCOPE_EXEMPT_MODELS).toEqual([]);
     expect(modelsWithTenantColumn(SCHEMA)).not.toContain('ProcessedEvent');
+    // Deployment-wide by design (Q-154): consumption is not per tenant.
+    expect(modelsWithTenantColumn(SCHEMA)).not.toContain('ProjectionCoverage');
   });
 });
 
-describe('the schema models nothing RUN-001 PR 1 has not decided', () => {
-  it('has the first fact and the consumer marker only (ADR-071 § 3)', () => {
+describe('the schema models nothing RUN-001 PR 2 has not decided', () => {
+  it('has the first fact, consumer marker, baseline and projection coverage only (ADR-071 § 3, § 6)', () => {
     // Each PR adds its models here, so an unplanned one still fails this test.
-    expect([...models(SCHEMA).keys()].sort()).toEqual(['FactMaintenance', 'ProcessedEvent']);
+    expect([...models(SCHEMA).keys()].sort()).toEqual([
+      'BaselineMetric',
+      'FactMaintenance',
+      'ProcessedEvent',
+      'ProjectionCoverage',
+    ]);
   });
 
   it('stores money as a bigint of minor units beside its currency, and no float anywhere', () => {

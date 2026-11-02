@@ -1,5 +1,6 @@
+import { amountMinorInput } from '../project/dto';
 import { z } from 'zod';
-import { cursorPaginationSchema } from '@rasta/contracts';
+import { cursorPaginationSchema, isoDateTime } from '@rasta/contracts';
 import { CANCELLATION_CODES, TENDER_STATES } from './tender.state-machine';
 
 /**
@@ -65,9 +66,11 @@ const visibility = z
  * than converted: a deadline that can be written two ways is a deadline two
  * people can read differently.
  */
-const utcInstant = z
-  .string()
-  .datetime({ message: 'A time is ISO 8601 in UTC with a trailing Z, e.g. 2026-10-31T12:00:00Z' });
+const utcInstant = z.string().check(
+  isoDateTime({
+    message: 'A time is ISO 8601 in UTC with a trailing Z, e.g. 2026-10-31T12:00:00Z',
+  }),
+);
 
 const window = {
   bidOpeningAt: utcInstant.describe('Start of the bidding window, inclusive. UTC.'),
@@ -92,6 +95,7 @@ export const createTenderSchema = z
     title,
     scopeOfWork,
     procurementNature: procurementNature.optional(),
+    estimatedCostMinor: amountMinorInput.optional(),
     visibility: visibility.optional(),
     bidOpeningAt: window.bidOpeningAt.optional(),
     bidClosingAt: window.bidClosingAt.optional(),
@@ -112,6 +116,7 @@ export const updateTenderSchema = z
     title: title.optional(),
     scopeOfWork: scopeOfWork.optional(),
     procurementNature: procurementNature.nullable().optional(),
+    estimatedCostMinor: amountMinorInput.nullable().optional(),
     visibility: visibility.nullable().optional(),
     bidOpeningAt: window.bidOpeningAt.nullable().optional(),
     bidClosingAt: window.bidClosingAt.nullable().optional(),
@@ -137,7 +142,7 @@ export const cancelTenderSchema = z
      * The closed reason code the event carries. `NO_QUALIFIED_BID` is for an EVALUATING tender in which no
      * bid was qualified (checked under the lock); every other cancellation is `OWNER_REQUEST`.
      */
-    reasonCode: z.enum(CANCELLATION_CODES).default('OWNER_REQUEST'),
+    reasonCode: z.enum(CANCELLATION_CODES).prefault('OWNER_REQUEST'),
   })
   .strict();
 
@@ -165,6 +170,8 @@ export const tenderViewSchema = z
     title: z.string(),
     scopeOfWork: z.string(),
     procurementNature: z.enum(PROCUREMENT_NATURES).nullable(),
+    estimatedCostMinor: z.string().nullable().optional(),
+    procurementThresholdWarning: z.literal('PROCUREMENT_AMOUNT_OUTSIDE_RANGE').optional(),
     visibility: z.enum(TENDER_VISIBILITIES).nullable(),
     bidOpeningAt: z.string().nullable(),
     bidClosingAt: z.string().nullable(),

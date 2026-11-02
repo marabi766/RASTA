@@ -8,6 +8,7 @@ import {
 } from '@temporalio/client';
 import { ENV } from '../tokens';
 import type { MarketplaceEnv } from '../config/env';
+import { foreignFailure } from './foreign-failure';
 import { installTemporalRuntimeLogger } from './runtime-logger';
 
 /**
@@ -59,7 +60,9 @@ export class OrderSagaClient implements OnModuleDestroy {
       this.connection = connection;
       const client = new Client({ connection, namespace: this.env.TEMPORAL_NAMESPACE });
       this.client = client;
-      this.logger.log(`Temporal client connected to ${this.env.TEMPORAL_ADDRESS}`);
+      // The setting, not its value: TEMPORAL_ADDRESS is a free string, and a
+      // log line is no place to find out whether it carries credentials.
+      this.logger.log('Temporal client connected (TEMPORAL_ADDRESS)');
       return client;
     })();
 
@@ -111,7 +114,11 @@ export class OrderSagaClient implements OnModuleDestroy {
         this.logger.debug({ orderId }, 'The order saga was already started');
         return;
       }
-      this.logger.error({ orderId, err: error }, 'Could not start the order saga');
+      // By class and code only: the failure's own text may quote the address.
+      this.logger.error(
+        { orderId, failure: foreignFailure(error) },
+        'Could not start the order saga',
+      );
     }
   }
 
@@ -131,7 +138,10 @@ export class OrderSagaClient implements OnModuleDestroy {
         this.logger.warn({ orderId, signalName }, 'No running saga to signal');
         return;
       }
-      this.logger.error({ orderId, signalName, err: error }, 'Could not signal the order saga');
+      this.logger.error(
+        { orderId, signalName, failure: foreignFailure(error) },
+        'Could not signal the order saga',
+      );
     }
   }
 

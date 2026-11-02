@@ -220,7 +220,7 @@ describe('the request bodies', () => {
     ['recordPartSchema', 'quantity', 'partQuantity'],
     ['recordPartSchema', 'unit', 'displayText(1, 32)'],
     ['recordPartSchema', 'unitCostMinor', 'boundedAmountMinorSchema'],
-    ['recordPartSchema', 'source', "partSourceSchema.default('WORKSHOP_SUPPLIED')"],
+    ['recordPartSchema', 'source', "partSourceSchema.prefault('WORKSHOP_SUPPLIED')"],
     ['recordPartSchema', 'sourceReference', 'referenceId().min(1).max(128).optional()'],
     ['recordLabourSchema', 'description', 'displayText(2, 500)'],
     ['recordLabourSchema', 'technician', 'displayText(2, 120).optional()'],
@@ -228,7 +228,7 @@ describe('the request bodies', () => {
     ['recordLabourSchema', 'hourlyRateMinor', 'boundedAmountMinorSchema'],
     ['recordCostSchema', 'category', 'directCostCategorySchema'],
     ['recordCostSchema', 'amountMinor', 'boundedAmountMinorSchema'],
-    ['recordCostSchema', 'currency', "currencySchema.default('IRR')"],
+    ['recordCostSchema', 'currency', "currencySchema.prefault('IRR')"],
     ['recordCostSchema', 'description', 'displayText(2, 500)'],
   ])('still bounds %s.%s as the forms do', (schema, key, expected) => {
     expect(squash(schemaProperties(schema).get(key))).toBe(expected);
@@ -289,10 +289,27 @@ describe('the request bodies', () => {
     const literal = topLevelConst(dto, 'MAX_AMOUNT_MINOR').getText().replace(/[_n]/g, '');
     expect(literal).toBe(MAX_AMOUNT_MINOR);
     expect(BigInt(MAX_AMOUNT_MINOR)).toBe(2n ** 63n - 1n);
-    // The schema the three amounts share is the platform's, narrowed by that bound.
+    // The schema the three amounts share is the platform's, narrowed by that bound: every
+    // amount the pattern admits converts to its bigint and is compared with it.
     const bounded = squash(topLevelConst(dto, 'boundedAmountMinorSchema').getText()) ?? '';
-    expect(bounded).toContain('amountMinorSchema');
-    expect(bounded).toContain('BigInt(value) <= MAX_AMOUNT_MINOR');
+    expect(bounded).toMatch(/^amountMinorSchema\b/);
+    expect(bounded).toContain(
+      '.refine( (value) => { const amount = digitsToBigInt(value); ' +
+        'return amount === undefined || amount <= MAX_AMOUNT_MINOR; },',
+    );
+    expect(squash(dto.text)).toMatch(
+      /import \{[^}]*\bdigitsToBigInt\b[^}]*\} from '@rasta\/contracts';/,
+    );
+    // …and the conversion is exact for a string of digits — undefined only for anything else,
+    // which `amountMinorSchema`'s own pattern already refuses.
+    const money = readFileSync(
+      join(ROOT, 'packages', 'contracts', 'src', 'common', 'money.ts'),
+      'utf8',
+    );
+    expect(squash(money)).toContain(
+      'export function digitsToBigInt(value: string): bigint | undefined { ' +
+        'return /^\\d+$/.test(value) ? BigInt(value) : undefined; }',
+    );
   });
 
   it('still checks a computed line and every stored total against that bound, as refusals', () => {
@@ -353,6 +370,8 @@ describe('the sentences the portal translates', () => {
     'dto.ts',
   ]
     .map((file) => read(file))
+    // The shared text rule's closed message lives in @rasta/contracts now.
+    .concat(readFileSync(join(ROOT, 'packages', 'contracts', 'src', 'common', 'text.ts'), 'utf8'))
     .join('\n');
 
   const normalise = (text: string) => text.replace(/'\s*\+\s*\n?\s*'/g, '').replace(/\s+/g, ' ');

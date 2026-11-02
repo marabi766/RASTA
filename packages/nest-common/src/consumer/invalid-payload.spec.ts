@@ -1,4 +1,4 @@
-import { DLQ_REASONS } from '@rasta/contracts';
+import { DLQ_REASONS, LegacyContextError, legacyParse } from '@rasta/contracts';
 import { z } from 'zod';
 import { UnprocessableEventError } from './event-consumer';
 import {
@@ -28,9 +28,9 @@ const fields = Object.keys(schema.shape);
 const envelope = { eventName: 'USAGE_RECORDED', eventId: 'EVT-1' };
 
 function refusal(payload: unknown): UnprocessableEventError {
-  const parsed = schema.safeParse(payload);
+  const parsed = legacyParse(schema, payload);
   if (parsed.success) throw new Error('expected the payload to fail');
-  return invalidPayloadError(envelope, parsed.error, fields);
+  return invalidPayloadError(envelope, parsed.refusal, fields);
 }
 
 describe('invalidPayloadError', () => {
@@ -65,13 +65,21 @@ describe('invalidPayloadError', () => {
     const many = z.object(
       Object.fromEntries(Array.from({ length: 7 }, (_, i) => [`f${i}`, z.string()])),
     );
-    const parsed = many.safeParse({});
+    const parsed = legacyParse(many, {});
     if (parsed.success) throw new Error('expected the payload to fail');
 
-    const error = invalidPayloadError(envelope, parsed.error, Object.keys(many.shape));
+    const error = invalidPayloadError(envelope, parsed.refusal, Object.keys(many.shape));
 
     expect(error.message).toMatch(/f4 invalid_type; and 2 more$/);
     expect(error.message).not.toContain('f5');
+  });
+
+  it('refuses a bare zod error: without the parse that raised it the codes would be guesses (r1 F1)', () => {
+    const bare = schema.safeParse({ kind: SENTINEL }).error;
+    expect(() => invalidPayloadError(envelope, bare as never, fields)).toThrow(LegacyContextError);
+    expect(() => invalidPayloadError(envelope, { issues: [] } as never, fields)).toThrow(
+      /invalidPayloadError needs a refusal from legacyParse/,
+    );
   });
 });
 

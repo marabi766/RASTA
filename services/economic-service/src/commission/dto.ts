@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { amountMinorSchema, businessLineSchema, organizationIdSchema } from '@rasta/contracts';
+import {
+  amountMinorSchema,
+  businessLineSchema,
+  isoDateTime,
+  numberInput,
+  organizationIdSchema,
+} from '@rasta/contracts';
 import { TRANSACTION_TYPES } from '../transaction/dto';
 import { COMMISSION_OUTCOMES } from './rule-engine';
 import { cursorQueryParameter } from '../shared/cursor';
@@ -9,8 +15,10 @@ import { cursorQueryParameter } from '../shared/cursor';
  *
  * **The rate is a required integer in basis points.** No default is offered
  * here and none is filled in downstream: the product document says the precise
- * rate "ساختگی و پیشینی نیست" and docs/24 Q-08 is open, so a schema default
- * would be this service inventing the very number it is forbidden to invent.
+ * rate "ساختگی و پیشینی نیست", and docs/24 Q-08's answer is a rule the operator
+ * writes (0% per line for the pilot), so a schema default would be this
+ * service inventing the very number it is forbidden to invent. `0` is a rate
+ * like any other: accepted, matched, and reported as matched.
  *
  * `rateBasisPoints` is an integer for the reason ADR-022 gives: 2.5% must be
  * exactly 250, and a decimal percentage cannot promise that.
@@ -52,14 +60,14 @@ export const createCommissionRuleSchema = z
      * (docs/10 § 10.7), and an active rule of the same scope may not overlap
      * this one's window (409).
      */
-    validFrom: z.string().datetime().optional(),
+    validFrom: z.string().check(isoDateTime()).optional(),
     /** Exclusive, so a replacement can start exactly where this one ends. */
-    validTo: z.string().datetime().optional(),
+    validTo: z.string().check(isoDateTime()).optional(),
     /**
      * Always `ACTIVE`: a rule that should not apply is not created. Accepted
      * for the clients that send it; `INACTIVE` is refused (docs/23 D-057).
      */
-    status: z.literal('ACTIVE').default('ACTIVE'),
+    status: z.literal('ACTIVE').prefault('ACTIVE'),
     /**
      * Provenance, shown wherever the rule is displayed.
      *
@@ -99,7 +107,7 @@ export const updateCommissionRuleSchema = z
      * that has already ended, is refused (`nextValidTo`). Nulling it makes a
      * rule that is still in force indefinite again.
      */
-    validTo: z.string().datetime().nullable().optional(),
+    validTo: z.string().check(isoDateTime()).nullable().optional(),
     label: z.string().trim().max(200).optional(),
   })
   .strict();
@@ -118,7 +126,7 @@ export type ListCommissionRulesQuery = z.infer<typeof listCommissionRulesQuerySc
 export const listCommissionsQuerySchema = z
   .object({
     cursor: cursorQueryParameter,
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
     /** Revenue of one business line (ADR-045 Consequences). */
     businessLine: businessLineSchema.optional(),
     /** `NO_ACTIVE_RULE` lists what no rule priced — reportable, per ADR-045 § 2. */

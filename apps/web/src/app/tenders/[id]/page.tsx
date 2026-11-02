@@ -6,6 +6,7 @@ import { BID_COMMANDS } from '@/lib/bid-fields';
 import { OWNER_DONE } from '@/lib/tender-owner-fields';
 import { FLASH_PARAM } from '@/lib/form-fields';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { webServerEnv } from '@/server/env';
 import { readFlash } from '@/server/flash';
 import { safeReturnTo } from '@/server/login-attempt';
@@ -40,6 +41,7 @@ import {
   fetchAwardRequest,
   fetchOwnerBids,
   fetchPublicationRequest,
+  fetchThresholdPreview,
   openingOnlyOffers,
   ownerCallerOf,
   ownerOffers,
@@ -57,6 +59,7 @@ import {
 import type { WebSession } from '@/server/session';
 import { tenderDetailPath } from '@/lib/tender-fields';
 import { PortalSidebar } from '@/app/PortalSidebar';
+import { DemoModeNotice } from '@/app/DemoModeNotice';
 
 import { BidCommands } from './BidCommands';
 import { bidCommandOffers } from './bid-offers';
@@ -77,6 +80,9 @@ import {
   PublicationSection,
 } from './OwnerSections';
 import { OpenTenderDetailScreen, OwnBidSection, OwnTenderDetailScreen } from './TenderDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The `/tenders/[id]` route — جزئیات مناقصه (docs/16 § ۱۶٫۶). Read-only.
@@ -96,6 +102,11 @@ import { OpenTenderDetailScreen, OwnBidSection, OwnTenderDetailScreen } from './
  * `assertCanBid`): the service audits every such read. The forms are the ones
  * `bidOffers` says the service would accept now; it decides again on every
  * request. No other bid is ever asked for.
+ *
+ * Every door draws `DemoModeNotice` (Q-14): the bid form takes a price, and the
+ * owner's opened bids and the award show them. None of these commands moves
+ * money — a bid is an offer, an award fixes the contract's amount — so an
+ * unknown provider is said, not used to withhold them.
  */
 export const dynamic = 'force-dynamic';
 
@@ -107,14 +118,19 @@ export default async function TenderPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const query = await searchParams;
-  const requested = query.view;
   const session = await currentSession();
   if (!session) {
+    // No session to bind the query to: the way back is the tender's default view.
     redirect(
-      `/login?returnTo=${encodeURIComponent(safeReturnTo(tenderDetailPath(id, requested)))}`,
+      `/login?returnTo=${encodeURIComponent(safeReturnTo(tenderDetailPath(id, undefined)))}`,
     );
   }
+  const query = await pageParams(session, searchParams);
+  const requested = query.view;
+
+  // Asked alongside the tender's own reads, and drawn above whichever body they make (Q-14): the
+  // opened bids' prices, the winner's amount and the bid form's price are money on this page.
+  const demoMode = fetchDemoMode(session);
 
   // From the token's own roles, the set construction-service decides on.
   const doors = tenderDoorsFor(tokenRoles(session.accessToken) ?? [], webServerEnv());
@@ -136,7 +152,7 @@ export default async function TenderPage({
       BID_COMMANDS,
     );
     const { offered, note } = bidCommandOffers(session, caller, id, result, own);
-    const pageHref = tenderDetailPath(id, 'open');
+    const pageHref = withContext(pageContext(session), tenderDetailPath(id, 'open'));
     // A tender behind the bidder's door, or a bid of this organization on one
     // that no longer is: otherwise the absence says all there is.
     const ownBid =
@@ -155,7 +171,7 @@ export default async function TenderPage({
                   : []
               }
               csrfToken={session.csrfToken}
-              owner={submissionBinding(session).owner}
+              account={submissionBinding(session)}
               pageHref={pageHref}
             />
           }
@@ -190,8 +206,9 @@ export default async function TenderPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -210,6 +227,9 @@ export default async function TenderPage({
         <ButtonLink href="/tenders" tone="quiet">
           بازگشت به فهرست مناقصه‌ها
         </ButtonLink>
+      </div>
+      <div className="mt-4">
+        <DemoModeNotice mode={await demoMode} />
       </div>
       <div className="mt-4">{body}</div>
     </AppShell>
@@ -255,11 +275,14 @@ async function loadAuthority(
       decisions: [...forms.publication, ...forms.award],
     };
   });
-  const pageHref = tenderDetailPath(id, 'own');
+  const pageHref = withContext(pageContext(session), tenderDetailPath(id, 'own'));
   const at = (cursor: string | null) =>
     cursor === null
       ? pageHref
-      : `${pageHref}&${new URLSearchParams({ [INBOX_CURSOR_PARAM]: cursor })}`;
+      : withContext(
+          pageContext(session),
+          `${pageHref}&${new URLSearchParams({ [INBOX_CURSOR_PARAM]: cursor })}`,
+        );
   const { truncated, resumeFrom, failure } = steps.data;
   return {
     views,
@@ -287,7 +310,7 @@ function authorityStepViews(
   pageSubmissionIds: readonly string[],
   firstShowsRestored: boolean,
 ): AuthorityStepView[] {
-  const ownerTag = submissionBinding(session).owner;
+  const account = submissionBinding(session);
   return views.map(({ step, notes, decisions }, index) => ({
     step,
     notes,
@@ -296,8 +319,8 @@ function authorityStepViews(
         tenderId={id}
         offered={decisions}
         csrfToken={session.csrfToken}
-        owner={ownerTag}
-        pageHref={tenderDetailPath(id, 'own')}
+        account={account}
+        pageHref={withContext(pageContext(session), tenderDetailPath(id, 'own'))}
         showsRestored={firstShowsRestored && index === 0}
         pageSubmissionIds={pageSubmissionIds}
       />
@@ -386,8 +409,8 @@ function sessionRecovery(session: WebSession, tenderId: string): ReactNode {
         tenderId={tenderId}
         offered={[]}
         csrfToken={session.csrfToken}
-        owner={submissionBinding(session).owner}
-        pageHref={tenderDetailPath(tenderId, 'own')}
+        account={submissionBinding(session)}
+        pageHref={withContext(pageContext(session), tenderDetailPath(tenderId, 'own'))}
         showsRestored
         pageSubmissionIds={[]}
       />
@@ -449,8 +472,8 @@ async function bidSideOnlyBody(
       tenderId={id}
       offered={offered}
       csrfToken={session.csrfToken}
-      owner={submissionBinding(session).owner}
-      pageHref={tenderDetailPath(id, 'own')}
+      account={submissionBinding(session)}
+      pageHref={withContext(pageContext(session), tenderDetailPath(id, 'own'))}
       showsRestored={showsRestored}
       pageSubmissionIds={pageSubmissionIds}
     />
@@ -510,11 +533,12 @@ async function ownerSections(
   const caller = ownerCallerOf(session.accessToken);
   const draft = tender.status === 'DRAFT';
   const awarding = tender.status === 'EVALUATED' || tender.status === 'AWARDED';
-  const [publication, bids, matrix, awardRequest] = await Promise.all([
+  const [publication, bids, matrix, awardRequest, thresholdPreview] = await Promise.all([
     draft ? fetchPublicationRequest(session, id) : null,
     readsOwnerBids(caller, tender.status, settings) ? fetchOwnerBids(session, id) : null,
     readsEvaluation(caller, tender.status, settings) ? fetchEvaluation(session, id) : null,
     awarding ? fetchAwardRequest(session, id) : null,
+    draft ? fetchThresholdPreview(session, id) : null,
   ]);
   const decidable =
     publication?.kind === 'OK' ? decidableStep(caller, publication.data, tender.version) : null;
@@ -555,15 +579,15 @@ async function ownerSections(
   const flash = query[FLASH_PARAM];
   const done = readFlash(session, typeof flash === 'string' ? flash : undefined, id, OWNER_DONE);
 
-  const pageHref = tenderDetailPath(id, 'own');
-  const ownerTag = submissionBinding(session).owner;
+  const pageHref = withContext(pageContext(session), tenderDetailPath(id, 'own'));
+  const account = submissionBinding(session);
   const pageSubmissionIds = submissionIdsOf(forms);
   const group = (offered: typeof forms.publication, showsRestored: boolean) => (
     <OwnerCommands
       tenderId={id}
       offered={offered}
       csrfToken={session.csrfToken}
-      owner={ownerTag}
+      account={account}
       pageHref={pageHref}
       showsRestored={showsRestored}
       pageSubmissionIds={pageSubmissionIds}
@@ -588,6 +612,8 @@ async function ownerSections(
       {draft ? (
         <PublicationSection
           request={publication}
+          thresholdPreview={thresholdPreview}
+          tenderVersion={tender.version}
           notes={notes.filter((note) => note !== 'AWAITING_CLOSE')}
           commands={group(forms.publication, restoredIn === 'publication')}
         />

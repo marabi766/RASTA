@@ -43,6 +43,21 @@ function storable(value: string, min: bigint): boolean {
 }
 
 /**
+ * The `bigint` a string of decimal digits states, or `undefined` for any other
+ * string — for a refinement that compares an amount.
+ *
+ * zod runs a refinement even after the schema's own pattern refused the value,
+ * with the raw text: `BigInt('1.5')` throws, and the client's text becomes a
+ * 500 and a log line; `BigInt('')`, `BigInt(' 1')` and `BigInt('0x10')` quietly
+ * answer. A refinement that gets `undefined` passes, so the pattern's issue is
+ * the one reported. This decides nothing about which amounts are accepted: each
+ * schema keeps its own pattern, and a digit string converts exactly as before.
+ */
+export function digitsToBigInt(value: string): bigint | undefined {
+  return /^\d+$/.test(value) ? BigInt(value) : undefined;
+}
+
+/**
  * A non-negative integer amount encoded as a decimal string, at most
  * {@link MAX_AMOUNT_MINOR}. The pattern is unchanged; the bound is a
  * refinement, so only amounts no service could ever store are newly refused.

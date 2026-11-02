@@ -3,10 +3,18 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
-import { toJsonSchema } from './zod-schema';
+import {
+  isOptionalField,
+  objectShapeOf,
+  publishedApiErrorSchema,
+  toJsonSchema,
+} from '@rasta/nest-common';
 import { DashboardController } from '../maintenance/dashboard.controller';
 import { DashboardService } from '../maintenance/dashboard.service';
 import { fleetDashboardQuerySchema, fleetDashboardViewSchema } from '../maintenance/dto';
+import { KpiController } from '../kpis/kpi.controller';
+import { KpiService } from '../kpis/kpi.service';
+import { kpisQuerySchema, kpisViewSchema } from '../kpis/dto';
 
 /**
  * The published contract of analytics-service — **OpenAPI first**.
@@ -22,7 +30,7 @@ import { fleetDashboardQuerySchema, fleetDashboardViewSchema } from '../maintena
  *     application.
  *
  * Payload shapes come from the Zod schemas the pipes validate with (`src/maintenance/dto.ts`),
- * converted by `zod-schema.ts`; Nest supplies paths, methods and parameters from the decorators.
+ * converted by `toJsonSchema`; Nest supplies paths, methods and parameters from the decorators.
  *
  * Regenerate after changing the API: `pnpm --filter @rasta/analytics-service openapi:generate`.
  */
@@ -30,23 +38,16 @@ import { fleetDashboardQuerySchema, fleetDashboardViewSchema } from '../maintena
 /** Pinned so the committed document is deterministic. */
 export const ANALYTICS_VERSION = '0.1.0';
 
-const apiErrorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    correlationId: z.string().optional(),
-    details: z.array(z.unknown()).optional(),
-  })
-  .strict();
-
 /** Success responses, each with the status the handler actually answers. */
 export const RESPONSE_BODIES: Record<string, { status: '200'; schema: z.ZodTypeAny }> = {
   'GET /v1/dashboards/fleet': { status: '200', schema: fleetDashboardViewSchema },
+  'GET /v1/kpis': { status: '200', schema: kpisViewSchema },
 };
 
 /** Query parameters, from the schema the pipe validates with. */
 export const QUERY_SCHEMAS: Record<string, z.ZodTypeAny> = {
   'GET /v1/dashboards/fleet': fleetDashboardQuerySchema,
+  'GET /v1/kpis': kpisQuerySchema,
 };
 
 export const ERROR_DESCRIPTIONS: Record<number, string> = {
@@ -65,7 +66,9 @@ const DESCRIPTION =
   'The governance view (aggregate-only, for AUDITOR) is not served yet; when it is, it answers ' +
   'only an organization that is a root of the hierarchy, as one group, for one closed period, ' +
   'from an immutable release — never a child subtree, never live facts (ADR-071 § 5). The ' +
-  'KPIs with INSUFFICIENT_BASELINE and the other dashboards follow (ADR-071 implementation plan).';
+  'tenant KPIs include completed-maintenance count and the recorded downtime baseline itself; ' +
+  'a missing exact baseline is INSUFFICIENT_BASELINE with value null. No savings formula is ' +
+  'chosen here. Other dashboards follow (ADR-071 implementation plan).';
 
 /** Builds the finished document for a booted application. */
 export function buildAnalyticsOpenApiDocument(app: INestApplication): OpenAPIObject {
@@ -86,8 +89,11 @@ export function buildAnalyticsOpenApiDocument(app: INestApplication): OpenAPIObj
  * endpoint and produces the same bytes on every machine.
  */
 @Module({
-  controllers: [DashboardController],
-  providers: [{ provide: DashboardService, useValue: {} }],
+  controllers: [DashboardController, KpiController],
+  providers: [
+    { provide: DashboardService, useValue: {} },
+    { provide: KpiService, useValue: {} },
+  ],
 })
 class DocumentationModule {}
 
@@ -101,7 +107,7 @@ export async function buildDocumentationApp(): Promise<INestApplication> {
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
-  document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
+  document.components.schemas.ApiError = toJsonSchema(publishedApiErrorSchema) as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {
     for (const [method, operation] of Object.entries(operations)) {
@@ -170,42 +176,14 @@ function isOperation(value: unknown): value is MutableOperation {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function toQueryParameters(schema: z.ZodTypeAny): unknown[] {
+function toQueryParameters(schema: z.ZodType): unknown[] {
   const shape = objectShapeOf(schema);
   if (!shape) return [];
 
   return Object.entries(shape).map(([name, member]) => ({
     name,
     in: 'query',
-    required: !member.isOptional(),
+    required: !isOptionalField(member),
     schema: toJsonSchema(member),
   }));
-}
-
-function objectShapeOf(schema: z.ZodTypeAny): z.ZodRawShape | undefined {
-  // JUSTIFIED-ANY: zod's `_def` is untyped across its type-kinds, and the walk below re-checks
-  // the kind before reading a field.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let current: any = schema;
-
-  for (let depth = 0; depth < 10; depth += 1) {
-    const typeName = current?._def?.typeName;
-    if (typeName === z.ZodFirstPartyTypeKind.ZodObject) {
-      return (current as z.ZodObject<z.ZodRawShape>).shape;
-    }
-    if (
-      typeName === z.ZodFirstPartyTypeKind.ZodEffects ||
-      typeName === z.ZodFirstPartyTypeKind.ZodOptional ||
-      typeName === z.ZodFirstPartyTypeKind.ZodDefault
-    ) {
-      current =
-        typeName === z.ZodFirstPartyTypeKind.ZodEffects
-          ? current._def.schema
-          : current._def.innerType;
-      continue;
-    }
-    return undefined;
-  }
-
-  return undefined;
 }

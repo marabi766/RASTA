@@ -36,6 +36,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import kafkajs from 'kafkajs';
 import { connectionFor, diffAcls, fromDescribe, toKafkajsAcl } from './kafka-acl-lib.mjs';
+import { foreignFailureText } from './replay-dlq-lib.mjs';
 
 const {
   Kafka,
@@ -69,7 +70,14 @@ const env = {
   ...process.env,
   KAFKA_SSL_CA_FILE: configuredCa && isAbsolute(configuredCa) ? configuredCa : exportedCa,
 };
-const connection = connectionFor(spec.admin, env, (path) => readFileSync(path, 'utf8'));
+let connection;
+try {
+  connection = connectionFor(spec.admin, env, (path) => readFileSync(path, 'utf8'));
+} catch (error) {
+  // A fixed text (UNREADABLE_CA_FILE), printed alone: never the path (#385 r4).
+  process.stderr.write(`kafka acl: ${error.message}\n`);
+  process.exit(1);
+}
 if (!connection.sasl || !connection.ssl) {
   process.stderr.write(
     'kafka acl: KAFKA_SASL_PASSWORD_ADMIN is required — in development from ' +
@@ -81,7 +89,9 @@ if (!connection.sasl || !connection.ssl) {
 
 const admin = new Kafka({
   ...connection,
-  logLevel: logLevel.ERROR,
+  // kafkajs's own log quotes the broker and its errors: a failure is reported
+  // below, by category and code (#385 r6).
+  logLevel: logLevel.NOTHING,
   retry: { initialRetryTime: 500, retries: 10 },
 }).admin();
 
@@ -131,6 +141,12 @@ try {
     `kafka acl: ${profile}: ${spec.acls.length} bindings for ${spec.principals.length} principals in place ` +
       `(${add.length} added, ${remove.length} removed)\n`,
   );
+} catch (error) {
+  // The broker's or the client's failure by category, never its text (#385 r6).
+  process.stderr.write(
+    `kafka acl: ${foreignFailureText('the Kafka admin operation failed', error)}\n`,
+  );
+  process.exitCode = 1;
 } finally {
-  await admin.disconnect();
+  await admin.disconnect().catch(() => undefined);
 }

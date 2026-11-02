@@ -33,6 +33,7 @@ import {
   PublicationSection,
 } from './[id]/OwnerSections';
 import { OwnTenderDetailScreen } from './[id]/TenderDetailScreen';
+import { bindingOf } from '@/test/unresolved-binding';
 
 // Each test renders the owner's tender screen and runs jest-axe over it (#341): room to finish.
 jest.setTimeout(20_000);
@@ -76,7 +77,7 @@ const group = (offered: OfferedOwnerCommand[]) => (
     tenderId={TENDER_ID}
     offered={offered}
     csrfToken={CSRF}
-    owner={OWNER_TAG}
+    account={bindingOf(OWNER_TAG, 'session-tag')}
     pageHref={PAGE}
     showsRestored
   />
@@ -139,6 +140,9 @@ describe('the publication', () => {
     );
     const steps = screen.getByRole('list', { name: 'مراحل موافقت' });
     expect(steps).toHaveTextContent('مدیر سازمان (نمونه)');
+    // The role is named, not spelled as its code.
+    expect(steps).toHaveTextContent('نقش مدیر سازمان');
+    expect(steps).not.toHaveTextContent(/[A-Z_]{3,}_[A-Z]{3,}/);
     expect(steps).toHaveTextContent('در انتظار تصمیم');
     expect(screen.getByRole('form', { name: 'موافقت با انتشار' })).toBeInTheDocument();
     expect(
@@ -273,7 +277,7 @@ describe('an owner form, in every state its action can put it in', () => {
         csrfToken={CSRF}
         submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
         replay={STAMP}
-        owner={OWNER_TAG}
+        account={bindingOf(OWNER_TAG, 'session-tag')}
         pageHref={PAGE}
       />,
     );
@@ -381,7 +385,7 @@ describe('an owner form, in every state its action can put it in', () => {
         csrfToken={CSRF}
         submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
         replay={STAMP}
-        owner={OWNER_TAG}
+        account={bindingOf(OWNER_TAG, 'session-tag')}
         pageHref={PAGE}
         heldBy="sub_OTHERAAAAAAAAAAAAAAAA"
       />,
@@ -412,7 +416,7 @@ describe('an unknown outcome that is never sent again', () => {
           csrfToken={CSRF}
           submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
           replay={STAMP}
-          owner={OWNER_TAG}
+          account={bindingOf(OWNER_TAG, 'session-tag')}
           pageHref={PAGE}
         />,
       );

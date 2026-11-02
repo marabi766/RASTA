@@ -48,6 +48,12 @@ export type DisputeFormState =
    * new key by a reload (`lib/unresolved-dispute.ts`).
    */
   | { readonly kind: 'STORAGE_UNAVAILABLE' }
+  /**
+   * Not sent: another command on this transaction, from this browser, is still
+   * unresolved, or an earlier request of this kind is held
+   * (`lib/unresolved-dispute.ts`). Its record is left exactly as it was.
+   */
+  | { readonly kind: 'HELD' }
   | { readonly kind: 'FORBIDDEN'; readonly correlationId: string }
   /** Gone, or never visible to this caller — the service says 404 for both. */
   | { readonly kind: 'NOT_FOUND' }

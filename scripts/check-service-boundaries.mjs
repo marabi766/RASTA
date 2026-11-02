@@ -26,7 +26,8 @@ const { scanned, services, violations } = scanRepository(repoRoot);
 if (services === 0 || scanned === 0) {
   // A gate that scanned nothing must not report success.
   console.error(
-    `service boundaries: nothing scanned under ${repoRoot}/services — refusing to pass`,
+    // The --root path is not repeated (#385 r6).
+    "service boundaries: nothing scanned under the repository root's services/ — refusing to pass",
   );
   process.exit(1);
 }

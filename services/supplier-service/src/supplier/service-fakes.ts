@@ -1,7 +1,7 @@
 import { runWithContext, type RequestContext } from '@rasta/nest-common';
 import type { PrismaService, ExtendedPrismaClient } from '../prisma/prisma.service';
 import type { EventPublisher } from '../events/publisher';
-import type { SupplierRepository } from './supplier.repository';
+import type { SupplierRepository, SuspensionWrite } from './supplier.repository';
 import type { SupplierCapability } from './capabilities';
 import type { QualificationStateName } from './qualification.state-machine';
 import type { SupplierStatusName } from './suspension.state-machine';
@@ -40,6 +40,7 @@ export interface FakeQualification {
   decidedBy: string | null;
   decidedAt: Date | null;
   decisionNote: string | null;
+  rejectionReason: string | null;
   evidence: { documentId: string; label: string | null }[];
 }
 
@@ -266,6 +267,7 @@ export class FakeRepository {
       decidedBy: null,
       decidedAt: null,
       decisionNote: null,
+      rejectionReason: null,
       evidence: input.evidence.map((item) => ({
         documentId: item.documentId,
         label: item.label,
@@ -281,6 +283,7 @@ export class FakeRepository {
       decidedBy: string;
       decidedAt: Date;
       decisionNote: string | null;
+      rejectionReason: string | null;
     },
   ): Promise<number> {
     if (this.raceOn === 'decision') return 0;
@@ -293,6 +296,7 @@ export class FakeRepository {
     row.decidedBy = input.decidedBy;
     row.decidedAt = input.decidedAt;
     row.decisionNote = input.decisionNote;
+    row.rejectionReason = input.rejectionReason;
     return 1;
   }
 
@@ -303,12 +307,20 @@ export class FakeRepository {
       supplierId: string;
       reason: string;
       suspendedBy: string;
+      expectedLatestSuspensionId: string | null;
     },
-  ): Promise<number> {
-    if (this.raceOn === 'suspend') return 0;
+  ): Promise<SuspensionWrite> {
+    if (this.raceOn === 'suspend') return { outcome: 'NOT_IN_STATE' };
 
     const supplier = this.suppliers.find((row) => row.id === input.supplierId);
-    if (!supplier || supplier.status !== 'ACTIVE') return 0;
+    if (!supplier || supplier.status !== 'ACTIVE') return { outcome: 'NOT_IN_STATE' };
+
+    // The real comparison: the newest episode, after the status check. (The
+    // real one has flipped the status already and its transaction rolls it
+    // back; this one simply does not flip it.)
+    if ((supplier.suspensions[0]?.id ?? null) !== input.expectedLatestSuspensionId) {
+      return { outcome: 'EPISODE_CHANGED' };
+    }
 
     supplier.status = 'SUSPENDED';
     supplier.suspensions.unshift({
@@ -320,31 +332,33 @@ export class FakeRepository {
       reinstatedAt: null,
       reinstatementNote: null,
     });
-    return 1;
+    return { outcome: 'WRITTEN', suspensionId: input.id };
   }
 
   async closeSuspension(
     _tx: ExtendedPrismaClient,
     input: {
       supplierId: string;
+      expectedSuspensionId: string;
       reinstatedBy: string;
       reinstatedAt: Date;
       reinstatementNote: string;
     },
-  ): Promise<{ changed: number; suspensionId: string | null }> {
-    if (this.raceOn === 'reinstate') return { changed: 0, suspensionId: null };
+  ): Promise<SuspensionWrite> {
+    if (this.raceOn === 'reinstate') return { outcome: 'NOT_IN_STATE' };
 
     const supplier = this.suppliers.find((row) => row.id === input.supplierId);
-    if (!supplier || supplier.status !== 'SUSPENDED') return { changed: 0, suspensionId: null };
+    if (!supplier || supplier.status !== 'SUSPENDED') return { outcome: 'NOT_IN_STATE' };
 
     const open = supplier.suspensions.find((row) => row.reinstatedAt === null);
-    if (!open) return { changed: 0, suspensionId: null };
+    if (!open) return { outcome: 'NOT_IN_STATE' };
+    if (open.id !== input.expectedSuspensionId) return { outcome: 'EPISODE_CHANGED' };
 
     supplier.status = 'ACTIVE';
     open.reinstatedBy = input.reinstatedBy;
     open.reinstatedAt = input.reinstatedAt;
     open.reinstatementNote = input.reinstatementNote;
-    return { changed: 1, suspensionId: open.id };
+    return { outcome: 'WRITTEN', suspensionId: open.id };
   }
 
   asRepository(): SupplierRepository {
@@ -387,6 +401,7 @@ export function aQualification(overrides: Partial<FakeQualification> = {}): Fake
     decidedBy: null,
     decidedAt: null,
     decisionNote: null,
+    rejectionReason: null,
     evidence: [],
     ...overrides,
   };

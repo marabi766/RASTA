@@ -4,13 +4,18 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   kafkaSaslConfigured,
   loadEnv,
   outboxPurgeEnvSchema,
   PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { marketplaceOperationBudgets } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
 
 /**
  * marketplace-service configuration.
@@ -31,23 +36,23 @@ export const marketplaceEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /** Where the order saga sends its financial commands (ADR-040). */
-    ECONOMIC_SERVICE_URL: z.string().url().default('http://localhost:3112'),
+    ECONOMIC_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3112'),
 
     /**
      * How long a call to economic-service may take before the activity fails
      * and Temporal retries it.
      */
-    ECONOMIC_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(500).max(60_000).default(10_000),
+    ECONOMIC_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(500).max(60_000).prefault(10_000),
 
     /**
      * Where a union administrator's subtree is confirmed before it decides a
      * dispute (docs/24 Q-136): organization-service, the owner of the
      * hierarchy (A-13), asked as economic-service asks it.
      */
-    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    ORGANIZATION_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3102'),
 
     /**
      * How long that question may take, body included. It is asked under the
@@ -61,14 +66,14 @@ export const marketplaceEnvSchema = baseEnvSchema
       .int()
       .min(100)
       .max(ORGANIZATION_REQUEST_CEILING_MS)
-      .default(2_000),
+      .prefault(2_000),
 
     /**
      * The owner of a return's goods (ADR-048 § 2, A-13), asked before an AUTHORIZED return is
      * cancelled whether a shipment exists for it, and asked to withdraw a dispatch reservation
      * when one is reconciled (Q-133 (9)(a)).
      */
-    INVENTORY_SERVICE_URL: z.string().url().default('http://localhost:3109'),
+    INVENTORY_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3109'),
 
     /**
      * How long that question may take, body included. Asked before the command's transaction,
@@ -80,12 +85,12 @@ export const marketplaceEnvSchema = baseEnvSchema
       .int()
       .min(100)
       .max(30_000)
-      .default(2_000),
+      .prefault(2_000),
 
     // ---- Temporal ---------------------------------------------------------
 
-    TEMPORAL_ADDRESS: z.string().default('localhost:7233'),
-    TEMPORAL_NAMESPACE: z.string().default('default'),
+    TEMPORAL_ADDRESS: z.string().prefault('localhost:7233'),
+    TEMPORAL_NAMESPACE: z.string().prefault('default'),
     /**
      * The queue this service's worker owns; nobody else polls it (ADR-039).
      *
@@ -95,7 +100,7 @@ export const marketplaceEnvSchema = baseEnvSchema
      * them — and reading the generic variable here made exactly that happen
      * silently, with the worker reporting that it was polling normally.
      */
-    MARKETPLACE_TEMPORAL_TASK_QUEUE: z.string().default('rasta-order'),
+    MARKETPLACE_TEMPORAL_TASK_QUEUE: z.string().prefault('rasta-order'),
     /**
      * Whether the worker starts with the service.
      *
@@ -112,7 +117,7 @@ export const marketplaceEnvSchema = baseEnvSchema
      * overdue. Expiry records a reminder; it never cancels and never moves
      * money.
      */
-    MARKETPLACE_FULFILLMENT_WINDOW_DAYS: z.coerce.number().int().min(1).max(365).default(7),
+    MARKETPLACE_FULFILLMENT_WINDOW_DAYS: z.coerce.number().int().min(1).max(365).prefault(7),
 
     /**
      * Days the buyer has to confirm receipt before the order is counted
@@ -121,7 +126,7 @@ export const marketplaceEnvSchema = baseEnvSchema
      * There is no automatic confirmation at the end of it. Q-11: automatic
      * confirmation would release money without the buyer's explicit consent.
      */
-    MARKETPLACE_RECEIPT_WINDOW_DAYS: z.coerce.number().int().min(1).max(365).default(3),
+    MARKETPLACE_RECEIPT_WINDOW_DAYS: z.coerce.number().int().min(1).max(365).prefault(3),
 
     /**
      * Days after an order COMPLETED within which its buyer may ask to return goods (RUN-005,
@@ -152,7 +157,7 @@ export const marketplaceEnvSchema = baseEnvSchema
     MARKETPLACE_RETURN_PARTIAL_DISPATCH_ALLOWED: booleanEnv(false),
 
     /** How often a reminder is recorded once a window has elapsed. */
-    MARKETPLACE_REMINDER_INTERVAL_DAYS: z.coerce.number().int().min(1).max(90).default(3),
+    MARKETPLACE_REMINDER_INTERVAL_DAYS: z.coerce.number().int().min(1).max(90).prefault(3),
 
     /**
      * Hours between the saga's own re-reads of a waiting order (ADR-039 § 3).
@@ -165,10 +170,10 @@ export const marketplaceEnvSchema = baseEnvSchema
      * order can wait indefinitely for its buyer (ADR-043), and one re-read a
      * day keeps a year-long wait to a few hundred history events.
      */
-    MARKETPLACE_SAGA_RECHECK_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    MARKETPLACE_SAGA_RECHECK_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
 
     /** Retention for stored `Idempotency-Key` responses (docs/06 § 6.8). */
-    MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
 
     /**
      * How long a claim still **in flight** holds its key before a retry may take
@@ -187,7 +192,7 @@ export const marketplaceEnvSchema = baseEnvSchema
       .int()
       .min(30)
       .max(3_600)
-      .default(60),
+      .prefault(60),
   })
   .refine(
     (env) =>
@@ -195,10 +200,13 @@ export const marketplaceEnvSchema = baseEnvSchema
       env.MARKETPLACE_IDEMPOTENCY_TTL_HOURS * 60 * 60,
     {
       path: ['MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS'],
-      message:
+      message: fixed(
         'MARKETPLACE_IDEMPOTENCY_CLAIM_LEASE_SECONDS must be shorter than MARKETPLACE_IDEMPOTENCY_TTL_HOURS',
+      ),
     },
   );
+
+export const MARKETPLACE_ENV_MESSAGES = seal();
 
 export type MarketplaceEnv = z.infer<typeof marketplaceEnvSchema>;
 
@@ -214,7 +222,7 @@ export function loadMarketplaceEnv(source: NodeJS.ProcessEnv = process.env): Mar
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'marketplace-service.main',
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: marketplaceOperationBudgets },
+    { operationBudgets: marketplaceOperationBudgets, fixedMessages: MARKETPLACE_ENV_MESSAGES },
   );
   assertReturnMirrorMayStart(env);
   return env;

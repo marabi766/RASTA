@@ -35,6 +35,8 @@ export interface MailWorkerOptions {
   /** Ceiling on a single backoff wait, in seconds. */
   readonly backoffMaxSeconds: number;
   readonly owner: string;
+  /** The clock the quiet-window check reads. Tests pin it; production leaves it unset. */
+  readonly now?: () => Date;
 }
 
 /** Bounded error classes this worker writes. Never a server's own text. */
@@ -181,7 +183,7 @@ export class MailWorker implements OnApplicationShutdown {
   }
 
   async sendOne(delivery: SendableDelivery): Promise<void> {
-    const now = new Date();
+    const now = this.options.now?.() ?? new Date();
 
     // 1 — is this person asleep?
     const window = await this.repository.quietWindowFor(delivery.organizationId, delivery.userId);

@@ -23,6 +23,9 @@ describe('usage recording', () => {
   const driverId = id('DRV');
   const assetId = id('AST');
   const userId = `USR-ITEST-${id('X').slice(-8)}`;
+  // One supervisor for the replays: a reference replays only to the caller
+  // who took it (test/usage-replay-binding.int-spec.ts).
+  const recorder = { organizationId: org.a, userId: `USR-ITEST-SUP-${id('X').slice(-8)}` };
 
   beforeAll(async () => {
     prisma = newPrisma();
@@ -140,16 +143,15 @@ describe('usage recording', () => {
     it('returns the original record and publishes nothing further on a replay', async () => {
       const clientReference = `offline-${id('R')}`;
 
-      const first = await asActor({ organizationId: org.a }, () =>
-        service.record(reading({ clientReference })),
-      );
+      const body = reading({ clientReference });
+      const first = await asActor(recorder, () => service.record(body));
       const lines: string[] = [];
       const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation((message: unknown) => {
         lines.push(String(message));
       });
-      const second = await asActor({ organizationId: org.a }, () =>
-        service.record(reading({ clientReference })),
-      ).finally(() => debug.mockRestore());
+      const second = await asActor(recorder, () => service.record(body)).finally(() =>
+        debug.mockRestore(),
+      );
 
       expect(second.id).toBe(first.id);
       // The replay is logged by the record's id. The reference is a key the
@@ -166,14 +168,14 @@ describe('usage recording', () => {
 
     it('survives two replays arriving at the same moment', async () => {
       // Both pass the replay check, one commits, and the loser reads back the
-      // winner's row rather than reporting a conflict the caller cannot act on.
+      // winner's row rather than reporting a conflict the caller cannot act on
+      // — nor `USAGE_PERIOD_OVERLAP`, which its twin's period is. The exact
+      // interleaving is pinned in usage-replay-binding.int-spec.ts.
       const clientReference = `race-${id('R')}`;
+      const body = reading({ clientReference });
 
-      const results = await asActor({ organizationId: org.a }, () =>
-        Promise.all([
-          service.record(reading({ clientReference })),
-          service.record(reading({ clientReference })),
-        ]),
+      const results = await asActor(recorder, () =>
+        Promise.all([service.record(body), service.record(body)]),
       );
 
       expect(results[0].id).toBe(results[1].id);

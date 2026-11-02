@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query } from '@nes
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AllowService, Roles, getContext, zodPipe } from '@rasta/nest-common';
 import { z } from 'zod';
+import { numberInput } from '@rasta/contracts';
 import { OrganizationService } from './organization.service';
 import {
   addLocationSchema,
@@ -44,7 +45,7 @@ export const ECONOMIC_SERVICE = 'economic-service';
 export const MARKETPLACE_SERVICE = 'marketplace-service';
 
 const subtreeQuerySchema = z
-  .object({ maxDepth: z.coerce.number().int().min(1).max(10).optional() })
+  .object({ maxDepth: numberInput(z.number().int().min(1).max(10)).optional() })
   .strict();
 
 /**
@@ -97,6 +98,21 @@ export class OrganizationController {
   get(@Param('id') id: string) {
     if (getContext().authType === 'SERVICE') return this.organizations.confirmWithinCaller(id);
     return this.organizations.get(id);
+  }
+
+  @Get(':id/procurement-thresholds')
+  @AllowService(CONSTRUCTION_SERVICE)
+  @ApiOperation({
+    summary: 'Effective procurement thresholds for construction-service',
+    description:
+      'Service callers only (construction-service). Person/session callers and other services ' +
+      'receive 403. The token organization must equal the requested id exactly; otherwise 404 ' +
+      'without existence details. Returns only { organizationId, policy: { id, value } | null }.',
+  })
+  procurementThresholds(
+    @Param('id') id: string,
+  ): ReturnType<OrganizationService['procurementThresholds']> {
+    return this.organizations.procurementThresholds(id);
   }
 
   @Get(':id/children')
@@ -176,7 +192,11 @@ export class OrganizationController {
    * and `OrganizationService.setPolicy` refuses every role not configured.
    */
   @Post(':id/policies')
-  @ApiOperation({ summary: 'Set a governance policy value' })
+  @ApiOperation({
+    summary: 'Set a governance policy value',
+    description:
+      'For construction.tender.procurement_thresholds, value must satisfy the strict procurementThresholdsSchema contract (all four natures, integer-string or null inclusive bounds, min <= max, WARN or REJECT). Malformed tables answer 400 VALIDATION_FAILED before any policy replacement.',
+  })
   setPolicy(@Param('id') id: string, @Body(zodPipe(setPolicySchema)) dto: SetPolicyDto) {
     return this.organizations.setPolicy(id, dto);
   }

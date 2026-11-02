@@ -1,14 +1,14 @@
 import { Writable } from 'node:stream';
 import pino from 'pino';
-import { clearLogContextProvider, createLogger, setLogContextProvider } from './logger';
+import {
+  clearLogContextProvider,
+  createLogger,
+  MAX_LOG_ARGUMENT_LENGTH,
+  setLogContextProvider,
+} from './logger';
 import { MAX_STACK_SCAN, scrubbedErrorSerializer } from './error-serializer';
 import { REDACTED, SCRUB_MESSAGE_MAX, scrubMessage, TRUNCATED_MESSAGE } from './redaction';
-import {
-  FALLBACK_LINE,
-  MAX_LOG_LINE_LENGTH,
-  MAX_LOG_STRING_LENGTH,
-  scrubLine,
-} from './scrubbing-destination';
+import { MAX_LOG_LINE_LENGTH, MAX_LOG_STRING_LENGTH, scrubLine } from './scrubbing-destination';
 
 const METADATA = Symbol.for('pino.metadata');
 
@@ -215,7 +215,13 @@ describe('logging never throws (Codex r3 F3)', () => {
 
     expect(() => loggerFor(stream).info('value %s', hostile)).not.toThrow();
 
-    expect(stream.lines).toEqual([FALLBACK_LINE]);
+    expect(stream.lines).toHaveLength(1);
+    expect(json(stream.lines[0]!)).toMatchObject({
+      time: expect.any(String),
+      level: expect.any(String),
+      service: expect.any(String),
+      msg: 'log record dropped: not serialisable',
+    });
   });
 
   it('a throwing `constructor` getter on err', () => {
@@ -276,7 +282,13 @@ describe('logging never throws (Codex r3 F3)', () => {
 
     expect(() => logger.child({ component: 'c' }).info(fields, 'x')).not.toThrow();
 
-    expect(stream.lines).toEqual([FALLBACK_LINE]);
+    expect(stream.lines).toHaveLength(1);
+    expect(json(stream.lines[0]!)).toMatchObject({
+      time: expect.any(String),
+      level: expect.any(String),
+      service: expect.any(String),
+      msg: 'log record dropped: not serialisable',
+    });
   });
 
   it('a throwing context provider costs the context, not the line', () => {
@@ -483,7 +495,7 @@ describe('a cut drops the line it runs through (Codex on #290, r5 R5-1)', () => 
 });
 
 describe('the line cap and its cost', () => {
-  it('replaces a 1 MB message with a fixed short line', () => {
+  it('replaces a 1 MB message with a safe short marker after bounding its arguments', () => {
     const stream = sink();
 
     loggerFor(stream).info('x'.repeat(1024 * 1024));
@@ -547,6 +559,290 @@ describe('the line cap and its cost', () => {
     (logger as unknown as { [k: symbol]: { write(s: string): void } })[
       Object.getOwnPropertySymbols(logger).find((s) => s.toString() === 'Symbol(pino.stream)')!
     ]!.write('{"msg":"Bearer LEAK');
-    expect(stream.lines).toEqual([FALLBACK_LINE]);
+    expect(stream.lines).toHaveLength(1);
+    expect(json(stream.lines[0]!)).toMatchObject({
+      time: expect.any(String),
+      level: expect.any(String),
+      service: expect.any(String),
+      msg: 'log record dropped: not serialisable',
+    });
+  });
+});
+
+describe('T-07 arguments are bounded before pino formats them', () => {
+  // Observe the actual arguments handed to pino, independently of the final
+  // destination cap. Removing the argument cap must fail this test.
+  function beforePino(args: unknown[]): unknown[] {
+    const logger = loggerFor(sink());
+    const { hooksSym } = pino.symbols as unknown as { hooksSym: symbol };
+    const hook = (
+      logger as unknown as Record<
+        symbol,
+        {
+          logMethod(args: unknown[], method: (...args: unknown[]) => void, level: number): void;
+        }
+      >
+    )[hooksSym]!;
+    let captured: unknown[] = [];
+    hook.logMethod.call(
+      logger,
+      args,
+      (...values: unknown[]) => {
+        captured = values;
+      },
+      30,
+    );
+    return captured;
+  }
+
+  it('caps messages, interpolated strings and direct merge-object string values without mutation', () => {
+    const huge = 'safe '.repeat(MAX_LOG_ARGUMENT_LENGTH);
+    const fields = Object.freeze({
+      msg: huge,
+      detail: huge,
+      count: 42,
+      amount: 9007199254740993n,
+      ok: true,
+    });
+    const args = [fields, 'value %s', huge];
+    const out = beforePino(args);
+    const bounded = out[0] as typeof fields;
+    for (const value of [bounded.msg, bounded.detail, out[2] as string]) {
+      expect(value.length).toBeLessThanOrEqual(MAX_LOG_ARGUMENT_LENGTH + TRUNCATED_MESSAGE.length);
+      expect(value.endsWith(TRUNCATED_MESSAGE)).toBe(true);
+    }
+    expect(bounded).toMatchObject({ count: 42, amount: 9007199254740993n, ok: true });
+    expect(fields.msg).toBe(huge);
+    expect(args[0]).toBe(fields);
+    expect(out[1]).toBe('value %s');
+    expect(beforePino([huge])[0]).toEqual(bounded.msg);
+  });
+
+  it('preserves Error instances and primitive values for the existing serializers', () => {
+    const err = new Error('postgresql://u:SECRET@h');
+    const fields = { err, error: err };
+    const args = [err, fields, 12, 9007199254740993n, false, null, undefined];
+    const out = beforePino(args);
+    out.forEach((arg, index) => expect(arg).toBe(args[index]));
+  });
+
+  it('caps a string returned by an enumerable getter and preserves null-prototype objects', () => {
+    const huge = 'safe '.repeat(MAX_LOG_ARGUMENT_LENGTH);
+    const fields = Object.create(null) as { detail: string };
+    Object.defineProperty(fields, 'detail', { enumerable: true, get: () => huge });
+    const out = beforePino([fields])[0] as typeof fields;
+    expect(out.detail.length).toBeLessThanOrEqual(
+      MAX_LOG_ARGUMENT_LENGTH + TRUNCATED_MESSAGE.length,
+    );
+    expect(Object.getPrototypeOf(out)).toBeNull();
+    expect(fields.detail).toBe(huge);
+  });
+
+  it('also bounds direct string fields of class instances and arrays', () => {
+    class Fields {
+      detail = 'safe '.repeat(MAX_LOG_ARGUMENT_LENGTH);
+      amount = 9007199254740993n;
+    }
+    const fields = new Fields();
+    const values = [fields.detail, fields.amount];
+    const out = beforePino([fields, values]);
+    expect(out[0]).toBeInstanceOf(Fields);
+    expect((out[0] as Fields).detail.length).toBeLessThanOrEqual(
+      MAX_LOG_ARGUMENT_LENGTH + TRUNCATED_MESSAGE.length,
+    );
+    expect((out[0] as Fields).amount).toBe(fields.amount);
+    expect(Array.isArray(out[1])).toBe(true);
+    expect((out[1] as unknown[])[0]).toBe((out[0] as Fields).detail);
+    expect((out[1] as unknown[])[1]).toBe(fields.amount);
+    expect(values[0]).toBe(fields.detail);
+  });
+
+  it('leaves a string exactly at the cap unchanged before formatting', () => {
+    const exact = 'x'.repeat(MAX_LOG_ARGUMENT_LENGTH);
+    expect(beforePino([exact, { detail: exact }])).toEqual([exact, { detail: exact }]);
+  });
+
+  it('drops every credential fragment crossing the argument boundary in every supported position', () => {
+    const stream = sink();
+    const logger = loggerFor(stream);
+    for (const secret of ['postgresql://u:ZZSECRETZZ@h', 'Bearer ZZSECRETZZ']) {
+      for (let offset = 0; offset <= secret.length + 1; offset++) {
+        const value = `${' '.repeat(MAX_LOG_ARGUMENT_LENGTH - offset)}${secret} tail`;
+        const args = beforePino([value, { detail: value }]);
+        expect(args[0]).not.toContain('ZZ');
+        expect((args[1] as { detail: string }).detail).not.toContain('ZZ');
+        logger.info(value);
+        logger.info({ detail: value });
+        logger.info('value %s', value);
+        logger.info({ msg: value });
+      }
+    }
+    for (const line of stream.lines) {
+      expect(line).not.toContain('ZZ');
+      expect(line).toContain('TRUNCATED');
+    }
+  });
+
+  it('still scrubs credentials before and after interpolation and on Error-derived msg', () => {
+    const stream = sink();
+    const logger = loggerFor(stream);
+    const large = `postgresql://u:ZZSECRETZZ@h ${'safe '.repeat(4000)}`;
+    logger.info(large);
+    logger.info({ detail: large });
+    logger.info('postgresql://u:%s@h %s', 'ZZSECRETZZ', large);
+    const errorText = `postgresql://u:ZZSECRETZZ@h ${'safe '.repeat(4000)}`;
+    logger.error({ err: new Error(errorText) });
+    logger.error(new Error(errorText));
+    expect(stream.lines).toHaveLength(5);
+    expect(text(stream)).not.toContain('ZZSECRET');
+    expect(text(stream)).toContain(REDACTED);
+    expect(json(stream.lines[3]!).err.message).toContain(REDACTED);
+  });
+
+  it.each(['message', 'merge object', 'interpolation'])(
+    '16 MiB %s completes far below the old 156 ms',
+    (shape) => {
+      const logger = loggerFor({ write() {} });
+      const large = 'safe '.repeat(Math.ceil((16 * 1024 * 1024) / 5));
+      const baseline = large.slice(0, 1024);
+      const log = (value: string): void => {
+        if (shape === 'merge object') logger.info({ detail: value });
+        else if (shape === 'interpolation') logger.info('value %s', value);
+        else logger.info(value);
+      };
+      log(baseline); // warm up; fixtures are built outside the measured call
+      const smallMs = cpuMs(() => log(baseline));
+      const largeMs = cpuMs(() => log(large));
+      // CPU time + least of three avoid the wall-clock flake seen in #290.
+      expect(largeMs).toBeLessThan(Math.max(30, smallMs * 30));
+    },
+  );
+});
+
+describe('T-07 drop markers carry a separate safe envelope', () => {
+  afterEach(() => clearLogContextProvider());
+  const tooLarge = { nested: { payload: 'DROPPED_CONTENT '.repeat(MAX_LOG_LINE_LENGTH) } };
+
+  it('keeps time, original level, service and all IDs, without any payload or forged envelope', () => {
+    const stream = sink({ metadata: true });
+    setLogContextProvider(() => ({
+      correlationId: 'request-1',
+      tenantId: 'tenant-1',
+      organizationId: 'org-1',
+    }));
+    loggerFor(stream).warn(
+      {
+        ...tooLarge,
+        time: 'forged-time',
+        service: 'forged-service',
+        level: 'forged-level',
+        password: 'SECRET',
+      },
+      'DROPPED_CONTENT',
+    );
+    const marker = json(stream.lines[0]!);
+    expect(marker).toEqual({
+      time: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      level: 'warn',
+      service: 'test',
+      correlationId: 'request-1',
+      tenantId: 'tenant-1',
+      organizationId: 'org-1',
+      msg: 'log record dropped: line too long',
+      length: expect.any(Number),
+    });
+    expect(Date.parse(marker.time)).toBeGreaterThan(Date.now() - 60_000);
+    expect(stream.lastLevel).toBe(40);
+    expect(text(stream)).not.toMatch(/DROPPED_CONTENT|SECRET|forged/);
+  });
+
+  it('takes child bindings and call IDs with the same precedence as pino', () => {
+    const stream = sink();
+    setLogContextProvider(() => ({ correlationId: 'context', tenantId: 'context-tenant' }));
+    loggerFor(stream)
+      .child({ correlationId: 'child', tenantId: 'child-tenant', organizationId: 'child-org' })
+      .error({ ...tooLarge, correlationId: 'call' });
+    expect(json(stream.lines[0]!)).toMatchObject({
+      level: 'error',
+      correlationId: 'call',
+      tenantId: 'context-tenant',
+      organizationId: 'child-org',
+    });
+  });
+
+  it('omits absent IDs instead of borrowing another request’s envelope', () => {
+    const stream = sink();
+    const logger = loggerFor(stream);
+    setLogContextProvider(() => ({ correlationId: 'first', tenantId: 'first-tenant' }));
+    logger.info(tooLarge);
+    clearLogContextProvider();
+    logger.info(tooLarge);
+    const marker = json(stream.lines[1]!);
+    expect(marker).not.toHaveProperty('correlationId');
+    expect(marker).not.toHaveProperty('tenantId');
+    expect(marker).not.toHaveProperty('organizationId');
+    expect(marker).toMatchObject({ level: 'info', service: 'test' });
+  });
+
+  it('omits credential-like, malformed and oversized IDs without invoking conversion', () => {
+    const stream = sink();
+    loggerFor(stream).info({
+      ...tooLarge,
+      correlationId: 'postgresql://u:SECRET@h',
+      tenantId: 'Bearer SECRET',
+      organizationId: 'x'.repeat(1024),
+    });
+    const marker = json(stream.lines[0]!);
+    expect(Object.keys(marker).sort()).toEqual(['length', 'level', 'msg', 'service', 'time']);
+    expect(text(stream)).not.toContain('SECRET');
+  });
+
+  it('gives a formatting failure the same envelope without exposing the thrown text', () => {
+    const stream = sink();
+    setLogContextProvider(() => ({ correlationId: 'request', tenantId: 'tenant' }));
+    loggerFor(stream).debug('value %s', {
+      toString() {
+        throw new Error('SECRET');
+      },
+    });
+    expect(json(stream.lines[0]!)).toEqual({
+      time: expect.any(String),
+      level: 'debug',
+      service: 'test',
+      correlationId: 'request',
+      tenantId: 'tenant',
+      msg: 'log record dropped: not serialisable',
+    });
+    expect(text(stream)).not.toContain('SECRET');
+  });
+
+  it('retains the envelope when scrubbing expands a record past the line cap', () => {
+    const stream = sink();
+    const fields = Object.fromEntries(
+      Array.from({ length: 2800 }, (_, i) => [`k${i}`, 'Bearer a']),
+    );
+    loggerFor(stream).info({ ...fields, correlationId: 'expanded' });
+    expect(json(stream.lines[0]!)).toMatchObject({
+      level: 'info',
+      service: 'test',
+      correlationId: 'expanded',
+      msg: 'log record dropped: line too long',
+    });
+  });
+
+  it('restores the outer envelope after a reentrant log call', () => {
+    const stream = sink();
+    const logger = loggerFor(stream);
+    const fields = {
+      ...tooLarge,
+      correlationId: 'outer',
+      get reenter() {
+        logger.error({ ...tooLarge, correlationId: 'inner' });
+        return true;
+      },
+    };
+    logger.warn(fields);
+    expect(stream.lines.map((line) => json(line).correlationId)).toEqual(['inner', 'outer']);
+    expect(stream.lines.map((line) => json(line).level)).toEqual(['error', 'warn']);
   });
 });

@@ -62,7 +62,8 @@ if (!packageDir || !testPathPattern) {
 
 const cwd = path.resolve(process.cwd(), packageDir);
 if (!existsSync(cwd)) {
-  console.error(`no such package directory: ${cwd}`);
+  // Not repeated (#385 r6): only a value that matched a closed list is echoed.
+  console.error('no such package directory (the first argument); it is not repeated');
   process.exit(2);
 }
 
@@ -143,7 +144,7 @@ if (!wholeReport) {
 }
 
 if (wholeReport.numTotalTests === 0) {
-  console.error(`no tests matched ${testPathPattern} in project "${project}"`);
+  console.error('no tests matched the testPathPattern in the --project; neither is repeated');
   process.exit(1);
 }
 

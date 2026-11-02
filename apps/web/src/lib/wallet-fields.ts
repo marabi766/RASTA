@@ -19,3 +19,16 @@ export type TopUpFormField = (typeof TOP_UP_FIELDS)[number];
 export type TopUpFormValues = Readonly<Record<TopUpFormField, string>>;
 
 export const EMPTY_TOP_UP_FORM: TopUpFormValues = { amountMinor: '' };
+
+/**
+ * What the top-up card says about the payment provider, in Persian, from the
+ * provider's own `simulated` flag (`GET /v1/wallets/provider`). The service
+ * sends an English sentence too; it is not shown — see `server/wallet.ts`.
+ * The card is drawn only when that read succeeded, so there is no wording for
+ * "unknown": an unreadable provider withholds the form instead.
+ */
+export function providerNotice(simulated: boolean): string {
+  return simulated
+    ? 'درگاه پرداخت نمایشی است: اتصال بانکی، وجه واقعی و نگهداری پول در کار نیست.'
+    : 'درگاه پرداخت واقعی است.';
+}

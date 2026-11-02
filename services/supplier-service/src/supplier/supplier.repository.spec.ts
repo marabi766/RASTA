@@ -156,6 +156,7 @@ const A_DECISION = {
   decidedAt: new Date('2026-03-01T00:00:00.000Z'),
   decidedCorrelationId: 'corr-1',
   decisionNote: null,
+  rejectionReason: null,
 } as const;
 
 describe('the guarded client this suite runs against', () => {
@@ -203,6 +204,7 @@ describe('opening a suspension episode', () => {
     suspendedBy: 'USR_OPERATOR',
     suspendedAt: new Date(),
     suspendedCorrelationId: 'corr-1',
+    expectedLatestSuspensionId: null,
   } as const;
 
   it('flips the suspended supplier and stamps the episode with the supplier organization', async () => {
@@ -210,27 +212,43 @@ describe('opening a suspension episode', () => {
 
     const opened = await asOperatorOf(OTHER_ORG, () => repository.openSuspension(tx, AN_EPISODE));
 
-    expect(opened).toBe(1);
-    expect(signatures(calls)).toEqual(['Supplier.updateMany', 'Suspension.create']);
+    expect(opened).toEqual({ outcome: 'WRITTEN', suspensionId: 'SSP_1' });
+    expect(signatures(calls)).toEqual([
+      'Supplier.updateMany',
+      'Suspension.findFirst',
+      'Suspension.create',
+    ]);
     expect(calls[0]?.args.where).toEqual({ id: 'SUP_1', status: 'ACTIVE' });
+    // The newest episode of the supplier, read after the status flip.
+    expect(calls[1]?.args.where).toEqual({ supplierId: 'SUP_1' });
     // The episode belongs to the supplier that was suspended, never to the
     // operator who suspended it: that is what keeps the history readable as the
     // supplier's own record.
-    expect(calls[1]?.args.data).toMatchObject({ organizationId: SUPPLIER_ORG });
+    expect(calls[2]?.args.data).toMatchObject({ organizationId: SUPPLIER_ORG });
+  });
+
+  it('opens nothing when the newest episode is not the one the caller read', async () => {
+    const { tx, calls } = guardedClient({ 'suspension.findFirst': { id: 'SSP_NEWER' } });
+
+    const opened = await asOperatorOf(OTHER_ORG, () => repository.openSuspension(tx, AN_EPISODE));
+
+    expect(opened).toEqual({ outcome: 'EPISODE_CHANGED' });
+    expect(signatures(calls)).toEqual(['Supplier.updateMany', 'Suspension.findFirst']);
   });
 
   it('does not require the suspending operator to belong to any organization', async () => {
     const { tx } = guardedClient();
 
-    await expect(asPlatformOperator(() => repository.openSuspension(tx, AN_EPISODE))).resolves.toBe(
-      1,
-    );
+    await expect(
+      asPlatformOperator(() => repository.openSuspension(tx, AN_EPISODE)),
+    ).resolves.toEqual({ outcome: 'WRITTEN', suspensionId: 'SSP_1' });
   });
 });
 
 describe('closing a suspension episode', () => {
   const A_REINSTATEMENT = {
     supplierId: 'SUP_1',
+    expectedSuspensionId: 'SSP_1',
     reinstatedBy: 'USR_OPERATOR',
     reinstatedAt: new Date('2026-04-01T00:00:00.000Z'),
     reinstatedCorrelationId: 'corr-1',
@@ -244,7 +262,7 @@ describe('closing a suspension episode', () => {
       repository.closeSuspension(tx, A_REINSTATEMENT),
     );
 
-    expect(result).toEqual({ changed: 1, suspensionId: 'SSP_1' });
+    expect(result).toEqual({ outcome: 'WRITTEN', suspensionId: 'SSP_1' });
     expect(signatures(calls)).toEqual([
       'Supplier.updateMany',
       'Suspension.findFirst',
@@ -255,12 +273,23 @@ describe('closing a suspension episode', () => {
     expect(calls[2]?.args.where).toEqual({ id: 'SSP_1', reinstatedAt: null });
   });
 
+  it('stamps nothing when the open episode is not the one the caller names', async () => {
+    const { tx, calls } = guardedClient({ 'suspension.findFirst': { id: 'SSP_2' } });
+
+    const result = await asOperatorOf(OTHER_ORG, () =>
+      repository.closeSuspension(tx, A_REINSTATEMENT),
+    );
+
+    expect(result).toEqual({ outcome: 'EPISODE_CHANGED' });
+    expect(signatures(calls)).toEqual(['Supplier.updateMany', 'Suspension.findFirst']);
+  });
+
   it('does not require the reinstating operator to belong to any organization', async () => {
     const { tx } = guardedClient({ 'suspension.findFirst': { id: 'SSP_1' } });
 
     await expect(
       asPlatformOperator(() => repository.closeSuspension(tx, A_REINSTATEMENT)),
-    ).resolves.toEqual({ changed: 1, suspensionId: 'SSP_1' });
+    ).resolves.toEqual({ outcome: 'WRITTEN', suspensionId: 'SSP_1' });
   });
 });
 

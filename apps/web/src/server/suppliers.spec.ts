@@ -6,7 +6,7 @@ import type { WebSession } from './session';
 
 /**
  * Reading suppliers. The cases that would be silent if wrong: an actor id or
- * a raw evidence document id reaching the page, a malformed timestamp
+ * an evidence entry without its id, a malformed timestamp
  * crashing the render instead of answering `MALFORMED`, and a 404 (another
  * tenant's supplier) told apart from a refusal.
  */
@@ -78,6 +78,7 @@ const SUPPLIER_DETAIL = {
       decidedBy: 'USR_ACTOR_SECRET',
       decidedAt: '2026-08-03T08:00:00.000Z',
       decisionNote: 'مستندات کامل بود',
+      rejectionReason: null,
       evidence: [{ documentId: 'DOC_ACTOR_SECRET', label: 'مجوز' }],
       current: true,
     },
@@ -134,14 +135,16 @@ describe('reading suppliers', () => {
     expect(urls[0]).toBe('http://gateway.test:3000/v1/suppliers/..%2Fx%3Fy');
   });
 
-  it('never lets an actor id or a raw evidence document id into what the screen receives', async () => {
+  it('never lets an actor id into what the screen receives, and keeps evidence as the API returns it', async () => {
     const { impl } = answering(SUPPLIER_DETAIL);
     const result = await withFetch(impl, () => fetchSupplier(SESSION, 'SUP_1'));
 
     expect(result.kind).toBe('OK');
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain('USR_ACTOR_SECRET');
-    expect(serialized).not.toContain('DOC_ACTOR_SECRET');
+    expect(JSON.stringify(result)).not.toContain('USR_ACTOR_SECRET');
+    // By id and label only: the portal never fetches or resolves a document.
+    expect(result.kind === 'OK' && result.data.qualifications[0]?.evidence).toEqual([
+      { documentId: 'DOC_ACTOR_SECRET', label: 'مجوز' },
+    ]);
     expect(result.kind === 'OK' && result.data.qualifications[0]?.evidenceCount).toBe(1);
   });
 
@@ -253,7 +256,7 @@ describe('a response missing a required field, not merely an invalid one', () =>
     'statement',
     'submittedAt',
     'decidedAt',
-    'decisionNote',
+    'rejectionReason',
     'evidence',
     'current',
   ] as const)('reads a qualification missing %s as MALFORMED', async (field) => {
@@ -270,6 +273,26 @@ describe('a response missing a required field, not merely an invalid one', () =>
       ).toBe('MALFORMED');
     },
   );
+
+  it('reads a qualification with no decisionNote key — the supplier’s own reading — and keeps the reason', async () => {
+    // supplier-service leaves the reviewer's note out for everyone but a
+    // reviewer (Codex review of PR 366, finding 1); absent is not malformed.
+    const result = await detailWith({
+      ...SUPPLIER_DETAIL,
+      qualifications: [
+        {
+          ...(omit(QUALIFICATION, 'decisionNote') as object),
+          state: 'REJECTED',
+          rejectionReason: 'پروانه منقضی شده است',
+        },
+      ],
+    });
+
+    expect(result.kind).toBe('OK');
+    if (result.kind !== 'OK') return;
+    expect(result.data.qualifications[0]).not.toHaveProperty('decisionNote');
+    expect(result.data.qualifications[0]!.rejectionReason).toBe('پروانه منقضی شده است');
+  });
 
   it('keeps an explicit [], false and null as the facts they are', async () => {
     const result = await detailWith({
@@ -307,6 +330,7 @@ describe('a response missing a required field, not merely an invalid one', () =>
       statement: null,
       decidedAt: null,
       decisionNote: null,
+      evidence: [],
       evidenceCount: 0,
       current: false,
     });

@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@rasta/contracts": "workspace:*",
+    "jose": "^5.9.6",
     "ulid": "^2.3.0"
   },
   "devDependencies": {

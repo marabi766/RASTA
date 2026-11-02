@@ -7,6 +7,14 @@ import type { ReadResult, Transaction } from '@/server/transactions';
 import { TransactionDetailScreen } from './[id]/TransactionDetailScreen';
 import { DisputeCommandForm } from './[id]/DisputeCommandForm';
 import type { DisputeFormState } from './[id]/form-state';
+import { bindingOf } from '@/test/unresolved-binding';
+
+// Each test renders the transaction screen or a dispute form and runs jest-axe over it (40 scans;
+// the file took 56 s on main 61a13bbc). On a loaded CI runner the first test passed jest's 5 s
+// default (train run 40171771172, PR #402 run 40173125770), and the axe run it left behind failed
+// every later test. The contracts and tenders screens have the same allowance; task 239 looks for
+// why this file is slow.
+jest.setTimeout(20_000);
 
 /**
  * What `/transactions/[id]` renders: every outcome the read can hand back, the
@@ -49,7 +57,7 @@ afterEach(() => {
 });
 
 const CSRF = 'csrf-token-for-this-session';
-const BINDING = { owner: 'owner-tag', session: 'session-tag' };
+const BINDING = bindingOf('owner-tag', 'session-tag');
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const STAMP = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
@@ -458,6 +466,58 @@ describe('the dispute state, as the record says it', () => {
     renderScreen(ok(DISPUTED));
     expect(window.location.search).toBe('?flash=FORGED');
     window.history.replaceState(null, '', '/');
+  });
+});
+
+describe('raw codes and English wording in the detail', () => {
+  it.each([
+    ['ORDER', 'سفارش'],
+    ['MAINTENANCE_REQUEST', 'درخواست تعمیر و نگهداری'],
+    ['PAYMENT_INTENT', 'افزایش موجودی کیف پول'],
+    ['STATEMENT', 'صورت‌وضعیت قرارداد'],
+  ])(
+    'names the source type %s in Persian and keeps the reference as an identifier',
+    (type, label) => {
+      const { container } = renderScreen(
+        ok({ ...HELD, sourceType: type, sourceReference: 'REF_9' }),
+      );
+      const row = [...container.querySelectorAll('dd')].find((dd) =>
+        dd.textContent?.includes('REF_9'),
+      )!;
+      expect(row.textContent).toContain(label);
+      expect(row.textContent).not.toContain(type);
+    },
+  );
+
+  it('names the one known machine reason in Persian', () => {
+    const machine = renderScreen(ok({ ...HELD, failureReason: 'Cancelled' }));
+    expect(machine.container.textContent).not.toContain('Cancelled');
+    expect(machine.container.textContent).toContain('لغو شد');
+  });
+
+  // Provenance is not language: an English reason somebody typed is theirs.
+  it.each([
+    ['a refund', { status: 'REFUNDED' }],
+    ['a cancel', { status: 'CANCELLED' }],
+    [
+      'a cancellation compensation of a marketplace order',
+      { status: 'REFUNDED', transactionType: 'MARKETPLACE_ORDER', sourceType: 'ORDER' },
+    ],
+  ])('shows an English human reason verbatim on %s', (_label, patch) => {
+    const human = renderScreen(
+      ok({
+        ...HELD,
+        ...patch,
+        sourceReference: 'ORD_42',
+        failureReason: 'Customer returned damaged goods',
+      } as Transaction),
+    );
+    expect(human.container.textContent).toContain('Customer returned damaged goods');
+  });
+
+  it('shows a Persian reason as written', () => {
+    const personal = renderScreen(ok({ ...HELD, failureReason: 'مشتری منصرف شد، مبلغ برگشت.' }));
+    expect(personal.container.textContent).toContain('مشتری منصرف شد، مبلغ برگشت.');
   });
 });
 

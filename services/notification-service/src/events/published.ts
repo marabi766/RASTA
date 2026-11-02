@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 
 /**
  * The events this service publishes.
@@ -234,7 +235,13 @@ export function validateNotificationPayload<N extends NotificationEventName>(
   payload: unknown,
 ): z.infer<(typeof NOTIFICATION_EVENT_SCHEMAS)[N]> {
   const schema = NOTIFICATION_EVENT_SCHEMAS[eventName];
-  return schema.parse(payload) as z.infer<(typeof NOTIFICATION_EVENT_SCHEMAS)[N]>;
+  const parsed = legacyParse(schema, payload);
+  if (!parsed.success) {
+    throw new Error(
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
+    );
+  }
+  return parsed.data as z.infer<(typeof NOTIFICATION_EVENT_SCHEMAS)[N]>;
 }
 
 /**

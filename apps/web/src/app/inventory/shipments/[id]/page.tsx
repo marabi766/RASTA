@@ -19,6 +19,8 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import type { OfferedInventoryCommand } from '../../InventoryCommands';
 import { ShipmentScreen } from './ShipmentScreen';
+import { pageContext, pageParams } from '@/server/page-context';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/inventory/shipments/[id]` route — one shipment and its tracking
@@ -50,7 +52,7 @@ export default async function ShipmentPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(href)}`);
 
-  const flash = (await searchParams)[FLASH_PARAM];
+  const flash = (await pageParams(session, searchParams))[FLASH_PARAM];
   const notice = readFlash(
     session,
     typeof flash === 'string' ? flash : undefined,
@@ -78,8 +80,9 @@ export default async function ShipmentPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -108,6 +111,7 @@ export default async function ShipmentPage({
           consigneeOnly={shipment.kind === 'OK' && isConsigneeOnly(caller, shipment.data)}
           csrfToken={session.csrfToken}
           binding={submissionBinding(session)}
+          context={pageContext(session)}
           sessionMaxAgeSeconds={webServerEnv().WEB_SESSION_MAX_AGE_SECONDS}
           notice={notice}
           pageHref={href}

@@ -1,11 +1,10 @@
 import request from 'supertest';
 import type { Server } from 'node:http';
-import { runUnscoped } from '@rasta/nest-common';
+import { runUnscoped, type JsonSchema } from '@rasta/nest-common';
 import { DocumentBuilder, SwaggerModule, type OpenAPIObject } from '@nestjs/swagger';
 import { enrichOpenApiDocument } from '../src/openapi/document';
 import { schemaMismatches } from '../src/openapi/schema-mismatches';
 import { TRANSACTION_RESPONSES } from '../src/openapi/transaction-view';
-import type { JsonSchema } from '../src/openapi/zod-schema';
 import { admin, apiTenant, startApi, type ApiHarness } from './api-helpers';
 import { cleanup, id } from './helpers';
 

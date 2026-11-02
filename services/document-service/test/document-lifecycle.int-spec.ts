@@ -674,6 +674,7 @@ describe('document lifecycle (real database and object storage)', () => {
     it('refuses an infected document', async () => {
       const { document } = await uploadDocument();
 
+      const now = new Date();
       await runUnscoped('the suite marks the document infected', () =>
         prisma.client.document.updateMany({
           where: { id: document.id },
@@ -681,12 +682,12 @@ describe('document lifecycle (real database and object storage)', () => {
             scanState: 'INFECTED',
             scanEngine: 'test-engine',
             scanSignature: 'EICAR-Test-File',
-            scannedAt: new Date(),
+            scannedAt: now,
             // The quarantine record is not optional: since ADR-049
             // `ck_document_infected_is_quarantined` refuses an INFECTED row
             // without one, so even a hand-written UPDATE cannot leave a
             // document infected and undecided about.
-            quarantinedAt: new Date(),
+            quarantinedAt: now,
             quarantineReason: 'marked infected by the suite',
           },
         }),

@@ -10,6 +10,7 @@ import {
   tenants,
   wire,
   type Wiring,
+  unanswered,
 } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaClient } from '../src/generated/prisma';
@@ -165,12 +166,15 @@ describe('the economic suite mutates only what it owns', () => {
       } as any),
     );
     const rewardRule = await asActor({ organizationId, userId: author }, () =>
-      wiring.rewards.createRule({
-        organizationId,
-        triggerEvent: 'USAGE_RECORDED',
-        points: 3,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      wiring.rewards.createRule(
+        {
+          organizationId,
+          triggerEvent: 'USAGE_RECORDED',
+          points: 3,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+        unanswered(),
+      ),
     );
 
     const outboxId = `OBX_${ulid()}`;
@@ -370,11 +374,14 @@ describe('the economic suite mutates only what it owns', () => {
   it('removes its own platform-wide rules, and only its own', async () => {
     // Ours: authored by this run, no organization.
     const ours = await asActor({ organizationId: org.a }, () =>
-      wiring.rewards.createRule({
-        triggerEvent: 'USAGE_RECORDED',
-        points: 9,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      wiring.rewards.createRule(
+        {
+          triggerEvent: 'USAGE_RECORDED',
+          points: 9,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+        unanswered(),
+      ),
     );
 
     // Theirs: the same shape, authored the way a *different* run's actor would
@@ -383,11 +390,14 @@ describe('the economic suite mutates only what it owns', () => {
     const theirs = await asActor(
       { organizationId: org.a, userId: `USR-ITEST-${ulid().slice(-10)}-FOREIGN-RUN` },
       () =>
-        wiring.rewards.createRule({
-          triggerEvent: 'USAGE_RECORDED',
-          points: 9,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any),
+        wiring.rewards.createRule(
+          {
+            triggerEvent: 'USAGE_RECORDED',
+            points: 9,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+          unanswered(),
+        ),
     );
 
     const exists = (id: string) =>

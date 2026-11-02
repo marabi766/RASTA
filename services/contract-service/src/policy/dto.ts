@@ -102,7 +102,7 @@ export const createPolicySchema = z
     /** Why — a governance setting without a rationale is unauditable. */
     rationale: z.string().trim().min(8).max(2000),
     /** Demo data: «نمونه — نیازمند تصویب» (ADR-023). */
-    isSample: z.boolean().default(false),
+    isSample: z.boolean().prefault(false),
     /**
      * The authorities. For `contract.signature` they are alternatives: any one may sign, so each
      * (organization, role) is named once. For a statement chain they are its steps, asked in this

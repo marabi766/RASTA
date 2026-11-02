@@ -116,6 +116,33 @@ describe('SupplierStandingConsumer', () => {
     expect(c.calls).toEqual([]);
   });
 
+  describe('a qualifiedFor longer than 50 (GHSA-mrhx-c7xc-m3w5)', () => {
+    const qualified = (count: number) =>
+      envelope('SUPPLIER_QUALIFIED', {
+        organizationId: 'org-1',
+        qualifiedFor: [
+          'CONTRACTING',
+          ...Array.from({ length: count - 1 }, () => 'EQUIPMENT_RENTAL'),
+        ],
+        decidedAt: '2026-09-29T08:00:00.000Z',
+      });
+
+    it('is dead-lettered as VALIDATION_FAILED, and nothing is recorded', async () => {
+      const c = consumer();
+      await expect(c.handle(qualified(51))).rejects.toMatchObject({
+        name: 'UnprocessableEventError',
+        reason: 'VALIDATION_FAILED',
+      });
+      expect(c.calls).toEqual([]);
+    });
+
+    it('at 50 it is still read', async () => {
+      const c = consumer();
+      await c.handle(qualified(50));
+      expect(c.calls).toEqual([['qualified', 'org-1', new Date('2026-09-29T08:00:00.000Z')]]);
+    });
+  });
+
   it.each(['ORGANIZATION_MISMATCH', 'EPISODE_OUT_OF_ORDER'] as const)(
     'dead-letters an episode the read model refuses (%s)',
     async (refusal) => {

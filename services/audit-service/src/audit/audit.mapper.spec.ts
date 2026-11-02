@@ -5,7 +5,6 @@ import {
   AUDIT_DEAD_LETTER_TOPIC,
   DOMAIN_PROJECTOR_CONSUMER,
   DOMAIN_TOPICS,
-  describePayloadKeys,
   isSensitiveKey,
   toAuditEventRecord,
   toEnvelopeProvenance,
@@ -173,6 +172,26 @@ describe('mapping an envelope to an audit record', () => {
       expect(record.actorId).toBe('asset-service');
     });
 
+    it('records an unauthenticated request origin as ANONYMOUS with no id — never the producer as SYSTEM (PR #483 r3 F1)', () => {
+      const record = toAuditEventRecord(
+        envelope({ producer: 'identity-service', anonymous: true }),
+        delivery('rasta.identity.v1'),
+      );
+
+      expect(record.actorType).toBe('ANONYMOUS');
+      expect(record.actorId).toBeNull();
+    });
+
+    it('a named actor wins over the anonymous flag: never a sender-chosen id under ANONYMOUS', () => {
+      const record = toAuditEventRecord(
+        envelope({ actor: { type: 'USER', id: 'USR-77' }, anonymous: true }),
+        delivery(),
+      );
+
+      expect(record.actorType).toBe('USER');
+      expect(record.actorId).toBe('USR-77');
+    });
+
     it('records roles as an empty array, never null', () => {
       // Null would mean "unknown". Path A knows they are unavailable, which is
       // a different and more useful statement.
@@ -271,36 +290,5 @@ describe('redaction reuses the platform list', () => {
       expect(isSensitiveKey(key.toUpperCase())).toBe(true);
     }
     expect(isSensitiveKey('assetId')).toBe(false);
-  });
-
-  it('describes a payload by key names only, never values', () => {
-    const described = describePayloadKeys({
-      assetId: 'AST_1',
-      password: 'hunter2',
-      token: 'eyJhbGciOi',
-    });
-
-    // The whole point: no value from the payload may appear.
-    expect(described).not.toContain('hunter2');
-    expect(described).not.toContain('eyJhbGciOi');
-    expect(described).not.toContain('AST_1');
-    expect(described).toContain('assetId');
-    expect(described).toContain('[REDACTED]');
-  });
-
-  it('bounds a wide payload description', () => {
-    const wide = Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`field${i}`, i]));
-    const described = describePayloadKeys(wide);
-
-    expect(described).toContain('(60 keys)');
-    expect(described.length).toBeLessThan(500);
-  });
-
-  it('handles payloads that are not objects', () => {
-    expect(describePayloadKeys(undefined)).toBe('(none)');
-    expect(describePayloadKeys(null)).toBe('(none)');
-    expect(describePayloadKeys({})).toBe('(empty)');
-    expect(describePayloadKeys('a string')).toBe('(string)');
-    expect(describePayloadKeys([1, 2, 3])).toBe('(object)');
   });
 });

@@ -5,7 +5,11 @@ import { CSRF_FIELD } from '@/server/csrf';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
+import { RECEIPT_NOTE_REFUSAL } from '@/server/orders';
+
 import { IDLE_ORDER_COMMAND_FORM } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
+import { landing } from '@/test/landing';
 
 /**
  * The one server action behind every order command.
@@ -36,6 +40,9 @@ jest.mock('@/server/current-session', () => ({
   missingSessionReason: async () => 'NO_SESSION',
 }));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
+// The provider gate is open here: what it refuses, against a fake gateway, is
+// `app/money-actions-gate.spec.ts`.
+jest.mock('@/server/money-gate', () => ({ mayDispatch: async () => true }));
 jest.mock('@/server/orders', () => {
   const actual = jest.requireActual('@/server/orders');
   return { ...actual, issueOrderCommand: (...a: unknown[]) => issueOrderCommand(...a) };
@@ -51,7 +58,7 @@ const SESSION = {
   subject: 'USR_1',
   username: 'buyer',
   organizationId: 'ORG_BUYER',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_BUYER'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -162,7 +169,14 @@ describe('what reaches the service', () => {
       { command: 'CONFIRM_RECEIPT', body: {} },
       expect.any(String),
     );
-    expect(redirect).toHaveBeenCalledWith('/orders/ORD_1?done=CONFIRM_RECEIPT');
+    expect(
+      landing(redirect.mock.calls[0]![0] as string, SESSION, 'ORD_1', ['CONFIRM_RECEIPT']),
+    ).toEqual({
+      path: '/orders/ORD_1',
+      query: {},
+      bound: true,
+      confirmed: 'CONFIRM_RECEIPT',
+    });
   });
 
   it('ignores an order id smuggled into the form — the bound one wins', async () => {
@@ -183,6 +197,84 @@ describe('what reaches the service', () => {
   });
 });
 
+// Q-110: the service refuses a receipt note, the form no longer offers the
+// field, and a post that still carries one must not settle the order with the
+// text lost.
+describe('a receipt confirmation that still carries a note', () => {
+  it('is refused in Persian before anything is sent — not dropped, not settled', async () => {
+    const state = await submit(formData([...RECEIPT, ['note', 'کالا سالم رسید']]));
+
+    expect(state).toMatchObject({
+      kind: 'INVALID',
+      command: 'CONFIRM_RECEIPT',
+      fieldErrors: { note: RECEIPT_NOTE_REFUSAL },
+    });
+    expect(JSON.stringify(state)).not.toContain('Q-110');
+    expect(issueOrderCommand).not.toHaveBeenCalled();
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('treats a whitespace-only note as no note', async () => {
+    await expect(submit(formData([...RECEIPT, ['note', ' \n ']]))).rejects.toThrow(/NEXT_REDIRECT/);
+    expect(issueOrderCommand).toHaveBeenCalledWith(
+      SESSION,
+      'ORD_1',
+      { command: 'CONFIRM_RECEIPT', body: {} },
+      expect.any(String),
+    );
+  });
+
+  it('keeps every gate in front of it: no session, CSRF, submission and acknowledgement are still checked first', async () => {
+    const withNote = [...RECEIPT, ['note', 'x']] as Array<[string, string]>;
+    currentSession.mockResolvedValue(null);
+    await expect(submit(formData(withNote))).resolves.toMatchObject({ kind: 'REFUSED' });
+    currentSession.mockResolvedValue(SESSION);
+    await expect(submit(formData(withNote, { csrf: 'other' }))).resolves.toMatchObject({
+      reason: 'CSRF',
+    });
+    await expect(submit(formData(withNote, { submission: 'chosen' }))).resolves.toMatchObject({
+      reason: 'SUBMISSION',
+    });
+    await expect(
+      submit(
+        formData([
+          ['command', 'CONFIRM_RECEIPT'],
+          ['note', 'x'],
+        ]),
+      ),
+    ).resolves.toMatchObject({ kind: 'INVALID', fieldErrors: { acknowledge: expect.any(String) } });
+    expect(issueOrderCommand).not.toHaveBeenCalled();
+  });
+
+  it('a duplicate submit of the same confirmation carries the same idempotency key, so the service replays it and settles once', async () => {
+    const id = mintSubmissionId(SESSION);
+    await expect(submit(formData(RECEIPT, { submission: id }))).rejects.toThrow(/NEXT_REDIRECT/);
+    await expect(submit(formData(RECEIPT, { submission: id }))).rejects.toThrow(/NEXT_REDIRECT/);
+
+    const keys = issueOrderCommand.mock.calls.map((call) => call[3]);
+    expect(keys).toEqual([id, id]);
+    const bodies = issueOrderCommand.mock.calls.map((call) => call[2]);
+    expect(bodies[0]).toEqual(bodies[1]);
+  });
+
+  it('fulfil still sends its note, which the service stores', async () => {
+    await expect(
+      submit(
+        formData([
+          ['command', 'FULFILL'],
+          ['note', 'ارسال با باربری'],
+        ]),
+      ),
+    ).rejects.toThrow(/NEXT_REDIRECT/);
+    expect(issueOrderCommand).toHaveBeenCalledWith(
+      SESSION,
+      'ORD_1',
+      { command: 'FULFILL', body: { note: 'ارسال با باربری' } },
+      expect.any(String),
+    );
+  });
+});
+
 describe('what the service answers', () => {
   it('keeps a refusal apart from an absence', async () => {
     issueOrderCommand.mockResolvedValue({ kind: 'FORBIDDEN', correlationId: 'c1' });
@@ -195,17 +287,29 @@ describe('what the service answers', () => {
     await expect(submit(formData(RECEIPT))).resolves.toEqual({ kind: 'NOT_FOUND' });
   });
 
-  it('carries the service sentence when the other party acted first', async () => {
+  it('carries the mapped sentence when the other party acted first', async () => {
     issueOrderCommand.mockResolvedValue({
       kind: 'INVALID',
       fieldErrors: {},
-      message: 'Order ORD_1 cannot move from DISPUTED to RECEIPT_CONFIRMED',
+      message: 'وضعیت سفارش اجازه‌ی این اقدام را نمی‌دهد',
       correlationId: 'c',
     });
     const state = await submit(formData(RECEIPT));
-    expect(state).toMatchObject({ kind: 'INVALID', message: expect.stringContaining('DISPUTED') });
+    expect(state).toMatchObject({ kind: 'INVALID', message: expect.stringContaining('وضعیت') });
     expect(redirect).not.toHaveBeenCalled();
   });
+
+  it.each(['UNKNOWN_OUTCOME', 'IN_PROGRESS'])(
+    'reads %s as unconfirmed, never as "nothing was saved"',
+    async (kind) => {
+      issueOrderCommand.mockResolvedValue({ kind, correlationId: 'c', retryAfterSeconds: 1 });
+      await expect(submit(formData(RECEIPT))).resolves.toEqual({
+        kind: 'UNCONFIRMED',
+        correlationId: 'c',
+      });
+      expect(redirect).not.toHaveBeenCalled();
+    },
+  );
 
   it('never puts anything token-shaped in the state it returns', async () => {
     issueOrderCommand.mockResolvedValue({

@@ -1,5 +1,5 @@
 import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   UnprocessableEventError,
   invalidPayloadError,
@@ -178,14 +178,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
     }
 
     const contract = ASSET_PAYLOADS[envelope.eventName as keyof typeof ASSET_PAYLOADS];
-    const parsed = contract.schema.safeParse(envelope.payload);
+    const parsed = legacyParse(contract.schema, envelope.payload);
     if (!parsed.success) {
       // An event this service projects, without a field of its producer's
       // contract that the projection uses — no machine, a status change with
       // no status: a producer defect no retry fixes. Dead-lettered at once,
       // before the marker, so a corrected replay is still applied (audit
       // L7-26, review #205 r1, docs/07 § 7.6).
-      throw invalidPayloadError(envelope, parsed.error, contract.fields);
+      throw invalidPayloadError(envelope, parsed.refusal, contract.fields);
     }
 
     const payload = parsed.data as Record<string, unknown>;

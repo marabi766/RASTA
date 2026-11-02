@@ -42,6 +42,11 @@ function harness(supplier: FakeSupplier = aSupplier()) {
   };
 }
 
+/** The id of the supplier's open episode, as the reinstating operator read it. */
+function openEpisode(h: { supplier: FakeSupplier }): string {
+  return h.supplier.suspensions.find((row) => row.reinstatedAt === null)?.id ?? 'SSP_NONE';
+}
+
 async function codeOf(fn: () => Promise<unknown>): Promise<string> {
   try {
     await fn();
@@ -65,7 +70,10 @@ describe('who may suspend', () => {
     const h = harness();
 
     const suspended = await asOperatorOf(OTHER_ORG, () =>
-      h.service.suspend('SUP_1', { reason: 'Two buyers reported undelivered orders' }),
+      h.service.suspend('SUP_1', {
+        reason: 'Two buyers reported undelivered orders',
+        latestSuspensionId: null,
+      }),
     );
 
     expect(suspended.status).toBe('SUSPENDED');
@@ -76,7 +84,11 @@ describe('who may suspend', () => {
     const h = harness();
 
     expect(
-      await codeOf(() => asOwner(() => h.service.suspend('SUP_1', { reason: 'A stated reason' }))),
+      await codeOf(() =>
+        asOwner(() =>
+          h.service.suspend('SUP_1', { reason: 'A stated reason', latestSuspensionId: null }),
+        ),
+      ),
     ).toBe('FORBIDDEN');
     expect(h.supplier.status).toBe('ACTIVE');
   });
@@ -89,7 +101,7 @@ describe('who may suspend', () => {
       expect(
         await codeOf(() =>
           asRole(SUPPLIER_ORG, [role], () =>
-            h.service.suspend('SUP_1', { reason: 'A stated reason' }),
+            h.service.suspend('SUP_1', { reason: 'A stated reason', latestSuspensionId: null }),
           ),
         ),
       ).toBe('FORBIDDEN');
@@ -103,7 +115,7 @@ describe('who may suspend', () => {
     expect(
       await codeOf(() =>
         asRole(OTHER_ORG, ['AUDITOR'], () =>
-          h.service.suspend('SUP_1', { reason: 'A stated reason' }),
+          h.service.suspend('SUP_1', { reason: 'A stated reason', latestSuspensionId: null }),
         ),
       ),
     ).toBe('FORBIDDEN');
@@ -114,7 +126,9 @@ describe('who may suspend', () => {
 
     expect(
       await codeOf(() =>
-        asOperatorOf(OTHER_ORG, () => h.service.suspend('SUP_NOPE', { reason: 'A stated reason' })),
+        asOperatorOf(OTHER_ORG, () =>
+          h.service.suspend('SUP_NOPE', { reason: 'A stated reason', latestSuspensionId: null }),
+        ),
       ),
     ).toBe('NOT_FOUND');
   });
@@ -125,7 +139,10 @@ describe('SUPPLIER_SUSPENDED', () => {
     const h = harness();
 
     await asOperatorOf(OTHER_ORG, () =>
-      h.service.suspend('SUP_1', { reason: 'Two buyers reported undelivered orders' }),
+      h.service.suspend('SUP_1', {
+        reason: 'Two buyers reported undelivered orders',
+        latestSuspensionId: null,
+      }),
     );
 
     expect(h.prisma.committed).toHaveLength(1);
@@ -139,7 +156,10 @@ describe('SUPPLIER_SUSPENDED', () => {
     const h = harness();
 
     await asOperatorOf(OTHER_ORG, () =>
-      h.service.suspend('SUP_1', { reason: 'A stated reason for the record' }),
+      h.service.suspend('SUP_1', {
+        reason: 'A stated reason for the record',
+        latestSuspensionId: null,
+      }),
     );
 
     expect(h.prisma.committed[0].payload.until).toBeNull();
@@ -152,7 +172,10 @@ describe('SUPPLIER_SUSPENDED', () => {
     expect(
       await codeOf(() =>
         asOperatorOf(OTHER_ORG, () =>
-          h.service.suspend('SUP_1', { reason: 'A stated reason for the record' }),
+          h.service.suspend('SUP_1', {
+            reason: 'A stated reason for the record',
+            latestSuspensionId: null,
+          }),
         ),
       ),
     ).toBe('BUSINESS_RULE_VIOLATION');
@@ -165,7 +188,10 @@ describe('suspension withholds, it does not revoke', () => {
     const h = harness(aSupplier({ qualifications: [APPROVED] }));
 
     const suspended = await asOperatorOf(OTHER_ORG, () =>
-      h.service.suspend('SUP_1', { reason: 'A stated reason for the record' }),
+      h.service.suspend('SUP_1', {
+        reason: 'A stated reason for the record',
+        latestSuspensionId: null,
+      }),
     );
 
     expect(suspended.qualifiedFor).toEqual([]);
@@ -179,11 +205,17 @@ describe('suspension withholds, it does not revoke', () => {
     const h = harness(aSupplier({ qualifications: [APPROVED] }));
 
     await asOperatorOf(OTHER_ORG, () =>
-      h.service.suspend('SUP_1', { reason: 'A stated reason for the record' }),
+      h.service.suspend('SUP_1', {
+        reason: 'A stated reason for the record',
+        latestSuspensionId: null,
+      }),
     );
 
     const reinstated = await asOperatorOf(OTHER_ORG, () =>
-      h.service.reinstate('SUP_1', { reason: 'The orders were delivered late, not never' }),
+      h.service.reinstate('SUP_1', {
+        reason: 'The orders were delivered late, not never',
+        suspensionId: openEpisode(h),
+      }),
     );
 
     expect(reinstated.status).toBe('ACTIVE');
@@ -198,7 +230,10 @@ describe('reinstating', () => {
   async function suspended() {
     const h = harness(aSupplier({ qualifications: [APPROVED] }));
     await asOperatorOf(OTHER_ORG, () =>
-      h.service.suspend('SUP_1', { reason: 'A stated reason for the record' }),
+      h.service.suspend('SUP_1', {
+        reason: 'A stated reason for the record',
+        latestSuspensionId: null,
+      }),
     );
     h.prisma.committed.length = 0;
     return h;
@@ -210,7 +245,10 @@ describe('reinstating', () => {
     const h = await suspended();
 
     const reinstated = await asOperatorOf(OTHER_ORG, () =>
-      h.service.reinstate('SUP_1', { reason: 'The orders were delivered late, not never' }),
+      h.service.reinstate('SUP_1', {
+        reason: 'The orders were delivered late, not never',
+        suspensionId: openEpisode(h),
+      }),
     );
 
     expect(reinstated.suspensions).toHaveLength(1);
@@ -229,7 +267,10 @@ describe('reinstating', () => {
     const episode = h.supplier.suspensions[0];
 
     await asOperatorOf(OTHER_ORG, () =>
-      h.service.reinstate('SUP_1', { reason: 'The orders were delivered late, not never' }),
+      h.service.reinstate('SUP_1', {
+        reason: 'The orders were delivered late, not never',
+        suspensionId: openEpisode(h),
+      }),
     );
 
     expect(h.prisma.committed).toEqual([
@@ -261,7 +302,10 @@ describe('reinstating', () => {
     expect(
       await codeOf(() =>
         asOperatorOf(OTHER_ORG, () =>
-          h.service.reinstate('SUP_1', { reason: 'The orders were delivered late, not never' }),
+          h.service.reinstate('SUP_1', {
+            reason: 'The orders were delivered late, not never',
+            suspensionId: openEpisode(h),
+          }),
         ),
       ),
     ).toBe('BUSINESS_RULE_VIOLATION');
@@ -273,7 +317,12 @@ describe('reinstating', () => {
 
     expect(
       await codeOf(() =>
-        asOwner(() => h.service.reinstate('SUP_1', { reason: 'Lifting my own suspension' })),
+        asOwner(() =>
+          h.service.reinstate('SUP_1', {
+            reason: 'Lifting my own suspension',
+            suspensionId: openEpisode(h),
+          }),
+        ),
       ),
     ).toBe('FORBIDDEN');
     expect(h.supplier.status).toBe('SUSPENDED');
@@ -286,7 +335,10 @@ describe('reinstating', () => {
     expect(
       await codeOf(() =>
         asOperatorOf(OTHER_ORG, () =>
-          h.service.reinstate('SUP_1', { reason: 'Nothing to lift here at all' }),
+          h.service.reinstate('SUP_1', {
+            reason: 'Nothing to lift here at all',
+            suspensionId: openEpisode(h),
+          }),
         ),
       ),
     ).toBe('BUSINESS_RULE_VIOLATION');
@@ -298,9 +350,87 @@ describe('reinstating', () => {
     expect(
       await codeOf(() =>
         asOperatorOf(OTHER_ORG, () =>
-          h.service.suspend('SUP_1', { reason: 'A second stated reason' }),
+          h.service.suspend('SUP_1', {
+            reason: 'A second stated reason',
+            latestSuspensionId: null,
+          }),
         ),
       ),
     ).toBe('BUSINESS_RULE_VIOLATION');
+  });
+});
+
+describe('a command names the suspension episode it was decided on (Codex review of PR 366, finding 2)', () => {
+  /** Suspended (A), lifted, and suspended again (B) by other operators. */
+  async function secondEpisode() {
+    const h = harness();
+    await asOperatorOf(OTHER_ORG, () =>
+      h.service.suspend('SUP_1', { reason: 'The first stated reason', latestSuspensionId: null }),
+    );
+    const first = openEpisode(h);
+    await asOperatorOf(OTHER_ORG, () =>
+      h.service.reinstate('SUP_1', { reason: 'The first was resolved', suspensionId: first }),
+    );
+    await asOperatorOf(OTHER_ORG, () =>
+      h.service.suspend('SUP_1', { reason: 'The second stated reason', latestSuspensionId: first }),
+    );
+    const second = openEpisode(h);
+    h.prisma.committed.length = 0;
+    return { h, first, second };
+  }
+
+  it('refuses to lift episode B with a form that was read during episode A, and writes nothing', async () => {
+    const { h, first, second } = await secondEpisode();
+
+    const error = await asOperatorOf(OTHER_ORG, () =>
+      h.service.reinstate('SUP_1', { reason: 'The first was resolved', suspensionId: first }),
+    ).catch((caught: unknown) => caught);
+
+    expect(isRastaError(error) && error.status).toBe(409);
+    expect(isRastaError(error) && error.code).toBe('OPTIMISTIC_LOCK_FAILED');
+    expect(isRastaError(error) && error.details).toEqual([
+      expect.objectContaining({ path: 'suspensionId', code: 'SUSPENSION_EPISODE_CHANGED' }),
+    ]);
+    expect(h.supplier.status).toBe('SUSPENDED');
+    expect(openEpisode(h)).toBe(second);
+    expect(h.supplier.suspensions.find((row) => row.id === second)?.reinstatementNote).toBeNull();
+    expect(h.prisma.committed).toEqual([]);
+  });
+
+  it('lifts episode B when the command names B', async () => {
+    const { h, second } = await secondEpisode();
+
+    const reinstated = await asOperatorOf(OTHER_ORG, () =>
+      h.service.reinstate('SUP_1', { reason: 'The second was resolved', suspensionId: second }),
+    );
+
+    expect(reinstated.status).toBe('ACTIVE');
+    expect(h.prisma.committed.map((event) => event.aggregateId)).toEqual([second]);
+  });
+
+  it('refuses a suspension decided before a newer episode was opened and closed', async () => {
+    // The same cycle seen from the suspend form: read while the supplier was
+    // active with no history, sent after somebody suspended and reinstated it.
+    const h = harness();
+    await asOperatorOf(OTHER_ORG, () =>
+      h.service.suspend('SUP_1', { reason: 'Somebody else suspended', latestSuspensionId: null }),
+    );
+    const episode = openEpisode(h);
+    await asOperatorOf(OTHER_ORG, () =>
+      h.service.reinstate('SUP_1', { reason: 'And somebody lifted it', suspensionId: episode }),
+    );
+    h.prisma.committed.length = 0;
+
+    const error = await asOperatorOf(OTHER_ORG, () =>
+      h.service.suspend('SUP_1', { reason: 'The stale form reason', latestSuspensionId: null }),
+    ).catch((caught: unknown) => caught);
+
+    expect(isRastaError(error) && error.status).toBe(409);
+    expect(isRastaError(error) && error.details).toEqual([
+      expect.objectContaining({ path: 'latestSuspensionId', code: 'SUSPENSION_EPISODE_CHANGED' }),
+    ]);
+    expect(h.supplier.status).toBe('ACTIVE');
+    expect(h.supplier.suspensions).toHaveLength(1);
+    expect(h.prisma.committed).toEqual([]);
   });
 });

@@ -83,8 +83,23 @@ export class UsageController {
     description:
       'At least one of `hours` or `kilometres` is required. Publishes USAGE_RECORDED, which ' +
       'drives usage-based maintenance schedules. Send `clientReference` to make the submission ' +
-      'replay-safe: resending the same reference returns the original record and publishes ' +
-      'nothing further, which is what lets the field application queue readings offline.',
+      'replay-safe: resending the same request under the same reference returns the original ' +
+      'record and publishes nothing further, which is what lets the field application queue ' +
+      'readings offline. The reference is bound to its first request, as an Idempotency-Key ' +
+      'is: a replay is answered only to the same caller (the user; for a service caller, the ' +
+      'same service) sending an equivalent body (keys in any order, defaults applied, each ' +
+      'quantity by exact value so "7.50" equals "7.5", each instant in one UTC spelling so ' +
+      '"…:00Z" equals "…:00.000Z", notes with CRLF read as LF and in Unicode NFC so a ' +
+      'decomposed accent equals the precomposed one; an omitted quantity is not ' +
+      '"0"), and ' +
+      'only while that caller may still read the record by the rule of GET ' +
+      '/v1/usage-records/{id}. Any other request under a reference already taken — another ' +
+      'body, another caller, a caller who may not read the record — gets one and the same ' +
+      '`409 IDEMPOTENCY_KEY_REUSED`, which carries nothing of the stored record and does not ' +
+      'say which of these it was; send a new reference. A record created before this binding ' +
+      'replays only to the user who recorded it, and only when every stored field equals the ' +
+      "request's — an omitted `driverId` only for the caller's own driver record, or for a " +
+      'supervisor where the record names no driver; one a service recorded then never replays.',
   })
   record(@Body(zodPipe(recordUsageSchema)) dto: RecordUsageDto) {
     return this.usage.record(dto);

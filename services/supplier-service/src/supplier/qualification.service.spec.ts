@@ -319,6 +319,37 @@ describe('rejecting', () => {
     // The private note is not the published reason.
     expect(JSON.stringify(event)).not.toContain('Third attempt');
   });
+
+  it('records the stated reason on the qualification, where the supplier reads it', async () => {
+    // Codex review of PR 366, finding 4: the event is a seven-day log, the row
+    // is the supplier's record of why.
+    const h = harness(aSupplier({ qualifications: [aQualification()] }));
+
+    const rejected = await asOperatorOf(OTHER_ORG, () =>
+      h.service.reject('SUP_1', 'QLF_1', {
+        reason: 'The submission named no capability evidence',
+        note: 'Third attempt from this organization',
+      }),
+    );
+
+    expect(rejected.rejectionReason).toBe('The submission named no capability evidence');
+    expect(h.supplier.qualifications[0].rejectionReason).toBe(
+      'The submission named no capability evidence',
+    );
+    // The answer goes to the deciding reviewer, who reads the note too.
+    expect(rejected.decisionNote).toBe('Third attempt from this organization');
+  });
+
+  it('records no rejection reason on an approval', async () => {
+    const h = harness(aSupplier({ qualifications: [aQualification()] }));
+
+    const approved = await asOperatorOf(OTHER_ORG, () =>
+      h.service.approve('SUP_1', 'QLF_1', { note: 'Checked against the registry' }),
+    );
+
+    expect(approved.rejectionReason).toBeNull();
+    expect(h.supplier.qualifications[0].rejectionReason).toBeNull();
+  });
 });
 
 describe('the review queue', () => {

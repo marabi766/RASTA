@@ -18,12 +18,14 @@ import {
   sealAssetLifecycleBaseline,
 } from './asset-lifecycle-commands';
 import { signPayload } from './signed-payload';
+import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 import {
   canActivateFrom,
   canDecommissionFrom,
   statusTargetsFrom,
 } from '@/lib/asset-lifecycle-fields';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The three lifecycle commands: what a person may type and in what words a
@@ -39,7 +41,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG_1'),
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -294,7 +296,7 @@ describe('writing', () => {
         body,
       });
       expect(calls[0]!.headers['idempotency-key']).toBe('sub_abc');
-      expect(calls[0]!.headers.authorization).toBe('Bearer access-token-value');
+      expect(calls[0]!.headers.authorization).toBe(`Bearer ${SESSION.accessToken}`);
     },
   );
 
@@ -408,7 +410,7 @@ describe('writing', () => {
       },
     );
 
-    it('says a transition it does not know by its platform code, and an unknown code as it arrived', async () => {
+    it('says a transition it does not know by its platform code, and an unknown code by the generic Persian sentence', async () => {
       const call = (impl: typeof fetch) => activateAsset(SESSION, ASSET, 1, 's', impl);
       expect(
         await call(
@@ -423,7 +425,7 @@ describe('writing', () => {
         await call(
           recording(409, { code: 'SOME_NEW_CODE', message: 'An asset cannot be frobbed' }).impl,
         ),
-      ).toMatchObject({ kind: 'INVALID', message: 'An asset cannot be frobbed' });
+      ).toMatchObject({ kind: 'INVALID', message: GENERIC_REFUSAL_MESSAGE });
     });
 
     it('puts a field problem from the service on the field it names', async () => {
@@ -441,7 +443,7 @@ describe('writing', () => {
       );
       expect(result).toMatchObject({
         kind: 'INVALID',
-        fieldErrors: { reason: 'String must contain at least 3 character(s)' },
+        fieldErrors: { reason: 'این متن دست‌کم ۳ نویسه باشد' },
       });
     });
   });

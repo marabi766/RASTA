@@ -20,6 +20,7 @@ import {
   type RenewalDependencies,
   type SessionRenewal,
 } from './session-refresh';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * One refresh per refresh token across replicas (Codex #113 R1-1), and a
@@ -41,7 +42,7 @@ const session = (): WebSession => ({
   subject: 'USR_01J8',
   username: 'dehyar',
   organizationId: 'ORG_01J8',
-  accessToken: 'access-0',
+  accessToken: actingAccessToken('ORG_01J8'),
   accessTokenExpiresAt: T0 + 900,
   refreshToken: 'refresh-0',
   csrfToken: 'csrf-token-value',

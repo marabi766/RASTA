@@ -16,6 +16,7 @@ import {
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
 import { mintFlash } from '@/server/flash';
+import { pageHref } from '@/server/page-context';
 import { verifyInventoryStamp, type VerifiedInventoryStamp } from '@/server/inventory-replay';
 import {
   inventoryRequestOf,
@@ -90,24 +91,31 @@ function landing(
   scope: InventoryScope,
   command: InventoryCommand,
   answeredId: string,
-): { readonly path: string; readonly subject: string } {
+): {
+  readonly path: string;
+  readonly params: Readonly<Record<string, string>>;
+  readonly subject: string;
+} {
   switch (command) {
     case 'CREATE_WAREHOUSE':
       return {
-        path: `/inventory?warehouse=${encodeURIComponent(answeredId)}`,
+        path: '/inventory',
+        params: { warehouse: answeredId },
         subject: answeredId,
       };
     case 'RECEIVE_STOCK':
     case 'ADJUST_STOCK': {
       const warehouseId = scope.kind === 'WAREHOUSE' ? scope.warehouseId : answeredId;
       return {
-        path: `/inventory?warehouse=${encodeURIComponent(warehouseId)}`,
+        path: '/inventory',
+        params: { warehouse: warehouseId },
         subject: warehouseId,
       };
     }
     case 'CREATE_SHIPMENT':
       return {
         path: `/inventory/shipments/${encodeURIComponent(answeredId)}`,
+        params: {},
         subject: answeredId,
       };
     case 'DISPATCH_SHIPMENT':
@@ -115,6 +123,7 @@ function landing(
       const shipmentId = scope.kind === 'SHIPMENT' ? scope.shipmentId : answeredId;
       return {
         path: `/inventory/shipments/${encodeURIComponent(shipmentId)}`,
+        params: {},
         subject: shipmentId,
       };
     }
@@ -195,9 +204,10 @@ export async function submitInventoryCommand(
       // form is drawn again from that body.
       body ? valuesOfBody(command, body) : null,
       (answeredId) => {
-        const { path, subject } = landing(scope, command, answeredId);
+        const { path, params, subject } = landing(scope, command, answeredId);
         const flash = mintFlash(session, subject, command);
-        return redirect(`${path}${path.includes('?') ? '&' : '?'}${FLASH_PARAM}=${flash}`);
+        // Bound to the organization this session acts for, as every page's links are.
+        return redirect(pageHref(session, path, { ...params, [FLASH_PARAM]: flash }));
       },
     );
   });

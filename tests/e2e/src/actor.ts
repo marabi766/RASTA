@@ -32,6 +32,8 @@ export interface ApiResponse<T> {
 export interface CallOptions {
   /** Sent as `Idempotency-Key`. Required by the gateway on economic writes. */
   idempotencyKey?: string;
+  /** Sent as `Idempotency-Replay-Deadline` (epoch ms): the last instant the request may still be executed under its key. */
+  replayDeadline?: number | string;
   /** Sent as `X-Correlation-Id`. Generated when absent so every call has one. */
   correlationId?: string;
   /** Sent as `X-Organization-Id` — the tenant the caller asks to act for. */
@@ -216,13 +218,14 @@ export class Actor {
   readonly username: E2eUser | (string & {});
   private readonly token: SessionToken;
   private readonly config: Pick<E2eConfig, 'gatewayUrl'>;
-  private readonly fetchImpl: Fetch;
+  /** Absent: send()'s own fetch, inside the audited transport (src/http.ts). */
+  private readonly fetchImpl?: Fetch;
 
   constructor(
     username: E2eUser | (string & {}),
     token: SessionToken,
     config: Pick<E2eConfig, 'gatewayUrl'>,
-    fetchImpl: Fetch = fetch,
+    fetchImpl?: Fetch,
   ) {
     this.username = username;
     this.token = token;
@@ -268,11 +271,13 @@ export class Actor {
     const headers: Record<string, string> = {
       'x-correlation-id': correlationId,
       accept: 'application/json',
-      ...(options.internalToken
-        ? { 'x-internal-token': options.internalToken }
-        : { authorization: `Bearer ${await this.token.value()}` }),
+      // The internal token travels in the request, and send() alone sets its header.
+      ...(options.internalToken ? {} : { authorization: `Bearer ${await this.token.value()}` }),
     };
     if (options.idempotencyKey) headers['idempotency-key'] = options.idempotencyKey;
+    if (options.replayDeadline !== undefined) {
+      headers['idempotency-replay-deadline'] = String(options.replayDeadline);
+    }
     if (options.organizationId) headers['x-organization-id'] = options.organizationId;
     if (options.body !== undefined) headers['content-type'] = 'application/json';
 
@@ -284,6 +289,7 @@ export class Actor {
         baseUrl: options.baseUrl ?? this.config.gatewayUrl,
         path,
         headers,
+        ...(options.internalToken ? { internalToken: options.internalToken } : {}),
         body: options.body,
       },
       this.fetchImpl,

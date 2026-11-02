@@ -26,7 +26,8 @@ export function parseReprojectArgs(argv: readonly string[]): ReprojectArgs {
     else if (flag === '--organization') args.organizationId = optionValue(argv, ++i, flag);
     else if (flag === '--page-size') args.pageSize = Number(optionValue(argv, ++i, flag));
     else if (flag === '--reissue') args.reissue = true;
-    else throw new Error(`unknown argument ${String(flag)}`);
+    // Not repeated: only an argument that matched is ever echoed (#385 r6).
+    else throw new Error(`unknown argument at position ${i + 1}; it is not repeated`);
   }
   if (!Number.isInteger(args.pageSize) || args.pageSize < 1 || args.pageSize > MAX_PAGE_SIZE) {
     throw new Error(`--page-size must be an integer from 1 to ${MAX_PAGE_SIZE}`);

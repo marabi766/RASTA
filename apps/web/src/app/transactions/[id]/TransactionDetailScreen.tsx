@@ -11,7 +11,12 @@ import {
   StatusBadge,
 } from '@/ui';
 import { formatJalaliDateLong } from '@/lib/format';
-import { transactionStatusLabel, transactionTypeLabel } from '@/lib/labels';
+import {
+  transactionReasonLabel,
+  transactionSourceLabel,
+  transactionStatusLabel,
+  transactionTypeLabel,
+} from '@/lib/labels';
 import {
   disputedThroughOrder,
   disputeTargetOf,
@@ -142,7 +147,7 @@ export function TransactionDetailScreen({
           {t.settledAt ? <Row term="زمان تسویه">{formatJalaliDateLong(t.settledAt)}</Row> : null}
           {t.failureReason !== null ? (
             <Row term="دلیل ثبت‌شده برای لغو، بازگشت وجه یا ناموفقی">
-              <IsolatedText>{t.failureReason}</IsolatedText>
+              <IsolatedText>{transactionReasonLabel(t.failureReason)}</IsolatedText>
             </Row>
           ) : null}
         </dl>
@@ -165,9 +170,9 @@ export function TransactionDetailScreen({
           </Row>
           {t.sourceType !== null || t.sourceReference !== null ? (
             <Row term="مرجع">
-              <Identifier>
-                {[t.sourceType, t.sourceReference].filter(Boolean).join(' / ')}
-              </Identifier>
+              {t.sourceType !== null ? `${transactionSourceLabel(t.sourceType)}` : ''}
+              {t.sourceType !== null && t.sourceReference !== null ? ' · ' : ''}
+              {t.sourceReference !== null ? <Identifier>{t.sourceReference}</Identifier> : null}
             </Row>
           ) : null}
           {t.settlement !== null ? (

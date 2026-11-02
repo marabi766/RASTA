@@ -330,6 +330,10 @@ describe('issuing a command', () => {
         'sub_aaaaaaaaaaaaaaaaaaaa',
       ),
     );
-    expect(result).toMatchObject({ kind: 'INVALID', message: expect.stringContaining('ORD_1') });
+    expect(result).toMatchObject({
+      kind: 'INVALID',
+      message: expect.stringContaining('وضعیت سفارش'),
+    });
+    expect(JSON.stringify(result)).not.toContain('ORD_1');
   });
 });

@@ -77,9 +77,11 @@ export class CommissionController {
     summary: 'Commission rules that could apply to this organization',
     description:
       'Platform-wide rules and this organization own. Never another organization negotiated ' +
-      'rate. An empty list is the expected state today: docs/24 Q-08 is open and **no ' +
-      'commercial rate is seeded**, so every transaction settles at zero commission until the ' +
-      'steering group decides otherwise.',
+      'rate. **No commercial rate is seeded.** The pilot runs on an explicit 0% rule per ' +
+      'business line, created by the operator before the release (docs/24 Q-08): a settlement ' +
+      'priced by one reports `commissionRuleMatched: true` with nothing charged, and one whose ' +
+      'line no active rule covers is refused with 422 NO_ACTIVE_RULE outside development and ' +
+      'test (Q-29). The real rate is a new rule the steering group approves, not a deployment.',
   })
   async listRules(@Query(zodPipe(listCommissionRulesQuerySchema)) query: ListCommissionRulesQuery) {
     assertNotAuditor();

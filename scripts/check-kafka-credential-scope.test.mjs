@@ -13,6 +13,7 @@ import {
   composeServices,
   workflowSteps,
 } from './check-kafka-credential-scope-lib.mjs';
+import { KEY_SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (path) => readFileSync(resolve(ROOT, path), 'utf8');
@@ -385,4 +386,33 @@ test('kafka-credentials.sh hands out exactly each scope, each from its own direc
     rmSync(services, { recursive: true, force: true });
     rmSync(admins, { recursive: true, force: true });
   }
+});
+
+// #385 r4: the files these read may hold any name. A known principal's is
+// named; one no principal has is shown as a placeholder or a count.
+test('a Kafka password named for no known principal is flagged, and never named', () => {
+  for (const key of KEY_SENTINELS) {
+    const line = `KAFKA_SASL_PASSWORD_${key}=x\n`;
+    for (const problems of [
+      checkLocalEnv(line, SERVICES),
+      checkLocalEnv(`export ${line}`, SERVICES),
+      checkEnvExample(line, SERVICES),
+      checkBootstrapExample(
+        `KAFKA_SASL_PASSWORD_ADMIN=a\nKAFKA_SASL_PASSWORD_OPS_REPLAY=b\n${line}`,
+      ),
+    ]) {
+      assert.equal(problems.length, 1, key);
+      assert.match(problems[0], /named for no known principal/);
+      assertNoSentinel(problems.join('\n'), key);
+    }
+  }
+  // A known principal is still named.
+  assert.match(
+    checkLocalEnv('KAFKA_SASL_PASSWORD_ADMIN=x\n', SERVICES)[0],
+    /KAFKA_SASL_PASSWORD_ADMIN,/,
+  );
+  assert.match(
+    checkBootstrapExample('KAFKA_SASL_PASSWORD_ADMIN=a\nKAFKA_SASL_PASSWORD_KAFKA_UI=b\n')[0],
+    /it assigns ADMIN, KAFKA_UI$/,
+  );
 });

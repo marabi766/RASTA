@@ -9,12 +9,31 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { procurementOperationBudgets } from './operation-budgets';
 import { isKekId, parseKekConfiguration, parseKekEntries } from '../rfq/key-provider';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const KEK_CURRENT_NOT_IN_KEKS = fixed(
+  'PROCUREMENT_RFQ_KEK_CURRENT must name one of the ids in PROCUREMENT_RFQ_KEKS, ' +
+    'and be set exactly when PROCUREMENT_RFQ_KEKS is',
+);
+
+const RESERVED_CANCELLATION_CODE = fixed(
+  'PROCUREMENT_RFQ_CANCELLATION_CODES may not name NO_QUALIFIED_QUOTATION: it ' +
+    'arrives with evaluation (plan PR 10), which checks it',
+);
+const KEKS_MALFORMED = fixed(
+  'PROCUREMENT_RFQ_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+);
+const KEK_CURRENT_MALFORMED = fixed('PROCUREMENT_RFQ_KEK_CURRENT must be a KEK id (a-z0-9-)');
 
 export const SERVICE_NAME = 'procurement-service';
 
@@ -86,15 +105,20 @@ function commaList() {
 
 /** A list of platform roles of the buyer's own organization: never the oversight role or the operator. */
 function roleList(name: string, options: { min: number }) {
+  const unknownRole = fixed(`Unknown role in ${name}`);
   return commaList().pipe(
     z
-      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: `Unknown role in ${name}` }) }))
-      .min(options.min, `${name} must name at least ${options.min} role`)
+      .array(z.enum(PLATFORM_ROLES, { error: unknownRole }))
+      .min(options.min, fixed(`${name} must name at least ${options.min} role`))
       .refine((roles) => !roles.includes(REFUSED_ROLE), {
-        message: `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        message: fixed(
+          `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        ),
       })
       .refine((roles) => !roles.includes(PLATFORM_ROLE), {
-        message: `${name} may not name ${PLATFORM_ROLE}: the platform operator never acts for a buyer`,
+        message: fixed(
+          `${name} may not name ${PLATFORM_ROLE}: the platform operator never acts for a buyer`,
+        ),
       }),
   );
 }
@@ -185,15 +209,15 @@ export const procurementEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     PROCUREMENT_DEMAND_ROLES: z
       .string()
-      .default('PROCUREMENT_USER,ORGANIZATION_ADMIN')
+      .prefault('PROCUREMENT_USER,ORGANIZATION_ADMIN')
       .pipe(roleList('PROCUREMENT_DEMAND_ROLES', { min: 1 })),
 
     /** Q-10: seven days. At most a year: a window nobody closes is not a window. */
-    PROCUREMENT_AGGREGATION_WINDOW_HOURS: z.coerce.number().int().min(1).max(8760).default(168),
+    PROCUREMENT_AGGREGATION_WINDOW_HOURS: z.coerce.number().int().min(1).max(8760).prefault(168),
 
     /**
      * Q-10: no threshold. A whole quantity of the product's base unit, as a demand's is (Q-105).
@@ -206,27 +230,27 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(0)
       .max(2_147_483_647)
-      .default(0),
+      .prefault(0),
 
     /** Q-10: "carried into the next window". */
-    PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: z.enum(SHORTFALL_POLICIES).default('EXTEND'),
+    PROCUREMENT_AGGREGATION_SHORTFALL_POLICY: z.enum(SHORTFALL_POLICIES).prefault('EXTEND'),
 
     /** Q-119 (2): who records the organization's aggregation settings (plan PR 3). */
     PROCUREMENT_AGGREGATION_SETTING_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('PROCUREMENT_AGGREGATION_SETTING_ROLES', { min: 1 })),
 
     /** ADR-070 § 3: who cancels a READY aggregation (and, from PR 6, issues its RFQ). */
     PROCUREMENT_RFQ_ISSUER_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('PROCUREMENT_RFQ_ISSUER_ROLES', { min: 1 })),
 
     /** ADR-070 § 4: who reads, for an invited supplier's organization, the RFQs it is invited to. */
     PROCUREMENT_SUPPLIER_ROLES: z
       .string()
-      .default('SUPPLIER')
+      .prefault('SUPPLIER')
       .pipe(roleList('PROCUREMENT_SUPPLIER_ROLES', { min: 1 })),
 
     /**
@@ -236,7 +260,7 @@ export const procurementEnvSchema = baseEnvSchema
      */
     PROCUREMENT_RFQ_CANCELLATION_CODES: z
       .string()
-      .default(DEFAULT_RFQ_CANCELLATION_CODES.join(','))
+      .prefault(DEFAULT_RFQ_CANCELLATION_CODES.join(','))
       .pipe(
         commaList().pipe(
           z
@@ -245,12 +269,12 @@ export const procurementEnvSchema = baseEnvSchema
                 .string()
                 .regex(
                   RFQ_CANCELLATION_CODE_PATTERN,
-                  'A cancellation code is upper-case words, 2 to 64 characters',
+                  fixed('A cancellation code is upper-case words, 2 to 64 characters'),
                 ),
             )
-            .min(1, 'PROCUREMENT_RFQ_CANCELLATION_CODES must name at least one code')
+            .min(1, fixed('PROCUREMENT_RFQ_CANCELLATION_CODES must name at least one code'))
             .refine((codes) => new Set(codes).size === codes.length, {
-              message: 'PROCUREMENT_RFQ_CANCELLATION_CODES names a code twice',
+              message: fixed('PROCUREMENT_RFQ_CANCELLATION_CODES names a code twice'),
             })
             .refine(
               (codes) =>
@@ -258,9 +282,7 @@ export const procurementEnvSchema = baseEnvSchema
                   (RESERVED_RFQ_CANCELLATION_CODES as readonly string[]).includes(code),
                 ),
               {
-                message:
-                  'PROCUREMENT_RFQ_CANCELLATION_CODES may not name NO_QUALIFIED_QUOTATION: it ' +
-                  'arrives with evaluation (plan PR 10), which checks it',
+                message: RESERVED_CANCELLATION_CODE,
               },
             ),
         ),
@@ -272,7 +294,7 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(MAX_INVITEES_LIMIT)
-      .default(200),
+      .prefault(200),
 
     /**
      * The key-encryption keys that wrap each RFQ's private sealing key (ADR-070 § 4, ADR-066 § 2):
@@ -294,8 +316,7 @@ export const procurementEnvSchema = baseEnvSchema
           }
         },
         {
-          message:
-            'PROCUREMENT_RFQ_KEKS must be id:base64 pairs (id a-z0-9-, 32 random bytes each)',
+          message: KEKS_MALFORMED,
         },
       ),
     /** The id in `PROCUREMENT_RFQ_KEKS` that wraps new RFQ keys; older ones only unwrap. */
@@ -303,7 +324,7 @@ export const procurementEnvSchema = baseEnvSchema
       .string()
       .optional()
       .refine((value) => value === undefined || value === '' || isKekId(value), {
-        message: 'PROCUREMENT_RFQ_KEK_CURRENT must be a KEK id (a-z0-9-)',
+        message: KEK_CURRENT_MALFORMED,
       }),
 
     /**
@@ -312,13 +333,13 @@ export const procurementEnvSchema = baseEnvSchema
      * with a token signed for no tenant, before the issue's transaction. Unreachable, or anything
      * but a well-formed 200, refuses the issue (503; 504 past the timeout) and writes nothing.
      */
-    SUPPLIER_SERVICE_URL: z.string().url().default('http://localhost:3108'),
+    SUPPLIER_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3108'),
     PROCUREMENT_SUPPLIER_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
       .min(100)
       .max(60_000)
-      .default(5000),
+      .prefault(5000),
 
     /**
      * The sweeper that closes RFQs at their deadline (ADR-070 § 3, plan PR 6; the shape of the
@@ -332,26 +353,26 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(500)
       .max(300_000)
-      .default(5000),
-    PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+      .prefault(5000),
+    PROCUREMENT_RFQ_CLOSE_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
     PROCUREMENT_RFQ_CLOSE_SWEEP_LEASE_SECONDS: z.coerce
       .number()
       .int()
       .min(10)
       .max(3600)
-      .default(60),
+      .prefault(60),
     PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(3600)
-      .default(10),
+      .prefault(10),
     PROCUREMENT_RFQ_CLOSE_SWEEP_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(900),
+      .prefault(900),
 
     /**
      * A technical limit, not a business rule (PR-327 r2 F1, PR-338 r1 F1, Q-119 note of
@@ -369,15 +390,15 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(MAX_LIVE_DEMANDS_LIMIT)
-      .default(DEFAULT_MAX_LIVE_DEMANDS),
+      .prefault(DEFAULT_MAX_LIVE_DEMANDS),
 
-    PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    PROCUREMENT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
     PROCUREMENT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
       .number()
       .int()
       .min(10)
       .max(900)
-      .default(120),
+      .prefault(120),
 
     /**
      * The sweeper that ends windows past `closes_at` (ADR-070 § 2, plan PR 2; the shape of
@@ -394,21 +415,21 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(500)
       .max(300_000)
-      .default(5000),
-    PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
-    PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(60),
+      .prefault(5000),
+    PROCUREMENT_WINDOW_SWEEP_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    PROCUREMENT_WINDOW_SWEEP_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).prefault(60),
     PROCUREMENT_WINDOW_SWEEP_BACKOFF_BASE_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(3600)
-      .default(10),
+      .prefault(10),
     PROCUREMENT_WINDOW_SWEEP_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(900),
+      .prefault(900),
 
     /**
      * The batch of a window's end (`MAX_FOLLOW_BATCH_SIZE`): the most live demands one transaction
@@ -424,7 +445,7 @@ export const procurementEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(MAX_FOLLOW_BATCH_SIZE)
-      .default(2000),
+      .prefault(2000),
   })
   .superRefine((env, ctx) => {
     try {
@@ -438,12 +459,12 @@ export const procurementEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['PROCUREMENT_RFQ_KEK_CURRENT'],
-        message:
-          'PROCUREMENT_RFQ_KEK_CURRENT must name one of the ids in PROCUREMENT_RFQ_KEKS, ' +
-          'and be set exactly when PROCUREMENT_RFQ_KEKS is',
+        message: KEK_CURRENT_NOT_IN_KEKS,
       });
     }
   });
+
+export const PROCUREMENT_ENV_MESSAGES = seal();
 
 export type ProcurementEnv = z.infer<typeof procurementEnvSchema>;
 
@@ -467,7 +488,7 @@ export function loadProcurementEnv(source: NodeJS.ProcessEnv = process.env): Pro
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: procurementOperationBudgets },
+    { operationBudgets: procurementOperationBudgets, fixedMessages: PROCUREMENT_ENV_MESSAGES },
   );
 }
 

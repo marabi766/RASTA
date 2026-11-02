@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState, useCallback, useState } from 'react';
+import { useCallback, useState } from 'react';
 
 import { Alert, Button, Field, controlClassName } from '@/ui';
 import { toPersianDigits } from '@/lib/format';
@@ -34,16 +34,21 @@ import {
   type InventoryScope,
 } from '@/lib/inventory-commands';
 import { formatQuantity } from '@/lib/inventory-fields';
-import { isRedirect, sessionHasEnded, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { submitThroughSlot, useSlotActionState } from '@/lib/fenced-submission';
+import { SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
 import type { Binding } from '@/lib/unresolved-order';
 import {
+  advanceUnresolvedInventory,
+  answerUnresolvedInventory,
   clearUnresolvedInventory,
-  rememberInventoryFirstSend,
+  inventoryQuarantine,
   restoreUnresolvedInventory,
   saveUnresolvedInventory,
+  settleUnresolvedInventory,
   type ReplayStamp,
   type RestoredInventory,
 } from '@/lib/unresolved-inventory';
+import { UnresolvedForm } from '@/app/UnresolvedQuarantine';
 
 import { submitInventoryCommand } from './inventory-actions';
 import {
@@ -70,9 +75,12 @@ import {
  * A confirmed answer redirects and drops the entry; otherwise only the person
  * drops it, once the same request has been tried again or can no longer be.
  * A form drawn with a submission id that is already in doubt — a page brought
- * back from the browser's history — starts from that record (`initial`, from
- * `InventoryCommands`), and its send path checks again: a matching id alone is
- * never a first send.
+ * back from the browser's history — starts from that record (`UnresolvedForm`
+ * restores it on every mount), and its send path checks again: a matching id
+ * alone is never a first send. Every send goes through the one boundary
+ * (`lib/fenced-submission.ts`): a re-send records its generation before it
+ * leaves, and only the newest send's definite answer may clear the record —
+ * a first send's refusal arriving after a re-send left clears nothing.
  *
  * ## One unresolved command per slot
  *
@@ -155,7 +163,44 @@ function pendingFrom(
   };
 }
 
-export function InventoryCommandForm({
+/**
+ * The form, drawn the one way every fenced form is (`UnresolvedForm`): behind
+ * the device's quarantine of this kind, and — every time it mounts — from what
+ * `sessionStorage` keeps of its own submission, if anything: its uncertainty
+ * view, never a blank form under a key whose outcome is unknown.
+ */
+export function InventoryCommandForm(props: InventoryCommandFormProps) {
+  const { scope, submissionId, binding, sessionMaxAgeSeconds } = props;
+  const restore = () => {
+    const restored = restoreUnresolvedInventory(scope, binding, sessionMaxAgeSeconds);
+    return restored?.entry.submissionId === submissionId
+      ? { submissionId, state: unconfirmedFrom(restored) }
+      : null;
+  };
+  return (
+    <UnresolvedForm
+      source={inventoryQuarantine}
+      account={binding}
+      scope={slotOf(scope)}
+      restore={restore}
+    >
+      {(restored) => <InventoryCommandFormBody {...props} initial={restored ?? props.initial} />}
+    </UnresolvedForm>
+  );
+}
+
+function slotOf(scope: InventoryScope): string {
+  switch (scope.kind) {
+    case 'WAREHOUSES':
+      return 'warehouses';
+    case 'WAREHOUSE':
+      return `warehouse.${scope.warehouseId}`;
+    case 'SHIPMENT':
+      return `shipment.${scope.shipmentId}`;
+  }
+}
+
+function InventoryCommandFormBody({
   scope,
   command,
   csrfToken,
@@ -169,74 +214,70 @@ export function InventoryCommandForm({
   heldBy = null,
 }: InventoryCommandFormProps) {
   const send = useCallback(
-    async (previous: InventoryFormState, form: FormData): Promise<InventoryFormState> => {
-      const firstSend = previous.kind !== 'UNCONFIRMED';
+    (previous: InventoryFormState, form: FormData): Promise<InventoryFormState> => {
+      const retrying = previous.kind === 'UNCONFIRMED' ? previous : null;
       const sent = form.get(SUBMISSION_FIELD);
-      const sentId = firstSend ? (typeof sent === 'string' ? sent : '') : previous.submissionId;
-      if (firstSend) {
+      const submissionId = retrying ? retrying.submissionId : typeof sent === 'string' ? sent : '';
+      // Remembered BEFORE it is sent; not sent if it cannot be remembered.
+      const unsent = retrying ? null : pendingFrom(form, command, replay);
+      return submitThroughSlot<InventoryFormState>({
+        submissionId,
+        retrying,
+        // Another submission's outcome is unknown here: nothing is sent, and its
+        // record is not touched. This one's: the form was drawn again over it and
+        // does not know what it sent — the record, not the typed values, is shown.
+        stored: () => {
+          const stored = restoreUnresolvedInventory(scope, binding, sessionMaxAgeSeconds);
+          return stored
+            ? { submissionId: stored.entry.submissionId, state: unconfirmedFrom(stored) }
+            : null;
+        },
         // A typed command checked here first, before it is remembered or sent.
-        if (hasFields(command)) {
+        check: () => {
+          if (!hasFields(command)) return null;
           const values = inventoryFormValues(form);
           const parsed = parseInventoryForm(command, values);
-          if (!parsed.ok) {
-            return {
-              kind: 'INVALID',
-              command,
-              submissionId: sentId,
-              values,
-              fieldErrors: parsed.fieldErrors,
-              message: parsed.message,
-            };
-          }
-        }
-        // Another submission's outcome is unknown here: nothing is sent, and its
-        // record is not touched.
-        const holder = restoreUnresolvedInventory(scope, binding, sessionMaxAgeSeconds);
-        if (holder && holder.entry.submissionId !== sentId) return { kind: 'HELD' };
-        // This one's is: the form was drawn again over it (Back/Forward to a
-        // cached page) and does not know what it sent. Not a first send — nothing
-        // is sent, and the record, not the typed values, is what is shown.
-        if (holder) return unconfirmedFrom(holder);
-      } else {
+          return parsed.ok
+            ? null
+            : {
+                kind: 'INVALID',
+                command,
+                submissionId,
+                values,
+                fieldErrors: parsed.fieldErrors,
+                message: parsed.message,
+              };
+        },
+        remember: () => (unsent ? saveUnresolvedInventory(scope, unsent, binding) : null),
         // A replay only while the service still holds its key, and only from
         // the login it is bound to. Past that, never re-sent.
-        const stored = restoreUnresolvedInventory(scope, binding, sessionMaxAgeSeconds);
-        if (stored?.kind !== 'RETRYABLE' || stored.entry.submissionId !== previous.submissionId) {
-          return { ...previous, viewOnly: true };
-        }
-      }
-
-      // Remembered BEFORE it is sent; not sent if it cannot be remembered.
-      const unsent = firstSend ? pendingFrom(form, command, replay) : null;
-      const saved = unsent ? rememberInventoryFirstSend(scope, unsent, binding) : null;
-      if (saved === 'HELD') return { kind: 'HELD' };
-      if (saved === 'UNAVAILABLE') return { kind: 'STORAGE_UNAVAILABLE' };
-
-      let next: InventoryFormState;
-      try {
-        next = await submitInventoryCommand(scope, previous, form);
-      } catch (error) {
-        // Done: the action redirects to the warehouse or the shipment.
-        if (isRedirect(error)) {
-          clearUnresolvedInventory(scope, sentId);
-          throw error;
-        }
-        const ended = await sessionHasEnded();
-        if (!firstSend) return withRetryNote(previous, ended ? 'sessionEnded' : 'retryUnknown');
-        if (unsent) return ended ? { ...unsent, sessionEnded: true } : unsent;
-        throw error;
-      }
-
-      // Still in doubt: kept. A definite answer to the send that wrote the record
-      // just now: that record is dropped — never another's, and never on the
-      // answer to a later attempt, which says nothing about the first.
-      if (next.kind === 'UNCONFIRMED') saveUnresolvedInventory(scope, next, binding);
-      else if (saved === 'SAVED') clearUnresolvedInventory(scope, sentId);
-      return next;
+        admitRetry: (view) => {
+          const stored = restoreUnresolvedInventory(scope, binding, sessionMaxAgeSeconds);
+          return stored?.kind === 'RETRYABLE' && stored.entry.submissionId === view.submissionId
+            ? null
+            : { ...view, viewOnly: true };
+        },
+        // Its generation recorded before it leaves (`lib/unresolved-tenancy.ts`).
+        advance: () => advanceUnresolvedInventory(scope, submissionId, binding),
+        send: () => submitInventoryCommand(scope, previous, form),
+        failed: (ended) => {
+          if (retrying) return withRetryNote(retrying, ended ? 'sessionEnded' : 'retryUnknown');
+          if (!unsent) return null;
+          return ended ? { ...unsent, sessionEnded: true } : unsent;
+        },
+        // Still in doubt: kept, at this send's generation. A definite answer: only
+        // the newest send's own, and only a first send's refusal or a confirmed
+        // success, drops the record (`lib/fenced-submission.ts`).
+        answer: (state, attempt) => answerUnresolvedInventory(scope, state, binding, attempt),
+        settle: (attempt, settlement) =>
+          settleUnresolvedInventory(scope, submissionId, binding, attempt, settlement),
+        held: { kind: 'HELD' },
+        unavailable: { kind: 'STORAGE_UNAVAILABLE' },
+      });
     },
     [scope, command, replay, binding, sessionMaxAgeSeconds],
   );
-  const [state, action, pending] = useActionState(send, initial);
+  const [state, action, pending] = useSlotActionState(send, initial);
   const headingId = `inventory-command-${command}`;
 
   if (state.kind === 'UNCONFIRMED') {
@@ -248,7 +289,7 @@ export function InventoryCommandForm({
         csrfToken={csrfToken}
         headingId={headingId}
         pageHref={pageHref}
-        onForget={() => clearUnresolvedInventory(scope, state.submissionId)}
+        onForget={() => clearUnresolvedInventory(scope, state.submissionId, binding)}
       />
     );
   }
@@ -726,7 +767,7 @@ function UnconfirmedCommand({
         {what}
       </h3>
       <Alert tone="warning">
-        نتوانستیم تایید کنیم که «{what}» انجام شد یا نه؛ ممکن است انجام شده باشد. پیش از هر کار
+        نتوانستیم تأیید کنیم که «{what}» انجام شد یا نه؛ ممکن است انجام شده باشد. پیش از هر کار
         دیگر،{' '}
         <a href={pageHref} className="underline">
           این صفحه را تازه کنید

@@ -25,13 +25,13 @@ import type { ReadResult } from './assets';
 const requestSummarySchema = z.object({
   id: z.string(),
   assetId: z.string(),
-  scheduleId: z.string().nullable().default(null),
+  scheduleId: z.string().nullable().prefault(null),
   type: z.string(),
   status: z.string(),
-  severity: z.string().nullable().default(null),
+  severity: z.string().nullable().prefault(null),
   title: z.string(),
   reportedAt: renderableDate,
-  dueDate: renderableDate.nullable().default(null),
+  dueDate: renderableDate.nullable().prefault(null),
   totalCostMinor: z.string(),
 });
 
@@ -39,8 +39,8 @@ export type MaintenanceRequestSummary = z.infer<typeof requestSummarySchema>;
 
 const requestPageSchema = z.object({
   items: z.array(requestSummarySchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type MaintenanceRequestPage = z.infer<typeof requestPageSchema>;
@@ -60,14 +60,14 @@ const costLineSchema = z.object({
 const repairOrderSchema = z.object({
   id: z.string(),
   status: z.string(),
-  workshopName: z.string().nullable().default(null),
-  workSummary: z.string().nullable().default(null),
-  workPerformed: z.string().nullable().default(null),
+  workshopName: z.string().nullable().prefault(null),
+  workSummary: z.string().nullable().prefault(null),
+  workPerformed: z.string().nullable().prefault(null),
   assignedAt: renderableDate,
-  startedAt: z.string().nullable().default(null),
-  completedAt: z.string().nullable().default(null),
-  cancelledAt: z.string().nullable().default(null),
-  cancellationReason: z.string().nullable().default(null),
+  startedAt: z.string().nullable().prefault(null),
+  completedAt: z.string().nullable().prefault(null),
+  cancelledAt: z.string().nullable().prefault(null),
+  cancellationReason: z.string().nullable().prefault(null),
   partsCostMinor: z.string(),
   labourCostMinor: z.string(),
   otherCostMinor: z.string(),
@@ -83,7 +83,7 @@ export type RepairOrderSummary = z.infer<typeof repairOrderSchema>;
 const partLineSchema = z.object({
   id: z.string(),
   partName: z.string(),
-  partReference: z.string().nullable().default(null),
+  partReference: z.string().nullable().prefault(null),
   quantity: z.string(),
   unit: z.string(),
   unitCostMinor: z.string(),
@@ -95,7 +95,7 @@ const partLineSchema = z.object({
 const labourLineSchema = z.object({
   id: z.string(),
   description: z.string(),
-  technician: z.string().nullable().default(null),
+  technician: z.string().nullable().prefault(null),
   hours: z.string(),
   hourlyRateMinor: z.string(),
   totalCostMinor: z.string(),
@@ -111,17 +111,17 @@ const costLineEntrySchema = z.object({
   id: z.string(),
   category: z.string(),
   amountMinor: z.string(),
-  description: z.string().nullable().default(null),
-  partUsageId: z.string().nullable().default(null),
-  laborEntryId: z.string().nullable().default(null),
+  description: z.string().nullable().prefault(null),
+  partUsageId: z.string().nullable().prefault(null),
+  laborEntryId: z.string().nullable().prefault(null),
   recordedAt: z.string(),
 });
 
 /** A repair order with what was recorded under it. */
 const repairOrderDetailSchema = repairOrderSchema.extend({
-  parts: z.array(partLineSchema).default([]),
-  labour: z.array(labourLineSchema).default([]),
-  costs: z.array(costLineEntrySchema).default([]),
+  parts: z.array(partLineSchema).prefault([]),
+  labour: z.array(labourLineSchema).prefault([]),
+  costs: z.array(costLineEntrySchema).prefault([]),
 });
 
 export type RepairOrderDetail = z.infer<typeof repairOrderDetailSchema>;
@@ -130,19 +130,19 @@ export type RepairLabourLine = z.infer<typeof labourLineSchema>;
 export type RepairCostLine = z.infer<typeof costLineEntrySchema>;
 
 const requestDetailSchema = requestSummarySchema.extend({
-  description: z.string().nullable().default(null),
+  description: z.string().nullable().prefault(null),
   reportedBy: z.string(),
-  outOfServiceAt: z.string().nullable().default(null),
-  returnedToServiceAt: renderableDate.nullable().default(null),
-  downtimeMinutes: z.number().int().nullable().default(null),
-  startedAt: renderableDate.nullable().default(null),
-  completedAt: renderableDate.nullable().default(null),
-  approvedAt: renderableDate.nullable().default(null),
-  approvalNotes: z.string().nullable().default(null),
-  cancelledAt: renderableDate.nullable().default(null),
-  cancellationReason: z.string().nullable().default(null),
-  repairOrders: z.array(repairOrderSchema).default([]),
-  costBreakdown: z.array(costLineSchema).default([]),
+  outOfServiceAt: z.string().nullable().prefault(null),
+  returnedToServiceAt: renderableDate.nullable().prefault(null),
+  downtimeMinutes: z.number().int().nullable().prefault(null),
+  startedAt: renderableDate.nullable().prefault(null),
+  completedAt: renderableDate.nullable().prefault(null),
+  approvedAt: renderableDate.nullable().prefault(null),
+  approvalNotes: z.string().nullable().prefault(null),
+  cancelledAt: renderableDate.nullable().prefault(null),
+  cancellationReason: z.string().nullable().prefault(null),
+  repairOrders: z.array(repairOrderSchema).prefault([]),
+  costBreakdown: z.array(costLineSchema).prefault([]),
 });
 
 export type MaintenanceRequestDetail = z.infer<typeof requestDetailSchema>;

@@ -13,6 +13,8 @@ import {
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { WalletScreen } from './WalletScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/wallet` route — کیف پول و تراکنش (docs/16 § ۱۶٫۶, role
@@ -40,7 +42,7 @@ export default async function WalletPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/wallet');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const query: TransactionListQuery = {
     status: one(params.status),
     transactionType: one(params.transactionType),
@@ -62,8 +64,9 @@ export default async function WalletPage({
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -79,7 +82,7 @@ export default async function WalletPage({
         holds={holds}
         transactions={transactions}
         provider={provider}
-        query={query}
+        query={{ ...query, context: pageContext(session) }}
         csrfToken={session.csrfToken}
         submissionId={mintSubmissionId(session)}
       />

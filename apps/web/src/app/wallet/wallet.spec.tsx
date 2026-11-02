@@ -3,6 +3,7 @@ import { axe } from 'jest-axe';
 
 import { WalletScreen } from './WalletScreen';
 import { formatMoney } from '@/lib/format';
+import { providerNotice } from '@/lib/wallet-fields';
 import type {
   HoldsPage,
   PaymentProviderDisclosure,
@@ -10,6 +11,8 @@ import type {
   TransactionPage,
   Wallet,
 } from '@/server/wallet';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * `WalletScreen`, composing four independent reads. Mirrors
@@ -81,7 +84,6 @@ const TRANSACTIONS: TransactionPage = {
 const PROVIDER: PaymentProviderDisclosure = {
   provider: 'mock',
   simulated: true,
-  notice: 'Simulated payment provider. No bank connection, no real funds, no custody of money.',
 };
 
 function render_(
@@ -90,7 +92,7 @@ function render_(
     holds?: ReadResult<HoldsPage>;
     transactions?: ReadResult<TransactionPage>;
     provider?: ReadResult<PaymentProviderDisclosure>;
-    query?: { status?: string; transactionType?: string; cursor?: string };
+    query?: { context?: string; status?: string; transactionType?: string; cursor?: string };
   } = {},
 ) {
   return render(
@@ -99,7 +101,7 @@ function render_(
       holds={overrides.holds ?? { kind: 'OK', data: HOLDS }}
       transactions={overrides.transactions ?? { kind: 'OK', data: TRANSACTIONS }}
       provider={overrides.provider ?? { kind: 'OK', data: PROVIDER }}
-      query={overrides.query ?? {}}
+      query={{ context: TEST_CONTEXT, ...overrides.query }}
       csrfToken="csrf-token-for-this-session"
       submissionId="sub_AAAAAAAAAAAAAAAAAAAA"
     />,
@@ -128,8 +130,31 @@ describe('the balance', () => {
 describe('the top-up section', () => {
   it('shows the simulation disclosure and the form when the provider read succeeds', () => {
     const { getByText, container } = render_();
-    expect(getByText(PROVIDER.notice)).toBeInTheDocument();
+    expect(getByText(providerNotice(true))).toBeInTheDocument();
     expect(container.querySelector('[name="amountMinor"]')).toBeInTheDocument();
+  });
+
+  it('words the disclosure in Persian from the provider state, never the service’s English sentence', () => {
+    // The service still sends its English `notice`; the page does not render it.
+    const english =
+      'Simulated payment provider. No bank connection, no real funds, no custody of money.';
+    const { container, queryByText } = render_({
+      provider: {
+        kind: 'OK',
+        data: { ...PROVIDER, notice: english } as unknown as PaymentProviderDisclosure,
+      },
+    });
+    expect(queryByText(english)).toBeNull();
+    expect(container.textContent).not.toMatch(/Simulated|bank connection|custody/);
+    expect(container.textContent).toContain(providerNotice(true));
+  });
+
+  it('says the live provider in Persian too', () => {
+    const { container } = render_({
+      provider: { kind: 'OK', data: { ...PROVIDER, simulated: false } },
+    });
+    expect(container.textContent).toContain(providerNotice(false));
+    expect(container.textContent).not.toMatch(/Live payment provider/);
   });
 
   it('withholds the form rather than showing an amount field with no disclosure above it', () => {
@@ -139,6 +164,44 @@ describe('the top-up section', () => {
     expect(container.querySelector('[name="amountMinor"]')).toBeNull();
     expect(getByText('افزایش موجودی اکنون در دسترس نیست')).toBeInTheDocument();
   });
+});
+
+describe('the whole screen: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn once, above the balances, while the provider is simulated', () => {
+    const { getAllByText, queryByText } = render_();
+    expect(getAllByText('حالت نمایشی')).toHaveLength(1);
+    expect(queryByText('وضعیت درگاه پرداخت معلوم نیست')).toBeNull();
+  });
+
+  it('is absent once the provider is real', () => {
+    const { queryByText, container } = render_({
+      provider: {
+        kind: 'OK',
+        data: { ...PROVIDER, simulated: false },
+      },
+    });
+    expect(queryByText('حالت نمایشی')).toBeNull();
+    expect(queryByText('وضعیت درگاه پرداخت معلوم نیست')).toBeNull();
+    expect(container.querySelector('[name="amountMinor"]')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['refused', { kind: 'FORBIDDEN' } as const],
+    ['unavailable', { kind: 'UNAVAILABLE', status: 503, correlationId: 'COR_1' } as const],
+    ['malformed', { kind: 'MALFORMED', correlationId: 'COR_2' } as const],
+  ])(
+    'says the provider is unknown when its read was %s — the history still shown, labelled',
+    (_how, provider) => {
+      // Even with the wallet itself unread: the history below is money too.
+      const { getByText, queryByText } = render_({
+        provider,
+        wallet: { kind: 'UNAVAILABLE', status: 503, correlationId: 'COR_9' },
+      });
+      expect(getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+      expect(queryByText('حالت نمایشی')).toBeNull();
+      expect(getByText('تراکنش‌ها')).toBeInTheDocument();
+    },
+  );
 });
 
 describe('escrow holds', () => {
@@ -178,7 +241,10 @@ describe('transaction history', () => {
     const unfiltered = render_({ transactions: empty });
     expect(unfiltered.getByText('هیچ تراکنشی ثبت نشده')).toBeInTheDocument();
 
-    const filtered = render_({ transactions: empty, query: { status: 'DISPUTED' } });
+    const filtered = render_({
+      transactions: empty,
+      query: { context: TEST_CONTEXT, status: 'DISPUTED' },
+    });
     expect(filtered.getByText('چیزی با این پالایش پیدا نشد')).toBeInTheDocument();
   });
 
@@ -188,11 +254,11 @@ describe('transaction history', () => {
 
     const { getByRole } = render_({
       transactions: { kind: 'OK', data: { ...TRANSACTIONS, hasMore: true, nextCursor: 'CUR_2' } },
-      query: { status: 'SETTLED' },
+      query: { context: TEST_CONTEXT, status: 'SETTLED' },
     });
     expect(getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      '/wallet?status=SETTLED&cursor=CUR_2',
+      withContext(TEST_CONTEXT, '/wallet?status=SETTLED&cursor=CUR_2'),
     );
   });
 

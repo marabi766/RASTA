@@ -82,7 +82,7 @@ PRIVILEGE_SPLIT_SERVICES=(
 # `default` (DML on every table, by default privileges) otherwise.
 privilege_split_grants_mode() {
   case "$1" in
-    supplier) printf 'migration' ;;
+    supplier|analytics) printf 'migration' ;;
     *) printf 'default' ;;
   esac
 }

@@ -1,6 +1,15 @@
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { asActor, cleanup, newPrisma, readBalances, tenants, wire, type Wiring } from './helpers';
+import {
+  asActor,
+  cleanup,
+  newPrisma,
+  readBalances,
+  tenants,
+  wire,
+  type Wiring,
+  unanswered,
+} from './helpers';
 import { RewardGrantError } from '../src/reward/reward.service';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
@@ -33,15 +42,18 @@ describe('rewards (real database)', () => {
 
   async function createRule(overrides: Record<string, unknown>) {
     return asActor({ organizationId: org.a, roles: ['SYSTEM_ADMIN'] }, () =>
-      wiring.rewards.createRule({
-        organizationId: org.a,
-        triggerEvent: 'USAGE_RECORDED',
-        rewardType: 'POINTS',
-        points: 10,
-        status: 'ACTIVE',
-        label: 'itest',
-        ...overrides,
-      } as never),
+      wiring.rewards.createRule(
+        {
+          organizationId: org.a,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points: 10,
+          status: 'ACTIVE',
+          label: 'itest',
+          ...overrides,
+        } as never,
+        unanswered(),
+      ),
     );
   }
 

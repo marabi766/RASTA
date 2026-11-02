@@ -17,6 +17,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SENTINELS, assertNoSentinel } from './refusal-probes.mjs';
 
 const SCRIPT = fileURLToPath(new URL('./marketplace-saga-drain-check.mjs', import.meta.url));
 const QUERY = 'WorkflowType="orderSaga" AND ExecutionStatus="Running"';
@@ -223,7 +224,7 @@ const UNVERIFIABLE = {
   'the CLI is not installed': [
     drained(),
     { cli: '/nonexistent/temporal' },
-    /temporal task-queue describe: .*ENOENT/,
+    /temporal task-queue describe: TEMPORAL_CLI could not be run \(ENOENT\)$/m,
   ],
   'the CLI fails (unreachable server, refused credentials)': [
     {
@@ -407,3 +408,19 @@ for (const [name, [scenario, options, message]] of Object.entries(UNVERIFIABLE))
     assert.doesNotMatch(stdout, /OK/);
   });
 }
+
+// #385 r4: TEMPORAL_CLI's value — a path — is not repeated when it cannot run.
+test('blocks on a CLI that cannot run, without printing the configured path', () => {
+  for (const sentinel of SENTINELS) {
+    const { status, stdout, stderr } = run(drained(), {
+      cli: `/nonexistent/${sentinel}/${sentinel.replaceAll('-', '_')}/temporal`,
+    });
+    assert.equal(status, 2);
+    assert.equal(
+      stderr,
+      'marketplace saga drain check: cannot verify — deployment blocked: temporal task-queue ' +
+        'describe: TEMPORAL_CLI could not be run (ENOENT)\n',
+    );
+    assertNoSentinel(stdout + stderr, sentinel);
+  }
+});

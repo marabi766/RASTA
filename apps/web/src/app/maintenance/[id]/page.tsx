@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { tokenWriteRoles } from '@/server/realm-roles';
 import { fetchMaintenanceRequest, fetchRepairOrder } from '@/server/maintenance';
 import { canManageMaintenance, sealApprovalBaseline } from '@/server/maintenance-commands';
@@ -25,6 +26,8 @@ import {
   RecordPartForm,
   StartRepairForm,
 } from './RepairOrderForms';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageParams } from '@/server/page-context';
 
 /**
  * The `/maintenance/[id]` route (docs/16 § 16.6).
@@ -46,10 +49,10 @@ export default async function MaintenanceRequestPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
-  const query = await searchParams;
 
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/maintenance/${id}`)}`);
+  const query = await pageParams(session, searchParams);
   // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
@@ -129,10 +132,13 @@ export default async function MaintenanceRequestPage({
     }
   }
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -146,6 +152,7 @@ export default async function MaintenanceRequestPage({
       <RequestDetailScreen
         result={result}
         requestId={id}
+        demoMode={demoMode}
         notice={readFlash(
           session,
           typeof query[FLASH_PARAM] === 'string' ? query[FLASH_PARAM] : undefined,

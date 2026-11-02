@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 import { WORKFLOW_KEYS } from '../policy/policy.state-machine';
 
 /**
@@ -56,7 +57,7 @@ export type ContractEventName = keyof typeof CONTRACT_EVENTS;
 
 const id = z.string().min(1).max(128);
 /** ISO 8601 in UTC, the form every event of the platform carries a time in. */
-const instant = z.string().datetime({ offset: false });
+const instant = z.string().check(isoDateTime({ offset: false }));
 
 /**
  * A draft contract was made from an awarded tender (ADR-068 § 3). Keyed by
@@ -710,10 +711,10 @@ export function validateContractPayload<N extends ContractEventName>(
   payload: unknown,
 ): ContractEventPayload<N> {
   const schema = CONTRACT_EVENT_SCHEMAS[eventName];
-  const parsed = schema.safeParse(payload);
+  const parsed = legacyParse(schema, payload);
   if (!parsed.success) {
     throw new Error(
-      `${eventName} payload does not match its published contract: ${parsed.error.message}`,
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
     );
   }
   return parsed.data as ContractEventPayload<N>;

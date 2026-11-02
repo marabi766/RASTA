@@ -1,13 +1,16 @@
 /**
  * @jest-environment node
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
   declaredTestInputs,
+  filesMatching,
+  globToRegExp,
   isDeclared,
   isOutsideInput,
+  matchesGlob,
   undeclaredReads,
 } from './test/turbo-inputs-guard';
 
@@ -33,12 +36,13 @@ describe('apps/web/turbo.json test inputs', () => {
     expect(inputsOf('test:unit')).toEqual(inputsOf('test'));
   });
 
-  it('keep the default inputs and name only files that exist, under the repository root', () => {
+  it('keep the default inputs and name only patterns that match a file, under the repository root', () => {
     const inputs = inputsOf('test');
     expect(inputs[0]).toBe('$TURBO_DEFAULT$');
     for (const entry of inputs.slice(1)) {
       expect(entry.startsWith('$TURBO_ROOT$/')).toBe(true);
-      expect([entry, existsSync(abs(entry.slice('$TURBO_ROOT$/'.length)))]).toEqual([entry, true]);
+      const matched = filesMatching(entry.slice('$TURBO_ROOT$/'.length)).length;
+      expect([entry, matched > 0]).toEqual([entry, true]);
     }
   });
 
@@ -51,15 +55,17 @@ describe('apps/web/turbo.json test inputs', () => {
 describe('the guard', () => {
   const declared = declaredTestInputs();
 
-  it('reads the declared inputs as repository-relative paths', () => {
-    expect(declared).toContain('services/asset-service/src/asset/dto.ts');
-    expect(declared).toContain('services/maintenance-service/src/maintenance/dto.ts');
+  it('reads the declared inputs as repository-relative patterns', () => {
+    expect(declared).toContain('services/asset-service/src/**');
+    expect(declared).toContain('services/construction-service/prisma/schema.prisma');
   });
 
   it('passes a file that is named, and files that are not inputs at all', () => {
     expect(
       undeclaredReads([
         abs('services/asset-service/src/asset/dto.ts'),
+        abs('services/asset-service/src/a-file-added-later/new.ts'),
+        abs('services/construction-service/prisma/schema.prisma'),
         abs('apps/web/src/lib/labels.ts'),
         abs('node_modules/zod/index.js'),
         abs('packages/contracts/dist/index.js'),
@@ -74,12 +80,14 @@ describe('the guard', () => {
     expect(
       undeclaredReads([
         abs('services/asset-service/src/asset/dto.ts'),
-        abs('services/maintenance-service/src/maintenance/NOT-LISTED.ts'),
-        abs('packages/contracts/src/never-listed.ts'),
+        abs('services/identity-service/src/auth/NOT-LISTED.ts'),
+        abs('packages/logging/src/index.ts'),
+        abs('services/construction-service/prisma/other.prisma'),
       ]),
     ).toEqual([
-      'packages/contracts/src/never-listed.ts',
-      'services/maintenance-service/src/maintenance/NOT-LISTED.ts',
+      'packages/logging/src/index.ts',
+      'services/construction-service/prisma/other.prisma',
+      'services/identity-service/src/auth/NOT-LISTED.ts',
     ]);
   });
 
@@ -92,10 +100,26 @@ describe('the guard', () => {
     expect(isOutsideInput('/elsewhere/a.ts')).toBe(false);
   });
 
-  it('matches a directory entry as a prefix and a file entry exactly', () => {
+  it('matches globs: `**` crosses directories, `*` and `?` stay in one segment, a plain path is exact', () => {
     expect(isDeclared(abs('a/b/c.ts'), ['a/b/**'])).toBe(true);
+    expect(isDeclared(abs('a/b/c/d.ts'), ['a/b/**'])).toBe(true);
     expect(isDeclared(abs('a/bb/c.ts'), ['a/b/**'])).toBe(false);
     expect(isDeclared(abs('a/b/c.ts'), ['a/b/c.ts'])).toBe(true);
     expect(isDeclared(abs('a/b/c.tsx'), ['a/b/c.ts'])).toBe(false);
+    expect(matchesGlob('a/b/c.ts', 'a/*/c.ts')).toBe(true);
+    expect(matchesGlob('a/b/x/c.ts', 'a/*/c.ts')).toBe(false);
+    expect(matchesGlob('a/b/x/c.ts', 'a/**/c.ts')).toBe(true);
+    expect(matchesGlob('a/c.ts', 'a/**/c.ts')).toBe(true);
+    expect(matchesGlob('a/b/c.ts', 'a/b/?.ts')).toBe(true);
+    expect(globToRegExp('a.b/**').test('aXb/c')).toBe(false);
+  });
+
+  it('finds the files a pattern matches, and none for a pattern that matches nothing', () => {
+    expect(filesMatching('services/asset-service/src/**').length).toBeGreaterThan(0);
+    expect(filesMatching('services/construction-service/prisma/schema.prisma')).toEqual([
+      'services/construction-service/prisma/schema.prisma',
+    ]);
+    expect(filesMatching('services/asset-service/src/no-such-dir/**')).toEqual([]);
+    expect(filesMatching('services/asset-service/NOT-A-FILE.ts')).toEqual([]);
   });
 });

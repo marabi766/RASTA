@@ -480,6 +480,34 @@ Indexهای یکتای جزئی `ux_bid_evaluation_person` و `ux_bid_recusal_pe
 | I5  | ثبت‌نام انبوه خودکار                   | D      | M   | M      | Rate Limit · تأیید دستی ثبت‌نام (الزام سند محصول)                          |
 | I6  | Session ربوده‌شده پس از خروج           | S      | M   | L      | ابطال سمت سرور · عمر کوتاه Access Token                                    |
 
+**I2 و I5 پس از task 117 و task 130 (ممیزی F1 و F5؛ PR #483 r1 R1 و R5).** کنترل I2 بر اختیار **زندهٔ** فراخواننده تکیه
+می‌کند، نه توکن: هر نوشتن مدیریت هویت عضویت فراخواننده را درون تراکنش و پس از قفل‌ها از پایگاه داده می‌خواند (ADR-060، افزودهٔ
+اختیار زنده)؛ وگرنه مدیری که تنزل یافته بود با توکن پیشینش نقش را برای همیشه برمی‌گرداند. نقش‌های زنده با **همان گزاره‌ای**
+سنجیده می‌شوند که `RolesGuard` بر توکن اعمال می‌کند (`assertRolesAdmitted`): ردِ `AUDITOR` پیش از هر اعطا، حتی کنار
+`ORGANIZATION_ADMIN` یا `SYSTEM_ADMIN`. برای I5، `POST /v1/registration-requests` به هر درخواست معتبر یک پاسخ می‌دهد —
+`202 {"status":"RECEIVED"}` — و پیش از پاسخ برای همه **یک کار** می‌کند: یک ردیف `registration_intake` و Commit، بی هیچ خواندن
+یا قیدی که به وجود حساب وابسته باشد. اینکه نام کاربری یا ایمیل گرفته است، پس از پاسخ و به‌طور خصوصی، در کارگر ثبت‌نام
+(`RegistrationIntakeWorker`) تصمیم گرفته می‌شود. آزمون `registration-acknowledgement.int-spec.ts` هم بایت‌های پاسخ، هم ردیف‌های
+نوشته‌شده و هم میانهٔ زمان پاسخ را (±۲۵٪ روی ۴۰ جفت درهم) می‌سنجد؛ حدِ آن آزمون: پایگاه دادهٔ آزمون روی همین ماشین، نه شبکه، و
+اختلافی کوچک‌تر از آن مرز را نمی‌گیرد. Rate Limit پنج در ساعت فقط بر خود ثبت‌نام است.
+
+**منشأ ممیزی از صف دریافت عبور می‌کند (PR #483 r2 N1).** رویداد `REGISTRATION_SUBMITTED` پس از پایان درخواست، در کارگر ساخته
+می‌شود و Context آن درخواست دیگر وجود ندارد؛ پس ردیف `registration_intake` منشأ درخواست را جدا از بدنهٔ متقاضی نگه می‌دارد:
+کنشگر تأییدشده (`actor_type` و `actor_id`، فقط از Context احراز هویت و هرگز از بدنه؛ برای درخواست ناشناس `ANONYMOUS` بی
+شناسه) و Correlation ID همان درخواست. کارگر آن را با تنها مسیر بازگرداندن (`restoreOutboxProvenance` و `buildRestoredOutboxRow`)
+به رویداد می‌دهد و Context محیطی خوانده نمی‌شود؛ پس ممیزی فرستندهٔ واقعی و زنجیرهٔ همان درخواست را ثبت می‌کند و ثبت‌نام ناشناس
+را `ANONYMOUS` — نه `SYSTEM / identity-service`، که کار پس‌زمینهٔ خود سرویس است (PR #483 r3 F1؛ Envelope: `anonymous: true`).
+هیچ توکن یا اعتبارنامه‌ای ذخیره نمی‌شود. آزمون: `registration-provenance.int-spec.ts` (پس از پایان درخواست، زیر Context دیگر، و
+پس از راه‌اندازی دوباره) و تا رکورد ممیزی: `audit-service/test/ingestion.int-spec.ts` و E2E `04-registration-approval`.
+
+**منشأ را هیچ ناشری نمی‌تواند جایگزین کند (PR #483 r3 F2).** ورودی عادی Outbox (`OutboxMessageInput`) منشأ ندارد:
+`buildOutboxRow` کنشگر و Correlation ID را فقط از Context تأییدشده می‌گیرد و ورودی‌ای را که `provenance` داشته باشد رد می‌کند.
+منشأ بازگردانده‌شده مقداری مُهرخورده است (`OutboxProvenance`) که فقط `captureOutboxProvenance` (از Context) و
+`restoreOutboxProvenance` (از ردیف ذخیره‌شده) می‌سازند؛ شیء دست‌نوشته نه Typecheck می‌شود نه در اجرا پذیرفته می‌شود، و
+`buildRestoredOutboxRow` مستأجر را الزامی می‌کند. آزمون `scripts/outbox-provenance-restoration-guard.test.mjs` نام‌بردن از این
+مسیر را بیرون از صف دریافت ثبت‌نام رد می‌کند؛ آزمون `enqueue-provenance.spec.ts` در identity، asset، fleet، maintenance و
+organization نشان می‌دهد `enqueueEvent` منشأ داده‌شده را رد می‌کند و کنشگر، Correlation و مستأجر دیگر را نادیده می‌گیرد.
+
 ### دامنه Asset / Fleet
 
 | #   | تهدید                                         | STRIDE | اثر | احتمال | کنترل                                                        |

@@ -1,5 +1,12 @@
 import { z } from 'zod';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import {
+  DLQ_REASONS,
+  type EventEnvelope,
+  type LegacyIssue,
+  legacyParse,
+  requireLegacyRefusal,
+  type LegacyRefusal,
+} from '@rasta/contracts';
 import { UnprocessableEventError, type EventDelivery } from '@rasta/nest-common';
 import {
   ECONOMIC_RECONCILIATION_CONTRACT,
@@ -279,7 +286,7 @@ const REPORTABLE_FIELDS: ReadonlySet<string> = new Set([
 ]);
 
 /** The top-level schema field an issue is about, or `(payload)`. Never a payload-supplied name. */
-function fieldOf(issue: z.ZodIssue): string {
+function fieldOf(issue: LegacyIssue): string {
   const [first] = issue.path;
   if (first === undefined) return '(payload)';
   return typeof first === 'string' && REPORTABLE_FIELDS.has(first) ? first : '(payload)';
@@ -290,12 +297,15 @@ function fieldOf(issue: z.ZodIssue): string {
  * never an issue message (some repeat the value received) and never a path
  * segment the payload supplied.
  */
-export function describeIssues(error: z.ZodError): string {
-  const issues = error.issues
+export function describeIssues(refusal: LegacyRefusal): string {
+  // zod 3's codes, which these diagnostics have always carried, translated
+  // against the schema that refused (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F1).
+  const { issues } = requireLegacyRefusal(refusal, 'describeIssues');
+  const named = issues
     .slice(0, 8)
     .map((issue) => `${fieldOf(issue)} ${issue.code}`)
     .join('; ');
-  return error.issues.length > 8 ? `${issues}; and ${error.issues.length - 8} more` : issues;
+  return issues.length > 8 ? `${named}; and ${issues.length - 8} more` : named;
 }
 
 function refuse(eventName: string, why: string): UnprocessableEventError {
@@ -352,9 +362,9 @@ export function toPaymentReconciliationEvidence(
  * allow-list would have kept from it.
  */
 function assertEconomicContract(eventName: PaymentReconciliationEventName, payload: unknown): void {
-  const parsed = ECONOMIC_RECONCILIATION_CONTRACT[eventName].safeParse(payload);
+  const parsed = legacyParse(ECONOMIC_RECONCILIATION_CONTRACT[eventName], payload);
   if (!parsed.success) {
-    throw refuse(eventName, `economic's event contract: ${describeIssues(parsed.error)}`);
+    throw refuse(eventName, `economic's event contract: ${describeIssues(parsed.refusal)}`);
   }
 }
 
@@ -363,8 +373,8 @@ function fromResolved(
   payload: unknown,
 ): PaymentReconciliationEvidence {
   assertEconomicContract(eventName, payload);
-  const parsed = resolvedPayload.safeParse(payload);
-  if (!parsed.success) throw refuse(eventName, describeIssues(parsed.error));
+  const parsed = legacyParse(resolvedPayload, payload);
+  if (!parsed.success) throw refuse(eventName, describeIssues(parsed.refusal));
   const value = parsed.data;
   return {
     projectionVersion: PAYMENT_RECONCILIATION_PROJECTION_VERSION,
@@ -391,8 +401,8 @@ function fromOperatorAction(
   payload: unknown,
 ): PaymentReconciliationEvidence {
   assertEconomicContract(eventName, payload);
-  const parsed = operatorActionPayload.safeParse(payload);
-  if (!parsed.success) throw refuse(eventName, describeIssues(parsed.error));
+  const parsed = legacyParse(operatorActionPayload, payload);
+  if (!parsed.success) throw refuse(eventName, describeIssues(parsed.refusal));
   const value = parsed.data;
   return {
     projectionVersion: PAYMENT_RECONCILIATION_PROJECTION_VERSION,

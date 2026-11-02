@@ -1,0 +1,188 @@
+diff --git a/v4/classic/schemas.cjs b/v4/classic/schemas.cjs
+index d624a212b95515c07054dcdc5604e1db4d531396..f9623c69b063458f44db18647c028eda259efa02 100644
+--- a/v4/classic/schemas.cjs
++++ b/v4/classic/schemas.cjs
+@@ -132,6 +132,11 @@ const processors = __importStar(require("../core/json-schema-processors.cjs"));
+ const regexes = __importStar(require("../core/regexes.cjs"));
+ const to_json_schema_js_1 = require("../core/to-json-schema.cjs");
+ const en_js_1 = __importDefault(require("../locales/en.cjs"));
++// @rasta patch (PR #444, D-078): zod 3's run order, for diagnostics only. Every hunk
++// marked so is off unless the parse's params carry this registered symbol set to true.
++// Only @rasta/contracts' legacyParse sets it, and only on input stock zod has already
++// refused: every other parse, and acceptance everywhere, is stock zod 4.6.7.
++const LEGACY_RUN_ORDER = Symbol.for("@rasta/zod.legacyRunOrder");
+ const checks = __importStar(require("./checks.cjs"));
+ const parse = __importStar(require("./parse.cjs"));
+ // Register English as the default locale on first ZodType construction. Hooked into the `ZodType` `$constructor` (rather than a top-level `config(en())` in `external.ts`) so bundlers honoring `sideEffects: false` can't tree-shake it out — see #5953, #5725. An explicit `z.config(z.locales.xx())` call wins regardless of order, since this only sets the default when none is present.
+@@ -1336,6 +1341,10 @@ exports.ZodTransform = core.$constructor("ZodTransform", (inst, def) => {
+                     _issue.input = payload.value;
+                 _issue.inst ?? (_issue.inst = inst);
+                 // _issue.continue ??= true;
++                // @rasta patch (PR #444, D-078): switched on, an issue a transform adds marks the value
++                // dirty, as in zod 3: enclosing refinements still run, unless it is fatal.
++                if (_ctx?.[LEGACY_RUN_ORDER] === true)
++                    _issue.continue ?? (_issue.continue = true);
+                 payload.issues.push(index_js_1.util.issue(_issue));
+             }
+         };
+diff --git a/v4/classic/schemas.js b/v4/classic/schemas.js
+index db63ba8bac6cbf286de1d43c9d14c31724f742dd..6c8244d3f1d5d1d0131d147d910ac3594ac6863e 100644
+--- a/v4/classic/schemas.js
++++ b/v4/classic/schemas.js
+@@ -6,6 +6,11 @@ import { createStandardJSONSchemaMethod, createToJSONSchemaMethod } from "../cor
+ import en from "../locales/en.js";
+ import * as checks from "./checks.js";
+ import * as parse from "./parse.js";
++// @rasta patch (PR #444, D-078): zod 3's run order, for diagnostics only. Every hunk
++// marked so is off unless the parse's params carry this registered symbol set to true.
++// Only @rasta/contracts' legacyParse sets it, and only on input stock zod has already
++// refused: every other parse, and acceptance everywhere, is stock zod 4.6.7.
++const LEGACY_RUN_ORDER = Symbol.for("@rasta/zod.legacyRunOrder");
+ // Register English as the default locale on first ZodType construction. Hooked into the `ZodType` `$constructor` (rather than a top-level `config(en())` in `external.ts`) so bundlers honoring `sideEffects: false` can't tree-shake it out — see #5953, #5725. An explicit `z.config(z.locales.xx())` call wins regardless of order, since this only sets the default when none is present.
+ function _ensureDefaultLocale() {
+     if (!core.globalConfig.localeError)
+@@ -1212,6 +1217,10 @@ export const ZodTransform = /*@__PURE__*/ core.$constructor("ZodTransform", (ins
+                     _issue.input = payload.value;
+                 _issue.inst ?? (_issue.inst = inst);
+                 // _issue.continue ??= true;
++                // @rasta patch (PR #444, D-078): switched on, an issue a transform adds marks the value
++                // dirty, as in zod 3: enclosing refinements still run, unless it is fatal.
++                if (_ctx?.[LEGACY_RUN_ORDER] === true)
++                    _issue.continue ?? (_issue.continue = true);
+                 payload.issues.push(util.issue(_issue));
+             }
+         };
+diff --git a/v4/core/schemas.cjs b/v4/core/schemas.cjs
+index 0d9f7203c375d0ceb49e52f72529c8e3c285245f..bf55361a6f4eafdcb3250d5c3132077a0685ed3a 100644
+--- a/v4/core/schemas.cjs
++++ b/v4/core/schemas.cjs
+@@ -48,6 +48,11 @@ const parse_js_1 = require("./parse.cjs");
+ const regexes = __importStar(require("./regexes.cjs"));
+ const util = __importStar(require("./util.cjs"));
+ const versions_js_1 = require("./versions.cjs");
++// @rasta patch (PR #444, D-078): zod 3's run order, for diagnostics only. Every hunk
++// marked so is off unless the parse's params carry this registered symbol set to true.
++// Only @rasta/contracts' legacyParse sets it, and only on input stock zod has already
++// refused: every other parse, and acceptance everywhere, is stock zod 4.6.7.
++const LEGACY_RUN_ORDER = Symbol.for("@rasta/zod.legacyRunOrder");
+ exports.$ZodType = core.$constructor("$ZodType", (inst, def) => {
+     var _a;
+     inst ?? (inst = {});
+@@ -92,6 +97,14 @@ exports.$ZodType = core.$constructor("$ZodType", (inst, def) => {
+                 }
+                 const currLen = payload.issues.length;
+                 const _ = ch._zod.check(payload);
++                // @rasta patch (PR #444, D-078): switched on, a failed .int() goes on as in zod 3:
++                // the number's later checks and every enclosing refinement still run.
++                if (ctx?.[LEGACY_RUN_ORDER] === true && ch._zod.def.check === "number_format") {
++                    for (let i = currLen; i < payload.issues.length; i++) {
++                        if (payload.issues[i].code === "invalid_type")
++                            payload.issues[i].continue = true;
++                    }
++                }
+                 if (_ instanceof Promise && ctx?.async === false) {
+                     throw new core.$ZodAsyncError();
+                 }
+@@ -699,6 +712,11 @@ exports.$ZodNumber = core.$constructor("$ZodNumber", (inst, def) => {
+             input,
+             inst,
+             ...(received ? { received } : {}),
++            // @rasta patch (PR #444, D-078): switched on, ±Infinity is refused as a number, as in
++            // zod 3: the parse goes on, so its checks and enclosing refinements are reported.
++            ...(_ctx?.[LEGACY_RUN_ORDER] === true && typeof input === "number" && !Number.isNaN(input)
++                ? { continue: true }
++                : {}),
+         });
+         return payload;
+     };
+@@ -1272,7 +1290,9 @@ function handleUnionResults(results, final, inst, ctx) {
+         }
+     }
+     const nonaborted = results.filter((r) => !util.aborted(r));
+-    if (nonaborted.length === 1) {
++    // @rasta patch (PR #444, D-078): switched on, a union answers with its first option that
++    // failed only on checks, as zod 3 did, and enclosing refinements still run.
++    if (nonaborted.length === 1 || (nonaborted.length > 1 && ctx?.[LEGACY_RUN_ORDER] === true)) {
+         final.value = nonaborted[0].value;
+         return nonaborted[0];
+     }
+@@ -2360,6 +2380,12 @@ exports.$ZodPipe = core.$constructor("$ZodPipe", (inst, def) => {
+     };
+ });
+ function handlePipeResult(left, next, ctx) {
++    // @rasta patch (PR #444, D-078): switched on, a value refused before its .transform() stops
++    // enclosing refinements, as zod 3's INVALID did.
++    if (ctx?.[LEGACY_RUN_ORDER] === true && left.issues.length && next._zod.def.type === "transform") {
++        for (const iss of left.issues)
++            iss.continue = false;
++    }
+     // Any issue stops the pipe, so a failing refinement never feeds its transform. An unrecognized key is the exception: it describes the input's extra properties, not the value being piped, and an enclosing intersection may yet reconcile it.
+     if (left.issues.some((iss) => iss.code !== "unrecognized_keys")) {
+         // prevent further checks
+diff --git a/v4/core/schemas.js b/v4/core/schemas.js
+index c8c5de787d82e9c9db6df3fc21876d5924411f54..d26b01c351bbe7b532a154359d6e0a75ede08e39 100644
+--- a/v4/core/schemas.js
++++ b/v4/core/schemas.js
+@@ -5,6 +5,11 @@ import { parse, parseAsync } from "./parse.js";
+ import * as regexes from "./regexes.js";
+ import * as util from "./util.js";
+ import { version } from "./versions.js";
++// @rasta patch (PR #444, D-078): zod 3's run order, for diagnostics only. Every hunk
++// marked so is off unless the parse's params carry this registered symbol set to true.
++// Only @rasta/contracts' legacyParse sets it, and only on input stock zod has already
++// refused: every other parse, and acceptance everywhere, is stock zod 4.6.7.
++const LEGACY_RUN_ORDER = Symbol.for("@rasta/zod.legacyRunOrder");
+ export const $ZodType = /*@__PURE__*/ core.$constructor("$ZodType", (inst, def) => {
+     var _a;
+     inst ?? (inst = {});
+@@ -49,6 +54,14 @@ export const $ZodType = /*@__PURE__*/ core.$constructor("$ZodType", (inst, def)
+                 }
+                 const currLen = payload.issues.length;
+                 const _ = ch._zod.check(payload);
++                // @rasta patch (PR #444, D-078): switched on, a failed .int() goes on as in zod 3:
++                // the number's later checks and every enclosing refinement still run.
++                if (ctx?.[LEGACY_RUN_ORDER] === true && ch._zod.def.check === "number_format") {
++                    for (let i = currLen; i < payload.issues.length; i++) {
++                        if (payload.issues[i].code === "invalid_type")
++                            payload.issues[i].continue = true;
++                    }
++                }
+                 if (_ instanceof Promise && ctx?.async === false) {
+                     throw new core.$ZodAsyncError();
+                 }
+@@ -655,6 +668,11 @@ export const $ZodNumber = /*@__PURE__*/ core.$constructor("$ZodNumber", (inst, d
+             input,
+             inst,
+             ...(received ? { received } : {}),
++            // @rasta patch (PR #444, D-078): switched on, ±Infinity is refused as a number, as in
++            // zod 3: the parse goes on, so its checks and enclosing refinements are reported.
++            ...(_ctx?.[LEGACY_RUN_ORDER] === true && typeof input === "number" && !Number.isNaN(input)
++                ? { continue: true }
++                : {}),
+         });
+         return payload;
+     };
+@@ -1228,7 +1246,9 @@ function handleUnionResults(results, final, inst, ctx) {
+         }
+     }
+     const nonaborted = results.filter((r) => !util.aborted(r));
+-    if (nonaborted.length === 1) {
++    // @rasta patch (PR #444, D-078): switched on, a union answers with its first option that
++    // failed only on checks, as zod 3 did, and enclosing refinements still run.
++    if (nonaborted.length === 1 || (nonaborted.length > 1 && ctx?.[LEGACY_RUN_ORDER] === true)) {
+         final.value = nonaborted[0].value;
+         return nonaborted[0];
+     }
+@@ -2316,6 +2336,12 @@ export const $ZodPipe = /*@__PURE__*/ core.$constructor("$ZodPipe", (inst, def)
+     };
+ });
+ function handlePipeResult(left, next, ctx) {
++    // @rasta patch (PR #444, D-078): switched on, a value refused before its .transform() stops
++    // enclosing refinements, as zod 3's INVALID did.
++    if (ctx?.[LEGACY_RUN_ORDER] === true && left.issues.length && next._zod.def.type === "transform") {
++        for (const iss of left.issues)
++            iss.continue = false;
++    }
+     // Any issue stops the pipe, so a failing refinement never feeds its transform. An unrecognized key is the exception: it describes the input's extra properties, not the value being piped, and an enclosing intersection may yet reconcile it.
+     if (left.issues.some((iss) => iss.code !== "unrecognized_keys")) {
+         // prevent further checks

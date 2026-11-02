@@ -20,6 +20,8 @@ import {
   type InventorySelection,
   type InventoryWriteView,
 } from './InventoryScreen';
+import { bindingOf } from '@/test/unresolved-binding';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * `/inventory` with its commands and its ledger: every state a viewer can be in
@@ -120,7 +122,7 @@ function write(overrides: Partial<InventoryWriteView> = {}): InventoryWriteView 
   return {
     canOperate: true,
     csrfToken: 'csrf',
-    binding: { owner: 'owner-tag', session: 'session-tag' },
+    binding: bindingOf('owner-tag', 'session-tag'),
     sessionMaxAgeSeconds: 43_200,
     warehouseForms: [offered('CREATE_WAREHOUSE')],
     selectionForms: [offered('RECEIVE_STOCK'), offered('ADJUST_STOCK'), offered('CREATE_SHIPMENT')],
@@ -138,7 +140,7 @@ function props(overrides: Partial<InventoryScreenProps> = {}): InventoryScreenPr
   return {
     warehouses: warehouses([WAREHOUSE]),
     selection: chosen(),
-    query: { warehouse: WAREHOUSE_ID },
+    query: { context: TEST_CONTEXT, warehouse: WAREHOUSE_ID },
     shipments: shipments([SHIPMENT]),
     write: write(),
     ...overrides,
@@ -162,19 +164,19 @@ describe('an operator', () => {
       expect(await forms(name)).toBeInTheDocument();
     }
     // No edit and no retire of a warehouse, no approval and no reservation commands.
-    expect(screen.queryByRole('form', { name: /ویرایش|بستن|حذف|تایید|رزرو/ })).toBeNull();
+    expect(screen.queryByRole('form', { name: /ویرایش|بستن|حذف|تأیید|رزرو/ })).toBeNull();
   });
 
   it('an adjustment names the item and the direction, and says it has no reason and no second approval', async () => {
     render(<InventoryScreen {...props()} />);
     const form = await forms('اصلاح یا خروج مستقیم موجودی');
-    expect(form).toHaveTextContent('دلیل یا تایید دوم نمی‌خواهد');
+    expect(form).toHaveTextContent('دلیل یا تأیید دوم نمی‌خواهد');
     const select = within(form).getByLabelText(/کالا/) as HTMLSelectElement;
     expect(select).toHaveTextContent(ITEM.productId);
     expect(within(form).getByLabelText(/نوع تغییر/)).toBeInTheDocument();
     expect(within(form).getByLabelText(/مقدار/)).toBeInTheDocument();
     expect(within(form).getByLabelText(/مرجع سند/)).toBeInTheDocument();
-    expect(within(form).queryByLabelText(/دلیل|تاییدکننده/)).toBeNull();
+    expect(within(form).queryByLabelText(/دلیل|تأییدکننده/)).toBeNull();
   });
 
   it('a shipment form takes legs, one at first, and says what it does not do', async () => {
@@ -315,7 +317,7 @@ describe('the ledger', () => {
     );
     expect(screen.getByRole('link', { name: 'حرکت‌های قدیمی‌تر' })).toHaveAttribute(
       'href',
-      `/inventory?warehouse=${WAREHOUSE_ID}&mcursor=MOV_0`,
+      `/inventory?warehouse=${WAREHOUSE_ID}&mcursor=MOV_0&ctx=${TEST_CONTEXT}`,
     );
   });
 
@@ -351,13 +353,13 @@ describe('the shipments', () => {
         {...props({
           write: undefined,
           shipments: shipments([SHIPMENT], 'SHP_0'),
-          query: { warehouse: WAREHOUSE_ID, cursor: 'c' },
+          query: { context: TEST_CONTEXT, warehouse: WAREHOUSE_ID, cursor: 'c' },
         })}
       />,
     );
     expect(screen.getByRole('link', { name: 'محموله‌های بعدی' })).toHaveAttribute(
       'href',
-      `/inventory?warehouse=${WAREHOUSE_ID}&cursor=c&scursor=SHP_0`,
+      `/inventory?warehouse=${WAREHOUSE_ID}&cursor=c&scursor=SHP_0&ctx=${TEST_CONTEXT}`,
     );
   });
 

@@ -35,6 +35,7 @@ import type {
 
 import type { AdjustableItem } from './InventoryCommandForm';
 import { InventoryCommands, type OfferedInventoryCommand } from './InventoryCommands';
+import { withContext, type InContext } from '@/lib/page-context';
 
 /**
  * Warehouses, their stock levels, the ledger and the shipments (docs/16
@@ -94,12 +95,15 @@ export interface InventoryWriteView {
 export interface InventoryScreenProps {
   readonly warehouses: ReadResult<WarehousePage>;
   readonly selection: InventorySelection | null;
-  readonly query: InventoryQuery;
+  readonly query: InContext<InventoryQuery>;
   readonly shipments?: ReadResult<ShipmentPage> | null;
   readonly write?: InventoryWriteView;
 }
 
-export function inventoryHref(query: InventoryQuery, changes: Partial<InventoryQuery>): string {
+export function inventoryHref(
+  query: InContext<InventoryQuery>,
+  changes: Partial<InventoryQuery>,
+): string {
   const merged = { ...query, ...changes };
   // The stock and ledger cursors are positions in one warehouse's rows: another
   // warehouse never inherits them, whoever builds the link.
@@ -114,7 +118,7 @@ export function inventoryHref(query: InventoryQuery, changes: Partial<InventoryQ
   if (merged.movementCursor) params.set('mcursor', merged.movementCursor);
   if (merged.shipmentCursor) params.set('scursor', merged.shipmentCursor);
   const text = params.toString();
-  return text ? `/inventory?${text}` : '/inventory';
+  return withContext(query.context, text ? `/inventory?${text}` : '/inventory');
 }
 
 export function InventoryScreen({
@@ -143,7 +147,7 @@ function WarehousesSection({
   write,
 }: {
   result: ReadResult<WarehousePage>;
-  query: InventoryQuery;
+  query: InContext<InventoryQuery>;
   write?: InventoryWriteView;
 }) {
   if (result.kind === 'FORBIDDEN') {
@@ -230,7 +234,7 @@ function StockSection({
   write,
 }: {
   selection: InventorySelection;
-  query: InventoryQuery;
+  query: InContext<InventoryQuery>;
   write?: InventoryWriteView;
 }) {
   const { warehouse, stock } = selection;
@@ -310,7 +314,7 @@ function MovementsSection({
   query,
 }: {
   result: ReadResult<MovementPage>;
-  query: InventoryQuery;
+  query: InContext<InventoryQuery>;
 }) {
   if (result.kind === 'FORBIDDEN') {
     return (
@@ -423,7 +427,7 @@ function ShipmentsSection({
   query,
 }: {
   result: ReadResult<ShipmentPage>;
-  query: InventoryQuery;
+  query: InContext<InventoryQuery>;
 }) {
   if (result.kind === 'FORBIDDEN') {
     return (
@@ -496,7 +500,7 @@ function StockBody({
   query,
 }: {
   stock: ReadResult<StockPage> | null;
-  query: InventoryQuery;
+  query: InContext<InventoryQuery>;
 }) {
   if (stock === null) return null;
 

@@ -39,13 +39,13 @@ const productSchema = z.object({
   id: z.string(),
   sku: z.string(),
   name: z.string(),
-  description: z.string().nullable().default(null),
+  description: z.string().nullable().prefault(null),
   category: z.string(),
   kind: z.string(),
   unit: z.string(),
   // Sorted by the same `sort` the search query carried, so the first entry is
   // "the price this row leads with" without a second request.
-  offers: z.array(offerSchema).default([]),
+  offers: z.array(offerSchema).prefault([]),
 });
 
 export type Product = z.infer<typeof productSchema>;

@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import {
   cursorPaginationSchema,
-  seedIdSchema,
   ID_PREFIXES,
+  isoDateTime,
   plainText,
   referenceId,
+  seedIdSchema,
 } from '@rasta/contracts';
 
 /**
@@ -22,6 +23,12 @@ const organizationId = seedIdSchema(ID_PREFIXES.organization);
  * Latin letters, spaces, ZWNJ (نیم‌فاصله) and hyphens. A name is a label, not
  * an identifier — the rule exists to reject control characters and markup, not
  * to police what a person may be called.
+ *
+ * Deliberately NOT the shared display-text rule: no digits, no comma-like
+ * punctuation. Whitespace stays `\s`, exactly as before the display-text work:
+ * a stored name may hold a tab or a line break, and the unchanged PATCH of it
+ * must keep validating. Tightening it (one line, no BOM) is a separate change
+ * that canonicalises the stored names first.
  *
  * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
  * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
@@ -122,7 +129,7 @@ export type ListUsersQuery = z.infer<typeof listUsersQuerySchema>;
  * `from` and the database's clock as the query ran.
  */
 export const membershipWindowQuerySchema = z
-  .object({ from: z.string().datetime().optional() })
+  .object({ from: z.string().check(isoDateTime()).optional() })
   .strict();
 
 export type MembershipWindowQuery = z.infer<typeof membershipWindowQuerySchema>;
@@ -134,8 +141,8 @@ export type MembershipWindowQuery = z.infer<typeof membershipWindowQuerySchema>;
 export const createMembershipSchema = z
   .object({
     organizationId,
-    roles: z.array(roleSchema).min(1),
-    validUntil: z.string().datetime().optional(),
+    roles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length),
+    validUntil: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -143,7 +150,7 @@ export type CreateMembershipDto = z.infer<typeof createMembershipSchema>;
 
 export const updateMembershipRolesSchema = z
   .object({
-    roles: z.array(roleSchema).min(1),
+    roles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length),
     /** Recorded on the audit event. Role changes need a stated why. */
     reason: plainText().min(3).max(500),
   })
@@ -162,14 +169,16 @@ export type SwitchOrganizationDto = z.infer<typeof switchOrganizationSchema>;
 // Registration
 // ---------------------------------------------------------------------------
 
+const registrationUsername = z
+  .string()
+  .trim()
+  .min(3)
+  .max(64)
+  .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/);
+
 export const submitRegistrationSchema = z
   .object({
-    username: z
-      .string()
-      .trim()
-      .min(3)
-      .max(64)
-      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    username: registrationUsername,
     email: z.string().trim().toLowerCase().email().max(255),
     firstName: personName,
     lastName: personName,
@@ -179,13 +188,13 @@ export const submitRegistrationSchema = z
       .regex(/^(?:\+98|0)9\d{9}$/)
       .optional(),
     requestedOrganizationId: organizationId,
-    requestedRoles: z.array(roleSchema).min(1),
+    requestedRoles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length),
     justification: plainText().max(1000).optional(),
     /**
      * Document ids from document-service. Never file contents. Stored as
      * given, so no control or format character, bidi controls included (#209).
      */
-    documentRefs: z.array(referenceId().min(1)).max(10).default([]),
+    documentRefs: z.array(referenceId().min(1)).max(10).prefault([]),
   })
   .strict();
 
@@ -194,9 +203,25 @@ export type SubmitRegistrationDto = z.infer<typeof submitRegistrationSchema>;
 export const approveRegistrationSchema = z
   .object({
     /** Lets the reviewer grant something narrower than what was asked for. */
-    roles: z.array(roleSchema).min(1).optional(),
+    roles: z.array(roleSchema).min(1).max(PLATFORM_ROLES.length).optional(),
   })
   .strict();
+
+export const REGISTRATION_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'] as const;
+
+/**
+ * `GET /v1/registration-requests`: the review queue. The public submission no
+ * longer answers with the request's id (task 117, F5), so this is where a
+ * reviewer finds a request — by status, or by the applicant's exact username.
+ */
+export const listRegistrationRequestsQuerySchema = cursorPaginationSchema
+  .extend({
+    status: z.enum(REGISTRATION_STATUSES).optional(),
+    username: registrationUsername.optional(),
+  })
+  .strict();
+
+export type ListRegistrationRequestsQuery = z.infer<typeof listRegistrationRequestsQuerySchema>;
 
 export type ApproveRegistrationDto = z.infer<typeof approveRegistrationSchema>;
 

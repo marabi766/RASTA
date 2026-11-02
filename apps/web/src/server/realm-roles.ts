@@ -79,6 +79,28 @@ const ORGANIZATION_ID = /^[A-Za-z0-9_-]+$/;
  * here — the result only chooses what to draw; the gateway and the service
  * verify the token on every request.
  */
+/**
+ * The organization a request carrying this access token acts for: its `org_id`
+ * claim as written, or null when there is none or it cannot be read. Unlike
+ * {@link tokenAuthority} it does not ask whether the token grants anything
+ * there — it says *where*, for a form that must not be sent anywhere else than
+ * where it was drawn (`submission.ts`). Not verified here.
+ */
+export function tokenOrganization(accessToken: string): string | null {
+  const payload = accessToken.split('.')[1];
+  if (!payload) return null;
+  try {
+    const claims: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!claims || typeof claims !== 'object' || Array.isArray(claims)) return null;
+    const organizationId = (claims as Record<string, unknown>)['org_id'];
+    return typeof organizationId === 'string' && ORGANIZATION_ID.test(organizationId)
+      ? organizationId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface TokenAuthority {
   readonly organizationId: string | null;
   readonly roles: readonly string[];
@@ -195,4 +217,31 @@ export function tokenPerson(accessToken: string): TokenPerson | null {
       ? sub
       : null;
   return { memberships, platformUser, actorId };
+}
+
+/**
+ * Every organization the token says its holder belongs to (`org_ids`), not only
+ * the one the request acts for. Needed where a service refuses by **membership**
+ * and not by tenant: supplier-service refuses a decision about a supplier whose
+ * organization is any of them, so a platform operator who is also a member of
+ * the supplier's organization is offered no decision form
+ * (`assertNotDecidingOwnCase`). Empty when the token cannot be read. Not
+ * verified here — presentation only, like everything in this module.
+ */
+export function tokenMemberships(accessToken: string): readonly string[] {
+  const payload = accessToken.split('.')[1];
+  if (!payload) return [];
+  try {
+    const claims: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    const ids =
+      claims && typeof claims === 'object' ? (claims as Record<string, unknown>)['org_ids'] : [];
+    if (!Array.isArray(ids)) return [];
+    return [
+      ...new Set(
+        ids.filter((id): id is string => typeof id === 'string' && ORGANIZATION_ID.test(id)),
+      ),
+    ];
+  } catch {
+    return [];
+  }
 }

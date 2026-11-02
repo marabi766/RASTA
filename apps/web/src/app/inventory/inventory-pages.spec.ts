@@ -64,6 +64,8 @@ const { ShipmentScreen } =
 const { verifyInventoryStamp } =
   require('@/server/inventory-replay') as typeof import('@/server/inventory-replay');
 const { mintFlash } = require('@/server/flash') as typeof import('@/server/flash');
+const { pageContext } = require('@/server/page-context') as typeof import('@/server/page-context');
+const { CONTEXT_PARAM } = require('@/lib/page-context') as typeof import('@/lib/page-context');
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 const ULID = '01HZZZZZZZZZZZZZZZZZZZZZZZ';
@@ -145,8 +147,20 @@ beforeEach(() => {
   });
 });
 
+/** A page's query as its own links carry it: bound to the organization the session acts for. */
+function inContext(search: Record<string, string>): Record<string, string> {
+  const session = mockSession.current as Parameters<typeof pageContext>[0] | null;
+  if (session === null) return search;
+  try {
+    return { ...search, [CONTEXT_PARAM]: pageContext(session) };
+  } catch {
+    // A token that names no organization: there is no context to carry.
+    return search;
+  }
+}
+
 async function inventory(search: Record<string, string> = { warehouse: WAREHOUSE_ID }) {
-  const tree = await InventoryPage({ searchParams: Promise.resolve(search) });
+  const tree = await InventoryPage({ searchParams: Promise.resolve(inContext(search)) });
   const screen = ofType(tree, InventoryScreen)[0]!
     .props as import('./InventoryScreen').InventoryScreenProps;
   return { tree, screen, write: screen.write! };
@@ -155,7 +169,7 @@ async function inventory(search: Record<string, string> = { warehouse: WAREHOUSE
 async function shipment(search: Record<string, string> = {}) {
   const tree = await ShipmentPage({
     params: Promise.resolve({ id: SHIPMENT_ID }),
-    searchParams: Promise.resolve(search),
+    searchParams: Promise.resolve(inContext(search)),
   });
   return ofType(tree, ShipmentScreen)[0]!
     .props as import('./shipments/[id]/ShipmentScreen').ShipmentScreenProps;
@@ -217,7 +231,8 @@ describe('/inventory', () => {
     ['the oversight role', ['ORGANIZATION_ADMIN', 'AUDITOR']],
     ['the platform administrator', ['ORGANIZATION_ADMIN', 'SYSTEM_ADMIN']],
     ['a role outside the operator set', ['FLEET_MANAGER']],
-    ['no role', []],
+    // No role at all in the organization: the session does not resolve and no page
+    // is drawn for it (`server/session-organization.ts`).
   ])('draws no form to %s', async (_name, roles) => {
     mockSession.current = signedInWith(roles);
     const { write } = await inventory();
@@ -266,7 +281,11 @@ describe('/inventory', () => {
   });
 
   it('reloads the chosen warehouse after a command', async () => {
-    expect((await inventory()).write.pageHref).toBe(`/inventory?warehouse=${WAREHOUSE_ID}`);
+    expect((await inventory()).write.pageHref).toBe(
+      `/inventory?warehouse=${WAREHOUSE_ID}&${CONTEXT_PARAM}=${pageContext(
+        mockSession.current as Parameters<typeof pageContext>[0],
+      )}`,
+    );
     expect((await inventory({})).write.pageHref).toBe('/inventory');
   });
 });

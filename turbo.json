@@ -1,7 +1,20 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "ui": "stream",
-  "globalDependencies": ["tsconfig.base.json", ".env"],
+  // Every Jest configuration loads the disclosure guard by path, not as a
+  // dependency (#452), so a change to it must re-run every package's tests
+  // rather than replay a cached green.
+  "globalDependencies": [
+    "tsconfig.base.json",
+    ".env",
+    "jest.disclosure-guard.cjs",
+    "packages/testing/src/disclosure-guard.ts",
+    "packages/testing/src/absence-guard.ts",
+    "packages/testing/src/disclosure.ts",
+    "tests/e2e/src/expect.ts",
+    "tests/e2e/src/api.ts",
+    "apps/web/e2e/expect.ts"
+  ],
   "globalEnv": ["NODE_ENV", "CI"],
   "tasks": {
     "build": {
@@ -46,7 +59,22 @@
       "env": ["DATABASE_URL", "DATABASE_URL_*", "RASTA_ALLOW_DEMO_SEED"]
     },
     "typecheck": { "dependsOn": ["^build", "db:generate"], "outputs": [] },
-    "lint": { "dependsOn": ["^build"], "outputs": [] },
+    "lint": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/eslint.config.mjs",
+        "$TURBO_ROOT$/scripts/internal-token-transport-rule.mjs",
+        "$TURBO_ROOT$/scripts/raw-http-boundary-rule.mjs",
+        "$TURBO_ROOT$/scripts/internal-token-source-rule.mjs",
+        "$TURBO_ROOT$/scripts/internal-token-parser.mjs",
+        "$TURBO_ROOT$/scripts/test-only-path.mjs",
+        "$TURBO_ROOT$/scripts/testing-dev-only.mjs",
+        "$TURBO_ROOT$/scripts/no-zod-default-rule.mjs",
+        "$TURBO_ROOT$/scripts/exchange-deadline-rule.mjs"
+      ],
+      "outputs": []
+    },
     // KAFKA_BROKERS is the same trap again (D-005), found by AUD-004 Phase C2:
     // identity-service's `test` runs its integration project too, and its
     // Kafka suite skips itself when the variable is absent. Undeclared, turbo
@@ -72,10 +100,15 @@
         "KAFKA_SSL*",
         "S3_*",
         "DOCUMENT_*",
+        "REQUIRE_MAILPIT",
+        "MAILPIT_API_URL",
+        "NOTIFICATION_SMTP_*",
         "OUTBOX_PURGE_*",
         "OUTBOX_CLAIM_LEASE_SECONDS",
         "ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS",
         "ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS",
+        "FLEET_IDENTITY_REQUEST_TIMEOUT_MS",
+        "IDENTITY_SERVICE_URL",
         "CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS",
         "ECONOMIC_ORGANIZATION_REQUEST_TIMEOUT_MS",
         "MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS",
@@ -87,10 +120,14 @@
         "INVENTORY_SERVICE_URL",
         "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
+        "KEYCLOAK_WRITE_SETTLE_SECONDS",
+        "REGISTRATION_INTAKE_INTERVAL_SECONDS",
+        "REGISTRATION_INTAKE_BATCH_SIZE",
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE",
         "ECONOMIC_SERVICE_URL",
         "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
         "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
@@ -147,10 +184,15 @@
         "KAFKA_SSL*",
         "S3_*",
         "DOCUMENT_*",
+        "REQUIRE_MAILPIT",
+        "MAILPIT_API_URL",
+        "NOTIFICATION_SMTP_*",
         "OUTBOX_PURGE_*",
         "OUTBOX_CLAIM_LEASE_SECONDS",
         "ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS",
         "ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS",
+        "FLEET_IDENTITY_REQUEST_TIMEOUT_MS",
+        "IDENTITY_SERVICE_URL",
         "CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS",
         "ECONOMIC_ORGANIZATION_REQUEST_TIMEOUT_MS",
         "MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS",
@@ -162,10 +204,14 @@
         "INVENTORY_SERVICE_URL",
         "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
+        "KEYCLOAK_WRITE_SETTLE_SECONDS",
+        "REGISTRATION_INTAKE_INTERVAL_SECONDS",
+        "REGISTRATION_INTAKE_BATCH_SIZE",
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE",
         "ECONOMIC_SERVICE_URL",
         "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
         "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",
@@ -198,6 +244,9 @@
         "DATABASE_STATEMENT_TIMEOUT_MS",
         "OUTBOX_CLAIM_LEASE_SECONDS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
+        "KEYCLOAK_WRITE_SETTLE_SECONDS",
+        "REGISTRATION_INTAKE_INTERVAL_SECONDS",
+        "REGISTRATION_INTAKE_BATCH_SIZE",
         "REDIS_URL",
         "KAFKA_BROKERS",
         "KAFKA_SASL_*",
@@ -292,6 +341,9 @@
     // CONTRACT_SERVICE_URL and ECONOMIC_STATEMENT_BUSINESS_LINE (CON-003 PR 6b):
     // economic-service's statement owner (A-13) and the line a statement's
     // obligation is recorded under (Q-130, unset by default); the same rule.
+    // ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE (docs/24 Q-29): whether a
+    // settlement with no active rule for its line is refused; unset, on outside
+    // development and test. Declared from its first commit, the same rule.
     // ECONOMIC_SERVICE_URL and CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS (CON-003
     // PR 6c): where contract-service asks economic-service, before a statement
     // is SETTLED, for its obligation (A-13), and how long that may take.
@@ -318,6 +370,8 @@
         "OUTBOX_CLAIM_LEASE_SECONDS",
         "ASSET_TRANSFER_CLEARANCE_TIMEOUT_MS",
         "ASSET_TRANSFER_RESOLUTION_TIMEOUT_MS",
+        "FLEET_IDENTITY_REQUEST_TIMEOUT_MS",
+        "IDENTITY_SERVICE_URL",
         "CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS",
         "ECONOMIC_ORGANIZATION_REQUEST_TIMEOUT_MS",
         "MARKETPLACE_ORGANIZATION_REQUEST_TIMEOUT_MS",
@@ -329,10 +383,14 @@
         "INVENTORY_SERVICE_URL",
         "MARKETPLACE_INVENTORY_REQUEST_TIMEOUT_MS",
         "SECURITY_EVENT_CAPTURE_TIMEOUT_MS",
+        "KEYCLOAK_WRITE_SETTLE_SECONDS",
+        "REGISTRATION_INTAKE_INTERVAL_SECONDS",
+        "REGISTRATION_INTAKE_BATCH_SIZE",
         "CONSTRUCTION_*",
         "GATEWAY_*",
         "CONTRACT_SERVICE_URL",
         "ECONOMIC_STATEMENT_BUSINESS_LINE",
+        "ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE",
         "ECONOMIC_SERVICE_URL",
         "CONTRACT_SETTLEMENT_REQUEST_TIMEOUT_MS",
         "CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS",

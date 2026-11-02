@@ -1,15 +1,42 @@
 import { z } from 'zod';
+import { parsableUrl } from '@rasta/contracts';
 import {
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
 } from '@rasta/config';
 import { documentOperationBudgets } from './operation-budgets';
 import type { ClamdAddress } from '../scanning/clamav/clamd.client';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const CLAMAV_ADDRESS_MISSING = fixed(
+  'The ClamAV driver needs an address: set DOCUMENT_CLAMAV_SOCKET_PATH (production) ' +
+    'or DOCUMENT_CLAMAV_HOST (local development and CI only).',
+);
+const CLAMAV_TCP_IN_PRODUCTION = fixed(
+  'DOCUMENT_CLAMAV_HOST configures an unauthenticated TCP scanner and is refused in ' +
+    'production (AGENTS.md S-08, ADR-049). Use DOCUMENT_CLAMAV_SOCKET_PATH with a ' +
+    'sidecar sharing the socket volume.',
+);
+const CLAMAV_SOCKET_IN_PRODUCTION = fixed(
+  'A production deployment must reach clamd over a Unix domain socket (ADR-049).',
+);
+const SCANNER_DISABLED_IN_PRODUCTION = fixed(
+  'DOCUMENT_SCANNER_DRIVER=disabled binds a scanner that inspects nothing, which leaves ' +
+    'every document undownloadable. It is a development setting and is refused in ' +
+    'production (ADR-049).',
+);
+const SCAN_LEASE_TOO_SHORT = fixed(
+  'DOCUMENT_SCAN_LEASE_SECONDS must exceed DOCUMENT_SCAN_TIMEOUT_MS, or a scan still ' +
+    'running loses its claim and is started again by another worker.',
+);
 
 export const SERVICE_NAME = 'document-service';
 
@@ -35,15 +62,15 @@ export const documentEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     // ---- Object storage (ADR-014) ----------------------------------------
 
-    S3_ENDPOINT: z.string().url().default('http://localhost:9000'),
-    S3_REGION: z.string().min(1).default('us-east-1'),
+    S3_ENDPOINT: z.string().check(parsableUrl()).prefault('http://localhost:9000'),
+    S3_REGION: z.string().min(1).prefault('us-east-1'),
     S3_ACCESS_KEY: z.string().min(1),
     S3_SECRET_KEY: z.string().min(1),
-    S3_BUCKET_DOCUMENTS: z.string().min(1).default('rasta-documents'),
+    S3_BUCKET_DOCUMENTS: z.string().min(1).prefault('rasta-documents'),
     /**
      * MinIO addresses buckets by path; AWS S3 by subdomain. Wrong here and
      * every signed URL points at a host that does not exist.
@@ -59,7 +86,7 @@ export const documentEnvSchema = baseEnvSchema
      * that a misconfiguration cannot turn one into something a person can
      * paste into a chat and have work tomorrow.
      */
-    DOCUMENT_SIGNED_URL_TTL_SECONDS: z.coerce.number().int().min(30).max(3600).default(300),
+    DOCUMENT_SIGNED_URL_TTL_SECONDS: z.coerce.number().int().min(30).max(3600).prefault(300),
 
     /**
      * How long an upload intent may sit unfinalized, in seconds.
@@ -67,7 +94,7 @@ export const documentEnvSchema = baseEnvSchema
      * Longer than the signed PUT URL it accompanies, because a client that
      * uploaded successfully at the last second must still be able to finalize.
      */
-    DOCUMENT_UPLOAD_INTENT_TTL_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
+    DOCUMENT_UPLOAD_INTENT_TTL_SECONDS: z.coerce.number().int().min(60).max(86_400).prefault(900),
 
     /**
      * The largest object this service will register, in bytes.
@@ -81,7 +108,7 @@ export const documentEnvSchema = baseEnvSchema
       .int()
       .min(1024)
       .max(200 * 1024 * 1024)
-      .default(25 * 1024 * 1024),
+      .prefault(25 * 1024 * 1024),
 
     // ---- Scanning (ADR-014, ADR-049) -------------------------------------
     //
@@ -111,7 +138,7 @@ export const documentEnvSchema = baseEnvSchema
      * next member, and `DOCUMENT_SCANNER_ENABLED=false` would have no room for
      * it.
      */
-    DOCUMENT_SCANNER_DRIVER: z.enum(['clamav', 'disabled']).default('clamav'),
+    DOCUMENT_SCANNER_DRIVER: z.enum(['clamav', 'disabled']).prefault('clamav'),
 
     /**
      * The clamd Unix domain socket. The production transport.
@@ -135,7 +162,7 @@ export const documentEnvSchema = baseEnvSchema
      * warning, because a warning in a boot log is not a control.
      */
     DOCUMENT_CLAMAV_HOST: z.string().min(1).optional(),
-    DOCUMENT_CLAMAV_PORT: z.coerce.number().int().min(1).max(65535).default(3310),
+    DOCUMENT_CLAMAV_PORT: z.coerce.number().int().min(1).max(65535).prefault(3310),
 
     /**
      * The whole-exchange deadline for one scan, in milliseconds.
@@ -144,10 +171,10 @@ export const documentEnvSchema = baseEnvSchema
      * unbounded and a stalled clamd holds a worker slot indefinitely, which
      * turns one hung scan into a stalled queue.
      */
-    DOCUMENT_SCAN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).default(60_000),
+    DOCUMENT_SCAN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(600_000).prefault(60_000),
 
     /** Bytes per INSTREAM frame — how much of an object is ever resident. */
-    DOCUMENT_SCAN_CHUNK_BYTES: z.coerce.number().int().min(4_096).max(1_048_576).default(65_536),
+    DOCUMENT_SCAN_CHUNK_BYTES: z.coerce.number().int().min(4_096).max(1_048_576).prefault(65_536),
 
     /**
      * The largest object this deployment will submit for scanning.
@@ -163,7 +190,7 @@ export const documentEnvSchema = baseEnvSchema
       .int()
       .min(1024)
       .max(64 * 1024 * 1024)
-      .default(32 * 1024 * 1024),
+      .prefault(32 * 1024 * 1024),
 
     /**
      * How old the signature database may be and still support a `CLEAN`.
@@ -184,10 +211,10 @@ export const documentEnvSchema = baseEnvSchema
      * there for determinism — and freshness itself is proven by a separate job
      * that actually runs freshclam.
      */
-    DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(8_760).default(48),
+    DOCUMENT_SCAN_SIGNATURE_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(8_760).prefault(48),
 
     /** How long a `zVERSION` reply may be reused before it is asked for again. */
-    DOCUMENT_SCAN_VERSION_CACHE_SECONDS: z.coerce.number().int().min(1).max(3_600).default(60),
+    DOCUMENT_SCAN_VERSION_CACHE_SECONDS: z.coerce.number().int().min(1).max(3_600).prefault(60),
 
     // ---- The scan worker --------------------------------------------------
 
@@ -203,10 +230,10 @@ export const documentEnvSchema = baseEnvSchema
     DOCUMENT_SCAN_WORKER_ENABLED: booleanEnv(true),
 
     /** How often a replica looks for claimable work. */
-    DOCUMENT_SCAN_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(300_000).default(2_000),
+    DOCUMENT_SCAN_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(300_000).prefault(2_000),
 
     /** Documents claimed per poll. Bounded, because each one holds a lease. */
-    DOCUMENT_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(50).default(5),
+    DOCUMENT_SCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(50).prefault(5),
 
     /**
      * How long a claim is held before another worker may take it.
@@ -217,7 +244,7 @@ export const documentEnvSchema = baseEnvSchema
      * but the work is done twice. Checked at startup by the refinement below
      * rather than left as advice in a comment.
      */
-    DOCUMENT_SCAN_LEASE_SECONDS: z.coerce.number().int().min(10).max(3_600).default(300),
+    DOCUMENT_SCAN_LEASE_SECONDS: z.coerce.number().int().min(10).max(3_600).prefault(300),
 
     /**
      * Attempts before a document is recorded `FAILED` for good.
@@ -226,12 +253,12 @@ export const documentEnvSchema = baseEnvSchema
      * document in the queue forever, where it competes with real work and
      * where its state says "waiting" rather than "this needs a person".
      */
-    DOCUMENT_SCAN_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
+    DOCUMENT_SCAN_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).prefault(5),
 
     /** First retry delay; doubles per attempt up to the ceiling below. */
-    DOCUMENT_SCAN_RETRY_BASE_MS: z.coerce.number().int().min(100).max(600_000).default(5_000),
+    DOCUMENT_SCAN_RETRY_BASE_MS: z.coerce.number().int().min(100).max(600_000).prefault(5_000),
 
-    DOCUMENT_SCAN_RETRY_MAX_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(300_000),
+    DOCUMENT_SCAN_RETRY_MAX_MS: z.coerce.number().int().min(1_000).max(3_600_000).prefault(300_000),
   })
   .superRefine((env, ctx) => {
     const production = env.NODE_ENV === 'production';
@@ -243,9 +270,7 @@ export const documentEnvSchema = baseEnvSchema
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['DOCUMENT_CLAMAV_SOCKET_PATH'],
-          message:
-            'The ClamAV driver needs an address: set DOCUMENT_CLAMAV_SOCKET_PATH (production) ' +
-            'or DOCUMENT_CLAMAV_HOST (local development and CI only).',
+          message: CLAMAV_ADDRESS_MISSING,
         });
       }
 
@@ -265,10 +290,7 @@ export const documentEnvSchema = baseEnvSchema
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['DOCUMENT_CLAMAV_HOST'],
-          message:
-            'DOCUMENT_CLAMAV_HOST configures an unauthenticated TCP scanner and is refused in ' +
-            'production (AGENTS.md S-08, ADR-049). Use DOCUMENT_CLAMAV_SOCKET_PATH with a ' +
-            'sidecar sharing the socket volume.',
+          message: CLAMAV_TCP_IN_PRODUCTION,
         });
       }
 
@@ -276,7 +298,7 @@ export const documentEnvSchema = baseEnvSchema
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['DOCUMENT_CLAMAV_SOCKET_PATH'],
-          message: 'A production deployment must reach clamd over a Unix domain socket (ADR-049).',
+          message: CLAMAV_SOCKET_IN_PRODUCTION,
         });
       }
     }
@@ -290,10 +312,7 @@ export const documentEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['DOCUMENT_SCANNER_DRIVER'],
-        message:
-          'DOCUMENT_SCANNER_DRIVER=disabled binds a scanner that inspects nothing, which leaves ' +
-          'every document undownloadable. It is a development setting and is refused in ' +
-          'production (ADR-049).',
+        message: SCANNER_DISABLED_IN_PRODUCTION,
       });
     }
 
@@ -305,12 +324,12 @@ export const documentEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['DOCUMENT_SCAN_LEASE_SECONDS'],
-        message:
-          'DOCUMENT_SCAN_LEASE_SECONDS must exceed DOCUMENT_SCAN_TIMEOUT_MS, or a scan still ' +
-          'running loses its claim and is started again by another worker.',
+        message: SCAN_LEASE_TOO_SHORT,
       });
     }
   });
+
+export const DOCUMENT_ENV_MESSAGES = seal();
 
 export type DocumentEnv = z.infer<typeof documentEnvSchema>;
 
@@ -326,7 +345,7 @@ export function loadDocumentEnv(source: NodeJS.ProcessEnv = process.env): Docume
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: documentOperationBudgets },
+    { operationBudgets: documentOperationBudgets, fixedMessages: DOCUMENT_ENV_MESSAGES },
   );
 }
 

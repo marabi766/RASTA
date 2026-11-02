@@ -17,6 +17,7 @@ import {
   viewOf,
   type WebSession,
 } from './session';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The session cookie is where this portal's whole security posture lives
@@ -30,7 +31,7 @@ function session(overrides: Partial<WebSession> = {}): WebSession {
     subject: 'USR_01J8',
     username: 'dehyar',
     organizationId: 'ORG_01J8',
-    accessToken: 'access-token-value',
+    accessToken: actingAccessToken('ORG_01J8'),
     accessTokenExpiresAt: 1_800_000_000,
     refreshToken: 'refresh-token-value',
     csrfToken: 'csrf-token-value',

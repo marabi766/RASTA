@@ -72,8 +72,8 @@ const movementSchema = z
     onHandAfter: quantity,
     reservedAfter: quantity,
     itemVersion: z.number().int().min(1),
-    reservationId: z.string().min(1).nullable().default(null),
-    sourceReference: z.string().min(1).nullable().default(null),
+    reservationId: z.string().min(1).nullable().prefault(null),
+    sourceReference: z.string().min(1).nullable().prefault(null),
     createdAt: utcInstant,
     createdBy: z.string().min(1),
   })
@@ -84,12 +84,12 @@ const movementSchema = z
 
 export type MovementSummary = z.infer<typeof movementSchema>;
 
-const nullableInstant = utcInstant.nullable().default(null);
+const nullableInstant = utcInstant.nullable().prefault(null);
 
 const legSchema = z.object({
   sequence: z.number().int().min(1),
   carrierName: z.string(),
-  carrierReference: z.string().nullable().default(null),
+  carrierReference: z.string().nullable().prefault(null),
 });
 
 /**
@@ -102,9 +102,9 @@ const shipmentSchema = z.object({
   organizationId: z.string().min(1),
   originWarehouseId: z.string().min(1),
   consigneeOrganizationId: z.string().min(1),
-  orderReference: z.string().nullable().default(null),
+  orderReference: z.string().nullable().prefault(null),
   status: z.string().min(1),
-  legs: z.array(legSchema).default([]),
+  legs: z.array(legSchema).prefault([]),
   createdAt: utcInstant,
   dispatchedAt: nullableInstant,
   deliveredAt: nullableInstant,
@@ -131,8 +131,8 @@ export type ShipmentTracking = z.infer<typeof trackingSchema>;
 function pageSchema<S extends z.ZodTypeAny>(item: S) {
   return z.object({
     items: z.array(item),
-    nextCursor: z.string().nullable().default(null),
-    hasMore: z.boolean().default(false),
+    nextCursor: z.string().nullable().prefault(null),
+    hasMore: z.boolean().prefault(false),
   });
 }
 

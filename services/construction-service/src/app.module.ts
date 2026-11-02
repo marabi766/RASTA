@@ -1,3 +1,4 @@
+import { ProcurementThresholdPolicy } from './organization/procurement-threshold-policy';
 import {
   Inject,
   Module,
@@ -298,6 +299,7 @@ import { loadConstructionEnv, SERVICE_NAME, type ConstructionEnv } from './confi
     ApprovalService,
     PolicyService,
     OrganizationDirectory,
+    ProcurementThresholdPolicy,
     PolicyReconciliationRepository,
     PolicySuspensionService,
     {

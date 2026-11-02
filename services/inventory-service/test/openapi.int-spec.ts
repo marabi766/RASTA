@@ -2,7 +2,10 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { buildInventoryOpenApiDocument, formatDocument } from '../src/openapi/document';
-import { startApi, type ApiHarness } from './api-helpers';
+import { key, orgAdmin, seedStock, startApi, type ApiHarness } from './api-helpers';
+import { cleanup, newOrganizationId } from './helpers';
+import { PROBE_TRACEPARENT, httpErrorBodyProblems } from '@rasta/nest-common';
+import request from 'supertest';
 
 /**
  * The published contract, checked against the service that answers it (the arrangement
@@ -19,6 +22,7 @@ import { startApi, type ApiHarness } from './api-helpers';
 describe('the published OpenAPI contract (real application)', () => {
   let api: ApiHarness;
   let document: OpenAPIObject;
+  const organizations: string[] = [];
 
   beforeAll(async () => {
     api = await startApi();
@@ -26,6 +30,7 @@ describe('the published OpenAPI contract (real application)', () => {
   });
 
   afterAll(async () => {
+    await cleanup(organizations);
     await api.close();
   });
 
@@ -73,5 +78,60 @@ describe('the published OpenAPI contract (real application)', () => {
     for (const route of ['GET /v1/stock/reservations', 'GET /v1/stock/movements']) {
       expect([route, routes.indexOf(route) < byId]).toEqual([route, true]);
     }
+  });
+
+  it('accepts the error bodies the application really sends over HTTP, with and without a trace (audit 10-26 F3)', async () => {
+    const owner = newOrganizationId();
+    organizations.push(owner);
+    const stock = await seedStock(api, owner, 5);
+    const problems: string[] = [];
+    for (const traced of [true, false]) {
+      const headers: Record<string, string> = traced ? { traceparent: PROBE_TRACEPARENT } : {};
+      const path = '/v1/warehouses';
+      const answers = [
+        {
+          method: 'GET',
+          url: path,
+          response: await request(api.app.getHttpServer()).get(path).set(headers),
+        },
+        {
+          method: 'GET',
+          url: `${path}?limit=zzz`,
+          response: await request(api.app.getHttpServer())
+            .get(`${path}?limit=zzz`)
+            .set(headers)
+            .set('authorization', `Bearer ${orgAdmin(owner)}`),
+        },
+        {
+          method: 'POST',
+          url: '/v1/stock/reservations',
+          response: await request(api.app.getHttpServer())
+            .post('/v1/stock/reservations')
+            .set(headers)
+            .set('authorization', `Bearer ${orgAdmin(owner)}`)
+            .set('idempotency-key', key())
+            .send({ lines: [{ stockItemId: stock.stockItemId, quantity: 99 }] }),
+        },
+      ];
+      expect(answers.map(({ response }) => response.status)).toEqual([401, 400, 422]);
+      expect(answers[1]!.response.body).toMatchObject({ code: 'VALIDATION_FAILED' });
+      expect(answers[1]!.response.body.details.length).toBeGreaterThan(0);
+      expect(answers[2]!.response.body).toMatchObject({
+        code: 'BUSINESS_RULE_VIOLATION',
+        details: [{ path: 'reservation', code: 'INSUFFICIENT_AVAILABLE_STOCK' }],
+      });
+      for (const { method, url, response } of answers) {
+        problems.push(
+          ...httpErrorBodyProblems(document, {
+            method,
+            url,
+            status: response.status,
+            body: response.body,
+            traced,
+          }),
+        );
+      }
+    }
+    expect(problems).toEqual([]);
   });
 });

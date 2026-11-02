@@ -4,6 +4,14 @@ packages:
   - 'packages/*'
   - 'tests/*'
 
+# One version for every package that resolves zod. nest-common's pipe uses
+# `instanceof ZodError` and apps/web composes @rasta/contracts schemas into its
+# own, so two copies (or two majors) side by side would turn validation errors
+# into 500s. zod 4.6.6+ closes GHSA-mrhx-c7xc-m3w5 (leading array length checks
+# reject before any element is parsed); 4.6.7 was published 2026-10-12.
+catalog:
+  zod: 4.6.7
+
 # pnpm blocks dependency lifecycle scripts by default. These compile native
 # binaries or generate clients at install time and genuinely need to run.
 allowBuilds:
@@ -35,7 +43,13 @@ overrides:
   # denial of service. @nestjs/platform-express pins multer 2.2.0 exactly, so
   # the patched release has to come from here.
   # GHSA-3pph-fpjx-jg34 (moderate, 2026-10-05) — 2.4.0 closes it as well.
-  'multer@<2.4.0': '2.4.0'
+  # GHSA-q7qp-rjg7-q26m (high, published 2026-10-23) — multer <2.5.0: a pending
+  # asynchronous fileFilter after request teardown leaves busboy with no error
+  # listener, and its late error crashes the process. No service registers a
+  # multipart route today, but the audit gate is version-based and the fix is
+  # small. 2.5.0 (2026-10-22) is younger than the minimum release age, so it is
+  # named in minimumReleaseAgeExclude below.
+  'multer@<2.5.0': '2.5.0'
   # GHSA-6g55-p6wh-862q and GHSA-r28c-9q8g-f849 — arbitrary file read and path
   # traversal through an attacker-controlled `sourceMappingURL` in a CSS
   # comment. Both are reached only through `next`, which still pins an affected
@@ -62,6 +76,13 @@ overrides:
   # @opentelemetry/auto-instrumentations-node pulls in (packages/observability);
   # they still resolve an affected release of their range.
   '@grpc/grpc-js@>=1.14.0 <1.14.5': '1.14.5'
+  # GHSA-3f7j-7jwc-fxfj (high, 2026-10-29 in CI) — systeminformation <5.33.16:
+  # Windows command injection in services() through Unicode quotation marks.
+  # Reached only through @opentelemetry/instrumentation-host-metrics (pulled in
+  # by auto-instrumentations-node in packages/observability); every service runs
+  # on Linux and nothing calls services(), but the audit gate is version-based.
+  # 5.33.16 (2026-10-19) is past the seven-day minimum release age.
+  'systeminformation@<5.33.16': '5.33.16'
   # GHSA-jqcg-44mw-7w3h (critical) — proxy-addr <2.0.8. Reached through express
   # (@nestjs/platform-express) in every service and the gateway, where it decides
   # the client address behind a proxy. Express still resolves 2.0.7.
@@ -83,22 +104,14 @@ overrides:
   # 2026-09-30) is now past the seven-day minimum release age, so the time-boxed
   # audit ignore is replaced by this pin.
   'source-map-js@<1.2.2': '1.2.2'
+  # GHSA-27r3-jxmh-p828 (high, published 2026-10-23) — body-parser <2.4.0: a
+  # compressed body followed by trailing bytes leaves the decoder piped with no
+  # error listener, and its late error crashes the process. Unauthenticated,
+  # before routing: one request takes down any service. 2.4.0 (2026-10-22) is
+  # younger than the minimum release age, so it is named in
+  # minimumReleaseAgeExclude below; this pin keeps that exception to one version.
+  'body-parser@<2.4.0': '2.4.0'
 
-# Advisories with NO patched release yet, accepted for a fixed time only. Each
-# entry names the advisory, why it cannot be fixed by an override, where it is
-# reached, and the date it must be re-checked; the CI "Dependency audit" step
-# fails again for it once removed. Remove the entry as soon as a patched
-# release exists (then pin it in overrides above instead).
-auditConfig:
-  ignoreGhsas:
-    # GHSA-vfj7-8cjw-p6xm (high) — braces <=3.0.3, stack exhaustion on crafted
-    # brace patterns. No patched release exists (3.0.3 is the newest on the
-    # registry, 2026-10-03). Reached ONLY through development tooling (Jest's
-    # micromatch, @types/jest -> expect, linters); pnpm audit --prod is clean,
-    # so no service image or runtime path loads it. Patterns are written by
-    # this repository, not by users. RE-CHECK BY 2026-10-17: if a patched
-    # braces is out, pin it under overrides and delete this entry.
-    - GHSA-vfj7-8cjw-p6xm
 # A transitive dependency may not arrive from a git URL or a tarball over
 # http. Everything here comes from the registry, and a sub-dependency that
 # suddenly does not is worth stopping on.
@@ -120,9 +133,24 @@ minimumReleaseAge: 10080
 minimumReleaseAgeStrict: true
 # Named exceptions only — a package that must track the newest release goes
 # here with the advisory or reason that justifies it, pinned to a version so
-# the exception dies with it. Empty today: deepmerge-ts@8.0.2, the security
-# pin that once needed one, aged out of the window on its own.
-minimumReleaseAgeExclude: []
+# the exception dies with it. (deepmerge-ts@8.0.2, an earlier security pin,
+# aged out of the window on its own.)
+minimumReleaseAgeExclude:
+  # GHSA-27r3-jxmh-p828 (see the body-parser override above). 2.4.0 was
+  # published by the expressjs GitHub Actions trusted publisher; its diff from
+  # 2.3.0 was read on 2026-10-23: the fix in lib/read.js plus small refactors,
+  # no new dependency, and every dependency range resolves to releases older
+  # than the window. Remove this entry once 2.4.0 is older than seven days
+  # (2026-10-29).
+  - body-parser@2.4.0
+  # GHSA-q7qp-rjg7-q26m (see the multer override above). 2.5.0 was published by
+  # the expressjs GitHub Actions trusted publisher with SLSA provenance; its diff
+  # from 2.4.0 was read on 2026-10-24: lib/make-middleware.js only (a no-op error
+  # listener kept after teardown, no cleanup entry for a file the engine never
+  # stored, and the fieldSize "max allowed" adjustment applied to busboy's 1MB
+  # default), no new dependency. Remove this entry once 2.5.0 is older than seven
+  # days (2026-10-29).
+  - multer@2.5.0
 
 # Refuse a version whose publish carried weaker trust evidence (no provenance
 # attestation) than an earlier-published version of the same package — the
@@ -139,3 +167,16 @@ trustPolicyExclude:
   - pino@9.14.0
   - semver@6.3.1
   - undici-types@6.21.0
+# zod 3's parse kept going after a check failed, and so ran every enclosing
+# refinement; zod 4 stops at some of those failures (a fractional `.int()`,
+# ±Infinity as a number, an issue added inside a transform, a union of options
+# that failed only on checks) and goes on after one zod 3 stopped at (a value
+# refused before its transform). Every refusal in this repository is still
+# worded as zod 3's (PR #444), so the patch restores zod 3's run order in the
+# one zod every workspace resolves; acceptance is zod 4's, unchanged. Each hunk
+# says which zod 3 rule it keeps. pnpm refuses to install a patch that no
+# longer applies; `packages/contracts/src/common/zod-compat-patch.spec.ts`
+# fails when the catalog moves past the patched version, and checks the copy
+# every workspace resolves.
+patchedDependencies:
+  zod@4.6.7: patches/zod@4.6.7.patch

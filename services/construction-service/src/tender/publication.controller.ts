@@ -46,6 +46,15 @@ const TENANT_NOTE =
 export class PublicationController {
   constructor(private readonly publication: PublicationService) {}
 
+  @Get('tenders/:id/procurement-threshold-preview')
+  @ApiOperation({
+    summary: 'Preview the procurement threshold decision for an owner draft',
+    description: `Advisory PASS/WARN/REJECT/ESTIMATE_REQUIRED for the returned tenderVersion. No write or approval is made. Publication rechecks the policy. Unavailable configuration fails closed (503/504). ${TENANT_NOTE} ${ROLES_NOTE}`,
+  })
+  thresholdPreview(@Param('id') id: string) {
+    return this.publication.thresholdPreview(id);
+  }
+
   @Post('tenders/:id/publish')
   @RequirePlatformUserId()
   @HttpCode(HttpStatus.OK)
@@ -55,7 +64,14 @@ export class PublicationController {
       "`expectedVersion` must equal the tender's current `version`; otherwise 409 " +
       'OPTIMISTIC_LOCK_FAILED. Refused with 422 (BUSINESS_RULE_VIOLATION), naming every reason ' +
       'in the message, unless: the procurement nature and the visibility are chosen (never ' +
-      'defaulted, Q-03); the bidding window is set, at least ' +
+      'defaulted, Q-03). The effective organization policy construction.tender.procurement_thresholds ' +
+      'checks the tender estimatedCostMinor against inclusive min/max rial amounts for the manual nature. ' +
+      'No configured table means no amount check. A configured table requires an estimate (422 ' +
+      'BUSINESS_RULE_VIOLATION, details code PROCUREMENT_ESTIMATE_REQUIRED); an inconsistent REJECT ' +
+      'entry answers 422 with details code PROCUREMENT_AMOUNT_OUTSIDE_RANGE. WARN allows publication ' +
+      'and returns procurementThresholdWarning=PROCUREMENT_AMOUNT_OUTSIDE_RANGE on the tender detail ' +
+      'and executed publication result, plus the 202 request and approval detail snapshot. Execution rechecks the policy; its result is persisted and audited even if different from the snapshot. Both warnings and refusals are audited. Unavailable or malformed ' +
+      'governance configuration fails closed (503/504). The bidding window is set, at least ' +
       'CONSTRUCTION_TENDER_MIN_BIDDING_PERIOD_SECONDS long (default 0) and not already closed by the ' +
       'database clock; the criteria exist and their weights sum to exactly 10000 basis points; ' +
       'a RESTRICTED tender has at least one invitation. The criteria are frozen from this moment. ' +

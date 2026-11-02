@@ -11,15 +11,17 @@ import {
   type InventoryScope,
 } from '@/lib/inventory-commands';
 import {
+  answerUnresolvedInventory,
   clearUnresolvedInventory,
   markInventoryOpen,
   purgeAllUnresolvedInventory,
   purgeForeignUnresolvedInventory,
-  rememberInventoryFirstSend,
   restoreUnresolvedInventory,
   saveUnresolvedInventory,
   type ReplayStamp,
 } from '@/lib/unresolved-inventory';
+import { FIRST_ATTEMPT } from '@/lib/unresolved-tenancy';
+import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
 
 import { InventoryCommandForm } from './InventoryCommandForm';
 import { InventoryCommands } from './InventoryCommands';
@@ -65,12 +67,12 @@ const PRODUCT_ID = `PRD_${ULID}`;
 const KEY = 'sub_FIRSTKEYFIRSTKEYFIRS';
 const FRESH = 'sub_FRESHKEYFRESHKEYFRE';
 const OTHER = 'sub_OTHERKEYOTHERKEYOTHE';
-const BINDING = { owner: 'owner-tag-A', session: 'session-tag-1' };
+const BINDING = bindingOf('owner-tag-A', 'session-tag-1');
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const WAREHOUSE: InventoryScope = { kind: 'WAREHOUSE', warehouseId: WAREHOUSE_ID };
 const SHIPMENT: InventoryScope = { kind: 'SHIPMENT', shipmentId: SHIPMENT_ID };
-const WAREHOUSE_SLOT = `rasta.unresolved-inventory.warehouse.${WAREHOUSE_ID}`;
-const SHIPMENT_SLOT = `rasta.unresolved-inventory.shipment.${SHIPMENT_ID}`;
+const WAREHOUSE_SLOT = keyFor('rasta.unresolved-inventory.', BINDING, `warehouse.${WAREHOUSE_ID}`);
+const SHIPMENT_SLOT = keyFor('rasta.unresolved-inventory.', BINDING, `shipment.${SHIPMENT_ID}`);
 const STAMP: ReplayStamp = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
 const RECEIPT = { productId: PRODUCT_ID, quantity: 120, sourceReference: null };
 const ITEMS = [{ id: ITEM_ID, productId: PRODUCT_ID, onHandQuantity: 120, reservedQuantity: 20 }];
@@ -342,7 +344,7 @@ describe('never silently gone', () => {
     expect(saveUnresolvedInventory(WAREHOUSE, entry, BINDING)).toBe('UNAVAILABLE');
   });
 
-  it('from another login it is shown, never re-sent; another person’s page removes it', () => {
+  it('from another login it is shown, never re-sent; another person’s page reduces it to a held marker', () => {
     saveUnresolvedInventory(WAREHOUSE, entry, BINDING);
     expect(
       restoreUnresolvedInventory(
@@ -351,8 +353,14 @@ describe('never silently gone', () => {
         SESSION_MAX_AGE,
       )?.kind,
     ).toBe('VIEW_ONLY');
-    purgeForeignUnresolvedInventory('owner-tag-B');
+    purgeForeignUnresolvedInventory({ person: OTHER_PERSON, legacy: [] });
     expect(restoreUnresolvedInventory(WAREHOUSE, BINDING, SESSION_MAX_AGE)).toBeNull();
+    // Not removed: a content-free marker that still holds this kind (`lib/unresolved-tenancy.ts`).
+    const kept = Object.keys(window.sessionStorage);
+    expect(kept).toHaveLength(1);
+    expect(JSON.parse(window.sessionStorage.getItem(kept[0]!)!)).toMatchObject({
+      quarantined: true,
+    });
   });
 
   it('refuses an entry that is not what its slot holds or is not readable', () => {
@@ -373,7 +381,8 @@ describe('never silently gone', () => {
     ]) {
       window.sessionStorage.setItem(WAREHOUSE_SLOT, JSON.stringify({ ...base, ...value }));
       expect(restoreUnresolvedInventory(WAREHOUSE, BINDING, SESSION_MAX_AGE)).toBeNull();
-      expect(stored()).toBeNull();
+      // Left exactly as it is: quarantined, never removed (`lib/unresolved-tenancy.ts`).
+      expect(stored()).toMatchObject({ command: 'DISPATCH_SHIPMENT' });
     }
   });
 
@@ -538,9 +547,9 @@ describe('one unresolved command per warehouse', () => {
         BINDING,
       ),
     ).toBe('HELD');
-    clearUnresolvedInventory(WAREHOUSE, ADJUST_KEY);
+    clearUnresolvedInventory(WAREHOUSE, ADJUST_KEY, BINDING);
     expect(slot()).toMatchObject({ submissionId: RECEIVE_KEY, command: 'RECEIVE_STOCK' });
-    clearUnresolvedInventory(WAREHOUSE, RECEIVE_KEY);
+    clearUnresolvedInventory(WAREHOUSE, RECEIVE_KEY, BINDING);
     expect(slot()).toBeNull();
   });
 
@@ -851,9 +860,10 @@ describe('a page brought back from the browser history', () => {
     ['before the replay deadline', false, { kind: 'IDLE' } as InventoryFormState],
     ['past the replay deadline', true, { kind: 'REFUSED', reason: 'REPLAY' } as InventoryFormState],
   ])(
-    'a form drawn idle with the id in doubt (%s) sends nothing and keeps the record',
+    'a form drawn with the id in doubt (%s) is never idle: it starts from the record, which it keeps',
     async (_when, expired, answer) => {
-      // The form as the earlier `InventoryCommands` drew it on the way back: idle, editable.
+      // The form as the earlier `InventoryCommands` drew it on the way back, without
+      // `initial`: it restores its own record on mount (`UnresolvedForm`).
       saveUnresolvedInventory(
         WAREHOUSE,
         {
@@ -868,8 +878,9 @@ describe('a page brought back from the browser history', () => {
       if (expired) pastDeadline();
       submit.mockResolvedValue(answer);
       const { container } = renderReceiptForm();
-      fill(container, '۵');
-      await send(container.querySelector('form'));
+      expect(await screen.findByText(/کد پیگیری: COR_ORIGINAL/)).toBeInTheDocument();
+      // Past the deadline even the kept request is not sent again.
+      if (expired) await send(container.querySelector('form'));
       expect(submit).not.toHaveBeenCalled();
       expect(record()).toMatchObject({ submissionId: KEY, body: RECEIPT, replay: STAMP });
       expect(editable(container)).toBeNull();
@@ -960,7 +971,7 @@ describe('a page brought back from the browser history', () => {
     expect(editable(container)).toBeNull();
   });
 
-  it('a first send never takes a slot that holds a record, its own included; an answer still updates it', () => {
+  it('a first send never takes a slot that holds a record, its own included (UNRESOLVED); an answer still updates it', () => {
     const entry = {
       command: 'RECEIVE_STOCK' as const,
       submissionId: KEY,
@@ -968,22 +979,232 @@ describe('a page brought back from the browser history', () => {
       correlationId: null,
       replay: STAMP,
     };
-    expect(rememberInventoryFirstSend(WAREHOUSE, entry, BINDING)).toBe('SAVED');
+    expect(saveUnresolvedInventory(WAREHOUSE, entry, BINDING)).toBe('SAVED');
     const first = window.sessionStorage.getItem(WAREHOUSE_SLOT);
     expect(
-      rememberInventoryFirstSend(
-        WAREHOUSE,
-        { ...entry, body: { ...RECEIPT, quantity: 5 } },
-        BINDING,
-      ),
-    ).toBe('HELD');
-    expect(rememberInventoryFirstSend(WAREHOUSE, { ...entry, submissionId: OTHER }, BINDING)).toBe(
+      saveUnresolvedInventory(WAREHOUSE, { ...entry, body: { ...RECEIPT, quantity: 5 } }, BINDING),
+    ).toBe('UNRESOLVED');
+    expect(saveUnresolvedInventory(WAREHOUSE, { ...entry, submissionId: OTHER }, BINDING)).toBe(
       'HELD',
     );
     expect(window.sessionStorage.getItem(WAREHOUSE_SLOT)).toBe(first);
-    expect(saveUnresolvedInventory(WAREHOUSE, { ...entry, correlationId: 'COR' }, BINDING)).toBe(
-      'SAVED',
-    );
+    expect(
+      answerUnresolvedInventory(
+        WAREHOUSE,
+        { ...entry, correlationId: 'COR' },
+        BINDING,
+        FIRST_ATTEMPT,
+      ),
+    ).toBe('SAVED');
     expect(stored()).toMatchObject({ submissionId: KEY, body: RECEIPT, correlationId: 'COR' });
+  });
+});
+
+/**
+ * Codex PR-363 r3, finding 1, with the real mounted components: with stock 2,
+ * an adjustment K / −5 is refused and the service releases K, but the answer
+ * is delayed. The page is left and drawn again while it is out; the record
+ * brings back K's retry. Another operator receives stock, and the retry of
+ * K / −5 commits — its answer lost. The first refusal finally arrives: it must
+ * not clear K's record, or the next page offers a fresh key and the same
+ * adjustment is applied twice. Only the newest send's own answer may clear.
+ */
+describe('a late answer of an earlier send (attempt generations)', () => {
+  const RECEIVE_KEY = 'sub_RECEIVEKEYRECEIVEKEY';
+  const ADJUST_KEY = 'sub_ADJUSTKEYADJUSTKEYADJ';
+  const KEYS = { receive: RECEIVE_KEY, adjust: ADJUST_KEY };
+  const ADJUST_LABEL = 'اصلاح یا خروج مستقیم موجودی';
+  const ADJUSTMENT = { stockItemId: ITEM_ID, quantityDelta: -5, sourceReference: null };
+  const REFUSAL: InventoryFormState = {
+    kind: 'INVALID',
+    command: 'ADJUST_STOCK',
+    submissionId: ADJUST_KEY,
+    values: null,
+    fieldErrors: {},
+    message: 'موجودی منفی می‌شد.',
+  };
+  const doubt = (correlationId: string): InventoryFormState => ({
+    kind: 'UNCONFIRMED',
+    command: 'ADJUST_STOCK',
+    correlationId,
+    submissionId: ADJUST_KEY,
+    body: ADJUSTMENT,
+    replay: STAMP,
+  });
+  const redirected = () =>
+    Object.assign(new Error('NEXT_REDIRECT'), { digest: 'NEXT_REDIRECT;push;/x;307;' });
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  /** `act`, for a step after which a confirmed answer's redirect surfaces: that is the navigation. */
+  async function actPastRedirect(step: () => Promise<void> | void) {
+    try {
+      await act(async () => {
+        await step();
+      });
+    } catch (error) {
+      if (!String(error).includes('NEXT_REDIRECT')) throw error;
+    }
+  }
+
+  /** The adjustment K / −5 sent from the warehouse page, its answer still out; then the page is left. */
+  async function adjustmentOut() {
+    const first = deferred<InventoryFormState>();
+    submit.mockImplementationOnce(() => first.promise);
+    const view = renderWarehouseCommands(KEYS);
+    const form = await screen.findByRole('form', { name: ADJUST_LABEL });
+    fireEvent.change(form.querySelector(`[name="${STOCK_ITEM_FIELD}"]`)!, {
+      target: { value: ITEM_ID },
+    });
+    fireEvent.change(form.querySelector(`[name="${DIRECTION_FIELD}"]`)!, {
+      target: { value: 'DECREASE' },
+    });
+    fireEvent.change(form.querySelector(`[name="${AMOUNT_FIELD}"]`)!, {
+      target: { value: '5' },
+    });
+    await send(form);
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(stored()).toMatchObject({ submissionId: ADJUST_KEY, body: ADJUSTMENT, attempt: 1 });
+    view.unmount();
+    return first;
+  }
+
+  /** The page drawn again: the record brings back K's retry, which is pressed. */
+  async function retryAfterRemount(answer: () => Promise<InventoryFormState>) {
+    submit.mockImplementationOnce(answer);
+    const view = renderWarehouseCommands(KEYS);
+    const retry = await screen.findByRole('button', { name: RETRY_LABEL });
+    // A confirmed answer redirects: the rejection is the navigation.
+    await actPastRedirect(() => {
+      fireEvent.click(retry);
+    });
+    await actPastRedirect(() => undefined);
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect(String(submit.mock.calls[1]![2].get('submission'))).toBe(ADJUST_KEY);
+    return view;
+  }
+
+  it("Codex's sequence: the first refusal, arriving after the retry committed unseen, leaves K's record", async () => {
+    const first = await adjustmentOut();
+    const view = await retryAfterRemount(() => Promise.reject(lostResponse()));
+    expect(stored()).toMatchObject({ submissionId: ADJUST_KEY, attempt: 2 });
+    const before = window.sessionStorage.getItem(WAREHOUSE_SLOT);
+
+    await act(async () => first.resolve(REFUSAL));
+    expect(window.sessionStorage.getItem(WAREHOUSE_SLOT)).toBe(before);
+    view.unmount();
+
+    // A reload: only K's uncertainty view, under K, with K's body — no fresh key.
+    const { container } = renderWarehouseCommands({ receive: FRESH, adjust: OTHER });
+    expect(await screen.findByRole('button', { name: RETRY_LABEL })).toBeInTheDocument();
+    expect(container.querySelector('input[name="submission"]')).toHaveValue(ADJUST_KEY);
+    expect(container.querySelector(`input[value="${FRESH}"]`)).toBeNull();
+    expect(container.querySelector(`input[value="${OTHER}"]`)).toBeNull();
+  });
+
+  it("the newest send's own refusal still clears it — a remount alone is not a re-send", async () => {
+    const first = await adjustmentOut();
+    const view = renderWarehouseCommands(KEYS);
+    expect(await screen.findByRole('button', { name: RETRY_LABEL })).toBeInTheDocument();
+    await act(async () => first.resolve(REFUSAL));
+    expect(stored()).toBeNull();
+    view.unmount();
+    renderWarehouseCommands({ receive: FRESH, adjust: OTHER });
+    expect(await screen.findByRole('form', { name: ADJUST_LABEL })).toBeInTheDocument();
+  });
+
+  it("an earlier send's late answer in doubt does not rewrite the newer send's record", async () => {
+    const first = await adjustmentOut();
+    await retryAfterRemount(async () => doubt('COR_RETRY'));
+    const before = window.sessionStorage.getItem(WAREHOUSE_SLOT);
+    // The newer send's own answer in doubt did update it, at its generation.
+    expect(JSON.parse(before!)).toMatchObject({ attempt: 2, correlationId: 'COR_RETRY' });
+    await act(async () => first.resolve(doubt('COR_FIRST')));
+    expect(window.sessionStorage.getItem(WAREHOUSE_SLOT)).toBe(before);
+  });
+
+  it('after the retry is confirmed, the first send’s late answer in doubt recreates nothing and holds nothing', async () => {
+    const first = await adjustmentOut();
+    const view = await retryAfterRemount(() => Promise.reject(redirected()));
+    expect(stored()).toBeNull();
+    await actPastRedirect(() => first.resolve(doubt('COR_FIRST')));
+    expect(window.sessionStorage.length).toBe(0);
+    view.unmount();
+    renderWarehouseCommands({ receive: FRESH, adjust: OTHER });
+    expect(await screen.findByRole('form', { name: ADJUST_LABEL })).toBeInTheDocument();
+  });
+
+  it('after the person set it aside, the first send’s late answer in doubt is kept aside — never written back as K', async () => {
+    const first = await adjustmentOut();
+    // The action answers a refused retry with K's view and the note (`afterRetry`).
+    await retryAfterRemount(async () => ({
+      ...(doubt('COR_FIRST') as UnconfirmedInventory),
+      correlationId: null,
+      retryRefused: true,
+    }));
+    expect(stored()).toMatchObject({ submissionId: ADJUST_KEY, attempt: 2 });
+    // The person sets it aside — what «وضعیت را دیدم؛ این درخواست را کنار بگذار» calls.
+    // (React entangles the two sends' transitions, so the view under it is still
+    // drawn as sending until the first send settles.)
+    clearUnresolvedInventory(WAREHOUSE, ADJUST_KEY, BINDING);
+    expect(stored()).toBeNull();
+    await act(async () => first.resolve(doubt('COR_FIRST')));
+    expect(stored()).toBeNull();
+    const keys = Object.keys(window.sessionStorage);
+    expect(keys).toHaveLength(1);
+    expect(JSON.parse(window.sessionStorage.getItem(keys[0]!)!)).toMatchObject({
+      quarantined: true,
+    });
+  });
+
+  it('a logout while the first send is out: its late refusal leaves the marker', async () => {
+    const first = await adjustmentOut();
+    purgeAllUnresolvedInventory();
+    markInventoryOpen();
+    const marker = window.sessionStorage.getItem(WAREHOUSE_SLOT);
+    expect(JSON.parse(marker!)).toMatchObject({ marker: true, submissionId: ADJUST_KEY });
+    await act(async () => first.resolve(REFUSAL));
+    expect(window.sessionStorage.getItem(WAREHOUSE_SLOT)).toBe(marker);
+  });
+
+  it('a retry whose generation cannot be recorded is not sent, and K stays as it was', async () => {
+    // The first send's answer was lost: K in doubt, nothing out.
+    const view = renderWarehouseCommands(KEYS);
+    const form = await screen.findByRole('form', { name: ADJUST_LABEL });
+    fireEvent.change(form.querySelector(`[name="${STOCK_ITEM_FIELD}"]`)!, {
+      target: { value: ITEM_ID },
+    });
+    fireEvent.change(form.querySelector(`[name="${DIRECTION_FIELD}"]`)!, {
+      target: { value: 'DECREASE' },
+    });
+    fireEvent.change(form.querySelector(`[name="${AMOUNT_FIELD}"]`)!, {
+      target: { value: '5' },
+    });
+    submit.mockRejectedValueOnce(lostResponse());
+    await send(form);
+    view.unmount();
+    const before = window.sessionStorage.getItem(WAREHOUSE_SLOT);
+    expect(JSON.parse(before!)).toMatchObject({ submissionId: ADJUST_KEY, attempt: 1 });
+
+    renderWarehouseCommands(KEYS);
+    const retry = await screen.findByRole('button', { name: RETRY_LABEL });
+    jest.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    });
+    await act(async () => {
+      fireEvent.click(retry);
+    });
+    jest.restoreAllMocks();
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(window.sessionStorage.getItem(WAREHOUSE_SLOT)).toBe(before);
+    expect(await screen.findByRole('button', { name: RETRY_LABEL })).toBeEnabled();
   });
 });

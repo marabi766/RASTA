@@ -1,5 +1,5 @@
 import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
-import { DLQ_REASONS, RETRY_TOPIC_SUFFIX, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, RETRY_TOPIC_SUFFIX, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   HANDLER_MESSAGE_MAX,
   UnprocessableEventError,
@@ -657,7 +657,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
     }
 
     const contract = CONSUMED_PAYLOADS[envelope.eventName as ConsumedEventName];
-    const parsed = contract.schema.safeParse(envelope.payload);
+    const parsed = legacyParse(contract.schema, envelope.payload);
     if (!parsed.success) {
       // An event this service projects, without a field of its producer's
       // contract that the projection uses — no machine, a status change with
@@ -666,7 +666,7 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
       // failure acknowledged here would leave the machine dispatchable with no
       // trace, and a corrected replay must still be applied (audit L7-26,
       // review #205 r1, docs/07 § 7.6).
-      throw invalidPayloadError(envelope, parsed.error, contract.fields);
+      throw invalidPayloadError(envelope, parsed.refusal, contract.fields);
     }
 
     const payload = parsed.data as Record<string, unknown>;
@@ -1254,10 +1254,14 @@ export class AssetSyncConsumer implements OnModuleInit, OnApplicationShutdown {
   }
 
   /**
-   * A parked event's dead letter, as the producer published it: the original
-   * envelope under the key the record carried, with the platform headers and
-   * why, from where and after how many attempts (the consumer's own DLQ
-   * headers, {@link deadLetterHeaders}).
+   * A parked event's dead letter: the envelope as stored — re-serialized from
+   * its JSONB column, not the original bytes — under the key the record
+   * carried, with platform headers rebuilt from that envelope rather than the
+   * original record's, and why, from where and after how many attempts (the
+   * consumer's own DLQ headers, {@link deadLetterHeaders}). Only those added
+   * headers are bounded: its size relative to the source record is not
+   * (known escapes (ii) and (iii) in `@rasta/contracts` dead-letter-size.ts;
+   * a refused publication stays in the outbox, PR #378 r4).
    */
   private parkedDeadLetter(
     row: ParkedInsurance,

@@ -1,7 +1,9 @@
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { enrichOpenApiDocument } from '../src/openapi/document';
-import { startApi, type ApiHarness } from './api-helpers';
+import { apiTenant, startApi, supplierActor, type ApiHarness } from './api-helpers';
+import request from 'supertest';
+import { PROBE_TRACEPARENT, httpErrorBodyProblems } from '@rasta/nest-common';
 
 /**
  * The published contract, built from the **running application**.
@@ -211,5 +213,44 @@ describe('the OpenAPI document describes the application that is running', () =>
         });
       }
     }
+  });
+
+  it('accepts the error bodies the application really sends over HTTP, with and without a trace (audit 10-26 F3)', async () => {
+    const problems: string[] = [];
+    for (const traced of [true, false]) {
+      const headers: Record<string, string> = traced ? { traceparent: PROBE_TRACEPARENT } : {};
+      const http = () => request(api.app.getHttpServer());
+      const answers = [
+        {
+          method: 'GET',
+          url: '/v1/suppliers',
+          response: await http().get('/v1/suppliers').set(headers),
+        },
+        {
+          method: 'POST',
+          url: '/v1/suppliers',
+          response: await http()
+            .post('/v1/suppliers')
+            .set(headers)
+            .set('authorization', `Bearer ${supplierActor(apiTenant('API-ENVELOPE'))}`)
+            .send({ displayName: 'ok', capabilities: [] }),
+        },
+      ];
+      expect(answers.map(({ response }) => response.status)).toEqual([401, 400]);
+      expect(answers[1]!.response.body).toMatchObject({ code: 'VALIDATION_FAILED' });
+      expect(answers[1]!.response.body.details.length).toBeGreaterThan(0);
+      for (const { method, url, response } of answers) {
+        problems.push(
+          ...httpErrorBodyProblems(document, {
+            method,
+            url,
+            status: response.status,
+            body: response.body,
+            traced,
+          }),
+        );
+      }
+    }
+    expect(problems).toEqual([]);
   });
 });

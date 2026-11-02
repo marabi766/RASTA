@@ -3,8 +3,9 @@ import { ApiExcludeController } from '@nestjs/swagger';
 import { Public, RastaError, getContext } from '@rasta/nest-common';
 import { authorizationDenialsTotal, normalizeRoute } from '@rasta/observability';
 import type { Request, Response } from 'express';
-import { ProxyService } from './proxy.service';
+import { ClientCancelledError, ProxyService, type ProxyResponse } from './proxy.service';
 import { RateLimiter } from './rate-limiter';
+import { isSafeMethod, rateLimitFor } from './rate-limit-rule';
 import { resolveRoute, type RouteRule } from '../config/routes';
 import { assertCanonicalPath, assertNoFragment } from '../http/canonical-path';
 import { SERVICE_NAME, type GatewayEnv } from '../config/env';
@@ -21,7 +22,8 @@ import { GATEWAY_ENV } from '../tokens';
  *   3. rate limit        before doing real work, so a flood is cheap to refuse
  *   4. idempotency key   before forwarding, so a missing key never charges
  *   5. coarse role check a cheap filter, NOT the authorization decision
- *   6. forward
+ *   6. forward           admitted by the service's circuit breaker; refused
+ *                        here never takes its HALF_OPEN probe slot
  *
  * Step 5 deserves emphasis: the service re-checks authorization independently,
  * including object-level ownership, because only it knows which record is
@@ -59,18 +61,31 @@ export class GatewayController {
       throw RastaError.unauthenticated('This endpoint requires authentication');
     }
 
-    await this.enforceRateLimit(request, route, response);
+    await this.enforceRateLimit(request, route, path, response);
     this.enforceIdempotencyKey(request, route);
     this.enforceRouteRoles(request, route, context.roles);
 
-    const result = await this.proxy.forward({
-      service: route.service,
-      method: request.method,
-      path: `/v1${path}`,
-      query: this.queryString(request),
-      headers: request.headers,
-      body: request.body,
-    });
+    // The caller's disconnect travels with the request, so a probe whose
+    // caller has gone gives its slot back instead of holding it to the deadline.
+    const cancellation = clientCancellation(response);
+    let result: ProxyResponse;
+    try {
+      result = await this.proxy.forward({
+        service: route.service,
+        method: request.method,
+        path: `/v1${path}`,
+        query: this.queryString(request),
+        headers: request.headers,
+        body: request.body,
+        signal: cancellation.signal,
+      });
+    } catch (error) {
+      // Nobody is left to answer; the socket is already closed.
+      if (error instanceof ClientCancelledError) return;
+      throw error;
+    } finally {
+      cancellation.dispose();
+    }
 
     for (const [name, value] of Object.entries(result.headers)) {
       response.setHeader(name, value);
@@ -86,6 +101,7 @@ export class GatewayController {
   private async enforceRateLimit(
     request: Request,
     route: RouteRule,
+    path: string,
     response: Response,
   ): Promise<void> {
     const context = getContext();
@@ -95,16 +111,13 @@ export class GatewayController {
       windowSeconds: Math.ceil(this.env.GATEWAY_RATE_LIMIT_WINDOW_MS / 1000),
     };
 
-    // A route override marked `unsafeMethodsOnly` caps the operations that
-    // create work and leaves reads on the platform default. `docs/06` § 6.9
-    // limits operations — twenty document *uploads* an hour — while the
-    // routing table matches on a prefix, so applying such a cap to GET as well
-    // would lock a user out of their own listing screen for an hour.
-    const override = route.rateLimit;
-    const rule =
-      override && !(override.unsafeMethodsOnly && isSafeMethod(request.method))
-        ? override
-        : platformDefault;
+    // A route override caps the operations it names (`appliesTo`) and leaves
+    // every other request on the platform default, each in a bucket of its
+    // own. `docs/06` § 6.9 limits operations — twenty document *uploads* an
+    // hour — while the routing table matches on a prefix, so applying such a
+    // cap to GET as well would lock a user out of their own listing screen for
+    // an hour (`rateLimitFor`).
+    const { bucket, rule } = rateLimitFor(route, request.method, path, platformDefault);
 
     // Anonymous traffic is limited by IP; there is no better identifier, and
     // this is the one surface reachable without a token.
@@ -118,11 +131,7 @@ export class GatewayController {
           windowSeconds: rule.windowSeconds,
         };
 
-    const result = await this.rateLimiter.consume(
-      `${scope}:${route.prefix}`,
-      identifier,
-      effectiveRule,
-    );
+    const result = await this.rateLimiter.consume(`${scope}:${bucket}`, identifier, effectiveRule);
 
     response.setHeader('X-RateLimit-Limit', String(result.limit));
     response.setHeader('X-RateLimit-Remaining', String(result.remaining));
@@ -131,7 +140,7 @@ export class GatewayController {
     if (!result.allowed) {
       response.setHeader('Retry-After', String(Math.max(1, result.retryAfterSeconds)));
       throw new RastaError('RATE_LIMIT_EXCEEDED', 'Too many requests', {
-        internalContext: { scope, route: route.prefix },
+        internalContext: { scope, route: bucket },
       });
     }
 
@@ -192,11 +201,25 @@ export class GatewayController {
 }
 
 /**
- * Whether a method only reads.
- *
- * One definition, used by both the idempotency requirement and the rate-limit
- * scoping, so the two cannot drift into disagreeing about what a write is.
+ * An `AbortSignal` that fires when the caller's connection closes before the
+ * response was written. Already aborted if it closed before this was asked —
+ * a `close` listener added afterwards would never fire. `dispose` removes the
+ * listener.
  */
-function isSafeMethod(method: string): boolean {
-  return ['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase());
+export function clientCancellation(
+  response: Pick<Response, 'closed' | 'writableFinished' | 'once' | 'off'>,
+): {
+  signal: AbortSignal;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  const onClose = () => {
+    if (!response.writableFinished) controller.abort();
+  };
+  if (response.closed) {
+    if (!response.writableFinished) controller.abort();
+    return { signal: controller.signal, dispose: () => undefined };
+  }
+  response.once('close', onClose);
+  return { signal: controller.signal, dispose: () => response.off('close', onClose) };
 }

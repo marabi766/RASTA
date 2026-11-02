@@ -4,6 +4,8 @@ import {
   RETURN_DISPATCH_EVENT_SCHEMAS,
   RETURN_REQUEST_EVENTS,
   RETURN_REQUEST_EVENT_SCHEMAS,
+  describeLegacyRefusal,
+  legacyParse,
 } from '@rasta/contracts';
 
 /**
@@ -475,7 +477,11 @@ export function validateMarketplacePayload<N extends MarketplaceEventName>(
 ): z.infer<(typeof MARKETPLACE_EVENT_SCHEMAS)[N]> {
   // The schema is selected by the same key as the return type; TypeScript
   // cannot correlate the two through a generic parameter, hence the assertion.
-  return MARKETPLACE_EVENT_SCHEMAS[eventName].parse(payload) as z.infer<
-    (typeof MARKETPLACE_EVENT_SCHEMAS)[N]
-  >;
+  const parsed = legacyParse(MARKETPLACE_EVENT_SCHEMAS[eventName], payload);
+  if (!parsed.success) {
+    throw new Error(
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
+    );
+  }
+  return parsed.data as z.infer<(typeof MARKETPLACE_EVENT_SCHEMAS)[N]>;
 }

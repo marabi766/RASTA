@@ -8,6 +8,7 @@ import {
 } from '@/server/login-attempt';
 import { endpointsFor, exchangeCode, OidcError, verifyIdToken } from '@/server/oidc';
 import { SESSION_COOKIE, newCsrfToken, sealSession, sessionCookieOptions } from '@/server/session';
+import { storedOrganizationFor } from '@/server/session-organization';
 
 /**
  * Finishes a login (ADR-059 § 1).
@@ -82,7 +83,9 @@ export async function GET(request: Request): Promise<NextResponse> {
         {
           subject: identity.subject,
           username: identity.username,
-          organizationId: identity.organizationId,
+          // The access token's organization, as every service reads it — not
+          // the ID token's claim (`session-organization.ts`).
+          organizationId: storedOrganizationFor(tokens.access_token),
           accessToken: tokens.access_token,
           // From the server clock and the provider's own lifetime, never from
           // anything the browser could influence.

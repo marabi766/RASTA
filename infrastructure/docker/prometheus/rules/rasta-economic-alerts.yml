@@ -1,4 +1,5 @@
-# Alert rules for the payment reconciler (ADR-064 step B2), evaluated by the
+# Alert rules for the payment reconciler (ADR-064 step B2) and for settlement
+# refused for want of a commission rule (docs/24 Q-29), evaluated by the
 # local Prometheus in docker-compose.yml (`observability` profile).
 #
 # Local-only, like the audit and notification rules next door: there is no
@@ -62,3 +63,31 @@ groups:
           summary: 'The payment reconciler has stopped sweeping ({{ $labels.instance }})'
           description: 'An economic-service instance with the payment reconciler enabled has not completed a sweep in more than five intervals. Unfinished refunds are not being asked about or resolved on that instance.'
           runbook: docs/runbooks/payment-refund-stuck.md
+
+  # Settlement fails closed without a commission rule for the line (docs/24
+  # Q-29): the refusal moves nothing and the funds stay held, but the payee is
+  # not paid until a rule for the line is in force. One refusal is enough to
+  # page: in production every line carries a rule (the pilot's 0% rule per line,
+  # Q-08), so any refusal means a line was missed.
+  - name: rasta-economic-settlement
+    rules:
+      - alert: RastaSettlementNoActiveRule
+        # increase() misses refusals before the first scrape. Also accept a
+        # positive series absent 15m ago, matching all labels before summing so
+        # another instance cannot hide it. Filter zero increases before `or`
+        # so they cannot mask that branch; old steady positives then age out.
+        expr: >-
+          sum(
+            (increase(rasta_economic_settlement_failures_total{reason="no_active_rule"}[15m]) > 0)
+            or
+            (
+              (rasta_economic_settlement_failures_total{reason="no_active_rule"} > 0)
+              unless rasta_economic_settlement_failures_total{reason="no_active_rule"} offset 15m
+            )
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Settlements refused: no active commission rule for the line'
+          description: 'A settlement refusal with 422 NO_ACTIVE_RULE was observed in the last 15 minutes (a counter increase or a newly observed positive series): no active commission rule covers its business line, and settlement fails closed. Nothing moved and the funds stay held; the payee is not paid until a rule for the line is in force. The SETTLEMENT_REFUSED events name the transactions and lines; this alert deliberately carries none.'
+          runbook: docs/runbooks/settlement-no-active-rule.md

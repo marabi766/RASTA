@@ -243,6 +243,7 @@ async function boot(options: {
     INTERNAL_TOKEN_SECRET: `itest-${'x'.repeat(40)}`,
     ASSET_SERVICE_URL: 'http://127.0.0.1:9',
     MAINTENANCE_SERVICE_URL: 'http://127.0.0.1:9',
+    IDENTITY_SERVICE_URL: 'http://127.0.0.1:9',
     SHUTDOWN_TIMEOUT_MS: String(SHUTDOWN_TIMEOUT_MS),
     OUTBOX_SHUTDOWN_GRACE_SECONDS: String(GRACE_SECONDS),
     OUTBOX_POLL_INTERVAL_MS: '50',

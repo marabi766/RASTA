@@ -10,6 +10,8 @@ import {
 import type { ReadResult, ShipmentSummary, ShipmentTracking } from '@/server/inventory';
 
 import { ShipmentScreen, type ShipmentScreenProps } from './ShipmentScreen';
+import { bindingOf } from '@/test/unresolved-binding';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * `/inventory/shipments/[id]`: the shipment, its legs and its tracking, with
@@ -99,9 +101,10 @@ function props(overrides: Partial<ShipmentScreenProps> = {}): ShipmentScreenProp
     canOperate: true,
     consigneeOnly: false,
     csrfToken: 'csrf',
-    binding: { owner: 'owner-tag', session: 'session-tag' },
+    binding: bindingOf('owner-tag', 'session-tag'),
     sessionMaxAgeSeconds: 43_200,
     pageHref: `/inventory/shipments/${SHIPMENT_ID}`,
+    context: TEST_CONTEXT,
     ...overrides,
   };
 }
@@ -112,7 +115,7 @@ describe('the shipment', () => {
     expect(screen.getAllByText('ایجادشده، هنوز ارسال نشده').length).toBeGreaterThan(0);
     expect(screen.getByRole('link', { name: WAREHOUSE_ID })).toHaveAttribute(
       'href',
-      `/inventory?warehouse=${WAREHOUSE_ID}`,
+      `/inventory?warehouse=${WAREHOUSE_ID}&ctx=${TEST_CONTEXT}`,
     );
     expect(screen.getByText('ORG-DEH-0002')).toBeInTheDocument();
     expect(screen.getByText(`ORD_${ULID}`)).toBeInTheDocument();

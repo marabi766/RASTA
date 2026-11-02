@@ -19,6 +19,8 @@ import { TOTAL_WEIGHT_BP } from './criteria.dto';
 export const PUBLICATION_REFUSALS = [
   /** `procurementNature` is the owner's to choose and is never defaulted (Q-03). */
   'NATURE_REQUIRED',
+  'PROCUREMENT_AMOUNT_OUTSIDE_RANGE',
+  'PROCUREMENT_ESTIMATE_REQUIRED',
   'VISIBILITY_REQUIRED',
   'WINDOW_REQUIRED',
   /** The bidding period is shorter than the configured minimum (Q-84 (3); default 0). */

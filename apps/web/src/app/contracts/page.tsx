@@ -3,10 +3,13 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, PageHeader, TopBar } from '@/ui';
 import { isContractStatus } from '@/lib/contract-fields';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { fetchContracts, type ContractListQuery } from '@/server/contracts';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ContractsScreen } from './ContractsScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/contracts` route — قراردادها (docs/16 § ۱۶٫۶, ADR-068).
@@ -33,7 +36,7 @@ export default async function ContractsPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/contracts');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const status = one(params.status);
   // A status the service would not accept is dropped, not forwarded to earn a
   // 400 the person cannot act on.
@@ -44,10 +47,13 @@ export default async function ContractsPage({
 
   const result = await fetchContracts(session, query);
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -63,7 +69,11 @@ export default async function ContractsPage({
         description="قراردادهایی که این سازمان طرف آن‌هاست — به‌عنوان کارفرما یا پیمانکار."
       />
       <div className="mt-4">
-        <ContractsScreen result={result} query={query} />
+        <ContractsScreen
+          result={result}
+          query={{ ...query, context: pageContext(session) }}
+          demoMode={demoMode}
+        />
       </div>
     </AppShell>
   );

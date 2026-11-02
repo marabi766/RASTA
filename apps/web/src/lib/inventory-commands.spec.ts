@@ -69,7 +69,7 @@ describe('the vocabulary', () => {
   });
 
   it('says what an adjustment does not have: no reason, no second approval', () => {
-    expect(INVENTORY_COMMAND_CONSEQUENCES.ADJUST_STOCK).toContain('دلیل یا تایید دوم نمی‌خواهد');
+    expect(INVENTORY_COMMAND_CONSEQUENCES.ADJUST_STOCK).toContain('دلیل یا تأیید دوم نمی‌خواهد');
   });
 
   it('shows a status or a movement it does not know as it arrived', () => {
@@ -547,8 +547,16 @@ describe('every body the parser accepts survives a retry losslessly', () => {
 });
 
 describe('fixed words', () => {
-  /** A hamza on a word (أ إ ؤ ئ ء ۀ) and the combining hamza above (U+0654) are not written here. */
-  const HAMZA = new RegExp('\\u0621|\\u0623|\\u0624|\\u0625|\\u0626|\\u06C0|\\u0654');
+  /**
+   * Standard Persian orthography (owner decision B, 2026-10-24, which replaced
+   * the earlier ban on hamza): the hamza spellings (تأیید، تأمین، مسئله) are
+   * the standard ones, so their hamza-less forms are not written here, and
+   * neither is the combining hamza above (U+0654) on alef, waw or yeh. The
+   * ezafe «ـهٔ» stays allowed.
+   */
+  const HAMZA_LESS = /تایید|تامین|تاخیر|تاثیر|تاکید|مامور|ماخذ|تالیف|مساله|مسوول|رییس|جزییات/;
+  const COMBINING_ON_LETTER = new RegExp('[\u0627\u0648\u06CC\u064A]\u0654');
+  const nonStandard = (text: string) => HAMZA_LESS.test(text) || COMBINING_ON_LETTER.test(text);
 
   function strings(value: unknown, into: string[] = []): string[] {
     if (typeof value === 'string') into.push(value);
@@ -559,13 +567,19 @@ describe('fixed words', () => {
     return into;
   }
 
-  it('none of the exported texts carries one', () => {
-    const texts = strings(Object.values(commands));
-    expect(texts.length).toBeGreaterThan(40);
-    for (const text of texts) expect([text, HAMZA.test(text)]).toEqual([text, false]);
+  it('the guard sees both kinds', () => {
+    expect(nonStandard('نتوانستیم تایید کنیم')).toBe(true);
+    expect(nonStandard('ا\u0654')).toBe(true);
+    expect(nonStandard('نتوانستیم تأیید کنیم؛ صفحهٔ بعد')).toBe(false);
   });
 
-  it('nor does the source of any screen file written for these commands', () => {
+  it('none of the exported texts is spelled otherwise', () => {
+    const texts = strings(Object.values(commands));
+    expect(texts.length).toBeGreaterThan(40);
+    for (const text of texts) expect([text, nonStandard(text)]).toEqual([text, false]);
+  });
+
+  it('nor is the source of any screen file written for these commands', () => {
     const root = join(__dirname, '..');
     const files = [
       'app/inventory/InventoryCommandForm.tsx',
@@ -577,9 +591,8 @@ describe('fixed words', () => {
       'lib/inventory-commands.ts',
     ];
     for (const file of files) {
-      // «صفحهٔ بعد» is the read-only screen's own link, older than these commands.
-      const text = readFileSync(join(root, file), 'utf8').replace('صفحهٔ بعد', '');
-      expect([file, HAMZA.test(text)]).toEqual([file, false]);
+      const text = readFileSync(join(root, file), 'utf8');
+      expect([file, nonStandard(text)]).toEqual([file, false]);
     }
   });
 });

@@ -1,3 +1,7 @@
+import { randomBytes } from 'node:crypto';
+import { InternalTokenService } from '@rasta/nest-common';
+import { withRedirectProbe } from '@rasta/testing';
+import { SourceFactsClient } from '../src/provenance/source-facts.client';
 import { ulid } from 'ulid';
 import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
 import {
@@ -19,6 +23,7 @@ import {
   tenants,
   wire,
   type Wiring,
+  unanswered,
 } from './helpers';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { PrismaClient } from '../src/generated/prisma';
@@ -371,6 +376,54 @@ describe('economic consumers', () => {
     expect(await findBySource(redirected.requestId)).toBeNull();
   });
 
+  it.each(['settlement', 'reward'] as const)(
+    'an HTTP redirect leaves %s retryable with no writes, then recovery processes the same event',
+    async (kind) => {
+      const payload = kind === 'settlement' ? approval() : usage();
+      const fact =
+        kind === 'settlement'
+          ? sources.approved(payload as ReturnType<typeof approval>)
+          : sources.recorded(payload as ReturnType<typeof usage>);
+      const event =
+        kind === 'settlement'
+          ? envelope(CONSUMED_EVENTS.MAINTENANCE_APPROVED, payload)
+          : envelope(CONSUMED_EVENTS.USAGE_RECORDED, payload, userActor());
+      await withRedirectProbe({ body: fact }, async (probe) => {
+        const facts = new SourceFactsClient({
+          maintenanceBaseUrl: probe.baseUrl,
+          fleetBaseUrl: probe.baseUrl,
+          contractBaseUrl: probe.baseUrl,
+          timeoutMs: 2000,
+          tokens: new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300),
+          fetch: probe.fetch,
+        });
+        const consumer =
+          kind === 'settlement'
+            ? new SettlementAuthorityConsumer(noBroker, prisma, wiring.transactions, facts)
+            : new RewardTriggerConsumer(noBroker, prisma, wiring.rewards, facts);
+        const name =
+          kind === 'settlement'
+            ? SettlementAuthorityConsumer.CONSUMER_NAME
+            : RewardTriggerConsumer.CONSUMER_NAME;
+        const reference = fact.id;
+        await expect(consumer.handle(event)).rejects.toMatchObject({
+          code: 'UPSTREAM_UNAVAILABLE',
+        });
+        expect(await findBySource(reference)).toBeNull();
+        expect(await processedBy(name, event.eventId)).toBeNull();
+        expect(await rewardsFor(reference)).toHaveLength(0);
+        expect(await evaluationFor(reference)).toHaveLength(0);
+        expect(probe.sent).toHaveLength(1);
+        expect(probe.target).toEqual([]);
+        probe.recover();
+        await expect(consumer.handle(event)).resolves.toBeUndefined();
+        expect(await processedBy(name, event.eventId)).not.toBeNull();
+        if (kind === 'settlement') expect(await findBySource(reference)).not.toBeNull();
+        expect(probe.sent).toHaveLength(2);
+      });
+    },
+  );
+
   it('records nothing, and retries, while maintenance-service cannot be asked', async () => {
     // Fail closed. The error is the retryable kind, not a refusal: once the
     // owner is back, the retry or a DLQ replay records the obligation.
@@ -465,18 +518,21 @@ describe('economic consumers', () => {
 
   async function createRule(points = 5, extra: Record<string, unknown> = {}) {
     return asActor({ organizationId: org.a, roles: ['SYSTEM_ADMIN'] }, () =>
-      wiring.rewards.createRule({
-        organizationId: org.a,
-        triggerEvent: 'USAGE_RECORDED',
-        rewardType: 'POINTS',
-        points,
-        status: 'ACTIVE',
-        ...extra,
-        // JUSTIFIED-ANY: the DTO is a Zod inference with several optional
-        // shapes; spelling it out here would restate the schema rather than
-        // test anything.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      wiring.rewards.createRule(
+        {
+          organizationId: org.a,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points,
+          status: 'ACTIVE',
+          ...extra,
+          // JUSTIFIED-ANY: the DTO is a Zod inference with several optional
+          // shapes; spelling it out here would restate the schema rather than
+          // test anything.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+        unanswered(),
+      ),
     );
   }
 
@@ -602,17 +658,20 @@ describe('economic consumers', () => {
   /** A monetised rule: every point also credits the organization's wallet. */
   const monetisedRuleIn = (organizationId: string, points: number) =>
     asActor({ organizationId, roles: ['SYSTEM_ADMIN'] }, () =>
-      wiring.rewards.createRule({
-        organizationId,
-        triggerEvent: 'USAGE_RECORDED',
-        rewardType: 'POINTS',
-        points,
-        creditPerPointMinor: '1000',
-        status: 'ACTIVE',
-        validFrom: new Date(Date.now() - 86_400_000).toISOString(),
-        // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      wiring.rewards.createRule(
+        {
+          organizationId,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points,
+          creditPerPointMinor: '1000',
+          status: 'ACTIVE',
+          validFrom: new Date(Date.now() - 86_400_000).toISOString(),
+          // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+        unanswered(),
+      ),
     );
 
   it('leaves a transiently failed grant unprocessed, and a redelivery pays it exactly once', async () => {
@@ -712,15 +771,18 @@ describe('economic consumers', () => {
 
   it('reads a completed repair as a reward trigger too, keyed on the request', async () => {
     await asActor({ organizationId: org.a, roles: ['SYSTEM_ADMIN'] }, () =>
-      wiring.rewards.createRule({
-        organizationId: org.a,
-        triggerEvent: 'MAINTENANCE_COMPLETED',
-        rewardType: 'POINTS',
-        points: 3,
-        status: 'ACTIVE',
-        // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      wiring.rewards.createRule(
+        {
+          organizationId: org.a,
+          triggerEvent: 'MAINTENANCE_COMPLETED',
+          rewardType: 'POINTS',
+          points: 3,
+          status: 'ACTIVE',
+          // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+        unanswered(),
+      ),
     );
 
     const payload = {
@@ -789,16 +851,19 @@ describe('economic consumers', () => {
     // A rule activated later, valid from a day before the fact.
     const ruleFor = (points: number) =>
       asActor({ organizationId: org.b, roles: ['SYSTEM_ADMIN'] }, () =>
-        wiring.rewards.createRule({
-          organizationId: org.b,
-          triggerEvent: 'USAGE_RECORDED',
-          rewardType: 'POINTS',
-          points,
-          status: 'ACTIVE',
-          validFrom: new Date(Date.now() - 86_400_000).toISOString(),
-          // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any),
+        wiring.rewards.createRule(
+          {
+            organizationId: org.b,
+            triggerEvent: 'USAGE_RECORDED',
+            rewardType: 'POINTS',
+            points,
+            status: 'ACTIVE',
+            validFrom: new Date(Date.now() - 86_400_000).toISOString(),
+            // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+          unanswered(),
+        ),
       );
     await ruleFor(4);
 
@@ -863,16 +928,19 @@ describe('economic consumers', () => {
 
   const ruleIn = (organizationId: string, points: number, validFrom?: Date) =>
     asActor({ organizationId, roles: ['SYSTEM_ADMIN'] }, () =>
-      wiring.rewards.createRule({
-        organizationId,
-        triggerEvent: 'USAGE_RECORDED',
-        rewardType: 'POINTS',
-        points,
-        status: 'ACTIVE',
-        validFrom: (validFrom ?? new Date(Date.now() - 86_400_000)).toISOString(),
-        // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      wiring.rewards.createRule(
+        {
+          organizationId,
+          triggerEvent: 'USAGE_RECORDED',
+          rewardType: 'POINTS',
+          points,
+          status: 'ACTIVE',
+          validFrom: (validFrom ?? new Date(Date.now() - 86_400_000)).toISOString(),
+          // JUSTIFIED-ANY: as above — the DTO is a Zod inference.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+        unanswered(),
+      ),
     );
 
   const evaluationFor = (sourceReference: string) =>

@@ -584,6 +584,14 @@ Migration نخستش `down.sql` ندارد (مثل `identity`) از این را�
 یک فایل است، نه یک Rollback. برای شکل ۱، افزودن اشیاء تازه به نگاشت `EXPECTED` هم لازم
 است؛ Migrationی که فقط یک Index می‌سازد و نامش در آن نگاشت نیست، **به‌کلی** نامرئی است.
 
+**نکته 2026-10-23 — در CI این سه شکل در چند Job موازی اجرا می‌شوند (task 082).** Job ‏`migration-reversibility-chain`
+یک Matrix است و هر Leg آن، برای گروهی از سرویس‌ها، کل زنجیره را (شکل ۱) روی PostgreSQL خودش بررسی می‌کند؛ شکل ۲ و ۳ و
+گاردهای پایگاه داده در `migration-guards` اجرا می‌شوند. Check الزامی «Migration reversibility and database guards» فقط
+تجمیع این دو است و اگر یکی شکست بخورد یا Skip شود، شکست می‌خورد. سرویس تازه‌ای که Migration دارد باید هم در
+`test:migration` و هم در **یکی** از Shardهای `include` در `.github/workflows/ci.yml` بیاید (در سبک‌ترین Shard)؛ وگرنه
+`scripts/verify-migration-reversible-lib.test.mjs` (با `scripts/ci-migration-reversibility-lib.mjs`) شکست می‌خورد.
+`pnpm test:migration` همچنان همه را پشت سر هم اجرا می‌کند.
+
 ---
 
 ## ۱۴٫۴ تست قرارداد
@@ -933,6 +941,56 @@ PostgreSQL آن نقض کل تراکنش را Abort می‌کند و هر دست
 
 ---
 
+## RUN-003 reference restore — PM decision D-068
+
+For every discovered database (currently all 16), collect a separate schema-only
+SOURCE dump with the same pinned `pg_dump` and flags. Restore it into a fresh
+scratch database, then dump that database to obtain REF. Do not modify SOURCE.
+Compare the real archive's restored schema with REF using strict byte equality;
+strip only the two generated version header lines at their exact header position.
+No SQL, whitespace or expression normalization is allowed.
+
+Between SOURCE and REF only, equal line counts and an identical multiset of CHECK
+identities (database, schema, table, constraint name) are required. Every differing
+line must be a whole `CONSTRAINT "name" CHECK (...)` line in actual CREATE TABLE
+SQL context. Function bodies, comments and COMMENT strings never qualify. A
+non-CHECK difference, dropped/extra object or renamed constraint refuses. Report
+only the observed number of differing CHECK lines per database; do not hard-code
+exceptions or print expressions. Rows/MD5 digests, migration records, sequences,
+ACLs, ledger and wallet remain compared against SOURCE; REF contains schema only.
+
+PostgreSQL CHECK deparse is not idempotent on the first round trip. For example,
+`= ANY ((ARRAY['USER'::character varying, ...])::"text"[])` can return as
+`= ANY (ARRAY[('USER'::character varying)::"text", ...])`.
+
+REF equality proves the backup under test restores to exactly what PostgreSQL itself produces from the source schema. The SOURCE-vs-REF allowance TRUSTS PostgreSQL's own schema dump/restore for CHECK text: it does not prove semantic equivalence of those lines (a same-name CHECK with a different bound would also pass that structural guard — e.g. economic init migration :648-649). The fixed point proves stability for one more round trip only.
+
+Restore REF into a second fresh scratch database and dump it: these bytes must
+also equal REF. Missing REF, missing fixed-point evidence, a skipped allowance
+guard, or any failed reference restore/dump refuses operator acceptance. The drill
+creates both databases with its random suffix inside its existing single active
+PostgreSQL server (512 MiB, one CPU). It drops them after collection, and removes
+the owned cluster/volume on success, failure and signals. Ownership comes from
+names created by this invocation, never from a restored disposable marker.
+All new SQL files are private 0600 inside the 0700 directory. Plain-SQL restore
+stdout/stderr are captured and never printed, including on failure. Writers,
+services, consumers and publishers stay stopped throughout SOURCE, REF and archive
+collection; restored outboxes never publish.
+
+Version 5 JSON includes mandatory `referenceChecked`, `allowanceChecked` and
+`fixedPointEqual` gates plus per-database `before.reference.checkLinesDifferent`
+and `before.reference.milliseconds` (extra reference collection/restore/dump and
+fixed-point time). The PG suite prints that extra time separately in local and CI
+logs. CI budgets remain **10 minutes per job / 5 minutes for the PG test step**;
+main integration job/step budgets are unchanged. Runtime tenant isolation is not
+proved. This drill does not prove PITR, WAL archiving, operational RPO/RTO,
+large-data recovery time, direct equality of every column value (rows use MD5
+rather than collision-free proof), production-role recovery (bootstrap supplies
+development roles), runtime role access or runtime tenant isolation, API or real
+payment flows, Keycloak/Temporal storage, object-storage file contents, backup
+encryption/off-host transfer and retention, Kafka offsets, distributed snapshot
+consistency with active writers, or full-system recovery.
+
 ## ۱۴٫۱۱ اجرای تست‌ها
 
 ```bash
@@ -949,15 +1007,50 @@ pnpm verify                     # دروازه کامل کیفیت
 **اجرای محلی Suite یکپارچگی یک سرویس (از #131، Broker با SASL_SSL).** Suiteها `.env` را خودشان نمی‌خوانند؛ باید در Shell
 Export شود. CI همین متغیرها را صریح در `env:` هر گام می‌دهد (`.github/workflows/ci.yml`، گام «Integration tests»).
 
-**چیدمان CI (از 2026-10-14).** کار یکپارچگی که به ۳۳–۳۴ دقیقه رسیده بود، چهار Job موازی است و هرکدام PostgreSQL،
+**چیدمان CI (از 2026-10-14).** کار یکپارچگی که به ۳۳–۳۴ دقیقه رسیده بود، پنج Job موازی است. چهار Job نخست PostgreSQL،
 Broker و — فقط جایی که Suiteهایش می‌خوانند — MinIO، ClamAV و Redis خودش را بالا می‌آورد: `integration-suites` (گام
 «Integration tests» و سپس نگهبان‌های فقط-PostgreSQL)، `integration-security` (استقلال تست F-25، جداسازی Tenant و
 مجوز، Retry replay)، `integration-coverage-critical` (دروازه‌های پوشش construction، contract و inventory) و
-`integration-coverage` (هفت دروازهٔ پوشش دیگر). همان دستورها، همان `env:` و همان مهلت هر گام. Job ‏`integration` با
+`integration-coverage` (هفت دروازه پوشش دیگر). Job پنجم `integration-backup-drill` فقط PostgreSQL دارد و آزمون بازیابی را اجرا می‌کند. همان دستورها، همان `env:` و همان مهلت هر گام. Job ‏`integration` با
 نام «Integration and security tests» — همان Check الزامی Branch protection و Merge queue — فقط تجمیع می‌کند: با
-`always()` اجرا می‌شود و جز وقتی هر چهار `success` باشند شکست می‌خورد (شکست، لغو یا Skip). ‏`pnpm
+`always()` اجرا می‌شود و جز وقتی هر پنج `success` باشند شکست می‌خورد (شکست، لغو یا Skip). ‏`pnpm
 test:ci-integration-split` (در Job کیفیت) رد می‌کند اگر Job ‏`integration-*`ی بیرون از آن بماند، گامی از کار قدیم در هیچ
 Jobی یا در دو Job اجرا شود، یا گامی بدون زیرساختی که می‌خواند اجرا شود.
+
+**ساخت و اسکن ایمیج سرویس‌ها فقط روی قطار ادغام و main (تصمیم مالک 2026-10-24).** ایمیج‌ها جایی ساخته و با Trivy اسکن می‌شوند که
+ادغام تصمیم‌گیری می‌شود، نه روی هر اجرای PR. قطار ادغام (`mq/train-N`، PR پیش‌نویس موقت میزبان) همان اجرای `pull_request` است و
+با **Head ref** همان PR در همین مخزن شناخته می‌شود، نه با Label. تصمیم را `node scripts/container-scope.mjs --run` از متغیر محیطی
+می‌گیرد (نام شاخه هرگز در متن Shell نمی‌آید) و منطقش یک جا، در `classifyRun` (`scripts/container-scope-lib.mjs`) است:
+
+| اجرا                                                                                 | ایمیج‌های ساخته و اسکن‌شده                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Push به `main`                                                                       | همهٔ ایمیج‌ها (هر `services/*/Dockerfile`)                                                                                                                                                 |
+| PR از `mq/train-N` (قطار)                                                            | ایمیج‌های **متأثر**، دقیقاً مثل PRهای پیشین؛ هر خطای طبقه‌بندی (Base نامعتبر، Git، YAML) ← **همه**؛ «هیچ» فقط وقتی همهٔ مسیرها زیر `docs/` یا `tests/` باشند (همان فهرست معاف بازبینی‌شده) |
+| هر PR دیگر                                                                           | هیچ؛ Check «Images built and scanned» موفق است و می‌نویسد ایمیج‌ها روی قطار و main ساخته می‌شوند                                                                                           |
+| رویداد یا شاخهٔ ناشناخته، فرادادهٔ ناقص، Fork، یا نام نادرست زیر فضای رزروشدهٔ `mq/` | **همه** (ناشناخته هرگز یعنی کمتر نه)                                                                                                                                                       |
+
+**Check یکپارچه: «Images built and scanned»** (Job ‏`images`، همیشه با `always()`). فقط وقتی `success` است که هر ایمیج انتخاب‌شده ساخته و
+اسکن شده باشد؛ Job ‏`containers` اگر Skip، لغو یا ناموفق باشد و ایمیجی انتخاب شده باشد، قرمز می‌شود، و «هیچ ایمیج» فقط برای قطار
+معاف‌شده (docs/tests) و PR عادی پذیرفته است. **قرارداد:** روی PR عادی این Check **عمداً بدون اسکن** موفق می‌شود و سبز بودنش شاهد اسکن نیست؛ شاهد اسکن، همین Check روی PR قطار
+`mq/train-N` (پیشوند آزمون‌شده) و اجرای push روی `main` است. پس میزبان ادغام باید `SUCCESS` بودن این Check را روی PR قطار
+(نه Skip، لغو یا نبود) الزامی کند و نباید PR عادی را بیرون از قطار ادغام کند. این الزام تنظیم میزبان است و در این مخزن اعمال نمی‌شود؛
+هیچ‌چیز اینجا وضعیت فعلی میزبان را ادعا نمی‌کند. Job ‏`trivy-db` روی هر اجرا، PR عادی هم، اجرا می‌شود: اسکن ایمیج ClamAV (Check الزامی) هم از همان پایگاه می‌خواند.
+
+| Job                                                                                                         | PR عادی، پیش از این | PR عادی، اکنون                                | قطار (`mq/train-N`)                           | push به main                   |
+| ----------------------------------------------------------------------------------------------------------- | ------------------- | --------------------------------------------- | --------------------------------------------- | ------------------------------ |
+| `quality` (شامل `test:container-scope` و اثبات BuildKit روی Fixture) و سایر Jobهای کیفیت/امنیت/یکپارچگی/E2E | اجرا                | اجرا                                          | اجرا                                          | اجرا                           |
+| `container-scope` ‏«Images to build and scan» (Check الزامی Branch protection)                              | اجرا؛ انتخاب متأثر  | اجرا؛ انتخاب «هیچ»؛ اثبات محدودسازی می‌ماند   | اجرا؛ متأثر                                   | اجرا؛ همه                      |
+| `trivy-db`                                                                                                  | اجرا                | اجرا (ClamAV هم می‌خواند)                     | اجرا                                          | اجرا                           |
+| `containers` ‏«Build and scan images (<service>)»                                                           | متأثر               | **Skip**                                      | متأثر                                         | همه                            |
+| `images` ‏«Images built and scanned»                                                                        | نبود                | **success** («images are built on the train») | success فقط با ساخت و اسکن همهٔ انتخاب‌شده‌ها | success فقط با ساخت و اسکن همه |
+
+**اجرای محلی `pnpm verify` به `docker buildx` نیاز دارد** (آزمون «BuildKit: !README.md re-includes only the context root» در
+`scripts/container-scope.test.mjs` یک Build روی Fixture موقت `FROM scratch` می‌زند و به شبکه نیاز ندارد). در CI نبود آن **شکست**
+است. محلی (`CI` تنظیم‌نشده) فقط وقتی آزمون Skip می‌شود که خودِ ابزار نباشد: باینری `docker` یا افزونهٔ buildx (`docker buildx version`
+می‌گوید `'buildx' is not a docker command`)؛ Daemon خاموش، دسترسی ممنوع، Timeout یا شکست Build همچنان شکست است
+(`scripts/container-scope-buildx.mjs`). پیام Skip نصب را می‌گوید.
+
+**Mailpit برای Suiteهای SMTP اعلان (از 2026-10-23).** `email-delivery.int-spec.ts` و `mail-channel.int-spec.ts` (notification-service) پیام را از API خود Mailpit می‌خوانند. `integration-suites` و `integration-coverage` آن را به‌صورت Service container با همان ایمیج و Digest فایل compose بالا می‌آورند (پورت‌های ۱۰۲۵ و ۸۰۲۵، Health check با `/mailpit readyz`) و گام‌های «Integration tests» و «Notification coverage gate» `REQUIRE_MAILPIT=1` دارند: در CI نبودن Mailpit در `beforeAll` **خطا** می‌دهد (`test/mailpit.ts`)، نه Skip؛ محلی و بدون این متغیر همان Skip + هشدار می‌ماند (`docker compose --profile tools up -d mailpit`). `test:ci-integration-split` گام بدون `REQUIRE_MAILPIT` یا بدون Service را رد می‌کند.
 
 **Pull ایمیج در CI و خطای گذرای Registry (از 2026-10-15).** `docker run` در گام «Start Keycloak with the platform realm»
 با کد ۱۲۵ شکست خورد چون quay.io برای Manifest پاسخ `502 Bad Gateway` داد (#279)؛ گام Retry نداشت. اکنون پیش از گام‌هایی
@@ -1001,7 +1094,7 @@ pnpm --filter @rasta/identity-service test:integration
   `.env`ِ ساخته‌شده از `.env.example` پیش از #131 باید دوباره ساخته شود.
 - **Observer:** Specهای Kafka به‌عنوان `itest-observer` می‌خوانند و گذرواژه‌اش فقط در
   `infrastructure/docker/kafka/bootstrap.env.example` (یا `bootstrap.env` محلی) است، نه `.env` — فقط همان یک خط را Export کن، نه
-  گذرواژهٔ admin یا ops-replay. بی آن، Spec با `KafkaConnectionConfigError: itest-observer refuses to reach Kafka …`
+  گذرواژهٔ admin یا ops-replay. بی آن، Spec با `KafkaConnectionConfigError: This Kafka client refuses to reach Kafka …`
   شکست می‌خورد.
 - **Skip بی‌صدا:** بی `KAFKA_BROKERS` این ده Spec با یک `console.warn` کنار گذاشته می‌شوند و اجرا سبز است:
   `identity-service/test/security-event-kafka`، `audit-service/test/kafka-projector`،

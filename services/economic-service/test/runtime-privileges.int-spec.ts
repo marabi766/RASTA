@@ -83,6 +83,21 @@ describe('the runtime role cannot lift an integrity guard (D-045)', () => {
     });
   });
 
+  it('can execute the commission pricing and rule-change helpers as the real runtime login', async () => {
+    // A rolled-back scope mutation proves both application call sites remain usable
+    // after a privilege split, without retaining transaction-local scope settings.
+    const rollback = new Error('rollback runtime helper probe');
+    await expect(
+      runtime.$transaction(async (tx) => {
+        const identity = await tx.$queryRaw<{ role: string }[]>`SELECT current_user::text AS role`;
+        expect(identity).toEqual([{ role: 'rasta_economic' }]);
+        await tx.$executeRaw`SELECT commission_pricing_scope_lock('runtime-acl-probe', 'PARTS', NULL)`;
+        await tx.$queryRaw`SELECT commission_rule_scope_change('runtime-acl-probe', 'PARTS', NULL)`;
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+  });
+
   it('may not DISABLE any trigger in the schema — the guards included', async () => {
     const triggers = await schemaTriggers(runtime);
     for (const [table, trigger] of GUARDS) {

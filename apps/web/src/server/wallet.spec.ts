@@ -167,12 +167,28 @@ describe('the payment provider disclosure', () => {
     const { impl, urls } = answering({
       provider: 'mock',
       simulated: true,
-      notice: 'Simulated payment provider. No bank connection, no real funds, no custody of money.',
     });
     const result = await withFetch(impl, () => fetchPaymentProvider(SESSION));
     expect(new URL(urls[0]!).pathname).toBe('/v1/wallets/provider');
     expect(result.kind).toBe('OK');
     if (result.kind === 'OK') expect(result.data.simulated).toBe(true);
+  });
+
+  it('does not keep the service’s English notice: only the flag the page words itself from', async () => {
+    const { impl } = answering({
+      provider: 'mock',
+      simulated: true,
+      notice: 'Simulated payment provider. No bank connection, no real funds, no custody of money.',
+    });
+    const result = await withFetch(impl, () => fetchPaymentProvider(SESSION));
+    expect(result.kind).toBe('OK');
+    expect(JSON.stringify(result)).not.toContain('Simulated payment provider');
+  });
+
+  it('fails closed: a disclosure without the flag is malformed, so the top-up is withheld', async () => {
+    const { impl } = answering({ provider: 'mock', notice: 'Simulated payment provider.' });
+    const result = await withFetch(impl, () => fetchPaymentProvider(SESSION));
+    expect(result.kind).toBe('MALFORMED');
   });
 });
 

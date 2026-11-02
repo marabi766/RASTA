@@ -313,7 +313,7 @@ describe('the bodies', () => {
 describe('who may do what', () => {
   it('operators are configured, ORGANIZATION_ADMIN by default, and the portal’s default is the same', () => {
     expect(squash(serviceEnv)).toContain(
-      "INVENTORY_OPERATOR_ROLES:z.string().default('ORGANIZATION_ADMIN')",
+      "INVENTORY_OPERATOR_ROLES:z.string().prefault('ORGANIZATION_ADMIN')",
     );
     expect(webServerEnv().WEB_INVENTORY_ROLES).toEqual(['ORGANIZATION_ADMIN']);
   });

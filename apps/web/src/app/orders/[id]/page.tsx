@@ -1,8 +1,11 @@
 import { redirect } from 'next/navigation';
 
 import { AppShell, Button, ButtonLink, PageHeader, TopBar } from '@/ui';
-import { isOrderCommand } from '@/lib/order-fields';
+import { isOrderCommand, ORDER_COMMANDS, ORDER_PLACED } from '@/lib/order-fields';
+import { FLASH_PARAM } from '@/lib/form-fields';
+import { readFlash } from '@/server/flash';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { webServerEnv } from '@/server/env';
 import { fetchOrder } from '@/server/orders';
 import { mintReturnSubmission } from '@/server/return-replay';
@@ -18,6 +21,8 @@ import { mintSubmissionId, submissionBinding } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { OrderDetailScreen, type OrderDetailScreenProps } from './OrderDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageParams } from '@/server/page-context';
 
 /**
  * The `/orders/[id]` route — جزئیات سفارش + Stepper (docs/16 § ۱۶٫۶).
@@ -40,11 +45,12 @@ export default async function OrderPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/orders/${id}`)}`);
 
-  const query = await searchParams;
-  const done =
-    typeof query.done === 'string' && isOrderCommand(query.done) ? query.done : undefined;
-
-  const placed = query.placed === '1';
+  const query = await pageParams(session, searchParams);
+  // The confirmation this session's own write earned for this order, signed for it and for
+  // this organization (`server/flash.ts`) — never a flag somebody could type (PR 405 review 2, F2).
+  const confirmed = readFlash(session, query[FLASH_PARAM], id, [...ORDER_COMMANDS, ORDER_PLACED]);
+  const done = isOrderCommand(confirmed) ? confirmed : undefined;
+  const placed = confirmed === ORDER_PLACED;
 
   const result = await fetchOrder(session, id);
 
@@ -99,10 +105,13 @@ export default async function OrderPage({
     }
   }
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -130,6 +139,7 @@ export default async function OrderPage({
           done={done}
           placed={placed}
           returns={returns}
+          demoMode={demoMode}
         />
       </div>
     </AppShell>

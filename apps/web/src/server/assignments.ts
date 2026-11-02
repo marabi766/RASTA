@@ -1,6 +1,7 @@
-import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
+import { ID_PREFIXES, legacyParse, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
 import {
   ASSIGN_DRIVER_FIELDS,
@@ -48,18 +49,18 @@ const assignmentSummarySchema = z.object({
   assetId: z.string(),
   active: z.boolean(),
   startedAt: renderableDate,
-  endedAt: renderableDate.nullable().default(null),
-  purpose: z.string().nullable().default(null),
-  endReason: z.string().nullable().default(null),
-  endNotes: z.string().nullable().default(null),
+  endedAt: renderableDate.nullable().prefault(null),
+  purpose: z.string().nullable().prefault(null),
+  endReason: z.string().nullable().prefault(null),
+  endNotes: z.string().nullable().prefault(null),
 });
 
 export type AssignmentSummary = z.infer<typeof assignmentSummarySchema>;
 
 const assignmentPageSchema = z.object({
   items: z.array(assignmentSummarySchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type AssignmentPage = z.infer<typeof assignmentPageSchema>;
@@ -183,17 +184,13 @@ export function parseAssignForm(
   values: AssignDriverFormValues,
   driverIdValue: string,
 ): ParsedAssignForm {
-  const parsed = assignFormSchema.safeParse(values);
+  const parsed = legacyParse(assignFormSchema, values);
   if (parsed.success) return { ok: true, request: { ...parsed.data, driverId: driverIdValue } };
 
-  const fieldErrors: Partial<Record<AssignDriverField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (typeof field === 'string' && isAssignField(field) && fieldErrors[field] === undefined) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, isAssignField),
+  };
 }
 
 function isAssignField(value: string): value is AssignDriverField {
@@ -278,21 +275,13 @@ export type ParsedEndAssignmentForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<EndAssignmentField, string>> };
 
 export function parseEndAssignmentForm(values: EndAssignmentFormValues): ParsedEndAssignmentForm {
-  const parsed = endAssignmentFormSchema.safeParse(values);
+  const parsed = legacyParse(endAssignmentFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<EndAssignmentField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (
-      typeof field === 'string' &&
-      isEndAssignmentField(field) &&
-      fieldErrors[field] === undefined
-    ) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, isEndAssignmentField),
+  };
 }
 
 function isEndAssignmentField(value: string): value is EndAssignmentField {

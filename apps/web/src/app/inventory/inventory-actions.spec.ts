@@ -24,6 +24,7 @@ import type { WebSession } from '@/server/session';
 import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 
 import { IDLE_INVENTORY_FORM, type UnconfirmedInventory } from './inventory-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The inventory commands' write path — the order of checks every portal write
@@ -62,7 +63,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'operator',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',

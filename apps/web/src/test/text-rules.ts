@@ -41,8 +41,11 @@ export function probesFrom(sample: string, codePoints: readonly number[]): strin
 /** The schema of one key of a form schema, through its refinements and transforms. */
 export function formField(schema: z.ZodTypeAny, key: string): z.ZodTypeAny {
   let current: z.ZodTypeAny = schema;
-  while (current instanceof z.ZodEffects) current = current.innerType();
-  const field = (current as z.AnyZodObject).shape?.[key] as z.ZodTypeAny | undefined;
+  // A refinement is a check on the object itself; a transform or preprocess is a pipe.
+  while (current instanceof z.ZodPipe) {
+    current = (current.in instanceof z.ZodTransform ? current.out : current.in) as z.ZodType;
+  }
+  const field = (current as z.ZodObject).shape?.[key] as z.ZodTypeAny | undefined;
   if (!field) throw new Error(`the form schema has no \`${key}\``);
   return field;
 }

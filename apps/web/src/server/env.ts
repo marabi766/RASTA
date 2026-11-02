@@ -1,4 +1,12 @@
 import { z } from 'zod';
+import { parsableUrl, legacyParse } from '@rasta/contracts';
+
+import {
+  MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS,
+  MAX_REPLAY_MARGIN_SECONDS,
+  projectCreateWindowFits,
+  replayMarginCoversClockBudget,
+} from './unresolved-request-policy';
 
 /**
  * Server-only configuration for the portal (ADR-059).
@@ -31,14 +39,28 @@ const MIN_SECRET_LENGTH = 32;
  * fetched, and the failure would surface as a connection error at runtime
  * rather than as a refusal at boot — which is the whole point of validating
  * configuration.
+ *
+ * Nor a username or password in it: the portal calls these with `fetch`, which
+ * refuses such a URL on every call with a TypeError that repeats it whole —
+ * the password in it — into the server log (#385 r5).
  */
 const httpUrl = z
   .string()
-  .url()
+  .check(parsableUrl())
   .refine(
     (value) => value.startsWith('http://') || value.startsWith('https://'),
     'Expected an http(s) URL',
-  );
+  )
+  .refine((value) => {
+    // Not URL.parse: jsdom's URL (the tests' environment) has no static parse.
+    try {
+      const url = new URL(value);
+      return url.username === '' && url.password === '';
+    } catch {
+      // Not a URL: refused by `.url()` above. The error is dropped, not kept.
+      return true;
+    }
+  }, 'Expected a URL without a username or password');
 
 /** The oversight role has aggregate access only; no setting here may grant it a screen. */
 const OVERSIGHT_ROLE = 'AUDITOR';
@@ -54,7 +76,7 @@ function roleList(name: string, fallback: string, alsoRefused: readonly string[]
   const refused = [OVERSIGHT_ROLE, ...alsoRefused];
   return z
     .string()
-    .default(fallback)
+    .prefault(fallback)
     .transform((raw) =>
       raw
         .split(',')
@@ -73,7 +95,7 @@ const REASON_CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
 function reasonCodeList(name: string, fallback: string) {
   return z
     .string()
-    .default(fallback)
+    .prefault(fallback)
     .transform((raw) =>
       raw
         .split(',')
@@ -130,7 +152,7 @@ const schema = z.object({
     .int()
     .min(300)
     .max(30 * 24 * 60 * 60)
-    .default(12 * 60 * 60),
+    .prefault(12 * 60 * 60),
 
   /**
    * Whether the session cookie carries `Secure`.
@@ -150,7 +172,7 @@ const schema = z.object({
    */
   WEB_REDIS_URL: z
     .string()
-    .url()
+    .check(parsableUrl())
     .refine(
       (value) => value.startsWith('redis://') || value.startsWith('rediss://'),
       'Expected a redis:// or rediss:// URL',
@@ -208,7 +230,7 @@ const schema = z.object({
    */
   WEB_TENDER_COI_RULES: z
     .string()
-    .default('AWARDER_NOT_EVALUATOR')
+    .prefault('AWARDER_NOT_EVALUATOR')
     .transform((raw) =>
       raw
         .split(',')
@@ -261,7 +283,7 @@ const schema = z.object({
    * (same bounds, 1..168) and must be changed together with it, or set lower.
    * The default is that setting's floor, as for economic-service's below.
    */
-  WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_MARKETPLACE_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a
@@ -273,7 +295,7 @@ const schema = z.object({
     .int()
     .min(60)
     .max(30 * 60)
-    .default(10 * 60),
+    .prefault(10 * 60),
 
   /**
    * Who, on the employer's side, is drawn the forms that cancel a draft,
@@ -318,7 +340,7 @@ const schema = z.object({
    */
   WEB_CONTRACT_CANCEL_AFTER_SIGNATURE: z
     .enum(['true', 'false'])
-    .default('false')
+    .prefault('false')
     .transform((value) => value === 'true'),
 
   /**
@@ -333,7 +355,7 @@ const schema = z.object({
    * than the service's only offers the re-send for less time than it could
    * be; a higher one would offer a re-send the service may execute as new.
    */
-  WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a
@@ -347,7 +369,7 @@ const schema = z.object({
     .int()
     .min(60)
     .max(30 * 60)
-    .default(10 * 60),
+    .prefault(10 * 60),
 
   /**
    * How long contract-service keeps an idempotency record, in hours — the
@@ -360,8 +382,17 @@ const schema = z.object({
    * This **mirrors** contract-service's `CONTRACT_IDEMPOTENCY_TTL_HOURS`
    * (same bounds, 1..168) and must be changed together with it, or set lower.
    * The default is that setting's floor, as for economic-service's above.
+   *
+   * The project-create window (this retention less the margin below, plus the
+   * portal's 30 s clock allowance) may not exceed
+   * `PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS` (`@rasta/contracts`, 3 300 s):
+   * construction-service refuses a replay deadline past its own retention
+   * less its fence budget, and refuses to start unless it can accept that
+   * much. Beyond it the portal refuses to start (`loadWebServerEnv`), so an
+   * honest client never meets the refusal. With 1 h that means a margin of at
+   * least 330 s.
    */
-  WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a
@@ -373,30 +404,51 @@ const schema = z.object({
     .int()
     .min(60)
     .max(30 * 60)
-    .default(10 * 60),
+    .prefault(10 * 60),
 
   /**
    * How long construction-service keeps an idempotency record, in hours — the
    * window in which a bid re-sent under its original key is answered with its
    * stored receipt rather than run again (`server/bid-replay.ts`).
    *
-   * This **mirrors** construction-service's `CONSTRUCTION_IDEMPOTENCY_TTL_HOURS`
-   * (same bounds, 1..168) and must be changed together with it, or set lower.
-   * The default is that setting's floor, as for economic-service's above.
+   * This is the portal's own bound on construction-service's
+   * `CONSTRUCTION_IDEMPOTENCY_TTL_HOURS` (the service accepts 1..168 and keeps
+   * records that long): it must not exceed the service's setting, and it may be
+   * no more than `MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS` (1), the longest
+   * retention that can boot at all given the cap below
+   * (`unresolved-request-policy.ts` derives it; a larger value could only fail
+   * at start, so the schema refuses it here). The default is the service
+   * setting's floor.
+   *
+   * The project-create window (this retention less the margin below, plus the
+   * portal's 30 s clock allowance) may not exceed
+   * `PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS` (`@rasta/contracts`, 3 300 s):
+   * construction-service refuses a replay deadline past its own retention
+   * less its fence budget, and refuses to start unless it can accept that
+   * much. Beyond it the portal refuses to start (`loadWebServerEnv`), so an
+   * honest client never meets the refusal. With 1 h that means a margin of at
+   * least 330 s.
    */
-  WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_BOOTABLE_CONSTRUCTION_RETENTION_HOURS)
+    .prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending a bid
    * command, in seconds: room for the request to reach construction-service.
-   * Same bounds as the dispute margin.
+   * Same bounds as the dispute margin, and at least `2 × MAX_CLOCK_SKEW_MS +
+   * MAX_REQUEST_TIMEOUT_MS` (75 s: `unresolved-request-policy.ts`) — below that
+   * the portal refuses to start (`loadWebServerEnv`).
    */
   WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS: z.coerce
     .number()
     .int()
     .min(60)
-    .max(30 * 60)
-    .default(10 * 60),
+    .max(MAX_REPLAY_MARGIN_SECONDS)
+    .prefault(10 * 60),
 
   /**
    * How long inventory-service keeps an idempotency record, in hours — the
@@ -411,7 +463,7 @@ const schema = z.object({
    * together with it, or set lower. The default is that setting's floor, as for
    * the services above.
    */
-  WEB_INVENTORY_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(1),
+  WEB_INVENTORY_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(1),
 
   /**
    * How much earlier than that retention the portal stops re-sending an
@@ -423,11 +475,11 @@ const schema = z.object({
     .int()
     .min(60)
     .max(30 * 60)
-    .default(10 * 60),
+    .prefault(10 * 60),
 
   WEB_COOKIE_SECURE: z
     .enum(['true', 'false'])
-    .default('true')
+    .prefault('true')
     .transform((value) => value === 'true'),
 });
 
@@ -445,13 +497,36 @@ export function loadWebServerEnv(
   // else. `NODE_ENV` is read for one rule only: `WEB_REDIS_URL` in production.
   source: Record<string, string | undefined> = process.env,
 ): WebServerEnv {
-  const parsed = schema.safeParse(source);
-  const missing = parsed.success ? [] : parsed.error.issues.map((issue) => issue.path.join('.'));
+  const parsed = legacyParse(schema, source);
+  const missing = parsed.success ? [] : parsed.refusal.issues.map((issue) => issue.path.join('.'));
 
   // The one rule that depends on where the portal runs. Production is two
   // replicas, and two replicas without shared coordination race for every
   // refresh token (ADR-059 addendum).
   if (source.NODE_ENV === 'production' && !source.WEB_REDIS_URL) missing.push('WEB_REDIS_URL');
+
+  // The clock budget of the replay deadlines (`unresolved-request-policy.ts`):
+  // the margin must cover two clock skews and one request, or a key could be
+  // resent after the service forgot it. Refuse to start rather than run without.
+  if (
+    parsed.success &&
+    !replayMarginCoversClockBudget(parsed.data.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS)
+  ) {
+    missing.push('WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS');
+  }
+  // The window itself must fit what construction-service accepts: its replay fence refuses a deadline
+  // later than its retention less B, and both sides are held to one shared constant
+  // (`PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS`). The portal cannot read the service's settings, so it is
+  // this side that refuses to start when its own window is too long (D-067).
+  if (
+    parsed.success &&
+    !projectCreateWindowFits(
+      parsed.data.WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS,
+      parsed.data.WEB_CONSTRUCTION_REPLAY_MARGIN_SECONDS,
+    )
+  ) {
+    missing.push('WEB_CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+  }
 
   if (!parsed.success || missing.length > 0) {
     // Names only, never values: this object holds the session key.

@@ -13,6 +13,7 @@ import type { MarketplaceEnv } from '../config/env';
 import { OrderService } from '../order/order.service';
 import { EconomicClient } from '../economic/economic.client';
 import { createActivities } from './activities';
+import { foreignFailure } from './foreign-failure';
 import { installTemporalRuntimeLogger } from './runtime-logger';
 
 /**
@@ -83,13 +84,19 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
       // would block Nest's bootstrap forever.
       this.running = this.worker.run().catch((error: unknown) => {
         // Also what the SDK raises when the force time passes first.
-        this.logger.warn({ err: error }, 'The order saga worker ended with an error');
+        this.logger.warn(
+          { failure: foreignFailure(error) },
+          'The order saga worker ended with an error',
+        );
       });
       this.logger.log(`Order saga worker polling ${this.env.MARKETPLACE_TEMPORAL_TASK_QUEUE}`);
     } catch (error) {
       // A missing Temporal server must not take the API down: existing orders
       // are still readable and the failure is loud in the log.
-      this.logger.error({ err: error }, 'Could not start the order saga worker');
+      this.logger.error(
+        { failure: foreignFailure(error) },
+        'Could not start the order saga worker',
+      );
     }
   }
 
@@ -131,7 +138,10 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
       this.worker?.shutdown();
     } catch (error) {
       // Not running (it already ended); there is nothing to request.
-      this.logger.warn({ err: error }, 'The order saga worker could not be asked to shut down');
+      this.logger.warn(
+        { failure: foreignFailure(error) },
+        'The order saga worker could not be asked to shut down',
+      );
     }
 
     if (this.running) {
@@ -146,7 +156,10 @@ export class OrderSagaWorker implements OnApplicationBootstrap, OnModuleDestroy 
 
     if (this.connection) {
       const closing = this.connection.close().catch((error: unknown) => {
-        this.logger.warn({ err: error }, 'The Temporal connection did not close cleanly');
+        this.logger.warn(
+          { failure: foreignFailure(error) },
+          'The Temporal connection did not close cleanly',
+        );
       });
       await withinDeadline(closing, deadlineAt - Date.now());
     }

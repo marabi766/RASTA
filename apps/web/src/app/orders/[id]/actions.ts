@@ -2,12 +2,15 @@
 
 import { redirect } from 'next/navigation';
 
+import { MONEY_EFFECTS } from '@/lib/demo-mode';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { mayDispatch } from '@/server/money-gate';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { issueOrderCommand, orderCommandFormValues, parseOrderCommand } from '@/server/orders';
 
 import type { OrderCommandFormState } from './form-state';
+import { flashHref } from '@/server/flash';
 
 /**
  * The one server action behind every command on `/orders/[id]`.
@@ -19,7 +22,9 @@ import type { OrderCommandFormState } from './form-state';
  *
  * Same order as every write in this portal (ADR-059 § 3, § 5): session, CSRF,
  * submission id, the form, then the gateway — each gate returning before the
- * next runs.
+ * next runs. Between the form and the gateway, a command that moves money
+ * (`MONEY_EFFECTS.order`) is sent only while the provider can be read
+ * (`mayDispatch`): the page withholds it otherwise, and so does this.
  *
  * **Which command is allowed is not checked here.** marketplace-service
  * decides that against the record when the command runs; this action only
@@ -55,6 +60,10 @@ export async function submitOrderCommand(
     };
   }
 
+  if (!(await mayDispatch(session, MONEY_EFFECTS.order[parsed.request.command]))) {
+    return { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
+  }
+
   const result = await issueOrderCommand(session, orderId, parsed.request, submissionId);
 
   switch (result.kind) {
@@ -63,7 +72,14 @@ export async function submitOrderCommand(
       // not a returned state, so a refresh cannot repeat the command — and on
       // `orders` a repeat would replay, not act twice, but the page should not
       // lean on that.
-      redirect(`/orders/${encodeURIComponent(orderId)}?done=${parsed.request.command}`);
+      redirect(
+        flashHref(
+          session,
+          `/orders/${encodeURIComponent(orderId)}`,
+          orderId,
+          parsed.request.command,
+        ),
+      );
       break;
     case 'INVALID':
       return {

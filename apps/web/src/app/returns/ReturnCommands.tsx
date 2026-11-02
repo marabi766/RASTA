@@ -61,7 +61,6 @@ export function ReturnCommands({
   emptyNote,
 }: ReturnCommandsProps) {
   const [checked, setChecked] = useState<{ readonly restored: RestoredReturn | null } | null>(null);
-  const { owner, session } = binding;
   const kind = scope.kind;
   const target = scope.kind === 'ORDER' ? scope.orderId : scope.returnId;
 
@@ -70,11 +69,11 @@ export function ReturnCommands({
       kind === 'ORDER' ? { kind, orderId: target } : { kind, returnId: target };
     const read = () =>
       setChecked({
-        restored: restoreUnresolvedReturn(slot, { owner, session }, sessionMaxAgeSeconds),
+        restored: restoreUnresolvedReturn(slot, binding, sessionMaxAgeSeconds),
       });
     read();
     return subscribeUnresolvedReturns(read);
-  }, [kind, target, owner, session, sessionMaxAgeSeconds]);
+  }, [kind, target, binding, sessionMaxAgeSeconds]);
 
   if (checked === null) return null;
 

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 
 /**
  * Events published by identity-service.
@@ -84,7 +85,7 @@ export const membershipExpiredPayload = z.object({
   membershipId: z.string(),
   userId: z.string(),
   organizationId: z.string(),
-  validUntil: z.string().datetime(),
+  validUntil: z.string().check(isoDateTime()),
 });
 
 /**
@@ -164,5 +165,11 @@ export const IDENTITY_EVENT_SCHEMAS = {
  * in a dead-letter topic somebody has to triage by hand.
  */
 export function validateIdentityPayload(eventName: IdentityEventName, payload: unknown): unknown {
-  return IDENTITY_EVENT_SCHEMAS[eventName].parse(payload);
+  const parsed = legacyParse(IDENTITY_EVENT_SCHEMAS[eventName], payload);
+  if (!parsed.success) {
+    throw new Error(
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
+    );
+  }
+  return parsed.data;
 }

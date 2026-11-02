@@ -322,9 +322,7 @@ export function inventoryRequestOf(
 }
 
 /** The answer's schema, narrowed to the id the redirect is addressed by. */
-function answerSchemaOf(
-  command: InventoryCommand,
-): z.ZodType<InventoryWriteData, z.ZodTypeDef, unknown> {
+function answerSchemaOf(command: InventoryCommand): z.ZodType<InventoryWriteData, unknown> {
   switch (command) {
     case 'CREATE_WAREHOUSE':
       return warehouseAnswer;

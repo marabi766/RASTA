@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 
 /**
  * The opaque page cursor.
@@ -36,7 +37,7 @@ import { z } from 'zod';
 const cursorPayload = z
   .object({
     /** `occurredAt` of the last row of the previous page, as an ISO instant. */
-    o: z.string().datetime({ offset: true }),
+    o: z.string().check(isoDateTime({ offset: true })),
     /** `id` of that row — the deterministic tie-breaker. */
     i: z
       .string()

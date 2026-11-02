@@ -7,6 +7,7 @@ import {
   buildDocumentationApp,
   formatDocument,
 } from './document';
+import { errorEnvelopeProblems } from '@rasta/nest-common';
 
 /**
  * The committed contract is exactly what the generator produces.
@@ -42,7 +43,7 @@ describe('the committed OpenAPI document', () => {
     expect(readFileSync(committedPath, 'utf8')).toBe(generated);
   });
 
-  it('publishes the one read endpoint of RUN-001 PR 1, closed, and no route that writes', () => {
+  it('publishes the two tenant read endpoints of RUN-001 PR 2, closed, and no route that writes', () => {
     const document = buildAnalyticsOpenApiDocument(app);
     const operations = Object.entries(document.paths ?? {}).flatMap(([path, item]) =>
       Object.entries(
@@ -51,7 +52,7 @@ describe('the committed OpenAPI document', () => {
     );
 
     expect(operations.map((o) => o.key)).toEqual(Object.keys(RESPONSE_BODIES));
-    expect(operations.map((o) => o.key)).toEqual(['GET /v1/dashboards/fleet']);
+    expect(operations.map((o) => o.key)).toEqual(['GET /v1/dashboards/fleet', 'GET /v1/kpis']);
     for (const { operation } of operations) {
       expect(operation.security).toEqual([{ bearer: [] }]);
       expect(Object.keys(operation.responses).sort()).toEqual(['200', '400', '401', '403', '500']);
@@ -86,11 +87,48 @@ describe('the committed OpenAPI document', () => {
     ).toEqual([]);
   });
 
+  it('publishes the closed KPI statuses: null-only insufficient values and a value-free NO_DATA (D-082)', () => {
+    const document = buildAnalyticsOpenApiDocument(app);
+    const operation = document.paths['/v1/kpis']?.get;
+    expect(
+      operation?.parameters?.map((parameter) => ('name' in parameter ? parameter.name : 'ref')),
+    ).toEqual(['from', 'to']);
+    const response = operation?.responses?.['200'];
+    expect(
+      response && 'content' in response
+        ? response.content?.['application/json']?.schema
+        : undefined,
+    ).toMatchObject({
+      properties: {
+        kpis: {
+          items: {
+            description: expect.stringContaining(
+              'MAINTENANCE_COMPLETED_COUNT: AVAILABLE only when the maintenance projection covers the',
+            ),
+            anyOf: [
+              {
+                properties: {
+                  status: { const: 'AVAILABLE' },
+                  value: { type: 'string', pattern: '^\\d+$' },
+                },
+              },
+              {
+                properties: { status: { const: 'INSUFFICIENT_BASELINE' }, value: { const: null } },
+              },
+              {
+                properties: { status: { const: 'NO_DATA' } },
+                required: ['key', 'unit', 'dependsOnBaseline', 'status'],
+              },
+            ],
+          },
+        },
+      },
+    });
+  });
+
   it('serves no governance number yet: no governance route, no period-free aggregate across organizations', () => {
     const document = buildAnalyticsOpenApiDocument(app);
-    expect(
-      Object.keys(document.paths ?? {}).filter((path) => /governance|kpis/.test(path)),
-    ).toEqual([]);
+    expect(Object.keys(document.paths ?? {}).filter((path) => /governance/.test(path))).toEqual([]);
   });
 
   it('keeps the health probes and the metrics target out of the contract', () => {
@@ -98,5 +136,9 @@ describe('the committed OpenAPI document', () => {
     expect(Object.keys(document.paths ?? {}).some((path) => /^\/(health|metrics)/.test(path))).toBe(
       false,
     );
+  });
+
+  it('accepts the error bodies the shared filter really sends (audit 10-26 F3)', () => {
+    expect(errorEnvelopeProblems(buildAnalyticsOpenApiDocument(app))).toEqual([]);
   });
 });

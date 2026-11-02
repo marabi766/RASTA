@@ -24,6 +24,7 @@ import type { Binding } from '@/lib/unresolved-order';
 import type { ReadResult, ShipmentSummary, ShipmentTracking } from '@/server/inventory';
 
 import { InventoryCommands, type OfferedInventoryCommand } from '../../InventoryCommands';
+import { contextHref } from '@/lib/page-context';
 
 /**
  * One shipment, its legs and its tracking history, with the dispatch and the
@@ -48,6 +49,8 @@ export interface ShipmentScreenProps {
   /** The command a signed flash confirms just happened, if any. */
   readonly notice?: InventoryCommand;
   readonly pageHref: string;
+  /** The tag every link of the page carries: the organization the session acts for (`lib/page-context.ts`). */
+  readonly context: string;
 }
 
 export function ShipmentScreen({
@@ -61,6 +64,7 @@ export function ShipmentScreen({
   sessionMaxAgeSeconds,
   notice,
   pageHref,
+  context,
 }: ShipmentScreenProps) {
   if (shipment.kind === 'NOT_FOUND') {
     // One sentence for "does not exist" and "not yours": inventory-service
@@ -102,7 +106,7 @@ export function ShipmentScreen({
             <dt className="text-content-muted">انبار مبدا</dt>
             <dd>
               <Link
-                href={`/inventory?warehouse=${encodeURIComponent(data.originWarehouseId)}`}
+                href={contextHref(context, '/inventory', { warehouse: data.originWarehouseId })}
                 className="underline"
               >
                 <Identifier>{data.originWarehouseId}</Identifier>

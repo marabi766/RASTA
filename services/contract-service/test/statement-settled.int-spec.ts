@@ -1,3 +1,4 @@
+import { withRedirectProbe } from '@rasta/testing';
 import { randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 import {
@@ -563,6 +564,47 @@ describe('a statement settled on economic-service’s confirmation (CON-003 PR 6
       expect(await consumer.handle(forged)).toBe('SKIPPED');
       expect(economic.asked).not.toContainEqual({ statementId: ofA, organizationId: b.employer });
       expect(await snapshot(a, [ofA])).toEqual(beforeA);
+    });
+  });
+
+  it('a redirected obligation is unavailable: no statement, contract, outbox or processed write; replay then settles once', async () => {
+    const c = await contract();
+    const id = await approved(c, '1302');
+    const fact = settledObligation(c, id, '1302');
+    const event = eventOf(fact);
+    const before = await snapshot(c, [id]);
+    await withRedirectProbe({ body: fact }, async (probe) => {
+      const redirected = new SettlementCompletedConsumer(
+        () => {
+          throw new Error('no broker');
+        },
+        w.prisma,
+        new ContractRepository(w.prisma),
+        new SettlementRepository(w.prisma),
+        new EventPublisher(w.env),
+        new ObligationSourceClient({
+          baseUrl: probe.baseUrl,
+          timeoutMs: 2000,
+          tokens,
+          fetch: probe.fetch,
+        }),
+        silent,
+      );
+      await expect(redirected.handle(event)).rejects.toMatchObject({
+        code: 'UPSTREAM_UNAVAILABLE',
+      });
+      expect(await snapshot(c, [id])).toEqual(before);
+      expect(
+        await runUnscoped('check that the redirected event stays retryable', () =>
+          w.prisma.client.statement.count({ where: { settlementEventId: event.eventId } }),
+        ),
+      ).toBe(0);
+      expect(probe.sent).toHaveLength(1);
+      expect(probe.target).toEqual([]);
+      probe.recover();
+      await expect(redirected.handle(event)).resolves.toBeUndefined();
+      await expect(redirected.handle(event)).resolves.toBe('SKIPPED');
+      expect((await statementRow(id))!.status).toBe('SETTLED');
     });
   });
 

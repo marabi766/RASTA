@@ -44,6 +44,8 @@ export interface RequestInsert {
   standingAsOf: Date | null;
   reason: string | null;
   reasonCode: string | null;
+  procurementThresholdWarning?: string | null;
+  procurementThresholdPolicyId?: string | null;
   requestedBy: string;
   requestedByIdentity: StoredIdentity;
   requestedAt: Date;
@@ -169,6 +171,8 @@ export class TenderApprovalRepository {
           standingAsOf: input.standingAsOf,
           reason: input.reason,
           reasonCode: input.reasonCode,
+          procurementThresholdWarning: input.procurementThresholdWarning ?? null,
+          procurementThresholdPolicyId: input.procurementThresholdPolicyId ?? null,
           requestedBy: input.requestedBy,
           requestedByIssuer: input.requestedByIdentity.issuer,
           requestedBySubject: input.requestedByIdentity.subject,

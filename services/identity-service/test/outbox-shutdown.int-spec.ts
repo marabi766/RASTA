@@ -17,12 +17,16 @@ import {
   type TokenVerifier,
 } from '@rasta/nest-common';
 import { ulid } from 'ulid';
-import { AppModule, ENV } from '../src/app.module';
+import { AppModule, ENV, FENCE_PRISMA, SAMPLER_PRISMA } from '../src/app.module';
 import { IDENTITY_TOPIC, loadIdentityEnv, SERVICE_NAME, type IdentityEnv } from '../src/config/env';
 import { IdentityRepository } from '../src/identity/identity.repository';
 import { IdentityService } from '../src/identity/identity.service';
 import { MembershipExpiryScanner } from '../src/identity/membership-expiry.scanner';
+import { KeycloakProjector } from '../src/keycloak/keycloak.projector';
+import { KeycloakFenceSampler } from '../src/keycloak/keycloak-fence-sampler';
 import { KeycloakProjectionConsumer } from '../src/keycloak/keycloak-projection.consumer';
+import { OutboxGauges } from '../src/observability/outbox-gauges';
+import { PrismaService } from '../src/prisma/prisma.service';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { PrismaOutboxStore } from '../src/outbox/outbox.store';
 import { SecurityEventOutboxStore } from '../src/security-events/security-event-outbox.store';
@@ -425,5 +429,63 @@ describe('identity-service shutdown: both relays, purge, expiry scanner and proj
     expect(calls.lapses).toEqual(['MBR_SHUTDOWN_1']);
     expect(kafka.committed).toEqual([]);
     expect(kafka.uncommitted).toEqual(['42']);
+  }, 30_000);
+
+  it('closes the three pools last — after every worker and timer returned — and nothing runs on them afterwards (#458 r2 F2)', async () => {
+    booted = await boot({
+      project: async () => undefined,
+      expire: async () => true,
+      relayRow: false,
+    });
+    const { app } = booted;
+    const order: string[] = [];
+    const returned = (name: string, prototype: object) => {
+      const target = prototype as { stop: (...args: unknown[]) => Promise<unknown> };
+      const real = target.stop;
+      jest.spyOn(target, 'stop').mockImplementation(async function (this: unknown, ...args) {
+        try {
+          return await real.apply(this, args);
+        } finally {
+          order.push(`${name} returned`);
+        }
+      });
+    };
+    returned('scanner', MembershipExpiryScanner.prototype);
+    returned('consumer', KeycloakProjectionConsumer.prototype);
+    returned('projector', KeycloakProjector.prototype);
+    returned('sampler', KeycloakFenceSampler.prototype);
+    returned('gauges', OutboxGauges.prototype);
+    const realClose = PrismaService.prototype.stop;
+    jest.spyOn(PrismaService.prototype, 'stop').mockImplementation(function (
+      this: PrismaService,
+      options,
+    ) {
+      order.push('pool closing');
+      return realClose.call(this, options);
+    });
+
+    const { exits, errors } = await closeUnderDeadline(booted);
+
+    expect(exits).toEqual([0]);
+    expect(errors).toEqual([]);
+    // Nest ran every destroy hook at once; the pools still closed after every
+    // worker and timer that uses them had returned, each once.
+    const firstClose = order.indexOf('pool closing');
+    expect(order.filter((step) => step === 'pool closing')).toHaveLength(3);
+    for (const name of ['scanner', 'consumer', 'projector', 'sampler', 'gauges']) {
+      const at = order.indexOf(`${name} returned`);
+      expect({ name, returnedBeforeAnyPoolClosed: at >= 0 && at < firstClose }).toEqual({
+        name,
+        returnedBeforeAnyPoolClosed: true,
+      });
+    }
+    // Closed is closed: a request still being served gets a refusal, and no
+    // pool reconnects behind the close.
+    for (const token of [PrismaService, FENCE_PRISMA, SAMPLER_PRISMA]) {
+      const pool = app.get<PrismaService>(token);
+      await expect(pool.client.user.count()).rejects.toThrow(/pool is closed/);
+      // Refused before anything begins, as a cancelled scope refuses it.
+      expect(() => pool.transaction(async () => 1)).toThrow(/pool is closed/);
+    }
   }, 30_000);
 });

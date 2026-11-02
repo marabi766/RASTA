@@ -7,6 +7,7 @@ import {
   type RefreshCoordinator,
 } from './refresh-coordinator';
 import { openSession, sealSession, sessionSecondsLeft, type WebSession } from './session';
+import { storedOrganizationFor } from './session-organization';
 
 /**
  * Keeping a session's tokens usable, at the one point where the result can
@@ -52,6 +53,17 @@ import { openSession, sealSession, sessionSecondsLeft, type WebSession } from '.
  * Until then only this render stops using a session whose access token has
  * already run out. Without the terminal rule a revoked session kept its
  * cookie, and re-asked the provider, until its absolute lifetime ran out.
+ *
+ * ## The organization goes with the token
+ *
+ * The session's `organizationId` is the stored copy of the organization its
+ * access token acts for (`session-organization.ts`). A refresh writes the new
+ * token's, and a cookie whose copy disagrees with its token — sealed before
+ * the copy was kept in step — is resealed with the token's here, before the
+ * route runs, when its token needs no refresh. Where the cookie cannot be
+ * written (a refused refresh, below) such a session is hidden from the render
+ * instead: no page may draw it for one organization while it acts for another
+ * (PR 405 review 1, F1).
  */
 
 /**
@@ -68,13 +80,18 @@ export type SessionRenewal =
   | { readonly kind: 'NONE' }
   /** A usable session that needs no change. */
   | { readonly kind: 'VALID' }
-  /** Refreshed: write this cookie back, living no longer than `maxAgeSeconds`. */
+  /**
+   * Refreshed — or, with the same tokens, resealed so its stored organization
+   * is its token's: write this cookie back, living no longer than
+   * `maxAgeSeconds`.
+   */
   | { readonly kind: 'RENEWED'; readonly sealed: string; readonly maxAgeSeconds: number }
   /**
    * The refresh was refused or went unanswered. Leave the browser's cookie
    * alone (see above); `usable` says whether this request may still act on
    * the session — true while its access token has not yet expired, judged by
-   * the clock once the refresh settled. Either way the failure may pass: the
+   * the clock once the refresh settled, and its stored organization is its
+   * token's (the cookie cannot be resealed here). Either way the failure may pass: the
    * login itself is not known to have ended (`session-state.ts`).
    */
   | { readonly kind: 'REFUSED'; readonly usable: boolean }
@@ -147,7 +164,22 @@ export async function renewSession(
   const secondsLeft = sessionSecondsLeft(session, env.WEB_SESSION_MAX_AGE_SECONDS, now);
   if (secondsLeft <= 0) return { kind: 'ENDED' };
 
-  if (!isExpiring(session, now)) return { kind: 'VALID' };
+  if (!isExpiring(session, now)) {
+    if (inStep(session)) return { kind: 'VALID' };
+    // Same tokens, the token's organization: no refresh is spent, so nothing
+    // can race this write. The copy it replaces is kept, to recognise what was
+    // remembered under it (`formerOrganizationId`).
+    const resealed: WebSession = {
+      ...session,
+      organizationId: storedOrganizationFor(session.accessToken),
+      formerOrganizationId: formerCopyOf(session),
+    };
+    return {
+      kind: 'RENEWED',
+      sealed: sealSession(resealed, env.WEB_SESSION_SECRET),
+      maxAgeSeconds: secondsLeft,
+    };
+  }
 
   const refresh =
     deps.refresh ??
@@ -162,7 +194,9 @@ export async function renewSession(
   const outcome = await coordinator.refresh(session.refreshToken, refresh);
   // Read after the await: the token may have run out while the refresh was out.
   const settledAt = deps.clock?.() ?? deps.now ?? Date.now();
-  const usable = session.accessTokenExpiresAt > Math.floor(settledAt / 1000);
+  // A copy that disagrees with its token cannot be resealed on a refusal (the
+  // cookie is left alone), so this render does not use it either.
+  const usable = session.accessTokenExpiresAt > Math.floor(settledAt / 1000) && inStep(session);
   if (outcome.kind === 'REFUSED') return { kind: 'REFUSED', usable };
   if (outcome.kind === 'REJECTED') {
     // Terminal for the token — once the grace has passed with no rotation of
@@ -178,6 +212,11 @@ export async function renewSession(
     accessToken: tokens.access_token,
     accessTokenExpiresAt: Math.floor(now / 1000) + tokens.expires_in,
     refreshToken: tokens.refresh_token,
+    // The new token's organization, never the login's: the person may have
+    // switched organization since, and the token is what every service reads.
+    organizationId: storedOrganizationFor(tokens.access_token),
+    // A copy that was out of step is kept, to recognise what was remembered under it.
+    ...(inStep(session) ? {} : { formerOrganizationId: formerCopyOf(session) }),
     // `issuedAt` is carried over untouched by the spread: a refresh extends
     // the access token, never the session.
   };
@@ -188,6 +227,22 @@ export async function renewSession(
     // The cookie lives no longer than the session it carries.
     maxAgeSeconds: secondsLeft,
   };
+}
+
+/** True when the session's stored organization is the one its token acts for. */
+function inStep(session: WebSession): boolean {
+  return session.organizationId === storedOrganizationFor(session.accessToken);
+}
+
+/**
+ * The copy an out-of-step cookie is brought into step from: the first one
+ * only — a cookie is out of step only once, as sealed by the build before
+ * task 100, whose copy was the login's organization for its whole life.
+ */
+function formerCopyOf(session: WebSession): string | null {
+  return session.formerOrganizationId !== undefined
+    ? session.formerOrganizationId
+    : session.organizationId;
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,28 @@ import js from '@eslint/js';
 import jsxA11y from 'eslint-plugin-jsx-a11y';
 import reactHooks from 'eslint-plugin-react-hooks';
 import tseslint from 'typescript-eslint';
+// The services' rule itself, not a copy: zod 4's `.default()` skips parsing;
+// `.prefault()` is zod 3's (GHSA-mrhx-c7xc-m3w5, PR #444 r1 F2).
+import noZodDefault from '../../scripts/no-zod-default-rule.mjs';
+// The internal-token source boundary, restated with this config's own parser
+// (PR #423 follow-up 1): the root config cannot be imported here.
+import internalTokenSource from '../../scripts/internal-token-source-rule.mjs';
+import { typedOrUntypedParser } from '../../scripts/internal-token-parser.mjs';
+// Also the services' rule, not a copy: a module that sends a bearer token,
+// cookie, API key or secret/grant form field must send it through
+// credentialFetch, which refuses redirects (Q-155).
+import credentialTransport from '../../scripts/internal-token-transport-rule.mjs';
+// And the transport boundary: no raw HTTP primitive outside the audited
+// transports, however it is reached (Q-155 Follow-up 1).
+import rawHttpBoundary from '../../scripts/raw-http-boundary-rule.mjs';
+
+const internal = {
+  rules: {
+    transport: credentialTransport,
+    'raw-http': rawHttpBoundary,
+    'token-source': internalTokenSource,
+  },
+};
 
 /**
  * The portal's lint rules.
@@ -25,6 +47,50 @@ export default tseslint.config(
     },
   },
   {
+    plugins: { zod: { rules: { 'no-default': noZodDefault } } },
+    rules: { 'zod/no-default': 'error' },
+  },
+  {
+    // Every file this config lints; typed through tsconfig.json where it covers
+    // the file, fail closed where it does not (.js/.mjs/.cjs).
+    files: ['**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}'],
+    languageOptions: { parser: typedOrUntypedParser(tseslint.parser) },
+    plugins: { internal },
+    rules: { 'internal/token-source': 'error' },
+  },
+  {
+    // Test token factories only: specs and src/test plumbing.
+    files: ['**/*.spec.{ts,tsx}', '**/*.test.{ts,tsx,mjs}', '**/test/**'],
+    rules: { 'internal/token-source': 'off' },
+  },
+  {
+    // Production source only, as in the services: specs and test helpers
+    // build credential sentinels against local fakes.
+    files: ['src/**/*.{ts,tsx}'],
+    ignores: ['**/*.spec.{ts,tsx}', 'src/test/**'],
+    plugins: { internal },
+    rules: { 'internal/transport': 'error', 'internal/raw-http': 'error' },
+  },
+  {
+    // Live suites aim at an endpoint the environment names, with real
+    // credentials, as in the root config (PR #492 r2 F2).
+    files: ['**/*.live-spec.ts'],
+    plugins: { internal },
+    rules: { 'internal/raw-http': 'error' },
+  },
+  {
+    // The browser suite's helpers and specs send real credentials (the
+    // Keycloak admin password, password grants, bearers) and signed storage
+    // URLs: all of them, specs included, go through guardedFetch or the
+    // request fixture that e2e/expect.ts guards (PR #492 r1 F2).
+    files: ['e2e/**/*.ts'],
+    plugins: { internal },
+    rules: {
+      'internal/transport': 'error',
+      'internal/raw-http': ['error', { playwright: true }],
+    },
+  },
+  {
     files: ['**/*.{ts,tsx}'],
     plugins: { 'jsx-a11y': jsxA11y, 'react-hooks': reactHooks },
     languageOptions: {
@@ -40,6 +106,26 @@ export default tseslint.config(
       // its own yet, so the browser console is allowed only for real failures.
       'no-console': ['error', { allow: ['error'] }],
       '@typescript-eslint/no-explicit-any': 'error',
+      // The services' rule, restated (importing the root config here would load
+      // typescript-eslint from two roots): only `env.ts` may use `z.coerce`.
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "MemberExpression[object.name='z'][property.name='coerce']",
+          message:
+            'z.coerce converts unchecked input (a TypeError is a 500). Use numberInput from @rasta/contracts.',
+        },
+        {
+          selector:
+            "ImportDeclaration[source.value=/^zod/] ImportSpecifier[imported.name='coerce']",
+          message:
+            'z.coerce converts unchecked input (a TypeError is a 500). Use numberInput from @rasta/contracts.',
+        },
+      ],
     },
+  },
+  {
+    files: ['**/env.ts'],
+    rules: { 'no-restricted-syntax': 'off' },
   },
 );

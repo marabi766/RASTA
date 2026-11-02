@@ -157,21 +157,21 @@ describe('D-2 — self-judgement cannot be reached by selecting another tenant',
       .post(`/v1/suppliers/${supplierId}/suspend`)
       .set('authorization', `Bearer ${token}`)
       .set('x-organization-id', unionOrg)
-      .send({ reason: 'suspending a competitor' })
+      .send({ reason: 'suspending a competitor', latestSuspensionId: null })
       .expect(403);
 
     // Suspend legitimately, then prove the compromised caller cannot lift it.
-    await request(api.app.getHttpServer())
+    const suspended = await request(api.app.getHttpServer())
       .post(`/v1/suppliers/${supplierId}/suspend`)
       .set('authorization', `Bearer ${platformAdmin(unionOrg)}`)
-      .send({ reason: 'a real suspension by an unconflicted operator' })
+      .send({ reason: 'a real suspension by an unconflicted operator', latestSuspensionId: null })
       .expect(200);
 
     await request(api.app.getHttpServer())
       .post(`/v1/suppliers/${supplierId}/reinstate`)
       .set('authorization', `Bearer ${token}`)
       .set('x-organization-id', unionOrg)
-      .send({ reason: 'lifting my own suspension' })
+      .send({ reason: 'lifting my own suspension', suspensionId: suspended.body.suspensions[0].id })
       .expect(403);
 
     const supplier = await runUnscoped('the D-2 suite reads the supplier directly', () =>

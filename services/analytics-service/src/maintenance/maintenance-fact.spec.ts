@@ -107,6 +107,60 @@ describe('toMaintenanceFact', () => {
     },
   );
 
+  /**
+   * Task 011: the bound's refinement ran on a cost the pattern had already refused — zod does
+   * that — and `BigInt('1.5')` threw a SyntaxError out of the handler: retried three times, then
+   * dead-lettered as MAX_RETRIES_EXCEEDED with the cost in x-dlq-error. Now it is the same
+   * VALIDATION_FAILED verdict as any other malformed cost. Pinned from origin/main: the
+   * nineteen-digit rule, leading zeros and the bound decide exactly as they did.
+   */
+  describe('the cost', () => {
+    const issues = (totalCostMinor: string) =>
+      verdict(() => toMaintenanceFact(envelope({ totalCostMinor }))).message.replace(
+        'MAINTENANCE_COMPLETED EVT_1 payload fails its schema: ',
+        '',
+      );
+
+    it.each([
+      ['a fraction', '1.5'],
+      ['letters', 'abc'],
+      ['an exponent', '1e3'],
+      ['free text', 'private-invoice-reference-123'],
+      ['nothing', ''],
+      ['a leading space', ' 1'],
+      ['a plus sign', '+1'],
+      ['a hexadecimal literal', '0x10'],
+      ['a minus sign', '-1'],
+    ])('dead-letters %s as VALIDATION_FAILED, never a thrown SyntaxError', (_l, value) => {
+      const error = verdict(() => toMaintenanceFact(envelope({ totalCostMinor: value })));
+      expect(error.reason).toBe(DLQ_REASONS.VALIDATION_FAILED);
+      expect(issues(value)).toBe('totalCostMinor invalid_string');
+      expect(error.message).not.toContain('private-invoice-reference-123');
+    });
+
+    it.each([
+      ['one past a bigint', '9223372036854775808', 'totalCostMinor custom'],
+      ['nineteen nines', '9'.repeat(19), 'totalCostMinor custom'],
+      ['twenty digits', '9'.repeat(20), 'totalCostMinor invalid_string; totalCostMinor custom'],
+      [
+        'a leading zero past nineteen digits',
+        `0${'1'.repeat(19)}`,
+        'totalCostMinor invalid_string',
+      ],
+    ])('refuses %s with the issues it had', (_l, value, expected) => {
+      expect(issues(value)).toBe(expected);
+    });
+
+    it.each([
+      ['zero', '0', 0n],
+      ['zero with a leading zero', '00', 0n],
+      ['one with a leading zero', '01', 1n],
+      ['the largest bigint', '9223372036854775807', 9_223_372_036_854_775_807n],
+    ])('keeps %s, as before', (_l, value, cost) => {
+      expect(toMaintenanceFact(envelope({ totalCostMinor: value }))?.totalCostMinor).toBe(cost);
+    });
+  });
+
   it('refuses an envelope with no tenant, whatever the payload says', () => {
     const error = verdict(() => toMaintenanceFact(envelope({}, { tenantId: undefined })));
     expect(error.reason).toBe(DLQ_REASONS.VALIDATION_FAILED);

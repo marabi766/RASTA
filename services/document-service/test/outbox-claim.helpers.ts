@@ -1,5 +1,7 @@
+import { expireClaim } from '@rasta/testing';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, ownerDatabaseUrl } from './helpers';
+import { readUrl } from '@rasta/config';
 
 /**
  * An isolated `outbox_message` for the ADR-050 protocol suite.
@@ -20,7 +22,7 @@ import { databaseUrl, ownerDatabaseUrl } from './helpers';
 export const PROTOCOL_SCHEMA = 'outbox_claim_protocol_test';
 
 function schemaUrl(schema: string): string {
-  const url = new URL(databaseUrl());
+  const url = readUrl(databaseUrl());
   url.searchParams.set('schema', schema);
   return url.toString();
 }
@@ -31,7 +33,7 @@ export function newProtocolPrisma(): PrismaService {
 }
 
 /** The role the service — and so every protocol "replica" — connects as. */
-const runtimeRole = () => decodeURIComponent(new URL(databaseUrl()).username);
+const runtimeRole = () => decodeURIComponent(readUrl(databaseUrl()).username);
 
 /**
  * Creates the isolated schema and table, as the owner (D-045: the runtime role
@@ -50,6 +52,15 @@ export async function createProtocolSchema(): Promise<void> {
     await admin.client.$executeRawUnsafe(
       `CREATE TABLE "${PROTOCOL_SCHEMA}".outbox_message
          (LIKE public.outbox_message INCLUDING ALL)`,
+    );
+    // Explicit search_path opt-in only: ordinary sessions still resolve pg_catalog.now.
+    await admin.client.$executeRawUnsafe(
+      `CREATE FUNCTION "${PROTOCOL_SCHEMA}".now() RETURNS timestamptz
+         LANGUAGE sql STABLE
+         AS 'SELECT pg_catalog.date_trunc(''milliseconds'', pg_catalog.now())'`,
+    );
+    await admin.client.$executeRawUnsafe(
+      `GRANT EXECUTE ON FUNCTION "${PROTOCOL_SCHEMA}".now() TO "${runtime}"`,
     );
     await admin.client.$executeRawUnsafe(
       `GRANT USAGE ON SCHEMA "${PROTOCOL_SCHEMA}" TO "${runtime}"`,
@@ -170,10 +181,7 @@ export class GatedPublisher {
 
 /** Advances a row's lease into the past without waiting for wall-clock time. */
 export async function expireLease(prisma: PrismaService, id: string): Promise<void> {
-  await prisma.client.$executeRawUnsafe(
-    `UPDATE outbox_message SET claim_expires_at = now() - interval '1 second' WHERE id = $1`,
-    id,
-  );
+  await expireClaim(prisma, [id]);
 }
 
 /** A lock held open on one connection until the test lets it go. */

@@ -1,11 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import type { BrowserContext } from '@playwright/test';
+import type { BrowserContext } from './expect';
 import { decodeJwt } from 'jose';
+import { guardedFetch } from '@rasta/testing';
 import { z } from 'zod';
 
 import { SESSION_COOKIE, newCsrfToken, sealSession } from '../src/server/session';
+import { storedOrganizationFor } from '../src/server/session-organization';
+import { contextTagFor } from '../src/server/context-tag';
 
 /**
  * A real portal session for the live-stack browser scenario.
@@ -84,6 +87,14 @@ interface RealmExport {
 export interface LiveSession {
   readonly accessToken: string;
   readonly organizationId: string;
+  /**
+   * The tag a URL drawn for this session's organization carries
+   * (`src/server/page-context.ts`): a scenario that goes straight to a URL
+   * with a query binds it with `withContext(session.context, url)`, as every
+   * link and form of the portal does — without it the page reads none of the
+   * query (PR 405 review 2, F2).
+   */
+  readonly context: string;
 }
 
 function requiredEnv(name: string): string {
@@ -156,7 +167,7 @@ async function tokensFor(fixture: Fixture): Promise<z.infer<typeof tokenResponse
 
   let refusal = '';
   for (let attempt = 1; attempt <= TOKEN_ATTEMPTS; attempt += 1) {
-    const response = await fetch(`${issuer}/protocol/openid-connect/token`, {
+    const response = await guardedFetch(`${issuer}/protocol/openid-connect/token`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body,
@@ -187,7 +198,7 @@ async function tokensFor(fixture: Fixture): Promise<z.infer<typeof tokenResponse
  */
 async function requireSeededPlatformUser(fixture: Fixture, accessToken: string): Promise<void> {
   const gateway = requiredEnv('API_GATEWAY_URL').replace(/\/+$/, '');
-  const response = await fetch(`${gateway}/v1/users/me`, {
+  const response = await guardedFetch(`${gateway}/v1/users/me`, {
     headers: { authorization: `Bearer ${accessToken}` },
   });
   if (!response.ok) {
@@ -276,7 +287,9 @@ async function installSession(context: BrowserContext, fixture: Fixture): Promis
     {
       subject: claims.sub,
       username: claims.preferred_username,
-      organizationId: claims.org_id,
+      // As `auth/callback` stores it: the access token's organization, resolved
+      // the way the guard and every portal reader resolve it (task 100).
+      organizationId: storedOrganizationFor(tokens.access_token),
       accessToken: tokens.access_token,
       accessTokenExpiresAt: expiresAt,
       refreshToken: tokens.refresh_token,
@@ -298,5 +311,12 @@ async function installSession(context: BrowserContext, fixture: Fixture): Promis
     },
   ]);
 
-  return { accessToken: tokens.access_token, organizationId: claims.org_id };
+  return {
+    accessToken: tokens.access_token,
+    organizationId: claims.org_id,
+    context: contextTagFor(
+      requiredEnv('WEB_SESSION_SECRET'),
+      storedOrganizationFor(tokens.access_token),
+    ),
+  };
 }

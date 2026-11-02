@@ -1,8 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { inspect } from 'node:util';
 import { SignJWT, exportJWK, generateKeyPair, type KeyLike } from 'jose';
-import { InternalTokenService, TokenVerifier } from './token-verifier';
+import { TokenVerifier } from './token-verifier';
+import { InternalTokenService } from '../http/internal-http-client';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { RastaError } from '../errors/rasta-error';
 
 /**
@@ -81,9 +84,14 @@ describe('internal service tokens', () => {
   // scanner exists to refuse, and it cannot tell a fixture from a leak.
   const SECRET = randomBytes(32).toString('base64url');
   const tokens = new InternalTokenService(SECRET, 'rasta-internal', 300);
+  const tokenKey: TestInternalTokenKey = {
+    secret: SECRET,
+    issuer: 'rasta-internal',
+    ttlSeconds: 300,
+  };
 
-  it('accepts a token minted by `issue`, which always sets an expiry', async () => {
-    const token = await tokens.issue('notification-service', 'identity-service');
+  it('accepts a token in the issuer’s layout, which always sets an expiry', async () => {
+    const token = await mintTestInternalToken(tokenKey, 'notification-service', 'identity-service');
     const claims = await tokens.verify(token, 'identity-service');
     expect(claims.callerService).toBe('notification-service');
     expect(claims.expiresAt).toBeGreaterThan(Date.now());
@@ -140,5 +148,31 @@ describe('a refused token never puts its own text in the log', () => {
     expect(error.code).toBe('TOKEN_INVALID');
     expect(error.internalContext).toEqual({ joseCode: 'ERR_JOSE_NOT_SUPPORTED' });
     expect(JSON.stringify([error.message, error.internalContext])).not.toContain('secret123');
+  });
+});
+
+describe('TokenVerifier configuration (#385 r5)', () => {
+  it('refuses an unreadable JWKS URI with a fixed text, never the URI', () => {
+    // Built from the two sentinels, not written as one literal URL.
+    const [user, password] = ['private-sentinel-79', 'JZ97-another-secret'];
+    let error: unknown;
+    try {
+      new TokenVerifier({
+        jwksUri: `http://${user}:${password}@keycloak:bad/certs`,
+        issuer: ISSUER,
+        audience: AUDIENCE,
+      });
+    } catch (thrown) {
+      error = thrown;
+    }
+    expect((error as Error).message).toBe(
+      'the JWKS URI (OIDC_JWKS_URI) cannot be read as a URL; its value is not repeated',
+    );
+    const printed = [
+      (error as Error).stack,
+      JSON.stringify(error, Object.getOwnPropertyNames(error)),
+      inspect(error, { showHidden: true, depth: 10 }),
+    ].join('\n');
+    expect(printed).not.toMatch(/sentinel|jz97|another-secret/i);
   });
 });

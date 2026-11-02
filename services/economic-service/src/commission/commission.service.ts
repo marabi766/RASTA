@@ -18,6 +18,7 @@ import { ECONOMIC_EVENTS } from '../events/events';
 import { formatMinor, parseMinor } from '../shared/money';
 import { nextValidTo } from '../shared/rule-validity';
 import { after, resolveCursor } from '../shared/cursor';
+import { databaseNow } from '../shared/database-clock';
 import { commissionApplicationsTotal } from '../observability/metrics';
 import { SERVICE_NAME } from '../config/env';
 import type { BusinessLine, Prisma, TransactionType } from '../generated/prisma';
@@ -31,9 +32,11 @@ import type { CreateCommissionRuleDto, UpdateCommissionRuleDto } from './dto';
  * **No rate is hard-coded in this code.** Not a default, not a fallback, not a
  * "reasonable" figure. Every number comes from a `commission_rule` row, and
  * with no matching row the commission is zero and recorded as
- * `NO_ACTIVE_RULE` — a result, not an error and not a guess (ADR-045 § 2).
- * docs/24 Q-08 is open, and the answer to it will be an INSERT rather than a
- * deployment. The one rate in the repository is the demonstration seed's
+ * `NO_ACTIVE_RULE` — a result, not a guess (ADR-045 § 2). Settling one is
+ * refused in production for a transaction with a line (docs/24 Q-29,
+ * `SettlementService`); the pilot's rates are explicit 0% rules per line,
+ * which match and charge zero (Q-08) — an INSERT, not a deployment, as the
+ * real rate will be. The one rate in the repository is the demonstration seed's
  * 200 bps (`prisma/seed.ts`): written only behind its flag, labelled "نمونه —
  * نیازمند تصویب", and never a production default.
  *
@@ -146,11 +149,53 @@ export class CommissionService {
     },
   ): Promise<CommissionDecision> {
     const subject = pricingSubjectAt(input, input.occurredAt, await this.linePricingFrom(tx));
-    await tx.$executeRaw`SELECT commission_pricing_scope_lock(
-      ${subject.organizationId}, ${subject.businessLine}::"BusinessLine",
-      ${subject.transactionType}::"TransactionType")`;
+    await lockScopeForPricing(tx, subject);
     const rules = await this.candidateRules(tx, subject);
     return computeCommission(rules as CommissionRuleView[], { ...input, ...subject });
+  }
+
+  /**
+   * The rule in force for a transaction's line **at the settlement**, for an
+   * obligation no rule priced when it was recorded — the fail-closed policy of
+   * docs/24 Q-29, and only that.
+   *
+   * A rule is never backdated (docs/23 D-057), so the rule an operator adds for
+   * a line the obligation found unpriced can never be in force at its
+   * `occurredAt`: matched there, a settlement refused for want of a rule could
+   * never succeed. It is matched at the instant the settlement commits on
+   * instead, and nothing is repriced by it — no rule was agreed for the
+   * obligation, and without one it is not settled at all.
+   *
+   * The same discipline as {@link decide}: under the scope's pricing lock,
+   * shared and held until the settlement commits, in the settlement's own
+   * transaction, and at the database clock read once the lock is held. A rule
+   * ended or withdrawn by a change that committed before the lock was taken is
+   * not in force at that instant, so the settlement is refused rather than
+   * charged nothing; a change that comes after waits until it has committed,
+   * at the rule's terms. Never matched at a zero nobody chose.
+   *
+   * The line is the transaction's own: a settlement is later than the pricing
+   * cutover, which is the instant its migration ran, so a line always prices.
+   */
+  async decideAtSettlement(
+    tx: ExtendedPrismaClient,
+    input: Omit<Parameters<CommissionService['decide']>[1], 'occurredAt' | 'businessLine'> & {
+      businessLine: BusinessLine;
+    },
+  ): Promise<CommissionDecision> {
+    const subject: CommissionSubject = {
+      organizationId: input.organizationId,
+      businessLine: input.businessLine,
+      transactionType: input.transactionType,
+    };
+    await lockScopeForPricing(tx, subject);
+    const at = await databaseNow(tx);
+    const rules = await this.candidateRules(tx, subject);
+    return computeCommission(rules as CommissionRuleView[], {
+      ...input,
+      ...subject,
+      occurredAt: at,
+    });
   }
 
   /**
@@ -552,6 +597,20 @@ interface ScopeOfRule {
   organizationId: string | null;
   businessLine: string | null;
   transactionType: string | null;
+}
+
+/**
+ * Takes the platform's and the tenant's pricing lock for one subject, shared,
+ * until the transaction ends (`commission_pricing_scope_lock`): a change to the
+ * scope's rules ({@link lockScopeForChange}) waits for it, and it for one.
+ */
+async function lockScopeForPricing(
+  tx: ExtendedPrismaClient,
+  subject: CommissionSubject,
+): Promise<void> {
+  await tx.$executeRaw`SELECT commission_pricing_scope_lock(
+    ${subject.organizationId}, ${subject.businessLine}::"BusinessLine",
+    ${subject.transactionType}::"TransactionType")`;
 }
 
 /**

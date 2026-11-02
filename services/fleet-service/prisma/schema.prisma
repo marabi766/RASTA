@@ -264,6 +264,15 @@ model UsageRecord {
   /// second one.
   clientReference String? @map("client_reference")
 
+  /// What `clientReference` is bound to: SHA-256 over the caller and the
+  /// canonical body of the request that created the row. A resubmission
+  /// replays this row only when its own hash is equal and its caller may read
+  /// the row; any other request under the reference is
+  /// `409 IDEMPOTENCY_KEY_REUSED`. Null on rows with no reference, and on rows
+  /// from before the binding: those replay only to the same `recordedBy` user
+  /// sending equal fields, compared column by column (UsageService).
+  requestHash String? @map("request_hash")
+
   recordedAt DateTime @default(now()) @map("recorded_at")
   recordedBy String   @map("recorded_by")
 

@@ -96,7 +96,12 @@ describe('tenant isolation', () => {
 
     it('refuses B suspending A', async () => {
       await expect(
-        asSupplier(orgB, () => w.suspensions.suspend(supplierA.id, { reason: 'A stated reason' })),
+        asSupplier(orgB, () =>
+          w.suspensions.suspend(supplierA.id, {
+            reason: 'A stated reason',
+            latestSuspensionId: null,
+          }),
+        ),
       ).rejects.toMatchObject({ code: 'FORBIDDEN' });
     });
 
@@ -115,7 +120,11 @@ describe('tenant isolation', () => {
       await expect(
         runWithContext(
           context({ organizationId: orgA, userId: newUserId(), roles: ['SYSTEM_ADMIN'] }),
-          () => w.suspensions.suspend(supplierA.id, { reason: 'Lifting my own problem' }),
+          () =>
+            w.suspensions.suspend(supplierA.id, {
+              reason: 'Lifting my own problem',
+              latestSuspensionId: null,
+            }),
         ),
       ).rejects.toMatchObject({ code: 'FORBIDDEN' });
     });

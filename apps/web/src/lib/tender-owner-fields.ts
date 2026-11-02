@@ -256,6 +256,10 @@ export const REASON_FIELD = 'reason';
  * `TENDER_APPROVAL_REFUSALS` (the gate) and `OPENING_REFUSALS`.
  */
 export const PUBLICATION_REFUSAL_TEXT: Readonly<Record<string, string>> = {
+  PROCUREMENT_ESTIMATE_REQUIRED:
+    'برای بررسی حدود مبلغ، برآورد مبلغ این مناقصه را به ریال وارد کنید.',
+  PROCUREMENT_AMOUNT_OUTSIDE_RANGE:
+    'مبلغ برآورد با حدود پیکربندی‌شده برای نوع فرایند انتخابی سازگار نیست؛ انتشار انجام نشد.',
   NATURE_REQUIRED: 'نوع مناقصه (مناقصه، استعلام، …) تعیین نشده است.',
   VISIBILITY_REQUIRED: 'دسترسی مناقصه (عمومی یا فقط دعوت‌شدگان) تعیین نشده است.',
   WINDOW_REQUIRED: 'بازهٔ پذیرش پیشنهاد تعیین نشده است.',

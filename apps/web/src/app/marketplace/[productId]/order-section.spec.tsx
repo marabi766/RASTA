@@ -1,9 +1,12 @@
 import { render } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
+import type { DemoMode } from '@/lib/demo-mode';
 import type { Offer, OffersPage, Product, ReadResult } from '@/server/marketplace';
 
 import { OffersScreen } from './OffersScreen';
+import { bindingOf } from '@/test/unresolved-binding';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * The order section of the offers screen: who it is shown to, which offers it
@@ -39,7 +42,7 @@ const ORDERING = {
   csrfToken: 'csrf-token-for-this-session',
   mintSubmissionId: () => 'sub_AAAAAAAAAAAAAAAAAAAA',
   organizationId: 'ORG-DEH-0001',
-  binding: { owner: 'owner-tag', session: 'session-tag' },
+  binding: bindingOf('owner-tag', 'session-tag'),
   sessionMaxAgeSeconds: 3600,
 };
 
@@ -47,9 +50,12 @@ function screen(
   offers: ReadResult<OffersPage>,
   ordering: typeof ORDERING | null = ORDERING,
   product: ReadResult<Product> = { kind: 'OK', data: PRODUCT },
+  demoMode: DemoMode = 'REAL',
 ) {
   return render(
     <OffersScreen
+      context={TEST_CONTEXT}
+      demoMode={demoMode}
       product={product}
       offers={offers}
       productId="PRD_1"
@@ -60,6 +66,31 @@ function screen(
 }
 
 const page = (...items: Offer[]): ReadResult<OffersPage> => ({ kind: 'OK', data: { items } });
+
+describe('the order section while the provider is unknown (Q-14)', () => {
+  it('withholds the form — placing an order holds its amount — and says the provider is unknown', () => {
+    const { getByText, queryByRole } = screen(
+      page(OFFER('OFR_1', 'ORG-DEH-0002')),
+      ORDERING,
+      { kind: 'OK', data: PRODUCT },
+      'UNKNOWN',
+    );
+    expect(getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    expect(getByText('ثبت سفارش اکنون در دسترس نیست')).toBeInTheDocument();
+    expect(queryByRole('form', { name: 'ثبت سفارش' })).toBeNull();
+  });
+
+  it('offers it, labelled, while the provider is simulated', () => {
+    const { getByText, getByRole } = screen(
+      page(OFFER('OFR_1', 'ORG-DEH-0002')),
+      ORDERING,
+      { kind: 'OK', data: PRODUCT },
+      'SIMULATED',
+    );
+    expect(getByText('حالت نمایشی')).toBeInTheDocument();
+    expect(getByRole('form', { name: 'ثبت سفارش' })).toBeInTheDocument();
+  });
+});
 
 describe('the order section', () => {
   it('offers the form with the offers of other organizations', () => {

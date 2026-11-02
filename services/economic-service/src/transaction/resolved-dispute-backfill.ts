@@ -86,9 +86,10 @@ export function parseResolvedDisputeBackfillArgs(
       options.apply = true;
       continue;
     }
-    const name = FLAGS[flag];
+    const name = Object.hasOwn(FLAGS, flag) ? FLAGS[flag] : undefined;
     const value = argv[i + 1];
-    if (!name) throw new Error(`Unknown option ${flag}`);
+    // Not repeated: only an option that matched is ever echoed (#385 r6).
+    if (!name) throw new Error(`Unknown option at position ${i + 1}; it is not repeated`);
     if (value === undefined || value.startsWith('--')) throw new Error(`${flag} needs a value`);
     i += 1;
     if (name === 'after') {

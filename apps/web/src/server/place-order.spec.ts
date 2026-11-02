@@ -81,6 +81,18 @@ describe('parsing the form', () => {
     });
   });
 
+  it('never sends an order note: marketplace-service refuses any non-empty one (Q-110)', () => {
+    const parsed = parsePlaceOrderForm({
+      ...values({ offerId: 'OFR_1', quantity: '3' }),
+      note: 'x',
+    } as never);
+    expect(parsed).toEqual({
+      ok: true,
+      request: { lines: [{ offerId: 'OFR_1', quantity: 3 }] },
+    });
+    expect(JSON.stringify(parsed)).not.toContain('note');
+  });
+
   it.each(['OFR_‮1', 'OFR_‏1', 'OFR_\u00001', 'OFR_\n1'])(
     'refuses an offer id with a bidi or control character (%j)',
     (offerId) => {

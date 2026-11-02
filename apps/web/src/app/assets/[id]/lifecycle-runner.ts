@@ -16,6 +16,8 @@ import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import type { WriteResult } from '@/server/write';
 
 import type { LifecycleFormState } from './lifecycle-form-state';
+import { pageContext } from '@/server/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The one path every lifecycle command on `/assets/[id]` takes.
@@ -59,8 +61,11 @@ export interface LifecycleCommand<V, B, F extends string> {
   ) => Promise<WriteResult<{ id: string }, F>>;
 }
 
-const assetPath = (assetId: string, flash: string): string =>
-  `/assets/${encodeURIComponent(assetId)}?${FLASH_PARAM}=${flash}`;
+const assetPath = (session: WebSession, assetId: string, flash: string): string =>
+  withContext(
+    pageContext(session),
+    `/assets/${encodeURIComponent(assetId)}?${FLASH_PARAM}=${flash}`,
+  );
 
 export async function runLifecycle<V, B, F extends string>(
   command: LifecycleCommand<V, B, F>,
@@ -114,7 +119,9 @@ export async function runLifecycle<V, B, F extends string>(
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and the page the
     // person lands on reads the asset again, so it shows what the command did.
-    redirect(assetPath(baseline.assetId, mintFlash(session, baseline.assetId, command.notice)));
+    redirect(
+      assetPath(session, baseline.assetId, mintFlash(session, baseline.assetId, command.notice)),
+    );
   }
 
   switch (result.kind) {
@@ -123,7 +130,11 @@ export async function runLifecycle<V, B, F extends string>(
         // The same stale baseline would conflict again, so the typed values are
         // not offered back for another try: the person sees the page as it is.
         redirect(
-          assetPath(baseline.assetId, mintFlash(session, baseline.assetId, 'lifecycleConflict')),
+          assetPath(
+            session,
+            baseline.assetId,
+            mintFlash(session, baseline.assetId, 'lifecycleConflict'),
+          ),
         );
       }
       return {

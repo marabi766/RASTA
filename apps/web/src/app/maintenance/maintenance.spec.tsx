@@ -1,14 +1,17 @@
-import { cleanup as cleanupRender, render } from '@testing-library/react';
+import { cleanup as cleanupRender, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import { MaintenanceScreen } from './MaintenanceScreen';
 import { RequestDetailScreen } from './[id]/RequestDetailScreen';
+import type { DemoMode } from '@/lib/demo-mode';
 import type {
   MaintenanceRequestDetail,
   MaintenanceRequestPage,
   ReadResult,
   RepairOrderDetail,
 } from '@/server/maintenance';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * The two maintenance screens, in every state the server can put them in.
@@ -40,7 +43,9 @@ const page = (
 
 describe('the maintenance list', () => {
   it('shows a row per request, linking to its detail and to its asset', () => {
-    const { getByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(getByRole('link', { name: 'صدای غیرعادی موتور' })).toHaveAttribute(
       'href',
       '/maintenance/MREQ_1',
@@ -51,7 +56,9 @@ describe('the maintenance list', () => {
   it('translates the type, severity and status without translating the data', () => {
     // CLAUDE.md: the label is presentation; the value stays Latin everywhere
     // a comparison or a filter could see it.
-    const { getByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     const row = getByRole('row', { name: /صدای غیرعادی موتور/ });
     expect(row).toHaveTextContent('اصلاحی');
     expect(row).toHaveTextContent('زیاد');
@@ -63,37 +70,43 @@ describe('the maintenance list', () => {
     const { getByText } = render(
       <MaintenanceScreen
         result={page({ items: [{ ...REQUEST, status: 'ESCALATED' }] })}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
       />,
     );
     expect(getByText('ESCALATED')).toBeInTheDocument();
   });
 
   it('offers the next page only when there is one', () => {
-    const { queryByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+    const { queryByRole } = render(
+      <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(queryByRole('link', { name: 'صفحهٔ بعد' })).toBeNull();
 
     const { getByRole } = render(
       <MaintenanceScreen
         result={page({ hasMore: true, nextCursor: 'CUR_2' })}
-        query={{ status: 'OPEN' }}
+        query={{ context: TEST_CONTEXT, status: 'OPEN' }}
       />,
     );
     // The filter travels with the cursor: a second page of a filtered list is
     // still that filtered list.
     expect(getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      '/maintenance?status=OPEN&cursor=CUR_2',
+      withContext(TEST_CONTEXT, '/maintenance?status=OPEN&cursor=CUR_2'),
     );
   });
 
   it('says something different when a filter matched nothing', () => {
     const empty = page({ items: [] });
 
-    const unfiltered = render(<MaintenanceScreen result={empty} query={{}} />);
+    const unfiltered = render(
+      <MaintenanceScreen result={empty} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(unfiltered.getByText('هیچ درخواست نگهداری‌ای ثبت نشده')).toBeInTheDocument();
 
-    const filtered = render(<MaintenanceScreen result={empty} query={{ severity: 'CRITICAL' }} />);
+    const filtered = render(
+      <MaintenanceScreen result={empty} query={{ context: TEST_CONTEXT, severity: 'CRITICAL' }} />,
+    );
     expect(filtered.getByText('چیزی با این پالایش پیدا نشد')).toBeInTheDocument();
     expect(filtered.getByRole('link', { name: 'نمایش همه' })).toHaveAttribute(
       'href',
@@ -102,13 +115,15 @@ describe('the maintenance list', () => {
   });
 
   it('renders a refusal as a refusal and an outage as an outage', () => {
-    const forbidden = render(<MaintenanceScreen result={{ kind: 'FORBIDDEN' }} query={{}} />);
+    const forbidden = render(
+      <MaintenanceScreen result={{ kind: 'FORBIDDEN' }} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(forbidden.getByText('دسترسی ندارید')).toBeInTheDocument();
 
     const down = render(
       <MaintenanceScreen
         result={{ kind: 'UNAVAILABLE', status: 503, correlationId: 'COR_9' }}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
       />,
     );
     // docs/16 § 16.11: the correlation id is on screen so support can find the
@@ -117,14 +132,18 @@ describe('the maintenance list', () => {
   });
 
   it('filters through the URL, with no javascript', () => {
-    const { getByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+    const { getByRole } = render(
+      <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     const form = getByRole('form', { name: 'پالایش فهرست' });
     expect(form).toHaveAttribute('method', 'get');
     expect(form).toHaveAttribute('action', '/maintenance');
   });
 
   it('has no accessibility violations', async () => {
-    const { container } = render(<MaintenanceScreen result={page()} query={{}} />);
+    const { container } = render(
+      <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 
@@ -133,7 +152,7 @@ describe('the maintenance list', () => {
 
     it('puts the form under its own heading, before the filters, when it is handed one', () => {
       const { getByRole, getByText } = render(
-        <MaintenanceScreen result={page()} query={{}} reportForm={form} />,
+        <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} reportForm={form} />,
       );
       const heading = getByRole('heading', { name: 'ثبت درخواست' });
       expect(heading).toBeInTheDocument();
@@ -145,18 +164,22 @@ describe('the maintenance list', () => {
     });
 
     it('shows nothing where it was not handed one — no empty section, no dead heading', () => {
-      const { queryByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+      const { queryByRole } = render(
+        <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+      );
       expect(queryByRole('heading', { name: 'ثبت درخواست' })).toBeNull();
     });
 
     it('still lists the requests when the person cannot report one', () => {
-      const { getByRole } = render(<MaintenanceScreen result={page()} query={{}} />);
+      const { getByRole } = render(
+        <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} />,
+      );
       expect(getByRole('link', { name: 'صدای غیرعادی موتور' })).toBeInTheDocument();
     });
 
     it('has no accessibility violations with the slot filled', async () => {
       const { container } = render(
-        <MaintenanceScreen result={page()} query={{}} reportForm={form} />,
+        <MaintenanceScreen result={page()} query={{ context: TEST_CONTEXT }} reportForm={form} />,
       );
       expect(await axe(container)).toHaveNoViolations();
     });
@@ -188,7 +211,7 @@ describe('the maintenance request detail', () => {
 
   it('shows the workflow history in order, only for what has happened', () => {
     const { getByText, queryByText } = render(
-      <RequestDetailScreen result={ok()} requestId="MREQ_1" />,
+      <RequestDetailScreen demoMode="REAL" result={ok()} requestId="MREQ_1" />,
     );
     expect(getByText('گزارش شد')).toBeInTheDocument();
     // Nothing has started yet, so no step claims it has.
@@ -203,7 +226,7 @@ describe('the maintenance request detail', () => {
       startedAt: '2026-02-02T00:00:00.000Z',
     };
     const { getByText } = render(
-      <RequestDetailScreen result={ok(inProgress)} requestId="MREQ_1" />,
+      <RequestDetailScreen demoMode="REAL" result={ok(inProgress)} requestId="MREQ_1" />,
     );
     expect(getByText('گزارش شد')).toBeInTheDocument();
     expect(getByText('تعمیر آغاز شد')).toBeInTheDocument();
@@ -217,7 +240,9 @@ describe('the maintenance request detail', () => {
       approvedAt: '2026-02-04T00:00:00.000Z',
       approvalNotes: 'تأیید شد، هزینه مطابق برآورد بود',
     };
-    const { getByText } = render(<RequestDetailScreen result={ok(approved)} requestId="MREQ_1" />);
+    const { getByText } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok(approved)} requestId="MREQ_1" />,
+    );
     expect(getByText('تأیید شد، هزینه مطابق برآورد بود')).toBeInTheDocument();
   });
 
@@ -227,7 +252,9 @@ describe('the maintenance request detail', () => {
       returnedToServiceAt: '2026-02-01T10:30:00.000Z',
       downtimeMinutes: 150,
     };
-    const { getByText } = render(<RequestDetailScreen result={ok(returned)} requestId="MREQ_1" />);
+    const { getByText } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok(returned)} requestId="MREQ_1" />,
+    );
     expect(getByText('۱۵۰ دقیقه')).toBeInTheDocument();
   });
 
@@ -238,7 +265,7 @@ describe('the maintenance request detail', () => {
       severity: null,
     };
     const { getByText } = render(
-      <RequestDetailScreen result={ok(preventive)} requestId="MREQ_1" />,
+      <RequestDetailScreen demoMode="REAL" result={ok(preventive)} requestId="MREQ_1" />,
     );
     expect(getByText('ندارد — کار پیشگیرانه')).toBeInTheDocument();
   });
@@ -246,7 +273,7 @@ describe('the maintenance request detail', () => {
   describe('the confirmation after reporting', () => {
     it('confirms a request that was just reported', () => {
       const { getByText } = render(
-        <RequestDetailScreen result={ok()} requestId="MREQ_1" notice="created" />,
+        <RequestDetailScreen demoMode="REAL" result={ok()} requestId="MREQ_1" notice="created" />,
       );
       // A confirmation is `status`, which waits for a pause in the screen
       // reader; only something the person must act on now is `alert`. Found by
@@ -255,7 +282,9 @@ describe('the maintenance request detail', () => {
     });
 
     it('says nothing when the page was opened without one', () => {
-      const { queryByText } = render(<RequestDetailScreen result={ok()} requestId="MREQ_1" />);
+      const { queryByText } = render(
+        <RequestDetailScreen demoMode="REAL" result={ok()} requestId="MREQ_1" />,
+      );
       expect(queryByText(/درخواست ثبت شد/)).toBeNull();
     });
 
@@ -263,7 +292,12 @@ describe('the maintenance request detail', () => {
       // Even a genuine flash must not put a confirmation in front of a request
       // the viewer cannot read.
       const { queryByText } = render(
-        <RequestDetailScreen result={{ kind: 'NOT_FOUND' }} requestId="MREQ_X" notice="created" />,
+        <RequestDetailScreen
+          demoMode="REAL"
+          result={{ kind: 'NOT_FOUND' }}
+          requestId="MREQ_X"
+          notice="created"
+        />,
       );
       expect(queryByText(/درخواست ثبت شد/)).toBeNull();
     });
@@ -274,13 +308,15 @@ describe('the maintenance request detail', () => {
     // should not learn it. maintenance-service answers 404 for both, and so
     // does this.
     const { getByText } = render(
-      <RequestDetailScreen result={{ kind: 'NOT_FOUND' }} requestId="MREQ_X" />,
+      <RequestDetailScreen demoMode="REAL" result={{ kind: 'NOT_FOUND' }} requestId="MREQ_X" />,
     );
     expect(getByText('این درخواست پیدا نشد')).toBeInTheDocument();
   });
 
   it('shows no repair order as not-yet-assigned, not as an error', () => {
-    const { getByText } = render(<RequestDetailScreen result={ok()} requestId="MREQ_1" />);
+    const { getByText } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok()} requestId="MREQ_1" />,
+    );
     expect(getByText('هنوز ارجاع نشده')).toBeInTheDocument();
   });
 
@@ -307,13 +343,17 @@ describe('the maintenance request detail', () => {
         },
       ],
     };
-    const { getByText } = render(<RequestDetailScreen result={ok(withOrder)} requestId="MREQ_1" />);
+    const { getByText } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok(withOrder)} requestId="MREQ_1" />,
+    );
     expect(getByText('تعمیرگاه مرکزی')).toBeInTheDocument();
     expect(getByText('بررسی موتور')).toBeInTheDocument();
   });
 
   it('has no accessibility violations', async () => {
-    const { container } = render(<RequestDetailScreen result={ok()} requestId="MREQ_1" />);
+    const { container } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok()} requestId="MREQ_1" />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 });
@@ -349,7 +389,12 @@ describe('the commands on a request', () => {
 
   const shown = (data: MaintenanceRequestDetail) => {
     const { queryByText } = render(
-      <RequestDetailScreen result={ok(data)} requestId="MREQ_1" commandForms={forms} />,
+      <RequestDetailScreen
+        demoMode="REAL"
+        result={ok(data)}
+        requestId="MREQ_1"
+        commandForms={forms}
+      />,
     );
     return {
       assign: queryByText('فرم ارجاع نمونه') !== null,
@@ -380,7 +425,9 @@ describe('the commands on a request', () => {
   });
 
   it('offers nothing to a person the page did not hand the forms to', () => {
-    const { queryByText } = render(<RequestDetailScreen result={ok(DETAIL)} requestId="MREQ_1" />);
+    const { queryByText } = render(
+      <RequestDetailScreen demoMode="REAL" result={ok(DETAIL)} requestId="MREQ_1" />,
+    );
     expect(queryByText('فرم ارجاع نمونه')).toBeNull();
     expect(queryByText('فرم لغو نمونه')).toBeNull();
   });
@@ -388,6 +435,7 @@ describe('the commands on a request', () => {
   it('offers nothing where the read failed, whatever the page handed it', () => {
     const { queryByText } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={{ kind: 'NOT_FOUND' }}
         requestId="MREQ_X"
         commandForms={forms}
@@ -404,7 +452,12 @@ describe('the commands on a request', () => {
     ['costChanged', 'هزینه از زمان نمایش تغییر کرده بود', 'alert'],
   ] as const)('says what %s did, as a %s', (notice, words, role) => {
     const { getByText } = render(
-      <RequestDetailScreen result={ok(DETAIL)} requestId="MREQ_1" notice={notice} />,
+      <RequestDetailScreen
+        demoMode="REAL"
+        result={ok(DETAIL)}
+        requestId="MREQ_1"
+        notice={notice}
+      />,
     );
     expect(getByText(new RegExp(words)).closest(`[role="${role}"]`)).not.toBeNull();
   });
@@ -412,6 +465,7 @@ describe('the commands on a request', () => {
   it('has no accessibility violations with the commands in place', async () => {
     const { container } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok({ ...DETAIL, status: 'COMPLETED' })}
         requestId="MREQ_1"
         commandForms={forms}
@@ -514,9 +568,10 @@ describe('the repair orders on a request', () => {
     COMMANDS.map((command) => [command, <div key={command}>فرم {command} نمونه</div>]),
   );
 
-  const offered = (orderStatus: string) => {
+  const offered = (orderStatus: string, demoMode: DemoMode = 'REAL') => {
     const { queryByText } = render(
       <RequestDetailScreen
+        demoMode={demoMode}
         result={ok(request('IN_PROGRESS', orderStatus))}
         requestId="MREQ_1"
         orderForms={{ RPO_1: forms }}
@@ -539,9 +594,32 @@ describe('the repair orders on a request', () => {
     },
   );
 
+  // Completing publishes MAINTENANCE_COMPLETED, a reward trigger: under a monetised rule
+  // economic-service credits the wallet by itself, and the portal cannot see the rules
+  // (Codex PR-361 r3). The other order commands record work and cost, and stay.
+  it('withholds completing the repair while the provider is unknown, and nothing else on the order', () => {
+    expect(offered('IN_PROGRESS', 'UNKNOWN')).toEqual(['cancel', 'part', 'labour', 'cost']);
+    expect(screen.getByText('تکمیل تعمیر اکنون در دسترس نیست')).toBeInTheDocument();
+    expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    cleanupRender();
+    expect(offered('OPEN', 'UNKNOWN')).toEqual(['start', 'cancel', 'part', 'labour', 'cost']);
+  });
+
+  it.each(['SIMULATED', 'REAL'] as const)(
+    'offers completing the repair while the provider is %s',
+    (demoMode) => {
+      expect(offered('IN_PROGRESS', demoMode)).toContain('complete');
+      expect(screen.queryByText(/اکنون در دسترس نیست/)).toBeNull();
+    },
+  );
+
   it('offers no order command to a person the page did not hand the forms to', () => {
     const { queryByText } = render(
-      <RequestDetailScreen result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))} requestId="MREQ_1" />,
+      <RequestDetailScreen
+        demoMode="REAL"
+        result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
+        requestId="MREQ_1"
+      />,
     );
     for (const command of COMMANDS) expect(queryByText(`فرم ${command} نمونه`)).toBeNull();
   });
@@ -549,6 +627,7 @@ describe('the repair orders on a request', () => {
   it('puts the forms on the order they were built for, and on no other', () => {
     const { queryByText } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
         requestId="MREQ_1"
         orderForms={{ RPO_OTHER: forms }}
@@ -560,6 +639,7 @@ describe('the repair orders on a request', () => {
   it('lists the parts, the labour and the direct charges, once each, with every figure in rials', () => {
     const { getByText, getAllByText, queryAllByText } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
         requestId="MREQ_1"
         orderDetails={{ RPO_1: detail('IN_PROGRESS') }}
@@ -578,6 +658,7 @@ describe('the repair orders on a request', () => {
     const empty: RepairOrderDetail = { ...detail('OPEN'), parts: [], labour: [], costs: [] };
     const { getByText } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok(request('OPEN', 'OPEN'))}
         requestId="MREQ_1"
         orderDetails={{ RPO_1: empty }}
@@ -589,6 +670,7 @@ describe('the repair orders on a request', () => {
   it('keeps the card, and says the lines could not be read, when they could not — the commands stay', () => {
     const { getByText, queryByText } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
         requestId="MREQ_1"
         orderDetails={{ RPO_1: null }}
@@ -602,7 +684,11 @@ describe('the repair orders on a request', () => {
 
   it('does not claim lines it was not given: a page that read none shows no list and no apology', () => {
     const { queryByText } = render(
-      <RequestDetailScreen result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))} requestId="MREQ_1" />,
+      <RequestDetailScreen
+        demoMode="REAL"
+        result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
+        requestId="MREQ_1"
+      />,
     );
     expect(queryByText(/خوانده نشد/)).toBeNull();
     expect(queryByText(/هنوز قطعه، اجرت یا هزینه‌ای ثبت نشده/)).toBeNull();
@@ -618,7 +704,12 @@ describe('the repair orders on a request', () => {
     ['costRecorded', 'هزینه ثبت شد', 'status'],
   ] as const)('says what %s did, as a %s', (notice, words, role) => {
     const { getByText } = render(
-      <RequestDetailScreen result={ok(DETAIL)} requestId="MREQ_1" notice={notice} />,
+      <RequestDetailScreen
+        demoMode="REAL"
+        result={ok(DETAIL)}
+        requestId="MREQ_1"
+        notice={notice}
+      />,
     );
     expect(getByText(new RegExp(words)).closest(`[role="${role}"]`)).not.toBeNull();
   });
@@ -626,6 +717,7 @@ describe('the repair orders on a request', () => {
   it('has no accessibility violations with lines, commands and a notice', async () => {
     const { container } = render(
       <RequestDetailScreen
+        demoMode="REAL"
         result={ok(request('IN_PROGRESS', 'IN_PROGRESS'))}
         requestId="MREQ_1"
         orderDetails={{ RPO_1: detail('IN_PROGRESS') }}
@@ -634,5 +726,69 @@ describe('the repair orders on a request', () => {
       />,
     );
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('the maintenance request page: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn when the provider is simulated', () => {
+    const view = render(
+      <RequestDetailScreen
+        result={{ kind: 'OK', data: DETAIL }}
+        requestId="MREQ_1"
+        demoMode="SIMULATED"
+      />,
+    );
+    expect(view.getByText('حالت نمایشی')).toBeInTheDocument();
+  });
+
+  it('is absent when it is not', () => {
+    const view = render(
+      <RequestDetailScreen
+        result={{ kind: 'OK', data: DETAIL }}
+        requestId="MREQ_1"
+        demoMode="REAL"
+      />,
+    );
+    expect(view.queryByText('حالت نمایشی')).toBeNull();
+    expect(view.queryByText('وضعیت درگاه پرداخت معلوم نیست')).toBeNull();
+  });
+
+  const forms = {
+    assign: <div>فرم ارجاع نمونه</div>,
+    approve: <div>فرم تأیید نمونه</div>,
+    cancel: <div>فرم لغو نمونه</div>,
+  };
+
+  // The approval records the obligation; a separate settlement pays it, so it moves no money
+  // and a disclosure outage must not stop it (Codex PR-361 r2, the same rule as orders).
+  it('says the provider is unknown, and still offers the cost approval and cancelling', () => {
+    const view = render(
+      <RequestDetailScreen
+        result={{ kind: 'OK', data: { ...DETAIL, status: 'COMPLETED' } }}
+        requestId="MREQ_1"
+        commandForms={forms}
+        demoMode="UNKNOWN"
+      />,
+    );
+    expect(view.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    expect(view.queryByText('حالت نمایشی')).toBeNull();
+    expect(view.queryByText(/اکنون در دسترس نیست/)).toBeNull();
+    expect(view.getByText('فرم تأیید نمونه')).toBeInTheDocument();
+    expect(view.getByText('فرم لغو نمونه')).toBeInTheDocument();
+  });
+
+  it('offers the approval while the provider is known', () => {
+    for (const demoMode of ['SIMULATED', 'REAL'] as const) {
+      const view = render(
+        <RequestDetailScreen
+          result={{ kind: 'OK', data: { ...DETAIL, status: 'COMPLETED' } }}
+          requestId="MREQ_1"
+          commandForms={forms}
+          demoMode={demoMode}
+        />,
+      );
+      expect(view.getByText('فرم تأیید نمونه')).toBeInTheDocument();
+      view.unmount();
+    }
   });
 });

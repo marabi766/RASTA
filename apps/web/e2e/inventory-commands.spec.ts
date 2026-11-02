@@ -1,7 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Browser, type Page } from '@playwright/test';
+import { guardedFetch } from '@rasta/testing';
+import { expect, test, type Browser, type Page } from './expect';
 
 import {
   INVENTORY_COMMAND_LABELS,
@@ -143,7 +144,10 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
       await form.getByRole('button', { name: INVENTORY_COMMAND_LABELS.CREATE_WAREHOUSE }).click();
 
       await expect(page).toHaveURL(/\/inventory\?warehouse=WHS_[^&]+&flash=/);
-      warehousePath = `/inventory?warehouse=${new URL(page.url()).searchParams.get('warehouse')}`;
+      // The landing carries the page's context tag (`server/page-context.ts`): kept, or the
+      // warehouse in the query would be read as no query at all.
+      const landed = new URL(page.url()).searchParams;
+      warehousePath = `/inventory?warehouse=${landed.get('warehouse')}&ctx=${landed.get('ctx')}`;
       await expect(page.getByText(INVENTORY_DONE_MESSAGES.CREATE_WAREHOUSE)).toBeVisible();
       await expect(page.getByRole('link', { name: WAREHOUSE_NAME })).toBeVisible();
       // Nothing in it yet: a receipt is offered, an adjustment waits for stock.
@@ -191,7 +195,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
       const form = page.getByRole('form', { name: INVENTORY_COMMAND_LABELS.ADJUST_STOCK });
       await expect(form).toBeVisible();
       // The API has neither a reason nor a second approval; the form says so and draws neither.
-      await expect(form).toContainText('دلیل یا تایید دوم نمی‌خواهد');
+      await expect(form).toContainText('دلیل یا تأیید دوم نمی‌خواهد');
       await expect(form.getByLabel(/دلیل/)).toHaveCount(0);
 
       await form.getByLabel('کالا', { exact: false }).first().selectOption({ index: 1 });
@@ -338,7 +342,7 @@ test.describe.serial('inventory commands, live (EXP-004)', () => {
     // shipment has moved: proven through the API, with the closed reason in `details`.
     const token = await provisionedAccessToken(owner);
     const id = shipmentPath.split('/').pop()!;
-    const response = await fetch(
+    const response = await guardedFetch(
       `${(process.env.API_GATEWAY_URL ?? '').replace(/\/+$/, '')}/v1/shipments/${id}/dispatch`,
       {
         method: 'POST',

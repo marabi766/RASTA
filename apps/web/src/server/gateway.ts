@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
+import { credentialFetch } from './credential-fetch';
+import { MAX_REQUEST_TIMEOUT_MS } from './unresolved-request-policy';
+
 /**
  * The only way this portal reaches the platform (ADR-058 § 3, ADR-059 § 3).
  *
@@ -66,7 +69,8 @@ export class GatewayRequestError extends Error {
 /**
  * The request may have reached the platform, but no answer it could be judged
  * by came back: the connection failed after it was opened, this portal's own
- * deadline passed, or a 2xx arrived whose body would not parse.
+ * deadline passed, a redirect was refused (`credentialFetch`), or a 2xx
+ * arrived whose body would not parse.
  *
  * A read treats it like any other unavailable gateway — it still *is* a
  * `GatewayRequestError`, with the status it always had. A write must not
@@ -83,6 +87,20 @@ export class GatewayOutcomeUnknownError extends GatewayRequestError {
   ) {
     super(status, correlationId, null);
     this.name = 'GatewayOutcomeUnknownError';
+  }
+}
+
+/**
+ * The request provably never left this portal (connection refused, DNS failure
+ * …, see `neverSent`): nothing reached the platform, so nothing happened. A
+ * `GatewayRequestError` with status 503 as before — every reader treats it so —
+ * but a write can tell it from a 503 that came back from the platform, which
+ * may follow a commit (`write.ts` carries it as `neverSent`).
+ */
+export class GatewayNeverSentError extends GatewayRequestError {
+  constructor(correlationId: string) {
+    super(503, correlationId, null);
+    this.name = 'GatewayNeverSentError';
   }
 }
 
@@ -146,6 +164,14 @@ export interface GatewayCall {
    * about which routes need one stays where it belongs — in the gateway.
    */
   readonly idempotencyKey?: string;
+  /**
+   * Sent as `Idempotency-Replay-Deadline`: the last instant (ms since the epoch) this request may be
+   * executed under its key. The owning service compares it with the clock that expires its
+   * idempotency record and refuses a later attempt with `409 REPLAY_WINDOW_CLOSED` before it writes
+   * anything (PM decision D-065) — the guarantee a clock in this portal can never give. Only with an
+   * `idempotencyKey`, and only a positive safe integer; anything else is a programming error.
+   */
+  readonly replayDeadline?: number;
   readonly fetchImpl?: typeof fetch;
   /** Overrides {@link GATEWAY_TIMEOUT_MS}. Exists for tests. */
   readonly timeoutMs?: number;
@@ -160,7 +186,7 @@ export interface GatewayCall {
  * it — for as long as the platform's own socket timeout, which is a much
  * longer and much less predictable number than this one.
  */
-const GATEWAY_TIMEOUT_MS = 15_000;
+const GATEWAY_TIMEOUT_MS = MAX_REQUEST_TIMEOUT_MS;
 
 export interface GatewayResponse<T> {
   readonly data: T;
@@ -176,24 +202,42 @@ export interface GatewayResponse<T> {
  */
 export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse<T>> {
   const url = gatewayUrl(call.baseUrl, call.path);
+  if (
+    call.replayDeadline !== undefined &&
+    (call.idempotencyKey === undefined ||
+      !Number.isSafeInteger(call.replayDeadline) ||
+      call.replayDeadline <= 0)
+  ) {
+    throw new Error('a replay deadline needs an idempotency key and a positive safe integer');
+  }
   const correlationId = call.correlationId ?? randomUUID();
-  const fetchImpl = call.fetchImpl ?? fetch;
+  // Absent: credentialFetch's own fetch, the only raw one (Q-155 boundary).
+  const fetchImpl = call.fetchImpl;
 
   let response: Response;
   try {
-    response = await fetchImpl(url, {
-      method: call.method ?? 'GET',
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${call.accessToken}`,
-        'x-correlation-id': correlationId,
-        ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
-        ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),
+    // Never follows a redirect: the bearer token, and a write's key and body,
+    // are sent to this URL once and nowhere else (Q-155).
+    response = await credentialFetch(
+      url,
+      {
+        method: call.method ?? 'GET',
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${call.accessToken}`,
+          'x-correlation-id': correlationId,
+          ...(call.body === undefined ? {} : { 'content-type': 'application/json' }),
+          ...(call.idempotencyKey === undefined ? {} : { 'idempotency-key': call.idempotencyKey }),
+          ...(call.replayDeadline === undefined
+            ? {}
+            : { 'idempotency-replay-deadline': String(call.replayDeadline) }),
+        },
+        body: call.body === undefined ? undefined : JSON.stringify(call.body),
+        cache: 'no-store',
+        signal: AbortSignal.timeout(call.timeoutMs ?? GATEWAY_TIMEOUT_MS),
       },
-      body: call.body === undefined ? undefined : JSON.stringify(call.body),
-      cache: 'no-store',
-      signal: AbortSignal.timeout(call.timeoutMs ?? GATEWAY_TIMEOUT_MS),
-    });
+      fetchImpl,
+    );
   } catch (error) {
     // A refused connection, a DNS failure, a reset, or this function's own
     // timeout above all reject `fetch` rather than answering it, and none of
@@ -202,8 +246,10 @@ export async function callGateway<T>(call: GatewayCall): Promise<GatewayResponse
     // failure as one here — rather than in each of those modules — is what
     // makes that mapping actually total (`docs/16 § ۱۶٫۱۱`). Only a failure
     // before anything was sent is a plain one; after that, whether the
-    // platform acted is unknown.
-    if (neverSent(error)) throw new GatewayRequestError(503, correlationId, null);
+    // platform acted is unknown. A refused redirect is one of those: the
+    // request was sent and answered with a 3xx that says nothing about whether
+    // it was applied, so a write it answered is unconfirmed, never `neverSent`.
+    if (neverSent(error)) throw new GatewayNeverSentError(correlationId);
     throw new GatewayOutcomeUnknownError(503, correlationId, 'TRANSPORT');
   }
 

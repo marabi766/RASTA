@@ -1,3 +1,7 @@
+import { randomBytes } from 'node:crypto';
+import { InternalTokenService } from '@rasta/nest-common';
+import { withRedirectProbe } from '@rasta/testing';
+import { SupplierSnapshotClient } from '../src/tender/supplier-snapshot.client';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
@@ -123,6 +127,49 @@ describe('the contractor standing is bootstrapped from supplier-service', () => 
       expect(await verdict(first)).toBe('STANDING_NOT_LOADED');
       expect(await verdict(second)).toBe('STANDING_NOT_LOADED');
     });
+  });
+
+  it('a cross-origin redirect on snapshot page 2 commits neither that page nor completion, and resumes its cursor', async () => {
+    const first = org();
+    const second = org();
+    await withRedirectProbe(
+      {
+        firstPage: {
+          items: [item(first, AT)],
+          nextCursor: 'page-2',
+          hasMore: true,
+          snapshotAt: AT,
+        },
+        body: { items: [item(second, AT)], nextCursor: null, hasMore: false, snapshotAt: AT },
+      },
+      async (probe) => {
+        const source = new SupplierSnapshotClient(
+          {
+            SUPPLIER_SERVICE_URL: probe.baseUrl,
+            CONSTRUCTION_SUPPLIER_REQUEST_TIMEOUT_MS: 2000,
+          } as never,
+          new InternalTokenService(randomBytes(32).toString('hex'), 'rasta-internal', 300),
+        );
+        await expect(bootstrapOf(w, source).runOnce()).rejects.toMatchObject({
+          code: 'UPSTREAM_UNAVAILABLE',
+        });
+        expect(await marker()).toMatchObject({
+          cursor: 'page-2',
+          suppliersLoaded: 1,
+          completedAt: null,
+        });
+        expect(await verdict(first)).toBe('STANDING_NOT_LOADED');
+        expect(await verdict(second)).toBe('STANDING_NOT_LOADED');
+        expect((await standingRows([second])).standing).toHaveLength(0);
+        expect(probe.sent).toHaveLength(2);
+        expect(probe.target).toEqual([]);
+        probe.recover();
+        await expect(bootstrapOf(w, source).runOnce()).resolves.toBe('LOADED');
+        expect(probe.sent[2].url).toContain('cursor=page-2');
+        expect(await marker()).toMatchObject({ suppliersLoaded: 2, completedAt: expect.any(Date) });
+        expect(await verdict(second)).toBe('ELIGIBLE');
+      },
+    );
   });
 
   describe('what predates the consumer group', () => {

@@ -1,8 +1,10 @@
 const swcOptions = require('../../jest.swc.cjs');
+const disclosureGuard = require('../../jest.disclosure-guard.cjs');
 
 /** @type {import('jest').Config} */
 module.exports = {
   displayName: require('./package.json').name,
+  setupFilesAfterEnv: [disclosureGuard],
   rootDir: 'src',
   testEnvironment: 'node',
   testRegex: '.*\.spec\.ts$',

@@ -575,3 +575,5 @@ Batch را اشغال نمی‌کند؛ الگو با ADR-049 هم‌خانوا�
 - هیچ Comment یا سندی نباید ادعا کند `SKIP LOCKED` به‌تنهایی مانع انتشار
   تکراری است، و هیچ‌کدام نباید Exactly-Once ادعا کند.
 - بازبینی: هیچ Mutation ردیف Outbox بدون شرط `claim_token` نوشته نشود.
+
+Test clock note: claim SQL must use unqualified `now()` so the isolated protocol suite can select its transaction-local millisecond clock through `search_path`.

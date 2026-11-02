@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/marabi766/RASTA/actions/workflows/ci.yml"><img src="https://github.com/marabi766/RASTA/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="package.json"><img src="https://img.shields.io/badge/Node.js-%3E%3D22-339933?logo=node.js&logoColor=white" alt="Node.js 22 or newer" /></a>
+  <a href="package.json"><img src="https://img.shields.io/badge/Node.js-%3E%3D22.18-339933?logo=node.js&logoColor=white" alt="Node.js 22.18 or newer" /></a>
   <a href="pnpm-workspace.yaml"><img src="https://img.shields.io/badge/pnpm-10-F69220?logo=pnpm&logoColor=white" alt="pnpm 10" /></a>
   <a href="tsconfig.base.json"><img src="https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white" alt="TypeScript strict mode" /></a>
   <img src="https://img.shields.io/badge/license-UNLICENSED-lightgrey" alt="UNLICENSED" />
@@ -162,7 +162,7 @@ logic. The repository enforces service boundaries in its quality gates.
 
 ### Prerequisites
 
-- Node.js 22 or newer
+- Node.js 22.18 or newer (some test scripts import TypeScript directly through Node's built-in type stripping)
 - pnpm 10
 - Docker Engine with Docker Compose v2
 - Git 2.40 or newer

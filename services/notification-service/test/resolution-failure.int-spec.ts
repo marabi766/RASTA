@@ -1,3 +1,4 @@
+import { expireClaim, setEligibilityFixture } from '@rasta/testing';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { RecipientResolutionError } from '../src/recipients/recipient.port';
@@ -80,12 +81,9 @@ describe('recipient resolution failure and recovery', () => {
     });
 
     // Make it due again, with identity still down: the count climbs.
-    await runUnscoped('the test makes a deferred intent due immediately', () =>
-      w.prisma.client.notificationIntent.updateMany({
-        where: { organizationId },
-        data: { nextResolutionAt: null },
-      }),
-    );
+    await setEligibilityFixture(w.prisma, 'resolutionDue', [
+      (await rowsFor(w.prisma, organizationId)).intents[0]!.id,
+    ]);
     w.recipients.failWith = new RecipientResolutionError('REFUSED', 'identity answered 503');
     await expect(w.worker.tick()).resolves.toBeGreaterThanOrEqual(1);
     intent = (await rowsFor(w.prisma, organizationId)).intents[0]!;
@@ -97,12 +95,9 @@ describe('recipient resolution failure and recovery', () => {
     w.recipients.failWith = undefined;
     const user = newUserId();
     w.recipients.answers.set(organizationId, [{ userId: user, role: 'FLEET_MANAGER' }]);
-    await runUnscoped('the test makes a deferred intent due immediately', () =>
-      w.prisma.client.notificationIntent.updateMany({
-        where: { organizationId },
-        data: { nextResolutionAt: null },
-      }),
-    );
+    await setEligibilityFixture(w.prisma, 'resolutionDue', [
+      (await rowsFor(w.prisma, organizationId)).intents[0]!.id,
+    ]);
     await expect(w.worker.tick()).resolves.toBeGreaterThanOrEqual(1);
 
     rows = await rowsFor(w.prisma, organizationId);
@@ -162,12 +157,20 @@ describe('recipient resolution failure and recovery', () => {
     // file leave PENDING rows whose retry time can pass while this one runs (main
     // run 37192634269: worker-d leased two of them). Push every pending row that
     // is not this test's out of reach first, so the counts below are only ours.
-    await runUnscoped('the test parks rows left by earlier tests', () =>
-      w.prisma.client.notificationIntent.updateMany({
+    await runUnscoped('the test parks rows left by earlier tests', async () => {
+      const pending = await w.prisma.client.notificationIntent.findMany({
         where: { status: 'PENDING' },
-        data: { nextResolutionAt: new Date(Date.now() + 24 * 60 * 60 * 1_000) },
-      }),
-    );
+        select: { id: true },
+      });
+      // Parking is a sweep of whatever others left: none left is fine here, and
+      // the helper refuses an empty list rather than "pass" on nothing.
+      if (pending.length > 0)
+        await setEligibilityFixture(
+          w.prisma,
+          'resolutionParked',
+          pending.map((row) => row.id),
+        );
+    });
     const organizationId = organization();
     for (let i = 0; i < 6; i += 1) {
       await deliver(
@@ -190,12 +193,7 @@ describe('recipient resolution failure and recovery', () => {
     expect(await w.repository.claimPending('worker-d', 10, 60)).toHaveLength(0);
 
     // Expire one lease as a crashed worker would leave it; it is claimable again.
-    await runUnscoped('the test expires one lease to simulate a crashed worker', () =>
-      w.prisma.client.notificationIntent.update({
-        where: { id: a[0]!.id },
-        data: { claimExpiresAt: new Date(Date.now() - 1_000) },
-      }),
-    );
+    await expireClaim(w.prisma, [a[0]!.id], 'notification_intent');
     const reclaimed = await w.repository.claimPending('worker-d', 10, 60);
     expect(reclaimed.map((intent) => intent.id)).toEqual([a[0]!.id]);
     expect(reclaimed[0]!.claimToken).not.toBe(a[0]!.claimToken);
@@ -210,12 +208,7 @@ describe('recipient resolution failure and recovery', () => {
 
     const [stale] = await w.repository.claimPending('worker-slow', 1, 60);
     // The slow worker's lease expires and a fast one takes it over.
-    await runUnscoped('the test expires a lease to stage a takeover', () =>
-      w.prisma.client.notificationIntent.update({
-        where: { id: stale!.id },
-        data: { claimExpiresAt: new Date(Date.now() - 1_000) },
-      }),
-    );
+    await expireClaim(w.prisma, [stale!.id], 'notification_intent');
     const [fresh] = await w.repository.claimPending('worker-fast', 1, 60);
     expect(fresh!.id).toBe(stale!.id);
     expect(fresh!.claimToken).not.toBe(stale!.claimToken);
@@ -303,7 +296,9 @@ describe('recipient resolution failure and recovery', () => {
     // to give, which is the stronger property.
     expect(logger.lines.length).toBeGreaterThan(0);
     for (const line of logger.lines) {
-      expect(line).not.toMatch(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+      // Not even an '@', which every address needs and no generated id or instant can hold: the
+      // run's ids cannot decide this check, as they could an address-shaped pattern's (#452).
+      expect(line).not.toContain('@');
     }
   });
 });

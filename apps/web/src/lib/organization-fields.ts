@@ -110,6 +110,22 @@ export function roleLabel(role: string): string {
   return ROLE_LABELS[role] ?? role;
 }
 
+/**
+ * Persian names for a user account's own status (`GET /v1/users/me` →
+ * `status`), same fallback rule. Not the membership's: a membership is never
+ * `PENDING` or `DEACTIVATED`, and a user is never `REVOKED`.
+ */
+export const USER_STATUS_LABELS: Readonly<Record<string, string>> = {
+  PENDING: 'در انتظار تایید',
+  ACTIVE: 'فعال',
+  SUSPENDED: 'معلق',
+  DEACTIVATED: 'غیرفعال‌شده',
+};
+
+export function userStatusLabel(status: string): string {
+  return USER_STATUS_LABELS[status] ?? status;
+}
+
 /** Persian names for membership status, same fallback rule. */
 export const MEMBERSHIP_STATUS_LABELS: Readonly<Record<string, string>> = {
   ACTIVE: 'فعال',

@@ -8,7 +8,23 @@ import {
   type InventoryCommand,
   type InventoryScope,
 } from './inventory-commands';
-import type { Binding } from './unresolved-order';
+import {
+  fencedSlot,
+  keysUnder,
+  locate,
+  ownedHere,
+  purgeForeign,
+  storedKeyOf,
+  type AccountTags,
+  type AnswerOutcome,
+  type Attempt,
+  type Binding,
+  type Settlement,
+  type StartOutcome,
+  type StoredKey,
+} from './unresolved-tenancy';
+
+export type { AnswerOutcome };
 
 /**
  * An inventory command whose outcome is unknown, kept in `sessionStorage` so
@@ -42,9 +58,11 @@ import type { Binding } from './unresolved-order';
  * its slot, and a shipment's dispatch and delivery share its own: a new
  * submission never **replaces** another submission's record — saving it is
  * refused (`HELD`) and the form is not sent — a submission already in doubt is
- * never sent again as a first send (`rememberInventoryFirstSend`), and a record
- * is cleared only by the submission it belongs to, on a definite outcome of the
- * very send that wrote it, a confirmed outcome, or the person. Every
+ * never sent again as a first send (`UNRESOLVED`), and a record is cleared only
+ * by the submission it belongs to: a definite answer of the very send that
+ * wrote it while no re-send has started since, a confirmed outcome of the
+ * newest send, or the person (the shared slot, `lib/unresolved-tenancy.ts`:
+ * per person and organization, and fenced to the send's generation). Every
  * change is announced to the page's other forms (`subscribeUnresolvedInventory`),
  * which stay view-only while another command holds the slot.
  *
@@ -54,8 +72,22 @@ import type { Binding } from './unresolved-order';
  * **reduced** to a marker — no body, no login tag, no stamp — shown view-only
  * as "the outcome is unknown" until the person acknowledges it. A confirmed
  * answer (the action redirects) drops it; otherwise only the person does.
- * Another person's page drops every entry of anyone else
- * (`purgeForeignUnresolvedInventory`).
+ * Another person's page reduces every entry of anyone else to a content-free
+ * marker, and nothing that cannot be attributed is removed
+ * (`purgeForeignUnresolvedInventory`, `lib/unresolved-tenancy.ts`).
+ *
+ * ## Per tab, not per browser (PR 363 review 3, finding 2)
+ *
+ * `sessionStorage` is this tab's: the guard above holds within one tab only.
+ * A tab duplicated before either copy sent anything has its own copy of the
+ * page's submission id K and stamp, and can send another body under K. That
+ * cannot commit twice: inventory-service keys each request by organization,
+ * endpoint and K, and refuses a different body under a K it holds
+ * (`409 IDEMPOTENCY_KEY_REUSED`) — in flight for its claim lease, and once
+ * answered for `INVENTORY_IDEMPOTENCY_TTL_HOURS`, which outlasts the stamp's
+ * replay deadline. A request the service refused holds nothing: the other
+ * tab's body is then the one request under K. Another endpoint or another
+ * organization is another key. No cross-tab lock (PM decision, PR 363 round 4).
  */
 
 const KEY_PREFIX = 'rasta.unresolved-inventory.';
@@ -152,10 +184,6 @@ function scopeOf(scope: InventoryScope): string {
     case 'SHIPMENT':
       return `shipment.${scope.shipmentId}`;
   }
-}
-
-function keyOf(scope: InventoryScope): string {
-  return `${KEY_PREFIX}${scopeOf(scope)}`;
 }
 
 /** Which commands a slot holds (`SCOPE_COMMANDS`). */
@@ -271,30 +299,35 @@ function markerOf(entry: Stored): string {
   });
 }
 
-function ownKeys(store: Storage): string[] {
-  const keys: string[] = [];
-  for (let index = 0; index < store.length; index += 1) {
-    const key = store.key(index);
-    if (key !== null && key.startsWith(KEY_PREFIX)) keys.push(key);
-  }
-  return keys;
-}
-
 function stored(store: Storage, key: string): Stored | null {
+  const located = storedKeyOf(KEY_PREFIX, key);
   const raw = store.getItem(key);
-  return raw === null ? null : parse(raw, key.slice(KEY_PREFIX.length));
+  return located === null || raw === null ? null : parse(raw, located.scope);
 }
 
-/** Logout: every entry reduced to a marker; unreadable ones removed. */
+/** `parse` for `lib/unresolved-tenancy.ts`, which hands the key too. */
+const parseEntry = (raw: string, key: StoredKey): Stored | null => parse(raw, key.scope);
+
+/** The one slot per scope, fenced to its submission and its send (`lib/unresolved-tenancy.ts`). */
+const slot = fencedSlot(KEY_PREFIX, parseEntry, { closing: () => accountClosing, changed });
+
+/** The quarantine of this kind (`lib/unresolved-tenancy.ts`, `app/UnresolvedQuarantine.tsx`). */
+export const inventoryQuarantine = slot.quarantine;
+
+/**
+ * Logout: every entry reduced to a marker; a record that does not read, and one
+ * from before entries were kept per organization, are left as they are.
+ */
 export function purgeAllUnresolvedInventory(): void {
   markInventoryClosing();
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) {
+    for (const key of keysUnder(store, KEY_PREFIX)) {
+      // Whose an old-format entry is cannot be told here; it is never written over.
+      if (storedKeyOf(KEY_PREFIX, key)?.kind !== 'TENANT') continue;
       const entry = stored(store, key);
       if (entry) store.setItem(key, markerOf(entry));
-      else store.removeItem(key);
     }
   } catch {
     // Unavailable storage holds nothing to purge.
@@ -302,30 +335,61 @@ export function purgeAllUnresolvedInventory(): void {
   changed();
 }
 
-/** A page for `owner`: entries of anyone else, and unreadable ones, are removed. */
-export function purgeForeignUnresolvedInventory(owner: string): void {
+/**
+ * A page for this person: entries of anyone else are reduced to content-free
+ * markers; theirs stay, for every organization, and nothing that cannot be
+ * attributed is touched (`lib/unresolved-tenancy.ts`).
+ */
+export function purgeForeignUnresolvedInventory(tags: AccountTags): void {
   try {
     const store = storage();
     if (!store) return;
-    for (const key of ownKeys(store)) {
-      const entry = stored(store, key);
-      if (!entry || entry.owner !== owner) store.removeItem(key);
-    }
+    purgeForeign(store, KEY_PREFIX, tags, parseEntry);
   } catch {
     // See above.
   }
 }
 
-/**
- * `SAVED`: stored. `HELD`: another submission's record holds this slot — it is
- * left exactly as it was, and this one must not be sent. `UNAVAILABLE`: storage
- * refused it, or a logout has started.
- */
-export type SaveOutcome = 'SAVED' | 'HELD' | 'UNAVAILABLE';
+/** What a save before the first send says (`StartOutcome`, `lib/unresolved-tenancy.ts`). */
+export type SaveOutcome = StartOutcome;
 
 /**
- * Updates the record of a submission already sent — its answer's correlation
- * id, a withdrawn stamp; the body and the date stay the first send's.
+ * What is stored for `entry`, or null to keep a marker as it is: a marker is
+ * never turned back into something that can be re-sent. When the slot already
+ * keeps this submission, its first command, body and time stay, and a withdrawn
+ * replay stays withdrawn.
+ */
+function recordOf(
+  scope: InventoryScope,
+  entry: Omit<UnresolvedInventory, 'savedAt' | 'marker'>,
+  earlier: Stored | null,
+  binding: Binding,
+  now: number,
+): string | null {
+  if (earlier?.marker) return null;
+  return JSON.stringify({
+    v: VERSION,
+    marker: false,
+    scope: scopeOf(scope),
+    command: earlier ? earlier.command : entry.command,
+    submissionId: entry.submissionId,
+    // The body is the first send's, whatever a later answer carries.
+    body: earlier ? earlier.body : entry.body,
+    correlationId: entry.correlationId,
+    // The entry dates from the first send.
+    savedAt: earlier ? earlier.savedAt : now,
+    // Once withdrawn — the server said the deadline passed — never restored.
+    replay: earlier && earlier.replay === null ? null : entry.replay,
+    owner: binding.owner,
+    session: binding.session,
+  });
+}
+
+/**
+ * Before the first send (`StartOutcome`, `lib/unresolved-tenancy.ts`):
+ * `UNRESOLVED` when the slot already keeps this very submission — a form drawn
+ * again over it is not a first send. A body that would not be read back as
+ * itself cannot be retried as the same request: it is not sent at all.
  */
 export function saveUnresolvedInventory(
   scope: InventoryScope,
@@ -333,99 +397,78 @@ export function saveUnresolvedInventory(
   binding: Binding,
   now: number = Date.now(),
 ): SaveOutcome {
-  return write(scope, entry, binding, now, false);
+  if (!belongs(scopeOf(scope), entry.command)) return 'UNAVAILABLE';
+  return slot.start(binding, scopeOf(scope), entry.submissionId, () =>
+    roundTrips(entry.command, entry.body) ? recordOf(scope, entry, null, binding, now) : null,
+  );
 }
 
 /**
- * The record a first send leaves before it goes. `HELD` whenever the slot holds
- * a record at all — another submission's, **or this one's**: a submission
- * already in doubt is not sent again as a first send (a form drawn again with
- * the same id, Back/Forward to a cached page, has lost what it sent), and a
- * definite answer to such a send would say nothing about the first one.
+ * An answer to send `attempt` of `entry.submissionId` still in doubt: its
+ * record is updated while the slot holds it at that very send; a later send's
+ * record is left as it is (`SUPERSEDED`); otherwise the answer is kept aside
+ * (`SET_ASIDE`; `lib/unresolved-tenancy.ts`).
  */
-export function rememberInventoryFirstSend(
+export function answerUnresolvedInventory(
   scope: InventoryScope,
   entry: Omit<UnresolvedInventory, 'savedAt' | 'marker'>,
   binding: Binding,
+  attempt: Attempt,
   now: number = Date.now(),
-): SaveOutcome {
-  return write(scope, entry, binding, now, true);
+): AnswerOutcome {
+  return slot.answer(
+    binding,
+    scopeOf(scope),
+    entry.submissionId,
+    attempt,
+    (earlier) => recordOf(scope, entry, earlier, binding, now),
+    now,
+  );
 }
 
-function write(
+/** Before a re-send of `submissionId`: its next generation, recorded — or null, and nothing is sent. */
+export function advanceUnresolvedInventory(
   scope: InventoryScope,
-  entry: Omit<UnresolvedInventory, 'savedAt' | 'marker'>,
+  submissionId: string,
   binding: Binding,
-  now: number,
-  first: boolean,
-): SaveOutcome {
-  if (accountClosing) return 'UNAVAILABLE';
-  try {
-    const store = storage();
-    if (!store) return 'UNAVAILABLE';
-    const key = keyOf(scope);
-    if (!belongs(scopeOf(scope), entry.command)) return 'UNAVAILABLE';
-    const parsed = stored(store, key);
-    // Someone else's is not this person's to keep (`purgeForeignUnresolvedInventory`).
-    const earlier = parsed?.owner === binding.owner ? parsed : null;
-    // Another submission's record — even a marker — is never replaced; nor is
-    // this one's by a first send.
-    if (earlier !== null && (first || earlier.submissionId !== entry.submissionId)) return 'HELD';
-    // A body that would not be read back as itself cannot be retried as the
-    // same request: it is not sent at all.
-    if (!roundTrips(entry.command, entry.body)) return 'UNAVAILABLE';
-    // A marker is never turned back into something that can be re-sent.
-    if (earlier?.marker) return 'SAVED';
-    const same = earlier !== null;
-    store.setItem(
-      key,
-      JSON.stringify({
-        v: VERSION,
-        marker: false,
-        scope: scopeOf(scope),
-        command: entry.command,
-        submissionId: entry.submissionId,
-        // The body is the first send's, whatever a later answer carries.
-        body: same ? earlier.body : entry.body,
-        correlationId: entry.correlationId,
-        // The entry dates from the first send.
-        savedAt: same ? earlier.savedAt : now,
-        // Once withdrawn — the server said the deadline passed — never restored.
-        replay: same && earlier.replay === null ? null : entry.replay,
-        owner: binding.owner,
-        session: binding.session,
-      }),
-    );
-    changed();
-    return 'SAVED';
-  } catch {
-    return 'UNAVAILABLE';
-  }
+): Attempt | null {
+  return slot.advance(binding, scopeOf(scope), submissionId);
 }
 
 /**
- * Forgets the record of `submissionId` — and only that one: a record another
- * submission holds stays. An unreadable record is left to
- * `restoreUnresolvedInventory`, which removes it.
+ * A definite answer to send `attempt` of `submissionId`, from the login it was
+ * sent under: its record, and only that, goes — only while no later send of it
+ * has started.
  */
-export function clearUnresolvedInventory(scope: InventoryScope, submissionId: string): void {
-  try {
-    const store = storage();
-    if (!store) return;
-    const entry = stored(store, keyOf(scope));
-    if (entry?.submissionId !== submissionId) return;
-    store.removeItem(keyOf(scope));
-  } catch {
-    // See above.
-    return;
-  }
-  changed();
+export function settleUnresolvedInventory(
+  scope: InventoryScope,
+  submissionId: string,
+  binding: Binding,
+  attempt: Attempt,
+  settlement: Settlement,
+): void {
+  slot.settle(binding, scopeOf(scope), submissionId, attempt, settlement);
+}
+
+/**
+ * The person sets aside the record of `submissionId` — and only that one: a
+ * record another submission holds stays, and so does every other
+ * organization's. A record that cannot be attributed is never removed
+ * (quarantined).
+ */
+export function clearUnresolvedInventory(
+  scope: InventoryScope,
+  submissionId: string,
+  binding: Binding,
+): void {
+  slot.release(binding, scopeOf(scope), submissionId);
 }
 
 /**
  * The unresolved inventory command in this slot, if this person has one.
- * Unreadable, or someone else's: removed, read as none. Older than the
- * session's lifetime: reduced to the marker, and read as that — never as none.
+ * Unreadable, or not this person's: read as none and left as it is
+ * (quarantined). Older than the session's lifetime: reduced to the marker, and
+ * read as that — never as none.
  */
 export function restoreUnresolvedInventory(
   scope: InventoryScope,
@@ -435,17 +478,15 @@ export function restoreUnresolvedInventory(
 ): RestoredInventory | null {
   try {
     const store = storage();
-    const key = keyOf(scope);
-    if (!store || store.getItem(key) === null) return null;
+    const found = store ? locate(store, KEY_PREFIX, binding, scopeOf(scope)) : null;
+    if (!store || found === null) return null;
 
-    const entry = stored(store, key);
-    if (!entry || entry.owner !== binding.owner) {
-      store.removeItem(key);
-      return null;
-    }
+    const entry = parse(found.raw, scopeOf(scope));
+    // Not this person's, or does not read: none here, and left as it is (quarantined).
+    if (!entry || !ownedHere(binding, found.legacy, entry.owner)) return null;
     const { command, submissionId, correlationId, savedAt } = entry;
     if (entry.marker || now - savedAt > maxAgeSeconds * 1000) {
-      if (!entry.marker) store.setItem(key, markerOf(entry));
+      if (!entry.marker && !found.legacy) store.setItem(found.key, markerOf(entry));
       return {
         kind: 'VIEW_ONLY',
         entry: {
@@ -468,8 +509,12 @@ export function restoreUnresolvedInventory(
       replay: entry.replay,
       marker: false,
     };
+    // An old-format record may have been sent for another organization: never re-sent.
     const retryable =
-      entry.session === binding.session && entry.replay !== null && now < entry.replay.until;
+      !found.legacy &&
+      entry.session === binding.session &&
+      entry.replay !== null &&
+      now < entry.replay.until;
     return { kind: retryable ? 'RETRYABLE' : 'VIEW_ONLY', entry: restored };
   } catch {
     return null;

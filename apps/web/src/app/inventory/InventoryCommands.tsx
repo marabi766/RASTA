@@ -91,7 +91,6 @@ export function InventoryCommands({
     readonly slot: string;
     readonly restored: RestoredInventory | null;
   } | null>(null);
-  const { owner, session } = binding;
   const kind = scope.kind;
   const target = targetOf(scope);
   const slotKey = `${kind}.${target}`;
@@ -101,11 +100,11 @@ export function InventoryCommands({
     const read = () =>
       setChecked({
         slot: slotKey,
-        restored: restoreUnresolvedInventory(slot, { owner, session }, sessionMaxAgeSeconds),
+        restored: restoreUnresolvedInventory(slot, binding, sessionMaxAgeSeconds),
       });
     read();
     return subscribeUnresolvedInventory(read);
-  }, [kind, target, slotKey, owner, session, sessionMaxAgeSeconds]);
+  }, [kind, target, slotKey, binding, sessionMaxAgeSeconds]);
 
   // What was read for another warehouse or shipment is not an answer for this one.
   if (checked === null || checked.slot !== slotKey) return null;

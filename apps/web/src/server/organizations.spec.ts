@@ -7,6 +7,7 @@ import {
   updateOrganization,
   updateOrganizationFormValues,
 } from './organizations';
+import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 
 /**
@@ -163,7 +164,7 @@ describe('updateOrganization', () => {
       {
         code: 'VALIDATION_ERROR',
         message: 'invalid',
-        details: [{ path: 'name', message: 'نام تکراری است' }],
+        details: [{ path: 'name', message: 'Name already in use' }],
       },
       422,
     );
@@ -177,7 +178,10 @@ describe('updateOrganization', () => {
       ),
     );
 
-    expect(result).toMatchObject({ kind: 'INVALID', fieldErrors: { name: 'نام تکراری است' } });
+    expect(result).toMatchObject({
+      kind: 'INVALID',
+      fieldErrors: { name: GENERIC_REFUSAL_MESSAGE },
+    });
   });
 });
 

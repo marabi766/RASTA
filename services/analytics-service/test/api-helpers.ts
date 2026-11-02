@@ -7,12 +7,17 @@ import {
   type AuthGuardOptions,
   type TokenVerifier,
 } from '@rasta/nest-common';
+import { mintTestInternalToken } from '@rasta/testing';
 import { randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { MaintenanceFactsConsumer } from '../src/maintenance/maintenance-facts.consumer';
 import { databaseUrl } from './helpers';
+import type { Logger } from '@rasta/logging';
+import { ENV, LOGGER } from '../src/tokens';
+import { loadAnalyticsEnv } from '../src/config/env';
+import { KPI_VALUE_READERS, type KpiValueReaders } from '../src/kpis/kpi.service';
 
 /**
  * The HTTP surface, booted from the **real** `AppModule` — the harness construction-service
@@ -94,7 +99,8 @@ export function internalToken(
   callerService: string,
   options: { organizationId?: string } = {},
 ): Promise<string> {
-  return new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300).issue(
+  return mintTestInternalToken(
+    { secret: INTERNAL_SECRET, issuer: 'rasta-internal', ttlSeconds: 300 },
     callerService,
     SERVICE_NAME,
     'SERVICE',
@@ -118,10 +124,22 @@ function applyEnvironment(): void {
 
 const inert = { start: async () => undefined, stop: async () => undefined, isRunning: () => false };
 
-export async function startApi(): Promise<ApiHarness> {
+export async function startApi(
+  options: {
+    kpiReaders?: KpiValueReaders;
+    logger?: Logger;
+    /**
+     * Whether the deployment runs the maintenance projection (ANALYTICS_MAINTENANCE_FACTS_
+     * CONSUMER_ENABLED). Default true: a KPI count is NO_DATA without it (Q-154). The real env
+     * loader refuses `true` over an unauthenticated broker, which this harness has by design, so
+     * the flag is set on the loaded env instead; the consumer itself stays inert either way.
+     */
+    consumerEnabled?: boolean;
+  } = {},
+): Promise<ApiHarness> {
   applyEnvironment();
 
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+  const builder = Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(MaintenanceFactsConsumer)
     .useValue(inert)
     .overrideProvider(AUTH_OPTIONS)
@@ -151,8 +169,16 @@ export async function startApi(): Promise<ApiHarness> {
           // tests/e2e.
         } as unknown as TokenVerifier,
       }),
-    })
-    .compile();
+    });
+  builder.overrideProvider(ENV).useFactory({
+    factory: () => ({
+      ...loadAnalyticsEnv(),
+      ANALYTICS_MAINTENANCE_FACTS_CONSUMER_ENABLED: options.consumerEnabled ?? true,
+    }),
+  });
+  if (options.kpiReaders) builder.overrideProvider(KPI_VALUE_READERS).useValue(options.kpiReaders);
+  if (options.logger) builder.overrideProvider(LOGGER).useValue(options.logger);
+  const moduleRef = await builder.compile();
 
   const app = moduleRef.createNestApplication();
   // Same as main.ts: without it every `@Controller({ version: '1' })` route is mounted at a path

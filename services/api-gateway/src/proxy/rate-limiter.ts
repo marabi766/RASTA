@@ -64,6 +64,21 @@ end
 return {0, 0, retry_ms}
 `;
 
+/**
+ * A Redis failure as it is logged: its class and code (`ECONNREFUSED`,
+ * `ReplyError`), never its message, which may quote the host it dialled from
+ * REDIS_URL or the server's answer (#385 r6, the configuration-disclosure
+ * class). Shapes are checked: a name or code that is not one is `unknown`.
+ */
+export function redisFailure(error: unknown): string {
+  const type =
+    error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)
+      ? error.name
+      : 'unknown';
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? `${type} ${code}` : type;
+}
+
 @Injectable()
 export class RateLimiter implements OnModuleDestroy {
   private readonly logger = new Logger(RateLimiter.name);
@@ -93,7 +108,7 @@ export class RateLimiter implements OnModuleDestroy {
     this.redis.on('error', (error) => {
       // Logged at warn, not error: a transient reconnect is expected and this
       // path is designed to degrade rather than fail.
-      this.logger.warn(`Redis unavailable for rate limiting: ${error.message}`);
+      this.logger.warn(`Redis unavailable for rate limiting (REDIS_URL): ${redisFailure(error)}`);
     });
   }
 
@@ -124,7 +139,7 @@ export class RateLimiter implements OnModuleDestroy {
       };
     } catch (error) {
       this.logger.warn(
-        `Rate limit check failed (${(error as Error).message}); ` +
+        `Rate limit check failed (${redisFailure(error)}); ` +
           `${this.failOpen ? 'allowing' : 'refusing'} the request`,
       );
 

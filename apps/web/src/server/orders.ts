@@ -1,5 +1,7 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText, toLatinDigits, toPersianDigits } from '@/lib/format';
 import {
   DISPUTE_OUTCOMES,
@@ -54,7 +56,7 @@ const orderLineSchema = z.object({
    * The order line a return request names (RUN-005). A service that does not
    * send it leaves the line out of every return form rather than guessed.
    */
-  id: z.string().min(1).nullable().default(null),
+  id: z.string().min(1).nullable().prefault(null),
   offerId: z.string(),
   productId: z.string(),
   productName: z.string(),
@@ -71,14 +73,14 @@ const orderSchema = z.object({
   supplierOrganizationId: z.string(),
   totalAmountMinor: minorUnits,
   currency: z.string(),
-  lines: z.array(orderLineSchema).default([]),
-  confirmedAt: z.string().nullable().default(null),
-  fulfilledAt: z.string().nullable().default(null),
-  receiptConfirmedAt: z.string().nullable().default(null),
-  completedAt: z.string().nullable().default(null),
-  cancelledAt: z.string().nullable().default(null),
-  cancellationReason: z.string().nullable().default(null),
-  failureReason: z.string().nullable().default(null),
+  lines: z.array(orderLineSchema).prefault([]),
+  confirmedAt: z.string().nullable().prefault(null),
+  fulfilledAt: z.string().nullable().prefault(null),
+  receiptConfirmedAt: z.string().nullable().prefault(null),
+  completedAt: z.string().nullable().prefault(null),
+  cancelledAt: z.string().nullable().prefault(null),
+  cancellationReason: z.string().nullable().prefault(null),
+  failureReason: z.string().nullable().prefault(null),
   createdAt: renderableDate,
   /**
    * The commands *this viewer* may issue now, computed by marketplace-service
@@ -89,7 +91,7 @@ const orderSchema = z.object({
    */
   availableActions: z
     .array(z.string())
-    .default([])
+    .prefault([])
     .transform((actions) => actions.filter(isOrderCommand)),
 });
 
@@ -103,7 +105,7 @@ export type OrderLine = z.infer<typeof orderLineSchema>;
 
 const orderPageSchema = z.object({
   items: z.array(orderSchema),
-  nextCursor: z.string().nullable().default(null),
+  nextCursor: z.string().nullable().prefault(null),
 });
 
 export type OrderPage = z.infer<typeof orderPageSchema>;
@@ -183,6 +185,13 @@ export function orderCommandFormValues(form: FormData): OrderCommandFormValues {
   };
 }
 
+/**
+ * What the buyer reads when a receipt confirmation arrives with a note. Plain
+ * words: the note is not kept, nothing was confirmed, and what to do next.
+ */
+export const RECEIPT_NOTE_REFUSAL =
+  'یادداشت هنگام تایید دریافت ذخیره نمی‌شود، پس چیزی ارسال نشد. صفحه را تازه کنید و بدون یادداشت تایید کنید.';
+
 /** An optional free-text field: blank means "not given", so it is left out. */
 const optionalText = (max: number, message: string) =>
   z
@@ -214,11 +223,19 @@ const COMMAND_SCHEMAS = {
     ),
   }),
 
+  // Q-110 (docs/06 § order commands, temporary decision): marketplace-service
+  // refuses a non-empty receipt note, because confirming receipt records who
+  // and when and has no place to keep a note. The form therefore has no note
+  // field; a post that still carries one (a stale page, a crafted request) is
+  // refused HERE, in Persian, before anything is sent — never dropped silently
+  // and never settled with the text lost. Blank (after normalising) is no note.
+  // The sentence names no ticket number.
   CONFIRM_RECEIPT: z.object({
-    note: optionalText(
-      LIMITS.note.max,
-      `یادداشت نباید بیش از ${digits(LIMITS.note.max)} نویسه باشد`,
-    ),
+    note: z
+      .string()
+      .trim()
+      .max(0, RECEIPT_NOTE_REFUSAL)
+      .transform(() => undefined),
   }),
 
   RAISE_DISPUTE: z.object({
@@ -236,7 +253,7 @@ const COMMAND_SCHEMAS = {
   }),
 
   RESOLVE_DISPUTE: z.object({
-    outcome: z.enum(DISPUTE_OUTCOMES, { errorMap: () => ({ message: 'نتیجه را انتخاب کنید' }) }),
+    outcome: z.enum(DISPUTE_OUTCOMES, { error: 'نتیجه را انتخاب کنید' }),
     resolution: z
       .string()
       .trim()
@@ -248,7 +265,7 @@ const COMMAND_SCHEMAS = {
     // Required, never defaulted: ADR-052 rule 14 forbids reading
     // responsibility out of the outcome or out of free text.
     responsibility: z.enum(RESPONSIBILITIES, {
-      errorMap: () => ({ message: 'مسئول را صریحاً مشخص کنید' }),
+      error: 'مسئول را صریحاً مشخص کنید',
     }),
   }),
 
@@ -314,7 +331,7 @@ export function parseOrderCommand(values: OrderCommandFormValues): ParsedOrderCo
   }
 
   const command = values.command;
-  const parsed = COMMAND_SCHEMAS[command].safeParse(values);
+  const parsed = legacyParse(COMMAND_SCHEMAS[command], values);
 
   // Checked here, on the server, not only by the checkbox's `required`: a
   // browser attribute is a convenience a crafted post does not have to honour,
@@ -332,20 +349,20 @@ export function parseOrderCommand(values: OrderCommandFormValues): ParsedOrderCo
     return { ok: true, request: { command, body } };
   }
 
-  const fieldErrors: Partial<Record<OrderCommandField, string>> = {};
-  if (!parsed.success) {
-    for (const issue of parsed.error.issues) {
-      const field = issue.path[0];
-      if (typeof field === 'string' && field !== 'command') {
-        fieldErrors[field as OrderCommandField] ??= issue.message;
-      }
-    }
-  }
+  const fieldErrors: Partial<Record<OrderCommandField, string>> = parsed.success
+    ? {}
+    : firstIssuePerField(
+        parsed.refusal,
+        (field): field is OrderCommandField => field !== 'command',
+      );
   if (!acknowledged) {
     fieldErrors.acknowledge = 'برای ادامه تأیید کنید که این اقدام بازگشت‌پذیر نیست';
   }
   return { ok: false, command, fieldErrors };
 }
+
+const ORDER_STATE_REFUSAL =
+  'وضعیت سفارش اجازه‌ی این اقدام را نمی‌دهد؛ ممکن است طرف مقابل همین حالا اقدام کرده باشد. صفحه را تازه کنید.';
 
 export const ORDER_COMMAND_FIELD_MAPPING: FieldMapping<OrderCommandField> = {
   paths: {
@@ -358,7 +375,28 @@ export const ORDER_COMMAND_FIELD_MAPPING: FieldMapping<OrderCommandField> = {
     rating: 'rating',
     comment: 'comment',
   },
-  messages: {},
+  messages: {
+    // Q-110: the service's refusal of a receipt note, if a post ever got past
+    // the portal's own check above. The ticket number is the service's, not
+    // the reader's.
+    'A receipt confirmation note is not stored yet (open question Q-110); leave it out':
+      RECEIPT_NOTE_REFUSAL,
+    'Only a completed order may be reviewed': 'فقط برای سفارش تکمیل‌شده می‌توان نظر ثبت کرد.',
+  },
+  // An order's state moves under both parties' hands; the service says which
+  // transition it refused ("Order ORD_… cannot move from …", "… is already …")
+  // with ids and statuses in the sentence, which are not for the reader.
+  patterns: [
+    [
+      /^Order \S+ (?:cannot move from \S+ to \S+|is already \S+ and cannot change further)$/,
+      ORDER_STATE_REFUSAL,
+    ],
+  ],
+  byCode: {
+    BUSINESS_RULE_VIOLATION: ORDER_STATE_REFUSAL,
+    INVALID_STATE_TRANSITION: ORDER_STATE_REFUSAL,
+    VALIDATION_FAILED: 'اطلاعات فرم پذیرفته نشد؛ فیلدها را بررسی کنید.',
+  },
 };
 
 export function issueOrderCommand(

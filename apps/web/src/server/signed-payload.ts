@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { webServerEnv } from './env';
 import type { WebSession } from './session';
+import { sessionOrganization } from './session-organization';
 
 /**
  * A small piece of JSON the server hands to a browser and later accepts back,
@@ -11,10 +12,10 @@ import type { WebSession } from './session';
  * written for, and only until it expires.
  *
  * It is the same construction as `submission.ts`' bound ids — an HMAC keyed
- * from the session secret under a purpose label, over the session's subject and
- * CSRF token — but over a payload, so the two uses that need one (the flash a
- * redirect carries, and the baseline an edit form carries) share one reviewed
- * implementation instead of two.
+ * from the session secret under a purpose label, over the session's subject,
+ * CSRF token and acting organization — but over a payload, so every use that
+ * needs one (the flash a redirect carries, the baseline an edit form carries,
+ * a replay stamp, a release token) shares one reviewed implementation.
  *
  * ## What it proves, and what it does not
  *
@@ -22,6 +23,12 @@ import type { WebSession } from './session';
  *   changed, fails.
  * - **Not somebody else's**: another person's token, and one from an earlier
  *   login (the CSRF token is per login), fail.
+ * - **Not another organization's**: the organization the session acts for
+ *   (`sessionOrganization`) is signed too, so a token issued while the person
+ *   acted for A fails once the session acts for B — a confirmation of A's bid
+ *   is not shown on B's page, an A baseline is not accepted by a B form (PR
+ *   405 review 2, F2). A session whose organization cannot be told signs
+ *   nothing and verifies nothing.
  * - **Not for another purpose**: the purpose is inside the key, so a flash
  *   cannot be passed off as a baseline.
  * - **Not forever**: `exp` is signed with the rest.
@@ -30,7 +37,7 @@ import type { WebSession } from './session';
  * payload is readable by whoever holds the token, so nothing secret goes in it.
  */
 
-const KEY_LABEL = 'rasta-web/signed-payload/v1';
+const KEY_LABEL = 'rasta-web/signed-payload/v2';
 
 /** Far larger than anything signed here; refuses a megabyte of junk before parsing it. */
 const MAX_TOKEN_LENGTH = 4096;
@@ -40,16 +47,23 @@ const MAC_CHARS = 43;
 
 const TOKEN_SHAPE = new RegExp(`^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]{${MAC_CHARS}}$`);
 
-function macFor(session: WebSession, purpose: string, body: string): Buffer {
+/** Null when the session's organization cannot be told: nothing is signed or accepted for it. */
+function macFor(session: WebSession, purpose: string, body: string): Buffer | null {
+  const organizationId = sessionOrganization(session);
+  if (organizationId === undefined) return null;
   const key = createHmac('sha256', webServerEnv().WEB_SESSION_SECRET)
     .update(`${KEY_LABEL}:${purpose}`)
     .digest();
   return createHmac('sha256', key)
-    .update(`${session.subject}\n${session.csrfToken}\n${body}`)
+    .update(`${session.subject}\n${session.csrfToken}\n${organizationId ?? ''}\n${body}`)
     .digest();
 }
 
-/** Signs `payload`, valid for `ttlSeconds` from `now`. */
+/**
+ * Signs `payload`, valid for `ttlSeconds` from `now`. Throws for a session
+ * whose organization cannot be told — `readSession()` refuses such a session,
+ * so a caller that holds one draws nothing.
+ */
 export function signPayload(
   session: WebSession,
   purpose: string,
@@ -59,7 +73,10 @@ export function signPayload(
 ): string {
   const exp = Math.floor(now / 1000) + ttlSeconds;
   const body = Buffer.from(JSON.stringify({ ...payload, exp })).toString('base64url');
-  return `${body}.${macFor(session, purpose, body).toString('base64url')}`;
+  const mac = macFor(session, purpose, body);
+  if (mac === null)
+    throw new Error('Nothing is signed for a session whose organization is unknown.');
+  return `${body}.${mac.toString('base64url')}`;
 }
 
 /**
@@ -88,6 +105,7 @@ export function verifyPayload<S extends z.ZodRawShape>(
   if (received.toString('base64url') !== macText) return null;
 
   const expected = macFor(session, purpose, body);
+  if (expected === null) return null;
   if (received.length !== expected.length || !timingSafeEqual(received, expected)) return null;
 
   let json: unknown;

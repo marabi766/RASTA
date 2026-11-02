@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from '@rasta/contracts';
 import { CONTRACT_CURRENCY } from '../statement/settlement-fact';
 
 /**
@@ -42,7 +43,10 @@ export const obligationFactSchema = z.object({
   payerOrganizationId: z.string().min(1).max(128),
   beneficiaryOrganizationId: z.string().min(1).max(128),
   settlementId: z.string().min(1).max(128).nullable(),
-  settledAt: z.string().datetime({ offset: true }).nullable(),
+  settledAt: z
+    .string()
+    .check(isoDateTime({ offset: true }))
+    .nullable(),
   settledAmountMinor: minor.nullable(),
   fullySettled: z.boolean(),
 });

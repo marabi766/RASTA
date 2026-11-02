@@ -171,12 +171,16 @@ export function consumerDeclarationProblem(
   service: string,
   consumer: { groupId: string; topics: readonly string[]; deadLetterTopic?: string },
 ): string | undefined {
+  // The texts name a service only once it is a declared one, and never the
+  // group: a consumer's principal and group can come from the environment
+  // (SERVICE_NAME, KAFKA_CONSUMER_GROUP), and these reach the boot log through
+  // EventConsumer's refusal (#385 r4). Topics are the caller's constants.
   const declared = BY_SERVICE[service];
   if (!isDeclaredConsumer(service) || declared === undefined) {
-    return `${service} is not declared in TOPIC_CONSUMERS`;
+    return "the consumer's service is not declared in TOPIC_CONSUMERS";
   }
   if (consumerGroupService(consumer.groupId) !== service) {
-    return `group ${consumer.groupId} is outside ${service}'s namespace (${service}${CONSUMER_GROUP_SEPARATOR}…)`;
+    return `the consumer group is outside ${service}'s namespace (${service}${CONSUMER_GROUP_SEPARATOR}…)`;
   }
   // A topic's `.retry` twin is read under the same declaration: it carries
   // replays of the same stream (docs/runbooks/replay-dlq.md).

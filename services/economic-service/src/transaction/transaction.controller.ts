@@ -139,7 +139,10 @@ export class TransactionController {
       'request rolls back, leaving no orphaned obligation. Requires an `Idempotency-Key`. ' +
       '`sourceType` `MAINTENANCE_REQUEST`, `PAYMENT_INTENT` and `STATEMENT` are refused to every ' +
       'caller, and `ORDER` to everyone but marketplace-service recording a `MARKETPLACE_ORDER` ' +
-      '(400 VALIDATION_FAILED on `sourceType`).',
+      '(400 VALIDATION_FAILED on `sourceType`). Where settlement fails closed without a ' +
+      'commission rule (docs/24 Q-29, on outside development and test), `businessLine` is ' +
+      'required — 422 BUSINESS_LINE_REQUIRED, nothing recorded — except for marketplace-service ' +
+      'recording its own `ORDER` (docs/24 Q-130).',
   })
   async create(
     @Headers('idempotency-key') idempotencyKey: string | undefined,

@@ -32,11 +32,14 @@ function proxy(): ProxyService {
 }
 
 /** Forwards one request against a stubbed fetch and returns the sent headers. */
-async function forwardAndCaptureHeaders(context: {
-  userId?: string;
-  roles: string[];
-  authType: 'USER' | 'ANONYMOUS';
-}): Promise<Record<string, string>> {
+async function forwardAndCaptureHeaders(
+  context: {
+    userId?: string;
+    roles: string[];
+    authType: 'USER' | 'ANONYMOUS';
+  },
+  requestHeaders: Record<string, string | string[]> = {},
+): Promise<Record<string, string>> {
   let sent: Record<string, string> = {};
 
   const originalFetch = globalThis.fetch;
@@ -60,7 +63,7 @@ async function forwardAndCaptureHeaders(context: {
           method: 'POST',
           path: '/v1/registration-requests',
           query: '',
-          headers: {},
+          headers: requestHeaders,
           body: { nationalId: '1234567890' },
         }),
     );
@@ -70,6 +73,26 @@ async function forwardAndCaptureHeaders(context: {
 
   return sent;
 }
+
+describe('ProxyService — the replay deadline travels', () => {
+  // PM decision D-065: the owning service compares `Idempotency-Replay-Deadline` with its own clock, so
+  // the gateway must neither drop it nor keep a second copy apart from the first.
+  it('forwards Idempotency-Replay-Deadline to the service, untouched', async () => {
+    const headers = await forwardAndCaptureHeaders(
+      { roles: [], authType: 'ANONYMOUS' },
+      { 'Idempotency-Replay-Deadline': '1767225600000', 'idempotency-key': 'k-0001' },
+    );
+    expect(headers['idempotency-replay-deadline']).toBe('1767225600000');
+  });
+
+  it('joins a duplicated header into one value that is no canonical integer, which the service refuses', async () => {
+    const headers = await forwardAndCaptureHeaders(
+      { roles: [], authType: 'ANONYMOUS' },
+      { 'idempotency-replay-deadline': ['1767225600000', '1767225600001'] },
+    );
+    expect(headers['idempotency-replay-deadline']).toBe('1767225600000,1767225600001');
+  });
+});
 
 describe('ProxyService — the internal token it mints', () => {
   it('marks an anonymous forward as a relay, not a service call', async () => {

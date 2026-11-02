@@ -1,8 +1,10 @@
+import { envEnumProbes } from '@rasta/config';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EVIDENCE_MAX_CHAIN_LINKS } from '../tender/evidence-limits';
 import {
   brokersOf,
+  constructionEnvSchema,
   corsOrigins,
   DEFAULT_PORT,
   loadConstructionEnv,
@@ -12,8 +14,14 @@ import {
   TENDER_OPEN_TIMEOUT_DEFAULT_MS,
   TENDER_OPEN_TIMEOUT_MAX_MS,
   TENDER_OPEN_TIMEOUT_MIN_MS,
+  replayWindowRoomSeconds,
 } from './env';
-import { constructionOperationBudgets } from './operation-budgets';
+import {
+  REPLAY_FENCE_MARGIN_MS,
+  constructionOperationBudgets,
+  replayFenceBudgetMs,
+} from './operation-budgets';
+import { PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS } from '@rasta/contracts';
 
 /**
  * Configuration parsing, the fallbacks a deployment relies on, and the four
@@ -483,6 +491,65 @@ describe('what is deliberately not configurable', () => {
     expect(load().CONSTRUCTION_IDEMPOTENCY_TTL_HOURS).toBe(24);
     expect(() => load({ CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: '0' })).toThrow();
   });
+
+  it('bounds the clock skew the replay fence budgets for (PM decision D-065)', () => {
+    expect(load().CONSTRUCTION_CLOCK_SKEW_SECONDS).toBe(30);
+    expect(load({ CONSTRUCTION_CLOCK_SKEW_SECONDS: '0' }).CONSTRUCTION_CLOCK_SKEW_SECONDS).toBe(0);
+    expect(load({ CONSTRUCTION_CLOCK_SKEW_SECONDS: '300' }).CONSTRUCTION_CLOCK_SKEW_SECONDS).toBe(
+      300,
+    );
+    for (const bad of ['-1', '301', '1.5', 'x']) {
+      expect(() => load({ CONSTRUCTION_CLOCK_SKEW_SECONDS: bad })).toThrow();
+    }
+  });
+
+  it('refuses to boot when the retention cannot accept the shared replay window (D-067: TTL − B − skew ≥ K)', () => {
+    // K = PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS = 3 300. With a 1 h retention the room is
+    // 3 600 − (2·skew + 7) − skew = 3 593 − 3·skew: skew 97 → 3 302 (passes, 2 s over), 98 → 3 299 (1 s short).
+    expect(PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS).toBe(3300);
+    expect(
+      replayWindowRoomSeconds({
+        CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: 1,
+        CONSTRUCTION_CLOCK_SKEW_SECONDS: 97,
+      }),
+    ).toBe(3302);
+    expect(
+      replayWindowRoomSeconds({
+        CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: 1,
+        CONSTRUCTION_CLOCK_SKEW_SECONDS: 98,
+      }),
+    ).toBe(3299);
+    const at = (hours: string, skew: string) =>
+      load({ CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: hours, CONSTRUCTION_CLOCK_SKEW_SECONDS: skew });
+    expect(at('1', '97').CONSTRUCTION_CLOCK_SKEW_SECONDS).toBe(97);
+    expect(() => at('1', '98')).toThrow('CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    expect(() => at('1', '300')).toThrow('CONSTRUCTION_IDEMPOTENCY_TTL_HOURS');
+    // Longer retentions fit every legal skew.
+    expect(at('2', '300').CONSTRUCTION_CLOCK_SKEW_SECONDS).toBe(300);
+  });
+
+  it('the defaults accept the portal’s default window with room to spare', () => {
+    const room = replayWindowRoomSeconds(load());
+    expect(room).toBe(24 * 3600 - 67 - 30); // 86 303 s
+    expect(room - PROJECT_CREATE_MAX_REPLAY_WINDOW_SECONDS).toBe(83_003);
+    // Portal default: 1 h − 600 s = 3 000 s window + 30 s skew allowance = 3 030 ≤ K (slack 270 s);
+    // and the shortest legal service retention with the default skew: 3 600 − 67 − 30 = 3 503 ≥ K (slack 203 s).
+    expect(
+      replayWindowRoomSeconds({
+        CONSTRUCTION_IDEMPOTENCY_TTL_HOURS: 1,
+        CONSTRUCTION_CLOCK_SKEW_SECONDS: 30,
+      }),
+    ).toBe(3503);
+    // webWindow + webSkew + serviceSkew ≤ TTL − B  ⇔  (webWindow + webSkew) ≤ room(TTL) with room = TTL − B − serviceSkew.
+    expect(3000 + 30 + 30).toBeLessThanOrEqual(3600 - 67);
+  });
+
+  it('the largest budget leaves the shortest retention a usable window: B(max skew) · 2 ≤ 1 hour', () => {
+    // A deadline is claim + TTL − B; with the bounds above it can never be pushed before its claim.
+    expect(replayFenceBudgetMs(300) * 2).toBeLessThanOrEqual(1 * 60 * 60 * 1000);
+    expect(replayFenceBudgetMs(0)).toBe(REPLAY_FENCE_MARGIN_MS);
+    expect(replayFenceBudgetMs(30)).toBe(60_000 + REPLAY_FENCE_MARGIN_MS);
+  });
 });
 
 describe('PR 2 settings (Q-68, Q-70 to Q-72)', () => {
@@ -683,5 +750,36 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets (#268 r4)'
     expect(() =>
       load({ ...slowTransactions, DATABASE_STATEMENT_TIMEOUT_MS: '60001' }),
     ).not.toThrow();
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    constructionEnvSchema,
+    (source) => loadConstructionEnv(source),
+    BASE,
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining(['NODE_ENV', 'LOG_LEVEL', 'KAFKA_SASL_MECHANISM']),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
   });
 });

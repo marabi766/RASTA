@@ -1,7 +1,12 @@
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { apiErrorSchema } from '@rasta/contracts';
-import { RETRY_AFTER_MAX_SECONDS, RETRY_AFTER_MIN_SECONDS } from '@rasta/nest-common';
-import { toJsonSchema, type JsonSchema } from './zod-schema';
+import type { z } from 'zod';
+import {
+  RETRY_AFTER_MAX_SECONDS,
+  RETRY_AFTER_MIN_SECONDS,
+  toJsonSchema as sharedToJsonSchema,
+  type JsonSchema,
+} from '@rasta/nest-common';
 import { TRANSACTION_RESPONSES, TRANSACTION_VIEW_SCHEMAS } from './transaction-view';
 import {
   listEntriesQuerySchema,
@@ -58,6 +63,30 @@ import {
  * gets a 400, and the reason it must not be optional — a retried POST charging
  * twice — is the whole point of docs/06 § 6.8.
  */
+
+/**
+ * The shared converter, minus array bounds. This service's own copy of the
+ * converter never published `minItems`/`maxItems`, and replacing that copy with
+ * the shared one keeps every generated document byte-identical. Publishing the
+ * three bounds it hides (recognition-rule `levels` ≤ 50 and `badges` ≤ 100,
+ * participation-rule `contributions` 1–2) is a contract change of its own:
+ * delete this wrapper then.
+ */
+function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
+  return withoutArrayBounds(sharedToJsonSchema(schema)) as JsonSchema;
+}
+
+function withoutArrayBounds(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(withoutArrayBounds);
+  if (typeof node !== 'object' || node === null) return node;
+  const isArray = (node as { type?: unknown }).type === 'array';
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (isArray && (key === 'minItems' || key === 'maxItems')) continue;
+    out[key] = withoutArrayBounds(value);
+  }
+  return out;
+}
 
 /** Request bodies, keyed by `METHOD /path` as Nest emits them. */
 const REQUEST_BODIES: Record<string, JsonSchema> = {
@@ -135,6 +164,9 @@ const IDEMPOTENT_ROUTES = new Set([
   'POST /v1/rewards/participation-rules',
   // The same for levels and badges: one version in force for everyone.
   'POST /v1/rewards/recognition-rules',
+  // A retried monetised rule was a second rule paying for the same fact
+  // (economic audit F1). Required by the service, as the two above.
+  'POST /v1/rewards/rules',
 ]);
 
 /**
@@ -156,6 +188,7 @@ const LIST = [...COMMON, 400] as const;
 
 const ERRORS: Record<string, readonly number[]> = {
   'GET /v1/wallets/provider': COMMON,
+  'GET /v1/wallets/provider/disclosure': COMMON,
   'GET /v1/wallets/me': COMMON,
   'GET /v1/wallets/{id}': READ_ONE,
   'GET /v1/wallets/{id}/holds': READ_ONE,
@@ -216,6 +249,31 @@ const STATUS_TEXT: Record<number, string> = {
 };
 
 /**
+ * A status said more precisely for one route, where it has a refusal of its
+ * own that a client branches on.
+ */
+const ROUTE_STATUS_TEXT: Record<string, Partial<Record<number, string>>> = {
+  'POST /v1/transactions': {
+    422:
+      'A business rule refuses the obligation, and nothing was recorded: INSUFFICIENT_BALANCE ' +
+      '(holdFunds), a domain rule (BUSINESS_RULE_VIOLATION) — or BUSINESS_LINE_REQUIRED: ' +
+      'settlement fails closed without a commission rule (docs/24 Q-29; on outside development ' +
+      'and test, `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`), so a new obligation must name ' +
+      '`businessLine`. Only marketplace-service recording its own `ORDER` may leave it out ' +
+      '(docs/24 Q-130)',
+  },
+  'POST /v1/settlements': {
+    422:
+      'A business rule refuses the settlement, and nothing moved: INSUFFICIENT_BALANCE, ' +
+      'LEDGER_UNBALANCED, a domain rule (BUSINESS_RULE_VIOLATION) — or NO_ACTIVE_RULE: no ' +
+      'active commission rule covers the transaction’s business line, and settlement fails ' +
+      'closed (docs/24 Q-29; on outside development and test, ' +
+      '`ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`). The funds stay held; the same ' +
+      'settlement succeeds once a rule for the line — a 0% rule included — is in force',
+  },
+};
+
+/**
  * The same statuses on the internal routes (`/v1/internal/…`, ADR-061 § 4),
  * which answer one named service and no user at all.
  */
@@ -255,14 +313,43 @@ const RETRY_AFTER_HEADER = {
   schema: { type: 'integer', minimum: RETRY_AFTER_MIN_SECONDS, maximum: RETRY_AFTER_MAX_SECONDS },
 };
 
+/**
+ * Success bodies outside the transaction views (`transaction-view.ts`), by
+ * component name, and the routes that send them. Held to the route's answer
+ * by `api-wallet.int-spec.ts` with `schemaMismatches`, both ways.
+ */
+const OTHER_VIEW_SCHEMAS: Record<string, JsonSchema> = {
+  PaymentDisclosure: {
+    type: 'object',
+    required: ['simulated'],
+    properties: {
+      simulated: {
+        type: 'boolean',
+        description:
+          'True while no real money moves (the simulated provider, ADR-024): a screen that ' +
+          'shows or moves money draws «حالت نمایشی» (Q-14).',
+      },
+    },
+  },
+};
+
+const OTHER_RESPONSES: Record<string, string> = {
+  'GET /v1/wallets/provider/disclosure': 'PaymentDisclosure',
+};
+
+const RESPONSES: Record<string, string> = { ...TRANSACTION_RESPONSES, ...OTHER_RESPONSES };
+
 export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
   document.components ??= {};
   document.components.schemas ??= {};
   // The one error shape every Rasta service returns. Referenced rather than
   // inlined per response, so a client generates a single error type.
   document.components.schemas.ApiError = toJsonSchema(apiErrorSchema) as never;
-  // The transaction a response carries — referenced for the same reason.
-  for (const [name, schema] of Object.entries(TRANSACTION_VIEW_SCHEMAS)) {
+  // The transaction a response carries, and the disclosure — referenced for the same reason.
+  for (const [name, schema] of Object.entries({
+    ...TRANSACTION_VIEW_SCHEMAS,
+    ...OTHER_VIEW_SCHEMAS,
+  })) {
     document.components.schemas[name] = schema as never;
   }
   document.components.securitySchemes ??= {};
@@ -311,7 +398,7 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
 
       // The success body, under the status the handler answers with.
       const success = successStatus(key, operation);
-      const view = TRANSACTION_RESPONSES[key];
+      const view = RESPONSES[key];
       operation.responses ??= {};
       operation.responses[success] = {
         description: 'Success',
@@ -323,7 +410,10 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
       for (const status of ERRORS[key] ?? []) {
         operation.responses[String(status)] = {
           description:
-            (internal ? INTERNAL_STATUS_TEXT[status] : undefined) ?? STATUS_TEXT[status] ?? 'Error',
+            ROUTE_STATUS_TEXT[key]?.[status] ??
+            (internal ? INTERNAL_STATUS_TEXT[status] : undefined) ??
+            STATUS_TEXT[status] ??
+            'Error',
           ...(status === 409 && IDEMPOTENT_ROUTES.has(key)
             ? { headers: { 'Retry-After': RETRY_AFTER_HEADER } }
             : {}),

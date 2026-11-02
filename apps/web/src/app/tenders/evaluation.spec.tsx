@@ -31,6 +31,7 @@ import { OwnerCommands, type OfferedOwnerCommand } from './[id]/OwnerCommands';
 import type { OwnerFormState } from './[id]/owner-form-state';
 import { OwnerFlash } from './[id]/OwnerSections';
 import { OwnTenderDetailScreen } from './[id]/TenderDetailScreen';
+import { bindingOf } from '@/test/unresolved-binding';
 
 // Each test renders the owner's tender screen and runs jest-axe over it once (#341): room to finish.
 jest.setTimeout(20_000);
@@ -87,7 +88,7 @@ const group = (offered: OfferedOwnerCommand[]) => (
     tenderId={TENDER_ID}
     offered={offered}
     csrfToken="csrf-token-for-this-session"
-    owner="owner-tag"
+    account={bindingOf('owner-tag', 'session-tag')}
     pageHref={PAGE}
     showsRestored
   />
@@ -324,6 +325,27 @@ describe('the award', () => {
       within(screen.getByRole('form', { name: 'رد درخواست واگذاری' })).getByLabelText(/دلیل رد/),
     ).toBeRequired();
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it('names a standing verdict other than ELIGIBLE in Persian, not by its code', () => {
+    awardPage({
+      request: { kind: 'OK', data: AWARD_PENDING_REQUEST },
+      step: {
+        kind: 'OK',
+        data: {
+          ...AWARD_STEP,
+          request: {
+            ...AWARD_STEP.request!,
+            bid: { ...AWARD_STEP.request!.bid!, standingVerdict: 'NOT_ELIGIBLE' },
+          },
+        },
+      },
+      notes: ['AWARD_PENDING'],
+      offered: [offer('GRANT_AWARD'), offer('REJECT_AWARD')],
+    });
+    const named = region('واگذاری');
+    expect(named).toHaveTextContent('فاقد صلاحیت');
+    expect(named).not.toHaveTextContent('NOT_ELIGIBLE');
   });
 
   it('approved: only executing it, with the justification approved and nothing to type', async () => {

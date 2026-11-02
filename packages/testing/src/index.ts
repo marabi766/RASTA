@@ -49,3 +49,72 @@ export type { ParticipantStop, ShutdownFactoryProvider } from './outbox-shutdown
 
 export { SAGA_DISPUTE_RECOVERY } from './saga-dispute-recovery';
 export type { SagaDisputeRecoveryRow } from './saga-dispute-recovery';
+
+export {
+  expireClaim,
+  makeDue,
+  setEligibilityFixture,
+  setTenantEligibilityFixture,
+  insertTransferFixture,
+  eligibilityClockSql,
+  eligibilityClockWrite,
+  eligibilityClockTag,
+} from './eligibility-clock';
+
+export { mintTestInternalToken } from './internal-token';
+export type { TestInternalTokenKey } from './internal-token';
+
+export { withRedirectProbe, REDIRECT_CASES } from './redirect-probe';
+export type { RedirectProbe } from './redirect-probe';
+
+export {
+  GENERATED_VALUE_SHAPES,
+  absenceHazard,
+  correlationId,
+  errorEnvelope,
+  expectNotDisclosed,
+  generatedValuesIn,
+  instant,
+  oneOf,
+  thisRun,
+} from './disclosure';
+export { absenceRefusal, guardedAbsenceMatchers } from './absence-guard';
+export {
+  ISO_INSTANT_SHAPE,
+  SEMVER_SHAPE,
+  TRACEPARENT_SHAPE,
+  ULID_SHAPE,
+  arrayOf,
+  envelopeShape,
+  exactly,
+  expectStoredMessageWithout,
+  optional,
+  storedMessageProblems,
+  wholly,
+} from './stored-message';
+export type {
+  EnvelopePins,
+  Leaf,
+  ObjectShape,
+  Pin,
+  Shape,
+  StoredMessageRules,
+} from './stored-message';
+export type { AbsenceMatcherResult } from './absence-guard';
+export type {
+  DisclosureOptions,
+  GeneratedShape,
+  GeneratedValue,
+  MetadataExpectation,
+  MetadataMatcher,
+} from './disclosure';
+
+export {
+  globalFetchStub,
+  guardedFetch,
+  guardFetch,
+  guardRequestContext,
+  RedirectRefusedError,
+  REFUSED_REDIRECT_STATUSES,
+} from './guarded-http';
+export type { GuardableRequestContext, GuardedFetch } from './guarded-http';

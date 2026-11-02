@@ -6,6 +6,7 @@ import { tokenWriteRoles } from '@/server/realm-roles';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { DriverDetailScreen } from './DriverDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
 
 /**
  * The `/drivers/[id]` route (docs/16 § ۱۶٫۶).
@@ -44,8 +45,9 @@ export default async function DriverDetailPage({ params }: { params: Promise<{ i
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
