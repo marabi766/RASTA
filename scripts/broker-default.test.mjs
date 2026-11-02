@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { withBrokerDefault } from './broker-default.mjs';
+import {
+  BROKER_DEFAULT_ALREADY_ABSENT,
+  brokerDefaultDeleteOutcome,
+  withBrokerDefault,
+} from './broker-default.mjs';
 
 for (const [label, before, target] of [
   ['add', undefined, 3145728],
@@ -161,3 +165,95 @@ test('failed compensation cannot be confirmed by stale matching reads', async ()
   assert.equal(writes, 21);
   assert.equal(reads, 1);
 });
+
+test('Kafka deletion recognises only the exact known absence refusal; all other errors refuse', () => {
+  const missing = { status: 1, stdout: '', stderr: 'Invalid config(s): message.max.bytes\n' };
+  assert.equal(brokerDefaultDeleteOutcome(missing), BROKER_DEFAULT_ALREADY_ABSENT);
+  assert.equal(brokerDefaultDeleteOutcome({ status: 0, stdout: '', stderr: '' }), undefined);
+  for (const altered of [
+    { status: 2 },
+    { status: null },
+    { stdout: 'unexpected' },
+    { stderr: 'authentication failed' },
+    { stderr: 'connection reset' },
+    { stderr: 'Invalid config(s): other.config' },
+    { stderr: 'Invalid config(s): message.max.bytes\nforeign error' },
+  ])
+    assert.throws(
+      () => brokerDefaultDeleteOutcome({ ...missing, ...altered }),
+      /deletion unconfirmed/,
+    );
+});
+
+test('already absent is confirmed only after the full bounded CLI refusal window and readback', async () => {
+  let writes = 0;
+  let reads = 0;
+  let pauses = 0;
+  await withBrokerDefault(undefined, async () => {}, {
+    read: async () => {
+      reads += 1;
+      return undefined;
+    },
+    set: async () => {
+      writes += 1;
+      return BROKER_DEFAULT_ALREADY_ABSENT;
+    },
+    pause: async () => {
+      pauses += 1;
+    },
+  });
+  assert.equal(writes, 20);
+  assert.equal(reads, 2);
+  assert.equal(pauses, 19);
+});
+
+test('stale absent CLI refusals never skip deletion when the committed override becomes visible', async () => {
+  let current;
+  let writes = 0;
+  let pauses = 0;
+  await assert.rejects(
+    withBrokerDefault(3145728, async () => {}, {
+      read: async () => current,
+      set: async (value) => {
+        writes += 1;
+        if (writes === 1) {
+          current = value;
+          throw new Error('setup response lost');
+        }
+        if (writes < 5) return BROKER_DEFAULT_ALREADY_ABSENT;
+        current = value;
+      },
+      pause: async () => {
+        pauses += 1;
+      },
+    }),
+    /setup response lost/,
+  );
+  assert.equal(writes, 5);
+  assert.equal(pauses, 3);
+  assert.equal(current, undefined);
+});
+
+for (const issue of ['unknown-write', 'unreadable', 'override-present', 'wrong-provenance']) {
+  test(`known absence cannot mask ${issue}`, async () => {
+    let writes = 0;
+    let reads = 0;
+    const before = issue === 'wrong-provenance' ? 1100000 : undefined;
+    await assert.rejects(
+      withBrokerDefault(before, async () => {}, {
+        read: async () => {
+          if (++reads === 1) return before;
+          if (issue === 'unreadable') throw new Error('unreadable');
+          return issue === 'override-present' ? 3145728 : before;
+        },
+        set: async () => {
+          if (++writes === 10 && issue === 'unknown-write') throw new Error('unconfirmed');
+          return BROKER_DEFAULT_ALREADY_ABSENT;
+        },
+        pause: async () => {},
+      }),
+      /restoration unconfirmed/,
+    );
+    assert.equal(writes, 20);
+  });
+}

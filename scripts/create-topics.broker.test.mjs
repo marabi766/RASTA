@@ -31,7 +31,10 @@
  * between the real call and its answer, when told to.
  */
 import './disposable-broker.mjs';
-import { withBrokerDefault as restoreBrokerDefault } from './broker-default.mjs';
+import {
+  brokerDefaultDeleteOutcome,
+  withBrokerDefault as restoreBrokerDefault,
+} from './broker-default.mjs';
 import { describe, test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -244,7 +247,7 @@ async function brokerDefault() {
 }
 
 async function setBrokerDefault(bytes) {
-  await kafka('kafka-configs.sh', [
+  const args = [
     '--alter',
     '--entity-type',
     'brokers',
@@ -252,7 +255,11 @@ async function setBrokerDefault(bytes) {
     ...(bytes === undefined
       ? ['--delete-config', 'message.max.bytes']
       : ['--add-config', `message.max.bytes=${bytes}`]),
-  ]);
+  ];
+  if (bytes !== undefined) return kafka('kafka-configs.sh', args);
+  return brokerDefaultDeleteOutcome(
+    await docker(['exec', CONTAINER, `${REAL}/kafka-configs.sh`, ...ADMIN, ...args]),
+  );
 }
 
 /**
