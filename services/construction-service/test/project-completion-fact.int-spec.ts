@@ -202,13 +202,14 @@ describe('the internal project completion source read (D-081)', () => {
       '/v1/internal/projects/{id}/completion'
     ]!.get!;
     expect(operation.security).toEqual([{ internalToken: [] }]);
-    expect(Object.keys(operation.responses).sort()).toEqual([
-      '200',
-      '401',
-      '403',
-      '404',
-      '500',
-    ]);
+    expect(operation.responses['200']).toMatchObject({
+      content: {
+        'application/json': {
+          schema: { properties: { version: { type: 'integer', minimum: 1 } } },
+        },
+      },
+    });
+    expect(Object.keys(operation.responses).sort()).toEqual(['200', '401', '403', '404', '500']);
     expect(api.app.get(ProjectCompletionService)).toBeInstanceOf(ProjectCompletionService);
   });
 });

@@ -2477,7 +2477,7 @@
                     },
                     "version": {
                       "type": "integer",
-                      "minimum": 0
+                      "minimum": 1
                     },
                     "completedAt": {
                       "type": "string",

@@ -13,7 +13,7 @@ export const projectCompletionFactSchema = z
     projectId: z.string().min(1).max(128),
     organizationId: z.string().min(1).max(128),
     status: z.enum(PROJECT_STATES),
-    version: z.number().int().positive(),
+    version: z.number().int().min(1),
     completedAt: z
       .string()
       .check(isoDateTime({ offset: false }))
