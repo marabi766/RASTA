@@ -589,4 +589,27 @@ test('the executable identity shard runs stress after workspace failure and pres
     '--',
     '--testNamePattern=concurren',
   ]);
+  // Refuse every ownership shape that could widen Turbo's selectors or omit stress.
+  for (const members of [
+    [],
+    null,
+    'all',
+    ['@rasta/*'],
+    ['@rasta/identity-service...'],
+    ['!@rasta/identity-service'],
+    ['@rasta/identity-service', '@rasta/identity-service'],
+  ]) {
+    rmSync(trace, { force: true });
+    writeFileSync(
+      resolve(root, 'scripts/integration-partitions.mjs'),
+      `export const INTEGRATION_PARTITIONS = ${JSON.stringify({ 'Integration tests': members })};`,
+    );
+    const refused = spawnSync(
+      process.execPath,
+      [resolve(root, 'scripts/run-test-phases.mjs'), 'test:integration', '--shard=identity'],
+      { encoding: 'utf8', env: { ...process.env, SHARD_TRACE: trace } },
+    );
+    assert.equal(refused.status, 2, refused.stderr);
+    assert.throws(() => readFileSync(trace), /ENOENT/);
+  }
 });

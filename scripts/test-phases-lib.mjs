@@ -94,10 +94,16 @@ export function planTestRun(argv) {
   const members = Object.hasOwn(shardNames, shard ?? '')
     ? INTEGRATION_PARTITIONS[shardNames[shard]]
     : undefined;
-  if (before.length > 0 && (task !== 'test:integration' || !members)) {
+  // Empty/selector-like ownership must never become an unfiltered Turbo run.
+  const validMembers =
+    Array.isArray(members) &&
+    members.length > 0 &&
+    members.every((name) => typeof name === 'string' && /^@rasta\/[a-z0-9-]+$/.test(name)) &&
+    new Set(members).size === members.length;
+  if (before.length > 0 && (task !== 'test:integration' || !validMembers)) {
     throw new Error(
-      'test phases: options before `--` are not accepted (they would decide whether the exclusive ' +
-        'phase runs); pass test-runner arguments after `--`, or run `pnpm exec turbo run ' +
+      'test phases: only a known nonempty integration --shard=<name> is accepted before `--`; ' +
+        'pass test-runner arguments after `--`, or run `pnpm exec turbo run ' +
         `${task} …` +
         '` for a filtered workspace-only run',
     );
