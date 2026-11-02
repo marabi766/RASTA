@@ -678,6 +678,7 @@ function sdkProbe(source, extra = {}) {
     cwd: ROOT,
     encoding: 'utf8',
     timeout: 30_000,
+    killSignal: 'SIGKILL',
     env: cleanEnv({ DEBUG: '', GRPC_TRACE: '', GRPC_VERBOSITY: '', ...extra }),
   });
   const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
@@ -835,3 +836,238 @@ for (const path of ['client', 'worker']) {
     );
   });
 }
+
+const S3_OPERATIONS = `[
+  s => s.createUploadUrl({objectKey:'x', contentType:'application/pdf', contentLength:1, expiresInSeconds:60}),
+  s => s.createDownloadUrl({objectKey:'x', contentType:'application/pdf', downloadFilename:'x', expiresInSeconds:60}),
+  s => s.copyToSealedKey({sourceKey:'x', destinationKey:'y', ifMatchETag:'etag'}),
+  s => s.head('x'), s => s.readPrefix('x', 10),
+  s => s.openReadStream({objectKey:'x', maxBytes:10}), s => s.remove('x'), s => s.isHealthy()
+]`;
+
+for (const suffix of ['--x-s3', '--xa-s3']) {
+  test(`S3 ${suffix}: all eight operations refuse unsupported names with real SDK`, () => {
+    sdkProbe(`
+      const assert = require('node:assert/strict');
+      const { S3ObjectStorage, ObjectStorageError } = require('./services/document-service/dist/storage/s3.storage');
+      const operations = ${S3_OPERATIONS};
+      (async () => {
+        for (const operation of operations) {
+          await assert.rejects(async () => operation(new S3ObjectStorage({
+            endpoint:'https://s3.us-east-1.amazonaws.com', region:'us-east-1',
+            bucket:'${USER}--use1-az4${suffix}', forcePathStyle:false,
+            accessKeyId:'${USER}', secretAccessKey:'${PASSWORD}'
+          })), error => error instanceof ObjectStorageError && error.code === 'UNSUPPORTED_DIRECTORY_BUCKET');
+        }
+      })().catch(error => { console.error(error); process.exitCode = 3; });
+    `);
+  });
+
+  test(`S3 ${suffix}: session auth disabled across all eight real SDK operations`, () => {
+    sdkProbe(`
+      const assert = require('node:assert/strict');
+      const { createRequire } = require('node:module');
+      const req = createRequire(require('node:path').resolve('services/document-service/package.json'));
+      const { S3ObjectStorage } = require('./services/document-service/dist/storage/s3.storage');
+      const operations = ${S3_OPERATIONS};
+      (async () => {
+        const { S3Client, HeadObjectCommand } = req('@aws-sdk/client-s3');
+        let controlIdentities = 0;
+        const control = new S3Client({region:'us-east-1', endpoint:'https://s3.us-east-1.amazonaws.com',
+          credentials:{accessKeyId:'${USER}',secretAccessKey:'${PASSWORD}'},
+          s3ExpressIdentityProvider:{getS3ExpressIdentity:async () => {
+            controlIdentities++; throw new Error('${USER} ${PASSWORD}');
+          }}});
+        try {
+          await assert.rejects(control.send(new HeadObjectCommand({Bucket:'example--use1-az4${suffix}',Key:'x'})));
+          assert.equal(controlIdentities, 1, 'control must request real Express credentials');
+        } finally { control.destroy(); }
+        let requests = 0, identities = 0;
+        for (const operation of operations) {
+          const options = { endpoint:'https://s3.us-east-1.amazonaws.com', region:'us-east-1',
+            bucket:'ordinary-bucket', forcePathStyle:false, accessKeyId:'${USER}', secretAccessKey:'${PASSWORD}' };
+          const storage = new S3ObjectStorage(options);
+          assert.equal(storage.client.config.disableS3ExpressSessionAuth, true);
+          // Bypass ONLY the name refusal to exercise the independent SDK class boundary.
+          options.bucket = 'example--use1-az4${suffix}';
+          storage.client.config.s3ExpressIdentityProvider = { getS3ExpressIdentity: async () => {
+            identities++;
+            throw new Error('${USER} ${PASSWORD}');
+          }};
+          storage.client.config.maxAttempts = async () => 1;
+          storage.client.config.requestHandler = { handle: async request => {
+            requests++;
+            assert.equal(request.query?.session, undefined);
+            throw new Error('${USER} ${PASSWORD}');
+          }};
+          try { await operation(storage); } catch (error) { console.error(error); }
+          storage.client.destroy();
+        }
+        assert.equal(identities, 0);
+        assert.ok(requests >= 5, 'real SDK transport must be reached');
+      })().catch(error => { console.error(error); process.exitCode = 3; });
+    `);
+  });
+}
+
+// Exercise actual grpc-js diagnostic sites. Only I/O is synthetic; neither
+// Temporal Connection.connect nor NativeConnection.connect is replaced.
+for (const owner of ['@temporalio/client', '@temporalio/worker/lib/connection']) {
+  for (const category of [
+    'trace-alias',
+    'excess-pings',
+    'proxy-status',
+    'proxy-error',
+    'proxy-scheme',
+    'metadata',
+  ]) {
+    test(`grpc boundary ${owner}: ${category} with real SDK`, () => {
+      const output = sdkProbe(
+        `
+        const assert = require('node:assert/strict');
+        const { createRequire } = require('node:module');
+        const { EventEmitter } = require('node:events');
+        const req = createRequire(require('node:path').resolve('services/marketplace-service/package.json'));
+        const sdkReq = createRequire(req.resolve('${owner}'));
+        const clientReq = createRequire(req.resolve('@temporalio/client'));
+        const nativeReq = createRequire(req.resolve('@temporalio/worker/lib/connection'));
+        assert.equal(clientReq.resolve('@grpc/grpc-js'), nativeReq.resolve('@grpc/grpc-js'));
+        const grpc = sdkReq('@grpc/grpc-js');
+        const grpcReq = createRequire(sdkReq.resolve('@grpc/grpc-js'));
+        const logging = grpcReq('./logging');
+        let diagnostics = 0;
+        const originalLog = logging.log;
+        logging.log = (...args) => { diagnostics++; return originalLog(...args); };
+        const { installTemporalRuntimeLogger } = require('./services/marketplace-service/dist/temporal/runtime-logger');
+        const env = {NODE_ENV:'test', LOG_LEVEL:'trace', SERVICE_VERSION:'1'};
+        (async () => {
+          installTemporalRuntimeLogger(env);
+          // Replacing the logger models a stale/default logger after Runtime installation.
+          grpc.setLogger({error: (...args) => console.error(...args)});
+          installTemporalRuntimeLogger(env);
+          if ('${category}' === 'trace-alias') {
+            assert.ok(logging.isTracerEnabled('channel'));
+            const { Connection } = req('@temporalio/client');
+            const connection = Connection.lazy({address:'${USER}.${PASSWORD}:7233'});
+            await connection.close();
+            // Prove verbosity was reset (trace arguments include the configured target).
+            assert.ok(diagnostics > 0);
+          } else if ('${category}' === 'metadata') {
+            const result = grpc.Metadata.fromHttp2Headers({'${USER}':'${PASSWORD}\\n'});
+            assert.equal(result.get('${USER}').length, 0);
+          } else if ('${category}' === 'proxy-scheme') {
+            process.env.grpc_proxy = '${USER}://host';
+            grpcReq('./http_proxy').mapProxyName({scheme:'dns',path:'${PASSWORD}:7233'}, {});
+          } else if ('${category}'.startsWith('proxy-')) {
+            const http = require('node:http');
+            const request = new EventEmitter();
+            request.end = () => {
+              if ('${category}' === 'proxy-error') request.emit('error', new Error('${USER} ${PASSWORD}'));
+              else request.emit('connect', {statusCode:503}, new EventEmitter(), Buffer.alloc(0));
+            };
+            const original = http.request;
+            http.request = () => request;
+            try {
+              await assert.rejects(grpcReq('./http_proxy').getProxiedConnection(
+                {host:'${USER}',port:80}, {'grpc.http_connect_target':'${PASSWORD}:7233'}));
+            } finally { http.request = original; }
+          } else {
+            const { Subchannel } = grpcReq('./subchannel');
+            const { ConnectivityState } = grpcReq('./connectivity-state');
+            const { Http2SubchannelConnector } = grpcReq('./transport');
+            const http2 = require('node:http2');
+            const session = new EventEmitter();
+            session.socket = new EventEmitter();
+            session.close = () => {};
+            session.destroy = () => {};
+            session.unref = () => {};
+            const connector = new Http2SubchannelConnector({scheme:'dns',path:'${USER}:7233'});
+            const originalConnect = http2.connect;
+            http2.connect = () => session;
+            let transport;
+            try {
+              const pending = connector.createSession({secure:false,socket:session.socket},
+                {host:'${PASSWORD}',port:7233}, {'grpc.enable_channelz':0});
+              session.emit('remoteSettings', {});
+              transport = await pending;
+            } finally { http2.connect = originalConnect; }
+            const subchannel = new Subchannel({scheme:'dns',path:'${USER}:7233'},
+              {host:'${PASSWORD}',port:7233}, {'grpc.keepalive_time_ms':1000,'grpc.enable_channelz':0},
+              grpc.credentials.createInsecure(), {connect: async () => transport});
+            subchannel.connectivityState = ConnectivityState.CONNECTING;
+            subchannel.startConnectingInternal();
+            await Promise.resolve();
+            assert.equal(subchannel.connectivityState, ConnectivityState.READY);
+            session.emit('goaway', require('node:http2').constants.NGHTTP2_ENHANCE_YOUR_CALM,
+              0, Buffer.from('too_many_pings'));
+            assert.equal(subchannel.keepaliveTime, 2000);
+          }
+          assert.ok(diagnostics > 0, 'expected SDK diagnostic site was not reached');
+        })().catch(error => { console.error(error); process.exitCode = 3; })
+          .finally(async () => { await req('@temporalio/worker').Runtime.instance().shutdown(); });
+      `,
+        {
+          GRPC_NODE_TRACE: category === 'trace-alias' ? 'all' : '',
+          GRPC_NODE_VERBOSITY: category === 'trace-alias' ? 'DEBUG' : '',
+        },
+      );
+      if (category === 'trace-alias') assert.doesNotMatch(output, /Temporal gRPC diagnostic/);
+      else assert.match(output, /Temporal gRPC diagnostic/);
+    });
+  }
+}
+
+for (const path of ['client', 'worker']) {
+  test(`Temporal ${path} installs grpc boundary through real connection failure`, () => {
+    const output = sdkProbe(
+      `
+      const assert = require('node:assert/strict');
+      const { createRequire } = require('node:module');
+      const req = createRequire(require('node:path').resolve('services/marketplace-service/package.json'));
+      const grpcReq = createRequire(req.resolve('@temporalio/client'));
+      const grpc = grpcReq('@grpc/grpc-js');
+      let installed = 0;
+      const setLogger = grpc.setLogger;
+      grpc.setLogger = logger => { installed++; setLogger(logger); };
+      const env = {NODE_ENV:'test',LOG_LEVEL:'info',SERVICE_VERSION:'1',
+        MARKETPLACE_TEMPORAL_ENABLED:true, TEMPORAL_ADDRESS:'http://[${USER}.${PASSWORD}]:bad',
+        TEMPORAL_NAMESPACE:'rasta',MARKETPLACE_TEMPORAL_TASK_QUEUE:'test'};
+      (async () => {
+        if ('${path}' === 'client') {
+          const { OrderSagaClient } = require('./services/marketplace-service/dist/temporal/saga.client');
+          const client = new OrderSagaClient(env);
+          await client.start('test-order');
+          await client.onModuleDestroy();
+        } else {
+          const { OrderSagaWorker } = require('./services/marketplace-service/dist/temporal/worker');
+          const worker = new OrderSagaWorker(env, {}, {});
+          await worker.onApplicationBootstrap();
+          await worker.onModuleDestroy();
+        }
+        assert.equal(installed, 2);
+        grpc.Metadata.fromHttp2Headers({'${USER}':'${PASSWORD}\\n'});
+      })().catch(error => { console.error(error); process.exitCode = 3; })
+          .finally(async () => { await req('@temporalio/worker').Runtime.instance().shutdown(); });
+    `,
+      { GRPC_NODE_TRACE: 'all', GRPC_NODE_VERBOSITY: 'DEBUG' },
+    );
+    assert.match(output, /Temporal gRPC diagnostic/);
+  });
+}
+
+test('Temporal refuses a missing grpc boundary with a fixed diagnostic', () => {
+  sdkProbe(`
+    const assert = require('node:assert/strict');
+    const Module = require('node:module');
+    const { installTemporalRuntimeLogger } = require('./services/marketplace-service/dist/temporal/runtime-logger');
+    const original = Module._resolveFilename;
+    Module._resolveFilename = function(id, ...args) {
+      if (id === '@grpc/grpc-js') throw new Error('${USER} ${PASSWORD}');
+      return original.call(this, id, ...args);
+    };
+    try {
+      assert.throws(() => installTemporalRuntimeLogger({NODE_ENV:'test',LOG_LEVEL:'info',SERVICE_VERSION:'1'}),
+        error => error.message === 'TEMPORAL_ADDRESS: gRPC diagnostic boundary unavailable' && error.cause === undefined);
+    } finally { Module._resolveFilename = original; }
+  `);
+});

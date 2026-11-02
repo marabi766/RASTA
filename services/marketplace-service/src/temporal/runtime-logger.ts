@@ -1,4 +1,5 @@
 import { Runtime, type Logger as TemporalLogger, type RuntimeOptions } from '@temporalio/worker';
+import { createRequire } from 'node:module';
 import { assertTemporalDiagnosticsSafe } from '@rasta/config';
 import { createLogger, type Logger } from '@rasta/logging';
 import { foreignFailure } from './foreign-failure';
@@ -92,6 +93,37 @@ export function temporalRuntimeOptions(base: Logger): RuntimeOptions {
 
 let installed = false;
 
+interface GrpcDiagnostics {
+  setLogger(logger: { error(): void; info(): void; debug(): void }): void;
+  setLogVerbosity(level: number): void;
+  logVerbosity: { ERROR: number };
+}
+
+/** Resolve from each SDK owner, rather than assuming a hoisted grpc-js instance.
+ * NativeConnection uses Core (forwarded above); worker-side JS also uses grpc-js.
+ * Reinstall before every connection, even when Runtime was already installed.
+ */
+function installGrpcDiagnostics(base: Logger): void {
+  const report = (): void => {
+    try {
+      base.error({ component: 'temporal-grpc' }, 'Temporal gRPC diagnostic (TEMPORAL_ADDRESS)');
+    } catch {
+      // Diagnostic reporting cannot become an SDK failure or a raw fallback.
+    }
+  };
+  try {
+    for (const owner of ['@temporalio/client', '@temporalio/worker/lib/connection']) {
+      const sdkRequire = createRequire(require.resolve(owner));
+      const grpc = sdkRequire('@grpc/grpc-js') as GrpcDiagnostics;
+      grpc.setLogger({ error: report, info: report, debug: report });
+      grpc.setLogVerbosity(grpc.logVerbosity.ERROR);
+    }
+  } catch {
+    // A changed SDK layout must refuse connection without exposing resolution details.
+    throw new Error('TEMPORAL_ADDRESS: gRPC diagnostic boundary unavailable');
+  }
+}
+
 /**
  * Installs the Temporal runtime with {@link temporalRuntimeOptions}. Call it
  * before the first `NativeConnection`, `Worker` or `Connection` of the process:
@@ -102,18 +134,16 @@ let installed = false;
 export function installTemporalRuntimeLogger(
   env: Pick<MarketplaceEnv, 'NODE_ENV' | 'LOG_LEVEL' | 'SERVICE_VERSION'>,
 ): void {
+  const base = createLogger({
+    serviceName: SERVICE_NAME,
+    serviceVersion: env.SERVICE_VERSION,
+    environment: env.NODE_ENV,
+    level: env.LOG_LEVEL,
+    pretty: env.NODE_ENV === 'development',
+  });
+  installGrpcDiagnostics(base);
   assertTemporalDiagnosticsSafe();
   if (installed) return;
-  Runtime.install(
-    temporalRuntimeOptions(
-      createLogger({
-        serviceName: SERVICE_NAME,
-        serviceVersion: env.SERVICE_VERSION,
-        environment: env.NODE_ENV,
-        level: env.LOG_LEVEL,
-        pretty: env.NODE_ENV === 'development',
-      }),
-    ),
-  );
+  Runtime.install(temporalRuntimeOptions(base));
   installed = true;
 }

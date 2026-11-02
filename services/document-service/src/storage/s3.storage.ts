@@ -52,12 +52,15 @@ export class S3ObjectStorage implements ObjectStorage {
       throw new ObjectStorageError('INVALID_ENDPOINT');
     }
     // S3 Express starts SDK-owned session refresh promises outside public operations.
-    // Until those failures can be contained, directory buckets are unsupported.
-    if (/--x-s3$/.test(options.bucket)) {
+    // Both directory buckets and Express access-point aliases are unsupported.
+    if (/--(?:x|xa)-s3$/.test(options.bucket)) {
       throw new ObjectStorageError('UNSUPPORTED_DIRECTORY_BUCKET');
     }
     try {
       this.client = new S3Client({
+        // Class boundary: never create SDK-owned background session credentials,
+        // even if the SDK recognizes another Express endpoint form later.
+        disableS3ExpressSessionAuth: true,
         endpoint: options.endpoint,
         region: options.region,
         forcePathStyle: options.forcePathStyle,
