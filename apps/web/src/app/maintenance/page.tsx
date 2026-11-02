@@ -3,12 +3,15 @@ import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchMaintenanceRequests, type MaintenanceRequestListQuery } from '@/server/maintenance';
 import { canReportMaintenance } from '@/server/maintenance-commands';
-import { tokenWriteRoles } from '@/server/realm-roles';
 import { mintSubmissionId } from '@/server/submission';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { MaintenanceScreen } from './MaintenanceScreen';
 import { ReportRequestForm } from './ReportRequestForm';
-import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import {
+  actingOrganizationLabel,
+  actingScope,
+  sessionWriteRoles,
+} from '@/server/session-organization';
 import { pageContext, pageParams } from '@/server/page-context';
 
 /**
@@ -34,10 +37,10 @@ export default async function MaintenancePage({
 }) {
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/maintenance');
-  // What the forms are offered on: the access token's own roles (`tokenWriteRoles`),
+  // What the forms are offered on: the token's roles in the pinned organization (`sessionWriteRoles`),
   // the set the service decides on — not `/v1/users/me`, which runs ahead of the
   // token until it is refreshed.
-  const roles = tokenWriteRoles(session.accessToken);
+  const roles = sessionWriteRoles(session);
 
   const params = await pageParams(session, searchParams);
   const query: MaintenanceRequestListQuery = {

@@ -41,6 +41,11 @@ import {
   type SigningAuthorityView,
 } from './contract-commands';
 import type { WebSession } from './session';
+import { pinnedTokens } from '@/test/session-token';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * The contract commands' server side: who is drawn which form — each helper a
@@ -64,9 +69,9 @@ const ENV = {
 };
 
 const employer = (roles: readonly string[] = ['ORGANIZATION_ADMIN'], options = {}) =>
-  contractCallerOf(tokenFor(EMPLOYER, roles, options));
+  contractCallerOf(pinnedTokens(tokenFor(EMPLOYER, roles, options)));
 const contractor = (roles: readonly string[] = ['CONTRACTOR'], options = {}) =>
-  contractCallerOf(tokenFor(CONTRACTOR, roles, options));
+  contractCallerOf(pinnedTokens(tokenFor(CONTRACTOR, roles, options)));
 const IN_FORCE: SigningAuthorityView = { policy: SIGNING_POLICY };
 const NONE: SigningAuthorityView = { policy: null };
 
@@ -122,9 +127,13 @@ describe('who may sign the contract — ContractService.sign', () => {
       signableSide(employer(['ORGANIZATION_ADMIN'], { uid: false }), DRAFT, IN_FORCE),
     ).toBeNull();
     expect(
-      signableSide(contractCallerOf(tokenFor(STRANGER, ['ORGANIZATION_ADMIN'])), DRAFT, IN_FORCE),
+      signableSide(
+        contractCallerOf(pinnedTokens(tokenFor(STRANGER, ['ORGANIZATION_ADMIN']))),
+        DRAFT,
+        IN_FORCE,
+      ),
     ).toBeNull();
-    expect(signableSide(contractCallerOf('not-a-token'), DRAFT, IN_FORCE)).toBeNull();
+    expect(signableSide(contractCallerOf(pinnedTokens('not-a-token')), DRAFT, IN_FORCE)).toBeNull();
   });
 
   it('signingRoleUnder: the first step for the governed organization whose role is held', () => {
@@ -358,7 +367,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'employer',
   organizationId: EMPLOYER,
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',

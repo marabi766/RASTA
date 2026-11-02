@@ -1,6 +1,6 @@
 import { Controller, Get, HttpStatus, Res, VERSION_NEUTRAL } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
-import { Public } from '@rasta/nest-common';
+import { Public, assertConsumerHealth } from '@rasta/nest-common';
 import type { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { DomainProjectorConsumer } from '../consumers/domain-projector.consumer';
@@ -74,6 +74,7 @@ export class HealthController {
   @Get('live')
   @Public('Liveness probe; exposed only on the internal network')
   live(): { status: string; service: string; uptimeSeconds: number } {
+    assertConsumerHealth(SERVICE_NAME);
     return {
       status: 'ok',
       service: SERVICE_NAME,
@@ -90,6 +91,7 @@ export class HealthController {
     ingests: true;
     queryApi: true;
   }> {
+    assertConsumerHealth(SERVICE_NAME);
     const database = await this.prisma.isHealthy();
     const projector = this.projector.isRunning();
     const trail = this.trail.isRunning();

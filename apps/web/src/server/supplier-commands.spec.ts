@@ -30,6 +30,7 @@ import {
   type SupplierActor,
 } from './supplier-commands';
 import type { WebSession } from './session';
+import { pinnedTokens } from '@/test/session-token';
 
 /**
  * The supplier commands against a fake gateway: the path, the method and the
@@ -74,7 +75,7 @@ const session = (accessToken = tokenFor('ORG-A', ['ORGANIZATION_ADMIN'])): WebSe
 });
 
 const actorOf = (organizationId: string | null, roles: string[], memberships?: string[]) =>
-  supplierActor(tokenFor(organizationId, roles, memberships)) as SupplierActor;
+  supplierActor(pinnedTokens(tokenFor(organizationId, roles, memberships))) as SupplierActor;
 
 describe('who is offered which form', () => {
   const SUPPLIER_ORG = 'ORG-SUP';
@@ -144,8 +145,8 @@ describe('who is offered which form', () => {
   });
 
   it('offers nothing for a token that cannot be read', () => {
-    expect(supplierActor('not-a-jwt')).toBeNull();
-    expect(supplierActor(tokenOf({ org_id: 'ORG-A', org_ids: [] }))).toBeNull();
+    expect(supplierActor(pinnedTokens('not-a-jwt'))).toBeNull();
+    expect(supplierActor(pinnedTokens(tokenOf({ org_id: 'ORG-A', org_ids: [] })))).toBeNull();
   });
 });
 

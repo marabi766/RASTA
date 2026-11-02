@@ -1,8 +1,10 @@
 /**
  * @jest-environment node
  */
-import { globalRealmRoles, tokenAuthority, tokenRoles } from './realm-roles';
+import { globalRealmRoles, tokenAuthority } from './realm-roles';
 import { tenderDoorsFor, tenderSidesFor } from './portal-nav';
+import { pinnedTokens } from '@/test/session-token';
+import { sessionRoles } from './session-organization';
 
 const token = (claims: unknown): string =>
   `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
@@ -50,17 +52,19 @@ describe('tokenRoles — what every screen draws from', () => {
       org_roles: [`${ORG}:CONTRACTOR`],
       realm_access: { roles: ['SYSTEM_ADMIN'] },
     });
-    expect(tokenRoles(jwt)).toEqual(['CONTRACTOR', 'SYSTEM_ADMIN']);
+    expect(sessionRoles(pinnedTokens(jwt))).toEqual(['CONTRACTOR', 'SYSTEM_ADMIN']);
   });
 
   it('gives a realm SYSTEM_ADMIN with a CONTRACTOR membership the owner’s door only', () => {
-    const roles = tokenRoles(
-      token({
-        org_id: ORG,
-        org_ids: [ORG],
-        org_roles: [`${ORG}:CONTRACTOR`],
-        realm_access: { roles: ['SYSTEM_ADMIN'] },
-      }),
+    const roles = sessionRoles(
+      pinnedTokens(
+        token({
+          org_id: ORG,
+          org_ids: [ORG],
+          org_roles: [`${ORG}:CONTRACTOR`],
+          realm_access: { roles: ['SYSTEM_ADMIN'] },
+        }),
+      ),
     );
     expect(roles).not.toBeNull();
     expect(tenderSidesFor(roles!, DEFAULTS)).toEqual({ owner: true, bidder: false });
@@ -68,11 +72,15 @@ describe('tokenRoles — what every screen draws from', () => {
   });
 
   it('is null for a token that cannot be read or that the guard would refuse', () => {
-    expect(tokenRoles('opaque')).toBeNull();
+    expect(sessionRoles(pinnedTokens('opaque'))).toBeNull();
     expect(
-      tokenRoles(token({ org_id: ORG, org_ids: [], org_roles: [`${ORG}:CONTRACTOR`] })),
+      sessionRoles(
+        pinnedTokens(token({ org_id: ORG, org_ids: [], org_roles: [`${ORG}:CONTRACTOR`] })),
+      ),
     ).toBeNull();
-    expect(tokenRoles(token({ org_id: ORG, org_ids: [ORG], org_roles: [] }))).toBeNull();
+    expect(
+      sessionRoles(pinnedTokens(token({ org_id: ORG, org_ids: [ORG], org_roles: [] }))),
+    ).toBeNull();
   });
 });
 
@@ -87,7 +95,7 @@ describe('tokenAuthority — the roles the service will act on, from the token',
       org_roles: [`${ORG}:ORGANIZATION_ADMIN`, `${OTHER}:UNION_ADMIN`, `${ORG}:ORGANIZATION_ADMIN`],
       realm_access: { roles: ['SYSTEM_ADMIN', 'offline_access'] },
     });
-    expect(tokenAuthority(jwt)).toEqual({
+    expect(tokenAuthority(jwt, pinnedTokens(jwt).organizationId)).toEqual({
       organizationId: ORG,
       roles: ['ORGANIZATION_ADMIN', 'SYSTEM_ADMIN'],
     });
@@ -105,7 +113,10 @@ describe('tokenAuthority — the roles the service will act on, from the token',
         42,
       ],
     });
-    expect(tokenAuthority(jwt)).toEqual({ organizationId: ORG, roles: ['FLEET_MANAGER'] });
+    expect(tokenAuthority(jwt, pinnedTokens(jwt).organizationId)).toEqual({
+      organizationId: ORG,
+      roles: ['FLEET_MANAGER'],
+    });
   });
 
   it.each([
@@ -119,11 +130,16 @@ describe('tokenAuthority — the roles the service will act on, from the token',
     },
     { name: 'a malformed org_id', claims: { org_id: 'A:B', org_ids: ['A:B'], org_roles: [] } },
   ])('is null for $name — the guard answers TENANT_MISMATCH', ({ claims }) => {
-    expect(tokenAuthority(token(claims))).toBeNull();
+    expect(tokenAuthority(token(claims), pinnedTokens(token(claims)).organizationId)).toBeNull();
   });
 
   it('with no org_id, only the global realm roles remain', () => {
-    expect(tokenAuthority(token({ realm_access: { roles: ['SYSTEM_ADMIN'] } }))).toEqual({
+    expect(
+      tokenAuthority(
+        token({ realm_access: { roles: ['SYSTEM_ADMIN'] } }),
+        pinnedTokens(token({ realm_access: { roles: ['SYSTEM_ADMIN'] } })).organizationId,
+      ),
+    ).toEqual({
       organizationId: null,
       roles: ['SYSTEM_ADMIN'],
     });
@@ -132,12 +148,30 @@ describe('tokenAuthority — the roles the service will act on, from the token',
   it.each(['opaque', 'h.!!!.s', token('x'), token(['a'])])(
     'is null for an unreadable token %#',
     (jwt) => {
-      expect(tokenAuthority(jwt)).toBeNull();
+      expect(tokenAuthority(jwt, pinnedTokens(jwt).organizationId)).toBeNull();
     },
   );
 
   it('ignores the membership rows entirely: what identity-service reports now is not an input', () => {
-    // The function takes only the token: there is no parameter for the rows.
-    expect(tokenAuthority.length).toBe(1);
+    // The function takes the token and the organization asked for: there is no parameter for the rows.
+    expect(tokenAuthority.length).toBe(2);
+  });
+
+  it('answers for the organization asked, not the token’s active one (task 118)', () => {
+    const switched = token({
+      org_id: 'ORG_B',
+      org_ids: [ORG, 'ORG_B'],
+      org_roles: [`${ORG}:FLEET_MANAGER`, 'ORG_B:ORGANIZATION_ADMIN'],
+    });
+    expect(tokenAuthority(switched, ORG)).toEqual({
+      organizationId: ORG,
+      roles: ['FLEET_MANAGER'],
+    });
+    expect(tokenAuthority(switched, 'ORG_B')).toEqual({
+      organizationId: 'ORG_B',
+      roles: ['ORGANIZATION_ADMIN'],
+    });
+    expect(tokenAuthority(switched, 'ORG_C')).toBeNull();
+    expect(tokenAuthority(switched, `${ORG}:X`)).toBeNull();
   });
 });

@@ -15,6 +15,7 @@ import {
 } from '@/test/bid-fixtures';
 
 import { bidCommandOffers } from './bid-offers';
+import { pinnedTokens } from '@/test/session-token';
 
 /**
  * The forms the tender page draws, each with a fresh submission whose stamp
@@ -40,7 +41,7 @@ const SESSION = {
   issuedAt: Math.floor(DURING / 1000),
 } satisfies WebSession;
 
-const caller = bidderCallerOf(SESSION.accessToken);
+const caller = bidderCallerOf(pinnedTokens(SESSION.accessToken));
 const tender = { kind: 'OK' as const, data: OPEN_TENDER };
 
 it('a submission’s stamp binds the tender and no bid', () => {
@@ -85,7 +86,7 @@ it('a replacement’s and a withdrawal’s stamps bind the bid and the revision 
 });
 
 it('nothing, and nothing minted, for a caller that is no bidder', () => {
-  const owner = bidderCallerOf(tokenFor('ORG-DEH-0001', ['ORGANIZATION_ADMIN']));
+  const owner = bidderCallerOf(pinnedTokens(tokenFor('ORG-DEH-0001', ['ORGANIZATION_ADMIN'])));
   expect(bidCommandOffers(SESSION, owner, TENDER_ID, tender, null, DURING)).toEqual({
     offered: [],
     note: null,

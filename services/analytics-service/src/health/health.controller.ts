@@ -8,7 +8,7 @@ import {
   VERSION_NEUTRAL,
 } from '@nestjs/common';
 import { ApiExcludeController, ApiOperation } from '@nestjs/swagger';
-import { Public } from '@rasta/nest-common';
+import { Public, assertConsumerHealth } from '@rasta/nest-common';
 import { metricsText, metricsContentType } from '@rasta/observability';
 import type { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
@@ -31,6 +31,8 @@ import { ENV } from '../tokens';
  * stopped for an hour means every dashboard is an hour behind. When the projection is not
  * enabled (`ANALYTICS_MAINTENANCE_FACTS_CONSUMER_ENABLED=false`) it is reported as `disabled`,
  * which is a deployment decision, not a fault.
+ * A terminal KafkaJS crash is different: the sticky internal fault fails both probes
+ * before dependency checks and requests a bounded non-zero process exit.
  */
 @ApiExcludeController()
 @Controller({ path: 'health', version: VERSION_NEUTRAL })
@@ -47,6 +49,7 @@ export class HealthController {
   @Public('Liveness probe; exposed only on the internal network')
   @ApiOperation({ summary: 'Process liveness' })
   live() {
+    assertConsumerHealth(SERVICE_NAME);
     return {
       status: 'ok',
       service: SERVICE_NAME,
@@ -58,6 +61,7 @@ export class HealthController {
   @Public('Readiness probe; exposed only on the internal network')
   @ApiOperation({ summary: 'Dependency readiness' })
   async ready(@Res({ passthrough: true }) response: Response) {
+    assertConsumerHealth(SERVICE_NAME);
     const database = await this.prisma.isHealthy();
     const projection = !this.env.ANALYTICS_MAINTENANCE_FACTS_CONSUMER_ENABLED
       ? 'disabled'

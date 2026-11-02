@@ -16,6 +16,12 @@ import {
   neverSent,
   parseRetryAfter,
 } from './gateway';
+import { tenantCredential } from './session-organization';
+import { actingAccessToken } from '@/test/session-token';
+
+const ORG = 'ORG-DEH-0001';
+const TOKEN = actingAccessToken(ORG);
+const CREDENTIAL = tenantCredential({ accessToken: TOKEN, organizationId: ORG });
 
 /**
  * ADR-058 § 3 said the browser talks only to the API Gateway, and added that
@@ -87,7 +93,7 @@ describe('what goes on the wire', () => {
     return callGateway<{ id: string }>({
       baseUrl: GATEWAY,
       path: '/v1/users/me',
-      accessToken: 'token-value',
+      credential: CREDENTIAL,
       fetchImpl: impl,
       correlationId: 'COR_1',
     }).then((result) => {
@@ -95,7 +101,9 @@ describe('what goes on the wire', () => {
       expect(result.correlationId).toBe('COR_1');
 
       const headers = calls[0]!.init.headers as Record<string, string>;
-      expect(headers.authorization).toBe('Bearer token-value');
+      expect(headers.authorization).toBe(`Bearer ${TOKEN}`);
+      // Every call names the organization the session is pinned to (audit F2).
+      expect(headers['x-organization-id']).toBe(ORG);
       expect(headers['x-correlation-id']).toBe('COR_1');
       // A tenant's data cached by the framework between two people's requests
       // is the worst bug this file could have.
@@ -110,7 +118,7 @@ describe('what goes on the wire', () => {
       path: '/v1/projects',
       method: 'POST',
       body: {},
-      accessToken: 't',
+      credential: CREDENTIAL,
       idempotencyKey: 'key-0001',
       replayDeadline: 1_900_000_000_123,
       fetchImpl: impl,
@@ -127,7 +135,7 @@ describe('what goes on the wire', () => {
       path: '/v1/projects',
       method: 'POST',
       body: {},
-      accessToken: 't',
+      credential: CREDENTIAL,
       idempotencyKey: 'key-0001',
       fetchImpl: impl,
     });
@@ -151,7 +159,7 @@ describe('what goes on the wire', () => {
         path: '/v1/projects',
         method: 'POST',
         body: {},
-        accessToken: 't',
+        credential: CREDENTIAL,
         idempotencyKey: key,
         replayDeadline: deadline,
         fetchImpl: impl,
@@ -165,7 +173,7 @@ describe('what goes on the wire', () => {
     const result = await callGateway({
       baseUrl: GATEWAY,
       path: '/v1/users/me',
-      accessToken: 't',
+      credential: CREDENTIAL,
       fetchImpl: impl,
     });
     expect(result.correlationId).toMatch(/^[0-9a-f-]{36}$/);
@@ -183,7 +191,7 @@ describe('what goes on the wire', () => {
       callGateway({
         baseUrl: GATEWAY,
         path: '/v1/users/me',
-        accessToken: 't',
+        credential: CREDENTIAL,
         fetchImpl: impl,
         correlationId: 'COR_2',
       }),
@@ -193,7 +201,7 @@ describe('what goes on the wire', () => {
       callGateway({
         baseUrl: GATEWAY,
         path: '/v1/users/me',
-        accessToken: 't',
+        credential: CREDENTIAL,
         fetchImpl: impl,
       }),
     ).rejects.toBeInstanceOf(GatewayRequestError);
@@ -205,7 +213,7 @@ describe('what goes on the wire', () => {
       callGateway({
         baseUrl: GATEWAY,
         path: 'https://evil.test/steal',
-        accessToken: 'token-value',
+        credential: CREDENTIAL,
         fetchImpl: impl,
       }),
     ).rejects.toBeInstanceOf(GatewayOriginError);
@@ -221,7 +229,12 @@ describe('a transport failure never escapes as a bare throw', () => {
     }) as unknown as typeof fetch;
 
     await expect(
-      callGateway({ baseUrl: GATEWAY, path: '/v1/users/me', accessToken: 't', fetchImpl: impl }),
+      callGateway({
+        baseUrl: GATEWAY,
+        path: '/v1/users/me',
+        credential: CREDENTIAL,
+        fetchImpl: impl,
+      }),
     ).rejects.toMatchObject({ status: 503 });
   });
 
@@ -239,7 +252,7 @@ describe('a transport failure never escapes as a bare throw', () => {
       callGateway({
         baseUrl: GATEWAY,
         path: '/v1/users/me',
-        accessToken: 't',
+        credential: CREDENTIAL,
         fetchImpl: impl,
         timeoutMs: 20,
       }),
@@ -254,7 +267,12 @@ describe('a transport failure never escapes as a bare throw', () => {
       })) as unknown as typeof fetch;
 
     await expect(
-      callGateway({ baseUrl: GATEWAY, path: '/v1/users/me', accessToken: 't', fetchImpl: impl }),
+      callGateway({
+        baseUrl: GATEWAY,
+        path: '/v1/users/me',
+        credential: CREDENTIAL,
+        fetchImpl: impl,
+      }),
     ).rejects.toMatchObject({ status: 502 });
   });
 });
@@ -269,7 +287,7 @@ describe('a read keeps today’s outcome; a write learns the outcome is unknown 
     const error = await callGateway({
       baseUrl: GATEWAY,
       path: '/v1/drivers',
-      accessToken: 't',
+      credential: CREDENTIAL,
       fetchImpl: rejecting(new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } })),
     }).catch((caught: unknown) => caught);
 
@@ -282,7 +300,7 @@ describe('a read keeps today’s outcome; a write learns the outcome is unknown 
     const error = await callGateway({
       baseUrl: GATEWAY,
       path: '/v1/drivers',
-      accessToken: 't',
+      credential: CREDENTIAL,
       fetchImpl: (async () =>
         new Response('not json', {
           status: 201,
@@ -298,7 +316,7 @@ describe('a read keeps today’s outcome; a write learns the outcome is unknown 
     const error = await callGateway({
       baseUrl: GATEWAY,
       path: '/v1/drivers',
-      accessToken: 't',
+      credential: CREDENTIAL,
       fetchImpl: rejecting(new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } })),
     }).catch((caught: unknown) => caught);
 
@@ -333,7 +351,7 @@ describe('a success with no body', () => {
       path: '/v1/memberships/MBR_1/revoke',
       method: 'POST',
       body: { reason: 'پایان همکاری' },
-      accessToken: 'token',
+      credential: CREDENTIAL,
       fetchImpl: noBody(204),
     });
 
@@ -346,7 +364,7 @@ describe('a success with no body', () => {
       baseUrl: GATEWAY,
       path: '/v1/memberships/MBR_1/revoke',
       method: 'POST',
-      accessToken: 'token',
+      credential: CREDENTIAL,
       fetchImpl: noBody(200, { 'content-length': '0' }),
     });
 
@@ -364,7 +382,7 @@ describe('a success with no body', () => {
       baseUrl: GATEWAY,
       path: '/v1/memberships/MBR_1/roles',
       method: 'POST',
-      accessToken: 'token',
+      credential: CREDENTIAL,
       fetchImpl: withBody,
     });
 

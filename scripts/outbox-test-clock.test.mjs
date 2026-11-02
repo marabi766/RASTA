@@ -232,11 +232,14 @@ test('F1: derivation reads every product SQL literal; the four tables the name f
       key,
     );
   }
-  // The DB-clock value read in the same flow (transactionNow -> ${at}) gates too.
+  // The post-lock DB-clock value (databaseClock -> expiry -> ${at}) gates too.
+  // lockExpirable now locks candidates before sampling; dueQuantity compares the sampled instant.
   assert.ok(
     gate.gated
       .get('stock_reservation.expires_at')
-      .evidence.some((e) => /reservation\.repository\.ts:\d+ \(dueOf, db-clock value\)/.test(e)),
+      .evidence.some((e) =>
+        /reservation\.repository\.ts:\d+ \(dueQuantity, db-clock value\)/.test(e),
+      ),
   );
   // The r1 columns are still derived.
   for (const key of [

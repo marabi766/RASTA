@@ -16,11 +16,16 @@ import credentialTransport from '../../scripts/internal-token-transport-rule.mjs
 // And the transport boundary: no raw HTTP primitive outside the audited
 // transports, however it is reached (Q-155 Follow-up 1).
 import rawHttpBoundary from '../../scripts/raw-http-boundary-rule.mjs';
+// And the deadline boundary: no abort controller or abort-timer pairing outside
+// the files that own one (#507 r2 F2). The portal's server and browser code
+// made its own deadline once (session-refusal.ts), so it is not exempt.
+import exchangeDeadline from '../../scripts/exchange-deadline-rule.mjs';
 
 const internal = {
   rules: {
     transport: credentialTransport,
     'raw-http': rawHttpBoundary,
+    'exchange-deadline': exchangeDeadline,
     'token-source': internalTokenSource,
   },
 };
@@ -69,7 +74,11 @@ export default tseslint.config(
     files: ['src/**/*.{ts,tsx}'],
     ignores: ['**/*.spec.{ts,tsx}', 'src/test/**'],
     plugins: { internal },
-    rules: { 'internal/transport': 'error', 'internal/raw-http': 'error' },
+    rules: {
+      'internal/transport': 'error',
+      'internal/raw-http': 'error',
+      'internal/exchange-deadline': 'error',
+    },
   },
   {
     // Live suites aim at an endpoint the environment names, with real
@@ -88,6 +97,7 @@ export default tseslint.config(
     rules: {
       'internal/transport': 'error',
       'internal/raw-http': ['error', { playwright: true }],
+      'internal/exchange-deadline': 'error',
     },
   },
   {
