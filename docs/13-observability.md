@@ -529,7 +529,7 @@ Stack **محلی** Compose (Profile `observability`/`all`):
   و شکست انتشار؛ (۱۱) سن پشتهٔ **بسته** با خط ۶۰ ثانیه — `pending_age` پنجرهٔ باز عمداً نیست. هر Panel توضیح دارد، هر Query همان
   عبارت (یا عبارت پیش از مقایسهٔ `> 0`) هشدار متناظرش است، و هیچ Label یا متنی شناسهٔ مستأجر، Actor، منبع، رویداد، Correlation،
   Partition، Offset یا متن خطا را نمایش نمی‌دهد.
-- **دسترسی محلی:** `docker compose --profile observability up -d`، سپس `http://localhost:3001/d/rasta-audit-evidence` (پوشهٔ
+- **دسترسی محلی:** `COMPOSE_PROFILES=observability pnpm infra:up`، سپس `http://localhost:3001/d/rasta-audit-evidence` (پوشهٔ
   `Rasta`). ورود با Credential محلی Compose است.
 - **اعتبارسنجی:** `pnpm run check:grafana-dashboard` (در `pnpm verify` و Job ‏`quality` در CI) و
   `pnpm run verify:grafana-dashboard-live` (دستی، Docker) — جزئیات در [`14-testing-strategy.md`](14-testing-strategy.md) § ۱۴٫۱۱.
