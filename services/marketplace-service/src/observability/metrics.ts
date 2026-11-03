@@ -172,3 +172,23 @@ export const productSearchesTotal = new Counter({
   labelNames: ['service', 'mode'] as const,
   registers: [registry],
 });
+
+/** Durable starter backlog; no tenant/order labels or monetary values. */
+export const sagaStartBacklogCount = new Gauge({
+  name: 'rasta_marketplace_saga_start_backlog',
+  help: 'Orders awaiting proven saga acceptance',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+export const sagaStartBacklogAge = new Gauge({
+  name: 'rasta_marketplace_saga_start_backlog_age_seconds',
+  help: 'Age of oldest undelivered saga start intent',
+  labelNames: ['service'] as const,
+  registers: [registry],
+});
+export const sagaStartDeliveries = new Counter({
+  name: 'rasta_marketplace_saga_start_deliveries_total',
+  help: 'Saga start delivery attempts by fixed outcome',
+  labelNames: ['service', 'outcome'] as const,
+  registers: [registry],
+});

@@ -239,6 +239,32 @@ procurement در organization-service در PR 11) ولی امتیازی را ع�
   نگه‌داشتن تحویل نامرتب، `FORK`، ناسازگاری هویت، هشدار شکاف)؛ `GET /v1/internal/rfq-evidence/{rfqId}/chain` با `@AllowService('procurement-service')`.
 - رویدادهای `QUOTATION_*` هنوز تولید نمی‌شوند؛ آزمون با رویدادهای ساختگی هم‌شکل قرارداد `@rasta/contracts` (همان ترتیب CON-002 PR 6).
 
+> **وضعیت: ساخته شد (2026-11-02، COM-007 PR 7).** همان فهرست بالا، با این تفاوت‌ها:
+>
+> 1. **قرارداد رویداد هنوز در `@rasta/contracts` نیست:** رویدادهای `QUOTATION_*` را PR 8 تولید می‌کند (و کار هم‌زمان قرارداد آن را می‌سازد). مصرف‌کننده
+>    Schema خودش را دارد (`quotationReceiptPayloadSchema` در `audit/rfq-evidence.ts`، بی `.strict()` مانند `receiptPayloadSchema`) با میدان‌های ADR-070 § ۹ و
+>    قالب `BID_SUBMITTED`: `rfqId`، `quotationId`، `organizationId` (خریدار)، `supplierOrganizationId`، `revision`، `receivedAt`، `contentCommitment`،
+>    `ciphertextSha256`، `previousReceipt`، `receipt`. **PR 8 باید** قرارداد را با این میدان‌ها (و `.strict()` سمت تولیدکننده) بنویسد و آزمونی بیاورد که
+>    Schema تولیدکننده رویداد ساختگی این مصرف‌کننده را می‌پذیرد؛ نام یا نوع میدانی که تغییر کند، این PR را می‌شکند.
+> 2. **Genesis:** `SHA-256` روی برچسب و `rfqId` (هرکدام با پیشوند طول)، برچسب `rasta.quotation.receipt.genesis.v1` (دوقلوی `rasta.bid.receipt.genesis.v1`).
+>    `SealingLabels.receiptGenesis` برش PR 8 باید دقیقاً همین باشد وگرنه نخستین رسید زنجیره را ادامه نمی‌دهد؛ بایت‌ها با یک بردار در `rfq-evidence.spec.ts`
+>    سنجاق شده‌اند. پیاده‌سازی Genesis عمداً مستقل از `@rasta/sealing` است (همان قاعدهٔ audit-service در PR 4).
+> 3. **فقط رسیدها:** `QUOTATION_SUBMITTED` و `QUOTATION_REVISED` زنجیره را می‌افزایند. `QUOTATION_WITHDRAWN` و `QUOTATION_ACCESSED` زنجیره را نمی‌افزایند
+>    و جدول شاهد هم ندارند (ردیف ممیزی Projector هستند؛ ثبت الحاقی خواندن `quotation_access_log` در procurement-service و PR 8 است، نه جدول دوم اینجا).
+> 4. **سخت‌گیری افزوده نسبت به `tender_receipt_link`:** پاکتی که `producer`اش `procurement-service` نباشد، همانند ناسازگاری مستأجر یا شناسه، با
+>    `rfq_evidence_mismatch` رد می‌شود (ACL موضوع هم همین را می‌گوید؛ زنجیره لنگر اعتماد است).
+> 5. **پایگاه داده:** `rfq_receipt_link` (الحاقی با Trigger برای همه، نقش اجرا فقط `SELECT, INSERT`) و `rfq_receipt_pending` (صف کار با `SELECT, INSERT, DELETE`)،
+>    یکتایی `(rfq_id, receipt)` و `(rfq_id, previous_receipt)` برای FORK. Migration برگشت‌پذیر است و تا یک رسید یا رسید نگه‌داشته‌شده هست رد می‌شود.
+> 6. **مصرف‌کننده:** گروه `audit-service.rfq-evidence` (در `TOPIC_CONSUMERS`)، موضوع `rasta.procurement.v1` فقط، `fromBeginning`، DLQ همان `rasta.audit.v1.dlq`؛
+>    پیکربندی `AUDIT_RFQ_GAP_ALERT_SECONDS` (پیش‌فرض ۳۰۰)، سنج‌های `rasta_audit_rfq_{pending_links,overdue_links,pending_oldest_age_seconds}` و هشدار
+>    `RastaAuditRfqChainGapOpen`؛ دلیل‌های شمارندهٔ ورود `rfq_chain_fork`، `rfq_chain_gap_overdue`، `rfq_evidence_mismatch`.
+> 7. **خواندن:** `GET /v1/internal/rfq-evidence/{rfqId}/chain`، `@AllowService('procurement-service')` **و** بررسی فراخواننده در سرویس
+>    (`assertRfqEvidenceCaller`: توکن سرویس، فراخوانندهٔ `procurement-service`، سازمان امضاشده الزامی) ⇒ هر شخص، هر سرویس دیگر (از جمله `construction-service`)
+>    و توکن بی مستأجر `403`؛ جستجو با سازمان توکن **و** RFQ، پس RFQ سازمان دیگر یا RFQ ناشناخته همان زنجیرهٔ تهی با سر = Genesis است. خروجی OpenAPI سرویس
+>    را می‌گیرد. مصرف‌کنندهٔ این خواندن (`RfqEvidenceClient` و مقایسهٔ حلقه‌به‌حلقه) با PR 9 می‌آید.
+> 8. **آزمون:** `test/rfq-evidence.int-spec.ts` مجموعهٔ `tender-evidence.int-spec.ts` را مورد به مورد دنبال می‌کند (مورد‌های `BID_ACCESSED` ندارند)، و
+>    `src/audit/rfq-evidence.spec.ts` نگاشت و Genesis را.
+
 ### PR 8 — پیشنهاد قیمت مهرشده (`L`)
 
 - `quotation`، `quotation_receipt`، `quotation_access_log` (الحاقی)؛ ثبت/بازنگری/انصراف پیش از مهلت با `FOR SHARE`، پرسش مرجع صلاحیت و `eligible_as_of`،
