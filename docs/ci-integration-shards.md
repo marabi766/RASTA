@@ -1,20 +1,21 @@
-# Integration suite sharding: prerequisite and baseline (task 1204 A)
+# Integration suite sharding (tasks 1204 A / 1224 B / 1236)
 
-This PR adds independent package discovery to the existing integration validator.
-It does **not** split execution or reduce timeouts. The worker size rule requires
-a separate follow-up for job provisioning, phase orchestration and command/env
-inventory changes. `INTEGRATION_PARTITIONS` currently describes the single,
-unfiltered workspace phase; it is checked against manifests, not used to discover
-them. Exact commands and aggregate dependency/verdict checks still apply.
+Slice B uses four explicit suite jobs, each needing `quality`, with exact package
+filters produced by `run-test-phases.mjs --shard=<name>`. The aggregate retains
+its required-check name and needs all four jobs plus the existing coverage,
+security and backup jobs. Missing, duplicate or unknown packages fail independent
+manifest discovery; the validator also checks the runner's effective plan.
+FU-027 independently cross-checks partition step-name keys against the suite
+command inventory and all workflow jobs, refusing missing, unknown or repeated
+steps. The command inventory is not derived from ownership keys.
 
-Discovery reads every `packages` glob in `pnpm-workspace.yaml`, including future
-roots and exclusions. Only workspace manifests declaring `test:integration`
-belong to the partition. Root orchestration and installed dependencies are not
-workspace members. The empty api-gateway integration project is a member.
-Unknown, missing and duplicate assignments, unreadable/malformed manifests and
-invalid discovery configuration fail closed. Duplicate workspace names fail too.
-The partition declaration is not yet a validator for filtered execution: the
-follow-up must bind each package list to the exact effective Turbo filters.
+Every shard provisions the existing complete infrastructure. Services, setup
+steps and suite environments use YAML anchors/aliases (no merge keys), supported
+by [GitHub Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations).
+This preserves per-job Kafka credential generation, masking and ACLs, private
+bucket setup and the Unix scanner transport. Only dependency caches are reused.
+All suite environment keys are inventoried, fixed literals are pinned, and extra
+suite environment keys are refused. Missing infrastructure fails validation.
 
 ## Pinned baseline
 
@@ -53,24 +54,53 @@ guards and coverage. Summed durations of the five integration jobs plus aggregat
 4,767 seconds = 79.45 runner minutes (unrounded elapsed time, not billing units).
 No candidate performance or cost improvement is claimed by this prerequisite.
 
-## Proposed follow-up B (stacked on this PR)
+## Slice B topology and provisional budgets
 
-Use four explicit `integration-*` suite jobs, each needing `quality`: construction
-alone; economic plus procurement; contract plus inventory, marketplace and audit;
-identity plus all remaining workspaces. Their lower bounds from the longest task
-are 500.147, 462.796, 434.103 and 353.740 seconds, respectively. These are planning
-bounds, **not measured shard durations or chosen timeout caps**. Keep stress inside
-the identity shard through `run-test-phases`, after its other tasks exit even on
-failure. With a separate PostgreSQL per job, no other shard shares its WAL; docs/14
-§ 14.3's exclusivity reasoning and the stress bounds remain applicable.
+| Job                      | Packages                                |            Baseline lower bound | Initial step cap | Job cap |
+| ------------------------ | --------------------------------------- | ------------------------------: | ---------------: | ------: |
+| integration-suites       | identity and remaining small packages   | 353.740 + 33.388 stress seconds |           13 min |  75 min |
+| integration-construction | construction                            |                       500.147 s |           17 min |  25 min |
+| integration-economic     | economic, procurement                   |                       462.796 s |           16 min |  24 min |
+| integration-contract     | contract, inventory, marketplace, audit |                       434.103 s |           15 min |  23 min |
 
-Retain full provisioning initially, exact suite env, private per-job Kafka
-credentials, dependency-only caches, and all database-guard prerequisites. Move
-only the workspace suite step; preserve coverage/security/backup gates. Bind each
-partition to exact filters, inventory every new env key and literal, update
-`check:test-phases`, require every shard in the aggregate, and measure individual
-caps and setup cost. Obtain two runs at the final reviewed SHA, compare test
-identities and passed/skipped counts including stress and filtered security, then
-remove the retired single-step cap/comment. Existing baseline logs give file
-identities and totals but do not enumerate every test title; title-level baseline
-evidence still needs collection. #374, #376 and #387 are already merged.
+Initial caps round up twice the longest measured package duration (plus stress
+for identity). These are provisional until actual shard durations are available;
+they are **not** claims of measured shard performance. The retired 21-minute
+single-step inventory and stopgap comment are removed. Each new job adds the
+existing 8-minute full-provisioning setup allowance; identity's job retains 54
+minutes of guard/connection-step limits plus its 13-minute suite cap and setup.
+
+Stress stays inside the identity job, after all its workspace tasks exit, even
+on failure, with the original first-failure exit status. Other shards have their
+own PostgreSQL instances, so none shares its WAL. The exclusivity reasoning in
+docs/14 § 14.3 and stress bounds still hold. Test caching remains disabled by
+`turbo.json`; the unsharded, filtered security selection is unchanged. Suite steps and the
+filtered security integration run add `--verbose` solely to expose file/test names
+in candidate logs; no selection or assertion changes.
+
+No coverage or security steps moved. All database guards, their full database
+provisioning and migrations stay in `integration-suites`. An explicit shared
+package build now precedes its suite step, so guards never depend on incidental
+build outputs from unrelated workspaces. The backup-drill exemption is unchanged.
+
+## Evidence still required before acceptance
+
+#591 has merged and #594 now targets `main`, so final-head CI can run. Full test-title
+baseline evidence also remains unavailable in the archived baseline logs. Do not
+infer identity equality from the same file/test totals. The expected partition
+of the archived baseline, not an observed candidate result, is:
+
+| Shard        | Files including stress | Passed tests | Skipped tests |
+| ------------ | ---------------------: | -----------: | ------------: |
+| identity     |                    175 |         2261 |             0 |
+| construction |                     68 |         1118 |             0 |
+| economic     |                     98 |         1399 |             0 |
+| contract     |                     95 |         1600 |             4 |
+| Total        |                    436 |         6378 |             4 |
+
+Acceptance requires two full runs at the final reviewed head, complete file/test
+identities and passed/skipped counts including stress and filtered security,
+measured per-step durations, aggregate critical path and summed integration runner
+minutes. Three extra complete setup sequences increase runner cost; no candidate
+performance or cost improvement is claimed without those runs. #374, #376 and
+#387 are merged and their behavior is preserved.
