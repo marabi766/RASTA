@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { currentSession } from '@/server/current-session';
 import { actingOrganizationId } from '@/server/session-organization';
 
+import { PageThemeOwner } from '../../PageThemeOwner';
 import { NoOrganizationScreen } from './NoOrganizationScreen';
 
 /**
@@ -17,5 +18,10 @@ export default async function NoOrganizationPage() {
   const session = await currentSession();
   if (!session) redirect('/login');
   if (actingOrganizationId(session) !== null) redirect('/');
-  return <NoOrganizationScreen csrfToken={session.csrfToken} />;
+  return (
+    <>
+      <PageThemeOwner subject={session.subject} />
+      <NoOrganizationScreen csrfToken={session.csrfToken} />
+    </>
+  );
 }

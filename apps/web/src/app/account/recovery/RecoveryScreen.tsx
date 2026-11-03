@@ -1,4 +1,4 @@
-import { Alert, Button, ButtonLink, PageHeader } from '@/ui';
+import { Alert, Button, ButtonLink, PageHeader, ThemeSwitch } from '@/ui';
 
 /**
  * What a person sees when they are signed in but the portal can tell no
@@ -59,6 +59,10 @@ export function RecoveryScreen({
       <ButtonLink href={SWITCH_ACCOUNT_HREF} tone="secondary" className="py-3 text-base">
         {RECOVERY_SWITCH}
       </ButtonLink>
+      {/* No shell here, so no top bar to hold the light / dark switch. */}
+      <div className="flex">
+        <ThemeSwitch />
+      </div>
     </main>
   );
 }

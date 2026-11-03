@@ -81,9 +81,13 @@ describe('countMissingReconciliationEvidence — the unscoped, aggregate-only re
 
   it('exports one unlabelled series', async () => {
     const { repository } = repositoryReturning([{ missing: 2n }]);
-    const monitor = new ReconciliationEvidenceMonitor(repository, {
-      AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: 24,
-    } as never);
+    const monitor = new ReconciliationEvidenceMonitor(
+      repository,
+      {
+        AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: 24,
+      } as never,
+      { beforeDisconnect: () => undefined } as never,
+    );
 
     expect(await monitor.sample(new Date('2026-10-03T12:00:00.000Z'))).toBe(2);
     const { values } = await auditReconciliationEvidenceMissing.get();
@@ -92,9 +96,13 @@ describe('countMissingReconciliationEvidence — the unscoped, aggregate-only re
 
   it('looks back from now by the configured hours', async () => {
     const { repository, seen } = repositoryReturning([{ missing: 0n }]);
-    const monitor = new ReconciliationEvidenceMonitor(repository, {
-      AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: 24,
-    } as never);
+    const monitor = new ReconciliationEvidenceMonitor(
+      repository,
+      {
+        AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: 24,
+      } as never,
+      { beforeDisconnect: () => undefined } as never,
+    );
 
     await monitor.sample(new Date('2026-10-03T12:00:00.000Z'));
     expect(seen[0]?.values).toContainEqual(new Date('2026-10-02T12:00:00.000Z'));

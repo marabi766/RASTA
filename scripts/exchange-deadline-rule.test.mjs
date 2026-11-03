@@ -529,6 +529,7 @@ test('the allow-lists change only with a reviewed decision', () => {
     'services/identity-service/src/keycloak/keycloak.projector.ts',
     'services/identity-service/src/observability/outbox-gauges.ts',
     'services/identity-service/src/prisma/cancellation.ts',
+    'services/marketplace-service/src/temporal/saga.client.ts',
   ]);
   assert.deepEqual(Object.keys(TIMER_ABORT_MODULES).sort(), [
     'apps/web/src/lib/session-refusal.ts',
