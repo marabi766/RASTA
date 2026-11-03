@@ -222,7 +222,11 @@ export class ReservationService {
     if (expiresAt === undefined) return null;
     const instant = new Date(expiresAt);
     const latest = at.getTime() + this.env.INVENTORY_RESERVATION_MAX_TTL_SECONDS * 1000;
-    if (instant.getTime() <= at.getTime() || instant.getTime() > latest) {
+    if (
+      !Number.isFinite(instant.getTime()) ||
+      instant.getTime() <= at.getTime() ||
+      instant.getTime() > latest
+    ) {
       throw refusal(
         'reservation',
         'EXPIRY_OUT_OF_RANGE',

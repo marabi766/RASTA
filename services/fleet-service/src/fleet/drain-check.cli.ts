@@ -1,5 +1,5 @@
 import { Kafka } from 'kafkajs';
-import { assertNoMigratorCredentials } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
 import { kafkaClientConfig, kafkaConnection } from '@rasta/nest-common';
 import { ASSET_SYNC_GROUP, ASSET_SYNC_TOPICS, loadFleetEnv, SERVICE_NAME } from '../config/env';
@@ -63,7 +63,7 @@ async function main(): Promise<number> {
 main().then(
   (code) => process.exit(code),
   (error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`${commandFailure(error)}\n`);
     process.exit(2);
   },
 );

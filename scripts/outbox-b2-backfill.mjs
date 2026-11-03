@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { commandFailure } from '../packages/config/src/command-failure.js';
 // -----------------------------------------------------------------------------
 // ADR-051 Phase B2 — the operational backfill CLI.
 //
@@ -124,7 +125,6 @@
 //            mistake a partial backfill for a finished one.
 // -----------------------------------------------------------------------------
 import {
-  B2RefusalError,
   databaseUrlKey,
   parseOptions,
   resolveDatabaseUrl,
@@ -184,6 +184,7 @@ async function main() {
 
   for (const service of options.services) {
     let db;
+    let outcome = 'refused';
     try {
       // Inside the boundary, not above it. Resolving the URL can refuse — a
       // missing `DATABASE_URL_<SERVICE>` is the ordinary case — and a throw
@@ -197,9 +198,9 @@ async function main() {
       if (split.has(service)) await db.preflight(databaseUrlKey(service));
       const result = await runServiceBackfill({ service, db, options, emit });
       if (converged(result)) {
-        ok += 1;
+        outcome = 'ok';
       } else {
-        incomplete += 1;
+        outcome = 'incomplete';
         // Distinct from `refused` on purpose: nothing went wrong, the run was
         // simply bounded. Counts only — no payload, no URL, no stack.
         emit({
@@ -217,20 +218,24 @@ async function main() {
         });
       }
     } catch (error) {
-      refused += 1;
-      // Every way one service can fail lands here: an unresolvable connection,
-      // a B1 precondition, the ordering guard. The message,
-      // never the stack and never the URL — a stack from a Prisma client can
-      // carry the datasource in it, and `resolveDatabaseUrl` deliberately
-      // names the environment variable rather than its value.
+      outcome = 'refused';
+      // Foreign diagnostics and Error subclasses are untrusted; retain only registered codes.
       emit({
         type: 'refused',
         service,
-        reason: error instanceof B2RefusalError ? error.message : String(error.message ?? error),
+        reason: commandFailure(error),
       });
     } finally {
-      await db?.close();
+      try {
+        await db?.close();
+      } catch (error) {
+        outcome = 'refused';
+        emit({ type: 'refused', service, phase: 'cleanup', reason: commandFailure(error) });
+      }
     }
+    if (outcome === 'ok') ok += 1;
+    else if (outcome === 'incomplete') incomplete += 1;
+    else refused += 1;
     // No `break`: every explicitly selected service is attempted, so one
     // bounded or refused service never silently skips the rest, and the
     // summary below is always reached.
@@ -250,7 +255,7 @@ async function main() {
 process.exitCode = await main().catch((error) => {
   emit({
     type: 'refused',
-    reason: error instanceof B2RefusalError ? error.message : String(error.message ?? error),
+    reason: commandFailure(error),
   });
   return 1;
 });

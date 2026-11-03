@@ -31,7 +31,8 @@ initTelemetry({
 // first would leave those spans missing entirely.
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { SwaggerModule } from '@nestjs/swagger';
+import { buildGatewayOpenApiDocument } from './openapi/document';
 import { allowsDeveloperTooling } from '@rasta/config';
 import helmet from 'helmet';
 import {
@@ -78,18 +79,7 @@ async function bootstrap(): Promise<void> {
   app.useBodyParser('json', { limit: '256kb' });
 
   if (allowsDeveloperTooling(env)) {
-    const document = SwaggerModule.createDocument(
-      app,
-      new DocumentBuilder()
-        .setTitle('Rasta — API Gateway')
-        .setDescription(
-          'The single entry point for external traffic. Authenticates, resolves the ' +
-            'tenant, rate limits and routes. Holds no business logic and no database.',
-        )
-        .setVersion(env.SERVICE_VERSION)
-        .addBearerAuth()
-        .build(),
-    );
+    const document = buildGatewayOpenApiDocument(app, env.SERVICE_VERSION);
     SwaggerModule.setup('docs', app, document);
   }
 
