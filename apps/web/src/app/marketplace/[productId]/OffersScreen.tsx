@@ -7,6 +7,7 @@ import {
   PageHeader,
   Section,
   StatusBadge,
+  TableScroll,
 } from '@/ui';
 import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
 import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
@@ -131,65 +132,67 @@ function OfferRows({
   }
 
   return (
-    <table className="w-full border-collapse text-sm">
-      <caption className="sr-only">فهرست پیشنهادهای تأمین‌کنندگان</caption>
-      <thead>
-        <tr className="border-b border-border text-start text-content-muted">
-          <th scope="col" className="p-3 text-start font-medium">
-            تأمین‌کننده
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            قیمت واحد
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            موجودی
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            حداقل سفارش
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            زمان تحویل
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            احراز صلاحیت
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {offers.items.map((offer) => {
-          const standing = offerSupplierStanding(
-            offer.supplierOrganizationId,
-            suppliers.get(offer.supplierOrganizationId),
-          );
-          return (
-            <tr key={offer.id} className="border-b border-border">
-              <td className="p-3">
-                <div>{standing.name ?? OFFER_SUPPLIER_NAME_UNKNOWN}</div>
-                <div className="text-xs text-content-muted">
-                  <Identifier>{offer.supplierOrganizationId}</Identifier>
-                </div>
-              </td>
-              <td className="p-3">{formatMoney(offer.unitPriceMinor)}</td>
-              <td className="p-3 text-content-muted">
-                {toPersianDigits(String(offer.availableQuantity))}
-              </td>
-              <td className="p-3 text-content-muted">
-                {toPersianDigits(String(offer.minimumQuantity))}
-              </td>
-              <td className="p-3 text-content-muted">
-                {toPersianDigits(String(offer.leadTimeDays))} روز
-              </td>
-              <td className="p-3">
-                <StatusBadge
-                  status={STANDING_BADGE[standing.state]}
-                  label={offerSupplierStateLabel(standing.state)}
-                />
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <TableScroll label="فهرست پیشنهادهای تأمین‌کنندگان">
+      <table className="w-full border-collapse text-sm">
+        <caption className="sr-only">فهرست پیشنهادهای تأمین‌کنندگان</caption>
+        <thead>
+          <tr className="border-b border-border text-start text-content-muted">
+            <th scope="col" className="p-3 text-start font-medium">
+              تأمین‌کننده
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              قیمت واحد
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              موجودی
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              حداقل سفارش
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              زمان تحویل
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              احراز صلاحیت
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {offers.items.map((offer) => {
+            const standing = offerSupplierStanding(
+              offer.supplierOrganizationId,
+              suppliers.get(offer.supplierOrganizationId),
+            );
+            return (
+              <tr key={offer.id} className="border-b border-border">
+                <td className="p-3">
+                  <div>{standing.name ?? OFFER_SUPPLIER_NAME_UNKNOWN}</div>
+                  <div className="text-xs text-content-muted">
+                    <Identifier>{offer.supplierOrganizationId}</Identifier>
+                  </div>
+                </td>
+                <td className="p-3">{formatMoney(offer.unitPriceMinor)}</td>
+                <td className="p-3 text-content-muted">
+                  {toPersianDigits(String(offer.availableQuantity))}
+                </td>
+                <td className="p-3 text-content-muted">
+                  {toPersianDigits(String(offer.minimumQuantity))}
+                </td>
+                <td className="p-3 text-content-muted">
+                  {toPersianDigits(String(offer.leadTimeDays))} روز
+                </td>
+                <td className="p-3">
+                  <StatusBadge
+                    status={STANDING_BADGE[standing.state]}
+                    label={offerSupplierStateLabel(standing.state)}
+                  />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </TableScroll>
   );
 }
 

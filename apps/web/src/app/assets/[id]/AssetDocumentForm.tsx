@@ -2,7 +2,7 @@
 
 import { useActionState, type ReactNode } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, controlClassName, JalaliDateInput } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import {
@@ -190,7 +190,7 @@ export function AttachDocumentForm(identity: DocumentIdentity) {
           </Field>
           <Field label="تاریخ صدور" error={errors.issuedAt} hint="اختیاری.">
             {(control) => (
-              <input
+              <JalaliDateInput
                 {...control}
                 name="issuedAt"
                 type="date"
@@ -205,7 +205,7 @@ export function AttachDocumentForm(identity: DocumentIdentity) {
             hint="اختیاری؛ مدرک از آغاز این روز منقضی شمرده می‌شود."
           >
             {(control) => (
-              <input
+              <JalaliDateInput
                 {...control}
                 name="expiresAt"
                 type="date"

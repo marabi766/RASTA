@@ -92,9 +92,11 @@ describe('the offers table', () => {
 
   it('never renders the qualification as a check nobody performed', () => {
     // No directory answer was passed: the badge is «نامشخص», not «واجد صلاحیت».
-    const { getByText, queryByText } = render_();
+    const { getByText, queryByText, container } = render_();
     expect(getByText('وضعیت نامشخص')).toBeInTheDocument();
     expect(queryByText('واجد صلاحیت')).toBeNull();
+    // Neutral (task 248 wording rule): no verdict on the supplier, no promise that it will change.
+    expect(container.textContent).not.toMatch(/هنوز|فعال نیست|رد شد|فاقد صلاحیت|بی‌صلاحیت/);
   });
 
   it('shows an empty offer list as empty, not as an error', () => {
