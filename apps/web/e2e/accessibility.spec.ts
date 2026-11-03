@@ -36,6 +36,31 @@ async function violationsOf(page: Page) {
     impact: violation.impact,
     help: violation.help,
     targets: violation.nodes.map((node) => node.target.join(' ')),
+    // What axe measured, so a failure explains itself: for `color-contrast`
+    // the foreground and background it resolved, the ratio and the one it
+    // needed. The dark pass flaked once on a danger Alert's title spans with
+    // no way to tell a real shortfall from a background sampled mid-transition.
+    measured: violation.nodes.map((node) => ({
+      target: node.target.join(' '),
+      colours: [...node.any, ...node.all, ...node.none].flatMap((check) => {
+        const data = check.data as {
+          fgColor?: string;
+          bgColor?: string;
+          contrastRatio?: number;
+          expectedContrastRatio?: string;
+        } | null;
+        return data?.fgColor
+          ? [
+              {
+                fg: data.fgColor,
+                bg: data.bgColor,
+                ratio: data.contrastRatio,
+                needed: data.expectedContrastRatio,
+              },
+            ]
+          : [];
+      }),
+    })),
   }));
 }
 

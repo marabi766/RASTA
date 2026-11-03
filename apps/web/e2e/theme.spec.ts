@@ -62,7 +62,11 @@ async function themeCookies(context: BrowserContext) {
 
 /** A signed-in person whose access token grants their pinned organization nothing:
  * `/account/recovery` is theirs, and it draws no tenant data, so it needs no gateway. */
-function sessionCookie(subject: string) {
+function sessionCookie(
+  subject: string,
+  organizationId = 'ORG-E2E-LOST',
+  tokenOrg = 'ORG-E2E-OTHER',
+) {
   const secret = process.env.WEB_SESSION_SECRET;
   if (!secret) throw new Error('This scenario needs WEB_SESSION_SECRET (the portal has it).');
   const now = Math.floor(Date.now() / 1000);
@@ -72,8 +76,8 @@ function sessionCookie(subject: string) {
       {
         subject,
         username: subject,
-        organizationId: 'ORG-E2E-LOST',
-        accessToken: actingAccessToken('ORG-E2E-OTHER'),
+        organizationId,
+        accessToken: actingAccessToken(tokenOrg),
         accessTokenExpiresAt: now + 3600,
         refreshToken: 'e2e-refresh',
         csrfToken: newCsrfToken(),
@@ -292,6 +296,112 @@ test.describe('the theme, per person on one device', () => {
     expect((await themeCookies(context)).map((cookie) => cookie.name).sort()).toEqual(
       ['rasta_theme', nameA, nameB].sort(),
     );
+
+    await context.close();
+  });
+});
+
+/**
+ * A retained document across an account change (PR 595 review, F1).
+ *
+ * Next keeps the root layout when a `<Link>` is followed, so everything that
+ * decides whose theme a page wears and whose cookie its switch writes must
+ * arrive with the page. These scenarios never reload after the account
+ * changes: the only navigation is a click on a Link, and a marker on `window`
+ * proves it was a soft one. The portal pages draw with the gateway down, which
+ * is all they need (a forged session whose token grants its own organization).
+ */
+test.describe('the theme across an account change in a retained document', () => {
+  test.skip(!process.env.WEB_SESSION_SECRET, 'needs WEB_SESSION_SECRET (the portal has it)');
+
+  const ORG = 'ORG-E2E-ACT';
+  const portalSession = (subject: string) => sessionCookie(subject, ORG, ORG);
+
+  async function openOrdersAs(context: BrowserContext, subject: string) {
+    await context.addCookies([portalSession(subject)]);
+    const page = await context.newPage();
+    await page.goto('/orders');
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    await page.evaluate(() => {
+      (window as unknown as { __doc: string }).__doc = 'same-document';
+    });
+    return page;
+  }
+
+  /** Follow a Link that stays on a page with the shell: a soft navigation. */
+  async function followLink(page: Page) {
+    await page.getByRole('navigation', { name: 'سمت سفارش' }).getByRole('link').last().click();
+    await expect(page).toHaveURL(/\/orders\?/);
+    // Still the document that was there before: nothing was reloaded.
+    expect(await page.evaluate(() => (window as unknown as { __doc?: string }).__doc)).toBe(
+      'same-document',
+    );
+  }
+
+  test("logout and login as B in another tab: a Link in the old tab shows B's theme and keeps B's cookie", async ({
+    browser,
+  }) => {
+    const nameA = userThemeCookieName('USR-E2E-A', process.env.WEB_SESSION_SECRET!);
+    const nameB = userThemeCookieName('USR-E2E-B', process.env.WEB_SESSION_SECRET!);
+    const context = await browser.newContext({ colorScheme: 'light', locale: 'fa-IR' });
+    const old = await openOrdersAs(context, 'USR-E2E-A');
+    const toggle = old.getByRole('banner').getByRole('button', SWITCH);
+    await toggle.click();
+    await expect(old.locator('html')).toHaveAttribute('data-theme', 'dark');
+
+    // Another tab: A logs out, B signs in (one cookie jar, so this tab's jar changes too).
+    const other = await context.newPage();
+    await context.clearCookies({ name: SESSION_COOKIE });
+    await context.addCookies([portalSession('USR-E2E-B')]);
+    await other.goto('/orders');
+    await other.close();
+
+    await followLink(old);
+    await expect(old.locator('html')).toHaveAttribute('data-theme', 'light');
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+    // B chooses dark, then light again. Only B's cookie is written; A's stays dark.
+    await toggle.click();
+    await expect(old.locator('html')).toHaveAttribute('data-theme', 'dark');
+    expect((await themeCookies(context)).find((c) => c.name === nameB)?.value).toBe('dark');
+    await toggle.click();
+    await expect(old.locator('html')).toHaveAttribute('data-theme', 'light');
+    const cookies = await themeCookies(context);
+    expect(cookies.find((c) => c.name === nameB)?.value).toBe('light');
+    expect(cookies.find((c) => c.name === nameA)?.value).toBe('dark');
+    expect(cookies.map((c) => c.name).sort()).toEqual([nameA, nameB].sort());
+
+    await context.close();
+  });
+
+  test('the session expires in another tab: the soft redirect to /login wears the device theme and writes the device cookie', async ({
+    browser,
+  }) => {
+    const nameA = userThemeCookieName('USR-E2E-A', process.env.WEB_SESSION_SECRET!);
+    const context = await browser.newContext({ colorScheme: 'light', locale: 'fa-IR' });
+    const old = await openOrdersAs(context, 'USR-E2E-A');
+    const toggle = old.getByRole('banner').getByRole('button', SWITCH);
+    await toggle.click();
+    await expect(old.locator('html')).toHaveAttribute('data-theme', 'dark');
+
+    await context.clearCookies({ name: SESSION_COOKIE });
+    await old.getByRole('navigation', { name: 'سمت سفارش' }).getByRole('link').last().click();
+    await expect(old).toHaveURL(/\/login/);
+    expect(await old.evaluate(() => (window as unknown as { __doc?: string }).__doc)).toBe(
+      'same-document',
+    );
+    // The device has chosen nothing: light, not A's dark.
+    await expect(old.locator('html')).toHaveAttribute('data-theme', 'light');
+    const loginToggle = old.getByRole('button', SWITCH);
+    await expect(loginToggle).toHaveAttribute('aria-pressed', 'false');
+
+    await loginToggle.click();
+    await loginToggle.click();
+    await loginToggle.click();
+    const cookies = await themeCookies(context);
+    expect(cookies.find((c) => c.name === 'rasta_theme')?.value).toBe('dark');
+    expect(cookies.find((c) => c.name === nameA)?.value).toBe('dark');
+    expect(cookies.map((c) => c.name).sort()).toEqual(['rasta_theme', nameA].sort());
 
     await context.close();
   });

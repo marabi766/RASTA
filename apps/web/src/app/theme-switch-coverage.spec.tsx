@@ -2,6 +2,8 @@ import { render, screen } from '@testing-library/react';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
+import { ThemeOwner } from '@/ui';
+
 import { NoOrganizationScreen } from './account/no-organization/NoOrganizationScreen';
 import { RecoveryScreen } from './account/recovery/RecoveryScreen';
 import { LoginScreen } from './login/LoginScreen';
@@ -46,9 +48,13 @@ describe('the theme switch is on every page', () => {
     (page) => {
       if (page in SHELL_LESS) {
         expect(read(SHELL_LESS[page])).toContain('<ThemeSwitch />');
+        // …and names whose preference it keeps, in the page's own render.
+        expect(read(page)).toContain('<PageThemeOwner');
         return;
       }
       expect(read(page)).toContain('<TopBar');
+      // The shell page names its owner through the sidebar it draws.
+      expect(read(page)).toContain('<PortalSidebar');
     },
   );
 
@@ -64,7 +70,12 @@ describe.each([
   ['the no-organization screen', () => <NoOrganizationScreen csrfToken="c" />],
 ])('%s', (_name, screen_) => {
   it('offers the switch as a plain button, outside any form, after the main action', () => {
-    const { container } = render(screen_());
+    const { container } = render(
+      <>
+        <ThemeOwner cookieName="rasta_theme" secure={false} />
+        {screen_()}
+      </>,
+    );
     const toggle = screen.getByRole('button', { name: 'حالت تیره' });
     expect(toggle).toHaveAttribute('type', 'button');
     expect(toggle).toHaveAttribute('aria-pressed', 'false');
@@ -74,5 +85,24 @@ describe.each([
     const focusable = [...container.querySelectorAll('a[href], button, input, select, textarea')];
     expect(focusable[0]).not.toBe(toggle);
     expect(focusable[focusable.length - 1]).toBe(toggle);
+  });
+});
+
+describe('the owner is delivered by the page, not by the root layout', () => {
+  it('the root layout declares no owner and mounts no provider', () => {
+    const layout = read('layout.tsx');
+    expect(layout).not.toMatch(/<ThemeProvider|<ThemeOwner|<PageThemeOwner/);
+    expect(layout).not.toMatch(/cookieName=/);
+  });
+
+  it('the shell sidebar and the three shell-less pages render it', () => {
+    expect(read('PortalSidebar.tsx')).toContain('<PageThemeOwner subject={session.subject} />');
+    expect(read('login/page.tsx')).toContain('<PageThemeOwner subject={null} />');
+    expect(read('account/recovery/page.tsx')).toContain(
+      '<PageThemeOwner subject={stored.subject} />',
+    );
+    expect(read('account/no-organization/page.tsx')).toContain(
+      '<PageThemeOwner subject={session.subject} />',
+    );
   });
 });

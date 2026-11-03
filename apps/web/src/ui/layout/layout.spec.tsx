@@ -8,6 +8,7 @@ import { Grid } from './Grid';
 import { PageHeader } from './PageHeader';
 import { Section } from './Section';
 import { Sidebar } from './Sidebar';
+import { ThemeOwner } from '../theme/ThemeSwitch';
 import { TopBar } from './TopBar';
 
 const ITEMS = [
@@ -51,7 +52,12 @@ describe('AppShell', () => {
   itSnapshotsInBothDirections('the full shell', () => (
     <AppShell
       topBar={<TopBar organizationName="دهیاری نمونه" />}
-      sidebar={<Sidebar items={ITEMS} currentHref="/assets" />}
+      sidebar={
+        <>
+          <ThemeOwner cookieName="rasta_theme" secure={false} />
+          <Sidebar items={ITEMS} currentHref="/assets" />
+        </>
+      }
     >
       <PageHeader title="ماشین‌آلات" />
     </AppShell>
@@ -60,13 +66,24 @@ describe('AppShell', () => {
 
 describe('TopBar', () => {
   it('carries the light / dark switch before the page’s own controls, with or without them', () => {
-    const { container, rerender } = renderInDirection(<TopBar />, 'rtl');
+    // The page names whose preference the switch keeps (`PageThemeOwner`); without it, no switch.
+    const owner = <ThemeOwner cookieName="rasta_theme" secure={false} />;
+    const { container, rerender } = renderInDirection(
+      <>
+        {owner}
+        <TopBar />
+      </>,
+      'rtl',
+    );
     expect(screen.getByRole('button', { name: 'حالت تیره' })).toHaveAttribute('type', 'button');
 
     rerender(
-      <TopBar>
-        <button type="button">خروج</button>
-      </TopBar>,
+      <>
+        {owner}
+        <TopBar>
+          <button type="button">خروج</button>
+        </TopBar>
+      </>,
     );
     const buttons = [...container.querySelectorAll('header button')].map((b) => b.textContent);
     expect(buttons).toEqual(['حالت تیره', 'خروج']);

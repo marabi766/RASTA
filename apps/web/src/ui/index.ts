@@ -42,7 +42,7 @@ export { Form, useSchemaForm } from './form/Form';
 export { MoneyField } from './form/MoneyField';
 export { TextField } from './form/TextField';
 
-export { ThemeProvider, ThemeSwitch } from './theme/ThemeSwitch';
+export { ThemeOwner, ThemeSwitch } from './theme/ThemeSwitch';
 export {
   DEFAULT_THEME,
   DEVICE_THEME_COOKIE,

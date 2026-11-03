@@ -25,7 +25,7 @@ jest.mock('next/headers', () => ({
 }));
 
 /* eslint-disable @typescript-eslint/no-require-imports */
-const { readThemePreference } = require('./theme') as typeof import('./theme');
+const { readThemePreference, themeOwnerFor } = require('./theme') as typeof import('./theme');
 const { userThemeCookieName } = require('./theme-cookie') as typeof import('./theme-cookie');
 const { sealSession } = require('./session') as typeof import('./session');
 const { actingAccessToken } =
@@ -196,5 +196,41 @@ describe('the Secure flag', () => {
     expect((await readThemePreference()).secure).toBe(false);
     process.env.WEB_COOKIE_SECURE = 'true';
     expect((await readThemePreference()).secure).toBe(true);
+  });
+});
+
+describe('the owner a page declares (themeOwnerFor)', () => {
+  const B = () => userThemeCookieName('USR_B', SECRET);
+
+  it("is the person's own cookie for a signed-in page, the device's for a signed-out one", () => {
+    expect(themeOwnerFor('USR_A')).toEqual({ cookieName: A(), secure: true });
+    expect(themeOwnerFor('USR_B')).toEqual({ cookieName: B(), secure: true });
+    expect(themeOwnerFor(null)).toEqual({ cookieName: DEVICE_THEME_COOKIE, secure: true });
+  });
+
+  it('is computed from the subject given, never from the request or a previous call', () => {
+    // The root layout is kept across a soft navigation; a page's owner is not.
+    signedInAs('USR_A');
+    expect(themeOwnerFor('USR_B')?.cookieName).toBe(B());
+    expect(themeOwnerFor('USR_A')?.cookieName).toBe(A());
+  });
+
+  it('follows WEB_COOKIE_SECURE', () => {
+    process.env.WEB_COOKIE_SECURE = 'false';
+    expect(themeOwnerFor('USR_A')?.secure).toBe(false);
+    process.env.WEB_COOKIE_SECURE = 'true';
+  });
+
+  it('is nothing — no switch — when the name cannot be computed, never the device cookie', () => {
+    const saved = process.env.WEB_SESSION_SECRET;
+    process.env.WEB_SESSION_SECRET = 'short';
+    jest.resetModules();
+    try {
+      /* eslint-disable-next-line @typescript-eslint/no-require-imports */
+      const fresh = require('./theme') as typeof import('./theme');
+      expect(fresh.themeOwnerFor('USR_A')).toBeNull();
+    } finally {
+      process.env.WEB_SESSION_SECRET = saved;
+    }
   });
 });

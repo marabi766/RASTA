@@ -1,30 +1,83 @@
 'use client';
 
-import { createContext, useContext, useSyncExternalStore, type ReactNode } from 'react';
+import { useLayoutEffect, useSyncExternalStore } from 'react';
 
 import { Button } from '../action/Button';
-import { DEVICE_THEME_COOKIE, parseTheme, themeCookie, type Theme } from './theme';
+import { THEME_COOKIE_NAME, parseTheme, resolveTheme, themeCookie, type Theme } from './theme';
 
 /**
- * Where this page keeps the choice: which cookie, and whether it is `Secure`.
- * The root layout knows both (the name is the person's own, an opaque
- * derivation only the server can compute) and hands them down once.
+ * Whose preference this page's switch keeps: which cookie, and whether it is
+ * `Secure`. Every page publishes its own through `ThemeOwner`, rendered by the
+ * same server render as the rest of that page — never by the root layout. Next
+ * keeps the root layout across a soft navigation, so a name handed down once
+ * from there outlives the account it was computed for (PR 595 review, F1); a
+ * name that arrives with the page cannot be older than the page.
  */
-const ThemeStorage = createContext<{ cookieName: string; secure: boolean }>({
-  cookieName: DEVICE_THEME_COOKIE,
-  secure: false,
-});
+interface Owner {
+  readonly cookieName: string;
+  readonly secure: boolean;
+}
 
-export function ThemeProvider({
-  cookieName,
-  secure,
-  children,
-}: {
-  cookieName: string;
-  secure: boolean;
-  children: ReactNode;
-}) {
-  return <ThemeStorage value={{ cookieName, secure }}>{children}</ThemeStorage>;
+let owner: Owner | null = null;
+/** The cookie whose theme the document last took on: `null` before any page has. */
+let applied: string | null = null;
+const ownerWatchers = new Set<() => void>();
+
+function setOwner(next: Owner | null) {
+  owner = next;
+  ownerWatchers.forEach((notify) => notify());
+}
+
+function watchOwner(onChange: () => void): () => void {
+  ownerWatchers.add(onChange);
+  return () => {
+    ownerWatchers.delete(onChange);
+  };
+}
+
+/** The value of one cookie in this document's jar (`document.cookie`), or undefined. */
+function readCookie(name: string): string | undefined {
+  try {
+    for (const pair of document.cookie.split('; ')) {
+      const at = pair.indexOf('=');
+      if (at > 0 && pair.slice(0, at) === name) return pair.slice(at + 1);
+    }
+  } catch {
+    // Cookies are refused: there is nothing stored to read.
+  }
+  return undefined;
+}
+
+/**
+ * Declares, for the page that renders it, whose theme preference its switch
+ * keeps, and makes the document wear that person's theme.
+ *
+ * - **Delivery.** It is part of the page, so a soft navigation to another
+ *   person's page replaces it; an unmount (to a page that does not render one)
+ *   takes the owner away, and a switch with no owner is not drawn — it never
+ *   writes under a name it was not given for this page.
+ * - **Synchronisation.** When the owner is not the one the document last took
+ *   its theme from — the first page, or another account's — the attribute is
+ *   set from that cookie before paint. The attribute is imperative (the
+ *   switch writes it), so React re-rendering the root with an equal
+ *   `data-theme` prop would not correct it. The same owner on the next page
+ *   leaves the attribute as it is: with cookies blocked it is the only
+ *   memory the choice has.
+ */
+export function ThemeOwner({ cookieName, secure }: { cookieName: string; secure: boolean }) {
+  // Only a name the theme may ever use: anything else is no owner (fail closed).
+  const valid = THEME_COOKIE_NAME.test(cookieName);
+  useLayoutEffect(() => {
+    if (!valid) return undefined;
+    if (applied !== cookieName) {
+      document.documentElement.setAttribute('data-theme', resolveTheme(cookieName, readCookie));
+      applied = cookieName;
+      watchers.forEach((notify) => notify());
+    }
+    setOwner({ cookieName, secure });
+    return () => setOwner(null);
+  }, [cookieName, secure, valid]);
+  return null;
 }
 
 /** The theme the document is wearing right now — the attribute is the truth. */
@@ -64,21 +117,28 @@ const never = () => () => undefined;
  * choice, and only the memory of it is lost.
  *
  * The state is read from the attribute, not kept here: every page mounts its
- * own switch, and the document is the one place all of them agree.
+ * own switch, and the document is the one place all of them agree. The cookie
+ * it writes is the one its own page's `ThemeOwner` named.
  *
  * It is drawn after hydration only. Before that it would be a button that does
  * nothing, on exactly the connections where scripts fail; the server HTML
  * already carries the theme, so nothing is lost by its absence.
  */
 export function ThemeSwitch() {
-  const { cookieName, secure } = useContext(ThemeStorage);
   const ready = useSyncExternalStore(
     never,
     () => true,
     () => false,
   );
   const theme = useSyncExternalStore(watchDocumentTheme, documentTheme, () => 'light' as Theme);
-  if (!ready) return null;
+  const keeping = useSyncExternalStore(
+    watchOwner,
+    () => owner,
+    () => null,
+  );
+  // No owner declared by this page: nothing to keep a choice under, so no switch.
+  if (!ready || !keeping) return null;
+  const { cookieName, secure } = keeping;
 
   const choose = () => {
     const next: Theme = theme === 'dark' ? 'light' : 'dark';

@@ -52,6 +52,28 @@ function themeCookieSecure(): boolean {
   return process.env.WEB_COOKIE_SECURE !== 'false';
 }
 
+/**
+ * Where one page's switch keeps its choice: the person's own cookie (the
+ * signed-out page's device cookie for `null`). A page renders this itself
+ * (`app/PageThemeOwner.tsx`) rather than inheriting it from the root layout,
+ * which Next keeps across a soft navigation. `null` when the name cannot be
+ * computed (no secret): the page then has no switch rather than one writing
+ * under a name it was not given.
+ */
+export function themeOwnerFor(
+  subject: string | null,
+): { readonly cookieName: string; readonly secure: boolean } | null {
+  try {
+    const cookieName =
+      subject === null
+        ? DEVICE_THEME_COOKIE
+        : userThemeCookieName(subject, webServerEnv().WEB_SESSION_SECRET);
+    return { cookieName, secure: themeCookieSecure() };
+  } catch {
+    return null;
+  }
+}
+
 /** The theme of the request being rendered, and the cookie that holds it. */
 export async function readThemePreference(): Promise<ThemePreference> {
   const secure = themeCookieSecure();

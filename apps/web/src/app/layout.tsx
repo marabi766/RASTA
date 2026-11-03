@@ -2,7 +2,6 @@ import type { Metadata } from 'next';
 import { Suspense, type ReactNode } from 'react';
 
 import { readThemePreference } from '@/server/theme';
-import { ThemeProvider } from '@/ui';
 
 import { AccountGuard } from './AccountGuard';
 import { vazirmatn } from './fonts';
@@ -35,15 +34,18 @@ export const metadata: Metadata = {
  * decision 2026-10-24). It is in the HTML itself, so the first paint is already
  * the right one, nothing needs an inline script (and so nothing for the content
  * security policy to permit), and it holds with scripts blocked.
+ *
+ * Only the first paint is decided here. This layout is kept across a soft
+ * navigation, so whose preference a page's switch keeps, and the theme after
+ * an account change in the same document, are declared by each page
+ * (`PageThemeOwner`), not by anything above it (PR 595 review, F1).
  */
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  const { theme, cookieName, secure } = await readThemePreference();
+  const { theme } = await readThemePreference();
   return (
     <html lang="fa" dir="rtl" data-theme={theme} className={vazirmatn.variable}>
       <body>
-        <ThemeProvider cookieName={cookieName} secure={secure}>
-          {children}
-        </ThemeProvider>
+        {children}
         <Suspense fallback={null}>
           <AccountGuard />
         </Suspense>

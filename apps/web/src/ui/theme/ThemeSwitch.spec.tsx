@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
-import { ThemeProvider, ThemeSwitch } from './ThemeSwitch';
+import { ThemeOwner, ThemeSwitch } from './ThemeSwitch';
 
 /**
  * The switch writes in place: the attribute on `<html>` and one cookie. It
@@ -30,9 +30,10 @@ beforeEach(() => {
 
 const renderSwitch = () =>
   render(
-    <ThemeProvider cookieName={NAME} secure={false}>
+    <>
+      <ThemeOwner cookieName={NAME} secure={false} />
       <ThemeSwitch />
-    </ThemeProvider>,
+    </>,
   );
 
 const toggle = () => screen.getByRole('button', { name: 'حالت تیره' });
@@ -41,9 +42,8 @@ describe('the theme switch', () => {
   it('is a plain button that can never submit a form around it', () => {
     render(
       <form onSubmit={(event) => event.preventDefault()}>
-        <ThemeProvider cookieName={NAME} secure={false}>
-          <ThemeSwitch />
-        </ThemeProvider>
+        <ThemeOwner cookieName={NAME} secure={false} />
+        <ThemeSwitch />
       </form>,
     );
     expect(toggle()).toHaveAttribute('type', 'button');
@@ -59,7 +59,9 @@ describe('the theme switch', () => {
   });
 
   it('starts pressed when the document already wears dark', () => {
+    // As the server rendered it: the attribute and the person's cookie agree.
     html.setAttribute('data-theme', 'dark');
+    document.cookie = `${NAME}=dark; Path=/`;
     renderSwitch();
     expect(toggle()).toHaveAttribute('aria-pressed', 'true');
   });
@@ -90,13 +92,14 @@ describe('the theme switch', () => {
 
   it('does not remount, so a half-filled form keeps what was typed', () => {
     render(
-      <ThemeProvider cookieName={NAME} secure={false}>
+      <>
+        <ThemeOwner cookieName={NAME} secure={false} />
         <form>
           <input aria-label="مقدار" />
           <input type="hidden" name="submissionId" defaultValue="key-1" />
           <ThemeSwitch />
         </form>
-      </ThemeProvider>,
+      </>,
     );
     const field = screen.getByLabelText('مقدار');
     fireEvent.change(field, { target: { value: '1250' } });
@@ -135,10 +138,10 @@ describe('the theme switch', () => {
     }
   });
 
-  it('writes the device cookie when nothing has told it whose page this is', () => {
+  it('is not drawn when its page named no owner: it never writes under a default name', () => {
     render(<ThemeSwitch />);
-    fireEvent.click(toggle());
-    expect(cookiesOf()).toEqual(['rasta_theme=dark']);
+    expect(screen.queryByRole('button', { name: 'حالت تیره' })).toBeNull();
+    expect(cookiesOf()).toEqual([]);
   });
 
   it('has no accessibility violations in either state', async () => {
@@ -146,5 +149,99 @@ describe('the theme switch', () => {
     expect(await axe(container)).toHaveNoViolations();
     fireEvent.click(toggle());
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+/**
+ * Whose preference a retained document keeps (PR 595 review, F1). The root
+ * layout survives a soft navigation, so the page renders the owner itself:
+ * these tests swap the page under a document that stays — which is exactly
+ * what a Next `<Link>` does — and never rebuild it.
+ */
+describe('the owner a page declares', () => {
+  const A = 'rasta_theme_aaaaaaaaaaaaaaaaaaaaaaaa';
+  const B = 'rasta_theme_bbbbbbbbbbbbbbbbbbbbbbbb';
+  const page = (owner: string | null) => (
+    <>
+      {owner ? <ThemeOwner cookieName={owner} secure={false} /> : null}
+      <ThemeSwitch />
+    </>
+  );
+
+  // Each test starts the document as a fresh load: no owner has ever applied.
+  async function freshDocument() {
+    const first = render(page('rasta_theme_cccccccccccccccccccccccc'));
+    first.unmount();
+    clearCookies();
+    html.setAttribute('data-theme', 'light');
+  }
+  beforeEach(freshDocument);
+
+  it("takes another account's theme from its own cookie, not from the old one's", () => {
+    document.cookie = `${A}=dark; Path=/`;
+    const view = render(page(A));
+    expect(html).toHaveAttribute('data-theme', 'dark');
+    expect(toggle()).toHaveAttribute('aria-pressed', 'true');
+
+    // The same document, the page beneath it replaced by B's, who has no cookie.
+    view.rerender(page(B));
+    expect(html).toHaveAttribute('data-theme', 'light');
+    expect(toggle()).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('corrects an attribute changed by hand, which an equal root prop would leave', () => {
+    // The root layout renders data-theme="light" for A and for B alike: React
+    // sees no change and writes nothing. Only the owner can repair it.
+    const view = render(page(A));
+    fireEvent.click(toggle());
+    expect(html).toHaveAttribute('data-theme', 'dark');
+    view.rerender(page(B));
+    expect(html).toHaveAttribute('data-theme', 'light');
+  });
+
+  it("writes the new owner's cookie after the switch, and leaves the old one's alone", () => {
+    const view = render(page(A));
+    fireEvent.click(toggle());
+    expect(cookiesOf()).toEqual([`${A}=dark`]);
+
+    view.rerender(page(B));
+    fireEvent.click(toggle());
+    fireEvent.click(toggle());
+    fireEvent.click(toggle());
+    expect(cookiesOf().sort()).toEqual([`${A}=dark`, `${B}=dark`]);
+    expect(html).toHaveAttribute('data-theme', 'dark');
+  });
+
+  it('keeps the attribute for the same owner on the next page (cookies blocked)', () => {
+    const view = render(page(A));
+    fireEvent.click(toggle());
+    clearCookies();
+    // The next page of the same person: a new owner element, same name.
+    view.unmount();
+    render(page(A));
+    expect(html).toHaveAttribute('data-theme', 'dark');
+  });
+
+  it('draws no switch once the page that named the owner is gone', () => {
+    const view = render(page(A));
+    expect(toggle()).toBeInTheDocument();
+    view.rerender(page(null));
+    expect(screen.queryByRole('button', { name: 'حالت تیره' })).toBeNull();
+  });
+
+  it('reads only its own cookie: a strictly parsed value, nothing else', () => {
+    document.cookie = `${A}=dark; Path=/`;
+    document.cookie = `${B}=DARK; Path=/`;
+    render(page(B));
+    expect(html).toHaveAttribute('data-theme', 'light');
+  });
+
+  it('is no owner at all for a name the theme may never use', () => {
+    for (const bad of ['session', 'rasta_theme_x', 'rasta_theme; Path=/', '']) {
+      const view = render(page(bad));
+      expect(screen.queryByRole('button', { name: 'حالت تیره' })).toBeNull();
+      view.unmount();
+    }
+    expect(cookiesOf()).toEqual([]);
   });
 });
