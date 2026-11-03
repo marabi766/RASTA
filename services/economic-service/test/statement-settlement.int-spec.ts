@@ -3,7 +3,7 @@ import { inspect } from 'node:util';
 import { Logger } from '@nestjs/common';
 import request from 'supertest';
 import { ulid } from 'ulid';
-import { REDIRECT_CASES, withRedirectProbe } from '@rasta/testing';
+import { REDIRECT_CASES, recordCalls, withRedirectProbe } from '@rasta/testing';
 import { DLQ_HEADERS, DLQ_REASONS, MAX_AMOUNT_MINOR, type EventEnvelope } from '@rasta/contracts';
 import {
   EventConsumer,
@@ -649,6 +649,22 @@ describe('STATEMENT_APPROVED → one settleable obligation (CON-003 PR 6b)', () 
      */
     describe('an owner whose net is malformed', () => {
       const SENTINEL = 'private-invoice-reference-123';
+
+      /**
+       * Positive control for `captureNestLogs`: a line the Nest logger writes while it is active
+       * is in `lines()` — before the restore and after it. A capture that records nothing fails
+       * here instead of letting "the text is nowhere" pass on an empty record.
+       */
+      it('the log capture holds a line a consumer logs, before and after the restore', () => {
+        const nest = captureNestLogs();
+        new Logger('capture-control').warn(`line naming ${SENTINEL}`);
+        expect(nest.lines().join('\n')).toContain(SENTINEL);
+        nest.restore();
+        expect(nest.lines().join('\n')).toContain(SENTINEL);
+        const untouched = captureNestLogs();
+        untouched.restore();
+        expect(untouched.lines()).toEqual([]);
+      });
 
       it.each([
         ['a fractional net', '12.5'],
@@ -1416,13 +1432,19 @@ async function brokerOver(
   };
 }
 
-/** What Nest's `Logger` writes while a test runs — the consumers' own log lines. */
+/**
+ * What Nest's `Logger` writes while a test runs — the consumers' own log lines. `lines()` answers
+ * from a snapshot once `restore()` has run: a restored spy has an empty history, and "the text is
+ * nowhere" would pass on it.
+ */
 function captureNestLogs(): { lines: () => string[]; restore: () => void } {
-  const spies = (['log', 'warn', 'error', 'debug', 'verbose'] as const).map((level) =>
-    jest.spyOn(Logger.prototype, level),
+  const record = recordCalls(
+    (['log', 'warn', 'error', 'debug', 'verbose'] as const).map((level) =>
+      jest.spyOn(Logger.prototype, level),
+    ),
   );
   return {
-    lines: () => spies.flatMap((spy) => spy.mock.calls.map((call) => inspect(call))),
-    restore: () => spies.forEach((spy) => spy.mockRestore()),
+    lines: () => record.calls().map((call) => inspect(call)),
+    restore: () => record.restore(),
   };
 }
