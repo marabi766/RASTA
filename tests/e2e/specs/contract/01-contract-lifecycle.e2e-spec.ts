@@ -824,14 +824,18 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
     projectId = (created.body as { id: string }).id;
 
     const need = await author.post(`/v1/projects/${projectId}/needs`, {
-      body: { title: 'Contractor', description: 'Resurfacing works, two kilometres' },
+      body: {
+        expectedProjectVersion: 1,
+        title: 'Contractor',
+        description: 'Resurfacing works, two kilometres',
+      },
     });
     expect(need.status, JSON.stringify(need.body)).toBe(201);
     expect(
       (
         await author.post(
           `/v1/projects/${projectId}/needs/${(need.body as { id: string }).id}/submit`,
-          { body: { expectedVersion: 1 } },
+          { body: { expectedProjectVersion: 1, expectedVersion: 1 } },
         )
       ).status,
     ).toBe(200);

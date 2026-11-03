@@ -247,6 +247,7 @@ const needUnit = z
 
 export const createNeedSchema = z
   .object({
+    expectedProjectVersion: expectedVersion,
     title: needTitle,
     description: needDescription,
     quantity: needQuantity.optional(),
@@ -257,8 +258,15 @@ export const createNeedSchema = z
 
 export type CreateNeedDto = z.infer<typeof createNeedSchema>;
 
+/** Old completed keys must still replay their original body. New claims require the fence. */
+export const replayableCreateNeedSchema = createNeedSchema.partial({
+  expectedProjectVersion: true,
+});
+export type ReplayableCreateNeedDto = z.infer<typeof replayableCreateNeedSchema>;
+
 export const updateNeedSchema = z
   .object({
+    expectedProjectVersion: expectedVersion,
     expectedVersion,
     title: needTitle.optional(),
     description: needDescription.optional(),
@@ -267,18 +275,30 @@ export const updateNeedSchema = z
     estimatedCostMinor: estimatedCostMinor.nullable().optional(),
   })
   .strict()
-  .refine((value) => Object.keys(value).some((key) => key !== 'expectedVersion'), {
-    message: 'An update must change at least one field',
-  });
+  .refine(
+    (value) =>
+      Object.keys(value).some(
+        (key) => key !== 'expectedVersion' && key !== 'expectedProjectVersion',
+      ),
+    {
+      message: 'An update must change at least one field',
+    },
+  );
 
 export type UpdateNeedDto = z.infer<typeof updateNeedSchema>;
 
-export const submitNeedSchema = z.object({ expectedVersion }).strict();
+export const submitNeedSchema = z
+  .object({
+    expectedProjectVersion: expectedVersion,
+    expectedVersion,
+  })
+  .strict();
 
 export type SubmitNeedDto = z.infer<typeof submitNeedSchema>;
 
 export const withdrawNeedSchema = z
   .object({
+    expectedProjectVersion: expectedVersion,
     expectedVersion,
     reason: statedReason,
   })

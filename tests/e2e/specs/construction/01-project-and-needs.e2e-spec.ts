@@ -153,30 +153,34 @@ test.describe.serial('construction projects and needs (CON-001 PR 1)', () => {
 
   test('a project and its need walk their lifecycle', async ({ tenantA }) => {
     const need = await tenantA.post(`/v1/projects/${projectId}/needs`, {
-      body: { title: 'Gravel', description: 'Base course for two kilometres' },
+      body: {
+        expectedProjectVersion: 1,
+        title: 'Gravel',
+        description: 'Base course for two kilometres',
+      },
     });
     expect(need.status, JSON.stringify(need.body)).toBe(201);
     const drafted = need.body as NeedBody;
     expect(drafted).toMatchObject({ status: 'DRAFT', version: 1 });
 
     const edited = await tenantA.patch(`/v1/projects/${projectId}/needs/${drafted.id}`, {
-      body: { expectedVersion: 1, quantity: '120', unit: 'm3' },
+      body: { expectedProjectVersion: 1, expectedVersion: 1, quantity: '120', unit: 'm3' },
     });
     expect(edited.status, JSON.stringify(edited.body)).toBe(200);
 
     const submitted = await tenantA.post(`/v1/projects/${projectId}/needs/${drafted.id}/submit`, {
-      body: { expectedVersion: 2 },
+      body: { expectedProjectVersion: 1, expectedVersion: 2 },
     });
     expect(submitted.status).toBe(200);
     expect(submitted.body).toMatchObject({ status: 'SUBMITTED', version: 3 });
 
     // A submitted need is immutable: correcting it means withdraw and add anew.
     const frozen = await tenantA.patch(`/v1/projects/${projectId}/needs/${drafted.id}`, {
-      body: { expectedVersion: 3, unit: 'tonne' },
+      body: { expectedProjectVersion: 1, expectedVersion: 3, unit: 'tonne' },
     });
     expect(frozen.status).toBe(422);
     const withdrawn = await tenantA.post(`/v1/projects/${projectId}/needs/${drafted.id}/withdraw`, {
-      body: { expectedVersion: 3, reason: 'Quantity was wrong' },
+      body: { expectedProjectVersion: 1, expectedVersion: 3, reason: 'Quantity was wrong' },
     });
     expect(withdrawn.status).toBe(200);
     expect(withdrawn.body).toMatchObject({ status: 'WITHDRAWN', version: 4 });
@@ -216,7 +220,11 @@ test.describe.serial('construction projects and needs (CON-001 PR 1)', () => {
         }),
       () =>
         tenantB.post(`/v1/projects/${projectId}/needs`, {
-          body: { title: 'Probe title', description: 'Probe description' },
+          body: {
+            expectedProjectVersion: 1,
+            title: 'Probe title',
+            description: 'Probe description',
+          },
         }),
       () =>
         tenantB.post(`/v1/projects/${projectId}/cancel`, {

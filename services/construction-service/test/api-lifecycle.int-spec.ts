@@ -92,12 +92,12 @@ describe('construction HTTP API — approvals, execution and progress', () => {
     const need = await http()
       .post(`/v1/projects/${project.body.id}/needs`)
       .set('authorization', `Bearer ${token}`)
-      .send({ title: 'Gravel', description: 'Base course' })
+      .send({ expectedProjectVersion: 1, title: 'Gravel', description: 'Base course' })
       .expect(201);
     await http()
       .post(`/v1/projects/${project.body.id}/needs/${need.body.id}/submit`)
       .set('authorization', `Bearer ${token}`)
-      .send({ expectedVersion: 1 })
+      .send({ expectedProjectVersion: 1, expectedVersion: 1 })
       .expect(200);
     return { id: project.body.id, version: project.body.version };
   }
