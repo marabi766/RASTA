@@ -1,3 +1,4 @@
+import { ownText } from './own-key';
 /**
  * Return requests in the portal (EXP-003, RUN-005; ADR-048) — the closed
  * vocabularies, their Persian wording, and the fixed sentences every refusal
@@ -116,7 +117,7 @@ export const ORDER_LINE_ID_MAX = 64;
 export const REASON_FIELD = 'reason';
 
 /** The form field of one order line's quantity to return. */
-export function quantityField(orderLineId: string): string {
+export function quantityField(orderLineId: string): `quantity.${string}` {
   return `quantity.${orderLineId}`;
 }
 
@@ -219,9 +220,7 @@ const RETURN_SHIPMENT_STATUS_LABELS: Readonly<Record<ReturnShipmentStatus, strin
 };
 
 export function returnShipmentStatusLabel(status: string): string {
-  return (RETURN_SHIPMENT_STATUSES as readonly string[]).includes(status)
-    ? RETURN_SHIPMENT_STATUS_LABELS[status as ReturnShipmentStatus]
-    : status;
+  return ownText(RETURN_SHIPMENT_STATUS_LABELS, status) ?? status;
 }
 
 /** `RETURN_DISPOSITIONS` (`@rasta/contracts`): what became of received units — a record, not stock. */
@@ -245,7 +244,5 @@ const RETURN_DISPOSITION_LABELS: Readonly<Record<ReturnDisposition, string>> = {
 };
 
 export function returnDispositionLabel(disposition: string): string {
-  return (RETURN_DISPOSITIONS as readonly string[]).includes(disposition)
-    ? RETURN_DISPOSITION_LABELS[disposition as ReturnDisposition]
-    : disposition;
+  return ownText(RETURN_DISPOSITION_LABELS, disposition) ?? disposition;
 }

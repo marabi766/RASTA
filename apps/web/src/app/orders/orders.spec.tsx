@@ -98,6 +98,16 @@ beforeEach(() => {
 
 // ---------------------------------------------------------------------------
 
+describe('a status named like an Object.prototype member (Codex PR-439 r1 F2)', () => {
+  it.each(['__proto__', 'constructor', 'toString'])(
+    'renders order status %s without a branch note',
+    (status) => {
+      expect(() => renderDetail({ ...ORDER, status })).not.toThrow();
+      expect(screen.getByText('فیلتر روغن')).toBeInTheDocument();
+    },
+  );
+});
+
 describe('one order, two viewers', () => {
   it('shows the buyer the command that releases money, once the goods are delivered', () => {
     renderDetail({ ...ORDER, availableActions: ['CONFIRM_RECEIPT', 'RAISE_DISPUTE', 'CANCEL'] });

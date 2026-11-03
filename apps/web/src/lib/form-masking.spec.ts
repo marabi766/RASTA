@@ -36,9 +36,10 @@ import { firstIssuePerField, GENERIC_FIELD_MESSAGE } from './form-issues';
  * `criteriaMode: 'all'`), `firstIssuePerField` and the branch trees, with
  * every error object and tree serialized and inspected.
  *
- * Explicit exceptions, as before: a record key stays in paths (it is the
- * form's field name), and a message the author built from the input repeats
- * it, at the top level and in an option alike.
+ * One explicit exception: a record key stays in paths (it is the form's
+ * field name). A message the author built from the input is no longer one
+ * (Codex PR-439 r1 F1): nobody declared it (`formMessage`), so it is masked
+ * like a default, at the top level and in an option alike.
  */
 
 const MATRIX = join(__dirname, '../test/form-masking-matrix.ts');
@@ -180,12 +181,17 @@ describe.each(RUNS)('form messages decided by provenance (PR #444 r5 F6), %s', (
     expect(JSON.stringify({ errors, fields })).not.toContain(AUTHORED_IN_FALLBACK);
   });
 
-  it('shows a Persian message the schema wrote as written, static or built from the input', async () => {
+  it('shows a Persian sentence the schema author declared as written', async () => {
     expectShownAsWritten(await matrix({ kind: 'static', text: AUTHORED }), () => AUTHORED);
-    // The author's own sentence repeats the input: shown, as before (the explicit exception).
-    expectShownAsWritten(await matrix({ kind: 'dynamic' }), (each) =>
-      dynamicMessage(inputOf(each)),
-    );
+  });
+
+  it('masks an author’s sentence built from the input, Persian and all (PR-439 r1 F1)', async () => {
+    const cases = await matrix({ kind: 'dynamic' });
+    expectMasked(cases);
+    for (const each of cases) {
+      const echo = dynamicMessage(inputOf(each));
+      expect([...each.texts, ...each.messages].some((text) => text.includes(echo))).toBe(false);
+    }
   });
 });
 

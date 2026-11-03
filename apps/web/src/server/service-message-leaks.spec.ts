@@ -1,24 +1,12 @@
 /**
  * @jest-environment node
  */
-import * as assetCommands from './asset-commands';
-import * as assetDocuments from './asset-documents';
-import * as assetLifecycle from './asset-lifecycle-commands';
-import * as assetRecords from './asset-records';
-import * as assignments from './assignments';
-import * as contractCommands from './contract-commands';
 import * as drivers from './drivers';
-import * as fleetAvailability from './fleet-availability';
 import * as maintenanceCommands from './maintenance-commands';
-import * as members from './members';
 import * as orders from './orders';
-import * as organizations from './organizations';
-import * as placeOrder from './place-order';
-import * as repairOrders from './repair-order-commands';
-import * as returns from './returns';
-import * as transactions from './transactions';
 import * as usage from './usage';
-import * as wallet from './wallet';
+import { KNOWN_MAPPINGS, resolveMappings } from '@/test/entry-points';
+
 import { GENERIC_REFUSAL_MESSAGE, mapProblemToFields, type FieldMapping } from './write';
 
 /**
@@ -30,50 +18,28 @@ import { GENERIC_REFUSAL_MESSAGE, mapProblemToFields, type FieldMapping } from '
  * server.
  */
 
-const MODULES = [
-  assetCommands,
-  assetDocuments,
-  assetLifecycle,
-  assetRecords,
-  assignments,
-  contractCommands,
-  drivers,
-  fleetAvailability,
-  maintenanceCommands,
-  members,
-  orders,
-  organizations,
-  placeOrder,
-  repairOrders,
-  returns,
-  transactions,
-  usage,
-  wallet,
-];
-
-const MAPPINGS: ReadonlyArray<readonly [string, FieldMapping<string>]> = MODULES.flatMap((module) =>
-  Object.entries(module)
-    .filter(
-      ([name, value]) =>
-        /MAPPING$/.test(name) &&
-        typeof value === 'object' &&
-        value !== null &&
-        'paths' in (value as object),
-    )
-    .map(([name, value]) => [name, value as FieldMapping<string>] as const),
-);
+// Every FieldMapping declaration — exported constants, factories and private
+// constants alike, in any directory — found, not listed (test/entry-points.ts).
+const RESOLVED = resolveMappings();
+const MAPPINGS: ReadonlyArray<readonly [string, FieldMapping<string>]> = RESOLVED.mappings;
 
 const LATIN_WORD = /[A-Za-z]{3,}/;
 
 describe('every write module’s mapping', () => {
-  it('is found: the sweep below is not vacuous', () => {
-    expect(MAPPINGS.length).toBeGreaterThanOrEqual(20);
+  it('is found: the sweep below is not vacuous, and nothing is left out (PR-439 r1 F4)', () => {
+    expect(RESOLVED.unaccounted).toEqual([]);
+    expect(RESOLVED.stale).toEqual([]);
+    expect(RESOLVED.discovered).toEqual(expect.arrayContaining([...KNOWN_MAPPINGS]));
+    expect(MAPPINGS.length).toBeGreaterThanOrEqual(40);
     expect(MAPPINGS.map(([name]) => name)).toEqual(
       expect.arrayContaining([
-        'USAGE_FIELD_MAPPING',
-        'ORDER_COMMAND_FIELD_MAPPING',
-        'CREATE_DRIVER_FIELD_MAPPING',
-        'REPORT_REQUEST_FIELD_MAPPING',
+        'server/usage:USAGE_FIELD_MAPPING',
+        'server/orders:ORDER_COMMAND_FIELD_MAPPING',
+        'server/drivers:CREATE_DRIVER_FIELD_MAPPING',
+        'server/maintenance-commands:REPORT_REQUEST_FIELD_MAPPING',
+        'server/fleet-availability:REVOKE_MAPPING',
+        'server/tender-bids:bidFieldMapping#1',
+        'server/tender-owner:mappingFor#0',
       ]),
     );
   });

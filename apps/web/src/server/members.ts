@@ -16,6 +16,7 @@ import { webServerEnv } from './env';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * The people in the organization this session is acting for, and the two
@@ -140,20 +141,20 @@ export function updateMemberRolesFormValues(form: FormData): UpdateMemberRolesFo
 export const MAX_POSTED_ROLES = 50;
 
 export const updateMemberRolesFormSchema = z.object({
-  membershipId: z.string().trim().min(1, 'عضویت مشخص نیست'),
+  membershipId: z.string().trim().min(1, formMessage('عضویت مشخص نیست')),
   roles: z
     .array(z.string().trim().min(1))
-    .min(1, 'دست‌کم یک نقش را انتخاب کنید')
+    .min(1, formMessage('دست‌کم یک نقش را انتخاب کنید'))
     // Before the de-duplication below: what a posted form may carry at all
     // (GHSA-mrhx-c7xc-m3w5). See MAX_POSTED_ROLES.
-    .max(MAX_POSTED_ROLES, 'تعداد نقش‌های فرستاده‌شده بیش از حد است')
+    .max(MAX_POSTED_ROLES, formMessage('تعداد نقش‌های فرستاده‌شده بیش از حد است'))
     // A checkbox group can post the same value twice if the page is malformed.
     .transform((roles) => [...new Set(roles)]),
   reason: z
     .string()
     .trim()
-    .min(3, 'دلیل تغییر نقش را بنویسید')
-    .max(500, 'دلیل نباید بیش از ۵۰۰ نویسه باشد'),
+    .min(3, formMessage('دلیل تغییر نقش را بنویسید'))
+    .max(500, formMessage('دلیل نباید بیش از ۵۰۰ نویسه باشد')),
 });
 
 export type UpdateMemberRolesRequest = z.infer<typeof updateMemberRolesFormSchema>;
@@ -214,12 +215,12 @@ export function revokeMembershipFormValues(form: FormData): RevokeMembershipForm
 }
 
 export const revokeMembershipFormSchema = z.object({
-  membershipId: z.string().trim().min(1, 'عضویت مشخص نیست'),
+  membershipId: z.string().trim().min(1, formMessage('عضویت مشخص نیست')),
   reason: z
     .string()
     .trim()
-    .min(3, 'دلیل ابطال عضویت را بنویسید')
-    .max(500, 'دلیل نباید بیش از ۵۰۰ نویسه باشد'),
+    .min(3, formMessage('دلیل ابطال عضویت را بنویسید'))
+    .max(500, formMessage('دلیل نباید بیش از ۵۰۰ نویسه باشد')),
 });
 
 export type RevokeMembershipRequest = z.infer<typeof revokeMembershipFormSchema>;

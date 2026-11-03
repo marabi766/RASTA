@@ -4,7 +4,13 @@ import { useState } from 'react';
 import type { ReactNode } from 'react';
 import type { FieldPath, FieldValues, UseFormReturn } from 'react-hook-form';
 
-import { IRR, MoneyInputError, formatMoney, parseMoneyInput } from '@/lib/format';
+import {
+  IRR,
+  MoneyInputError,
+  formatMoney,
+  moneyInputMessage,
+  parseMoneyInput,
+} from '@/lib/format';
 import type { CurrencyFormat } from '@/lib/format/money';
 
 import { Field, controlClassName } from './Field';
@@ -80,7 +86,7 @@ export function MoneyField<TValues extends FieldValues>({
         // it did not parse is the fastest way to make them retype a long
         // number they had almost right.
         setDraft(raw);
-        setParseError(cause.message);
+        setParseError(moneyInputMessage(cause.failure, currency));
         return;
       }
       throw cause;

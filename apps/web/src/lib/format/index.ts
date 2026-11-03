@@ -28,7 +28,8 @@ export {
 } from './datetime';
 export type { DateFormatOptions } from './datetime';
 
-export { IRR, MoneyInputError, formatMoney, parseMoneyInput } from './money';
+export { IRR, MoneyInputError, formatMoney, moneyInputMessage, parseMoneyInput } from './money';
+export type { MoneyInputFailure } from './money';
 export type { CurrencyFormat, FormatMoneyOptions } from './money';
 
 export { formatScaledDecimal, parseScaledDecimalInput } from './decimal';

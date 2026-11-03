@@ -1,3 +1,4 @@
+import { ownValue } from '@/lib/own-key';
 /**
  * The shape of every `/organizations` form: field names, blank value sets, and
  * the Persian labels for the roles a member can hold.
@@ -107,7 +108,7 @@ export const ROLE_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function roleLabel(role: string): string {
-  return ROLE_LABELS[role] ?? role;
+  return ownValue(ROLE_LABELS, role) ?? role;
 }
 
 /**
@@ -123,7 +124,7 @@ export const USER_STATUS_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function userStatusLabel(status: string): string {
-  return USER_STATUS_LABELS[status] ?? status;
+  return ownValue(USER_STATUS_LABELS, status) ?? status;
 }
 
 /** Persian names for membership status, same fallback rule. */
@@ -134,5 +135,5 @@ export const MEMBERSHIP_STATUS_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function membershipStatusLabel(status: string): string {
-  return MEMBERSHIP_STATUS_LABELS[status] ?? status;
+  return ownValue(MEMBERSHIP_STATUS_LABELS, status) ?? status;
 }

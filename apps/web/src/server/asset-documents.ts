@@ -22,6 +22,7 @@ import { putToSignedUrl } from './signed-url-upload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 import { rolesGuardAdmits } from './roles-guard';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * A machine's documents, through the gateway (EXP-002, slice 7; ADR-058 § 3,
@@ -278,7 +279,7 @@ export function attachDocumentFormValues(form: FormData): AttachDocumentFormValu
 export const attachDocumentFormSchema = z
   .object({
     kind: z.enum(DOCUMENT_KINDS, {
-      error: 'نوع مدرک را از فهرست انتخاب کنید',
+      error: formMessage('نوع مدرک را از فهرست انتخاب کنید'),
     }),
     title: displayText('عنوان', DOCUMENT_BOUNDS.title.min, DOCUMENT_BOUNDS.title.max).refine(
       (value) => !BIDI_CONTROL.test(value),
