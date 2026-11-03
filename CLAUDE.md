@@ -124,7 +124,15 @@ selects every workspace. Contracts tests hash repository inputs as well. The pla
 invokes only an installed native Turbo binary and refuses missing binaries or
 incomplete dependent closures. Run from the worktree root after
 `pnpm install --frozen-lockfile`; an invalid base or Turbo result refuses selection.
-The executor and CI-parity guard remain follow-up work.
+`pnpm run prepush:parity --base origin/main` recomputes selection and runs the
+scope and parity suites serially in a controlled environment, then verifies the
+selection and execution inputs again. `scripts/prepush-parity.json` explicitly
+accounts for every quality-job step, including exclusions with reasons. Command,
+environment, condition or failure-handling drift refuses until reviewed. This is
+an incomplete parity slice, not the full pre-push gate: package checks, static
+checks, prerequisites and measured cold/warm timings remain slice C. No old
+selection file is accepted; executed root test scripts are checked against their
+manifest and launched directly with Node, without package-manager hooks or .env.
 
 ## Coding Standards
 
