@@ -409,9 +409,13 @@ describe('payment-reconciliation evidence (real PostgreSQL)', () => {
     }
 
     beforeAll(() => {
-      monitor = new ReconciliationEvidenceMonitor(new AuditRepository(prisma), {
-        AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: 24,
-      } as never);
+      monitor = new ReconciliationEvidenceMonitor(
+        new AuditRepository(prisma),
+        {
+          AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: 24,
+        } as never,
+        prisma,
+      );
     });
 
     it('counts an audit row with no evidence row, exports it, and keeps counting after a redelivery', async () => {
