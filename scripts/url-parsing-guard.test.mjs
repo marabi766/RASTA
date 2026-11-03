@@ -22,7 +22,8 @@
 // -----------------------------------------------------------------------------
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CLI_CONTRACT, OTHER_NAMED_LIKE_CREDENTIALS, VALUE_KINDS } from './cli-contract.mjs';
@@ -38,6 +39,8 @@ import {
 } from './url-parsing-guard-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+let scannedRepository;
+const repositorySites = () => (scannedRepository ??= repositoryUrlParses(ROOT));
 
 /** Each parse of a non-literal that stays, and why it cannot carry configuration. */
 const ALLOWED = Object.freeze([
@@ -147,6 +150,145 @@ const ALLOWED = Object.freeze([
     file: 'tests/e2e/src/target-guard.ts',
     call: 'new URL(value)',
     reason: 'inside try/catch returning undefined: the native error is discarded',
+  },
+  {
+    file: 'apps/web/next.config.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason: 'loads only the local upload-limit.cjs constant from this repository',
+  },
+  {
+    file: 'apps/web/scripts/build-run.mjs',
+    call: "createRequire(join(options.nextFrom ?? webDir, 'package.json'))",
+    reason:
+      'resolves only next/dist/bin/next from the build workspace; it does not load a URL parser',
+  },
+  {
+    file: 'apps/web/src/test/setup.ts',
+    call: 'Object.assign(globalThis, { TextEncoder: globalThis.TextEncoder ?? TextEncoder, TextDecoder: globalThis.TextDecoder ?? TextDecoder, })',
+    reason:
+      'installs only TextEncoder/TextDecoder test globals with static keys; no parser is read or returned',
+  },
+  {
+    file: 'packages/observability/src/__tests__/telemetry-boundary.fixture.ts',
+    call: "createRequire(require.resolve('@opentelemetry/sdk-node'))",
+    reason:
+      'test fixture resolves the pinned SDK api-logs dependency to exercise telemetry refusal',
+  },
+  {
+    file: 'packages/testing/src/disclosure-guard.ts',
+    call: "( globalThis as unknown as Record<symbol, { matchers?: Record<string, BuiltIn> } | undefined> )[Symbol.for('$$jest-matchers-object')]",
+    reason:
+      'reads only the fixed Jest matcher registry symbol to install disclosure assertion guards',
+  },
+  {
+    file: 'scripts/aggregation-evidence.mjs',
+    call: "createRequire(join(packageDir, 'package.json'))",
+    reason: 'resolves only jest/package.json for the selected repository package',
+  },
+  {
+    file: 'scripts/broker-default-delete.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason: 'loads pinned KafkaJS transport and codec internals for the disposable-broker harness',
+  },
+  {
+    file: 'scripts/check-kafka-topic-limits.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason: 'loads only the built repository contracts package for topic limits',
+  },
+  {
+    file: 'scripts/check-test-phases.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason: 'loads only repository Jest configuration to verify test phase registration',
+    line: 53,
+  },
+  {
+    file: 'scripts/check-test-phases.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason: 'loads only repository Jest configuration to verify test phase registration',
+    line: 78,
+  },
+  {
+    file: 'scripts/kafka-acl-generate.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason: 'loads only the built repository contracts package to generate broker ACL documents',
+  },
+  {
+    file: 'scripts/outbox-b2-backfill.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason: 'loads only the built config package to enforce the owner-credential startup gate',
+  },
+  {
+    file: 'scripts/outbox-b2-prisma-port.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason:
+      'loads the repository runtime-role gate or the selected service generated Prisma client',
+  },
+  {
+    file: 'scripts/outbox-b2-prisma-port.mjs',
+    call: "createRequire(join(serviceDir, 'package.json'))",
+    reason:
+      'loads the repository runtime-role gate or the selected service generated Prisma client',
+  },
+  {
+    file: 'scripts/replay-dlq.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason: 'loads only the built repository contracts package to validate replay envelopes',
+  },
+  {
+    file: 'scripts/run-test-phases.mjs',
+    call: "createRequire(join(root, 'package.json'))",
+    reason: 'resolves only turbo/package.json to select the installed test runner',
+  },
+  {
+    file: 'scripts/runtime-preflight.e2e.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason:
+      'loads repository config/nest-common and its KafkaJS dependency for the runtime preflight harness',
+  },
+  {
+    file: 'scripts/testing-dev-only-source.mjs',
+    call: "createRequire(join(workspace, 'package.json'))",
+    reason:
+      'resolves package paths and hashes pinned Prisma runtime sources for the production dependency guard',
+  },
+  {
+    file: 'scripts/testing-dev-only-source.mjs',
+    call: 'createRequire(file)',
+    reason:
+      'resolves package paths and hashes pinned Prisma runtime sources for the production dependency guard',
+  },
+  {
+    file: 'scripts/verify-audit-correction-command-migration.mjs',
+    call: "createRequire(join(SERVICE_DIR, 'package.json'))",
+    reason:
+      'resolves only prisma/package.json from the audit service for the reversible migration harness',
+  },
+  {
+    file: 'scripts/verify-migration-reversible.mjs',
+    call: "createRequire(join(serviceDir, 'package.json'))",
+    reason: 'resolves only prisma/package.json from the selected service for reversible migrations',
+  },
+  {
+    file: 'scripts/verify-outbox-claim-migration.mjs',
+    call: "createRequire(join(serviceDir, 'package.json'))",
+    reason:
+      'resolves only prisma/package.json from the selected service for the outbox claim migration harness',
+  },
+  {
+    file: 'scripts/verify-security-event-outbox-migration.mjs',
+    call: "createRequire(join(SERVICE_DIR, 'package.json'))",
+    reason:
+      'resolves only prisma/package.json from the identity service for the security outbox migration harness',
+  },
+  {
+    file: 'scripts/verify-test-independence.mjs',
+    call: "createRequire(path.join(cwd, 'noop.js'))",
+    reason: 'resolves Jest and reads its manifest to run the test independence harness',
+  },
+  {
+    file: 'scripts/verify-test-independence.mjs',
+    call: 'createRequire(import.meta.url)',
+    reason: 'resolves Jest and reads its manifest to run the test independence harness',
   },
 ]);
 
@@ -262,6 +404,165 @@ for (const [form, escape, kind] of ESCAPES) {
   });
 }
 
+// F2 acceptance fixtures go through the real repository walker, in each source
+// extension/tree, including fixtures without URL/module text (addendum A).
+const F2 = [
+  ['shadowed sibling', 'function f(URL){new URL(env.X)} function g(){new globalThis.URL(env.X)}'],
+  ['instance constructor', "const base=new URL('http://ok'); new base.constructor(env.X)"],
+  ['loader re-export', "export {createRequire as load} from 'node:module'"],
+  ['vm re-export', "export * from 'node:vm'"],
+  ['computed destructuring', "const {['URL']: U}=globalThis; new U(env.X)"],
+  ['nested global destructuring', 'const {globalThis: {URL: U}}=globalThis; new U(env.X)'],
+  ['prototype constructor', 'const {prototype: {constructor: U}}=URL; new U(env.X)'],
+  ['prototype alias', 'const {constructor: U}=URL.prototype; new U(env.X)'],
+  ['global alias', 'const g=globalThis; new g[k](env.X)'],
+  ['Reflect.get', "const U=Reflect.get(globalThis,'URL'); new U(env.X)"],
+  [
+    'createRequire alias',
+    "import {createRequire as cr} from 'node:module'; const load=cr(import.meta.url); load('node:url').parse(env.X)",
+  ],
+  ['builtin module', "process.getBuiltinModule('node:url').parse(env.X)"],
+  ['default re-export', "export {default as u} from 'node:url'"],
+  ['eval', 'eval(code)'],
+  ['Function', 'Function(code)()'],
+  ['new Function', 'new Function(code)()'],
+  ['vm', "import vm from 'node:vm'; vm.runInThisContext(code)"],
+  ['vm import only', "import 'node:vm'"],
+  ['vm import expression', "await import('node:vm')"],
+  ['dynamic vm', "const vm=await import('node:vm'); vm.runInThisContext(code)"],
+  ['mutation', "const base=new URL('http://ok'); base.href=env.X"],
+  ['mutation alias', "const base=new URL('http://ok'); const alias=base; alias['href']=env.X"],
+];
+for (const [label, source] of F2) {
+  test(`repository scanner refuses F2 ${label}`, () => {
+    const root = mkdtempSync(join(tmpdir(), 'url-guard-'));
+    try {
+      for (const tree of ['scripts', 'packages', 'services', 'apps', 'tests'])
+        mkdirSync(join(root, tree));
+      const files = [
+        'scripts/a.mjs',
+        'packages/a.cts',
+        'services/a.ts',
+        'apps/a.tsx',
+        'tests/a.cjs',
+        'scripts/a.js',
+        'packages/a.mts',
+        'apps/a.jsx',
+      ];
+      for (const file of files) writeFileSync(join(root, file), source);
+      const found = repositoryUrlParses(root);
+      if (
+        [
+          'computed destructuring',
+          'nested global destructuring',
+          'prototype constructor',
+          'prototype alias',
+        ].includes(label)
+      ) {
+        for (const file of files)
+          assert.ok(
+            found.some((site) => site.file === file && site.kind === 'new URL'),
+            `${label}: native binding in ${file}`,
+          );
+      }
+      for (const file of files)
+        assert.ok(
+          found.some((site) => site.file === file),
+          `${label}: ${file}`,
+        );
+      assert.ok(unlistedUrlParses(found, []).unlisted.length >= files.length);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test('lexical shadowing permits unrelated URL values and preserves sibling native parses', () => {
+  for (const local of [
+    'function f(URL) { return new URL(env.X); }',
+    'const x={URL: Custom}; const {URL: U}=x; new U(env.X); new x.URL(env.X);',
+    "import { URL } from './local.js'; new URL(env.X);",
+    'function f() { const URL=Custom; return new URL(env.X); }',
+  ]) {
+    assert.deepEqual(sites(local), [], local);
+    assert.deepEqual(sites(`${local} function sibling(){ return new globalThis.URL(env.X) }`), [
+      'new URL',
+    ]);
+    assert.deepEqual(
+      sites(`${local} new URL(env.X);`),
+      local.includes('import') ? [] : ['new URL'],
+    );
+  }
+  assert.deepEqual(
+    sites("import {URL as U} from 'node:url'; function f(U){new U(env.X)} new U(env.X)"),
+    ['new URL'],
+  );
+});
+
+test('one expression exemption cannot cover duplicates, neighbours, or a whole loader file', () => {
+  const found = rawUrlParses('eval(code);\neval(code);\nnew URL(env.X)', 'a.mjs');
+  const entry = { file: 'a.mjs', call: 'eval(code)', reason: 'reviewed test expression' };
+  assert.equal(unlistedUrlParses(found, [entry]).unlisted.length, 3);
+  assert.equal(unlistedUrlParses(found, [entry]).stale.length, 1);
+  assert.equal(unlistedUrlParses(found, [{ ...entry, line: 1 }]).unlisted.length, 2);
+  assert.equal(unlistedUrlParses(found, [{ ...entry, line: 9 }]).stale.length, 1);
+  const loader = rawUrlParses(
+    "import {createRequire} from 'node:module'; const req=createRequire(import.meta.url); new URL(env.X)",
+    'a.mjs',
+  );
+  assert.deepEqual(
+    unlistedUrlParses(loader, [{ ...entry, call: 'createRequire(import.meta.url)' }]).unlisted.map(
+      (site) => site.kind,
+    ),
+    ['new URL'],
+  );
+});
+
+test('an exempt loader factory still exposes an aliased node:url parse', () => {
+  const source =
+    "import {createRequire as cr} from 'node:module'; const load=cr(import.meta.url); load('node:url').parse(env.X)";
+  const found = rawUrlParses(source, 'a.mjs');
+  const { unlisted, stale } = unlistedUrlParses(found, [
+    { file: 'a.mjs', call: 'cr(import.meta.url)', reason: 'reviewed factory only' },
+  ]);
+  assert.deepEqual(stale, []);
+  assert.ok(unlisted.some((site) => site.kind === 'url.parse'));
+});
+
+for (const [label, source] of [
+  ['imported argv', "import {argv as args} from 'node:process'; args.slice(2);"],
+  ['destructured argv', 'const {argv: args}=process; args.slice(2);'],
+  ['namespace argv', "import * as p from 'node:process'; const args=p.argv; args.slice(2);"],
+  [
+    'namespace parseArgs',
+    "import * as u from 'node:util'; u.parseArgs({options:{endpoint:{type:'string'}}});",
+  ],
+  [
+    'CommonJS parseArgs',
+    "const u=require('node:util'); u.parseArgs({options:{endpoint:{type:'string'}}});",
+  ],
+  [
+    'destructured parseArgs',
+    "const {parseArgs: p}=require('util'); p({options:{endpoint:{type:'string'}}});",
+  ],
+]) {
+  test(`CLI discovery refuses unregistered F2 ${label}`, () => {
+    const surface = commandLineSurface(source, 'a.mjs');
+    assert.equal(surface.readsArgv, true);
+    if (label.includes('parseArgs')) assert.deepEqual(surface.options, ['--endpoint']);
+    assert.equal(contractProblems(new Map([['a.mjs', surface]]), {}, {}, {}).length, 1);
+    if (surface.options.length)
+      assert.ok(
+        contractProblems(
+          new Map([['a.mjs', surface]]),
+          { 'a.mjs': { accepts: { '--endpoint': 'string' }, positionals: [] } },
+          { string: 'text' },
+          {},
+        ).includes('a.mjs: accepts --endpoint'),
+      );
+  });
+}
+
 test('literals, import.meta.url, comments and other parse methods are not sites', () => {
   assert.deepEqual(sites("new URL('http://localhost:3000/x')"), []);
   assert.deepEqual(sites('new URL(`http://localhost/x`)'), []);
@@ -324,7 +625,7 @@ test('every scanned tree is non-empty, and the reader itself is found', () => {
     );
   }
   // The reader's own two parses are seen: the scan reaches packages/config/src.
-  const reader = repositoryUrlParses(ROOT).filter(
+  const reader = repositorySites().filter(
     (site) => site.file === 'packages/config/src/url-reader.js',
   );
   assert.equal(reader.length, 2);
@@ -334,7 +635,7 @@ test('no native URL parse of configuration outside the reader (allow-list aside)
   for (const entry of ALLOWED) {
     assert.ok(entry.reason.length > 20, `${entry.file}: an allow-list entry needs a reason`);
   }
-  const { unlisted, stale } = unlistedUrlParses(repositoryUrlParses(ROOT), ALLOWED);
+  const { unlisted, stale } = unlistedUrlParses(repositorySites(), ALLOWED);
   assert.deepEqual(
     unlisted.map((site) => `${site.file}:${site.line} ${site.call}`),
     [],
