@@ -479,7 +479,7 @@ Hash یکسانِ دو بدنهٔ یکسان به خوانندهٔ پایگاه 
 انقضایش (`CONSTRUCTION_IDEMPOTENCY_TTL_HOURS`، پیش‌فرض ۲۴ ساعت) تکرار با آن کلید برای همه — خود نویسنده هم — `409
 IDEMPOTENCY_KEY_REUSED` است؛ بازپخش نمی‌شود و چیزی دوباره ساخته نمی‌شود.
 
-**ددلاین بازپخش: `Idempotency-Replay-Deadline` (construction، فقط `POST /v1/projects`؛ تصمیم PM D-065).** کلیدِ منقضی‌شده دوباره قابل
+**ددلاین بازپخش: `Idempotency-Replay-Deadline` (construction، `POST /v1/projects` و `POST /v1/projects/{id}/needs`؛ تصمیم PM D-065).** کلیدِ منقضی‌شده دوباره قابل
 استفاده است؛ برای فراخوانی که درخواستی را بازمی‌فرستد که شاید Commit شده، یعنی بار دوم همان درخواست «تازه» اجرا می‌شود. هیچ فراخوانی این را
 تنها با ساعت خودش نمی‌بندد (پرش ساعت، توقف فرایند، اختلاف ساعت replicaها)، پس سرویس مالک آن را با **همان ساعتی** می‌بندد که کلید را منقضی
 می‌کند. هدر: یک عدد صحیح **متعارف** (میلی‌ثانیه از epoch، بی علامت، بی صفر آغازین، بی فاصله، یک‌بار) و فقط همراه `Idempotency-Key`؛ ناقص،
@@ -505,6 +505,18 @@ Claim از آن پیروی می‌کنند، چه درخواست هم‌خوان
 که پیش از استقرار پاک شده رفتار امروز را دارند (کلید منقضی دوباره قابل استفاده است)؛ تضمین فقط درخواست‌های هدردار پس از استقرار را می‌پوشاند و
 پنجره‌ی فراخوان باید از نگهداشت کوتاه‌تر باشد. فرمان‌های بازپخش‌پذیر دیگر (پیشنهاد، مالک مناقصه، بازگشت، اختلاف، صورت‌حساب، فرمان قرارداد) هنوز
 این مرز را ندارند.
+
+Need command parent fence (task 879): add, update, submit and withdraw require
+`expectedProjectVersion`, an integer from 1 through 2147483647. The service checks it under the
+existing tenant-scoped project row lock, before editability and no-op checks. A mismatch returns
+`409 OPTIMISTIC_LOCK_FAILED`, with no current version or key details and no domain/outbox writes.
+Need writes leave the project version unchanged. A completed add replays its stored response
+without executing this fence; a completed pre-deploy body without the field still replays, but a
+new claim without it gets `400 VALIDATION_FAILED`. The field participates in the canonical body,
+so changing it under an existing key is `IDEMPOTENCY_KEY_REUSED`. PATCH must include a changed
+field besides the two version fields. New clients must read and send the parent version; #411
+is the pending portal consumer. The need replay deadline reuses project creation's parser and
+shared claim admission, including the database clock after insertion, without clamping.
 
 **پس‌گرفتنِ پیشنهاد گشایش نام می‌برد چه چیزی را پس می‌گیرد.** بدنه `{"proposedAt": "…Z"}` لازم است (نبودنش
 `400 VALIDATION_FAILED`): همان لحظه‌ای که پاسخ پیشنهاد (`proposedAt`) و `GET /v1/tenders/{id}/bids` (`proposal`) می‌گویند؛ پیشنهاد

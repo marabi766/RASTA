@@ -143,7 +143,7 @@ describe('the published OpenAPI contract (real application)', () => {
           await http()
             .post(`/v1/projects/${id}/needs`)
             .set('authorization', `Bearer ${token}`)
-            .send({ title: 'Late', description: 'Too late' })
+            .send({ expectedProjectVersion: 2, title: 'Late', description: 'Too late' })
         ).status,
       ),
     ); // 422

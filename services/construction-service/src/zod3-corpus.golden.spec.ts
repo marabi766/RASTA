@@ -222,11 +222,15 @@ const CASES: [string, { safeParse(input: unknown): unknown }, unknown][] = [
     createProgressSchema,
     { progressBasisPoints: Number.POSITIVE_INFINITY, assetsUsed: ['AST-SAMPLE', 'AST-SAMPLE'] },
   ],
-  ['updateNeedSchema m0 expectedVersion=0.5', updateNeedSchema, { expectedVersion: 0.5 }],
+  [
+    'updateNeedSchema m0 expectedVersion=0.5',
+    updateNeedSchema,
+    { expectedProjectVersion: 1, expectedVersion: 0.5 },
+  ],
   [
     'updateNeedSchema m0 expectedVersion=Infinity',
     updateNeedSchema,
-    { expectedVersion: Number.POSITIVE_INFINITY },
+    { expectedProjectVersion: 1, expectedVersion: Number.POSITIVE_INFINITY },
   ],
   ['updateProjectSchema m0 expectedVersion=0.5', updateProjectSchema, { expectedVersion: 0.5 }],
   [

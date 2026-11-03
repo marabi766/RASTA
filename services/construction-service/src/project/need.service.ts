@@ -14,7 +14,7 @@ import { assertProjectEditable } from './project.state-machine';
 import { assertNeedEditable, assertNeedTransition, type NeedStateName } from './need.state-machine';
 import { toNeedView } from './views';
 import type {
-  CreateNeedDto,
+  ReplayableCreateNeedDto,
   ListNeedsQuery,
   NeedView,
   SubmitNeedDto,
@@ -30,7 +30,8 @@ export const ADD_NEED_ENDPOINT = 'POST /v1/projects/:id/needs';
  *
  * A need lives inside the project aggregate (`docs/03` § 3.3), so every command
  * here first **locks the project row** in the caller's organization and checks
- * that the project is still editable. That lock is what stops a need changing
+ * that its version matches the editing episode and it is still editable.
+ * That lock is what stops a need changing
  * under an approval request made at the same instant (PR 2), and under a
  * cancellation now. The need itself is then changed by compare-and-set on its
  * own `version`, and its event is written in the same transaction (A-08).
@@ -48,14 +49,26 @@ export class NeedService {
     private readonly idempotency: IdempotencyStore,
   ) {}
 
-  async add(projectId: string, dto: CreateNeedDto, idempotencyKey?: string): Promise<NeedView> {
+  async add(
+    projectId: string,
+    dto: ReplayableCreateNeedDto,
+    idempotencyKey?: string,
+    replayDeadlineMs?: number,
+  ): Promise<NeedView> {
     const { organizationId, actor } = this.access.assertCanWrite();
 
     const work = async (record: RecordCompletion<NeedView>): Promise<NeedView> => {
+      // Validation belongs inside new work: an old completed key still replays its old body.
+      if (dto.expectedProjectVersion === undefined) {
+        throw RastaError.validation([
+          { path: 'expectedProjectVersion', code: 'invalid_type', message: 'Required' },
+        ]);
+      }
+      const expectedProjectVersion = dto.expectedProjectVersion;
       const needId = newId(ID_PREFIX.need);
       const view = await this.prisma.transaction(async (tx) => {
         const at = await transactionNow(tx);
-        await this.lockEditableProject(tx, organizationId, projectId);
+        await this.lockEditableProject(tx, organizationId, projectId, expectedProjectVersion);
 
         await this.repository.createNeed(tx, {
           id: needId,
@@ -95,6 +108,8 @@ export class NeedService {
       targeted(projectId, { requester: actor, body: dto }),
       201,
       work,
+      undefined,
+      replayDeadlineMs,
     );
   }
 
@@ -126,7 +141,7 @@ export class NeedService {
 
     await this.prisma.transaction(async (tx) => {
       const at = await transactionNow(tx);
-      await this.lockEditableProject(tx, organizationId, projectId);
+      await this.lockEditableProject(tx, organizationId, projectId, dto.expectedProjectVersion);
       const need = await this.needOrNotFound(tx, projectId, needId);
       this.assertVersion(need, dto.expectedVersion);
       assertNeedEditable(needId, need.status as NeedStateName);
@@ -202,7 +217,7 @@ export class NeedService {
 
     await this.prisma.transaction(async (tx) => {
       const at = await transactionNow(tx);
-      await this.lockEditableProject(tx, organizationId, projectId);
+      await this.lockEditableProject(tx, organizationId, projectId, dto.expectedProjectVersion);
       const need = await this.needOrNotFound(tx, projectId, needId);
       this.assertVersion(need, dto.expectedVersion);
       assertNeedTransition(needId, need.status as NeedStateName, 'SUBMITTED');
@@ -247,7 +262,7 @@ export class NeedService {
 
     await this.prisma.transaction(async (tx) => {
       const at = await transactionNow(tx);
-      await this.lockEditableProject(tx, organizationId, projectId);
+      await this.lockEditableProject(tx, organizationId, projectId, dto.expectedProjectVersion);
       const need = await this.needOrNotFound(tx, projectId, needId);
       this.assertVersion(need, dto.expectedVersion);
       assertNeedTransition(needId, need.status as NeedStateName, 'WITHDRAWN');
@@ -293,10 +308,15 @@ export class NeedService {
     tx: ExtendedPrismaClient,
     organizationId: string,
     projectId: string,
+    expectedProjectVersion: number,
   ): Promise<void> {
     const locked = await this.repository.lockProject(tx, organizationId, projectId);
     if (!locked) throw RastaError.notFound('Project', projectId);
     assertOwnProject(locked, organizationId);
+    if (locked.version !== expectedProjectVersion) {
+      versionConflictsTotal.inc({ service: SERVICE_NAME, aggregate: 'Project' });
+      throw RastaError.optimisticLockFailed('Project', projectId);
+    }
     assertProjectEditable(projectId, locked.status);
   }
 
