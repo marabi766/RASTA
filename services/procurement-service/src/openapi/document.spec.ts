@@ -1,3 +1,5 @@
+import { errorEnvelopeProblems } from '@rasta/nest-common';
+import { refusal, type RefusalArea, type ReasonOf, REFUSAL_REASONS } from '../shared/refusal';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
@@ -41,6 +43,22 @@ describe('the committed OpenAPI document', () => {
         operation,
       })),
     );
+
+  it('accepts real filter bodies and every listed typed refusal on every published error', () => {
+    expect(
+      errorEnvelopeProblems(buildProcurementOpenApiDocument(app), {
+        refusal: (area, reason) => {
+          const status = (REFUSAL_REASONS[area as RefusalArea] as Record<string, number>)[reason];
+          return refusal(
+            status === 403 ? 'FORBIDDEN' : status === 409 ? 'CONFLICT' : 'BUSINESS_RULE_VIOLATION',
+            'Refused',
+            area as RefusalArea,
+            [reason as ReasonOf<RefusalArea>],
+          );
+        },
+      }),
+    ).toEqual([]);
+  });
 
   it('matches the generator byte for byte (run `pnpm openapi:generate` after changing the API)', () => {
     const generated = formatDocument(buildProcurementOpenApiDocument(app), committedPath);

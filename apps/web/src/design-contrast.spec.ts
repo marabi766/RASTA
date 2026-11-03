@@ -130,6 +130,59 @@ describe.each([
   });
 });
 
+/**
+ * The light / dark switch (`ThemeSwitch`, a `secondary` Button), in both
+ * themes. It is drawn on the top bar (raised) and, on the login page, on the
+ * base surface; hovered and pressed it fills sunken. Its pieces:
+ *
+ *  - the label (`text-content`) on each of those three fills — 4.5:1;
+ *  - its border (`border-strong`) against each of them and against the surface
+ *    around it — 3:1 (1.4.11, a control's boundary);
+ *  - its focus ring (`focus`) over the two surfaces it can sit on — 3:1.
+ *
+ * The first test pins that the component really uses these tokens, so a later
+ * restyle cannot leave the pairs below measuring something it no longer draws.
+ */
+describe('the theme switch', () => {
+  const button = readFileSync(join(__dirname, 'ui', 'action', 'Button.tsx'), 'utf8');
+  const switchSource = readFileSync(join(__dirname, 'ui', 'theme', 'ThemeSwitch.tsx'), 'utf8');
+
+  it('is drawn from exactly the tokens measured below', () => {
+    expect(button).toContain(
+      "secondary: 'border border-border-strong bg-surface-raised text-content hover:bg-surface-sunken'",
+    );
+    expect(button).toContain('focus-visible:outline-focus');
+    expect(switchSource).toContain('tone="secondary"');
+    expect(switchSource).toContain('aria-pressed:bg-surface-sunken');
+  });
+
+  describe.each([
+    ['light', light],
+    ['dark', dark],
+  ])('in the %s theme', (_themeName, palette) => {
+    const ratio = (foreground: string, background: string) =>
+      contrast(palette[`--color-${foreground}`], palette[`--color-${background}`]);
+
+    it.each(['surface-raised', 'surface-base', 'surface-sunken'])(
+      'reads its label on %s at 4.5:1',
+      (fill) => {
+        expect(ratio('content', fill)).toBeGreaterThanOrEqual(4.5);
+      },
+    );
+
+    it.each(['surface-raised', 'surface-base', 'surface-sunken'])(
+      'shows its border against %s at 3:1',
+      (neighbour) => {
+        expect(ratio('border-strong', neighbour)).toBeGreaterThanOrEqual(3);
+      },
+    );
+
+    it.each(['surface-raised', 'surface-base'])('shows its focus ring over %s at 3:1', (around) => {
+      expect(ratio('focus', around)).toBeGreaterThanOrEqual(3);
+    });
+  });
+});
+
 describe('the conversion itself', () => {
   // Without these, a bug in the maths above could make every pair "pass".
   it('puts white and black at the ends of the scale', () => {

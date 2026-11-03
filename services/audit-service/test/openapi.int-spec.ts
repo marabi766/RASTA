@@ -62,6 +62,8 @@ describe('the published OpenAPI contract (real application)', () => {
   const INTERNAL = '/v1/internal/audit-events/{id}';
   /** The tender's receipt chain and head, for construction-service alone (ADR-066 § 2). */
   const EVIDENCE = '/v1/internal/tender-evidence/{tenderId}/chain';
+  /** The RFQ's quotation-receipt chain and head, for procurement-service alone (ADR-070 § 4). */
+  const RFQ_EVIDENCE = '/v1/internal/rfq-evidence/{rfqId}/chain';
 
   beforeAll(async () => {
     migrator = newMigratorPrisma();
@@ -106,7 +108,7 @@ describe('the published OpenAPI contract (real application)', () => {
       // `DETAIL` because `/v1/audit-events` is a prefix of
       // `/v1/audit-events/{id}`.
       expect(Object.keys(document.paths ?? {}).sort()).toEqual(
-        [...PATHS, INTERNAL, EVIDENCE].sort(),
+        [...PATHS, INTERNAL, EVIDENCE, RFQ_EVIDENCE].sort(),
       );
     });
 
@@ -174,7 +176,7 @@ describe('the published OpenAPI contract (real application)', () => {
 
       expect(paths).not.toContain('/metrics');
       expect(paths.some((path) => path.includes('metrics') || path.includes('health'))).toBe(false);
-      expect(paths.sort()).toEqual([...PATHS, INTERNAL, EVIDENCE].sort());
+      expect(paths.sort()).toEqual([...PATHS, INTERNAL, EVIDENCE, RFQ_EVIDENCE].sort());
     });
   });
 
