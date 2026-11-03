@@ -25,6 +25,7 @@ import { signPayload, verifyPayload } from './signed-payload';
 import { writeThroughGateway, type FieldMapping, type WriteResult } from './write';
 import type { WebSession } from './session';
 import { rolesGuardAdmits } from './roles-guard';
+import { formMessage } from '@/lib/form-issues';
 
 /**
  * A machine's availability, through the gateway (EXP-002, slice 7).
@@ -257,7 +258,7 @@ const optionalDate = z.string().transform((raw, ctx): string | undefined => {
   return iso;
 });
 
-export const END_NOT_AFTER_START_MESSAGE = 'پایان باید پس از آغاز باشد';
+export const END_NOT_AFTER_START_MESSAGE = formMessage('پایان باید پس از آغاز باشد');
 
 export function declareAvailabilityFormValues(form: FormData): DeclareAvailabilityFormValues {
   return readFields(form, DECLARE_AVAILABILITY_FIELDS);
@@ -266,7 +267,7 @@ export function declareAvailabilityFormValues(form: FormData): DeclareAvailabili
 export const declareAvailabilityFormSchema = z
   .object({
     available: z.enum(AVAILABILITY_CHOICES, {
-      error: 'وضعیت را از فهرست انتخاب کنید',
+      error: formMessage('وضعیت را از فهرست انتخاب کنید'),
     }),
     reason: displayText(
       'دلیل',
@@ -345,7 +346,7 @@ export const REVOKE_MESSAGES: Readonly<Record<string, string>> = {
   'This availability window was revoked by another request': ALREADY_REVOKED_MESSAGE,
 };
 
-const REVOKE_MAPPING: FieldMapping<never> = {
+export const REVOKE_MAPPING: FieldMapping<never> = {
   paths: {},
   messages: REVOKE_MESSAGES,
   byCode: { INVALID_STATE_TRANSITION: ALREADY_REVOKED_MESSAGE },

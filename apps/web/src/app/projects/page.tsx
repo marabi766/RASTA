@@ -39,6 +39,7 @@ import {
 } from '@/server/session-organization';
 import type { DecisionTokens } from './[id]/ProjectApprovals';
 import { pageContext, pageParams } from '@/server/page-context';
+import { setOwn } from '@/lib/own-key';
 
 /**
  * The `/projects` route — پروژه‌های عمرانی (docs/16 § ۱۶٫۶).
@@ -64,7 +65,7 @@ function inboxDecisions(session: WebSession, inbox: Inbox): Record<string, Decis
         digests: null,
       }),
     });
-    tokens[step.id] = { grant: token('grant'), reject: token('reject') };
+    setOwn(tokens, step.id, { grant: token('grant'), reject: token('reject') });
   }
   return tokens;
 }

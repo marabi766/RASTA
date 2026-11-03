@@ -1,3 +1,4 @@
+import { ownValue } from '@/lib/own-key';
 /**
  * The vocabulary of the contract commands on `/contracts/[id]` (EXP-004;
  * contract-service `contract/`, `amendment/`, `milestone/` and
@@ -121,11 +122,11 @@ export const AMENDMENT_REASON_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function cancelReasonLabel(code: string): string {
-  return CANCEL_REASON_LABELS[code] ?? code;
+  return ownValue(CANCEL_REASON_LABELS, code) ?? code;
 }
 
 export function amendmentReasonLabel(code: string): string {
-  return AMENDMENT_REASON_LABELS[code] ?? code;
+  return ownValue(AMENDMENT_REASON_LABELS, code) ?? code;
 }
 
 /**

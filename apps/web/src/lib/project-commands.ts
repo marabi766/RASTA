@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { legacyParse } from '@rasta/contracts';
 
-import { firstIssuePerField } from './form-issues';
+import { firstIssuePerField, formMessage } from './form-issues';
 import {
   IRR,
   MoneyInputError,
@@ -11,6 +11,7 @@ import {
 } from './format';
 import type { ProjectStatus } from './project-fields';
 import { SESSION_REFUSAL_MESSAGES } from './session-refusal';
+import { ownHas, ownValue } from '@/lib/own-key';
 
 /**
  * The commands of the project write screens (EXP-004; construction-service
@@ -291,9 +292,9 @@ const fa = (value: number): string => toPersianDigits(String(value));
 function text(label: string, min: number, max: number) {
   return z
     .string()
-    .min(1, `${label} را بنویسید`)
-    .min(min, `${label} دست‌کم ${fa(min)} نویسه باشد`)
-    .max(max, `${label} حداکثر ${fa(max)} نویسه است`);
+    .min(1, formMessage(`${label} را بنویسید`))
+    .min(min, formMessage(`${label} دست‌کم ${fa(min)} نویسه باشد`))
+    .max(max, formMessage(`${label} حداکثر ${fa(max)} نویسه است`));
 }
 
 /** The estimate as construction-service takes it: whole rial minor units, `0` to the BIGINT bound. */
@@ -439,11 +440,14 @@ export function parseGrantForm(
       .string()
       .max(
         MAX_DECISION_NUMBER_LENGTH,
-        `شماره تصمیم حداکثر ${fa(MAX_DECISION_NUMBER_LENGTH)} نویسه است`,
+        formMessage(`شماره تصمیم حداکثر ${fa(MAX_DECISION_NUMBER_LENGTH)} نویسه است`),
       ),
     conditions: z
       .string()
-      .max(MAX_CONDITIONS_LENGTH, `شرایط حداکثر ${fa(MAX_CONDITIONS_LENGTH)} نویسه است`),
+      .max(
+        MAX_CONDITIONS_LENGTH,
+        formMessage(`شرایط حداکثر ${fa(MAX_CONDITIONS_LENGTH)} نویسه است`),
+      ),
   });
   const parsed = legacyParse(grantSchema, values);
   if (!parsed.success)
@@ -669,12 +673,12 @@ export const APPROVAL_STATUS_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function approvalStatusLabel(status: string): string {
-  return APPROVAL_STATUS_LABELS[status] ?? status;
+  return ownValue(APPROVAL_STATUS_LABELS, status) ?? status;
 }
 
 export function workflowLabel(key: string): string {
-  return WORKFLOW_LABELS[key] ?? key;
+  return ownValue(WORKFLOW_LABELS, key) ?? key;
 }
 
 /** Project workflows only: a tender step is decided on its tender's screen. */
-export const isProjectWorkflow = (key: string): boolean => key in WORKFLOW_LABELS;
+export const isProjectWorkflow = (key: string): boolean => ownHas(WORKFLOW_LABELS, key);
