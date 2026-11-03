@@ -282,6 +282,7 @@ test('every job holds its steps one after the other: step limits plus setup fit 
       'migration-reversibility-chain': 17,
       'migration-guards': 18,
       'trivy-db': 21,
+      quality: 64,
     },
   );
   for (const [id, job] of jobs) {
@@ -477,7 +478,11 @@ test('a job whose measured runtime needed its limit may not go back below it', (
     delete missing.jobs[id]['timeout-minutes'];
     fails(missing, new RegExp(`^${id} has no timeout-minutes`));
     const raised = real();
-    raised.jobs[id]['timeout-minutes'] = floor + 1;
+    // A raised limit must still hold the job's step limits plus its setup (quality: 10 + 54).
+    const budget = limitedSteps(raised.jobs[id]).length
+      ? stepSum(raised.jobs[id]) + JOB_SETUP_MINUTES[id]
+      : 0;
+    raised.jobs[id]['timeout-minutes'] = Math.max(floor + 1, budget);
     assert.deepEqual(checkIntegrationSplit(raised), [], id);
   }
 });

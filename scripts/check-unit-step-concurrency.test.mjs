@@ -19,6 +19,14 @@ import {
   UNBOUNDED_EXCEPTIONS,
   unitStepProblems,
 } from './check-unit-step-concurrency-lib.mjs';
+import {
+  EXEMPT_SCRIPTS,
+  nodeTestSegments,
+  nodeTestTimeoutProblems,
+  reachableScripts,
+  runsNodeTest,
+  UNIT_STEP,
+} from './ci-node-test-timeouts-lib.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const realWorkflow = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
@@ -48,6 +56,159 @@ test('real workflow passes as YAML and as parsed text', () => {
     [],
   );
   assert.equal(realScripts['test:unit'], 'turbo run test:unit');
+});
+
+// Task 310: main 3fa1beeb hung 43 minutes in this step. Every node --test of the
+// quality job keeps a --test-timeout, and this step keeps its own limit and its
+// per-test watchdog.
+const timeoutProblemsAfter = (edit, scripts = realScripts) => {
+  const doc = structuredClone(realDoc);
+  const copy = structuredClone(scripts);
+  edit(doc, copy);
+  return nodeTestTimeoutProblems(doc, copy);
+};
+const boundedStep = (doc) => doc.jobs.quality.steps.find((step) => step.name === UNIT_STEP.step);
+const qualityNodeTestScripts = [
+  ...new Set(
+    realDoc.jobs.quality.steps.flatMap((step) =>
+      typeof step.run === 'string' ? [...reachableScripts(step.run, realScripts)] : [],
+    ),
+  ),
+].filter((name) => nodeTestSegments(realScripts[name]).length > 0);
+test('task 310: the real quality job bounds every node --test', () => {
+  assert.deepEqual(nodeTestTimeoutProblems(realDoc, realScripts), []);
+  // The class is found, not listed: the step that hung and the slowest others.
+  for (const name of [UNIT_STEP.script, 'test:backup-restore-drill-lib', 'test:ci-trivy-db'])
+    assert.ok(qualityNodeTestScripts.includes(name), name);
+  assert.ok(qualityNodeTestScripts.length >= 40, String(qualityNodeTestScripts.length));
+  assert.deepEqual(Object.keys(EXEMPT_SCRIPTS), ['lint:scripts']);
+});
+for (const name of qualityNodeTestScripts.filter((script) => !(script in EXEMPT_SCRIPTS))) {
+  for (const [label, edit] of [
+    ['missing', (text) => text.replaceAll(/ --test-timeout=\d+/g, '')],
+    ['zero', (text) => text.replaceAll(/--test-timeout=\d+/g, '--test-timeout=0')],
+    ['text', (text) => text.replaceAll(/--test-timeout=\d+/g, '--test-timeout=soon')],
+    [
+      'above the maximum',
+      (text) => text.replaceAll(/--test-timeout=\d+/g, '--test-timeout=541000'),
+    ],
+    ['spaced form', (text) => text.replaceAll(/--test-timeout=(\d+)/g, '--test-timeout $1')],
+  ]) {
+    test(`task 310: ${label} --test-timeout is refused in ${name}`, () => {
+      const problems = timeoutProblemsAfter((_doc, all) => {
+        all[name] = edit(all[name]);
+      });
+      refused(
+        problems,
+        new RegExp(`script ${name.replaceAll('.', '\\.')} runs node --test without`),
+      );
+    });
+  }
+}
+test('task 310: a new node --test is found directly and through script chains', () => {
+  for (const [run, scripts] of [
+    ['node --test scripts/new.test.mjs', {}],
+    ['node --no-warnings --test scripts/new.test.mjs', {}],
+    ['pnpm exec node --test scripts/new.test.mjs', {}],
+    ['FOO=1 node --test=scripts/new.test.mjs', {}],
+    ['true && node --test scripts/new.test.mjs --test-timeout=999999', {}],
+    ['echo hi\nnode --test --test-timeout=0 x', {}],
+    ['pnpm run test:new', { 'test:new': 'node --test scripts/new.test.mjs' }],
+    ['pnpm run a', { a: 'pnpm run b', b: 'pnpm run c', c: 'true && node --test x' }],
+    ['pnpm run a', { a: 'node --test --test-timeout=300000 x && node --test y' }],
+  ]) {
+    const problems = timeoutProblemsAfter((doc, all) => {
+      Object.assign(all, scripts);
+      doc.jobs.quality.steps.push({ name: 'Brand new step', run });
+    });
+    refused(problems, /(?:step "Brand new step"|script (?:test:new|c|a)) runs node --test without/);
+  }
+  // A bounded one passes; so does a step in another job.
+  assert.deepEqual(
+    timeoutProblemsAfter((doc) => {
+      doc.jobs.quality.steps.push({
+        name: 'Fine',
+        run: 'node --test --test-timeout=300000 scripts/x.test.mjs',
+      });
+      doc.jobs.security.steps.push({ name: 'Other job', run: 'node --test y' });
+    }),
+    [],
+  );
+});
+test('task 310: cycles terminate, inherited names are not scripts, other commands are free', () => {
+  assert.equal(runsNodeTest('pnpm run a', { a: 'pnpm run b', b: 'pnpm run a' }), false);
+  assert.equal(runsNodeTest('pnpm constructor', {}), false);
+  assert.equal(runsNodeTest('pnpm toString', {}), false);
+  assert.equal(runsNodeTest('echo "node-test" && pnpm run build', { build: 'tsc' }), false);
+  assert.equal(runsNodeTest('pnpm run a', { a: 'node --test x' }), true);
+  assert.deepEqual(
+    timeoutProblemsAfter((doc) => doc.jobs.quality.steps.push({ name: 'Plain', run: 'echo done' })),
+    [],
+  );
+});
+test('task 310: an unreadable run or job is refused, not assumed free of node --test', () => {
+  refused(
+    timeoutProblemsAfter((doc) => doc.jobs.quality.steps.push({ name: 'Odd', run: ['a'] })),
+    /"Odd": run is not text/,
+  );
+  refused(nodeTestTimeoutProblems({ jobs: { quality: {} } }, realScripts), /no readable steps/);
+});
+test('task 310: an exemption that no longer applies is refused', () => {
+  refused(
+    timeoutProblemsAfter((_doc, all) => {
+      all['lint:scripts'] = 'eslint scripts';
+    }),
+    /exempt script lint:scripts is not a node --test script/,
+  );
+  refused(
+    timeoutProblemsAfter((_doc, all) => {
+      delete all['lint:scripts'];
+    }),
+    /exempt script lint:scripts is not a node --test script/,
+  );
+});
+test('task 310: the unit-step step keeps its step limit, file budget and watchdog', () => {
+  const script = realScripts[UNIT_STEP.script];
+  assert.match(script, /--test-timeout=540000 /);
+  assert.match(script, /--import \.\/scripts\/test-stall-watchdog\.mjs /);
+  assert.match(script, /scripts\/test-stall-watchdog\.test\.mjs/);
+  assert.equal(boundedStep(realDoc)['timeout-minutes'], UNIT_STEP.maxMinutes);
+  for (const [edit, pattern] of [
+    [(text) => text.replace(/--import \S+ /, ''), /must preload/],
+    [(text) => text.replace('--import ./', '--import ../'), /must preload/],
+    [
+      (text) => text.replace(/ --test-timeout=\d+/, ''),
+      /script test:unit-step-concurrency runs node/,
+    ],
+  ])
+    refused(
+      timeoutProblemsAfter((_doc, all) => {
+        all[UNIT_STEP.script] = edit(script);
+      }),
+      pattern,
+    );
+  for (const [value, pattern] of [
+    [UNIT_STEP.maxMinutes + 1, /timeout-minutes must be at most/],
+    [undefined, /needs a whole-minute timeout-minutes/],
+    [0, /needs a whole-minute timeout-minutes/],
+    ['10', /needs a whole-minute timeout-minutes/],
+    [2.5, /needs a whole-minute timeout-minutes/],
+  ])
+    refused(
+      timeoutProblemsAfter((doc) => {
+        if (value === undefined) delete boundedStep(doc)['timeout-minutes'];
+        else boundedStep(doc)['timeout-minutes'] = value;
+      }),
+      pattern,
+    );
+  refused(
+    timeoutProblemsAfter((doc) => {
+      doc.jobs.quality.steps = doc.jobs.quality.steps.filter(
+        (step) => step.name !== UNIT_STEP.step,
+      );
+    }),
+    /not found/,
+  );
 });
 
 for (const value of ['1', '3', '12']) {

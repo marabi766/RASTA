@@ -624,7 +624,10 @@ test('neither B2 test script is the backfill, and the PostgreSQL one is not in v
   assert.doesNotMatch(scripts.verify, /test:outbox-b2-pg/);
 
   // Both test scripts run a test file. Neither runs the tool.
-  assert.match(scripts['test:outbox-b2'], /--test scripts\/outbox-b2-lib\.test\.mjs$/);
+  assert.match(
+    scripts['test:outbox-b2'],
+    /--test(?: --test-timeout=\d+)? scripts\/outbox-b2-lib\.test\.mjs$/,
+  );
   assert.match(scripts['test:outbox-b2-pg'], /--test scripts\/outbox-b2-backfill\.pg\.test\.mjs$/);
 });
 
