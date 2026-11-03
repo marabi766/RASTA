@@ -62,6 +62,18 @@ const transactionSchema = z.object({
   id: z.string(),
   transactionType: z.string(),
   status: z.string(),
+  /**
+   * What the transaction is for, fixed at creation (economic-service
+   * `grossAmountMinor`; `views.ts` `toTransactionView`). A string of whole minor
+   * units (the same shape the transaction detail accepts), never a number. It is **not** the net amount and **not** a statement
+   * that a hold is active: the net is zero until settlement, and whether funds
+   * are held is the wallet's holds list. Absent: `null`, shown as a dash.
+   */
+  grossAmountMinor: z
+    .string()
+    .regex(/^-?\d+$/, 'amount must be whole minor units')
+    .nullable()
+    .prefault(null),
   netAmountMinor: z.string(),
   currency: z.string(),
   occurredAt: renderableDate,

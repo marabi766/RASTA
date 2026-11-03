@@ -14,6 +14,7 @@ import {
   GENERIC_FIELD_MESSAGE,
 } from './form-issues';
 import { legacyFormResolver } from './form-resolver';
+import { nonStandardSpelling } from '@/test/orthography';
 
 /**
  * The portal's one Persian boundary for local validation (`form-issues.ts`).
@@ -24,8 +25,6 @@ import { legacyFormResolver } from './form-resolver';
 
 const LATIN_LETTER = /[A-Za-z]/;
 const ARABIC_LETTER = /\p{Script=Arabic}/u;
-/** Hamza letters and U+0654: the project's text policy for added copy. */
-const FORBIDDEN_SPELLING = /[\u0654\u0623\u0625\u0624\u0626]/u;
 
 // Parsed as every form parser parses (legacyParse): zod 3's issue, with the value it was raised on.
 const issueOf = (schema: z.ZodTypeAny, value: unknown): LegacyIssue => {
@@ -64,7 +63,7 @@ describe('formIssueMessage', () => {
       const message = formIssueMessage(issueOf(schema, value));
       expect(message).toBe(expected);
       expect(message).not.toMatch(LATIN_LETTER);
-      expect(message).not.toMatch(FORBIDDEN_SPELLING);
+      expect(nonStandardSpelling(message)).toBeNull();
     },
   );
 

@@ -2,12 +2,13 @@
 
 import { useActionState } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, controlClassName, JalaliDateInput } from '@/ui';
 import { ProviderUnknownRefusal } from '@/app/DemoModeNotice';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { EMPTY_USAGE_FORM, type UsageField, type UsageFormValues } from '@/lib/usage-fields';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { ASSET_ID_HINT } from '@/lib/id-hints';
 
 import { submitUsage } from './actions';
 import { IDLE_USAGE_FORM, type UsageFormState } from './form-state';
@@ -77,7 +78,7 @@ export function UsageForm({
 
       <FormBanner state={state} />
 
-      <Field label={LABELS.assetId} required error={errors.assetId} hint="مانند AST_01J…">
+      <Field label={LABELS.assetId} required error={errors.assetId} hint={ASSET_ID_HINT}>
         {(control) => (
           <input
             {...control}
@@ -93,7 +94,7 @@ export function UsageForm({
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label={LABELS.periodStart} required error={errors.periodStart}>
           {(control) => (
-            <input
+            <JalaliDateInput
               {...control}
               type="datetime-local"
               name="periodStart"
@@ -105,7 +106,7 @@ export function UsageForm({
 
         <Field label={LABELS.periodEnd} required error={errors.periodEnd}>
           {(control) => (
-            <input
+            <JalaliDateInput
               {...control}
               type="datetime-local"
               name="periodEnd"

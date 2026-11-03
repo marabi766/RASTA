@@ -51,6 +51,8 @@ describe('TableScroll', () => {
     renderTable();
     const box = screen.getByRole('group', { name: 'فهرست نمونه' });
     expect(box).toHaveClass('overflow-x-auto');
+    // The edge shadows (globals.css) that say there is more to scroll to.
+    expect(box).toHaveClass('table-scroll');
     expect(box.className).toContain('focus-visible:outline');
   });
 

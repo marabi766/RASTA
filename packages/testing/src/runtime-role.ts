@@ -35,6 +35,8 @@ export interface RuntimeRoleFacts {
   createDb: boolean;
   createRole: boolean;
   bypassRls: boolean;
+  /** REPLICATION: it could stream every database's changes (#540 r1 F1). */
+  replication: boolean;
 }
 
 export async function runtimeRoleFacts(client: RawSqlClient): Promise<RuntimeRoleFacts> {
@@ -47,7 +49,8 @@ export async function runtimeRoleFacts(client: RawSqlClient): Promise<RuntimeRol
              AS "ownsASchema",
            r.rolcreatedb AS "createDb",
            r.rolcreaterole AS "createRole",
-           r.rolbypassrls AS "bypassRls"
+           r.rolbypassrls AS "bypassRls",
+           r.rolreplication AS replication
       FROM pg_database d, pg_roles r
      WHERE d.datname = current_database() AND r.rolname = current_user`);
   if (!row) throw new Error('the connected role is not in pg_roles');

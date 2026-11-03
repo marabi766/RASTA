@@ -1,3 +1,4 @@
+import { Prisma } from '../generated/prisma';
 import {
   createTenantGuardExtension,
   runWithContext,
@@ -93,7 +94,10 @@ function guardedClient(replies: Readonly<Record<string, unknown>> = {}): {
   tx: ExtendedPrismaClient;
   calls: RecordedCall[];
 } {
-  const guard = createTenantGuardExtension({ scopedModels: TENANT_SCOPED_MODELS });
+  const guard = createTenantGuardExtension({
+    datamodel: Prisma.dmmf.datamodel,
+    scopedModels: TENANT_SCOPED_MODELS,
+  });
   const calls: RecordedCall[] = [];
   const client: Record<string, Record<string, unknown>> = {};
 
@@ -331,6 +335,6 @@ describe('the writes a supplier makes about itself', () => {
           capabilities: [],
         }),
       ),
-    ).rejects.toThrow(/Cross-tenant writes are never implicit/);
+    ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
   });
 });

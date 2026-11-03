@@ -131,6 +131,14 @@ const SOURCE = /\.[cm]?[jt]sx?$/;
 const SWEPT = ['apps', 'services', 'packages'];
 /** What a workspace may leave unswept, at its own root only. */
 const BUILD_DIRS = new Set(['dist', 'coverage', '.next', 'node_modules']);
+/**
+ * Build-time tooling that no image or artifact runs, by repository-relative path. The portal
+ * has no image (its artifact is `.next`, checked as a tree), and `apps/web/scripts` are the
+ * Node scripts `pnpm build` and CI run around it. Like root `scripts/` they are not swept on
+ * their own, and are production once a production file reaches one; a tsconfig that compiles
+ * from them brings them back. Every other workspace's `scripts/` stays swept.
+ */
+const TOOLING_DIRS = new Set(['apps/web/scripts']);
 
 export { isTestOnlyPath };
 
@@ -1344,7 +1352,10 @@ export function sourceProblems(root = REPO_ROOT) {
     walk(
       ws,
       (path, name) => {
-        if (dirname(path) === ws && BUILD_DIRS.has(name)) {
+        if (
+          dirname(path) === ws &&
+          (BUILD_DIRS.has(name) || TOOLING_DIRS.has(toPosix(relative(root, path))))
+        ) {
           skipped.push(path);
           return true;
         }

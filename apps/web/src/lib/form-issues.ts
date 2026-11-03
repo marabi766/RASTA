@@ -34,7 +34,7 @@ import { toPersianDigits } from './format/digits';
  *     («حداکثر ۲۰۰ نویسه مجاز است»), which names the limit and never the input.
  *  4. Otherwise one generic sentence.
  *
- * Persian here follows standard orthography (checklist item 19, owner decision B).
+ * Standard orthography (hamza included), no U+0654: `orthography.spec.ts`.
  */
 
 /** The fallback for an issue nothing above can describe. */

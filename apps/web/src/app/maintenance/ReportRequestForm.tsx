@@ -2,7 +2,7 @@
 
 import { useActionState, useEffect, useState } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, controlClassName, JalaliDateInput } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { IN_PROGRESS_WRITE_MESSAGE } from '@/lib/in-progress-write';
@@ -13,6 +13,7 @@ import {
   type ReportRequestFormValues,
 } from '@/lib/maintenance-fields';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { ASSET_ID_HINT } from '@/lib/id-hints';
 
 import { submitReportRequest } from './actions';
 import {
@@ -107,7 +108,7 @@ export function ReportRequestForm({
       <FormBanner state={state} />
       {locked && <SentValues values={values} />}
 
-      <Field label={LABELS.assetId} required error={errors.assetId} hint="مانند AST_01J…">
+      <Field label={LABELS.assetId} required error={errors.assetId} hint={ASSET_ID_HINT}>
         {(control) => (
           <input
             {...control}
@@ -201,7 +202,7 @@ export function ReportRequestForm({
           hint="اگر پیش از گزارش از کار افتاده بود؛ زمان از کار افتادگی از همین روز حساب می‌شود"
         >
           {(control) => (
-            <input
+            <JalaliDateInput
               {...control}
               type="date"
               name="outOfServiceAt"
@@ -214,7 +215,7 @@ export function ReportRequestForm({
 
         <Field label={LABELS.dueDate} error={errors.dueDate}>
           {(control) => (
-            <input
+            <JalaliDateInput
               {...control}
               type="date"
               name="dueDate"
