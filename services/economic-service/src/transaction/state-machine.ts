@@ -47,6 +47,11 @@ import type { TransactionStatus } from '../generated/prisma';
  * owner approved the work. That is the "تسویه بدون تأیید دریافت غیرممکن است"
  * test in docs/10 § 10.12, expressed as a missing edge rather than as a check
  * somebody has to remember to write.
+ *
+ * **And settlement checks that authority itself** ({@link assertSettlementReady}):
+ * a status written by an older release is not proof of it. A resolution made
+ * before D-083 left escrowed, never-authorised rows in `PENDING_SETTLEMENT`;
+ * the status alone would pay them (review of #623 round 1, F1).
  */
 
 /** What can happen to a transaction. Named for the act, not for the state. */
@@ -151,8 +156,34 @@ export interface SettlementAuthority {
 export function resolvedStatus(
   authority: SettlementAuthority,
 ): (typeof RESOLUTION_TARGETS)[number] {
-  if (authority.settlementAuthorised || !authority.fundsHeld) return 'PENDING_SETTLEMENT';
-  return 'HELD';
+  return isSettlementReady(authority) ? 'PENDING_SETTLEMENT' : 'HELD';
+}
+
+/**
+ * The one rule both a resolution and a settlement decide from: a transaction
+ * may be settlement-ready only when its settlement was authorised, or when
+ * nothing is held for it (an ADR-032 obligation, authorised when recorded).
+ * Enforced in the database too (`trg_transaction_settlement_authority`,
+ * `trg_wallet_hold_release_settlement_authority`, migration
+ * 20261103121000_transaction_settlement_authority).
+ */
+export function isSettlementReady(authority: SettlementAuthority): boolean {
+  return authority.settlementAuthorised || !authority.fundsHeld;
+}
+
+/**
+ * Refuses to settle an escrowed transaction whose settlement was never
+ * authorised, whatever its status says — before any journal or hold release.
+ * `INVALID_STATE_TRANSITION` (409), as the state machine refuses: the
+ * transaction has to be authorised first, and no retry changes that.
+ */
+export function assertSettlementReady(transactionId: string, authority: SettlementAuthority): void {
+  if (isSettlementReady(authority)) return;
+  throw new RastaError(
+    'INVALID_STATE_TRANSITION',
+    'A transaction whose funds are held cannot be settled before its settlement is authorised',
+    { internalContext: { transactionId, ...authority } },
+  );
 }
 
 /**

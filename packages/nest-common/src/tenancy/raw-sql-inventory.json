@@ -1080,9 +1080,9 @@
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",
     "line": 108,
-    "hash": "1393895982db6e8a09300b9bb39180de82a2b012105328b164e642638271b43d",
+    "hash": "daeb0670a1ea029e63f6c4b8d3d5a63c8b1f598b9bdea4b081bae73bba31e0cc",
     "occurrence": 0,
-    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (wallet_hold by its reference), the authority fact a dispute resolution decides from (D-083)"
+    "decision": "platform-wide: transaction can be operated on by either financial party; lock by global id precedes assertVisible and command authority checks; it also reads whether that transaction's own ACTIVE wallet hold exists (wallet_hold by its reference), the authority fact a dispute resolution decides from (D-083), and the transaction's own settlement_authority_reconciliation row (by transaction id), the legacy authorisation settlement decides from"
   },
   {
     "file": "services/economic-service/src/transaction/transaction.repository.ts",

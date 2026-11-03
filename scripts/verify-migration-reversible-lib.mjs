@@ -2147,6 +2147,8 @@ export const EXPECTED = {
       'recognition_rule',
       // A source key taken off a transaction, kept with its decision (#334 r3).
       'transaction_source_quarantine',
+      // What 20261103121000 found and did about legacy settlement authority (D-083).
+      'settlement_authority_reconciliation',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -2174,6 +2176,11 @@ export const EXPECTED = {
       'trg_transaction_source_quarantine_no_truncate',
       // A resolved dispute goes back to where its settlement authority stands (D-083).
       'trg_transaction_dispute_resolution',
+      // Escrowed money settles only on a recorded authorisation (D-083, #623 r1 F1).
+      'trg_transaction_settlement_authority',
+      'trg_wallet_hold_release_settlement_authority',
+      'trg_settlement_authority_reconciliation_frozen',
+      'trg_settlement_authority_reconciliation_no_truncate',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: ['BusinessLine', 'CommissionOutcome'],
@@ -2193,6 +2200,9 @@ export const EXPECTED = {
       // The correction 20261017130000's preflight names (an operator's tool).
       'quarantine_transaction_source',
       'enforce_transaction_dispute_resolution',
+      'enforce_transaction_settlement_authority',
+      'enforce_hold_release_settlement_authority',
+      'reject_settlement_authority_reconciliation_change',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -2213,6 +2223,7 @@ export const EXPECTED = {
       // ORDER is recorded by a service over the API, never by a person (recorded-sources.ts).
       'ck_transaction_order_source',
       'ck_transaction_source_quarantine_decision',
+      'ck_settlement_authority_reconciliation_outcome',
       'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',
