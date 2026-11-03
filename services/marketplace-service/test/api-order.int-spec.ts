@@ -2,7 +2,8 @@ import request from 'supertest';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { enrichOpenApiDocument } from '../src/openapi/document';
 import type { Server } from 'node:http';
-import { runUnscoped } from '@rasta/nest-common';
+import { inspect } from 'node:util';
+import { EXCEPTION_FILTER_LOGGER, runUnscoped } from '@rasta/nest-common';
 import {
   apiKey,
   apiTenant,
@@ -15,7 +16,9 @@ import {
   type ApiHarness,
 } from './api-helpers';
 import { cleanup, testEnv } from './helpers';
+import { expectNotDisclosed } from '@rasta/testing';
 import { ORDER_NOTE_NOT_STORED, RECEIPT_NOTE_NOT_STORED } from '../src/order/dto';
+import { OrderSagaClient } from '../src/temporal/saga.client';
 
 /**
  * The order HTTP surface, every path including the refusals.
@@ -234,6 +237,132 @@ describe('order API', () => {
         .expect(422);
 
       expect(response.body.code).toBe('BUSINESS_RULE_VIOLATION');
+    });
+
+    describe('a derived total past the largest storable amount (marketplace audit F4)', () => {
+      const MAX = '9223372036854775807';
+
+      /** Every line the application could write: the filter's logger and the streams. */
+      function captureLogs(): { text: () => string; restore: () => void } {
+        const logger = harness.app.get<Record<string, unknown>>(EXCEPTION_FILTER_LOGGER);
+        const spies = [
+          ...['fatal', 'error', 'warn', 'info', 'debug', 'trace']
+            .filter((level) => typeof logger[level] === 'function')
+            .map((level) => jest.spyOn(logger as Record<string, () => void>, level)),
+          jest.spyOn(process.stdout, 'write'),
+          jest.spyOn(process.stderr, 'write'),
+        ];
+        return {
+          text: () =>
+            inspect(
+              spies.flatMap((spy): unknown[][] => spy.mock.calls),
+              { depth: null, maxStringLength: null },
+            ),
+          restore: () => spies.forEach((spy) => spy.mockRestore()),
+        };
+      }
+
+      /** What a refused placement must have left exactly as it was. */
+      async function effects(key: string, offerIds: string[]) {
+        return runUnscoped(
+          'the suite reads what a refused placement could have written',
+          async () => ({
+            orders: await harness.prisma.client.order.count({
+              where: { organizationId: buyerOrg, idempotencyKey: key },
+            }),
+            available: (
+              await harness.prisma.client.offer.findMany({
+                where: { id: { in: offerIds } },
+                select: { id: true, availableQuantity: true },
+                orderBy: { id: 'asc' },
+              })
+            ).map((offer) => [offer.id, offer.availableQuantity]),
+            outbox: await harness.prisma.client.outboxMessage.count({
+              where: { organizationId: buyerOrg, eventName: 'ORDER_CREATED' },
+            }),
+          }),
+        );
+      }
+
+      async function refusedPlacement(lines: { offerId: string; quantity: number }[]) {
+        const key = apiKey('api-amount-bound');
+        const offerIds = lines.map((line) => line.offerId);
+        const before = await effects(key, offerIds);
+        const start = jest.spyOn(harness.app.get(OrderSagaClient), 'start');
+        const logs = captureLogs();
+        let response: request.Response;
+        try {
+          response = await request(http)
+            .post('/v1/orders')
+            .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+            .set('idempotency-key', key)
+            .send({ lines });
+        } finally {
+          logs.restore();
+          start.mockRestore();
+        }
+        return { response, before, after: await effects(key, offerIds), logs, start, key };
+      }
+
+      it('places an order whose total is exactly the bound', async () => {
+        const offerId = await publishOffer({ price: MAX, quantity: 2 });
+        const response = await placeOrder(offerId, 1);
+        expect(response.body.totalAmountMinor).toBe(MAX);
+      });
+
+      it('refuses the largest price times two with 422 and its closed reason, and changes nothing', async () => {
+        const offerId = await publishOffer({ price: MAX, quantity: 2 });
+        const { response, before, after, logs, start } = await refusedPlacement([
+          { offerId, quantity: 2 },
+        ]);
+
+        expect(response.status).toBe(422);
+        expect(response.body).toEqual({
+          code: 'BUSINESS_RULE_VIOLATION',
+          message: 'The order total exceeds the largest amount the platform can record',
+          details: [
+            {
+              path: 'lines[0].quantity',
+              code: 'ORDER_AMOUNT_EXCEEDS_LIMIT',
+              message: 'The order total exceeds the largest amount the platform can record',
+            },
+          ],
+          correlationId: expect.any(String),
+          timestamp: expect.any(String),
+          path: '/v1/orders',
+        });
+        // No figure — the price, the product of it or the overflow — in the
+        // answer or in anything the application wrote while refusing.
+        const figures = [MAX, (BigInt(MAX) * 2n).toString()];
+        expectNotDisclosed(response.body, figures);
+        expectNotDisclosed(logs.text(), figures);
+        expect(after).toEqual(before);
+        expect(after.orders).toBe(0);
+        expect(start).not.toHaveBeenCalled();
+      });
+
+      it('refuses two lines that are each storable but sum one past the bound, and changes nothing', async () => {
+        const first = await publishOffer({ price: MAX, quantity: 1 });
+        const second = await publishOffer({ price: '1', quantity: 1 });
+        const { response, before, after, start } = await refusedPlacement([
+          { offerId: first, quantity: 1 },
+          { offerId: second, quantity: 1 },
+        ]);
+
+        expect(response.status).toBe(422);
+        expect(response.body.code).toBe('BUSINESS_RULE_VIOLATION');
+        expect(response.body.details).toEqual([
+          expect.objectContaining({ path: 'lines', code: 'ORDER_AMOUNT_EXCEEDS_LIMIT' }),
+        ]);
+        expect(after).toEqual(before);
+        expect(after.available).toEqual(
+          [
+            [first, 1],
+            [second, 1],
+          ].sort(([a], [b]) => String(a).localeCompare(String(b))),
+        );
+        expect(start).not.toHaveBeenCalled();
+      });
     });
 
     it('replays the original response for the same key and body', async () => {
