@@ -223,16 +223,46 @@ export default {
         if (requireKnown)
           for (const ref of binding?.references ?? []) {
             if (ref.writeExpr && !ref.init) options(ref.writeExpr, seen, true);
-            const member = ref.identifier.parent;
+            let read = ref.identifier;
+            while (read.parent && unwrap(read.parent) === unwrap(read)) read = read.parent;
+            const member = read.parent;
             if (
               member.type === 'MemberExpression' &&
-              member.object === ref.identifier &&
+              member.object === read &&
               (key(member) === 'coerce' || key(member) === undefined) &&
-              member.parent.type === 'AssignmentExpression' &&
-              member.parent.left === member &&
+              ['AssignmentExpression', 'UpdateExpression'].includes(member.parent.type) &&
+              (member.parent.left ?? member.parent.argument) === member &&
               constant(member.parent.right) !== false
             )
               report(member);
+            // A helper/container could mutate an otherwise empty options object
+            // (Object.assign, defineProperty, or an opaque alias). Do not guess
+            // what happened there. Primitive message strings cannot be mutated.
+            if (!ref.isRead() || constant(def?.node.init) !== undefined) continue;
+            if (member.type === 'VariableDeclarator' && member.init === read) {
+              options(member.id, seen, true);
+            } else if (
+              member.type === 'AssignmentExpression' &&
+              member.right === read &&
+              member.left.type === 'Identifier'
+            ) {
+              options(member.left, seen, true);
+            } else if (
+              (['CallExpression', 'NewExpression'].includes(member.type) &&
+                member.arguments.includes(read) &&
+                !origin(member.callee)?.raw) ||
+              [
+                'Property',
+                'ArrayExpression',
+                'ReturnStatement',
+                'ExportSpecifier',
+                'ExportDefaultDeclaration',
+              ].includes(member.type) ||
+              (member.type === 'MemberExpression' &&
+                member.parent.type === 'CallExpression' &&
+                member.parent.callee === member)
+            )
+              report(read);
           }
       } else if (requireKnown && !['ObjectExpression', 'Literal'].includes(node.type)) report(node);
       if (node.type === 'ObjectExpression')
