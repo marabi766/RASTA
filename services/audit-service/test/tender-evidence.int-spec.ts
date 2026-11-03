@@ -240,9 +240,13 @@ describe('the tender-evidence projection', () => {
       const first = receipt('BID_SUBMITTED', tenderId, genesisReceipt(tenderId));
       const second = receipt('BID_SUBMITTED', tenderId, first.receipt);
       const repository = new TenderEvidenceRepository(prisma);
-      const monitor = new TenderGapMonitor(repository, {
-        AUDIT_TENDER_GAP_ALERT_SECONDS: 60,
-      } as never);
+      const monitor = new TenderGapMonitor(
+        repository,
+        {
+          AUDIT_TENDER_GAP_ALERT_SECONDS: 60,
+        } as never,
+        prisma,
+      );
       const gauge = async (name: string): Promise<number> =>
         (await registry.getSingleMetric(name)!.get()).values[0]?.value ?? 0;
 

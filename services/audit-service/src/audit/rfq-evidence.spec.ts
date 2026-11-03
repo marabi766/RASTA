@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
-import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
+import { UnprocessableEventError } from '@rasta/nest-common';
 import {
   RFQ_RECEIPT_GENESIS_LABEL,
   RfqEvidenceIdentityError,
   RfqEvidenceUnmappableError,
+  RFQ_RECEIPT_EVENT_VERSIONS,
   genesisReceipt,
   toRfqEvidenceEvent,
 } from './rfq-evidence';
@@ -128,6 +130,41 @@ describe('toRfqEvidenceEvent', () => {
       expect(error).toBeInstanceOf(RfqEvidenceIdentityError);
       expect((error as RfqEvidenceIdentityError).field).toBe(field);
     }
+  });
+
+  it.each(['QUOTATION_SUBMITTED', 'QUOTATION_REVISED'])(
+    'refuses %s at a version it does not understand, before anything is persisted',
+    (name) => {
+      expect(RFQ_RECEIPT_EVENT_VERSIONS[name as 'QUOTATION_SUBMITTED']).toEqual([1]);
+      for (const eventVersion of [999, 2]) {
+        const refuse = (): unknown =>
+          toRfqEvidenceEvent(envelope(name, payload(), { eventVersion }));
+        // The payload is valid v1: the version alone is what is refused.
+        expect(refuse).toThrow(UnprocessableEventError);
+        expect(refuse).toThrow(
+          expect.objectContaining({ reason: DLQ_REASONS.SCHEMA_VERSION_UNSUPPORTED }),
+        );
+      }
+    },
+  );
+
+  it.each(['QUOTATION_SUBMITTED', 'QUOTATION_REVISED'])(
+    'reads %s at version 1, stated or by default',
+    (name) => {
+      expect(toRfqEvidenceEvent(envelope(name, payload(), { eventVersion: 1 }))).toBeDefined();
+      expect(toRfqEvidenceEvent(envelope(name, payload()))).toBeDefined();
+    },
+  );
+
+  it('refuses a receipt equal to the genesis: the genesis starts a chain, it is never a link in it', () => {
+    expect(() =>
+      toRfqEvidenceEvent(
+        envelope(
+          'QUOTATION_SUBMITTED',
+          payload({ previousReceipt: digest('A'), receipt: genesisReceipt(RFQ) }),
+        ),
+      ),
+    ).toThrow(RfqEvidenceUnmappableError);
   });
 
   it('names the field and never its value in the refusal', () => {

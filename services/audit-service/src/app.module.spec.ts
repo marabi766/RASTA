@@ -145,6 +145,7 @@ const idleRepository = {
 /** The runtime-role check, passing: the connection is the runtime role. */
 const runtimeRole = {
   assertRuntimeRole: async () => undefined,
+  beforeDisconnect: () => undefined,
 } as unknown as PrismaService;
 
 describe('audit-service composition root', () => {

@@ -1883,6 +1883,9 @@ export const EXPECTED = {
       'tg_bid_access_evidence_no_truncate',
       'tg_rfq_receipt_link_append_only',
       'tg_rfq_receipt_link_no_truncate',
+      // One identity across the placed and the held state (20261102100000_rfq_evidence).
+      'tg_rfq_receipt_link_identity',
+      'tg_rfq_receipt_pending_identity',
       'audit_event_append_only',
       'audit_event_append_only_truncate',
       // AUD-003, and the same asymmetry as above: the row-level trigger is what
@@ -1935,6 +1938,7 @@ export const EXPECTED = {
       'refuse_chain_head_regression',
       'tender_evidence_append_only',
       'rfq_evidence_append_only',
+      'rfq_receipt_identity_guard',
       'payment_reconciliation_evidence_append_only',
     ],
     constraints: [

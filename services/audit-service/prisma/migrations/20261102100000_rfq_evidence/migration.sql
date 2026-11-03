@@ -82,6 +82,45 @@ ALTER TABLE "rfq_receipt_pending" ADD CONSTRAINT "ck_rfq_receipt_pending_shape"
          AND "receipt" <> "previous_receipt");
 
 -- =============================================================================
+-- One identity across both states
+-- =============================================================================
+
+-- A receipt, or a successor of one predecessor, belongs to ONE event of an RFQ, whether that
+-- event's row is placed in the chain or still held. The unique indexes above are per table; this
+-- is the rule across the two (a receipt held in `rfq_receipt_pending` and the same receipt
+-- committed through another event is two claims on one link). Moving a held row into the chain
+-- is the same event (same `source_event_id`) and is allowed. The consumer serializes writers per
+-- RFQ with an advisory lock and checks the same pair first; this is the guarantee that does not
+-- depend on the consumer's code.
+CREATE FUNCTION "rfq_receipt_identity_guard"() RETURNS trigger AS $$
+BEGIN
+  IF TG_TABLE_NAME = 'rfq_receipt_link' THEN
+    IF EXISTS (SELECT 1 FROM "rfq_receipt_pending" p
+                WHERE p."rfq_id" = NEW."rfq_id" AND p."source_event_id" <> NEW."source_event_id"
+                  AND (p."receipt" = NEW."receipt" OR p."previous_receipt" = NEW."previous_receipt")) THEN
+      RAISE EXCEPTION 'ck_rfq_receipt_identity: a held receipt already claims this receipt or predecessor'
+        USING ERRCODE = 'check_violation';
+    END IF;
+  ELSE
+    IF EXISTS (SELECT 1 FROM "rfq_receipt_link" l
+                WHERE l."rfq_id" = NEW."rfq_id" AND l."source_event_id" <> NEW."source_event_id"
+                  AND (l."receipt" = NEW."receipt" OR l."previous_receipt" = NEW."previous_receipt")) THEN
+      RAISE EXCEPTION 'ck_rfq_receipt_identity: a placed link already claims this receipt or predecessor'
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "tg_rfq_receipt_link_identity"
+  BEFORE INSERT ON "rfq_receipt_link"
+  FOR EACH ROW EXECUTE FUNCTION "rfq_receipt_identity_guard"();
+CREATE TRIGGER "tg_rfq_receipt_pending_identity"
+  BEFORE INSERT ON "rfq_receipt_pending"
+  FOR EACH ROW EXECUTE FUNCTION "rfq_receipt_identity_guard"();
+
+-- =============================================================================
 -- Append-only, for everybody
 -- =============================================================================
 

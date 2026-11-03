@@ -225,6 +225,7 @@ test('the audit entry names every object AUD-003 adds', () => {
     'refuse_chain_head_regression',
     'refuse_mutation',
     'rfq_evidence_append_only',
+    'rfq_receipt_identity_guard',
     'tender_evidence_append_only',
   ]);
 

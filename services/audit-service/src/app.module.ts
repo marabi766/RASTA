@@ -46,6 +46,7 @@ import { RfqEvidenceController } from './audit/rfq-evidence.controller';
 import { RfqEvidenceRepository } from './audit/rfq-evidence.repository';
 import { RfqEvidenceService } from './audit/rfq-evidence.service';
 import { RfqGapMonitor } from './audit/rfq-gap-monitor';
+import { SamplingLoop } from './audit/sampling-loop';
 import { PROCUREMENT_TOPIC, RFQ_EVIDENCE_CONSUMER } from './audit/rfq-evidence';
 import { TenderEvidenceController } from './audit/tender-evidence.controller';
 import { TenderEvidenceRepository } from './audit/tender-evidence.repository';
@@ -415,7 +416,17 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
   ],
 })
 export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdown {
-  private gaugeTimer?: NodeJS.Timeout;
+  /** The capacity sampler: tracked, and stopped before the client disconnects (`beforeDisconnect`). */
+  private readonly gauges = new SamplingLoop(async () => {
+    try {
+      for (const { partition, rows } of await this.repository.partitionRowCounts()) {
+        auditPartitionRows.set({ partition }, rows);
+      }
+    } catch {
+      // Upkeep must never take the service down; ingestion failures have
+      // their own counter and the relay's logging covers a persistent fault.
+    }
+  });
 
   constructor(
     private readonly projector: DomainProjectorConsumer,
@@ -455,23 +466,11 @@ export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdow
     // Sampled from the catalogue, never maintained by inc/dec: an arithmetic
     // gauge drifts on every restart, and a drifting capacity number is worse
     // than no capacity number.
-    const sample = async (): Promise<void> => {
-      try {
-        for (const { partition, rows } of await this.repository.partitionRowCounts()) {
-          auditPartitionRows.set({ partition }, rows);
-        }
-      } catch {
-        // Upkeep must never take the service down; ingestion failures have
-        // their own counter and the relay's logging covers a persistent fault.
-      }
-    };
-
-    void sample();
-    this.gaugeTimer = setInterval(() => void sample(), 60_000);
-    this.gaugeTimer.unref?.();
+    this.prisma.beforeDisconnect(() => this.gauges.stop());
+    this.gauges.start();
   }
 
   async onApplicationShutdown(): Promise<void> {
-    if (this.gaugeTimer) clearInterval(this.gaugeTimer);
+    await this.gauges.stop();
   }
 }

@@ -4,7 +4,12 @@ import { ulid } from 'ulid';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
 import { expectNotDisclosed, instant, thisRun } from '@rasta/testing';
-import { RfqEvidenceUnmappableError, genesisReceipt } from '../src/audit/rfq-evidence';
+import { UnprocessableEventError } from '@rasta/nest-common';
+import {
+  RfqEvidenceUnmappableError,
+  genesisReceipt,
+  type QuotationReceiptPayload,
+} from '../src/audit/rfq-evidence';
 import { RfqEvidenceRepository } from '../src/audit/rfq-evidence.repository';
 import { RfqGapMonitor } from '../src/audit/rfq-gap-monitor';
 import { registry } from '@rasta/observability';
@@ -39,6 +44,7 @@ describe('the RFQ-evidence projection', () => {
   let migrator: PrismaService;
   let api: ApiHarness;
   let consumer: RfqEvidenceConsumer;
+  let repository: RfqEvidenceRepository;
 
   const BUYER = id('ORG-BUYER');
   const SUPPLIER = id('ORG-SUPPLIER');
@@ -129,11 +135,12 @@ describe('the RFQ-evidence projection', () => {
     migrator = newMigratorPrisma();
     await migrator.onModuleInit();
     api = await startApi();
+    repository = new RfqEvidenceRepository(prisma);
     consumer = new RfqEvidenceConsumer(
       () => {
         throw new Error('the suite calls handle() and never subscribes');
       },
-      new RfqEvidenceRepository(prisma),
+      repository,
       {
         info: () => undefined,
         warn: () => undefined,
@@ -250,9 +257,13 @@ describe('the RFQ-evidence projection', () => {
       const first = receipt('QUOTATION_SUBMITTED', rfqId, genesisReceipt(rfqId));
       const second = receipt('QUOTATION_SUBMITTED', rfqId, first.receipt);
       const repository = new RfqEvidenceRepository(prisma);
-      const monitor = new RfqGapMonitor(repository, {
-        AUDIT_RFQ_GAP_ALERT_SECONDS: 60,
-      } as never);
+      const monitor = new RfqGapMonitor(
+        repository,
+        {
+          AUDIT_RFQ_GAP_ALERT_SECONDS: 60,
+        } as never,
+        prisma,
+      );
       const gauge = async (name: string): Promise<number> =>
         (await registry.getSingleMetric(name)!.get()).values[0]?.value ?? 0;
 
@@ -354,6 +365,194 @@ describe('the RFQ-evidence projection', () => {
       const chain = await chainOf(rfqId);
       expect(chain.links.map((l) => l.receipt)).toEqual([first.receipt, second.receipt]);
       expect(await failures('rfq_chain_fork')).toBeGreaterThanOrEqual(before + 2);
+    });
+
+    describe('one admission boundary across the held and the placed (Codex on #590, F1)', () => {
+      const storedFor = async (rfqId: string): Promise<{ placed: number; held: number }> => {
+        const [{ placed }] = await migrator.client.$queryRawUnsafe<{ placed: bigint }[]>(
+          `SELECT count(*) AS placed FROM rfq_receipt_link WHERE rfq_id = $1`,
+          rfqId,
+        );
+        return { placed: Number(placed), held: await heldFor(rfqId) };
+      };
+
+      it('(a) refuses a receipt held through one event and then delivered through another: one claim per receipt, in either order', async () => {
+        const rfqId = id('RFQ');
+        const genesis = genesisReceipt(rfqId);
+        const missing = hash();
+        const held = receipt('QUOTATION_SUBMITTED', rfqId, missing);
+        await consumer.handle(held.event, DELIVERY);
+
+        // The same receipt, now claiming to follow the genesis, under another event id.
+        const rival = receipt('QUOTATION_SUBMITTED', rfqId, genesis, { receipt: held.receipt });
+        await expect(consumer.handle(rival.event, DELIVERY)).rejects.toMatchObject({
+          name: 'RfqEvidenceContinuityError',
+          reason: 'FORK',
+        });
+        expect(await storedFor(rfqId)).toEqual({ placed: 0, held: 1 });
+
+        // And a second successor of the held one's predecessor, appended as the chain's head:
+        // the held row would never be placed, so it is refused now.
+        const sibling = receipt('QUOTATION_SUBMITTED', rfqId, missing);
+        await expect(consumer.handle(sibling.event, DELIVERY)).rejects.toMatchObject({
+          reason: 'FORK',
+        });
+
+        // The other order: placed first, then held under another event.
+        const rfq2 = id('RFQ');
+        const placed = receipt('QUOTATION_SUBMITTED', rfq2, genesisReceipt(rfq2));
+        await consumer.handle(placed.event, DELIVERY);
+        await expect(
+          consumer.handle(
+            receipt('QUOTATION_SUBMITTED', rfq2, hash(), { receipt: placed.receipt }).event,
+            DELIVERY,
+          ),
+        ).rejects.toMatchObject({ reason: 'FORK' });
+        expect(await storedFor(rfq2)).toEqual({ placed: 1, held: 0 });
+      });
+
+      it('(a) the database refuses the same pair itself, whichever table the second claim goes to', async () => {
+        const rfqId = id('RFQ');
+        const placed = receipt('QUOTATION_SUBMITTED', rfqId, genesisReceipt(rfqId));
+        await consumer.handle(placed.event, DELIVERY);
+        const missing = hash();
+        const held = receipt('QUOTATION_SUBMITTED', rfqId, missing);
+        await consumer.handle(held.event, DELIVERY);
+        const insertPending = (previous: string, receiptValue: string): Promise<number> =>
+          prisma.client.$executeRawUnsafe(
+            `INSERT INTO rfq_receipt_pending (source_event_id, rfq_id, organization_id, supplier_organization_id,
+               quotation_id, revision, received_at, ciphertext_sha256, content_commitment, previous_receipt, receipt)
+             VALUES ($1, $2, $3, $3, 'Q', 1, now(), $4, $4, $5, $6)`,
+            id('EVT'),
+            rfqId,
+            BUYER,
+            hash(),
+            previous,
+            receiptValue,
+          );
+        const insertLink = (previous: string, receiptValue: string): Promise<number> =>
+          prisma.client.$executeRawUnsafe(
+            `INSERT INTO rfq_receipt_link (rfq_id, seq, organization_id, supplier_organization_id, quotation_id,
+               revision, received_at, ciphertext_sha256, content_commitment, previous_receipt, receipt, source_event_id)
+             VALUES ($1, 99, $2, $2, 'Q', 1, now(), $3, $3, $4, $5, $6)`,
+            rfqId,
+            BUYER,
+            hash(),
+            previous,
+            receiptValue,
+            id('EVT'),
+          );
+        // Held while the receipt is placed / the predecessor already has its successor.
+        await expect(insertPending(hash(), placed.receipt)).rejects.toThrow(
+          /ck_rfq_receipt_identity/,
+        );
+        await expect(insertPending(genesisReceipt(rfqId), hash())).rejects.toThrow(
+          /ck_rfq_receipt_identity/,
+        );
+        // Placed while the receipt is held / the predecessor already has its held successor.
+        await expect(insertLink(hash(), held.receipt)).rejects.toThrow(/ck_rfq_receipt_identity/);
+        await expect(insertLink(missing, hash())).rejects.toThrow(/ck_rfq_receipt_identity/);
+      });
+
+      it('(b) an event id that comes back with other content is a conflict, never a duplicate: placed and held', async () => {
+        const rfqId = id('RFQ');
+        const placed = receipt('QUOTATION_SUBMITTED', rfqId, genesisReceipt(rfqId));
+        await consumer.handle(placed.event, DELIVERY);
+        const held = receipt('QUOTATION_SUBMITTED', rfqId, hash());
+        await consumer.handle(held.event, DELIVERY);
+        const before = await failures('rfq_chain_fork');
+
+        const claimAgain = (original: EventEnvelope, changes: object, tenant?: string) =>
+          consumer.handle(
+            {
+              ...original,
+              ...(tenant ? { tenantId: tenant } : {}),
+              payload: { ...(original.payload as object), ...changes },
+            },
+            DELIVERY,
+          );
+        for (const original of [placed.event, held.event]) {
+          // Another quotation, another receipt, another organization, another instant.
+          await expect(claimAgain(original, { quotationId: id('QUO') })).rejects.toMatchObject({
+            name: 'RfqEvidenceContinuityError',
+            reason: 'CONFLICTING_REPLAY',
+          });
+          await expect(claimAgain(original, { receipt: hash() })).rejects.toMatchObject({
+            reason: 'CONFLICTING_REPLAY',
+          });
+          await expect(
+            claimAgain(original, { organizationId: 'ORG_OTHER' }, 'ORG_OTHER'),
+          ).rejects.toMatchObject({ reason: 'CONFLICTING_REPLAY' });
+          await expect(
+            claimAgain(original, { receivedAt: '2001-01-01T00:00:00.000Z' }),
+          ).rejects.toMatchObject({ reason: 'CONFLICTING_REPLAY' });
+          // The exact replay is still a duplicate.
+          await expect(consumer.handle(original, DELIVERY)).resolves.toBeUndefined();
+        }
+        expect(await failures('rfq_chain_fork')).toBeGreaterThanOrEqual(before + 8);
+        expect(await storedFor(rfqId)).toEqual({ placed: 1, held: 1 });
+      });
+
+      it('(b) a held event keeps reading as a duplicate once it has been drained into the chain', async () => {
+        const rfqId = id('RFQ');
+        const first = receipt('QUOTATION_SUBMITTED', rfqId, genesisReceipt(rfqId));
+        const second = receipt('QUOTATION_SUBMITTED', rfqId, first.receipt);
+        await consumer.handle(second.event, DELIVERY); // held
+        await consumer.handle(first.event, DELIVERY); // places both
+        expect(await storedFor(rfqId)).toEqual({ placed: 2, held: 0 });
+
+        await expect(consumer.handle(second.event, DELIVERY)).resolves.toBeUndefined();
+        await expect(
+          consumer.handle(
+            { ...second.event, payload: { ...(second.event.payload as object), revision: 7 } },
+            DELIVERY,
+          ),
+        ).rejects.toMatchObject({ reason: 'CONFLICTING_REPLAY' });
+      });
+
+      it('(c) refuses the genesis as a receipt: genesis -> A, then A -> genesis, commits no cycle', async () => {
+        const rfqId = id('RFQ');
+        const genesis = genesisReceipt(rfqId);
+        const a = receipt('QUOTATION_SUBMITTED', rfqId, genesis);
+        await consumer.handle(a.event, DELIVERY);
+
+        // Through the consumer: not the contract.
+        await expect(
+          consumer.handle(
+            receipt('QUOTATION_SUBMITTED', rfqId, a.receipt, { receipt: genesis }).event,
+            DELIVERY,
+          ),
+        ).rejects.toBeInstanceOf(RfqEvidenceUnmappableError);
+        // And at the repository itself, whoever calls it.
+        await expect(
+          repository.appendLink(id('EVT'), {
+            ...(receipt('QUOTATION_SUBMITTED', rfqId, a.receipt).event
+              .payload as object as QuotationReceiptPayload),
+            receipt: genesis,
+          }),
+        ).rejects.toMatchObject({ name: 'RfqEvidenceContinuityError', reason: 'GENESIS_RECEIPT' });
+
+        const chain = await chainOf(rfqId);
+        expect(chain.links.map((l) => l.receipt)).toEqual([a.receipt]);
+        expect(await storedFor(rfqId)).toEqual({ placed: 1, held: 0 });
+      });
+
+      it('F2: an unsupported eventVersion is refused before anything is stored, for both events', async () => {
+        const rfqId = id('RFQ');
+        for (const name of ['QUOTATION_SUBMITTED', 'QUOTATION_REVISED'] as const) {
+          const link = receipt(name, rfqId, genesisReceipt(rfqId), {}, { eventVersion: 999 });
+          await expect(consumer.handle(link.event, DELIVERY)).rejects.toBeInstanceOf(
+            UnprocessableEventError,
+          );
+          const [{ marked }] = await migrator.client.$queryRawUnsafe<{ marked: bigint }[]>(
+            `SELECT count(*) AS marked FROM processed_event WHERE event_id = $1`,
+            link.event.eventId,
+          );
+          expect(Number(marked)).toBe(0);
+        }
+        expect(await storedFor(rfqId)).toEqual({ placed: 0, held: 0 });
+        expect((await chainOf(rfqId)).links).toEqual([]);
+      });
     });
 
     it('lets exactly one of two concurrent links naming the same head through', async () => {

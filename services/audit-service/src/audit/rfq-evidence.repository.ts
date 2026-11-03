@@ -9,6 +9,45 @@ import {
   type QuotationReceiptPayload,
 } from './rfq-evidence';
 
+/** The database's cross-state identity guard (`rfq_receipt_identity_guard`), named in its message. */
+const IDENTITY_GUARD = 'ck_rfq_receipt_identity';
+
+/** A unique violation, or the identity guard's refusal: either way a second claim on an identity. */
+function isIdentityConflict(error: unknown): boolean {
+  const { code, message } = error as { code?: string; message?: string };
+  return code === 'P2002' || (typeof message === 'string' && message.includes(IDENTITY_GUARD));
+}
+
+/** What is compared when an event id comes back: every field the evidence is made of, canonically. */
+type StoredContent = {
+  rfqId: string;
+  organizationId: string;
+  supplierOrganizationId: string;
+  quotationId: string;
+  revision: number;
+  receivedAt: Date;
+  ciphertextSha256: string;
+  contentCommitment: string;
+  previousReceipt: string;
+  receipt: string;
+};
+
+function sameContent(stored: StoredContent, link: QuotationReceiptPayload): boolean {
+  return (
+    stored.rfqId === link.rfqId &&
+    stored.organizationId === link.organizationId &&
+    stored.supplierOrganizationId === link.supplierOrganizationId &&
+    stored.quotationId === link.quotationId &&
+    stored.revision === link.revision &&
+    // The column is millisecond-precise and the instant is compared as one, not as text.
+    stored.receivedAt.getTime() === new Date(link.receivedAt).getTime() &&
+    stored.ciphertextSha256 === link.ciphertextSha256 &&
+    stored.contentCommitment === link.contentCommitment &&
+    stored.previousReceipt === link.previousReceipt &&
+    stored.receipt === link.receipt
+  );
+}
+
 /** An RFQ has a bounded number of quotations; a chain longer than this is refused, not truncated. */
 export const MAX_CHAIN_LINKS = 10_000;
 
@@ -57,13 +96,29 @@ export class RfqEvidenceRepository {
       // One writer per RFQ chain at a time; the head is read after the lock is held.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`rfq_evidence:${link.rfqId}`}, 0))`;
 
+      // The genesis is where a chain starts, never a link in it (`genesis -> A`, then
+      // `A -> genesis`, would be a cycle). Refused before anything is read or written.
+      const genesis = genesisReceipt(link.rfqId);
+      if (link.receipt === genesis) {
+        throw new RfqEvidenceContinuityError('GENESIS_RECEIPT', eventId);
+      }
+
       // Checked under the lock, not before it: a concurrent delivery of this same event
       // that committed while this one waited must read as a duplicate, never as a fork.
+      // A DUPLICATE is an exact replay: the stored content is compared, and an event id
+      // that comes back with other content is a conflict, never silently "already done".
       const already = await tx.processedEvent.findUnique({
         where: { eventId_consumerName: { eventId, consumerName: RFQ_EVIDENCE_CONSUMER } },
         select: { eventId: true },
       });
-      if (already) return 'DUPLICATE';
+      if (already) {
+        const stored =
+          (await tx.rfqReceiptLink.findUnique({ where: { sourceEventId: eventId } })) ??
+          (await tx.rfqReceiptPending.findUnique({ where: { sourceEventId: eventId } }));
+        // A processed marker whose row is nowhere cannot be shown to be a replay: refused.
+        if (stored && sameContent(stored, link)) return 'DUPLICATE';
+        throw new RfqEvidenceContinuityError('CONFLICTING_REPLAY', eventId);
+      }
 
       const head = await tx.rfqReceiptLink.findFirst({
         where: { rfqId: link.rfqId },
@@ -85,8 +140,21 @@ export class RfqEvidenceRepository {
         throw new RfqEvidenceIdentityError('QUOTATION_RECEIPT', eventId, 'organization');
       }
 
-      const genesis = genesisReceipt(link.rfqId);
       const expected = head?.receipt ?? genesis;
+
+      // One identity across both states: a receipt, or a successor of this predecessor, that
+      // is already placed OR held (under any other event) is a fork, whichever of the two
+      // arrived first. The database refuses the same pair (`rfq_receipt_identity_guard`).
+      const claimed = {
+        rfqId: link.rfqId,
+        OR: [{ receipt: link.receipt }, { previousReceipt: link.previousReceipt }],
+      };
+      if (
+        (await tx.rfqReceiptLink.findFirst({ where: claimed, select: { receipt: true } })) ||
+        (await tx.rfqReceiptPending.findFirst({ where: claimed, select: { receipt: true } }))
+      ) {
+        throw new RfqEvidenceContinuityError('FORK', eventId);
+      }
 
       if (link.previousReceipt === expected) {
         await this.insertLink(tx, eventId, link, (head?.seq ?? 0) + 1);
@@ -105,11 +173,7 @@ export class RfqEvidenceRepository {
               where: { rfqId: link.rfqId, receipt: link.previousReceipt },
               select: { receipt: true },
             });
-      const duplicate = await tx.rfqReceiptLink.findFirst({
-        where: { rfqId: link.rfqId, receipt: link.receipt },
-        select: { receipt: true },
-      });
-      if (known || duplicate) throw new RfqEvidenceContinuityError('FORK', eventId);
+      if (known) throw new RfqEvidenceContinuityError('FORK', eventId);
 
       try {
         await tx.rfqReceiptPending.create({
@@ -129,7 +193,7 @@ export class RfqEvidenceRepository {
         });
       } catch (error) {
         // A second held successor of one predecessor, or the same receipt held twice.
-        if ((error as { code?: string }).code === 'P2002') {
+        if (isIdentityConflict(error)) {
           throw new RfqEvidenceContinuityError('FORK', eventId);
         }
         throw error;
@@ -166,7 +230,7 @@ export class RfqEvidenceRepository {
       });
     } catch (error) {
       // The same receipt under another event, or a second successor: a fork.
-      if ((error as { code?: string }).code === 'P2002') {
+      if (isIdentityConflict(error)) {
         throw new RfqEvidenceContinuityError('FORK', eventId);
       }
       throw error;
@@ -175,9 +239,11 @@ export class RfqEvidenceRepository {
 
   /**
    * Moves held receipts into the chain, oldest link first, for as long as one continues
-   * it. A held receipt whose receipt is already in the chain is left held (and so
-   * becomes an overdue gap): it must neither be dropped silently nor block the legitimate
-   * link whose arrival triggered the drain.
+   * it. Moving a held row is moving **the same event** (same `sourceEventId`): if the chain
+   * already holds that receipt under *another* event, the held one is a conflicting claim and
+   * is left held (an overdue gap, loud) — never accepted, never dropped silently, and it does
+   * not block the legitimate link whose arrival triggered the drain. (Admission refuses such a
+   * pair, and the database guard does too; this is the last line.)
    */
   private async drain(
     tx: Prisma.TransactionClient,
@@ -194,9 +260,16 @@ export class RfqEvidenceRepository {
       if (!next) return;
       const placed = await tx.rfqReceiptLink.findFirst({
         where: { rfqId, receipt: next.receipt },
-        select: { receipt: true },
+        select: { sourceEventId: true, seq: true },
       });
-      if (placed) return;
+      if (placed) {
+        if (placed.sourceEventId !== next.sourceEventId) return;
+        // Already moved (this very event): only the held copy remains, and it goes.
+        await tx.rfqReceiptPending.delete({ where: { sourceEventId: next.sourceEventId } });
+        receipt = next.receipt;
+        seq = placed.seq;
+        continue;
+      }
 
       seq += 1;
       await this.insertLink(

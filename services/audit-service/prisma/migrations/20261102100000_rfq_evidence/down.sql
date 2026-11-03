@@ -30,6 +30,9 @@ BEGIN
 END
 $preflight_rfq_evidence$;
 
+DROP TRIGGER IF EXISTS "tg_rfq_receipt_link_identity" ON "rfq_receipt_link";
+DROP TRIGGER IF EXISTS "tg_rfq_receipt_pending_identity" ON "rfq_receipt_pending";
+DROP FUNCTION IF EXISTS "rfq_receipt_identity_guard"();
 DROP TRIGGER IF EXISTS "tg_rfq_receipt_link_append_only" ON "rfq_receipt_link";
 DROP TRIGGER IF EXISTS "tg_rfq_receipt_link_no_truncate" ON "rfq_receipt_link";
 DROP FUNCTION IF EXISTS "rfq_evidence_append_only"();

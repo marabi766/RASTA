@@ -1,6 +1,11 @@
 import { Injectable, type OnModuleDestroy } from '@nestjs/common';
 import type { EventEnvelope } from '@rasta/contracts';
-import { originalDelivery, type EventConsumer, type EventDelivery } from '@rasta/nest-common';
+import {
+  UnprocessableEventError,
+  originalDelivery,
+  type EventConsumer,
+  type EventDelivery,
+} from '@rasta/nest-common';
 import type { Logger } from '@rasta/logging';
 import type { RfqEvidenceRepository } from '../audit/rfq-evidence.repository';
 import {
@@ -70,7 +75,12 @@ export class RfqEvidenceConsumer implements OnModuleDestroy {
           reason: INGESTION_FAILURE_REASONS.RFQ_EVIDENCE_MISMATCH,
         });
         this.logger.error(error.message);
-      } else if (error instanceof RfqEvidenceUnmappableError) {
+      } else if (
+        error instanceof RfqEvidenceUnmappableError ||
+        // An (eventName, eventVersion) pair this projection does not understand: dead-lettered
+        // at once (SCHEMA_VERSION_UNSUPPORTED), before anything is persisted.
+        error instanceof UnprocessableEventError
+      ) {
         auditIngestionFailuresTotal.inc({ reason: INGESTION_FAILURE_REASONS.UNMAPPABLE_ENVELOPE });
         // Identifiers only; the payload is never logged.
         this.logger.error(error.message);

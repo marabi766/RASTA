@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { isoDateTime } from '@rasta/contracts';
-import type { EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, isoDateTime, type EventEnvelope } from '@rasta/contracts';
+import { UnprocessableEventError } from '@rasta/nest-common';
 
 /**
  * The RFQ-evidence projection's rules, pure (COM-007 PR 7, ADR-070 § 4, ADR-066 § 2-3).
@@ -31,6 +31,21 @@ export const RFQ_EVIDENCE_PRODUCER = 'procurement-service';
 
 /** The receipt-chain events of a quotation (ADR-070 § 9). `QUOTATION_WITHDRAWN` extends no chain. */
 export const RFQ_RECEIPT_EVENTS = ['QUOTATION_SUBMITTED', 'QUOTATION_REVISED'] as const;
+
+/**
+ * The `(eventName, eventVersion)` pairs this projection understands — an explicit table, not "any
+ * positive version". The shared envelope permits any positive version, and this mapper is not
+ * `.strict()`, so without a boundary a v999 event with the v1 field names would be stored as if
+ * it were v1. A pair that is not here is refused before anything is persisted (dead-lettered
+ * with `SCHEMA_VERSION_UNSUPPORTED`, like the other evidence projections). A new version is a
+ * deliberate entry, together with the mapping it needs.
+ */
+export const RFQ_RECEIPT_EVENT_VERSIONS: Readonly<
+  Record<(typeof RFQ_RECEIPT_EVENTS)[number], readonly number[]>
+> = {
+  QUOTATION_SUBMITTED: [1],
+  QUOTATION_REVISED: [1],
+};
 
 /**
  * The domain-separation label of an RFQ chain's genesis: the quotation twin of
@@ -66,6 +81,11 @@ export const quotationReceiptPayloadSchema = z
   // A link that is its own predecessor is no link.
   .refine((link) => link.receipt !== link.previousReceipt, {
     message: 'a receipt is not its own predecessor',
+  })
+  // The genesis is where a chain starts, never a link in it: a receipt equal to it would let
+  // `genesis -> A` followed by `A -> genesis` commit a cycle.
+  .refine((link) => link.receipt !== genesisReceipt(link.rfqId), {
+    message: 'a receipt is not the genesis',
   });
 
 export type QuotationReceiptPayload = z.infer<typeof quotationReceiptPayloadSchema>;
@@ -88,7 +108,12 @@ export class RfqEvidenceUnmappableError extends Error {
  */
 export class RfqEvidenceContinuityError extends Error {
   constructor(
-    readonly reason: 'FORK',
+    /**
+     * `FORK`: a second successor, or a receipt/predecessor already recorded (held or placed).
+     * `CONFLICTING_REPLAY`: an event id already processed, now claiming other content.
+     * `GENESIS_RECEIPT`: a receipt equal to the chain's genesis.
+     */
+    readonly reason: 'FORK' | 'CONFLICTING_REPLAY' | 'GENESIS_RECEIPT',
     eventId: string,
   ) {
     super(`receipt link of ${eventId} breaks the RFQ's chain (${reason})`);
@@ -126,6 +151,16 @@ export interface RfqEvidenceEvent {
  */
 export function toRfqEvidenceEvent(envelope: EventEnvelope): RfqEvidenceEvent | undefined {
   if (!(RFQ_RECEIPT_EVENTS as readonly string[]).includes(envelope.eventName)) return undefined;
+  const eventName = envelope.eventName as (typeof RFQ_RECEIPT_EVENTS)[number];
+  // Before the payload is looked at: what a version means is not known for a version not listed.
+  const version = envelope.eventVersion ?? 1;
+  if (!RFQ_RECEIPT_EVENT_VERSIONS[eventName].includes(version)) {
+    throw new UnprocessableEventError(
+      DLQ_REASONS.SCHEMA_VERSION_UNSUPPORTED,
+      `${eventName} v${String(version)} has no rfq-evidence projection; ` +
+        `only v${RFQ_RECEIPT_EVENT_VERSIONS[eventName].join(', v')} is understood`,
+    );
+  }
   const parsed = quotationReceiptPayloadSchema.safeParse(envelope.payload);
   if (!parsed.success) throw new RfqEvidenceUnmappableError(envelope.eventName, envelope.eventId);
   // The chain is a trust anchor: only the service that owns RFQs may extend it. The topic's
