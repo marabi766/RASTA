@@ -113,9 +113,10 @@ export class OrderRepository {
    * narrows to the two named organizations immediately. The caller then runs
    * `assertOrderVisible`, which is where a stranger gets a 404.
    */
-  async findForParty(orderId: string) {
+  /** `client` is the caller's transaction when the read belongs to its snapshot. */
+  async findForParty(orderId: string, client: ExtendedPrismaClient = this.prisma.client) {
     return runUnscoped('an order names two organizations and the seller is one of them', () =>
-      this.prisma.client.order.findUnique({
+      client.order.findUnique({
         where: { id: orderId },
         include: ORDER_VIEW_INCLUDE,
       }),

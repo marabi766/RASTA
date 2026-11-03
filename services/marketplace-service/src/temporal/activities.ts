@@ -3,6 +3,7 @@ import { ApplicationFailure, Context } from '@temporalio/activity';
 import {
   createSystemContext,
   isRastaError,
+  RastaError,
   runWithContext,
   type RequestContext,
 } from '@rasta/nest-common';
@@ -408,6 +409,19 @@ export function createActivities(deps: ActivityDependencies) {
         orderId,
         'authoriseSettlement',
         async (order) => {
+          // The buyer's receipt is what authorises settlement; without it on
+          // the row, nothing is asked of economic-service. An order an older
+          // release's SETTLE left RECEIPT_CONFIRMED with no receipt would
+          // otherwise authorise an obligation migration 20261103121000 put
+          // back in HELD (#625 round 2 self-review). Refused for good: the
+          // saga stops with the funds held, for the runbook
+          // (docs/runbooks/marketplace-receipt-evidence.md).
+          if (!order.receiptConfirmed) {
+            throw RastaError.businessRule(
+              'Settlement is authorised only for an order whose receipt the buyer confirmed',
+              { orderId: order.id },
+            );
+          }
           await deps.economic.authoriseSettlement({
             orderId: order.id,
             transactionId,

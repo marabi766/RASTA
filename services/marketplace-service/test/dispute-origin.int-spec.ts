@@ -4,6 +4,8 @@ import { withUtcSession } from '@rasta/config';
 import { runUnscoped } from '@rasta/nest-common';
 import { ulid } from 'ulid';
 import { PrismaClient } from '../src/generated/prisma';
+import type { EconomicClient } from '../src/economic/economic.client';
+import { createActivities } from '../src/temporal/activities';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import {
   asActor,
@@ -201,6 +203,44 @@ describe('a dispute’s origin and the receipt evidence, in the database (D-083)
         pending.id,
       ),
     ).rejects.toThrow(/ck_order_dispute_raised_from/);
+  });
+
+  it('the saga reads the order and its open dispute as one snapshot: a decision between the reads cannot tear it', async () => {
+    const orderId = await disputedAtConfirmed();
+    const dispute = await disputeOf(orderId);
+    // The operator's decision commits right after the saga read the order row
+    // and before it reads the dispute.
+    const original = wiring.repository.findForParty.bind(wiring.repository);
+    let decideBetween = true;
+    const spy = jest
+      .spyOn(wiring.repository, 'findForParty')
+      .mockImplementation(async (...args: Parameters<typeof original>) => {
+        const row = await original(...args);
+        if (decideBetween) {
+          decideBetween = false;
+          await asOperator(() =>
+            resolveOpenDispute(wiring, orderId, {
+              outcome: 'SETTLE',
+              resolution: 'decided between the two reads',
+              responsibility: 'UNDETERMINED',
+            }),
+          );
+        }
+        return row;
+      });
+    try {
+      const torn = await asSaga(() => wiring.orders.sagaView(orderId));
+      expect(decideBetween).toBe(false);
+      // As of the first read: DISPUTED, with that dispute open.
+      expect(torn.status).toBe('DISPUTED');
+      expect(torn.dispute?.id).toBe(dispute.id);
+    } finally {
+      spy.mockRestore();
+    }
+    // And the next look sees the decision whole.
+    const after = await asSaga(() => wiring.orders.sagaView(orderId));
+    expect(after.status).toBe('CONFIRMED');
+    expect(after.dispute).toBeNull();
   });
 
   it('a legacy dispute with no origin: SETTLE refused, nothing written; REFUND still decides it', async () => {
@@ -456,6 +496,26 @@ describe('a dispute’s origin and the receipt evidence, in the database (D-083)
     expect(await findings()).toEqual([
       { finding: 'RECEIPT_CONFIRMED_WITHOUT_RECEIPT', order_id: order.id, dispute_id: null },
     ]);
+
+    // The saga authorises nothing for it: no receipt, no call to
+    // economic-service (whose obligation for it the economic migration may
+    // have returned to HELD).
+    const economicCalls: string[] = [];
+    const economic = new Proxy(
+      {},
+      {
+        get: (_target, name) => () => {
+          economicCalls.push(String(name));
+          return Promise.resolve(undefined);
+        },
+      },
+    ) as EconomicClient;
+    const acts = createActivities({ orders: wiring.orders, economic, currentStep: sagaStep });
+    await expect(acts.authoriseSettlement(order.id, `TXN_${ulid()}`)).rejects.toMatchObject({
+      type: 'BUSINESS_RULE_VIOLATION',
+      nonRetryable: true,
+    });
+    expect(economicCalls).toEqual([]);
 
     // The way out the runbook names: a dispute, then the operator's decision.
     await asBuyer(() =>

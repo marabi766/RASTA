@@ -1229,6 +1229,8 @@ export class OrderService {
     currency: string;
     economicTransactionId: string | null;
     correlationId: string;
+    /** The buyer's receipt is recorded: who confirmed it, and when. */
+    receiptConfirmed: boolean;
   }> {
     const row = await this.repository.findForParty(orderId);
     if (!row) throw RastaError.notFound('Order', orderId);
@@ -1241,6 +1243,7 @@ export class OrderService {
       currency: row.currency,
       economicTransactionId: row.economicTransactionId,
       correlationId: row.correlationId,
+      receiptConfirmed: row.receiptConfirmedAt !== null && row.receiptConfirmedBy !== null,
     };
   }
 
@@ -1274,24 +1277,35 @@ export class OrderService {
     /** `mirroredDisputeId`'s dispute on this order, when one was named. */
     mirroredDispute?: { id: string; resolution: string | null } | null;
   }> {
-    const row = await this.repository.findForParty(orderId);
-    if (!row) throw RastaError.notFound('Order', orderId);
-
-    const dispute = await runUnscoped('the saga reads the dispute on the order it drives', () =>
-      this.prisma.client.orderDispute.findFirst({
-        where: { orderId: row.id, status: 'OPEN' },
-        select: { id: true, reason: true, resolution: true },
-      }),
+    // One snapshot for all three reads: a resolution committing between them
+    // would show the order DISPUTED with no OPEN dispute, and the saga stops
+    // on that as inconsistent (review of #625 round 2's self-review). Read
+    // only; it locks nothing and waits for nothing.
+    const { row, dispute, mirroredDispute } = await this.prisma.client.$transaction(
+      async (tx) => {
+        const row = await this.repository.findForParty(orderId, tx as ExtendedPrismaClient);
+        if (!row) throw RastaError.notFound('Order', orderId);
+        const dispute = await runUnscoped('the saga reads the dispute on the order it drives', () =>
+          tx.orderDispute.findFirst({
+            where: { orderId: row.id, status: 'OPEN' },
+            select: { id: true, reason: true, resolution: true },
+          }),
+        );
+        const mirroredDispute =
+          mirroredDisputeId === undefined
+            ? undefined
+            : await runUnscoped(
+                'the saga reads the dispute it mirrored, on the order it drives',
+                () =>
+                  tx.orderDispute.findFirst({
+                    where: { id: mirroredDisputeId, orderId: row.id },
+                    select: { id: true, resolution: true },
+                  }),
+              );
+        return { row, dispute, mirroredDispute };
+      },
+      { isolationLevel: 'RepeatableRead' },
     );
-    const mirroredDispute =
-      mirroredDisputeId === undefined
-        ? undefined
-        : await runUnscoped('the saga reads the dispute it mirrored, on the order it drives', () =>
-            this.prisma.client.orderDispute.findFirst({
-              where: { id: mirroredDisputeId, orderId: row.id },
-              select: { id: true, resolution: true },
-            }),
-          );
 
     return {
       status: row.status,
