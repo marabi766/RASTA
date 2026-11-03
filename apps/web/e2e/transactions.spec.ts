@@ -29,8 +29,9 @@ import { withContext } from '../src/lib/page-context';
  *
  * The payer's administrator opens the dispute; the payee's administrator sees
  * it and is offered no form (economic-service refuses it 403); the system
- * administrator — the platform operator — resolves it, which puts the
- * transaction back in the settlement queue and settles nothing. Not the
+ * administrator — the platform operator — resolves it, which returns the
+ * transaction to where its settlement authority stands — here the escrow, as
+ * nothing authorised it (D-083) — and settles nothing. Not the
  * union's administrator: it acts for another organization only within its
  * union's subtree (docs/24 Q-136), and the seeded union does not hold the
  * payer.
@@ -259,7 +260,7 @@ test.describe('transaction disputes through the live stack', () => {
     expect(shownForTheirs).not.toContain(THIRD_ORGANIZATION);
   });
 
-  test('a platform operator resolves it back to the settlement queue, settling nothing', async ({
+  test('a platform operator resolves it back to the escrow it was disputed from, authorising and settling nothing (D-083)', async ({
     context,
     page,
     request,
@@ -274,8 +275,12 @@ test.describe('transaction disputes through the live stack', () => {
 
     await expect(page.getByText(/رسیدگی شما ثبت شد/)).toBeVisible();
     await expect.poll(() => new URL(page.url()).searchParams.has('flash')).toBe(false);
+    // Held, and never authorised: a resolution lifts the dispute and returns
+    // the transaction to where its settlement authority stands — the escrow,
+    // not the settlement queue (D-083).
     const text = await mainText(page);
-    expect(text).toContain('در انتظار تسویه');
+    expect(text).toContain('در وثیقه');
+    expect(text).not.toContain('در انتظار تسویه');
     expect(text).toContain('اعتراض ثبت شده بود');
 
     const read = await call<{ status: string; settlement: unknown }>(
@@ -285,7 +290,7 @@ test.describe('transaction disputes through the live stack', () => {
       `/v1/transactions/${ownId}`,
     );
     expect(read.status).toBe(200);
-    expect(read.body.status).toBe('PENDING_SETTLEMENT');
+    expect(read.body.status).toBe('HELD');
     expect(read.body.settlement).toBeNull();
   });
 

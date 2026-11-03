@@ -540,11 +540,13 @@ describe('economic internals', () => {
       // `ck_wallet_hold_resolution` requires a resolved hold to name both the
       // moment and the journal that resolved it, so the drift has to be
       // introduced as a row the constraint accepts — otherwise this would test
-      // the constraint rather than the reconciliation.
+      // the constraint rather than the reconciliation. REFUNDED, not RELEASED:
+      // a release names an authorised transaction
+      // (`trg_wallet_hold_release_settlement_authority`), and this hold's has no row.
       await runUnscoped('the suite resolves a hold behind the ledger’s back', () =>
         prisma.client.$executeRawUnsafe(
           `UPDATE wallet_hold
-              SET status = 'RELEASED',
+              SET status = 'REFUNDED',
                   resolved_at = now(),
                   resolved_journal_id = placed_journal_id
             WHERE wallet_id = $1 AND reference = $2`,

@@ -228,7 +228,8 @@ describe('transaction disputes follow the source (Q-138) and keep the reason', (
 
       const resolved = await resolve(transactionId, await saga(), resolveKey).expect(200);
       expect(resolved.body).toMatchObject({
-        status: 'PENDING_SETTLEMENT',
+        // Disputed while HELD, never authorised: back to HELD (D-083).
+        status: 'HELD',
         disputeReason: REASON,
         disputeResolution: RESOLUTION,
         disputeResolvedBy: 'economic-service',
@@ -363,7 +364,7 @@ describe('transaction disputes follow the source (Q-138) and keep the reason', (
 
         const resolved = await resolve(transactionId, resolver()).expect(200);
         expect(resolved.body).toMatchObject({
-          status: 'PENDING_SETTLEMENT',
+          status: 'HELD',
           disputeReason: REASON,
           disputeResolution: RESOLUTION,
           disputeResolvedBy: expect.stringMatching(/^USR-APITEST-/),

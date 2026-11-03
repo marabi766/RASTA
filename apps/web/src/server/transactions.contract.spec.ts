@@ -9,7 +9,7 @@ import {
   DISPUTE_COMMAND_ROLES,
   DISPUTE_FIELD_LIMITS,
   DISPUTE_FROM_STATES,
-  DISPUTE_TARGET_STATE,
+  DISPUTE_TARGET_STATES,
   EMPTY_DISPUTE_FORM,
   NEVER_ROLE,
   PLATFORM_ROLES,
@@ -256,7 +256,14 @@ describe('the state machine', () => {
         .map(([state]) => state);
       expect(from.sort()).toEqual([...DISPUTE_FROM_STATES[command]].sort());
       for (const state of from) {
-        expect(transitions.get(state)?.get(command)).toBe(DISPUTE_TARGET_STATE[command]);
+        const target = transitions.get(state)?.get(command);
+        // `BY_AUTHORITY`: one of `RESOLUTION_TARGETS`, chosen by the
+        // transaction's settlement authority (D-083).
+        const targets =
+          target === 'BY_AUTHORITY'
+            ? literalsOf(topLevelConst(stateMachine, 'RESOLUTION_TARGETS').getText())
+            : [target];
+        expect([...targets].sort()).toEqual([...DISPUTE_TARGET_STATES[command]].sort());
       }
     },
   );
