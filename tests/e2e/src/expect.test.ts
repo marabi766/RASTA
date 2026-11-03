@@ -12,12 +12,11 @@ import { repositoryRoot } from './kafka-observer.ts';
  */
 
 const LUCKY = JSON.stringify({ timestamp: '2026-10-25T01:39:13.000Z' });
+// Load the separately compiled portal harness through main's reviewed runtime import.
+const portal = pathToFileURL(join(repositoryRoot(), 'apps/web/e2e/expect.ts')).href;
 
 describe('the e2e expect', () => {
   it('test.expect is the guarded expect in both harnesses', async () => {
-    // Load by URL at runtime: the portal harness belongs to a separate TypeScript project.
-    // From the repository root, whichever directory the runner starts in.
-    const portal = pathToFileURL(join(repositoryRoot(), 'apps/web/e2e/expect.ts')).href;
     const { expect: portalExpect, test: portalTest } = await import(portal);
     assert.equal(guardedTest.expect, expect);
     assert.equal(portalTest.expect, portalExpect);
@@ -45,3 +44,19 @@ describe('the e2e expect', () => {
     assert.throws(() => expect(['a']).not.toContain('a'), /toContain/);
   });
 });
+
+for (const harness of ['api', 'portal']) {
+  for (const depth of [1, 3]) {
+    it(`${harness}: ${depth} fixture extension(s) retain guarded test.expect`, async () => {
+      const { expect: guardedExpect, test: initial } =
+        harness === 'api' ? await import('./expect.ts') : await import(portal);
+      let derived = initial;
+      for (let step = 0; step < depth; step++) derived = derived.extend({});
+      assert.equal(LUCKY.includes('12.5'), false);
+      // Exercise the real installed Playwright object, including the reviewer's lucky timestamp.
+      assert.throws(() => derived.expect(LUCKY).not.toContain('12.5'), /can fail by chance/);
+      assert.equal(derived.expect, guardedExpect);
+      assert.notEqual(derived, initial);
+    });
+  }
+}
