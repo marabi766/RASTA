@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { readSession, readStoredSessionForLogout } from '@/server/current-session';
 import { organizationLost } from '@/server/session-organization';
 
+import { PageThemeOwner } from '../../PageThemeOwner';
 import { RecoveryScreen } from './RecoveryScreen';
 
 /**
@@ -25,6 +26,9 @@ export default async function RecoveryPage() {
   // Which way it cannot act is told from the session's own pin and token —
   // whether to say "your organization changed", nothing more is drawn of it.
   return (
-    <RecoveryScreen csrfToken={stored.csrfToken} organizationLost={organizationLost(stored)} />
+    <>
+      <PageThemeOwner subject={stored.subject} />
+      <RecoveryScreen csrfToken={stored.csrfToken} organizationLost={organizationLost(stored)} />
+    </>
   );
 }
