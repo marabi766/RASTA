@@ -706,8 +706,14 @@ describe('ADR-050 durable outbox claim, against real PostgreSQL', () => {
       ]);
       // Whichever bound reports first — the statement's, or Prisma's
       // transaction timeout, both what was left of the bound (#291 r3: no
-      // margin past it) — the release did not release.
-      expect(outcome).toMatch(/57014|statement timeout|expired transaction/);
+      // margin past it) — the release did not release. Prisma words its own
+      // refusal two ways, both P2028: `expired transaction` once the engine has
+      // recorded the expiry, `Transaction not found` for a request that lands
+      // between the rollback and that record (FU-034, the same race as
+      // construction-service's transaction-timeout spec).
+      expect(outcome).toMatch(
+        /57014|statement timeout|expired transaction|Transaction not found\. Transaction ID is invalid/,
+      );
       // And the database gave up too: no UPDATE is left waiting on the lock.
       // Prisma's timeout alone would not end it; the statement timeout does.
       expect(await updatesWaitingOnALock(b)).toBe(0);
