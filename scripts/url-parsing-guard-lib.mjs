@@ -201,8 +201,8 @@ function isBoundUrlModule(initializer) {
 
 /**
  * Resolve lexical symbols without loading dependencies or ambient libraries.
- * Unknown local bindings shadow globals only in their own scope. Aliases and
- * binding patterns are followed, but their escape sites are still refused.
+ * Unknown values retain the global-name floor; only proven non-parsers shadow it.
+ * Aliases and binding patterns are followed; their escape sites are still refused.
  */
 function parserBindings(sourceFile) {
   const host = ts.createCompilerHost({});
@@ -220,7 +220,7 @@ function parserBindings(sourceFile) {
       ts.isVariableDeclaration(declaration) ||
       ts.isParameter(declaration) ||
       ts.isBindingElement(declaration) ||
-      ts.isFunctionDeclaration(declaration) ||
+      (ts.isFunctionDeclaration(declaration) && declaration.body !== undefined) ||
       ts.isFunctionExpression(declaration) ||
       ts.isClassDeclaration(declaration) ||
       ts.isClassExpression(declaration) ||
@@ -239,11 +239,8 @@ function parserBindings(sourceFile) {
   };
   const runtimeDeclarations = (node) =>
     (valueSymbol(node)?.declarations ?? []).filter(isRuntimeBinding);
-  const hasLocalRoot = (node) => {
-    const inner = unwrap(node);
-    if (isMemberAccess(inner)) return hasLocalRoot(inner.expression);
-    return ts.isIdentifier(inner) && runtimeDeclarations(inner).length > 0;
-  };
+  // null = NOT_PARSER; capability strings = PARSER; UNKNOWN is neither proof.
+  const UNKNOWN = Symbol('unknown value');
   const active = new Set();
   const moduleKind = (name) => {
     if (URL_MODULES.has(name)) return 'module';
@@ -251,9 +248,32 @@ function parserBindings(sourceFile) {
     if (['module', 'node:module'].includes(name)) return 'loaderModule';
     if (['process', 'node:process'].includes(name)) return 'process';
     if (['util', 'node:util'].includes(name)) return 'util';
-    return null;
+    return name.startsWith('.') ? null : UNKNOWN;
   };
   const member = (object, name) => {
+    if (object && typeof object === 'object') {
+      // Resolve literal members, but never infer absence across spreads/getters.
+      let value = UNKNOWN;
+      if (ts.isObjectLiteralExpression(object)) {
+        for (const property of object.properties) {
+          const key = property.name;
+          if (ts.isSpreadAssignment(property) || (key && ts.isComputedPropertyName(key))) {
+            value = UNKNOWN;
+          } else if (key?.text === name) {
+            if (active.has(property)) value = UNKNOWN;
+            else {
+              active.add(property);
+              value = ts.isPropertyAssignment(property) ? reference(property.initializer) : UNKNOWN;
+              active.delete(property);
+            }
+          }
+        }
+      } else {
+        value = UNKNOWN;
+      }
+      return value === UNKNOWN && name === 'URL' ? 'class' : value;
+    }
+    if (object === UNKNOWN) return name === 'URL' ? 'class' : UNKNOWN;
     if (object === 'global') {
       if (name === 'URL') return 'class';
       if (GLOBAL_OBJECTS.has(name)) return 'global';
@@ -269,20 +289,32 @@ function parserBindings(sourceFile) {
     if (object === 'process' && name === 'getBuiltinModule') return 'getBuiltinModule';
     if (object === 'process' && name === 'argv') return 'argv';
     if (object === 'util' && name === 'parseArgs') return 'parseArgs';
-    return null;
+    return object === null ? null : name === 'URL' ? 'class' : UNKNOWN;
   };
   const declarationReference = (declaration) => {
     if (ts.isVariableDeclaration(declaration)) {
-      return declaration.initializer ? reference(declaration.initializer) : null;
+      const value = declaration.initializer ? reference(declaration.initializer) : UNKNOWN;
+      // Mutable bindings retain proven capabilities, never a proof of safety.
+      return declaration.parent.flags & ts.NodeFlags.Const || typeof value === 'string'
+        ? value
+        : UNKNOWN;
     }
     if (ts.isBindingElement(declaration)) {
       const pattern = declaration.parent;
       const owner = pattern.parent;
-      const from = ts.isBindingElement(owner)
-        ? declarationReference(owner)
-        : owner.initializer
-          ? reference(owner.initializer)
-          : null;
+      let from = ts.isParameter(owner)
+        ? UNKNOWN
+        : ts.isBindingElement(owner)
+          ? declarationReference(owner)
+          : owner.initializer
+            ? reference(owner.initializer)
+            : UNKNOWN;
+      if (
+        ts.isVariableDeclaration(owner) &&
+        !(owner.parent.flags & ts.NodeFlags.Const) &&
+        typeof from !== 'string'
+      )
+        from = UNKNOWN;
       const key = declaration.propertyName ?? declaration.name;
       const name = ts.isComputedPropertyName(key)
         ? isStringLike(unwrap(key.expression))
@@ -306,8 +338,9 @@ function parserBindings(sourceFile) {
     }
     if (ts.isImportEqualsDeclaration(declaration)) {
       const specifier = declaration.moduleReference.expression;
-      return specifier && isStringLike(specifier) ? moduleKind(specifier.text) : null;
+      return specifier && isStringLike(specifier) ? moduleKind(specifier.text) : UNKNOWN;
     }
+    if (ts.isParameter(declaration)) return UNKNOWN;
     return null;
   };
   const reference = (node) => {
@@ -316,26 +349,24 @@ function parserBindings(sourceFile) {
       const symbol = valueSymbol(inner);
       const declarations = runtimeDeclarations(inner);
       if (declarations.length > 0) {
-        if (active.has(symbol)) return null;
+        if (active.has(symbol)) return UNKNOWN;
         active.add(symbol);
-        const result = declarations.map(declarationReference).find(Boolean) ?? null;
+        const results = declarations.map(declarationReference);
+        const result =
+          results.find((value) => value !== null && value !== UNKNOWN) ??
+          (results.includes(UNKNOWN) ? UNKNOWN : null);
         active.delete(symbol);
-        return result;
+        if (result !== UNKNOWN || !['URL', 'process'].includes(inner.text)) return result;
       }
       if (inner.text === 'URL') return 'class';
       if (GLOBAL_OBJECTS.has(inner.text)) return 'global';
       if (['eval', 'Function'].includes(inner.text)) return 'unsafe';
       if (inner.text === 'process') return 'process';
-      return null;
+      return UNKNOWN;
     }
     if (ts.isAwaitExpression(inner)) return reference(inner.expression);
     if (isMemberAccess(inner)) {
-      const resolved = member(reference(inner.expression), memberName(inner));
-      // An unidentifiable receiver can still expose the native URL class.
-      // Suppress the name fallback only for a proven local value binding.
-      if (resolved === null && memberName(inner) === 'URL' && !hasLocalRoot(inner.expression))
-        return 'class';
-      return resolved;
+      return member(reference(inner.expression), memberName(inner));
     }
     if (isUrlModuleLoad(inner)) return 'module';
     if (ts.isCallExpression(inner)) {
@@ -360,8 +391,23 @@ function parserBindings(sourceFile) {
         return moduleKind(inner.arguments[0].text);
       }
     }
-    if (ts.isNewExpression(inner) && reference(inner.expression) === 'class') return 'instance';
-    return null;
+    if (ts.isNewExpression(inner)) {
+      const constructor = reference(inner.expression);
+      return constructor === 'class' ? 'instance' : constructor === null ? null : UNKNOWN;
+    }
+    if (ts.isObjectLiteralExpression(inner) || ts.isArrayLiteralExpression(inner)) return inner;
+    // Arbitrary expressions do not establish safety.
+    if (
+      ts.isLiteralExpression(inner) ||
+      [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NullKeyword].includes(
+        inner.kind,
+      ) ||
+      ts.isFunctionExpression(inner) ||
+      ts.isArrowFunction(inner) ||
+      ts.isClassExpression(inner)
+    )
+      return null;
+    return UNKNOWN;
   };
   return { reference };
 }
@@ -393,7 +439,8 @@ function isDeclarationName(node) {
     ts.isImportSpecifier(parent) ||
     ts.isImportClause(parent) ||
     ts.isNamespaceImport(parent) ||
-    ts.isImportEqualsDeclaration(parent) ||
+    (ts.isImportEqualsDeclaration(parent) && parent.name === node) ||
+    (ts.isExportSpecifier(parent) && parent.parent.parent.moduleSpecifier?.text?.startsWith('.')) ||
     (ts.isPropertySignature(parent) && parent.name === node) ||
     ts.isLabeledStatement(parent) ||
     ts.isBreakOrContinueStatement(parent)

@@ -290,6 +290,16 @@ const ALLOWED = Object.freeze([
     call: 'createRequire(import.meta.url)',
     reason: 'resolves Jest and reads its manifest to run the test independence harness',
   },
+  {
+    file: 'scripts/prepush-scope-lib.mjs',
+    call: "createRequire(join(cwd, 'package.json'))",
+    reason: 'resolves only turbo/package.json to locate the installed native Turbo binary',
+  },
+  {
+    file: 'scripts/prepush-scope-lib.mjs',
+    call: "createRequire(realpathSync(rootRequire.resolve('turbo/package.json')))",
+    reason: 'resolves only the installed native Turbo binary package; no module is loaded',
+  },
 ]);
 
 /** zod `.url()` settings in a service's configuration that stay, and why. */
@@ -494,6 +504,7 @@ const F1 = [
     [
       "import {parse} from 'node:url'; export {parse}",
       "import {URL} from 'node:url'; export {URL}",
+      "export {URL} from 'node:url'",
       "import * as u from 'node:url'; export {u}",
       "import {createRequire} from 'node:module'; export {createRequire}",
       'const {getBuiltinModule}=process; export {getBuiltinModule}',
@@ -565,8 +576,95 @@ test('F1 shorthand and ambient CLI bindings retain discovery', () => {
     'const {argv}=process; run({argv})',
     'declare const process: any; process.argv',
     'declare global {var process: any}; process.argv',
+    'function main(process){process.argv}',
   ])
     assert.equal(commandLineSurface(source, 'a.ts').readsArgv, true, source);
+});
+
+// R2-1: no local declaration is proof of its unknown runtime value.
+const UNKNOWN_RECEIVERS = [
+  "const spec='node:url'; const m=await import(spec); new m.URL(env.X)",
+  'const m=require(name); new m.URL(env.X)',
+  "const m=module.require('url'); new m.URL(env.X)",
+  "const m=process.mainModule.require('url'); new m.URL(env.X)",
+  'function f(){const g=this; return new g.URL(env.X)}',
+  'const w=window.top; new w.URL(env.X)',
+  'const w=document.defaultView; new w.URL(env.X)',
+  'const {URL}=await import(spec); new URL(env.X)',
+  'const {URL:U}=require(name); new U(env.X)',
+  'function f(){const {URL}=this; return new URL(env.X)}',
+  'function f({URL}){new URL(env.X)} f(await import(spec))',
+  'function f({URL:U}){new U(env.X)} f(await import(spec))',
+  'function f({URL}={URL:class {}}){new URL(env.X)} f(unknown)',
+  'function f({URL:U}={URL:class {}}){new U(env.X)} f(unknown)',
+  'function f(o){new o.nested.URL(env.X)} f({nested:await import(spec)})',
+  'const m=await import(spec); f(m.URL)',
+  'let m; m=await import(spec); new m.URL(env.X)',
+  'var m; m=await import(spec); new m.URL(env.X)',
+  'let URL; ({URL}=await import(spec)); new URL(env.X)',
+  'let m={}; m=await import(spec); new m.URL(env.X)',
+  'let URL=class {}; URL=unknown; new URL(env.X)',
+  'let m={URL:class {}}; m=unknown; new m.URL(env.X)',
+  'let {URL:U}={URL:class {}}; ({URL:U}=unknown); new U(env.X)',
+  'let {URL:U}={}; ({URL:U}=await import(spec)); new U(env.X)',
+  'function f(URL){return new URL(env.X)}',
+  'try {} catch(URL) {new URL(env.X)}',
+  'function f(){const URL=unknown; return new URL(env.X)}',
+  'const x={nested:unknown}; new x.nested.URL(env.X)',
+  'const x={...unknown}; new x.URL(env.X)',
+  'const x={get nested(){return unknown}}; new x.nested.URL(env.X)',
+  'const x=[]; new x.URL(env.X)',
+  "const base=new URL('http://ok'); new base.URL(env.X)",
+  'const x={URL:x.URL}; new x.URL(env.X)',
+  'const {nested:{URL:U}}=unknown; new U(env.X)',
+  "import * as m from 'unknown-package'; new m.URL(env.X)",
+  "let u=require('node:url'); u.parse(env.X)",
+  "let {parse:p}=require('url'); p(env.X)",
+];
+test('R2-1 unknown runtime values fail closed across all scanned trees and extensions', () => {
+  const root = mkdtempSync(join(tmpdir(), 'url-guard-'));
+  try {
+    for (const tree of ['scripts', 'packages', 'services', 'apps', 'tests']) {
+      mkdirSync(join(root, tree));
+      for (const extension of ['ts', 'mts', 'cts', 'tsx', 'js', 'mjs', 'cjs', 'jsx']) {
+        const file = `${tree}/unknown.${extension}`;
+        const source = UNKNOWN_RECEIVERS.map((source) => `{${source}}`).join('\n');
+        writeFileSync(join(root, file), source);
+      }
+    }
+    const found = repositoryUrlParses(root);
+    for (const tree of ['scripts', 'packages', 'services', 'apps', 'tests'])
+      for (const extension of ['ts', 'mts', 'cts', 'tsx', 'js', 'mjs', 'cjs', 'jsx'])
+        for (let line = 1; line <= UNKNOWN_RECEIVERS.length; line++)
+          assert.ok(
+            found.some(
+              (site) => site.file === `${tree}/unknown.${extension}` && site.line === line,
+            ),
+            `${tree}/${extension}:${line}: ${UNKNOWN_RECEIVERS[line - 1]}`,
+          );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+test('R2-1 unknown local global-object names stay unknown while their URL member is refused', () => {
+  for (const name of ['window', 'self', 'global', 'globalThis']) {
+    assert.deepEqual(sites(`function f(${name}){run(${name})}`), []);
+    assert.deepEqual(sites(`function f(${name}){new ${name}.URL(env.X)}`), ['new URL']);
+  }
+});
+test('R2-1 mutable bindings retain proven native instance capabilities', () => {
+  assert.deepEqual(sites("let base=new URL('http://ok'); base.href=env.X"), ['URL mutation']);
+});
+test('R2-2 reexports stay with their exporter; R2-3 import-equals references are visited', () => {
+  assert.deepEqual(sites("export { URL } from './local.js'"), []);
+  assert.ok(rawUrlParses("export {URL as U} from 'node:url'", 'a.ts').length > 0);
+  assert.ok(rawUrlParses('import U = URL; new U(env.X)', 'a.ts').length > 0);
+});
+test('R2-1 bodiless function declarations cannot shadow the runtime URL', () => {
+  for (const extension of ['ts', 'mts', 'cts', 'tsx'])
+    assert.ok(
+      rawUrlParses('function URL(x: string): any; new URL(env.X)', `a.${extension}`).length,
+    );
 });
 
 // This is main 5702020a's caught-forms corpus: all native-parse/ESCAPES
@@ -575,6 +673,8 @@ test('F1 shorthand and ambient CLI bindings retain discovery', () => {
 test("main's caught-forms corpus remains refused by the new resolver", () => {
   const corpus = [
     ...ESCAPES.map(([, source]) => source),
+    ...UNKNOWN_RECEIVERS,
+    'function URL(x: string): any; new URL(env.X)',
     ...F1.flatMap(([, sources]) => sources).filter(
       (source) => !/createRequire|getBuiltinModule|eval/.test(source),
     ),
@@ -598,14 +698,11 @@ test("main's caught-forms corpus remains refused by the new resolver", () => {
 
 test('lexical shadowing permits unrelated URL values and preserves sibling native parses', () => {
   for (const local of [
-    'function f(URL) { return new URL(env.X); }',
     'function f(){ class URL {}; return new URL(env.X) }',
     'function f(){ function URL(){}; return new URL(env.X) }',
-    'try {} catch(URL) {new URL(env.X)}',
-    'function f(o){new o.nested.URL(env.X)}',
-    'const x={URL: Custom}; const {URL: U}=x; new U(env.X); new x.URL(env.X);',
+    'class Custom {}; const x={URL: Custom}; const {URL: U}=x; new U(env.X); new x.URL(env.X);',
     "import { URL } from './local.js'; new URL(env.X);",
-    'function f() { const URL=Custom; return new URL(env.X); }',
+    'function f() { class Custom {}; const URL=Custom; return new URL(env.X); }',
   ]) {
     assert.deepEqual(sites(local), [], local);
     assert.deepEqual(sites(`${local} function sibling(){ return new globalThis.URL(env.X) }`), [
