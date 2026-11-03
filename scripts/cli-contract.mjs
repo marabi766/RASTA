@@ -55,7 +55,13 @@ const PRETTIER = ['--parser', '--stdin-filepath'];
 export const CLI_CONTRACT = Object.freeze({
   // --- apps -----------------------------------------------------------------
   'apps/web/e2e/contract-fixture.ts': { other: ['-X', '-f', '-q', '-v'] },
+  // The build's preload puts itself into every child's NODE_OPTIONS / execArgv (`--require`);
+  // it reads no command line.
+  'apps/web/scripts/capture-next-config.cjs': { other: ['--require'] },
+  'apps/web/scripts/build-supervisor.mjs': { other: ['-axo'] },
   'apps/web/src/app/fonts.ts': { other: ['--font-vazirmatn'] },
+  // Test helper of the build-binding specs: runs the build scripts in a child Node.
+  'apps/web/src/test/build-scripts.ts': { other: ['--input-type', '-e'] },
 
   // --- packages: test fixtures run by their specs ----------------------------
   // The stock-zod oracle's build child (PR #444 r4): its input arrives on stdin.
