@@ -39,8 +39,23 @@ export { Skeleton } from './state/Skeleton';
 export { Field, controlClassName } from './form/Field';
 export type { FieldControlProps } from './form/Field';
 export { Form, useSchemaForm } from './form/Form';
+export { JalaliDateInput } from './form/JalaliDateInput';
+export type { JalaliDateInputProps } from './form/JalaliDateInput';
 export { MoneyField } from './form/MoneyField';
 export { TextField } from './form/TextField';
+
+export { ThemeOwner, ThemeSwitch } from './theme/ThemeSwitch';
+export {
+  DEFAULT_THEME,
+  DEVICE_THEME_COOKIE,
+  THEMES,
+  THEME_COOKIE_MAX_AGE_SECONDS,
+  THEME_COOKIE_NAME,
+  parseTheme,
+  resolveTheme,
+  themeCookie,
+} from './theme/theme';
+export type { Theme } from './theme/theme';
 
 export { DirectionalIcon } from './text/DirectionalIcon';
 export { Identifier, IsolatedText } from './text/Identifier';

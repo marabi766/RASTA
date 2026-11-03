@@ -175,6 +175,12 @@ export const auditEnvSchema = baseEnvSchema
      */
     AUDIT_TENDER_GAP_ALERT_SECONDS: z.coerce.number().int().min(1).max(86_400).prefault(300),
     /**
+     * The same for a quotation receipt held for a predecessor that has not arrived
+     * (COM-007 PR 7, ADR-070 § 4). Its own setting: the two chains are alerted on
+     * their own, and a deployment may want a different patience for each.
+     */
+    AUDIT_RFQ_GAP_ALERT_SECONDS: z.coerce.number().int().min(1).max(86_400).prefault(300),
+    /**
      * How far back the D-046 detective check looks for payment-reconciliation
      * audit rows without their evidence row, in hours (default 7 days). A
      * window rather than all history so the query stays on the recent

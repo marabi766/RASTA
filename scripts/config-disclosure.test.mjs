@@ -294,7 +294,13 @@ const ECHOES = [
 
 for (const [script, args, text] of ECHOES) {
   test(`${script} ${args.map((arg) => (/sentinel|JZ97/.test(arg) ? '<sentinel>' : arg)).join(' ')}: refused without echoing it`, () => {
-    assertRefusedWith(cli(script, args, cleanEnv({}), 60_000), text, script);
+    assertRefusedWith(
+      cli(script, args, cleanEnv({}), 60_000),
+      script.startsWith('outbox-b2-')
+        ? 'command failed (code unknown); diagnostics withheld'
+        : text,
+      script,
+    );
   });
 }
 
@@ -437,7 +443,7 @@ for (const code of ['P1000', 'P1001', 'PRIVATE_SENTINEL_79']) {
     assert.equal(run.status, 2, run.output);
     assert.match(run.output, /probe: preflight client opened/);
     assert.match(run.output, /probe: second client opened/);
-    assert.match(run.output, /DATABASE_URL_ASSET: database connection failed/);
+    assert.match(run.output, /command failed \(code /);
     assertNoSentinel(run.output);
   });
 }
@@ -449,7 +455,7 @@ test('real economic backfill CLI: a LAZY connection failure after preflight stay
   );
   assert.equal(run.status, 1, run.output);
   assert.match(run.output, /probe: second client opened/);
-  assert.match(run.output, /DATABASE_URL_ECONOMIC: database connection failed/);
+  assert.match(run.output, /command failed \(code /);
   assertNoSentinel(run.output);
 });
 
@@ -460,7 +466,7 @@ test('real asset drain-check CLI: cleanup failure is sanitized and stays exit 2'
   );
   assert.equal(run.status, 2, run.output);
   assert.match(run.output, /"drained":true/);
-  assert.match(run.output, /DATABASE_URL_ASSET: database connection failed/);
+  assert.match(run.output, /command failed \(code /);
   assertNoSentinel(run.output);
 });
 

@@ -1,4 +1,4 @@
-import { assertNoMigratorCredentials } from '@rasta/config';
+import { assertNoMigratorCredentials, commandFailure } from '@rasta/config';
 import { createLogger } from '@rasta/logging';
 import { preflightRuntimeRole } from '@rasta/nest-common';
 import { PrismaClient } from '../generated/prisma';
@@ -22,7 +22,7 @@ import { parseClearTransferredArgs } from './clear-transferred.args';
  * Runs as the **runtime** role, never the migrator (D-045): it updates only
  * `asset_ref`, which that role may. The preflight the service runs at boot is
  * run here too. Credentials come from the environment only; the arguments carry
- * no secret. Exit 2 on a refusal or an error, naming the role and never the URL.
+ * no secret. Exit 2 on a refusal or an error, with closed diagnostics that never repeat the URL.
  * The arguments are parsed first, before the environment or the database
  * ({@link parseClearTransferredArgs}): a malformed command line touches nothing.
  */
@@ -63,7 +63,7 @@ async function main(): Promise<number> {
 main().then(
   (code) => process.exit(code),
   (error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`${commandFailure(error)}\n`);
     process.exit(2);
   },
 );

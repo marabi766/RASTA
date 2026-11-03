@@ -33,7 +33,7 @@ const themeBlock = (() => {
   throw new Error('The @theme block is not closed.');
 })();
 
-/** The `[data-theme='dark'] { … }` block — dark mode asked for by the document. */
+/** The `[data-theme='dark'] { … }` block — dark mode, asked for by the document. */
 const darkBlock = (() => {
   const start = CSS.indexOf("[data-theme='dark'] {");
   expect(start).toBeGreaterThan(-1);
@@ -41,27 +41,6 @@ const darkBlock = (() => {
   expect(end).toBeGreaterThan(start);
   return CSS.slice(start, end);
 })();
-
-/** The `prefers-color-scheme: dark` block — dark mode asked for by the system. */
-const systemDarkBlock = (() => {
-  const start = CSS.indexOf(":root:not([data-theme='light']) {");
-  expect(start).toBeGreaterThan(-1);
-  const end = CSS.indexOf('\n  }', start);
-  expect(end).toBeGreaterThan(start);
-  return CSS.slice(start, end);
-})();
-
-/**
- * Just the `--token: value;` lines of a block, in order, with indentation and
- * comments dropped. Comparing these is how two blocks that must stay identical
- * are held to it without also demanding identical prose.
- */
-function declarations(block: string): string[] {
-  return block
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith('--'));
-}
 
 function collectTsxFiles(dir: string, found: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -193,16 +172,21 @@ describe('dark mode', () => {
     expect(darkBlock).toContain(`${token}:`);
   });
 
-  // The values live in two places — a media query for the system preference
-  // and an attribute selector for an explicit choice — because CSS cannot
-  // share one declaration body between them. This is what stops the copies
-  // from drifting, which is the only real cost of the duplication.
-  it('applies the same values whether the system or the document asks for it', () => {
-    expect(declarations(systemDarkBlock)).toEqual(declarations(darkBlock));
+  // Owner decision 2026-10-24: light by default for everyone, dark by the
+  // user's choice. The device setting decides nothing, so a stylesheet that
+  // still reads `prefers-color-scheme` would make a dark-preference device dark
+  // on its own. The dark values therefore exist exactly once.
+  it('is never chosen by the operating system', () => {
+    expect(CSS).not.toMatch(/@media[^{]*prefers-color-scheme/);
+    expect(CSS.match(/^\[data-theme='dark'\]\s*\{/gm)).toHaveLength(1);
   });
 
-  it('does not let an explicit light choice be overridden by the system', () => {
-    expect(systemDarkBlock).toContain(":root:not([data-theme='light'])");
+  it('keeps color-scheme in step with data-theme, never announcing both', () => {
+    const base = CSS.slice(CSS.indexOf('@layer base'));
+    expect(base).toMatch(/\bhtml\s*\{\s*color-scheme:\s*light;\s*\}/);
+    expect(base).toMatch(/html\[data-theme='light'\]\s*\{\s*color-scheme:\s*light;\s*\}/);
+    expect(base).toMatch(/html\[data-theme='dark'\]\s*\{\s*color-scheme:\s*dark;\s*\}/);
+    expect(CSS).not.toMatch(/color-scheme:\s*light dark/);
   });
 
   // The rule of docs/16 § 16.4 is that no component has a light/dark branch.

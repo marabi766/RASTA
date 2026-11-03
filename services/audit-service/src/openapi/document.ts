@@ -15,6 +15,7 @@ import {
 import { auditEventPageSchema, auditEventViewSchema } from '../audit/audit.view';
 import { auditChainVerificationSchema } from '../audit/audit.verification.view';
 import { auditTargetLookupQuerySchema, auditTargetViewSchema } from '../audit/audit.lookup';
+import { rfqChainViewSchema } from '../audit/rfq-evidence.service';
 import { tenderChainViewSchema } from '../audit/tender-evidence.service';
 
 /**
@@ -57,6 +58,10 @@ const RESPONSE_BODIES: Record<string, { status: '200'; schema: z.ZodTypeAny }> =
   'GET /v1/internal/tender-evidence/{tenderId}/chain': {
     status: '200',
     schema: tenderChainViewSchema,
+  },
+  'GET /v1/internal/rfq-evidence/{rfqId}/chain': {
+    status: '200',
+    schema: rfqChainViewSchema,
   },
 };
 
@@ -152,8 +157,10 @@ export function enrichOpenApiDocument(document: OpenAPIObject): OpenAPIObject {
     name: 'x-internal-token',
     description:
       'A signed internal service token. The correction-target lookup accepts one ' +
-      'minted for audit-service by identity-service, and the tender-evidence chain read ' +
-      'one minted by construction-service for the tender owner’s organization; nothing else.',
+      'minted for audit-service by identity-service, the tender-evidence chain read ' +
+      'one minted by construction-service for the tender owner’s organization, and the ' +
+      'rfq-evidence chain read one minted by procurement-service for the buyer’s ' +
+      'organization; nothing else.',
   } as never;
 
   for (const [path, operations] of Object.entries(document.paths ?? {})) {

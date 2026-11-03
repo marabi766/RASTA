@@ -862,8 +862,7 @@ test('through the CLI the purged stream is a refusal with exit 1, not a success'
       );
       const [refused] = run.of('refused');
       assert.equal(refused?.service, 'document');
-      assert.match(refused.reason, /next_seq ahead of their highest surviving stream_seq/);
-      assert.match(refused.reason, /Run B2 before the purge is enabled/);
+      assert.match(refused.reason, /command failed \(code unknown\); diagnostics withheld/);
       assert.equal(run.of('done').length, 0);
       assert.deepEqual(tally(run), { ok: 0, incomplete: 0, refused: 1 });
       assert.equal(await fingerprint(db), untouched);
@@ -961,7 +960,7 @@ test('through the CLI an interrupted, published and purged stream refuses the re
       );
       const [refused] = run.of('refused');
       assert.equal(refused?.service, 'document');
-      assert.match(refused.reason, /next_seq ahead of their highest surviving stream_seq/);
+      assert.match(refused.reason, /command failed \(code unknown\); diagnostics withheld/);
       assert.equal(run.of('done').length, 0);
       assert.equal(run.of('batch').length, 0);
       assert.deepEqual(tally(run), { ok: 0, incomplete: 0, refused: 1 });
@@ -1020,7 +1019,7 @@ test('a finalised apply whose verification mismatches exits 1 through the CLI', 
     assert.equal(verify.counter_published_mismatch, 1);
     assert.equal(verify.remaining, 0, 'nothing was left to sequence: only the mismatch fails it');
     const [refused] = run.of('refused');
-    assert.match(refused.reason, /verification failed .*counter_published_mismatch=1/);
+    assert.match(refused.reason, /command failed \(code unknown\); diagnostics withheld/);
     assert.equal(run.of('done').length, 0);
     assert.deepEqual(tally(run), { ok: 0, incomplete: 0, refused: 1 });
   });
@@ -1367,10 +1366,9 @@ test('a service whose connection cannot be resolved does not skip the services a
     assert.equal(run.of('refused').length, 1);
     const [refusal] = run.of('refused');
     assert.equal(refusal.service, 'economic');
-    assert.match(refusal.reason, /DATABASE_URL_ECONOMIC is not set/);
-    assert.match(refusal.reason, /never through a shared DATABASE_URL/);
+    assert.match(refusal.reason, /command failed \(code unknown\); diagnostics withheld/);
 
-    // Redaction: the variable is named, its value never is — and no stack
+    // Closed reporting: no configuration value or stack survives. No stack
     // frame, payload or credential rides along on the event or on stdout.
     assert.equal(refusal.stack, undefined);
     assert.doesNotMatch(refusal.reason, /postgresql:|@localhost|_dev_password/);
@@ -1548,19 +1546,16 @@ test('a global preflight refusal emits one unscoped refused, no summary and no s
         name: 'no target',
         argv: ['--apply'],
         env: { DATABASE_URL_DOCUMENT: url },
-        reason: /No target selected/,
       },
       {
         name: 'unknown service',
         argv: ['--service', 'supplier', '--apply'],
         env: { DATABASE_URL_DOCUMENT: url },
-        reason: /Unknown service\(s\): 1 --service value\(s\), not repeated/,
       },
       {
         name: 'NODE_ENV=production',
         argv: ['--service', 'document', '--apply'],
         env: { NODE_ENV: 'production', DATABASE_URL_DOCUMENT: url },
-        reason: /Refusing to run with NODE_ENV=production/,
       },
     ];
 
@@ -1574,7 +1569,7 @@ test('a global preflight refusal emits one unscoped refused, no summary and no s
       assert.equal(run.events.length, 1, `${where} expected one event, got ${run.events.length}`);
       const [event] = run.events;
       assert.equal(event.type, 'refused', `${where} the one event is not a refusal`);
-      assert.match(event.reason, testCase.reason);
+      assert.match(event.reason, /command failed \(code unknown\); diagnostics withheld/);
 
       // Unscoped: no service was ever chosen, so none can be named.
       assert.equal(event.service, undefined, `${where} the preflight refusal named a service`);
@@ -1631,14 +1626,14 @@ test("--apply with a split service's migrator URL as its runtime URL is a global
     assert.equal(run.events.length, 1, run.stdout);
     assert.equal(run.events[0].type, 'refused');
     assert.equal(run.events[0].service, undefined);
-    assert.match(run.events[0].reason, /DATABASE_URL_DOCUMENT/);
+    assert.match(run.events[0].reason, /command failed \(code unknown\); diagnostics withheld/);
     assert.ok(!run.stdout.includes(owner), 'the URL was printed');
     assert.ok(!run.stdout.includes(decodeURIComponent(new URL(owner).password)));
     assert.equal(await fingerprint(db), before, 'the database changed');
   });
 });
 
-test('--apply as the runtime role holding CREATE is refused by the per-service preflight before the first query, naming the role and never the URL', async () => {
+test('--apply as the runtime role holding CREATE is refused by the per-service preflight before the first query, with closed diagnostics', async () => {
   await withOutbox('document', async ({ db, url, schema }) => {
     await db.execute(insertRowsSql({ prefix: 'Q', topic: 't.q', partitionKey: 'K1', count: 4 }));
     const before = await fingerprint(db);
@@ -1650,12 +1645,7 @@ test('--apply as the runtime role holding CREATE is refused by the per-service p
     assert.equal(run.status, 1, `${run.stdout}${run.stderr}`);
     const [refusal] = run.of('refused');
     assert.equal(refusal?.service, 'document');
-    assert.match(
-      refusal.reason,
-      new RegExp(
-        `document-service refuses to start: it is connected as rasta_document, which holds CREATE on schema ${schema}`,
-      ),
-    );
+    assert.match(refusal.reason, /command failed \(code unknown\); diagnostics withheld/);
     // Nothing was planned, let alone written.
     assert.deepEqual(run.of('plan'), []);
     assert.deepEqual(run.of('batch'), []);
@@ -1680,7 +1670,7 @@ test('an owner credential anywhere in its environment is a global refusal: one u
     assert.equal(run.events.length, 1, run.stdout);
     assert.equal(run.events[0].type, 'refused');
     assert.equal(run.events[0].service, undefined);
-    assert.match(run.events[0].reason, /DATABASE_URL_DOCUMENT_MIGRATOR/);
+    assert.match(run.events[0].reason, /command failed \(code unknown\); diagnostics withheld/);
     assert.ok(!run.stdout.includes(owner), 'the URL was printed');
     assert.equal(await fingerprint(db), before, 'the database changed');
   });

@@ -2,7 +2,7 @@
 
 import { useActionState, type ReactNode } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, controlClassName, JalaliDateInput } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import {
@@ -201,7 +201,7 @@ export function DeclareAvailabilityForm(identity: AvailabilityIdentity) {
             hint="اختیاری؛ خالی یعنی از همین اکنون. اگر بنویسید، از آغاز همان روز."
           >
             {(control) => (
-              <input
+              <JalaliDateInput
                 {...control}
                 name="fromAt"
                 type="date"
@@ -216,7 +216,7 @@ export function DeclareAvailabilityForm(identity: AvailabilityIdentity) {
             hint="اختیاری؛ خالی یعنی تا زمانی که ابطال شود. اگر بنویسید، تا آغاز همان روز."
           >
             {(control) => (
-              <input
+              <JalaliDateInput
                 {...control}
                 name="toAt"
                 type="date"

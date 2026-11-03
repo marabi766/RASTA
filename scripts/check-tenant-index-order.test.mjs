@@ -500,6 +500,8 @@ const TABLES_CLASSIFIED = {
   audit: [
     'audit_chain_head',
     'bid_access_evidence',
+    'rfq_receipt_link',
+    'rfq_receipt_pending',
     'tender_receipt_link',
     'tender_receipt_pending',
   ],
