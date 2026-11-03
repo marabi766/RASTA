@@ -804,7 +804,9 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
         d.done.then((result) => {
           const writerFile = join(dirs[FIXTURES[i].name], 'writer.pid');
           if (existsSync(writerFile)) {
-            liveAtReturn[FIXTURES[i].name] = liveMembers(Number(readFileSync(writerFile, 'utf8')));
+            liveAtReturn[FIXTURES[i].name] = liveMembers([
+              Number(readFileSync(writerFile, 'utf8')),
+            ])[0];
           }
           return result;
         }),
