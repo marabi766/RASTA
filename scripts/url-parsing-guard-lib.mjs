@@ -210,6 +210,40 @@ function parserBindings(sourceFile) {
   const checker = ts
     .createProgram([sourceFile.fileName], { noLib: true, noResolve: true, allowJs: true }, host)
     .getTypeChecker();
+  // Only emitted value bindings can hide a runtime global. Types, ambient
+  // declarations and unknown declaration kinds must fall back to its name.
+  const isRuntimeBinding = (declaration) => {
+    for (let node = declaration; node; node = node.parent)
+      if (node.flags & ts.NodeFlags.Ambient) return false;
+    if (ts.isTypeOnlyImportDeclaration(declaration)) return false;
+    return (
+      ts.isVariableDeclaration(declaration) ||
+      ts.isParameter(declaration) ||
+      ts.isBindingElement(declaration) ||
+      ts.isFunctionDeclaration(declaration) ||
+      ts.isFunctionExpression(declaration) ||
+      ts.isClassDeclaration(declaration) ||
+      ts.isClassExpression(declaration) ||
+      ts.isImportSpecifier(declaration) ||
+      ts.isNamespaceImport(declaration) ||
+      ts.isImportClause(declaration) ||
+      ts.isImportEqualsDeclaration(declaration)
+    );
+  };
+  const valueSymbol = (node) => {
+    if (ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node)
+      return checker.getShorthandAssignmentValueSymbol(node.parent);
+    if (ts.isExportSpecifier(node.parent))
+      return checker.getExportSpecifierLocalTargetSymbol(node.parent);
+    return checker.getSymbolAtLocation(node);
+  };
+  const runtimeDeclarations = (node) =>
+    (valueSymbol(node)?.declarations ?? []).filter(isRuntimeBinding);
+  const hasLocalRoot = (node) => {
+    const inner = unwrap(node);
+    if (isMemberAccess(inner)) return hasLocalRoot(inner.expression);
+    return ts.isIdentifier(inner) && runtimeDeclarations(inner).length > 0;
+  };
   const active = new Set();
   const moduleKind = (name) => {
     if (URL_MODULES.has(name)) return 'module';
@@ -279,11 +313,12 @@ function parserBindings(sourceFile) {
   const reference = (node) => {
     const inner = unwrap(node);
     if (ts.isIdentifier(inner)) {
-      const symbol = checker.getSymbolAtLocation(inner);
-      if (symbol?.declarations?.some((declaration) => !ts.isIdentifier(declaration))) {
+      const symbol = valueSymbol(inner);
+      const declarations = runtimeDeclarations(inner);
+      if (declarations.length > 0) {
         if (active.has(symbol)) return null;
         active.add(symbol);
-        const result = (symbol.declarations ?? []).map(declarationReference).find(Boolean) ?? null;
+        const result = declarations.map(declarationReference).find(Boolean) ?? null;
         active.delete(symbol);
         return result;
       }
@@ -294,7 +329,14 @@ function parserBindings(sourceFile) {
       return null;
     }
     if (ts.isAwaitExpression(inner)) return reference(inner.expression);
-    if (isMemberAccess(inner)) return member(reference(inner.expression), memberName(inner));
+    if (isMemberAccess(inner)) {
+      const resolved = member(reference(inner.expression), memberName(inner));
+      // An unidentifiable receiver can still expose the native URL class.
+      // Suppress the name fallback only for a proven local value binding.
+      if (resolved === null && memberName(inner) === 'URL' && !hasLocalRoot(inner.expression))
+        return 'class';
+      return resolved;
+    }
     if (isUrlModuleLoad(inner)) return 'module';
     if (ts.isCallExpression(inner)) {
       const callee = reference(inner.expression);

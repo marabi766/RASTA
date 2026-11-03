@@ -477,9 +477,132 @@ for (const [label, source] of F2) {
   });
 }
 
+// F1 a–d: a local import is trusted only while its exporter refuses escapes.
+const F1 = [
+  [
+    'a shorthand',
+    [
+      'const o={URL}; new o.URL(env.X)',
+      "import {parse} from 'node:url'; module.exports={parse}",
+      "import {createRequire} from 'node:module'; run({createRequire})",
+      'const {getBuiltinModule}=process; run({getBuiltinModule})',
+      'run({eval})',
+    ],
+  ],
+  [
+    'b local export',
+    [
+      "import {parse} from 'node:url'; export {parse}",
+      "import {URL} from 'node:url'; export {URL}",
+      "import * as u from 'node:url'; export {u}",
+      "import {createRequire} from 'node:module'; export {createRequire}",
+      'const {getBuiltinModule}=process; export {getBuiltinModule}',
+    ],
+  ],
+  [
+    'c ambient',
+    [
+      'declare const URL: typeof globalThis.URL; new URL(env.X)',
+      'declare var URL: any; new URL(env.X)',
+      'declare let URL: any; new URL(env.X)',
+      'declare function URL(x: any): any; new URL(env.X)',
+      'declare class URL {}; new URL(env.X)',
+      'declare global {var URL: any}; new URL(env.X)',
+      "declare const process: any; process.getBuiltinModule('node:url')",
+      'interface URL {}; new URL(env.X)',
+      'enum URL {}; new URL(env.X)',
+      'namespace URL {}; new URL(env.X)',
+      'type URL = unknown; new URL(env.X)',
+      "import type {URL} from './types.js'; new URL(env.X)",
+    ],
+  ],
+  [
+    'd unknown receiver',
+    [
+      'new window.top.URL(env.X)',
+      'new document.defaultView.URL(env.X)',
+      'function f(){return new this.URL(env.X)}',
+      'new (require(name)).URL(env.X)',
+      'new getGlobal().URL(env.X)',
+      "new getGlobal()['URL'](env.X)",
+    ],
+  ],
+];
+for (const [label, sources] of F1) {
+  test(`F1 ${label} fails closed`, () => {
+    const extensions = label.startsWith('c')
+      ? ['ts', 'mts', 'cts', 'tsx']
+      : ['ts', 'mts', 'cts', 'tsx', 'js', 'mjs', 'cjs', 'jsx'];
+    for (const extension of extensions)
+      for (const source of sources)
+        assert.ok(rawUrlParses(source, `a.${extension}`).length > 0, `${extension}: ${source}`);
+  });
+}
+
+test('F1 b refuses the exporter before a local importer can hide the parser', () => {
+  const root = mkdtempSync(join(tmpdir(), 'url-guard-'));
+  try {
+    for (const tree of ['scripts', 'packages', 'services', 'apps', 'tests']) {
+      mkdirSync(join(root, tree));
+      writeFileSync(join(root, tree, 'a.js'), "import {parse} from 'node:url'; export {parse}");
+      writeFileSync(join(root, tree, 'b.js'), "import {parse} from './a.js'; parse(env.X)");
+    }
+    const found = repositoryUrlParses(root);
+    for (const tree of ['scripts', 'packages', 'services', 'apps', 'tests'])
+      assert.ok(
+        found.some((site) => site.file === `${tree}/a.js`),
+        tree,
+      );
+    assert.equal(unlistedUrlParses(found, []).unlisted.length, 5);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('F1 shorthand and ambient CLI bindings retain discovery', () => {
+  for (const source of [
+    "import {argv} from 'node:process'; run({argv})",
+    'const {argv}=process; run({argv})',
+    'declare const process: any; process.argv',
+    'declare global {var process: any}; process.argv',
+  ])
+    assert.equal(commandLineSurface(source, 'a.ts').readsArgv, true, source);
+});
+
+// This is main 5702020a's caught-forms corpus: all native-parse/ESCAPES
+// fixtures above, plus F1 forms main caught without lexical symbol resolution.
+// Keep it explicit so a resolver swap cannot trade old coverage for new forms.
+test("main's caught-forms corpus remains refused by the new resolver", () => {
+  const corpus = [
+    ...ESCAPES.map(([, source]) => source),
+    ...F1.flatMap(([, sources]) => sources).filter(
+      (source) => !/createRequire|getBuiltinModule|eval/.test(source),
+    ),
+    'new URL(process.env.X)',
+    'new globalThis.URL(raw)',
+    "import url from 'node:url'; new url.URL(raw)",
+    'URL.parse(raw)',
+    'URL.canParse(raw)',
+    "import {parse} from 'node:url'; parse(raw)",
+    "import {parse as p} from 'url'; p(raw)",
+    "import * as u from 'node:url'; u.parse(raw)",
+    "import u from 'url'; u.parse(raw)",
+    "const u=require('node:url'); u.parse(raw)",
+    "const {parse}=require('url'); parse(raw)",
+    'const u: URL = new URL(\n env.X as string,\n)',
+    "new URL('/v1/users', this.options.baseUrl)",
+    'new URL(`${base}/x`)',
+  ];
+  for (const source of corpus) assert.ok(rawUrlParses(source, 'a.ts').length > 0, source);
+});
+
 test('lexical shadowing permits unrelated URL values and preserves sibling native parses', () => {
   for (const local of [
     'function f(URL) { return new URL(env.X); }',
+    'function f(){ class URL {}; return new URL(env.X) }',
+    'function f(){ function URL(){}; return new URL(env.X) }',
+    'try {} catch(URL) {new URL(env.X)}',
+    'function f(o){new o.nested.URL(env.X)}',
     'const x={URL: Custom}; const {URL: U}=x; new U(env.X); new x.URL(env.X);',
     "import { URL } from './local.js'; new URL(env.X);",
     'function f() { const URL=Custom; return new URL(env.X); }',
