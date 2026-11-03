@@ -54,6 +54,13 @@ const primitiveFactories = new Set(
     .toLowerCase()
     .split(/\s+/),
 );
+const DATA_RESULTS = new Set(
+  `parse safeParse parseAsync safeParseAsync spa encode decode
+  encodeAsync decodeAsync safeEncode safeDecode safeEncodeAsync safeDecodeAsync validate
+  validateAsync isOptional isNullable toJSONSchema config getErrorMap formatError flattenError
+  treeifyError prettifyError registry get`.split(/\s+/),
+);
+const SCHEMA_FIELDS = new Set(['element', 'keyType', 'valueType', 'innerType', 'in', 'out']);
 const COERCING_API = -2;
 // Namespace factories, core Class-first factories and derived definitions share one signature.
 const optionsIndex = ({ name, raw, method, owner } = {}) => {
@@ -149,13 +156,17 @@ export default {
       def.node.importKind !== 'type';
     const access = (result, name) => ({
       ...result,
-      raw: (result.raw || ['constructor', 'clone'].includes(name)) && capability(name),
+      raw:
+        (result.raw || (result.schema && ['constructor', 'clone'].includes(name))) &&
+        capability(name),
+      receiverSchema: !!result.schema,
+      schema: !!result.schema && SCHEMA_FIELDS.has(name),
       method: !result.raw,
       owner: result.name,
       name,
     });
     // Follow binding definitions, not spellings: aliases, nested destructuring and const chains.
-    // Call results are schemas, distinct from raw namespaces/factories which may not escape.
+    // Keep schema results distinct from parsed/metadata data and raw factories.
     const origin = (raw, seen = new Set()) => {
       const node = unwrap(raw);
       if (!node) return undefined;
@@ -179,6 +190,7 @@ export default {
             }
             for (const name of path) if (result) result = access(result, name);
             if (result?.raw) resolved = result;
+            else if (result?.schema && !resolved?.raw) resolved = result;
             resolved ??= result;
           }
         }
@@ -196,10 +208,12 @@ export default {
             }
             for (const name of path) if (result) result = access(result, name);
             if (result?.raw) resolved = result;
+            else if (result?.schema && !resolved?.raw) resolved = result;
             resolved ??= result;
           }
         }
-        return resolved?.raw && v.references.some((ref) => ref.isWrite() && !ref.init)
+        return (resolved?.raw || resolved?.schema) &&
+          v.references.some((ref) => ref.isWrite() && !ref.init)
           ? { ...resolved, ambiguous: true }
           : resolved;
       }
@@ -210,7 +224,20 @@ export default {
       if (node.type === 'CallExpression' || node.type === 'NewExpression') {
         if (globalName(node.callee, 'require') && zodModule(constant(node.arguments[0])))
           return { raw: true };
-        if (origin(node.callee, seen)) return { raw: false };
+        const factory = origin(node.callee, seen);
+        if (factory) {
+          const data =
+            DATA_RESULTS.has(factory.name) ||
+            (factory.name === 'meta' && factory.receiverSchema && !node.arguments.length);
+          const inputSchema =
+            ['parse', 'parseAsync', 'decode', 'decodeAsync', 'encode', 'encodeAsync'].includes(
+              factory.name,
+            ) && origin(node.arguments[factory.receiverSchema ? 0 : 1], seen)?.schema;
+          return {
+            raw: false,
+            schema: !!inputSchema || (!data && !!(factory.raw || factory.receiverSchema)),
+          };
+        }
       }
       if (node.type === 'ImportExpression' && zodModule(constant(node.source)))
         return { raw: true };
@@ -408,7 +435,7 @@ export default {
         const index = optionsIndex(factory);
         if (index === COERCING_API) report(node);
         if (index >= 0) options(node.arguments[index], new Set(), true);
-        if (factory.name !== 'preprocess') return;
+        if (!factory.raw || factory.name !== 'preprocess') return;
         const callback = unwrap(node.arguments[0]);
         if (
           !callback ||

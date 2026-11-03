@@ -159,6 +159,8 @@ const formats = `int float32 float64 int32 uint32 int64 uint64 email guid uuid u
 );
 const regressions = {
   F1: [
+    `z.any().parse(z.number()).clone(getOptions());`,
+    `z.parse(z.unknown(), z.number()).clone(getOptions());`,
     `import {z as legacy} from 'zod/v3'; legacy.number({__proto__: {coerce: true}});`,
     `z.int({get error() { this.coerce = true; return undefined; }});`,
     `z.number({message: 'invalid', set error(value) { this.coerce = true; }});`,
@@ -177,6 +179,7 @@ const regressions = {
     ),
     `z.clone(z.number(), getOptions());`,
     `z.number().clone(getOptions());`,
+    `z.number().optional().unwrap().clone(getOptions());`,
     `const copy = z.number().clone; copy(getOptions());`,
     `const copy = z.number().clone; export { copy };`,
     `const C = z.number().constructor; new C(getOptions());`,
@@ -187,6 +190,7 @@ const regressions = {
     `z.core._stringFormat(z.ZodCustomStringFormat, 'custom', /a/, getOptions());`,
   ],
   F2: [
+    `let s = z.number().parse(1); s = z.number(); s.clone(getOptions());`,
     `let C = z.ZodNumberFormat; new C(getOptions()); C = z.ZodObject;`,
     `let C = z.ZodObject; C = z.ZodNumberFormat; new C(getOptions());`,
     `let f = z.number().safeParse; ({clone: f} = z.number()); f(getOptions());`,
@@ -209,6 +213,10 @@ const regressions = {
   ],
 };
 const positives = [
+  `const data = z.any().parse({preprocess: f => f(1)}); data.preprocess(Number);`,
+  `const data = z.object({clone:z.string(),constructor:z.string()}).parse({clone:'x',constructor:'y'}); const {clone,constructor}=data; export {clone,constructor};`,
+  `const meta = z.string().meta({clone:'label',constructor:'label'}).meta(); export const label=meta.clone; export const ctor=meta.constructor;`,
+  `const shape = z.object({clone:z.string()}).shape; export const field=shape.clone;`,
   `z.object({get coerce() {return z.boolean();}});`,
   `z.regexes.string(getOptions());`,
   `export {regexes} from 'zod';`,
