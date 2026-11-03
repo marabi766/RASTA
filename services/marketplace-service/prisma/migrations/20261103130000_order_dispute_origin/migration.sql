@@ -22,13 +22,20 @@
 --
 -- ## Disputes raised before this migration
 --
--- Recorded only where the order's history says it without doubt: the dispute is the order's one
--- OPEN dispute, the order is DISPUTED, and the order's latest status transition (one row, no
--- other at its instant) is the move into DISPUTED, from one of the four statuses. That row was
--- written with the dispute, in the same transaction; nothing leaves DISPUTED but a resolution,
--- which closes the dispute. Every other row keeps NULL: a resolved dispute needs no origin, and an
--- open one whose history is not that clear is refused SETTLE (DISPUTE_ORIGIN_UNKNOWN) rather
--- than resumed to a guess. REFUND stays open to it.
+-- Recorded only where the order's history says it of that dispute, by identity, not by time:
+-- the dispute is the order's one OPEN dispute, the order is DISPUTED, and exactly one status
+-- transition of the order was written by the transaction that inserted the dispute (the same
+-- `xmin`) — the move into DISPUTED, from one of the four statuses. Both writers insert the
+-- dispute and record that transition in one transaction, and an OPEN dispute row is never
+-- updated, so its `xmin` is still its insert's. Timestamps decide nothing: a clock that went
+-- back made the latest transition another dispute's (review of #625 round 1, R2). Every other
+-- row keeps NULL — a resolved dispute needs no origin; an open one whose row was rewritten, or
+-- whose transaction wrote no such transition or more than one, is refused SETTLE
+-- (DISPUTE_ORIGIN_UNKNOWN) rather than resumed to a guess. REFUND stays open to it. A database
+-- restored from a dump has new `xmin`s: per table they match nothing, and in one restore
+-- transaction every row of an order shares one (a disputed order has at least two transitions),
+-- so the count below refuses — NULL, never a guess. "The order's one OPEN dispute" is
+-- `uq_dispute_one_open_per_order` (20260829185748), so it is that one by status, not by time.
 --
 -- ## Receipt evidence, from now on
 --
@@ -38,8 +45,8 @@
 -- order the old SETTLE left RECEIPT_CONFIRMED without evidence is not repaired here, nor made
 -- unreadable (docs/runbooks/marketplace-receipt-evidence.md finds them, read-only).
 --
--- Bounded: one nullable column (no rewrite), one UPDATE of OPEN disputes only, joined through
--- `ix_order_history_order`, one function, one trigger and one NOT VALID constraint. Disputes are
+-- Bounded: one nullable column (no rewrite), one UPDATE of OPEN disputes only, joined through `ix_order_history_order`, one function, one trigger and
+-- one NOT VALID constraint. Disputes are
 -- a small fraction of orders; `statement_timeout` (default 5 s, raised for one run by
 -- `RASTA_MIGRATION_STATEMENT_TIMEOUT`) fails the run with nothing changed rather than hold the
 -- lock longer.
@@ -58,29 +65,21 @@ ALTER TABLE "order_dispute" ADD CONSTRAINT "ck_order_dispute_raised_from"
 
 UPDATE "order_dispute" AS d
    SET "raised_from_status" = h."from_status"
-  FROM "order" AS o,
-       LATERAL (
-         SELECT "from_status", "to_status", "occurred_at"
-           FROM "order_status_history"
-          WHERE "order_id" = o."id" AND "kind" = 'TRANSITION'
-          ORDER BY "occurred_at" DESC
-          LIMIT 1
-       ) AS h
+  FROM "order" AS o, "order_status_history" AS h
  WHERE d."status" = 'OPEN'
    AND d."raised_from_status" IS NULL
    AND o."id" = d."order_id"
    AND o."status" = 'DISPUTED'
+   -- Written by the transaction that inserted this dispute.
+   AND h."order_id" = d."order_id"
+   AND h."xmin" = d."xmin"
+   AND h."kind" = 'TRANSITION'
    AND h."to_status" = 'DISPUTED'
    AND h."from_status" IN ('FUNDS_HELD', 'CONFIRMED', 'AWAITING_RECEIPT_CONFIRMATION',
                            'RECEIPT_CONFIRMED')
-   -- One transition at that instant, or which one was the move is not certain.
+   -- And the only row of the order's history it wrote.
    AND (SELECT count(*) FROM "order_status_history" AS same
-         WHERE same."order_id" = o."id" AND same."kind" = 'TRANSITION'
-           AND same."occurred_at" = h."occurred_at") = 1
-   -- The order's only open dispute.
-   AND NOT EXISTS (SELECT 1 FROM "order_dispute" AS other
-                    WHERE other."order_id" = d."order_id" AND other."status" = 'OPEN'
-                      AND other."id" <> d."id");
+         WHERE same."order_id" = d."order_id" AND same."xmin" = d."xmin") = 1;
 
 CREATE OR REPLACE FUNCTION assign_order_dispute_origin() RETURNS TRIGGER AS $$
 BEGIN

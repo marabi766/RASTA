@@ -459,6 +459,9 @@ model OrderDispute {
   /// a dispute is refused SETTLE, never resumed to a guess.
   raisedFromStatus OrderStatus? @map("raised_from_status")
 
+  /// Also UNIQUE (order_id) WHERE status = 'OPEN' — `uq_dispute_one_open_per_order`,
+  /// a partial index Prisma cannot express (migration 20260829185748): one open
+  /// dispute per order, so a reader asks for it by status, never by time.
   @@index([orderId], map: "ix_dispute_order")
   @@index([organizationId, status], map: "ix_dispute_org_status")
   @@map("order_dispute")

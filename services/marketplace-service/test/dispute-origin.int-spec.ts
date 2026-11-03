@@ -238,31 +238,133 @@ describe('a dispute’s origin and the receipt evidence, in the database (D-083)
     expect(refunded.status).toBe('CANCELLING');
   });
 
-  it('the backfill records a legacy origin only where the history states it without doubt', async () => {
-    const certain = await disputedAtConfirmed();
-    const doubtful = await disputedAtConfirmed();
-    const certainDispute = await disputeOf(certain);
-    const doubtfulDispute = await disputeOf(doubtful);
-    await forgetOrigin(certainDispute.id);
-    await forgetOrigin(doubtfulDispute.id);
+  /** An order the supplier confirmed: where the legacy disputes below are planted. */
+  async function confirmedOrder(): Promise<{ id: string; organizationId: string }> {
+    const { offerId } = await publishOffer(wiring, org.supplier);
+    const order = await asBuyer(() =>
+      wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('origin-legacy')),
+    );
+    await asSaga(() => wiring.orders.markFundsHeld(order.id, `TXN_${ulid()}`, sagaStep()));
+    await asSupplier(() => wiring.orders.confirm(order.id));
+    return { id: order.id, organizationId: org.buyer };
+  }
 
-    // A second transition at the very instant of the move into DISPUTED: which
-    // one was the move is no longer certain.
-    const last = await owner.$queryRawUnsafe<{ occurred_at: Date; organization_id: string }[]>(
-      `SELECT "occurred_at", "organization_id" FROM "order_status_history"
-        WHERE "order_id" = $1 AND "kind" = 'TRANSITION' ORDER BY "occurred_at" DESC LIMIT 1`,
-      doubtful,
-    );
-    await owner.$executeRawUnsafe(
-      `INSERT INTO "order_status_history"
-         ("id", "organization_id", "order_id", "kind", "from_status", "to_status",
-          "actor_id", "actor_type", "correlation_id", "occurred_at")
-       VALUES ($1, $2, $3, 'TRANSITION', 'FUNDS_HELD', 'DISPUTED', 'USR-ORG-B', 'USER', 'itest', $4)`,
-      `OSH_${ulid()}`,
-      last[0]!.organization_id,
-      doubtful,
-      last[0]!.occurred_at,
-    );
+  type Planted = { id: string; organizationId: string };
+  const HISTORY = `INSERT INTO "order_status_history"
+      ("id", "organization_id", "order_id", "kind", "from_status", "to_status",
+       "actor_id", "actor_type", "correlation_id", "occurred_at")
+    VALUES ($1, $2, $3, 'TRANSITION', $4::"OrderStatus", $5::"OrderStatus", 'USR-ORG-B', 'USER', 'itest', $6)`;
+
+  /**
+   * A dispute as the previous release raised it: no origin, and — unless
+   * `split` — its transition into DISPUTED written by the same transaction
+   * (`extra` adds a second transition there).
+   */
+  async function legacyRaise(
+    order: Planted,
+    from: string,
+    at: string,
+    options: { split?: boolean; extra?: boolean } = {},
+  ): Promise<string> {
+    const disputeId = `DSP_${ulid()}`;
+    const history = (tx: Pick<PrismaClient, '$executeRawUnsafe'>, fromStatus = from) =>
+      tx.$executeRawUnsafe(
+        HISTORY,
+        `OSH_${ulid()}`,
+        order.organizationId,
+        order.id,
+        fromStatus,
+        'DISPUTED',
+        new Date(at),
+      );
+    await owner.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "order_dispute" DISABLE TRIGGER "trg_order_dispute_origin"',
+      );
+      await tx.$executeRawUnsafe(
+        `INSERT INTO "order_dispute" ("id", "organization_id", "order_id", "reason", "status", "raised_by", "raised_at")
+         VALUES ($1, $2, $3, 'a legacy objection', 'OPEN', 'USR-ORG-B', $4)`,
+        disputeId,
+        order.organizationId,
+        order.id,
+        new Date(at),
+      );
+      await tx.$executeRawUnsafe(
+        `UPDATE "order" SET "status" = 'DISPUTED' WHERE "id" = $1`,
+        order.id,
+      );
+      if (!options.split) await history(tx);
+      if (options.extra) await history(tx, 'FUNDS_HELD');
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "order_dispute" ENABLE TRIGGER "trg_order_dispute_origin"',
+      );
+    });
+    if (options.split) await history(owner);
+    return disputeId;
+  }
+
+  /** The previous release's SETTLE: the dispute closed and the order moved to `to`, in one transaction. */
+  async function legacySettle(order: Planted, disputeId: string, to: string, at: string) {
+    await owner.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        `UPDATE "order_dispute" SET "status" = 'RESOLVED_SETTLE', "resolution" = 'decided',
+                "responsibility" = 'UNDETERMINED',
+                "resolved_at" = $2, "resolved_by" = 'USR-ORG-OPS' WHERE "id" = $1`,
+        disputeId,
+        new Date(at),
+      );
+      await tx.$executeRawUnsafe(
+        `UPDATE "order" SET "status" = $2::"OrderStatus",
+                "receipt_confirmed_at" = COALESCE("receipt_confirmed_at", $3),
+                "receipt_confirmed_by" = COALESCE("receipt_confirmed_by", 'USR-ORG-B')
+          WHERE "id" = $1`,
+        order.id,
+        to,
+        new Date(at),
+      );
+      await tx.$executeRawUnsafe(
+        HISTORY,
+        `OSH_${ulid()}`,
+        order.organizationId,
+        order.id,
+        'DISPUTED',
+        to,
+        new Date(at),
+      );
+    });
+  }
+
+  const originOf = async (disputeId: string) =>
+    (
+      await owner.$queryRawUnsafe<{ raised_from_status: string | null }[]>(
+        'SELECT "raised_from_status"::text FROM "order_dispute" WHERE "id" = $1',
+        disputeId,
+      )
+    )[0]?.raised_from_status ?? null;
+
+  it('the backfill associates a legacy dispute with its own transition, never the latest by time (#625 r1 R2)', async () => {
+    // Certain: the dispute and its move into DISPUTED, one transaction.
+    const certain = await confirmedOrder();
+    const certainDispute = await legacyRaise(certain, 'CONFIRMED', '2026-10-01T10:00:00Z');
+
+    // The review's case: A raised at 200, settled back at 100, B raised at
+    // 110 — the clock went back. The latest transition is A's; B was raised
+    // from RECEIPT_CONFIRMED.
+    const reversed = await confirmedOrder();
+    const disputeA = await legacyRaise(reversed, 'CONFIRMED', '2026-10-01T10:03:20Z');
+    await legacySettle(reversed, disputeA, 'RECEIPT_CONFIRMED', '2026-10-01T10:01:40Z');
+    const disputeB = await legacyRaise(reversed, 'RECEIPT_CONFIRMED', '2026-10-01T10:01:50Z');
+
+    // Not provable: the transition written apart from the dispute; or two
+    // transitions written with it.
+    const split = await confirmedOrder();
+    const splitDispute = await legacyRaise(split, 'CONFIRMED', '2026-10-01T10:00:00Z', {
+      split: true,
+    });
+    const twice = await confirmedOrder();
+    const twiceDispute = await legacyRaise(twice, 'CONFIRMED', '2026-10-01T10:00:00Z', {
+      extra: true,
+    });
 
     // As the migration runs it: the backfill comes before the trigger that
     // keeps an origin from changing exists.
@@ -276,13 +378,38 @@ describe('a dispute’s origin and the receipt evidence, in the database (D-083)
       );
     });
 
-    expect((await disputeOf(certain)).raisedFromStatus).toBe('CONFIRMED');
-    expect((await disputeOf(doubtful)).raisedFromStatus).toBeNull();
+    expect(await originOf(certainDispute)).toBe('CONFIRMED');
+    expect(await originOf(disputeB)).toBe('RECEIPT_CONFIRMED');
+    expect(await originOf(disputeA)).toBeNull();
+    expect(await originOf(splitDispute)).toBeNull();
+    expect(await originOf(twiceDispute)).toBeNull();
+
+    // And the saga reads the OPEN dispute, B — not A, the latest raised.
+    const view = await asSaga(() => wiring.orders.sagaView(reversed.id, disputeA));
+    expect(view.dispute?.id).toBe(disputeB);
+    expect(view.mirroredDispute).toEqual({ id: disputeA, resolution: 'decided' });
+
+    // A second open dispute on one order is refused by the database — even
+    // one no origin check would stop (its trigger lifted here).
+    await expect(
+      owner.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          'ALTER TABLE "order_dispute" DISABLE TRIGGER "trg_order_dispute_origin"',
+        );
+        await tx.$executeRawUnsafe(
+          `INSERT INTO "order_dispute" ("id", "organization_id", "order_id", "reason", "status", "raised_by")
+           VALUES ($1, $2, $3, 'a second open objection', 'OPEN', 'USR-ORG-B')`,
+          `DSP_${ulid()}`,
+          reversed.organizationId,
+          reversed.id,
+        );
+      }),
+    ).rejects.toThrow(/23505[\s\S]*Key \(order_id\)/); // uq_dispute_one_open_per_order
 
     // Each is decided now so the next case's report counts only its own.
-    for (const orderId of [certain, doubtful]) {
+    for (const order of [certain, reversed, split, twice]) {
       await asOperator(() =>
-        resolveOpenDispute(wiring, orderId, {
+        resolveOpenDispute(wiring, order.id, {
           outcome: 'REFUND',
           resolution: 'closed for the next case',
           responsibility: 'UNDETERMINED',

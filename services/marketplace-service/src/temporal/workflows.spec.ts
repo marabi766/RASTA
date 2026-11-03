@@ -1,5 +1,5 @@
 import { TestWorkflowEnvironment } from '@temporalio/testing';
-import { Worker } from '@temporalio/worker';
+import { bundleWorkflowCode, Worker } from '@temporalio/worker';
 import { ApplicationFailure } from '@temporalio/activity';
 import { WorkflowFailedError, type WorkflowHandle } from '@temporalio/client';
 import { orderSaga, type OrderSagaInput, type SagaStatus } from './workflows';
@@ -74,9 +74,15 @@ class FakeOrder {
       status: this.status,
       economicTransactionId: this.economicTransactionId,
       cancellationReason: this.cancellationReason,
-      dispute: this.dispute
-        ? { id: this.dispute.id, reason: this.dispute.reason, resolution: this.dispute.resolution }
-        : null,
+      // The OPEN dispute, as `sagaView` reads it (#625 r1 R2): none once decided.
+      dispute:
+        this.dispute && this.status === 'DISPUTED'
+          ? {
+              id: this.dispute.id,
+              reason: this.dispute.reason,
+              resolution: this.dispute.resolution,
+            }
+          : null,
       ...(mirroredDisputeId === undefined
         ? {}
         : {
@@ -1802,5 +1808,256 @@ describe('the order saga', () => {
       expect(result).toBe('CANCELLED');
       expect(received).toEqual(['the recorded reason']);
     });
+  });
+});
+
+/**
+ * A saga the previous release started, replayed by this one and then run live
+ * (review of #625 round 1, R1).
+ *
+ * A wait entered while replaying a history without `DISPUTE_RESUME_PATCH`'s
+ * marker sees `patched()` answer `false`. Decided once, on entry, that answer
+ * stayed with the wait after the replay ended: a resumed order kept its
+ * economic dispute open, and a dispute wait never noticed a new dispute. The
+ * waits now decide at every wake-up, so the first one past the replay
+ * reconciles.
+ *
+ * The previous release is this workflow on a worker whose
+ * `patchActivationCallback` leaves the patch inactive: every guarded branch
+ * takes its old side and no marker is recorded — the same commands as main's
+ * code, which `workflows.replay.spec.ts` proves on main's own histories. Its
+ * worker caches nothing, so this release's worker replays the whole history
+ * on its first task. Each case ends with the mixed history replayed again,
+ * from the start, by this release.
+ */
+describe('a saga the previous release started, replayed and then run live (#625 r1 R1)', () => {
+  let env: TestWorkflowEnvironment;
+  let bundle: Awaited<ReturnType<typeof bundleWorkflowCode>>;
+  let queues = 0;
+
+  beforeAll(async () => {
+    const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
+    env = await TestWorkflowEnvironment.createTimeSkipping(
+      downloadDir
+        ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
+        : undefined,
+    );
+    bundle = await bundleWorkflowCode({ workflowsPath: require.resolve('./workflows') });
+  }, 300_000);
+
+  afterAll(async () => {
+    await env?.teardown();
+  });
+
+  type Drive = (ctx: { party: Party; handle: WorkflowHandle }) => Promise<void>;
+
+  /** `previous` on the previous release's worker, then `current` and the rest on this one's. */
+  async function upgrade(
+    order: FakeOrder,
+    activities: OrderActivities,
+    previous: Drive,
+    current: Drive,
+  ): Promise<string> {
+    const taskQueue = `upgrade-order-${(queues += 1)}`;
+    const handle = await env.client.workflow.start(orderSaga, {
+      taskQueue,
+      workflowId: `upgrade-${INPUT.orderId}-${Math.trunc(performance.now() * 1000)}`,
+      args: [{ ...INPUT, ...NO_RECHECK }],
+    });
+    const party = new Party(order, handle);
+    let finished = false;
+    try {
+      const old = await Worker.create({
+        connection: env.nativeConnection,
+        taskQueue,
+        workflowBundle: bundle,
+        activities,
+        maxCachedWorkflows: 0,
+        patchActivationCallback: () => false,
+      });
+      await old.runUntil(
+        within(STEP_DEADLINE_MS, previous({ party, handle }), 'the previous release to drive'),
+      );
+      const fresh = await Worker.create({
+        connection: env.nativeConnection,
+        taskQueue,
+        workflowBundle: bundle,
+        activities,
+      });
+      const result = await fresh.runUntil(async () => {
+        await within(STEP_DEADLINE_MS, current({ party, handle }), 'this release to drive');
+        return within(STEP_DEADLINE_MS, handle.result(), 'the saga to finish');
+      });
+      finished = true;
+      // The mixed history, replayed from the start by this release.
+      await Worker.runReplayHistory(
+        { workflowBundle: bundle },
+        await handle.fetchHistory(),
+        handle.workflowId,
+      );
+      return result;
+    } finally {
+      if (!finished) await handle.terminate('test finished').catch(() => undefined);
+    }
+  }
+
+  type Origin = 'FUNDS_HELD' | 'CONFIRMED' | 'AWAITING_RECEIPT_CONFIRMATION';
+  const REACH: Record<Origin, (party: Party) => Promise<void>> = {
+    FUNDS_HELD: async () => undefined,
+    CONFIRMED: (party) => party.confirm(),
+    AWAITING_RECEIPT_CONFIRMATION: async (party) => {
+      await party.confirm();
+      await party.fulfil();
+    },
+  };
+  const REST: Record<Origin, (party: Party) => Promise<void>> = {
+    FUNDS_HELD: async (party) => {
+      await party.confirm();
+      await party.fulfil();
+      await party.confirmReceipt();
+    },
+    CONFIRMED: async (party) => {
+      await party.fulfil();
+      await party.confirmReceipt();
+    },
+    AWAITING_RECEIPT_CONFIRMATION: (party) => party.confirmReceipt(),
+  };
+  const PHASE: Record<Origin, string> = {
+    FUNDS_HELD: 'AWAITING_CONFIRMATION',
+    CONFIRMED: 'AWAITING_FULFILMENT',
+    AWAITING_RECEIPT_CONFIRMATION: 'AWAITING_RECEIPT_CONFIRMATION',
+  };
+  const phaseIs = (handle: WorkflowHandle, phase: string) =>
+    eventually(
+      async () => (await handle.query<SagaStatus, []>('status')).phase === phase,
+      `the saga to wait in ${phase}`,
+    );
+
+  /** `resolveObligationDispute`, recording which dispute it decided and with what words. */
+  function deciding(order: FakeOrder) {
+    const decided: [string, string][] = [];
+    const recording = recordingActivities(order, {
+      resolveObligationDispute: async (
+        _orderId: string,
+        _transactionId: string,
+        disputeId: string,
+        resolution: string,
+      ) => {
+        recording.calls.push('resolveObligationDispute');
+        decided.push([disputeId, resolution]);
+      },
+    } as Partial<OrderActivities>);
+    return { ...recording, decided };
+  }
+
+  it.each<Origin>(['FUNDS_HELD', 'CONFIRMED', 'AWAITING_RECEIPT_CONFIRMATION'])(
+    'resumed at %s under the previous release: the first live wake-up releases the economic dispute',
+    async (origin) => {
+      const order = new FakeOrder();
+      const { calls, effects, activities, decided } = deciding(order);
+      let mark = 0;
+
+      const result = await upgrade(
+        order,
+        activities,
+        async ({ party, handle }) => {
+          await until(() => order.status !== 'PENDING', 'the hold to be recorded');
+          await REACH[origin](party);
+          await party.dispute('the parts do not match the offer');
+          await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
+          await party.resolve('SETTLE', 'the supplier showed the parts match the offer');
+          await phaseIs(handle, PHASE[origin]);
+          // The previous release waits there with the dispute still open in
+          // economic-service.
+          expect(order.status).toBe(origin);
+          expect(calls).not.toContain('resolveObligationDispute');
+        },
+        async ({ party, handle }) => {
+          mark = calls.length;
+          // Any wake-up: a signal about nothing that changed.
+          await handle.signal('orderConfirmed');
+          await until(
+            () => calls.slice(mark).includes('resolveObligationDispute'),
+            'the first live wake-up to release the mirrored dispute',
+          );
+          // Released where the order waits, before anything else happened to it.
+          expect(order.status).toBe(origin);
+          expect(calls.slice(mark).filter((c) => c !== 'readOrder')).toEqual([
+            'resolveObligationDispute',
+          ]);
+          await REST[origin](party);
+        },
+      );
+
+      expect(result).toBe('COMPLETED');
+      expect(decided).toEqual([['DSP_1', 'the supplier showed the parts match the offer']]);
+      expect(effects()).toEqual([
+        'createObligation',
+        'markFundsHeld',
+        'disputeObligation',
+        'resolveObligationDispute',
+        'authoriseSettlement',
+        'markSettling',
+        'settle',
+        'markCompleted',
+      ]);
+    },
+  );
+
+  it('waiting in a dispute under the previous release: decided and raised again, both are mirrored live', async () => {
+    const order = new FakeOrder();
+    const { calls, effects, activities, decided } = deciding(order);
+    let mark = 0;
+
+    const result = await upgrade(
+      order,
+      activities,
+      async ({ party, handle }) => {
+        await until(() => order.status !== 'PENDING', 'the hold to be recorded');
+        await party.dispute('the parts do not match the offer');
+        await until(() => calls.includes('disputeObligation'), 'the dispute to be mirrored');
+        await phaseIs(handle, 'DISPUTED');
+        // Between two looks: the operator settles it back and the buyer
+        // raises another. The order is DISPUTED throughout.
+        party.silently((o) => {
+          o.resolveDispute('SETTLE', 'the supplier showed the parts match the offer');
+          o.raiseDispute('one part arrived damaged');
+        });
+      },
+      async ({ party, handle }) => {
+        mark = calls.length;
+        await handle.signal('orderDisputed', 'one part arrived damaged');
+        await until(
+          () => calls.slice(mark).includes('disputeObligation'),
+          'the first live wake-up to notice the new dispute',
+        );
+        expect(calls.slice(mark).filter((c) => c !== 'readOrder')).toEqual([
+          'resolveObligationDispute',
+          'disputeObligation',
+        ]);
+        expect(decided).toEqual([['DSP_1', 'the supplier showed the parts match the offer']]);
+        await party.resolve('SETTLE', 'the damage happened after delivery');
+        await until(() => decided.length === 2, 'the second decision to be mirrored');
+        await REST.FUNDS_HELD(party);
+      },
+    );
+
+    expect(result).toBe('COMPLETED');
+    expect(decided).toEqual([
+      ['DSP_1', 'the supplier showed the parts match the offer'],
+      ['DSP_2', 'the damage happened after delivery'],
+    ]);
+    expect(effects()).toEqual([
+      'createObligation',
+      'markFundsHeld',
+      'disputeObligation',
+      'resolveObligationDispute',
+      'disputeObligation',
+      'resolveObligationDispute',
+      'authoriseSettlement',
+      'markSettling',
+      'settle',
+      'markCompleted',
+    ]);
   });
 });

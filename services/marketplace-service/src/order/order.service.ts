@@ -505,7 +505,7 @@ export class OrderService {
       from: COMMAND_FROM.RAISE_DISPUTE,
       authorise: COMMAND_AUTHORISATION.raiseDispute,
       apply: async (tx, order) => {
-        await runUnscoped('a dispute is filed under the order it belongs to', () =>
+        const dispute = await runUnscoped('a dispute is filed under the order it belongs to', () =>
           tx.orderDispute.create({
             data: {
               id: newId(ID_PREFIX.dispute),
@@ -520,20 +520,14 @@ export class OrderService {
 
         await tx.order.update({ where: { id: order.id }, data: { status: 'DISPUTED' } });
 
-        const dispute = await runUnscoped('the event names the dispute just written', () =>
-          tx.orderDispute.findFirst({
-            where: { orderId: order.id, status: 'OPEN' },
-            orderBy: { raisedAt: 'desc' },
-          }),
-        );
-
         await this.events.enqueue(tx, {
           eventName: MARKETPLACE_EVENTS.ORDER_DISPUTED,
           aggregateId: order.id,
           organizationId: order.organizationId,
           payload: {
             orderId: order.id,
-            disputeId: dispute?.id ?? order.id,
+            // The row just written, by its id — not re-read by time.
+            disputeId: dispute.id,
             buyerOrganizationId: order.organizationId,
             supplierOrganizationId: order.supplierOrganizationId,
             reason: dto.reason,
@@ -594,9 +588,9 @@ export class OrderService {
         const open = await runUnscoped(
           'an operator resolves the dispute open on either party’s order',
           () =>
+            // The one OPEN dispute (`uq_dispute_one_open_per_order`), by status.
             tx.orderDispute.findFirst({
               where: { orderId: order.id, status: 'OPEN' },
-              orderBy: { raisedAt: 'desc' },
               select: { id: true, raisedFromStatus: true },
             }),
         );
@@ -1270,7 +1264,12 @@ export class OrderService {
     status: OrderStatus;
     economicTransactionId: string | null;
     cancellationReason: string | null;
-    /** The most recent dispute's reason and, once decided, its resolution. */
+    /**
+     * The order's OPEN dispute — one at most (`uq_dispute_one_open_per_order`) — or
+     * null. Chosen by its status, never by when it was raised: with a clock
+     * that went back, the latest-raised was an older, decided one (review of
+     * #625 round 1, R2).
+     */
     dispute: { id: string; reason: string; resolution: string | null } | null;
     /** `mirroredDisputeId`'s dispute on this order, when one was named. */
     mirroredDispute?: { id: string; resolution: string | null } | null;
@@ -1280,8 +1279,7 @@ export class OrderService {
 
     const dispute = await runUnscoped('the saga reads the dispute on the order it drives', () =>
       this.prisma.client.orderDispute.findFirst({
-        where: { orderId: row.id },
-        orderBy: { raisedAt: 'desc' },
+        where: { orderId: row.id, status: 'OPEN' },
         select: { id: true, reason: true, resolution: true },
       }),
     );

@@ -289,10 +289,11 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
    * can meet a resumed order too: during a rollout a new API pod resumes it
    * while an old worker runs its next task, and that history waits at the
    * pre-receipt status with no call here. Replayed by this code, the call must
-   * not appear — so where the history has no marker, the saga skips it and
-   * the mirrored dispute is released at the next point the old code releases
-   * it (RECEIPT_CONFIRMED, CANCELLING or the next dispute), still before any
-   * authorisation. `workflows.replay.spec.ts` replays such a history.
+   * not appear — so where the history has no marker, the saga skips it while
+   * it replays. The wait it then enters asks again at every wake-up
+   * (`waitWhile`): the first one past the replay releases the dispute, before
+   * any authorisation. `workflows.replay.spec.ts` replays such a history;
+   * `workflows.spec.ts` replays one and then goes on live.
    */
   async function mirrorResumed(order: SagaOrderView): Promise<void> {
     if (mirroredDispute === undefined || !patched(DISPUTE_RESUME_PATCH)) return;
@@ -338,9 +339,9 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
     waitingIn: OrderStatus,
     window?: { firstDays: number; thenDays: number },
     /**
-     * For the dispute wait: the dispute it waits on. The wait ends when the
-     * order holds another — one settled back and raised again before the
-     * saga looked (D-083) — so that one is mirrored too.
+     * For the dispute wait: the dispute it waits on. Past the marker, the wait
+     * ends when the order holds another — one settled back and raised again
+     * before the saga looked (D-083) — so that one is mirrored too.
      */
     disputeId?: string,
   ): Promise<SagaOrderView> {
@@ -393,7 +394,16 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         nudged = false;
         const order = await read();
         if (order.status !== waitingIn) return order;
-        if (disputeId !== undefined && order.dispute?.id !== disputeId) return order;
+        // Decided again at every wake-up, not once on entry: a wait entered
+        // while replaying a history recorded without the marker answers
+        // `false` only while it replays, and must not carry the old behaviour
+        // into live execution (review of #625 round 1, R1). Replayed, each
+        // call answers `false` again and adds no command.
+        if (waitingIn === 'DISPUTED') {
+          if (order.dispute?.id !== disputeId && patched(DISPUTE_RESUME_PATCH)) return order;
+        } else {
+          await mirrorResumed(order);
+        }
 
         if (window && windowElapsed) {
           windowElapsed = false;
@@ -641,10 +651,8 @@ export async function orderSaga(input: OrderSagaInput): Promise<string> {
         // saga looks, with the order DISPUTED throughout: the wait ends on a
         // new dispute too, and this case mirrors the decision and then it. A
         // history recorded before the change kept waiting there; it replays
-        // the same way.
-        order = await (patched(DISPUTE_RESUME_PATCH)
-          ? waitWhile('DISPUTED', undefined, order.dispute.id)
-          : waitWhile('DISPUTED'));
+        // the same way, and the wait decides at each wake-up (`waitWhile`).
+        order = await waitWhile('DISPUTED', undefined, order.dispute.id);
         break;
 
       case 'RECEIPT_CONFIRMED':

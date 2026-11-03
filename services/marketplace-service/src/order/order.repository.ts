@@ -13,10 +13,10 @@ import type { OrderStatus, Prisma } from '../generated/prisma';
 export const ORDER_VIEW_INCLUDE = {
   lines: true,
   review: { select: { id: true } },
+  // The one OPEN dispute (`uq_dispute_one_open_per_order`), by status, not by time.
   disputes: {
     where: { status: 'OPEN' },
     select: { id: true },
-    orderBy: { raisedAt: 'desc' },
     take: 1,
   },
 } as const satisfies Prisma.OrderInclude;
