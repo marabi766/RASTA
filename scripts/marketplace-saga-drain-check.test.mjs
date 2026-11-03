@@ -126,7 +126,19 @@ const SETTINGS = {
   MARKETPLACE_TEMPORAL_TASK_QUEUE: 'rasta-order',
 };
 
-function run(scenario, { settings = SETTINGS, cli, target = { marketplaceSagaProtocol: 1 } } = {}) {
+const TARGET_NAME = '@rasta/marketplace-service';
+// Unmodified origin/main eae31b07 manifest: real pre-protocol target release.
+const legacyTarget = JSON.parse(
+  readFileSync(
+    new URL('./fixtures/marketplace-pre-protocol-package.json', import.meta.url),
+    'utf8',
+  ),
+);
+
+function run(
+  scenario,
+  { settings = SETTINGS, cli, target = { name: TARGET_NAME, marketplaceSagaProtocol: 1 } } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), 'saga-drain-'));
   try {
     const fake = join(dir, 'temporal.mjs');
@@ -547,20 +559,54 @@ for (const [name, recorded] of Object.entries({
     scenario['workflow describe order-A'].stdout.workflowExecutionInfo.historyLength = String(
       recorded.events.length,
     );
-    const refused = run(scenario, { target: { marketplaceSagaProtocol: 0 } });
+    const refused = run(scenario, { target: { name: TARGET_NAME, marketplaceSagaProtocol: 0 } });
     assert.equal(refused.status, 1);
     assert.match(refused.stderr, /incompatible target build/);
+    const legacyRefused = run(scenario, { target: legacyTarget });
+    assert.equal(legacyRefused.status, 1);
+    assert.match(legacyRefused.stderr, /incompatible target build/);
     assert.equal(run(scenario).status, 0);
   });
 }
 
 test('legacy-only histories accept an explicitly declared legacy target', () => {
-  assert.equal(run(drained(), { target: { marketplaceSagaProtocol: 0 } }).status, 0);
+  assert.equal(
+    run(drained(), { target: { name: TARGET_NAME, marketplaceSagaProtocol: 0 } }).status,
+    0,
+  );
 });
 
-for (const target of [{}, { marketplaceSagaProtocol: '1' }, { marketplaceSagaProtocol: 2 }]) {
-  test(`refuses unknown target declaration ${JSON.stringify(target)}`, () => {
-    assert.equal(run(drained(), { target }).status, 1);
+test('legacy-only histories accept the unmodified origin/main pre-protocol target', () => {
+  assert.equal(legacyTarget.name, TARGET_NAME);
+  assert.equal(Object.hasOwn(legacyTarget, 'marketplaceSagaProtocol'), false);
+  const result = run(drained(), { target: legacyTarget });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /OK — no poller/);
+});
+
+for (const value of ['1', '0', 2, -1, 0.5, null, false, {}, []]) {
+  test(`refuses malformed or unknown target protocol ${JSON.stringify(value)} before querying`, () => {
+    const result = run(drained(), {
+      target: { name: TARGET_NAME, marketplaceSagaProtocol: value },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /compatibility declaration is unsupported/);
+    assert.deepEqual(result.calls, []);
+  });
+}
+for (const target of [
+  { name: '@rasta/economic-service', marketplaceSagaProtocol: 1 },
+  { name: '@rasta/economic-service' },
+  { marketplaceSagaProtocol: 1 },
+  {},
+  null,
+  [],
+]) {
+  test(`refuses wrong or missing target manifest name ${JSON.stringify(target)} before querying`, () => {
+    const result = run(drained(), { target });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /target manifest is not marketplace-service/);
+    assert.deepEqual(result.calls, []);
   });
 }
 test('refuses unreadable or omitted target manifest', () => {

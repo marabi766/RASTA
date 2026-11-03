@@ -35,7 +35,9 @@
  * MARKETPLACE_TEMPORAL_TASK_QUEUE — the values the service runs with. TLS or
  * an API key: the `temporal` CLI's own TEMPORAL_* variables, inherited.
  * MARKETPLACE_TARGET_PACKAGE_JSON is the package.json extracted from the target
- * image; marketplaceSagaProtocol must explicitly declare 0 (legacy) or 1.
+ * image, whose name must be @rasta/marketplace-service. marketplaceSagaProtocol
+ * is 0 (legacy) or 1; an absent field means 0. Always run this gate from the
+ * newest of the running and target releases, never the rollback target checkout.
  * TEMPORAL_CLI overrides the binary (default `temporal` on PATH).
  */
 import { commandFailure, clientFailureCode } from '../packages/config/src/command-failure.js';
@@ -179,17 +181,21 @@ function check() {
   const address = setting('TEMPORAL_ADDRESS');
   const namespace = setting('TEMPORAL_NAMESPACE');
   const taskQueue = setting('MARKETPLACE_TEMPORAL_TASK_QUEUE');
-  let targetProtocol;
+  let target;
   try {
     // Must be extracted from the immutable target image, never this checkout.
-    targetProtocol = JSON.parse(
-      readFileSync(setting('MARKETPLACE_TARGET_PACKAGE_JSON'), 'utf8'),
-    ).marketplaceSagaProtocol;
+    target = JSON.parse(readFileSync(setting('MARKETPLACE_TARGET_PACKAGE_JSON'), 'utf8'));
   } catch {
     throw new Unverifiable('target build compatibility declaration cannot be read');
   }
+  if (target?.name !== '@rasta/marketplace-service') {
+    throw new Unverifiable('target manifest is not marketplace-service');
+  }
+  // Pre-protocol releases support only legacy histories; do not rewrite their manifests.
+  const targetProtocol =
+    target.marketplaceSagaProtocol === undefined ? 0 : target.marketplaceSagaProtocol;
   if (targetProtocol !== 0 && targetProtocol !== 1) {
-    throw new Unverifiable('target build compatibility declaration is missing or unsupported');
+    throw new Unverifiable('target build compatibility declaration is unsupported');
   }
   const common = ['--address', address, '--namespace', namespace];
   const blockers = [];

@@ -36,7 +36,8 @@ Worker قدیمی اثرش را Commit کرده و تکمیلش به Temporal ن
 
 ### گام ۳ — Gate
 
-از ریشهٔ مخزن، با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر چهار اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
+Gate همیشه از ریشهٔ مخزن **جدیدترینِ انتشار در حال اجرا و انتشار هدف** اجرا می‌شود؛ در Rollback هرگز از Checkout
+انتشار هدف اجرا نکن. با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر چهار اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
 اشتباه چیزی نمی‌یابد و می‌گذشت). TLS یا API Key: متغیرهای `TEMPORAL_*` خود CLI ـِ `temporal`، که به آن می‌رسند.
 
 ```bash
@@ -93,7 +94,7 @@ Gate هیچ پاسخی را پیش از سنجیدن شکلش تفسیر نمی�
 
 مخزن اسکریپت یا Job استقراری برای marketplace-service ندارد (`.github/workflows/ci.yml` فقط می‌سازد و می‌آزماید؛ Manifest
 استقراری در مخزن نیست)، پس Gate فعلاً گامی دستی است. هر خط استقرار که ساخته شود باید همین اسکریپت را میان گام ۲ و ۴
-اجرا کند و با هر کد خروج غیرصفر متوقف شود. رفتار Gate را `scripts/marketplace-saga-drain-check.test.mjs` در Job `quality`
+از جدیدترینِ انتشار در حال اجرا و انتشار هدف با هر چهار متغیر گام ۳ اجرا کند و با هر کد خروج غیرصفر متوقف شود. رفتار Gate را `scripts/marketplace-saga-drain-check.test.mjs` در Job `quality`
 ـِ CI می‌آزماید (`pnpm run test:marketplace-saga-drain-check`).
 
 ## Durable start delivery (task 1214 A)
@@ -187,10 +188,17 @@ for either a recorded `core_patch` rollover marker or a start input carrying
 `resume`, including a continued run before its first workflow task/activity.
 Durable history avoids visibility indexing delays and adds no workflow commands.
 
+Always run the gate from the **newest of the running and target releases**;
+never use the target checkout when rolling back. Use the four-variable invocation
+in step 3 above, including `MARKETPLACE_TARGET_PACKAGE_JSON`.
+
 Extract `services/marketplace-service/package.json` from the **immutable target
 image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
-`marketplaceSagaProtocol` declares support (this build: 1; audited legacy: 0).
-Missing, unreadable or unknown declarations block even an empty queue. An incompatible
+`name` must be `@rasta/marketplace-service`. `marketplaceSagaProtocol` declares
+support (this build: 1); an absent field means protocol **0**, the strictest legacy
+capability, so pre-protocol images are checked without modifying their manifests.
+Unreadable manifests, wrong names and malformed/unknown protocol values block
+even an empty queue. An incompatible
 target blocks regardless of pending activities. Missing/malformed markers,
 unsupported payload encodings and incomplete histories (event sequence/length
 checked against describe) also block. Never add protocol 1 to an old build to
