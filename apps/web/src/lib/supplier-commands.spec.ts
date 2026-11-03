@@ -1,8 +1,6 @@
 /**
  * @jest-environment node
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 
 import {
   MAX_EVIDENCE_ITEMS,
@@ -27,8 +25,7 @@ import {
 
 /**
  * How a supplier form is read and checked before anything is sent, and the
- * wording rule of these screens: no hamza and no combining hamza in any text
- * the screens add.
+ * spelling of these screens: the standard orthography (`orthography.spec.ts`).
  */
 
 function form(fields: Record<string, string | string[]>): FormData {
@@ -193,30 +190,6 @@ describe('the words', () => {
       expect(SUPPLIER_NOTICE_TEXT[notice].text.length).toBeGreaterThan(10);
     }
   });
-
-  /** Hamza (U+0621), alef, waw and yeh with hamza (U+0623, U+0624, U+0626) and the combining hamza (U+0654). */
-  const HAMZA = new RegExp(
-    [0x0621, 0x0623, 0x0624, 0x0626, 0x0654].map((code) => String.fromCharCode(code)).join('|'),
-    'u',
-  );
-  const FILES = [
-    ['lib', 'supplier-commands.ts'],
-    ['server', 'supplier-commands.ts'],
-    ['app', 'suppliers', 'SupplierForms.tsx'],
-    ['app', 'suppliers', '[id]', 'SupplierCommands.tsx'],
-    ['app', 'suppliers', 'supplier-actions.ts'],
-    ['app', 'suppliers', 'supplier-runner.ts'],
-    ['app', 'suppliers', 'supplier-form-state.ts'],
-  ] as const;
-
-  it.each(FILES.map((parts) => [parts.join('/'), parts] as const))(
-    '%s has no hamza on any word and no combining hamza',
-    (_name, parts) => {
-      const text = readFileSync(join(__dirname, '..', ...parts), 'utf8');
-      const offending = text.split('\n').filter((line) => HAMZA.test(line));
-      expect(offending).toEqual([]);
-    },
-  );
 });
 
 describe('the decision note has one audience, in every sentence that mentions it', () => {
@@ -230,13 +203,13 @@ describe('the decision note has one audience, in every sentence that mentions it
     ['the rejection consequence', SUPPLIER_COMMAND_CONSEQUENCES.REJECT_QUALIFICATION],
   ])('%s says the note is private to platform reviewers', (_name, text) => {
     for (const part of PRIVATE) expect(text).toContain(part);
-    expect(text).not.toMatch(/یادداشت[^.؛]*(برای|و) تامین‌کننده است/);
+    expect(text).not.toMatch(/یادداشت[^.؛]*(برای|و) تأمین‌کننده است/);
   });
 
   it('the approval consequence and the hint agree: reviewers only, never the supplier', () => {
     const approval = SUPPLIER_COMMAND_CONSEQUENCES.APPROVE_QUALIFICATION;
-    expect(approval).toContain('نه تامین‌کننده');
-    expect(REVIEWER_NOTE_HINT).toContain('نه تامین‌کننده');
-    expect(approval).not.toContain('برای سابقه و تامین‌کننده');
+    expect(approval).toContain('نه تأمین‌کننده');
+    expect(REVIEWER_NOTE_HINT).toContain('نه تأمین‌کننده');
+    expect(approval).not.toContain('برای سابقه و تأمین‌کننده');
   });
 });
