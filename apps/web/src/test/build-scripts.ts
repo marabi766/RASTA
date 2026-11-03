@@ -58,6 +58,54 @@ export async function waitGone(target: number, what: string, ms = 15_000): Promi
   }
 }
 
+/** Kernel task states that cannot write any more: zombie (`Z`) and dead (`X`). */
+const NOT_LIVE = /^[ZX]/;
+
+/**
+ * Members of `target` (a pid, or, negative, a process group) that are LIVE right now: one
+ * `ps` snapshot of pid, pgid and state, minus zombies. A zombie has released its memory and
+ * its files, so it cannot write, but it still answers `kill(pid, 0)` until its parent reaps it;
+ * the signal probe cannot tell it from a running writer, the process state can. `waitpid` is
+ * not an option: these are grandchildren of the build, not children of the test. Fails closed:
+ * a snapshot that cannot be taken or read proves nothing, so it throws (`ps`: test seam).
+ */
+export function liveMembers(target: number, ps = 'ps'): number[] {
+  const census = spawnSync(ps, ['-axo', 'pid=,pgid=,stat='], { encoding: 'utf8' });
+  if (census.status !== 0) throw new Error('process census failed: cannot prove a writer is gone');
+  return census.stdout
+    .trim()
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/))
+    .filter((row) => {
+      const [pid, pgid, state] = row;
+      if (row.length !== 3 || !/^\d+$/.test(pid) || !/^\d+$/.test(pgid) || !state) {
+        throw new Error('process census unreadable: cannot prove a writer is gone');
+      }
+      return (
+        (target < 0 ? Number(pgid) === -target : Number(pid) === target) && !NOT_LIVE.test(state)
+      );
+    })
+    .map(([pid]) => Number(pid));
+}
+
+/**
+ * For the places where a process must be gone AT a boundary (the wrapper returned, the lock
+ * was released): at this very moment no member of `target` may still be running. A zombie
+ * awaiting its parent's `wait` is allowed (it cannot write). Then `waitGone` for the full
+ * disappearance, which may lag the boundary. Without the first step a writer stopped a moment
+ * AFTER an early return and release would pass, as `waitGone` alone accepts any exit within
+ * its budget (FU-040).
+ */
+export async function goneAtBoundary(target: number, what: string, ms?: number): Promise<void> {
+  const live = liveMembers(target);
+  if (live.length > 0) {
+    throw new Error(
+      `${what}: ${target < 0 ? 'process group' : 'pid'} ${Math.abs(target)} still has a live writer (${live.join(', ')}) at the point the lock was released`,
+    );
+  }
+  await waitGone(target, what, ms);
+}
+
 export interface Result {
   /** Undefined when the driver died before printing its result. */
   status?: number;
