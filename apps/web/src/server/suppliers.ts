@@ -177,13 +177,15 @@ export interface SupplierListQuery {
   readonly status?: string;
   readonly capability?: string;
   readonly cursor?: string;
+  /** A page size other than the screens' own; the service caps it at 200. */
+  readonly limit?: number;
 }
 
 export function fetchSuppliers(
   session: WebSession,
   query: SupplierListQuery = {},
 ): Promise<ReadResult<SupplierPage>> {
-  const search = new URLSearchParams({ limit: String(SUPPLIERS_PER_PAGE) });
+  const search = new URLSearchParams({ limit: String(query.limit ?? SUPPLIERS_PER_PAGE) });
   if (query.status) search.set('status', query.status);
   if (query.capability) search.set('capability', query.capability);
   if (query.cursor) search.set('cursor', query.cursor);
