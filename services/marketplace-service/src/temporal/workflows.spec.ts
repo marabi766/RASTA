@@ -300,17 +300,24 @@ describe('the order saga', () => {
   let env: TestWorkflowEnvironment;
   let queues = 0;
 
-  beforeAll(async () => {
-    // CI points TEMPORAL_TEST_SERVER_DIR at a cached directory. The time-skipping
-    // server is a ~300 MB download, and fetching it on every run was what made
-    // this hook exceed its timeout on a slow network: the whole file failed
-    // before a single saga ran. Locally it falls back to the system temp dir.
+  /**
+   * A time-skipping server. CI points TEMPORAL_TEST_SERVER_DIR at a cached
+   * directory. The time-skipping server is a ~300 MB download, and fetching it
+   * on every run was what made this hook exceed its timeout on a slow network:
+   * the whole file failed before a single saga ran. Locally it falls back to
+   * the system temp dir.
+   */
+  const timeSkippingServer = (): Promise<TestWorkflowEnvironment> => {
     const downloadDir = process.env.TEMPORAL_TEST_SERVER_DIR;
-    env = await TestWorkflowEnvironment.createTimeSkipping(
+    return TestWorkflowEnvironment.createTimeSkipping(
       downloadDir
         ? { server: { executable: { type: 'cached-download', downloadDir, ttl: '30 days' } } }
         : undefined,
     );
+  };
+
+  beforeAll(async () => {
+    env = await timeSkippingServer();
   }, 300_000);
 
   afterAll(async () => {
@@ -1266,6 +1273,23 @@ describe('the order saga', () => {
   // -------------------------------------------------------------------------
 
   describe('a dispute an operator settles before receipt resumes the order where it was (D-083, marketplace audit F1)', () => {
+    // A server of its own, and every case here finishes its saga rather than
+    // terminating it. These cases skip time with `env.sleep`; after a case
+    // that terminates a saga with an activity in flight (two earlier ones do),
+    // the time-skipping server stopped skipping and `env.sleep` never returned
+    // — in CI and locally alike, while the same cases passed on a fresh
+    // server. What the earlier cases leave behind is theirs; these do not
+    // depend on it, and leave nothing for each other.
+    let shared: TestWorkflowEnvironment;
+    beforeAll(async () => {
+      shared = env;
+      env = await timeSkippingServer();
+    }, 300_000);
+    afterAll(async () => {
+      await env?.teardown();
+      env = shared;
+    });
+
     type Origin = 'FUNDS_HELD' | 'CONFIRMED' | 'AWAITING_RECEIPT_CONFIRMATION';
     const ORIGINS: Origin[] = ['FUNDS_HELD', 'CONFIRMED', 'AWAITING_RECEIPT_CONFIRMATION'];
     /** What the parties do to bring a held order to `origin`. */
@@ -1427,7 +1451,7 @@ describe('the order saga', () => {
       const { calls, activities } = recordingActivities(order);
       const reminders = () => calls.filter((c) => c === 'recordReminder').length;
 
-      await run(
+      const result = await run(
         order,
         activities,
         async ({ party, held }) => {
@@ -1445,17 +1469,22 @@ describe('the order saga', () => {
           await env.sleep('108 hours'); // day 7.5
           await until(() => reminders() === 1, 'the reminder due on day 7');
           expect(order.status).toBe('FUNDS_HELD');
+          expect(calls).not.toContain('authoriseSettlement');
+          // Finished, not terminated mid-activity: a saga terminated while an
+          // activity is in flight left the time-skipping server unable to skip
+          // for the cases after it.
+          await REST.FUNDS_HELD(party);
         },
-        { keepRunning: true, input: NO_RECHECK },
+        { input: NO_RECHECK },
       );
-      expect(calls).not.toContain('authoriseSettlement');
+      expect(result).toBe('COMPLETED');
     });
 
     it('records a reminder that fell due during the dispute as soon as it resumes', async () => {
       const order = new FakeOrder();
       const { calls, activities } = recordingActivities(order);
 
-      await run(
+      const result = await run(
         order,
         activities,
         async ({ party, held }) => {
@@ -1472,9 +1501,12 @@ describe('the order saga', () => {
           expect(calls.indexOf('resolveObligationDispute')).toBeLessThan(
             calls.indexOf('recordReminder'),
           );
+          expect(calls).not.toContain('authoriseSettlement');
+          await REST.FUNDS_HELD(party);
         },
-        { keepRunning: true, input: NO_RECHECK },
+        { input: NO_RECHECK },
       );
+      expect(result).toBe('COMPLETED');
     });
 
     it('resumes from its own re-read when the decision’s signal was lost', async () => {
