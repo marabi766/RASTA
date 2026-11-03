@@ -1,0 +1,24 @@
+rule_files:
+  - ../rules/rasta-marketplace-alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'rasta_marketplace_saga_start_backlog_age_seconds{service="marketplace-service",instance="replica-1"}'
+        values: '0 301 361 421 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RastaMarketplaceSagaStartBacklogAging
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RastaMarketplaceSagaStartBacklogAging
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Order saga starts are waiting
+              description: A start intent has waited over five minutes. Check Temporal connectivity and namespace retention before reconciling ambiguous legacy starts.
+              runbook: docs/runbooks/marketplace-saga-deploy.md
+      - eval_time: 4m
+        alertname: RastaMarketplaceSagaStartBacklogAging
+        exp_alerts: []
