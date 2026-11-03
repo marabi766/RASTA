@@ -183,6 +183,7 @@ export class PrismaService implements OnModuleInit {
       })
       .$extends(
         createTenantGuardExtension({
+          scalarFkFamily: 'identity',
           scopedModels: TENANT_SCOPED_MODELS,
           datamodel: Prisma.dmmf.datamodel,
           onUnscopedQuery: ({ model, operation, reason }) => {

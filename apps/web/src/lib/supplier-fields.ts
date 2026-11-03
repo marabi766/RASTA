@@ -15,7 +15,7 @@ export const SUPPLIER_CAPABILITIES = ['GOODS_SUPPLY', 'WORKSHOP_SERVICE', 'CONTR
 export type SupplierCapability = (typeof SUPPLIER_CAPABILITIES)[number];
 
 export const SUPPLIER_CAPABILITY_LABELS: Readonly<Record<SupplierCapability, string>> = {
-  GOODS_SUPPLY: 'تامین کالا',
+  GOODS_SUPPLY: 'تأمین کالا',
   WORKSHOP_SERVICE: 'خدمات تعمیرگاهی',
   CONTRACTING: 'پیمانکاری',
 };
@@ -51,7 +51,7 @@ export type QualificationState = (typeof QUALIFICATION_STATES)[number];
 
 export const QUALIFICATION_STATE_LABELS: Readonly<Record<QualificationState, string>> = {
   SUBMITTED: 'ارسال‌شده',
-  APPROVED: 'تاییدشده',
+  APPROVED: 'تأییدشده',
   REJECTED: 'ردشده',
 };
 

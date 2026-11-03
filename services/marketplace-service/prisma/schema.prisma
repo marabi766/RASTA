@@ -173,6 +173,7 @@ model Offer {
   priceHistory OfferPriceHistory[]
   orderLines   OrderLine[]
 
+  @@unique([organizationId, id], map: "uq_offer_tenant_id")
   @@index([organizationId, status], map: "ix_offer_org_status")
   @@index([productId, status], map: "ix_offer_product_status")
   @@index([status, unitPriceMinor], map: "ix_offer_status_price")
@@ -185,7 +186,7 @@ model OfferPriceHistory {
   organizationId String @map("organization_id")
 
   offerId String @map("offer_id")
-  offer   Offer  @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  offer   Offer  @relation(fields: [organizationId, offerId], references: [organizationId, id], map: "fk_offer_price_history_tenant", onUpdate: Restrict, onDelete: Cascade)
 
   /// The version this row describes — the same number `OrderLine` records.
   version Int
@@ -281,10 +282,11 @@ model Order {
   review       Review?
   sagaSteps    SagaStep[]
 
+  @@unique([organizationId, idempotencyKey], map: "uq_order_org_idempotency_key")
+  @@unique([organizationId, id], map: "uq_order_tenant_id")
   @@index([organizationId, status], map: "ix_order_org_status")
   @@index([supplierOrganizationId, status], map: "ix_order_supplier_status")
   @@index([organizationId, createdAt], map: "ix_order_org_created")
-  @@unique([organizationId, idempotencyKey], map: "uq_order_org_idempotency_key")
   @@map("order")
 }
 
@@ -295,7 +297,7 @@ model OrderLine {
   organizationId String @map("organization_id")
 
   orderId String @map("order_id")
-  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_order_line_tenant", onUpdate: Restrict, onDelete: Cascade)
 
   offerId String @map("offer_id")
   offer   Offer  @relation(fields: [offerId], references: [id], onDelete: Restrict)
@@ -332,7 +334,7 @@ model Fulfillment {
   organizationId String @map("organization_id")
 
   orderId String @map("order_id")
-  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_fulfillment_tenant", onUpdate: Restrict, onDelete: Cascade)
 
   /// Free text from the supplier: a waybill number, a courier reference.
   /// Opaque to this service.
@@ -359,7 +361,7 @@ model OrderStatusHistory {
   organizationId String @map("organization_id")
 
   orderId String @map("order_id")
-  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_order_status_history_tenant", onUpdate: Restrict, onDelete: Cascade)
 
   kind OrderHistoryKind @default(TRANSITION)
 
@@ -393,7 +395,7 @@ model SagaStep {
   organizationId String @map("organization_id")
 
   orderId String @map("order_id")
-  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_saga_step_tenant", onUpdate: Restrict, onDelete: Cascade)
 
   /// `<workflowId>/<runId>/<activityId>`: one scheduled activity, every attempt.
   stepKey String @map("step_key")
@@ -420,7 +422,7 @@ model OrderDispute {
   organizationId String @map("organization_id")
 
   orderId String @map("order_id")
-  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_order_dispute_tenant", onUpdate: Restrict, onDelete: Cascade)
 
   /// At least a sentence, mirroring economic-service: whoever resolves this
   /// needs to know what it is about, and a one-word reason is how a dispute
@@ -516,6 +518,7 @@ model ReturnRequest {
 
   @@unique([organizationId, commandKeyHash], map: "ux_return_request_command")
   @@unique([organizationId, returnShipmentId], map: "ux_return_request_shipment")
+  @@unique([organizationId, id], map: "ux_return_request_org_id")
   @@index([organizationId, status, id], map: "ix_return_request_org_status")
   @@index([organizationId, orderId, id], map: "ix_return_request_order")
   @@index([supplierOrganizationId, id], map: "ix_return_request_supplier")
@@ -529,7 +532,7 @@ model ReturnLine {
 
   organizationId  String @map("organization_id")
   returnRequestId String @map("return_request_id")
-  returnRequest   ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Restrict)
+  returnRequest   ReturnRequest @relation(fields: [organizationId, returnRequestId], references: [organizationId, id], map: "fk_return_line_request", onUpdate: Restrict, onDelete: Restrict)
 
   orderLineId String @map("order_line_id")
   /// Copied from the order line (the trigger checks it); what the supplier is asked to take back.
@@ -550,7 +553,7 @@ model ReturnStatusHistory {
 
   organizationId  String        @map("organization_id")
   returnRequestId String        @map("return_request_id")
-  returnRequest   ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Restrict)
+  returnRequest   ReturnRequest @relation(fields: [organizationId, returnRequestId], references: [organizationId, id], map: "fk_return_history_request", onUpdate: Restrict, onDelete: Restrict)
 
   fromStatus String? @map("from_status")
   toStatus   String  @map("to_status")
@@ -577,7 +580,7 @@ model ReturnDispatchRelease {
   /// The buyer — the request's tenant.
   organizationId  String        @map("organization_id")
   returnRequestId String        @map("return_request_id")
-  returnRequest   ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Restrict)
+  returnRequest   ReturnRequest @relation(fields: [organizationId, returnRequestId], references: [organizationId, id], map: "fk_return_dispatch_release_request", onUpdate: Restrict, onDelete: Restrict)
 
   /// The reservation cleared, as the request held it.
   reservationId         String   @map("reservation_id")
@@ -607,7 +610,7 @@ model Review {
 
   /// One review per order (`docs/17`: "یک ارزیابی به‌ازای سفارش").
   orderId String @unique @map("order_id")
-  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order   Order  @relation(fields: [organizationId, orderId], references: [organizationId, id], map: "fk_review_tenant", onUpdate: Restrict, onDelete: Cascade)
 
   supplierOrganizationId String @map("supplier_organization_id")
 
@@ -620,6 +623,7 @@ model Review {
   submittedAt DateTime @default(now()) @map("submitted_at")
   submittedBy String   @map("submitted_by")
 
+  @@unique([organizationId, orderId], map: "uq_review_tenant_order")
   @@index([supplierOrganizationId], map: "ix_review_supplier")
   @@index([organizationId], map: "ix_review_org")
   @@map("review")

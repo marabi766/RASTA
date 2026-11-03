@@ -1,10 +1,13 @@
-# Integration suite sharding (tasks 1204 A / 1224 B)
+# Integration suite sharding (tasks 1204 A / 1224 B / 1236)
 
 Slice B uses four explicit suite jobs, each needing `quality`, with exact package
 filters produced by `run-test-phases.mjs --shard=<name>`. The aggregate retains
 its required-check name and needs all four jobs plus the existing coverage,
 security and backup jobs. Missing, duplicate or unknown packages fail independent
 manifest discovery; the validator also checks the runner's effective plan.
+FU-027 independently cross-checks partition step-name keys against the suite
+command inventory and all workflow jobs, refusing missing, unknown or repeated
+steps. The command inventory is not derived from ownership keys.
 
 Every shard provisions the existing complete infrastructure. Services, setup
 steps and suite environments use YAML anchors/aliases (no merge keys), supported
@@ -82,9 +85,7 @@ build outputs from unrelated workspaces. The backup-drill exemption is unchanged
 
 ## Evidence still required before acceptance
 
-The requested stacked PR base (`ci/integration-tests-shards`) is excluded by the
-current `pull_request.branches: [main]` trigger. Until that is resolved or A
-merges, no two-run shard measurements can be collected on this PR. Full test-title
+#591 has merged and #594 now targets `main`, so final-head CI can run. Full test-title
 baseline evidence also remains unavailable in the archived baseline logs. Do not
 infer identity equality from the same file/test totals. The expected partition
 of the archived baseline, not an observed candidate result, is:

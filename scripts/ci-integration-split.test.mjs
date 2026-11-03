@@ -18,6 +18,7 @@ import {
   jobBudgetProblems,
   discoverIntegrationPackages,
   integrationPartitionProblems,
+  integrationPartitionStepProblems,
 } from './ci-integration-split-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -79,6 +80,62 @@ test('partition mutants: drop, duplicate within/across partitions, and unknown p
   for (const invalid of [null, [], {}, { suites: [] }, { suites: 'all' }]) {
     assert.ok(integrationPartitionProblems(invalid).length > 0);
   }
+});
+
+test('FU-027: partition keys cannot be renamed, added or removed independently', () => {
+  for (const change of ['rename', 'add', 'remove']) {
+    const partitions = structuredClone(INTEGRATION_PARTITIONS);
+    if (change !== 'add') delete partitions['Integration construction'];
+    if (change !== 'remove') partitions['Unregistered suite'] = ['@rasta/construction-service'];
+    assert.match(
+      integrationPartitionStepProblems(real(), partitions).join('\n'),
+      /partition step missing from suite inventory|suite inventory step has no partition/,
+    );
+  }
+});
+
+test('FU-027: inventory keys cannot be renamed, added or removed independently', () => {
+  for (const change of ['rename', 'add', 'remove']) {
+    const inventory = structuredClone(STEP_INVENTORY);
+    if (change !== 'remove')
+      inventory['Unregistered suite'] = inventory['Integration construction'];
+    if (change !== 'add') delete inventory['Integration construction'];
+    assert.match(
+      integrationPartitionStepProblems(real(), INTEGRATION_PARTITIONS, inventory).join('\n'),
+      /partition step missing from suite inventory|suite inventory step has no partition/,
+    );
+  }
+});
+
+test('FU-027: workflow suite steps cannot be renamed, added or removed independently', () => {
+  for (const change of ['rename', 'add', 'remove']) {
+    const workflow = real();
+    const step = stepNamed(workflow, 'Integration construction');
+    if (change === 'add') {
+      workflow.jobs['integration-construction'].steps.push({ ...step, name: 'Unregistered suite' });
+    } else if (change === 'rename') step.name = 'Unregistered suite';
+    else dropStep(workflow.jobs['integration-construction'], step.name);
+    fails(workflow, /workflow suite step has no partition|partition step must occur exactly once/);
+  }
+  for (const run of [
+    'pnpm run test:integration',
+    'node scripts/run-test-phases.mjs test:integration',
+  ]) {
+    const extra = real();
+    extra.jobs.quality.steps.push({ name: 'Unregistered suite', run });
+    fails(extra, /workflow integration step missing from inventory/);
+  }
+  const outside = real();
+  outside.jobs.quality.steps.push({
+    name: 'Tenant isolation and authorization tests',
+    run: 'pnpm run test:integration',
+  });
+  fails(outside, /integration execution must run in an integration-\* job/);
+  const workflow = real();
+  workflow.jobs.quality.steps.push(
+    structuredClone(stepNamed(workflow, 'Integration construction')),
+  );
+  fails(workflow, /partition step must occur exactly once in workflow, found 2/);
 });
 
 const workspaceFixture = (t) => {
@@ -549,7 +606,7 @@ test('minutes are positive whole numbers everywhere: a fraction is refused, not 
       )['timeout-minutes'] = 0.5),
     'a step timeout past its job limit': (w) =>
       (stepNamed(w, 'Integration tests')['timeout-minutes'] = 20.5),
-    'a job timeout above an integer floor': (w) => (w.jobs.quality['timeout-minutes'] = 37.5),
+    'a job timeout above an integer floor': (w) => (w.jobs.quality['timeout-minutes'] = 56.5),
   };
   for (const [what, mutate] of Object.entries(mutations)) {
     const workflow = real();
@@ -584,7 +641,7 @@ test('a step named like an inherited property is an ordinary step, not a crash',
 });
 
 test('a job whose measured runtime needed its limit may not go back below it', () => {
-  assert.deepEqual(JOB_FLOOR_MINUTES, { quality: 37, 'web-browser': 37 });
+  assert.deepEqual(JOB_FLOOR_MINUTES, { quality: 56, 'web-browser': 37 });
   for (const [id, floor] of Object.entries(JOB_FLOOR_MINUTES)) {
     const back = real();
     back.jobs[id]['timeout-minutes'] = floor - 1;

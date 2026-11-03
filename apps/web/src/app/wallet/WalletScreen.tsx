@@ -12,6 +12,7 @@ import {
   PageHeader,
   Section,
   StatusBadge,
+  TableScroll,
 } from '@/ui';
 import {
   transactionStatusLabel,
@@ -121,39 +122,41 @@ function HoldRows({ holds }: { holds: HoldsPage }) {
   }
 
   return (
-    <table className="w-full border-collapse text-sm">
-      <caption className="sr-only">فهرست وجوه در وثیقه</caption>
-      <thead>
-        <tr className="border-b border-border text-start text-content-muted">
-          <th scope="col" className="p-3 text-start font-medium">
-            مبلغ
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            وضعیت
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            مرجع
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            تاریخ
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {holds.items.map((hold) => (
-          <tr key={hold.id} className="border-b border-border">
-            <td className="p-3">{formatMoney(hold.amountMinor)}</td>
-            <td className="p-3">
-              <StatusBadge status={hold.status} label={walletHoldStatusLabel(hold.status)} />
-            </td>
-            <td className="p-3 text-content-muted">
-              <Identifier>{hold.reference}</Identifier>
-            </td>
-            <td className="p-3 text-content-muted">{formatJalaliDateLong(hold.placedAt)}</td>
+    <TableScroll label="فهرست وجوه در وثیقه">
+      <table className="w-full border-collapse text-sm">
+        <caption className="sr-only">فهرست وجوه در وثیقه</caption>
+        <thead>
+          <tr className="border-b border-border text-start text-content-muted">
+            <th scope="col" className="p-3 text-start font-medium">
+              مبلغ
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              وضعیت
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              مرجع
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              تاریخ
+            </th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {holds.items.map((hold) => (
+            <tr key={hold.id} className="border-b border-border">
+              <td className="p-3">{formatMoney(hold.amountMinor)}</td>
+              <td className="p-3">
+                <StatusBadge status={hold.status} label={walletHoldStatusLabel(hold.status)} />
+              </td>
+              <td className="p-3 text-content-muted">
+                <Identifier>{hold.reference}</Identifier>
+              </td>
+              <td className="p-3 text-content-muted">{formatJalaliDateLong(hold.placedAt)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableScroll>
   );
 }
 
@@ -214,49 +217,65 @@ function TransactionRows({
 }) {
   return (
     <>
-      <table className="w-full border-collapse text-sm">
-        <caption className="sr-only">فهرست تراکنش‌ها</caption>
-        <thead>
-          <tr className="border-b border-border text-start text-content-muted">
-            <th scope="col" className="p-3 text-start font-medium">
-              نوع
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              مبلغ خالص
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              وضعیت
-            </th>
-            <th scope="col" className="p-3 text-start font-medium">
-              تاریخ
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {page.items.map((transaction) => (
-            <tr key={transaction.id} className="border-b border-border">
-              <td className="p-3">
-                <Link
-                  href={`/transactions/${encodeURIComponent(transaction.id)}`}
-                  className="underline"
-                >
-                  {transactionTypeLabel(transaction.transactionType)}
-                </Link>
-              </td>
-              <td className="p-3">{formatMoney(transaction.netAmountMinor)}</td>
-              <td className="p-3">
-                <StatusBadge
-                  status={transaction.status}
-                  label={transactionStatusLabel(transaction.status)}
-                />
-              </td>
-              <td className="p-3 text-content-muted">
-                {formatJalaliDateLong(transaction.occurredAt)}
-              </td>
+      <TableScroll label="فهرست تراکنش‌ها">
+        <table className="w-full border-collapse text-sm">
+          <caption className="sr-only">فهرست تراکنش‌ها</caption>
+          <thead>
+            <tr className="border-b border-border text-start text-content-muted">
+              <th scope="col" className="p-3 text-start font-medium">
+                نوع
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                مبلغ خالص
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                وضعیت
+              </th>
+              <th scope="col" className="p-3 text-start font-medium">
+                تاریخ
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {page.items.map((transaction) => (
+              <tr key={transaction.id} className="border-b border-border">
+                <td className="p-3">
+                  <Link
+                    href={`/transactions/${encodeURIComponent(transaction.id)}`}
+                    className="underline"
+                  >
+                    {transactionTypeLabel(transaction.transactionType)}
+                  </Link>
+                </td>
+                <td className="p-3">
+                  {formatMoney(transaction.netAmountMinor)}
+                  {/* The gross, labelled as the gross: never the net, and no claim
+                    about a hold (net is zero until settlement, ADR-028). */}
+                  <span className="block text-xs text-content-muted">
+                    مبلغ کل:{' '}
+                    {transaction.grossAmountMinor === null
+                      ? '—'
+                      : formatMoney(transaction.grossAmountMinor)}
+                  </span>
+                </td>
+                <td className="p-3">
+                  <StatusBadge
+                    status={transaction.status}
+                    label={transactionStatusLabel(transaction.status)}
+                  />
+                </td>
+                <td className="p-3 text-content-muted">
+                  {formatJalaliDateLong(transaction.occurredAt)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </TableScroll>
+      <p className="mt-3 text-xs text-content-muted">
+        مبلغ کل همان مبلغ ثبت‌شدهٔ تراکنش است. مبلغ خالص هنگام تسویه محاسبه می‌شود و تا آن زمان صفر
+        نشان داده می‌شود؛ صفر به معنی «مبلغی در تعهد نیست» نیست و وجه در وثیقه را نشان نمی‌دهد.
+      </p>
 
       {page.hasMore && page.nextCursor ? (
         <div className="mt-4 flex justify-start">

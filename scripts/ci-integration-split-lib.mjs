@@ -218,11 +218,16 @@ const postgresGuard = (command) => ({ run: [command], env: POSTGRES, timeout: 5 
  */
 export const STEP_INVENTORY = Object.freeze({
   ...Object.fromEntries(
-    Object.keys(INTEGRATION_PARTITIONS).map((name) => {
-      const shard = name === 'Integration tests' ? 'identity' : name.split(' ')[1];
+    Object.entries({
+      'Integration tests': 'identity',
+      'Integration construction': 'construction',
+      'Integration economic': 'economic',
+      'Integration contract': 'contract',
+    }).map(([name, shard]) => {
       return [
         name,
         {
+          shard,
           run: withKafka('tests', `pnpm run test:integration --shard=${shard} -- --verbose`),
           env: {
             KAFKA_SECRETS_DIR: '${{ runner.temp }}/rasta-kafka-secrets',
@@ -432,8 +437,10 @@ export const JOB_SETUP_MINUTES = Object.freeze({
  * took more than 80 % of the old limit, so the new one is ceil(max x 1.5 / 60).
  * `quality` took up to 1446 s (old limit 25, 96 %) and cancelled train run
  * 40936057488; `web-browser` took up to 1462 s (old limit 30, 81 %).
+ * On 2026-11-02 `quality` took up to 2216 s (limit 37, 100 %) and cancelled
+ * main run 41496157174 and train run 41512869238, so its floor is 56.
  */
-export const JOB_FLOOR_MINUTES = Object.freeze({ quality: 37, 'web-browser': 37 });
+export const JOB_FLOOR_MINUTES = Object.freeze({ quality: 56, 'web-browser': 37 });
 
 /** The keys a test step may have: nothing that skips it, forgives it or changes its shell. */
 const STEP_KEYS = new Set(['name', 'run', 'env', 'timeout-minutes']);
@@ -522,8 +529,65 @@ export function checkIntegrationSplitText(text) {
   return checkIntegrationSplit(workflow);
 }
 
+/** FU-027: ownership, command inventory and executable workflow must agree on step keys. */
+export function integrationPartitionStepProblems(
+  workflow,
+  partitions = INTEGRATION_PARTITIONS,
+  inventory = STEP_INVENTORY,
+) {
+  if (!isMapping(partitions) || !isMapping(inventory))
+    return ['partition steps and suite inventory must be mappings'];
+  const problems = [];
+  const partitionNames = new Set(Object.keys(partitions));
+  // Inventory is independent of ownership: deriving these keys from partitions
+  // would let an ownership rename silently rename its own supposed cross-check.
+  const suiteNames = new Set(
+    Object.entries(inventory)
+      .filter(
+        ([, entry]) =>
+          isMapping(entry) &&
+          (Object.hasOwn(entry, 'shard') || /--shard(?:=|\s)/.test(textOf(entry.run))),
+      )
+      .map(([name]) => name),
+  );
+  const occurrences = new Map([...partitionNames].map((name) => [name, 0]));
+  for (const name of partitionNames) {
+    if (!suiteNames.has(name))
+      problems.push(`${name}: partition step missing from suite inventory`);
+  }
+  for (const name of suiteNames) {
+    if (!partitionNames.has(name)) problems.push(`${name}: suite inventory step has no partition`);
+  }
+  // Scan every job, so a duplicate outside integration-* cannot escape the guard.
+  for (const [id, job] of Object.entries(workflow?.jobs ?? {})) {
+    for (const step of Array.isArray(job?.steps) ? job.steps : []) {
+      if (occurrences.has(step?.name)) occurrences.set(step.name, occurrences.get(step.name) + 1);
+      const integrationRun = /test:integration|run-test-phases\.mjs|--shard(?:=|\s)/.test(
+        textOf(step?.run),
+      );
+      if (integrationRun && !id.startsWith(SPLIT_PREFIX))
+        problems.push(`${id}: integration execution must run in an integration-* job`);
+      if (integrationRun && !Object.hasOwn(inventory, step?.name))
+        problems.push(`${textOf(step?.name)}: workflow integration step missing from inventory`);
+      if (
+        (suiteNames.has(step?.name) || /--shard(?:=|\s)/.test(textOf(step?.run))) &&
+        !partitionNames.has(step?.name)
+      )
+        problems.push(`${textOf(step?.name)}: workflow suite step has no partition`);
+    }
+  }
+  for (const [name, count] of occurrences) {
+    if (count !== 1)
+      problems.push(`${name}: partition step must occur exactly once in workflow, found ${count}`);
+  }
+  return problems;
+}
+
 export function checkIntegrationSplit(workflow) {
-  const problems = integrationPartitionProblems();
+  const problems = [
+    ...integrationPartitionProblems(),
+    ...integrationPartitionStepProblems(workflow),
+  ];
   // Inspect the exact plan the executable runner consumes, not only ownership.
   const effective = {};
   let stressCount = 0;

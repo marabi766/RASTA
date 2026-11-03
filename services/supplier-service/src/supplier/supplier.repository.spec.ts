@@ -95,6 +95,7 @@ function guardedClient(replies: Readonly<Record<string, unknown>> = {}): {
   calls: RecordedCall[];
 } {
   const guard = createTenantGuardExtension({
+    scalarFkFamily: 'supplier',
     datamodel: Prisma.dmmf.datamodel,
     scopedModels: TENANT_SCOPED_MODELS,
   });
