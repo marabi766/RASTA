@@ -118,11 +118,13 @@ pnpm verify     # format:check → lint → typecheck → test → build
 ---
 
 The pre-push gate is being built in stages. `pnpm run prepush:scope --base origin/main`
-prints a selection plan only; it does not run quality checks. Root/shared changes
-select all packages. Custom task inputs conservatively select their readers and
-dependents, including files read outside package dependencies. Run from the worktree
-root after `pnpm install --frozen-lockfile`; an invalid base or Turbo result refuses
-selection. The executor and CI-parity guard remain follow-up work.
+prints a selection plan only; it does not run quality checks. Until
+repository-reading tests have enforced input coverage, any changed path
+selects every workspace. Contracts tests hash repository inputs as well. The planner
+invokes only an installed native Turbo binary and refuses missing binaries or
+incomplete dependent closures. Run from the worktree root after
+`pnpm install --frozen-lockfile`; an invalid base or Turbo result refuses selection.
+The executor and CI-parity guard remain follow-up work.
 
 ## Coding Standards
 

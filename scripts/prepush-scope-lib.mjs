@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join, posix } from 'node:path';
+import { accessSync, constants, readFileSync, realpathSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
 import ts from 'typescript';
 
 // Planning only: no task is executed and no .env file is sourced. Discard child
@@ -12,11 +13,9 @@ export function scopeRunner(cwd) {
   }
   return (command, args) => {
     try {
-      // Invoke the installed CLI directly. Nested pnpm exec can auto-install
-      // dependencies and prepend human output to Turbo's JSON.
-      const executable = command === 'turbo' ? process.execPath : command;
-      const argv =
-        command === 'turbo' ? [join(cwd, 'node_modules/turbo/bin/turbo'), ...args] : args;
+      // Resolve only; never load Turbo's JS launcher (it can run npm install).
+      const executable = command === 'turbo' ? installedTurbo(cwd) : command;
+      const argv = args;
       return execFileSync(executable, argv, {
         cwd,
         env,
@@ -29,6 +28,25 @@ export function scopeRunner(cwd) {
       throw new Error('Prepush scope: Git/Turbo command failed; selection refused');
     }
   };
+}
+
+function installedTurbo(cwd) {
+  const platform = { linux: 'linux', darwin: 'darwin', win32: 'windows' }[process.platform];
+  const arch = { x64: '64', arm64: 'arm64' }[process.arch];
+  if (!platform || !arch) throw new Error('Unsupported Turbo platform');
+  const rootRequire = createRequire(join(cwd, 'package.json'));
+  const turboRequire = createRequire(realpathSync(rootRequire.resolve('turbo/package.json')));
+  const suffix = `${platform}-${arch}/bin/turbo${platform === 'windows' ? '.exe' : ''}`;
+  for (const prefix of ['@turbo/', 'turbo-']) {
+    try {
+      const binary = turboRequire.resolve(`${prefix}${suffix}`);
+      accessSync(binary, constants.X_OK);
+      return binary;
+    } catch {
+      // Try the other installed package spelling, never an installer or shim.
+    }
+  }
+  throw new Error('Missing installed native Turbo binary');
 }
 
 export function changedPaths(run, base) {
@@ -103,48 +121,53 @@ export function planScope({ run, base = 'origin/main', turboSource }) {
   if (parsed.error || !Array.isArray(globals) || globals.some((g) => typeof g !== 'string' || !g)) {
     throw new Error('Prepush scope: unsupported global dependencies');
   }
-  // Compare literal prefixes, not glob matches: includes added/deleted paths,
-  // dotfiles and future glob forms. Negation also broadens; never subtracts.
-  const prefixes = globals.map((g) => inputPrefix(g));
+  // Build the reverse package graph from ALL tasks, including prerequisites.
+  // Filtered dry-runs are not evidence that their own closure is complete.
+  const graph = new Map();
+  for (const task of all.tasks) {
+    if (
+      !byName.has(task.package) ||
+      task.taskId !== `${task.package}#${task.task}` ||
+      graph.has(task.taskId) ||
+      !Array.isArray(task.dependencies) ||
+      !Array.isArray(task.resolvedTaskDefinition?.inputs) ||
+      task.resolvedTaskDefinition.inputs.some((input) => typeof input !== 'string')
+    )
+      throw new Error('Prepush scope: malformed task graph');
+    graph.set(task.taskId, task);
+  }
+  for (const task of graph.values()) {
+    if (task.dependencies.some((id) => typeof id !== 'string' || !graph.has(id)))
+      throw new Error('Prepush scope: incomplete task graph');
+  }
+  const closure = (seeds) => {
+    const result = new Set(seeds);
+    let previousSize;
+    do {
+      previousSize = result.size;
+      for (const task of graph.values()) {
+        if (task.dependencies.some((id) => result.has(graph.get(id).package)))
+          result.add(task.package);
+      }
+    } while (result.size !== previousSize);
+    return result;
+  };
+  const validate = (packages, seeds = packages) => {
+    if (
+      packages.some((name) => !byName.has(name)) ||
+      [...closure(seeds)].some((name) => !packages.includes(name))
+    )
+      throw new Error('Prepush scope: incomplete dependent selection');
+  };
   const committed = dryRun(run, [`--filter=...[${changes.mergeBase}]`]);
   const selected = new Set(committed.packages);
   if ([...selected].some((name) => name !== '//' && !byName.has(name)))
     throw new Error('Prepush scope: unknown selected package');
-  const readers = new Set();
-  for (const task of all.tasks) {
-    if (!byName.has(task.package) || !Array.isArray(task.resolvedTaskDefinition?.inputs))
-      throw new Error('Prepush scope: malformed task inputs');
-    if (
-      task.resolvedTaskDefinition.inputs.some((input) => {
-        if (typeof input !== 'string') throw new Error('Prepush scope: malformed input');
-        return (
-          input !== '$TURBO_DEFAULT$' &&
-          changes.paths.some((path) =>
-            path.startsWith(inputPrefix(input, byName.get(task.package).directory)),
-          )
-        );
-      })
-    )
-      readers.add(task.package);
-  }
-  const broad = changes.paths.some(
-    (path) =>
-      path.startsWith('packages/') ||
-      prefixes.some((prefix) => path.startsWith(prefix)) ||
-      !tasks.some((task) => path.startsWith(`${task.directory}/`)),
-  );
-  if (broad || selected.has('//')) return { ...changes, packages: all.packages, broad: true };
-  if (changes.paths.length) {
-    for (const task of tasks) {
-      // Every custom input owner is a possible cross-package source reader.
-      // Deliberately broad, avoiding a second implementation of Turbo globs.
-      if (
-        readers.has(task.package) ||
-        changes.paths.some((p) => p.startsWith(`${task.directory}/`))
-      ) {
-        selected.add(task.package);
-      }
-    }
+  if (selected.has('//')) return { ...changes, packages: all.packages, broad: true };
+  validate(committed.packages);
+  for (const task of tasks) {
+    if (changes.paths.some((path) => path.startsWith(`${task.directory}/`)))
+      selected.add(task.package);
   }
   const result = selected.size
     ? dryRun(
@@ -152,29 +175,12 @@ export function planScope({ run, base = 'origin/main', turboSource }) {
         [...selected].map((name) => `--filter=...${name}`),
       ).packages
     : [];
-  if (
-    result.some((name) => !byName.has(name)) ||
-    [...selected].some((name) => !result.includes(name)) ||
-    (changes.paths.length && !result.length)
-  ) {
-    throw new Error('Prepush scope: incomplete affected selection');
-  }
+  validate(result, selected);
+  // Until repository-read coverage is enforced, ANY workspace may contain an
+  // undeclared reader. Include them all; input declarations alone cannot prove
+  // a narrow selection safe, even for a new file or a new test package.
+  if (changes.paths.length) return { ...changes, packages: all.packages, broad: true };
   return { ...changes, packages: result, broad: false };
-}
-
-// A prefix is a superset of a glob. Unknown syntax stops the prefix early,
-// selecting broadly; never try to reproduce Turbo's matching/exclusion rules.
-function inputPrefix(input, directory = '') {
-  let pattern = input.replace(/^!/, '');
-  if (pattern.startsWith('$TURBO_ROOT$/')) {
-    directory = '';
-    pattern = pattern.slice('$TURBO_ROOT$/'.length);
-  }
-  if (pattern.startsWith('/') || pattern.includes('\\') || pattern.includes('$')) return '';
-  const literal = pattern.match(/^[\w./-]*/)[0];
-  if (pattern.slice(literal.length).includes('..')) return '';
-  const prefix = posix.join(directory, literal);
-  return prefix === '.' || prefix.startsWith('..') ? '' : prefix;
 }
 
 export function scopeFromRoot(root, base) {

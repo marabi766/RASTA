@@ -2,25 +2,14 @@
   "$schema": "https://turbo.build/schema.json",
   "extends": ["//"],
   "tasks": {
-    // `topic-consumers.repo.spec.ts` reads every service's source to check
-    // each EventConsumer against TOPIC_CONSUMERS (RUN-006). Without the
-    // services as inputs, turbo would replay a cached green after a service
-    // added a consumer the contract does not declare. `broker-acls.spec.ts`
-    // compares the generated broker files with the contracts, so they are
-    // inputs too: a hand edit to them must not replay a cached green.
+    // Repository guards read portal/service/shared sources, workspace manifests,
+    // scripts, patches and docs. Hash the repository for both test entry points;
+    // declarations alone do not yet enforce coverage of future repository reads.
     "test": {
-      "inputs": [
-        "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/services/*/src/**/*.ts",
-        "$TURBO_ROOT$/infrastructure/docker/kafka/*"
-      ]
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/**", "!$TURBO_ROOT$/**/node_modules/**"]
     },
     "test:unit": {
-      "inputs": [
-        "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/services/*/src/**/*.ts",
-        "$TURBO_ROOT$/infrastructure/docker/kafka/*"
-      ]
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/**", "!$TURBO_ROOT$/**/node_modules/**"]
     }
   }
 }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import test from 'node:test';
@@ -14,6 +14,8 @@ const inventory = {
       package: names[i],
       directory,
       task: 'test:unit',
+      taskId: `${names[i]}#test:unit`,
+      dependencies: [],
       resolvedTaskDefinition: { inputs: i === 1 || i === 2 ? ['../../services/**'] : [] },
     }),
   ),
@@ -45,10 +47,10 @@ test('service changes select web/contracts source readers and their dependents',
   assert.ok(calls.some(([, args]) => args.includes(`--filter=...[${sha}]`)));
 });
 
-test('web-only changes do not select unrelated service readers', () => {
+test('undeclared repository readers are always included for any changed path', () => {
   const result = fixture(['apps/web/src/new.tsx']).plan();
-  assert.deepEqual(result.packages, [names[1]]);
-  assert.equal(result.broad, false);
+  assert.deepEqual(result.packages, names);
+  assert.equal(result.broad, true);
 });
 
 for (const path of [
@@ -166,15 +168,17 @@ test('invalid base and malformed NUL paths refuse', () => {
   );
 });
 
-test('lint, typecheck and prerequisite task source readers are selected too', () => {
+test('lint, typecheck and prerequisite edges participate in closure validation', () => {
   for (const task of ['lint', 'typecheck', 'build']) {
     const all = structuredClone(inventory);
     all.tasks.push({
       ...all.tasks[3],
       task,
+      taskId: `${names[3]}#${task}`,
+      dependencies: [`${names[0]}#test:unit`],
       resolvedTaskDefinition: { inputs: ['../../services/**'] },
     });
-    assert.ok(fixture(['services/service/src/a.ts'], { all }).plan().packages.includes(names[3]));
+    assert.throws(() => fixture([], { all, committed: [names[0]] }).plan(), /dependent selection/);
   }
 });
 
@@ -204,15 +208,78 @@ test('Turbo root pseudo-package broadens selection instead of being executed', (
   assert.throws(() => fixture(['package.json'], { committed: ['@rasta/unknown'] }).plan());
 });
 
-test('root lint configuration inputs do not select unrelated workspaces', () => {
+test('root lint inputs cannot narrow the undeclared-reader fallback', () => {
   const all = structuredClone(inventory);
   for (const task of inventory.tasks)
     all.tasks.push({
       ...task,
       task: 'lint',
+      taskId: `${task.package}#lint`,
       resolvedTaskDefinition: {
         inputs: ['$TURBO_DEFAULT$', '../../eslint.config.mjs', '../../scripts/*.mjs'],
       },
     });
-  assert.deepEqual(fixture(['apps/web/src/new.tsx'], { all }).plan().packages, [names[1]]);
+  assert.deepEqual(fixture(['apps/web/src/new.tsx'], { all }).plan().packages, names);
+});
+
+test('both filtered stages refuse a missing dependent even with every seed retained', () => {
+  const all = structuredClone(inventory);
+  all.tasks[3].dependencies = [`${names[1]}#test:unit`];
+  // Stage one retains its source seed but omits its dependent.
+  assert.throws(() => fixture([], { all, committed: [names[1]] }).plan(), /dependent selection/);
+  // Stage two retains the path owner seed but omits its dependent.
+  assert.throws(
+    () => fixture(['apps/web/src/a.ts'], { all, expand: (seeds) => seeds }).plan(),
+    /dependent selection/,
+  );
+  assert.deepEqual(fixture([], { all, committed: [names[1], names[3]] }).plan().packages, [
+    names[1],
+    names[3],
+  ]);
+});
+
+test('closure follows transitive prerequisite edges and malformed graphs refuse', () => {
+  const all = structuredClone(inventory);
+  all.tasks[1].dependencies = [`${names[0]}#test:unit`];
+  all.tasks[3].dependencies = [`${names[1]}#test:unit`];
+  assert.throws(() => fixture([], { all, committed: [names[0], names[1]] }).plan());
+  for (const mutate of [
+    (t) => delete t.dependencies,
+    (t) => (t.dependencies = ['@rasta/missing#build']),
+    (t) => (t.taskId = '@rasta/wrong#test:unit'),
+    (t) => (t.dependencies = [null]),
+  ]) {
+    const broken = structuredClone(inventory);
+    mutate(broken.tasks[0]);
+    assert.throws(() => fixture([], { all: broken }).plan());
+  }
+});
+
+test('missing native binary refuses without entering installer-capable JS launcher', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'prepush-no-install-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const turbo = join(root, 'node_modules/turbo');
+  mkdirSync(join(turbo, 'bin'), { recursive: true });
+  writeFileSync(join(turbo, 'package.json'), '{"name":"turbo"}');
+  const marker = join(root, 'installer-entered');
+  // A launcher capable of installation must not even be entered. The marker is
+  // deterministic evidence; this fixture never runs an actual installer.
+  writeFileSync(
+    join(turbo, 'bin/turbo'),
+    `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'npm install');`,
+  );
+  for (const filters of [[], ['--filter=...[HEAD]'], ['--filter=...@rasta/web']]) {
+    assert.throws(
+      () => scopeRunner(root)('turbo', ['run', 'test:unit', '--dry=json', ...filters]),
+      /selection refused/,
+    );
+    assert.equal(existsSync(marker), false);
+  }
+});
+
+test('contracts cache inputs cover the repository for both test entry points', () => {
+  const source = readFileSync(new URL('../packages/contracts/turbo.json', import.meta.url), 'utf8');
+  for (const task of ['test', 'test:unit']) {
+    assert.match(source.split(`"${task}":`)[1].split('}')[0], /"\$TURBO_ROOT\$\/\*\*"/);
+  }
 });
