@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { scalarRelationPolicy, type ScalarFkFamily } from './scalar-relation-policy';
 import { getOrganizationId, tryGetContext } from '../context/request-context';
 import { RastaError } from '../errors/rasta-error';
 
@@ -110,7 +111,9 @@ export interface TenantDatamodel {
       kind: string;
       type: string;
       isList: boolean;
+      relationName?: string;
       relationFromFields?: readonly string[];
+      relationToFields?: readonly string[];
     }[];
   }[];
 }
@@ -141,6 +144,8 @@ export function runWithNestedTenantWrite<T>(review: NestedWriteReview, fn: () =>
 }
 
 export interface TenantGuardOptions {
+  /** Missing family or unknown owning relation fails closed on explicit and implicit FK writes. */
+  scalarFkFamily?: ScalarFkFamily;
   /** Always pass Prisma.dmmf.datamodel from this service's generated client. */
   datamodel: TenantDatamodel;
   /**
@@ -179,11 +184,16 @@ export function createTenantGuardExtension(options: TenantGuardOptions) {
   const models = new Map(options.datamodel.models.map((model) => [model.name, model]));
   for (const model of scoped) if (!models.has(model)) refuse();
 
-  function writeData(model: string, value: unknown, create: boolean): unknown {
+  function writeData(
+    model: string,
+    value: unknown,
+    create: boolean,
+    inheritedTenant = false,
+  ): unknown {
     if (Array.isArray(value)) {
       // Empty tenant batches still require context, just like nonempty writes.
       if (scoped.has(model)) actingOrganization();
-      return value.map((row) => writeData(model, row, create));
+      return value.map((row) => writeData(model, row, create, inheritedTenant));
     }
     let row = record(value);
     if (scoped.has(model)) {
@@ -210,11 +220,20 @@ export function createTenantGuardExtension(options: TenantGuardOptions) {
       }
     }
     const result = { ...row };
+    // Prisma omits the owning composite FK columns from nested create input:
+    // they come from the guarded parent in the same statement. Validate the
+    // caller's tenant above, then let that FK carry it rather than resending it.
+    if (create && inheritedTenant) delete result[tenantColumn];
     const metadata = models.get(model);
     if (!metadata) refuse();
     for (const field of metadata.fields) {
-      if (field.kind !== 'object' || row[field.name] === undefined) continue;
+      if (field.kind !== 'object') continue;
       const relation = `${model}.${field.name}`;
+      const from = field.relationFromFields ?? [];
+      if (from.length && from.some((column) => row[column] !== undefined)) {
+        classifyOwner(model, field);
+      }
+      if (row[field.name] === undefined) continue;
       const tenantTarget = scoped.has(field.type);
       if (tenantTarget) {
         actingOrganization();
@@ -235,11 +254,66 @@ export function createTenantGuardExtension(options: TenantGuardOptions) {
         ) {
           refuse();
         }
-        rewritten[action] = nestedAction(field.type, action, input, field.isList);
+        const owning = field.relationName
+          ? models
+              .get(field.type)
+              ?.fields.find(
+                (other) =>
+                  other.kind === 'object' &&
+                  other.relationName === field.relationName &&
+                  other.relationFromFields?.includes(tenantColumn),
+              )
+          : undefined;
+        const tenantIndex = owning?.relationFromFields?.indexOf(tenantColumn) ?? -1;
+        const inheritsTenant =
+          scoped.has(model) &&
+          tenantTarget &&
+          !from.length &&
+          tenantIndex >= 0 &&
+          owning?.relationToFields?.[tenantIndex] === tenantColumn;
+        rewritten[action] = nestedAction(model, field, action, input, inheritsTenant);
       }
       result[field.name] = rewritten;
     }
     return result;
+  }
+
+  type RelationField = TenantDatamodel['models'][number]['fields'][number];
+
+  function classifyOwner(model: string, field: RelationField): void {
+    const from = field.relationFromFields ?? [];
+    const policy = scalarRelationPolicy(options.scalarFkFamily, `${model}.${field.name}`);
+    if (policy === 'UNCLASSIFIED') refuse();
+    if (policy === 'SAME_TENANT' || policy === 'PROTECTED_BY_COMPOSITE_FK') {
+      // The same atomic composite-FK requirement applies to implicit assignments.
+      const index = from.indexOf(tenantColumn);
+      if (
+        !scoped.has(model) ||
+        !scoped.has(field.type) ||
+        index < 0 ||
+        field.relationToFields?.[index] !== tenantColumn
+      )
+        refuse();
+    }
+  }
+
+  function classifyNestedOwner(model: string, field: RelationField): void {
+    if (field.relationFromFields?.length) return classifyOwner(model, field);
+    const owners = models
+      .get(field.type)
+      ?.fields.filter(
+        (other) =>
+          other.kind === 'object' &&
+          other.type === model &&
+          other.name !== (model === field.type ? field.name : undefined) &&
+          field.relationName !== undefined &&
+          other.relationName === field.relationName &&
+          (other.relationFromFields?.length ?? 0) > 0,
+      );
+    // Missing/ambiguous metadata (including implicit many-to-many) proves no owner.
+    const owner = owners?.[0];
+    if (!owner || owners?.length !== 1) refuse();
+    classifyOwner(field.type, owner);
   }
 
   function selector(model: string, input: unknown): Record<string, unknown> {
@@ -252,17 +326,40 @@ export function createTenantGuardExtension(options: TenantGuardOptions) {
       : where;
   }
 
-  function nestedAction(model: string, action: string, input: unknown, isList: boolean): unknown {
+  function nestedAction(
+    parent: string,
+    field: RelationField,
+    action: string,
+    input: unknown,
+    inheritedTenant = false,
+  ): unknown {
+    const model = field.type;
+    const isList = field.isList;
+    if (
+      [
+        'create',
+        'createMany',
+        'connect',
+        'connectOrCreate',
+        'upsert',
+        'set',
+        'disconnect',
+      ].includes(action)
+    )
+      classifyNestedOwner(parent, field);
+    // update/updateMany do not relink this edge; writeData checks every scalar
+    // or nested relation change in their data (also in the upsert update branch).
     // set also disconnects omitted existing children, including foreign ones;
     // even an empty set has effects that its input cannot tenant-constrain.
     if (action === 'set' && scoped.has(model)) refuse();
-    if (Array.isArray(input)) return input.map((item) => nestedAction(model, action, item, isList));
+    if (Array.isArray(input))
+      return input.map((item) => nestedAction(parent, field, action, item, inheritedTenant));
     switch (action) {
       case 'create':
-        return writeData(model, input, true);
+        return writeData(model, input, true, inheritedTenant);
       case 'createMany': {
         const envelope = record(input);
-        return { ...envelope, data: writeData(model, envelope.data, true) };
+        return { ...envelope, data: writeData(model, envelope.data, true, inheritedTenant) };
       }
       case 'connect':
       case 'set':
@@ -279,7 +376,7 @@ export function createTenantGuardExtension(options: TenantGuardOptions) {
         return {
           ...envelope,
           where: selector(model, envelope.where),
-          create: writeData(model, envelope.create, true),
+          create: writeData(model, envelope.create, true, inheritedTenant),
         };
       }
       case 'upsert': {
@@ -287,7 +384,7 @@ export function createTenantGuardExtension(options: TenantGuardOptions) {
         return {
           ...envelope,
           where: selector(model, envelope.where ?? {}),
-          create: writeData(model, envelope.create, true),
+          create: writeData(model, envelope.create, true, inheritedTenant),
           update: writeData(model, envelope.update, false),
         };
       }
