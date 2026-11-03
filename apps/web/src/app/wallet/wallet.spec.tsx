@@ -67,6 +67,7 @@ const TRANSACTIONS: TransactionPage = {
       id: 'TXN_1',
       transactionType: 'MARKETPLACE_ORDER',
       status: 'SETTLED',
+      grossAmountMinor: '1000000',
       netAmountMinor: '900000',
       currency: 'IRR',
       occurredAt: '2026-02-01T00:00:00.000Z',
@@ -233,6 +234,64 @@ describe('transaction history', () => {
     const { getByRole } = render_();
     const row = getByRole('row', { name: /سفارش بازار/ });
     expect(row).toHaveTextContent('تسویه‌شده');
+  });
+
+  // Demo run 2026-10-24, defect 13: a transaction tied to a held order showed
+  // «۰ ریال». Zero net is right before settlement (ADR-028), so the zero stays;
+  // the gross is shown beside it, labelled, and says nothing about holds.
+  describe('a transaction that is not settled yet', () => {
+    const HELD: TransactionPage = {
+      items: [
+        {
+          ...TRANSACTIONS.items[0]!,
+          id: 'TXN_HELD',
+          status: 'HELD',
+          grossAmountMinor: '5000000',
+          netAmountMinor: '0',
+          settledAt: null,
+        },
+      ],
+      nextCursor: null,
+      hasMore: false,
+    };
+    const heldRow = (page: TransactionPage = HELD) =>
+      render_({ transactions: { kind: 'OK', data: page } }).getByRole('row', {
+        name: /سفارش بازار/,
+      });
+
+    it('keeps the net at zero and shows the gross, labelled as the gross', () => {
+      const row = heldRow();
+      expect(row).toHaveTextContent(`${formatMoney('0')}`);
+      expect(row).toHaveTextContent(`مبلغ کل: ${formatMoney('5000000')}`);
+    });
+
+    it('never presents the gross as the net or as a verified hold', () => {
+      const row = heldRow();
+      expect(row.textContent).not.toMatch(/وثیقهٔ فعال|مبلغ خالص: /);
+      // The only «وثیقه» in the row is the status badge's own word.
+      expect(row.textContent?.match(/وثیقه/g)).toHaveLength(1);
+    });
+
+    it('explains the zero and refuses to read it as "nothing committed"', () => {
+      const { getByText } = render_({ transactions: { kind: 'OK', data: HELD } });
+      expect(getByText(/صفر به معنی «مبلغی در تعهد نیست» نیست/)).toBeInTheDocument();
+    });
+
+    it('shows a dash, never a made-up amount, when the API sent no gross', () => {
+      const row = heldRow({
+        ...HELD,
+        items: [{ ...HELD.items[0]!, grossAmountMinor: null }],
+      });
+      expect(row).toHaveTextContent('مبلغ کل: —');
+    });
+
+    it('writes a gross beyond 2^53 exactly (a string, never a number)', () => {
+      const row = heldRow({
+        ...HELD,
+        items: [{ ...HELD.items[0]!, grossAmountMinor: '9007199254740993123' }],
+      });
+      expect(row).toHaveTextContent(`مبلغ کل: ${formatMoney('9007199254740993123')}`);
+    });
   });
 
   it('says something different when a filter matched nothing', () => {

@@ -143,6 +143,8 @@ describe('transaction history', () => {
           id: 'TXN_1',
           transactionType: 'MARKETPLACE_ORDER',
           status: 'SETTLED',
+          grossAmountMinor: '1000000',
+          commissionAmountMinor: '100000',
           netAmountMinor: '900000',
           currency: 'IRR',
           occurredAt: '2026-02-01T00:00:00.000Z',
@@ -163,6 +165,48 @@ describe('transaction history', () => {
     if (result.kind !== 'OK') return;
     expect(JSON.stringify(result.data)).not.toContain('createdBy');
     expect(JSON.stringify(result.data)).not.toContain('counterpartyOrganizationId');
+    expect(JSON.stringify(result.data)).not.toContain('commissionAmountMinor');
+  });
+
+  describe('the gross amount', () => {
+    const row = (gross: unknown) => ({
+      id: 'TXN_1',
+      transactionType: 'MARKETPLACE_ORDER',
+      status: 'HELD',
+      ...(gross === undefined ? {} : { grossAmountMinor: gross }),
+      netAmountMinor: '0',
+      currency: 'IRR',
+      occurredAt: '2026-02-01T00:00:00.000Z',
+    });
+    const read = async (gross: unknown) => {
+      const { impl } = answering({ items: [row(gross)], nextCursor: null, hasMore: false });
+      return withFetch(impl, () => fetchTransactions(SESSION));
+    };
+
+    it('keeps the gross as the string the API sent, beside the zero net', async () => {
+      const result = await read('9007199254740993123');
+      expect(result.kind).toBe('OK');
+      if (result.kind !== 'OK') return;
+      expect(result.data.items[0]).toMatchObject({
+        grossAmountMinor: '9007199254740993123',
+        netAmountMinor: '0',
+      });
+    });
+
+    it('reads an absent gross as null, not as zero', async () => {
+      const result = await read(undefined);
+      expect(result.kind).toBe('OK');
+      if (result.kind !== 'OK') return;
+      expect(result.data.items[0]?.grossAmountMinor).toBeNull();
+    });
+
+    it.each([[5000000], ['5e6'], ['1.5'], [''], ['١٢٣']])(
+      'refuses a gross that is not whole minor units as a string (%p)',
+      async (gross) => {
+        const result = await read(gross);
+        expect(result.kind).not.toBe('OK');
+      },
+    );
   });
 });
 
