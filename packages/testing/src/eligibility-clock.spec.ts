@@ -121,6 +121,8 @@ describe('tenant-keyed eligibility fixtures (real key, one organization)', () =>
   const client = { $executeRawUnsafe: jest.fn<Promise<number>, [string, ...unknown[]]>() };
 
   it.each([
+    ['sagaStartDueAndExpired', 'id = ANY($2::text[])'],
+    ['sagaStartExpired', 'id = ANY($2::text[])'],
     ['transferFenceExpired', 'asset_id = ANY($2::text[])'],
     ['dedupeWindowExpired', 'dedupe_key = ANY($2::text[])'],
   ] as const)('%s binds the organization and keys by %s', async (fixture, selector) => {

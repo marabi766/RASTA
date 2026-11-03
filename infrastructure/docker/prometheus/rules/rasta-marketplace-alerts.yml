@@ -1,0 +1,12 @@
+groups:
+  - name: rasta-marketplace-saga-start
+    rules:
+      - alert: RastaMarketplaceSagaStartBacklogAging
+        expr: max(rasta_marketplace_saga_start_backlog_age_seconds) > 300
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Order saga starts are waiting
+          description: A start intent has waited over five minutes. Check Temporal connectivity and namespace retention before reconciling ambiguous legacy starts.
+          runbook: docs/runbooks/marketplace-saga-deploy.md
