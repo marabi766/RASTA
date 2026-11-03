@@ -4,6 +4,7 @@ import type { PrismaClient } from '../src/generated/prisma';
 import { ID_PREFIX, newId } from '../src/events/publisher';
 import { ReservationExpiry } from '../src/reservation/expiry';
 import { ReservationRepository } from '../src/reservation/reservation.repository';
+import { ReservationService } from '../src/reservation/reservation.service';
 import { ReservationSweeper } from '../src/reservation/reservation.sweeper';
 import { transactionNow } from '../src/shared/clock';
 import { commandKeyHash } from '../src/shared/command';
@@ -127,6 +128,37 @@ describe('reservation expiry', () => {
     await raw.$disconnect();
     await api.close();
   });
+
+  it('the central expiry guard refuses an invalid instant even if its caller bypasses the DTO', () => {
+    const service = api.app.get(ReservationService);
+    expect(() => service['expiryOf']('not a date', new Date())).toThrow();
+  });
+
+  it.each(['+24:00', '+99:99', '-00:60'])(
+    'refuses malformed expiry offset %s without effects',
+    async (offset) => {
+      const a = org();
+      const { stockItemId } = await seedStock(api, a, 5);
+      const owner = client(api, orgAdmin(a));
+      const beforeStock = await owner.stockItem(stockItemId);
+      const beforeReservations = await raw.stockReservation.count({ where: { organizationId: a } });
+      const beforeMovements = await raw.stockMovement.count({ where: { organizationId: a } });
+      const beforeOutbox = await raw.outboxMessage.count({ where: { organizationId: a } });
+      const beforeKeys = await raw.idempotencyKey.count({ where: { organizationId: a } });
+      const response = await owner.reserve([{ stockItemId, quantity: 2 }], {
+        expiresAt: `2026-11-02T00:00:00${offset}`,
+      });
+      expect([400, 422]).toContain(response.status);
+      expect(response.body).toEqual(expect.objectContaining({ code: expect.any(String) }));
+      expect((await owner.stockItem(stockItemId)).body).toEqual(beforeStock.body);
+      expect(await raw.stockReservation.count({ where: { organizationId: a } })).toBe(
+        beforeReservations,
+      );
+      expect(await raw.stockMovement.count({ where: { organizationId: a } })).toBe(beforeMovements);
+      expect(await raw.outboxMessage.count({ where: { organizationId: a } })).toBe(beforeOutbox);
+      expect(await raw.idempotencyKey.count({ where: { organizationId: a } })).toBe(beforeKeys);
+    },
+  );
 
   it('the sweeper releases a due reservation nobody touches: EXPIRED, a RELEASE movement, STOCK_RELEASED', async () => {
     const a = org();
