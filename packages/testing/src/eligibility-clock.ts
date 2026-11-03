@@ -182,6 +182,12 @@ const reviewedClockTemplates: readonly {
   template: string;
   expressions: string | null;
 }[] = [
+  // FK-only parent copies: explicit tenant/id source, database-clock retry parked 24 hours.
+  {
+    file: 'services/marketplace-service/test/scalar-fk.int-spec.ts',
+    template: '079e569561e460718d41c3022ec1dcf8f3ccef64f83b4bdc2ea743a127ba96e4',
+    expressions: 'f7d12489c58c3e92cecd39bd9a969cd282160cb7e34c476dd0724522acb6293f',
+  },
   // Task 1201: legacy occurrence evidence, and fixed data in an isolated migration schema.
   // Fact-time boundaries intentionally use owner timestamps, not a live eligibility clock.
   {

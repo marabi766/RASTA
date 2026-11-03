@@ -5,6 +5,7 @@ import {
 } from '@rasta/nest-common';
 import { asActor, cleanup, id, key, newPrisma, publishOffer, tenants, wire } from './helpers';
 import { databaseUrl } from './helpers';
+import { eligibilityClockWrite } from '@rasta/testing';
 import { TENANT_SCOPED_MODELS, type PrismaService } from '../src/prisma/prisma.service';
 import { Prisma, PrismaClient } from '../src/generated/prisma';
 
@@ -35,22 +36,8 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
     own = (
       await asBuyer(() => wiring.orders.place({ lines: [{ offerId, quantity: 1 }] }, key('scalar')))
     ).id;
-    const parent = await asBuyer(() =>
-      prisma.client.order.findUniqueOrThrow({ where: { id: own } }),
-    );
     foreign = id('ORD');
-    await asBuyer(
-      () =>
-        prisma.client.order.create({
-          data: {
-            ...parent,
-            id: foreign,
-            organizationId: org.other,
-            idempotencyKey: key('foreign'),
-          },
-        }),
-      org.other,
-    );
+    await copyParent(foreign, org.other);
     const row = await asBuyer(() =>
       prisma.client.orderLine.findFirstOrThrow({ where: { orderId: own } }),
     );
@@ -60,6 +47,26 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
     await cleanup(prisma, [org.buyer, org.supplier, org.other]);
     await prisma.onModuleDestroy();
   });
+
+  /** FK-only parents: copy explicit non-clock fields; park saga eligibility on the DB clock. */
+  async function copyParent(target: string, organizationId: string): Promise<void> {
+    const inserted = await runUnscoped(
+      'scalar FK fixture copies one explicitly scoped parent',
+      () =>
+        eligibilityClockWrite(prisma.client)`
+        INSERT INTO "order" (
+          id, organization_id, supplier_organization_id, placed_by, total_amount_minor,
+          currency, idempotency_key, correlation_id, created_by, created_at, updated_at,
+          saga_start_next_attempt_at
+        )
+        SELECT ${target}, ${organizationId}, supplier_organization_id, placed_by,
+          total_amount_minor, currency, ${key('scalar-copy')}, correlation_id, created_by,
+          now(), now(), now() + interval '24 hours'
+        FROM "order" WHERE organization_id = ${org.buyer} AND id = ${own}
+      `,
+    );
+    expect(inserted).toBe(1);
+  }
 
   const shapes = [
     'create',
@@ -111,13 +118,8 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
   );
   it.each(shapes)('%s permits the same-tenant link', async (shape) => {
     // A fresh same-tenant order avoids (orderId, offerId) uniqueness collisions.
-    const parent = await asBuyer(() =>
-      prisma.client.order.findUniqueOrThrow({ where: { id: own } }),
-    );
     const target = id('ORD');
-    await runUnscoped('scalar positive fixture copies only the same tenant parent', () =>
-      prisma.client.order.create({ data: { ...parent, id: target, idempotencyKey: id('key') } }),
-    );
+    await copyParent(target, org.buyer);
     await expect(asBuyer(() => write(shape, target))).resolves.toBeDefined();
   });
   it('refuses a foreign tenant inside reviewed nested create data', async () => {
