@@ -2,7 +2,9 @@ import { Inject, Injectable, type OnModuleDestroy, type OnModuleInit } from '@ne
 import { ENV } from '../tokens';
 import type { AuditEnv } from '../config/env';
 import { auditReconciliationEvidenceMissing } from '../observability/metrics';
+import { PrismaService } from '../prisma/prisma.service';
 import { AuditRepository } from './audit.repository';
+import { SamplingLoop, type SamplingSignal } from './sampling-loop';
 
 /**
  * Makes a missing payment-reconciliation evidence row loud (D-046; Codex on
@@ -31,34 +33,36 @@ import { AuditRepository } from './audit.repository';
  */
 @Injectable()
 export class ReconciliationEvidenceMonitor implements OnModuleInit, OnModuleDestroy {
-  private timer?: NodeJS.Timeout;
+  private readonly loop = new SamplingLoop(async (signal) => {
+    // A sample that fails leaves the last value in place rather than reporting a reassuring zero.
+    await this.sample(new Date(), signal);
+  });
 
   constructor(
     private readonly repository: AuditRepository,
     @Inject(ENV) private readonly env: AuditEnv,
-  ) {}
-
-  onModuleInit(): void {
-    const tick = (): void => {
-      // Upkeep never takes the service down. A sample that fails leaves the
-      // last value in place rather than reporting a reassuring zero.
-      void this.sample().catch(() => undefined);
-    };
-    tick();
-    this.timer = setInterval(tick, 60_000);
-    this.timer.unref?.();
+    prisma: PrismaService,
+  ) {
+    // Stopped, and awaited, before the client disconnects: Nest destroys providers concurrently.
+    prisma.beforeDisconnect(() => this.loop.stop());
   }
 
-  onModuleDestroy(): void {
-    if (this.timer) clearInterval(this.timer);
+  onModuleInit(): void {
+    this.loop.start();
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.loop.stop();
   }
 
   /** Counts the gaps written inside the look-back window and exports the number. */
-  async sample(now: Date = new Date()): Promise<number> {
+  async sample(now: Date = new Date(), signal?: SamplingSignal): Promise<number> {
     const since = new Date(
       now.getTime() - this.env.AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS * 3_600_000,
     );
     const missing = await this.repository.countMissingReconciliationEvidence(since);
+    // Abandoned at the shutdown deadline (the client may be gone): write nothing.
+    signal?.throwIfAbandoned();
     auditReconciliationEvidenceMissing.set(missing);
     return missing;
   }

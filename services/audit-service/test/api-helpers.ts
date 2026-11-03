@@ -11,6 +11,7 @@ import { mintTestInternalToken } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { AppModule } from '../src/app.module';
 import { AuditTrailConsumer } from '../src/consumers/audit-trail.consumer';
+import { RfqEvidenceConsumer } from '../src/consumers/rfq-evidence.consumer';
 import { TenderEvidenceConsumer } from '../src/consumers/tender-evidence.consumer';
 import { OpsReplayConsumer } from '../src/consumers/ops-replay.consumer';
 import { DomainProjectorConsumer } from '../src/consumers/domain-projector.consumer';
@@ -215,6 +216,9 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
     .useValue(inertConsumer)
     // The tender-evidence projection is driven through `handle()` by its own suite.
     .overrideProvider(TenderEvidenceConsumer)
+    .useValue(inertConsumer)
+    // The RFQ-evidence projection likewise, by `rfq-evidence.int-spec.ts`.
+    .overrideProvider(RfqEvidenceConsumer)
     .useValue(inertConsumer)
     // As the other two: the HTTP suites need no broker, and a host whose broker ACLs
     // predate the replay topic must not fail every one of them at boot.

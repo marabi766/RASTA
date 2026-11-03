@@ -525,10 +525,11 @@ model Transaction {
   updatedAt DateTime @updatedAt @map("updated_at")
   createdBy String   @map("created_by")
 
-  legs             TransactionLeg[]
-  commission       Commission?
-  settlement       Settlement?
-  sourceQuarantine TransactionSourceQuarantine?
+  legs                              TransactionLeg[]
+  commission                        Commission?
+  settlement                        Settlement?
+  sourceQuarantine                  TransactionSourceQuarantine?
+  settlementAuthorityReconciliation SettlementAuthorityReconciliation?
 
   @@unique([organizationId, idempotencyKey])
   /// "What have I not settled yet" and "this order's transaction".
@@ -567,6 +568,22 @@ model TransactionSourceQuarantine {
 
   @@index([organizationId, sourceType, sourceReference], map: "ix_transaction_source_quarantine_key")
   @@map("transaction_source_quarantine")
+}
+
+/// What migration `20261103121000_transaction_settlement_authority` found and
+/// did about an escrowed, settlement-ready transaction with no recorded
+/// authorisation: AUTHORISED_UNRECORDED (never disputed, so authorised before
+/// the instant was recorded; it counts as authorised) or RETURNED_TO_HELD.
+/// Filled by that migration and frozen there
+/// (`trg_settlement_authority_reconciliation_frozen`): never written again.
+model SettlementAuthorityReconciliation {
+  transactionId String   @id @map("transaction_id")
+  outcome       String
+  reconciledAt  DateTime @default(now()) @map("reconciled_at")
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@map("settlement_authority_reconciliation")
 }
 
 /// The transaction categories commission rules are written against

@@ -12,6 +12,7 @@ rule_files:
   - rules/rasta-audit-alerts.yml
   - rules/rasta-notification-alerts.yml
   - rules/rasta-economic-alerts.yml
+  - rules/rasta-marketplace-alerts.yml
   - rules/rasta-construction-alerts.yml
   - rules/rasta-procurement-alerts.yml
   - rules/rasta-identity-alerts.yml

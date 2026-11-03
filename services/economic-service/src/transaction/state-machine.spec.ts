@@ -1,4 +1,5 @@
 import {
+  assertSettlementReady,
   attractsCommission,
   canTransition,
   isTerminal,
@@ -129,6 +130,45 @@ describe('a dispute stops settlement completely', () => {
   it('can be raised from HELD and from PENDING_SETTLEMENT', () => {
     expect(nextStatus('TXN_1', 'HELD', 'DISPUTE')).toBe('DISPUTED');
     expect(nextStatus('TXN_1', 'PENDING_SETTLEMENT', 'DISPUTE')).toBe('DISPUTED');
+  });
+});
+
+describe('settlement checks its authority, not only its status (D-083, #623 r1 F1)', () => {
+  it('refuses an escrowed transaction with no recorded authorisation — the legacy PENDING_SETTLEMENT row', () => {
+    try {
+      assertSettlementReady('TXN_1', { settlementAuthorised: false, fundsHeld: true });
+      throw new Error('settled without authority');
+    } catch (error) {
+      expect(error).toBeInstanceOf(RastaError);
+      expect((error as RastaError).code).toBe('INVALID_STATE_TRANSITION');
+    }
+  });
+
+  it('lets an authorised transaction, or one with nothing held, settle', () => {
+    for (const authority of [
+      { settlementAuthorised: true, fundsHeld: true },
+      { settlementAuthorised: true, fundsHeld: false },
+      { settlementAuthorised: false, fundsHeld: false },
+    ]) {
+      expect(() => assertSettlementReady('TXN_1', authority)).not.toThrow();
+    }
+  });
+
+  it('agrees with where a resolution sends it: settlement-ready exactly when settleable', () => {
+    for (const settlementAuthorised of [true, false]) {
+      for (const fundsHeld of [true, false]) {
+        const authority = { settlementAuthorised, fundsHeld };
+        const settleable = (() => {
+          try {
+            assertSettlementReady('TXN_1', authority);
+            return true;
+          } catch {
+            return false;
+          }
+        })();
+        expect(resolvedStatus(authority) === 'PENDING_SETTLEMENT').toBe(settleable);
+      }
+    }
   });
 });
 

@@ -123,7 +123,13 @@ export class TransactionRepository {
                  source_reference                AS "sourceReference",
                  correlation_id                  AS "correlationId",
                  dispute_id                      AS "disputeId",
-                 settlement_authorised_at IS NOT NULL AS "settlementAuthorised",
+                 (settlement_authorised_at IS NOT NULL
+                  OR EXISTS (
+                    SELECT 1
+                      FROM settlement_authority_reconciliation
+                     WHERE settlement_authority_reconciliation.transaction_id = "transaction".id
+                       AND settlement_authority_reconciliation.outcome = 'AUTHORISED_UNRECORDED'
+                  ))                             AS "settlementAuthorised",
                  EXISTS (
                    SELECT 1
                      FROM wallet_hold
@@ -353,7 +359,10 @@ export interface LockedTransaction {
   disputeId: string | null;
   /**
    * Its settlement authority (`SettlementAuthority`), read with the lock: where
-   * a resolved dispute returns it (D-083). The hold is read, not locked — only
+   * a resolved dispute returns it, and whether it may settle (D-083).
+   * Authorised is `settlement_authorised_at`, or an authorisation older than
+   * that column which migration 20261103121000 proved and recorded
+   * (`settlement_authority_reconciliation`). The hold is read, not locked — only
    * a settlement or a refund releases it, and both lock this row first.
    */
   settlementAuthorised: boolean;

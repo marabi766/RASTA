@@ -1869,6 +1869,9 @@ export const EXPECTED = {
       'bid_access_evidence',
       // 20261001130000_tender_receipt_pending: receipts held until their predecessor arrives.
       'tender_receipt_pending',
+      // 20261102100000_rfq_evidence (COM-007 PR 7): the quotation-receipt chain and its work queue.
+      'rfq_receipt_link',
+      'rfq_receipt_pending',
       // 20261003120000_payment_reconciliation_evidence (D-046): who proposed and
       // approved a payment-reconciliation resolution, on which evidence.
       'payment_reconciliation_evidence',
@@ -1878,6 +1881,11 @@ export const EXPECTED = {
       'tg_tender_receipt_link_no_truncate',
       'tg_bid_access_evidence_append_only',
       'tg_bid_access_evidence_no_truncate',
+      'tg_rfq_receipt_link_append_only',
+      'tg_rfq_receipt_link_no_truncate',
+      // One identity across the placed and the held state (20261102100000_rfq_evidence).
+      'tg_rfq_receipt_link_identity',
+      'tg_rfq_receipt_pending_identity',
       'audit_event_append_only',
       'audit_event_append_only_truncate',
       // AUD-003, and the same asymmetry as above: the row-level trigger is what
@@ -1909,6 +1917,12 @@ export const EXPECTED = {
       'ux_tender_receipt_pending_previous',
       'ux_tender_receipt_pending_receipt',
       'ix_tender_receipt_pending_held',
+      'ux_rfq_receipt_link_receipt',
+      'ux_rfq_receipt_link_previous',
+      'ux_rfq_receipt_link_event',
+      'ux_rfq_receipt_pending_previous',
+      'ux_rfq_receipt_pending_receipt',
+      'ix_rfq_receipt_pending_held',
       'ux_payment_reconciliation_evidence_audit_event',
       'ix_payment_reconciliation_evidence_intent',
     ],
@@ -1923,6 +1937,8 @@ export const EXPECTED = {
       'refuse_mutation',
       'refuse_chain_head_regression',
       'tender_evidence_append_only',
+      'rfq_evidence_append_only',
+      'rfq_receipt_identity_guard',
       'payment_reconciliation_evidence_append_only',
     ],
     constraints: [
@@ -1960,6 +1976,8 @@ export const EXPECTED = {
       'ck_bid_access_evidence_shape',
       'ck_bid_access_evidence_refusal_code',
       'ck_tender_receipt_pending_shape',
+      'ck_rfq_receipt_link_shape',
+      'ck_rfq_receipt_pending_shape',
       // D-046: the version, the allow-listed values and which fields each event carries.
       'ck_payment_reconciliation_evidence_version',
       'ck_payment_reconciliation_evidence_values',
@@ -2129,6 +2147,8 @@ export const EXPECTED = {
       'recognition_rule',
       // A source key taken off a transaction, kept with its decision (#334 r3).
       'transaction_source_quarantine',
+      // What 20261103121000 found and did about legacy settlement authority (D-083).
+      'settlement_authority_reconciliation',
     ],
     triggers: [
       'trg_ledger_entry_immutable',
@@ -2156,6 +2176,11 @@ export const EXPECTED = {
       'trg_transaction_source_quarantine_no_truncate',
       // A resolved dispute goes back to where its settlement authority stands (D-083).
       'trg_transaction_dispute_resolution',
+      // Escrowed money settles only on a recorded authorisation (D-083, #623 r1 F1).
+      'trg_transaction_settlement_authority',
+      'trg_wallet_hold_release_settlement_authority',
+      'trg_settlement_authority_reconciliation_frozen',
+      'trg_settlement_authority_reconciliation_no_truncate',
     ],
     // ADR-045: the business line a commission is charged under, and what the step decided.
     types: ['BusinessLine', 'CommissionOutcome'],
@@ -2175,6 +2200,9 @@ export const EXPECTED = {
       // The correction 20261017130000's preflight names (an operator's tool).
       'quarantine_transaction_source',
       'enforce_transaction_dispute_resolution',
+      'enforce_transaction_settlement_authority',
+      'enforce_hold_release_settlement_authority',
+      'reject_settlement_authority_reconciliation_change',
     ],
     // The queue's: a finished task names its resolution and holds no lease.
     constraints: [
@@ -2195,6 +2223,7 @@ export const EXPECTED = {
       // ORDER is recorded by a service over the API, never by a person (recorded-sources.ts).
       'ck_transaction_order_source',
       'ck_transaction_source_quarantine_decision',
+      'ck_settlement_authority_reconciliation_outcome',
       'ck_commission_pricing_cutover_single',
       'ck_payment_reconciliation_done_complete',
       'ck_payment_reconciliation_lease_pair',

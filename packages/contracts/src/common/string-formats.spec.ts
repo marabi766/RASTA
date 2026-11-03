@@ -35,6 +35,28 @@ describe('parsableUrl', () => {
 });
 
 describe('isoDateTime', () => {
+  it.each([
+    ['2026-11-02T00:00:00+14:00', true],
+    ['2026-11-02T00:00:00-14:00', true],
+    ['2026-11-02T00:00:00+14:01', false],
+    ['2026-11-02T00:00:00+24:00', false],
+    ['2026-11-02T00:00:00+99:99', false],
+    ['2026-11-02T00:00:00-00:60', false],
+  ])('validates offset and finite parsing of %s', (value, expected) => {
+    expect(
+      z
+        .string()
+        .check(isoDateTime({ offset: true }))
+        .safeParse(value).success,
+    ).toBe(expected);
+  });
+
+  it('refuses when the runtime cannot parse a syntactically valid timestamp', () => {
+    const parse = jest.spyOn(Date, 'parse').mockReturnValueOnce(NaN);
+    expect(z.string().check(isoDateTime()).safeParse('2026-11-02T00:00:00Z').success).toBe(false);
+    parse.mockRestore();
+  });
+
   it('refuses as zod 3’s invalid_string datetime, and keeps a schema message', () => {
     const instant = z.string().check(isoDateTime());
     expect(legacyParse(instant, '2026-10-24 12:00').refusal?.issues).toEqual([

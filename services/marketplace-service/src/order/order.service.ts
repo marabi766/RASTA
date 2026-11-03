@@ -226,6 +226,7 @@ export class OrderService {
                 supplierOrganizationId: priced.supplierOrganizationId,
                 placedBy: actor,
                 status: 'PENDING',
+                sagaStartRequestedAt: createdAt,
                 totalAmountMinor: priced.totalAmountMinor,
                 currency: priced.currency,
                 idempotencyKey,

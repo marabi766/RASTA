@@ -155,6 +155,7 @@ export const TOPIC_CONSUMERS = Object.freeze({
       'audit-service.trail',
       'audit-service.ops-replay',
       'audit-service.tender-evidence',
+      'audit-service.rfq-evidence',
     ] as const),
     subscribes: EVERY_DECLARED_TOPIC,
     deadLetterTopic: 'rasta.audit.v1.dlq',
