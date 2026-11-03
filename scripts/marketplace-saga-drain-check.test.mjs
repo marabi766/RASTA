@@ -177,7 +177,7 @@ for (const [name, answers] of Object.entries(PASSING)) {
   });
 }
 
-test('blocks on a pending activity, naming the workflow and the activity', () => {
+test('blocks on a pending activity, withholding foreign details', () => {
   const scenario = {
     ...drained(),
     'workflow describe order-B': { stdout: description('B', [pendingHold]) },
@@ -185,10 +185,7 @@ test('blocks on a pending activity, naming the workflow and the activity', () =>
   const { status, stderr } = run(scenario);
   assert.equal(status, 1);
   assert.match(stderr, /BLOCKED — 1 finding/);
-  assert.match(
-    stderr,
-    /order-B has a pending activity markSettlementFailed \(PENDING_ACTIVITY_STATE_STARTED, attempt 1\)/,
-  );
+  assert.match(stderr, /workflow has a pending activity; details withheld/);
 });
 
 test('blocks while a worker still polls the order task queue', () => {
@@ -204,17 +201,14 @@ test('blocks while a worker still polls the order task queue', () => {
   };
   const { status, stderr } = run(scenario);
   assert.equal(status, 1);
-  assert.match(
-    stderr,
-    /task queue rasta-order has a poller 41@marketplace-old \(activity, last seen/,
-  );
+  assert.match(stderr, /task queue has an active poller; details withheld/);
 });
 
 for (const name of Object.keys(SETTINGS)) {
   test(`cannot verify without ${name}, and asks Temporal nothing`, () => {
     const settings = { ...SETTINGS, [name]: '  ' };
     const { status, stderr, calls } = run(drained(), { settings });
-    assert.equal(status, 2);
+    assert.equal(status, 1);
     assert.match(stderr, new RegExp(`cannot verify — deployment blocked: ${name} is not set`));
     assert.deepEqual(calls, []);
   });
@@ -235,7 +229,7 @@ const UNVERIFIABLE = {
       },
     },
     {},
-    /temporal workflow describe exited 1: level=ERROR msg="failed reaching server"/,
+    /temporal workflow describe failed; child diagnostics withheld/,
   ],
   'the CLI prints something other than JSON': [
     { ...drained(), 'workflow list': { stdout: 'order-A orderSaga Running\n' } },
@@ -276,12 +270,12 @@ const UNVERIFIABLE = {
   'a description is of another workflow': [
     { ...drained(), 'workflow describe order-B': { stdout: description('A') } },
     {},
-    /describe order-B run-B: not a description of that run/,
+    /describe: not a description of that run/,
   ],
   'pending activities that are not a list': [
     { ...drained(), 'workflow describe order-B': { stdout: description('B', { count: 0 }) } },
     {},
-    /describe order-B run-B: not a description of that run/,
+    /describe: not a description of that run/,
   ],
 };
 
@@ -301,7 +295,7 @@ const describedAs = (id, change) => {
 };
 const COUNT = /temporal workflow count: not a count/;
 const QUEUE = /temporal task-queue describe: no poller list/;
-const RUN = /describe order-B run-B: not a description of that run/;
+const RUN = /describe: not a description of that run/;
 const MALFORMED = {
   'the count is an empty string': [noneListed({ count: '' }), COUNT],
   'the count is false': [noneListed({ count: false }), COUNT],
@@ -340,11 +334,11 @@ const MALFORMED = {
   'pending activities are null': [describedAs('B', (d) => (d.pendingActivities = null)), RUN],
   'a run is on another task queue': [
     describedAs('B', (d) => (d.executionConfig.taskQueue.name = 'rasta-order-v2')),
-    /order-B runs on task queue "rasta-order-v2", not rasta-order: its pollers were not checked/,
+    /workflow runs on an unchecked task queue/,
   ],
   'a description does not say its task queue': [
     describedAs('B', (d) => delete d.executionConfig),
-    /order-B runs on task queue undefined, not rasta-order/,
+    /workflow runs on an unchecked task queue/,
   ],
 };
 for (const [name, [scenario, message]] of Object.entries(MALFORMED)) {
@@ -368,9 +362,9 @@ for (const [name, count] of Object.entries(DUPLICATED)) {
       'workflow describe order-B': { stdout: description('B', [pendingHold]) },
     };
     const { status, stdout, stderr, calls } = run(scenario);
-    assert.equal(status, 2);
+    assert.equal(status, 1);
     assert.match(stderr, /cannot verify — deployment blocked: /);
-    assert.match(stderr, /temporal workflow list: order-A run-A is listed twice/);
+    assert.match(stderr, /temporal workflow list: an execution is listed twice/);
     assert.doesNotMatch(stdout, /OK/);
     assert.deepEqual(
       calls.map((args) => args.slice(0, 2).join(' ')),
@@ -402,7 +396,7 @@ test('passes two runs of one workflow id listed once each, describing each run',
 for (const [name, [scenario, options, message]] of Object.entries(UNVERIFIABLE)) {
   test(`blocks when ${name}`, () => {
     const { status, stdout, stderr } = run(scenario, options);
-    assert.equal(status, 2);
+    assert.equal(status, 1);
     assert.match(stderr, /cannot verify — deployment blocked: /);
     assert.match(stderr, message);
     assert.doesNotMatch(stdout, /OK/);
@@ -415,7 +409,7 @@ test('blocks on a CLI that cannot run, without printing the configured path', ()
     const { status, stdout, stderr } = run(drained(), {
       cli: `/nonexistent/${sentinel}/${sentinel.replaceAll('-', '_')}/temporal`,
     });
-    assert.equal(status, 2);
+    assert.equal(status, 1);
     assert.equal(
       stderr,
       'marketplace saga drain check: cannot verify — deployment blocked: temporal task-queue ' +
@@ -424,3 +418,52 @@ test('blocks on a CLI that cannot run, without printing the configured path', ()
     assertNoSentinel(stdout + stderr, sentinel);
   }
 });
+
+// Every foreign text channel is opaque, including ordinary successful JSON.
+for (const sentinel of SENTINELS) {
+  const scenarios = {
+    stderr: { ...drained(), 'workflow count': { status: 1, stderr: sentinel } },
+    json: { ...drained(), 'workflow count': { stdout: { count: sentinel } } },
+    poller: {
+      ...drained(),
+      'task-queue describe': {
+        stdout: {
+          pollers: [{ identity: sentinel, taskQueueType: sentinel, lastAccessTime: sentinel }],
+          stats,
+        },
+      },
+    },
+    activity: {
+      ...drained(),
+      'workflow describe order-B': {
+        stdout: description('B', [
+          {
+            activityType: { name: sentinel },
+            state: sentinel,
+            attempt: sentinel,
+          },
+        ]),
+      },
+    },
+    queue: describedAs('B', (d) => {
+      d.executionConfig.taskQueue.name = sentinel;
+    }),
+    duplicate: {
+      ...drained(),
+      'workflow list': {
+        stdout: [
+          { ...execution('A'), execution: { workflowId: sentinel, runId: sentinel } },
+          { ...execution('A'), execution: { workflowId: sentinel, runId: sentinel } },
+        ],
+      },
+    },
+  };
+  for (const [channel, scenario] of Object.entries(scenarios)) {
+    test(`Temporal ${channel} never repeats a sentinel`, () => {
+      const result = run(scenario);
+      assert.equal(result.status, 1);
+      assertNoSentinel(result.stdout + result.stderr);
+      assert.doesNotMatch(result.stdout, /OK/);
+    });
+  }
+}

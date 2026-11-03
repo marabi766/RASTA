@@ -2,11 +2,12 @@
 
 import { useActionState } from 'react';
 
-import { Alert, Button, Field, controlClassName } from '@/ui';
+import { Alert, Button, Field, controlClassName, JalaliDateInput } from '@/ui';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { EMPTY_ASSIGN_DRIVER_FORM, type AssignDriverField } from '@/lib/driver-fields';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
+import { ASSET_ID_HINT } from '@/lib/id-hints';
 
 import { submitAssign } from './actions';
 import { IDLE_ASSIGN_FORM, type AssignFormState } from './form-state';
@@ -61,7 +62,7 @@ export function AssignDriverForm({
 
       <FormBanner state={state} />
 
-      <Field label={LABELS.assetId} required error={errors.assetId} hint="مانند AST_01J…">
+      <Field label={LABELS.assetId} required error={errors.assetId} hint={ASSET_ID_HINT}>
         {(control) => (
           <input
             {...control}
@@ -76,7 +77,7 @@ export function AssignDriverForm({
 
       <Field label={LABELS.startedAt} error={errors.startedAt} hint="خالی بگذارید برای همین لحظه">
         {(control) => (
-          <input
+          <JalaliDateInput
             {...control}
             type="datetime-local"
             name="startedAt"
