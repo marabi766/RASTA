@@ -1,5 +1,16 @@
 // Closed reviewed registry: source/helper drift requires review of the declared launch boundaries.
 export const JEST_LAUNCHERS = {
+  'scripts/prepush-scope.test.mjs': {
+    kind: 'non-jest',
+    reaches:
+      'Git fixture commands and Node environment probe; Turbo selection is mocked or --dry=json and missing-binary refusal never enters its JS launcher. No Jest or task execution.',
+    sha256: {
+      'scripts/prepush-scope.test.mjs':
+        '4f9d1329d3d25f39f4c558cbee2e1162098fc9514ce04e7f11e0f8f12552f07e',
+      'scripts/prepush-scope-lib.mjs':
+        'a7cb60ff2283945e9eee8a7bc9b83cbe05cdb680af0ea74e54afc561f3e66e13',
+    },
+  },
   'scripts/verify-test-independence.mjs': {
     kind: 'independence',
     reaches:

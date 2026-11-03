@@ -1109,6 +1109,38 @@ test('R1 registry checks all three real launch paths and refuses executable/help
   }
 });
 
+test('reviewed non-Jest launchers refuse configuration overrides and any source/helper drift', async () => {
+  const { JEST_LAUNCHERS } = await import('./disclosure-jest-launchers.mjs');
+  const control = '.github/workflows/non-jest-control.yml';
+  const paths = [control, ...Object.keys(JEST_LAUNCHERS)];
+  for (const [file, entry] of Object.entries(JEST_LAUNCHERS)) {
+    if (entry.kind !== 'non-jest') continue;
+    const read = (path, args = '') =>
+      path === control
+        ? `jobs:\n  control:\n    steps:\n      - run: node ${file} ${args}\n`
+        : readFileSync(join(root, path), 'utf8');
+    assert.deepEqual(jestCommands(paths, read), [], file);
+    for (const flag of ['--config', '--setupFilesAfterEnv', '--projects', '--preset', '-c']) {
+      const commands = jestCommands(paths, (path) => read(path, `${flag} alternate.cjs`));
+      assert.equal(commands.length, 1, `${file} ${flag}`);
+      assert.equal(commands[0].opaque, true);
+      assert.match(commands[0].reason, /unsupported registered launcher/);
+    }
+    for (const dependency of Object.keys(entry.sha256)) {
+      for (const unreadable of [false, true]) {
+        const commands = jestCommands(paths, (path) => {
+          if (path !== dependency) return read(path);
+          if (unreadable) throw new Error('unreadable control');
+          return `${read(path)}\n// source drift`;
+        });
+        assert.equal(commands.length, 1, dependency);
+        assert.equal(commands[0].opaque, true);
+        assert.match(commands[0].reason, /(?:changed\/unreadable|unreadable launcher)/);
+      }
+    }
+  }
+});
+
 test('R1 subshell cwd does not leak to sibling launches', () => {
   const commands = launchControl(
     '( cd apps/web && pnpm test -- --config a.json ); pnpm --filter @rasta/web test -- --config b.json',
