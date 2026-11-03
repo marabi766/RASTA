@@ -15,6 +15,7 @@ import {
   type ApiHarness,
 } from './api-helpers';
 import { cleanup, testEnv } from './helpers';
+import { expectNotDisclosed } from '@rasta/testing';
 import { ORDER_NOTE_NOT_STORED, RECEIPT_NOTE_NOT_STORED } from '../src/order/dto';
 
 /**
@@ -680,15 +681,23 @@ describe('order API', () => {
           `TXN_APITEST_${order.body.id}`,
         ),
       );
-      await request(http)
+      const raised = await request(http)
         .post(`/v1/orders/${order.body.id}/disputes`)
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', apiKey('api-raise'))
         .send({ reason: 'the supplier has not delivered anything at all' })
         .expect(200);
+      // The view names the dispute the order now holds: what a decision names.
+      expect(raised.body.openDisputeId).toMatch(/^DSP_[0-9A-HJKMNP-TV-Z]{26}$/);
+      disputeOf.set(order.body.id as string, raised.body.openDisputeId as string);
 
       return order.body.id as string;
     }
+    const disputeOf = new Map<string, string>();
+    const naming = (orderId: string, body: Record<string, unknown>) => ({
+      disputeId: disputeOf.get(orderId),
+      ...body,
+    });
 
     it('refuses either party with 403', async () => {
       const orderId = await disputedOrder();
@@ -697,14 +706,16 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
         .set('idempotency-key', apiKey('api-self-resolve'))
-        .send({ outcome: 'SETTLE', resolution: 'I decided in my own favour here' })
+        .send(naming(orderId, { outcome: 'SETTLE', resolution: 'I decided in my own favour here' }))
         .expect(403);
 
       await request(http)
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${supplier(supplierOrg)}`)
         .set('idempotency-key', apiKey('api-sup-resolve'))
-        .send({ outcome: 'SETTLE', resolution: 'the supplier decides for themselves' })
+        .send(
+          naming(orderId, { outcome: 'SETTLE', resolution: 'the supplier decides for themselves' }),
+        )
         .expect(403);
     });
 
@@ -715,14 +726,70 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-resolve-settle'))
-        .send({
-          outcome: 'SETTLE',
-          resolution: 'the supplier evidenced correct delivery',
-          responsibility: 'BUYER',
-        })
+        .send(
+          naming(orderId, {
+            outcome: 'SETTLE',
+            resolution: 'the supplier evidenced correct delivery',
+            responsibility: 'BUYER',
+          }),
+        )
         .expect(200);
 
-      expect(resolved.body.status).toBe('RECEIPT_CONFIRMED');
+      // Disputed from FUNDS_HELD, before any receipt: resumed there, and no
+      // receipt is written on the buyer's behalf (D-083).
+      expect(resolved.body).toMatchObject({
+        status: 'FUNDS_HELD',
+        receiptConfirmedAt: null,
+        openDisputeId: null,
+      });
+    });
+
+    it('refuses a decision about a dispute the order no longer holds with 409, deciding nothing', async () => {
+      const orderId = await disputedOrder();
+      const first = disputeOf.get(orderId)!;
+      await request(http)
+        .post(`/v1/orders/${orderId}/disputes/resolve`)
+        .set('authorization', `Bearer ${platformAdmin()}`)
+        .set('idempotency-key', apiKey('api-resolve-a'))
+        .send(
+          naming(orderId, {
+            outcome: 'SETTLE',
+            resolution: 'decided A in the supplier’s favour',
+            responsibility: 'BUYER',
+          }),
+        )
+        .expect(200);
+      const again = await request(http)
+        .post(`/v1/orders/${orderId}/disputes`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', apiKey('api-raise-b'))
+        .send({ reason: 'still nothing has been delivered to us' })
+        .expect(200);
+      const second = again.body.openDisputeId as string;
+      expect(second).not.toBe(first);
+
+      // A form still open on A: refused, and B stands as it was.
+      const stale = await request(http)
+        .post(`/v1/orders/${orderId}/disputes/resolve`)
+        .set('authorization', `Bearer ${platformAdmin()}`)
+        .set('idempotency-key', apiKey('api-resolve-stale'))
+        .send({
+          disputeId: first,
+          outcome: 'REFUND',
+          resolution: 'a refund decided on the stale form',
+          responsibility: 'SUPPLIER',
+        })
+        .expect(409);
+      expect(stale.body).toMatchObject({
+        code: 'CONFLICT',
+        details: [{ path: 'disputeId', code: 'DISPUTE_DECISION_STALE' }],
+      });
+      expectNotDisclosed(stale.body, [first, second]);
+      const now = await request(http)
+        .get(`/v1/orders/${orderId}`)
+        .set('authorization', `Bearer ${platformAdmin()}`)
+        .expect(200);
+      expect(now.body).toMatchObject({ status: 'DISPUTED', openDisputeId: second });
     });
 
     it('resolves in the buyer’s favour, moving the order to compensation', async () => {
@@ -732,11 +799,13 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-resolve-refund'))
-        .send({
-          outcome: 'REFUND',
-          resolution: 'the goods were never delivered to the buyer',
-          responsibility: 'SUPPLIER',
-        })
+        .send(
+          naming(orderId, {
+            outcome: 'REFUND',
+            resolution: 'the goods were never delivered to the buyer',
+            responsibility: 'SUPPLIER',
+          }),
+        )
         .expect(200);
 
       expect(resolved.body.status).toBe('CANCELLING');
@@ -750,11 +819,13 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-bad-outcome'))
-        .send({
-          outcome: 'SPLIT_THE_DIFFERENCE',
-          resolution: 'a compromise nobody defined',
-          responsibility: 'PLATFORM',
-        })
+        .send(
+          naming(orderId, {
+            outcome: 'SPLIT_THE_DIFFERENCE',
+            resolution: 'a compromise nobody defined',
+            responsibility: 'PLATFORM',
+          }),
+        )
         .expect(400);
     });
 
@@ -766,11 +837,13 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-bad-responsibility'))
-        .send({
-          outcome: 'SETTLE',
-          resolution: 'a resolution with an invalid attribution',
-          responsibility: 'WEATHER',
-        })
+        .send(
+          naming(orderId, {
+            outcome: 'SETTLE',
+            resolution: 'a resolution with an invalid attribution',
+            responsibility: 'WEATHER',
+          }),
+        )
         .expect(400);
     });
 
@@ -781,11 +854,32 @@ describe('order API', () => {
         .post(`/v1/orders/${orderId}/disputes/resolve`)
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-missing-responsibility'))
-        .send({ outcome: 'SETTLE', resolution: 'a resolution missing its attribution' })
+        .send(
+          naming(orderId, {
+            outcome: 'SETTLE',
+            resolution: 'a resolution missing its attribution',
+          }),
+        )
         .expect(400);
     });
 
-    it('refuses to resolve an order that has no dispute with 422', async () => {
+    it('refuses a decision that names no dispute with 400', async () => {
+      const orderId = await disputedOrder();
+
+      const refused = await request(http)
+        .post(`/v1/orders/${orderId}/disputes/resolve`)
+        .set('authorization', `Bearer ${platformAdmin()}`)
+        .set('idempotency-key', apiKey('api-unnamed'))
+        .send({
+          outcome: 'SETTLE',
+          resolution: 'a decision about whichever dispute is open',
+          responsibility: 'BUYER',
+        })
+        .expect(400);
+      expect(refused.body.code).toBe('VALIDATION_FAILED');
+    });
+
+    it('refuses to resolve an order that has no dispute with 409 DISPUTE_DECISION_STALE', async () => {
       const offerId = await publishOffer();
       const order = await placeOrder(offerId);
 
@@ -794,11 +888,17 @@ describe('order API', () => {
         .set('authorization', `Bearer ${platformAdmin()}`)
         .set('idempotency-key', apiKey('api-nothing-to-resolve'))
         .send({
+          disputeId: 'DSP_00000000000000000000000000',
           outcome: 'SETTLE',
           resolution: 'resolving something never disputed',
           responsibility: 'UNDETERMINED',
         })
-        .expect(422);
+        .expect(409)
+        .expect((response) => {
+          expect(response.body.details).toEqual([
+            expect.objectContaining({ path: 'disputeId', code: 'DISPUTE_DECISION_STALE' }),
+          ]);
+        });
     });
   });
 

@@ -220,8 +220,16 @@ export class OrderController {
   @ApiOperation({
     summary: 'Resolve a dispute',
     description:
-      'A platform operator decides. `SETTLE` returns the order to the settlement path; ' +
-      '`REFUND` cancels it and compensates. Neither moves money here.',
+      "A platform operator decides the dispute named by `disputeId` (the order's " +
+      '`openDisputeId`). `SETTLE` lifts it and resumes the order where the dispute found it ' +
+      '(D-083): a dispute raised after the buyer confirmed receipt returns to ' +
+      '`RECEIPT_CONFIRMED` and settles; one raised before returns to `FUNDS_HELD`, `CONFIRMED` ' +
+      'or `AWAITING_RECEIPT_CONFIRMATION`, and settlement still waits for delivery and the ' +
+      "buyer's confirmation. `REFUND` cancels it and compensates. Neither moves money here. " +
+      'A decision about a dispute the order no longer holds is refused 409 `CONFLICT`, ' +
+      '`details[].code` `DISPUTE_DECISION_STALE`; `SETTLE` where the origin is not recorded, ' +
+      'or a receipt to return to is missing, is refused 422 `BUSINESS_RULE_VIOLATION` ' +
+      '(`DISPUTE_ORIGIN_UNKNOWN`, `DISPUTE_RECEIPT_EVIDENCE_MISSING`).',
   })
   async resolveDispute(
     @Param('id') id: string,

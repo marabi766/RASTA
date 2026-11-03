@@ -5,6 +5,23 @@ import { newId, ID_PREFIX } from '../events/publisher';
 import type { OrderStatus, Prisma } from '../generated/prisma';
 
 /**
+ * What every path that builds an order view selects (`toView`): its lines,
+ * whether it was reviewed, and the dispute it holds now — the one an
+ * operator's decision names (D-083). One constant, so no path can forget part
+ * of it.
+ */
+export const ORDER_VIEW_INCLUDE = {
+  lines: true,
+  review: { select: { id: true } },
+  disputes: {
+    where: { status: 'OPEN' },
+    select: { id: true },
+    orderBy: { raisedAt: 'desc' },
+    take: 1,
+  },
+} as const satisfies Prisma.OrderInclude;
+
+/**
  * Data access for orders and offers.
  *
  * Two things here are load-bearing rather than plumbing.
@@ -100,7 +117,7 @@ export class OrderRepository {
     return runUnscoped('an order names two organizations and the seller is one of them', () =>
       this.prisma.client.order.findUnique({
         where: { id: orderId },
-        include: { lines: true, review: { select: { id: true } } },
+        include: ORDER_VIEW_INCLUDE,
       }),
     );
   }
@@ -118,7 +135,9 @@ export class OrderRepository {
       () => tx.$queryRaw<RawLockedOrderRow[]>`
         SELECT id, organization_id, supplier_organization_id, status::text AS status,
                total_amount_minor, currency, economic_transaction_id, correlation_id,
-               cancellation_cause::text AS cancellation_cause
+               cancellation_cause::text AS cancellation_cause,
+               (receipt_confirmed_at IS NOT NULL AND receipt_confirmed_by IS NOT NULL)
+                 AS receipt_confirmed
         FROM "order"
         WHERE id = ${orderId}
         FOR UPDATE
@@ -141,6 +160,7 @@ export class OrderRepository {
       economicTransactionId: row.economic_transaction_id,
       correlationId: row.correlation_id,
       cancellationCause: row.cancellation_cause,
+      receiptConfirmed: row.receipt_confirmed,
     };
   }
 
@@ -301,7 +321,7 @@ export class OrderRepository {
       () =>
         this.prisma.client.order.findMany({
           where,
-          include: { lines: true, review: { select: { id: true } } },
+          include: ORDER_VIEW_INCLUDE,
           orderBy: { id: 'desc' },
           take: query.limit,
         }),
@@ -367,6 +387,7 @@ interface RawLockedOrderRow {
   economic_transaction_id: string | null;
   correlation_id: string;
   cancellation_cause: string | null;
+  receipt_confirmed: boolean;
 }
 
 export interface LockedOrderRow {
@@ -384,4 +405,9 @@ export interface LockedOrderRow {
    * finishes. Null for every order that never entered `CANCELLING`.
    */
   cancellationCause: string | null;
+  /**
+   * The buyer's receipt is recorded — who and when (ADR-038 § 5). What lets
+   * an operator's SETTLE return an order to RECEIPT_CONFIRMED (D-083).
+   */
+  receiptConfirmed: boolean;
 }

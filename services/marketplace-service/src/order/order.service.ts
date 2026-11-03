@@ -6,6 +6,7 @@ import {
   runUnscoped,
   runWithNestedTenantWrite,
 } from '@rasta/nest-common';
+import { ERROR_CODES } from '@rasta/contracts';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { MARKETPLACE_EVENTS } from '../events/events';
@@ -37,11 +38,12 @@ import type { RecordResponse } from '../shared/idempotency';
 import {
   OrderRepository,
   type LockedOrderRow,
+  ORDER_VIEW_INCLUDE,
   type SagaActivity,
   type SagaStep,
 } from './order.repository';
-import { ORDER_TRANSITIONS, assertTransition, isTerminal } from './state-machine';
-import { availableOrderActions } from './order-actions';
+import { DISPUTE_ORIGINS, ORDER_TRANSITIONS, assertTransition, isTerminal } from './state-machine';
+import { COMMAND_FROM, availableOrderActions } from './order-actions';
 import { priceOrder, type PriceableOffer } from './pricing';
 import type {
   CancelOrderDto,
@@ -344,6 +346,7 @@ export class OrderService {
   async confirm(orderId: string, record?: RecordResponse<OrderView>): Promise<OrderView> {
     return this.transition(orderId, 'CONFIRMED', {
       record,
+      from: COMMAND_FROM.CONFIRM,
       authorise: COMMAND_AUTHORISATION.confirm,
       apply: async (tx, order) => {
         // The order row is scoped to the **buyer** (ADR-037 § 8) and the actor
@@ -390,6 +393,7 @@ export class OrderService {
 
     return this.transition(orderId, 'AWAITING_RECEIPT_CONFIRMATION', {
       record,
+      from: COMMAND_FROM.FULFILL,
       authorise: COMMAND_AUTHORISATION.fulfill,
       apply: async (tx, order) => {
         const fulfillmentId = newId(ID_PREFIX.fulfillment);
@@ -454,7 +458,7 @@ export class OrderService {
       // Never from DISPUTED. That edge belongs to `resolveDispute` and to a
       // platform operator; a buyer travelling it would be resolving their own
       // dispute in their own favour.
-      from: ['AWAITING_RECEIPT_CONFIRMATION'],
+      from: COMMAND_FROM.CONFIRM_RECEIPT,
       authorise: COMMAND_AUTHORISATION.confirmReceipt,
       apply: async (tx, order) => {
         await tx.order.update({
@@ -494,6 +498,10 @@ export class OrderService {
 
     const view = await this.transition(orderId, 'DISPUTED', {
       record,
+      // Where the dispute finds the order is recorded on its row by the
+      // database (`trg_order_dispute_origin`), from the order as it stands
+      // under this lock — the status an operator's SETTLE resumes (D-083).
+      from: COMMAND_FROM.RAISE_DISPUTE,
       authorise: COMMAND_AUTHORISATION.raiseDispute,
       apply: async (tx, order) => {
         await runUnscoped('a dispute is filed under the order it belongs to', () =>
@@ -542,12 +550,30 @@ export class OrderService {
   /**
    * A platform operator decides a dispute.
    *
-   * The outcome re-enters the normal path rather than jumping to an end state:
-   * `SETTLE` returns the order to `RECEIPT_CONFIRMED` so the saga settles it,
-   * and `REFUND` moves it to `CANCELLING` so the saga compensates. Neither
-   * moves money here — but each decides that money moves, on the buyer's
-   * books, so a union administrator decides only for a buyer within its
-   * union's subtree ({@link assertDisputeResolver}, docs/24 Q-136).
+   * The outcome re-enters the normal path rather than jumping to an end state.
+   * `REFUND` moves the order to `CANCELLING` so the saga compensates. `SETTLE`
+   * resumes the order where the dispute found it (D-083): a dispute raised
+   * after the buyer confirmed receipt returns it to `RECEIPT_CONFIRMED`, and
+   * the saga settles; one raised before — `FUNDS_HELD`, `CONFIRMED`,
+   * `AWAITING_RECEIPT_CONFIRMATION` — returns it there, and the order goes on
+   * exactly as it would have: the supplier still accepts and delivers, and
+   * settlement still waits for the buyer's confirmation. A SETTLE is never a
+   * receipt; it used to be written as one, with nobody's confirmation behind
+   * it, and the order then could not settle (marketplace audit F1).
+   *
+   * The decision names the dispute it decides (`dto.disputeId`) and is
+   * refused, `409 CONFLICT` with `details[].code` `DISPUTE_DECISION_STALE`,
+   * unless that dispute is the one the order holds now: a form drawn for
+   * dispute A never decides dispute B raised since. While an order is
+   * DISPUTED nothing but this decision moves it, so the open dispute's
+   * identity is the order's state as the operator saw it.
+   *
+   * Origin and destination are read under the order's row lock, after the
+   * authority to decide and the source state are checked, and written in the
+   * same transaction as the decision, its history row and its event. Neither
+   * outcome moves money here — but each decides that money moves, on the
+   * buyer's books, so a union administrator decides only for a buyer within
+   * its union's subtree ({@link assertDisputeResolver}, docs/24 Q-136).
    */
   async resolveDispute(
     orderId: string,
@@ -555,83 +581,101 @@ export class OrderService {
     record?: RecordResponse<OrderView>,
   ): Promise<OrderView> {
     const context = getContext();
-    const target: OrderStatus = dto.outcome === 'SETTLE' ? 'RECEIPT_CONFIRMED' : 'CANCELLING';
     const resolvedAt = new Date();
     let authority: DisputeAuthority | undefined;
 
-    const view = await this.transition(orderId, target, {
-      record,
-      // The mirror of the restriction on `confirmReceipt`: an operator resolves
-      // a dispute, and there is nothing to resolve on an order that has none.
-      from: ['DISPUTED'],
-      // Under the order's row lock: nothing else the decision writes is
-      // locked after this, so organization-service's answer is the last thing
-      // read before the decision is written.
-      authorise: async (order) => {
-        authority = await COMMAND_AUTHORISATION.resolveDispute(order, this.hierarchy);
-      },
-      apply: async (tx, order) => {
-        // Read before the update names the dispute the event below is about —
-        // the same pattern `raiseDispute` uses, and for the same reason: after
-        // `updateMany` flips it away from OPEN, nothing OPEN is left to find.
-        const dispute = await runUnscoped(
+    const view = await this.transition(
+      orderId,
+      async (tx, order) => {
+        // The dispute the order holds now, read under the order's lock: a new
+        // one is raised only under that lock too, so it cannot appear between
+        // this read and the write below.
+        const open = await runUnscoped(
           'an operator resolves the dispute open on either party’s order',
           () =>
             tx.orderDispute.findFirst({
               where: { orderId: order.id, status: 'OPEN' },
               orderBy: { raisedAt: 'desc' },
+              select: { id: true, raisedFromStatus: true },
             }),
         );
-
-        await runUnscoped('an operator resolves a dispute on either party’s order', () =>
-          tx.orderDispute.updateMany({
-            where: { orderId: order.id, status: 'OPEN' },
-            data: {
-              status: dto.outcome === 'SETTLE' ? 'RESOLVED_SETTLE' : 'RESOLVED_REFUND',
-              resolution: dto.resolution,
-              // Chosen by the operator, never derived from `resolution`
-              // (ADR-052 § 4 rule 14).
-              responsibility: dto.responsibility,
-              resolvedAt,
-              resolvedBy: context.userId ?? SERVICE_NAME,
-            },
-          }),
-        );
-
-        await runUnscoped('an operator resolves a dispute on either party’s order', () =>
-          tx.order.update({
-            where: { id: order.id },
-            data:
-              target === 'CANCELLING'
-                ? {
-                    status: target,
-                    cancellationReason: dto.resolution,
-                    // Propagated from the dispute's own structured
-                    // attribution — not re-decided and not parsed from text.
-                    cancellationCause: dto.responsibility,
-                  }
-                : { status: target },
-          }),
-        );
-
-        await this.events.enqueue(tx, {
-          eventName: MARKETPLACE_EVENTS.ORDER_DISPUTE_RESOLVED,
-          aggregateId: order.id,
-          organizationId: order.organizationId,
-          payload: {
-            orderId: order.id,
-            disputeId: dispute?.id ?? order.id,
-            buyerOrganizationId: order.organizationId,
-            supplierOrganizationId: order.supplierOrganizationId,
-            outcome: dto.outcome,
-            responsibility: dto.responsibility,
-            resolvedBy: context.userId ?? SERVICE_NAME,
-            resolvedAt: resolvedAt.toISOString(),
-          },
-        });
+        if (open?.id !== dto.disputeId) throw staleDisputeDecision();
+        return dto.outcome === 'REFUND'
+          ? 'CANCELLING'
+          : settledBackTo(order, open.raisedFromStatus);
       },
-      reason: dto.resolution,
-    });
+      {
+        record,
+        // The mirror of the restriction on `confirmReceipt`: an operator
+        // resolves a dispute, and there is nothing to resolve on an order that
+        // has none.
+        from: COMMAND_FROM.RESOLVE_DISPUTE,
+        // Under the order's row lock: nothing else the decision writes is
+        // locked after this, so organization-service's answer is the last
+        // thing read before the decision is written.
+        authorise: async (order) => {
+          authority = await COMMAND_AUTHORISATION.resolveDispute(order, this.hierarchy);
+          // After the authority check, so nobody unauthorised learns anything:
+          // an order that holds no dispute holds not the one this decision
+          // names either — already decided by someone else, or never raised.
+          // The same typed refusal as a newer dispute, never a state error.
+          if (order.status !== 'DISPUTED') throw staleDisputeDecision();
+        },
+        apply: async (tx, order, target) => {
+          await runUnscoped('an operator resolves a dispute on either party’s order', () =>
+            tx.orderDispute.update({
+              where: { id: dto.disputeId },
+              data: {
+                status: dto.outcome === 'SETTLE' ? 'RESOLVED_SETTLE' : 'RESOLVED_REFUND',
+                resolution: dto.resolution,
+                // Chosen by the operator, never derived from `resolution`
+                // (ADR-052 § 4 rule 14).
+                responsibility: dto.responsibility,
+                resolvedAt,
+                resolvedBy: context.userId ?? SERVICE_NAME,
+              },
+            }),
+          );
+
+          await runUnscoped('an operator resolves a dispute on either party’s order', () =>
+            tx.order.update({
+              where: { id: order.id },
+              // The status only: no receipt is written here. A dispute raised
+              // after receipt returns to the evidence the buyer recorded; one
+              // raised before it returns to waiting for it.
+              data:
+                target === 'CANCELLING'
+                  ? {
+                      status: target,
+                      cancellationReason: dto.resolution,
+                      // Propagated from the dispute's own structured
+                      // attribution — not re-decided and not parsed from text.
+                      cancellationCause: dto.responsibility,
+                    }
+                  : { status: target },
+            }),
+          );
+
+          await this.events.enqueue(tx, {
+            eventName: MARKETPLACE_EVENTS.ORDER_DISPUTE_RESOLVED,
+            aggregateId: order.id,
+            organizationId: order.organizationId,
+            payload: {
+              orderId: order.id,
+              disputeId: dto.disputeId,
+              buyerOrganizationId: order.organizationId,
+              supplierOrganizationId: order.supplierOrganizationId,
+              outcome: dto.outcome,
+              orderStatus: target,
+              responsibility: dto.responsibility,
+              resolvedBy: context.userId ?? SERVICE_NAME,
+              resolvedAt: resolvedAt.toISOString(),
+            },
+          });
+        },
+        reason: dto.resolution,
+      },
+    );
     if (authority) recordDisputeDecision(orderId, dto.outcome, authority);
     return view;
   }
@@ -652,7 +696,7 @@ export class OrderService {
       // the saga would refund the escrow, and a supplier who had delivered
       // would go unpaid. Leaving a dispute is the operator's decision, whichever
       // exit it takes.
-      from: ['PENDING', 'FUNDS_HELD', 'CONFIRMED', 'AWAITING_RECEIPT_CONFIRMATION'],
+      from: COMMAND_FROM.CANCEL,
       authorise: COMMAND_AUTHORISATION.cancel,
       apply: async (tx, order) => {
         await tx.order.update({
@@ -686,7 +730,7 @@ export class OrderService {
       assertOrderVisible(order);
       COMMAND_AUTHORISATION.review(order);
 
-      if (order.status !== 'COMPLETED') {
+      if (!COMMAND_FROM.REVIEW.includes(order.status)) {
         // `docs/17`: a review is only possible after a completed order. A
         // rating on an order that was never delivered would be a rating of
         // nothing.
@@ -1272,13 +1316,19 @@ export class OrderService {
    */
   private async transition(
     orderId: string,
-    to: OrderStatus,
+    /**
+     * Where the command takes the order — or, for a command whose destination
+     * depends on the row, how to decide it: called under the row lock, after
+     * the caller is authorised and the source state is checked, so the
+     * decision and the write read the same row (`resolveDispute`, D-083).
+     */
+    to: OrderStatus | ((tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<OrderStatus>),
     handlers: {
       /** Stores the idempotent response, as the transaction's last statement. */
       record: RecordResponse<OrderView> | undefined;
       /** Awaited under the row lock, before the transition is checked or applied. */
       authorise: (order: LockedOrderRow) => unknown;
-      apply: (tx: ExtendedPrismaClient, order: LockedOrderRow) => Promise<void>;
+      apply: (tx: ExtendedPrismaClient, order: LockedOrderRow, to: OrderStatus) => Promise<void>;
       reason?: string;
       /**
        * The states this particular command may be issued from.
@@ -1291,10 +1341,16 @@ export class OrderService {
        * raised the dispute walk out of it and release the money. That is the
        * one invariant this service exists to keep, so the restriction is
        * declared per command rather than inferred.
+       *
+       * Required (D-083): the edges out of DISPUTED now lead back to every
+       * pre-receipt status, and a command that named no source states would
+       * travel them — the supplier's `confirm` resuming a disputed order. Only
+       * `resolveDispute` names DISPUTED.
        */
-      from?: readonly OrderStatus[];
+      from: readonly OrderStatus[];
     },
   ): Promise<OrderView> {
+    let target: OrderStatus | undefined;
     const view = await this.prisma.transaction(async (tx) => {
       const order = await this.repository.lockOrder(tx, orderId);
 
@@ -1310,7 +1366,7 @@ export class OrderService {
       assertOrderVisible(order);
       await handlers.authorise(order);
 
-      if (handlers.from && !handlers.from.includes(order.status)) {
+      if (!handlers.from.includes(order.status)) {
         orderRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'WRONG_SOURCE_STATE' });
         throw RastaError.businessRule(
           `Order ${order.id} cannot take this command while it is ${order.status}`,
@@ -1318,30 +1374,32 @@ export class OrderService {
         );
       }
 
+      const destination = typeof to === 'function' ? await to(tx, order) : to;
       try {
-        assertTransition(order.id, order.status, to);
+        assertTransition(order.id, order.status, destination);
       } catch (error) {
         orderRefusalsTotal.inc({ service: SERVICE_NAME, reason: 'ILLEGAL_TRANSITION' });
         throw error;
       }
 
-      await handlers.apply(tx, order);
+      await handlers.apply(tx, order, destination);
 
       await this.repository.recordHistory(tx, {
         orderId: order.id,
         organizationId: order.organizationId,
         kind: 'TRANSITION',
         fromStatus: order.status,
-        toStatus: to,
+        toStatus: destination,
         reason: handlers.reason ?? null,
       });
 
       const loaded = await this.load(tx, order.id);
       await handlers.record?.(tx, loaded);
+      target = destination;
       return loaded;
     });
 
-    orderTransitionsTotal.inc({ service: SERVICE_NAME, to });
+    if (target) orderTransitionsTotal.inc({ service: SERVICE_NAME, to: target });
     return view;
   }
 
@@ -1524,7 +1582,7 @@ export class OrderService {
     const row = await runUnscoped('reading back the order just written in this transaction', () =>
       tx.order.findUnique({
         where: { id: orderId },
-        include: { lines: true, review: { select: { id: true } } },
+        include: ORDER_VIEW_INCLUDE,
       }),
     );
     if (!row) throw RastaError.notFound('Order', orderId);
@@ -1640,6 +1698,8 @@ type OrderRow = {
    * quietly offering a second review.
    */
   review: { id: string } | null;
+  /** The open dispute, at most one ({@link ORDER_VIEW_INCLUDE}); required for the same reason. */
+  disputes: { id: string }[];
 };
 
 export function toView(row: OrderRow): OrderView {
@@ -1663,6 +1723,7 @@ export function toView(row: OrderRow): OrderView {
     })),
     economicTransactionId: row.economicTransactionId,
     economicSettlementId: row.economicSettlementId,
+    openDisputeId: row.disputes[0]?.id ?? null,
     // ADR-041: not `false`. A false says the check ran and failed.
     supplierQualification: 'UNAVAILABLE',
     reminderCount: row.reminderCount,
@@ -1687,4 +1748,59 @@ export function toView(row: OrderRow): OrderView {
       ),
     ],
   };
+}
+
+/**
+ * The closed reasons (`details[].code`, docs/06 § 6.7) a dispute decision is
+ * refused for. Fixed words; no identifier, status or reason text in the
+ * message or the log (S-09).
+ */
+export const DISPUTE_DECISION_REFUSALS = {
+  /** The decision names a dispute the order no longer holds (or never did). */
+  STALE: 'DISPUTE_DECISION_STALE',
+  /**
+   * SETTLE on a dispute whose origin is not recorded — raised before migration
+   * 20261103130000 and not certain from the order's history. Resuming it
+   * anywhere would be a guess; REFUND still decides it.
+   */
+  ORIGIN_UNKNOWN: 'DISPUTE_ORIGIN_UNKNOWN',
+  /**
+   * SETTLE on a dispute raised from RECEIPT_CONFIRMED where the order holds no
+   * receipt — an order an earlier SETTLE left there without one. Returning it
+   * would claim a receipt nobody confirmed; REFUND still decides it.
+   */
+  RECEIPT_EVIDENCE_MISSING: 'DISPUTE_RECEIPT_EVIDENCE_MISSING',
+} as const;
+
+function staleDisputeDecision(): RastaError {
+  const message = 'This decision is about a dispute the order no longer holds; reload the order';
+  return new RastaError(ERROR_CODES.CONFLICT, message, {
+    details: [{ path: 'disputeId', code: DISPUTE_DECISION_REFUSALS.STALE, message }],
+  });
+}
+
+function settleRefused(code: string, message: string): RastaError {
+  return new RastaError(ERROR_CODES.BUSINESS_RULE_VIOLATION, message, {
+    details: [{ path: 'outcome', code, message }],
+  });
+}
+
+/**
+ * Where SETTLE returns an order: where its dispute found it (D-083). Never a
+ * receipt the buyer did not record, never a guess.
+ */
+function settledBackTo(order: LockedOrderRow, origin: OrderStatus | null): OrderStatus {
+  if (origin === null || !DISPUTE_ORIGINS.includes(origin)) {
+    throw settleRefused(
+      DISPUTE_DECISION_REFUSALS.ORIGIN_UNKNOWN,
+      'Where this dispute found the order is not recorded; it can be refunded, not settled',
+    );
+  }
+  if (origin === 'RECEIPT_CONFIRMED' && !order.receiptConfirmed) {
+    throw settleRefused(
+      DISPUTE_DECISION_REFUSALS.RECEIPT_EVIDENCE_MISSING,
+      'The order holds no confirmed receipt to return to; it can be refunded, not settled',
+    );
+  }
+  return origin;
 }
