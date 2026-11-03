@@ -342,6 +342,12 @@ const REVIEWED_COMPUTED_IMPORTS = [
     argument: 'path',
     loads: 'apps/web/src page modules: production (apps/*/src)',
   },
+  {
+    file: 'apps/web/src/test/build-controller.mjs',
+    argument: 'supervisorUrl',
+    loads:
+      'apps/web/scripts/build-supervisor.mjs, the production supervisor a build fixture spawns (build-scripts.ts): a build-time script, byte-identical to its reviewed copy; opens no database',
+  },
 ];
 
 function packageScriptEntries(repository) {
