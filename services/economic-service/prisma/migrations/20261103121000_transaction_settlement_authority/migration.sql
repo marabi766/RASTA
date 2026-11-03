@@ -54,11 +54,15 @@
 -- is the bounded set this migration found and never a way to authorise a new
 -- row. No outbox row: the status read by marketplace is economic's own, at the
 -- saga's next call, and this table is the record of who moved and why.
--- `down.sql` puts RETURNED_TO_HELD rows that are still HELD back.
+-- `down.sql` puts back a RETURNED_TO_HELD row that is still HELD, held,
+-- unauthorised and under the same dispute — never one disputed again since.
 --
 -- Bounded: the triggers on "transaction" are created first, so its lock is
 -- held from there to commit and no transaction moves while the rows are
--- chosen; waited for at most `lock_timeout`. `statement_timeout` (default
+-- chosen; waited for at most `lock_timeout`. A settlement in flight that
+-- already wrote its hold may deadlock with that lock: PostgreSQL aborts one of
+-- the two, which leaves nothing half-done (the settlement is one transaction,
+-- and so is this), and the loser is retried. `statement_timeout` (default
 -- 5 s, raised for one run by `RASTA_MIGRATION_STATEMENT_TIMEOUT`) bounds the
 -- scan of PENDING_SETTLEMENT rows.
 SET LOCAL lock_timeout = '3s';
@@ -69,6 +73,9 @@ SELECT set_config('statement_timeout',
 CREATE TABLE "settlement_authority_reconciliation" (
     "transaction_id" TEXT NOT NULL,
     "outcome" TEXT NOT NULL,
+    -- The dispute the row held when reconciled: `down.sql` puts back only a
+    -- row no dispute has touched since.
+    "dispute_id" TEXT,
     "reconciled_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "settlement_authority_reconciliation_pkey" PRIMARY KEY ("transaction_id"),
@@ -157,9 +164,10 @@ BEGIN
 END; $$ LANGUAGE plpgsql;
 
 -- The legacy rows, chosen under the lock the triggers above took.
-INSERT INTO "settlement_authority_reconciliation" ("transaction_id", "outcome")
+INSERT INTO "settlement_authority_reconciliation" ("transaction_id", "outcome", "dispute_id")
 SELECT t."id",
-       CASE WHEN t."disputed_at" IS NULL THEN 'AUTHORISED_UNRECORDED' ELSE 'RETURNED_TO_HELD' END
+       CASE WHEN t."disputed_at" IS NULL THEN 'AUTHORISED_UNRECORDED' ELSE 'RETURNED_TO_HELD' END,
+       t."dispute_id"
   FROM "transaction" t
  WHERE t."status" = 'PENDING_SETTLEMENT'
    AND t."settlement_authorised_at" IS NULL

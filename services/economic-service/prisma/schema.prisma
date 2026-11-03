@@ -579,6 +579,8 @@ model TransactionSourceQuarantine {
 model SettlementAuthorityReconciliation {
   transactionId String   @id @map("transaction_id")
   outcome       String
+  /// The dispute it held when reconciled; `down.sql` restores only under it.
+  disputeId     String?  @map("dispute_id")
   reconciledAt  DateTime @default(now()) @map("reconciled_at")
 
   transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Restrict, onUpdate: Restrict)

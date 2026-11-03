@@ -386,16 +386,35 @@ describe('settlement needs settlement authority, whatever the status says (D-083
       ),
     ).rejects.toThrow(/fixed by its migration/);
 
+    // One of them is disputed again since, and resolved (back to HELD, as
+    // today's release resolves it): down must leave that one alone.
+    await request(http)
+      .post(`/v1/transactions/${resolvedLogistics.transactionId}/dispute`)
+      .set('authorization', asPayer())
+      .set('idempotency-key', id('sta-dispute-again'))
+      .send({ reason: 'A second objection, after the upgrade.' })
+      .expect(200);
+    const again = await request(http)
+      .post(`/v1/transactions/${resolvedLogistics.transactionId}/resolve-dispute`)
+      .set('authorization', asSystemAdmin())
+      .set('idempotency-key', id('sta-resolve-again'))
+      .send({ resolution: 'The second objection is unfounded.' })
+      .expect(200);
+    expect(again.body.status).toBe('HELD');
+
     // Down, verbatim, inside a transaction that is then rolled back: it puts
-    // back exactly the rows it returned to HELD.
+    // back exactly the row it returned to HELD that nothing touched since.
     await owner
       .$transaction(async (tx) => {
         await tx.$executeRawUnsafe(DOWN_UPDATE);
         const back = await tx.$queryRawUnsafe<{ id: string; status: string }[]>(
-          `SELECT id, status::text FROM "transaction" WHERE id = ANY($1::text[]) ORDER BY id`,
+          `SELECT id, status::text FROM "transaction" WHERE id = ANY($1::text[])`,
           [resolvedOrder.transactionId, resolvedLogistics.transactionId],
         );
-        expect(back.map((row) => row.status)).toEqual(['PENDING_SETTLEMENT', 'PENDING_SETTLEMENT']);
+        expect(Object.fromEntries(back.map((row) => [row.id, row.status]))).toEqual({
+          [resolvedOrder.transactionId]: 'PENDING_SETTLEMENT',
+          [resolvedLogistics.transactionId]: 'HELD',
+        });
         throw new Error('rolled back: down is only probed');
       })
       .catch((error: Error) => {

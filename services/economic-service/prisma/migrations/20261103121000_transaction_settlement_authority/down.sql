@@ -1,8 +1,11 @@
 -- Reverse of `migration.sql` (20261103121000_transaction_settlement_authority).
 --
--- Puts every RETURNED_TO_HELD row that is still HELD, still holds its funds
--- and is still unauthorised back to PENDING_SETTLEMENT, where it was; a row
--- that has moved on since (authorised, refunded, disputed) keeps its state.
+-- Puts every RETURNED_TO_HELD row that is still HELD, still holds its funds,
+-- is still unauthorised and holds the dispute it held then back to
+-- PENDING_SETTLEMENT, where it was; a row that has moved on since
+-- (authorised, refunded, disputed again) keeps its state. An
+-- AUTHORISED_UNRECORDED row is not moved; once the table is gone, a dispute of
+-- one resolves to HELD under the restored function — the safe side.
 -- Then drops both settlement-authority triggers and the reconciliation table,
 -- and gives `enforce_transaction_dispute_resolution` back its 20261103120000
 -- body. Run with the previous release deployed. Bounded as `migration.sql` is.
@@ -25,6 +28,7 @@ UPDATE "transaction" t
    AND r."outcome" = 'RETURNED_TO_HELD'
    AND t."status" = 'HELD'
    AND t."settlement_authorised_at" IS NULL
+   AND t."dispute_id" IS NOT DISTINCT FROM r."dispute_id"
    AND EXISTS (
      SELECT 1 FROM "wallet_hold" h
       WHERE h."reference" = t."id" AND h."reference_type" = 'TRANSACTION' AND h."status" = 'ACTIVE');
