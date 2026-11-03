@@ -1,5 +1,19 @@
 import { Test } from '@nestjs/testing';
 import { ENV } from '../tokens';
+import { AppModule } from '../app.module';
+import type { AuditRepository } from './audit.repository';
+import { ReconciliationEvidenceMonitor } from './reconciliation-evidence-monitor';
+import {
+  auditIngestionFailuresTotal,
+  auditPartitionRows,
+  auditReconciliationEvidenceMissing,
+  auditRfqOverdueLinks,
+  auditRfqPendingLinks,
+  auditRfqPendingOldestAgeSeconds,
+  auditTenderOverdueLinks,
+  auditTenderPendingLinks,
+  auditTenderPendingOldestAgeSeconds,
+} from '../observability/metrics';
 import { PrismaService } from '../prisma/prisma.service';
 import { RfqEvidenceRepository } from './rfq-evidence.repository';
 import { RfqGapMonitor } from './rfq-gap-monitor';
@@ -16,8 +30,8 @@ import { TenderGapMonitor } from './tender-gap-monitor';
 
 const SUMMARY = [{ held: 0n, overdue: 0n, oldest: null }];
 
-/** A database whose first query is held until the test releases it, and which counts what runs after `$disconnect`. */
-function slowDatabase() {
+/** A database whose `heldQuery`-th query is held until the test releases it, and which counts what runs after `$disconnect`. */
+function slowDatabase(heldQuery = 1) {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
@@ -31,20 +45,89 @@ function slowDatabase() {
     $queryRaw: async () => {
       state.queries += 1;
       if (state.disconnected) state.queriesAfterDisconnect += 1;
-      if (state.queries === 1) {
+      if (state.queries === heldQuery) {
         await gate;
-        return SUMMARY;
       }
-      return [];
+      return state.queries === 1 ? SUMMARY : [];
     },
   };
   return { client, state, release };
 }
 
+/** Every metric a gap sample writes. */
+const RFQ_WRITES = [
+  auditRfqPendingLinks,
+  auditRfqPendingOldestAgeSeconds,
+  auditRfqOverdueLinks,
+  auditIngestionFailuresTotal,
+];
+const TENDER_WRITES = [
+  auditTenderPendingLinks,
+  auditTenderPendingOldestAgeSeconds,
+  auditTenderOverdueLinks,
+  auditIngestionFailuresTotal,
+];
+
+/** Lets promise continuations that are ready run (the fake clock leaves `setImmediate` real). */
+const settle = async (): Promise<void> => {
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+};
+
+function fakeClock(): void {
+  jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
+}
+
 describe.each([
-  ['RFQ', RfqGapMonitor, RfqEvidenceRepository, { AUDIT_RFQ_GAP_ALERT_SECONDS: 300 }],
-  ['tender', TenderGapMonitor, TenderEvidenceRepository, { AUDIT_TENDER_GAP_ALERT_SECONDS: 300 }],
-] as const)('the %s gap monitor at shutdown', (_name, Monitor, Repository, env) => {
+  ['RFQ', RfqGapMonitor, RfqEvidenceRepository, { AUDIT_RFQ_GAP_ALERT_SECONDS: 300 }, RFQ_WRITES],
+  [
+    'tender',
+    TenderGapMonitor,
+    TenderEvidenceRepository,
+    { AUDIT_TENDER_GAP_ALERT_SECONDS: 300 },
+    TENDER_WRITES,
+  ],
+] as const)('the %s gap monitor at shutdown', (_name, Monitor, Repository, env, writes) => {
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  /** Query number `heldQuery` outlives the deadline; it is released only AFTER the client has disconnected. */
+  async function abandonedAtDeadline(heldQuery: number): Promise<{
+    state: ReturnType<typeof slowDatabase>['state'];
+    sets: jest.SpyInstance[];
+  }> {
+    fakeClock();
+    const { client, state, release } = slowDatabase(heldQuery);
+    const sets = writes.map((metric) =>
+      jest.spyOn(metric as { set?: () => void; inc: () => void }, 'set' in metric ? 'set' : 'inc'),
+    );
+    const prisma = new PrismaService('postgresql://nobody:nothing@127.0.0.1:1/none');
+    Object.defineProperty(prisma, 'client', { value: client });
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        { provide: PrismaService, useValue: prisma },
+        { provide: ENV, useValue: env },
+        Repository,
+        Monitor,
+      ],
+    }).compile();
+    await moduleRef.init(); // the first sample starts
+    await settle();
+    expect(state.queries).toBe(heldQuery); // the sample is parked inside query `heldQuery`
+
+    const closing = moduleRef.close();
+    await jest.advanceTimersByTimeAsync(5_000); // the deadline expires with the sample in flight
+    await closing;
+    expect(state.disconnected).toBe(true);
+
+    if (heldQuery === 1)
+      release(); // only now does the abandoned sample resume
+    else release();
+    await settle();
+    return { state, sets };
+  }
+
   it('finishes the sample in flight before the database disconnects: no query after $disconnect', async () => {
     const { client, state, release } = slowDatabase();
     const prisma = new PrismaService('postgresql://nobody:nothing@127.0.0.1:1/none');
@@ -71,6 +154,20 @@ describe.each([
     expect(state.disconnected).toBe(true);
     expect(state.queries).toBe(2); // the sample ran to its end...
     expect(state.queriesAfterDisconnect).toBe(0); // ...before the client went away
+  });
+
+  it('after the deadline: the abandoned sample runs no further query and writes no metric (first query held)', async () => {
+    const { state, sets } = await abandonedAtDeadline(1);
+    expect(state.queries).toBe(1); // no second query, neither before nor after the disconnect
+    expect(state.queriesAfterDisconnect).toBe(0);
+    for (const set of sets) expect(set).not.toHaveBeenCalled();
+  });
+
+  it('after the deadline: a sample held in its LAST query writes no metric when it resumes', async () => {
+    const { state, sets } = await abandonedAtDeadline(2);
+    expect(state.queries).toBe(2);
+    expect(state.queriesAfterDisconnect).toBe(0);
+    for (const set of sets) expect(set).not.toHaveBeenCalled();
   });
 });
 
@@ -124,5 +221,78 @@ describe('SamplingLoop', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('the other samplers at the shutdown deadline', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it('reconciliation monitor: a query that resumes after the deadline writes no metric', async () => {
+    fakeClock();
+    let release!: (missing: number) => void;
+    const countMissingReconciliationEvidence = jest.fn(
+      () =>
+        new Promise<number>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const hooks: (() => Promise<void>)[] = [];
+    const monitor = new ReconciliationEvidenceMonitor(
+      { countMissingReconciliationEvidence } as unknown as AuditRepository,
+      { AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS: 24 } as never,
+      { beforeDisconnect: (stop: () => Promise<void>) => hooks.push(stop) } as never,
+    );
+    const set = jest.spyOn(auditReconciliationEvidenceMissing, 'set');
+    monitor.onModuleInit();
+    await settle();
+    expect(countMissingReconciliationEvidence).toHaveBeenCalledTimes(1);
+
+    const stopping = hooks[0]!();
+    await jest.advanceTimersByTimeAsync(5_000);
+    await stopping;
+    release(7); // after the deadline
+    await settle();
+
+    expect(set).not.toHaveBeenCalled();
+    expect(countMissingReconciliationEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  it('capacity sampler: a query that resumes after the deadline writes no gauge', async () => {
+    fakeClock();
+    let release!: (rows: { partition: string; rows: number }[]) => void;
+    const partitionRowCounts = jest.fn(
+      () =>
+        new Promise<{ partition: string; rows: number }[]>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const noop = { isRunning: () => true, start: async () => undefined } as never;
+    const module = new AppModule(
+      noop,
+      noop,
+      noop,
+      noop,
+      noop,
+      { partitionRowCounts } as unknown as AuditRepository,
+      {
+        AUDIT_EXPECTED_ACTIVE_PRODUCERS: [],
+      } as never,
+      { assertRuntimeRole: async () => undefined, beforeDisconnect: () => undefined } as never,
+    );
+    const set = jest.spyOn(auditPartitionRows, 'set');
+    await module.onModuleInit();
+    await settle();
+    expect(partitionRowCounts).toHaveBeenCalledTimes(1);
+
+    const stopping = module.onApplicationShutdown();
+    await jest.advanceTimersByTimeAsync(5_000);
+    await stopping;
+    release([{ partition: 'audit_event_default', rows: 9 }]);
+    await settle();
+
+    expect(set).not.toHaveBeenCalled();
   });
 });

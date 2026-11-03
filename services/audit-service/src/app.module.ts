@@ -417,9 +417,12 @@ function consumerLogger(logger: Logger): ConstructorParameters<typeof EventConsu
 })
 export class AppModule implements NestModule, OnModuleInit, OnApplicationShutdown {
   /** The capacity sampler: tracked, and stopped before the client disconnects (`beforeDisconnect`). */
-  private readonly gauges = new SamplingLoop(async () => {
+  private readonly gauges = new SamplingLoop(async (signal) => {
     try {
-      for (const { partition, rows } of await this.repository.partitionRowCounts()) {
+      const counts = await this.repository.partitionRowCounts();
+      for (const { partition, rows } of counts) {
+        // Abandoned at the shutdown deadline (the client may be gone): write nothing.
+        signal.throwIfAbandoned();
         auditPartitionRows.set({ partition }, rows);
       }
     } catch {

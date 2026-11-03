@@ -1,7 +1,7 @@
 import { Inject, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { ENV } from '../tokens';
 import { PrismaService } from '../prisma/prisma.service';
-import { SamplingLoop } from './sampling-loop';
+import { SamplingLoop, type SamplingSignal } from './sampling-loop';
 import type { AuditEnv } from '../config/env';
 import {
   auditIngestionFailuresTotal,
@@ -28,7 +28,7 @@ export class RfqGapMonitor implements OnModuleInit, OnModuleDestroy {
   /** Held receipts already counted, so a sample every minute does not count one forever. */
   private readonly alerted = new Set<string>();
 
-  private readonly loop = new SamplingLoop(() => this.sample());
+  private readonly loop = new SamplingLoop((signal) => this.sample(signal));
 
   constructor(
     private readonly repository: RfqEvidenceRepository,
@@ -48,8 +48,13 @@ export class RfqGapMonitor implements OnModuleInit, OnModuleDestroy {
     await this.loop.stop();
   }
 
-  async sample(): Promise<void> {
-    const summary = await this.repository.pendingSummary(this.env.AUDIT_RFQ_GAP_ALERT_SECONDS);
+  async sample(signal: SamplingSignal): Promise<void> {
+    const summary = await this.repository.pendingSummary(
+      this.env.AUDIT_RFQ_GAP_ALERT_SECONDS,
+      signal,
+    );
+    // Abandoned at the shutdown deadline (the client may be gone): write nothing.
+    signal.throwIfAbandoned();
     auditRfqPendingLinks.set(summary.held);
     auditRfqPendingOldestAgeSeconds.set(summary.oldestAgeSeconds);
     auditRfqOverdueLinks.set(summary.overdueCount);

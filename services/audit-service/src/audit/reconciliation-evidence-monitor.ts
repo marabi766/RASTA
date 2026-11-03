@@ -4,7 +4,7 @@ import type { AuditEnv } from '../config/env';
 import { auditReconciliationEvidenceMissing } from '../observability/metrics';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditRepository } from './audit.repository';
-import { SamplingLoop } from './sampling-loop';
+import { SamplingLoop, type SamplingSignal } from './sampling-loop';
 
 /**
  * Makes a missing payment-reconciliation evidence row loud (D-046; Codex on
@@ -33,9 +33,9 @@ import { SamplingLoop } from './sampling-loop';
  */
 @Injectable()
 export class ReconciliationEvidenceMonitor implements OnModuleInit, OnModuleDestroy {
-  private readonly loop = new SamplingLoop(async () => {
+  private readonly loop = new SamplingLoop(async (signal) => {
     // A sample that fails leaves the last value in place rather than reporting a reassuring zero.
-    await this.sample();
+    await this.sample(new Date(), signal);
   });
 
   constructor(
@@ -56,11 +56,13 @@ export class ReconciliationEvidenceMonitor implements OnModuleInit, OnModuleDest
   }
 
   /** Counts the gaps written inside the look-back window and exports the number. */
-  async sample(now: Date = new Date()): Promise<number> {
+  async sample(now: Date = new Date(), signal?: SamplingSignal): Promise<number> {
     const since = new Date(
       now.getTime() - this.env.AUDIT_RECONCILIATION_EVIDENCE_LOOKBACK_HOURS * 3_600_000,
     );
     const missing = await this.repository.countMissingReconciliationEvidence(since);
+    // Abandoned at the shutdown deadline (the client may be gone): write nothing.
+    signal?.throwIfAbandoned();
     auditReconciliationEvidenceMissing.set(missing);
     return missing;
   }

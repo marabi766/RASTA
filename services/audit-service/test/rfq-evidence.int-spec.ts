@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import type { SamplingSignal } from '../src/audit/sampling-loop';
 import request from 'supertest';
 import { ulid } from 'ulid';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
@@ -38,6 +39,9 @@ import {
 
 const DELIVERY = { topic: 'rasta.procurement.v1', partition: 0, offset: '0' } as EventDelivery;
 const hash = (): string => createHash('sha256').update(randomBytes(16)).digest('hex');
+
+/** A sample that is never abandoned. */
+const LIVE_SAMPLE: SamplingSignal = { abandoned: false, throwIfAbandoned: () => undefined };
 
 describe('the RFQ-evidence projection', () => {
   let prisma: PrismaService;
@@ -269,7 +273,7 @@ describe('the RFQ-evidence projection', () => {
 
       await consumer.handle(second.event, DELIVERY);
       const before = await failures('rfq_chain_gap_overdue');
-      await monitor.sample();
+      await monitor.sample(LIVE_SAMPLE);
       // Held, but not for long enough yet: no alert.
       expect(await failures('rfq_chain_gap_overdue')).toBe(before);
       expect(await gauge('rasta_audit_rfq_pending_links')).toBeGreaterThanOrEqual(1);
@@ -279,8 +283,8 @@ describe('the RFQ-evidence projection', () => {
         `UPDATE rfq_receipt_pending SET held_at = now() - interval '10 minutes' WHERE rfq_id = $1`,
         rfqId,
       );
-      await monitor.sample();
-      await monitor.sample();
+      await monitor.sample(LIVE_SAMPLE);
+      await monitor.sample(LIVE_SAMPLE);
       expect(await failures('rfq_chain_gap_overdue')).toBe(before + 1);
       expect(await gauge('rasta_audit_rfq_pending_oldest_age_seconds')).toBeGreaterThanOrEqual(600);
 
@@ -288,14 +292,14 @@ describe('the RFQ-evidence projection', () => {
       expect(await gauge('rasta_audit_rfq_overdue_links')).toBeGreaterThanOrEqual(1);
 
       await consumer.handle(first.event, DELIVERY);
-      await monitor.sample();
+      await monitor.sample(LIVE_SAMPLE);
       expect(await heldFor(rfqId)).toBe(0);
       expect(await failures('rfq_chain_gap_overdue')).toBe(before + 1);
     });
 
     it('counts overdue gaps over every held row, not a bounded sample', async () => {
       const repository = new RfqEvidenceRepository(prisma);
-      const baseline = await repository.pendingSummary(60);
+      const baseline = await repository.pendingSummary(60, LIVE_SAMPLE);
       const rfqId = id('RFQ');
       await consumer.handle(receipt('QUOTATION_SUBMITTED', rfqId, hash()).event, DELIVERY);
       await migrator.client.$executeRawUnsafe(
@@ -312,7 +316,7 @@ describe('the RFQ-evidence projection', () => {
         hash(),
       );
 
-      const summary = await repository.pendingSummary(60);
+      const summary = await repository.pendingSummary(60, LIVE_SAMPLE);
 
       expect(summary.overdueCount - baseline.overdueCount).toBe(1100);
       expect(summary.held - baseline.held).toBe(1101);
