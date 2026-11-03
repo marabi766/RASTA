@@ -21,6 +21,7 @@
  */
 import { afterEach, beforeEach } from 'node:test';
 import { isMainThread, Worker } from 'node:worker_threads';
+import { monotonicMs } from './test-stall-watchdog-clock.mjs';
 
 export const DEFAULT_STALL_MS = 60_000;
 const NAME_BYTES = 1024;
@@ -40,7 +41,7 @@ export const runsTestFile = isMainThread && process.env.NODE_TEST_CONTEXT !== un
 
 if (runsTestFile) {
   const buffer = new SharedArrayBuffer(16 + NAME_BYTES);
-  const state = new Float64Array(buffer, 0, 2); // [time of the last change (ms), 1 while a test runs]
+  const state = new Float64Array(buffer, 0, 2); // [monotonic time of the last change (ms), 1 while a test runs]
   const nameBytes = new Uint8Array(buffer, 16);
   const encoder = new TextEncoder();
   const record = (running, name) => {
@@ -48,7 +49,7 @@ if (runsTestFile) {
     // Keep a terminating zero byte; a cut multi-byte character only garbles the name.
     encoder.encodeInto(name.slice(0, 200), nameBytes.subarray(0, NAME_BYTES - 1));
     state[1] = running ? 1 : 0;
-    state[0] = Date.now();
+    state[0] = monotonicMs();
   };
   record(false, '(start of file)');
   new Worker(new URL('./test-stall-watchdog-worker.mjs', import.meta.url), {

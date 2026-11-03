@@ -121,7 +121,10 @@ test('task 310: a new node --test is found directly and through script chains', 
       Object.assign(all, scripts);
       doc.jobs.quality.steps.push({ name: 'Brand new step', run });
     });
-    refused(problems, /(?:step "Brand new step"|script (?:test:new|c|a)) runs node --test without/);
+    refused(
+      problems,
+      /(?:step "Brand new step"|script (?:test:new|c|a)) (?:runs node --test without|cannot be proven bounded)/,
+    );
   }
   // A bounded one passes; so does a step in another job.
   assert.deepEqual(
@@ -135,6 +138,144 @@ test('task 310: a new node --test is found directly and through script chains', 
     [],
   );
 });
+// Task 312 (#606 r1 F1): the guard reads effective arguments, not text. Each form
+// below was ACCEPTED by the text-matching guard of the previous head and is
+// ineffective or undecidable: Node ignores options after the first file, a later
+// --test-timeout=0 wins, comments and quoted payloads are not arguments, and a
+// wrapper (absolute node, pnpm exec, sh -c ...) hides the command.
+const B = '--test-timeout=300000';
+const ineffectiveForms = {
+  'a budget after the file (Node ignores it)': `node --test scripts/x.test.mjs ${B}`,
+  'a budget after the file in a later segment': `true && node --test x ${B} && true`,
+  'a later zero that disables the budget': `node --test ${B} --test-timeout=0 x`,
+  'a second, different budget': `node --test ${B} --test-timeout=200000 x`,
+  'the same budget twice': `node --test ${B} ${B} x`,
+  'a budget in a comment': `node --test x # ${B}`,
+  'a budget in a quoted file argument': `node --test "x ${B}"`,
+  'a budget in an echo payload': `echo '${B}' && node --test x`,
+  'a budget in a separate echo command': `echo ${B}; node --test x`,
+  'an absolute node': `/usr/bin/node --test ${B} x`,
+  'a quoted absolute node': `"/usr/bin/node" --test ${B} x`,
+  'a relative node': `./node_modules/.bin/node --test ${B} x`,
+  'node without a budget behind a quoted --test': 'node "--test" x',
+  'node without a budget behind a quoted command': "'node' '--test' x",
+  'a quoted option name that is not a budget': `node --test '--test-timeout=0' x`,
+  'a budget given as a separate word': 'node --test --test-timeout 300000 x',
+  'a budget through the --test= form': `node ${B} --test=x`,
+  'an unlisted node option': `node --test --test-isolation=none ${B} x`,
+  'an unlisted option before --test': `node --watch --test ${B} x`,
+  'a computed option': `node --test ${B} $EXTRA x`,
+  'a computed budget': 'node --test --test-timeout=$MS x',
+  'a computed command word': `$NODE --test ${B} x`,
+  'a brace-expanded budget': 'node --test --test-timeout={0,300000} x',
+  'a glob in the option position': `node --test ${B} --test-timeo* x`,
+  'a command substitution that runs node --test': 'echo "$(node --test x)"',
+  'a backtick substitution that runs node --test': 'echo `node --test x`',
+  'node --test inside a compound command': 'if true; then node --test x; fi',
+  'a redirection': `node --test ${B} x > out.txt`,
+  'pnpm exec delegation': `pnpm exec node --test ${B} x`,
+  'pnpm exec behind workspace options': `pnpm --filter pkg exec node --test x`,
+  'pnpm dlx delegation': 'pnpm dlx node --test x',
+  'pnpm falling back to a binary': 'pnpm node --test x',
+  'a pnpm script call with an option': 'pnpm run --silent test:bounded',
+  'a pnpm script call with an option before run': 'pnpm --silent run test:bounded',
+  'a pnpm script call with arguments': `pnpm run test:bounded ${B}=0`,
+  'a pnpm script call with -- arguments': 'pnpm run test:bounded -- --test-timeout=0',
+  'a pnpm script call into another directory': 'pnpm --dir elsewhere run test:bounded',
+  'a pnpm script call for another package': 'pnpm --filter pkg run test:bounded',
+  'a pnpm script that does not exist': 'pnpm run test:missing',
+  'a pnpm built-in that is also a script name': 'pnpm exec',
+  'npx delegation': `npx node --test ${B} x`,
+  'env delegation': `env node --test ${B} x`,
+  'a shell string': `sh -c "node --test x"`,
+  'bash -c': `bash -c 'node --test ${B} x'`,
+  'xargs delegation': 'echo x | xargs node --test',
+  eval: 'eval "node --test x"',
+  'a computed pnpm script name': 'pnpm run $SCRIPT',
+  'a pnpm script name with a computed suffix': 'pnpm run test:bounded$SUFFIX',
+  'node with a computed suffix': `node$SUFFIX --test ${B} x`,
+  'an unterminated quote': `node --test ${B} 'x`,
+};
+for (const [label, run] of Object.entries(ineffectiveForms)) {
+  for (const where of ['step', 'script']) {
+    test(`task 312: ${label} is refused (${where})`, () => {
+      const problems = timeoutProblemsAfter((doc, all) => {
+        all['test:bounded'] = `node --test ${B} scripts/bounded.test.mjs`;
+        all.exec = `node --test ${B} scripts/exec.test.mjs`; // shadowed by the pnpm built-in
+        if (where === 'step') doc.jobs.quality.steps.push({ name: 'Escape', run });
+        else {
+          all['test:escape'] = run;
+          doc.jobs.quality.steps.push({ name: 'Escape', run: 'pnpm run test:escape' });
+        }
+      });
+      assert.notDeepEqual(problems, [], run);
+    });
+  }
+}
+test('task 312: the commands the quality job really uses are still accepted', () => {
+  for (const run of [
+    `node --test ${B} scripts/x.test.mjs scripts/y.test.mjs`,
+    `node '--test' "--test-timeout=300000" 'scripts/x.test.mjs'`,
+    `node --no-warnings --test ${B} --test-concurrency=1 x`,
+    `node --env-file-if-exists=.env --test ${B} --import ./a.mjs x`,
+    `FOO=1 BAR="$(node scripts/print.mjs)" node --test ${B} x`,
+    `node --test ${B} x # a comment mentioning --test-timeout=0 and a stray ' quote`,
+    `pnpm run test:bounded # && node --test unbounded.test.mjs`,
+    `node --test \\\n  ${B} \\\n  x`,
+    `pnpm --filter @rasta/contracts build && node --test ${B} x`,
+    `pnpm --filter @rasta/contracts run build\nnode scripts/check.mjs --test`,
+    `base="$(node scripts/print.mjs)"\nSCOPE="$base" pnpm run test:bounded`,
+    'node scripts/check.mjs --test-timeout=0 && echo done',
+    'prettier --check "**/*.{ts,json}" && eslint scripts && turbo run lint --concurrency=3',
+    'pnpm install --frozen-lockfile',
+    'if true; then pnpm run test:bounded; fi',
+  ]) {
+    const problems = timeoutProblemsAfter((doc, all) => {
+      all['test:bounded'] = `node --test ${B} scripts/bounded.test.mjs`;
+      doc.jobs.quality.steps.push({ name: 'Fine', run });
+    });
+    assert.deepEqual(problems, [], run);
+  }
+});
+test('task 312: a step that changes the shell or directory is not readable as root scripts', () => {
+  for (const extra of [{ shell: 'python {0}' }, { 'working-directory': 'services/x' }])
+    refused(
+      timeoutProblemsAfter((doc) =>
+        doc.jobs.quality.steps.push({ name: 'Odd', run: 'pnpm run test:progress', ...extra }),
+      ),
+      /"Odd" sets shell or working-directory/,
+    );
+  refused(
+    timeoutProblemsAfter((doc) => {
+      doc.jobs.quality.defaults = { run: { 'working-directory': 'x' } };
+    }),
+    /sets defaults\.run/,
+  );
+});
+// The watchdog preload is an argument of the one node --test command, before its files.
+{
+  const watchdog = UNIT_STEP.watchdog;
+  const preload = `--import ${watchdog} `;
+  for (const [label, edit] of Object.entries({
+    'after the files': (text) => text.replace(preload, '').replace(' && ', ` ${preload}&& `),
+    'in a comment': (text) => text.replace(preload, '').replace(' && ', ` # ${preload}\n&& `),
+    'in an echo': (text) => `${text.replace(preload, '')} && echo ${preload}`,
+    'in a quoted file argument': (text) => text.replace(preload, `"x ${preload}" `),
+    'next to another preload': (text) => text.replace(preload, `--import ./other.mjs ${preload}`),
+    twice: (text) => text.replace(preload, `${preload}${preload}`),
+    computed: (text) => text.replace(watchdog, '$WATCHDOG'),
+    'as the --import=<file> form': (text) => text.replace(preload, `--import=${watchdog} `),
+    'with a second node --test command': (text) => `${text} && node --test ${B} y`,
+  }))
+    test(`task 312: a watchdog preload ${label} is refused`, () => {
+      refused(
+        timeoutProblemsAfter((_doc, all) => {
+          all[UNIT_STEP.script] = edit(realScripts[UNIT_STEP.script]);
+        }),
+        /must preload|cannot be proven bounded/,
+      );
+    });
+}
 test('task 310: cycles terminate, inherited names are not scripts, other commands are free', () => {
   assert.equal(runsNodeTest('pnpm run a', { a: 'pnpm run b', b: 'pnpm run a' }), false);
   assert.equal(runsNodeTest('pnpm constructor', {}), false);
