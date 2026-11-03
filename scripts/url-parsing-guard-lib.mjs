@@ -27,11 +27,8 @@
 // explicit contract in cli-contract.mjs.
 // -----------------------------------------------------------------------------
 import { readdirSync, readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import ts from 'typescript';
 import { extname, join, relative } from 'node:path';
-
-const require = createRequire(import.meta.url);
-const ts = require('typescript');
 
 /** The trees scanned, relative to the repository root. */
 export const SCANNED_TREES = Object.freeze(['scripts', 'packages', 'services', 'apps', 'tests']);
@@ -82,6 +79,7 @@ const PARSE_METHODS = new Set(['parse', 'canParse']);
 
 /** Objects a computed access on could yield `URL` (`globalThis[name]`). */
 const GLOBAL_OBJECTS = new Set(['globalThis', 'window', 'self', 'global']);
+const DYNAMIC_CAPABILITIES = new Set(['unsafe', 'createRequire', 'getBuiltinModule']);
 
 const isImportMetaUrl = (node) =>
   ts.isPropertyAccessExpression(node) &&
@@ -130,13 +128,14 @@ function literalUrlNames(sourceFile, bindings) {
   };
   visit(sourceFile);
   const literalUrls = new Set();
-  // In source order, so a URL built on an earlier one is seen.
+  // In source order, so a URL built on an earlier one is seen. Only the name
+  // floor can establish literal bases; extra resolution must not suppress sites.
   for (const declaration of candidates) {
     const value = unwrap(declaration.initializer);
     if (
       declared.get(declaration.name.text) === 1 &&
       ts.isNewExpression(value) &&
-      parserReference(value.expression, bindings) === 'class' &&
+      nameReference(value.expression, bindings.names) === 'class' &&
       (value.arguments ?? []).length > 0 &&
       value.arguments.every((argument) => isLiteral(argument, literalUrls))
     ) {
@@ -201,24 +200,8 @@ function isBoundUrlModule(initializer) {
   );
 }
 
-/**
- * Every name `sourceFile` binds to a parser, resolved through the forms that
- * cannot hide one (#385 r6, Codex PR-385 r5 F2):
- *
- *   classes  `URL`, `import { URL as U } from 'node:url'`, any `{ URL: U }`
- *            destructuring (`= require('node:url')`, `= await import('url')`,
- *            `= globalThis`);
- *   parses   `node:url`'s legacy `parse` imported or destructured by name
- *            (aliased or not), and `{ parse: p } = URL`;
- *   modules  `node:url` as a default, namespace or `import u = require(…)`
- *            import, or bound from `require('url')` / `await import('url')`.
- *
- * Every other way to get hold of a parser — `const U = URL`,
- * `const parse = URL.parse`, `foo(URL)`, `URL[name]`, `import('url').then(…)`,
- * `class X extends URL` — is not followed but refused where it stands
- * ({@link parserEscapes}).
- */
-function parserBindings(sourceFile) {
+/** The name-only rules from main are an unconditional minimum, across scopes. */
+function nameBindings(sourceFile) {
   const classes = new Set(['URL']);
   const parses = new Set();
   const modules = new Set();
@@ -282,7 +265,7 @@ function parserBindings(sourceFile) {
 }
 
 /** What `node` refers to, as far as parsers go: 'class', 'parse', 'module' or null. */
-function parserReference(node, bindings) {
+function nameReference(node, bindings) {
   const inner = unwrap(node);
   if (ts.isIdentifier(inner)) {
     if (bindings.classes.has(inner.text)) return 'class';
@@ -295,11 +278,218 @@ function parserReference(node, bindings) {
   if (isMemberAccess(inner)) {
     const name = memberName(inner);
     if (name === 'URL') return 'class';
-    const object = parserReference(inner.expression, bindings);
+    const object = nameReference(inner.expression, bindings);
     if (name !== null && PARSE_METHODS.has(name) && object === 'class') return 'parse';
     if (name === 'parse' && object === 'module') return 'parse';
   }
   return null;
+}
+
+/**
+ * Resolve lexical symbols without loading dependencies or ambient libraries.
+ * Resolution may add capabilities, never proofs that suppress the name-only floor.
+ * Aliases and binding patterns are followed; their escape sites are still refused.
+ */
+function parserBindings(sourceFile) {
+  const names = nameBindings(sourceFile);
+  const host = ts.createCompilerHost({});
+  host.getSourceFile = (file) => (file === sourceFile.fileName ? sourceFile : undefined);
+  const checker = ts
+    .createProgram([sourceFile.fileName], { noLib: true, noResolve: true, allowJs: true }, host)
+    .getTypeChecker();
+  // Only emitted value bindings add capabilities. Types and ambient
+  // declarations cannot establish a runtime value.
+  const isRuntimeBinding = (declaration) => {
+    for (let node = declaration; node; node = node.parent)
+      if (node.flags & ts.NodeFlags.Ambient) return false;
+    if (ts.isTypeOnlyImportDeclaration(declaration)) return false;
+    return (
+      ts.isVariableDeclaration(declaration) ||
+      ts.isParameter(declaration) ||
+      ts.isBindingElement(declaration) ||
+      (ts.isFunctionDeclaration(declaration) && declaration.body !== undefined) ||
+      ts.isFunctionExpression(declaration) ||
+      ts.isClassDeclaration(declaration) ||
+      ts.isClassExpression(declaration) ||
+      ts.isImportSpecifier(declaration) ||
+      ts.isNamespaceImport(declaration) ||
+      ts.isImportClause(declaration) ||
+      ts.isImportEqualsDeclaration(declaration)
+    );
+  };
+  const valueSymbol = (node) => {
+    if (ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node)
+      return checker.getShorthandAssignmentValueSymbol(node.parent);
+    if (ts.isExportSpecifier(node.parent))
+      return checker.getExportSpecifierLocalTargetSymbol(node.parent);
+    return checker.getSymbolAtLocation(node);
+  };
+  const runtimeDeclarations = (node) =>
+    (valueSymbol(node)?.declarations ?? []).filter(isRuntimeBinding);
+  // Capabilities or UNKNOWN only: initial values never establish safety.
+  const UNKNOWN = Symbol('unknown value');
+  const active = new Set();
+  const moduleKind = (name) => {
+    if (URL_MODULES.has(name)) return 'module';
+    if (['vm', 'node:vm'].includes(name)) return 'unsafe';
+    if (['module', 'node:module'].includes(name)) return 'loaderModule';
+    if (['process', 'node:process'].includes(name)) return 'process';
+    if (['util', 'node:util'].includes(name)) return 'util';
+    return UNKNOWN;
+  };
+  const member = (object, name) => {
+    if (name === 'URL') return 'class';
+    if (object && typeof object === 'object') {
+      // Resolve literal members, but never infer absence across spreads/getters.
+      let value = UNKNOWN;
+      if (ts.isObjectLiteralExpression(object)) {
+        for (const property of object.properties) {
+          const key = property.name;
+          if (ts.isSpreadAssignment(property) || (key && ts.isComputedPropertyName(key))) {
+            value = UNKNOWN;
+          } else if (key?.text === name) {
+            if (active.has(property)) value = UNKNOWN;
+            else {
+              active.add(property);
+              value = ts.isPropertyAssignment(property) ? reference(property.initializer) : UNKNOWN;
+              active.delete(property);
+            }
+          }
+        }
+      } else {
+        value = UNKNOWN;
+      }
+      return value;
+    }
+    if (object === UNKNOWN) return UNKNOWN;
+    if (object === 'global') {
+      if (GLOBAL_OBJECTS.has(name)) return 'global';
+      if (['eval', 'Function'].includes(name)) return 'unsafe';
+      if (name === 'process') return 'process';
+    }
+    if (object === 'class' && PARSE_METHODS.has(name)) return 'parse';
+    if (object === 'module' && name === 'parse') return 'parse';
+    if (object === 'class' && name === 'prototype') return 'prototype';
+    if (['prototype', 'instance'].includes(object) && name === 'constructor') return 'class';
+    if (object === 'loaderModule' && name === 'createRequire') return 'createRequire';
+    if (object === 'process' && name === 'getBuiltinModule') return 'getBuiltinModule';
+    if (object === 'process' && name === 'argv') return 'argv';
+    if (object === 'util' && name === 'parseArgs') return 'parseArgs';
+    return UNKNOWN;
+  };
+  const declarationReference = (declaration) => {
+    if (ts.isVariableDeclaration(declaration)) {
+      const value = declaration.initializer ? reference(declaration.initializer) : UNKNOWN;
+      // Mutable bindings retain proven capabilities, never a proof of safety.
+      return declaration.parent.flags & ts.NodeFlags.Const || typeof value === 'string'
+        ? value
+        : UNKNOWN;
+    }
+    if (ts.isBindingElement(declaration)) {
+      const pattern = declaration.parent;
+      const owner = pattern.parent;
+      let from = ts.isParameter(owner)
+        ? UNKNOWN
+        : ts.isBindingElement(owner)
+          ? declarationReference(owner)
+          : owner.initializer
+            ? reference(owner.initializer)
+            : UNKNOWN;
+      if (
+        ts.isVariableDeclaration(owner) &&
+        !(owner.parent.flags & ts.NodeFlags.Const) &&
+        typeof from !== 'string'
+      )
+        from = UNKNOWN;
+      const key = declaration.propertyName ?? declaration.name;
+      const name = ts.isComputedPropertyName(key)
+        ? isStringLike(unwrap(key.expression))
+          ? unwrap(key.expression).text
+          : null
+        : ts.isIdentifier(key) || isStringLike(key)
+          ? key.text
+          : null;
+      return member(from, name);
+    }
+    if (ts.isImportSpecifier(declaration)) {
+      const from = moduleKind(declaration.parent.parent.parent.moduleSpecifier.text);
+      const name = (declaration.propertyName ?? declaration.name).text;
+      return name === 'default' ? from : member(from, name);
+    }
+    if (ts.isNamespaceImport(declaration) || ts.isImportClause(declaration)) {
+      const imported = ts.isNamespaceImport(declaration)
+        ? declaration.parent.parent
+        : declaration.parent;
+      return moduleKind(imported.moduleSpecifier.text);
+    }
+    if (ts.isImportEqualsDeclaration(declaration)) {
+      const specifier = declaration.moduleReference.expression;
+      return specifier && isStringLike(specifier) ? moduleKind(specifier.text) : UNKNOWN;
+    }
+    return UNKNOWN;
+  };
+  const reference = (node) => {
+    const inner = unwrap(node);
+    const floor = nameReference(inner, names);
+    if (floor !== null) return floor;
+    if (ts.isIdentifier(inner)) {
+      const symbol = valueSymbol(inner);
+      const declarations = runtimeDeclarations(inner);
+      if (declarations.length > 0) {
+        if (active.has(symbol)) return UNKNOWN;
+        active.add(symbol);
+        const results = declarations.map(declarationReference);
+        const result = results.find((value) => value !== UNKNOWN) ?? UNKNOWN;
+        active.delete(symbol);
+        if (result !== UNKNOWN || !['URL', 'process'].includes(inner.text)) return result;
+      }
+      if (inner.text === 'URL') return 'class';
+      if (GLOBAL_OBJECTS.has(inner.text)) return 'global';
+      if (['eval', 'Function'].includes(inner.text)) return 'unsafe';
+      if (inner.text === 'process') return 'process';
+      return UNKNOWN;
+    }
+    if (ts.isAwaitExpression(inner)) return reference(inner.expression);
+    if (isMemberAccess(inner)) {
+      return member(reference(inner.expression), memberName(inner));
+    }
+    if (isUrlModuleLoad(inner)) return 'module';
+    if (ts.isCallExpression(inner)) {
+      const callee = reference(inner.expression);
+      if (callee === 'createRequire') return 'loader';
+      if (
+        ['loader', 'getBuiltinModule'].includes(callee) &&
+        inner.arguments.length === 1 &&
+        isStringLike(inner.arguments[0])
+      )
+        return moduleKind(inner.arguments[0].text);
+    }
+    if (
+      ts.isCallExpression(inner) &&
+      inner.arguments.length === 1 &&
+      isStringLike(inner.arguments[0])
+    ) {
+      if (
+        inner.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(inner.expression) && inner.expression.text === 'require')
+      ) {
+        return moduleKind(inner.arguments[0].text);
+      }
+    }
+    if (ts.isNewExpression(inner)) {
+      const constructor = reference(inner.expression);
+      return constructor === 'class' ? 'instance' : UNKNOWN;
+    }
+    if (ts.isObjectLiteralExpression(inner) || ts.isArrayLiteralExpression(inner)) return inner;
+    return UNKNOWN;
+  };
+  return { reference, names };
+}
+
+/** Native parser capabilities, including global objects that can hand them out. */
+function parserReference(node, bindings) {
+  const kind = bindings.reference(node);
+  return ['class', 'parse', 'module', 'global', 'prototype'].includes(kind) ? kind : null;
 }
 
 /** An identifier that names a declaration or a property, not a value. */
@@ -323,7 +513,7 @@ function isDeclarationName(node) {
     ts.isImportSpecifier(parent) ||
     ts.isImportClause(parent) ||
     ts.isNamespaceImport(parent) ||
-    ts.isImportEqualsDeclaration(parent) ||
+    (ts.isImportEqualsDeclaration(parent) && parent.name === node) ||
     (ts.isPropertySignature(parent) && parent.name === node) ||
     ts.isLabeledStatement(parent) ||
     ts.isBreakOrContinueStatement(parent)
@@ -358,6 +548,9 @@ function staysInPlace(reference, kind) {
   const node = outermost(reference);
   const { parent } = node;
   if (ts.isTypeOfExpression(parent)) return true;
+  if (kind === 'global' || kind === 'prototype') {
+    return isMemberAccess(parent) && parent.expression === node && memberName(parent) !== null;
+  }
   if (kind === 'parse') return ts.isCallExpression(parent) && parent.expression === node;
   if (kind === 'class') {
     if (ts.isNewExpression(parent) && parent.expression === node) return true;
@@ -468,6 +661,38 @@ export function rawUrlParses(text, file) {
     });
   };
   const visit = (node) => {
+    // Refuse dynamic execution/loaders themselves, even without URL text.
+    // A reviewed exemption covers this expression only; scanning continues.
+    if (
+      !isInType(node) &&
+      ((ts.isIdentifier(node) && !isDeclarationName(node)) || isMemberAccess(node)) &&
+      DYNAMIC_CAPABILITIES.has(bindings.reference(node))
+    ) {
+      const expression = outermost(node);
+      site(
+        expression.parent &&
+          (ts.isCallExpression(expression.parent) || ts.isNewExpression(expression.parent))
+          ? expression.parent
+          : expression,
+        'dynamic code/loader',
+      );
+    }
+    if (ts.isCallExpression(node) && DYNAMIC_CAPABILITIES.has(bindings.reference(node)))
+      site(node, 'dynamic code/loader');
+    if (
+      ts.isImportDeclaration(node) &&
+      isStringLike(node.moduleSpecifier) &&
+      ['vm', 'node:vm'].includes(node.moduleSpecifier.text)
+    )
+      site(node, 'dynamic code/loader');
+    if (
+      ts.isBinaryExpression(node) &&
+      ts.isAssignmentOperator(node.operatorToken.kind) &&
+      isMemberAccess(unwrap(node.left)) &&
+      bindings.reference(unwrap(node.left).expression) === 'instance' &&
+      !isLiteral(node.right)
+    )
+      site(node, 'URL mutation');
     const what = parseKind(node, bindings);
     if (
       what !== null &&
@@ -491,6 +716,24 @@ export function rawUrlParses(text, file) {
     if (reference !== null && !partOfLarger && !isInType(node) && !staysInPlace(node, reference)) {
       site(outermost(node).parent ?? node, 'escape');
     }
+    // Loader/vm re-exports would move the refused capability into another file.
+    if (
+      ts.isExportDeclaration(node) &&
+      node.moduleSpecifier &&
+      isStringLike(node.moduleSpecifier) &&
+      ['module', 'node:module', 'process', 'node:process', 'vm', 'node:vm'].includes(
+        node.moduleSpecifier.text,
+      ) &&
+      (!node.exportClause ||
+        !ts.isNamedExports(node.exportClause) ||
+        node.exportClause.elements.some((element) =>
+          ['default', 'createRequire', 'getBuiltinModule'].includes(
+            (element.propertyName ?? element.name).text,
+          ),
+        ) ||
+        ['vm', 'node:vm'].includes(node.moduleSpecifier.text))
+    )
+      site(node, 'dynamic code/loader');
     // A re-export hands a parser to another file under any name: refused here.
     if (
       ts.isExportDeclaration(node) &&
@@ -500,7 +743,7 @@ export function rawUrlParses(text, file) {
       (!node.exportClause ||
         !ts.isNamedExports(node.exportClause) ||
         node.exportClause.elements.some((element) =>
-          ['parse', 'URL'].includes((element.propertyName ?? element.name).text),
+          ['parse', 'URL', 'default'].includes((element.propertyName ?? element.name).text),
         ))
     ) {
       site(node, 'escape');
@@ -530,37 +773,37 @@ export function rawUrlParses(text, file) {
  */
 export const isTestFile = (file) => /\.(spec|test|int-spec|e2e-spec)\.[cm]?[jt]sx?$/.test(file);
 
-/** A file that cannot hold a parse: spells neither `URL` nor the `url` module. */
-const cannotParse = (text) => !text.includes('URL') && !/['"](node:)?url['"]/.test(text);
-
 /** Every raw parse in the scanned trees under `root`, test files left out. */
 export function repositoryUrlParses(root) {
   return sourceFiles(root)
     .filter((file) => !isTestFile(file))
     .flatMap((file) => {
       const text = readFileSync(join(root, file), 'utf8');
-      return cannotParse(text) ? [] : rawUrlParses(text, file);
+      return rawUrlParses(text, file);
     });
 }
 
 /**
  * The sites `allowList` does not cover, and the entries that cover no site
  * (stale: the code moved or was fixed, so the entry must go). An entry is
- * `{ file, call, reason }`; it covers every site in `file` whose collapsed
- * source is `call`.
+ * `{ file, call, reason, line? }`; an expression must match exactly one site.
+ * Repeated expressions need a line. Duplicate/stale entries never grant access.
  */
 export function unlistedUrlParses(sites, allowList) {
-  const key = (file, call) => `${file}\n${normalizeCall(call)}`;
-  const allowed = new Set(allowList.map((entry) => key(entry.file, entry.call)));
-  const used = new Set();
-  const unlisted = [];
-  for (const site of sites) {
-    const siteKey = key(site.file, site.call);
-    if (allowed.has(siteKey)) used.add(siteKey);
-    else unlisted.push(site);
+  const remaining = new Set(sites);
+  const stale = [];
+  for (const entry of allowList) {
+    const matches = [...remaining].filter(
+      (site) =>
+        site.file === entry.file &&
+        normalizeCall(site.call) === normalizeCall(entry.call) &&
+        (entry.line === undefined || site.line === entry.line),
+    );
+    if (matches.length === 1 && typeof entry.reason === 'string' && entry.reason.trim()) {
+      remaining.delete(matches[0]);
+    } else stale.push(entry);
   }
-  const stale = allowList.filter((entry) => !used.has(key(entry.file, entry.call)));
-  return { unlisted, stale };
+  return { unlisted: [...remaining], stale };
 }
 
 /**
@@ -568,23 +811,6 @@ export function unlistedUrlParses(sites, allowList) {
  * `--schema`, `--max=3`, `-X`, `-tA`. Its option is the part before any `=`.
  */
 const OPTION_LITERAL = /^--?[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]+)*(?:=[\s\S]*)?$/;
-
-/** Whether `node` is `process.argv`, or a call of node:util's `parseArgs`. */
-function readsCommandLine(node, utilParseArgs) {
-  if (
-    isMemberAccess(node) &&
-    memberName(node) === 'argv' &&
-    ts.isIdentifier(unwrap(node.expression)) &&
-    unwrap(node.expression).text === 'process'
-  ) {
-    return true;
-  }
-  return (
-    ts.isCallExpression(node) &&
-    ts.isIdentifier(node.expression) &&
-    utilParseArgs.has(node.expression.text)
-  );
-}
 
 /**
  * The command-line surface of a file (#385 r6, Codex PR-385 r5 F2): whether
@@ -597,24 +823,15 @@ function readsCommandLine(node, utilParseArgs) {
 export function commandLineSurface(text, file) {
   const kind = SCRIPT_KINDS[extname(file)] ?? ts.ScriptKind.TS;
   const sourceFile = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
-  const utilParseArgs = new Set();
+  const bindings = parserBindings(sourceFile);
   let readsArgv = false;
   const options = new Set();
   const visit = (node) => {
     if (
-      ts.isImportDeclaration(node) &&
-      isStringLike(node.moduleSpecifier) &&
-      ['util', 'node:util'].includes(node.moduleSpecifier.text) &&
-      node.importClause?.namedBindings &&
-      ts.isNamedImports(node.importClause.namedBindings)
+      (((ts.isIdentifier(node) && !isDeclarationName(node)) || isMemberAccess(node)) &&
+        bindings.reference(node) === 'argv') ||
+      (ts.isCallExpression(node) && bindings.reference(node.expression) === 'parseArgs')
     ) {
-      for (const element of node.importClause.namedBindings.elements) {
-        if ((element.propertyName ?? element.name).text === 'parseArgs') {
-          utilParseArgs.add(element.name.text);
-        }
-      }
-    }
-    if (readsCommandLine(node, utilParseArgs)) {
       readsArgv = true;
       // A parseArgs call's options are its accepted options, keys spelled bare.
       const [config] = ts.isCallExpression(node) ? node.arguments : [];
@@ -622,7 +839,8 @@ export function commandLineSurface(text, file) {
         for (const property of config.properties) {
           if (
             ts.isPropertyAssignment(property) &&
-            property.name.getText(sourceFile) === 'options' &&
+            (ts.isIdentifier(property.name) || isStringLike(property.name)) &&
+            property.name.text === 'options' &&
             ts.isObjectLiteralExpression(property.initializer)
           ) {
             for (const option of property.initializer.properties) {
