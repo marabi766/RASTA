@@ -4,14 +4,21 @@ import { axe } from 'jest-axe';
 import { LoginScreen } from './login/LoginScreen';
 import RootLayout, { metadata } from './layout';
 
+let preference: { theme: 'light' | 'dark'; cookieName: string; secure: boolean };
+jest.mock('@/server/theme', () => ({ readThemePreference: async () => preference }));
+
+beforeEach(() => {
+  preference = { theme: 'light', cookieName: 'rasta_theme', secure: true };
+});
+
 /**
  * `RootLayout` renders `<html>` and `<body>`, which React cannot mount inside
  * an existing document. Asserting the two attributes therefore means reading
  * them off the element the component returns rather than off a rendered tree.
  */
-function rootElement() {
-  const tree = RootLayout({ children: null }) as {
-    props: { lang?: string; dir?: string };
+async function rootElement() {
+  const tree = (await RootLayout({ children: null })) as {
+    props: { lang?: string; dir?: string; 'data-theme'?: string };
   };
   return tree.props;
 }
@@ -20,9 +27,26 @@ describe('the document shell', () => {
   // docs/16 § 16.3: the direction is a property of the document. Every layout
   // rule beneath it is written with logical properties on that assumption, so
   // losing either attribute silently mirrors the whole application.
-  it('declares Persian and right-to-left on the document itself', () => {
-    expect(rootElement().lang).toBe('fa');
-    expect(rootElement().dir).toBe('rtl');
+  it('declares Persian and right-to-left on the document itself', async () => {
+    expect((await rootElement()).lang).toBe('fa');
+    expect((await rootElement()).dir).toBe('rtl');
+  });
+
+  // Owner decision 2026-10-24: light for everyone, dark by choice. The theme is
+  // rendered into the document by the server, so it is right before first paint
+  // and with scripts blocked; there is no inline script for it to need.
+  it('renders the server-resolved theme on <html data-theme>', async () => {
+    expect((await rootElement())['data-theme']).toBe('light');
+    preference = { ...preference, theme: 'dark' };
+    expect((await rootElement())['data-theme']).toBe('dark');
+  });
+
+  it('puts no inline script in the document shell', async () => {
+    const source = JSON.stringify(await RootLayout({ children: null }), (key, value) =>
+      key === '_owner' ? undefined : value,
+    );
+    expect(source).not.toContain('dangerouslySetInnerHTML');
+    expect(source).not.toContain('"script"');
   });
 
   it('names the product in the document title', () => {

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 
 import { cn } from '../cn';
+import { ThemeSwitch } from '../theme/ThemeSwitch';
 
 /**
  * The bar across the top of the application shell.
@@ -18,7 +19,7 @@ export function TopBar({
 }: {
   /** Which tenant's data is on screen. */
   organizationName?: ReactNode;
-  /** Account menu, notifications, search. */
+  /** Account menu, notifications, search. The light / dark switch is always first. */
   children?: ReactNode;
   className?: string;
 }) {
@@ -40,7 +41,10 @@ export function TopBar({
           </>
         ) : null}
       </div>
-      {children ? <div className="flex items-center gap-2">{children}</div> : null}
+      <div className="flex items-center gap-2">
+        <ThemeSwitch />
+        {children}
+      </div>
     </header>
   );
 }

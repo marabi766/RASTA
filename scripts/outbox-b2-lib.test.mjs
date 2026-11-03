@@ -11,6 +11,7 @@
 // a single row is touched: that the tool refuses rather than guesses.
 // -----------------------------------------------------------------------------
 import assert from 'node:assert/strict';
+import { commandFailure } from '../packages/config/src/command-failure.js';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
@@ -242,7 +243,7 @@ for (const cli of ['outbox-b2-backfill.mjs', 'outbox-b2-vacuum.mjs']) {
       assert.equal(run.events.length, 1, run.stdout);
       const [{ at, ...event }] = run.events;
       assert.ok(at);
-      assert.deepEqual(event, { type: 'refused', reason: UNRECOGNISED_NODE_ENV });
+      assert.deepEqual(event, { type: 'refused', reason: commandFailure(null) });
       assertNoSentinel(run.stdout, `${cli} (${sentinel})`);
     }
   });
@@ -254,13 +255,13 @@ for (const cli of ['outbox-b2-backfill.mjs', 'outbox-b2-vacuum.mjs']) {
     assert.equal(run.status, 1);
     const refused = run.events.find((event) => event.type === 'refused');
     assert.equal(refused.service, 'document', run.stdout);
-    assert.match(refused.reason, /^DATABASE_URL_DOCUMENT(_MIGRATOR)? is not set/);
+    assert.equal(refused.reason, commandFailure(null));
   });
 }
 
 // The backfill's global owner-credential refusal is @rasta/config's (built
-// dist): an unregistered key is counted, never named, in any spelling.
-test('outbox-b2-backfill.mjs: an owner credential named for no service is counted, not named', () => {
+// dist): an unregistered key is refused without repeating its name or value.
+test('outbox-b2-backfill.mjs: an owner credential named for no service is refused without details', () => {
   for (const key of KEY_SENTINELS) {
     for (const name of [`DATABASE_URL_${key}_MIGRATOR`, `POSTGRES_PASSWORD_${key}_MIGRATOR`]) {
       const run = runB2Cli('outbox-b2-backfill.mjs', ['--service', 'document'], {
@@ -270,10 +271,7 @@ test('outbox-b2-backfill.mjs: an owner credential named for no service is counte
       assert.equal(run.status, 1);
       assert.equal(run.events.length, 1, run.stdout);
       assert.equal(run.events[0].type, 'refused');
-      assert.match(
-        run.events[0].reason,
-        /\(1 more \*_MIGRATOR variable\(s\) named for no service\)/,
-      );
+      assert.match(run.events[0].reason, /command failed \(code unknown\); diagnostics withheld/);
       assertNoSentinel(run.stdout + run.stderr, name);
     }
   }
