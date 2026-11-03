@@ -34,12 +34,14 @@ export const JEST_LAUNCHERS = {
   'scripts/run-test-phases.mjs': {
     kind: 'phases',
     reaches:
-      'Turbo workspace task; integration also selects identity test:aggregation-stress; arguments after -- reach both phases.',
+      'Pinned phase planner expands exact positive shard ownership; only unsharded/identity integration adds stress. CLI arguments after -- reach every selected Jest descendant.',
     sha256: {
+      'scripts/integration-partitions.mjs':
+        'd593876d547a32a50cc030ccf345f9d153c529eeae54d1dbf11138aef5ac3f7c',
       'scripts/run-test-phases.mjs':
-        'c8638166f4eda0bb04f98d94ef9bc960bdb10783dfe99637984780e637e59cb9',
+        'c4d7ce726aecbb3bd33416c7aad724bb2687354124a957bd13d98a17112da09f',
       'scripts/test-phases-lib.mjs':
-        'c55e4e7b1cd92787e2de1206574bde3be853b352726fed843d756b9c2ae2b54e',
+        '4da467fa6be27f98cef54a1161ac1ef68321e3f56ffb697b2ec9565f6cd5c1c5',
     },
   },
   'scripts/aggregation-evidence-cli.test.mjs': {
@@ -75,14 +77,16 @@ export const JEST_LAUNCHERS = {
   'scripts/test-phases.test.mjs': {
     kind: 'non-jest',
     reaches:
-      'Spawns the orchestrator with no arguments to prove usage refusal; Jest commands are contract fixture strings.',
+      'Spawns the Node contract checker and a copied orchestrator against a fixture-owned fake Turbo that only records argv/exits; malformed shard ownership refuses before spawning. No real Jest or forwarded CLI config.',
     sha256: {
+      'scripts/integration-partitions.mjs':
+        'd593876d547a32a50cc030ccf345f9d153c529eeae54d1dbf11138aef5ac3f7c',
       'scripts/test-phases.test.mjs':
-        '4801b54dca9bfd6bd04ce59b6b956f183655d632f173debe9ee3dcfaeefca176',
+        'f9343feabd3e2fc1977ac04edff8b135a2011ce9dafb3c52792d23680c52bacd',
       'scripts/run-test-phases.mjs':
-        'c8638166f4eda0bb04f98d94ef9bc960bdb10783dfe99637984780e637e59cb9',
+        'c4d7ce726aecbb3bd33416c7aad724bb2687354124a957bd13d98a17112da09f',
       'scripts/test-phases-lib.mjs':
-        'c55e4e7b1cd92787e2de1206574bde3be853b352726fed843d756b9c2ae2b54e',
+        '4da467fa6be27f98cef54a1161ac1ef68321e3f56ffb697b2ec9565f6cd5c1c5',
     },
   },
   'scripts/check-kafka-credential-scope.test.mjs': {
@@ -91,7 +95,7 @@ export const JEST_LAUNCHERS = {
       'Spawns the credential export shell helper; pnpm test strings are YAML fixtures, not executed.',
     sha256: {
       'scripts/check-kafka-credential-scope.test.mjs':
-        '47c1c5bf5f8020a845657f8f56e594c3f0195a030830fb24aca2edb08ac13863',
+        'a7feee1c004f4091369ff9baa8618dd1a3cc5c5cfd30486e129b9a3daa56e8f5',
     },
   },
   'scripts/disposable-broker.test.mjs': {
@@ -147,10 +151,12 @@ export const JEST_LAUNCHERS = {
   'scripts/check-unit-step-concurrency.test.mjs': {
     kind: 'non-jest',
     reaches:
-      'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; Jest and pnpm test commands are inspected source strings, never executed.',
+      'Spawns copied Node concurrency-checker CLI against temporary YAML/package fixtures; the added timeout helper only parses command strings. Jest/pnpm test/Node preload examples remain inert fixtures, never executed.',
     sha256: {
+      'scripts/ci-node-test-timeouts-lib.mjs':
+        '73f4adbb236d634ff18c58c513eedae4988f66e1f6854f14ccd3c076b0ace679',
       'scripts/check-unit-step-concurrency.test.mjs':
-        '73681f4236521393a019e49a406e217f6b2578bc58d8469c69bb29d1dcd37408',
+        '08458ba01284f457a712c4189210c0ea2397e9ba221cd54d2bdb2f6b4a06c96d',
       'scripts/check-unit-step-concurrency.mjs':
         'b1dc69abcb7db76eccba8f43066731549b9a07e3a1d252cdf032c7489eff62e1',
       'scripts/check-unit-step-concurrency-lib.mjs':

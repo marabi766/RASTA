@@ -1182,6 +1182,88 @@ test('R1 root phase scripts preserve forwarded configuration through Turbo in bo
   }
 });
 
+test('sharded phase launches inspect every selected Jest config and refuse unknown ownership', async () => {
+  const control = '.github/workflows/shard-control.yml';
+  const paths = [...everyFile.filter((path) => /(^|\/)package\.json$/.test(path)), control];
+  const { INTEGRATION_PARTITIONS } = await import('./integration-partitions.mjs');
+  for (const [shard, job] of Object.entries({
+    identity: 'Integration tests',
+    construction: 'Integration construction',
+    economic: 'Integration economic',
+    contract: 'Integration contract',
+  })) {
+    for (const guarded of [true, false]) {
+      const config = JSON.stringify({
+        rootDir: join(root, 'apps/web'),
+        setupFilesAfterEnv: guarded ? [GUARD] : [],
+      });
+      const read = (path) =>
+        path === control
+          ? require('yaml').stringify({
+              jobs: {
+                control: {
+                  steps: [
+                    {
+                      run: `node scripts/run-test-phases.mjs test:integration --shard=${shard} -- --config '${config}'`,
+                    },
+                  ],
+                },
+              },
+            })
+          : readFileSync(join(root, path), 'utf8');
+      const commands = jestCommands(paths, read).filter(({ name }) => name.startsWith(control));
+      assert.equal(
+        commands.length,
+        INTEGRATION_PARTITIONS[job].length + (shard === 'identity' ? 1 : 0),
+      );
+      assert.deepEqual(
+        commands.map(({ directory }) => relative(root, directory)).sort(),
+        [
+          ...INTEGRATION_PARTITIONS[job],
+          ...(shard === 'identity' ? ['@rasta/identity-service'] : []),
+        ]
+          .map((name) => `services/${name.slice('@rasta/'.length)}`)
+          .sort(),
+      );
+      assert.equal(
+        commands.filter(({ args }) => args.includes('aggregation-stress')).length,
+        shard === 'identity' ? 1 : 0,
+      );
+      for (const command of commands) {
+        assert.equal(command.opaque, false);
+        assert.ok(command.args.includes(config));
+        const problems = await jestWiringProblems(
+          undefined,
+          'shard forwarding',
+          command.directory,
+          command.args,
+        );
+        assert.equal(problems.length === 0, guarded, JSON.stringify(problems));
+      }
+    }
+  }
+  for (const args of [
+    '--shard=unknown',
+    '--shard=',
+    '--shard=identity --shard=contract',
+    '--filter=@rasta/web',
+  ]) {
+    const commands = jestCommands(paths, (path) =>
+      path === control
+        ? require('yaml').stringify({
+            jobs: {
+              control: {
+                steps: [{ run: `node scripts/run-test-phases.mjs test:integration ${args}` }],
+              },
+            },
+          })
+        : readFileSync(join(root, path), 'utf8'),
+    ).filter(({ name }) => name.startsWith(control));
+    assert.equal(commands.length, 1);
+    assert.match(commands[0].reason, /unsupported test phases/);
+  }
+});
+
 test('R1 env-prefixed shell wrappers and unresolved script aliases fail closed', () => {
   for (const run of [
     'env CI=1 bash -lc \'pnpm --filter @rasta/web test -- --config "$CONFIG"\'',

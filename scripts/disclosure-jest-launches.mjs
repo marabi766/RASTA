@@ -4,6 +4,7 @@ import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tokenizeShell } from './check-dockerfile-pins-lib.mjs';
 import { JEST_LAUNCHERS } from './disclosure-jest-launchers.mjs';
+import { planTestRun } from './test-phases-lib.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const require = createRequire(import.meta.url);
@@ -208,22 +209,32 @@ export function jestCommands(paths, read) {
             resolve(root, cwd, packageDir),
           );
         } else if (entry.kind === 'phases') {
-          const [task, ...rest] = args;
-          if (!['test', 'test:integration'].includes(task) || (rest.length && rest[0] !== '--')) {
+          let plan;
+          try {
+            plan = planTestRun(args);
+          } catch {
             refuse(name, 'unsupported test phases arguments');
             continue;
           }
-          inspect(`turbo run ${task} -- ${rest.slice(1).map(quote).join(' ')}`, name, '.', [
-            ...stack,
-            path,
-          ]);
-          if (task === 'test:integration')
-            inspect(
-              `pnpm --filter @rasta/identity-service test:aggregation-stress -- ${rest.slice(1).map(quote).join(' ')}`,
-              name,
-              '.',
-              [...stack, path],
-            );
+          // Use the pinned real planner: shard ownership and exclusive-phase
+          // selection must match execution. Expand each positive filter separately
+          // so every descendant reaches the effective Jest configuration adapter.
+          for (const { args: phaseArgs } of plan) {
+            const [, task, ...rest] = phaseArgs;
+            const separator = rest.indexOf('--');
+            const filters = separator < 0 ? rest : rest.slice(0, separator);
+            const forwarded = separator < 0 ? [] : rest.slice(separator + 1);
+            const targets = filters.length ? filters : [undefined];
+            for (const filter of targets) {
+              const launch = filter
+                ? `pnpm ${quote(filter)} ${quote(task)}`
+                : `turbo run ${quote(task)}`;
+              inspect(`${launch} -- ${forwarded.map(quote).join(' ')}`, name, '.', [
+                ...stack,
+                path,
+              ]);
+            }
+          }
         } else if (entry.kind === 'evidence') {
           if (args.some((arg) => CONFIG_FLAG.test(arg))) {
             refuse(name, 'unsupported evidence configuration arguments');
