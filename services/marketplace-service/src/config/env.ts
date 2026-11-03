@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  outboxShutdownBudgetMs,
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
@@ -12,7 +13,7 @@ import {
   PRISMA_DEFAULT_TRANSACTION_TIMEOUT_MS,
   serviceUrlSchema,
 } from '@rasta/config';
-import { marketplaceOperationBudgets } from './operation-budgets';
+import { marketplaceOperationBudgets, SAGA_START_STOP_BUDGET_MS } from './operation-budgets';
 
 /** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
 const { fixed, seal } = fixedEnvMessages();
@@ -193,6 +194,10 @@ export const marketplaceEnvSchema = baseEnvSchema
       .min(30)
       .max(3_600)
       .prefault(60),
+  })
+  .refine((env) => outboxShutdownBudgetMs(env) >= SAGA_START_STOP_BUDGET_MS, {
+    path: ['SHUTDOWN_TIMEOUT_MS'],
+    message: fixed('SHUTDOWN_TIMEOUT_MS must cover the saga starter database stop budget'),
   })
   .refine(
     (env) =>
