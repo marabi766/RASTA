@@ -1,7 +1,12 @@
-import { runUnscoped, runWithNestedTenantWrite } from '@rasta/nest-common';
+import {
+  createTenantGuardExtension,
+  runUnscoped,
+  runWithNestedTenantWrite,
+} from '@rasta/nest-common';
 import { asActor, cleanup, id, key, newPrisma, publishOffer, tenants, wire } from './helpers';
-import type { PrismaService } from '../src/prisma/prisma.service';
-import type { Prisma } from '../src/generated/prisma';
+import { databaseUrl } from './helpers';
+import { TENANT_SCOPED_MODELS, type PrismaService } from '../src/prisma/prisma.service';
+import { Prisma, PrismaClient } from '../src/generated/prisma';
 
 describe('scalar FK tenant policy (real PostgreSQL)', () => {
   const org = tenants();
@@ -127,6 +132,41 @@ describe('scalar FK tenant policy (real PostgreSQL)', () => {
       ),
     ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
   });
+  it.each([undefined, 'analytics'] as const)(
+    'transaction batches refuse implicit FK writes with family %s (real DMMF)',
+    async (scalarFkFamily) => {
+      const base = new PrismaClient({ datasources: { db: { url: databaseUrl() } } });
+      const client = base.$extends(
+        createTenantGuardExtension({
+          datamodel: Prisma.dmmf.datamodel,
+          scopedModels: TENANT_SCOPED_MODELS,
+          scalarFkFamily,
+        }),
+      );
+      try {
+        await expect(
+          asBuyer(() =>
+            runWithNestedTenantWrite(
+              {
+                relation: 'Order.lines',
+                reason: 'Batch implicit FK classification regression control',
+              },
+              () =>
+                client.$transaction([
+                  client.order.findUnique({ where: { id: own } }),
+                  client.order.update({
+                    where: { id: own },
+                    data: { lines: { connect: { id: line.id } } },
+                  }),
+                ]),
+            ),
+          ),
+        ).rejects.toMatchObject({ code: 'TENANT_MISMATCH' });
+      } finally {
+        await base.$disconnect();
+      }
+    },
+  );
   it('cannot bypass atomic enforcement through runUnscoped', async () => {
     await expect(
       runUnscoped('prove database ownership enforcement survives explicit guard bypass', () =>

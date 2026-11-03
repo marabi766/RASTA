@@ -108,8 +108,11 @@ ordinary code review. Raw SQL is never made safe by wrapping it in this extensio
 
 Every installer names its service family. `scalar-relation-policy.ts` explicitly
 lists the remaining legacy relations; its schema/installer test pins that list.
-New or unclassified scalar FK writes refuse, including through nested data and
-both upsert branches. The legacy list is rollout debt, not reviewed safety.
+New or unclassified FK writes refuse, including implicit nested links from either
+side. Link creation/replacement/disconnection resolves exactly one DMMF owner and
+uses the scalar classification and composite-FK gate; missing/ambiguous owners
+refuse. Nested update data, createMany rows, both upsert branches and transaction
+batches retain the same traversal. The legacy list is rollout debt, not reviewed safety.
 
 Marketplace classifies all twelve owning relations. `Offer.product` and
 `OrderLine.offer` are reviewed cross-party links (ADR-037/042). Seven same-tenant
