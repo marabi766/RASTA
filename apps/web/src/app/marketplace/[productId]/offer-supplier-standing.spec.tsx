@@ -3,6 +3,7 @@ import { render } from '@testing-library/react';
 import { OffersScreen } from './OffersScreen';
 import type { Offer, Product } from '@/server/marketplace';
 import type { SupplierSummary } from '@/server/suppliers';
+import { nonStandardSpelling } from '@/test/orthography';
 import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
@@ -81,6 +82,15 @@ describe('the supplier name and qualification beside an offer', () => {
     for (const code of ['ACTIVE', 'SUSPENDED', 'GOODS_SUPPLY', 'UNAVAILABLE', 'ARCHIVED']) {
       expect(container.textContent).not.toContain(code);
     }
+  });
+
+  it.each([
+    ['a qualified supplier', withSupplier({})],
+    ['an unreadable directory', new Map<string, SupplierSummary>()],
+  ])('is in standard orthography as rendered, for %s', (_case, suppliers) => {
+    const { container } = screen(suppliers);
+    expect(container.textContent).toContain('تأمین‌کننده');
+    expect(nonStandardSpelling(container.textContent ?? '')).toBeNull();
   });
 
   it('reads as unknown, not qualified, when the directory read failed (no entry)', () => {
