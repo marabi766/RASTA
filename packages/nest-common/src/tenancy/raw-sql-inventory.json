@@ -280,6 +280,27 @@
     "decision": "platform-wide: projects signed organization hierarchy events into the shared audit reference replica"
   },
   {
+    "file": "services/audit-service/src/audit/rfq-evidence.repository.ts",
+    "line": 58,
+    "hash": "eddd5de45570718e23166439d4b2c6d353abe78d153b615739819fc7b5e77167",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction coordination lock keyed by the domain slot; no tenant row is read or written"
+  },
+  {
+    "file": "services/audit-service/src/audit/rfq-evidence.repository.ts",
+    "line": 236,
+    "hash": "76f5c31752bf913d857829a2fef73d4308d1b8cb791b34a34347f3f6b5751958",
+    "occurrence": 0,
+    "decision": "platform-wide: audit ingestion or operational evidence metrics enumerate platform-held source evidence; public reads are separately authorized and scoped"
+  },
+  {
+    "file": "services/audit-service/src/audit/rfq-evidence.repository.ts",
+    "line": 242,
+    "hash": "db43fbeaa38c2c52616e2008e1f82ae289453d52c1ab93b786136a958bcb76cb",
+    "occurrence": 0,
+    "decision": "platform-wide: audit ingestion or operational evidence metrics enumerate platform-held source evidence; public reads are separately authorized and scoped"
+  },
+  {
     "file": "services/audit-service/src/audit/tender-evidence.repository.ts",
     "line": 59,
     "hash": "839f7e9a308c458a3c203532ca02d081cbd4a40365adb1b8647dd3e7d9be3b22",

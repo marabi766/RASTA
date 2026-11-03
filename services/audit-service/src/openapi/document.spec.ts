@@ -17,6 +17,7 @@ describe('the published error envelope (audit 10-26 F3)', () => {
         '/v1/audit-events/{id}': { get: {} },
         '/v1/internal/audit-events/{id}': { get: {} },
         '/v1/internal/tender-evidence/{tenderId}/chain': { get: {} },
+        '/v1/internal/rfq-evidence/{rfqId}/chain': { get: {} },
       },
     } as unknown as OpenAPIObject);
     expect(errorEnvelopeProblems(document)).toEqual([]);
