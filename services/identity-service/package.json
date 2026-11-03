@@ -22,7 +22,7 @@
     "db:seed": "node --import @swc-node/register/esm-register --env-file-if-exists=../../.env prisma/seed.ts",
     "keycloak:reconcile": "node -r @swc-node/register --env-file-if-exists=../../.env src/keycloak/projection.cli.ts reconcile",
     "keycloak:backfill": "node -r @swc-node/register --env-file-if-exists=../../.env src/keycloak/projection.cli.ts backfill",
-    "openapi:generate": "tsx src/openapi.ts"
+    "openapi:generate": "node -r @swc-node/register src/openapi/generate.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
