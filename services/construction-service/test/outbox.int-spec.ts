@@ -43,20 +43,35 @@ describe('the transactional outbox', () => {
 
   async function fullLifecycle(organizationId: string): Promise<string> {
     const project = await asAdmin(organizationId, () => w.projects.create(PROJECT));
-    await asAdmin(organizationId, () =>
+    const updated = await asAdmin(organizationId, () =>
       w.projects.update(project.id, { expectedVersion: 1, title: 'Renamed project' }),
     );
     const need = await asAdmin(organizationId, () =>
-      w.needs.add(project.id, { title: 'Gravel', description: 'Base course' }),
+      w.needs.add(project.id, {
+        expectedProjectVersion: updated.version,
+        title: 'Gravel',
+        description: 'Base course',
+      }),
     );
     await asAdmin(organizationId, () =>
-      w.needs.update(project.id, need.id, { expectedVersion: 1, unit: 'm3' }),
+      w.needs.update(project.id, need.id, {
+        expectedProjectVersion: updated.version,
+        expectedVersion: 1,
+        unit: 'm3',
+      }),
     );
     await asAdmin(organizationId, () =>
-      w.needs.submit(project.id, need.id, { expectedVersion: 2 }),
+      w.needs.submit(project.id, need.id, {
+        expectedProjectVersion: updated.version,
+        expectedVersion: 2,
+      }),
     );
     await asAdmin(organizationId, () =>
-      w.needs.withdraw(project.id, need.id, { expectedVersion: 3, reason: 'Scope was reduced' }),
+      w.needs.withdraw(project.id, need.id, {
+        expectedProjectVersion: updated.version,
+        expectedVersion: 3,
+        reason: 'Scope was reduced',
+      }),
     );
     await asAdmin(organizationId, () =>
       w.projects.cancel(project.id, { expectedVersion: 2, reason: 'Funding was withdrawn' }),
@@ -121,7 +136,9 @@ describe('the transactional outbox', () => {
       asAdmin(a, () => w.projects.update(project.id, { expectedVersion: 7, title: 'Stale' })),
     ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
     await expect(
-      asAdmin(a, () => w.needs.submit(project.id, 'PND_NOPE', { expectedVersion: 1 })),
+      asAdmin(a, () =>
+        w.needs.submit(project.id, 'PND_NOPE', { expectedProjectVersion: 1, expectedVersion: 1 }),
+      ),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
 
     expect(await outboxFor(w.prisma, a)).toHaveLength(before);

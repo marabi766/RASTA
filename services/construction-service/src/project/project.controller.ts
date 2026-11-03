@@ -18,7 +18,7 @@ import { ProjectService } from './project.service';
 import { NeedService } from './need.service';
 import {
   cancelProjectSchema,
-  createNeedSchema,
+  replayableCreateNeedSchema,
   createProjectSchema,
   listNeedsQuerySchema,
   listProjectsQuerySchema,
@@ -27,7 +27,7 @@ import {
   updateProjectSchema,
   withdrawNeedSchema,
   type CancelProjectDto,
-  type CreateNeedDto,
+  type ReplayableCreateNeedDto,
   type CreateProjectDto,
   type ListNeedsQuery,
   type ListProjectsQuery,
@@ -64,6 +64,12 @@ const ROLES_NOTE =
 const TENANT_NOTE =
   'Only the organization the request acts for: a project of any other organization answers ' +
   '404, never 403, so its existence is not disclosed.';
+
+const PARENT_VERSION_NOTE =
+  '`expectedProjectVersion` is required and must match the parent under its row lock, before ' +
+  'editability or no-op checks; otherwise 409 OPTIMISTIC_LOCK_FAILED and nothing changes. ' +
+  'Need writes do not increment the project version. Completed add replays return their stored ' +
+  'response without domain work, including an old body without this field; new claims require it. ';
 
 const VERSION_NOTE =
   '`expectedVersion` must equal the current `version`; otherwise 409 OPTIMISTIC_LOCK_FAILED ' +
@@ -164,14 +170,18 @@ export class ProjectController {
     description:
       'Only while the project is DRAFT or CHANGES_REQUESTED (422 otherwise). Fields are the ' +
       'provisional set of docs/24 Q-68. An optional Idempotency-Key makes a retry return the first ' +
-      `response. Publishes PROJECT_NEED_ADDED. ${TENANT_NOTE}`,
+      'response. The optional Idempotency-Replay-Deadline uses the same admission and retention ' +
+      'fence as project creation. ' +
+      `${PARENT_VERSION_NOTE} Publishes PROJECT_NEED_ADDED. ${TENANT_NOTE}`,
   })
   async addNeed(
     @Param('id') id: string,
-    @Body(zodPipe(createNeedSchema)) dto: CreateNeedDto,
+    @Body(zodPipe(replayableCreateNeedSchema)) dto: ReplayableCreateNeedDto,
     @Headers('idempotency-key') idempotencyKey?: string,
+    @Headers('idempotency-replay-deadline') replayDeadline?: string,
   ) {
-    return this.needs.add(id, dto, parseIdempotencyKey(idempotencyKey));
+    const key = parseIdempotencyKey(idempotencyKey);
+    return this.needs.add(id, dto, key, parseReplayDeadline(replayDeadline, key));
   }
 
   @Get(':id/needs')
@@ -186,7 +196,7 @@ export class ProjectController {
   @Patch(':id/needs/:needId')
   @ApiOperation({
     summary: 'Edit a DRAFT need of an editable project',
-    description: `${VERSION_NOTE} A submitted need cannot be edited: withdraw it and add a new one. Publishes PROJECT_NEED_UPDATED.`,
+    description: `${PARENT_VERSION_NOTE}${VERSION_NOTE} A submitted need cannot be edited: withdraw it and add a new one. Publishes PROJECT_NEED_UPDATED.`,
   })
   async updateNeed(
     @Param('id') id: string,
@@ -200,7 +210,7 @@ export class ProjectController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Submit a need into the project scope (DRAFT → SUBMITTED)',
-    description: `${VERSION_NOTE} Publishes PROJECT_NEED_SUBMITTED.`,
+    description: `${PARENT_VERSION_NOTE}${VERSION_NOTE} Publishes PROJECT_NEED_SUBMITTED.`,
   })
   async submitNeed(
     @Param('id') id: string,
@@ -215,7 +225,7 @@ export class ProjectController {
   @ApiOperation({
     summary: 'Withdraw a need (terminal)',
     description:
-      `${VERSION_NOTE} The reason is required and kept as withdrawalReason; ` +
+      `${PARENT_VERSION_NOTE}${VERSION_NOTE} The reason is required and kept as withdrawalReason; ` +
       'PROJECT_NEED_WITHDRAWN does not carry it (no free text on events).',
   })
   async withdrawNeed(
