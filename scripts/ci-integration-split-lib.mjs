@@ -259,8 +259,10 @@ export const JOB_SETUP_MINUTES = Object.freeze({
  * took more than 80 % of the old limit, so the new one is ceil(max x 1.5 / 60).
  * `quality` took up to 1446 s (old limit 25, 96 %) and cancelled train run
  * 40936057488; `web-browser` took up to 1462 s (old limit 30, 81 %).
+ * On 2026-11-02 `quality` took up to 2216 s (limit 37, 100 %) and cancelled
+ * main run 41496157174 and train run 41512869238, so its floor is 56.
  */
-export const JOB_FLOOR_MINUTES = Object.freeze({ quality: 37, 'web-browser': 37 });
+export const JOB_FLOOR_MINUTES = Object.freeze({ quality: 56, 'web-browser': 37 });
 
 /** The keys a test step may have: nothing that skips it, forgives it or changes its shell. */
 const STEP_KEYS = new Set(['name', 'run', 'env', 'timeout-minutes']);
