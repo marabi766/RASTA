@@ -58,7 +58,7 @@ export function isoDateTime(options: IsoDateTimeOptions = {}): z.core.$ZodCheck<
     pattern: legacyDatetimeRegex(options),
   } as z.core.$ZodISODateTimeParams;
   const check = z.core._isoDateTime(z.ZodISODateTime, params);
-  const pattern = legacyDatetimeRegex(rule);
+  const pattern = legacyDatetimeRegex(options);
   check._zod.check = (payload) => {
     if (pattern.test(payload.value) && Number.isFinite(Date.parse(payload.value))) return;
     payload.issues.push({
