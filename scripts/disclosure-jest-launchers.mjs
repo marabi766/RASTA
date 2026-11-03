@@ -161,11 +161,11 @@ export const JEST_LAUNCHERS = {
       'Spawns offline pnpm install, production dependency graph queries and Node checker probes; no Jest launch.',
     sha256: {
       'scripts/testing-dev-only.test.mjs':
-        'dc670876ab27e52357d85322a890ff18b06301c8b5fdf5817d2d31e55ee8d89a',
+        '7e5223788548f0e6b7fc16366fbd39e735bc8b53c33a215116f4676f7d3b27c6',
       'scripts/testing-dev-only.mjs':
         '208d2c5102acfc44d932880f86a5c0809de9e10c1d6633cb89bc662373f5b155',
       'scripts/testing-dev-only-source.mjs':
-        '34e94e8bdacc74c3a7289a2036f9768c170a587e74e488003bcf523a32588d0f',
+        '579f4d5a3b4539ca9304b5742fb23b7c826c1f83c085509c0911976775873ab3',
     },
   },
   'scripts/lint-scripts-registration.test.mjs': {
