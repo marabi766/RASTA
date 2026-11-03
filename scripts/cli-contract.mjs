@@ -55,7 +55,13 @@ const PRETTIER = ['--parser', '--stdin-filepath'];
 export const CLI_CONTRACT = Object.freeze({
   // --- apps -----------------------------------------------------------------
   'apps/web/e2e/contract-fixture.ts': { other: ['-X', '-f', '-q', '-v'] },
+  // The build's preload puts itself into every child's NODE_OPTIONS / execArgv (`--require`);
+  // it reads no command line.
+  'apps/web/scripts/capture-next-config.cjs': { other: ['--require'] },
+  'apps/web/scripts/build-supervisor.mjs': { other: ['-axo'] },
   'apps/web/src/app/fonts.ts': { other: ['--font-vazirmatn'] },
+  // Test helper of the build-binding specs: runs the build scripts in a child Node.
+  'apps/web/src/test/build-scripts.ts': { other: ['--input-type', '-e'] },
 
   // --- packages: test fixtures run by their specs ----------------------------
   // The stock-zod oracle's build child (PR #444 r4): its input arrives on stdin.
@@ -257,7 +263,8 @@ export const CLI_CONTRACT = Object.freeze({
       '-v',
     ],
   },
-  'scripts/check-db-runtime-privileges.mjs': { other: ['-X', '-d', '-q', '-tA', '-v'] },
+  // psqlRows (#540 r2 R2-2): the check's one way to run psql.
+  'scripts/check-db-runtime-privileges-lib.mjs': { other: ['-X', '-d', '-q', '-tA', '-v'] },
   // Docker command lines read from Dockerfiles and compose files, never run.
   'scripts/check-dockerfile-pins-lib.mjs': {
     other: [
@@ -371,6 +378,10 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/database-services.mjs': { other: ['-service'] },
   'scripts/disposable-broker.mjs': { positionals: ['script'] },
   'scripts/infra-preflight-lib.mjs': { other: ['-service'] },
+  'scripts/kafka-init-gate.mjs': {
+    positionals: ['enum'],
+    other: ['--all', '--quiet', '--format', '-d'],
+  },
   'scripts/kafka-acl.mjs': { accepts: { '--profile': 'enum' }, positionals: ['enum'] },
   'scripts/kafka-outbox-tables.mjs': { positionals: ['script'] },
   // `temporal workflow` options; the address is TEMPORAL_ADDRESS's, never an argument here.

@@ -621,8 +621,10 @@ model Review {
   supplierOrganizationId String @map("supplier_organization_id")
 
   /// 1..5, checked in the database as well as in the DTO.
-  rating  Int
-  comment String?
+  rating        Int
+  /// Separate buyer quality answer (Q-56); null means no quality signal.
+  qualityRating Int?    @map("quality_rating")
+  comment       String?
 
   submittedAt DateTime @default(now()) @map("submitted_at")
   submittedBy String   @map("submitted_by")

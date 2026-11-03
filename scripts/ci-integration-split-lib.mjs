@@ -186,9 +186,13 @@ export const STEP_INVENTORY = Object.freeze({
     'pnpm run test:supplier-privilege-split',
   ),
   'Runtime roles own nothing (D-045)': postgresGuard('pnpm run check:db-runtime-privileges'),
-  'Runtime-role check and the generic split, on a throwaway database': postgresGuard(
-    'pnpm run test:db-runtime-privileges',
-  ),
+  // 18 = ceil(710 s x 1.5 / 60), an estimate (#540 r3): the three files took
+  // 640 s in CI at 709012e7; the R3-1 fixtures and the two psql calls each
+  // split adds come to ~70 s more there (ci.yml has the arithmetic).
+  'Runtime-role check and the generic split, on a throwaway database': {
+    ...postgresGuard('pnpm run test:db-runtime-privileges'),
+    timeout: 18,
+  },
   'Every database session runs in UTC (L7-37)': postgresGuard('pnpm run test:db-session-utc'),
   'The runtime pool and statement timeout come from configuration': postgresGuard(
     'pnpm run test:db-pool-config',
@@ -255,8 +259,10 @@ export const JOB_SETUP_MINUTES = Object.freeze({
  * took more than 80 % of the old limit, so the new one is ceil(max x 1.5 / 60).
  * `quality` took up to 1446 s (old limit 25, 96 %) and cancelled train run
  * 40936057488; `web-browser` took up to 1462 s (old limit 30, 81 %).
+ * On 2026-11-02 `quality` took up to 2216 s (limit 37, 100 %) and cancelled
+ * main run 41496157174 and train run 41512869238, so its floor is 56.
  */
-export const JOB_FLOOR_MINUTES = Object.freeze({ quality: 37, 'web-browser': 37 });
+export const JOB_FLOOR_MINUTES = Object.freeze({ quality: 56, 'web-browser': 37 });
 
 /** The keys a test step may have: nothing that skips it, forgives it or changes its shell. */
 const STEP_KEYS = new Set(['name', 'run', 'env', 'timeout-minutes']);

@@ -2304,6 +2304,7 @@ export const EXPECTED = {
       'return_dispatch_release_guard',
     ],
     constraints: [
+      'ck_review_quality_rating',
       'ck_return_request_status',
       'ck_return_request_status_coherent',
       'ck_return_request_version_matches_status',
