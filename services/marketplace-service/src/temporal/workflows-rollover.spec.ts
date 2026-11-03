@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TestWorkflowEnvironment, MockActivityEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
@@ -66,6 +66,80 @@ describe('history rollover on real Temporal', () => {
   }, 300_000);
   afterAll(async () => {
     await env?.teardown();
+  });
+
+  it('switches a running legacy command stream to the patch and replays its mixed history', async () => {
+    // Exercise the legacy branch that the immutable pre-change fixture above
+    // independently verifies. Disable patch adoption only for the first worker.
+    const dir = mkdtempSync(join(__dirname, '.legacy-'));
+    const source = readFileSync(require.resolve('./workflows.ts'), 'utf8');
+    writeFileSync(join(dir, 'workflows.ts'), source.replaceAll('patched(ROLLOVER_PATCH)', 'false'));
+    try {
+      const taskQueue = `rollover-mixed-${++serial}`;
+      const ids: string[] = [];
+      const activities = {
+        readOrder: async () => {
+          ids.push(Context.current().info.activityId);
+          return {
+            status: 'FUNDS_HELD',
+            economicTransactionId: 'TXN_MIXED',
+            cancellationReason: null,
+            dispute: null,
+          };
+        },
+      } satisfies Partial<OrderActivities>;
+      const options = {
+        connection: env.nativeConnection,
+        taskQueue,
+        activities,
+        maxCachedWorkflows: 0,
+      };
+      const legacy = await Worker.create({ ...options, workflowsPath: join(dir, 'workflows.ts') });
+      await legacy.runUntil(async () => {
+        const handle = await env.client.workflow.start(orderSaga, {
+          workflowId: taskQueue,
+          taskQueue,
+          args: [{ ...INPUT, historyEventThreshold: 2000 }],
+        });
+        let status: SagaStatus | undefined;
+        for (let i = 0; i < 100; i++) {
+          status = await handle.query<SagaStatus>('status');
+          if (status.phase === 'AWAITING_CONFIRMATION') break;
+          await env.sleep('1 second');
+        }
+        expect(status).toMatchObject({ phase: 'AWAITING_CONFIRMATION' });
+      });
+      const handle = env.client.workflow.getHandle(taskQueue);
+      try {
+        const before = await handle.fetchHistory();
+        expect(before.events?.some((e) => e.markerRecordedEventAttributes)).toBe(false);
+        expect(ids).toEqual(['1']);
+        const patchedWorker = await Worker.create({
+          ...options,
+          workflowsPath: require.resolve('./workflows'),
+        });
+        await patchedWorker.runUntil(async () => {
+          await handle.signal('orderConfirmed');
+          // Query is ordered after the signal; wait for its asynchronous read.
+          for (let i = 0; i < 100 && ids.length < 2; i++) await env.sleep('1 second');
+          await handle.query('status');
+          expect(ids).toEqual(['1', 'saga-step-1']);
+          const mixed = await handle.fetchHistory();
+          expect(
+            mixed.events?.some((e) => e.markerRecordedEventAttributes?.markerName === 'core_patch'),
+          ).toBe(true);
+          await Worker.runReplayHistory(
+            { workflowsPath: require.resolve('./workflows') },
+            mixed,
+            taskQueue,
+          );
+        });
+      } finally {
+        await handle.terminate();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('preserves absolute reminder deadlines, counters and progress; replays both sides of rollover', async () => {

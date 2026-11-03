@@ -36,12 +36,13 @@ Worker قدیمی اثرش را Commit کرده و تکمیلش به Temporal ن
 
 ### گام ۳ — Gate
 
-از ریشهٔ مخزن، با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر سه اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
+از ریشهٔ مخزن، با همان مقادیری که سرویس با آن‌ها اجرا می‌شود؛ هر چهار اجباری‌اند و پیش‌فرض ندارند (بررسی Namespace یا Queue
 اشتباه چیزی نمی‌یابد و می‌گذشت). TLS یا API Key: متغیرهای `TEMPORAL_*` خود CLI ـِ `temporal`، که به آن می‌رسند.
 
 ```bash
 TEMPORAL_ADDRESS='<as the service>' TEMPORAL_NAMESPACE='<as the service>' \
   MARKETPLACE_TEMPORAL_TASK_QUEUE='<as the service>' \
+  MARKETPLACE_TARGET_PACKAGE_JSON='<package.json extracted from target image>' \
   node scripts/marketplace-saga-drain-check.mjs
 ```
 
@@ -55,6 +56,7 @@ temporal task-queue describe "${C[@]}" --task-queue "$MARKETPLACE_TEMPORAL_TASK_
 temporal workflow count "${C[@]}" --query "$Q" --output json                                          # n
 temporal workflow list "${C[@]}" --query "$Q" --output json                                           # باید دقیقاً n اجرای یکتا باشد، بی تکرار
 temporal workflow describe "${C[@]}" --workflow-id <id> --run-id <runId> --output json                 # هر ردیف یک بار: .pendingActivities نیست یا []
+temporal workflow show "${C[@]}" --workflow-id <id> --run-id <runId> --output json --no-json-shorthand-payloads # سازگاری نسخه
 temporal workflow count "${C[@]}" --query "$Q" --output json                                          # باز همان n
 ```
 
@@ -163,13 +165,38 @@ The internal test threshold can only lower the event ceiling.
 A rollover carries both dispute identities, absolute reminder deadlines, status
 and counters, and the monotonic activity sequence. Financial effects are already
 recorded by their owner before a checkpoint; the new run re-reads that owner state.
-It does not repeat initial hold placement. New activity receipt keys derive from
-the order workflow id and a sequence carried across runs, never the new run id.
-Financial HTTP keys remain derived from the order and operation/dispute identity.
-Legacy numeric activity ids retain their previous receipt keys.
+It does not repeat initial hold placement. Activity receipt keys are run-scoped:
+workflow id / run id / activity id, including legacy numeric activity ids. Patched
+activity ids use a sequence carried across runs. Financial HTTP idempotency keys
+remain derived from the order and operation/dispute identity, unchanged by rollover.
 
 `order-saga-durable-rollover-v1` gates new activity options/identities and rollover.
 Pre-change history replays the original commands; an existing live run can adopt
 the patch at a later checkpoint. The checked-in synthetic 49-event pre-change
 history and newly captured pre/post rollover histories are explicitly replayed
 with `Worker.runReplayHistory` in the workflow test suite.
+
+### Forward-only worker compatibility boundary
+
+After adoption of `order-saga-durable-rollover-v1`, the minimum compatible worker
+protocol is **1**. Draining activities does not make a downgrade safe. The gate
+reads every running execution's complete durable history with `workflow show
+--output json --no-json-shorthand-payloads` (the pinned CLI supports this flag;
+[CLI reference](https://docs.temporal.io/cli/workflow#show)). It requires protocol 1
+for either a recorded `core_patch` rollover marker or a start input carrying
+`resume`, including a continued run before its first workflow task/activity.
+Durable history avoids visibility indexing delays and adds no workflow commands.
+
+Extract `services/marketplace-service/package.json` from the **immutable target
+image** as `MARKETPLACE_TARGET_PACKAGE_JSON`, never from the operator checkout.
+`marketplaceSagaProtocol` declares support (this build: 1; audited legacy: 0).
+Missing, unreadable or unknown declarations block even an empty queue. An incompatible
+target blocks regardless of pending activities. Missing/malformed markers,
+unsupported payload encodings and incomplete histories (event sequence/length
+checked against describe) also block. Never add protocol 1 to an old build to
+bypass the gate: it must preserve both continuation state and patched commands.
+
+Use this gate for **every** deployment, including rollback. Once a running saga
+requires protocol 1, restore only a compatible image or ship a forward fix. Never
+reset/terminate a saga to downgrade. Keep the stopped-worker/no-new-start window
+above; a history change during inspection requires another drain/check.
