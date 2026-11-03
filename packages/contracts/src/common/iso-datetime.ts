@@ -48,13 +48,14 @@ export function legacyDatetimeRegex(options: IsoDateTimeOptions = {}): RegExp {
 
 /** zod 3's `.datetime()` as a zod 4 check: `z.string().check(isoDateTime())`. */
 export function isoDateTime(options: IsoDateTimeOptions = {}): z.core.$ZodCheck<string> {
-  const { message, ...rule } = options;
   // The params type leaves `pattern` out (zod derives it from the options); the
   // constructor keeps a pattern it is given (`def.pattern ??= …`).
   const params = {
-    ...rule,
-    ...(message === undefined ? {} : { message }),
-    pattern: legacyDatetimeRegex(rule),
+    offset: options.offset,
+    local: options.local,
+    precision: options.precision,
+    message: options.message,
+    pattern: legacyDatetimeRegex(options),
   } as z.core.$ZodISODateTimeParams;
   return z.core._isoDateTime(z.ZodISODateTime, params);
 }

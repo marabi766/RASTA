@@ -36,6 +36,7 @@ const zodModule = (name) => typeof name === 'string' && /^(zod)(\/|$)/.test(name
 const capability = (name) =>
   ![
     'NEVER',
+    'regexes',
     'ZodIssueCode',
     'ZodFirstPartyTypeKind',
     'ZodError',
@@ -43,6 +44,35 @@ const capability = (name) =>
     '$ZodAsyncError',
     '$ZodEncodeError',
   ].includes(name);
+// Zod 4 classic/mini/core signatures: only these slots can enable primitive coercion.
+// Shapes, enum entries, parse input and metadata are deliberately absent.
+const primitiveFactories = new Set(
+  `string number bigint boolean date int float32 float64
+  int32 uint32 int64 uint64 email guid uuid uuidv4 uuidv6 uuidv7 url httpUrl emoji nanoid
+  cuid cuid2 ulid xid ksuid ipv4 mac ipv6 cidrv4 cidrv6 base64 base64url e164 creditCard iban
+  hostname hex currencyCode jwt datetime date time duration isodatetime isodate isotime isoduration`
+    .toLowerCase()
+    .split(/\s+/),
+);
+const COERCING_API = -2;
+// Namespace factories, core Class-first factories and derived definitions share one signature.
+const optionsIndex = ({ name, raw, method, owner } = {}) => {
+  if (!raw) return -1;
+  const api = name?.replace(/^_/, '');
+  const core = name?.startsWith('_') ? 1 : 0;
+  if (raw && api?.startsWith('coerced')) return COERCING_API;
+  const kind = api?.replace(/^\$?Zod(?:Mini)?/, '').toLowerCase();
+  if (name === 'clone') return method ? 0 : raw ? 1 : 0;
+  if (name === 'constructor') return 0;
+  if (name === 'create') return owner ? optionsIndex({ name: owner, raw: true }) : 0;
+  if (api === 'hash') return 1 + core;
+  if (api === 'stringFormat') return 2 + core;
+  return raw &&
+    (primitiveFactories.has(kind) ||
+      /^\$?Zod(?:Mini)?(?:String|CustomString|Number|BigInt|Boolean|Date|ISO)/.test(name))
+    ? core
+    : -1;
+};
 const unwrap = (node) => {
   while (
     node &&
@@ -117,6 +147,13 @@ export default {
       zodModule(def.parent.source?.value) &&
       def.parent.importKind !== 'type' &&
       def.node.importKind !== 'type';
+    const access = (result, name) => ({
+      ...result,
+      raw: (result.raw || ['constructor', 'clone'].includes(name)) && capability(name),
+      method: !result.raw,
+      owner: result.name,
+      name,
+    });
     // Follow binding definitions, not spellings: aliases, nested destructuring and const chains.
     // Call results are schemas, distinct from raw namespaces/factories which may not escape.
     const origin = (raw, seen = new Set()) => {
@@ -140,8 +177,8 @@ export default {
               if (binding.parent?.type === 'Property') path.unshift(key(binding.parent));
               binding = binding.parent;
             }
-            for (const name of path) if (result) result = { ...result, name };
-            if (result?.raw) return result;
+            for (const name of path) if (result) result = access(result, name);
+            if (result?.raw) resolved = result;
             resolved ??= result;
           }
         }
@@ -157,21 +194,18 @@ export default {
             ) {
               if (binding.parent?.type === 'Property') path.unshift(key(binding.parent));
             }
-            for (const name of path) if (result) result = { ...result, name };
-            if (result?.raw) return result;
+            for (const name of path) if (result) result = access(result, name);
+            if (result?.raw) resolved = result;
             resolved ??= result;
           }
         }
-        return resolved;
+        return resolved?.raw && v.references.some((ref) => ref.isWrite() && !ref.init)
+          ? { ...resolved, ambiguous: true }
+          : resolved;
       }
       if (node.type === 'MemberExpression') {
         const result = origin(node.object, seen);
-        if (result)
-          return {
-            ...result,
-            raw: (result.raw || key(node) === 'constructor') && capability(key(node)),
-            name: key(node),
-          };
+        if (result) return access(result, key(node));
       }
       if (node.type === 'CallExpression' || node.type === 'NewExpression') {
         if (globalName(node.callee, 'require') && zodModule(constant(node.arguments[0])))
@@ -238,7 +272,12 @@ export default {
             // A helper/container could mutate an otherwise empty options object
             // (Object.assign, defineProperty, or an opaque alias). Do not guess
             // what happened there. Primitive message strings cannot be mutated.
-            if (!ref.isRead() || constant(def?.node.init) !== undefined) continue;
+            if (
+              !ref.isRead() ||
+              (constant(def?.node.init) !== undefined &&
+                !binding.references.some((r) => r.isWrite() && !r.init))
+            )
+              continue;
             if (member.type === 'VariableDeclarator' && member.init === read) {
               options(member.id, seen, true);
             } else if (
@@ -250,7 +289,7 @@ export default {
             } else if (
               (['CallExpression', 'NewExpression'].includes(member.type) &&
                 member.arguments.includes(read) &&
-                !origin(member.callee)?.raw) ||
+                optionsIndex(origin(member.callee)) !== member.arguments.indexOf(read)) ||
               [
                 'Property',
                 'ArrayExpression',
@@ -269,7 +308,11 @@ export default {
         for (const prop of node.properties) {
           if (prop.type === 'SpreadElement') options(prop.argument, seen, requireKnown);
           else if (
-            (key(prop) === 'coerce' || (requireKnown && key(prop) === undefined)) &&
+            (key(prop) === 'coerce' ||
+              (requireKnown &&
+                (key(prop) === undefined ||
+                  key(prop) === '__proto__' ||
+                  ['get', 'set'].includes(prop.kind)))) &&
             constant(prop.value) !== false
           )
             report(prop);
@@ -300,14 +343,15 @@ export default {
         ['ReturnStatement', 'ExportSpecifier', 'ExportDefaultDeclaration'].includes(parent.type)
       )
         return;
-      // These two core check factories take their own constructor as an argument
-      // (#444 compatibility adapters); the constructor never leaves zod's factory.
+      // Known core factories keep their Class argument inside Zod's constructor boundary.
+      const factory = origin(parent.callee);
       if (
         parent.type === 'CallExpression' &&
-        ['ZodURL', 'ZodISODateTime'].includes(origin(raw).name) &&
-        origin(parent.callee)?.raw &&
-        { ZodURL: '_url', ZodISODateTime: '_isoDateTime' }[origin(raw).name] ===
-          origin(parent.callee).name
+        /^\$?Zod/.test(origin(raw).name ?? '') &&
+        factory?.raw &&
+        factory.name?.startsWith('_') &&
+        (optionsIndex(factory) > 0 || optionsIndex(factory) === COERCING_API) &&
+        parent.arguments[0] === node
       )
         return;
       report(node, 'escape');
@@ -352,16 +396,18 @@ export default {
       CallExpression(node) {
         escape(node);
         const factory = origin(node.callee);
-        if (!factory?.raw) return;
-        for (const [index, arg] of node.arguments.entries())
-          options(
-            arg,
-            new Set(),
-            index === 0 &&
-              ['number', 'string', 'bigint', 'boolean', 'date', 'create', 'constructor'].includes(
-                factory.name,
-              ),
-          );
+        if (!factory) return;
+        if (
+          factory.raw &&
+          factory.ambiguous &&
+          origin(unwrap(node.callee)?.object)?.name !== 'coerce'
+        ) {
+          report(node, factory.name === 'preprocess' ? 'preprocess' : 'boundary');
+          return;
+        }
+        const index = optionsIndex(factory);
+        if (index === COERCING_API) report(node);
+        if (index >= 0) options(node.arguments[index], new Set(), true);
         if (factory.name !== 'preprocess') return;
         const callback = unwrap(node.arguments[0]);
         if (
@@ -386,6 +432,7 @@ export default {
           if (value?.type !== 'Identifier') return false;
           const binding = variable(value),
             def = binding?.defs[0];
+          if (binding?.references.some((ref) => ref.isWrite() && !ref.init)) return false;
           if (def?.name.typeAnnotation?.typeAnnotation.type === 'TSStringKeyword') return true;
           if (
             def?.type === 'Variable' &&
@@ -428,13 +475,14 @@ export default {
             const fn = def?.type === 'FunctionName' ? def.node : unwrap(def?.node.init);
             if (
               seen.has(binding) ||
+              binding?.references.some((ref) => ref.isWrite() && !ref.init) ||
               !['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration'].includes(
                 fn?.type,
               )
             )
               return true;
             let result = false;
-            walk(fn.body, (child) => {
+            walk(fn, (child) => {
               if (
                 ['CallExpression', 'NewExpression'].includes(child.type) &&
                 unsafe(child.callee, new Set([...seen, binding]))
@@ -477,21 +525,20 @@ export default {
           }
           return true;
         };
-        walk(callback.body, (child) => {
+        walk(callback, (child) => {
           if (['CallExpression', 'NewExpression'].includes(child.type) && unsafe(child.callee))
             report(child, 'preprocess');
         });
       },
       NewExpression(node) {
         const factory = origin(node.callee);
-        if (factory?.raw)
-          for (const arg of node.arguments)
-            options(
-              arg,
-              new Set(),
-              factory.name === 'constructor' ||
-                /Zod(Number|String|BigInt|Boolean|Date)$/.test(factory.name ?? ''),
-            );
+        if (factory?.raw && factory.ambiguous) {
+          report(node);
+          return;
+        }
+        const index = optionsIndex(factory);
+        if (index === COERCING_API) report(node);
+        if (index >= 0) options(node.arguments[index], new Set(), true);
       },
       ImportExpression: escape,
       ExportAllDeclaration(node) {
@@ -499,7 +546,12 @@ export default {
       },
       ExportNamedDeclaration(node) {
         if (node.exportKind === 'type') return;
-        if (zodModule(node.source?.value) && node.specifiers.some((s) => s.exportKind !== 'type'))
+        if (
+          zodModule(node.source?.value) &&
+          node.specifiers.some(
+            (s) => s.exportKind !== 'type' && capability(s.local?.name ?? s.local?.value),
+          )
+        )
           report(node, 'escape');
         for (const spec of node.specifiers)
           if (!node.source && spec.exportKind !== 'type' && origin(spec.local)?.raw)

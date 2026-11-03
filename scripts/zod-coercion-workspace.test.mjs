@@ -41,6 +41,14 @@ for (const config of ['eslint.config.mjs', 'apps/web/eslint.config.mjs']) {
           [`${prelude} schema.number({ coerce: true }); ${jsx}`, 1],
           [`${prelude} schema.preprocess(v => BigInt(v), schema.bigint()); ${jsx}`, 1],
           [`${prelude} schema.number(); ${jsx}`, 0],
+          [`${prelude} schema.int(getOptions()); ${jsx}`, 1],
+          [`${prelude} schema.number().clone(getOptions()); ${jsx}`, 1],
+          [
+            `${prelude} schema.preprocess((v, ctx, n = Number(v)) => n, schema.number()); ${jsx}`,
+            1,
+          ],
+          [`${prelude} schema.object({coerce: schema.boolean()}); ${jsx}`, 0],
+          [`${prelude} schema.safeParse(schema.object({}), {coerce: true}); ${jsx}`, 0],
         ]) {
           probes.push({ filePath, code });
           expected.push(count);

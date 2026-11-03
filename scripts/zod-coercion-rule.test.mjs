@@ -150,3 +150,108 @@ tester.run('zod/coercion-boundary', rule, {
     { ...bad(`${z}z.coerce.number();`), filename: `${ROOT}packages/other/src/env-issues.spec.ts` },
   ],
 });
+
+// Round 2: each row reproduces a review trigger; reject the class across aliases/options.
+const formats = `int float32 float64 int32 uint32 int64 uint64 email guid uuid uuidv4 uuidv6
+  uuidv7 url httpUrl emoji nanoid cuid cuid2 ulid xid ksuid ipv4 mac ipv6 cidrv4 cidrv6 base64 base64url
+  e164 creditCard iban hostname hex currencyCode jwt iso.datetime iso.date iso.time iso.duration`.split(
+  /\s+/,
+);
+const regressions = {
+  F1: [
+    `import {z as legacy} from 'zod/v3'; legacy.number({__proto__: {coerce: true}});`,
+    `z.int({get error() { this.coerce = true; return undefined; }});`,
+    `z.number({message: 'invalid', set error(value) { this.coerce = true; }});`,
+    ...['String', 'Number', 'Boolean', 'Bigint', 'Date'].map(
+      (name) => `z.core._coerced${name}(z.Zod${name === 'Bigint' ? 'BigInt' : name}, {});`,
+    ),
+    ...formats.map((name) => `const opts = {}; opts.coerce = true; z.${name}(opts);`),
+    `const f = z.int; f(getOptions());`,
+    `z.email({ ...getOptions() });`,
+    `z.hash('sha256', getOptions());`,
+    `z.stringFormat('custom', /a/, getOptions());`,
+    ...['ZodNumberFormat', 'ZodBigIntFormat', 'ZodMiniNumber'].map((name) =>
+      name === 'ZodMiniNumber'
+        ? `import { ZodMiniNumber } from 'zod/mini'; new ZodMiniNumber(getOptions());`
+        : `new z.${name}(getOptions());`,
+    ),
+    `z.clone(z.number(), getOptions());`,
+    `z.number().clone(getOptions());`,
+    `const copy = z.number().clone; copy(getOptions());`,
+    `const copy = z.number().clone; export { copy };`,
+    `const C = z.number().constructor; new C(getOptions());`,
+    `const opts = {}; const alias = opts; Object.assign(alias, {coerce: true}); z.int(opts);`,
+    `z.int({ ...{coerce: true} });`,
+    `z.core._int(z.ZodNumberFormat, getOptions());`,
+    `z.core._isoDateTime(z.ZodISODateTime, getOptions());`,
+    `z.core._stringFormat(z.ZodCustomStringFormat, 'custom', /a/, getOptions());`,
+  ],
+  F2: [
+    `let C = z.ZodNumberFormat; new C(getOptions()); C = z.ZodObject;`,
+    `let C = z.ZodObject; C = z.ZodNumberFormat; new C(getOptions());`,
+    `let f = z.number().safeParse; ({clone: f} = z.number()); f(getOptions());`,
+    `let f = z.number().safeParse; f = z.number().clone; f(getOptions());`,
+    `let f = z.object; f = z.preprocess; f(v => Number(v), z.number());`,
+    `let f; f = z.transform; f(Number);`,
+    `let f = z.object; ({preprocess: f} = z); f(v => Number(v), z.number());`,
+    `let convert = v => v; convert = Number; z.preprocess(v => convert(v), z.number());`,
+    `function convert(v) { return v; } convert = Number; z.preprocess(v => convert(v), z.number());`,
+    `let convert = v => v; convert = v => Number(v); z.preprocess(v => convert(v), z.number());`,
+    `let convert; ({convert} = {convert: Number}); z.preprocess(v => convert(v), z.number());`,
+    `let opts = 'message'; opts = {}; Object.assign(opts, {coerce: true}); z.number(opts);`,
+    `let opts = 'message'; opts = {}; const alias = opts; mutate(alias); z.int(opts);`,
+  ],
+  F3: [
+    `z.preprocess((v, ctx, n = Number(v)) => n, z.number());`,
+    `z.preprocess((v, ctx, {n = Number(v)} = {}) => n, z.number());`,
+    `const f = (v, n = Number(v)) => n; z.preprocess(v => f(v), z.number());`,
+    `function f(v, {n = Number(v)} = {}) { return n; } z.preprocess(v => f(v), z.number());`,
+  ],
+};
+const positives = [
+  `z.object({get coerce() {return z.boolean();}});`,
+  `z.regexes.string(getOptions());`,
+  `export {regexes} from 'zod';`,
+  `import {ZodError} from 'zod/v3'; ZodError.create([]);`,
+  `import {z as legacy} from 'zod/v3'; legacy.ZodObject.create({coerce: legacy.boolean()});`,
+  `import {z as legacy} from 'zod/v3'; legacy.ZodEnum.create(['coerce', 'other']);`,
+  ...['object', 'strictObject', 'looseObject'].map((name) => `z.${name}({coerce: z.boolean()});`),
+  `z.enum({coerce: 'value'});`,
+  ...['parse', 'safeParse', 'parseAsync', 'safeParseAsync'].map(
+    (name) => `z.${name}(z.object({}), {coerce: true});`,
+  ),
+  `z.meta({coerce: true});`,
+  `z.object({}).meta({coerce: true});`,
+  `export { ZodError, NEVER, ZodIssueCode } from 'zod';`,
+  `export { ZodError as Error } from 'zod/v4';`,
+  `const {ZodError, NEVER, ZodIssueCode} = z; export {ZodError, NEVER, ZodIssueCode};`,
+  `z.int({coerce: false});`,
+  `z.core._int(z.ZodNumberFormat, {coerce: false});`,
+  `const opts = {coerce: false}; z.number().clone(opts);`,
+  `z.object({}).clone({type: 'object', shape: {coerce: z.boolean()}});`,
+  `z.hash('sha256', {coerce: false});`,
+  `z.stringFormat('custom', /a/, {coerce: false});`,
+];
+// Use diagnostic presence: fail-closed ambiguity may report more than one unsafe path.
+import { Linter } from 'eslint';
+import assert from 'node:assert/strict';
+const linter = new Linter();
+const messages = (code) =>
+  linter.verify(z + code, [
+    {
+      languageOptions: { parser: tseslint.parser },
+      plugins: { boundary: { rules: { coercion: rule } } },
+      rules: { 'boundary/coercion': 'error' },
+    },
+  ]);
+for (const [finding, cases] of Object.entries(regressions))
+  for (const [index, code] of cases.entries())
+    it(`${finding} review trigger ${index + 1}: ${code}`, () => {
+      const diagnostics = messages(code);
+      assert.ok(
+        diagnostics.some((m) => m.ruleId === 'boundary/coercion'),
+        JSON.stringify(diagnostics),
+      );
+    });
+for (const [index, code] of positives.entries())
+  it(`F4 safe syntax ${index + 1}: ${code}`, () => assert.deepEqual(messages(code), []));
