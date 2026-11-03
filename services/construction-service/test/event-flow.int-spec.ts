@@ -100,9 +100,11 @@ describeWithKafka('construction event flow over Kafka', () => {
   it('carries a project’s lifecycle to the topic, keyed by projectId, in stream order', async () => {
     const project = await asAdmin(org, () => w.projects.create(PROJECT));
     const need = await asAdmin(org, () =>
-      w.needs.add(project.id, { title: 'Gravel', description: 'Base' }),
+      w.needs.add(project.id, { expectedProjectVersion: 1, title: 'Gravel', description: 'Base' }),
     );
-    await asAdmin(org, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 }));
+    await asAdmin(org, () =>
+      w.needs.submit(project.id, need.id, { expectedProjectVersion: 1, expectedVersion: 1 }),
+    );
     await asAdmin(org, () =>
       w.projects.cancel(project.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
     );

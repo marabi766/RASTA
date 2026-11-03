@@ -46,6 +46,7 @@ describe('need lifecycle', () => {
 
     const need = await asAdmin(a, () =>
       w.needs.add(project.id, {
+        expectedProjectVersion: 1,
         title: 'Hot-mix asphalt',
         description: 'Wearing course',
         quantity: '120.5',
@@ -84,17 +85,22 @@ describe('need lifecycle', () => {
     const a = org();
     const project = await newProject(a);
     const need = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'Culvert pipes', description: 'Two crossings' }),
+      w.needs.add(project.id, {
+        expectedProjectVersion: 1,
+        title: 'Culvert pipes',
+        description: 'Two crossings',
+      }),
     );
 
     const submitted = await asAdmin(a, () =>
-      w.needs.submit(project.id, need.id, { expectedVersion: 1 }),
+      w.needs.submit(project.id, need.id, { expectedProjectVersion: 1, expectedVersion: 1 }),
     );
     expect(submitted).toMatchObject({ status: 'SUBMITTED', version: 2 });
     expect(submitted.submittedBy).toBeTruthy();
 
     const withdrawn = await asAdmin(a, () =>
       w.needs.withdraw(project.id, need.id, {
+        expectedProjectVersion: 1,
         expectedVersion: 2,
         reason: 'Covered by the county',
       }),
@@ -123,11 +129,19 @@ describe('need lifecycle', () => {
     const a = org();
     const project = await newProject(a);
     const need = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'Signage', description: 'Two signs' }),
+      w.needs.add(project.id, {
+        expectedProjectVersion: 1,
+        title: 'Signage',
+        description: 'Two signs',
+      }),
     );
 
     const withdrawn = await asAdmin(a, () =>
-      w.needs.withdraw(project.id, need.id, { expectedVersion: 1, reason: 'Not needed after all' }),
+      w.needs.withdraw(project.id, need.id, {
+        expectedProjectVersion: 1,
+        expectedVersion: 1,
+        reason: 'Not needed after all',
+      }),
     );
     expect(withdrawn).toMatchObject({ status: 'WITHDRAWN', submittedAt: null });
   });
@@ -136,11 +150,17 @@ describe('need lifecycle', () => {
     const a = org();
     const project = await newProject(a);
     const need = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'Gravel', description: 'Base course', quantity: '10' }),
+      w.needs.add(project.id, {
+        expectedProjectVersion: 1,
+        title: 'Gravel',
+        description: 'Base course',
+        quantity: '10',
+      }),
     );
 
     const edited = await asAdmin(a, () =>
       w.needs.update(project.id, need.id, {
+        expectedProjectVersion: 1,
         expectedVersion: 1,
         quantity: '10.0000',
         unit: 'm3',
@@ -155,9 +175,17 @@ describe('need lifecycle', () => {
     // 10 and 10.0000 are the same quantity; only the unit changed.
     expect(payload.changedFields).toEqual(['unit']);
 
-    await asAdmin(a, () => w.needs.submit(project.id, need.id, { expectedVersion: 2 }));
+    await asAdmin(a, () =>
+      w.needs.submit(project.id, need.id, { expectedProjectVersion: 1, expectedVersion: 2 }),
+    );
     await expect(
-      asAdmin(a, () => w.needs.update(project.id, need.id, { expectedVersion: 3, unit: 't' })),
+      asAdmin(a, () =>
+        w.needs.update(project.id, need.id, {
+          expectedProjectVersion: 1,
+          expectedVersion: 3,
+          unit: 't',
+        }),
+      ),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
   });
 
@@ -165,20 +193,32 @@ describe('need lifecycle', () => {
     const a = org();
     const project = await newProject(a);
     const need = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'Kerbs', description: '400 m' }),
+      w.needs.add(project.id, { expectedProjectVersion: 1, title: 'Kerbs', description: '400 m' }),
     );
-    await asAdmin(a, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 }));
+    await asAdmin(a, () =>
+      w.needs.submit(project.id, need.id, { expectedProjectVersion: 1, expectedVersion: 1 }),
+    );
 
     await expect(
-      asAdmin(a, () => w.needs.submit(project.id, need.id, { expectedVersion: 2 })),
+      asAdmin(a, () =>
+        w.needs.submit(project.id, need.id, { expectedProjectVersion: 1, expectedVersion: 2 }),
+      ),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
 
     await asAdmin(a, () =>
-      w.needs.withdraw(project.id, need.id, { expectedVersion: 2, reason: 'Scope was reduced' }),
+      w.needs.withdraw(project.id, need.id, {
+        expectedProjectVersion: 1,
+        expectedVersion: 2,
+        reason: 'Scope was reduced',
+      }),
     );
     await expect(
       asAdmin(a, () =>
-        w.needs.withdraw(project.id, need.id, { expectedVersion: 3, reason: 'Scope was reduced' }),
+        w.needs.withdraw(project.id, need.id, {
+          expectedProjectVersion: 1,
+          expectedVersion: 3,
+          reason: 'Scope was reduced',
+        }),
       ),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
   });
@@ -187,14 +227,24 @@ describe('need lifecycle', () => {
     const a = org();
     const project = await newProject(a);
     const need = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'Lighting', description: 'Poles' }),
+      w.needs.add(project.id, {
+        expectedProjectVersion: 1,
+        title: 'Lighting',
+        description: 'Poles',
+      }),
     );
     await asAdmin(a, () =>
-      w.needs.update(project.id, need.id, { expectedVersion: 1, title: 'Street lighting' }),
+      w.needs.update(project.id, need.id, {
+        expectedProjectVersion: 1,
+        expectedVersion: 1,
+        title: 'Street lighting',
+      }),
     );
 
     await expect(
-      asAdmin(a, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 })),
+      asAdmin(a, () =>
+        w.needs.submit(project.id, need.id, { expectedProjectVersion: 1, expectedVersion: 1 }),
+      ),
     ).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
   });
 
@@ -202,12 +252,16 @@ describe('need lifecycle', () => {
     const a = org();
     const project = await newProject(a);
     const need = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'Fencing', description: '1 km' }),
+      w.needs.add(project.id, { expectedProjectVersion: 1, title: 'Fencing', description: '1 km' }),
     );
 
     const results = await Promise.allSettled([
-      asAdmin(a, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 })),
-      asAdmin(a, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 })),
+      asAdmin(a, () =>
+        w.needs.submit(project.id, need.id, { expectedProjectVersion: 1, expectedVersion: 1 }),
+      ),
+      asAdmin(a, () =>
+        w.needs.submit(project.id, need.id, { expectedProjectVersion: 1, expectedVersion: 1 }),
+      ),
     ]);
 
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
@@ -219,21 +273,33 @@ describe('need lifecycle', () => {
     const a = org();
     const project = await newProject(a);
     const need = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'Paint', description: 'Lines' }),
+      w.needs.add(project.id, { expectedProjectVersion: 1, title: 'Paint', description: 'Lines' }),
     );
     await asAdmin(a, () =>
       w.projects.cancel(project.id, { expectedVersion: 1, reason: 'Funding was withdrawn' }),
     );
 
     await expect(
-      asAdmin(a, () => w.needs.add(project.id, { title: 'More', description: 'Anything' })),
-    ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
-    await expect(
-      asAdmin(a, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 })),
+      asAdmin(a, () =>
+        w.needs.add(project.id, {
+          expectedProjectVersion: 2,
+          title: 'More',
+          description: 'Anything',
+        }),
+      ),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
     await expect(
       asAdmin(a, () =>
-        w.needs.withdraw(project.id, need.id, { expectedVersion: 1, reason: 'Project is gone' }),
+        w.needs.submit(project.id, need.id, { expectedProjectVersion: 2, expectedVersion: 1 }),
+      ),
+    ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+    await expect(
+      asAdmin(a, () =>
+        w.needs.withdraw(project.id, need.id, {
+          expectedProjectVersion: 2,
+          expectedVersion: 1,
+          reason: 'Project is gone',
+        }),
       ),
     ).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
   });
@@ -273,10 +339,12 @@ describe('need lifecycle', () => {
       const a = org();
       const project = await newProject(a);
       const need = await asAdmin(a, () =>
-        w.needs.add(project.id, { title: 'Drains', description: 'Two' }),
+        w.needs.add(project.id, { expectedProjectVersion: 1, title: 'Drains', description: 'Two' }),
       );
       const submit = () =>
-        asAdmin(a, () => w.needs.submit(project.id, need.id, { expectedVersion: 1 }));
+        asAdmin(a, () =>
+          w.needs.submit(project.id, need.id, { expectedProjectVersion: 1, expectedVersion: 1 }),
+        );
       const cancel = () =>
         asAdmin(a, () => w.projects.cancel(project.id, { expectedVersion: 1, reason: REASON }));
       return { a, project, submit, cancel };
@@ -332,7 +400,7 @@ describe('need lifecycle', () => {
       await cancel();
       hold.release();
 
-      await expect(submitted).rejects.toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+      await expect(submitted).rejects.toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
 
       const stream = await outboxStream(w.prisma, a, project.id);
       expect(stream.map((row) => row.eventName)).toEqual([
@@ -397,7 +465,7 @@ describe('need lifecycle', () => {
           names.indexOf('PROJECT_STATUS_CHANGED'),
         );
       } else {
-        expect(submitted.reason).toMatchObject({ code: 'BUSINESS_RULE_VIOLATION' });
+        expect(submitted.reason).toMatchObject({ code: 'OPTIMISTIC_LOCK_FAILED' });
         expect(names).not.toContain('PROJECT_NEED_SUBMITTED');
       }
       // One stream, dense, in commit order.
@@ -412,11 +480,13 @@ describe('need lifecycle', () => {
     const first = await newProject(a);
     const second = await newProject(a);
     const need = await asAdmin(a, () =>
-      w.needs.add(first.id, { title: 'Pipes', description: 'Six' }),
+      w.needs.add(first.id, { expectedProjectVersion: 1, title: 'Pipes', description: 'Six' }),
     );
 
     await expect(
-      asAdmin(a, () => w.needs.submit(second.id, need.id, { expectedVersion: 1 })),
+      asAdmin(a, () =>
+        w.needs.submit(second.id, need.id, { expectedProjectVersion: 1, expectedVersion: 1 }),
+      ),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
@@ -424,15 +494,17 @@ describe('need lifecycle', () => {
     const a = org();
     const project = await newProject(a);
     const n1 = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'One', description: 'First' }),
+      w.needs.add(project.id, { expectedProjectVersion: 1, title: 'One', description: 'First' }),
     );
     const n2 = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'Two', description: 'Second' }),
+      w.needs.add(project.id, { expectedProjectVersion: 1, title: 'Two', description: 'Second' }),
     );
     const n3 = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'Three', description: 'Third' }),
+      w.needs.add(project.id, { expectedProjectVersion: 1, title: 'Three', description: 'Third' }),
     );
-    await asAdmin(a, () => w.needs.submit(project.id, n2.id, { expectedVersion: 1 }));
+    await asAdmin(a, () =>
+      w.needs.submit(project.id, n2.id, { expectedProjectVersion: 1, expectedVersion: 1 }),
+    );
 
     const page = await asAdmin(a, () => w.needs.list(project.id, { limit: 2 }));
     expect(page.items.map((item) => item.id)).toEqual([n1.id, n2.id]);
@@ -452,7 +524,7 @@ describe('need lifecycle', () => {
     const a = org();
     const first = await newProject(a);
     const second = await newProject(a);
-    const dto = { title: 'Bitumen', description: 'Tack coat' };
+    const dto = { expectedProjectVersion: 1, title: 'Bitumen', description: 'Tack coat' };
     const author = newUserId();
     const add = (projectId: string, user = author) =>
       asAdmin(a, () => w.needs.add(projectId, dto, 'need-key'), user);
@@ -472,16 +544,28 @@ describe('need lifecycle', () => {
     const a = org();
     const project = await newProject(a);
     const need = await asAdmin(a, () =>
-      w.needs.add(project.id, { title: 'Sand', description: 'Fill', quantity: '3', unit: 'm3' }),
+      w.needs.add(project.id, {
+        expectedProjectVersion: 1,
+        title: 'Sand',
+        description: 'Fill',
+        quantity: '3',
+        unit: 'm3',
+      }),
     );
 
     const cleared = await asAdmin(a, () =>
-      w.needs.update(project.id, need.id, { expectedVersion: 1, quantity: null, unit: null }),
+      w.needs.update(project.id, need.id, {
+        expectedProjectVersion: 1,
+        expectedVersion: 1,
+        quantity: null,
+        unit: null,
+      }),
     );
     expect(cleared).toMatchObject({ quantity: null, unit: null, version: 2 });
 
     const set = await asAdmin(a, () =>
       w.needs.update(project.id, need.id, {
+        expectedProjectVersion: 1,
         expectedVersion: 2,
         quantity: '4',
         estimatedCostMinor: '100',
@@ -497,6 +581,7 @@ describe('need lifecycle', () => {
 
     const same = await asAdmin(a, () =>
       w.needs.update(project.id, need.id, {
+        expectedProjectVersion: 1,
         expectedVersion: 3,
         estimatedCostMinor: '100',
         unit: null,
