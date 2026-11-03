@@ -159,7 +159,10 @@ function sidebarOf(tree: ReactNode): string[] {
   const [sidebar] = ofType(tree, PortalSidebar);
   if (!sidebar) throw new Error('no sidebar');
   const drawn = PortalSidebar(sidebar.props as Parameters<typeof PortalSidebar>[0]);
-  return (drawn.props as { items: { href: string }[] }).items.map((item) => item.href);
+  // The sidebar's element sits beside the page's theme owner (`PageThemeOwner`).
+  const bar = elements(drawn).find((e) => 'items' in (e.props as object));
+  if (!bar) throw new Error('no sidebar items');
+  return (bar.props as { items: { href: string }[] }).items.map((item) => item.href);
 }
 
 async function run(path: string, params: Record<string, string> = {}): Promise<ReactElement> {

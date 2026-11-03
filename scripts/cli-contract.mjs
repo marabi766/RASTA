@@ -78,6 +78,21 @@ export const CLI_CONTRACT = Object.freeze({
   },
 
   // --- scripts ----------------------------------------------------------------
+  // A Git revision is resolved to a verified commit id; raw input is never echoed.
+  'scripts/prepush-scope.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
+  'scripts/prepush-scope-lib.mjs': {
+    other: [
+      '--cached',
+      '--dry',
+      '--end-of-options',
+      '--exclude-standard',
+      '--name-only',
+      '--no-renames',
+      '--others',
+      '--verify',
+      '-z',
+    ],
+  },
   'scripts/aggregation-campaign-accounting.mjs': {
     accepts: { '--reports-manifest': 'path' },
     positionals: ['path'],
@@ -341,6 +356,20 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/ci-image-matrix.mjs': { other: ['--run'] },
   'scripts/ci-integration-split-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
   'scripts/ci-migration-reversibility-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
+  // Task 312: the quality-job guard READS the options of the node/pnpm commands it checks; it has no command line.
+  'scripts/ci-node-test-timeouts-lib.mjs': {
+    other: [
+      '--dir',
+      '--enable-source-maps',
+      '--filter',
+      '--import',
+      '--no-warnings',
+      '--test',
+      '--test-timeout',
+      '-C',
+      '-F',
+    ],
+  },
   // Trivy's own options, passed to the pinned trivy binary (download and canary
   // scan), and zstd's (-q -T0 -c to pack; -q -d -c --memory to unpack).
   'scripts/ci-trivy-db-lib.mjs': {
@@ -562,7 +591,9 @@ export const CLI_CONTRACT = Object.freeze({
   'services/fleet-service/src/fleet/clear-transferred.cli.ts': { positionals: [] },
   'services/fleet-service/src/fleet/drain-check.cli.ts': { positionals: [] },
   'services/identity-service/src/keycloak/projection.cli.ts': { positionals: ['enum'] },
+  'services/identity-service/src/openapi/document.ts': { other: PRETTIER },
   'services/inventory-service/src/openapi/document.ts': { other: PRETTIER },
   'services/notification-service/src/openapi/document.ts': { other: PRETTIER },
+  'services/organization-service/src/openapi/document.ts': { other: PRETTIER },
   'services/procurement-service/src/openapi/document.ts': { other: PRETTIER },
 });

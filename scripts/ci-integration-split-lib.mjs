@@ -59,14 +59,126 @@
  * script and shell.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { globSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 
 export const AGGREGATE_JOB = 'integration';
 export const AGGREGATE_NAME = 'Integration and security tests';
 export const SPLIT_PREFIX = 'integration-';
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * Current workspace phase ownership, keyed by its exact-command inventory step.
+ * This is deliberately independent of discovery. The follow-up replaces this
+ * single partition with explicit jobs; adding a workspace must update ownership.
+ */
+export const INTEGRATION_PARTITIONS = Object.freeze({
+  'Integration tests': Object.freeze([
+    '@rasta/analytics-service',
+    '@rasta/api-gateway',
+    '@rasta/asset-service',
+    '@rasta/audit-service',
+    '@rasta/construction-service',
+    '@rasta/contract-service',
+    '@rasta/document-service',
+    '@rasta/economic-service',
+    '@rasta/fleet-service',
+    '@rasta/identity-service',
+    '@rasta/inventory-service',
+    '@rasta/maintenance-service',
+    '@rasta/marketplace-service',
+    '@rasta/notification-service',
+    '@rasta/organization-service',
+    '@rasta/procurement-service',
+    '@rasta/supplier-service',
+  ]),
+});
+
+/** Read every configured workspace root; never infer membership from the registry. */
+export function discoverIntegrationPackages(root = ROOT) {
+  const patterns = parseYaml(readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf8'))?.packages;
+  if (!Array.isArray(patterns) || patterns.length === 0) {
+    throw new Error('pnpm-workspace.yaml must declare nonempty packages');
+  }
+  for (const pattern of patterns) {
+    if (
+      typeof pattern !== 'string' ||
+      pattern.replace(/^!/, '').length === 0 ||
+      isAbsolute(pattern.replace(/^!/, '')) ||
+      pattern.includes('..') ||
+      pattern.includes('\\')
+    ) {
+      throw new Error('workspace package patterns must be relative globs inside the repository');
+    }
+  }
+  const manifests = globSync(
+    patterns
+      .filter((pattern) => !pattern.startsWith('!'))
+      .map((pattern) => `${pattern}/package.json`),
+    {
+      cwd: root,
+      exclude: [
+        '**/node_modules/**',
+        ...patterns
+          .filter((pattern) => pattern.startsWith('!'))
+          .map((pattern) => `${pattern.slice(1)}/package.json`),
+      ],
+    },
+  );
+  const names = new Set();
+  for (const file of new Set(manifests)) {
+    // pnpm includes the repository root implicitly; it orchestrates, never shards.
+    if (resolve(root, file) === resolve(root, 'package.json')) continue;
+    const manifest = JSON.parse(readFileSync(join(root, file), 'utf8'));
+    if (!Object.hasOwn(manifest.scripts ?? {}, 'test:integration')) continue;
+    if (
+      typeof manifest.name !== 'string' ||
+      !manifest.name.trim() ||
+      typeof manifest.scripts['test:integration'] !== 'string' ||
+      !manifest.scripts['test:integration'].trim()
+    ) {
+      throw new Error(`${file}: integration workspace needs a name and nonempty script`);
+    }
+    if (names.has(manifest.name))
+      throw new Error(`duplicate integration workspace name: ${manifest.name}`);
+    names.add(manifest.name);
+  }
+  return [...names].sort();
+}
+
+/** Exact set equality with multiplicity: unknown, missing and duplicate members fail. */
+export function integrationPartitionProblems(partitions = INTEGRATION_PARTITIONS, root = ROOT) {
+  let packages;
+  try {
+    packages = discoverIntegrationPackages(root);
+  } catch (error) {
+    return [`integration package discovery failed: ${error.message}`];
+  }
+  const owners = new Map(packages.map((name) => [name, []]));
+  const problems = [];
+  if (!isMapping(partitions) || Object.keys(partitions).length === 0) {
+    return ['integration partitions must be a nonempty mapping'];
+  }
+  for (const [step, members] of Object.entries(partitions)) {
+    if (!Array.isArray(members) || members.length === 0) {
+      problems.push(`${step}: integration partition must be a nonempty package list`);
+      continue;
+    }
+    for (const name of members) {
+      if (!owners.has(name)) problems.push(`${step}: unknown integration package ${textOf(name)}`);
+      else owners.get(name).push(step);
+    }
+  }
+  for (const [name, steps] of owners) {
+    if (steps.length !== 1) {
+      problems.push(`${name}: expected exactly one integration partition, found ${steps.length}`);
+    }
+  }
+  return problems;
+}
 
 /** Present and not empty, any value. */
 const ANY = null;
@@ -240,7 +352,9 @@ export const ALLOWED_CONDITIONS = Object.freeze([
  * is refused here without an entry, rather than assumed to need no setup.
  * Measured maxima, in seconds: suites 298, security 309, critical 281,
  * coverage 310, backup drill 92, migration chain 135 (per shard), migration
- * guards 253, trivy-db 5.
+ * guards 253, trivy-db 5. `quality` (2026-11-03): its one limited step is the
+ * unit-step concurrency step (74-87 s in green runs); the rest of the worst run
+ * (2216 s, 2026-11-02) is 2216 - 87 = 2129 s, so ceil(2129 x 1.5 / 60) = 54.
  */
 export const JOB_SETUP_MINUTES = Object.freeze({
   'integration-suites': 8,
@@ -251,6 +365,7 @@ export const JOB_SETUP_MINUTES = Object.freeze({
   'migration-reversibility-chain': 4,
   'migration-guards': 7,
   'trivy-db': 1,
+  quality: 54,
 });
 
 /**
@@ -352,7 +467,7 @@ export function checkIntegrationSplitText(text) {
 }
 
 export function checkIntegrationSplit(workflow) {
-  const problems = [];
+  const problems = integrationPartitionProblems();
   const jobs = isMapping(workflow?.jobs) ? workflow.jobs : {};
   const splitIds = Object.keys(jobs).filter((id) => id.startsWith(SPLIT_PREFIX));
   const aggregate = jobs[AGGREGATE_JOB];

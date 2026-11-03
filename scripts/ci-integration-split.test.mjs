@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
@@ -9,11 +10,14 @@ import {
   ALLOWED_CONDITIONS,
   JOB_FLOOR_MINUTES,
   JOB_SETUP_MINUTES,
+  INTEGRATION_PARTITIONS,
   SPLIT_STEPS,
   STEP_INVENTORY,
   checkIntegrationSplit,
   checkIntegrationSplitText,
   jobBudgetProblems,
+  discoverIntegrationPackages,
+  integrationPartitionProblems,
 } from './ci-integration-split-lib.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -38,6 +42,115 @@ const dropStep = (job, name) => {
   job.steps = job.steps.filter((step) => step.name !== name);
 };
 const escape = (text) => text.replace(/[()]/g, '\\$&');
+
+test('disk discovery covers the live partition, including the empty gateway project', () => {
+  assert.deepEqual(
+    discoverIntegrationPackages(),
+    [...INTEGRATION_PARTITIONS['Integration tests']].sort(),
+  );
+  assert.deepEqual(integrationPartitionProblems(), []);
+});
+
+test('the workflow validator refuses a newly added, unassigned workspace on disk', (t) => {
+  const dir = mkdtempSync(resolve(ROOT, 'packages/ci-integration-discovery-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(
+    resolve(dir, 'package.json'),
+    JSON.stringify({ name: '@rasta/new-workspace', scripts: { 'test:integration': 'jest' } }),
+  );
+  fails(real(), /@rasta\/new-workspace: expected exactly one integration partition, found 0/);
+});
+
+test('partition mutants: drop, duplicate within/across partitions, and unknown package fail', () => {
+  const packages = discoverIntegrationPackages();
+  assert.match(integrationPartitionProblems({ suites: packages.slice(1) }).join('\n'), /found 0/);
+  assert.match(
+    integrationPartitionProblems({ suites: [...packages, packages[0]] }).join('\n'),
+    /found 2/,
+  );
+  assert.match(
+    integrationPartitionProblems({ suites: packages, other: [packages[0]] }).join('\n'),
+    /found 2/,
+  );
+  assert.match(
+    integrationPartitionProblems({ suites: [...packages, '@rasta/unknown'] }).join('\n'),
+    /unknown integration package/,
+  );
+  for (const invalid of [null, [], {}, { suites: [] }, { suites: 'all' }]) {
+    assert.ok(integrationPartitionProblems(invalid).length > 0);
+  }
+});
+
+const workspaceFixture = (t) => {
+  const root = mkdtempSync(resolve(tmpdir(), 'integration-discovery-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const put = (file, value) => {
+    mkdirSync(dirname(resolve(root, file)), { recursive: true });
+    writeFileSync(resolve(root, file), JSON.stringify(value));
+  };
+  put('pnpm-workspace.yaml', {
+    packages: [
+      '.',
+      'apps/*',
+      'services/*',
+      'packages/*',
+      'tests/*',
+      'extensions/**',
+      '!extensions/excluded',
+    ],
+  });
+  put('package.json', {
+    name: 'orchestration',
+    scripts: { 'test:integration': 'node orchestrate' },
+  });
+  for (const group of ['apps', 'services', 'packages', 'tests', 'extensions/nested']) {
+    put(`${group}/member/package.json`, { name: group, scripts: { 'test:integration': 'jest' } });
+  }
+  put('extensions/excluded/package.json', {
+    name: 'excluded',
+    scripts: { 'test:integration': 'jest' },
+  });
+  put('extensions/node_modules/dependency/package.json', {
+    name: 'dependency',
+    scripts: { 'test:integration': 'jest' },
+  });
+  put('apps/no-integration/package.json', { name: 'no-integration', scripts: { test: 'jest' } });
+  return { root, put };
+};
+
+test('discovery follows configured roots, exclusions and new manifests independently', (t) => {
+  const { root, put } = workspaceFixture(t);
+  const packages = ['apps', 'services', 'packages', 'tests', 'extensions/nested'].sort();
+  assert.deepEqual(discoverIntegrationPackages(root), packages);
+  assert.deepEqual(integrationPartitionProblems({ suites: packages }, root), []);
+  put('extensions/added/package.json', {
+    name: 'new-workspace',
+    scripts: { 'test:integration': 'jest' },
+  });
+  assert.match(
+    integrationPartitionProblems({ suites: packages }, root).join('\n'),
+    /new-workspace:.*found 0/,
+  );
+});
+
+test('unreadable/malformed discovery inputs and duplicate package names fail closed', (t) => {
+  const { root, put } = workspaceFixture(t);
+  put('apps/duplicate/package.json', { name: 'apps', scripts: { 'test:integration': 'jest' } });
+  assert.match(integrationPartitionProblems({}, root).join('\n'), /discovery failed: duplicate/);
+  put('apps/duplicate/package.json', { name: 'unique', scripts: { 'test:integration': '' } });
+  assert.match(
+    integrationPartitionProblems({}, root).join('\n'),
+    /discovery failed:.*nonempty script/,
+  );
+  writeFileSync(resolve(root, 'apps/duplicate/package.json'), '{');
+  assert.match(integrationPartitionProblems({}, root).join('\n'), /discovery failed/);
+  for (const patterns of [null, [], ['../outside/*'], ['/tmp/*'], [null]]) {
+    put('pnpm-workspace.yaml', { packages: patterns });
+    assert.match(integrationPartitionProblems({}, root).join('\n'), /discovery failed/);
+  }
+  rmSync(resolve(root, 'pnpm-workspace.yaml'));
+  assert.match(integrationPartitionProblems({}, root).join('\n'), /discovery failed/);
+});
 
 test('the committed workflow passes', () => {
   assert.deepEqual(checkIntegrationSplitText(TEXT), []);
@@ -282,6 +395,7 @@ test('every job holds its steps one after the other: step limits plus setup fit 
       'migration-reversibility-chain': 17,
       'migration-guards': 18,
       'trivy-db': 21,
+      quality: 64,
     },
   );
   for (const [id, job] of jobs) {
@@ -477,7 +591,11 @@ test('a job whose measured runtime needed its limit may not go back below it', (
     delete missing.jobs[id]['timeout-minutes'];
     fails(missing, new RegExp(`^${id} has no timeout-minutes`));
     const raised = real();
-    raised.jobs[id]['timeout-minutes'] = floor + 1;
+    // A raised limit must still hold the job's step limits plus its setup (quality: 10 + 54).
+    const budget = limitedSteps(raised.jobs[id]).length
+      ? stepSum(raised.jobs[id]) + JOB_SETUP_MINUTES[id]
+      : 0;
+    raised.jobs[id]['timeout-minutes'] = Math.max(floor + 1, budget);
     assert.deepEqual(checkIntegrationSplit(raised), [], id);
   }
 });

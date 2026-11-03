@@ -97,6 +97,7 @@ describe('TOPIC_CONSUMERS', () => {
           'audit-service.trail',
           'audit-service.ops-replay',
           'audit-service.tender-evidence',
+          'audit-service.rfq-evidence',
         ],
         subscribes: Object.keys(TOPIC_PRODUCERS),
         deadLetterTopic: 'rasta.audit.v1.dlq',

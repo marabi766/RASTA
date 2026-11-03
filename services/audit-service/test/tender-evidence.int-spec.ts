@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import type { SamplingSignal } from '../src/audit/sampling-loop';
 import request from 'supertest';
 import { ulid } from 'ulid';
 import { eventEnvelopeSchema, type EventEnvelope } from '@rasta/contracts';
@@ -23,6 +24,9 @@ import { internalToken, startApi, systemAdmin, type ApiHarness } from './api-hel
 
 const DELIVERY = { topic: 'rasta.construction.v1', partition: 0, offset: '0' } as EventDelivery;
 const hash = (): string => createHash('sha256').update(randomBytes(16)).digest('hex');
+
+/** A sample that is never abandoned. */
+const LIVE_SAMPLE: SamplingSignal = { abandoned: false, throwIfAbandoned: () => undefined };
 
 describe('the tender-evidence projection', () => {
   let prisma: PrismaService;
@@ -240,15 +244,19 @@ describe('the tender-evidence projection', () => {
       const first = receipt('BID_SUBMITTED', tenderId, genesisReceipt(tenderId));
       const second = receipt('BID_SUBMITTED', tenderId, first.receipt);
       const repository = new TenderEvidenceRepository(prisma);
-      const monitor = new TenderGapMonitor(repository, {
-        AUDIT_TENDER_GAP_ALERT_SECONDS: 60,
-      } as never);
+      const monitor = new TenderGapMonitor(
+        repository,
+        {
+          AUDIT_TENDER_GAP_ALERT_SECONDS: 60,
+        } as never,
+        prisma,
+      );
       const gauge = async (name: string): Promise<number> =>
         (await registry.getSingleMetric(name)!.get()).values[0]?.value ?? 0;
 
       await consumer.handle(second.event, DELIVERY);
       const before = await failures('tender_chain_gap_overdue');
-      await monitor.sample();
+      await monitor.sample(LIVE_SAMPLE);
       // Held, but not for long enough yet: no alert.
       expect(await failures('tender_chain_gap_overdue')).toBe(before);
       expect(await gauge('rasta_audit_tender_pending_links')).toBeGreaterThanOrEqual(1);
@@ -258,8 +266,8 @@ describe('the tender-evidence projection', () => {
         `UPDATE tender_receipt_pending SET held_at = now() - interval '10 minutes' WHERE tender_id = $1`,
         tenderId,
       );
-      await monitor.sample();
-      await monitor.sample();
+      await monitor.sample(LIVE_SAMPLE);
+      await monitor.sample(LIVE_SAMPLE);
       expect(await failures('tender_chain_gap_overdue')).toBe(before + 1);
       expect(await gauge('rasta_audit_tender_pending_oldest_age_seconds')).toBeGreaterThanOrEqual(
         600,
@@ -269,14 +277,14 @@ describe('the tender-evidence projection', () => {
       expect(await gauge('rasta_audit_tender_overdue_links')).toBeGreaterThanOrEqual(1);
 
       await consumer.handle(first.event, DELIVERY);
-      await monitor.sample();
+      await monitor.sample(LIVE_SAMPLE);
       expect(await heldFor(tenderId)).toBe(0);
       expect(await failures('tender_chain_gap_overdue')).toBe(before + 1);
     });
 
     it('counts overdue gaps over every held row, not a bounded sample', async () => {
       const repository = new TenderEvidenceRepository(prisma);
-      const baseline = await repository.pendingSummary(60);
+      const baseline = await repository.pendingSummary(60, LIVE_SAMPLE);
       const tenderId = id('TND');
       await consumer.handle(receipt('BID_SUBMITTED', tenderId, hash()).event, DELIVERY);
       await migrator.client.$executeRawUnsafe(
@@ -293,7 +301,7 @@ describe('the tender-evidence projection', () => {
         hash(),
       );
 
-      const summary = await repository.pendingSummary(60);
+      const summary = await repository.pendingSummary(60, LIVE_SAMPLE);
 
       expect(summary.overdueCount - baseline.overdueCount).toBe(1100);
       expect(summary.held - baseline.held).toBe(1101);

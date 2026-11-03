@@ -61,7 +61,11 @@ jobs:
     # train run 41512869238 were cancelled at the limit with every step
     # green. 56 is ceil(2216 s x 1.5 / 60). Splitting the job is the fix;
     # this only stops the limit from cancelling healthy runs.
-    timeout-minutes: 56
+    # 64 minutes (2026-11-03, task 310): the unit-step concurrency step now has
+    # its own 10-minute limit (main 3fa1beeb hung in it for 43 minutes), and the
+    # job budget rule (JOB_SETUP_MINUTES) adds that limit to the other steps'
+    # allowance: 54 + 10.
+    timeout-minutes: 64
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -84,6 +88,9 @@ jobs:
 
       # Prisma clients are generated artefacts that typecheck depends on.
       - run: pnpm run db:generate
+
+      - name: Prepush affected-package selection
+        run: pnpm run test:prepush-scope
 
       - name: Product backlog and progress gate
         run: |
@@ -395,6 +402,13 @@ jobs:
         # Static tripwire for accidental changes to the root bound or a second
         # literal unbounded unit run. Workflow code review covers dynamic commands
         # and shell behavior; this does not prove execution or failure propagation.
+        # Bounded (task 310): main 3fa1beeb hung here for 43 minutes in a step that
+        # takes 74-87 s (418 s with two copies and other work on one host). The
+        # step 10 minutes; the test file 9 (--test-timeout, which the parent
+        # runner enforces on the whole file, spin or not); any one test 60 s,
+        # named on stderr (scripts/test-stall-watchdog.mjs). Every node --test
+        # of this job keeps a --test-timeout: scripts/ci-node-test-timeouts-lib.mjs.
+        timeout-minutes: 10
         run: pnpm run test:unit-step-concurrency
 
       - name: Unit tests

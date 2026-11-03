@@ -1,4 +1,4 @@
-import { Alert, ButtonLink, PageHeader } from '@/ui';
+import { Alert, ButtonLink, PageHeader, ThemeSwitch } from '@/ui';
 import { ownText } from '@/lib/own-key';
 
 /**
@@ -67,6 +67,13 @@ export function LoginScreen({ reason, returnTo }: { reason?: string; returnTo?: 
         گذرواژهٔ شما هرگز به این پورتال وارد نمی‌شود؛ احراز هویت در سامانهٔ مرکزی سازمان انجام
         می‌گیرد.
       </p>
+
+      {/* Outside any form (there is none) and after the way in, so the first
+          control reached by keyboard is still the sign-in link. This screen has
+          no shell and so no skip link to follow. */}
+      <div className="flex">
+        <ThemeSwitch />
+      </div>
     </main>
   );
 }

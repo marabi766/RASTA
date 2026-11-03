@@ -262,6 +262,7 @@ const OPTED_IN = {
   ],
   maintenance: ['asset_transfer_release_pkey', 'ux_request_open_per_asset'],
   marketplace: [
+    'ix_order_saga_start_due',
     'ix_offer_product_status',
     'ix_offer_status_price',
     'ix_order_history_order',
@@ -499,6 +500,8 @@ const TABLES_CLASSIFIED = {
   audit: [
     'audit_chain_head',
     'bid_access_evidence',
+    'rfq_receipt_link',
+    'rfq_receipt_pending',
     'tender_receipt_link',
     'tender_receipt_pending',
   ],

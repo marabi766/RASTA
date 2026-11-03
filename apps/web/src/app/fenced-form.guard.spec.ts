@@ -540,6 +540,124 @@ describe('the guard fails where it must', () => {
     });
   });
 
+  describe('review 6 R7: one binding graph', () => {
+    const storeImport =
+      "import { answerThing, clearThing, restoreThing, saveThing, settleThing } from '@/lib/thing-store';";
+    const barrels = [
+      ["import { saveThing } from './thing-store'; export { saveThing };", 'B.saveThing'],
+      [
+        "import { saveThing } from './thing-store'; const keep = saveThing; export { keep };",
+        'B.keep',
+      ],
+      ["import * as store from './thing-store'; export { store };", 'B.store.saveThing'],
+    ] as const;
+    it.each(barrels)('store discovery through %s', (barrel, writer) => {
+      const extra = { 'lib/barrel.ts': barrel };
+      const imports = "import * as B from '@/lib/barrel';";
+      const valid = COMPLIANT.replace(storeImport, imports)
+        .replaceAll('saveThing()', `${writer}()`)
+        .replaceAll('answerThing(state)', 'null')
+        .replaceAll('settleThing()', 'null')
+        .replaceAll('clearThing()', 'null')
+        .replaceAll('restoreThing()', 'null');
+      const invalid = `${imports}
+        import { useActionState } from 'react';
+        export const Form = () => useActionState(() => ${writer}(), null);`;
+      expect(fencedForms(tree(valid, extra))).toEqual(['app/thing/ThingForm.tsx']);
+      expect(rules(valid, extra)).toEqual([]);
+      expect(fencedForms(tree(invalid, extra))).toEqual(['app/thing/ThingForm.tsx']);
+      expect(rules(invalid, extra)).toEqual(expect.arrayContaining(['state', 'store']));
+    });
+
+    it.each([
+      ['named', "import { QuarantineGate as Gate } from '@/lib/gates';", 'Gate'],
+      [
+        'named alias',
+        "import { QuarantineGate } from '@/lib/gates'; const Gate = QuarantineGate;",
+        'Gate',
+      ],
+      ['namespace', "import * as Q from '@/lib/gates';", 'Q.QuarantineGate'],
+      [
+        'namespace alias',
+        "import * as Q from '@/lib/gates'; const Gate = Q.QuarantineGate;",
+        'Gate',
+      ],
+    ])('global gate through import-then-export: %s', (_label, imports, tag) => {
+      const extra = {
+        'lib/gates.ts':
+          "import { QuarantineGate, UnresolvedForm } from '@/app/UnresolvedQuarantine'; export { QuarantineGate, UnresolvedForm };",
+      };
+      expect(rules(`${imports} export const Form = () => <${tag} />;`, extra)).toEqual(['drawn']);
+      expect(
+        rules(
+          `${imports.replaceAll('QuarantineGate', 'UnresolvedForm')} export const Form = () => <${tag.replaceAll('QuarantineGate', 'UnresolvedForm')} />;`,
+          extra,
+        ),
+      ).toEqual([]);
+    });
+
+    for (const method of ['start', 'answer', 'settle']) {
+      it.each([
+        ['local alias', `const write = slot.${method};`, 'write'],
+        ['destructuring', `const { ${method} } = slot;`, method],
+        ['renamed destructuring', `const { ${method}: write } = slot;`, 'write'],
+      ])(`slot ${method} through %s`, (_label, binding, write) => {
+        const extra = { 'lib/thing-store.ts': `${STORE} export { slot };` };
+        const form = COMPLIANT.replace(
+          storeImport,
+          `${storeImport} import { slot } from '@/lib/thing-store'; ${binding}`,
+        );
+        expect(
+          rules(form.replace('remember: () => saveThing()', `remember: () => ${write}()`), extra),
+        ).toEqual([]);
+        expect(rules(`${form} ${write}();`, extra)).toEqual(['store']);
+      });
+    }
+
+    it('follows nested exported namespaces, local destructured exports and barrel cycles', () => {
+      const extra = {
+        'lib/inner.ts':
+          "import * as store from './thing-store'; const { saveThing: keep } = store; export { keep }; export * from './outer';",
+        'lib/outer.ts': "import * as inner from './inner'; export { inner };",
+      };
+      const valid = COMPLIANT.replace(
+        storeImport,
+        `${storeImport} import { inner } from '@/lib/outer';`,
+      ).replace('remember: () => saveThing()', 'remember: () => inner.keep()');
+      expect(rules(valid, extra)).toEqual([]);
+      expect(rules(`${valid} inner.keep();`, extra)).toEqual(['store']);
+      const invalid =
+        "import { inner } from '@/lib/outer'; import { useActionState } from 'react'; useActionState(() => inner.keep(), null);";
+      expect(fencedForms(tree(invalid, extra))).toEqual(['app/thing/ThingForm.tsx']);
+      expect(rules(invalid, extra)).toEqual(expect.arrayContaining(['state', 'store']));
+    });
+
+    it('keeps a missing named re-export of a store fail closed', () => {
+      const extra = { 'lib/broken.ts': "export { missing } from './thing-store';" };
+      const form =
+        "import { missing } from '@/lib/broken'; import { useActionState } from 'react'; useActionState(() => null, null);";
+      expect(fencedForms(tree(form, extra))).toEqual(['app/thing/ThingForm.tsx']);
+      expect(rules(form, extra)).toContain('state');
+    });
+
+    it.each([
+      'export default function () { return fencedSlot(); }',
+      'export default () => fencedSlot();',
+    ])('anonymous default factory: %s', (factory) => {
+      const extra = {
+        'lib/factory.ts': `import { fencedSlot } from './unresolved-tenancy'; ${factory}`,
+        'lib/thing-store.ts': STORE.replace(
+          "import { fencedSlot } from './unresolved-tenancy';",
+          "import fencedSlot from './factory';",
+        ),
+      };
+      expect(fencedModules(tree(COMPLIANT, extra)).has('lib/thing-store.ts')).toBe(true);
+      expect(fencedForms(tree(COMPLIANT, extra))).toEqual(['app/thing/ThingForm.tsx']);
+      expect(rules(COMPLIANT, extra)).toEqual([]);
+      expect(rules(`${COMPLIANT} saveThing();`, extra)).toEqual(['store']);
+    });
+  });
+
   it('QuarantineGate drawn by any other file is refused, also aliased or through a barrel', () => {
     expect(
       rules(COMPLIANT, {

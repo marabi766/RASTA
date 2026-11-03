@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { SamplingSignal } from './sampling-loop';
 import type { Prisma } from '../generated/prisma';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -228,7 +229,10 @@ export class TenderEvidenceRepository {
    * (at most 1000, oldest first) the overdue receipts' event ids, only for the monitor
    * to count each new gap once; it is never what the gauges are computed from.
    */
-  async pendingSummary(olderThanSeconds: number): Promise<{
+  async pendingSummary(
+    olderThanSeconds: number,
+    signal: SamplingSignal,
+  ): Promise<{
     held: number;
     overdueCount: number;
     oldestAgeSeconds: number;
@@ -240,6 +244,8 @@ export class TenderEvidenceRepository {
              count(*) FILTER (WHERE clock_timestamp() - held_at >= make_interval(secs => ${olderThanSeconds})) AS overdue,
              EXTRACT(EPOCH FROM (clock_timestamp() - min(held_at)))::float8 AS oldest
         FROM tender_receipt_pending`;
+    // The first query may have outlived the shutdown deadline: no second query then.
+    signal.throwIfAbandoned();
     const rows = await this.prisma.client.$queryRaw<{ source_event_id: string }[]>`
       SELECT source_event_id FROM tender_receipt_pending
        WHERE clock_timestamp() - held_at >= make_interval(secs => ${olderThanSeconds})
