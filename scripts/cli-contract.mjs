@@ -562,7 +562,9 @@ export const CLI_CONTRACT = Object.freeze({
   'services/fleet-service/src/fleet/clear-transferred.cli.ts': { positionals: [] },
   'services/fleet-service/src/fleet/drain-check.cli.ts': { positionals: [] },
   'services/identity-service/src/keycloak/projection.cli.ts': { positionals: ['enum'] },
+  'services/identity-service/src/openapi/document.ts': { other: PRETTIER },
   'services/inventory-service/src/openapi/document.ts': { other: PRETTIER },
   'services/notification-service/src/openapi/document.ts': { other: PRETTIER },
+  'services/organization-service/src/openapi/document.ts': { other: PRETTIER },
   'services/procurement-service/src/openapi/document.ts': { other: PRETTIER },
 });
