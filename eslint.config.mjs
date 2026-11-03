@@ -227,7 +227,7 @@ const base = tseslint.config(
   {
     // @rasta/config's URL reader is plain CommonJS so the scripts can import
     // it before any build (url-reader.js); Node's CommonJS globals apply.
-    files: ['**/src/url-reader.js'],
+    files: ['**/src/url-reader.js', '**/src/command-failure.js'],
     languageOptions: { sourceType: 'commonjs', globals: { ...globals.node } },
   },
   {
