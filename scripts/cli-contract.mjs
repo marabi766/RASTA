@@ -339,7 +339,7 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/check-service-boundaries.mjs': { positionals: [], accepts: { '--root': 'path' } },
   'scripts/check-test-phases.mjs': { positionals: ['script'] },
   'scripts/ci-image-matrix.mjs': { other: ['--run'] },
-  'scripts/ci-integration-split-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
+  'scripts/ci-integration-split-lib.mjs': { other: ['--filter', '--noprofile', '--norc', '-eo'] },
   'scripts/ci-migration-reversibility-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
   // Trivy's own options, passed to the pinned trivy binary (download and canary
   // scan), and zstd's (-q -T0 -c to pack; -q -d -c --memory to unpack).
@@ -458,7 +458,14 @@ export const CLI_CONTRACT = Object.freeze({
   },
   'scripts/test-phases-lib.mjs': {
     accepts: { '--calibrate': 'switch', '--pairs': 'integer' },
-    other: ['--passWithNoTests', '--runInBand', '--selectProjects', '--testNamePattern'],
+    other: [
+      '--passWithNoTests',
+      '--runInBand',
+      '--selectProjects',
+      '--shard',
+      '--testNamePattern',
+      '--verbose',
+    ],
   },
   'scripts/verify-audit-correction-command-migration.mjs': {
     positionals: [],
