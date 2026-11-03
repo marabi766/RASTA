@@ -45,6 +45,12 @@ const repositorySites = () => (scannedRepository ??= repositoryUrlParses(ROOT));
 /** Each parse of a non-literal that stays, and why it cannot carry configuration. */
 const ALLOWED = Object.freeze([
   {
+    file: 'services/economic-service/src/payment/payment-reconciliation.repository.ts',
+    call: 'window[window.length - 1]',
+    reason:
+      'local window is the bounded Prisma result array in heal(); this reads its last row, not a global object or URL parser',
+  },
+  {
     file: 'packages/config/src/url-reader.js',
     call: 'new URL(value)',
     reason: 'the reader itself: the native error is discarded, a fixed text is thrown',
@@ -487,7 +493,7 @@ for (const [label, source] of F2) {
   });
 }
 
-// F1 a–d: a local import is trusted only while its exporter refuses escapes.
+// F1 a–d: local exports expose parser escapes even when importers use unrelated names.
 const F1 = [
   [
     'a shorthand',
@@ -655,8 +661,8 @@ test('R2-1 unknown local global-object names stay unknown while their URL member
 test('R2-1 mutable bindings retain proven native instance capabilities', () => {
   assert.deepEqual(sites("let base=new URL('http://ok'); base.href=env.X"), ['URL mutation']);
 });
-test('R2-2 reexports stay with their exporter; R2-3 import-equals references are visited', () => {
-  assert.deepEqual(sites("export { URL } from './local.js'"), []);
+test('name floor includes relative reexports; R2-3 import-equals references are visited', () => {
+  assert.deepEqual(sites("export { URL } from './local.js'"), ['escape']);
   assert.ok(rawUrlParses("export {URL as U} from 'node:url'", 'a.ts').length > 0);
   assert.ok(rawUrlParses('import U = URL; new U(env.X)', 'a.ts').length > 0);
 });
@@ -667,6 +673,40 @@ test('R2-1 bodiless function declarations cannot shadow the runtime URL', () => 
     );
 });
 
+// R3-1 instances 1–6, plus literal/computed/renamed keys and sibling scopes.
+const NAME_FLOOR = [
+  'const state={mod:null}; state.mod=await import(spec); new state.mod.URL(env.X)',
+  'const o={m:0}; o.m=require(name); new o.m.URL(env.X)',
+  'const f=()=>{}; f.m=await import(spec); new f.m.URL(env.X)',
+  'class L {mod=null}; const l=new L(); l.mod=await import(spec); new l.mod.URL(env.X)',
+  'class C {constructor(){return require(name)}}; new (new C()).URL(env.X)',
+  'class Registry {static mod=null}; Registry.mod=await import(spec); new Registry.mod.URL(env.X)',
+  'function f(){}; Object.assign(f,await import(spec)); new f.URL(env.X)',
+  'function m(){}; m=await import(spec); new m.URL(env.X)',
+  'class m {}; m=await import(spec); new m.URL(env.X)',
+  'function URL(){}; URL=(await import(spec))[k]; new URL(env.X)',
+  'class URL {}; URL=(await import(spec))[k]; new URL(env.X)',
+  "import {state} from './state.js'; state.mod=await import(spec); new state.mod.URL(env.X)",
+  'class Custom{}; const x={URL:Custom}; Object.assign(x,await import(spec)); new x.URL(env.X)',
+  'function f(){class URL {}; return new URL(env.X)}',
+  'function f(){function URL(){}; return new URL(env.X)}',
+  'class Custom {}; const x={URL:Custom}; const {URL:U}=x; new U(env.X); new x.URL(env.X)',
+  "import {URL} from './local.js'; new URL(env.X)",
+  "import {URL as U} from './dist/local.js'; new U(env.X)",
+  'function f(){class Custom {}; const URL=Custom; return new URL(env.X)}',
+  "import {URL as U} from 'node:url'; function f(U){new U(env.X)} new U(env.X)",
+  'const {URL:U}={URL:null}; function f(U){new U(env.X)}',
+  "const x={URL:null}; new x['URL'](env.X)",
+  "const x={URL:null}; const {['URL']:U}=x; new U(env.X)",
+  'const x={URL:null}; const {URL}=x; new URL(env.X)',
+  "const U=URL; const base=new U('http://ok'); new URL('/path',base)",
+];
+const NAME_ESCAPE_FLOOR = [
+  "export { URL } from './local.js'",
+  "export { URL as U } from './local.js'",
+  "const globalThis = new URL('http://ok'); globalThis[key]",
+  'const window = {}; window[key]',
+];
 // This is main 5702020a's caught-forms corpus: all native-parse/ESCAPES
 // fixtures above, plus F1 forms main caught without lexical symbol resolution.
 // Keep it explicit so a resolver swap cannot trade old coverage for new forms.
@@ -674,6 +714,8 @@ test("main's caught-forms corpus remains refused by the new resolver", () => {
   const corpus = [
     ...ESCAPES.map(([, source]) => source),
     ...UNKNOWN_RECEIVERS,
+    ...NAME_FLOOR,
+    ...NAME_ESCAPE_FLOOR,
     'function URL(x: string): any; new URL(env.X)',
     ...F1.flatMap(([, sources]) => sources).filter(
       (source) => !/createRequire|getBuiltinModule|eval/.test(source),
@@ -696,27 +738,30 @@ test("main's caught-forms corpus remains refused by the new resolver", () => {
   for (const source of corpus) assert.ok(rawUrlParses(source, 'a.ts').length > 0, source);
 });
 
-test('lexical shadowing permits unrelated URL values and preserves sibling native parses', () => {
-  for (const local of [
-    'function f(){ class URL {}; return new URL(env.X) }',
-    'function f(){ function URL(){}; return new URL(env.X) }',
-    'class Custom {}; const x={URL: Custom}; const {URL: U}=x; new U(env.X); new x.URL(env.X);',
-    "import { URL } from './local.js'; new URL(env.X);",
-    'function f() { class Custom {}; const URL=Custom; return new URL(env.X); }',
-  ]) {
-    assert.deepEqual(sites(local), [], local);
-    assert.deepEqual(sites(`${local} function sibling(){ return new globalThis.URL(env.X) }`), [
-      'new URL',
-    ]);
-    assert.deepEqual(
-      sites(`${local} new URL(env.X);`),
-      local.includes('import') ? [] : ['new URL'],
-    );
-  }
-  assert.deepEqual(
-    sites("import {URL as U} from 'node:url'; function f(U){new U(env.X)} new U(env.X)"),
-    ['new URL'],
-  );
+test('name-only escapes cannot be suppressed by lexical capabilities', () => {
+  for (const source of NAME_ESCAPE_FLOOR) assert.ok(sites(source).includes('escape'), source);
+});
+test('R3-1 name floor refuses every mutable-slot instance and former non-parser exemption', () => {
+  for (const extension of ['ts', 'mts', 'cts', 'tsx', 'js', 'mjs', 'cjs', 'jsx'])
+    for (const source of NAME_FLOOR) {
+      const found = rawUrlParses(source, `a.${extension}`);
+      assert.ok(
+        found.some((site) => site.kind === 'new URL'),
+        `${extension}: ${source}`,
+      );
+    }
+  for (const from of [
+    './local.js',
+    './dist/local.js',
+    './generated/local.js',
+    '../root.js',
+    './x.test.js',
+  ])
+    assert.deepEqual(sites(`import {URL} from '${from}'; new URL(env.X)`), ['new URL']);
+  // Neither the explicit URL key nor its receiver's initial value proves safety.
+  for (const receiver of ['null', '0', '()=>{}', 'class {}', '{}', '{URL: class {}}'])
+    for (const use of ['new x.URL(env.X)', "new x['URL'](env.X)", 'const {URL:U}=x; new U(env.X)'])
+      assert.ok(sites(`const x=${receiver}; ${use}`).includes('new URL'));
 });
 
 test('one expression exemption cannot cover duplicates, neighbours, or a whole loader file', () => {
