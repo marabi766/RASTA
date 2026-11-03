@@ -24,6 +24,7 @@ import {
   startDriver,
   SCRIPTS,
   url,
+  waitGone,
   WEB,
   type Result,
 } from './test/build-scripts';
@@ -915,7 +916,7 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
     ['writerAfterFailure', 'failed'],
   ])(
     '%s: `next build` %s while a process it started still writes: refused, and that process is gone before the lock is (r4 F1 c, B)',
-    (name) => {
+    async (name) => {
       const { status, problems } = results[name];
       expect(status).toBe(1);
       expect(problems).toEqual([
@@ -925,7 +926,7 @@ describe('a receipt can only describe the invocation that wrote it (r2 F1, F2: r
       // The case is not vacuous: the writer did write into `.next` during the build ...
       expect(existsSync(join(dirs[name], '.next/from-writer'))).toBe(true);
       // ... and it was stopped and awaited before the wrapper returned and released the lock.
-      expect(alive(writer)).toBe(false);
+      await waitGone(writer, 'writer `next build` started');
       expect(existsSync(join(dirs[name], LOCK))).toBe(false);
       expect(existsSync(join(dirs[name], '.next/server-action-build-receipt.json'))).toBe(false);
     },
@@ -1042,8 +1043,7 @@ describe('two invocations in one package (r3 F1: real `next build`)', () => {
     const b = await runDriver(dir, { lockWaitMs: 5_000 });
     expect(b).toMatchObject({ status: 0, problems: [] });
     // A's `next build` never got past the preload: it wrote no record, no output.
-    for (let i = 0; i < 300 && alive(pid); i += 1) await new Promise((r) => setTimeout(r, 100));
-    expect(alive(pid)).toBe(false);
+    await waitGone(pid, 'orphaned `next build` of the killed wrapper', 30_000);
     expect(existsSync(capturePath)).toBe(false);
     rmSync(join(capturePath, '..'), { recursive: true, force: true });
     expect(checkReceipt(dir)).toEqual([]);
