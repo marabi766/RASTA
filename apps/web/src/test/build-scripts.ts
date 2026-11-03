@@ -41,6 +41,23 @@ export const alive = (target: number): boolean => {
   }
 };
 
+/**
+ * A signal's effect is not visible to the signaller at once: the target has to run its exit,
+ * and be reaped (a zombie still answers a signal-0 probe), after the sender's `kill` returned.
+ * So "it ended" is a bounded wait, never a single probe (FU-038: an instant `alive()` right
+ * after a group kill found the linger process still there and turned main red).
+ * Fails, naming the pid (negative: the group), when the target outlives `ms`.
+ */
+export async function waitGone(target: number, what: string, ms = 15_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (alive(target) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+  if (alive(target)) {
+    throw new Error(
+      `${what}: ${target < 0 ? 'process group' : 'pid'} ${Math.abs(target)} still alive ${ms} ms after it should have ended`,
+    );
+  }
+}
+
 export interface Result {
   /** Undefined when the driver died before printing its result. */
   status?: number;

@@ -26,6 +26,7 @@ import {
   runModule,
   startDriver,
   url,
+  waitGone,
   type Plan,
 } from './test/build-scripts';
 
@@ -535,7 +536,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect(await driver.ended).toBe('COMPLETED');
     await driver.done;
     // COMPLETED required the supervisor's own FINAL plus observed group absence.
-    for (const pid of ran(dir)) expect(alive(pid)).toBe(false);
+    for (const pid of ran(dir)) await waitGone(pid, 'process the build ran');
   });
 
   it('R6-1: controller loss is LOST, and the watchdog rejects while inherited pipes stay held', async () => {
@@ -584,7 +585,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       expect.stringContaining('build lock: could not be released (details withheld)'),
     ]);
     // When the wrapper returned, its `next build` was gone, and had never got past the handshake.
-    expect(alive(pid)).toBe(false);
+    await waitGone(pid, '`next build` of the refused build');
     expect(ran(dir)).toEqual([]);
     chmodSync(join(dir, LOCK), 0o700);
     // The kept lock names a dead wrapper and no group: B takes it over and builds its own.
@@ -604,7 +605,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       status: 1,
       problems: ['build: unexpected failure (details withheld); refusing'],
     });
-    expect(alive(record(dir).pid)).toBe(false);
+    await waitGone(record(dir).pid, '`next build` of the failed start');
     expect(existsSync(join(dir, LOCK))).toBe(false);
     expect(ran(dir)).toEqual([]);
   });
@@ -665,11 +666,40 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       });
       const writer = Number(readFileSync(join(dir, 'linger.pid'), 'utf8'));
       expect(existsSync(join(dir, '.next/from-linger'))).toBe(true);
-      expect(alive(writer)).toBe(false);
+      await waitGone(writer, 'process `next build` started (linger.pid)');
       expect(existsSync(join(dir, LOCK))).toBe(false);
       expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
     },
   );
+
+  it('waitGone: a process that ends shortly AFTER its signal is waited for (an instant probe still sees it)', async () => {
+    const child = spawn(
+      process.execPath,
+      [
+        '-e',
+        "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 400)); console.log('ready'); setInterval(() => {}, 1000)",
+      ],
+      { detached: true, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    child.unref();
+    groups.set(child.pid as number, child);
+    const pid = child.pid as number;
+    await new Promise((resolve) => (child.stdout as NodeJS.ReadableStream).once('data', resolve));
+    process.kill(pid, 'SIGTERM');
+    expect(alive(pid)).toBe(true);
+    await waitGone(pid, 'delayed-exit process');
+    expect(alive(pid)).toBe(false);
+  });
+
+  it('waitGone: a process that never ends fails within the deadline, naming its pid', async () => {
+    const pid = liveGroup();
+    await expect(waitGone(pid, 'sleeper', 200)).rejects.toThrow(
+      `sleeper: pid ${pid} still alive 200 ms after it should have ended`,
+    );
+    await expect(waitGone(-pid, 'sleeper group', 100)).rejects.toThrow(
+      `sleeper group: process group ${pid} still alive 100 ms`,
+    );
+  });
 
   it('(B) a process that outlives `next build` briefly, inside the settle window, is waited for: receipted', async () => {
     const dir = app({ linger: { ms: 300 } });
@@ -695,8 +725,11 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
         status,
         problems: ['build: interrupted; the build was stopped before the lock was released'],
       });
-      expect(alive(record(dir).pid)).toBe(false);
-      expect(alive(Number(readFileSync(join(dir, 'linger.pid'), 'utf8')))).toBe(false);
+      await waitGone(record(dir).pid, '`next build` of the interrupted build');
+      await waitGone(
+        Number(readFileSync(join(dir, 'linger.pid'), 'utf8')),
+        'process `next build` started (linger.pid)',
+      );
       expect(existsSync(join(dir, LOCK))).toBe(false);
       expect(existsSync(join(dir, '.next/server-action-build-receipt.json'))).toBe(false);
     },
@@ -724,8 +757,8 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
           problems: ['build: interrupted; the build was stopped before the lock was released'],
         });
         const { pid, group } = record(dir);
-        expect(alive(pid)).toBe(false);
-        expect(alive(-group)).toBe(false);
+        await waitGone(pid, '`next build` of the interrupted build');
+        await waitGone(-group, 'group of the interrupted build');
         expect(existsSync(join(dir, LOCK))).toBe(false);
         const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
         expect(events.filter((e) => e === 'send-term')).toHaveLength(1);
@@ -783,7 +816,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     await waitFor(() => existsSync(join(dir, 'paused')));
     const { pid, group } = record(dir);
     expect(pid).not.toBe(group);
-    expect(alive(pid)).toBe(false);
+    await waitGone(pid, 'root `next build` (exited, supervisor holds the group)');
     expect(alive(group)).toBe(true);
     expect(alive(-group)).toBe(true);
     const census = spawnSync('ps', ['-axo', 'pid=,pgid='], { encoding: 'utf8' });
@@ -799,7 +832,7 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
     expect((await runDriver(dir, { nextFrom, lockWaitMs: 0 })).status).toBe(1);
     writeFileSync(join(dir, 'go'), '');
     expect(await driver.done).toMatchObject({ status: 0, problems: [] });
-    expect(alive(-group)).toBe(false);
+    await waitGone(-group, 'group of the finished build');
     expect(existsSync(join(dir, LOCK))).toBe(false);
     expect(receipt(dir)).toEqual([]);
     const events = JSON.parse(readFileSync(join(dir, 'group-events.json'), 'utf8')) as string[];
@@ -990,7 +1023,10 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       status: 1,
       problems: ['next build: a process it started was still running after it exited; refusing'],
     });
-    expect(alive(Number(readFileSync(join(dir, 'linger.pid'), 'utf8')))).toBe(false);
+    await waitGone(
+      Number(readFileSync(join(dir, 'linger.pid'), 'utf8')),
+      'surviving writer that ignores TERM (linger.pid)',
+    );
     expect(existsSync(join(dir, LOCK))).toBe(false);
   });
 
@@ -1007,7 +1043,10 @@ describe('ownership lasts as long as every process that could write (r4 F1, fake
       problems: ['next build: a process it started was still running after it exited; refusing'],
     });
     expect(existsSync(join(dir, LOCK))).toBe(false);
-    expect(alive(Number(readFileSync(join(dir, 'linger.pid'), 'utf8')))).toBe(false);
+    await waitGone(
+      Number(readFileSync(join(dir, 'linger.pid'), 'utf8')),
+      'process `next build` started (linger.pid)',
+    );
   });
 
   it('(C) the wrapper killed with SIGKILL after publication: the lock stays held while the build lives, and recovery waits for it (fail closed)', async () => {
