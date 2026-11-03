@@ -223,6 +223,40 @@ test('the miniature repository is clean', (t) => {
   assert.equal(result.prismaRuntime, 1);
 });
 
+test('apps/web/scripts is build tooling: unswept alone, production once reached, others still swept', (t) => {
+  const tool = { 'apps/web/scripts/tool.mjs': "import '@rasta/testing';\n" };
+  assert.deepEqual(sourceProblems(fixture(t, tool)).problems, []);
+  const reached = sourceProblems(
+    fixture(t, { ...tool, 'apps/web/src/app/page.tsx': "import '../../scripts/tool.mjs';\n" }),
+  );
+  assert.match(
+    reached.problems.join('\n'),
+    /page\.tsx → apps\/web\/scripts\/tool\.mjs:1 imports @rasta\/testing/,
+  );
+  // Only the portal's: a service's own scripts are production by path.
+  const service = sourceProblems(
+    fixture(t, { 'services/svc/scripts/tool.mjs': "import '@rasta/testing';\n" }),
+  );
+  assert.match(
+    service.problems.join('\n'),
+    /services\/svc\/scripts\/tool\.mjs:1 imports @rasta\/testing/,
+  );
+  // A tsconfig that compiles from it brings it back into the sweep.
+  const compiled = sourceProblems(
+    fixture(t, {
+      ...tool,
+      'apps/web/tsconfig.scripts.json': JSON.stringify({
+        compilerOptions: { allowJs: true, noEmit: true },
+        include: ['scripts/**/*'],
+      }),
+    }),
+  );
+  assert.match(
+    compiled.problems.join('\n'),
+    /apps\/web\/scripts\/tool\.mjs:1 imports @rasta\/testing/,
+  );
+});
+
 /** [name, files added to BASE, what the problem must say]. */
 const escapes = [
   // Resolved targets, not spellings (r2 F1).

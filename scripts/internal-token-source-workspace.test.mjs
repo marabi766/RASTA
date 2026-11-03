@@ -766,14 +766,59 @@ test('structural: the rule is on for every lintable file of every workspace lint
 });
 
 /**
+ * What the rule, run without types, cannot resolve in the portal's build scripts (PR #420
+ * r9, R8-1), each reviewed: a `Reflect.get` forwarding Next's configuration module (no token,
+ * no secret) and the coverage checker's two imports of test-only helpers (which the source
+ * sweep refuses to any production file). Exact `file:line ruleId messageId: message` reports,
+ * each allowing ONE report, and only while that line is still the reviewed source (the scripts
+ * are byte-frozen, but no other check here pins them): anything else in those files, an edited
+ * or moved line, or any other file in `apps/web/scripts` is held to the rule like every other
+ * file no lint script reaches.
+ */
+const UNTYPED =
+  'without type information through TypeScript types; the boundary fails closed. Keep this in a type-checked file or remove it.';
+const REVIEWED_UNRESOLVED = [
+  {
+    report: `apps/web/scripts/capture-next-config.cjs:253 ${RULE} unresolved: internal-token source: cannot resolve \`Reflect\` in a file ${UNTYPED}`,
+    source: "key === 'default' ? recording : Reflect.get(target, key, receiver),",
+  },
+  {
+    report: `apps/web/scripts/check-server-action-coverage.mjs:40 ${RULE} unresolved: internal-token source: cannot resolve '../src/test/server-action-discovery.ts' from a file ${UNTYPED}`,
+    source: "import('../src/test/server-action-discovery.ts'),",
+  },
+  {
+    report: `apps/web/scripts/check-server-action-coverage.mjs:41 ${RULE} unresolved: internal-token source: cannot resolve '../src/test/server-action-manifest.ts' from a file ${UNTYPED}`,
+    source: "import('../src/test/server-action-manifest.ts'),",
+  },
+];
+
+/**
+ * The reports `REVIEWED_UNRESOLVED` does not account for: an allowance applies only while its
+ * line reads as reviewed, and to one report.
+ */
+function unreviewed(reports, read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8')) {
+  const left = REVIEWED_UNRESOLVED.filter(({ report, source }) => {
+    const [, file, line] = /^(\S+?):(\d+) /.exec(report);
+    return read(file).split('\n')[line - 1]?.trim() === source;
+  }).map(({ report }) => report);
+  return reports.filter((report) => {
+    const at = left.indexOf(report);
+    if (at < 0) return true;
+    left.splice(at, 1);
+    return false;
+  });
+}
+
+/**
  * Every tracked JS/TS file, classified by ESLint itself (ignores and configs
  * as each lint script sees them): linted with the rule on, linted with it off,
  * or reached by no lint script.
  */
-function coverage() {
-  const tracked = spawnSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' })
+function coverage(
+  tracked = spawnSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' })
     .stdout.split('\n')
-    .filter((file) => /\.[cm]?[jt]sx?$/.test(file));
+    .filter((file) => /\.[cm]?[jt]sx?$/.test(file)),
+) {
   const owners = [{ workspace: '.', targets: ['scripts'] }];
   for (const { workspace, lint } of lintWorkspaces())
     owners.push({ workspace, targets: lintTargets(workspace, lint) });
@@ -789,6 +834,7 @@ function coverage() {
           (target) => target === '.' || file === target || file.startsWith(`${target}/`),
         ),
       );
+    if (reached.length === 0) continue;
     for (const [file, config] of Object.entries(
       effectiveLevels(path.join(ROOT, workspace), reached),
     )) {
@@ -830,9 +876,23 @@ test('coverage: the exemptions are test-only code, and the rest is held to the r
     );
   }
 
-  // Files no lint script reaches (root config files, anything an
-  // ignore pattern removes) are linted here with the rule itself, without
-  // types: fail closed, not a spelling scan.
+  // Files no lint script reaches (root config files, anything an ignore pattern removes, the
+  // portal's build scripts) are linted here with the rule itself, without types: fail closed,
+  // not a spelling scan. Only the reviewed reports pass, and each must still be there.
+  const reports = untypedReports(unlinted);
+  assert.deepEqual(
+    REVIEWED_UNRESOLVED.filter(({ report }) => !reports.includes(report)),
+    [],
+    'a reviewed allowance no longer matches: remove it, or review the change',
+  );
+  assert.deepEqual(unreviewed(reports), [], 'move this into a linted path or remove it');
+});
+
+/**
+ * The rule's reports (and parse failures) on `files`, linted without types, ignores and inline
+ * configuration off: `file:line ruleId messageId: message`.
+ */
+function untypedReports(files) {
   const script = `
     const { ESLint } = await import(${JSON.stringify(path.join(ROOT, 'node_modules/eslint/lib/api.js'))});
     const tseslint = (await import(${JSON.stringify(path.join(ROOT, 'node_modules/typescript-eslint/dist/index.js'))})).default;
@@ -851,15 +911,15 @@ test('coverage: the exemptions are test-only code, and the rest is held to the r
     });
     const results = await eslint.lintFiles(JSON.parse(process.argv[1]));
     process.stdout.write(JSON.stringify(results.flatMap((r) => r.messages.filter((m) => m.ruleId === '${RULE}' || m.fatal).map((m) =>
-      r.filePath.slice(${JSON.stringify(ROOT)}.length) + ':' + m.line + ' ' + (m.ruleId ?? 'fatal') + ' ' + m.message))));`;
+      r.filePath.slice(${JSON.stringify(ROOT)}.length) + ':' + m.line + ' ' + (m.ruleId ?? 'fatal') + ' ' + m.messageId + ': ' + m.message))));`;
   const result = spawnSync(
     process.execPath,
-    ['--input-type=module', '-e', script, JSON.stringify(unlinted)],
+    ['--input-type=module', '-e', script, JSON.stringify(files)],
     { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
   );
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), [], 'move this into a linted path or remove it');
-});
+  return JSON.parse(result.stdout);
+}
 
 test('review F4: production importing an exempt helper is refused by the source sweep', (t) => {
   // The review's example: a test file exports a minting helper; the rule is
@@ -895,6 +955,66 @@ test('review F4: production importing an exempt helper is refused by the source 
   assert.deepEqual(problems, [
     `services/svc/${S}/use.ts:1 ./mint.test reaches test-only services/svc/${S}/mint.test.ts`,
   ]);
+});
+
+test('R8-1: a build-script helper a production page imports is held to the rule', (t) => {
+  // The review's mutants: helpers in apps/web/scripts that build an internal-token header or
+  // read the secret, imported by a portal page (which R8-1 found passes the portal's own lint:
+  // the helpers' code is not its own). The helpers are reached by no lint script, so coverage
+  // lints them with the rule wherever they sit, and neither report is a reviewed one.
+  const header = `apps/web/scripts/${TAG}-header.mjs`;
+  const secret = `apps/web/scripts/nested/${TAG}-secret.mjs`;
+  const page = `apps/web/src/app/${TAG}/page.tsx`;
+  const files = {
+    [header]: "export const makeHeaders = (token) => ({ 'x-internal-token': token });\n",
+    [secret]: 'export const secret = () => process.env.INTERNAL_TOKEN_SECRET;\n',
+    [page]:
+      `import { makeHeaders } from '../../../scripts/${TAG}-header.mjs';\n` +
+      `import { secret } from '../../../scripts/nested/${TAG}-secret.mjs';\n` +
+      'export default function Page() { return String(makeHeaders(secret())); }\n',
+  };
+  for (const file of Object.keys(files)) {
+    assert.ok(!fs.existsSync(path.join(ROOT, file)), `fixture would overwrite ${file}`);
+  }
+  const directories = [`apps/web/scripts/nested`, `apps/web/src/app/${TAG}`];
+  for (const dir of directories) assert.ok(!fs.existsSync(path.join(ROOT, dir)));
+  t.after(() => {
+    for (const file of Object.keys(files)) fs.rmSync(path.join(ROOT, file), { force: true });
+    for (const dir of directories)
+      fs.rmSync(path.join(ROOT, dir), { recursive: true, force: true });
+  });
+  for (const [file, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(ROOT, file)), { recursive: true });
+    fs.writeFileSync(path.join(ROOT, file), text);
+  }
+  const { on, unlinted } = coverage(Object.keys(files));
+  assert.ok(on.has(page), 'the page is linted by the portal, with the rule on');
+  assert.deepEqual(unlinted, [header, secret]);
+  const problems = unreviewed(untypedReports(unlinted));
+  assert.ok(
+    problems.some((report) => report.startsWith(`${header}:1 ${RULE} header: `)),
+    `the header helper must fail: ${problems}`,
+  );
+  assert.ok(
+    problems.some((report) => report.startsWith(`${secret}:1 ${RULE} signer: `)),
+    `the secret helper must fail: ${problems}`,
+  );
+});
+
+test('R8-1: a reviewed allowance is one exact report on its reviewed line, used once', () => {
+  const [{ report: reviewed }] = REVIEWED_UNRESOLVED;
+  assert.deepEqual(unreviewed([reviewed]), []);
+  // The same report from an edited line (a `Reflect.apply` of a signer, say) is not reviewed.
+  const edited = (file) =>
+    fs
+      .readFileSync(path.join(ROOT, file), 'utf8')
+      .replace('Reflect.get(target, key, receiver)', 'Reflect.apply(sign, target, [key])');
+  assert.deepEqual(unreviewed([reviewed], edited), [reviewed]);
+  // Twice on the same line, the same text on another line, or another report on that line.
+  assert.deepEqual(unreviewed([reviewed, reviewed]), [reviewed]);
+  const moved = reviewed.replace(':253 ', ':254 ');
+  const header = reviewed.replace(/ unresolved: .*/, ' header: internal-token header');
+  assert.deepEqual(unreviewed([moved, header]), [moved, header]);
 });
 
 test('lint:scripts runs this file on its own, after every other script test', () => {
