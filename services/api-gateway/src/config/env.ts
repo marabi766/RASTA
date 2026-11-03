@@ -1,7 +1,18 @@
 import { z } from 'zod';
-import { authEnvSchema, baseEnvSchema, booleanEnv, redisEnvSchema, loadEnv } from '@rasta/config';
+import {
+  authEnvSchema,
+  baseEnvSchema,
+  booleanEnv,
+  fixedEnvMessages,
+  redisEnvSchema,
+  loadEnv,
+} from '@rasta/config';
 import { serviceUrlEnvSchema } from './routes';
-import { trustedProxiesSchema } from '../http/trust-proxy';
+import { TRUSTED_PROXY_REFUSED, trustedProxiesSchema } from '../http/trust-proxy';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+fixed(TRUSTED_PROXY_REFUSED);
 
 /**
  * `GATEWAY_TENDER_OPEN_TIMEOUT_MS` (Codex r2 on #250, G1): construction-service's own opening
@@ -25,19 +36,19 @@ export const gatewayEnvSchema = baseEnvSchema
   .merge(authEnvSchema)
   .merge(serviceUrlEnvSchema)
   .extend({
-    GATEWAY_CORS_ORIGINS: z.string().default(''),
+    GATEWAY_CORS_ORIGINS: z.string().prefault(''),
 
     /** Default per-user allowance. Individual routes may tighten this. */
-    GATEWAY_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(300),
-    GATEWAY_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).default(60_000),
+    GATEWAY_RATE_LIMIT_MAX: z.coerce.number().int().min(1).prefault(300),
+    GATEWAY_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1000).prefault(60_000),
 
     /** Tenant-wide ceiling, so one busy organization cannot starve the rest. */
-    GATEWAY_TENANT_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(3000),
+    GATEWAY_TENANT_RATE_LIMIT_MAX: z.coerce.number().int().min(1).prefault(3000),
 
     /** Anonymous callers get far less: only registration is reachable. */
-    GATEWAY_ANON_RATE_LIMIT_MAX: z.coerce.number().int().min(1).default(60),
+    GATEWAY_ANON_RATE_LIMIT_MAX: z.coerce.number().int().min(1).prefault(60),
 
-    GATEWAY_UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(100).default(3000),
+    GATEWAY_UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(100).prefault(3000),
 
     /**
      * The upstream deadline of the two routes that open a tender's bids and read every opened
@@ -58,9 +69,9 @@ export const gatewayEnvSchema = baseEnvSchema
       .int()
       .min(TENDER_OPEN_DEADLINE_MIN_MS)
       .max(TENDER_OPEN_DEADLINE_MAX_MS)
-      .default(TENDER_OPEN_DEADLINE_DEFAULT_MS),
-    GATEWAY_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).default(5),
-    GATEWAY_CIRCUIT_RESET_MS: z.coerce.number().int().min(1000).default(30_000),
+      .prefault(TENDER_OPEN_DEADLINE_DEFAULT_MS),
+    GATEWAY_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).prefault(5),
+    GATEWAY_CIRCUIT_RESET_MS: z.coerce.number().int().min(1000).prefault(30_000),
 
     /**
      * Allow traffic when Redis is unreachable.
@@ -83,17 +94,23 @@ export const gatewayEnvSchema = baseEnvSchema
   // A longer deadline for the tender routes only: never one shorter than every other route gets.
   .refine((env) => env.GATEWAY_TENDER_OPEN_TIMEOUT_MS >= env.GATEWAY_UPSTREAM_TIMEOUT_MS, {
     path: ['GATEWAY_TENDER_OPEN_TIMEOUT_MS'],
-    message: 'must be at least GATEWAY_UPSTREAM_TIMEOUT_MS',
+    message: fixed('must be at least GATEWAY_UPSTREAM_TIMEOUT_MS'),
   });
+
+export const GATEWAY_ENV_MESSAGES = seal();
 
 export type GatewayEnv = z.infer<typeof gatewayEnvSchema>;
 
 export function loadGatewayEnv(source: NodeJS.ProcessEnv = process.env): GatewayEnv {
-  return loadEnv(gatewayEnvSchema, {
-    ...source,
-    SERVICE_NAME: source.SERVICE_NAME ?? 'api-gateway',
-    PORT: source.PORT ?? source.PORT_API_GATEWAY ?? '3000',
-  });
+  return loadEnv(
+    gatewayEnvSchema,
+    {
+      ...source,
+      SERVICE_NAME: source.SERVICE_NAME ?? 'api-gateway',
+      PORT: source.PORT ?? source.PORT_API_GATEWAY ?? '3000',
+    },
+    { fixedMessages: GATEWAY_ENV_MESSAGES },
+  );
 }
 
 export function corsOrigins(env: GatewayEnv): string[] {

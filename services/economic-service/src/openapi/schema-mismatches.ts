@@ -1,4 +1,4 @@
-import type { JsonSchema } from './zod-schema';
+import type { JsonSchema } from '@rasta/nest-common';
 
 /**
  * How `value` departs from the documented `schema`, one line per departure,

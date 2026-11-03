@@ -2,9 +2,12 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
 import { fetchAssetTimeline, type AssetTimelineQuery } from '@/server/assets';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { TIMELINE_CATEGORIES, oneOf } from '@/lib/asset-fields';
 import { TimelineScreen } from './TimelineScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/assets/[id]/timeline` route — تاریخچهٔ دارایی (docs/16 § ۱۶٫۶, role
@@ -39,19 +42,23 @@ export default async function AssetTimelinePage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/assets/${id}/timeline`)}`);
 
-  const search = await searchParams;
+  const search = await pageParams(session, searchParams);
   const query: AssetTimelineQuery = {
     // A strict enum on asset-service's side; see `/assets/page.tsx`.
     category: oneOf(TIMELINE_CATEGORIES, one(search.category)),
     cursor: one(search.cursor),
   };
 
-  const result = await fetchAssetTimeline(session, id, query);
+  const [result, demoMode] = await Promise.all([
+    fetchAssetTimeline(session, id, query),
+    fetchDemoMode(session),
+  ]);
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -62,7 +69,12 @@ export default async function AssetTimelinePage({
       }
       sidebar={<PortalSidebar session={session} currentHref="/assets" />}
     >
-      <TimelineScreen result={result} assetId={id} query={query} />
+      <TimelineScreen
+        result={result}
+        assetId={id}
+        query={{ ...query, context: pageContext(session) }}
+        demoMode={demoMode}
+      />
     </AppShell>
   );
 }

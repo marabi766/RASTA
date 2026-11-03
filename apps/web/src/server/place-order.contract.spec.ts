@@ -34,6 +34,7 @@ const controller = parseSource(readSource(...SERVICE, 'order.controller.ts'));
 const dto = parseSource(readSource(...SERVICE, 'dto.ts'));
 const pricing = readSource(...SERVICE, 'pricing.ts');
 const orderService = readSource(...SERVICE, 'order.service.ts');
+const orderDto = readSource(...SERVICE, 'dto.ts');
 
 describe('the endpoint', () => {
   it('is POST /v1/orders, version 1, and requires an Idempotency-Key', () => {
@@ -115,7 +116,7 @@ describe('the sentences the portal translates', () => {
     );
     expect(translated.length).toBeGreaterThan(0);
     for (const sentence of translated) {
-      expect([sentence, (pricing + orderService).includes(`'${sentence}'`)]).toEqual([
+      expect([sentence, (pricing + orderService + orderDto).includes(`'${sentence}'`)]).toEqual([
         sentence,
         true,
       ]);

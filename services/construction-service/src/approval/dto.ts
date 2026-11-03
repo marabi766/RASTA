@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cursorPaginationSchema } from '@rasta/contracts';
+import { cursorPaginationSchema, digitsToBigInt, numberInput } from '@rasta/contracts';
 import { PLATFORM_ROLES } from '@rasta/nest-common';
 import { amountMinorInput } from '../project/dto';
 import { APPROVAL_STATES, POLICY_STATES, WORKFLOW_KEYS } from './approval.state-machine';
@@ -39,10 +39,14 @@ export const policyStepInput = z
   })
   .strict()
   .refine(
-    (step) =>
-      step.minAmountMinor === undefined ||
-      step.maxAmountMinor === undefined ||
-      BigInt(step.minAmountMinor) < BigInt(step.maxAmountMinor),
+    (step) => {
+      if (step.minAmountMinor === undefined || step.maxAmountMinor === undefined) return true;
+      // zod runs this even when a bound failed its own pattern, with the raw text: only digits
+      // are compared, and a malformed bound is reported by its pattern alone.
+      const min = digitsToBigInt(step.minAmountMinor);
+      const max = digitsToBigInt(step.maxAmountMinor);
+      return min === undefined || max === undefined || min < max;
+    },
     { message: 'minAmountMinor must be less than maxAmountMinor', path: ['maxAmountMinor'] },
   );
 
@@ -59,7 +63,7 @@ export const createPolicySchema = z
     /** Why — a governance setting without a rationale is unauditable. */
     rationale: z.string().trim().min(8).max(2000),
     /** Demo data: «نمونه — نیازمند تصویب» (ADR-023). */
-    isSample: z.boolean().default(false),
+    isSample: z.boolean().prefault(false),
     /** In order: the first is asked first (Q-70: strictly sequential). */
     steps: z.array(policyStepInput).min(1).max(MAX_POLICY_STEPS),
   })
@@ -124,14 +128,14 @@ export const decisionSchema = z
 export type DecisionDto = z.infer<typeof decisionSchema>;
 
 export const inboxQuerySchema = cursorPaginationSchema
-  .extend({ status: z.enum(APPROVAL_STATES).default('PENDING') })
+  .extend({ status: z.enum(APPROVAL_STATES).prefault('PENDING') })
   .strict();
 export type InboxQuery = z.infer<typeof inboxQuerySchema>;
 
 export const projectApprovalsQuerySchema = z
   .object({
     workflowKey: z.enum(WORKFLOW_KEYS).optional(),
-    round: z.coerce.number().int().min(1).optional(),
+    round: numberInput(z.number().int().min(1)).optional(),
   })
   .strict();
 export type ProjectApprovalsQuery = z.infer<typeof projectApprovalsQuerySchema>;
@@ -196,6 +200,8 @@ export const approvalBindingSchema = z
     requestId: z.string(),
     tenderVersion: z.number().int(),
     status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'STALE', 'CONSUMED']),
+    procurementThresholdWarning: z.literal('PROCUREMENT_AMOUNT_OUTSIDE_RANGE').optional(),
+    procurementThresholdPolicyId: z.string().optional(),
     requestedBy: z.string(),
     requestedAt: z.string(),
     bid: z

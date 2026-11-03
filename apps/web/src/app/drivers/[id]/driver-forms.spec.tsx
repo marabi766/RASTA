@@ -112,7 +112,7 @@ describe('UpdateDriverForm', () => {
       kind: 'UNCONFIRMED',
       correlationId: 'corr-sample',
     });
-    expect(getByText(/نتوانستیم تأیید کنیم/)).toBeInTheDocument();
+    expect(getByText(/نتوانستیم بدانیم که این درخواست ثبت شد یا نه/)).toBeInTheDocument();
     expect(getByText(/corr-sample/)).toBeInTheDocument();
     expect(container.textContent).not.toMatch(/چیزی تغییر نکرد|ذخیره انجام نشد/);
   });

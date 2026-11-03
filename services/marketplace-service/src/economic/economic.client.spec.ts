@@ -1,3 +1,5 @@
+import { registry } from '@rasta/observability';
+import { withRedirectProbe } from '@rasta/testing';
 import { AllExceptionsFilter, RastaError, isRastaError } from '@rasta/nest-common';
 import {
   EconomicClient,
@@ -288,6 +290,99 @@ describe('a refusal keeps economic-service’s own error code', () => {
   });
 });
 
+describe('one deadline covers the response body too (#502 r1 F1)', () => {
+  const original = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  const TIMEOUT_ENV = { ...ENV, ECONOMIC_REQUEST_TIMEOUT_MS: 30 } as MarketplaceEnv;
+  const refundInput = {
+    orderId: 'ORD_1',
+    transactionId: 'TXN_1',
+    buyerOrganizationId: 'ORG-BUYER',
+    reason: 'cancelled',
+    correlationId: 'corr-1',
+  };
+
+  /** Success headers at once; then part of a body, and the rest never comes. */
+  const stalledBody = (): Response =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"id":'));
+        },
+      }),
+      { status: 200 },
+    );
+
+  it('fails a stalled body as an unavailable service within the deadline, with the signal aborted', async () => {
+    const signals: AbortSignal[] = [];
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      signals.push(init.signal!);
+      // Not wired to the signal, like a transport that ignores the abort.
+      return stalledBody();
+    }) as unknown as typeof fetch;
+    const client = new EconomicClient(TIMEOUT_ENV, recordingTokens().service as never);
+    const started = Date.now();
+
+    await expect(client.refund(refundInput)).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(true);
+  });
+
+  it('keeps the write unresolved: nothing is sent again, and a retry carries the same idempotency key', async () => {
+    const sent: { key?: string }[] = [];
+    let call = 0;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      call += 1;
+      sent.push({ key: (init.headers as Record<string, string>)['idempotency-key'] });
+      return call === 1
+        ? stalledBody()
+        : new Response(JSON.stringify({ id: 'TXN_1', status: 'REFUNDED' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = new EconomicClient(TIMEOUT_ENV, recordingTokens().service as never);
+
+    await expect(client.refund(refundInput)).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+    // The failed attempt was the only request: the client does not retry by itself.
+    expect(sent).toHaveLength(1);
+
+    await expect(client.refund(refundInput)).resolves.toMatchObject({ id: 'TXN_1' });
+    expect(sent).toHaveLength(2);
+    expect(sent[0]!.key).toBeDefined();
+    expect(sent[1]!.key).toBe(sent[0]!.key);
+  });
+
+  it('counts a stalled body as an unreachable call, and still reads a body that ends in time', async () => {
+    const before = await outcomeCount('UNREACHABLE');
+    globalThis.fetch = (async () => stalledBody()) as unknown as typeof fetch;
+    const client = new EconomicClient(TIMEOUT_ENV, recordingTokens().service as never);
+    await expect(client.refund(refundInput)).rejects.toMatchObject({
+      code: 'UPSTREAM_UNAVAILABLE',
+    });
+    expect(await outcomeCount('UNREACHABLE')).toBe(before + 1);
+
+    const { impl } = stubFetch({ status: 200, body: { id: 'TXN_1' } });
+    globalThis.fetch = impl as typeof fetch;
+    await expect(client.refund(refundInput)).resolves.toEqual({ id: 'TXN_1' });
+  });
+});
+
+async function outcomeCount(outcome: string): Promise<number> {
+  const metric = await registry.getSingleMetric('rasta_marketplace_economic_calls_total')?.get();
+  return (
+    metric?.values
+      .filter((value) => value.labels.outcome === outcome)
+      .reduce((sum, value) => sum + value.value, 0) ?? 0
+  );
+}
+
 describe('each command reaches the endpoint it names', () => {
   const original = globalThis.fetch;
   afterEach(() => {
@@ -550,3 +645,110 @@ describe('what an obligation’s status says of its funds (review of #334 round 
     expect(fundsOf(status)).toBe(funds);
   });
 });
+
+// Real HTTP owner with an in-memory commit ledger: this is a unit test, not PG.
+it.each([
+  ['createObligation', 'hold'],
+  ['authoriseSettlement', 'authorise'],
+  ['settle', 'settle'],
+  ['refund', 'refund'],
+  ['cancel', 'cancel'],
+  ['dispute', 'dispute'],
+  ['resolveDispute', 'resolveDispute'],
+] as const)(
+  '%s retries an uncertain write with the same key, body and decision identity',
+  async (operation, keyName) => {
+    const transaction = { id: 'TXN_COMMITTED', status: 'HELD', organizationId: 'ORG_BUYER' };
+    const committed = new Map<string, string>();
+    const receivedBodies: string[] = [];
+    let writes = 0;
+    await withRedirectProbe(
+      {
+        body: transaction,
+        onRequest: (request, body) => {
+          if (request.method !== 'POST') return;
+          const key = String(request.headers['idempotency-key']);
+          receivedBodies.push(body);
+          if (!committed.has(key)) {
+            committed.set(key, body);
+            writes += 1;
+          }
+        },
+      },
+      async (probe) => {
+        const original = globalThis.fetch;
+        globalThis.fetch = probe.fetch;
+        try {
+          const client = new EconomicClient(
+            { ...ENV, ECONOMIC_SERVICE_URL: probe.baseUrl },
+            recordingTokens().service as never,
+          );
+          const input = {
+            orderId: 'ORD_1',
+            transactionId: 'TXN_COMMITTED',
+            buyerOrganizationId: 'ORG_BUYER',
+            supplierOrganizationId: 'ORG_SUPPLIER',
+            totalAmountMinor: 10n,
+            currency: 'IRR',
+            correlationId: 'corr-1',
+            reason: 'the original reason',
+            resolution: 'the original decision',
+            disputeId: 'DSP_ORIGINAL',
+            economicDisputeId: 'TXD_ORIGINAL',
+          };
+          const invoke = () => client[operation](input);
+          const expectedKey =
+            keyName === 'dispute' || keyName === 'resolveDispute'
+              ? idempotencyKeyFor[keyName](input.orderId, input.disputeId)
+              : idempotencyKeyFor[keyName](input.orderId);
+          await expect(invoke()).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+          expect(writes).toBe(1);
+          expect(probe.sent).toHaveLength(1);
+          expect(probe.target).toEqual([]);
+          probe.recover();
+          await expect(invoke()).resolves.toEqual(transaction);
+          expect(writes).toBe(1);
+          expect([...committed.keys()]).toEqual([expectedKey]);
+          expect(receivedBodies).toHaveLength(2);
+          expect(receivedBodies[1]).toBe(receivedBodies[0]);
+          expect(probe.sent.map((request) => request.headers['idempotency-key'])).toEqual([
+            expectedKey,
+            expectedKey,
+          ]);
+          const expectedBodies = {
+            createObligation: {
+              transactionType: 'MARKETPLACE_ORDER',
+              counterpartyOrganizationId: 'ORG_SUPPLIER',
+              grossAmountMinor: '10',
+              currency: 'IRR',
+              sourceType: 'ORDER',
+              sourceReference: 'ORD_1',
+              holdFunds: true,
+            },
+            authoriseSettlement: undefined,
+            settle: { transactionId: 'TXN_COMMITTED' },
+            refund: { reason: 'the original reason' },
+            cancel: { reason: 'the original reason' },
+            dispute: { reason: 'the original reason' },
+            resolveDispute: { resolution: 'the original decision', disputeId: 'TXD_ORIGINAL' },
+          };
+          expect(receivedBodies[0]).toBe(JSON.stringify(expectedBodies[operation]) ?? '');
+          if (operation !== 'createObligation' && operation !== 'settle')
+            expect(probe.sent.map((request) => request.url)).toEqual([
+              `/v1/transactions/TXN_COMMITTED/${operation === 'authoriseSettlement' ? 'authorise-settlement' : operation === 'resolveDispute' ? 'resolve-dispute' : operation}`,
+              probe.sent[0]!.url,
+            ]);
+          // A later order, or a later dispute episode, has its own replay identity.
+          const laterKey =
+            keyName === 'dispute' || keyName === 'resolveDispute'
+              ? idempotencyKeyFor[keyName](input.orderId, 'DSP_LATER')
+              : idempotencyKeyFor[keyName]('ORD_LATER');
+          expect(laterKey).not.toBe(expectedKey);
+          expect(probe.target).toEqual([]);
+        } finally {
+          globalThis.fetch = original;
+        }
+      },
+    );
+  },
+);

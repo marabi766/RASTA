@@ -54,6 +54,7 @@ describe('the runtime role cannot lift an integrity guard (D-045)', () => {
       createDb: false,
       createRole: false,
       bypassRls: false,
+      replication: false,
     });
   });
 

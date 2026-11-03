@@ -28,12 +28,14 @@ function fieldOf(schema: z.ZodTypeAny, path: string): z.ZodTypeAny {
   let current: z.ZodTypeAny = schema;
   for (const key of path.split('.')) {
     for (;;) {
-      if (current instanceof z.ZodEffects) current = current.innerType();
+      // A refinement is a check on the schema itself; a transform or preprocess is a pipe.
+      if (current instanceof z.ZodPipe)
+        current = (current.in instanceof z.ZodTransform ? current.out : current.in) as z.ZodType;
       else if (current instanceof z.ZodOptional || current instanceof z.ZodNullable)
-        current = current.unwrap();
+        current = current.unwrap() as z.ZodType;
       else break;
     }
-    current = (current as z.AnyZodObject).shape[key] as z.ZodTypeAny;
+    current = (current as z.ZodObject).shape[key] as z.ZodTypeAny;
     if (!current) throw new Error(`no field ${path}`);
   }
   return current;

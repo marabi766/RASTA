@@ -1,6 +1,11 @@
 /* eslint-disable no-console */
 import { PrismaClient } from '../src/generated/prisma';
-import { assertDemoSeedAllowed, assertDemoSeedDatabase, withUtcSession } from '@rasta/config';
+import {
+  assertDemoSeedAllowed,
+  assertDemoSeedDatabase,
+  tryReadUrl,
+  withUtcSession,
+} from '@rasta/config';
 import { assertDemoSeedRuntimeRole } from '@rasta/nest-common';
 
 /**
@@ -133,12 +138,8 @@ export function resolveDatabaseUrl(env: DatabaseUrlEnv = process.env): string {
 
 /** `host:port/database`, with the credentials left out of the log. */
 function describeTarget(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return `${parsed.host}${parsed.pathname}`;
-  } catch {
-    return '(unparsable connection string)';
-  }
+  const parsed = tryReadUrl(url);
+  return parsed === null ? '(unparsable connection string)' : `${parsed.host}${parsed.pathname}`;
 }
 
 // -----------------------------------------------------------------------------

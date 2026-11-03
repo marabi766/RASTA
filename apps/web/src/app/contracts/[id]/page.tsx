@@ -10,6 +10,7 @@ import {
   statementCallerOf,
 } from '@/server/contract-statements';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { fetchAmendments, fetchContract, fetchMilestones } from '@/server/contracts';
 import { webServerEnv } from '@/server/env';
 import { readFlash } from '@/server/flash';
@@ -19,6 +20,8 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { ContractDetailScreen } from './ContractDetailScreen';
 import { contractCommandOffers } from './contract-offers';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/contracts/[id]` route — جزئیات قرارداد (docs/16 § ۱۶٫۶, ADR-068).
@@ -63,7 +66,7 @@ export default async function ContractPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(`/contracts/${id}`)}`);
 
-  const query = await searchParams;
+  const query = await pageParams(session, searchParams);
   const amendmentCursor = one(query.amendmentCursor);
   const statementCursor = one(query.statementCursor);
 
@@ -89,7 +92,7 @@ export default async function ContractPage({
     result.kind === 'OK'
       ? await contractCommandOffers(
           session,
-          contractCallerOf(session.accessToken),
+          contractCallerOf(session),
           result.data,
           amendments,
           milestones,
@@ -97,7 +100,7 @@ export default async function ContractPage({
       : null;
 
   const draft =
-    result.kind === 'OK' && canDraftStatement(statementCallerOf(session.accessToken), result.data)
+    result.kind === 'OK' && canDraftStatement(statementCallerOf(session), result.data)
       ? {
           offered: [
             {
@@ -118,10 +121,13 @@ export default async function ContractPage({
         }
       : null;
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -143,6 +149,7 @@ export default async function ContractPage({
       </div>
       <div className="mt-4">
         <ContractDetailScreen
+          context={pageContext(session)}
           result={result}
           amendments={amendments}
           milestones={milestones}
@@ -150,6 +157,7 @@ export default async function ContractPage({
           draft={draft}
           commands={commands}
           notice={notice ?? null}
+          demoMode={demoMode}
         />
       </div>
     </AppShell>

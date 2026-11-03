@@ -4,7 +4,9 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import kafkajs from 'kafkajs';
+import { SENTINELS, assertNoSentinel, thrownBy } from './refusal-probes.mjs';
 import {
+  UNREADABLE_CA_FILE,
   aclKey,
   connectionFor,
   diffAcls,
@@ -197,3 +199,143 @@ test('the applier refuses to run without an explicit profile (review of #131, #5
     assert.match(result.stderr, /--profile development\|deployment/);
   }
 });
+
+// #385 r4: the configured CA path is not repeated — not by the library's error
+// in any part (the filesystem's ENOENT carries it on .message and .path), and
+// not by the real applier, which refuses before it connects.
+const missingCa = (sentinel) => `/nonexistent/${sentinel}/${sentinel.replaceAll('-', '_')}/ca.pem`;
+
+test('connectionFor: an unreadable CA file is one fixed refusal, with nothing of the path', () => {
+  for (const sentinel of SENTINELS) {
+    const error = thrownBy(() =>
+      connectionFor('admin', { KAFKA_SSL_CA_FILE: missingCa(sentinel) }, (path) =>
+        readFileSync(path, 'utf8'),
+      ),
+    );
+    assert.equal(error.message, UNREADABLE_CA_FILE);
+    assert.equal(error.cause, undefined);
+    assert.deepEqual(Object.keys(error), []);
+    assertNoSentinel(error, sentinel);
+  }
+});
+
+test('kafka-acl.mjs: an unreadable CA file is refused before connecting, path unprinted', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const script = resolve(ROOT, 'scripts/kafka-acl.mjs');
+  const run = (env) =>
+    spawnSync(process.execPath, [script, 'apply', '--profile', 'development'], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH, ...env },
+    });
+  for (const sentinel of SENTINELS) {
+    const result = run({ KAFKA_SSL_CA_FILE: missingCa(sentinel), KAFKA_SASL_PASSWORD_ADMIN: 'x' });
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr, `kafka acl: ${UNREADABLE_CA_FILE}\n`);
+    assert.equal(result.stdout, '');
+    assertNoSentinel(result.stdout + result.stderr, sentinel);
+  }
+  // Positive control: a readable CA passes the read, and the run goes on to its
+  // next check (no admin password here) — still before any connection.
+  const dir = mkdtempSync(resolve(tmpdir(), 'kafka-acl-ca-'));
+  try {
+    writeFileSync(resolve(dir, 'ca.pem'), 'PEM');
+    const result = run({ KAFKA_SSL_CA_FILE: resolve(dir, 'ca.pem') });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /^kafka acl: KAFKA_SASL_PASSWORD_ADMIN is required/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+for (const scenario of ['match', 'missing', 'extra', 'denied', 'unreadable']) {
+  test(`read-only post-rotation ACL check: ${scenario}, never mutates or discloses foreign errors`, async () => {
+    const { spawnSync } = await import('node:child_process');
+    const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { pathToFileURL } = await import('node:url');
+    const dir = mkdtempSync(resolve(tmpdir(), 'kafka-acl-check-'));
+    const url = (file) => pathToFileURL(resolve(ROOT, file)).href;
+    try {
+      const fake = resolve(dir, 'fake.mjs');
+      const calls = resolve(dir, 'calls');
+      writeFileSync(resolve(dir, 'ca.pem'), 'fixture CA');
+      writeFileSync(
+        fake,
+        `
+        import kafkajs from ${JSON.stringify(url('node_modules/kafkajs/index.js'))};
+        import { toKafkajsAcl } from ${JSON.stringify(url('scripts/kafka-acl-lib.mjs'))};
+        import { readFileSync, appendFileSync } from 'node:fs';
+        const spec = JSON.parse(readFileSync(${JSON.stringify(resolve(ROOT, 'infrastructure/docker/kafka/broker-acls.development.json'))}));
+        const call = (name) => appendFileSync(process.env.CHECK_CALLS, name + '\\n');
+        const scenario = process.env.CHECK_SCENARIO;
+        export default { ...kafkajs, Kafka: class {
+          admin() { return {
+            connect: async () => { call('connect'); if (scenario === 'denied') throw Error('foreign-secret'); },
+            describeAcls: async () => {
+              call('describe');
+              if (scenario === 'unreadable') throw Error('foreign-secret');
+              const bindings = scenario === 'missing' ? spec.acls.slice(1) : [...spec.acls];
+              if (scenario === 'extra') bindings.push({ ...spec.acls[0], resourceName: 'unexpected' });
+              return { resources: bindings.map((binding) => {
+                const acl = toKafkajsAcl(binding);
+                return { resourceType: acl.resourceType, resourceName: acl.resourceName,
+                  resourcePatternType: acl.resourcePatternType, acls: [acl] };
+              }) };
+            },
+            createAcls: async () => { call('WRITE create'); },
+            deleteAcls: async () => { call('WRITE delete'); },
+            disconnect: async () => { call('disconnect'); },
+          }; }
+        } };
+      `,
+      );
+      const loader = resolve(dir, 'loader.mjs');
+      writeFileSync(
+        loader,
+        `
+        export async function resolve(specifier, context, next) {
+          if (specifier === 'kafkajs' && context.parentURL === ${JSON.stringify(url('scripts/kafka-acl.mjs'))})
+            return { url: ${JSON.stringify(pathToFileURL(fake).href)}, shortCircuit: true };
+          return next(specifier, context);
+        }
+      `,
+      );
+      const result = spawnSync(
+        process.execPath,
+        [
+          '--no-warnings',
+          '--experimental-loader',
+          loader,
+          resolve(ROOT, 'scripts/kafka-acl.mjs'),
+          'check',
+          '--profile',
+          'development',
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 10000,
+          env: {
+            PATH: process.env.PATH,
+            CHECK_SCENARIO: scenario,
+            CHECK_CALLS: calls,
+            KAFKA_SASL_PASSWORD_ADMIN: 'fixture',
+            KAFKA_SSL_CA_FILE: resolve(dir, 'ca.pem'),
+          },
+        },
+      );
+      assert.equal(result.status, scenario === 'match' ? 0 : 1, result.stderr);
+      assert.doesNotMatch(result.stdout + result.stderr, /foreign-secret/);
+      assert.equal(
+        result.stdout.includes('generated ACLs confirmed (read only)'),
+        scenario === 'match',
+      );
+      const history = readFileSync(calls, 'utf8');
+      assert.doesNotMatch(history, /WRITE/);
+      assert.ok(history.endsWith('disconnect\n'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

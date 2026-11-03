@@ -1,3 +1,4 @@
+import { PLAYWRIGHT_CLI } from './playwright-cli';
 /**
  * @jest-environment node
  */
@@ -59,7 +60,7 @@ function list(ci: boolean, live: Flag, exp004: Flag): Listed[] {
   if (live !== undefined) env.WEB_LIVE_STACK_E2E = live;
   if (exp004 !== undefined) env.WEB_LIVE_STACK_E2E_EXP004 = exp004;
 
-  const cli = path.join(path.dirname(require.resolve('@playwright/test/package.json')), 'cli.js');
+  const cli = PLAYWRIGHT_CLI;
   const run = spawnSync(process.execPath, [cli, 'test', '--list', '--reporter=json', SPEC], {
     cwd: WEB_ROOT,
     encoding: 'utf8',

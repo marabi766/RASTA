@@ -1,3 +1,10 @@
+import { ProcurementThresholdPolicy } from '../organization/procurement-threshold-policy';
+import {
+  checkProcurementThreshold,
+  PROCUREMENT_THRESHOLD_WARNING,
+  type ThresholdPolicy,
+  type ThresholdPreview,
+} from './procurement-thresholds';
 import { Inject, Injectable } from '@nestjs/common';
 import { RastaError, currentActor } from '@rasta/nest-common';
 import { withFinancialSpan } from '@rasta/observability';
@@ -93,6 +100,7 @@ export class PublicationService {
     private readonly gate: TenderApprovalGate,
     private readonly requests: TenderApprovalRepository,
     private readonly idempotency: IdempotencyStore,
+    private readonly thresholdPolicies: ProcurementThresholdPolicy,
   ) {}
 
   /**
@@ -134,6 +142,26 @@ export class PublicationService {
     );
   }
 
+  /** Advisory owner-only read. Publication rechecks the policy and the locked tender. */
+  async thresholdPreview(tenderId: string): Promise<ThresholdPreview> {
+    const { organizationId } = this.access.assertCanRead();
+    const tender = await this.tenders.findTender(tenderId);
+    if (!tender) throw RastaError.notFound('Tender', tenderId);
+    assertOwnTender(tender, organizationId);
+    if (tender.status !== 'DRAFT')
+      throw RastaError.businessRule('Threshold preview requires a draft tender');
+    const policy = await this.thresholdPolicies.get(organizationId);
+    return {
+      tenderVersion: tender.version,
+      decision: checkProcurementThreshold(
+        policy,
+        tender.procurementNature,
+        tender.estimatedCostMinor,
+      ),
+      procurementThresholdPolicyId: policy?.id ?? null,
+    };
+  }
+
   private async publishGated(
     tenderId: string,
     dto: PublishTenderDto,
@@ -142,11 +170,13 @@ export class PublicationService {
   ): Promise<Gated<TenderView>> {
     const { organizationId, userId: actor } = caller;
     // Asked before any transaction: no row lock is held across a network call.
+    const thresholdPolicy = await this.thresholdPolicies.get(organizationId);
     const confirmedPolicyId = await this.gate.confirmPolicy(organizationId, WORKFLOW);
     const ready =
       confirmedPolicyId !== null &&
       (await this.gate.hasApproved(organizationId, tenderId, WORKFLOW));
-    if (!ready) return this.askForApproval(tenderId, dto, caller, confirmedPolicyId, record);
+    if (!ready)
+      return this.askForApproval(tenderId, dto, caller, confirmedPolicyId, record, thresholdPolicy);
 
     const keyId = newId(ID_PREFIX.tenderKey);
     const { publicKeyPem, wrapped } = await this.makeKey(tenderId, keyId);
@@ -179,7 +209,12 @@ export class PublicationService {
           // One instant, read **after** the lock: the deadline is judged on it, and the row, the key and the
           // event are all stamped with it. The transaction's start (`now()`) can precede a long wait for the
           // lock by seconds, which would date a publication before the decision that made it.
-          const { row, criteria, refusals, at } = await this.judge(tx, tenderId, true);
+          const { row, criteria, refusals, at, thresholdDecision } = await this.judge(
+            tx,
+            tenderId,
+            true,
+            thresholdPolicy,
+          );
           if (refusals.length > 0) throw this.refused(tenderId, refusals);
 
           const resolution = await this.gate.resolve(tx, {
@@ -189,7 +224,12 @@ export class PublicationService {
               projectId: locked.projectId,
               version: locked.version,
             },
-            binding: { workflowKey: WORKFLOW },
+            binding: {
+              workflowKey: WORKFLOW,
+              procurementThresholdWarning:
+                thresholdDecision === 'WARN' ? PROCUREMENT_THRESHOLD_WARNING : null,
+              procurementThresholdPolicyId: thresholdPolicy?.id ?? null,
+            },
             confirmedPolicyId: confirmedPolicyId as string,
             caller,
             at,
@@ -209,9 +249,13 @@ export class PublicationService {
             return asked;
           }
 
+          const thresholdWarning =
+            thresholdDecision === 'WARN' ? PROCUREMENT_THRESHOLD_WARNING : null;
           const matched = await this.tenders.publishTender(tx, {
             tenderId,
             expectedVersion: dto.expectedVersion,
+            procurementThresholdWarning: thresholdWarning,
+            procurementThresholdPolicyId: thresholdPolicy?.id ?? null,
             actor,
             actorIdentity: caller.identity,
             at,
@@ -251,6 +295,8 @@ export class PublicationService {
               bidOpeningAt: row.bidOpeningAt?.toISOString(),
               bidClosingAt: row.bidClosingAt?.toISOString(),
               criteriaCount: criteria.length,
+              ...(thresholdPolicy ? { procurementThresholdPolicyId: thresholdPolicy.id } : {}),
+              ...(thresholdWarning ? { procurementThresholdWarning: thresholdWarning } : {}),
               keyId,
               approvalRequestId: resolution.request.id,
               publishedBy: actor,
@@ -284,6 +330,7 @@ export class PublicationService {
     caller: GateCaller,
     confirmedPolicyId: string | null,
     record: RecordCompletion<Gated<TenderView>>,
+    thresholdPolicy: ThresholdPolicy | null,
   ): Promise<Gated<TenderView>> {
     const { organizationId } = caller;
     const outcome = await this.prisma.transaction(
@@ -301,7 +348,12 @@ export class PublicationService {
           throw this.conflict(tenderId);
         }
         assertTenderTransition(tenderId, locked.status, 'PUBLISHED');
-        const { refusals, at } = await this.judge(tx, tenderId, confirmedPolicyId !== null);
+        const { refusals, at, thresholdDecision } = await this.judge(
+          tx,
+          tenderId,
+          confirmedPolicyId !== null,
+          thresholdPolicy,
+        );
         if (refusals.length > 0 || confirmedPolicyId === null) {
           throw this.refused(tenderId, refusals);
         }
@@ -312,7 +364,12 @@ export class PublicationService {
             projectId: locked.projectId,
             version: locked.version,
           },
-          binding: { workflowKey: WORKFLOW },
+          binding: {
+            workflowKey: WORKFLOW,
+            procurementThresholdWarning:
+              thresholdDecision === 'WARN' ? PROCUREMENT_THRESHOLD_WARNING : null,
+            procurementThresholdPolicyId: thresholdPolicy?.id ?? null,
+          },
           confirmedPolicyId,
           caller,
           at,
@@ -488,7 +545,12 @@ export class PublicationService {
    * Reads what publishing is judged on, under the tender's lock, and judges it.
    * `at` is the database's instant read after the lock (`clock_timestamp()`).
    */
-  private async judge(tx: ExtendedPrismaClient, tenderId: string, policyInForce: boolean) {
+  private async judge(
+    tx: ExtendedPrismaClient,
+    tenderId: string,
+    policyInForce: boolean,
+    thresholdPolicy: ThresholdPolicy | null,
+  ) {
     const at = await decisionInstant(tx);
     const row = await this.tenders.findTender(tenderId, tx);
     if (!row) throw RastaError.notFound('Tender', tenderId);
@@ -505,7 +567,15 @@ export class PublicationService {
       invitationCount: await this.publications.countInvitations(tx, tenderId),
       approval: policyInForce ? 'POLICY_IN_FORCE' : 'NO_POLICY',
     });
-    return { row, criteria, refusals, at };
+    const thresholdDecision = checkProcurementThreshold(
+      thresholdPolicy,
+      row.procurementNature,
+      row.estimatedCostMinor,
+    );
+    if (thresholdDecision === 'REJECT') refusals.unshift('PROCUREMENT_AMOUNT_OUTSIDE_RANGE');
+    if (thresholdDecision === 'ESTIMATE_REQUIRED')
+      refusals.unshift('PROCUREMENT_ESTIMATE_REQUIRED');
+    return { row, criteria, refusals, at, thresholdDecision };
   }
 
   private refused(tenderId: string, refusals: readonly PublicationRefusal[]): RastaError {

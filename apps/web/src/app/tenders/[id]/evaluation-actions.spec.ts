@@ -28,6 +28,7 @@ import {
   type OwnerFormState,
   type UnconfirmedOwnerCommand,
 } from './owner-form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The evaluation's and the award's write path through the owner's action:
@@ -65,7 +66,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'author',
   organizationId: OWNER,
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken(OWNER),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -324,21 +325,19 @@ describe('what an award sends', () => {
 });
 
 describe('unconfirmed', () => {
-  it('a lost award rejected meanwhile is never sent again: no second approval round', async () => {
+  it('a lost award, rejected meanwhile, is sent again under its key: the answer is the first one, replayed — and said to be', async () => {
     answer = () => problem(504, 'UPSTREAM_TIMEOUT');
     const data = form({ [JUSTIFICATION_FIELD]: 'زمان کوتاه‌تر' }, AWARD);
     const lost = (await send(data)) as UnconfirmedOwnerCommand;
-    expect(lost).toMatchObject({
-      command: 'AWARD',
-      viewOnly: true,
-      unrepeatable: true,
-      replay: null,
-      values: null,
-    });
-    // Were it sent again, the same key and choice would open a new round (202).
-    answer = () => json(202, { ...AWARD_PENDING_REQUEST, id: 'TAR_AWARD_2', round: 2 });
-    expect(await send(data, lost)).toEqual(lost);
-    expect(sent).toHaveLength(1);
+    expect(lost).toMatchObject({ command: 'AWARD', replay: { token: data.get('replay') } });
+    expect(lost.viewOnly).toBeUndefined();
+    expect(lost.unrepeatable).toBeUndefined();
+    // The service answers the same key with the first answer (the 202 of round 1), not a new round.
+    answer = () => json(202, AWARD_PENDING_REQUEST);
+    await expect(send(data, lost)).rejects.toThrow('NEXT_REDIRECT');
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toEqual(sent[0]);
+    expect(flashOf()).toBe('AWARD_REQUESTED_RESENT');
   });
 
   it('a score, unconfirmed, keeps what was typed and is sent again as it was: kept under its key', async () => {

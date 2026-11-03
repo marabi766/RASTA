@@ -1,0 +1,69 @@
+name: Restore the shared Trivy DB
+description: >-
+  Downloads the vulnerability DB the `trivy-db` job of this run published, and
+  fails unless it is exactly the copy that producer validated (same key, run
+  and attempt, same bytes) and at most 24 h old. Used by every Trivy scan;
+  none of them downloads a DB of its own. See scripts/ci-trivy-db-lib.mjs and
+  the `trivy-db` job in ci.yml.
+inputs:
+  key:
+    description: needs.trivy-db.outputs.key. Empty means the producer failed.
+    required: false
+    default: ''
+outputs:
+  dir:
+    description: Trivy cache directory holding the restored DB (pass as cache-dir).
+    value: ${{ steps.where.outputs.dir }}
+runs:
+  using: composite
+  steps:
+    - name: Require the key of the shared Trivy DB
+      # A consumer whose producer failed or was skipped still runs (see the
+      # `if:` on the callers) and ends here, red, instead of being skipped,
+      # which a required check would count as a passing scan.
+      id: where
+      shell: bash
+      env:
+        KEY: ${{ inputs.key }}
+      run: |
+        if [ -z "$KEY" ]; then
+          echo "::error::The trivy-db job published no database for this run; refusing to scan without one."
+          exit 1
+        fi
+        # Outside the checkout, so no image build context carries it.
+        echo "dir=$RUNNER_TEMP/trivy-db" >> "$GITHUB_OUTPUT"
+        echo "archive=$RUNNER_TEMP/trivy-db-artifact" >> "$GITHUB_OUTPUT"
+
+    - name: Download the shared Trivy DB
+      # By exact name, from this run (an artifact, not actions/cache: the
+      # cache entry was evicted before the image scans needed it, see the
+      # `trivy-db` job). No pattern: nothing but the producer's artifact. A
+      # missing artifact fails the step.
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      with:
+        name: ${{ inputs.key }}
+        path: ${{ steps.where.outputs.archive }}
+
+    - name: Unpack exactly the producer's archive
+      # The one admission (unpackDb, scripts/ci-trivy-db-lib.mjs): the
+      # artifact is exactly trivy-db.tar.zst, and the archive exactly the
+      # producer's five members (ustar, names/types/magic/prefix checked,
+      # checksum and octal sizes validated; owner/mode/time ignored; in order,
+      # each within its size limit; no link, no tar extension, nothing
+      # else). It is decompressed once, bounded, and the parse that admits a
+      # member is the one that writes it, into a fresh directory that only
+      # replaces the target once the whole archive passed. Whatever was in
+      # the target before is removed first; a refusal or any error leaves
+      # none.
+      shell: bash
+      env:
+        ARCHIVE_DIR: ${{ steps.where.outputs.archive }}
+        TRIVY_DB_DIR: ${{ steps.where.outputs.dir }}
+      run: node scripts/ci-trivy-db.mjs unpack "$ARCHIVE_DIR" "$TRIVY_DB_DIR"
+
+    - name: Check the restored Trivy DB
+      shell: bash
+      env:
+        TRIVY_DB_DIR: ${{ steps.where.outputs.dir }}
+        TRIVY_DB_KEY: ${{ inputs.key }}
+      run: node scripts/ci-trivy-db.mjs check "$TRIVY_DB_DIR" "$TRIVY_DB_KEY"

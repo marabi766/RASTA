@@ -95,6 +95,17 @@ OTLP/Collector اضافه می‌کند؛ پس مقصد پیکربندی‌شد�
 Listener ندارد، و مسیردهیِ چندهدفهٔ Transport سطح عددی می‌خواهد و سطر بی‌صدا حذف می‌شد. Fan-out را خودِ Logger
 می‌سازد؛ در مخزن هیچ فراخواننده‌ای `destination` نمی‌دهد. باقی‌مانده: T-07 در docs/23.
 
+**تشخیص‌های SDK اوپن‌تلمتری (#385 r5).** SDK هر متغیر `OTEL_*` را می‌خواند — حتی با
+`OTEL_SDK_DISABLED` — و هر مقداری را که نتوانست به کار ببرد روی `diag` گزارش می‌کند، همراه خود مقدار
+(Endpoint با رمز عبور، Compression، بازه، فهرست Detector). `initTelemetry` پیش از هر بخش SDK یک Logger امن
+نصب می‌کند (`packages/observability/src/diagnostics.ts`)، در سطحی که `OTEL_LOG_LEVEL` می‌خواهد (بی آن، هیچ
+سطری)، و هنگام ساخت `NodeSDK` این متغیر را پنهان می‌کند تا SDK Logger کنسولی خودش را جایگزین نکند؛ پس از ساخت
+و پس از `start()` همان Logger دوباره نصب می‌شود. هر تشخیص فقط یک سطر روی stderr است: سطح، یک دسته از فهرست
+ثابت، و نام تنظیم‌های ثبت‌شده در `OTEL_SETTINGS` — نه متن SDK، نه آرگومان‌ها، نه خطا. Endpoint صریحی که URL
+نیست با متن ثابت رد می‌شود. URLهای پیکربندی (Env یا argv) فقط با `readUrl`/`tryReadUrl` از `@rasta/config`
+خوانده می‌شوند که با متن ثابت رد می‌کنند؛ `scripts/url-parsing-guard.test.mjs` هر `new URL` دیگری را روی مقدار
+غیرثابت رد می‌کند.
+
 **MVP → PRODUCTION.** MVP: خروجی به stdout، تجمیع با `docker compose logs`.
 Production: OTel Collector → Loki یا سامانه معادل، با نگهداشت ۳۰ روز (۱۳ ماه برای
 Logهای مالی).
@@ -518,7 +529,7 @@ Stack **محلی** Compose (Profile `observability`/`all`):
   و شکست انتشار؛ (۱۱) سن پشتهٔ **بسته** با خط ۶۰ ثانیه — `pending_age` پنجرهٔ باز عمداً نیست. هر Panel توضیح دارد، هر Query همان
   عبارت (یا عبارت پیش از مقایسهٔ `> 0`) هشدار متناظرش است، و هیچ Label یا متنی شناسهٔ مستأجر، Actor، منبع، رویداد، Correlation،
   Partition، Offset یا متن خطا را نمایش نمی‌دهد.
-- **دسترسی محلی:** `docker compose --profile observability up -d`، سپس `http://localhost:3001/d/rasta-audit-evidence` (پوشهٔ
+- **دسترسی محلی:** `COMPOSE_PROFILES=observability pnpm infra:up`، سپس `http://localhost:3001/d/rasta-audit-evidence` (پوشهٔ
   `Rasta`). ورود با Credential محلی Compose است.
 - **اعتبارسنجی:** `pnpm run check:grafana-dashboard` (در `pnpm verify` و Job ‏`quality` در CI) و
   `pnpm run verify:grafana-dashboard-live` (دستی، Docker) — جزئیات در [`14-testing-strategy.md`](14-testing-strategy.md) § ۱۴٫۱۱.

@@ -1,3 +1,4 @@
+import { eligibilityClockSql } from '@rasta/testing';
 import { withUtcSession } from '@rasta/config';
 import {
   allocateStreamSeqSql,
@@ -93,7 +94,7 @@ describe('inventory-service outbox purge (D-052)', () => {
   /** Times come from the database clock, as the purge's own cutoff does. */
   const seed = async (id: string, row: Seed): Promise<string> => {
     await runtime.client.$executeRawUnsafe(
-      `INSERT INTO outbox_message
+      eligibilityClockSql`INSERT INTO outbox_message
          (id, aggregate_type, aggregate_id, event_name, event_version, topic, partition_key,
           payload, headers, organization_id, correlation_id, created_at, published_at,
           attempts, last_error, claim_token, claim_owner, claim_expires_at, claim_count, stream_seq)

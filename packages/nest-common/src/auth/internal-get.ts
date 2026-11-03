@@ -1,6 +1,6 @@
+import { InternalHttpClient, type InternalTokenService } from '../http/internal-http-client';
 import { tryGetContext } from '../context/request-context';
-import { RastaError } from '../errors/rasta-error';
-import type { InternalTokenService } from './token-verifier';
+import { upstreamExchange } from '../http/exchange-deadline';
 
 /** Identifier characters only; anything else is not forwarded as a correlation id. */
 const SAFE_CORRELATION_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -39,36 +39,30 @@ export async function internalGet(
   path: string,
   organizationId: string,
 ): Promise<InternalGetResult> {
-  const token = await options.tokens.issue(options.from, options.to, 'SERVICE', organizationId);
-  const headers: Record<string, string> = {
-    accept: 'application/json',
-    'x-internal-token': token,
-  };
+  const sender = await new InternalHttpClient(options.tokens, options.fetch).authorize({
+    from: options.from,
+    to: options.to,
+    purpose: 'SERVICE',
+    organizationId,
+  });
+  const headers: Record<string, string> = { accept: 'application/json' };
   const context = tryGetContext();
   if (context && SAFE_CORRELATION_ID.test(context.correlationId)) {
     headers['x-correlation-id'] = context.correlationId;
   }
 
-  const fetchImpl = options.fetch ?? fetch;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
-  timer.unref?.();
-  try {
-    const response = await fetchImpl(`${options.baseUrl.replace(/\/+$/, '')}${path}`, {
-      method: 'GET',
-      headers,
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    if (controller.signal.aborted) throw new Error('deadline passed');
-    return { status: response.status, body: parseJson(text) };
-  } catch {
-    throw controller.signal.aborted
-      ? RastaError.upstreamTimeout(options.to, options.timeoutMs)
-      : RastaError.upstreamUnavailable(options.to);
-  } finally {
-    clearTimeout(timer);
-  }
+  const { status, text } = await upstreamExchange(
+    options.to,
+    options.timeoutMs,
+    (signal) =>
+      sender.send(`${options.baseUrl.replace(/\/+$/, '')}${path}`, {
+        method: 'GET',
+        headers,
+        signal,
+      }),
+    async (response) => ({ status: response.status, text: await response.text() }),
+  );
+  return { status, body: parseJson(text) };
 }
 
 function parseJson(text: string): unknown {

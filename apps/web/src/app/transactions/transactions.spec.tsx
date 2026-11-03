@@ -7,6 +7,14 @@ import type { ReadResult, Transaction } from '@/server/transactions';
 import { TransactionDetailScreen } from './[id]/TransactionDetailScreen';
 import { DisputeCommandForm } from './[id]/DisputeCommandForm';
 import type { DisputeFormState } from './[id]/form-state';
+import { bindingOf } from '@/test/unresolved-binding';
+
+// Each test renders the transaction screen or a dispute form and runs jest-axe over it (40 scans;
+// the file took 56 s on main 61a13bbc). On a loaded CI runner the first test passed jest's 5 s
+// default (train run 40171771172, PR #402 run 40173125770), and the axe run it left behind failed
+// every later test. The contracts and tenders screens have the same allowance; task 239 looks for
+// why this file is slow.
+jest.setTimeout(20_000);
 
 /**
  * What `/transactions/[id]` renders: every outcome the read can hand back, the
@@ -49,11 +57,14 @@ afterEach(() => {
 });
 
 const CSRF = 'csrf-token-for-this-session';
-const BINDING = { owner: 'owner-tag', session: 'session-tag' };
+const BINDING = bindingOf('owner-tag', 'session-tag');
 const SESSION_MAX_AGE = 12 * 60 * 60;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 const STAMP = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
 const REASON = 'کالا تحویل نشده و پاسخی هم نیامده است';
+/** The caveats of a resolution whose dispute economic did not record. */
+const UNRECORDED = 'سامانه ثبت نکرده است که این تصمیم برای کدام اعتراض گرفته شده است';
+const UNRECORDED_LEGACY = 'ثبت نشده که آن تصمیم برای کدام اعتراض بوده است';
 
 const HELD: Transaction = {
   id: 'TXN_1',
@@ -95,7 +106,14 @@ const terms = (container: HTMLElement): string[] =>
   [...container.querySelectorAll('dt')].map((term) => term.textContent ?? '');
 
 /** The labels of the dispute section's rows, in order. */
-const DISPUTE_TERMS = ['دلیل اعتراض', 'آخرین متن ثبت‌شده برای اعتراض', 'زمان رسیدگی', 'شرح تصمیم'];
+const DISPUTE_TERMS = [
+  'دلیل اعتراض',
+  'آخرین متن ثبت‌شده برای اعتراض',
+  'زمان رسیدگی',
+  'شرح تصمیم',
+  'زمان آخرین رسیدگی',
+  'شرح آخرین تصمیم',
+];
 const disputeTerms = (container: HTMLElement): string[] =>
   terms(container).filter((term) => DISPUTE_TERMS.includes(term));
 
@@ -265,6 +283,9 @@ describe('the dispute state, as the record says it', () => {
     expect(text).toContain('نمی‌تواند بگوید کدام است');
     // No row names a decision: the caveat says why there is none to show.
     expect(terms(container)).not.toContain('شرح تصمیم');
+    // Nor is the resolution this dispute's: its dispute is not recorded.
+    expect(disputeTerms(container)).toEqual(['آخرین متن ثبت‌شده برای اعتراض', 'زمان آخرین رسیدگی']);
+    expect(text).toContain(UNRECORDED_LEGACY);
     await expectAccessible(container);
   });
 
@@ -308,29 +329,72 @@ describe('the dispute state, as the record says it', () => {
     expect(container.textContent).toContain('تحویل تأیید شد');
   });
 
-  it('resolved before the identity was kept: the times, as before', () => {
-    const later = renderScreen(
+  it('re-disputed with an earlier date, refunded, never attributed: the earlier decision is not shown as this dispute’s (Codex on PR 352 r2)', async () => {
+    // A resolved at 10:00; B committed after it dated 09:00 (read before its
+    // lock wait); the platform refunded B from DISPUTED. The backfill leaves a
+    // refunded row unattributed, so the row has B's reason, A's decision and
+    // no `resolvedDisputeId` — and by time, 10:00 >= 09:00, A's decision was B's.
+    const { container } = renderScreen(
       ok({
         ...DISPUTED,
         status: 'REFUNDED',
-        disputeResolvedAt: '2026-10-03T09:00:00.000Z',
-        disputeResolution: 'تحویل تأیید شد',
+        disputedAt: '2026-10-02T09:00:00.000Z',
+        disputeReason: REASON,
+        disputeId: 'TXD_B',
+        disputeResolvedAt: '2026-10-02T10:00:00.000Z',
+        disputeResolution: 'تصمیم برای اعتراض نخست',
         resolvedDisputeId: null,
       }),
     );
-    expect(disputeTerms(later.container)).toEqual(['دلیل اعتراض', 'زمان رسیدگی', 'شرح تصمیم']);
-    later.unmount();
-    const earlier = renderScreen(
-      ok({
-        ...DISPUTED,
-        status: 'REFUNDED',
-        disputeResolvedAt: '2026-10-01T09:00:00.000Z',
-        disputeResolution: 'تحویل تأیید شد',
-        resolvedDisputeId: null,
-      }),
-    );
-    expect(disputeTerms(earlier.container)).toEqual(['دلیل اعتراض']);
+    const text = container.textContent ?? '';
+    // B's reason is B's; the decision is the transaction's last, of no named dispute.
+    expect(disputeTerms(container)).toEqual([
+      'دلیل اعتراض',
+      'زمان آخرین رسیدگی',
+      'شرح آخرین تصمیم',
+    ]);
+    expect(terms(container)).not.toContain('شرح تصمیم');
+    expect(terms(container)).not.toContain('زمان رسیدگی');
+    expect(text).toContain(REASON);
+    expect(text).toContain('تصمیم برای اعتراض نخست');
+    expect(text).toContain(UNRECORDED);
+    await expectAccessible(container);
   });
+
+  it.each([
+    ['after', '2026-10-03T09:00:00.000Z'],
+    ['before', '2026-10-01T09:00:00.000Z'],
+  ])(
+    'resolved before the identity was kept, dated %s the dispute: the times decide nothing',
+    (_, disputeResolvedAt) => {
+      const separate = renderScreen(
+        ok({
+          ...DISPUTED,
+          status: 'REFUNDED',
+          disputeResolvedAt,
+          disputeResolution: 'تحویل تأیید شد',
+          resolvedDisputeId: null,
+        }),
+      );
+      expect(disputeTerms(separate.container)).toEqual([
+        'دلیل اعتراض',
+        'زمان آخرین رسیدگی',
+        'شرح آخرین تصمیم',
+      ]);
+      expect(separate.container.textContent).toContain('تحویل تأیید شد');
+      expect(separate.container.textContent).toContain(UNRECORDED);
+      separate.unmount();
+      // Before D-060 too: the one text may be the reason or the decision, either way.
+      const legacy = renderScreen(
+        ok({ ...DISPUTED, status: 'REFUNDED', disputeResolvedAt, resolvedDisputeId: null }),
+      );
+      expect(disputeTerms(legacy.container)).toEqual([
+        'آخرین متن ثبت‌شده برای اعتراض',
+        'زمان آخرین رسیدگی',
+      ]);
+      expect(legacy.container.textContent).toContain(UNRECORDED_LEGACY);
+    },
+  );
 
   it('resolved before D-060 and attributed since: still says the one text may be either', () => {
     const { container } = renderScreen(
@@ -353,6 +417,7 @@ describe('the dispute state, as the record says it', () => {
         status: 'REFUNDED',
         disputeResolvedAt: '2026-10-01T09:00:00.000Z',
         disputeResolution: 'یک تصمیم قدیمی',
+        resolvedDisputeId: 'TXD_0',
       }),
     );
     const text = container.textContent ?? '';
@@ -401,6 +466,58 @@ describe('the dispute state, as the record says it', () => {
     renderScreen(ok(DISPUTED));
     expect(window.location.search).toBe('?flash=FORGED');
     window.history.replaceState(null, '', '/');
+  });
+});
+
+describe('raw codes and English wording in the detail', () => {
+  it.each([
+    ['ORDER', 'سفارش'],
+    ['MAINTENANCE_REQUEST', 'درخواست تعمیر و نگهداری'],
+    ['PAYMENT_INTENT', 'افزایش موجودی کیف پول'],
+    ['STATEMENT', 'صورت‌وضعیت قرارداد'],
+  ])(
+    'names the source type %s in Persian and keeps the reference as an identifier',
+    (type, label) => {
+      const { container } = renderScreen(
+        ok({ ...HELD, sourceType: type, sourceReference: 'REF_9' }),
+      );
+      const row = [...container.querySelectorAll('dd')].find((dd) =>
+        dd.textContent?.includes('REF_9'),
+      )!;
+      expect(row.textContent).toContain(label);
+      expect(row.textContent).not.toContain(type);
+    },
+  );
+
+  it('names the one known machine reason in Persian', () => {
+    const machine = renderScreen(ok({ ...HELD, failureReason: 'Cancelled' }));
+    expect(machine.container.textContent).not.toContain('Cancelled');
+    expect(machine.container.textContent).toContain('لغو شد');
+  });
+
+  // Provenance is not language: an English reason somebody typed is theirs.
+  it.each([
+    ['a refund', { status: 'REFUNDED' }],
+    ['a cancel', { status: 'CANCELLED' }],
+    [
+      'a cancellation compensation of a marketplace order',
+      { status: 'REFUNDED', transactionType: 'MARKETPLACE_ORDER', sourceType: 'ORDER' },
+    ],
+  ])('shows an English human reason verbatim on %s', (_label, patch) => {
+    const human = renderScreen(
+      ok({
+        ...HELD,
+        ...patch,
+        sourceReference: 'ORD_42',
+        failureReason: 'Customer returned damaged goods',
+      } as Transaction),
+    );
+    expect(human.container.textContent).toContain('Customer returned damaged goods');
+  });
+
+  it('shows a Persian reason as written', () => {
+    const personal = renderScreen(ok({ ...HELD, failureReason: 'مشتری منصرف شد، مبلغ برگشت.' }));
+    expect(personal.container.textContent).toContain('مشتری منصرف شد، مبلغ برگشت.');
   });
 });
 

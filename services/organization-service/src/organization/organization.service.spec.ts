@@ -1,4 +1,5 @@
 import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import { OrganizationService } from './organization.service';
 import { toLabel, type OrganizationRepository } from './organization.repository';
 import { ORGANIZATION_EVENTS } from './events';
@@ -1036,10 +1037,12 @@ describe('contacts', () => {
 
     await runWithContext(context(), () => h.service.addContact(DEH1, contact));
 
-    const serialized = JSON.stringify(h.enqueued[0]?.payload);
-    expect(serialized).not.toContain(contact.phone);
-    expect(serialized).not.toContain(contact.email);
-    expect(serialized).not.toContain(contact.displayName);
+    // The generated contact id has no independent source: keep it searched with the payload.
+    expectNotDisclosed(
+      h.enqueued[0]?.payload,
+      [contact.phone, contact.email, contact.displayName],
+      { input: contact },
+    );
     expect(h.enqueued[0]?.payload).toMatchObject({
       organizationId: DEH1,
       change: 'ADDED',
@@ -1552,5 +1555,26 @@ describe('a dated policy that expires while waiting for its locks', () => {
     });
     expect(h.tx.organizationPolicy.updateMany).not.toHaveBeenCalled();
     expect(h.tx.organizationPolicy.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('procurement thresholds service boundary', () => {
+  it('refuses person callers before any policy or organization read, including system administrators', async () => {
+    const h = harness();
+    await expect(
+      runWithContext(operatorContext(), () => h.service.procurementThresholds(DEH1)),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(h.repository.readSnapshot).not.toHaveBeenCalled();
+    expect(h.repository.getPath).not.toHaveBeenCalled();
+  });
+  it('refuses a mismatched signed organization before any policy or organization read', async () => {
+    const h = harness();
+    await expect(
+      runWithContext(context({ authType: 'SERVICE', organizationId: COUNTY }), () =>
+        h.service.procurementThresholds(DEH1),
+      ),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(h.repository.readSnapshot).not.toHaveBeenCalled();
+    expect(h.repository.getPath).not.toHaveBeenCalled();
   });
 });

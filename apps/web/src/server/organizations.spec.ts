@@ -7,7 +7,12 @@ import {
   updateOrganization,
   updateOrganizationFormValues,
 } from './organizations';
+import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * Reading one organization and editing its profile.
@@ -23,7 +28,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'admin',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -163,7 +168,7 @@ describe('updateOrganization', () => {
       {
         code: 'VALIDATION_ERROR',
         message: 'invalid',
-        details: [{ path: 'name', message: 'نام تکراری است' }],
+        details: [{ path: 'name', message: 'Name already in use' }],
       },
       422,
     );
@@ -177,7 +182,10 @@ describe('updateOrganization', () => {
       ),
     );
 
-    expect(result).toMatchObject({ kind: 'INVALID', fieldErrors: { name: 'نام تکراری است' } });
+    expect(result).toMatchObject({
+      kind: 'INVALID',
+      fieldErrors: { name: GENERIC_REFUSAL_MESSAGE },
+    });
   });
 });
 

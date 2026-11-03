@@ -1,4 +1,4 @@
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   EventConsumer,
   RastaError,
@@ -185,9 +185,9 @@ export class SettlementCompletedConsumer {
 
     // A known event whose payload fails its schema is a producer defect no retry fixes:
     // dead-lettered at once as VALIDATION_FAILED, naming field paths and zod codes only (S-09).
-    const parsed = settlementCompletedPayload.safeParse(envelope.payload);
+    const parsed = legacyParse(settlementCompletedPayload, envelope.payload);
     if (!parsed.success) {
-      throw invalidPayloadError(envelope, parsed.error, SETTLEMENT_COMPLETED_FIELDS);
+      throw invalidPayloadError(envelope, parsed.refusal, SETTLEMENT_COMPLETED_FIELDS);
     }
     const payload = parsed.data;
 

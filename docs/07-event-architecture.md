@@ -77,6 +77,7 @@ Envelope می‌آید تا یک Topic بتواند در طول یک Rollout ج�
   "traceparent": "00-4bf92f3577b34da6...-01", // W3C Trace Context
 
   "actor": { "type": "USER", "id": "USR_01JBQ8..." },
+  // یا، بی actor: "anonymous": true — درخواست احراز هویت‌نشده (ثبت‌نام عمومی)، نه کار پس‌زمینه (PR #483 r3 F1، docs/events)
 
   "payload": {}, // مطابق Schema این رویداد و این نسخه
 }
@@ -351,6 +352,15 @@ Payload نامعتبر هرگز به Kafka نمی‌رسد و هرگز بی‌ص
 | `ORGANIZATION_UPDATED`           | organization | همه (Replica مرجع)                          |
 | `ORGANIZATION_DEACTIVATED`       | organization | identity (ابطال عضویت) · همه                |
 
+**`occurredAt` رویدادهای تنگ‌کننده (D-064، ADR-060 افزوده‌ی «نوشتن Keycloak پیش از Commit»).** `ROLE_REVOKED`،
+`MEMBERSHIP_REVOKED` و `MEMBERSHIP_EXPIRED` فقط پس از آن صف می‌شوند که `identity-service` صفت‌های کاربر را در Keycloak،
+درون همان تراکنش، تنگ کرده است؛ پس `occurredAt` آن‌ها دیرتر از هر توکنی است که Keycloak با اعطای قدیم ساخته، و Gateway آن را
+مرز ابطال می‌گیرد. اگر Keycloak نوشته نشود، تغییر Commit نمی‌شود و **رویدادی هم نیست** (`503 KEYCLOAK_UNAVAILABLE`)؛ همچنین
+وقتی نوشتنی پیشین از همان کاربر هنوز ممکن است بنشیند (`503 KEYCLOAK_WRITE_SETTLING`، حصار D-069). تکرار
+همان تنزل یا ابطال رویداد دومی نمی‌سازد. هر مسیر تنگ‌کننده‌ی بعدی — از جمله ابطال عضویت با `ORGANIZATION_DEACTIVATED`، که هنوز Consumerی در
+`identity-service` ندارد — از همان `KeycloakProjector.narrowing` می‌گذرد. `ROLE_ASSIGNED`، `MEMBERSHIP_CREATED` و `USER_ACTIVATED` مانند پیش‌اند: Commit، سپس
+Projection.
+
 ### Asset · Fleet · Maintenance · Insurance
 
 | رویداد                                | Producer                | مصرف‌کنندگان اصلی                                                      |
@@ -496,12 +506,21 @@ notification و analytics تا ساخته‌شدن Consumer مربوط، مقص�
 | `REWARD_GRANTED`                         | economic | notification · analytics                            |
 | `REWARD_LEVEL_CHANGED`                   | economic | notification                                        |
 | `SETTLEMENT_COMPLETED`                   | economic | marketplace · supplier · notification               |
+| `SETTLEMENT_REFUSED`                     | economic | audit                                               |
 | `JOURNAL_POSTED`                         | economic | audit · analytics                                   |
 | `COMMISSION_RULE_CHANGED`                | economic | audit                                               |
 | `REWARD_RULE_CHANGED`                    | economic | audit                                               |
 | `PARTICIPATION_RULE_CHANGED`             | economic | audit                                               |
 | `RECOGNITION_RULE_CHANGED`               | economic | audit                                               |
 | `TRANSACTION_STATUS_CHANGED`             | economic | audit                                               |
+
+> **افزوده (2026-10-23).** `SETTLEMENT_REFUSED` رکورد Audit تسویه‌ای است که با `422 NO_ACTIVE_RULE` رد شد (docs/24
+> Q-29): هیچ چیز جابه‌جا نشده — هرچه تسویه تا آن لحظه نوشته بود تا Savepoint برمی‌گردد — و رکورد در **همان** تراکنش Commit
+> می‌شود، پیش از پاسخ `422`: ردی بی رکورد پاسخ داده نمی‌شود و نشدنِ نوشتنش `500` است که همان کلید دوباره می‌فرستد (بازبینی
+> #364 دور ۱، یافتهٔ ۲). یکی برای هر تلاشِ ردشده. `reason` فهرستی بسته است (امروز فقط `NO_ACTIVE_RULE`)؛ `transactionType` و
+> `businessLine` هم فهرست بسته‌اند و Payload `.strict()` است، بی مبلغ. audit-service آن را با نام خودش
+> (`action=SETTLEMENT_REFUSED`)، `outcome=REFUSED`، `reason` و خط و نوع در `changes` (بدون تغییر: `from` = `to`) نگه می‌دارد —
+> Projection اعتبارسنجی‌شده و فهرست‌سفید (`settlement-refusal-projection.ts`، یافتهٔ ۳).
 
 > **افزوده (2026-09-26).** `TRANSACTION_STATUS_CHANGED` رکورد Audit هر گام چرخهٔ
 > عمر تراکنش است که رویداد پولی خودش را ندارد: ثبت، ثبت تعهد از رویداد، تأیید

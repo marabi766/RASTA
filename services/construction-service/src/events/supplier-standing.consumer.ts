@@ -45,9 +45,13 @@ const instant = z
     return at;
   });
 
-const qualifiedPayload = z.object({
+/** Exported for its early-rejection test. */
+export const qualifiedPayload = z.object({
   organizationId: identifier,
-  qualifiedFor: z.array(z.string()).min(1),
+  // supplier-service qualifies for at most its three capabilities at once;
+  // the cap only stops a payload whose length alone makes it a defect
+  // (GHSA-mrhx-c7xc-m3w5).
+  qualifiedFor: z.array(z.string()).min(1).max(50),
   decidedAt: instant,
 });
 const suspendedPayload = z.object({
@@ -169,7 +173,7 @@ export class SupplierStandingConsumer {
     }
   }
 
-  private parse<T>(envelope: EventEnvelope, schema: z.ZodType<T, z.ZodTypeDef, unknown>): T {
+  private parse<T>(envelope: EventEnvelope, schema: z.ZodType<T, unknown>): T {
     const parsed = schema.safeParse(envelope.payload);
     if (!parsed.success) {
       // A verdict on the event, not a failure to retry: it can never parse.

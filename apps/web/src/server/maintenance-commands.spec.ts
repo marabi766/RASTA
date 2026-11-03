@@ -9,7 +9,12 @@ import {
   REPORT_REQUEST_FIELD_MAPPING,
 } from './maintenance-commands';
 import { EMPTY_REPORT_REQUEST_FORM } from '@/lib/maintenance-fields';
+import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * Parsing and writing a maintenance request.
@@ -24,7 +29,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'operator',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -271,11 +276,15 @@ describe('writing a report', () => {
     return { impl, calls };
   }
 
+  // zod 4 infers a field whose transform may return undefined as present-but-undefined (zod 3: optional).
   const REQUEST = {
     assetId: ASSET,
     type: 'CORRECTIVE' as const,
     title: 'نشتی روغن',
     severity: 'HIGH' as const,
+    description: undefined,
+    outOfServiceAt: undefined,
+    dueDate: undefined,
   };
 
   it('posts the body to the gateway with the submission id in the Idempotency-Key header', async () => {
@@ -288,7 +297,7 @@ describe('writing a report', () => {
     expect(calls[0].url).toBe('http://gateway.test:3000/v1/maintenance-requests');
     expect(calls[0].method).toBe('POST');
     expect(calls[0].headers['idempotency-key']).toBe('sub_abc');
-    expect(calls[0].headers['authorization']).toBe('Bearer access-token-value');
+    expect(calls[0].headers['authorization']).toBe(`Bearer ${ACCESS_TOKEN_VALUE}`);
     expect(calls[0].body).toEqual(REQUEST);
   });
 
@@ -311,12 +320,15 @@ describe('writing a report', () => {
     const { impl } = recording(400, {
       code: 'VALIDATION_FAILED',
       message: 'Request validation failed',
-      details: [{ path: 'title', message: 'too short' }],
+      details: [{ path: 'title', message: 'String must contain at least 2 character(s)' }],
     });
 
     const result = await reportMaintenanceRequest(SESSION, REQUEST, 'sub_abc', impl);
 
-    expect(result).toMatchObject({ kind: 'INVALID', fieldErrors: { title: 'too short' } });
+    expect(result).toMatchObject({
+      kind: 'INVALID',
+      fieldErrors: { title: 'این متن دست‌کم ۲ نویسه باشد' },
+    });
   });
 
   it('says the duplicate-report refusal in Persian, as a message for the form', async () => {
@@ -336,7 +348,7 @@ describe('writing a report', () => {
     });
   });
 
-  it('shows a sentence it does not know as it arrived, never hidden', async () => {
+  it('shows the generic Persian sentence for one it does not know, never the English', async () => {
     const { impl } = recording(422, {
       code: 'BUSINESS_RULE_VIOLATION',
       message: 'A rule this portal has never heard of',
@@ -346,7 +358,7 @@ describe('writing a report', () => {
 
     expect(result).toMatchObject({
       kind: 'INVALID',
-      message: 'A rule this portal has never heard of',
+      message: GENERIC_REFUSAL_MESSAGE,
     });
   });
 
@@ -382,5 +394,23 @@ describe('writing a report', () => {
     const result = await reportMaintenanceRequest(SESSION, REQUEST, 'sub_abc', impl);
 
     expect(result).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
+  });
+});
+
+describe('Persian punctuation «،» «؛» «؟» in the report form', () => {
+  it('passes a title and description with them on to the service, which applies the one shared rule', () => {
+    const parsed = parseReportRequestForm({
+      assetId: 'AST_01J00000000000000000000000',
+      type: 'PREVENTIVE',
+      title: 'سرویس دوره‌ای، لودر',
+      description: 'تعویض روغن؛ فیلتر هم؟',
+      severity: '',
+      outOfServiceAt: '',
+      dueDate: '',
+    });
+    expect(parsed).toMatchObject({
+      ok: true,
+      request: { title: 'سرویس دوره‌ای، لودر', description: 'تعویض روغن؛ فیلتر هم؟' },
+    });
   });
 });

@@ -1,5 +1,5 @@
-import { EnvValidationError } from '@rasta/config';
-import { corsOrigins, loadEconomicEnv } from './env';
+import { EnvValidationError, envEnumProbes } from '@rasta/config';
+import { corsOrigins, economicEnvSchema, loadEconomicEnv } from './env';
 import { economicOperationBudgets } from './operation-budgets';
 import { withUtcSession } from '@rasta/config';
 
@@ -290,6 +290,50 @@ describe('loadEconomicEnv', () => {
     }
   });
 
+  it('fails a settlement without a rule closed by default outside development and test, and refuses to turn that off there (Q-29)', () => {
+    const required = (env: NodeJS.ProcessEnv) =>
+      loadEconomicEnv({ ...base, ...env }).ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE;
+
+    // Unset: on, unless NODE_ENV — as given — is development or test.
+    for (const NODE_ENV of ['staging', 'production', undefined]) {
+      expect(required({ NODE_ENV })).toBe(true);
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: '' })).toBe(true);
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'true' })).toBe(
+        true,
+      );
+    }
+    for (const NODE_ENV of ['development', 'test']) {
+      expect(required({ NODE_ENV })).toBe(false);
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: '' })).toBe(false);
+      // Turned on explicitly, it is on there too.
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'true' })).toBe(
+        true,
+      );
+      expect(required({ NODE_ENV, ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'false' })).toBe(
+        false,
+      );
+    }
+
+    // Off is refused at boot anywhere else, an unset NODE_ENV included.
+    for (const NODE_ENV of ['staging', 'production', undefined]) {
+      expect(() =>
+        loadEconomicEnv({
+          ...base,
+          NODE_ENV,
+          ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'false',
+        }),
+      ).toThrow(/ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE/);
+    }
+    // Not a boolean is refused everywhere, rather than read as either.
+    expect(() =>
+      loadEconomicEnv({
+        ...base,
+        NODE_ENV: 'test',
+        ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: 'maybe',
+      }),
+    ).toThrow(EnvValidationError);
+  });
+
   it('refuses to start without the identity provider or the internal secret', () => {
     // Validated once, at startup, and loudly: a service that boots without
     // these discovers it on the first request, which turns a deployment error
@@ -441,5 +485,43 @@ describe('DATABASE_STATEMENT_TIMEOUT_MS against the operation budgets', () => {
       /DATABASE_STATEMENT_TIMEOUT_MS: \(120000 ms\) is not above AUDIT_TX_TIMEOUT_MS, 120000 ms/,
     );
     expect(at('120001')).not.toThrow();
+  });
+});
+
+/**
+ * Refusals never carry the value written (S-09, #385 r2 F2): every enum setting, found by
+ * walking the schema rather than listed, set to each of two sentinels, is refused alike, with
+ * neither in the issues, the error's message or its stack (what the startup log prints).
+ */
+describe('enum settings are refused without the value written (#385 r2 F2)', () => {
+  const SENTINELS = ['private-sentinel-79', 'JZ97-another-secret'] as const;
+  const probes = envEnumProbes(
+    economicEnvSchema,
+    (source) => loadEconomicEnv(source),
+    base,
+    SENTINELS,
+  );
+
+  it('are found by walking the schema, the ones the r2 review named among them', () => {
+    expect(probes.map((probe) => probe.name)).toEqual(
+      expect.arrayContaining([
+        'NODE_ENV',
+        'LOG_LEVEL',
+        'KAFKA_SASL_MECHANISM',
+        'ECONOMIC_PAYMENT_PROVIDER',
+        'ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES',
+        'ECONOMIC_STATEMENT_BUSINESS_LINE',
+      ]),
+    );
+  });
+
+  it.each(probes.map((probe) => [probe.name, probe] as const))('%s', (name, probe) => {
+    expect(probe.codes).toContain('invalid_enum_value');
+    const [a, b] = probe.refusals;
+    expect(a).toEqual(b);
+    for (const sentinel of SENTINELS) expect(JSON.stringify(a)).not.toContain(sentinel);
+    expect(a.issues.some((issue) => issue.path === name || issue.path.startsWith(`${name}.`))).toBe(
+      true,
+    );
   });
 });

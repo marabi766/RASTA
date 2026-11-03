@@ -126,6 +126,25 @@ export class MaintenanceFactRepository {
   }
 
   /**
+   * Records, once and for the whole deployment, the instant this projection first ran
+   * successfully (ADR-071 § 6, Q-154). **Insert-if-absent**: the first start wins and every
+   * later one — a restart, a second replica, a replayed delivery — changes nothing, so the
+   * instant is never moved earlier or later. The database stamps it
+   * (`tg_projection_coverage_started_at`). Deployment-wide by design: consumption is not per
+   * tenant, so a quiet tenant is covered as soon as the projection is. Raw SQL on a table with
+   * no organization column, outside the tenant extension on purpose.
+   *
+   * Never called per delivery: a delivery that rolls back or is replayed cannot create or
+   * advance coverage, because no delivery writes it.
+   */
+  async recordCoverageStart(consumerName: string): Promise<void> {
+    await this.prisma.client.$executeRaw`
+      INSERT INTO projection_coverage (consumer_name)
+      VALUES (${consumerName})
+      ON CONFLICT (consumer_name) DO NOTHING`;
+  }
+
+  /**
    * The organization's completions in `[from, to)` by type and currency, and the earliest
    * completion held in any window — a dashboard says from when it counts, so an empty window
    * is not read as "no maintenance happened" before the projection existed (ADR-071,

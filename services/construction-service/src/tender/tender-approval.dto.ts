@@ -54,6 +54,8 @@ export const tenderApprovalRequestViewSchema = z
     status: z.enum(TENDER_REQUEST_STATUSES),
     /** A cancellation's closed reason code; `null` for the others. */
     reasonCode: z.enum(['OWNER_REQUEST', 'NO_QUALIFIED_BID']).nullable(),
+    procurementThresholdWarning: z.literal('PROCUREMENT_AMOUNT_OUTSIDE_RANGE').optional(),
+    procurementThresholdPolicyId: z.string().optional(),
     requestedBy: z.string(),
     requestedAt: z.string(),
     /** `REJECTED` or `STALE`, with when, once the request ended. */
@@ -99,6 +101,12 @@ export function toRequestView(
     tenderVersion: request.tenderVersion,
     status: requestStatus(request, steps),
     reasonCode: request.reasonCode as TenderApprovalRequestView['reasonCode'],
+    ...(request.procurementThresholdWarning === 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE'
+      ? { procurementThresholdWarning: request.procurementThresholdWarning }
+      : {}),
+    ...(request.procurementThresholdPolicyId
+      ? { procurementThresholdPolicyId: request.procurementThresholdPolicyId }
+      : {}),
     requestedBy: request.requestedBy,
     requestedAt: request.requestedAt.toISOString(),
     endedAt: iso(request.endedAt),
@@ -127,6 +135,12 @@ export function toBindingView(
     requestId: request.id,
     tenderVersion: request.tenderVersion,
     status: requestStatus(request, steps),
+    ...(request.procurementThresholdWarning === 'PROCUREMENT_AMOUNT_OUTSIDE_RANGE'
+      ? { procurementThresholdWarning: request.procurementThresholdWarning }
+      : {}),
+    ...(request.procurementThresholdPolicyId
+      ? { procurementThresholdPolicyId: request.procurementThresholdPolicyId }
+      : {}),
     requestedBy: request.requestedBy,
     requestedAt: request.requestedAt.toISOString(),
     bid:

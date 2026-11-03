@@ -11,6 +11,8 @@ import {
   Section,
   StatusBadge,
 } from '@/ui';
+import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
+import { MONEY_EFFECTS, mayOffer, type DemoMode } from '@/lib/demo-mode';
 import {
   costCategoryLabel,
   maintenanceRequestStatusLabel,
@@ -66,6 +68,8 @@ export interface RequestDetailScreenProps {
    * all when the read failed.
    */
   readonly notice?: 'created' | RequestCommandNotice | RepairCommandNotice;
+  /** What the provider says (`fetchDemoMode`, Q-14): «حالت نمایشی», nothing, or that it is unknown. */
+  readonly demoMode: DemoMode;
   /**
    * The three commands, present only for a person the page found allowed to
    * use them (`canManageMaintenance`) and only when the request read.
@@ -238,11 +242,13 @@ function RepairOrderCard({
   order,
   detail,
   forms,
+  demoMode,
 }: {
   order: RepairOrderSummary;
   /** `undefined` when the page did not read it, `null` when it could not. */
   detail?: RepairOrderDetail | null;
   forms?: OrderForms;
+  demoMode: DemoMode;
 }) {
   const open = repairCommandsFor(order.status);
   const has = (command: RepairCommandName) => Boolean(forms?.[command]) && open.includes(command);
@@ -296,7 +302,14 @@ function RepairOrderCard({
       {work.length > 0 || cost.length > 0 || has('cancel') ? (
         <div className="mt-6 flex flex-col gap-4 border-t border-border pt-4">
           {work.map((command) => (
-            <div key={command}>{forms?.[command]}</div>
+            <div key={command}>
+              {/* Withheld while the provider is unknown (Q-14): completing is a reward trigger, and a monetised rule credits the wallet. */}
+              {command === 'complete' && !mayOffer(demoMode, MONEY_EFFECTS.repairCompletion) ? (
+                <MoneyActionWithheld title="تکمیل تعمیر اکنون در دسترس نیست" />
+              ) : (
+                forms?.[command]
+              )}
+            </div>
           ))}
           {cost.map((command) => (
             <div key={command}>{forms?.[command]}</div>
@@ -312,6 +325,7 @@ export function RequestDetailScreen({
   result,
   requestId,
   notice,
+  demoMode,
   commandForms,
   orderDetails,
   orderForms,
@@ -367,6 +381,8 @@ export function RequestDetailScreen({
         title={request.title}
         description={`${maintenanceTypeLabel(request.type)} — گزارش‌شده در ${formatJalaliDateLong(request.reportedAt)}`}
       />
+
+      <DemoModeNotice mode={demoMode} />
 
       {notice ? <Alert tone={NOTICES[notice].tone}>{NOTICES[notice].text}</Alert> : null}
 
@@ -476,6 +492,7 @@ export function RequestDetailScreen({
                 order={order}
                 detail={orderDetails?.[order.id]}
                 forms={orderForms?.[order.id]}
+                demoMode={demoMode}
               />
             ))}
           </ul>
@@ -487,7 +504,12 @@ export function RequestDetailScreen({
 
       {commandForms && request.status === 'COMPLETED' ? (
         <Section headingId="approve" title="تأیید هزینه">
-          {commandForms.approve}
+          {/* Withheld while the provider is unknown only if it moves money (Q-14): the approval records the obligation, a separate settlement pays it. */}
+          {mayOffer(demoMode, MONEY_EFFECTS.maintenanceApproval) ? (
+            commandForms.approve
+          ) : (
+            <MoneyActionWithheld title="تأیید هزینه اکنون در دسترس نیست" />
+          )}
         </Section>
       ) : null}
 

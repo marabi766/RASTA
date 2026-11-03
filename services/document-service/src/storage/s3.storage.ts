@@ -9,7 +9,9 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { Transform, pipeline, type Readable } from 'node:stream';
+import { PassThrough, Transform, finished, pipeline, type Readable } from 'node:stream';
+import { serviceUrlSchema } from '@rasta/config';
+import { clientFailureCode } from '@rasta/nest-common';
 import { ObjectChangedError, type ObjectMetadata, type ObjectStorage } from './storage.port';
 
 export interface S3StorageOptions {
@@ -45,15 +47,39 @@ export class S3ObjectStorage implements ObjectStorage {
   private readonly client: S3Client;
 
   constructor(private readonly options: S3StorageOptions) {
-    this.client = new S3Client({
-      endpoint: options.endpoint,
-      region: options.region,
-      forcePathStyle: options.forcePathStyle,
-      credentials: {
-        accessKeyId: options.accessKeyId,
-        secretAccessKey: options.secretAccessKey,
-      },
-    });
+    // Validate before the SDK can emit endpoint diagnostics, including direct adapter users.
+    if (!serviceUrlSchema.safeParse(options.endpoint).success) {
+      throw new ObjectStorageError('INVALID_ENDPOINT');
+    }
+    // S3 Express starts SDK-owned session refresh promises outside public operations.
+    // Both directory buckets and Express access-point aliases are unsupported.
+    if (/--(?:x|xa)-s3$/.test(options.bucket)) {
+      throw new ObjectStorageError('UNSUPPORTED_DIRECTORY_BUCKET');
+    }
+    try {
+      this.client = new S3Client({
+        // Class boundary: never create SDK-owned background session credentials,
+        // even if the SDK recognizes another Express endpoint form later.
+        disableS3ExpressSessionAuth: true,
+        endpoint: options.endpoint,
+        region: options.region,
+        forcePathStyle: options.forcePathStyle,
+        credentials: {
+          accessKeyId: options.accessKeyId,
+          secretAccessKey: options.secretAccessKey,
+        },
+      });
+    } catch (error) {
+      throw storageFailure(error);
+    }
+  }
+
+  private async request<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      throw storageFailure(error);
+    }
   }
 
   async createUploadUrl(input: {
@@ -84,10 +110,12 @@ export class S3ObjectStorage implements ObjectStorage {
     // them the two stop one URL from being reused to store something else
     // entirely, of a different type or a different size than it was issued
     // for.
-    return getSignedUrl(this.client, command, {
-      expiresIn: input.expiresInSeconds,
-      signableHeaders: new Set(['content-type', 'content-length']),
-    });
+    return this.request(() =>
+      getSignedUrl(this.client, command, {
+        expiresIn: input.expiresInSeconds,
+        signableHeaders: new Set(['content-type', 'content-length']),
+      }),
+    );
   }
 
   async copyToSealedKey(input: {
@@ -110,7 +138,7 @@ export class S3ObjectStorage implements ObjectStorage {
       );
     } catch (error) {
       if (isPreconditionFailed(error)) throw new ObjectChangedError();
-      throw error;
+      throw storageFailure(error);
     }
   }
 
@@ -133,7 +161,9 @@ export class S3ObjectStorage implements ObjectStorage {
       ResponseContentType: input.contentType,
     });
 
-    return getSignedUrl(this.client, command, { expiresIn: input.expiresInSeconds });
+    return this.request(() =>
+      getSignedUrl(this.client, command, { expiresIn: input.expiresInSeconds }),
+    );
   }
 
   async head(objectKey: string): Promise<ObjectMetadata | null> {
@@ -150,26 +180,28 @@ export class S3ObjectStorage implements ObjectStorage {
       };
     } catch (error) {
       if (isNotFound(error)) return null;
-      throw error;
+      throw storageFailure(error);
     }
   }
 
   async readPrefix(objectKey: string, length: number): Promise<Uint8Array> {
-    const response = await this.client.send(
-      new GetObjectCommand({
-        Bucket: this.options.bucket,
-        Key: objectKey,
-        // A ranged request. Storage sends a header, not a document.
-        Range: `bytes=0-${Math.max(0, length - 1)}`,
-      }),
-    );
+    return this.request(async () => {
+      const response = await this.client.send(
+        new GetObjectCommand({
+          Bucket: this.options.bucket,
+          Key: objectKey,
+          // A ranged request. Storage sends a header, not a document.
+          Range: `bytes=0-${Math.max(0, length - 1)}`,
+        }),
+      );
 
-    const body = response.Body;
-    if (!body) return new Uint8Array();
+      const body = response.Body;
+      if (!body) return new Uint8Array();
 
-    // `transformToByteArray` is bounded by the range above, so this holds a
-    // few kilobytes at most — never the object.
-    return body.transformToByteArray();
+      // `transformToByteArray` is bounded by the range above, so this holds a
+      // few kilobytes at most — never the object.
+      return await body.transformToByteArray();
+    });
   }
 
   /**
@@ -197,19 +229,21 @@ export class S3ObjectStorage implements ObjectStorage {
    * the check upstream of it.
    */
   async openReadStream(input: { objectKey: string; maxBytes: number }): Promise<Readable> {
-    const response = await this.client.send(
-      new GetObjectCommand({
-        Bucket: this.options.bucket,
-        Key: input.objectKey,
-        // Inclusive end offset, so this requests bytes 0..maxBytes — that is
-        // maxBytes + 1 bytes in total.
-        Range: `bytes=0-${Math.max(0, input.maxBytes)}`,
-      }),
+    const response = await this.request(() =>
+      this.client.send(
+        new GetObjectCommand({
+          Bucket: this.options.bucket,
+          Key: input.objectKey,
+          // Inclusive end offset, so this requests bytes 0..maxBytes — that is
+          // maxBytes + 1 bytes in total.
+          Range: `bytes=0-${Math.max(0, input.maxBytes)}`,
+        }),
+      ),
     );
 
     const body = response.Body;
     if (!body) {
-      throw new Error('Object storage returned no body for a ranged read');
+      throw new ObjectStorageError('MISSING_BODY');
     }
 
     const source = body as unknown as Readable;
@@ -231,12 +265,25 @@ export class S3ObjectStorage implements ObjectStorage {
 
     // Without this, destroying the transform leaves the S3 socket open until
     // the SDK's own timeout — one leaked connection per oversized object.
-    return pipeline(source, bounded, () => undefined);
+    // `pipeline(source, ...)` would copy a delayed SDK error (and its cause/stack)
+    // onto the public stream. Only this bridge may see the foreign source.
+    const safeSource = new PassThrough();
+    const cleanup = finished(source, (error) => {
+      if (error) safeSource.destroy(storageFailure(error));
+    });
+    // A source may fail asynchronously while destroy() is closing its socket.
+    // Keep its error listener until that close; public-pipeline completion is earlier.
+    source.once('close', cleanup);
+    safeSource.once('close', () => source.destroy());
+    source.pipe(safeSource);
+    return pipeline(safeSource, bounded, () => {
+      source.destroy();
+    });
   }
 
   async remove(objectKey: string): Promise<void> {
-    await this.client.send(
-      new DeleteObjectCommand({ Bucket: this.options.bucket, Key: objectKey }),
+    await this.request(() =>
+      this.client.send(new DeleteObjectCommand({ Bucket: this.options.bucket, Key: objectKey })),
     );
   }
 
@@ -248,7 +295,7 @@ export class S3ObjectStorage implements ObjectStorage {
       // Logged without the endpoint credentials, and answered rather than
       // raised: a readiness probe that throws reads as a 500 rather than as
       // "not ready", and an orchestrator treats those differently.
-      this.logger.warn(`Object storage is not reachable: ${describe(error)}`);
+      this.logger.warn(`Object storage is not reachable: ${storageFailure(error).message}`);
       return false;
     }
   }
@@ -270,15 +317,15 @@ function isPreconditionFailed(error: unknown): boolean {
   return candidate.$metadata?.httpStatusCode === 412;
 }
 
-/**
- * A short, safe description of a storage failure.
- *
- * The error's own message can carry the signed URL, the endpoint and the
- * access key id (AGENTS.md S-09), so only the name is kept.
- */
-function describe(error: unknown): string {
-  if (typeof error === 'object' && error !== null && 'name' in error) {
-    return String((error as { name: unknown }).name);
+/** Fixed storage category and allowlisted code, never SDK properties or causes. */
+export class ObjectStorageError extends Error {
+  override readonly name = 'ObjectStorageError';
+
+  constructor(readonly code: string) {
+    super(`S3_ENDPOINT: object storage failed (code ${code}); SDK diagnostics withheld`);
   }
-  return 'unknown error';
+}
+
+function storageFailure(error: unknown): ObjectStorageError {
+  return new ObjectStorageError(clientFailureCode(error));
 }

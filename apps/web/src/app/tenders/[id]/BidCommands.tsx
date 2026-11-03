@@ -11,6 +11,7 @@ import {
 } from '@/lib/unresolved-bid';
 
 import { BidCommandForm, unconfirmedFrom, type CriterionOption } from './BidCommandForm';
+import type { Binding } from '@/lib/unresolved-tenancy';
 
 export interface OfferedBidCommand {
   readonly command: BidCommand;
@@ -23,7 +24,8 @@ export interface BidCommandsProps {
   readonly offered: readonly OfferedBidCommand[];
   readonly criteria: readonly CriterionOption[];
   readonly csrfToken: string;
-  readonly owner: string;
+  /** This person's one-way tags for this organization (`submissionBinding`). */
+  readonly account: Binding;
   readonly pageHref: string;
 }
 
@@ -45,16 +47,16 @@ export function BidCommands({
   offered,
   criteria,
   csrfToken,
-  owner,
+  account,
   pageHref,
 }: BidCommandsProps) {
   const [checked, setChecked] = useState<{ readonly restored: UnresolvedBid | null } | null>(null);
 
   useEffect(() => {
-    const read = () => setChecked({ restored: restoreUnresolvedBid(tenderId, owner) });
+    const read = () => setChecked({ restored: restoreUnresolvedBid(tenderId, account) });
     read();
     return subscribeUnresolvedBids(read);
-  }, [tenderId, owner]);
+  }, [tenderId, account]);
 
   if (checked === null) return null;
   const { restored } = checked;
@@ -72,7 +74,7 @@ export function BidCommands({
           csrfToken={csrfToken}
           submissionId={restored.submissionId}
           replay={null}
-          owner={owner}
+          account={account}
           pageHref={pageHref}
           initial={unconfirmedFrom(restored)}
         />
@@ -92,7 +94,7 @@ export function BidCommands({
           csrfToken={csrfToken}
           submissionId={submission.id}
           replay={submission.replay}
-          owner={owner}
+          account={account}
           pageHref={pageHref}
           heldBy={restored?.submissionId ?? null}
         />

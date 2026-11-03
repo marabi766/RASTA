@@ -1,4 +1,5 @@
 import { Alert } from '@/ui';
+import { ProviderUnknownRefusal } from '@/app/DemoModeNotice';
 import { UnconfirmedWriteAlert } from '@/app/UnconfirmedWriteAlert';
 import { BASELINE_FIELD, CSRF_FIELD, SUBMISSION_FIELD } from '@/lib/form-fields';
 import { isSessionRefusal, SESSION_REFUSAL_MESSAGES } from '@/lib/session-refusal';
@@ -62,6 +63,7 @@ export function CommandBanner({
     case 'INVALID':
       return state.message ? <Alert tone="warning">{state.message}</Alert> : null;
     case 'REFUSED':
+      if (state.reason === 'PROVIDER_UNKNOWN') return <ProviderUnknownRefusal />;
       return (
         <Alert tone="danger">
           {isSessionRefusal(state.reason)

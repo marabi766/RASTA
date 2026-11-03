@@ -8,6 +8,8 @@ import type { ReadResult, Settlement, SettlementPage } from '@/server/settlement
 
 import { SettlementDetailScreen } from './SettlementDetailScreen';
 import { SettlementsScreen } from './SettlementsScreen';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
 
 /**
  * What `/settlements` renders: every read outcome, the two sides, paging, money
@@ -38,27 +40,41 @@ const ok = (items: Settlement[], nextCursor: string | null = null): ReadResult<S
 describe('the list', () => {
   it('names the other party: the payee on the paid side, the payer on the received side', () => {
     const { unmount } = render(
-      <SettlementsScreen result={ok([SETTLEMENT])} query={{ view: 'PAID' }} />,
+      <SettlementsScreen
+        result={ok([SETTLEMENT])}
+        query={{ context: TEST_CONTEXT, view: 'PAID' }}
+      />,
     );
     expect(screen.getByText('ORG_B')).toBeInTheDocument();
     expect(screen.queryByText('ORG_A')).toBeNull();
     unmount();
 
-    render(<SettlementsScreen result={ok([SETTLEMENT])} query={{ view: 'RECEIVED' }} />);
+    render(
+      <SettlementsScreen
+        result={ok([SETTLEMENT])}
+        query={{ context: TEST_CONTEXT, view: 'RECEIVED' }}
+      />,
+    );
     expect(screen.getByText('ORG_A')).toBeInTheDocument();
     expect(screen.queryByText('ORG_B')).toBeNull();
   });
 
   it('shows a net amount past 2^53 digit for digit, in Persian digits', () => {
     const { container } = render(
-      <SettlementsScreen result={ok([SETTLEMENT])} query={{ view: 'PAID' }} />,
+      <SettlementsScreen
+        result={ok([SETTLEMENT])}
+        query={{ context: TEST_CONTEXT, view: 'PAID' }}
+      />,
     );
     expect(container.textContent).toContain('۹۰٬۰۷۱٬۹۹۲٬۵۴۷٬۴۰۹٬۹۳۱٬۱۳۴');
   });
 
   it('says it is simulated and never claims a bank', () => {
     const { container } = render(
-      <SettlementsScreen result={ok([SETTLEMENT])} query={{ view: 'PAID' }} />,
+      <SettlementsScreen
+        result={ok([SETTLEMENT])}
+        query={{ context: TEST_CONTEXT, view: 'PAID' }}
+      />,
     );
     expect(screen.getByText(SETTLEMENT_SIMULATION_NOTICE)).toBeInTheDocument();
     expect(container.textContent).not.toMatch(/پرداخت بانکی|واریز شد/);
@@ -66,36 +82,51 @@ describe('the list', () => {
 
   it('links the next page only when the read produced a cursor, keeping the side', () => {
     const { unmount } = render(
-      <SettlementsScreen result={ok([SETTLEMENT], 'SET_1')} query={{ view: 'RECEIVED' }} />,
+      <SettlementsScreen
+        result={ok([SETTLEMENT], 'SET_1')}
+        query={{ context: TEST_CONTEXT, view: 'RECEIVED' }}
+      />,
     );
     expect(screen.getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
       'href',
-      '/settlements?view=RECEIVED&cursor=SET_1',
+      withContext(TEST_CONTEXT, '/settlements?view=RECEIVED&cursor=SET_1'),
     );
     unmount();
 
-    render(<SettlementsScreen result={ok([SETTLEMENT])} query={{ view: 'PAID' }} />);
+    render(
+      <SettlementsScreen
+        result={ok([SETTLEMENT])}
+        query={{ context: TEST_CONTEXT, view: 'PAID' }}
+      />,
+    );
     expect(screen.queryByRole('link', { name: 'صفحهٔ بعد' })).toBeNull();
   });
 
   it('renders an empty state per side', () => {
-    const { unmount } = render(<SettlementsScreen result={ok([])} query={{ view: 'PAID' }} />);
+    const { unmount } = render(
+      <SettlementsScreen result={ok([])} query={{ context: TEST_CONTEXT, view: 'PAID' }} />,
+    );
     expect(screen.getByText('این سازمان هنوز تسویه‌ای پرداخت نکرده است.')).toBeInTheDocument();
     unmount();
-    render(<SettlementsScreen result={ok([])} query={{ view: 'RECEIVED' }} />);
+    render(
+      <SettlementsScreen result={ok([])} query={{ context: TEST_CONTEXT, view: 'RECEIVED' }} />,
+    );
     expect(screen.getByText('هنوز تسویه‌ای به نفع این سازمان انجام نشده است.')).toBeInTheDocument();
   });
 
   it('renders refusal and outage as outcomes', () => {
     const { unmount } = render(
-      <SettlementsScreen result={{ kind: 'FORBIDDEN' }} query={{ view: 'PAID' }} />,
+      <SettlementsScreen
+        result={{ kind: 'FORBIDDEN' }}
+        query={{ context: TEST_CONTEXT, view: 'PAID' }}
+      />,
     );
     expect(screen.getByText('فهرست تسویه‌های این سازمان در اختیار شما نیست.')).toBeInTheDocument();
     unmount();
     render(
       <SettlementsScreen
         result={{ kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' }}
-        query={{ view: 'PAID' }}
+        query={{ context: TEST_CONTEXT, view: 'PAID' }}
       />,
     );
     expect(
@@ -105,7 +136,10 @@ describe('the list', () => {
 
   it('has no accessibility violations', async () => {
     const { container } = render(
-      <SettlementsScreen result={ok([SETTLEMENT], 'SET_1')} query={{ view: 'PAID' }} />,
+      <SettlementsScreen
+        result={ok([SETTLEMENT], 'SET_1')}
+        query={{ context: TEST_CONTEXT, view: 'PAID' }}
+      />,
     );
     expect(await axe(container)).toHaveNoViolations();
   });

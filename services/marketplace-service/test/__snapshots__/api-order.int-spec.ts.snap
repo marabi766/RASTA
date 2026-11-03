@@ -1,0 +1,165 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`order API POST /v1/orders/:id/reviews publishes the registered review OpenAPI contract 1`] = `
+{
+  "post": {
+    "description": "Only after the order is COMPLETED, and only once. A rating on an order that was never delivered would be a rating of nothing.",
+    "operationId": "OrderController_review_v1",
+    "parameters": [
+      {
+        "in": "path",
+        "name": "id",
+        "required": true,
+        "schema": {
+          "type": "string",
+        },
+      },
+      {
+        "in": "header",
+        "name": "idempotency-key",
+        "required": true,
+        "schema": {
+          "type": "string",
+        },
+      },
+      {
+        "description": "Required. A retry by the same user with the same key returns the first response without executing again — once the caller has passed the current read and owner check of what it names; otherwise the caller gets the refusal the route itself would give. The same key with a different body, or from another user, is refused with 409 IDEMPOTENCY_KEY_REUSED, and while the first request is still in flight with CONFLICT and a Retry-After header, in seconds. Keys are honoured for 24 hours, which is this deployment’s configured retention window and not a platform constant.",
+        "in": "header",
+        "name": "Idempotency-Key",
+        "required": true,
+        "schema": {
+          "maxLength": 128,
+          "minLength": 8,
+          "type": "string",
+        },
+      },
+    ],
+    "requestBody": {
+      "content": {
+        "application/json": {
+          "schema": {
+            "additionalProperties": false,
+            "properties": {
+              "comment": {
+                "maxLength": 2000,
+                "pattern": "^[^\\p{Bidi_Control}]*$",
+                "type": "string",
+              },
+              "qualityRating": {
+                "maximum": 5,
+                "minimum": 1,
+                "type": "integer",
+              },
+              "rating": {
+                "maximum": 5,
+                "minimum": 1,
+                "type": "integer",
+              },
+            },
+            "required": [
+              "rating",
+            ],
+            "type": "object",
+          },
+        },
+      },
+      "required": true,
+    },
+    "responses": {
+      "201": {
+        "content": {
+          "application/json": {
+            "schema": {},
+          },
+        },
+        "description": "Success",
+      },
+      "400": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError",
+            },
+          },
+        },
+        "description": "The request is malformed or failed schema validation (VALIDATION_FAILED)",
+      },
+      "401": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError",
+            },
+          },
+        },
+        "description": "No credentials, or a token that is expired or invalid",
+      },
+      "403": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError",
+            },
+          },
+        },
+        "description": "Authenticated, but the role or the requested organization is not permitted",
+      },
+      "404": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError",
+            },
+          },
+        },
+        "description": "Not found — also returned for a resource owned by another organization, so its existence is never disclosed",
+      },
+      "409": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError",
+            },
+          },
+        },
+        "description": "Conflict: the resource already exists, the state transition is illegal, or another request changed it first",
+        "headers": {
+          "Retry-After": {
+            "description": "Sent only when this Idempotency-Key is still being processed (CONFLICT): the seconds to wait before retrying with the same key. Absent on every other 409.",
+            "required": false,
+            "schema": {
+              "maximum": 3600,
+              "minimum": 1,
+              "type": "integer",
+            },
+          },
+        },
+      },
+      "422": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError",
+            },
+          },
+        },
+        "description": "The request is well-formed but a business rule refuses it (see \`code\` and the \`rule\` it names)",
+      },
+      "500": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError",
+            },
+          },
+        },
+        "description": "Unexpected server error",
+      },
+    },
+    "summary": "Review a completed order",
+    "tags": [
+      "orders",
+    ],
+  },
+}
+`;

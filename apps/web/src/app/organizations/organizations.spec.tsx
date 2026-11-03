@@ -14,6 +14,7 @@ import type {
   UpdateMemberRolesFormState,
   UpdateOrganizationFormState,
 } from './form-state';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 /**
  * What `/organizations` renders.
@@ -284,7 +285,7 @@ describe('the members list', () => {
       <MembersScreen
         mintSubmissionId={mint}
         result={page([MEMBER, { ...MEMBER, id: 'USR_2', membershipId: 'MBR_2', username: 'b' }])}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
         grantableRoles={ORG_ADMIN_GRANTS}
         csrfToken={CSRF}
       />,
@@ -310,7 +311,7 @@ describe('the members list', () => {
       <MembersScreen
         mintSubmissionId={mint}
         result={page([MEMBER])}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
         grantableRoles={ORG_ADMIN_GRANTS}
         csrfToken={CSRF}
       />,
@@ -325,7 +326,7 @@ describe('the members list', () => {
       <MembersScreen
         mintSubmissionId={mint}
         result={page([{ ...MEMBER, membershipId: null }])}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
         grantableRoles={ORG_ADMIN_GRANTS}
         csrfToken={CSRF}
       />,
@@ -341,7 +342,7 @@ describe('the members list', () => {
       <MembersScreen
         mintSubmissionId={mint}
         result={page([])}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
         grantableRoles={ORG_ADMIN_GRANTS}
         csrfToken={CSRF}
       />,
@@ -352,7 +353,7 @@ describe('the members list', () => {
       <MembersScreen
         mintSubmissionId={mint}
         result={page([])}
-        query={{ q: 'کسی' }}
+        query={{ context: TEST_CONTEXT, q: 'کسی' }}
         grantableRoles={ORG_ADMIN_GRANTS}
         csrfToken={CSRF}
       />,
@@ -365,7 +366,7 @@ describe('the members list', () => {
       <MembersScreen
         mintSubmissionId={mint}
         result={{ kind: 'FORBIDDEN' }}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
         grantableRoles={[]}
         csrfToken={CSRF}
       />,
@@ -379,7 +380,7 @@ describe('the members list', () => {
       <MembersScreen
         mintSubmissionId={mint}
         result={{ kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-9' }}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
         grantableRoles={[]}
         csrfToken={CSRF}
       />,
@@ -395,7 +396,7 @@ describe('accessibility', () => {
       <MembersScreen
         mintSubmissionId={mint}
         result={page([MEMBER, { ...MEMBER, id: 'USR_3', membershipId: 'MBR_3' }])}
-        query={{}}
+        query={{ context: TEST_CONTEXT }}
         grantableRoles={ORG_ADMIN_GRANTS}
         csrfToken={CSRF}
       />,

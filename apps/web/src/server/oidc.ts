@@ -1,6 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey, type KeyLike } from 'jose';
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
+
+import { CredentialRedirectRefusedError, credentialFetch } from './credential-fetch';
 
 /**
  * The four OIDC steps this portal needs, on the server (ADR-059 § 2).
@@ -64,6 +67,14 @@ export interface AuthorizationRequest {
   readonly state: string;
   readonly nonce: string;
   readonly challenge: string;
+  /**
+   * `login`: the provider asks for credentials again even over a live
+   * single sign-on session — how a person whose account the portal refuses
+   * signs in with another one (`app/account/recovery`; PR 405 review 2, F3).
+   * Keycloak 26 honours `login`; `select_account` it only passes to a brokered
+   * provider, so it is not offered.
+   */
+  readonly prompt?: 'login';
 }
 
 /**
@@ -84,6 +95,7 @@ export function authorizationUrl(request: AuthorizationRequest): string {
   url.searchParams.set('nonce', request.nonce);
   url.searchParams.set('code_challenge', request.challenge);
   url.searchParams.set('code_challenge_method', 'S256');
+  if (request.prompt === 'login') url.searchParams.set('prompt', 'login');
   return url.toString();
 }
 
@@ -135,7 +147,8 @@ const TOKEN_ENDPOINT_TIMEOUT_MS = 10_000;
 async function postForm(
   endpoint: string,
   body: Record<string, string>,
-  fetchImpl: typeof fetch,
+  // Absent: credentialFetch's own fetch, the only raw one (Q-155 boundary).
+  fetchImpl: typeof fetch | undefined,
   timeoutMs: number = TOKEN_ENDPOINT_TIMEOUT_MS,
 ): Promise<TokenResponse> {
   // One deadline for the whole exchange, body included: the signal stays
@@ -145,14 +158,29 @@ async function postForm(
 
   let response: Response;
   try {
-    response = await fetchImpl(endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-      body: new URLSearchParams(body).toString(),
-      cache: 'no-store',
-      signal,
-    });
-  } catch {
+    // Never follows a redirect: a 307/308 would resend this form — the code
+    // and its PKCE verifier, or the refresh token — to wherever the Location
+    // points, and a followed answer is not the provider's (Q-155).
+    response = await credentialFetch(
+      endpoint,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          accept: 'application/json',
+        },
+        body: new URLSearchParams(body).toString(),
+        cache: 'no-store',
+        signal,
+      },
+      fetchImpl,
+    );
+  } catch (error) {
+    // A redirect says nothing about the grant: never INVALID_GRANT, so a
+    // refresh it answers leaves the session as any unanswered one does.
+    if (error instanceof CredentialRedirectRefusedError) {
+      throw new OidcError('TOKEN_REQUEST_FAILED', 'the identity provider answered with a redirect');
+    }
     // The error object is not forwarded: it can carry the request body, and
     // the request body is a refresh token or an authorization code.
     throw new OidcError(
@@ -195,11 +223,11 @@ async function postForm(
     throw new OidcError('MALFORMED_RESPONSE', 'the token response was not JSON');
   }
 
-  const parsed = tokenResponseSchema.safeParse(payload);
+  const parsed = legacyParse(tokenResponseSchema, payload);
   if (!parsed.success) {
     throw new OidcError(
       'MALFORMED_RESPONSE',
-      `the token response is missing ${parsed.error.issues.map((i) => i.path.join('.')).join(', ')}`,
+      `the token response is missing ${parsed.refusal.issues.map((i) => i.path.join('.')).join(', ')}`,
     );
   }
   return parsed.data;
@@ -228,7 +256,7 @@ export interface ExchangeRequest {
 
 export function exchangeCode(
   request: ExchangeRequest,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
 ): Promise<TokenResponse> {
   return postForm(
     request.endpoints.token,
@@ -252,7 +280,7 @@ export function refreshTokens(
     /** Overrides {@link TOKEN_ENDPOINT_TIMEOUT_MS}. Exists for tests. */
     timeoutMs?: number;
   },
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
 ): Promise<TokenResponse> {
   return postForm(
     request.endpoints.token,
@@ -272,13 +300,13 @@ const idTokenClaimsSchema = z.object({
   nonce: z.string().min(1),
   preferred_username: z.string().min(1).optional(),
   email: z.string().optional(),
-  org_id: z.string().optional(),
 });
 
 export interface VerifiedIdentity {
   readonly subject: string;
   readonly username: string;
-  readonly organizationId: string | null;
+  // No organization: the access token's is the only one the portal reads
+  // (`session-organization.ts`); the id token's claim was a second copy.
 }
 
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
@@ -352,7 +380,6 @@ export async function verifyIdToken(
   return {
     subject: parsed.data.sub,
     username: parsed.data.preferred_username ?? parsed.data.email ?? parsed.data.sub,
-    organizationId: parsed.data.org_id ?? null,
   };
 }
 

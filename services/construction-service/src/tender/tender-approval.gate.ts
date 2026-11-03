@@ -22,7 +22,11 @@ import { requestStatus } from './tender-approval.dto';
  * execution makes). A cancellation adds the reason in words and its closed code.
  */
 export type GateBinding =
-  | { workflowKey: 'tender.publication' }
+  | {
+      workflowKey: 'tender.publication';
+      procurementThresholdWarning?: string | null;
+      procurementThresholdPolicyId?: string | null;
+    }
   | {
       workflowKey: 'tender.award';
       bidId: string;
@@ -237,7 +241,12 @@ export class TenderApprovalGate {
     if (request.tenderVersion !== version) return false;
     switch (binding.workflowKey) {
       case 'tender.publication':
-        return true;
+        return (
+          (request.procurementThresholdWarning ?? null) ===
+            (binding.procurementThresholdWarning ?? null) &&
+          (request.procurementThresholdPolicyId ?? null) ===
+            (binding.procurementThresholdPolicyId ?? null)
+        );
       case 'tender.award':
         return (
           request.bidId === binding.bidId &&
@@ -289,6 +298,14 @@ export class TenderApprovalGate {
       standingAsOf: binding.workflowKey === 'tender.award' ? binding.standingAsOf : null,
       reason: binding.workflowKey === 'tender.cancellation' ? binding.reason : null,
       reasonCode: binding.workflowKey === 'tender.cancellation' ? binding.reasonCode : null,
+      procurementThresholdWarning:
+        binding.workflowKey === 'tender.publication'
+          ? (binding.procurementThresholdWarning ?? null)
+          : null,
+      procurementThresholdPolicyId:
+        binding.workflowKey === 'tender.publication'
+          ? (binding.procurementThresholdPolicyId ?? null)
+          : null,
       requestedBy: caller.userId,
       requestedByIdentity: caller.identity,
       requestedAt: at,

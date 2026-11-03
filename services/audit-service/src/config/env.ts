@@ -11,6 +11,7 @@ import {
   authEnvSchema,
   baseEnvSchema,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
 } from '@rasta/config';
@@ -19,6 +20,14 @@ import {
   DEFAULT_MAX_VERIFICATION_RECORDS,
 } from '../audit/audit.query.dto';
 import { auditOperationBudgets } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const PRODUCER_ENTRY_EMPTY = fixed('has an entry that is empty');
+const PRODUCER_ENTRY_UNKNOWN = fixed(
+  `has an entry that is not a known audit producer; allowed: ${AUDIT_SOURCE_SERVICES.join(', ')}`,
+);
 
 export const SERVICE_NAME = 'audit-service';
 
@@ -38,31 +47,24 @@ export const DEFAULT_PORT = '3115';
  * comma) and any name outside `AUDIT_SOURCE_SERVICES` — including the metric
  * fallback `unknown` and any other casing — refuse to boot rather than being
  * skipped: a typo that silently dropped a producer would disable exactly the
- * alert the operator asked for. The message names the entry's position and the
- * allowed set, never the rejected text.
+ * alert the operator asked for. The message is fixed: it names the allowed set,
+ * never the rejected text — nor, since every environment message is now a fixed
+ * text (#385 r2 F2), the entry's position or the list's length.
  */
 export const expectedActiveProducersSchema = z
   .string()
-  .default('')
+  .prefault('')
   .transform((raw, context): readonly AuditSourceService[] => {
     if (raw.trim().length === 0) return Object.freeze([]);
 
     const parsed = new Set<AuditSourceService>();
     const entries = raw.split(',');
-    entries.forEach((entry, index) => {
+    entries.forEach((entry) => {
       const name = entry.trim();
       if (name.length === 0) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `entry ${index + 1} of ${entries.length} is empty`,
-        });
+        context.addIssue({ code: z.ZodIssueCode.custom, message: PRODUCER_ENTRY_EMPTY });
       } else if (!isAuditSourceService(name)) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            `entry ${index + 1} of ${entries.length} is not a known audit producer; ` +
-            `allowed: ${AUDIT_SOURCE_SERVICES.join(', ')}`,
-        });
+        context.addIssue({ code: z.ZodIssueCode.custom, message: PRODUCER_ENTRY_UNKNOWN });
       } else {
         parsed.add(name);
       }
@@ -97,7 +99,7 @@ export const auditEnvSchema = baseEnvSchema
   .merge(kafkaEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * The widest `from`..`to` an audit query may cover, in days.
@@ -119,7 +121,7 @@ export const auditEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(366)
-      .default(DEFAULT_MAX_QUERY_WINDOW_DAYS),
+      .prefault(DEFAULT_MAX_QUERY_WINDOW_DAYS),
 
     /**
      * The most chain records one verification may walk (AUD-003).
@@ -152,7 +154,7 @@ export const auditEnvSchema = baseEnvSchema
       .int()
       .min(1_000)
       .max(5_000_000)
-      .default(DEFAULT_MAX_VERIFICATION_RECORDS),
+      .prefault(DEFAULT_MAX_VERIFICATION_RECORDS),
 
     /**
      * Producers whose audit silence `RastaAuditProducerSilent` may report.
@@ -171,7 +173,7 @@ export const auditEnvSchema = baseEnvSchema
      * delivery resolves in seconds; one still open after this is a lost or
      * withheld event, and the externally held head is behind because of it.
      */
-    AUDIT_TENDER_GAP_ALERT_SECONDS: z.coerce.number().int().min(1).max(86_400).default(300),
+    AUDIT_TENDER_GAP_ALERT_SECONDS: z.coerce.number().int().min(1).max(86_400).prefault(300),
     /**
      * How far back the D-046 detective check looks for payment-reconciliation
      * audit rows without their evidence row, in hours (default 7 days). A
@@ -185,8 +187,10 @@ export const auditEnvSchema = baseEnvSchema
       .int()
       .min(1)
       .max(2_160)
-      .default(168),
+      .prefault(168),
   });
+
+export const AUDIT_ENV_MESSAGES = seal();
 
 export type AuditEnv = z.infer<typeof auditEnvSchema>;
 
@@ -225,7 +229,7 @@ export function loadAuditEnv(source: NodeJS.ProcessEnv = process.env): AuditEnv 
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? DOMAIN_PROJECTOR_CONSUMER,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: auditOperationBudgets },
+    { operationBudgets: auditOperationBudgets, fixedMessages: AUDIT_ENV_MESSAGES },
   );
 }
 

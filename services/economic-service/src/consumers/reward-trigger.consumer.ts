@@ -1,5 +1,5 @@
 import { Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
-import { DLQ_REASONS, type EventEnvelope } from '@rasta/contracts';
+import { DLQ_REASONS, type EventEnvelope, legacyParse } from '@rasta/contracts';
 import {
   createSystemContext,
   invalidPayloadError,
@@ -456,50 +456,44 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
       );
     }
 
-    const ruleIds = fact.subject
-      ? await this.rewards.applicableRuleIds(
-          fact.organizationId,
-          envelope.eventName,
-          fact.occurredAt,
-        )
-      : [];
-    const outcome: EvaluationOutcome = !fact.subject
-      ? 'NO_SUBJECT'
-      : ruleIds.length === 0
-        ? 'NO_RULE'
-        : 'EVALUATED';
+    return this.rewards.withRuleSelection(async (tx) => {
+      const ruleIds = fact.subject
+        ? await this.rewards.applicableRuleIds(
+            fact.organizationId,
+            envelope.eventName,
+            fact.occurredAt,
+            tx,
+          )
+        : [];
+      const outcome: EvaluationOutcome = !fact.subject
+        ? 'NO_SUBJECT'
+        : ruleIds.length === 0
+          ? 'NO_RULE'
+          : 'EVALUATED';
 
-    if (outcome === 'EVALUATED') {
-      // Committed on its own, before any grant: the grants run in their own
-      // transactions (RewardService.grantFor), and a crash between them is
-      // what the recorded rule ids are for.
-      const held = await this.claimEvaluation(
-        this.prisma.client,
-        envelope,
-        claim,
-        fact,
-        outcome,
-        ruleIds,
-      );
-      // The holder's outcome and rules, not `ruleIds` (round 3 #3).
-      return held?.evaluation ?? null;
-    }
+      if (outcome === 'EVALUATED') {
+        // Committed on its own, before any grant: the grants run in their own
+        // transactions (RewardService.grantFor), and a crash between them is
+        // what the recorded rule ids are for.
+        const held = await this.claimEvaluation(tx, envelope, claim, fact, outcome, ruleIds);
+        // The holder's outcome and rules, not `ruleIds` (round 3 #3).
+        return held?.evaluation ?? null;
+      }
 
-    if (outcome === 'NO_SUBJECT') {
-      rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_actor' });
-      this.logger.debug(
-        `${envelope.eventName} ${claim.sourceReference} was recorded by no user; no reward subject`,
-      );
-    } else {
-      rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_rule' });
-    }
+      if (outcome === 'NO_SUBJECT') {
+        rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_actor' });
+        this.logger.debug(
+          `${envelope.eventName} ${claim.sourceReference} was recorded by no user; no reward subject`,
+        );
+      } else {
+        rewardsSkippedTotal.inc({ service: SERVICE_NAME, reason: 'no_rule' });
+      }
 
-    // Nothing to grant: the claim and processed_event commit together.
-    // Recorded even though nothing could pay: a rule activated later, even
-    // one backdated over this fact, must not pay it when the same fact is
-    // re-emitted under a new event id. That is a retroactive grant, and one
-    // belongs to an authorised backfill, not to a replay.
-    return this.prisma.transaction(async (tx) => {
+      // Nothing to grant: the claim and processed_event commit together.
+      // Recorded even though nothing could pay: a rule activated later, even
+      // one backdated over this fact, must not pay it when the same fact is
+      // re-emitted under a new event id. That is a retroactive grant, and one
+      // belongs to an authorised backfill, not to a replay.
       const held = await this.claimEvaluation(tx, envelope, claim, fact, outcome, []);
       if (!held) return null;
       // Only the delivery that wrote the row marks the event: a concurrent
@@ -608,9 +602,9 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
   private extract(envelope: EventEnvelope): Claim | null {
     switch (envelope.eventName) {
       case CONSUMED_EVENTS.USAGE_RECORDED: {
-        const parsed = usageRecordedSchema.safeParse(envelope.payload);
+        const parsed = legacyParse(usageRecordedSchema, envelope.payload);
         if (!parsed.success) {
-          throw invalidPayloadError(envelope, parsed.error, USAGE_RECORDED_FIELDS);
+          throw invalidPayloadError(envelope, parsed.refusal, USAGE_RECORDED_FIELDS);
         }
         const payload = parsed.data;
         return {
@@ -620,9 +614,9 @@ export class RewardTriggerConsumer implements OnModuleInit, OnApplicationShutdow
         };
       }
       case CONSUMED_EVENTS.MAINTENANCE_COMPLETED: {
-        const parsed = maintenanceCompletedSchema.safeParse(envelope.payload);
+        const parsed = legacyParse(maintenanceCompletedSchema, envelope.payload);
         if (!parsed.success) {
-          throw invalidPayloadError(envelope, parsed.error, MAINTENANCE_COMPLETED_FIELDS);
+          throw invalidPayloadError(envelope, parsed.refusal, MAINTENANCE_COMPLETED_FIELDS);
         }
         const payload = parsed.data;
         return {

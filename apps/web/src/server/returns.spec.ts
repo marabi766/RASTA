@@ -39,6 +39,11 @@ import {
 } from './returns';
 import type { WebSession } from './session';
 import type { ReturnRequest, ReturnShipment } from './returns';
+import { pinnedTokens } from '@/test/session-token';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -52,7 +57,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'buyer',
   organizationId: BUYER,
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -60,7 +65,7 @@ const SESSION = {
 } satisfies WebSession;
 
 const caller = (organizationId: string | null, roles: readonly string[]) =>
-  returnCallerOf(accessToken(organizationId, roles));
+  returnCallerOf(pinnedTokens(accessToken(organizationId, roles)));
 
 describe('who may ask for a return (mirrors POST /v1/orders/:id/returns)', () => {
   it('the buyer’s purchasing roles, of a completed order', () => {

@@ -53,6 +53,10 @@ export type KafkaConnectionEnv = Pick<BaseEnv, 'NODE_ENV' | 'SERVICE_NAME'> &
     | 'KAFKA_ALLOW_PLAINTEXT'
   >;
 
+/** One broker: a DNS name or IPv4 address, or a bracketed IPv6 address, and a port. */
+const BROKER =
+  /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\]):\d{1,5}$/;
+
 export class KafkaConnectionConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -74,7 +78,10 @@ export class KafkaConnectionConfigError extends Error {
  *     principal other than this service, and a CA file without TLS — each a
  *     configuration that does not do what it looks like it does.
  *
- * The messages name variables, never their values.
+ * The messages are fixed texts naming variables, never their values — nor
+ * `SERVICE_NAME`, which passes its schema as any string and reaches the boot
+ * log through these errors (#385 r4); `kafkaConnectionFor` sets it to the
+ * principal a script acts as.
  */
 export function kafkaConnection(
   env: KafkaConnectionEnv,
@@ -85,6 +92,15 @@ export function kafkaConnection(
     .map((broker) => broker.trim())
     .filter((broker) => broker.length > 0);
   if (brokers.length === 0) throw new KafkaConnectionConfigError('KAFKA_BROKERS names no broker');
+  // host:port and nothing else — no scheme, no credentials: kafkajs quotes a
+  // broker it cannot reach in its errors, so one may only ever be a host
+  // (#385 r6, the configuration-disclosure class).
+  if (!brokers.every((broker) => BROKER.test(broker))) {
+    throw new KafkaConnectionConfigError(
+      'KAFKA_BROKERS must list host:port entries, without a scheme or credentials; ' +
+        'its value is not repeated',
+    );
+  }
 
   if (Boolean(env.KAFKA_SASL_USERNAME) !== Boolean(env.KAFKA_SASL_PASSWORD)) {
     throw new KafkaConnectionConfigError(
@@ -96,7 +112,7 @@ export function kafkaConnection(
   }
   if (!kafkaPlaintextAllowed(env) && !(kafkaSaslConfigured(env) && env.KAFKA_SSL)) {
     throw new KafkaConnectionConfigError(
-      `${env.SERVICE_NAME} refuses to reach Kafka without its SASL credential and TLS ` +
+      'This Kafka client refuses to reach Kafka without its SASL credential and TLS ' +
         '(KAFKA_SASL_PASSWORD or KAFKA_SASL_PASSWORD_<SERVICE>, and KAFKA_SSL=true). PLAINTEXT is ' +
         `allowed only with KAFKA_ALLOW_PLAINTEXT=true and NODE_ENV ${KAFKA_PLAINTEXT_ENVIRONMENTS.join(' or ')} ` +
         '(ADR-061 § 3)',
@@ -117,8 +133,8 @@ export function kafkaConnection(
       // Another service's credential would let this one publish on that
       // service's topics, with the broker's blessing.
       throw new KafkaConnectionConfigError(
-        `${env.SERVICE_NAME} holds a Kafka credential for another principal; ` +
-          'each service connects as itself',
+        'KAFKA_SASL_USERNAME is not SERVICE_NAME: this process holds a Kafka credential for ' +
+          'another principal; each service connects as itself',
       );
     }
     connection.sasl = {
@@ -130,11 +146,32 @@ export function kafkaConnection(
 
   if (env.KAFKA_SSL) {
     connection.ssl = env.KAFKA_SSL_CA_FILE
-      ? { ca: [readFile(env.KAFKA_SSL_CA_FILE)], rejectUnauthorized: true }
+      ? { ca: [readCaFile(readFile, env.KAFKA_SSL_CA_FILE)], rejectUnauthorized: true }
       : true;
   }
 
   return connection;
+}
+
+/**
+ * The CA file's contents, or a fixed refusal: the filesystem's own error names
+ * the configured path (`ENOENT: …, open '<path>'`, and `.path` on the error),
+ * and nothing of it is kept — no cause, no path (#385 r4).
+ */
+function readCaFile(readFile: (path: string) => string, path: string): string {
+  let ca: string | undefined;
+  try {
+    ca = readFile(path);
+  } catch {
+    ca = undefined;
+  }
+  if (ca === undefined) {
+    throw new KafkaConnectionConfigError(
+      'KAFKA_SSL_CA_FILE cannot be read; with KAFKA_SSL=true it must name a readable file ' +
+        "holding the broker's CA certificate",
+    );
+  }
+  return ca;
 }
 
 /**

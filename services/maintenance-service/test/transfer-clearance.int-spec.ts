@@ -1,3 +1,4 @@
+import { insertTransferFixture, setTenantEligibilityFixture } from '@rasta/testing';
 import { ulid } from 'ulid';
 import type { EventEnvelope } from '@rasta/contracts';
 import { RastaError, runWithContext, type RequestContext } from '@rasta/nest-common';
@@ -18,6 +19,9 @@ import {
 } from '../src/maintenance/transfer-record';
 import type { PrismaService } from '../src/prisma/prisma.service';
 import { asActor, cleanup, id, newPrisma, seedAsset, tenants } from './helpers';
+
+/** The held transaction a race writes in. */
+type Executor = { $executeRawUnsafe(query: string, ...values: unknown[]): Promise<number> };
 
 /**
  * The transfer clearance and its fence (ADR-062, docs/23 D-033), against
@@ -542,10 +546,7 @@ describe('transfer clearance', () => {
     async function expiredFence(assetId: string): Promise<string> {
       const fenceId = fence();
       await ask(org.a, assetId, fenceId);
-      await prisma.client.$executeRawUnsafe(
-        `UPDATE asset_transfer_fence SET expires_at = now() - interval '1 second' WHERE asset_id = $1`,
-        assetId,
-      );
+      await setTenantEligibilityFixture(prisma, 'transferFenceExpired', org.a, [assetId]);
       return fenceId;
     }
 
@@ -610,13 +611,9 @@ describe('transfer clearance', () => {
       const request = await report(org.a, assetId);
       // A fence placed before the rule that counts open requests (or left by
       // the residual window), now expired.
-      await prisma.client.$executeRawUnsafe(
-        `INSERT INTO asset_transfer_fence (asset_id, organization_id, fence_id, expires_at, created_at)
-         VALUES ($1, $2, $3, now() - interval '1 second', now() - interval '601 seconds')`,
-        assetId,
-        org.a,
-        fence(),
-      );
+      await insertTransferFixture(prisma.client, 'fenceExpired', org.a, [
+        { assetId, fenceId: fence() },
+      ]);
 
       const recorded = servicesWith(source('RECORDED'));
       expect(
@@ -691,10 +688,7 @@ describe('transfer clearance', () => {
     async function expiredFence(assetId: string): Promise<string> {
       const fenceId = fence();
       await ask(org.a, assetId, fenceId);
-      await prisma.client.$executeRawUnsafe(
-        `UPDATE asset_transfer_fence SET expires_at = now() - interval '1 second' WHERE asset_id = $1`,
-        assetId,
-      );
+      await setTenantEligibilityFixture(prisma, 'transferFenceExpired', org.a, [assetId]);
       return fenceId;
     }
 
@@ -808,20 +802,27 @@ describe('transfer clearance', () => {
       it.each([
         [
           'the machine moves to another owner',
-          `UPDATE asset_ref SET organization_id = $2 WHERE id = $1`,
+          (tx: Executor, assetId: string, organizationId: string) =>
+            tx.$executeRawUnsafe(
+              `UPDATE asset_ref SET organization_id = $2 WHERE id = $1`,
+              assetId,
+              organizationId,
+            ),
           'b',
           'ASSET_OWNER_CHANGED',
         ],
         [
           'a transfer fence is placed',
-          `INSERT INTO asset_transfer_fence (asset_id, organization_id, fence_id, expires_at, created_at)
-           VALUES ($1, $2, 'TRF_01JSTARTRACE000000000000001', now() + interval '600 seconds', now())`,
+          (tx: Executor, assetId: string, organizationId: string) =>
+            insertTransferFixture(tx, 'fenceLive', organizationId, [
+              { assetId, fenceId: 'TRF_01JSTARTRACE000000000000001' },
+            ]),
           'a',
           'ASSET_TRANSFER_IN_PROGRESS',
         ],
       ] as const)(
         're-checks under the lock when %s while the start waits for it',
-        async (_label, statement, organization, expected) => {
+        async (_label, change, organization, expected) => {
           const assetId = await machine();
           const order = await referred(assetId);
 
@@ -830,9 +831,7 @@ describe('transfer clearance', () => {
           // start reads the old owner before it and then queues behind it.
           const commit = await holding(async (tx: never) => {
             await repository.lockAssetForWork(tx, assetId, 'EXCLUSIVE');
-            await (
-              tx as { $executeRawUnsafe: (q: string, ...v: unknown[]) => Promise<number> }
-            ).$executeRawUnsafe(statement, assetId, org[organization]);
+            await change(tx as unknown as Executor, assetId, org[organization]);
           });
           const started = outcome(
             asActor({ organizationId: org.a }, () => repairOrders.start(order.id, {})),
@@ -867,15 +866,9 @@ describe('transfer clearance', () => {
       )[0]!.n;
 
     const tombstone = (assetId: string, fenceId: string, expired: boolean) =>
-      prisma.client.$executeRawUnsafe(
-        `INSERT INTO asset_transfer_release (asset_id, fence_id, organization_id, released_at, expires_at)
-         VALUES ($1, $2, $3, now() - interval '2 hours',
-                 now() + (CASE WHEN $4 THEN interval '-1 hour' ELSE interval '1 hour' END))`,
-        assetId,
-        fenceId,
-        org.a,
-        expired,
-      );
+      insertTransferFixture(prisma.client, expired ? 'releaseExpired' : 'releaseLive', org.a, [
+        { assetId, fenceId },
+      ]);
 
     describe('tombstones expire (#1)', () => {
       it('purges expired tombstones of any machine on a release, and keeps live ones', async () => {
@@ -906,10 +899,7 @@ describe('transfer clearance', () => {
         // An older expired fence of this organization makes the clearance
         // stop at its source question, before the lock.
         await ask(org.a, assetId);
-        await prisma.client.$executeRawUnsafe(
-          `UPDATE asset_transfer_fence SET expires_at = now() - interval '1 second' WHERE asset_id = $1`,
-          assetId,
-        );
+        await setTenantEligibilityFixture(prisma, 'transferFenceExpired', org.a, [assetId]);
         let now = 0;
         let open!: () => void;
         const gate = new Promise<void>((resolve) => (open = resolve));
@@ -968,13 +958,9 @@ describe('transfer clearance', () => {
       )[0]!.n;
 
     const expiredTombstone = (assetId: string) =>
-      prisma.client.$executeRawUnsafe(
-        `INSERT INTO asset_transfer_release (asset_id, fence_id, organization_id, released_at, expires_at)
-         VALUES ($1, $2, $3, now() - interval '2 hours', now() - interval '1 hour')`,
-        assetId,
-        fence(),
-        org.a,
-      );
+      insertTransferFixture(prisma.client, 'releaseExpired', org.a, [
+        { assetId, fenceId: fence() },
+      ]);
 
     /** Another session holds a row lock on this machine's tombstone until released. */
     async function lockTombstone(assetId: string) {

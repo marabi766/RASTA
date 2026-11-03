@@ -40,5 +40,5 @@ if (errors.length > 0) {
     fail(`Generated progress report is stale. Run 'pnpm progress:report' and commit the result.`);
   else process.stdout.write('Backlog valid and generated progress report is current.\n');
 } else {
-  fail(`Unknown command '${command}'. Use validate, write or check.`);
+  fail('Unknown command; it is not repeated. Use validate, write or check.');
 }

@@ -41,7 +41,8 @@ function parseArgs(argv: readonly string[]): { maxSeconds: number } {
   let maxSeconds = DEFAULT_MAX_SECONDS;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--max-seconds') maxSeconds = Number(argv[++i]);
-    else throw new Error(`unknown argument ${String(argv[i])}`);
+    // Not repeated: only an argument that matched is ever echoed (#385 r6).
+    else throw new Error(`unknown argument at position ${i + 1}; it is not repeated`);
   }
   if (!Number.isInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > 86_400) {
     throw new Error('--max-seconds must be an integer from 1 to 86400');

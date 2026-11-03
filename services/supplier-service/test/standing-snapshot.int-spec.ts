@@ -73,17 +73,27 @@ describe('supplier standing snapshot', () => {
     }
   }
 
-  const suspend = (key: keyof typeof orgs) =>
+  /** The supplier's episodes as an operator reads them, newest first. */
+  const episodes = async (key: keyof typeof orgs) =>
+    (await http().get(`/v1/suppliers/${ids[key]}`).set('authorization', asPlatform()).expect(200))
+      .body.suspensions as { id: string; open: boolean }[];
+  const suspend = async (key: keyof typeof orgs) =>
     http()
       .post(`/v1/suppliers/${ids[key]}/suspend`)
       .set('authorization', asPlatform())
-      .send({ reason: 'A private reason for suspending' })
+      .send({
+        reason: 'A private reason for suspending',
+        latestSuspensionId: (await episodes(key))[0]?.id ?? null,
+      })
       .expect(200);
-  const reinstate = (key: keyof typeof orgs) =>
+  const reinstate = async (key: keyof typeof orgs) =>
     http()
       .post(`/v1/suppliers/${ids[key]}/reinstate`)
       .set('authorization', asPlatform())
-      .send({ reason: 'A private reason for lifting it' })
+      .send({
+        reason: 'A private reason for lifting it',
+        suspensionId: (await episodes(key)).find((episode) => episode.open)?.id,
+      })
       .expect(200);
 
   const snapshot = async (query = 'limit=200', token?: string) =>

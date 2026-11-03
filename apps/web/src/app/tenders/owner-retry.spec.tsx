@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { axe } from 'jest-axe';
 
 import {
+  KEYED_REPLAY_OWNER_COMMANDS,
+  OWNER_CODE_TEXT,
   REASON_FIELD,
   UNREPEATABLE_OWNER_COMMANDS,
   type OwnerCommand,
@@ -21,6 +23,8 @@ import { OwnerCommandForm } from './[id]/OwnerCommandForm';
 import { OwnerCommands } from './[id]/OwnerCommands';
 import { OwnTenderDetailScreen } from './[id]/TenderDetailScreen';
 import type { OwnerFormState } from './[id]/owner-form-state';
+import { OTHER_PERSON, bindingOf, keyFor } from '@/test/unresolved-binding';
+import type { Binding } from '@/lib/unresolved-tenancy';
 
 jest.setTimeout(20_000);
 
@@ -41,7 +45,8 @@ const KEY = 'sub_FIRSTKEYFIRSTKEYFIRS';
 const OTHER = 'sub_OTHERKEYOTHERKEYOTH';
 const FRESH = 'sub_FRESHKEYFRESHKEYFRE';
 const OWNER = 'owner-tag-A';
-const STORE_KEY = `rasta.unresolved-tender-command.${TENDER_ID}`;
+const ACCOUNT = bindingOf(OWNER, 'session-tag-1');
+const STORE_KEY = keyFor('rasta.unresolved-tender-command.', ACCOUNT, TENDER_ID);
 const STAMP: ReplayStamp = { token: 'signed-replay-stamp', until: Date.now() + 50 * 60 * 1000 };
 const PAGE = `/tenders/${TENDER_ID}?view=own`;
 const REASON = 'معیارها کامل نیست';
@@ -55,7 +60,13 @@ const SCORE_ROWS = [
 ];
 const BINDING = '{"scoring":[{"criterionCode":"technical"}],"award":null}';
 
-function renderForm(command: OwnerCommand = 'REJECT') {
+function renderForm(
+  command: OwnerCommand = 'REJECT',
+  award: { justificationRequired: boolean; execution: { justification: string | null } | null } = {
+    justificationRequired: false,
+    execution: null,
+  },
+) {
   return render(
     <OwnerCommandForm
       tenderId={TENDER_ID}
@@ -63,12 +74,10 @@ function renderForm(command: OwnerCommand = 'REJECT') {
       csrfToken="csrf"
       submissionId={KEY}
       replay={STAMP}
-      owner={OWNER}
+      account={ACCOUNT}
       pageHref={PAGE}
       {...(command === 'SCORE' ? { scoreRows: SCORE_ROWS, binding: BINDING } : {})}
-      {...(command === 'AWARD'
-        ? { award: { justificationRequired: false, execution: null }, binding: BINDING }
-        : {})}
+      {...(command === 'AWARD' ? { award, binding: BINDING } : {})}
     />,
   );
 }
@@ -125,6 +134,142 @@ it('a score is remembered before it leaves — that it was sent, never what it s
   expect(second!.get(scoreField('technical'))).toBe(first!.get(scoreField('technical')));
   expect(second!.get('binding')).toBe(BINDING);
   expect(await axe(container)).toHaveNoViolations();
+});
+
+it('every command the service answers again under its key, its call lost, is re-sent in the same page: the same key, the same stamp, the same fields', async () => {
+  for (const command of KEYED_REPLAY_OWNER_COMMANDS) {
+    action.mockReset();
+    window.sessionStorage.clear();
+    action.mockRejectedValueOnce(new Error('An unexpected response was received from the server.'));
+    sessionProbe.mockResolvedValue({ status: 503 });
+    const { container, unmount } = renderForm(command);
+    if (command === 'AWARD') {
+      fireEvent.change(container.querySelector('[name="justification"]')!, {
+        target: { value: 'کمترین قیمت' },
+      });
+    }
+    await submit(container);
+    expect(stored()).toMatchObject({ command, submissionId: KEY });
+    const retry = screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' });
+    expect(screen.queryByRole('link', { name: /کنار بگذار/ })).toBeNull();
+    action.mockRejectedValueOnce(new Error('An unexpected response was received from the server.'));
+    await act(async () => {
+      fireEvent.click(retry);
+    });
+    expect(action).toHaveBeenCalledTimes(2);
+    const [first, second] = action.mock.calls.map(([, , form]) => form);
+    for (const field of ['submission', 'replay', 'binding', 'justification']) {
+      expect(second!.get(field)).toBe(first!.get(field));
+    }
+    expect(second!.get('submission')).toBe(KEY);
+    expect(second!.get('replay')).toBe(STAMP.token);
+    unmount();
+  }
+});
+
+describe('executing an approved award, its response lost', () => {
+  const LOST = new Error('An unexpected response was received from the server.');
+  const APPROVED = [null, 'آنچه موافقت شد'];
+
+  for (const justification of APPROVED) {
+    const terms = { justificationRequired: true, execution: { justification } };
+
+    it(`re-sends the same key, stamp and binding after a transport error (approved justification ${justification === null ? 'null' : 'set'})`, async () => {
+      action.mockRejectedValueOnce(LOST);
+      sessionProbe.mockResolvedValue({ status: 503 });
+      const { container } = renderForm('AWARD', terms);
+      await submit(container);
+      expect(stored()).toMatchObject({ command: 'AWARD', submissionId: KEY });
+      action.mockRejectedValueOnce(LOST);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' }));
+      });
+      expect(action).toHaveBeenCalledTimes(2);
+      const [first, second] = action.mock.calls.map(([, , form]) => form);
+      expect(first!.get('binding')).toBe(BINDING);
+      expect(second!.get('submission')).toBe(KEY);
+      expect(second!.get('replay')).toBe(STAMP.token);
+      expect(second!.get('binding')).toBe(BINDING);
+      expect(second!.get('justification')).toBeNull();
+      expect(first!.get('justification')).toBeNull();
+    });
+
+    it(`re-sends from the state the server returned for an unknown outcome (approved justification ${justification === null ? 'null' : 'set'})`, async () => {
+      action.mockImplementationOnce(async (_t, _p, form) => ({
+        kind: 'UNCONFIRMED',
+        command: 'AWARD',
+        correlationId: 'COR_LOST',
+        submissionId: KEY,
+        values: { binding: String(form.get('binding')) },
+        replay: STAMP,
+      }));
+      const { container } = renderForm('AWARD', terms);
+      await submit(container);
+      action.mockRejectedValueOnce(LOST);
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' }));
+      });
+      const [first, second] = action.mock.calls.map(([, , form]) => form);
+      expect(second!.get('submission')).toBe(KEY);
+      expect(second!.get('replay')).toBe(STAMP.token);
+      expect(second!.get('binding')).toBe(first!.get('binding'));
+      expect(second!.get('binding')).toBe(BINDING);
+    });
+  }
+});
+
+it('a re-send refused as a key already used shows its fixed words beside the unconfirmed record', async () => {
+  action.mockResolvedValueOnce({
+    kind: 'UNCONFIRMED',
+    command: 'OPEN_BIDS',
+    correlationId: 'COR_LOST',
+    submissionId: KEY,
+    values: {},
+    replay: STAMP,
+  });
+  const { container } = renderForm('OPEN_BIDS');
+  await submit(container);
+  action.mockResolvedValueOnce({
+    kind: 'UNCONFIRMED',
+    command: 'OPEN_BIDS',
+    correlationId: 'COR_LOST',
+    submissionId: KEY,
+    values: {},
+    replay: STAMP,
+    retryRefused: true,
+    retryRefusal: OWNER_CODE_TEXT.IDEMPOTENCY_KEY_REUSED,
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'ارسال دوبارهٔ همین درخواست' }));
+  });
+  expect(screen.getByText(OWNER_CODE_TEXT.IDEMPOTENCY_KEY_REUSED)).toBeInTheDocument();
+  expect(screen.queryByText(/اگر آن انجام شده باشد، تکرارش پذیرفته نمی‌شود/)).toBeNull();
+  expect(await axe(container)).toHaveNoViolations();
+});
+
+it('after a reload a keyed command’s record is view-only, as any other: no re-send, only the set-aside', () => {
+  for (const command of KEYED_REPLAY_OWNER_COMMANDS) {
+    window.sessionStorage.clear();
+    saveUnresolvedOwnerCommand(
+      TENDER_ID,
+      { command, submissionId: KEY, correlationId: 'COR_ORIGINAL' },
+      ACCOUNT,
+    );
+    const { unmount } = render(
+      <OwnerCommands
+        tenderId={TENDER_ID}
+        offered={[]}
+        csrfToken="csrf"
+        account={ACCOUNT}
+        pageHref={PAGE}
+        showsRestored
+        pageSubmissionIds={[]}
+      />,
+    );
+    expect(screen.getByText(/این درخواست پیش از تازه‌شدن صفحه فرستاده شد/)).toBeInTheDocument();
+    expect(screen.queryByRole('button')).toBeNull();
+    unmount();
+  }
 });
 
 /** What a command's form needs typed before it is sent at all. */
@@ -209,7 +354,7 @@ it('a publication whose answer was lost — then rejected — offers no retry, a
       tenderId={TENDER_ID}
       offered={[{ command: 'PUBLISH', submission: { id: FRESH, replay: STAMP } }]}
       csrfToken="csrf"
-      owner={OWNER}
+      account={ACCOUNT}
       pageHref={PAGE}
       showsRestored
     />,
@@ -226,14 +371,14 @@ it('after a reload the record is view-only instead of any fresh form, until set 
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'PUBLISH', submissionId: KEY, correlationId: 'COR_ORIGINAL' },
-    OWNER,
+    ACCOUNT,
   );
   const { container } = render(
     <OwnerCommands
       tenderId={TENDER_ID}
       offered={[{ command: 'PUBLISH', submission: { id: FRESH, replay: STAMP } }]}
       csrfToken="csrf"
-      owner={OWNER}
+      account={ACCOUNT}
       pageHref={PAGE}
       showsRestored
       pageSubmissionIds={[FRESH]}
@@ -253,25 +398,25 @@ it('an authority’s decision on its last step, its answer lost: after the reloa
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'GRANT_AWARD', submissionId: KEY, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
   // The page as `page.tsx` draws it once the inbox holds no pending step: the absence, and the
   // session's recovery next to it.
-  const absence = (owner: string) => (
+  const absence = (account: Binding) => (
     <>
       <OwnTenderDetailScreen result={{ kind: 'NOT_FOUND' }} criteria={null} />
       <OwnerCommands
         tenderId={TENDER_ID}
         offered={[]}
         csrfToken="csrf"
-        owner={owner}
+        account={account}
         pageHref={PAGE}
         showsRestored
         pageSubmissionIds={[]}
       />
     </>
   );
-  const { container, unmount } = render(absence(OWNER));
+  const { container, unmount } = render(absence(ACCOUNT));
   expect(screen.getByText('این مناقصه پیدا نشد')).toBeInTheDocument();
   expect(screen.getByText(/این درخواست پیش از تازه‌شدن صفحه فرستاده شد/)).toBeInTheDocument();
   expect(screen.getByRole('heading', { name: /موافقت با واگذاری/ })).toBeInTheDocument();
@@ -289,9 +434,9 @@ it('an authority’s decision on its last step, its answer lost: after the reloa
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'GRANT_AWARD', submissionId: KEY, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
-  render(absence('owner-tag-B'));
+  render(absence(bindingOf('owner-tag-B', 'session-tag-B', OTHER_PERSON)));
   expect(screen.getByText('این مناقصه پیدا نشد')).toBeInTheDocument();
   expect(screen.queryByText(/این درخواست پیش از تازه‌شدن صفحه فرستاده شد/)).toBeNull();
   expect(screen.queryByRole('link', { name: /این درخواست را کنار بگذار/ })).toBeNull();
@@ -301,7 +446,7 @@ it('one slot per tender: another submission’s record is never replaced, the fo
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'GRANT', submissionId: OTHER, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
   const { container } = renderForm('OPEN_BIDS');
   await submit(container);
@@ -311,8 +456,8 @@ it('one slot per tender: another submission’s record is never replaced, the fo
     saveUnresolvedOwnerCommand(
       TENDER_ID,
       { command: 'OPEN_BIDS', submissionId: KEY, correlationId: null },
-      OWNER,
-    ),
+      ACCOUNT,
+    ).outcome,
   ).toBe('HELD');
 });
 
@@ -320,11 +465,11 @@ it('a record is cleared only by its own submission id', () => {
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'GRANT', submissionId: OTHER, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
-  clearUnresolvedOwnerCommand(TENDER_ID, KEY);
+  clearUnresolvedOwnerCommand(TENDER_ID, KEY, ACCOUNT);
   expect(stored()).toMatchObject({ submissionId: OTHER });
-  clearUnresolvedOwnerCommand(TENDER_ID, OTHER);
+  clearUnresolvedOwnerCommand(TENDER_ID, OTHER, ACCOUNT);
   expect(stored()).toBeNull();
 });
 
@@ -332,14 +477,14 @@ it('the other group of the page does not show a record a form of the page holds'
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'OPEN_BIDS', submissionId: KEY, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
   const { container } = render(
     <OwnerCommands
       tenderId={TENDER_ID}
       offered={[]}
       csrfToken="csrf"
-      owner={OWNER}
+      account={ACCOUNT}
       pageHref={PAGE}
       showsRestored
       pageSubmissionIds={[KEY]}
@@ -352,7 +497,7 @@ it('logout writes nothing more; another person’s page removes the record', () 
   saveUnresolvedOwnerCommand(
     TENDER_ID,
     { command: 'PUBLISH', submissionId: KEY, correlationId: null },
-    OWNER,
+    ACCOUNT,
   );
   purgeAllUnresolvedOwnerCommands();
   expect(stored()).toMatchObject({ submissionId: KEY });
@@ -360,9 +505,9 @@ it('logout writes nothing more; another person’s page removes the record', () 
     saveUnresolvedOwnerCommand(
       'TND_OTHER',
       { command: 'PUBLISH', submissionId: OTHER, correlationId: null },
-      OWNER,
-    ),
+      ACCOUNT,
+    ).outcome,
   ).toBe('UNAVAILABLE');
-  purgeForeignUnresolvedOwnerCommands('owner-tag-B');
+  purgeForeignUnresolvedOwnerCommands({ person: OTHER_PERSON, legacy: [] });
   expect(stored()).toBeNull();
 });

@@ -1,6 +1,16 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 import { DatabaseUrlConflictError, withDatabasePool } from './database-pool';
-import { withStatementTimeout, withUtcSession } from './database-session';
+import {
+  DATABASE_URL_CONTROL_CHARACTER,
+  DATABASE_URL_REPEATED_OPTIONS,
+  withStatementTimeout,
+  withUtcSession,
+} from './database-session';
+import { envIssues, type EnvIssue } from './env-issues';
+import { tryReadUrl } from './url-reader';
+
+export type { EnvIssue } from './env-issues';
 
 /**
  * Environment loading for Rasta services.
@@ -26,28 +36,57 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
  * instead — which is exactly the failure mode this module exists to prevent.
  */
 export function urlWithProtocol(protocols: readonly string[], label: string) {
-  const expected = protocols.map((p) => `${p}//`).join(' or ');
+  const messages = urlWithProtocolMessages(protocols, label);
   return z.string().superRefine((value, ctx) => {
-    let parsed: URL;
-    try {
-      parsed = new URL(value);
-    } catch {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} must be a valid URL` });
+    const parsed = tryReadUrl(value);
+    if (parsed === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: messages.invalid });
       return;
     }
     if (!protocols.includes(parsed.protocol)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `${label} must start with ${expected} (received "${parsed.protocol}//")`,
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: messages.wrongProtocol });
     }
     if (!parsed.hostname) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} must include a host` });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: messages.noHost });
     }
   });
 }
 
+/**
+ * What {@link urlWithProtocol} refuses with, fixed per schema: never the
+ * protocol written. A value that failed this check is not known to be a URL,
+ * and what it carries goes into the boot error and its log (S-09). A schema
+ * built here with other protocols or another label hands these texts to
+ * `loadEnv` (`fixedMessages`), or its refusals print the fixed text for their
+ * code instead.
+ */
+export function urlWithProtocolMessages(protocols: readonly string[], label: string) {
+  const expected = protocols.map((p) => `${p}//`).join(' or ');
+  return {
+    invalid: `${label} must be a valid URL`,
+    wrongProtocol: `${label} must start with ${expected}`,
+    noHost: `${label} must include a host`,
+  } as const;
+}
+
 export const httpUrlSchema = urlWithProtocol(['http:', 'https:'], 'URL');
+
+/** What {@link serviceUrlSchema} refuses a URL with a username or password with. */
+export const URL_CREDENTIALS_REFUSED = 'URL must not include a username or password';
+
+/**
+ * The base URL of a service called with `fetch`: an http(s) URL with a host,
+ * and **no username or password**. `fetch` refuses
+ * to build a request from a URL with credentials, and its TypeError repeats the
+ * URL whole — the password in it — into whatever logs the failure (#385 r5).
+ * Nothing that works is refused: such a URL fails every call.
+ */
+export const serviceUrlSchema = httpUrlSchema.superRefine((value, ctx) => {
+  const parsed = tryReadUrl(value);
+  if (parsed !== null && (parsed.username !== '' || parsed.password !== '')) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: URL_CREDENTIALS_REFUSED });
+  }
+});
 export const postgresUrlSchema = urlWithProtocol(
   ['postgresql:', 'postgres:'],
   'Database connection string',
@@ -93,11 +132,18 @@ export function booleanEnv(defaultValue: boolean) {
  * they have to stay that way: the moment an environment flag and a query
  * parameter disagree about what `"off"` means, one of them is a defect waiting
  * to be found.
+ *
+ * The refusal is {@link BOOLEAN_EXPECTED} and nothing else, whatever was sent:
+ * through `queryBoolean` it is the client's own text, and the pipe's echo
+ * backstop does not look for values under three characters, so `?flag=42`
+ * would otherwise come back verbatim (S-09, #385 r1 F2).
  */
+const BOOLEAN_EXPECTED = 'Expected a boolean such as "true" or "false"';
+
 function booleanish(defaultValue: boolean) {
   return z
     .union([z.boolean(), z.string()])
-    .default(defaultValue)
+    .prefault(defaultValue)
     .transform((value, ctx) => {
       if (typeof value === 'boolean') return value;
 
@@ -105,10 +151,7 @@ function booleanish(defaultValue: boolean) {
       if (['true', '1', 'yes', 'on'].includes(normalised)) return true;
       if (['false', '0', 'no', 'off', ''].includes(normalised)) return false;
 
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Expected a boolean such as "true" or "false", received "${value}"`,
-      });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: BOOLEAN_EXPECTED });
       return z.NEVER;
     });
 }
@@ -181,18 +224,18 @@ export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 25_000;
 
 /** Every Rasta service has these, without exception. */
 export const baseEnvSchema = z.object({
-  NODE_ENV: z.enum(NODE_ENVS).default('development'),
-  LOG_LEVEL: z.enum(LOG_LEVELS).default('info'),
+  NODE_ENV: z.enum(NODE_ENVS).prefault('development'),
+  LOG_LEVEL: z.enum(LOG_LEVELS).prefault('info'),
 
   SERVICE_NAME: z.string().min(1),
-  SERVICE_VERSION: z.string().default('0.0.0'),
+  SERVICE_VERSION: z.string().prefault('0.0.0'),
   PORT: z.coerce.number().int().min(1).max(65535),
 
   // Observability — tracing is opt-out rather than opt-in so that a service
   // deployed without OTel config is still visible, just without a collector.
   OTEL_EXPORTER_OTLP_ENDPOINT: httpUrlSchema.optional(),
   OTEL_TRACES_ENABLED: booleanEnv(true),
-  OTEL_SERVICE_NAMESPACE: z.string().default('rasta'),
+  OTEL_SERVICE_NAMESPACE: z.string().prefault('rasta'),
 
   // Bounded, and bounded *below* the orchestrator's own grace period: see
   // `installGracefulShutdown` in @rasta/nest-common.
@@ -201,7 +244,7 @@ export const baseEnvSchema = z.object({
     .int()
     .min(1000)
     .max(120_000)
-    .default(DEFAULT_SHUTDOWN_TIMEOUT_MS),
+    .prefault(DEFAULT_SHUTDOWN_TIMEOUT_MS),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
@@ -233,10 +276,12 @@ export const DATABASE_STATEMENT_TIMEOUT_MS_MAX = 3_600_000;
  * as 16 and an empty value as 0. For a setting that sizes a production pool,
  * anything but the number the operator meant fails at boot.
  */
+const WHOLE_NUMBER_EXPECTED = 'Expected a whole number written as digits, such as "10"';
+
 function wholeNumberEnv(min: number, max: number) {
   return z
     .string()
-    .regex(/^[0-9]+$/, 'Expected a whole number written as digits, such as "10"')
+    .regex(/^[0-9]+$/, WHOLE_NUMBER_EXPECTED)
     .transform(Number)
     .pipe(z.number().int().min(min).max(max));
 }
@@ -309,7 +354,7 @@ export const kafkaEnvSchema = z.object({
    */
   KAFKA_SASL_USERNAME: z.string().min(1).max(64).optional(),
   KAFKA_SASL_PASSWORD: z.string().min(1).optional(),
-  KAFKA_SASL_MECHANISM: z.enum(KAFKA_SASL_MECHANISMS).default('scram-sha-512'),
+  KAFKA_SASL_MECHANISM: z.enum(KAFKA_SASL_MECHANISMS).prefault('scram-sha-512'),
 
   /** TLS to the broker. Required together with SASL unless PLAINTEXT is allowed below. */
   KAFKA_SSL: booleanEnv(false),
@@ -325,8 +370,8 @@ export const kafkaEnvSchema = z.object({
   /** PEM file of the CA that signed the broker's certificate; absent = the system trust store. */
   KAFKA_SSL_CA_FILE: z.string().min(1).optional(),
 
-  OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).default(500),
-  OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
+  OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(50).prefault(500),
+  OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).prefault(100),
 
   /**
    * How long a claim owns its rows before another relay may take them back
@@ -344,13 +389,13 @@ export const kafkaEnvSchema = z.object({
    * a single `sendBatch`), it only has to hold three renewal intervals and stay
    * shorter than an acceptable recovery delay.
    */
-  OUTBOX_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(20).max(3600).default(60),
+  OUTBOX_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(20).max(3600).prefault(60),
 
   /** Base of the capped exponential retry backoff: `min(2^min(n,10) × base, max)`. */
-  OUTBOX_CLAIM_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).default(5),
+  OUTBOX_CLAIM_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).prefault(5),
 
   /** Ceiling of that backoff, so a poisoned row is retried eventually. */
-  OUTBOX_CLAIM_BACKOFF_MAX_SECONDS: z.coerce.number().int().min(1).max(86_400).default(3600),
+  OUTBOX_CLAIM_BACKOFF_MAX_SECONDS: z.coerce.number().int().min(1).max(86_400).prefault(3600),
 
   /**
    * How long shutdown keeps renewing a lease whose publish is still in flight.
@@ -370,7 +415,7 @@ export const kafkaEnvSchema = z.object({
    * exit. The default, 20 s, fits the default 23 s budget; it was 30 s, which
    * did not even fit the 25 s timeout.
    */
-  OUTBOX_SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().min(0).max(300).default(20),
+  OUTBOX_SHUTDOWN_GRACE_SECONDS: z.coerce.number().int().min(0).max(300).prefault(20),
 });
 
 export type KafkaEnv = z.infer<typeof kafkaEnvSchema>;
@@ -404,28 +449,28 @@ export const outboxPurgeEnvSchema = z.object({
    * of one hour refuses a typo that would empty that record as fast as it
    * fills; the ceiling of a year refuses one that would make the purge a no-op.
    */
-  OUTBOX_PURGE_RETENTION_HOURS: z.coerce.number().int().min(1).max(8760).default(168),
+  OUTBOX_PURGE_RETENTION_HOURS: z.coerce.number().int().min(1).max(8760).prefault(168),
 
   /**
    * Pause between the end of one run and the start of the next. A row outlives
    * its retention by at most one interval plus one run — five minutes against a
    * 168-hour window — while an idle run costs a single indexed probe.
    */
-  OUTBOX_PURGE_INTERVAL_SECONDS: z.coerce.number().int().min(10).max(86_400).default(300),
+  OUTBOX_PURGE_INTERVAL_SECONDS: z.coerce.number().int().min(10).max(86_400).prefault(300),
 
   /**
    * Rows deleted per statement. 1000 is the ceiling `OUTBOX_BATCH_SIZE`
    * already allows the relay to lock in one claim, so a purge batch locks no
    * more outbox rows at once than the platform's own relay may.
    */
-  OUTBOX_PURGE_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(1000),
+  OUTBOX_PURGE_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).prefault(1000),
 
   /**
    * Batches per run, so one run is bounded in time too. A run that hits the
    * cap reports `truncated` and the next continues; together with the defaults
    * above that is 10 000 rows per run, 120 000 an hour.
    */
-  OUTBOX_PURGE_MAX_BATCHES_PER_RUN: z.coerce.number().int().min(1).max(1000).default(10),
+  OUTBOX_PURGE_MAX_BATCHES_PER_RUN: z.coerce.number().int().min(1).max(1000).prefault(10),
 
   /**
    * `statement_timeout` for each batch. Bounds how long one batch can hold its
@@ -433,7 +478,7 @@ export const outboxPurgeEnvSchema = z.object({
    * batch bound that `loadEnv` holds under `SHUTDOWN_TIMEOUT_MS`
    * ({@link outboxPurgeBatchBoundMs}).
    */
-  OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+  OUTBOX_PURGE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).prefault(5000),
 
   /**
    * How long a batch may wait for a pooled connection before its transaction
@@ -443,7 +488,7 @@ export const outboxPurgeEnvSchema = z.object({
    * `failed`, rather than queue behind the service's own work. Part of the
    * batch bound ({@link outboxPurgeBatchBoundMs}).
    */
-  OUTBOX_PURGE_MAX_WAIT_MS: z.coerce.number().int().min(100).max(60_000).default(2000),
+  OUTBOX_PURGE_MAX_WAIT_MS: z.coerce.number().int().min(100).max(60_000).prefault(2000),
 });
 
 export type OutboxPurgeEnv = z.infer<typeof outboxPurgeEnvSchema>;
@@ -499,7 +544,7 @@ export function outboxShutdownBudgetMs(env: { SHUTDOWN_TIMEOUT_MS: number }): nu
 /** Services that use cache, distributed locks or rate limiting. */
 export const redisEnvSchema = z.object({
   REDIS_URL: redisUrlSchema,
-  REDIS_KEY_PREFIX: z.string().default('rasta'),
+  REDIS_KEY_PREFIX: z.string().prefault('rasta'),
 });
 
 /** Services that verify caller identity — which is all of them. */
@@ -515,8 +560,8 @@ export const authEnvSchema = z.object({
    * minimum for HS256 to be meaningfully secure.
    */
   INTERNAL_TOKEN_SECRET: z.string().min(32),
-  INTERNAL_TOKEN_ISSUER: z.string().default('rasta-internal'),
-  INTERNAL_TOKEN_TTL_SECONDS: z.coerce.number().int().min(30).max(900).default(300),
+  INTERNAL_TOKEN_ISSUER: z.string().prefault('rasta-internal'),
+  INTERNAL_TOKEN_TTL_SECONDS: z.coerce.number().int().min(30).max(900).prefault(300),
 });
 
 /**
@@ -541,7 +586,23 @@ export function kafkaPlaintextAllowed(
   );
 }
 
-export type EnvIssue = { path: string; message: string };
+/**
+ * The fixed texts this package's schemas refuse with — the audited list
+ * `loadEnv` keeps verbatim (compared by equality). Every other message is
+ * replaced by the fixed text for its issue code ({@link envIssues}).
+ */
+export const CONFIG_ENV_MESSAGES: readonly string[] = Object.freeze([
+  BOOLEAN_EXPECTED,
+  WHOLE_NUMBER_EXPECTED,
+  ...[
+    urlWithProtocolMessages(['http:', 'https:'], 'URL'),
+    urlWithProtocolMessages(['postgresql:', 'postgres:'], 'Database connection string'),
+    urlWithProtocolMessages(['redis:', 'rediss:'], 'Redis URL'),
+  ].flatMap((messages) => Object.values(messages)),
+  URL_CREDENTIALS_REFUSED,
+  DATABASE_URL_CONTROL_CHARACTER,
+  DATABASE_URL_REPEATED_OPTIONS,
+]);
 
 export class EnvValidationError extends Error {
   constructor(public readonly issues: EnvIssue[]) {
@@ -630,27 +691,33 @@ export interface LoadEnvOptions<T> {
    * closed). Not consulted while the variable is unset.
    */
   readonly operationBudgets?: (env: T) => readonly OperationBudget[];
+  /**
+   * The fixed texts the service's own schema refuses with (`fixedEnvMessages`
+   * in `env-issues.ts`), kept verbatim beside {@link CONFIG_ENV_MESSAGES}. Any
+   * other message is replaced by the fixed text for its issue code.
+   */
+  readonly fixedMessages?: readonly string[];
 }
 
 /**
  * Validates `source` against `schema` and returns the parsed, typed result.
  * Throws {@link EnvValidationError} listing *every* problem at once — fixing
  * one missing variable per restart is a miserable way to configure 17 services.
+ *
+ * The list is built by {@link envIssues} from each issue's path, code and the
+ * schema only, never from the value written: Zod's own enum refusal repeats
+ * it (`received '…'`), and the error reaches the boot log (S-09, #385 r2 F2).
  */
 export function loadEnv<S extends z.ZodTypeAny>(
   schema: S,
   source: NodeJS.ProcessEnv = process.env,
   options: LoadEnvOptions<z.infer<S>> = {},
 ): z.infer<S> {
-  const result = schema.safeParse(withKafkaCredentialFallback(source));
+  const result = legacyParse(schema, withKafkaCredentialFallback(source));
 
   if (!result.success) {
-    throw new EnvValidationError(
-      result.error.issues.map((issue) => ({
-        path: issue.path.join('.') || '(root)',
-        message: issue.message,
-      })),
-    );
+    const fixed = new Set([...CONFIG_ENV_MESSAGES, ...(options.fixedMessages ?? [])]);
+    throw new EnvValidationError(envIssues(result.refusal, fixed));
   }
 
   assertKafkaPlaintextOptOut(source, result.data);

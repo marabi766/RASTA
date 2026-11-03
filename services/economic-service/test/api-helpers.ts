@@ -4,19 +4,23 @@ import {
   AUTH_OPTIONS,
   InternalTokenService,
   OutboxRelay,
+  installNestLogger,
   type AuthGuardOptions,
 } from '@rasta/nest-common';
+import { mintTestInternalToken } from '@rasta/testing';
 import { InMemoryEventPublisher } from '../src/outbox/kafka.publisher';
 import { KafkaEventPublisher } from '../src/outbox/kafka.publisher';
 import { SettlementAuthorityConsumer } from '../src/consumers/settlement-authority.consumer';
 import { StatementSettlementConsumer } from '../src/consumers/statement-settlement.consumer';
 import { RewardTriggerConsumer } from '../src/consumers/reward-trigger.consumer';
-import { AppModule } from '../src/app.module';
-import { PAYMENT_PROVIDER } from '../src/tokens';
+import { AppModule, economicLogger } from '../src/app.module';
+import { ENV, LOGGER, PAYMENT_PROVIDER } from '../src/tokens';
+import { loadEconomicEnv, type EconomicEnv } from '../src/config/env';
 import type { PaymentProvider } from '../src/payment/provider';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { databaseUrl, PLATFORM_ORGANIZATION_ID } from './helpers';
 import { createHash, randomBytes } from 'node:crypto';
+import type { Writable } from 'node:stream';
 import { ulid } from 'ulid';
 
 /**
@@ -245,7 +249,8 @@ export function internalToken(
   options: InternalTokenOptions = {},
 ): Promise<string> {
   const ttl = options.ttlSeconds ?? 300;
-  return new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', ttl).issue(
+  return mintTestInternalToken(
+    { secret: INTERNAL_SECRET, issuer: 'rasta-internal', ttlSeconds: ttl },
     callerService,
     options.targetService ?? SERVICE_NAME,
     options.purpose ?? 'SERVICE',
@@ -263,6 +268,12 @@ export function verifyInternalToken(token: string, audience: string) {
 
 export interface StartApiOptions {
   /**
+   * Settings this app is built with over the suite's own, read through the
+   * same `loadEconomicEnv` the service boots with — so a value it refuses at
+   * boot is refused here too. Nothing else in the process sees them.
+   */
+  environment?: NodeJS.ProcessEnv;
+  /**
    * Replaces the payment provider bound at `PAYMENT_PROVIDER`.
    *
    * The provider is the one genuinely external thing in this service — a
@@ -279,6 +290,14 @@ export interface StartApiOptions {
    * optional on the interface and a real provider may omit it.
    */
   paymentProvider?: PaymentProvider;
+  /**
+   * Where the service's own logger writes, for a suite that reads what the
+   * service logs. The logger is the one `LOGGER` builds (`economicLogger`),
+   * at the environment's `LOG_LEVEL`, with its redaction; and Nest's logger
+   * is installed over it as `main.ts` installs it, undoing `jest.setup.cjs`'s
+   * silence for this application only.
+   */
+  logDestination?: Writable;
 }
 
 export async function startApi(options: StartApiOptions = {}): Promise<ApiHarness> {
@@ -287,8 +306,21 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
   const publisher = new InMemoryEventPublisher();
 
   let builder = Test.createTestingModule({ imports: [AppModule] });
+  if (options.environment) {
+    const environment = { ...process.env, ...options.environment };
+    builder = builder
+      .overrideProvider(ENV)
+      .useFactory({ factory: () => loadEconomicEnv(environment) });
+  }
   if (options.paymentProvider) {
     builder = builder.overrideProvider(PAYMENT_PROVIDER).useValue(options.paymentProvider);
+  }
+  const logDestination = options.logDestination;
+  if (logDestination) {
+    builder = builder.overrideProvider(LOGGER).useFactory({
+      inject: [ENV],
+      factory: (env: EconomicEnv) => economicLogger(env, logDestination),
+    });
   }
 
   const moduleRef = await builder
@@ -341,6 +373,7 @@ export async function startApi(options: StartApiOptions = {}): Promise<ApiHarnes
   // Same as main.ts: without it every `@Controller({ version: '1' })` route is
   // mounted at a path no client uses, and the whole suite would 404.
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
+  if (logDestination) installNestLogger(app);
   await app.init();
 
   return {

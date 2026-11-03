@@ -53,6 +53,30 @@ describe('a window that wraps midnight is the ordinary case', () => {
   });
 });
 
+describe('the minutes either side of midnight', () => {
+  it('defers at 23:59 and 00:00 inside a night window, until 07:00', () => {
+    for (const [hour, minute] of [
+      [23, 59],
+      [0, 0],
+    ] as const) {
+      const decision = applyQuietHours(tehran(hour, minute), 'INFO', night);
+      expect(decision.deferred).toBe(true);
+      expect(localMinuteOfDay(decision.scheduledFor!, night.timezone)).toBe(7 * 60);
+    }
+  });
+
+  it('leaves 23:59 outside a window that ends at 23:59, the way a stored [0, 1439) does', () => {
+    const almostWholeDay: QuietWindow = {
+      startMinute: 0,
+      endMinute: 1439,
+      timezone: 'Asia/Tehran',
+    };
+    expect(isInsideWindow(23 * 60 + 58, almostWholeDay)).toBe(true);
+    expect(isInsideWindow(23 * 60 + 59, almostWholeDay)).toBe(false);
+    expect(applyQuietHours(tehran(23, 59), 'INFO', almostWholeDay).deferred).toBe(false);
+  });
+});
+
 describe('the window is read where the recipient is', () => {
   it('reads the same instant differently in two zones', () => {
     const instant = new Date('2026-10-04T20:00:00.000Z');

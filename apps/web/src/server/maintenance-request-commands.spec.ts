@@ -19,7 +19,12 @@ import {
   parseCancelRequestForm,
 } from './maintenance-commands';
 import { EMPTY_ASSIGN_WORKSHOP_FORM, EMPTY_CANCEL_REQUEST_FORM } from '@/lib/maintenance-fields';
+import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * Referring a request to a workshop, approving its cost, cancelling it.
@@ -33,7 +38,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -55,6 +60,13 @@ beforeEach(() => {
 const REQUEST = 'MNT_01J00000000000000000000000';
 const WORKSHOP = 'ORG_01J00000000000000000000001';
 
+// zod 4 infers a field whose transform may return undefined as present-but-undefined (zod 3: optional).
+const ASSIGN = {
+  workshopOrganizationId: WORKSHOP,
+  workshopName: undefined,
+  workSummary: undefined,
+};
+const APPROVE = { expectedTotalCostMinor: '5', notes: undefined };
 describe('who is offered the commands', () => {
   it.each(['ORGANIZATION_ADMIN', 'FLEET_MANAGER', 'UNION_ADMIN'])(
     'offers them to %s, the roles assign, approve and cancel admit',
@@ -273,14 +285,18 @@ describe('cancelling', () => {
 });
 
 describe('the character class', () => {
-  it.each(['لودر کوماتسو', 'Komatsu WA320', 'گریدر ۱۴۰۲', 'می‌خواهم', 'کلید (اصلی) «برق»'])(
-    'accepts %j',
-    (text) => {
-      expect(MAINTENANCE_DISPLAY_TEXT.test(text)).toBe(true);
-    },
-  );
+  it.each([
+    'لودر کوماتسو',
+    'Komatsu WA320',
+    'گریدر ۱۴۰۲',
+    'می‌خواهم',
+    'کلید (اصلی) «برق»',
+    'استارت خراب است، باتری؟ بررسی شود؛',
+  ])('accepts %j', (text) => {
+    expect(MAINTENANCE_DISPLAY_TEXT.test(text)).toBe(true);
+  });
 
-  it.each(['a<b>', 'a=b', 'a&b', '50%', 'خودرو 🚜', '日本語', ''])('refuses %j', (text) => {
+  it.each(['a<b>', 'a=b', 'a&b', 'خودرو 🚜', '日本語', ''])('refuses %j', (text) => {
     expect(MAINTENANCE_DISPLAY_TEXT.test(text)).toBe(false);
   });
 });
@@ -315,15 +331,13 @@ describe('writing', () => {
       'assigns',
       'assign',
       201,
-      (impl: typeof fetch) =>
-        assignWorkshop(SESSION, REQUEST, { workshopOrganizationId: WORKSHOP }, 'sub_abc', impl),
+      (impl: typeof fetch) => assignWorkshop(SESSION, REQUEST, { ...ASSIGN }, 'sub_abc', impl),
     ],
     [
       'approves',
       'approve',
       200,
-      (impl: typeof fetch) =>
-        approveRequest(SESSION, REQUEST, { expectedTotalCostMinor: '5' }, 'sub_abc', impl),
+      (impl: typeof fetch) => approveRequest(SESSION, REQUEST, { ...APPROVE }, 'sub_abc', impl),
     ],
     [
       'cancels',
@@ -347,7 +361,7 @@ describe('writing', () => {
       );
       expect(calls[0].method).toBe('POST');
       expect(calls[0].headers['idempotency-key']).toBe('sub_abc');
-      expect(calls[0].headers['authorization']).toBe('Bearer access-token-value');
+      expect(calls[0].headers['authorization']).toBe(`Bearer ${ACCESS_TOKEN_VALUE}`);
     },
   );
 
@@ -381,13 +395,7 @@ describe('writing', () => {
       message: 'The cost has changed since it was shown to you; review it again before approving.',
     });
 
-    const result = await approveRequest(
-      SESSION,
-      REQUEST,
-      { expectedTotalCostMinor: '5' },
-      'sub_abc',
-      impl,
-    );
+    const result = await approveRequest(SESSION, REQUEST, { ...APPROVE }, 'sub_abc', impl);
 
     expect(result).toMatchObject({ kind: 'INVALID', message: APPROVAL_TOTAL_CHANGED_MESSAGE });
   });
@@ -425,8 +433,7 @@ describe('writing', () => {
     it.each([
       [
         'approve',
-        (impl: typeof fetch) =>
-          approveRequest(SESSION, REQUEST, { expectedTotalCostMinor: '5' }, 's', impl),
+        (impl: typeof fetch) => approveRequest(SESSION, REQUEST, { ...APPROVE }, 's', impl),
       ],
       [
         'cancel',
@@ -451,11 +458,9 @@ describe('writing', () => {
     ])('is said in Persian from its code, for %s', async (_n, status, code, persian) => {
       const sentence = 'A maintenance request cannot move from OPEN to APPROVED';
       for (const call of [
-        (impl: typeof fetch) =>
-          approveRequest(SESSION, REQUEST, { expectedTotalCostMinor: '5' }, 's', impl),
+        (impl: typeof fetch) => approveRequest(SESSION, REQUEST, { ...APPROVE }, 's', impl),
         (impl: typeof fetch) => cancelRequest(SESSION, REQUEST, { reason: 'فروخته شد' }, 's', impl),
-        (impl: typeof fetch) =>
-          assignWorkshop(SESSION, REQUEST, { workshopOrganizationId: WORKSHOP }, 's', impl),
+        (impl: typeof fetch) => assignWorkshop(SESSION, REQUEST, { ...ASSIGN }, 's', impl),
       ]) {
         const result = await call(recording(status, { code, message: sentence }).impl);
         expect(result).toMatchObject({ kind: 'INVALID', message: persian });
@@ -469,34 +474,22 @@ describe('writing', () => {
         message:
           'This request is already with a workshop. Cancel that referral before making another.',
       });
-      const result = await assignWorkshop(
-        SESSION,
-        REQUEST,
-        { workshopOrganizationId: WORKSHOP },
-        's',
-        impl,
-      );
+      const result = await assignWorkshop(SESSION, REQUEST, { ...ASSIGN }, 's', impl);
       expect(result).toMatchObject({
         kind: 'INVALID',
         message: expect.stringContaining('نزد یک تعمیرگاه'),
       });
     });
 
-    it('shows a sentence under a code with no fallback as it arrived, never hidden', async () => {
+    it('shows the generic Persian sentence under a code with no fallback, never the English', async () => {
       const { impl } = recording(409, {
         code: 'SOME_NEW_CODE',
         message: 'A completed request cannot be referred to a workshop',
       });
-      const result = await assignWorkshop(
-        SESSION,
-        REQUEST,
-        { workshopOrganizationId: WORKSHOP },
-        's',
-        impl,
-      );
+      const result = await assignWorkshop(SESSION, REQUEST, { ...ASSIGN }, 's', impl);
       expect(result).toMatchObject({
         kind: 'INVALID',
-        message: 'A completed request cannot be referred to a workshop',
+        message: GENERIC_REFUSAL_MESSAGE,
       });
     });
   });
@@ -524,8 +517,41 @@ describe('writing', () => {
   it('never claims nothing happened when the gateway timed out after forwarding', async () => {
     const { impl } = recording(504, { code: 'UPSTREAM_TIMEOUT', message: 'slow' });
 
-    expect(
-      await approveRequest(SESSION, REQUEST, { expectedTotalCostMinor: '5' }, 'sub_abc', impl),
-    ).toMatchObject({ kind: 'UNKNOWN_OUTCOME' });
+    expect(await approveRequest(SESSION, REQUEST, { ...APPROVE }, 'sub_abc', impl)).toMatchObject({
+      kind: 'UNKNOWN_OUTCOME',
+    });
+  });
+});
+
+describe('Persian punctuation «،» «؛» «؟» in free text', () => {
+  const TEXT = 'استارت خراب است، باتری؟ لطفاً بررسی شود؛';
+
+  it('is accepted when referring to a workshop', () => {
+    const parsed = parseAssignWorkshopForm({
+      ...EMPTY_ASSIGN_WORKSHOP_FORM,
+      workshopOrganizationId: WORKSHOP,
+      workshopName: 'کارگاه فنی، شعبه دو',
+      workSummary: TEXT,
+    });
+    expect(parsed).toMatchObject({ ok: true, body: { workSummary: TEXT } });
+  });
+
+  it('is accepted in the approval note', () => {
+    const parsed = parseApproveRequestForm({ expectedTotalCostMinor: '100', notes: TEXT });
+    expect(parsed).toMatchObject({ ok: true, body: { notes: TEXT } });
+  });
+
+  it('is accepted in the cancellation reason', () => {
+    expect(parseCancelRequestForm({ ...EMPTY_CANCEL_REQUEST_FORM, reason: TEXT })).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it('still refuses a bidi control, in Persian, at the field', () => {
+    const parsed = parseApproveRequestForm({
+      expectedTotalCostMinor: '100',
+      notes: `${TEXT}‮`,
+    });
+    expect(parsed).toMatchObject({ ok: false, fieldErrors: { notes: expect.any(String) } });
   });
 });

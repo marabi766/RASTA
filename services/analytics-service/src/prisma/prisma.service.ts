@@ -1,10 +1,11 @@
+import { createSafePrismaClient } from '@rasta/nest-common';
 import { Injectable, Logger, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import { SERVICE_NAME } from '../config/env';
 import {
   createTenantGuardExtension,
   assertRuntimeRole as assertConnectedRuntimeRole,
 } from '@rasta/nest-common';
-import { PrismaClient } from '../generated/prisma';
+import { Prisma, PrismaClient } from '../generated/prisma';
 
 /**
  * Models carrying an `organizationId` and therefore scoped automatically (AGENTS.md A-04).
@@ -14,7 +15,7 @@ import { PrismaClient } from '../generated/prisma';
  * silent cross-tenant read. `tenant-scope.spec.ts` derives the expected list from
  * `schema.prisma`, so an omission fails a unit test rather than passing review.
  */
-export const TENANT_SCOPED_MODELS = ['FactMaintenance'] as const;
+export const TENANT_SCOPED_MODELS = ['FactMaintenance', 'BaselineMetric'] as const;
 
 /**
  * Models that carry an organization column and are still not guarded. None: the only
@@ -36,13 +37,17 @@ export class PrismaService implements OnModuleInit, OnApplicationShutdown {
   readonly client: ExtendedPrismaClient;
 
   constructor(databaseUrl: string) {
-    this.base = new PrismaClient({
-      datasources: { db: { url: databaseUrl } },
-      log: [
-        { emit: 'event', level: 'warn' },
-        { emit: 'event', level: 'error' },
-      ],
-    });
+    this.base = createSafePrismaClient(
+      () =>
+        new PrismaClient({
+          datasources: { db: { url: databaseUrl } },
+          log: [
+            { emit: 'event', level: 'warn' },
+            { emit: 'event', level: 'error' },
+          ],
+        }),
+      'DATABASE_URL_ANALYTICS',
+    );
     this.client = this.buildClient();
   }
 
@@ -50,6 +55,7 @@ export class PrismaService implements OnModuleInit, OnApplicationShutdown {
     return this.base.$extends(
       createTenantGuardExtension({
         scopedModels: TENANT_SCOPED_MODELS,
+        datamodel: Prisma.dmmf.datamodel,
         onUnscopedQuery: ({ model, operation, reason }) => {
           // Every deliberate boundary crossing is recorded with its written reason, so an
           // auditor can enumerate them (ADR-011).

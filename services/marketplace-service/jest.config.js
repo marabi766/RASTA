@@ -1,4 +1,5 @@
 const swcOptions = require('../../jest.swc.cjs');
+const disclosureGuard = require('../../jest.disclosure-guard.cjs');
 const swcTransform = { '^.+\.(t|j)s$': ['@swc/jest', swcOptions] };
 
 // Money in this service is a bigint on the way to and from economic-service,
@@ -23,6 +24,7 @@ module.exports = {
   projects: [
     {
       displayName: 'unit',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: __dirname,
       roots: ['<rootDir>/src'],
       testEnvironment: 'node',
@@ -34,6 +36,7 @@ module.exports = {
     },
     {
       displayName: 'integration',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: __dirname,
       roots: ['<rootDir>/test'],
       testEnvironment: 'node',

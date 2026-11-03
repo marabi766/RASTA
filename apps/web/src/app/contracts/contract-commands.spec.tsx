@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
+import type { DemoMode } from '@/lib/demo-mode';
 import { axe } from 'jest-axe';
 
 import {
@@ -26,6 +27,8 @@ import type { OfferedContractCommand } from './[id]/ContractCommands';
 import { ContractDetailScreen } from './[id]/ContractDetailScreen';
 import type { ContractCommandOffers, SigningNote } from './[id]/contract-offers';
 import type { ContractFormState } from './[id]/contract-form-state';
+import { bindingOf } from '@/test/unresolved-binding';
+import { TEST_CONTEXT } from '@/test/page-context';
 
 // Each test renders a whole contract screen and runs jest-axe over it; give each room on a
 // loaded runner, as `statements.spec.tsx` does (main 59785c26).
@@ -74,7 +77,7 @@ const offer = (
 
 const CONTEXT = {
   csrfToken: 'csrf',
-  binding: { owner: 'owner-tag', session: 'session-tag' },
+  binding: bindingOf('owner-tag', 'session-tag'),
   sessionMaxAgeSeconds: 12 * 60 * 60,
   pageHref: `/contracts/${CONTRACT_ID}`,
 };
@@ -97,10 +100,11 @@ const CANCEL_REASONS = [
 function contractPage(
   contract: ContractDetail,
   commands: Partial<ContractCommandOffers> = {},
-  extra: { notice?: ContractCommand; amendments?: boolean } = {},
+  extra: { notice?: ContractCommand; amendments?: boolean; demoMode?: DemoMode } = {},
 ) {
   return render(
     <ContractDetailScreen
+      context={TEST_CONTEXT}
       result={{ kind: 'OK', data: contract }}
       amendments={{
         kind: 'OK',
@@ -113,6 +117,7 @@ function contractPage(
       statements={null}
       commands={{ ...NONE, ...commands }}
       notice={extra.notice ?? null}
+      demoMode={extra.demoMode ?? 'REAL'}
     />,
   );
 }
@@ -421,5 +426,25 @@ describe('each form state', () => {
     expect(screen.getByText(/محتوای آن دیگر نگه داشته نمی‌شود/)).toBeVisible();
     expect(screen.queryByRole('button')).toBeNull();
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe('the contract page: «حالت نمایشی» (Q-14)', () => {
+  it('is drawn when the provider is simulated', () => {
+    contractPage(DRAFT, {}, { demoMode: 'SIMULATED' });
+    expect(screen.getByText('حالت نمایشی')).toBeInTheDocument();
+  });
+
+  it('is absent when it is not', () => {
+    contractPage(DRAFT, {}, { demoMode: 'REAL' });
+    expect(screen.queryByText('حالت نمایشی')).toBeNull();
+    expect(screen.queryByText('وضعیت درگاه پرداخت معلوم نیست')).toBeNull();
+  });
+
+  it('says the provider is unknown in its place; signing moves no money, so nothing is withheld', () => {
+    contractPage(DRAFT, {}, { demoMode: 'UNKNOWN' });
+    expect(screen.getByText('وضعیت درگاه پرداخت معلوم نیست')).toBeInTheDocument();
+    expect(screen.queryByText('حالت نمایشی')).toBeNull();
+    expect(screen.queryByText(/اکنون در دسترس نیست/)).toBeNull();
   });
 });

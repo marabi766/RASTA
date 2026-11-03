@@ -3,10 +3,13 @@ import { redirect } from 'next/navigation';
 import { AppShell, Button, PageHeader, TopBar } from '@/ui';
 import { ORDER_LIST_ROLES, type OrderListRole } from '@/lib/order-fields';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { fetchOrders, type OrderListQuery } from '@/server/orders';
 import { PortalSidebar } from '@/app/PortalSidebar';
 
 import { OrdersScreen } from './OrdersScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/orders` route — سفارش‌ها (docs/16 § ۱۶٫۶, `PROCUREMENT_USER`,
@@ -44,7 +47,7 @@ export default async function OrdersPage({
   const session = await currentSession();
   if (!session) redirect('/login?returnTo=/orders');
 
-  const params = await searchParams;
+  const params = await pageParams(session, searchParams);
   const query: OrderListQuery = {
     role: side(one(params.role)),
     status: one(params.status),
@@ -53,10 +56,13 @@ export default async function OrdersPage({
 
   const result = await fetchOrders(session, query);
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -72,7 +78,11 @@ export default async function OrdersPage({
         description="سفارش‌هایی که این سازمان ثبت کرده یا به آن داده شده، و مرحله‌ای که هر کدام در آن است."
       />
       <div className="mt-4">
-        <OrdersScreen result={result} query={query} />
+        <OrdersScreen
+          result={result}
+          query={{ ...query, context: pageContext(session) }}
+          demoMode={demoMode}
+        />
       </div>
     </AppShell>
   );

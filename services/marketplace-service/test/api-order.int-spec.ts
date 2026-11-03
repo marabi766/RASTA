@@ -1,4 +1,6 @@
 import request from 'supertest';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { enrichOpenApiDocument } from '../src/openapi/document';
 import type { Server } from 'node:http';
 import { runUnscoped } from '@rasta/nest-common';
 import {
@@ -12,7 +14,7 @@ import {
   supplier,
   type ApiHarness,
 } from './api-helpers';
-import { cleanup } from './helpers';
+import { cleanup, testEnv } from './helpers';
 import { ORDER_NOTE_NOT_STORED, RECEIPT_NOTE_NOT_STORED } from '../src/order/dto';
 
 /**
@@ -805,6 +807,26 @@ describe('order API', () => {
   // -------------------------------------------------------------------------
 
   describe('POST /v1/orders/:id/reviews', () => {
+    it('publishes the registered review OpenAPI contract', () => {
+      const document = enrichOpenApiDocument(
+        SwaggerModule.createDocument(harness.app, new DocumentBuilder().build()),
+        { idempotencyTtlHours: testEnv().MARKETPLACE_IDEMPOTENCY_TTL_HOURS },
+      );
+      expect(document.paths['/v1/orders/{id}/reviews']).toMatchSnapshot();
+    });
+
+    it.each([0, 6, 2.5, '3', null])(
+      'refuses invalid qualityRating %s at HTTP ingress',
+      async (qualityRating) => {
+        await request(http)
+          .post('/v1/orders/ORD_BAD_QUALITY/reviews')
+          .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+          .set('idempotency-key', apiKey('bad-quality'))
+          .send({ rating: 4, qualityRating })
+          .expect(400);
+      },
+    );
+
     it('refuses a review before the order completed with 422', async () => {
       const offerId = await publishOffer();
       const order = await placeOrder(offerId);
@@ -853,14 +875,29 @@ describe('order API', () => {
         ),
       );
 
+      const reviewKey = apiKey('api-review');
       const review = await request(http)
         .post(`/v1/orders/${order.body.id}/reviews`)
         .set('authorization', `Bearer ${buyer(buyerOrg)}`)
-        .set('idempotency-key', apiKey('api-review'))
-        .send({ rating: 4, comment: 'تحویل به‌موقع' })
+        .set('idempotency-key', reviewKey)
+        .send({ rating: 4, qualityRating: 2, comment: 'تحویل به‌موقع' })
         .expect(201);
 
       expect(review.body.rating).toBe(4);
+
+      const replay = await request(http)
+        .post(`/v1/orders/${order.body.id}/reviews`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', reviewKey)
+        .send({ rating: 4, qualityRating: 2, comment: 'تحویل به‌موقع' })
+        .expect(201);
+      expect(replay.body).toEqual(review.body);
+      await request(http)
+        .post(`/v1/orders/${order.body.id}/reviews`)
+        .set('authorization', `Bearer ${buyer(buyerOrg)}`)
+        .set('idempotency-key', reviewKey)
+        .send({ rating: 4, qualityRating: 5, comment: 'تحویل به‌موقع' })
+        .expect(409);
 
       const second = await request(http)
         .post(`/v1/orders/${order.body.id}/reviews`)

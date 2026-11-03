@@ -3,7 +3,7 @@ import { enrichOpenApiDocument } from './document';
 import { TRANSACTION_RESPONSES, TRANSACTION_VIEW_SCHEMAS } from './transaction-view';
 import { schemaMismatches } from './schema-mismatches';
 import { toTransactionDetailView, toTransactionView } from '../shared/views';
-import type { JsonSchema } from './zod-schema';
+import type { JsonSchema } from '@rasta/nest-common';
 
 /**
  * The documented transaction against the one `shared/views.ts` writes.

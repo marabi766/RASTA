@@ -8,14 +8,18 @@ import {
   RastaError,
   type AuthGuardOptions,
 } from '@rasta/nest-common';
+import { mintTestInternalToken, type TestInternalTokenKey } from '@rasta/testing';
 import { ulid } from 'ulid';
 import { AppModule, ENV } from '../src/app.module';
 import { withAuthGuardRefusalAudit } from '../src/security-events/auth-guard-refusal';
+import { KeycloakAdminClient } from '../src/keycloak/keycloak.client';
+import { KeycloakProjectionConsumer } from '../src/keycloak/keycloak-projection.consumer';
 import { loadIdentityEnv } from '../src/config/env';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { SecurityEventOutboxStore } from '../src/security-events/security-event-outbox.store';
 import { SECURITY_EVENT_RELAY } from '../src/security-events/security-event.relay';
 import { databaseUrl } from './helpers';
+import { readUrl } from '@rasta/config';
 
 /**
  * The identity HTTP surface, booted from the **real** `AppModule` (AUD-004
@@ -59,6 +63,11 @@ const INTERNAL_SECRET = randomBytes(24).toString('hex');
  * exactly as that service would (ADR-020, ADR-035).
  */
 const internalTokens = new InternalTokenService(INTERNAL_SECRET, 'rasta-internal', 300);
+const tokenKey: TestInternalTokenKey = {
+  secret: INTERNAL_SECRET,
+  issuer: 'rasta-internal',
+  ttlSeconds: 300,
+};
 
 /**
  * Verifies an internal token minted by the booted service, as the service it
@@ -74,7 +83,7 @@ export function serviceToken(
   callerService = 'fleet-service',
   organizationId?: string,
 ): Promise<string> {
-  return internalTokens.issue(callerService, SERVICE_NAME, 'SERVICE', organizationId);
+  return mintTestInternalToken(tokenKey, callerService, SERVICE_NAME, 'SERVICE', organizationId);
 }
 
 export interface TestClaims {
@@ -157,6 +166,14 @@ export interface IdentityApiOptions {
    * not depend on the machine it runs on. Unset keeps the default.
    */
   connectionLimit?: number;
+  /**
+   * A stand-in for Keycloak's Admin API at `url` (`keycloak-http-stub.ts`):
+   * synchronisation on, the real `KeycloakAdminClient` pointed there with a
+   * `requestTimeoutMs` deadline, and the Kafka re-projection consumer inert —
+   * the HTTP boundary is the only thing replaced. Unset, synchronisation is
+   * off, as for every other suite (D-020).
+   */
+  keycloak?: { url: string; requestTimeoutMs?: number };
 }
 
 export interface IdentityApiHarness {
@@ -170,7 +187,7 @@ export interface IdentityApiHarness {
 /** `url` with its pool pinned to `connections`, or unchanged when none is given. */
 function withConnectionLimit(url: string, connections: number | undefined): string {
   if (connections === undefined) return url;
-  const pinned = new URL(url);
+  const pinned = readUrl(url);
   pinned.searchParams.set('connection_limit', String(connections));
   return pinned.toString();
 }
@@ -199,11 +216,16 @@ export async function startIdentityApi(
     OIDC_JWKS_URI: 'http://identitytest.invalid/realms/rasta/certs',
     OIDC_AUDIENCE: 'rasta-api',
     INTERNAL_TOKEN_SECRET: INTERNAL_SECRET,
-    KEYCLOAK_URL: 'http://identitytest.invalid',
+    KEYCLOAK_URL: options.keycloak?.url ?? 'http://identitytest.invalid',
     KEYCLOAK_REALM: 'rasta',
     KEYCLOAK_BACKEND_CLIENT_ID: 'identity-itest',
     KEYCLOAK_BACKEND_CLIENT_SECRET: randomBytes(16).toString('hex'),
-    KEYCLOAK_SYNC_ENABLED: 'false',
+    KEYCLOAK_SYNC_ENABLED: options.keycloak ? 'true' : 'false',
+    // With a Keycloak, no sweep on a timer writing to it behind the suite's back.
+    ...(options.keycloak ? { MEMBERSHIP_EXPIRY_SCAN_ENABLED: 'false' } : {}),
+    // Suites drain the registration intake themselves (`processRegistrations`),
+    // so what they assert never races a pass on a timer (task 130).
+    REGISTRATION_INTAKE_INTERVAL_SECONDS: '3600',
     SECURITY_EVENT_CAPTURE_TIMEOUT_MS: String(options.captureTimeoutMs ?? 5000),
     SECURITY_EVENT_FLUSH_INTERVAL_MS: String(options.flushIntervalMs ?? 1000),
     AUDIT_SERVICE_URL: options.auditServiceUrl ?? 'http://127.0.0.1:9',
@@ -247,6 +269,23 @@ export async function startIdentityApi(
 
   if (!options.runDomainRelay) {
     builder = builder.overrideProvider(OutboxRelay).useValue(inertRelay);
+  }
+  if (options.keycloak) {
+    const { url, requestTimeoutMs } = options.keycloak;
+    builder = builder
+      .overrideProvider(KeycloakAdminClient)
+      .useValue(
+        new KeycloakAdminClient({
+          baseUrl: url,
+          realm: env.KEYCLOAK_REALM,
+          clientId: env.KEYCLOAK_BACKEND_CLIENT_ID,
+          clientSecret: env.KEYCLOAK_BACKEND_CLIENT_SECRET,
+          enabled: true,
+          requestTimeoutMs,
+        }),
+      )
+      .overrideProvider(KeycloakProjectionConsumer)
+      .useValue(new KeycloakProjectionConsumer(null, null as never));
   }
   if (!options.runSecurityRelay) {
     builder = builder.overrideProvider(SECURITY_EVENT_RELAY).useValue(inertRelay);

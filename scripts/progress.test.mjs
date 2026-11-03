@@ -24,12 +24,13 @@ test('the repository baseline is valid and preserves the approved horizons', () 
   // or estimate change may move them. The earned figures move whenever an item
   // is accepted, so they are updated in the same commit as the acceptance —
   // that coupling is the point: a status change nobody meant to make fails here.
-  assert.equal(progress.mvp.committed, 563);
-  assert.equal(progress.mvp.earned, 322);
-  assert.equal(progress.mvp.percent, 57.2);
-  assert.equal(progress.fullProduct.committed, 786);
-  assert.equal(progress.fullProduct.earned, 322);
-  assert.equal(progress.fullProduct.percent, 41);
+  // 563 -> 589: D-073 (owner, 2026-10-25) re-estimated EXP-005 from 13 to 39; split into EXP-005..007.
+  assert.equal(progress.mvp.committed, 589);
+  assert.equal(progress.mvp.earned, 385);
+  assert.equal(progress.mvp.percent, 65.4);
+  assert.equal(progress.fullProduct.committed, 812);
+  assert.equal(progress.fullProduct.earned, 385);
+  assert.equal(progress.fullProduct.percent, 47.4);
 });
 
 test('a logged acceptance names who decided and only records that are ACCEPTED', () => {
@@ -210,8 +211,13 @@ test('decomposed features contribute child stories exactly once', () => {
     documentStories.reduce((sum, story) => sum + story.points, 0),
     documentFeature.points,
   );
-  assert.equal(progress.fullProduct.units, baseline.items.length - 1 + baseline.stories.length);
-  assert.equal(progress.fullProduct.committed, 786);
+  // Each decomposed feature (COM-004, RUN-005) leaves the count and its stories join it.
+  const decomposed = new Set(baseline.stories.map((story) => story.parentItemId)).size;
+  assert.equal(
+    progress.fullProduct.units,
+    baseline.items.length - decomposed + baseline.stories.length,
+  );
+  assert.equal(progress.fullProduct.committed, 812);
 });
 
 test('an accepted story earns its own points before feature-level acceptance', () => {
@@ -242,7 +248,7 @@ test('an accepted story earns its own points before feature-level acceptance', (
   // contributes none of its own on top of them.
   assert.equal(after.mvp.earned - before.mvp.earned, story.points);
   assert.equal(after.mvp.committed, before.mvp.committed);
-  assert.equal(after.mvp.committed, 563);
+  assert.equal(after.mvp.committed, 589);
 });
 
 test('accepted feature or story work without evidence cannot earn points', () => {

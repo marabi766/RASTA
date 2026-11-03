@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
 import {
   POLICY_COVERAGES,
@@ -147,8 +148,8 @@ const policySchema = z.object({
   insurerName: z.string(),
   coverage: z.string(),
   /** Minor units as a string — a rial amount does not survive a JSON number. */
-  premiumMinor: z.string().nullable().default(null),
-  insuredValueMinor: z.string().nullable().default(null),
+  premiumMinor: z.string().nullable().prefault(null),
+  insuredValueMinor: z.string().nullable().prefault(null),
   validFrom: renderableDate,
   validTo: renderableDate,
   status: z.string(),
@@ -160,11 +161,11 @@ export type InsurancePolicySummary = z.infer<typeof policySchema>;
 const inspectionSchema = z.object({
   id: z.string(),
   certificateNo: z.string(),
-  centerName: z.string().nullable().default(null),
+  centerName: z.string().nullable().prefault(null),
   inspectedAt: renderableDate,
   validTo: renderableDate,
   result: z.string(),
-  notes: z.string().nullable().default(null),
+  notes: z.string().nullable().prefault(null),
   daysUntilExpiry: z.number().int(),
 });
 
@@ -349,7 +350,7 @@ export const recordPolicyFormSchema = z
       RECORD_BOUNDS.insurerName.max,
     ),
     coverage: z.enum(POLICY_COVERAGES, {
-      errorMap: () => ({ message: 'نوع پوشش را از فهرست انتخاب کنید' }),
+      error: 'نوع پوشش را از فهرست انتخاب کنید',
     }),
     premium: optionalRials('حق بیمه'),
     insuredValue: optionalRials('سرمایهٔ بیمه'),
@@ -391,7 +392,7 @@ export const recordInspectionFormSchema = z
     inspectedAt: requiredDate('تاریخ معاینه'),
     validTo: requiredDate('تاریخ پایان اعتبار'),
     result: z.enum(INSPECTION_RESULTS, {
-      errorMap: () => ({ message: 'نتیجهٔ معاینه را از فهرست انتخاب کنید' }),
+      error: 'نتیجهٔ معاینه را از فهرست انتخاب کنید',
     }),
     // The service's `plainText()`: the person's own words, as typed, less the
     // invisible direction controls.
@@ -433,11 +434,11 @@ export type ParsedRecordForm<B, F extends string> =
 export function parseRecordPolicyForm(
   values: RecordPolicyFormValues,
 ): ParsedRecordForm<RecordPolicyBody, RecordPolicyField> {
-  const parsed = recordPolicyFormSchema.safeParse(values);
+  const parsed = legacyParse(recordPolicyFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, (value): value is RecordPolicyField =>
+    fieldErrors: firstIssuePerField(parsed.refusal, (value): value is RecordPolicyField =>
       (RECORD_POLICY_FIELDS as readonly string[]).includes(value),
     ),
   };
@@ -446,11 +447,11 @@ export function parseRecordPolicyForm(
 export function parseRecordInspectionForm(
   values: RecordInspectionFormValues,
 ): ParsedRecordForm<RecordInspectionBody, RecordInspectionField> {
-  const parsed = recordInspectionFormSchema.safeParse(values);
+  const parsed = legacyParse(recordInspectionFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
   return {
     ok: false,
-    fieldErrors: firstIssuePerField(parsed.error, (value): value is RecordInspectionField =>
+    fieldErrors: firstIssuePerField(parsed.refusal, (value): value is RecordInspectionField =>
       (RECORD_INSPECTION_FIELDS as readonly string[]).includes(value),
     ),
   };

@@ -1,7 +1,7 @@
 import type { EventEnvelope } from '@rasta/contracts';
 import type { EventConsumer, EventDelivery } from '@rasta/nest-common';
 import { REDACTED, SENSITIVE_KEYS, type Logger } from '@rasta/logging';
-import { DomainProjectorConsumer } from './domain-projector.consumer';
+import { AuditMappingError, DomainProjectorConsumer } from './domain-projector.consumer';
 import type { AuditRepository, IngestOutcome } from '../audit/audit.repository';
 import type { AuditEventRecord } from '../audit/audit.mapper';
 import {
@@ -289,12 +289,13 @@ describe('an unknown event carrying sensitive values', () => {
     expect(text).not.toContain(SENTINEL_PREFIX);
   });
 
-  it('describes an unmappable envelope by masked key name, never by value', async () => {
-    // The one diagnostic that is *about* the payload, and therefore the only
-    // place a value could realistically escape. `describePayloadKeys` returns
-    // names, and masks the sensitive ones even so — this asserts the mapping
+  it('describes an unmappable envelope by event type and error class only (PR #378 r1 F3)', async () => {
+    // The one diagnostic that is *about* a failure to read the payload, and
+    // therefore the place a value could realistically escape. It names the
+    // event type and version and the error's class — neither a payload key
+    // name nor the error's own message, which here quotes its input — and the
     // failure still reaches the caller (retry and DLQ belong to the shared
-    // consumer) while the log line stays free of every sentinel.
+    // consumer), rethrown with the same fixed text.
     const calls: unknown[][] = [];
     let ingested = 0;
     const projector = projectorWith(calls, async () => {
@@ -303,19 +304,30 @@ describe('an unknown event carrying sensitive values', () => {
     });
 
     // `streamSeq` is converted with `BigInt()`, which refuses a non-numeric
-    // string — a mapping failure that needs no change to production code.
+    // string and quotes it — a mapping failure that needs no change to
+    // production code.
     const unmappable = {
       ...envelope,
-      streamSeq: 'not-a-sequence',
+      streamSeq: `${SENTINEL_PREFIX}-sequence`,
     } as unknown as EventEnvelope;
 
-    await expect(projector.handle(unmappable, delivery)).rejects.toThrow();
+    const failure = await projector.handle(unmappable, delivery).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
 
+    expect(failure).toBeInstanceOf(AuditMappingError);
+    expect((failure as Error).message).toBe(
+      'audit record mapping failed for A_NAME_NO_SERVICE_HAS_DECLARED v1 (SyntaxError)',
+    );
+    expect(((failure as Error).cause as Error).message).toContain(SENTINEL_PREFIX);
     expect(ingested).toBe(0);
     expect(calls).toHaveLength(1);
     const text = loggedText(calls);
     expect(text).toContain('error');
-    expect(text).toContain(REDACTED);
+    expect(text).toContain('A_NAME_NO_SERVICE_HAS_DECLARED v1 (SyntaxError)');
+    expect(text).not.toContain('payload keys');
+    expect(text).not.toContain(REDACTED);
     for (const value of SENTINELS) {
       expect(text).not.toContain(value);
     }
@@ -781,9 +793,9 @@ describe('contract refusal events on path A', () => {
 
     expect(ingested).toBe(0);
     const text = JSON.stringify(logged);
-    // The event identifiers and the fixed schema paths and codes are logged…
-    expect(text).toContain('CONTRACT_AUTHORITY_REFUSED');
-    expect(text).toContain('01JPROJECTORSPECREFUSAL01');
+    // The event type and version and the fixed schema paths and codes are
+    // logged (the event id is logged, escaped, by the shared consumer)…
+    expect(text).toContain('CONTRACT_AUTHORITY_REFUSED v1');
     expect(text).toContain('reason:invalid_enum_value');
     expect(text).toContain('(root):unrecognized_keys');
     // …a property name from the payload never is, in any form.

@@ -194,7 +194,11 @@ describeWithKafka('supplier event flow over Kafka', () => {
     );
 
     await asOperator(
-      () => wiring.suspensions.suspend(supplier.id, { reason: 'under review' } as never),
+      () =>
+        wiring.suspensions.suspend(supplier.id, {
+          reason: 'under review',
+          latestSuspensionId: null,
+        }),
       platformOrg,
     );
 

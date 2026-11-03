@@ -1,4 +1,5 @@
 import type { OpenAPIObject } from '@nestjs/swagger';
+import { errorEnvelopeProblems } from '@rasta/nest-common';
 import { enrichOpenApiDocument } from './document';
 
 /**
@@ -222,5 +223,12 @@ describe('a document with nothing in it', () => {
     } as unknown as OpenAPIObject;
 
     expect(() => enrichOpenApiDocument(document, OPTIONS)).not.toThrow();
+  });
+});
+
+describe('the published error envelope (audit 10-26 F3)', () => {
+  it('accepts the error bodies the shared filter really sends, on every route', () => {
+    const document = enrichOpenApiDocument(nestDocument(), OPTIONS);
+    expect(errorEnvelopeProblems(document)).toEqual([]);
   });
 });

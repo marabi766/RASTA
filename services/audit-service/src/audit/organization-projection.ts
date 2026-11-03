@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { EventEnvelope } from '@rasta/contracts';
 import type { EventDelivery } from '@rasta/nest-common';
+import { declaredFieldNames, parseOrRefuse } from './refusal-diagnostics';
 
 /**
  * The consumer-side contract for the three organization events that carry
@@ -179,9 +180,44 @@ const organizationMoved = z
 const organizationStatusChanged = z.object({
   organizationId: identifier,
   newStatus: z.string(),
-  /** The cascade. A status change on a parent suspends its whole subtree. */
+  /**
+   * The cascade: the subject and every descendant whose status changed with
+   * it. **Deliberately without an element cap** (GHSA-mrhx-c7xc-m3w5, PR #378
+   * r1 F1), unlike the other consumer arrays:
+   *
+   *   - The producer is internal and the size is legitimate. organization-
+   *     service reads the whole subtree inside the status-change transaction
+   *     and publishes it uncapped (`organization.service.ts` § `changeStatus`),
+   *     GZIP-compressed (`outbox/kafka.publisher.ts`), so the broker's size
+   *     limit applies to the compressed batch and bounds nothing here: 100,001
+   *     distinct identifiers are about 1.5 MB as JSON and about 250 KB on the
+   *     wire.
+   *   - Refusing a real cascade is the worse failure. The event would be
+   *     dead-lettered, the deactivated descendants would stay `ACTIVE` in this
+   *     projection, and an ancestor's `UNION_ADMIN` would keep reaching them
+   *     (`isWithinProjectedSubtree`): stale authorization.
+   *   - The write is already bounded per statement: the list is applied in
+   *     chunks of `STATUS_CASCADE_CHUNK` (`audit.repository.ts`
+   *     `applyOrganizationProjection`). And only organization-service may
+   *     publish on this topic (broker ACL; ADR-061 § 2 in the shared
+   *     consumer), so a list of non-strings, which zod 3 would answer with one
+   *     issue per element, needs a compromised producer.
+   *
+   * A bounded cascade contract (producer-side chunking) is a separate task.
+   */
   affectedIds: z.array(z.string()),
 });
+
+/**
+ * The field names a refusal of one of the three payloads may print in an issue
+ * path — read from the schemas above, so the list cannot fall behind them
+ * (S-09; PR #378 r1 F3). See `refusal-diagnostics.ts`.
+ */
+export const ORGANIZATION_PROJECTION_FIELD_NAMES = declaredFieldNames(
+  organizationCreated,
+  organizationMoved,
+  organizationStatusChanged,
+);
 
 /**
  * One instruction for the projection, already validated and bounded.
@@ -264,8 +300,10 @@ export function isOrganizationProjectionEvent(
  * worse than an outage — and a hierarchy that is wrong is a
  * cross-tenant read.
  *
- * The error carries Zod's own issue paths, which are **field names**. No value
- * from the payload is placed in the message here or by the caller.
+ * A payload that fails its schema throws a `SchemaRefusedError` carrying the
+ * parse's zod 3 refusal (PR #444 r1 F1). It never leaves the consumer as it
+ * is: `DomainProjectorConsumer` rethrows a refusal built from issue codes and
+ * the paths of {@link ORGANIZATION_PROJECTION_FIELD_NAMES} only (PR #378 r1 F3).
  */
 export function toOrganizationProjection(
   envelope: EventEnvelope,
@@ -277,7 +315,7 @@ export function toOrganizationProjection(
 
   switch (envelope.eventName) {
     case ORGANIZATION_PROJECTION_EVENTS.CREATED: {
-      const payload = organizationCreated.parse(envelope.payload);
+      const payload = parseOrRefuse(organizationCreated, envelope.payload);
       return {
         kind: 'CREATED',
         organizationId: payload.organizationId,
@@ -291,7 +329,7 @@ export function toOrganizationProjection(
     }
 
     case ORGANIZATION_PROJECTION_EVENTS.MOVED: {
-      const payload = organizationMoved.parse(envelope.payload);
+      const payload = parseOrRefuse(organizationMoved, envelope.payload);
       return {
         kind: 'MOVED',
         organizationId: payload.organizationId,
@@ -303,7 +341,7 @@ export function toOrganizationProjection(
     }
 
     case ORGANIZATION_PROJECTION_EVENTS.STATUS_CHANGED: {
-      const payload = organizationStatusChanged.parse(envelope.payload);
+      const payload = parseOrRefuse(organizationStatusChanged, envelope.payload);
       // The subject is always included even when the producer left it out of
       // the cascade: a status change that did not change the subject's own
       // status is not a status change, and inferring it here costs nothing.

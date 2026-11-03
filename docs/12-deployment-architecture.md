@@ -43,14 +43,14 @@ pnpm db:seed
 pnpm dev
 ```
 
-`docker compose up` تا حد امکان محیط کامل را بالا می‌آورد. اجزای سنگین پشت پروفایل‌اند تا
+`pnpm infra:up` تا حد امکان محیط کامل را بالا می‌آورد. اجزای سنگین پشت پروفایل‌اند تا
 لپ‌تاپ توسعه‌دهنده خفه نشود:
 
 ```bash
-docker compose --profile tools up -d          # Kafka UI، Temporal UI، Mailpit
-docker compose --profile search up -d         # OpenSearch
-docker compose --profile observability up -d  # OTel، Prometheus، Grafana
-docker compose --profile all up -d            # همه
+COMPOSE_PROFILES=tools pnpm infra:up          # Kafka UI، Temporal UI، Mailpit
+COMPOSE_PROFILES=search pnpm infra:up         # OpenSearch
+COMPOSE_PROFILES=observability pnpm infra:up  # OTel، Prometheus، Grafana
+COMPOSE_PROFILES=all pnpm infra:up            # همه
 ```
 
 ---
@@ -135,6 +135,17 @@ Namespace: rasta-{env}
 
 ### الگوی Deployment
 
+The Deployment and probes below are **examples**, not executable manifests in this
+repository. A terminal Kafka consumer crash fails readiness and uses the service's
+existing bounded graceful shutdown to exit non-zero. Liveness alone is not the restart
+mechanism. Deploy each consumer service with Docker `restart: on-failure` or Kubernetes
+`restartPolicy: Always` and supervisor backoff; configure a restart budget and escalation
+(for example a service-manager delay of 30 seconds and a start limit). Docker marks an
+unhealthy container but does not restart it for that reason. Keep the supervisor grace
+period longer than `SHUTDOWN_TIMEOUT_MS`. Never commit or skip a poison record to bound
+restarts. See [consumer crash loop](runbooks/consumer-crash-loop.md) for the signals,
+retention deadline and replay limits.
+
 ```yaml
 spec:
   replicas: 2
@@ -143,6 +154,7 @@ spec:
     rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } # بدون قطعی
   template:
     spec:
+      restartPolicy: Always
       serviceAccountName: asset-service
       securityContext:
         runAsNonRoot: true
@@ -273,6 +285,44 @@ Tag روی main (v0.x.y)
 **ترتیب Migration.** Job Migration **پیش از** Rollout اجرا می‌شود و باید سازگار به عقب باشد
 (نسخه قدیم و جدید هم‌زمان زنده‌اند). تغییر شکننده = الگوی Expand/Contract در سه استقرار.
 
+**Topicهای Kafka و سقف اندازه (PR #378 r2، r4).** مخزن Chart یا Manifestی برای Topicها ندارد؛ تنها جای ساختن آن‌ها
+[`create-topics.sh`](../infrastructure/docker/kafka/create-topics.sh) است که از
+[`topics.txt`](../infrastructure/docker/kafka/topics.txt) می‌خواند. هر Topic سقف `max.message.bytes` **صریح** دارد:
+Topic مبدا و `.retry` همان پیش‌فرض Kafka 3.9 (۱٬۰۴۸٬۵۸۸ بایت)، و هر DLQ ۱٬۰۵۰٬۵۶۵ بایت: بزرگ‌ترین سقف مبداهایش + سقف
+Headerهای افزوده‌ی DLQ (`DLQ_ADDED_HEADERS_MAX_BYTES`) + بیشترین رشد GZIP (`gzipGrowthMaxBytes`، وابسته به اندازه).
+`pnpm run check:kafka-topic-limits` در CI برنامه را می‌سنجد. یک اجرای تنهای اسکریپت روی Broker موجود **هیچ سقفی را پایین
+نمی‌آورد**: اول سقف واقعی (Effective، به‌ارث‌رسیده هم) همه را می‌خواند و اگر نتواند بی‌تغییر شکست می‌خورد، بعد DLQها را
+بالای مبداهایشان می‌برد و فقط سپس مبداها را، یکی‌یکی؛ Broker هر محیطی که پیش از این تغییر ساخته شده یک بار باید آن را با
+Admin اجرا کند. نویسنده‌ی هم‌زمان (PR #378 r5، D-066) فقط وقتی دیده می‌شود که تغییرش پیش از خواندن دوباره‌ی همان Topic،
+درست پیش از نوشتن، برسد؛ آن وقت اجرا بی تغییر بیشتر می‌ایستد. تغییر Config در Kafka شرطی نیست، پس **پیش‌شرط** این است که
+در طول اجرا Provisioner دوم، Alter دستی یا تغییر پیش‌فرض Broker نباشد (Compose یک `kafka-init` در هر Stack، هر Job در CI
+Broker خودش).
+
+Detached Compose itself does **not** enforce `kafka-init` completion.
+Use `pnpm infra:up` (also after a full rebuild), or for targeted Kafka startup:
+`node scripts/infra-preflight.mjs && node scripts/kafka-init-gate.mjs kafka kafka-init && pnpm kafka:acl:apply:dev`.
+The wrapper starts Compose, pins the initializer's container ID/start time, and waits
+for confirmed exit 0 before allowing ACLs/clients. Repeated startup must start a new
+invocation; an already running initializer, missing/replaced container, inspection or
+wait error, or timeout fails closed. `RASTA_KAFKA_INIT_TIMEOUT_MS` bounds the entire
+gate (default 600000, maximum 3600000 ms). On timeout it does not stop the initializer:
+resolve its state before retrying. Never reset data to recover from a provisioning failure.
+CI retains its foreground provisioner and does not run this gate.
+
+Manual check (documented, not part of CI): on an isolated development Compose stack,
+mount a temporary override for `kafka-init` with `entrypoint: ['/bin/sh', '-c', 'exit 37']`;
+set `COMPOSE_FILE=docker-compose.yml:/absolute/path/to/override.yml` and run
+`pnpm infra:up`. Expect exit 37, `kafka-init readiness failed: kafka-init exited 37`,
+and no ACL application. Restore `COMPOSE_FILE` and run `pnpm infra:up` again: it must
+start a fresh initializer invocation and report confirmed completion before ACLs.
+Keep the stack's data volumes; this check never requires `infra:reset`.
+
+این جا **همه‌ی** Dead letterها را تضمین نمی‌کند: فقط برای مبدای بی‌فشرده‌سازی (یا GZIPی که کوچکش نکرده) ثابت شده، برای
+GZIP پیش‌فرض اندازه‌گیری شده، و سه فرار شناخته‌شده دارد (مبدا با سطح GZIP بالاتر، Dead letterهای Parked در fleet،
+بازنویسی JSONB) که طراحی جدا دارند (تصمیم PM D-063). در آن موارد ارسال DLQ با `MESSAGE_TOO_LARGE` رد می‌شود، مثل main:
+Consumer مشترک کرش می‌کند و تا ری‌استارت سرویس نمی‌خواند، و رکورد فقط تا Retention مبدا می‌ماند. شرح کامل و فرمان دستی:
+[`runbooks/replay-dlq.md`](runbooks/replay-dlq.md). رسیدن پیام به DLQ اثر آن را نمی‌سازد؛ تا بازپخش، آن اثر نیست.
+
 ---
 
 ## ۱۲٫۶ پیکربندی و Secret
@@ -314,7 +364,9 @@ Tag روی main (v0.x.y)
 مالی، و **اثبات توازن دفتر کل**.
 
 Runbookها: [`runbooks/restore-database.md`](runbooks/restore-database.md) ·
-[`runbooks/disaster-recovery.md`](runbooks/disaster-recovery.md)
+[`runbooks/disaster-recovery.md`](runbooks/disaster-recovery.md) ·
+[`runbooks/backup-restore-drill.md`](runbooks/backup-restore-drill.md) (تمرین محلی با گزارش JSON؛
+اجرای ماهانهٔ CI روی داده ساختگی، نه بازیابی production)
 
 ### سناریوهای فاجعه
 

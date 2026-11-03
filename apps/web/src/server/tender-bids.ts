@@ -12,9 +12,9 @@ import {
 import type { BidContent } from '@/lib/bid-input';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential, sessionAuthority, type SessionTokens } from './session-organization';
 import { webServerEnv } from './env';
 import { utcInstant } from './instant';
-import { tokenAuthority } from './realm-roles';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import type { OpenTenderDetail } from './tenders';
@@ -86,7 +86,7 @@ export async function fetchOwnBid(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: `${tenderBidsPath(tenderId)}/mine`,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
     const parsed = BID_RECEIPT_SCHEMA.safeParse(response.data);
     if (!parsed.success || parsed.data.tenderId !== tenderId) {
@@ -116,8 +116,8 @@ export interface BidderCaller {
   readonly roles: readonly string[] | null;
 }
 
-export function bidderCallerOf(accessToken: string): BidderCaller {
-  const authority = tokenAuthority(accessToken);
+export function bidderCallerOf(session: SessionTokens): BidderCaller {
+  const authority = sessionAuthority(session);
   return {
     organizationId: authority?.organizationId ?? null,
     roles: authority?.roles ?? null,

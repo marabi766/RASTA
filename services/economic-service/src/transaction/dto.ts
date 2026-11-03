@@ -3,6 +3,8 @@ import {
   amountMinorSchema,
   businessLineSchema,
   currencySchema,
+  isoDateTime,
+  numberInput,
   organizationIdSchema,
 } from '@rasta/contracts';
 import { queryBoolean } from '@rasta/config';
@@ -19,7 +21,7 @@ import { isEconomicRecordedSource, RECORDED_SOURCE_REFUSAL } from './recorded-so
  *
  * Schemas are Zod rather than class-validator because validation happens at
  * the boundary through `zodPipe`, and because the same schema is what
- * generates the OpenAPI body (`openapi/zod-schema.ts`) — one definition,
+ * generates the OpenAPI body (`toJsonSchema`, @rasta/nest-common) — one definition,
  * rather than a decorated class and a hand-written document that drift.
  */
 
@@ -63,14 +65,19 @@ export const createTransactionSchema = z
      * owns the fact knows it. Never inferred from the type here: an order may
      * sell parts or broker a service.
      *
-     * Optional for now (docs/24 Q-130): a transaction without a line is priced
-     * only by the type-only rules that predate business lines, and with none
-     * its commission is recorded as `NO_ACTIVE_RULE`.
+     * Optional in the schema while docs/24 Q-130 is open: a transaction
+     * without a line is priced only by the type-only rules that predate
+     * business lines, and with none its commission is recorded as
+     * `NO_ACTIVE_RULE`. Where settlement fails closed (Q-29,
+     * `ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE`) a new obligation must
+     * name it — 422 `BUSINESS_LINE_REQUIRED` otherwise — but for the source
+     * flows `recorded-sources.ts` names (`LINE_LESS_SOURCE_TYPES`), identified
+     * by their verified caller.
      */
     businessLine: businessLineSchema.optional(),
     counterpartyOrganizationId: organizationIdSchema.optional(),
     grossAmountMinor: amountMinorSchema,
-    currency: currencySchema.default('IRR'),
+    currency: currencySchema.prefault('IRR'),
     /**
      * When the underlying business event happened.
      *
@@ -78,7 +85,7 @@ export const createTransactionSchema = z
      * transaction recorded late is still charged the rate that was in force
      * when it occurred (docs/10 § 10.7). Defaults to now.
      */
-    occurredAt: z.string().datetime().optional(),
+    occurredAt: z.string().check(isoDateTime()).optional(),
     /**
      * The owning service's identifier space — an order id, a statement id.
      * Reserved types are refused below (`recorded-sources.ts`).
@@ -92,7 +99,7 @@ export const createTransactionSchema = z
      * together, or there is a window in which the money is still spendable
      * (docs/10 § 10.5).
      */
-    holdFunds: z.boolean().default(false),
+    holdFunds: z.boolean().prefault(false),
     /** Mirrors the `Idempotency-Key` header onto the row, for tracing. */
     idempotencyKey: z.string().trim().min(8).max(128).optional(),
   })
@@ -122,8 +129,8 @@ export const listTransactionsQuerySchema = z
      */
     sourceType: z.string().trim().min(1).max(64).optional(),
     sourceReference: z.string().trim().min(1).max(128).optional(),
-    from: z.string().datetime().optional(),
-    to: z.string().datetime().optional(),
+    from: z.string().check(isoDateTime()).optional(),
+    to: z.string().check(isoDateTime()).optional(),
     /**
      * Include transactions where this organization is the payee.
      *
@@ -141,7 +148,7 @@ export const listTransactionsQuerySchema = z
      */
     includeIncoming: queryBoolean(false),
     cursor: cursorQueryParameter,
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 
@@ -261,8 +268,9 @@ export interface TransactionDetailView extends TransactionView {
    * by identity: on a transaction resolved before the identity was kept that
    * could not be attributed for certain (or is not yet — the backfill), and in
    * a command's answer stored before the field existed, replayed
-   * (`storedTransactionDetailView`). There, resolution and dispute are told
-   * apart by time (docs/23 D-060).
+   * (`storedTransactionDetailView`). There, which dispute the resolution
+   * decided is not recorded, and the times do not establish it either: a
+   * re-dispute can be dated before a resolution it waited behind (docs/23 D-060).
    */
   resolvedDisputeId: string | null;
   legs: { role: string; organizationId: string; amountMinor: string; currency: string }[];

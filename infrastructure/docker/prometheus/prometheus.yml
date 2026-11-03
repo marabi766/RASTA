@@ -14,6 +14,8 @@ rule_files:
   - rules/rasta-economic-alerts.yml
   - rules/rasta-construction-alerts.yml
   - rules/rasta-procurement-alerts.yml
+  - rules/rasta-identity-alerts.yml
+  - rules/rasta-consumer-alerts.yml
 
 scrape_configs:
   - job_name: prometheus
@@ -92,5 +94,75 @@ scrape_configs:
     static_configs:
       - targets:
           - 'host.docker.internal:3107'
+        labels:
+          environment: local
+
+  - job_name: asset-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:3103']
+        labels:
+          environment: local
+
+  - job_name: fleet-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:3104']
+        labels:
+          environment: local
+
+  - job_name: maintenance-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:3105']
+        labels:
+          environment: local
+
+  - job_name: marketplace-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:3106']
+        labels:
+          environment: local
+
+  - job_name: supplier-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:3108']
+        labels:
+          environment: local
+
+  - job_name: construction-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:3110']
+        labels:
+          environment: local
+
+  - job_name: contract-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:3111']
+        labels:
+          environment: local
+
+  - job_name: economic-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:3112']
+        labels:
+          environment: local
+
+  - job_name: notification-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:3113']
+        labels:
+          environment: local
+
+  - job_name: analytics-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:3116']
         labels:
           environment: local

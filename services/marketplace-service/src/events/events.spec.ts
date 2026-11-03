@@ -6,6 +6,7 @@ import {
   orderCreatedPayload,
   orderDisputeResolvedPayload,
   orderReceiptConfirmedPayload,
+  reviewSubmittedPayload,
   validateMarketplacePayload,
 } from './events';
 
@@ -452,5 +453,28 @@ describe('the L7-14 audit records', () => {
         startedAt: '2026-08-29T00:00:00.000Z',
       }),
     ).toThrow();
+  });
+});
+
+describe('REVIEW_SUBMITTED v1 quality compatibility', () => {
+  const legacy = {
+    reviewId: 'REV_1',
+    orderId: 'ORD_1',
+    buyerOrganizationId: 'ORG-A',
+    supplierOrganizationId: 'ORG-B',
+    rating: 4,
+    submittedAt: '2026-11-02T00:00:00.000Z',
+  };
+  it('still parses the old v1 payload without a quality answer', () => {
+    expect(reviewSubmittedPayload.parse(legacy)).toEqual(legacy);
+  });
+  it.each([1, 2, 3, 4, 5])('preserves the separate quality answer %s', (qualityRating) => {
+    expect(reviewSubmittedPayload.parse({ ...legacy, qualityRating })).toEqual({
+      ...legacy,
+      qualityRating,
+    });
+  });
+  it.each([0, 6, 2.5, '3', null])('refuses invalid quality %s', (qualityRating) => {
+    expect(reviewSubmittedPayload.safeParse({ ...legacy, qualityRating }).success).toBe(false);
   });
 });

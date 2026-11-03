@@ -1,12 +1,16 @@
 import { z } from 'zod';
 import { queryBoolean } from '@rasta/config';
 import {
-  cursorPaginationSchema,
-  seedIdSchema,
-  ID_PREFIXES,
   amountMinorSchema,
+  cursorPaginationSchema,
+  displayText,
+  ID_PREFIXES,
+  isoDateTime,
+  numberInput,
   plainText,
   referenceId,
+  seedIdSchema,
+  withMaxKeys,
   withoutBidiControlDeep,
 } from '@rasta/contracts';
 import { canonicalIdentifier } from './identifier';
@@ -63,24 +67,6 @@ export const assetTypeSchema = z.enum(ASSET_TYPES);
 export const operationalStatusSchema = z.enum(OPERATIONAL_STATUSES);
 
 /**
- * Persian display text, allowing ZWNJ and the usual punctuation.
- *
- * The lookahead refuses every bidirectional control (`\p{Bidi_Control}`): the
- * script class alone admits U+061C ARABIC LETTER MARK, an Arabic-script one.
- * One pattern, so the published OpenAPI `pattern` states both rules.
- */
-const displayText = (min: number, max: number) =>
-  z
-    .string()
-    .trim()
-    .min(min)
-    .max(max)
-    .regex(
-      /^(?![\s\S]*\p{Bidi_Control})[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s‌()«»'’\-.,/:+]+$/u,
-      'Contains unsupported characters',
-    );
-
-/**
  * A value that takes part in a uniqueness check: asset tag, serial number,
  * policy number. Canonicalised before the length check and before storage, so
  * lookups and the unique index see one spelling (audit L3-10).
@@ -89,10 +75,20 @@ const identifierText = (min: number, max: number) =>
   plainText().transform(canonicalIdentifier).pipe(z.string().min(min).max(max));
 
 /**
+ * How many top-level attributes `specifications` may carry. A spec sheet names
+ * tens of fields (engine, capacity, axles…), and no screen writes it today
+ * (apps/web `asset-form-fields.ts`); a hundred is room, not a target. Counted
+ * before any entry is parsed (GHSA-mrhx-c7xc-m3w5, see `withMaxKeys`).
+ */
+export const MAX_SPECIFICATION_KEYS = 100;
+
+/**
  * Type-specific attributes: any shape, but no bidi control in any key or string
  * value at any depth (#209) — they are stored and shown like any other text.
  */
-const freeFormSpecifications = withoutBidiControlDeep(z.record(z.unknown()));
+const freeFormSpecifications = withoutBidiControlDeep(
+  withMaxKeys(z.record(z.string(), z.unknown()), MAX_SPECIFICATION_KEYS),
+);
 
 /**
  * A document-service id, stored as given and never resolved here. No control
@@ -126,10 +122,10 @@ export const createAssetSchema = z
     manufacturer: displayText(1, 120).optional(),
     model: plainText().min(1).max(120).optional(),
     serialNumber: identifierText(3, 120).optional(),
-    manufactureYear: z.coerce.number().int().min(1300).max(2100).optional(),
+    manufactureYear: numberInput(z.number().int().min(1300).max(2100)).optional(),
 
     /** Type-specific attributes; free-form so a new type needs no migration. */
-    specifications: freeFormSpecifications.default({}),
+    specifications: freeFormSpecifications.prefault({}),
 
     location: z
       .object({
@@ -169,7 +165,7 @@ export const updateAssetSchema = z
     assetTag: identifierText(1, 64).nullable().optional(),
     manufacturer: displayText(1, 120).nullable().optional(),
     model: plainText().min(1).max(120).nullable().optional(),
-    manufactureYear: z.coerce.number().int().min(1300).max(2100).nullable().optional(),
+    manufactureYear: numberInput(z.number().int().min(1300).max(2100)).nullable().optional(),
     specifications: freeFormSpecifications.optional(),
     expectedVersion,
   })
@@ -192,7 +188,7 @@ export const listAssetsQuerySchema = cursorPaginationSchema
     type: assetTypeSchema.optional(),
     q: z.string().trim().min(1).max(100).optional(),
     /** Assets whose insurance or inspection lapses within N days. */
-    expiringWithinDays: z.coerce.number().int().min(1).max(365).optional(),
+    expiringWithinDays: numberInput(z.number().int().min(1).max(365)).optional(),
   })
   .strict();
 
@@ -200,7 +196,7 @@ export type ListAssetsQuery = z.infer<typeof listAssetsQuerySchema>;
 
 export const activateAssetSchema = z
   .object({
-    commissionedAt: z.string().datetime().optional(),
+    commissionedAt: z.string().check(isoDateTime()).optional(),
     expectedVersion,
   })
   .strict();
@@ -222,7 +218,7 @@ export type ChangeStatusDto = z.infer<typeof changeStatusSchema>;
 export const decommissionSchema = z
   .object({
     reason: plainText().min(10).max(1000),
-    decommissionedAt: z.string().datetime().optional(),
+    decommissionedAt: z.string().check(isoDateTime()).optional(),
     expectedVersion,
   })
   .strict();
@@ -245,7 +241,7 @@ export const recordLocationSchema = z
     coordinate: coordinate.optional(),
     siteName: displayText(1, 200).optional(),
     addressLine: plainText().max(500).optional(),
-    source: z.enum(['MANUAL', 'TELEMATICS', 'IMPORTED']).default('MANUAL'),
+    source: z.enum(['MANUAL', 'TELEMATICS', 'IMPORTED']).prefault('MANUAL'),
   })
   .strict()
   .refine((v) => v.coordinate || v.siteName || v.addressLine, {
@@ -260,8 +256,8 @@ export const attachDocumentSchema = z
     documentId: documentReference.min(1),
     kind: z.enum(DOCUMENT_KINDS),
     title: displayText(2, 200),
-    issuedAt: z.string().datetime().optional(),
-    expiresAt: z.string().datetime().optional(),
+    issuedAt: z.string().check(isoDateTime()).optional(),
+    expiresAt: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -269,9 +265,9 @@ export type AttachDocumentDto = z.infer<typeof attachDocumentSchema>;
 
 export const nearbyQuerySchema = z
   .object({
-    latitude: z.coerce.number().min(-90).max(90),
-    longitude: z.coerce.number().min(-180).max(180),
-    radiusMeters: z.coerce.number().int().min(1).max(500_000).default(50_000),
+    latitude: numberInput(z.number().min(-90).max(90)),
+    longitude: numberInput(z.number().min(-180).max(180)),
+    radiusMeters: numberInput(z.number().int().min(1).max(500_000)).prefault(50_000),
     type: assetTypeSchema.optional(),
     /**
      * Only assets that could actually be dispatched.
@@ -283,7 +279,7 @@ export const nearbyQuerySchema = z
      * response is a plausible shorter list rather than an error.
      */
     availableOnly: queryBoolean(false),
-    limit: z.coerce.number().int().min(1).max(100).default(25),
+    limit: numberInput(z.number().int().min(1).max(100)).prefault(25),
   })
   .strict();
 
@@ -313,8 +309,8 @@ export type TimelineCategory = (typeof TIMELINE_CATEGORIES)[number];
 export const timelineQuerySchema = cursorPaginationSchema
   .extend({
     category: z.enum(TIMELINE_CATEGORIES).optional(),
-    from: z.string().datetime().optional(),
-    to: z.string().datetime().optional(),
+    from: z.string().check(isoDateTime()).optional(),
+    to: z.string().check(isoDateTime()).optional(),
   })
   .strict();
 
@@ -451,8 +447,8 @@ export const createPolicySchema = z
     coverage: z.enum(['THIRD_PARTY', 'COMPREHENSIVE', 'PASSENGER_ACCIDENT', 'LIABILITY']),
     premiumMinor: amountMinorSchema.optional(),
     insuredValueMinor: amountMinorSchema.optional(),
-    validFrom: z.string().datetime(),
-    validTo: z.string().datetime(),
+    validFrom: z.string().check(isoDateTime()),
+    validTo: z.string().check(isoDateTime()),
     documentId: documentReference.optional(),
   })
   .strict()
@@ -466,8 +462,8 @@ export const createInspectionSchema = z
   .object({
     certificateNo: plainText().min(3).max(64),
     centerName: displayText(2, 200).optional(),
-    inspectedAt: z.string().datetime(),
-    validTo: z.string().datetime(),
+    inspectedAt: z.string().check(isoDateTime()),
+    validTo: z.string().check(isoDateTime()),
     result: z.enum(['PASSED', 'CONDITIONAL', 'FAILED']),
     notes: plainText().max(1000).optional(),
     documentId: documentReference.optional(),
@@ -502,7 +498,7 @@ export const submitClaimSchema = z
     /** The insurer's file number, where one has been issued already. */
     claimNumber: plainText().min(1).max(64).optional(),
     description: plainText().min(10).max(2000),
-    incidentAt: z.string().datetime(),
+    incidentAt: z.string().check(isoDateTime()),
     claimedAmountMinor: amountMinorSchema.optional(),
   })
   .strict()
@@ -557,7 +553,7 @@ export type DecideClaimDto = z.infer<typeof decideClaimSchema>;
 
 export const recordClaimSettlementSchema = z
   .object({
-    settledAt: z.string().datetime().optional(),
+    settledAt: z.string().check(isoDateTime()).optional(),
     /** The reference under which settlement happened elsewhere — the insurer's
      *  payment reference or an economic-service transaction id. */
     settlementReference: plainText().min(1).max(120).optional(),

@@ -1,5 +1,7 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText, toPersianDigits } from '@/lib/format';
 import {
   DISPUTE_COMMAND_FIELDS,
@@ -18,6 +20,7 @@ import {
 } from '@/lib/transaction-dispute-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import { utcInstant } from './instant';
 import type { WebSession } from './session';
@@ -103,7 +106,9 @@ const transactionSchema = z.object({
    * (task 061, docs/23 D-060): equal to `disputeId`, the resolution is the
    * latest dispute's; different, an earlier one's. `null` before any
    * resolution, and on rows resolved before it was kept that economic could
-   * not attribute for certain — there the screen falls back to comparing times.
+   * not attribute for certain — there the screen shows the resolution as the
+   * transaction's last, says it cannot tell which dispute it decided, and
+   * never infers it from the times (Codex on PR 352 round 2).
    */
   resolvedDisputeId: z.string().min(1).nullable(),
   settledAt: utcInstant.nullable(),
@@ -126,7 +131,7 @@ export async function fetchTransaction(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: `/v1/transactions/${encodeURIComponent(transactionId)}`,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = transactionSchema.safeParse(response.data);
@@ -152,7 +157,7 @@ export async function fetchTransaction(
 export interface DisputeViewer {
   /**
    * The roles the service will act on for this request — read from the access
-   * token (`tokenAuthority`), never from `/v1/users/me` — or `null` when they
+   * token (`sessionAuthority`), never from `/v1/users/me` — or `null` when they
    * could not be read.
    */
   readonly roles: readonly string[] | null;
@@ -273,18 +278,17 @@ export function parseDisputeCommand(input: DisputeFormInput): ParsedDisputeComma
 
   const command = input.command;
   const field = DISPUTE_COMMAND_FIELDS[command];
-  const parsed = COMMAND_SCHEMAS[command].safeParse(input.values);
+  const parsed = legacyParse(COMMAND_SCHEMAS[command], input.values);
   if (parsed.success) {
     const text = (parsed.data as Record<DisputeField, string>)[field];
     return { ok: true, request: { command, body: { [field]: text } } };
   }
 
-  const fieldErrors: Partial<Record<DisputeField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const key = issue.path[0];
-    if (key === field) fieldErrors[field] ??= issue.message;
-  }
-  return { ok: false, command, fieldErrors };
+  return {
+    ok: false,
+    command,
+    fieldErrors: firstIssuePerField(parsed.refusal, [field]),
+  };
 }
 
 /**

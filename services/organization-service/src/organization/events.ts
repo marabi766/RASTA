@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 
 /**
  * Events published by organization-service.
@@ -141,5 +142,11 @@ export function validateOrganizationPayload(
   eventName: OrganizationEventName,
   payload: unknown,
 ): unknown {
-  return ORGANIZATION_EVENT_SCHEMAS[eventName].parse(payload);
+  const parsed = legacyParse(ORGANIZATION_EVENT_SCHEMAS[eventName], payload);
+  if (!parsed.success) {
+    throw new Error(
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
+    );
+  }
+  return parsed.data;
 }

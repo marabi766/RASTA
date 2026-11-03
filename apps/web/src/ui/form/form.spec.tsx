@@ -178,3 +178,28 @@ describe('MoneyField', () => {
 
   itSnapshotsInBothDirections('an empty request form', () => <RequestForm />);
 });
+
+describe('a message Zod wrote itself', () => {
+  // The resolver gets the portal's Persian error map: Zod's own «String must
+  // contain at most 5 character(s)» never reaches the screen.
+  function PlainForm() {
+    const form = useSchemaForm(z.object({ title: z.string().max(5) }), {
+      defaultValues: { title: '' },
+    });
+    return (
+      <Form form={form} onSubmit={() => {}}>
+        <TextField form={form} name="title" label="عنوان" />
+      </Form>
+    );
+  }
+
+  it('is shown in Persian, with the limit', async () => {
+    renderInDirection(<PlainForm />, 'rtl');
+    const input = screen.getByLabelText(/عنوان/);
+    fireEvent.change(input, { target: { value: 'abcdefg' } });
+    fireEvent.blur(input);
+
+    await waitFor(() => expect(screen.getByText('حداکثر ۵ نویسه مجاز است')).toBeInTheDocument());
+    expect(document.body.textContent).not.toMatch(/must contain|character\(s\)/);
+  });
+});

@@ -1,6 +1,7 @@
-import { ID_PREFIXES, seedIdSchema } from '@rasta/contracts';
+import { DISPLAY_TEXT_PATTERN, ID_PREFIXES, legacyParse, seedIdSchema } from '@rasta/contracts';
 import { z } from 'zod';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
 import {
   APPROVE_REQUEST_FIELDS,
@@ -104,7 +105,7 @@ export const reportRequestFormSchema = z
       .trim()
       .min(1, 'شناسهٔ ماشین را وارد کنید')
       .refine((value) => assetId.safeParse(value).success, 'شناسهٔ ماشین معتبر نیست'),
-    type: z.enum(MAINTENANCE_TYPES, { errorMap: () => ({ message: 'نوع کار را انتخاب کنید' }) }),
+    type: z.enum(MAINTENANCE_TYPES, { error: 'نوع کار را انتخاب کنید' }),
     title: z
       .string()
       .transform((raw) => normalizePersianText(raw))
@@ -118,11 +119,7 @@ export const reportRequestFormSchema = z
       .string()
       .trim()
       .transform((value) => (value === '' ? undefined : value))
-      .pipe(
-        z
-          .enum(SEVERITIES, { errorMap: () => ({ message: 'شدت را از فهرست انتخاب کنید' }) })
-          .optional(),
-      ),
+      .pipe(z.enum(SEVERITIES, { error: 'شدت را از فهرست انتخاب کنید' }).optional()),
     outOfServiceAt: optionalLocalDate,
     dueDate: optionalLocalDate,
   })
@@ -145,17 +142,13 @@ export type ParsedReportRequestForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<ReportRequestField, string>> };
 
 export function parseReportRequestForm(values: ReportRequestFormValues): ParsedReportRequestForm {
-  const parsed = reportRequestFormSchema.safeParse(values);
+  const parsed = legacyParse(reportRequestFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<ReportRequestField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (typeof field === 'string' && isReportRequestField(field) && !fieldErrors[field]) {
-      fieldErrors[field] = issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, isReportRequestField),
+  };
 }
 
 function isReportRequestField(value: string): value is ReportRequestField {
@@ -234,14 +227,12 @@ export function canManageMaintenance(roles: readonly string[]): boolean {
 }
 
 /**
- * The service's own `displayText` character class, which it applies to every
- * free-text field of these three commands. A copy, because the portal may not
- * import a service (A-02); `maintenance-commands.contract.spec.ts` fails the
- * moment the two disagree. Letters of the Arabic and Latin scripts, digits of
- * any script, combining marks, spaces, ZWNJ and a short list of punctuation.
+ * The service's own `displayText` rule, which it applies to every free-text
+ * field of these commands — the pattern itself, imported from
+ * `@rasta/contracts` (`DISPLAY_TEXT_PATTERN`), not copied. The policy (what
+ * whitespace, zero-width and control characters pass) is documented there.
  */
-export const MAINTENANCE_DISPLAY_TEXT =
-  /^[\p{Script=Arabic}\p{Script=Latin}\p{Nd}\p{Mark}\s\u200c()«»'’\-.,/:+]+$/u;
+export const MAINTENANCE_DISPLAY_TEXT = DISPLAY_TEXT_PATTERN;
 
 export const DISPLAY_TEXT_MESSAGE = 'فقط حروف فارسی و لاتین، عدد و نشانه‌های ساده مجاز است';
 
@@ -283,20 +274,8 @@ export function readFields<F extends string>(
   return values;
 }
 
-export function firstIssues<F extends string>(
-  error: z.ZodError,
-  fields: readonly F[],
-): Partial<Record<F, string>> {
-  const fieldErrors: Partial<Record<F, string>> = {};
-  for (const issue of error.issues) {
-    const field = issue.path[0];
-    if (typeof field === 'string' && (fields as readonly string[]).includes(field)) {
-      const key = field as F;
-      if (!fieldErrors[key]) fieldErrors[key] = issue.message;
-    }
-  }
-  return fieldErrors;
-}
+/** Kept under its old name for the command parsers below; the one implementation is `@/lib/form-issues`. */
+export const firstIssues = firstIssuePerField;
 
 // ---- Refer to a workshop ---------------------------------------------------
 
@@ -332,9 +311,12 @@ export type ParsedAssignWorkshopForm =
 export function parseAssignWorkshopForm(
   values: AssignWorkshopFormValues,
 ): ParsedAssignWorkshopForm {
-  const parsed = assignWorkshopFormSchema.safeParse(values);
+  const parsed = legacyParse(assignWorkshopFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, ASSIGN_WORKSHOP_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.refusal, ASSIGN_WORKSHOP_FIELDS),
+  };
 }
 
 /**
@@ -439,9 +421,12 @@ export type ParsedApproveRequestForm =
 export function parseApproveRequestForm(
   values: ApproveRequestFormValues,
 ): ParsedApproveRequestForm {
-  const parsed = approveRequestFormSchema.safeParse(values);
+  const parsed = legacyParse(approveRequestFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, APPROVE_REQUEST_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.refusal, APPROVE_REQUEST_FIELDS),
+  };
 }
 
 /**
@@ -574,9 +559,12 @@ export type ParsedCancelRequestForm =
   | { readonly ok: false; readonly fieldErrors: Partial<Record<CancelRequestField, string>> };
 
 export function parseCancelRequestForm(values: CancelRequestFormValues): ParsedCancelRequestForm {
-  const parsed = cancelRequestFormSchema.safeParse(values);
+  const parsed = legacyParse(cancelRequestFormSchema, values);
   if (parsed.success) return { ok: true, body: parsed.data };
-  return { ok: false, fieldErrors: firstIssues(parsed.error, CANCEL_REQUEST_FIELDS) };
+  return {
+    ok: false,
+    fieldErrors: firstIssues(parsed.refusal, CANCEL_REQUEST_FIELDS),
+  };
 }
 
 export const CANCEL_REQUEST_FIELD_MAPPING: FieldMapping<CancelRequestField> = {

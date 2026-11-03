@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import * as ts from 'typescript';
 import { TOPIC_CONSUMERS, consumerDeclarationProblem } from './topic-consumers';
@@ -439,6 +439,27 @@ describe('every Kafka consumer in the repository is a declared EventConsumer', (
   it('declares exactly the services that run a consumer', () => {
     const running = [...new Set(scan.consumers.map((consumer) => consumer.service))].sort();
     expect(running).toEqual(Object.keys(TOPIC_CONSUMERS).sort());
+  });
+
+  it('declares exactly the running groups for operational alerts', () => {
+    for (const [service, declaration] of Object.entries(TOPIC_CONSUMERS)) {
+      expect(
+        scan.consumers
+          .filter((consumer) => consumer.service === service)
+          .map((consumer) => consumer.groupId)
+          .sort(),
+      ).toEqual([...declaration.groups].sort());
+    }
+  });
+
+  it('scrapes every declared consumer service directly for crash and restart telemetry', () => {
+    const config = readFileSync(
+      join(REPO, 'infrastructure/docker/prometheus/prometheus.yml'),
+      'utf8',
+    );
+    for (const service of Object.keys(TOPIC_CONSUMERS))
+      expect(config).toContain(`job_name: ${service}`);
+    expect(config).toContain('rules/rasta-consumer-alerts.yml');
   });
 
   it('evaluates and holds each one to its service’s declaration', () => {

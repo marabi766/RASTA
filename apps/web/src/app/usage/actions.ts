@@ -2,12 +2,16 @@
 
 import { redirect } from 'next/navigation';
 
+import { MONEY_EFFECTS } from '@/lib/demo-mode';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { mayDispatch } from '@/server/money-gate';
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 import { parseUsageForm, recordUsage, usageFormValues } from '@/server/usage';
 
 import type { UsageFormState } from './form-state';
+import { flashHref } from '@/server/flash';
+import { USAGE_CREATED } from '@/lib/usage-fields';
 
 /**
  * The `/usage` form's server action — the first write path in the portal.
@@ -25,7 +29,9 @@ import type { UsageFormState } from './form-state';
  *   2. CSRF — refused before the body is even read into a request;
  *   3. the submission id — refused if it is not one this server minted;
  *   4. the form, in Persian, for what a form can see;
- *   5. the gateway, which is where every real decision is made.
+ *   5. the provider, read again: a usage record is a reward trigger, and the
+ *      form drawn while it was known is not sent once it is not (`mayDispatch`);
+ *   6. the gateway, which is where every real decision is made.
  *
  * Nothing token-shaped is in the state this returns; the state is rendered
  * into the page and would be visible to any script on it.
@@ -56,14 +62,21 @@ export async function submitUsage(
     };
   }
 
+  if (!(await mayDispatch(session, MONEY_EFFECTS.usageRecord))) {
+    return { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
+  }
+
   const result = await recordUsage(session, parsed.request);
 
   if (result.kind === 'CREATED') {
     // Redirect, not state: a refreshed page must not resubmit, and a fresh
     // form must carry a fresh submission id. The record id is not sensitive
     // and the query string is the only channel that survives a redirect
-    // without JavaScript.
-    redirect(`/usage?created=${encodeURIComponent(result.data.id)}`);
+    // without JavaScript; the flash beside it, signed for this session and
+    // organization, is what makes the page say "recorded" (PR 405 review 2, F2).
+    redirect(
+      flashHref(session, '/usage', result.data.id, USAGE_CREATED, { created: result.data.id }),
+    );
   }
 
   switch (result.kind) {

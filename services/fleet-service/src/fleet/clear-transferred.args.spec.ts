@@ -59,9 +59,9 @@ describe('insurance:clear-transferred arguments', () => {
     }
   });
 
-  it('refuses an unknown argument', () => {
-    expect(() => parseClearTransferredArgs(['--organisation', 'ORG-DEH-0001'])).toThrow(
-      'unknown argument --organisation',
-    );
+  it('refuses an unknown argument by its position, without repeating it (#385 r6)', () => {
+    expect(() =>
+      parseClearTransferredArgs(['--dry-run', '--organisation', 'ORG-DEH-0001']),
+    ).toThrow(/^unknown argument at position 2; it is not repeated$/);
   });
 });

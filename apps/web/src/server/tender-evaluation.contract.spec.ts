@@ -151,9 +151,9 @@ describe('who may evaluate and award — `canEvaluate`, `canAward`, `mayDecideAw
       "WEB_TENDER_AWARD_ROLES:roleList('WEB_TENDER_AWARD_ROLES','',['SYSTEM_ADMIN','CONTRACTOR']),",
     );
     expect(constructionEnv).toContain(
-      "CONSTRUCTION_COI_RULES:z.string().default('AWARDER_NOT_EVALUATOR')",
+      "CONSTRUCTION_COI_RULES:z.string().prefault('AWARDER_NOT_EVALUATOR')",
     );
-    expect(webEnv).toContain("WEB_TENDER_COI_RULES:z.string().default('AWARDER_NOT_EVALUATOR')");
+    expect(webEnv).toContain("WEB_TENDER_COI_RULES:z.string().prefault('AWARDER_NOT_EVALUATOR')");
     const rules = literalsOf(topLevelConst(constructionEnvTree, 'COI_RULES').getText());
     expect(webEnv).toContain(`z.enum([${rules.map((rule) => `'${rule}'`).join(',')}])`);
   });
@@ -334,7 +334,7 @@ describe('an authority of another organization (PR 346 review 1, finding 3)', ()
       'inboxScope():{organizationId:string;roles:readonlystring[]}{assertNotAuditor();',
     );
     expect(squash(topLevelConst(approvalDto, 'inboxQuerySchema').getText())).toContain(
-      "status:z.enum(APPROVAL_STATES).default('PENDING')",
+      "status:z.enum(APPROVAL_STATES).prefault('PENDING')",
     );
     expect(method(approvalService, 'get')).toContain(
       "this.access.assertCanSeeApproval(approval);//Whatanawardapprovalisaboutnamesabid:notshowntooneinconflictwiththetender.if(approval.workflowKey==='tender.award'){awaitthis.tenderApprovals.assertMayReadAward(approval);}",
@@ -373,14 +373,14 @@ describe('which commands may be sent again after a lost answer', () => {
       expect(method(evaluationServiceTree, name)).not.toContain('idempotency');
     }
     // The server keeps an award's first answer — a round rejected since included (task 060). The
-    // portal does not send one again yet: that is its own follow-up (REPEATABLE_OWNER_COMMANDS below).
+    // portal sends one again after a lost answer (REPEATABLE_OWNER_COMMANDS below).
     expect(squash(awardController.getText())).toContain("@Headers('idempotency-key')");
     expect(method(awardServiceTree, 'award')).toContain(
       'returnthis.idempotency.execute<Outcome>(AWARD_TENDER_ENDPOINT,idempotencyKey,',
     );
   });
 
-  it('a decision on a bid, the completion and an award keep no result for a re-send: only a score may be sent again', () => {
+  it('a decision on a bid and the completion keep no result for a re-send: of the evaluation only a score may be sent again, and an award, which the service replays', () => {
     // A decision on a bid answers its own repeat, but that answer cannot tell the first send from
     // another evaluator's; a completion freezes the matrix as it stands when the re-send arrives.
     expect(method(evaluationServiceTree, 'qualify')).toContain(
@@ -389,19 +389,14 @@ describe('which commands may be sent again after a lost answer', () => {
     expect(method(evaluationServiceTree, 'evaluate')).toContain(
       'constmatched=awaitthis.repo.completeEvaluation(tx,{tenderId,expectedVersion:tender.version,',
     );
-    // A lost award request, rejected meanwhile, is not found again: the same award opens a new round.
+    // Without the key a lost award request, rejected meanwhile, is not found again: the same award
+    // opens a new round. The key keeps the re-send the first send's, so an award may be sent again.
     expect(approvalGate).toContain(
       "return{kind:'REQUESTED',request:awaitthis.open(tx,input),created:true,",
     );
-    expect([...REPEATABLE_OWNER_COMMANDS]).toEqual(['SCORE']);
-    for (const command of [
-      'QUALIFY',
-      'DISQUALIFY',
-      'EVALUATE',
-      'AWARD',
-      'GRANT_AWARD',
-      'REJECT_AWARD',
-    ]) {
+    expect(REPEATABLE_OWNER_COMMANDS).toContain('AWARD');
+    expect(UNREPEATABLE_OWNER_COMMANDS).not.toContain('AWARD');
+    for (const command of ['QUALIFY', 'DISQUALIFY', 'EVALUATE', 'GRANT_AWARD', 'REJECT_AWARD']) {
       expect(UNREPEATABLE_OWNER_COMMANDS).toContain(command);
     }
   });

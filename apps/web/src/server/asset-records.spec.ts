@@ -17,9 +17,14 @@ import {
   recordPolicyFormValues,
   validityWindowOf,
 } from './asset-records';
+import { GENERIC_REFUSAL_MESSAGE } from './write';
 import type { WebSession } from './session';
 import { localDateFromIso } from './drivers';
 import { EMPTY_RECORD_INSPECTION_FORM, EMPTY_RECORD_POLICY_FORM } from '@/lib/asset-record-fields';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * The two record commands: who is offered the forms, what a person may type and
@@ -35,7 +40,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'manager',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -356,7 +361,7 @@ describe('sending', () => {
         body,
       });
       expect(calls[0]!.headers['idempotency-key']).toBe('sub_abc');
-      expect(calls[0]!.headers.authorization).toBe('Bearer access-token-value');
+      expect(calls[0]!.headers.authorization).toBe(`Bearer ${ACCESS_TOKEN_VALUE}`);
     },
   );
 
@@ -425,7 +430,7 @@ describe('sending', () => {
       }
     });
 
-    it('says an unknown code by its own sentence, visibly foreign rather than hidden', async () => {
+    it('says an unknown code by the generic Persian sentence, never the English one', async () => {
       const result = await recordInsurancePolicy(
         SESSION,
         ASSET,
@@ -433,7 +438,7 @@ describe('sending', () => {
         's',
         recording(422, { code: 'BUSINESS_RULE_VIOLATION', message: 'Some new rule' }).impl,
       );
-      expect(result).toMatchObject({ kind: 'INVALID', message: 'Some new rule' });
+      expect(result).toMatchObject({ kind: 'INVALID', message: GENERIC_REFUSAL_MESSAGE });
     });
 
     it('places a field-level problem on the form’s own field name', async () => {
@@ -453,7 +458,10 @@ describe('sending', () => {
       );
       expect(result).toMatchObject({
         kind: 'INVALID',
-        fieldErrors: { premium: 'Invalid', insuredValue: 'Invalid' },
+        fieldErrors: {
+          premium: 'مقدار واردشده معتبر نیست',
+          insuredValue: 'مقدار واردشده معتبر نیست',
+        },
       });
     });
 

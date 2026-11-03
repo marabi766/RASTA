@@ -135,11 +135,9 @@ export class StockRepository {
    * Moves the balance of a locked item by the deltas, one ledger position on, and returns the
    * row as it now is. The CHECKs refuse a negative or over-reserved result.
    *
-   * `updated_at` never moves backwards. `at` is the command's transaction instant (D-5), fixed
-   * when the transaction began — and a transaction can begin before another one that then takes
-   * the lock first: two first receipts of a product start in one order, and the second to start
-   * creates the stock item while the first waits on it. The waiting one's instant is then older
-   * than the item itself, and `ck_stock_item_timestamps_ordered` would refuse the write.
+   * `updated_at` never moves backwards: keep the monotonic clamp even though expiry commands
+   * now sample their decision instant after locks. Creation metadata can use transaction time,
+   * and database wall-clock corrections must not move an existing stock timestamp backwards.
    */
   async move(
     tx: ExtendedPrismaClient,

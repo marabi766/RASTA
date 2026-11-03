@@ -238,7 +238,8 @@ const PRODUCT_KINDS: Readonly<Record<string, string>> = {
 };
 
 function lookup(table: Readonly<Record<string, string>>, value: string): string {
-  return table[value] ?? value;
+  // Own keys only: «constructor» or «toString» is a word a person may type.
+  return Object.hasOwn(table, value) ? table[value]! : value;
 }
 
 export const assetTypeLabel = (value: string): string => lookup(ASSET_TYPE_LABELS, value);
@@ -249,6 +250,69 @@ export const policyCoverageLabel = (value: string): string => lookup(POLICY_COVE
 export const documentKindLabel = (value: string): string => lookup(DOCUMENT_KIND_LABELS, value);
 export const timelineCategoryLabel = (value: string): string =>
   lookup(TIMELINE_CATEGORY_LABELS, value);
+
+/**
+ * Where a transaction came from (`sourceType`): the closed set economic-service
+ * records itself (`recorded-sources.ts`) and `ORDER`, which marketplace-service
+ * records. Any other value is shown as sent.
+ */
+const TRANSACTION_SOURCE_LABELS: Readonly<Record<string, string>> = {
+  ORDER: 'سفارش',
+  MAINTENANCE_REQUEST: 'درخواست تعمیر و نگهداری',
+  PAYMENT_INTENT: 'افزایش موجودی کیف پول',
+  STATEMENT: 'صورت‌وضعیت قرارداد',
+};
+export const transactionSourceLabel = (value: string): string =>
+  lookup(TRANSACTION_SOURCE_LABELS, value);
+
+/**
+ * What supplier-service said about a bidder's standing when the bid was
+ * evaluated. `ELIGIBLE` is the only verdict that lets an award through; the
+ * refusal is `NOT_ELIGIBLE`. Any other value is shown as sent.
+ */
+const STANDING_VERDICT_LABELS: Readonly<Record<string, string>> = {
+  ELIGIBLE: 'واجد صلاحیت',
+  NOT_ELIGIBLE: 'فاقد صلاحیت',
+};
+export const standingVerdictLabel = (value: string): string =>
+  lookup(STANDING_VERDICT_LABELS, value);
+
+/**
+ * A timeline title the asset service wrote with the new status spelled as its
+ * code («تغییر وضعیت به IN_MAINTENANCE»): every asset-status code in it is
+ * replaced by its Persian label, so no code shows inside a Persian sentence.
+ * Text with no code is returned unchanged.
+ */
+export function timelineTitleLabel(title: string): string {
+  return title.replace(/\b[A-Z][A-Z_]{2,}\b/g, (code) =>
+    (ASSET_STATUSES as readonly string[]).includes(code) ? assetStatusLabel(code) : code,
+  );
+}
+
+/**
+ * The machine-written reasons that can reach a transaction's `failureReason`:
+ * a CLOSED set, matched exactly (case and spelling), so a reason a person wrote
+ * is never replaced, whatever its language.
+ *
+ * `failureReason` is written in two places only, `TransactionService.refund`
+ * and `.cancel` (`transaction.service.ts:608`, `:640`), from the reason their
+ * caller sends. The one caller that sends machine text is the marketplace
+ * saga's compensation, which falls back to «Cancelled» when the order holds no
+ * reason (`marketplace-service/src/temporal/workflows.ts:567`); every other
+ * reason is typed by a person (the buyer's cancellation, the operator's
+ * dispute resolution, a direct refund or cancel) and is shown as written.
+ * The payment-intent markers (`REFUND_REQUESTED` …,
+ * `payment.service.ts:1473–1513`) live on the payment intent, never on a
+ * transaction, so they are not in the set. A new machine reason is added here
+ * with its source; until then it is shown as written.
+ */
+const MACHINE_TRANSACTION_REASONS: Readonly<Record<string, string>> = {
+  Cancelled: 'لغو شد',
+};
+
+/** A transaction's recorded reason: a known machine wording in Persian, anything else as written. */
+export const transactionReasonLabel = (reason: string): string =>
+  lookup(MACHINE_TRANSACTION_REASONS, reason);
 
 export function blockerLabel(value: string): string {
   const status = STATUS_BLOCKER.exec(value)?.[1];

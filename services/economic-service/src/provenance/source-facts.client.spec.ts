@@ -59,12 +59,17 @@ describe('SourceFactsClient', () => {
   interface Call {
     url: string;
     headers: Record<string, string>;
+    signal: AbortSignal | undefined;
   }
 
   function client(respond: (call: Call) => Promise<Response> | Response, timeoutMs = 1000) {
     const calls: Call[] = [];
     const fake = (async (url: string, init: RequestInit) => {
-      const call = { url, headers: init.headers as Record<string, string> };
+      const call = {
+        url,
+        headers: init.headers as Record<string, string>,
+        signal: init.signal ?? undefined,
+      };
       calls.push(call);
       return respond(call);
     }) as unknown as typeof fetch;
@@ -197,6 +202,78 @@ describe('SourceFactsClient', () => {
     });
   });
 
+  // #507 r1 F1: a refusal's body is never awaited, and never left to a peer that stalls.
+  describe('a response is released with its deadline (#507 r1 F1)', () => {
+    /** Headers now, one chunk, and the rest never comes; `cancelled()` says whether it was given up. */
+    function stalled(status: number) {
+      let cancelled = false;
+      const response = new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"code":'));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { status, headers: { 'content-type': 'application/json' } },
+      );
+      return { response, cancelled: () => cancelled };
+    }
+
+    it.each([500, 502, 503, 401, 403, 302])(
+      'a %s with a stalled body is refused at once and its body is cancelled, on every retry',
+      async (status) => {
+        const watched = Array.from({ length: 3 }, () => stalled(status));
+        let next = 0;
+        const calls: Call[] = [];
+        const { facts } = client((call) => {
+          calls.push(call);
+          return watched[next++]!.response;
+        }, 30_000);
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const started = Date.now();
+          await expect(facts.maintenanceRequest('ORG-A', 'MNT_1')).rejects.toMatchObject({
+            code: 'UPSTREAM_UNAVAILABLE',
+          });
+          expect(Date.now() - started).toBeLessThan(5_000);
+          expect(watched[attempt]!.cancelled()).toBe(true);
+          expect(calls[attempt]!.signal?.aborted).toBe(true);
+        }
+      },
+    );
+
+    it('a 404 is judged on its body, so a body that stalls is a timeout, not an absence', async () => {
+      const watched = stalled(404);
+      const seen: Call[] = [];
+      const { facts } = client((call) => {
+        seen.push(call);
+        return watched.response;
+      }, 30);
+
+      await expect(facts.maintenanceRequest('ORG-A', 'MNT_1')).rejects.toMatchObject({
+        code: 'UPSTREAM_TIMEOUT',
+      });
+      // Being read, the body is the transport's to cut: the abort is what releases it.
+      expect(seen[0]!.signal?.aborted).toBe(true);
+    });
+
+    it('a 200 whose body stalls is a timeout and its request is aborted', async () => {
+      const watched = stalled(200);
+      const seen: Call[] = [];
+      const { facts } = client((call) => {
+        seen.push(call);
+        return watched.response;
+      }, 30);
+
+      await expect(facts.maintenanceRequest('ORG-A', 'MNT_1')).rejects.toMatchObject({
+        code: 'UPSTREAM_TIMEOUT',
+      });
+      expect(seen[0]!.signal?.aborted).toBe(true);
+    });
+  });
+
   describe('a statement, from contract-service (ADR-068 § 6 (2))', () => {
     it('asks with an X-Internal-Token for contract-service, signed for the employer, and keeps the net exact at 2^63 - 1', async () => {
       const { calls, facts } = client(() => json(statement));
@@ -252,6 +329,49 @@ describe('SourceFactsClient', () => {
       await expect(facts.statement('ORG-EMPLOYER', 'STM_1')).rejects.toMatchObject({
         code: 'UPSTREAM_UNAVAILABLE',
       });
+    });
+
+    // Task 011: the bound's refinement ran on a net the pattern had refused, and `BigInt` threw a
+    // SyntaxError carrying the owner's text out of `read` — retried, then dead-lettered as
+    // MAX_RETRIES_EXCEEDED with that text in x-dlq-error. It is a body that does not parse.
+    it.each([
+      ['a fractional net', '1.5'],
+      ['a net in letters', 'abc'],
+      ['a net with an exponent', '1e3'],
+      ['a net that is free text', 'private-invoice-reference-123'],
+      ['an empty net', ''],
+      ['a net with a leading space', ' 1'],
+      ['a net with a plus sign', '+1'],
+      ['a hexadecimal net', '0x10'],
+    ])(
+      'never says yes for %s: UPSTREAM_UNAVAILABLE, never a SyntaxError, the text nowhere',
+      async (_case, netMinor) => {
+        const { calls, facts } = client(() => json({ ...statement, netMinor }));
+        const error = await facts.statement('ORG-EMPLOYER', 'STM_1').catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(RastaError);
+        expect(error).toMatchObject({ code: 'UPSTREAM_UNAVAILABLE' });
+        expect(
+          JSON.stringify({ ...(error as RastaError), message: (error as Error).message }),
+        ).not.toContain('private-invoice-reference-123');
+        // Still asked as the organization the event names, and only as it.
+        const claims = await tokens.verify(
+          calls[0]!.headers['x-internal-token']!,
+          'contract-service',
+        );
+        expect(claims.organizationId).toBe('ORG-EMPLOYER');
+      },
+    );
+
+    it.each([
+      ['zero', '0'],
+      ['zero with a leading zero', '00'],
+      ['one with a leading zero', '01'],
+      ['the largest BIGINT', '9223372036854775807'],
+      ['a long run of leading zeros (no digit limit)', `${'0'.repeat(30)}7350000`],
+    ])('takes %s as the owner wrote it, byte for byte, as before', async (_case, netMinor) => {
+      const { facts } = client(() => json({ ...statement, netMinor }));
+      await expect(facts.statement('ORG-EMPLOYER', 'STM_1')).resolves.toMatchObject({ netMinor });
     });
 
     it('times out as UPSTREAM_TIMEOUT', async () => {

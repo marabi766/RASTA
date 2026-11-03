@@ -378,10 +378,10 @@ describe('supplier HTTP API', () => {
     });
 
     it('excludes a suspended supplier, and restores it on reinstatement', async () => {
-      await http()
+      const suspension = await http()
         .post(`/v1/suppliers/${supplierId}/suspend`)
         .set('authorization', `Bearer ${platformAdmin(platformOrg)}`)
-        .send({ reason: 'بازبینی مدارک' })
+        .send({ reason: 'بازبینی مدارک', latestSuspensionId: null })
         .expect(200);
 
       const suspended = await http()
@@ -393,7 +393,7 @@ describe('supplier HTTP API', () => {
       await http()
         .post(`/v1/suppliers/${supplierId}/reinstate`)
         .set('authorization', `Bearer ${platformAdmin(platformOrg)}`)
-        .send({ reason: 'مدارک تکمیل شد' })
+        .send({ reason: 'مدارک تکمیل شد', suspensionId: suspension.body.suspensions[0].id })
         .expect(200);
 
       const restored = await http()
@@ -583,7 +583,7 @@ describe('supplier HTTP API', () => {
       await http()
         .post(`/v1/suppliers/${supplierId}/suspend`)
         .set('authorization', `Bearer ${supplierActor(supplierOrg)}`)
-        .send({ reason: 'خودم' })
+        .send({ reason: 'خودم', latestSuspensionId: null })
         .expect(403);
     });
 
@@ -599,7 +599,7 @@ describe('supplier HTTP API', () => {
       await http()
         .post(`/v1/suppliers/${supplierId}/reinstate`)
         .set('authorization', `Bearer ${platformAdmin(platformOrg)}`)
-        .send({ reason: 'تعلیقی در کار نیست' })
+        .send({ reason: 'تعلیقی در کار نیست', suspensionId: 'SSP_NONE' })
         .expect(422);
     });
 
@@ -607,7 +607,7 @@ describe('supplier HTTP API', () => {
       await http()
         .post('/v1/suppliers/SUP_NOT_REAL/suspend')
         .set('authorization', `Bearer ${platformAdmin(platformOrg)}`)
-        .send({ reason: 'وجود ندارد' })
+        .send({ reason: 'وجود ندارد', latestSuspensionId: null })
         .expect(404);
     });
   });

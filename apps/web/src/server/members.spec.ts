@@ -2,6 +2,7 @@
  * @jest-environment node
  */
 import {
+  MAX_POSTED_ROLES,
   fetchMembers,
   memberName,
   parseRevokeMembershipForm,
@@ -12,6 +13,10 @@ import {
   updateMemberRolesFormValues,
 } from './members';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * Reading members, and parsing the two changes an administrator may make.
@@ -27,7 +32,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'admin',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -200,6 +205,23 @@ describe('parseUpdateMemberRolesForm', () => {
   it('collapses a role posted twice', () => {
     const parsed = parseUpdateMemberRolesForm({ ...base, roles: ['DRIVER', 'DRIVER'] });
     expect(parsed).toMatchObject({ ok: true, request: { roles: ['DRIVER'] } });
+  });
+
+  it('accepts as many posted roles as MAX_POSTED_ROLES, then collapses them', () => {
+    const roles = Array.from({ length: MAX_POSTED_ROLES }, (_, i) =>
+      i % 2 ? 'DRIVER' : 'OPERATOR',
+    );
+    const parsed = parseUpdateMemberRolesForm({ ...base, roles });
+    expect(parsed).toMatchObject({ ok: true, request: { roles: ['OPERATOR', 'DRIVER'] } });
+  });
+
+  it('refuses one posted role over MAX_POSTED_ROLES in Persian, before anything is sent', () => {
+    const roles = Array.from({ length: MAX_POSTED_ROLES + 1 }, () => 'DRIVER');
+    const parsed = parseUpdateMemberRolesForm({ ...base, roles });
+    expect(parsed).toMatchObject({
+      ok: false,
+      fieldErrors: { roles: 'تعداد نقش‌های فرستاده‌شده بیش از حد است' },
+    });
   });
 
   it('refuses a form with no membership to act on', () => {

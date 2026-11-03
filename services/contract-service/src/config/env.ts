@@ -5,11 +5,16 @@ import {
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { contractOperationBudgets } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
 
 export { SIGNING_TRANSACTION_MARGIN_MS, signingTransactionTimeoutMs } from './operation-budgets';
 
@@ -43,12 +48,15 @@ function commaList() {
 
 /** A list of platform roles that may never include the oversight role. */
 function roleList(name: string, options: { min: number }) {
+  const unknownRole = fixed(`Unknown role in ${name}`);
   return commaList().pipe(
     z
-      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: `Unknown role in ${name}` }) }))
-      .min(options.min, `${name} must name at least ${options.min} role`)
+      .array(z.enum(PLATFORM_ROLES, { error: unknownRole }))
+      .min(options.min, fixed(`${name} must name at least ${options.min} role`))
       .refine((roles) => !roles.includes(REFUSED_ROLE), {
-        message: `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        message: fixed(
+          `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        ),
       }),
   );
 }
@@ -58,14 +66,19 @@ const CODE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 
 /** A platform-role list that may be empty: an empty list is "nobody", never "everybody". */
 function optionalRoleList(name: string) {
+  const unknownRole = fixed(`Unknown role in ${name}`);
   return commaList().pipe(
     z
-      .array(z.enum(PLATFORM_ROLES, { errorMap: () => ({ message: `Unknown role in ${name}` }) }))
+      .array(z.enum(PLATFORM_ROLES, { error: unknownRole }))
       .refine((roles) => !roles.includes(REFUSED_ROLE), {
-        message: `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        message: fixed(
+          `${name} may not name ${REFUSED_ROLE}: the oversight role has aggregate access only`,
+        ),
       })
       .refine((roles) => !roles.includes('SYSTEM_ADMIN'), {
-        message: `${name} may not name SYSTEM_ADMIN: the platform operator never accepts a contract for a party`,
+        message: fixed(
+          `${name} may not name SYSTEM_ADMIN: the platform operator never accepts a contract for a party`,
+        ),
       }),
   );
 }
@@ -183,43 +196,46 @@ export const contractEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     CONTRACT_READER_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(roleList('CONTRACT_READER_ROLES', { min: 1 })),
 
-    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    ORGANIZATION_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3102'),
 
     CONTRACT_ORGANIZATION_REQUEST_TIMEOUT_MS: z.coerce
       .number()
       .int()
       .min(100)
       .max(60_000)
-      .default(3000),
+      .prefault(3000),
 
     CONTRACT_POLICY_FOUR_EYES: booleanEnv(true),
 
     CONTRACT_CANCEL_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(optionalRoleList('CONTRACT_CANCEL_ROLES')),
 
     CONTRACT_CANCEL_REASON_CODES: z
       .string()
-      .default('TERMS_NOT_AGREED,CONTRACTOR_WITHDREW,AWARD_ERROR,OTHER')
+      .prefault('TERMS_NOT_AGREED,CONTRACTOR_WITHDREW,AWARD_ERROR,OTHER')
       .pipe(
         commaList().pipe(
           z
             .array(
               z
                 .string()
-                .regex(CODE_PATTERN, 'A reason code is upper-case words, 2 to 64 characters'),
+                .regex(
+                  CODE_PATTERN,
+                  fixed('A reason code is upper-case words, 2 to 64 characters'),
+                ),
             )
-            .min(1, 'CONTRACT_CANCEL_REASON_CODES must name at least one reason')
+            .min(1, fixed('CONTRACT_CANCEL_REASON_CODES must name at least one reason'))
             .refine((codes) => new Set(codes).size === codes.length, {
-              message: 'CONTRACT_CANCEL_REASON_CODES names a reason twice',
+              message: fixed('CONTRACT_CANCEL_REASON_CODES names a reason twice'),
             }),
         ),
       ),
@@ -234,24 +250,27 @@ export const contractEnvSchema = baseEnvSchema
     /** Who, in the employer's organization, proposes an amendment (CON-003 PR 3, Q-100). */
     CONTRACT_AMENDMENT_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(optionalRoleList('CONTRACT_AMENDMENT_ROLES')),
 
     /** The closed list of reasons an amendment is proposed for; descriptive codes, no legal meaning. */
     CONTRACT_AMENDMENT_REASON_CODES: z
       .string()
-      .default('SCOPE_CHANGE,PRICE_ADJUSTMENT,SCHEDULE_CHANGE,OTHER')
+      .prefault('SCOPE_CHANGE,PRICE_ADJUSTMENT,SCHEDULE_CHANGE,OTHER')
       .pipe(
         commaList().pipe(
           z
             .array(
               z
                 .string()
-                .regex(CODE_PATTERN, 'A reason code is upper-case words, 2 to 64 characters'),
+                .regex(
+                  CODE_PATTERN,
+                  fixed('A reason code is upper-case words, 2 to 64 characters'),
+                ),
             )
-            .min(1, 'CONTRACT_AMENDMENT_REASON_CODES must name at least one reason')
+            .min(1, fixed('CONTRACT_AMENDMENT_REASON_CODES must name at least one reason'))
             .refine((codes) => new Set(codes).size === codes.length, {
-              message: 'CONTRACT_AMENDMENT_REASON_CODES names a reason twice',
+              message: fixed('CONTRACT_AMENDMENT_REASON_CODES names a reason twice'),
             }),
         ),
       ),
@@ -259,20 +278,25 @@ export const contractEnvSchema = baseEnvSchema
     /** Who, in the employer's organization, plans and edits milestones (CON-003 PR 3, Q-100). */
     CONTRACT_MILESTONE_ROLES: z
       .string()
-      .default('ORGANIZATION_ADMIN')
+      .prefault('ORGANIZATION_ADMIN')
       .pipe(optionalRoleList('CONTRACT_MILESTONE_ROLES')),
 
     /** The most milestones one contract holds: protection of the service, not a business rule. */
-    CONTRACT_MILESTONE_LIMIT: z.coerce.number().int().min(1).max(1000).default(100),
+    CONTRACT_MILESTONE_LIMIT: z.coerce.number().int().min(1).max(1000).prefault(100),
 
-    CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
-    CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce.number().int().min(10).max(900).default(120),
+    CONTRACT_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
+    CONTRACT_IDEMPOTENCY_CLAIM_LEASE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(10)
+      .max(900)
+      .prefault(120),
 
-    CONSTRUCTION_SERVICE_URL: z.string().url().default('http://localhost:3110'),
+    CONSTRUCTION_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3110'),
 
-    CONTRACT_AWARD_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+    CONTRACT_AWARD_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).prefault(5000),
 
-    ECONOMIC_SERVICE_URL: z.string().url().default('http://localhost:3112'),
+    ECONOMIC_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3112'),
 
     // At most half the consumer's session timeout (60 s): one question to economic-service never
     // outlasts the heartbeats around it (review of #343 round 1, F2).
@@ -281,7 +305,7 @@ export const contractEnvSchema = baseEnvSchema
       .int()
       .min(100)
       .max(30_000)
-      .default(5000),
+      .prefault(5000),
     // The settlement reconciliation (#343 r1 F1): how often, and how many APPROVED statements a
     // pass asks economic-service about.
     CONTRACT_SETTLEMENT_RECONCILE_INTERVAL_MS: z.coerce
@@ -289,11 +313,11 @@ export const contractEnvSchema = baseEnvSchema
       .int()
       .min(10_000)
       .max(86_400_000)
-      .default(600_000),
-    CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(50),
+      .prefault(600_000),
+    CONTRACT_SETTLEMENT_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(50),
 
-    CONTRACT_CONSUMER_MAX_RETRIES: z.coerce.number().int().min(1).max(20).default(5),
-    CONTRACT_CONSUMER_RETRY_BACKOFF_MS: z.coerce.number().int().min(10).max(60_000).default(1000),
+    CONTRACT_CONSUMER_MAX_RETRIES: z.coerce.number().int().min(1).max(20).prefault(5),
+    CONTRACT_CONSUMER_RETRY_BACKOFF_MS: z.coerce.number().int().min(10).max(60_000).prefault(1000),
 
     /**
      * D-050: ORGANIZATION_MOVED's instant is the organization service host's clock, the commit
@@ -304,8 +328,11 @@ export const contractEnvSchema = baseEnvSchema
     CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS: z
       .string()
       .trim()
-      .regex(/^\d+(\.\d+)?$/, 'CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS must be a number >= 0')
-      .default('300')
+      .regex(
+        /^\d+(\.\d+)?$/,
+        fixed('CONTRACT_HIERARCHY_CLOCK_SKEW_MARGIN_SECONDS must be a number >= 0'),
+      )
+      .prefault('300')
       .transform(Number)
       .pipe(z.number().finite().max(86_400)),
 
@@ -317,12 +344,19 @@ export const contractEnvSchema = baseEnvSchema
      * conditional — but wasteful). A failed task is retried after `BACKOFF_SECONDS`, doubling to
      * `BACKOFF_MAX_SECONDS`.
      */
-    CONTRACT_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(500).max(300_000).default(5000),
-    CONTRACT_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
-    CONTRACT_RECONCILE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).default(120),
-    CONTRACT_RECONCILE_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).default(30),
-    CONTRACT_RECONCILE_BACKOFF_MAX_SECONDS: z.coerce.number().int().min(1).max(86_400).default(900),
+    CONTRACT_RECONCILE_INTERVAL_MS: z.coerce.number().int().min(500).max(300_000).prefault(5000),
+    CONTRACT_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
+    CONTRACT_RECONCILE_LEASE_SECONDS: z.coerce.number().int().min(10).max(3600).prefault(120),
+    CONTRACT_RECONCILE_BACKOFF_SECONDS: z.coerce.number().int().min(1).max(3600).prefault(30),
+    CONTRACT_RECONCILE_BACKOFF_MAX_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(86_400)
+      .prefault(900),
   });
+
+export const CONTRACT_ENV_MESSAGES = seal();
 
 export type ContractEnv = z.infer<typeof contractEnvSchema>;
 
@@ -346,7 +380,7 @@ export function loadContractEnv(source: NodeJS.ProcessEnv = process.env): Contra
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? `${SERVICE_NAME}.main`,
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: contractOperationBudgets },
+    { operationBudgets: contractOperationBudgets, fixedMessages: CONTRACT_ENV_MESSAGES },
   );
 }
 

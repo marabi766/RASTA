@@ -1,4 +1,5 @@
 import { RastaError } from '@rasta/nest-common';
+import { expectNotDisclosed } from '@rasta/testing';
 import { ulid } from 'ulid';
 import {
   HIERARCHY_LOCK_KEY,
@@ -616,10 +617,11 @@ describe('organization hierarchy integrity', () => {
         hasPhone: false,
       });
 
-      const serialized = JSON.stringify(rows.map((outbox) => outbox.payload));
-      expect(serialized).not.toContain('09120000009');
-      expect(serialized).not.toContain('finance@example.test');
-      expect(serialized).not.toContain('امور مالی');
+      // No independently verified path exemption: generated values stay searched (#452).
+      expectNotDisclosed(
+        rows.map((outbox) => outbox.payload),
+        ['09120000009', 'finance@example.test', 'امور مالی'],
+      );
     });
   });
 

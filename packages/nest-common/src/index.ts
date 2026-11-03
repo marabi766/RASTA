@@ -28,6 +28,7 @@ export {
   RETRY_AFTER_MAX_SECONDS,
   RETRY_AFTER_MIN_SECONDS,
 } from './errors/rasta-error';
+export type { LedgerUnbalancedReason } from './errors/rasta-error';
 export { safeLogText } from './errors/safe-log-text';
 
 // Decorators -----------------------------------------------------------------
@@ -52,8 +53,18 @@ export {
 } from './decorators';
 
 // Authentication -------------------------------------------------------------
-export { TokenVerifier, InternalTokenService } from './auth/token-verifier';
+export { TokenVerifier } from './auth/token-verifier';
 export { internalGet } from './auth/internal-get';
+export { RedirectRefusedError, internalFetch } from './http/internal-fetch';
+export {
+  ExchangeCancelledError,
+  ExchangeDeadlineError,
+  exchangeWithDeadline,
+  upstreamExchange,
+} from './http/exchange-deadline';
+export type { ExchangeOptions } from './http/exchange-deadline';
+export { InternalHttpClient, InternalTokenService } from './http/internal-http-client';
+export type { InternalGrant, InternalSender } from './http/internal-http-client';
 export {
   currentActor,
   compareActors,
@@ -89,6 +100,12 @@ export type {
 } from './guards/auth.guard';
 
 export { RolesGuard } from './guards/roles.guard';
+export {
+  OVERSIGHT_ROLE,
+  SUPER_ROLE,
+  assertRolesAdmitted,
+  type RoleAdmission,
+} from './guards/role-admission';
 
 // Request pipeline -----------------------------------------------------------
 export {
@@ -123,12 +140,14 @@ export {
   ZodValidationPipe,
   zodPipe,
   toErrorDetails,
+  validateRequestInput,
   formatPath,
 } from './pipes/zod-validation.pipe';
 
 // Tenancy --------------------------------------------------------------------
 export {
   createTenantGuardExtension,
+  runWithNestedTenantWrite,
   runUnscoped,
   isUnscoped,
   currentUnscopedReason,
@@ -170,6 +189,9 @@ export {
   ConsumerStoppingError,
   UnprocessableEventError,
   deadLetterHeaders,
+  DeadLetterHeaderError,
+  DLQ_ADDED_HEADERS_MAX_BYTES,
+  utf8Prefix,
   HANDLER_MESSAGE_MAX,
   CONSUMER_SESSION_TIMEOUT_MS,
   DEFAULT_MAX_RETRIES,
@@ -207,9 +229,26 @@ export {
   RENEWAL_TRANSACTION_MARGIN_MS,
   outboxRenewalOperationBudget,
   withinDeadline,
+  buildRestoredOutboxRow,
 } from './outbox/outbox';
+// Provenance across a durable queue (PR #483 r3). `restoreOutboxProvenance` and
+// `buildRestoredOutboxRow` are the registration intake's only: the restoration
+// guard (scripts/outbox-provenance-restoration-guard.test.mjs) fails on any
+// other file that names them.
+export {
+  captureOutboxProvenance,
+  isOutboxProvenance,
+  persistedOutboxProvenance,
+  restoreOutboxProvenance,
+} from './outbox/outbox-provenance';
+export type {
+  OutboxActor,
+  OutboxProvenance,
+  PersistedOutboxProvenance,
+} from './outbox/outbox-provenance';
 export type {
   OutboxMessageInput,
+  RestoredOutboxMessageInput,
   OutboxRow,
   OutboxStore,
   EventPublisher,
@@ -275,6 +314,7 @@ export type {
 export {
   CONNECTED_ROLE_SQL,
   RuntimeRoleRefusedError,
+  RuntimeRoleUnverifiedError,
   assertDemoSeedRuntimeRole,
   assertRuntimeRole,
   connectedRoleProblems,
@@ -286,3 +326,37 @@ export type {
   RuntimeRolePreflightClient,
   RuntimeRoleQueryClient,
 } from './database/runtime-role';
+
+// OpenAPI --------------------------------------------------------------------
+export {
+  toJsonSchema,
+  codePointLength,
+  isOptionalField,
+  objectShapeOf,
+} from './openapi/zod-schema';
+export type { JsonSchema } from './openapi/zod-schema';
+export { publishedApiErrorSchema, publishedErrorDetailSchema } from './openapi/api-error';
+// Conformance checks of a published document against the real error bodies; for tests.
+export {
+  errorEnvelopeProblems,
+  httpErrorBodyProblems,
+  publishedErrorResponses,
+  publishedPathOf,
+  publishedResponseSchemaOf,
+  realFilterResponse,
+  validatePublishedBody,
+  PROBE_CONTEXTS,
+  PROBE_TRACEPARENT,
+} from './openapi/published-body';
+export type {
+  EnvelopeOptions,
+  ProbeContext,
+  PublishedDocument,
+  PublishedErrorResponse,
+  PublishedSchema,
+} from './openapi/published-body';
+
+export { clientFailureCode } from './database/client-failure';
+export { DatabaseConnectionError, createSafePrismaClient } from './database/safe-prisma-client';
+export type { RuntimeDatabaseSetting } from './database/safe-prisma-client';
+export { assertConsumerHealth, consumerFailures } from './consumer/consumer-health';

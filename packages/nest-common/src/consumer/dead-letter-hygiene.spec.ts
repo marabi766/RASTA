@@ -1,4 +1,4 @@
-import type { IHeaders } from 'kafkajs';
+import { CompressionTypes, type IHeaders } from 'kafkajs';
 import { DLQ_HEADERS, DLQ_REASONS, EVENT_HEADERS } from '@rasta/contracts';
 import { dlqMessagesTotal } from '@rasta/observability';
 import {
@@ -30,7 +30,13 @@ const SENTINEL = 'SENTINEL-3b7d-bearer-token';
 
 interface SentRecord {
   topic: string;
-  messages: { value: Buffer | null; headers: Record<string, unknown> }[];
+  acks?: number;
+  compression?: CompressionTypes;
+  messages: {
+    key?: Buffer | string | null;
+    value: Buffer | null;
+    headers: Record<string, unknown>;
+  }[];
 }
 
 class FakeDlqProducer {
@@ -49,6 +55,7 @@ interface PrivateHandle {
     value: Buffer | null,
     headers: IHeaders | undefined,
     offset?: string,
+    key?: Buffer | null,
   ): Promise<void>;
 }
 
@@ -196,6 +203,45 @@ describe('dead-letter headers: the platform’s own only (F3)', () => {
     const kept = forwardedHeaders({ ...PLATFORM_HEADERS, ...FOREIGN_HEADERS });
     expect(Object.keys(kept).sort()).toEqual(Object.values(EVENT_HEADERS).sort());
     expect(forwardedHeaders(undefined)).toEqual({});
+  });
+});
+
+describe('dead letters are sent GZIP-compressed, bytes and key unchanged (PR #378 r1 F2)', () => {
+  // The broker admitted the original compressed; the consumer holds its
+  // decompressed bytes. Sent uncompressed, a dead letter can exceed the size
+  // limit the original passed, and nothing is committed past a failed send.
+  const KEY = Buffer.from('AST_HYGIENE_1');
+
+  it.each([
+    [
+      'a handler refusal',
+      async (): Promise<never> => {
+        throw new UnprocessableEventError(DLQ_REASONS.VALIDATION_FAILED, 'bad payload');
+      },
+      BODY,
+    ],
+    [
+      'exhausted retries',
+      async (): Promise<never> => {
+        throw new Error('database unavailable');
+      },
+      BODY,
+    ],
+    ['an unparseable body', async (): Promise<void> => undefined, Buffer.from('not json')],
+  ] as const)('on %s', async (_, handler: EventHandler, body) => {
+    const { handle, dlq } = build(handler);
+
+    await handle.handleMessage('rasta.asset.v1', 1, body, PLATFORM_HEADERS, '5', KEY);
+
+    expect(dlq.sent).toHaveLength(1);
+    expect(dlq.sent[0]).toMatchObject({
+      topic: 'rasta.asset.v1.dlq',
+      acks: -1,
+      compression: CompressionTypes.GZIP,
+    });
+    const { key, value } = dlq.sent[0]?.messages[0] ?? {};
+    expect(value).toEqual(body);
+    expect(key).toEqual(KEY);
   });
 });
 

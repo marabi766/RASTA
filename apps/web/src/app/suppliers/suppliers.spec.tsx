@@ -12,13 +12,19 @@ import {
 
 import { SuppliersScreen } from './SuppliersScreen';
 import { SupplierDetailScreen } from './[id]/SupplierDetailScreen';
+import { TEST_CONTEXT } from '@/test/page-context';
+import { withContext } from '@/lib/page-context';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_OWNER');
 
 /**
  * What `/suppliers` and `/suppliers/[id]` render: every outcome the server
  * read can hand back (empty, permission, degraded, absent), the directory's
  * catalogue-safe fields, and the private record's qualification and
- * suspension history — with no actor id and no raw evidence document id
- * anywhere in the rendered text.
+ * suspension history — with no actor id anywhere in the rendered text and each
+ * evidence document by its id and label only, as the API returns it.
  */
 
 // A plain anchor: `next/link` prefetches through an intersection observer whose
@@ -51,7 +57,7 @@ const SUPPLIER: SupplierSummary = {
 const SUSPENDED_SUPPLIER: SupplierSummary = {
   ...SUPPLIER,
   id: 'SUP_2',
-  displayName: 'تأمین‌کنندهٔ تعلیق‌شده',
+  displayName: 'تأمین‌کننده‌ی تعلیق‌شده',
   status: 'SUSPENDED',
   qualifiedFor: [],
 };
@@ -67,6 +73,8 @@ const DETAIL: SupplierDetail = {
       submittedAt: '2026-08-02T08:00:00.000Z',
       decidedAt: '2026-08-03T08:00:00.000Z',
       decisionNote: 'مستندات کامل بود',
+      rejectionReason: null,
+      evidence: [{ documentId: 'DOC_1', label: 'پروانه کسب' }],
       evidenceCount: 1,
       current: true,
     },
@@ -93,7 +101,7 @@ const page = (
 
 describe('the supplier directory', () => {
   it('shows each supplier with a status word, its categories and a link to it', () => {
-    render(<SuppliersScreen result={page([SUPPLIER])} query={{}} />);
+    render(<SuppliersScreen result={page([SUPPLIER])} query={{ context: TEST_CONTEXT }} />);
 
     expect(screen.getByRole('link', { name: SUPPLIER.displayName })).toHaveAttribute(
       'href',
@@ -105,7 +113,9 @@ describe('the supplier directory', () => {
   });
 
   it('says a suspended supplier has no active qualification, without hiding the categories it claims', () => {
-    render(<SuppliersScreen result={page([SUSPENDED_SUPPLIER])} query={{}} />);
+    render(
+      <SuppliersScreen result={page([SUSPENDED_SUPPLIER])} query={{ context: TEST_CONTEXT }} />,
+    );
 
     expect(screen.getByText('در حال حاضر برای هیچ دسته‌ای صلاحیت فعال ندارد')).toBeInTheDocument();
     expect(screen.getAllByText('خدمات تعمیرگاهی').length).toBeGreaterThan(0);
@@ -115,7 +125,7 @@ describe('the supplier directory', () => {
     render(
       <SuppliersScreen
         result={page([SUPPLIER], 'c2')}
-        query={{ status: 'ACTIVE', capability: 'WORKSHOP_SERVICE' }}
+        query={{ context: TEST_CONTEXT, status: 'ACTIVE', capability: 'WORKSHOP_SERVICE' }}
       />,
     );
 
@@ -124,22 +134,26 @@ describe('the supplier directory', () => {
       'aria-current',
       'page',
     );
-    expect(screen.getByRole('link', { name: 'صفحهٔ بعد' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'صفحه‌ی بعد' })).toHaveAttribute(
       'href',
-      '/suppliers?status=ACTIVE&capability=WORKSHOP_SERVICE&cursor=c2',
+      withContext(TEST_CONTEXT, '/suppliers?status=ACTIVE&capability=WORKSHOP_SERVICE&cursor=c2'),
     );
   });
 
   it('says so when there are none, with and without a filter', () => {
-    const { rerender } = render(<SuppliersScreen result={page([])} query={{}} />);
+    const { rerender } = render(
+      <SuppliersScreen result={page([])} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(screen.getByText('هنوز تأمین‌کننده‌ای در این فهرست نیست.')).toBeInTheDocument();
 
-    rerender(<SuppliersScreen result={page([])} query={{ status: 'SUSPENDED' }} />);
+    rerender(
+      <SuppliersScreen result={page([])} query={{ context: TEST_CONTEXT, status: 'SUSPENDED' }} />,
+    );
     expect(screen.getByText('تأمین‌کننده‌ای با این فیلتر یافت نشد.')).toBeInTheDocument();
   });
 
   it('renders a refusal as no access', () => {
-    render(<SuppliersScreen result={{ kind: 'FORBIDDEN' }} query={{}} />);
+    render(<SuppliersScreen result={{ kind: 'FORBIDDEN' }} query={{ context: TEST_CONTEXT }} />);
     expect(screen.getByText('فهرست تأمین‌کنندگان در اختیار شما نیست.')).toBeInTheDocument();
   });
 
@@ -149,7 +163,7 @@ describe('the supplier directory', () => {
   ] as const)(
     'renders a degraded read ($kind) with the correlation id and fixed text',
     (result) => {
-      render(<SuppliersScreen result={result} query={{}} />);
+      render(<SuppliersScreen result={result} query={{ context: TEST_CONTEXT }} />);
       expect(screen.getByText(/فهرست تأمین‌کنندگان خوانده نشد/)).toBeInTheDocument();
       expect(screen.getByText(/corr-1/)).toBeInTheDocument();
     },
@@ -166,7 +180,9 @@ describe('the supplier directory', () => {
     ['unavailable', { kind: 'UNAVAILABLE', status: 503, correlationId: 'corr-1' }],
     ['malformed', { kind: 'MALFORMED', correlationId: 'corr-1' }],
   ])('has no accessibility violations (%s)', async (_name, result) => {
-    const { container } = render(<SuppliersScreen result={result} query={{}} />);
+    const { container } = render(
+      <SuppliersScreen result={result} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 });
@@ -179,7 +195,9 @@ describe('the supplier detail', () => {
     expect(screen.getByText('تأییدشده')).toBeInTheDocument();
     expect(screen.getByText('در حال حاضر معتبر')).toBeInTheDocument();
     expect(screen.getByText('مجهز به دستگاه بالانس')).toBeInTheDocument();
-    expect(screen.getByText('یادداشت بازبین: مستندات کامل بود')).toBeInTheDocument();
+    expect(
+      screen.getByText('یادداشت خصوصی بازبین (فقط بازبینان پلتفرم می‌بینند): مستندات کامل بود'),
+    ).toBeInTheDocument();
     expect(screen.getByText(/۱ سند پیوست‌شده/)).toBeInTheDocument();
     expect(screen.getByText('شکایت تکراری مشتریان')).toBeInTheDocument();
     expect(screen.getByText('باز')).toBeInTheDocument();
@@ -235,7 +253,7 @@ describe('the supplier detail', () => {
         result={{ kind: 'UNAVAILABLE', status: 502, correlationId: 'corr-9' }}
       />,
     );
-    expect(screen.getByText(/پروندهٔ تأمین‌کننده خوانده نشد/)).toBeInTheDocument();
+    expect(screen.getByText(/پرونده‌ی تأمین‌کننده خوانده نشد/)).toBeInTheDocument();
     expect(screen.getByText(/corr-9/)).toBeInTheDocument();
   });
 
@@ -281,7 +299,7 @@ describe('a malformed timestamp, from the response to the page', () => {
     subject: 'USR_1',
     username: 'owner',
     organizationId: 'ORG_OWNER',
-    accessToken: 'access-token-value',
+    accessToken: ACCESS_TOKEN_VALUE,
     accessTokenExpiresAt: 2_000_000_000,
     refreshToken: 'refresh-token-value',
     csrfToken: 'csrf',
@@ -295,7 +313,7 @@ describe('a malformed timestamp, from the response to the page', () => {
     });
     const result = await fetchSuppliers(session);
 
-    render(<SuppliersScreen result={result} query={{}} />);
+    render(<SuppliersScreen result={result} query={{ context: TEST_CONTEXT }} />);
     expect(screen.getByText(/فهرست تأمین‌کنندگان خوانده نشد/)).toBeInTheDocument();
     expect(screen.getByText(/corr-list/)).toBeInTheDocument();
   });
@@ -312,7 +330,7 @@ describe('a malformed timestamp, from the response to the page', () => {
     const result = await fetchSupplier(session, 'SUP_1');
 
     render(<SupplierDetailScreen result={result} />);
-    expect(screen.getByText(/پروندهٔ تأمین‌کننده خوانده نشد/)).toBeInTheDocument();
+    expect(screen.getByText(/پرونده‌ی تأمین‌کننده خوانده نشد/)).toBeInTheDocument();
     expect(screen.getByText(/corr-detail/)).toBeInTheDocument();
   });
 
@@ -357,7 +375,7 @@ describe('a missing required field, from the response to the page', () => {
     subject: 'USR_1',
     username: 'owner',
     organizationId: 'ORG_OWNER',
-    accessToken: 'access-token-value',
+    accessToken: ACCESS_TOKEN_VALUE,
     accessTokenExpiresAt: 2_000_000_000,
     refreshToken: 'refresh-token-value',
     csrfToken: 'csrf',
@@ -375,6 +393,7 @@ describe('a missing required field, from the response to the page', () => {
     decidedBy: 'USR_A',
     decidedAt: '2026-08-03T08:00:00.000Z',
     decisionNote: 'مستندات کامل بود',
+    rejectionReason: null,
     evidence: [{ documentId: 'DOC_1', label: null }],
     current: true,
   };
@@ -425,7 +444,7 @@ describe('a missing required field, from the response to the page', () => {
     'shows the fixed detail text, and no invented fact, when %s is missing',
     async (_f, data, fact) => {
       const { container } = await renderDetail(data);
-      expect(screen.getByText(/پروندهٔ تأمین‌کننده خوانده نشد/)).toBeInTheDocument();
+      expect(screen.getByText(/پرونده‌ی تأمین‌کننده خوانده نشد/)).toBeInTheDocument();
       expect(screen.getByText(/corr-omit/)).toBeInTheDocument();
       expect(container.textContent).not.toContain(fact);
     },
@@ -442,12 +461,14 @@ describe('a missing required field, from the response to the page', () => {
     mockCallGateway.mockResolvedValue({ data, correlationId: 'corr-omit-list' });
     const result = await fetchSuppliers(session);
 
-    const { container } = render(<SuppliersScreen result={result} query={{}} />);
+    const { container } = render(
+      <SuppliersScreen result={result} query={{ context: TEST_CONTEXT }} />,
+    );
     expect(screen.getByText(/فهرست تأمین‌کنندگان خوانده نشد/)).toBeInTheDocument();
     expect(screen.getByText(/corr-omit-list/)).toBeInTheDocument();
     expect(container.textContent).not.toContain(SUPPLIER.displayName);
     expect(container.textContent).not.toContain('در حال حاضر برای هیچ دسته‌ای صلاحیت فعال ندارد');
-    expect(screen.queryByRole('link', { name: 'صفحهٔ بعد' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'صفحه‌ی بعد' })).not.toBeInTheDocument();
   });
 
   it('renders the same record, complete, as the facts it states', async () => {

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime } from './iso-datetime';
 
 /**
  * Platform-wide error model.
@@ -43,6 +44,12 @@ export const ERROR_CODES = {
   CONFLICT: 'CONFLICT',
   /** Same idempotency key, different request body. */
   IDEMPOTENCY_KEY_REUSED: 'IDEMPOTENCY_KEY_REUSED',
+  /**
+   * The caller said (`Idempotency-Replay-Deadline`) until when this request may still be executed
+   * under its key, and the service's own clock is past it. Refused before any write: THIS attempt
+   * did nothing; an earlier attempt under the same key may have (PM decision D-065).
+   */
+  REPLAY_WINDOW_CLOSED: 'REPLAY_WINDOW_CLOSED',
   /** The aggregate is not in a state that permits this transition. */
   INVALID_STATE_TRANSITION: 'INVALID_STATE_TRANSITION',
   OPTIMISTIC_LOCK_FAILED: 'OPTIMISTIC_LOCK_FAILED',
@@ -60,6 +67,21 @@ export const ERROR_CODES = {
   BUSINESS_RULE_VIOLATION: 'BUSINESS_RULE_VIOLATION',
   INSUFFICIENT_BALANCE: 'INSUFFICIENT_BALANCE',
   LEDGER_UNBALANCED: 'LEDGER_UNBALANCED',
+  /**
+   * A settlement refused because no active commission rule covers the
+   * transaction's business line (docs/24 Q-29). Nothing moved; the funds stay
+   * where they were, and the same settlement succeeds once a rule — a 0% one
+   * included (Q-08) — is in force for the line.
+   */
+  NO_ACTIVE_RULE: 'NO_ACTIVE_RULE',
+  /**
+   * A new obligation recorded without a business line while settlement fails
+   * closed (docs/24 Q-29): no rule could ever price it, so it would settle
+   * with nothing charged. Nothing was recorded; send the line. Only the source
+   * flows named in economic-service's `recorded-sources.ts` record without
+   * one, identified by their verified caller (docs/24 Q-130).
+   */
+  BUSINESS_LINE_REQUIRED: 'BUSINESS_LINE_REQUIRED',
 
   // 429
   RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
@@ -67,6 +89,26 @@ export const ERROR_CODES = {
   // 5xx
   INTERNAL_ERROR: 'INTERNAL_ERROR',
   UPSTREAM_UNAVAILABLE: 'UPSTREAM_UNAVAILABLE',
+  /**
+   * A change that takes access away — a role removed, a membership revoked
+   * or lapsed — was refused because the identity provider could not be
+   * written first (ADR-060, write-ahead addendum, D-064). Nothing was
+   * committed: the roles or the membership are exactly as they were, and no
+   * event was emitted. The same request may be sent again; once it succeeds
+   * it is idempotent. Never says what the provider answered.
+   */
+  KEYCLOAK_UNAVAILABLE: 'KEYCLOAK_UNAVAILABLE',
+  /**
+   * A change that takes access away from one user was refused, before
+   * anything was sent, because an earlier identity-provider write of that
+   * same user may still land and could overtake it (D-069). The provider may
+   * be healthy: this concerns one user, for at most the `Retry-After` it
+   * carries. Nothing was committed and no event was emitted; the same request
+   * may be sent again after that. Only ever answered to a caller already
+   * authorized for the change. Not a service outage: the gateway does not
+   * count it towards identity's circuit (ADR-060, D-069).
+   */
+  KEYCLOAK_WRITE_SETTLING: 'KEYCLOAK_WRITE_SETTLING',
   UPSTREAM_TIMEOUT: 'UPSTREAM_TIMEOUT',
   NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
 } as const;
@@ -95,7 +137,7 @@ export const apiErrorSchema = z.object({
   correlationId: z.string(),
   /** W3C trace id, for jumping straight to the trace. */
   traceId: z.string().optional(),
-  timestamp: z.string().datetime(),
+  timestamp: z.string().check(isoDateTime()),
   path: z.string().optional(),
 });
 
@@ -118,6 +160,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   ALREADY_EXISTS: 409,
   CONFLICT: 409,
   IDEMPOTENCY_KEY_REUSED: 409,
+  REPLAY_WINDOW_CLOSED: 409,
   INVALID_STATE_TRANSITION: 409,
   OPTIMISTIC_LOCK_FAILED: 409,
   ACTOR_IDENTITY_UNKNOWN: 422,
@@ -125,9 +168,13 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   BUSINESS_RULE_VIOLATION: 422,
   INSUFFICIENT_BALANCE: 422,
   LEDGER_UNBALANCED: 422,
+  NO_ACTIVE_RULE: 422,
+  BUSINESS_LINE_REQUIRED: 422,
   RATE_LIMIT_EXCEEDED: 429,
   INTERNAL_ERROR: 500,
   UPSTREAM_UNAVAILABLE: 503,
+  KEYCLOAK_UNAVAILABLE: 503,
+  KEYCLOAK_WRITE_SETTLING: 503,
   UPSTREAM_TIMEOUT: 504,
   NOT_IMPLEMENTED: 501,
 };

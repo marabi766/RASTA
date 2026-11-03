@@ -295,3 +295,6 @@ export const ORDER_LIST_ROLE_LABELS: Readonly<Record<OrderListRole, string>> = {
   BUYER: 'سفارش‌هایی که ثبت کرده‌ایم',
   SUPPLIER: 'سفارش‌هایی که به ما داده شده',
 };
+
+/** The flash a placed order leaves on its detail page (`server/flash.ts`); a command leaves its own name. */
+export const ORDER_PLACED = 'PLACED';

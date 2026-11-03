@@ -1,8 +1,12 @@
 /**
  * @jest-environment node
  */
-import { activeMembership, displayName, fetchCurrentUser } from './identity';
+import { displayName, fetchCurrentUser, membershipIn } from './identity';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG_1');
 
 /**
  * What the portal keeps from identity-service, and what it drops.
@@ -17,7 +21,7 @@ const SESSION: WebSession = {
   subject: 'USR_1',
   username: 'dehyar',
   organizationId: 'ORG_1',
-  accessToken: 'access-token-value',
+  accessToken: ACCESS_TOKEN_VALUE,
   accessTokenExpiresAt: 2_000_000_000,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf',
@@ -108,10 +112,15 @@ describe('small presentation decisions', () => {
   });
 
   it('finds the membership for the organization being acted in', () => {
-    expect(activeMembership({ ...IDENTITY_ANSWER } as never)?.organizationId).toBe('ORG_1');
-    expect(
-      activeMembership({ ...IDENTITY_ANSWER, activeOrganizationId: 'ORG_OTHER' } as never),
-    ).toBeUndefined();
+    expect(membershipIn({ ...IDENTITY_ANSWER } as never, 'ORG_1')?.organizationId).toBe('ORG_1');
+    expect(membershipIn({ ...IDENTITY_ANSWER } as never, 'ORG_OTHER')).toBeUndefined();
+    expect(membershipIn({ ...IDENTITY_ANSWER } as never, null)).toBeUndefined();
+  });
+
+  it("is the token's organization, not identity's active one (task 100)", () => {
+    // A switch made elsewhere moves `activeOrganizationId` before the token follows.
+    const switched = { ...IDENTITY_ANSWER, activeOrganizationId: 'ORG_OTHER' } as never;
+    expect(membershipIn(switched, 'ORG_1')?.organizationId).toBe('ORG_1');
   });
 });
 

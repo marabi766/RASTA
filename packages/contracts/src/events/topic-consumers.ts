@@ -22,6 +22,10 @@ import {
  * The keys are the consuming services' `SERVICE_NAME`, which is also their
  * broker principal (`User:<service>`). Per service:
  *
+ *   - `groups`: fixed production group names used by generic lag monitoring. An
+ *     enabled instance exports an expectation only for one of these groups;
+ *     ephemeral test groups and configured aliases cannot silently opt in.
+ *     This list does not change the broker's service-namespace ACLs below.
  *   - `subscribes`: every topic any of its consumer groups reads. Kafka grants
  *     READ on a topic to a principal, not to a group, so the service is the
  *     unit here, not the group.
@@ -45,10 +49,12 @@ const EVERY_DECLARED_TOPIC = Object.freeze(Object.keys(TOPIC_PRODUCERS) as Decla
 
 export const TOPIC_CONSUMERS = Object.freeze({
   'identity-service': Object.freeze({
+    groups: Object.freeze(['identity-service.keycloak-projection'] as const),
     subscribes: Object.freeze(['rasta.identity.v1'] as const),
     deadLetterTopic: 'rasta.identity.v1.dlq',
   }),
   'asset-service': Object.freeze({
+    groups: Object.freeze(['asset-service.timeline', 'asset-service.document-removal'] as const),
     subscribes: Object.freeze([
       'rasta.fleet.v1',
       'rasta.maintenance.v1',
@@ -61,6 +67,7 @@ export const TOPIC_CONSUMERS = Object.freeze({
     deadLetterTopic: 'rasta.asset.v1.dlq',
   }),
   'fleet-service': Object.freeze({
+    groups: Object.freeze(['fleet-service.asset-sync'] as const),
     subscribes: Object.freeze([
       'rasta.asset.v1',
       'rasta.insurance.v1',
@@ -69,12 +76,18 @@ export const TOPIC_CONSUMERS = Object.freeze({
     deadLetterTopic: 'rasta.fleet.v1.dlq',
   }),
   'maintenance-service': Object.freeze({
+    groups: Object.freeze(['maintenance-service.usage', 'maintenance-service.asset-sync'] as const),
     subscribes: Object.freeze(['rasta.fleet.v1', 'rasta.asset.v1'] as const),
     deadLetterTopic: 'rasta.maintenance.v1.dlq',
   }),
   // CON-003 PR 6b (ADR-068 § 6): STATEMENT_APPROVED, as a trigger only — the statement, and its
   // amount, which is on no event, are asked of contract-service before any obligation (A-13).
   'economic-service': Object.freeze({
+    groups: Object.freeze([
+      'economic-service.settlement-authority',
+      'economic-service.statement-settlement',
+      'economic-service.reward-trigger',
+    ] as const),
     subscribes: Object.freeze([
       'rasta.maintenance.v1',
       'rasta.fleet.v1',
@@ -83,6 +96,7 @@ export const TOPIC_CONSUMERS = Object.freeze({
     deadLetterTopic: 'rasta.economic.v1.dlq',
   }),
   'notification-service': Object.freeze({
+    groups: Object.freeze(['notification-service.dispatcher'] as const),
     subscribes: Object.freeze(['rasta.insurance.v1', 'rasta.maintenance.v1'] as const),
     deadLetterTopic: 'rasta.notification.v1.dlq',
   }),
@@ -93,6 +107,10 @@ export const TOPIC_CONSUMERS = Object.freeze({
   // that left the union's subtree. Reads only ORGANIZATION_MOVED, as a trigger:
   // the answer is asked of organization-service on every delivery.
   'construction-service': Object.freeze({
+    groups: Object.freeze([
+      'construction-service.organization-moves',
+      'construction-service.supplier-standing',
+    ] as const),
     subscribes: Object.freeze(['rasta.organization.v1', 'rasta.supplier.v1'] as const),
     deadLetterTopic: 'rasta.construction.v1.dlq',
   }),
@@ -105,6 +123,11 @@ export const TOPIC_CONSUMERS = Object.freeze({
   // And SETTLEMENT_COMPLETED (CON-003 PR 6c, ADR-068 § 6 (3)), as a trigger only: a statement is
   // SETTLED only once economic-service itself confirms its obligation settled in full (I5, A-13).
   'contract-service': Object.freeze({
+    groups: Object.freeze([
+      'contract-service.organization-moves',
+      'contract-service.tender-awarded',
+      'contract-service.settlement-completed',
+    ] as const),
     subscribes: Object.freeze([
       'rasta.construction.v1',
       'rasta.organization.v1',
@@ -117,14 +140,22 @@ export const TOPIC_CONSUMERS = Object.freeze({
   // claim about goods that is checked against the request before anything is written; it
   // creates no money effect (ADR-061 § 4 needs no source read) and asks for none.
   'marketplace-service': Object.freeze({
+    groups: Object.freeze(['marketplace-service.return-mirror'] as const),
     subscribes: Object.freeze(['rasta.inventory.v1'] as const),
     deadLetterTopic: 'rasta.marketplace.v1.dlq',
   }),
   'supplier-service': Object.freeze({
+    groups: Object.freeze(['supplier-service.performance'] as const),
     subscribes: Object.freeze(['rasta.marketplace.v1'] as const),
     deadLetterTopic: 'rasta.supplier.v1.dlq',
   }),
   'audit-service': Object.freeze({
+    groups: Object.freeze([
+      'audit-service.domain-projector',
+      'audit-service.trail',
+      'audit-service.ops-replay',
+      'audit-service.tender-evidence',
+    ] as const),
     subscribes: EVERY_DECLARED_TOPIC,
     deadLetterTopic: 'rasta.audit.v1.dlq',
   }),
@@ -132,6 +163,7 @@ export const TOPIC_CONSUMERS = Object.freeze({
   // database. PR 1 reads MAINTENANCE_COMPLETED into `fact_maintenance`; each later projection
   // adds its topic here when it lands (ADR-071 § 3), never before.
   'analytics-service': Object.freeze({
+    groups: Object.freeze(['analytics-service.maintenance-facts'] as const),
     subscribes: Object.freeze(['rasta.maintenance.v1'] as const),
     deadLetterTopic: 'rasta.analytics.v1.dlq',
   }),
@@ -146,7 +178,7 @@ const BY_SERVICE: Readonly<
   Record<string, { subscribes: readonly string[]; deadLetterTopic: string }>
 > = TOPIC_CONSUMERS;
 
-export function isDeclaredConsumer(service: string): boolean {
+export function isDeclaredConsumer(service: string): service is DeclaredConsumer {
   return Object.prototype.hasOwnProperty.call(BY_SERVICE, service);
 }
 
@@ -171,12 +203,16 @@ export function consumerDeclarationProblem(
   service: string,
   consumer: { groupId: string; topics: readonly string[]; deadLetterTopic?: string },
 ): string | undefined {
+  // The texts name a service only once it is a declared one, and never the
+  // group: a consumer's principal and group can come from the environment
+  // (SERVICE_NAME, KAFKA_CONSUMER_GROUP), and these reach the boot log through
+  // EventConsumer's refusal (#385 r4). Topics are the caller's constants.
   const declared = BY_SERVICE[service];
   if (!isDeclaredConsumer(service) || declared === undefined) {
-    return `${service} is not declared in TOPIC_CONSUMERS`;
+    return "the consumer's service is not declared in TOPIC_CONSUMERS";
   }
   if (consumerGroupService(consumer.groupId) !== service) {
-    return `group ${consumer.groupId} is outside ${service}'s namespace (${service}${CONSUMER_GROUP_SEPARATOR}…)`;
+    return `the consumer group is outside ${service}'s namespace (${service}${CONSUMER_GROUP_SEPARATOR}…)`;
   }
   // A topic's `.retry` twin is read under the same declaration: it carries
   // replays of the same stream (docs/runbooks/replay-dlq.md).

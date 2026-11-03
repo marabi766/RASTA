@@ -10,6 +10,10 @@ import {
 } from './place-order';
 import { EMPTY_PLACE_ORDER_FORM } from '@/lib/place-order-fields';
 import type { WebSession } from './session';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * Placing an order: the form into the body the service accepts, and every way
@@ -27,7 +31,7 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-const SESSION = { accessToken: 'access-token-value' } as WebSession;
+const SESSION = { accessToken: ACCESS_TOKEN_VALUE, organizationId: 'ORG-DEH-0001' } as WebSession;
 const SUBMISSION = 'sub_AAAAAAAAAAAAAAAAAAAA';
 
 function form(fields: Record<string, string>): FormData {
@@ -79,6 +83,18 @@ describe('parsing the form', () => {
       ok: true,
       request: { lines: [{ offerId: 'OFR_1', quantity: 3 }] },
     });
+  });
+
+  it('never sends an order note: marketplace-service refuses any non-empty one (Q-110)', () => {
+    const parsed = parsePlaceOrderForm({
+      ...values({ offerId: 'OFR_1', quantity: '3' }),
+      note: 'x',
+    } as never);
+    expect(parsed).toEqual({
+      ok: true,
+      request: { lines: [{ offerId: 'OFR_1', quantity: 3 }] },
+    });
+    expect(JSON.stringify(parsed)).not.toContain('note');
   });
 
   it.each(['OFR_‮1', 'OFR_‏1', 'OFR_\u00001', 'OFR_\n1'])(

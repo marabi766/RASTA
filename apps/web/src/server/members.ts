@@ -1,5 +1,7 @@
 import { z } from 'zod';
+import { legacyParse } from '@rasta/contracts';
 
+import { firstIssuePerField } from '@/lib/form-issues';
 import { normalizePersianText } from '@/lib/format';
 import type {
   RevokeMembershipField,
@@ -9,6 +11,7 @@ import type {
 } from '@/lib/organization-fields';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential } from './session-organization';
 import { webServerEnv } from './env';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
@@ -37,20 +40,20 @@ import { writeThroughGateway, type FieldMapping, type WriteResult } from './writ
 const memberSchema = z.object({
   id: z.string(),
   /** Null only for a row whose membership vanished between two queries. */
-  membershipId: z.string().nullable().default(null),
+  membershipId: z.string().nullable().prefault(null),
   username: z.string(),
-  firstName: z.string().default(''),
-  lastName: z.string().default(''),
+  firstName: z.string().prefault(''),
+  lastName: z.string().prefault(''),
   status: z.string(),
-  roles: z.array(z.string()).default([]),
+  roles: z.array(z.string()).prefault([]),
 });
 
 export type Member = z.infer<typeof memberSchema>;
 
 const memberPageSchema = z.object({
   items: z.array(memberSchema),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 export type MemberPage = z.infer<typeof memberPageSchema>;
@@ -61,13 +64,15 @@ export interface MemberListQuery {
   readonly q?: string;
   readonly role?: string;
   readonly cursor?: string;
+  /** Rows per page; {@link MEMBERS_PER_PAGE} unless a caller reads every page. */
+  readonly limit?: number;
 }
 
 export async function fetchMembers(
   session: WebSession,
   query: MemberListQuery = {},
 ): Promise<ReadResult<MemberPage>> {
-  const search = new URLSearchParams({ limit: String(MEMBERS_PER_PAGE) });
+  const search = new URLSearchParams({ limit: String(query.limit ?? MEMBERS_PER_PAGE) });
   if (query.q) search.set('q', query.q);
   if (query.role) search.set('role', query.role);
   if (query.cursor) search.set('cursor', query.cursor);
@@ -76,7 +81,7 @@ export async function fetchMembers(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path: `/v1/users?${search.toString()}`,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
 
     const parsed = memberPageSchema.safeParse(response.data);
@@ -121,11 +126,27 @@ export function updateMemberRolesFormValues(form: FormData): UpdateMemberRolesFo
  * audit trail. Asking for it in the form is the difference between a person
  * writing a reason and a client inventing one.
  */
+/**
+ * How many `roles` values a posted form may carry. The checkbox group offers
+ * at most the platform's eleven roles; fifty leaves room for a malformed page
+ * that posts each one twice, and stops a request whose length alone is the
+ * defect. This form de-duplicates before it sends (below), so identity-service
+ * receives at most eleven distinct roles. identity-service itself caps the
+ * **raw** posted list at eleven elements (its DTO counts elements, duplicates
+ * included) and writes the membership row as received, without
+ * de-duplicating; only the Keycloak attributes built from the rows are
+ * de-duplicated (`platform-attributes.ts`).
+ */
+export const MAX_POSTED_ROLES = 50;
+
 export const updateMemberRolesFormSchema = z.object({
   membershipId: z.string().trim().min(1, 'عضویت مشخص نیست'),
   roles: z
     .array(z.string().trim().min(1))
     .min(1, 'دست‌کم یک نقش را انتخاب کنید')
+    // Before the de-duplication below: what a posted form may carry at all
+    // (GHSA-mrhx-c7xc-m3w5). See MAX_POSTED_ROLES.
+    .max(MAX_POSTED_ROLES, 'تعداد نقش‌های فرستاده‌شده بیش از حد است')
     // A checkbox group can post the same value twice if the page is malformed.
     .transform((roles) => [...new Set(roles)]),
   reason: z
@@ -144,17 +165,13 @@ export type ParsedUpdateMemberRolesForm =
 export function parseUpdateMemberRolesForm(
   values: UpdateMemberRolesFormValues,
 ): ParsedUpdateMemberRolesForm {
-  const parsed = updateMemberRolesFormSchema.safeParse(values);
+  const parsed = legacyParse(updateMemberRolesFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<UpdateMemberRolesField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (field === 'membershipId' || field === 'roles' || field === 'reason') {
-      fieldErrors[field] ??= issue.message;
-    }
-  }
-  return { ok: false, fieldErrors };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, ['membershipId', 'roles', 'reason'] as const),
+  };
 }
 
 export const UPDATE_MEMBER_ROLES_FIELD_MAPPING: FieldMapping<UpdateMemberRolesField> = {
@@ -214,15 +231,13 @@ export type ParsedRevokeMembershipForm =
 export function parseRevokeMembershipForm(
   values: RevokeMembershipFormValues,
 ): ParsedRevokeMembershipForm {
-  const parsed = revokeMembershipFormSchema.safeParse(values);
+  const parsed = legacyParse(revokeMembershipFormSchema, values);
   if (parsed.success) return { ok: true, request: parsed.data };
 
-  const fieldErrors: Partial<Record<RevokeMembershipField, string>> = {};
-  for (const issue of parsed.error.issues) {
-    const field = issue.path[0];
-    if (field === 'membershipId' || field === 'reason') fieldErrors[field] ??= issue.message;
-  }
-  return { ok: false, fieldErrors };
+  return {
+    ok: false,
+    fieldErrors: firstIssuePerField(parsed.refusal, ['membershipId', 'reason'] as const),
+  };
 }
 
 export const REVOKE_MEMBERSHIP_FIELD_MAPPING: FieldMapping<RevokeMembershipField> = {

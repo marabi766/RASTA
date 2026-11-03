@@ -2,8 +2,10 @@
 
 import { redirect } from 'next/navigation';
 
+import { MONEY_EFFECTS } from '@/lib/demo-mode';
 import { currentSession, missingSessionReason } from '@/server/current-session';
 import { verifyCsrf } from '@/server/csrf';
+import { mayDispatch } from '@/server/money-gate';
 import {
   placeOrder,
   parsePlaceOrderForm,
@@ -13,13 +15,17 @@ import {
 import { isBoundSubmissionId, SUBMISSION_FIELD } from '@/server/submission';
 
 import { withRetryNote, type PlaceOrderFormState } from './place-order-form-state';
+import { flashHref } from '@/server/flash';
+import { ORDER_PLACED } from '@/lib/order-fields';
 
 /**
  * The place-order form's one server action.
  *
  * Same order as every write in this portal (ADR-059 § 3, § 5): session, CSRF,
- * submission id, the form, then the gateway — each gate returning before the
- * next runs. An order is placed against an *offer*, which the form posts; the
+ * submission id, the form, the provider read again (placing an order holds
+ * money, so nothing is sent while it is unknown — `mayDispatch`), then the
+ * gateway — each gate returning before the next runs. A retry is gated the same
+ * way: it is the same hold. An order is placed against an *offer*, which the form posts; the
  * service — not the portal — decides whether that offer is published, large
  * enough, and from another organization.
  *
@@ -76,11 +82,22 @@ async function attempt(form: FormData): Promise<PlaceOrderFormState> {
     };
   }
 
+  if (!(await mayDispatch(session, MONEY_EFFECTS.placeOrder))) {
+    return { kind: 'REFUSED', reason: 'PROVIDER_UNKNOWN' };
+  }
+
   const result = await placeOrder(session, parsed.request, submissionId);
 
   switch (result.kind) {
     case 'CREATED':
-      redirect(`/orders/${encodeURIComponent(result.data.id)}?placed=1`);
+      redirect(
+        flashHref(
+          session,
+          `/orders/${encodeURIComponent(result.data.id)}`,
+          result.data.id,
+          ORDER_PLACED,
+        ),
+      );
       break;
     case 'INVALID':
       return {

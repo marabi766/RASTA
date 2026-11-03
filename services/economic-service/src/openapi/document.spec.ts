@@ -153,6 +153,29 @@ describe('enrichOpenApiDocument', () => {
     },
   );
 
+  it('publishes reward rule creation as idempotent, with its key’s errors (economic audit F1)', () => {
+    // The service requires the key itself: the gateway's `rewards` prefix
+    // does not (api-gateway routes.ts), so it is this document that tells a
+    // client a retry is safe only with one.
+    const document = emptyDocument();
+    document.paths = { '/v1/rewards/rules': { post: nest('201') } } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const create = (enriched.paths['/v1/rewards/rules'] as Record<string, never>)
+      .post as unknown as {
+      parameters: { name: string; in: string; required: boolean }[];
+      responses: Record<string, { description?: string; headers?: Record<string, unknown> }>;
+    };
+    const key = create.parameters.find((parameter) => parameter.name === 'Idempotency-Key');
+    expect(key).toMatchObject({ in: 'header', required: true });
+    expect(Object.keys(create.responses).sort()).toEqual(
+      ['201', '400', '401', '403', '404', '409', '422', '500'].sort(),
+    );
+    expect(create.responses['400']?.description).toContain('Idempotency-Key');
+    expect(create.responses['409']?.description).toContain('idempotency key reused');
+    expect(create.responses['409']?.headers?.['Retry-After']).toBeDefined();
+  });
+
   it('documents the success body under the status the route declares, never a guessed one', () => {
     // `dispute` takes a body and answers 200 (`@HttpCode(200)`). Guessed from
     // the body, it was documented as a 201 carrying the view, and its real
@@ -241,6 +264,46 @@ describe('enrichOpenApiDocument', () => {
     );
   });
 
+  it('names NO_ACTIVE_RULE on the settlement’s 422, and only there (docs/24 Q-29)', () => {
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/settlements': { post: nest('201') },
+      '/v1/transactions': { post: nest('201') },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const unprocessable = (path: string) =>
+      (
+        (enriched.paths[path] as Record<string, never>).post as unknown as {
+          responses: Record<string, { description: string }>;
+        }
+      ).responses['422']?.description;
+
+    expect(unprocessable('/v1/settlements')).toContain('NO_ACTIVE_RULE');
+    expect(unprocessable('/v1/settlements')).toContain('INSUFFICIENT_BALANCE');
+    expect(unprocessable('/v1/transactions')).not.toContain('NO_ACTIVE_RULE');
+  });
+
+  it('names BUSINESS_LINE_REQUIRED on the obligation’s 422, and only there (docs/24 Q-29)', () => {
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/settlements': { post: nest('201') },
+      '/v1/transactions': { post: nest('201') },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const unprocessable = (path: string) =>
+      (
+        (enriched.paths[path] as Record<string, never>).post as unknown as {
+          responses: Record<string, { description: string }>;
+        }
+      ).responses['422']?.description;
+
+    expect(unprocessable('/v1/transactions')).toContain('BUSINESS_LINE_REQUIRED');
+    expect(unprocessable('/v1/transactions')).toContain('INSUFFICIENT_BALANCE');
+    expect(unprocessable('/v1/settlements')).not.toContain('BUSINESS_LINE_REQUIRED');
+  });
+
   it.each([
     '/v1/transactions',
     '/v1/settlements',
@@ -310,6 +373,37 @@ describe('enrichOpenApiDocument', () => {
       expect(operation.security).toBeUndefined();
       expect(operation.responses['403']?.description).toContain('AUDITOR');
     });
+  });
+
+  it('publishes the rule arrays without their bounds, as this service’s own converter did', () => {
+    // The shared converter publishes `minItems`/`maxItems`; this document has
+    // never carried them, and the replacement kept it byte-identical. When a
+    // change of its own publishes them, this test changes with the wrapper.
+    const document = emptyDocument();
+    document.paths = {
+      '/v1/rewards/recognition-rules': { post: nest('201') },
+      '/v1/rewards/participation-rules': { post: nest('201') },
+    } as never;
+
+    const enriched = enrichOpenApiDocument(document);
+    const body = (path: string) =>
+      (
+        (enriched.paths[path] as Record<string, never>).post as unknown as {
+          requestBody: {
+            content: { 'application/json': { schema: { properties: Record<string, unknown> } } };
+          };
+        }
+      ).requestBody.content['application/json'].schema.properties;
+
+    const recognition = body('/v1/rewards/recognition-rules');
+    const participation = body('/v1/rewards/participation-rules');
+    for (const array of [recognition.levels, recognition.badges, participation.contributions]) {
+      expect(array).toMatchObject({ type: 'array' });
+      expect(array).not.toHaveProperty('minItems');
+      expect(array).not.toHaveProperty('maxItems');
+    }
+    // Only array bounds are held back: a string's bounds are published.
+    expect(JSON.stringify(recognition)).toContain('"maxLength":80');
   });
 
   it('leaves a route it knows nothing about with a success response and no body', () => {

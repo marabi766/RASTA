@@ -17,10 +17,11 @@ import {
 import type { OwnerInput, ScoringCell } from '@/lib/tender-owner-input';
 
 import { callGateway, GatewayRequestError } from './gateway';
+import { tenantCredential, sessionAuthority, type SessionTokens } from './session-organization';
 import { webServerEnv, type WebServerEnv } from './env';
 import { utcInstant } from './instant';
 import { canReadProjects } from './portal-nav';
-import { tokenAuthority, tokenPerson } from './realm-roles';
+import { tokenPerson } from './realm-roles';
 import type { WebSession } from './session';
 import type { ReadResult } from './assets';
 import type { TenderDetail } from './tenders';
@@ -83,6 +84,7 @@ export const APPROVAL_REQUEST_SCHEMA = z.object({
   round: z.number().int(),
   tenderVersion: z.number().int(),
   status: z.string(),
+  procurementThresholdWarning: z.literal('PROCUREMENT_AMOUNT_OUTSIDE_RANGE').optional(),
   requestedBy: z.string(),
   requestedAt: utcInstant,
   endedAt: utcInstant.nullable(),
@@ -91,12 +93,29 @@ export const APPROVAL_REQUEST_SCHEMA = z.object({
   steps: z.array(stepSchema),
 });
 
+export const THRESHOLD_PREVIEW_SCHEMA = z.object({
+  tenderVersion: z.number().int(),
+  decision: z.enum(['PASS', 'WARN', 'REJECT', 'ESTIMATE_REQUIRED']),
+  procurementThresholdPolicyId: z.string().nullable(),
+});
+export type ThresholdPreview = z.infer<typeof THRESHOLD_PREVIEW_SCHEMA>;
+export function fetchThresholdPreview(
+  session: WebSession,
+  tenderId: string,
+): Promise<ReadResult<ThresholdPreview>> {
+  return readOwnerView(
+    session,
+    `${tenderPath(tenderId)}/procurement-threshold-preview`,
+    THRESHOLD_PREVIEW_SCHEMA,
+  );
+}
+
 export type ApprovalRequest = z.infer<typeof APPROVAL_REQUEST_SCHEMA>;
 
 const requestPageSchema = z.object({
   items: z.array(APPROVAL_REQUEST_SCHEMA),
-  nextCursor: z.string().nullable().default(null),
-  hasMore: z.boolean().default(false),
+  nextCursor: z.string().nullable().prefault(null),
+  hasMore: z.boolean().prefault(false),
 });
 
 /** `approvalViewSchema`, as much as a decision needs. */
@@ -216,7 +235,7 @@ export async function readOwnerView<S extends z.ZodTypeAny>(
     const response = await callGateway<unknown>({
       baseUrl: webServerEnv().API_GATEWAY_URL,
       path,
-      accessToken: session.accessToken,
+      credential: tenantCredential(session),
     });
     const parsed = schema.safeParse(response.data);
     if (!parsed.success) return { kind: 'MALFORMED', correlationId: response.correlationId };
@@ -312,9 +331,9 @@ export interface OwnerCaller {
   readonly actorId: string | null;
 }
 
-export function ownerCallerOf(accessToken: string): OwnerCaller {
-  const authority = tokenAuthority(accessToken);
-  const person = tokenPerson(accessToken);
+export function ownerCallerOf(session: SessionTokens): OwnerCaller {
+  const authority = sessionAuthority(session);
+  const person = tokenPerson(session.accessToken);
   return {
     organizationId: authority?.organizationId ?? null,
     roles: authority?.roles ?? null,
@@ -826,10 +845,12 @@ export type OwnerCommandResult = Exclude<WriteResult<unknown, string>, { kind: '
 
 /**
  * Sends one command, with an `Idempotency-Key` — the gateway requires one on
- * every unsafe call under `/v1/tenders`. construction-service keeps a result
- * under it for a score alone (`IdempotencyStore.run`); which commands may be
- * sent again after a lost answer is `UNREPEATABLE_OWNER_COMMANDS`. Every
- * `UNAVAILABLE` is unconfirmed.
+ * every unsafe call under `/v1/tenders`. construction-service keeps the first
+ * answer under it (`IdempotencyStore.run`) for a score and for publish, award,
+ * propose, open and withdraw the proposal (`KEYED_REPLAY_OWNER_COMMANDS`): a
+ * re-send with the same key and body is answered with it. Which commands may
+ * be sent again after a lost answer is `REPEATABLE_OWNER_COMMANDS`, the rest
+ * `UNREPEATABLE_OWNER_COMMANDS`. Every `UNAVAILABLE` is unconfirmed.
  */
 export async function issueOwnerCommand(
   session: WebSession,

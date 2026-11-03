@@ -4,6 +4,7 @@ import { InventoryAccess } from '../access/access';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { ExpiryBacklog, ReservationExpiry } from '../reservation/expiry';
 import type { Command } from '../shared/command';
+import { transactionNow } from '../shared/clock';
 import { stockOverdrawn } from '../shared/command';
 import { CommandRunner } from '../shared/command-runner';
 import { MAX_QUANTITY, pageOf, type CursorPage } from '../shared/dto';
@@ -50,65 +51,83 @@ export class StockService {
     }
     const correlationId = getContext().correlationId;
 
-    return this.runner.run('receive', command.fence, stockOverdrawn, async (tx, at) => {
-      const itemId = await this.stock.ensureItem(tx, {
-        id: newId(ID_PREFIX.stockItem),
-        organizationId: acting.organizationId,
-        warehouseId: dto.warehouseId,
-        productId: dto.productId,
-        actor: acting.userId,
-        at,
-      });
-      const locked = await this.stock.lock(tx, acting.organizationId, itemId);
-      if (!locked) throw RastaError.notFound('StockItem', itemId);
-      // A backlog left past the batch cannot change a receipt: it is about reserved, not on hand.
-      const { item } = await this.expiry.expireDue(tx, locked, at, correlationId, 'command');
-
-      if (item.onHandQuantity + dto.quantity > MAX_QUANTITY) {
-        throw refusal(
-          'stock',
-          'QUANTITY_OUT_OF_RANGE',
-          'On hand would pass the largest quantity stored',
-          {
-            stockItemId: item.id,
-          },
+    return this.runner.runLocked(
+      'receive',
+      command.fence,
+      stockOverdrawn,
+      async (tx) => {
+        // Empty-item creation has no expiry decision. Keep its creation metadata unchanged.
+        const createdAt = await transactionNow(tx);
+        const itemId = await this.stock.ensureItem(tx, {
+          id: newId(ID_PREFIX.stockItem),
+          organizationId: acting.organizationId,
+          warehouseId: dto.warehouseId,
+          productId: dto.productId,
+          actor: acting.userId,
+          at: createdAt,
+        });
+        const locked = await this.stock.lock(tx, acting.organizationId, itemId);
+        if (!locked) throw RastaError.notFound('StockItem', itemId);
+        const candidates = await this.expiry.lockCandidates(tx, locked);
+        return { locked, candidates };
+      },
+      async (tx, at, { locked, candidates }) => {
+        // A backlog left past the batch cannot change a receipt: it is about reserved, not on hand.
+        const { item } = await this.expiry.expireDue(
+          tx,
+          locked,
+          at,
+          correlationId,
+          'command',
+          candidates,
         );
-      }
-      const moved = await this.stock.move(
-        tx,
-        item,
-        { onHand: dto.quantity, reserved: 0 },
-        acting.userId,
-        at,
-      );
-      const movement = await this.stock.insertMovement(tx, {
-        id: newId(ID_PREFIX.movement),
-        item: moved,
-        type: 'RECEIPT',
-        onHandDelta: dto.quantity,
-        reservedDelta: 0,
-        reservationId: null,
-        sourceReference: dto.sourceReference ?? null,
-        commandKeyHash: command.keyHash,
-        correlationId,
-        actor: acting.userId,
-        at,
-      });
-      await this.publisher.enqueue(tx, {
-        eventName: 'STOCK_RECEIVED',
-        aggregateId: moved.id,
-        organizationId: moved.organizationId,
-        occurredAt: at,
-        payload: {
-          ...stockFacts(moved, movement.id),
-          quantity: dto.quantity,
+
+        if (item.onHandQuantity + dto.quantity > MAX_QUANTITY) {
+          throw refusal(
+            'stock',
+            'QUANTITY_OUT_OF_RANGE',
+            'On hand would pass the largest quantity stored',
+            {
+              stockItemId: item.id,
+            },
+          );
+        }
+        const moved = await this.stock.move(
+          tx,
+          item,
+          { onHand: dto.quantity, reserved: 0 },
+          acting.userId,
+          at,
+        );
+        const movement = await this.stock.insertMovement(tx, {
+          id: newId(ID_PREFIX.movement),
+          item: moved,
+          type: 'RECEIPT',
+          onHandDelta: dto.quantity,
+          reservedDelta: 0,
+          reservationId: null,
           sourceReference: dto.sourceReference ?? null,
-          receivedBy: acting.userId,
-          receivedAt: at.toISOString(),
-        },
-      });
-      return { stockItem: toStockItemView(moved), movement: toStockMovementView(movement) };
-    });
+          commandKeyHash: command.keyHash,
+          correlationId,
+          actor: acting.userId,
+          at,
+        });
+        await this.publisher.enqueue(tx, {
+          eventName: 'STOCK_RECEIVED',
+          aggregateId: moved.id,
+          organizationId: moved.organizationId,
+          occurredAt: at,
+          payload: {
+            ...stockFacts(moved, movement.id),
+            quantity: dto.quantity,
+            sourceReference: dto.sourceReference ?? null,
+            receivedBy: acting.userId,
+            receivedAt: at.toISOString(),
+          },
+        });
+        return { stockItem: toStockItemView(moved), movement: toStockMovementView(movement) };
+      },
+    );
   }
 
   /**
@@ -121,76 +140,86 @@ export class StockService {
     const acting = this.access.assertOperator();
     const correlationId = getContext().correlationId;
 
-    return this.runner.run('adjust', command.fence, stockOverdrawn, async (tx, at) => {
-      const locked = await this.stock.lock(tx, acting.organizationId, dto.stockItemId);
-      if (!locked) throw RastaError.notFound('StockItem', dto.stockItemId);
-      // Below zero, on hand is refused whatever expires: expiry gives back reserved, never on
-      // hand. Final, before any expiry runs.
-      if (locked.onHandQuantity + dto.quantityDelta < 0) throw onHandBelowReserved(locked.id);
-      const { item, backlogQuantity } = await this.expiry.expireDue(
-        tx,
-        locked,
-        at,
-        correlationId,
-        'command',
-      );
-
-      const onHandAfter = item.onHandQuantity + dto.quantityDelta;
-      if (onHandAfter < item.reservedQuantity) {
-        // Below what live reservations hold, even with every due one past the batch expired:
-        // the refusal is final.
-        if (onHandAfter < item.reservedQuantity - backlogQuantity) {
-          throw onHandBelowReserved(item.id);
-        }
-        // Below reserved only while the backlog still counts in it: expired, it makes room —
-        // not sure yet.
-        throw new ExpiryBacklog(item.organizationId, [item.id]);
-      }
-      if (onHandAfter > MAX_QUANTITY) {
-        throw refusal(
-          'stock',
-          'QUANTITY_OUT_OF_RANGE',
-          'On hand would pass the largest quantity stored',
-          {
-            stockItemId: item.id,
-          },
+    return this.runner.runLocked(
+      'adjust',
+      command.fence,
+      stockOverdrawn,
+      async (tx) => {
+        const locked = await this.stock.lock(tx, acting.organizationId, dto.stockItemId);
+        if (!locked) throw RastaError.notFound('StockItem', dto.stockItemId);
+        const candidates = await this.expiry.lockCandidates(tx, locked);
+        return { locked, candidates };
+      },
+      async (tx, at, { locked, candidates }) => {
+        // Below zero, on hand is refused whatever expires: expiry gives back reserved, never on
+        // hand. Final, before any expiry runs.
+        if (locked.onHandQuantity + dto.quantityDelta < 0) throw onHandBelowReserved(locked.id);
+        const { item, backlogQuantity } = await this.expiry.expireDue(
+          tx,
+          locked,
+          at,
+          correlationId,
+          'command',
+          candidates,
         );
-      }
-      const moved = await this.stock.move(
-        tx,
-        item,
-        { onHand: dto.quantityDelta, reserved: 0 },
-        acting.userId,
-        at,
-      );
-      const movement = await this.stock.insertMovement(tx, {
-        id: newId(ID_PREFIX.movement),
-        item: moved,
-        type: 'ADJUSTMENT',
-        onHandDelta: dto.quantityDelta,
-        reservedDelta: 0,
-        reservationId: null,
-        sourceReference: dto.sourceReference ?? null,
-        commandKeyHash: command.keyHash,
-        correlationId,
-        actor: acting.userId,
-        at,
-      });
-      await this.publisher.enqueue(tx, {
-        eventName: 'STOCK_ADJUSTED',
-        aggregateId: moved.id,
-        organizationId: moved.organizationId,
-        occurredAt: at,
-        payload: {
-          ...stockFacts(moved, movement.id),
-          quantityDelta: dto.quantityDelta,
+
+        const onHandAfter = item.onHandQuantity + dto.quantityDelta;
+        if (onHandAfter < item.reservedQuantity) {
+          // Below what live reservations hold, even with every due one past the batch expired:
+          // the refusal is final.
+          if (onHandAfter < item.reservedQuantity - backlogQuantity) {
+            throw onHandBelowReserved(item.id);
+          }
+          // Below reserved only while the backlog still counts in it: expired, it makes room —
+          // not sure yet.
+          throw new ExpiryBacklog(item.organizationId, [item.id]);
+        }
+        if (onHandAfter > MAX_QUANTITY) {
+          throw refusal(
+            'stock',
+            'QUANTITY_OUT_OF_RANGE',
+            'On hand would pass the largest quantity stored',
+            {
+              stockItemId: item.id,
+            },
+          );
+        }
+        const moved = await this.stock.move(
+          tx,
+          item,
+          { onHand: dto.quantityDelta, reserved: 0 },
+          acting.userId,
+          at,
+        );
+        const movement = await this.stock.insertMovement(tx, {
+          id: newId(ID_PREFIX.movement),
+          item: moved,
+          type: 'ADJUSTMENT',
+          onHandDelta: dto.quantityDelta,
+          reservedDelta: 0,
+          reservationId: null,
           sourceReference: dto.sourceReference ?? null,
-          adjustedBy: acting.userId,
-          adjustedAt: at.toISOString(),
-        },
-      });
-      return { stockItem: toStockItemView(moved), movement: toStockMovementView(movement) };
-    });
+          commandKeyHash: command.keyHash,
+          correlationId,
+          actor: acting.userId,
+          at,
+        });
+        await this.publisher.enqueue(tx, {
+          eventName: 'STOCK_ADJUSTED',
+          aggregateId: moved.id,
+          organizationId: moved.organizationId,
+          occurredAt: at,
+          payload: {
+            ...stockFacts(moved, movement.id),
+            quantityDelta: dto.quantityDelta,
+            sourceReference: dto.sourceReference ?? null,
+            adjustedBy: acting.userId,
+            adjustedAt: at.toISOString(),
+          },
+        });
+        return { stockItem: toStockItemView(moved), movement: toStockMovementView(movement) };
+      },
+    );
   }
 
   // -- reads --------------------------------------------------------------------------------

@@ -22,6 +22,7 @@
  */
 
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { UnresolvedSessionOrganization } from '@/server/session-organization';
 
 Object.assign(process.env, {
   API_GATEWAY_URL: 'http://gateway.test:3000',
@@ -66,6 +67,8 @@ jest.mock('next/navigation', () => ({
     throw new Error(`NEXT_REDIRECT:${url}`);
   },
 }));
+// The provider read, answered without a gateway: what it draws is `demo-mode-pages.spec.ts`'s subject.
+jest.mock('@/server/demo-mode', () => ({ fetchDemoMode: async () => 'SIMULATED' }));
 jest.mock('@/server/assets', () => mockStubFetchers('@/server/assets'));
 jest.mock('@/server/asset-records', () => mockStubFetchers('@/server/asset-records'));
 jest.mock('@/server/fleet-availability', () => mockStubFetchers('@/server/fleet-availability'));
@@ -272,10 +275,12 @@ describe.each(SCREENS)('$name', ({ path, params, admitted, refused, offered }) =
     expect(offered(await run(path, params))).toBe(false);
   });
 
-  it('a token whose roles cannot be read: not offered', async () => {
+  it('a token whose roles cannot be read: nothing is drawn at all (task 100)', async () => {
+    // `readSession()` refuses such a session; one that reached a page anyway
+    // draws no organization, no list and no form.
     mockSession.current = { ...signedInWith([admitted]), accessToken: 'opaque' };
     identityReports([admitted]);
-    expect(offered(await run(path, params))).toBe(false);
+    await expect(run(path, params)).rejects.toThrow(UnresolvedSessionOrganization);
   });
 });
 
@@ -290,6 +295,8 @@ describe.each(SCREENS)(
     /** A session whose token carries these claims. */
     const withClaims = (claims: Record<string, unknown>) => ({
       ...signedInWith([]),
+      // The stored copy is the token's (`session-organization.ts`).
+      organizationId: typeof claims.org_id === 'string' ? claims.org_id : null,
       accessToken: jwt(claims),
     });
 
@@ -321,10 +328,21 @@ describe.each(SCREENS)(
       expect(offered(await run(path, params))).toBe(false);
     });
 
-    it('the global SYSTEM_ADMIN alone, acting for no organization: not offered — the write is tenant-scoped', async () => {
+    it('the global SYSTEM_ADMIN alone, acting for no organization: nothing is drawn or sent — the page is tenant-bound (task 118)', async () => {
       mockSession.current = withClaims({ realm_access: { roles: ['SYSTEM_ADMIN'] } });
       identityReports([admitted]);
-      expect(offered(await run(path, params))).toBe(false);
+      // `tenant-gate.ts` keeps such a session from the page. Were it reached
+      // anyway, it offers no form — or, where the page mints a submission id
+      // or reads through the gateway, throws before anything is sent.
+      const outcome = await run(path, params).then(
+        (tree) => ({ offered: offered(tree) }),
+        (error: unknown) => ({ refused: String(error) }),
+      );
+      expect(
+        'offered' in outcome
+          ? outcome.offered === false
+          : /acts for no (known )?organization/.test(outcome.refused),
+      ).toBe(true);
     });
   },
 );
@@ -351,11 +369,10 @@ describe('/tenders — which doors are asked', () => {
     expect(mockFetched).toEqual(['fetchTenders']);
   });
 
-  it('a token whose roles cannot be read: the owner’s door, whose own answer is shown', async () => {
+  it('a token whose roles cannot be read: nothing is drawn at all (task 100)', async () => {
     mockSession.current = { ...signedInWith(['CONTRACTOR']), accessToken: 'opaque' };
     identityReports(['CONTRACTOR']);
-    await run('./app/tenders/page');
-    expect(mockFetched).toEqual(['fetchTenders']);
+    await expect(run('./app/tenders/page')).rejects.toThrow(UnresolvedSessionOrganization);
   });
 });
 

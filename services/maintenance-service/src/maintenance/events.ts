@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isoDateTime, describeLegacyRefusal, legacyParse } from '@rasta/contracts';
 
 /**
  * Events published by maintenance-service, on `rasta.maintenance.v1`.
@@ -399,7 +400,13 @@ export function validateMaintenancePayload(
   eventName: MaintenanceEventName,
   payload: unknown,
 ): unknown {
-  return MAINTENANCE_EVENT_SCHEMAS[eventName].parse(payload);
+  const parsed = legacyParse(MAINTENANCE_EVENT_SCHEMAS[eventName], payload);
+  if (!parsed.success) {
+    throw new Error(
+      `${eventName} payload does not match its published contract: ${describeLegacyRefusal(parsed.refusal)}`,
+    );
+  }
+  return parsed.data;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +487,7 @@ export const assetTransferredSchema = z
     assetId: z.string().min(1),
     fromOrganizationId: z.string().min(1),
     toOrganizationId: z.string().min(1),
-    transferredAt: z.string().datetime({ offset: true }),
+    transferredAt: z.string().check(isoDateTime({ offset: true })),
   })
   .passthrough()
   .refine((payload) => payload.fromOrganizationId !== payload.toOrganizationId, {
@@ -516,7 +523,7 @@ export interface ConsumedPayloadContract {
   readonly fields: readonly string[];
 }
 
-const contract = (object: z.AnyZodObject) => ({
+const contract = (object: z.ZodObject) => ({
   schema: object,
   fields: Object.keys(object.shape),
 });

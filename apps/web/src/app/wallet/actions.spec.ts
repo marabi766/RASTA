@@ -6,6 +6,7 @@ import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_TOP_UP_FORM } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * `/wallet`'s one write path — the same order-of-checks suite as
@@ -32,6 +33,9 @@ jest.mock('@/server/current-session', () => ({
   missingSessionReason: async () => 'NO_SESSION',
 }));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
+// The provider gate is open here: what it refuses, against a fake gateway, is
+// `app/money-actions-gate.spec.ts`.
+jest.mock('@/server/money-gate', () => ({ mayDispatch: async () => true }));
 jest.mock('@/server/wallet', () => {
   const actual = jest.requireActual('@/server/wallet');
   return { ...actual, topUpWallet: (...args: unknown[]) => topUpWallet(...args) };
@@ -45,7 +49,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'manager',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -157,11 +161,11 @@ describe('topping up — the full order of checks', () => {
     );
   });
 
-  it('redirects to /wallet with ?toppedUp=1 after a successful top-up', async () => {
+  it('redirects to /wallet — with no flag the page never read — after a successful top-up', async () => {
     await expect(
       submitTopUp(WALLET_ID, IDLE_TOP_UP_FORM, formData({ amountMinor: '1000000' })),
     ).rejects.toThrow(/NEXT_REDIRECT/);
-    expect(redirect).toHaveBeenCalledWith('/wallet?toppedUp=1');
+    expect(redirect).toHaveBeenCalledWith('/wallet');
   });
 
   it('sends one submission twice under one reference — the double-submit case', async () => {

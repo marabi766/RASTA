@@ -1,0 +1,555 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`zod-3 golden: the pipe’s issue details a message the backstop cannot check: more than 200 input leaves (a key and a value each) 1`] = `
+{
+  "atLimit": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "custom",
+        "message": "a fixed schema message",
+        "path": "bag",
+      },
+    ],
+    "status": 400,
+  },
+  "overLimit": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "custom",
+        "message": "Invalid input",
+        "path": "bag",
+      },
+    ],
+    "status": 400,
+  },
+}
+`;
+
+exports[`zod-3 golden: the pipe’s issue details enums, literals, unions and discriminated unions 1`] = `
+{
+  "bad": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_enum_value",
+        "message": "Invalid enum value. Expected 'OPEN' | 'CLOSED'",
+        "path": "status",
+      },
+      {
+        "code": "invalid_literal",
+        "message": "Invalid literal value, expected 1",
+        "path": "version",
+      },
+      {
+        "code": "invalid_literal",
+        "message": "Invalid literal value, expected "yes"",
+        "path": "word",
+      },
+      {
+        "code": "invalid_union",
+        "message": "Invalid input",
+        "path": "either",
+      },
+      {
+        "code": "invalid_union",
+        "message": "Invalid input",
+        "path": "objects",
+      },
+      {
+        "code": "invalid_union_discriminator",
+        "message": "Invalid discriminator value. Expected 'A' | 'B'",
+        "path": "shape.kind",
+      },
+    ],
+    "status": 400,
+  },
+  "good": {
+    "parsed": {
+      "either": 3,
+      "objects": {
+        "y": 1,
+      },
+      "shape": {
+        "a": "x",
+        "kind": "A",
+      },
+      "status": "OPEN",
+      "version": 1,
+      "word": "yes",
+    },
+  },
+  "shapeFields": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "too_small",
+        "message": "String must contain at least 2 character(s)",
+        "path": "either",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected number, received string",
+        "path": "shape.b",
+      },
+    ],
+    "status": 400,
+  },
+  "shapeMissing": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_union_discriminator",
+        "message": "Invalid discriminator value. Expected 'A' | 'B'",
+        "path": "shape.kind",
+      },
+    ],
+    "status": 400,
+  },
+}
+`;
+
+exports[`zod-3 golden: the pipe’s issue details invalid_type, from a missing field to a wrong root 1`] = `
+{
+  "missing": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Required",
+        "path": "name",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Required",
+        "path": "count",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Required",
+        "path": "count2",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Required",
+        "path": "when",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Required",
+        "path": "flag",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Required",
+        "path": "list",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Required",
+        "path": "nested",
+      },
+    ],
+    "status": 400,
+  },
+  "rootArray": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected object, received array",
+        "path": "(root)",
+      },
+    ],
+    "status": 400,
+  },
+  "rootNull": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected object, received null",
+        "path": "(root)",
+      },
+    ],
+    "status": 400,
+  },
+  "rootString": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected object, received string",
+        "path": "(root)",
+      },
+    ],
+    "status": 400,
+  },
+  "wrongTypes": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected string, received number",
+        "path": "name",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected number, received string",
+        "path": "count",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected integer, received float",
+        "path": "count2",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected date, received string",
+        "path": "when",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected boolean, received string",
+        "path": "flag",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected array, received string",
+        "path": "list",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected string, received null",
+        "path": "nested.inner",
+      },
+    ],
+    "status": 400,
+  },
+}
+`;
+
+exports[`zod-3 golden: the pipe’s issue details number and array bounds 1`] = `
+{
+  "coercedOk": {
+    "parsed": {
+      "coerced": 12,
+    },
+  },
+  "elements": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected string, received number",
+        "path": "list[1]",
+      },
+    ],
+    "status": 400,
+  },
+  "high": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "too_big",
+        "message": "Number must be less than or equal to 10",
+        "path": "ranged",
+      },
+      {
+        "code": "too_big",
+        "message": "Array must contain at most 2 element(s)",
+        "path": "list",
+      },
+    ],
+    "status": 400,
+  },
+  "low": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "too_small",
+        "message": "Number must be greater than 0",
+        "path": "positive",
+      },
+      {
+        "code": "too_small",
+        "message": "Number must be greater than or equal to 0",
+        "path": "nonnegative",
+      },
+      {
+        "code": "too_small",
+        "message": "Number must be greater than or equal to 1",
+        "path": "ranged",
+      },
+      {
+        "code": "too_small",
+        "message": "Number must be greater than or equal to 1",
+        "path": "coerced",
+      },
+      {
+        "code": "too_small",
+        "message": "Array must contain at least 1 element(s)",
+        "path": "list",
+      },
+      {
+        "code": "too_small",
+        "message": "Array must contain at least 1 element(s)",
+        "path": "nonempty",
+      },
+    ],
+    "status": 400,
+  },
+  "notNumbers": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "not_finite",
+        "message": "Number must be finite",
+        "path": "finite",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected number, received nan",
+        "path": "coerced",
+      },
+    ],
+    "status": 400,
+  },
+}
+`;
+
+exports[`zod-3 golden: the pipe’s issue details refinements, schema messages and the echo backstop 1`] = `
+{
+  "bad": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "custom",
+        "message": "Invalid input",
+        "path": "plain",
+      },
+      {
+        "code": "custom",
+        "message": "Must be longer than three characters",
+        "path": "stated",
+      },
+      {
+        "code": "custom",
+        "message": "Invalid input",
+        "path": "echoing",
+      },
+      {
+        "code": "invalid_enum_value",
+        "message": "یکی از گزینه‌ها را برگزینید",
+        "path": "persian",
+      },
+      {
+        "code": "invalid_type",
+        "message": "متن لازم است",
+        "path": "persianType",
+      },
+      {
+        "code": "custom",
+        "message": "stopped here",
+        "path": "fatal",
+      },
+      {
+        "code": "invalid_enum_value",
+        "message": "Invalid enum value. Expected 'X' | 'Y'",
+        "path": "transformed",
+      },
+      {
+        "code": "too_small",
+        "message": "String must contain at least 2 character(s)",
+        "path": "preprocessed",
+      },
+      {
+        "code": "invalid_type",
+        "message": "Expected string, received number",
+        "path": "lazy.leaf",
+      },
+    ],
+    "status": 400,
+  },
+  "crossField": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "custom",
+        "message": "Cross-field rule",
+        "path": "stated",
+      },
+    ],
+    "status": 400,
+  },
+  "good": {
+    "parsed": {
+      "caught": 0,
+      "defaulted": 5,
+      "lazy": {
+        "leaf": "l",
+      },
+      "preprocessed": "ab",
+      "transformed": "X",
+    },
+  },
+}
+`;
+
+exports[`zod-3 golden: the pipe’s issue details string formats and bounds 1`] = `
+{
+  "allBad": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_string",
+        "message": "Invalid email",
+        "path": "email",
+      },
+      {
+        "code": "invalid_string",
+        "message": "Invalid url",
+        "path": "url",
+      },
+      {
+        "code": "invalid_string",
+        "message": "Invalid datetime",
+        "path": "instant",
+      },
+      {
+        "code": "invalid_string",
+        "message": "Invalid datetime",
+        "path": "offsetInstant",
+      },
+      {
+        "code": "invalid_string",
+        "message": "Invalid date",
+        "path": "day",
+      },
+      {
+        "code": "invalid_string",
+        "message": "Invalid",
+        "path": "code",
+      },
+      {
+        "code": "invalid_string",
+        "message": "Amount must be digits",
+        "path": "messaged",
+      },
+      {
+        "code": "too_small",
+        "message": "String must contain at least 3 character(s)",
+        "path": "bounded",
+      },
+      {
+        "code": "too_small",
+        "message": "String must contain exactly 4 character(s)",
+        "path": "exact",
+      },
+      {
+        "code": "too_small",
+        "message": "String must contain at least 1 character(s)",
+        "path": "filled",
+      },
+      {
+        "code": "invalid_string",
+        "message": "Invalid input: must start with "ORG-"",
+        "path": "prefix",
+      },
+      {
+        "code": "invalid_string",
+        "message": "Invalid input: must end with ".pdf"",
+        "path": "suffix",
+      },
+      {
+        "code": "too_big",
+        "message": "String must contain at most 3 character(s)",
+        "path": "codePoints",
+      },
+    ],
+    "status": 400,
+  },
+  "allGood": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_string",
+        "message": "Invalid datetime",
+        "path": "localInstant",
+      },
+    ],
+    "status": 400,
+  },
+  "tooLong": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "too_big",
+        "message": "String must contain at most 5 character(s)",
+        "path": "bounded",
+      },
+      {
+        "code": "too_small",
+        "message": "String must contain at least 2 character(s)",
+        "path": "codePoints",
+      },
+    ],
+    "status": 400,
+  },
+}
+`;
+
+exports[`zod-3 golden: the pipe’s issue details unknown keys, records, catchall and array paths 1`] = `
+{
+  "catchallValue": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected number, received string",
+        "path": "labels.*",
+      },
+    ],
+    "status": 400,
+  },
+  "nestedUnknown": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "too_small",
+        "message": "Number must be greater than 0",
+        "path": "items[1].quantity",
+      },
+      {
+        "code": "unrecognized_keys",
+        "message": "Unrecognized key(s) in object (1)",
+        "path": "items[1]",
+      },
+    ],
+    "status": 400,
+  },
+  "recordValue": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "invalid_type",
+        "message": "Expected number, received string",
+        "path": "metadata.*",
+      },
+    ],
+    "status": 400,
+  },
+  "unknownKeys": {
+    "code": "VALIDATION_FAILED",
+    "details": [
+      {
+        "code": "unrecognized_keys",
+        "message": "Unrecognized key(s) in object (2)",
+        "path": "(root)",
+      },
+    ],
+    "status": 400,
+  },
+}
+`;

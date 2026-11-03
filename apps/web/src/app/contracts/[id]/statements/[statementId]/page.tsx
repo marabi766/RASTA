@@ -11,6 +11,7 @@ import {
 } from '@/server/contract-statements';
 import { fetchContract } from '@/server/contracts';
 import { currentSession } from '@/server/current-session';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { webServerEnv } from '@/server/env';
 import { readFlash } from '@/server/flash';
 import { mintStatementSubmission } from '@/server/statement-replay';
@@ -19,6 +20,8 @@ import { PortalSidebar } from '@/app/PortalSidebar';
 
 import type { OfferedStatementCommand } from '../../StatementCommands';
 import { StatementDetailScreen } from './StatementDetailScreen';
+import { actingOrganizationLabel, actingScope } from '@/server/session-organization';
+import { pageParams } from '@/server/page-context';
 
 /**
  * The `/contracts/[id]/statements/[statementId]` route — one statement, its
@@ -54,7 +57,7 @@ export default async function StatementPage({
   const session = await currentSession();
   if (!session) redirect(`/login?returnTo=${encodeURIComponent(href)}`);
 
-  const flash = (await searchParams)[FLASH_PARAM];
+  const flash = (await pageParams(session, searchParams))[FLASH_PARAM];
   const notice = readFlash(
     session,
     typeof flash === 'string' ? flash : undefined,
@@ -68,7 +71,7 @@ export default async function StatementPage({
   const offered: OfferedStatementCommand[] = [];
   if (result.kind === 'OK') {
     const statement = result.data;
-    const caller = statementCallerOf(session.accessToken);
+    const caller = statementCallerOf(session);
     const facts = contract?.kind === 'OK' ? contract.data : null;
     const target = { contractId: id, statementId, expectedVersion: statement.version };
     if (facts && canSubmitStatement(caller, facts, statement)) {
@@ -98,10 +101,13 @@ export default async function StatementPage({
     }
   }
 
+  const demoMode = await fetchDemoMode(session);
+
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -139,6 +145,7 @@ export default async function StatementPage({
           sessionMaxAgeSeconds={webServerEnv().WEB_SESSION_MAX_AGE_SECONDS}
           notice={notice}
           pageHref={href}
+          demoMode={demoMode}
         />
       </div>
     </AppShell>

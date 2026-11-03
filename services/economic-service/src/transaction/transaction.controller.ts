@@ -113,8 +113,9 @@ export class TransactionController {
       'who raised it and why, and who resolved it, when and how. `resolvedDisputeId` names ' +
       'the dispute that resolution decided: equal to `disputeId`, it is the latest dispute’s; ' +
       'different, an earlier one’s. Null on a transaction resolved before it was kept and not ' +
-      'attributable for certain — there, a resolution older than `disputedAt` belongs to an ' +
-      'earlier dispute. A transaction resolved before the resolution had a field of its own ' +
+      'attributable for certain — there the record does not say which dispute the resolution ' +
+      'decided, and the instants do not either: a re-dispute can be dated before a resolution ' +
+      'it waited behind. A transaction resolved before the resolution had a field of its own ' +
       'holds the resolution text in `disputeReason`, with `disputeResolution` null and ' +
       '`disputeResolvedAt` set (docs/23 D-060).',
   })
@@ -138,7 +139,10 @@ export class TransactionController {
       'request rolls back, leaving no orphaned obligation. Requires an `Idempotency-Key`. ' +
       '`sourceType` `MAINTENANCE_REQUEST`, `PAYMENT_INTENT` and `STATEMENT` are refused to every ' +
       'caller, and `ORDER` to everyone but marketplace-service recording a `MARKETPLACE_ORDER` ' +
-      '(400 VALIDATION_FAILED on `sourceType`).',
+      '(400 VALIDATION_FAILED on `sourceType`). Where settlement fails closed without a ' +
+      'commission rule (docs/24 Q-29, on outside development and test), `businessLine` is ' +
+      'required — 422 BUSINESS_LINE_REQUIRED, nothing recorded — except for marketplace-service ' +
+      'recording its own `ORDER` (docs/24 Q-130).',
   })
   async create(
     @Headers('idempotency-key') idempotencyKey: string | undefined,

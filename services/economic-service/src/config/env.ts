@@ -1,16 +1,32 @@
 import { z } from 'zod';
 import { businessLineSchema } from '@rasta/contracts';
 import {
-  EnvValidationError,
   authEnvSchema,
   baseEnvSchema,
   booleanEnv,
   databaseEnvSchema,
+  EnvValidationError,
+  fixedEnvMessages,
   kafkaEnvSchema,
   loadEnv,
   outboxPurgeEnvSchema,
+  serviceUrlSchema,
 } from '@rasta/config';
 import { economicOperationBudgets } from './operation-budgets';
+
+/** The fixed texts this schema refuses with; `loadEnv` keeps only these verbatim (#385 r2 F2). */
+const { fixed, seal } = fixedEnvMessages();
+
+const GRACE_TOO_SHORT = fixed('must be more than twice ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS');
+const LEASE_TOO_SHORT = fixed(
+  'must exceed ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS by at least 5 seconds',
+);
+const MOCK_LATENCY_OVER_TIMEOUT = fixed(
+  'must exceed ECONOMIC_MOCK_PAYMENT_LATENCY_MS while the mock provider is bound',
+);
+const BACKOFF_MAX_BELOW_BASE = fixed(
+  'must not be below ECONOMIC_PAYMENT_RECONCILER_BACKOFF_SECONDS',
+);
 
 /**
  * economic-service configuration.
@@ -27,7 +43,7 @@ export const economicEnvSchema = baseEnvSchema
   .merge(outboxPurgeEnvSchema)
   .merge(authEnvSchema)
   .extend({
-    CORS_ORIGINS: z.string().default(''),
+    CORS_ORIGINS: z.string().prefault(''),
 
     /**
      * The organization that plays the platform operator role.
@@ -39,7 +55,7 @@ export const economicEnvSchema = baseEnvSchema
      * "the union" here would be exactly the structural assumption
      * `PROJECT_MEMORY` § 1 forbids.
      */
-    ECONOMIC_PLATFORM_ORGANIZATION_ID: z.string().min(1).default('ORG-PLATFORM'),
+    ECONOMIC_PLATFORM_ORGANIZATION_ID: z.string().min(1).prefault('ORG-PLATFORM'),
 
     /**
      * Which payment provider is wired in.
@@ -54,7 +70,7 @@ export const economicEnvSchema = baseEnvSchema
      * because a silent fallback to a simulated provider in an environment that
      * expected a real one is the worst possible failure here.
      */
-    ECONOMIC_PAYMENT_PROVIDER: z.enum(['mock']).default('mock'),
+    ECONOMIC_PAYMENT_PROVIDER: z.enum(['mock']).prefault('mock'),
 
     /**
      * Deterministic simulated latency for the mock provider, in milliseconds.
@@ -63,7 +79,7 @@ export const economicEnvSchema = baseEnvSchema
      * the loading states real. It is a fixed delay, never a random one — a
      * random delay makes a test flaky rather than realistic.
      */
-    ECONOMIC_MOCK_PAYMENT_LATENCY_MS: z.coerce.number().int().min(0).max(10_000).default(0),
+    ECONOMIC_MOCK_PAYMENT_LATENCY_MS: z.coerce.number().int().min(0).max(10_000).prefault(0),
 
     /**
      * How long a refund in flight is left alone before its reconciliation task
@@ -82,7 +98,7 @@ export const economicEnvSchema = baseEnvSchema
       .int()
       .min(30)
       .max(86_400)
-      .default(300),
+      .prefault(300),
 
     /**
      * The payment reconciler (ADR-064 step B2): an in-process sweeper over
@@ -97,36 +113,36 @@ export const economicEnvSchema = baseEnvSchema
       .int()
       .min(5)
       .max(3600)
-      .default(60),
+      .prefault(60),
     /** Tasks claimed per sweep. With the provider timeout, the bound on one sweep. */
-    ECONOMIC_PAYMENT_RECONCILER_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+    ECONOMIC_PAYMENT_RECONCILER_BATCH_SIZE: z.coerce.number().int().min(1).max(500).prefault(20),
     /** How long a claim holds before another sweeper may take the task back. */
     ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS: z.coerce
       .number()
       .int()
       .min(10)
       .max(3600)
-      .default(120),
+      .prefault(120),
     /** Delay after the first unresolved attempt; doubles per attempt up to the maximum. */
     ECONOMIC_PAYMENT_RECONCILER_BACKOFF_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(60),
+      .prefault(60),
     ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS: z.coerce
       .number()
       .int()
       .min(1)
       .max(86_400)
-      .default(3600),
+      .prefault(3600),
     /**
      * After this many unresolved attempts, or this long since the task was
      * opened, it is escalated to a person with `PAYMENT_RECONCILIATION_ESCALATED`.
      * The hold stays: escalation changes who decides, not where the money is.
      */
-    ECONOMIC_PAYMENT_RECONCILER_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(12),
-    ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(720).default(72),
+    ECONOMIC_PAYMENT_RECONCILER_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(100).prefault(12),
+    ECONOMIC_PAYMENT_RECONCILER_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(720).prefault(72),
 
     /**
      * The deadline on the refund-side provider calls — `refund` and
@@ -142,7 +158,7 @@ export const economicEnvSchema = baseEnvSchema
      */
     ECONOMIC_PAYMENT_RECONCILIATION_RESOLVER_ROLES: z
       .string()
-      .default('SYSTEM_ADMIN')
+      .prefault('SYSTEM_ADMIN')
       .transform((value) =>
         value
           .split(',')
@@ -164,7 +180,7 @@ export const economicEnvSchema = baseEnvSchema
       .int()
       .min(100)
       .max(60_000)
-      .default(10_000),
+      .prefault(10_000),
 
     /**
      * Cashback rewards.
@@ -191,16 +207,42 @@ export const economicEnvSchema = baseEnvSchema
     ECONOMIC_REFUND_BY_PAYEE_ENABLED: booleanEnv(true),
 
     /**
+     * Whether settling a transaction whose business line has no active
+     * commission rule is refused (`422 NO_ACTIVE_RULE`) rather than settled at
+     * zero (docs/24 Q-29, decided 2026-10-23).
+     *
+     * Unset, it is on outside development and test and off in them — what
+     * `loadEconomicEnv` resolves it to, reading `NODE_ENV` as given, as the
+     * four-eyes opt-out does — so a local stack and the suites settle as they
+     * always have unless they turn it on. Turning it off is refused outside
+     * development and test: a settlement that silently charges nothing is
+     * revenue that is never recorded. The pilot runs on an explicit 0% rule
+     * per line (Q-08), so on, nothing is refused that was configured.
+     *
+     * Every business line is commission-bearing until docs/24 Q-130 says which
+     * are not. A transaction its source recorded **without** a line is not
+     * refused: no rule can be written for one any more (docs/23 D-057), so it
+     * would never settle; it stays `NO_ACTIVE_RULE` at zero, as before, and is
+     * counted (`rasta_economic_commission_applications_total{matched="false"}`).
+     */
+    ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: z.preprocess(
+      (value) => (value === '' ? undefined : value),
+      // Unset stays unset (decided by NODE_ENV below). Not `booleanEnv(false).optional()`:
+      // zod 4's optional hands an absent value to a defaulted schema, which answers false.
+      z.union([z.undefined(), booleanEnv(false)]),
+    ),
+
+    /**
      * The services that own the facts this service makes money from (ADR-061 § 4).
      *
      * Required, with no default. Without them, the settlement consumer cannot
      * confirm an approval, so it could never record an obligation. That is
      * better found at boot than as a DLQ full of good events.
      */
-    MAINTENANCE_SERVICE_URL: z.string().url(),
-    FLEET_SERVICE_URL: z.string().url(),
+    MAINTENANCE_SERVICE_URL: serviceUrlSchema,
+    FLEET_SERVICE_URL: serviceUrlSchema,
     /** The owner of an approved contract statement (ADR-068 § 6 (2)); required for the same reason. */
-    CONTRACT_SERVICE_URL: z.string().url(),
+    CONTRACT_SERVICE_URL: serviceUrlSchema,
 
     /**
      * The business line a contract statement's obligation is recorded under
@@ -221,14 +263,14 @@ export const economicEnvSchema = baseEnvSchema
     ),
 
     /** One source read, body included. A timeout is retried, never acted on. */
-    ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(3000),
+    ECONOMIC_SOURCE_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).prefault(3000),
 
     /**
      * Where a union administrator's subtree is confirmed (docs/24 Q-136):
      * organization-service, the owner of the hierarchy (A-13), asked as
      * construction-service and contract-service ask it.
      */
-    ORGANIZATION_SERVICE_URL: z.string().url().default('http://localhost:3102'),
+    ORGANIZATION_SERVICE_URL: serviceUrlSchema.prefault('http://localhost:3102'),
 
     /**
      * How long that question may take, body included. It is asked under the
@@ -241,10 +283,10 @@ export const economicEnvSchema = baseEnvSchema
       .int()
       .min(100)
       .max(30_000)
-      .default(3000),
+      .prefault(3000),
 
     /** How long a stored idempotency key is honoured (docs/06 § 6.8). */
-    ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+    ECONOMIC_IDEMPOTENCY_TTL_HOURS: z.coerce.number().int().min(1).max(168).prefault(24),
 
     /**
      * Whether this instance runs the ledger/wallet reconciliation.
@@ -265,10 +307,10 @@ export const economicEnvSchema = baseEnvSchema
       .int()
       .min(30)
       .max(86_400)
-      .default(3600),
+      .prefault(3600),
 
     /** How many wallets one reconciliation pass checks. Bounds the query. */
-    ECONOMIC_BALANCE_AUDIT_BATCH_SIZE: z.coerce.number().int().min(1).max(5000).default(500),
+    ECONOMIC_BALANCE_AUDIT_BATCH_SIZE: z.coerce.number().int().min(1).max(5000).prefault(500),
   })
   .superRefine((env, ctx) => {
     // The grace keeps the reconciler off a refund whose provider call is still
@@ -280,7 +322,7 @@ export const economicEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['ECONOMIC_PAYMENT_RECONCILER_GRACE_SECONDS'],
-        message: 'must be more than twice ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS',
+        message: GRACE_TOO_SHORT,
       });
     }
     // A claim must outlive the provider question and the write that follows,
@@ -293,7 +335,7 @@ export const economicEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['ECONOMIC_PAYMENT_RECONCILER_LEASE_SECONDS'],
-        message: 'must exceed ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS by at least 5 seconds',
+        message: LEASE_TOO_SHORT,
       });
     }
     // The mock's fixed latency must fit inside the deadline, or every mock
@@ -307,7 +349,7 @@ export const economicEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['ECONOMIC_PAYMENT_PROVIDER_TIMEOUT_MS'],
-        message: 'must exceed ECONOMIC_MOCK_PAYMENT_LATENCY_MS while the mock provider is bound',
+        message: MOCK_LATENCY_OVER_TIMEOUT,
       });
     }
     if (
@@ -317,12 +359,20 @@ export const economicEnvSchema = baseEnvSchema
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['ECONOMIC_PAYMENT_RECONCILER_BACKOFF_MAX_SECONDS'],
-        message: 'must not be below ECONOMIC_PAYMENT_RECONCILER_BACKOFF_SECONDS',
+        message: BACKOFF_MAX_BELOW_BASE,
       });
     }
   });
 
-export type EconomicEnv = z.infer<typeof economicEnvSchema>;
+export const ECONOMIC_ENV_MESSAGES = seal();
+
+/** The settings as the schema parses them, before `loadEconomicEnv` resolves the defaults it alone can. */
+export type EconomicEnvInput = z.infer<typeof economicEnvSchema>;
+
+export type EconomicEnv = Omit<EconomicEnvInput, 'ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE'> & {
+  /** Resolved: never unset once loaded (`settlementRequiresCommissionRule`). */
+  ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: boolean;
+};
 
 export function loadEconomicEnv(source: NodeJS.ProcessEnv = process.env): EconomicEnv {
   const env = loadEnv(
@@ -336,10 +386,18 @@ export function loadEconomicEnv(source: NodeJS.ProcessEnv = process.env): Econom
       KAFKA_CONSUMER_GROUP: source.KAFKA_CONSUMER_GROUP ?? 'economic-service.main',
       CORS_ORIGINS: source.CORS_ORIGINS ?? source.GATEWAY_CORS_ORIGINS ?? '',
     },
-    { operationBudgets: economicOperationBudgets },
+    { operationBudgets: economicOperationBudgets, fixedMessages: ECONOMIC_ENV_MESSAGES },
   );
   assertFourEyesOptOut(source, env);
-  return env;
+  return {
+    ...env,
+    ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE: settlementRequiresCommissionRule(source, env),
+  };
+}
+
+/** Where nobody's money is real, read from `NODE_ENV` as given (`assertFourEyesOptOut`). */
+function isDevelopmentOrTest(source: NodeJS.ProcessEnv): boolean {
+  return source.NODE_ENV === 'development' || source.NODE_ENV === 'test';
 }
 
 /**
@@ -348,12 +406,33 @@ export function loadEconomicEnv(source: NodeJS.ProcessEnv = process.env): Econom
  * opt-out is: the schema would default an unset one to `development`, and an
  * operator who forgot it must not lose the second pair of eyes by accident.
  */
-function assertFourEyesOptOut(source: NodeJS.ProcessEnv, env: EconomicEnv): void {
+function assertFourEyesOptOut(source: NodeJS.ProcessEnv, env: EconomicEnvInput): void {
   if (env.ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES) return;
-  if (source.NODE_ENV === 'development' || source.NODE_ENV === 'test') return;
+  if (isDevelopmentOrTest(source)) return;
   throw new EnvValidationError([
     {
       path: 'ECONOMIC_PAYMENT_RECONCILIATION_RESOLUTION_FOUR_EYES',
+      message: 'may be false only when NODE_ENV is development or test',
+    },
+  ]);
+}
+
+/**
+ * Whether a settlement with no active commission rule for its line is refused
+ * (docs/24 Q-29). Unset: on, except in development and test. Off is refused
+ * anywhere else — the boot guard of the four-eyes opt-out, for the same
+ * reason: an unset or mistyped `NODE_ENV` must not switch a control off.
+ */
+function settlementRequiresCommissionRule(
+  source: NodeJS.ProcessEnv,
+  env: EconomicEnvInput,
+): boolean {
+  const configured = env.ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE;
+  if (configured === undefined) return !isDevelopmentOrTest(source);
+  if (configured || isDevelopmentOrTest(source)) return configured;
+  throw new EnvValidationError([
+    {
+      path: 'ECONOMIC_SETTLEMENT_REQUIRE_COMMISSION_RULE',
       message: 'may be false only when NODE_ENV is development or test',
     },
   ]);

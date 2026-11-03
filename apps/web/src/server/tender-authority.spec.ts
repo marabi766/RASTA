@@ -14,6 +14,11 @@ import {
   type AuthorityStep,
 } from './tender-authority';
 import { ownerCallerOf } from './tender-owner';
+import { pinnedTokens } from '@/test/session-token';
+import { actingAccessToken } from '@/test/session-token';
+
+/** A token that grants the session's pinned organization a role (task 118). */
+const ACCESS_TOKEN_VALUE = actingAccessToken('ORG-DEH-0001');
 
 /**
  * The approval authority of another organization (PR 346 review 1, finding 3):
@@ -30,18 +35,20 @@ Object.assign(process.env, {
   WEB_SESSION_SECRET: 'a-secret-that-is-long-enough-to-be-a-key',
 });
 
-const SESSION = { accessToken: 'access-token-value' } as WebSession;
+const SESSION = { accessToken: ACCESS_TOKEN_VALUE, organizationId: 'ORG-DEH-0001' } as WebSession;
 const REVIEWER_ORG = 'ORG-REVIEW-0001';
 
 function person(roles: string[], uid = 'USR-REVIEWER', org = REVIEWER_ORG) {
   return ownerCallerOf(
-    jwt({
-      sub: 'kc-subject',
-      org_id: org,
-      org_ids: [org],
-      org_roles: roles.map((role) => `${org}:${role}`),
-      rasta_uid: uid,
-    }),
+    pinnedTokens(
+      jwt({
+        sub: 'kc-subject',
+        org_id: org,
+        org_ids: [org],
+        org_roles: roles.map((role) => `${org}:${role}`),
+        rasta_uid: uid,
+      }),
+    ),
   );
 }
 

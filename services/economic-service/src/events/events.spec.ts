@@ -4,6 +4,7 @@ import {
   ECONOMIC_EVENT_DECODERS,
   ECONOMIC_EVENT_SCHEMAS,
   ECONOMIC_EVENT_VERSIONS,
+  SETTLEMENT_REFUSAL_TRANSACTION_TYPES,
   decodeEconomicPayload,
   validateEconomicPayload,
   type EconomicEventName,
@@ -15,6 +16,7 @@ import {
   STATEMENT_APPROVED_FIELDS,
   statementApprovedSchema,
 } from './consumed';
+import { TRANSACTION_TYPES } from '../transaction/dto';
 
 /**
  * The event contract (docs/07 § 7.8, docs/events/README.md § Economic).
@@ -28,7 +30,7 @@ import {
 const EVENT_NAMES = Object.values(ECONOMIC_EVENTS) as EconomicEventName[];
 
 describe('the catalogue', () => {
-  it('publishes exactly the twenty-three events docs/07 § 7.5 lists', () => {
+  it('publishes exactly the twenty-four events docs/07 § 7.5 lists', () => {
     expect(EVENT_NAMES.sort()).toEqual(
       [
         'COMMISSION_APPLIED',
@@ -52,6 +54,7 @@ describe('the catalogue', () => {
         'REWARD_LEVEL_CHANGED',
         'REWARD_RULE_CHANGED',
         'SETTLEMENT_COMPLETED',
+        'SETTLEMENT_REFUSED',
         'TRANSACTION_STATUS_CHANGED',
         'WALLET_OPENED',
       ].sort(),
@@ -173,6 +176,7 @@ describe('payment events disclose that they are simulated', () => {
     ECONOMIC_EVENTS.PAYMENT_COMPLETED,
     ECONOMIC_EVENTS.PAYMENT_FAILED,
   ])('%s requires a `simulated` flag', (name) => {
+    const now = new Date().toISOString();
     const base: Record<string, unknown> = {
       paymentIntentId: 'PAY_1',
       organizationId: 'ORG-A',
@@ -182,9 +186,9 @@ describe('payment events disclose that they are simulated', () => {
       amountMinor: '1000',
       currency: 'IRR',
       provider: 'mock',
-      authorizedAt: new Date().toISOString(),
-      completedAt: new Date().toISOString(),
-      failedAt: new Date().toISOString(),
+      authorizedAt: now,
+      completedAt: now,
+      failedAt: now,
       reason: 'DECLINED',
     };
 
@@ -726,5 +730,38 @@ describe('event versions (docs/07 § 7.8; Codex r1 on #307, F4)', () => {
       'COMMISSION_APPLIED has no version 3',
     );
     expect(() => decodeEconomicPayload('FUNDS_HELD', 2, {})).toThrow('FUNDS_HELD has no version 2');
+  });
+});
+
+describe('SETTLEMENT_REFUSED', () => {
+  const refused = (overrides: Record<string, unknown> = {}) => ({
+    transactionId: 'TXN_1',
+    organizationId: 'ORG_PAYER',
+    payerOrganizationId: 'ORG_PAYER',
+    payeeOrganizationId: 'ORG_PAYEE',
+    transactionType: 'LOGISTICS',
+    businessLine: 'LOGISTICS',
+    reason: 'NO_ACTIVE_RULE',
+    refusedBy: 'USR_1',
+    refusedAt: '2026-10-23T08:00:00.000Z',
+    ...overrides,
+  });
+
+  it('names exactly the types an obligation is recorded as', () => {
+    expect([...SETTLEMENT_REFUSAL_TRANSACTION_TYPES]).toEqual([...TRANSACTION_TYPES]);
+  });
+
+  it('accepts a refusal of a lined transaction', () => {
+    expect(() => validateEconomicPayload('SETTLEMENT_REFUSED', refused())).not.toThrow();
+  });
+
+  it.each([
+    ['a type outside the list', { transactionType: 'WALLET_TOP_UP' }],
+    ['a line outside the contract', { businessLine: 'TAXI' }],
+    ['no line — a line-less transaction is never refused', { businessLine: null }],
+    ['a reason outside the closed list', { reason: 'SOMETHING_ELSE' }],
+    ['an amount — the record carries none', { grossAmountMinor: '2000000' }],
+  ])('refuses %s', (_label, overrides) => {
+    expect(() => validateEconomicPayload('SETTLEMENT_REFUSED', refused(overrides))).toThrow();
   });
 });

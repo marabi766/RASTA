@@ -3,7 +3,7 @@ import type { JournalView, LedgerAccountView, LedgerEntryView } from '../ledger/
 import type { WalletHoldView, WalletView } from '../wallet/dto';
 import type { TransactionDetailView, TransactionView } from '../transaction/dto';
 import type { CommissionRuleView, CommissionView } from '../commission/dto';
-import type { RewardBalanceView, RewardView } from '../reward/dto';
+import type { RewardBalanceView, RewardRuleApiView, RewardView } from '../reward/dto';
 import type { PaymentIntentView } from '../payment/dto';
 
 /**
@@ -303,8 +303,8 @@ export function toTransactionDetailView(
  * A transaction command's stored answer, as it is replayed (Codex on #352,
  * finding 2). One stored by the release before `resolvedDisputeId` existed
  * lacks it, and the documented view requires it: it is replayed with `null`,
- * which the view documents as "not attributed by identity", and a reader
- * judges that answer's resolution by time, as that release's readers did. An
+ * which the view documents as "not attributed by identity": a reader cannot
+ * tell which dispute that answer's resolution decided, and says so. An
  * answer that has the field is replayed as stored.
  */
 export function storedTransactionDetailView(
@@ -437,6 +437,57 @@ export function toRewardBalanceView(row: RewardBalanceRow): RewardBalanceView {
       : null,
     lifetimeCreditMinor: formatMinor(row.lifetimeCreditMinor),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export interface RewardRuleRow {
+  id: string;
+  organizationId: string | null;
+  triggerEvent: string;
+  rewardType: string;
+  condition: unknown;
+  points: number;
+  creditPerPointMinor: bigint | null;
+  periodCap: number | null;
+  periodType: string | null;
+  validFrom: Date;
+  validTo: Date | null;
+  status: string;
+  label: string | null;
+  createdAt: Date;
+  createdBy: string;
+  updatedAt: Date;
+  updatedBy: string;
+}
+
+/**
+ * Every reward rule route answers through this (economic audit F1). The rule
+ * row used to be returned as Prisma read it, with `creditPerPointMinor` a
+ * native `bigint`: nothing in production serialises one, so a monetised
+ * rule's create committed and then answered 500, and the retry created a
+ * second paying rule. Only the test runner had been taught to serialise it
+ * (`jest.setup.cjs`), which is why no test saw it.
+ */
+export function toRewardRuleView(row: RewardRuleRow): RewardRuleApiView {
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    triggerEvent: row.triggerEvent,
+    rewardType: row.rewardType,
+    condition: row.condition ?? null,
+    points: row.points,
+    creditPerPointMinor:
+      row.creditPerPointMinor === null ? null : formatMinor(row.creditPerPointMinor),
+    periodCap: row.periodCap,
+    periodType: row.periodType,
+    validFrom: row.validFrom.toISOString(),
+    validTo: iso(row.validTo),
+    status: row.status,
+    label: row.label,
+    createdAt: row.createdAt.toISOString(),
+    createdBy: row.createdBy,
+    updatedAt: row.updatedAt.toISOString(),
+    updatedBy: row.updatedBy,
   };
 }
 

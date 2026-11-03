@@ -1,3 +1,7 @@
+import { eligibilityClockSql } from '@rasta/testing';
+import { setEligibilityFixture } from '@rasta/testing';
+import { ProcurementThresholdPolicy } from '../src/organization/procurement-threshold-policy';
+import type { ThresholdPolicy } from '../src/tender/procurement-thresholds';
 import { withUtcSession } from '@rasta/config';
 import {
   RastaError,
@@ -204,6 +208,8 @@ export interface Wiring {
   policies: PolicyService;
   /** The organization hierarchy these suites see instead of organization-service. */
   hierarchy: FakeHierarchy;
+  gate: TenderApprovalGate;
+  thresholds: { get(organizationId: string): Promise<ThresholdPolicy | null> };
   execution: ExecutionService;
   progress: ProgressService;
   /** Q-83: policies follow an ORGANIZATION_MOVED. */
@@ -278,6 +284,9 @@ export class TestTenderClock extends TenderClock {
 export function wire(env: ConstructionEnv = testEnv()): Wiring {
   const prisma = new PrismaService(databaseUrl(), env.CONSTRUCTION_TRANSACTION_TIMEOUT_MS);
   const hierarchy = new FakeHierarchy();
+  const thresholds = {
+    get: async (_organizationId: string): Promise<ThresholdPolicy | null> => null,
+  };
   const events = new EventPublisher(env);
   const repository = new ProjectRepository(prisma);
   const access = new ProjectAccess(env);
@@ -503,6 +512,7 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       gate,
       tenderApprovalRepository,
       idempotency,
+      thresholds as ProcurementThresholdPolicy,
     ),
     criteriaRepository,
     criteria: new CriteriaService(
@@ -525,6 +535,8 @@ export function wire(env: ConstructionEnv = testEnv()): Wiring {
       idempotency,
     ),
     hierarchy,
+    gate,
+    thresholds,
     execution: new ExecutionService(
       prisma,
       repository,
@@ -1421,10 +1433,9 @@ export async function evaluatingTender(
     bids.push({ bidder, bidId: view.bidId });
   }
   await runUnscoped('the suite lets the deadline pass', () =>
-    w.prisma.client.$executeRawUnsafe(
-      `UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
-         "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`,
-    ),
+    w.prisma.client
+      .$executeRawUnsafe(eligibilityClockSql`UPDATE "tender" SET "bid_opening_at" = now() - interval '2 hours',
+         "bid_closing_at" = now() - interval '1 minute' WHERE "id" = '${tenderId}'`),
   );
   await w.tenderClose.close({ organizationId: owner, tenderId });
   await asAdmin(owner, () => w.tenderOpen.open(tenderId));
@@ -1445,6 +1456,26 @@ export async function ownerSql(statements: string[]): Promise<void> {
         'ALTER TABLE "tender_award_standing_check" DISABLE TRIGGER "tg_award_standing_check_guard"',
       );
       for (const statement of statements) await tx.$executeRawUnsafe(statement);
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "tender_award_standing_check" ENABLE TRIGGER "tg_award_standing_check_guard"',
+      );
+    });
+  } finally {
+    await owner.$disconnect();
+  }
+}
+
+export async function ownerEligibilityFixture(
+  fixture: 'awardDue' | 'awardExpired',
+  tenderId: string,
+): Promise<void> {
+  const owner = ownerClient();
+  try {
+    await owner.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(
+        'ALTER TABLE "tender_award_standing_check" DISABLE TRIGGER "tg_award_standing_check_guard"',
+      );
+      await setEligibilityFixture({ client: tx }, fixture, [tenderId]);
       await tx.$executeRawUnsafe(
         'ALTER TABLE "tender_award_standing_check" ENABLE TRIGGER "tg_award_standing_check_guard"',
       );

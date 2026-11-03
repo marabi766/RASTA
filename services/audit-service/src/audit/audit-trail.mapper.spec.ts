@@ -428,13 +428,18 @@ describe('malformed messages', () => {
     expect(rejection.detail).toBe('actor.id, resourceType, resourceId blank');
   });
 
-  it.each([[2_147_483_648], [1e300]])(
+  // zod 4's `.int()` refuses an integer past 2^53 − 1 itself (zod 3 took 1e300 as
+  // an integer and left it to the column bound below): still refused, by the schema.
+  it.each([
+    [2_147_483_648, 'occurrenceCount exceeds 2147483647'],
+    [1e300, 'occurrenceCount too_big'],
+  ])(
     'refuses an occurrence count of %s, which the INTEGER column cannot hold',
-    (occurrenceCount) => {
+    (occurrenceCount, detail) => {
       const rejection = rejectionOf(envelope(refusal({ occurrenceCount })));
 
       expect(rejection.reason).toBe('trail_invalid_payload');
-      expect(rejection.detail).toBe('occurrenceCount exceeds 2147483647');
+      expect(rejection.detail).toBe(detail);
     },
   );
 

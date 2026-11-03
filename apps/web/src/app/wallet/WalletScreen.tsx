@@ -29,7 +29,12 @@ import type {
   TransactionPage,
   Wallet,
 } from '@/server/wallet';
+import { DemoModeNotice, MoneyActionWithheld } from '@/app/DemoModeNotice';
+import { demoModeOf } from '@/lib/demo-mode';
+import { providerNotice } from '@/lib/wallet-fields';
 import { TopUpForm } from './TopUpForm';
+import { withContext, type InContext } from '@/lib/page-context';
+import { ContextField } from '@/app/ContextField';
 
 /**
  * `/wallet` — کیف پول و تراکنش (docs/16 § ۱۶٫۶, role `ORGANIZATION_ADMIN`).
@@ -49,6 +54,11 @@ import { TopUpForm } from './TopUpForm';
  * If that read fails, the form is withheld rather than shown without its
  * disclosure — an amount field with nothing above it would look like an
  * ordinary payment box.
+ *
+ * The same read labels the whole screen, by the rule every money screen
+ * follows (`DemoModeNotice`, Q-14): «حالت نمایشی» above the balances and the
+ * history while the provider is simulated, and, when it could not be read,
+ * that it is unknown — the balances are shown either way, never unlabelled.
  */
 
 export interface WalletScreenProps {
@@ -56,19 +66,22 @@ export interface WalletScreenProps {
   readonly holds: ReadResult<HoldsPage>;
   readonly transactions: ReadResult<TransactionPage>;
   readonly provider: ReadResult<PaymentProviderDisclosure>;
-  readonly query: TransactionListQuery;
+  readonly query: InContext<TransactionListQuery>;
   readonly csrfToken: string;
   readonly submissionId: string;
 }
 
-function hrefWith(query: TransactionListQuery, changes: Partial<TransactionListQuery>): string {
+function hrefWith(
+  query: InContext<TransactionListQuery>,
+  changes: Partial<TransactionListQuery>,
+): string {
   const params = new URLSearchParams();
   const merged = { ...query, ...changes };
   if (merged.status) params.set('status', merged.status);
   if (merged.transactionType) params.set('transactionType', merged.transactionType);
   if (merged.cursor) params.set('cursor', merged.cursor);
   const search = params.toString();
-  return search ? `/wallet?${search}` : '/wallet';
+  return withContext(query.context, search ? `/wallet?${search}` : '/wallet');
 }
 
 const CONTROL =
@@ -144,7 +157,7 @@ function HoldRows({ holds }: { holds: HoldsPage }) {
   );
 }
 
-function TransactionFilters({ query }: { query: TransactionListQuery }) {
+function TransactionFilters({ query }: { query: InContext<TransactionListQuery> }) {
   return (
     <form
       method="get"
@@ -152,6 +165,7 @@ function TransactionFilters({ query }: { query: TransactionListQuery }) {
       className="flex flex-wrap items-end gap-4"
       aria-label="پالایش تراکنش‌ها"
     >
+      <ContextField context={query.context} />
       <label htmlFor="filter-status" className="flex flex-col gap-1 text-sm text-content-muted">
         وضعیت
         <select
@@ -191,7 +205,13 @@ function TransactionFilters({ query }: { query: TransactionListQuery }) {
   );
 }
 
-function TransactionRows({ page, query }: { page: TransactionPage; query: TransactionListQuery }) {
+function TransactionRows({
+  page,
+  query,
+}: {
+  page: TransactionPage;
+  query: InContext<TransactionListQuery>;
+}) {
   return (
     <>
       <table className="w-full border-collapse text-sm">
@@ -263,6 +283,9 @@ export function WalletScreen({
   return (
     <>
       <PageHeader title="کیف پول و تراکنش" description="موجودی سازمان فعال شما و تاریخچهٔ آن." />
+      {/* Over the balances and the history too, whichever of them read (Q-14): «حالت نمایشی», or
+          that the provider is unknown — never an unlabelled balance. */}
+      <DemoModeNotice mode={demoModeOf(provider)} />
 
       {wallet.kind === 'FORBIDDEN' ? <NoAccessState /> : null}
       {wallet.kind === 'UNAVAILABLE' ? (
@@ -290,9 +313,9 @@ export function WalletScreen({
           <Section headingId="top-up" title="افزایش موجودی">
             {provider.kind === 'OK' ? (
               <>
-                <Alert tone="info" title={provider.data.simulated ? 'حالت نمایشی' : undefined}>
-                  {provider.data.notice}
-                </Alert>
+                {/* Worded here from the provider's `simulated` flag, never the service's
+                    English sentence; the «حالت نمایشی» label itself is drawn once, above. */}
+                <Alert tone="info">{providerNotice(provider.data.simulated)}</Alert>
                 <TopUpForm
                   walletId={wallet.data.id}
                   csrfToken={csrfToken}
@@ -303,10 +326,7 @@ export function WalletScreen({
               // Withheld rather than shown without its disclosure — an amount
               // field with nothing above it would look like an ordinary
               // payment box (docs/16 § ۱۶٫۱۱, ADR-024).
-              <EmptyState
-                title="افزایش موجودی اکنون در دسترس نیست"
-                description="اطلاعات روش پرداخت خوانده نشد. بعداً دوباره سر بزنید."
-              />
+              <MoneyActionWithheld title="افزایش موجودی اکنون در دسترس نیست" />
             )}
           </Section>
         </>

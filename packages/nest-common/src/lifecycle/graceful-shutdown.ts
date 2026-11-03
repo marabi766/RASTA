@@ -1,4 +1,5 @@
 import { DEFAULT_SHUTDOWN_TIMEOUT_MS } from '@rasta/config';
+import { fatalShutdown, type FatalShutdown } from './fatal-shutdown';
 import { scrubMessage } from '@rasta/logging';
 
 /**
@@ -77,6 +78,8 @@ export interface GracefulShutdownOptions {
   exit?: (code: number) => void;
   /** Test seam. Default: `process`. */
   signalSource?: ShutdownSignalSource;
+  /** Test seam; production consumers and shutdown share the process singleton. */
+  fatalSource?: FatalShutdown;
 }
 
 export interface GracefulShutdown {
@@ -166,6 +169,15 @@ export function installGracefulShutdown(
   installedOn.add(signalSource);
 
   let running: Promise<void> | undefined;
+  let fatal = false;
+  let fatalTimer: NodeJS.Timeout | undefined;
+  let exited = false;
+  const finish = (code: number): void => {
+    if (exited) return;
+    exited = true;
+    clearTimeout(fatalTimer);
+    exit(code);
+  };
 
   const run = async (signal: string): Promise<void> => {
     logger.warn(`[${serviceName}] received ${signal}, shutting down`);
@@ -186,7 +198,7 @@ export function installGracefulShutdown(
       }
     }
 
-    exit(closed.kind === 'done' ? 0 : 1);
+    finish(!fatal && closed.kind === 'done' ? 0 : 1);
   };
 
   const shutdown = (signal: string): Promise<void> => {
@@ -197,6 +209,15 @@ export function installGracefulShutdown(
     running = run(signal);
     return running;
   };
+
+  (options.fatalSource ?? fatalShutdown).install(() => {
+    if (!fatal) {
+      fatal = true;
+      // Includes app.close AND telemetry. An already-running normal shutdown is escalated.
+      fatalTimer = setTimeout(() => finish(1), timeoutMs);
+    }
+    void shutdown('CONSUMER_TERMINAL_CRASH');
+  });
 
   for (const signal of signals) {
     signalSource.on(signal, () => void shutdown(signal));

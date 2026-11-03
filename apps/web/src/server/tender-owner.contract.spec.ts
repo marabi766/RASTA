@@ -226,7 +226,7 @@ describe('who may publish — `assertCanWrite`', () => {
 
   it('the project roles default as the portal’s do', () => {
     expect(constructionEnv).toContain(
-      "CONSTRUCTION_PROJECT_ROLES:z.string().default('ORGANIZATION_ADMIN')",
+      "CONSTRUCTION_PROJECT_ROLES:z.string().prefault('ORGANIZATION_ADMIN')",
     );
     expect(webEnv).toContain(
       "WEB_PROJECT_ROLES:roleList('WEB_PROJECT_ROLES','ORGANIZATION_ADMIN')",
@@ -296,7 +296,7 @@ describe('an opener who may not read the tender', () => {
 });
 
 describe('which commands may be sent again after a lost answer (PR 345 reviews 1 and 2, PR 346 review 1)', () => {
-  it('publishing and the opening’s three keep their first answer under the Idempotency-Key since task 060; a decision keeps none — and the portal sends none of them again yet', () => {
+  it('publishing and the opening’s three keep their first answer under the Idempotency-Key since task 060; a decision keeps none — so the portal sends those again after a lost answer, and no decision', () => {
     // The server side (task 060): the first answer is kept with the work it answers for.
     expect(publicationService).toContain(
       'this.idempotency.run(PUBLISH_TENDER_ENDPOINT,idempotencyKey,',
@@ -324,15 +324,18 @@ describe('which commands may be sent again after a lost answer (PR 345 reviews 1
     expect(approvalGate).toContain(
       "kind:'REQUESTED',request:awaitthis.open(tx,input),created:true,",
     );
-    // The portal's side is its own follow-up: until then these stay view-only after a lost answer.
+    // The portal's side: a re-send of what the service replays, in the same page, under the same
+    // key; a decision keeps nothing by key and stays view-only after a lost answer.
     for (const command of [
       'PUBLISH',
-      'GRANT',
-      'REJECT',
       'PROPOSE_OPENING',
       'OPEN_BIDS',
       'WITHDRAW_PROPOSAL',
     ] as const) {
+      expect(REPEATABLE_OWNER_COMMANDS).toContain(command);
+      expect(UNREPEATABLE_OWNER_COMMANDS).not.toContain(command);
+    }
+    for (const command of ['GRANT', 'REJECT'] as const) {
       expect(UNREPEATABLE_OWNER_COMMANDS).toContain(command);
     }
   });
@@ -344,8 +347,16 @@ describe('which commands may be sent again after a lost answer (PR 345 reviews 1
       "if(approval.version!==dto.expectedVersion)throwthis.conflict('Approval',step.id);",
     );
     expect(tenderApprovals).not.toContain('idempotency');
-    // Only a score keeps its result by key (`tender-evaluation.contract.spec.ts`).
-    expect([...REPEATABLE_OWNER_COMMANDS]).toEqual(['SCORE']);
+    // Of the evaluation's commands only a score keeps its result by key
+    // (`tender-evaluation.contract.spec.ts`); the portal sends again what the service replays.
+    expect([...REPEATABLE_OWNER_COMMANDS]).toEqual([
+      'PUBLISH',
+      'PROPOSE_OPENING',
+      'OPEN_BIDS',
+      'WITHDRAW_PROPOSAL',
+      'AWARD',
+      'SCORE',
+    ]);
   });
 });
 
@@ -377,7 +388,7 @@ describe('who may open — `assertCanOpenBids`', () => {
   });
 
   it('the opening roles default to none — the owner’s own — as the portal’s do', () => {
-    expect(constructionEnv).toContain("CONSTRUCTION_TENDER_OPEN_ROLES:z.string().default('')");
+    expect(constructionEnv).toContain("CONSTRUCTION_TENDER_OPEN_ROLES:z.string().prefault('')");
     expect(webEnv).toContain(
       "WEB_TENDER_OPEN_ROLES:roleList('WEB_TENDER_OPEN_ROLES','',['SYSTEM_ADMIN','CONTRACTOR'])",
     );

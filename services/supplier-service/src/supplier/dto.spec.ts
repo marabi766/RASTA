@@ -226,15 +226,48 @@ describe('the decision DTOs', () => {
 describe('the suspension DTOs', () => {
   it('requires a stated reason to suspend', () => {
     expect(suspendSupplierSchema.safeParse({}).success).toBe(false);
-    expect(suspendSupplierSchema.parse({ reason: 'Two undelivered orders' }).reason).toBe(
-      'Two undelivered orders',
+    expect(suspendSupplierSchema.safeParse({ latestSuspensionId: null }).success).toBe(false);
+    expect(
+      suspendSupplierSchema.parse({ reason: 'Two undelivered orders', latestSuspensionId: null })
+        .reason,
+    ).toBe('Two undelivered orders');
+  });
+
+  it('requires the newest episode the operator read to suspend — null included, never omitted', () => {
+    // Codex review of PR 366, finding 2: an omitted expectation would be an
+    // unchecked one.
+    expect(suspendSupplierSchema.safeParse({ reason: 'Two undelivered orders' }).success).toBe(
+      false,
     );
+    expect(
+      suspendSupplierSchema.safeParse({ reason: 'Two undelivered orders', latestSuspensionId: '' })
+        .success,
+    ).toBe(false);
+    expect(
+      suspendSupplierSchema.parse({ reason: 'Two undelivered orders', latestSuspensionId: 'SSP_1' })
+        .latestSuspensionId,
+    ).toBe('SSP_1');
   });
 
   it('requires a stated reason to reinstate', () => {
     // A lifting nobody explained is a gap in the record exactly where somebody
     // will later ask what happened.
     expect(reinstateSupplierSchema.safeParse({}).success).toBe(false);
+    expect(reinstateSupplierSchema.safeParse({ suspensionId: 'SSP_1' }).success).toBe(false);
+  });
+
+  it('requires the episode being lifted to reinstate', () => {
+    expect(reinstateSupplierSchema.safeParse({ reason: 'The orders were delivered' }).success).toBe(
+      false,
+    );
+    expect(
+      reinstateSupplierSchema.safeParse({ reason: 'The orders were delivered', suspensionId: null })
+        .success,
+    ).toBe(false);
+    expect(
+      reinstateSupplierSchema.parse({ reason: 'The orders were delivered', suspensionId: 'SSP_1' })
+        .suspensionId,
+    ).toBe('SSP_1');
   });
 
   it('refuses an `until` date — no rule defines a timed suspension', () => {

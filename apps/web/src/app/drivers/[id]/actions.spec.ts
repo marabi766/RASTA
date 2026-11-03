@@ -11,6 +11,7 @@ import {
   IDLE_END_ASSIGNMENT_FORM,
   IDLE_UPDATE_DRIVER_FORM,
 } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The `/drivers/[id]` detail page's four write paths.
@@ -69,7 +70,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'manager',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
@@ -216,11 +217,11 @@ describe('updating a driver — the full order of checks', () => {
     );
   });
 
-  it('redirects back to this driver with ?updated=1 after a successful write', async () => {
+  it('redirects back to this driver, with no flag the page never read, after a successful write', async () => {
     await expect(
       submitUpdateDriver(DRIVER_ID, IDLE_UPDATE_DRIVER_FORM, formData({})),
     ).rejects.toThrow(/NEXT_REDIRECT/);
-    expect(redirect).toHaveBeenCalledWith(`/drivers/${DRIVER_ID}?updated=1`);
+    expect(redirect).toHaveBeenCalledWith(`/drivers/${DRIVER_ID}`);
   });
 
   it('reports a sent-but-unconfirmed update as UNCONFIRMED, never as a failure (Codex #106)', async () => {
@@ -260,11 +261,11 @@ describe('changing status', () => {
     expect(changeDriverStatus).not.toHaveBeenCalled();
   });
 
-  it('redirects back to this driver with ?statusChanged=1', async () => {
+  it('redirects back to this driver, with no flag the page never read, after a status change', async () => {
     await expect(
       submitChangeStatus(DRIVER_ID, IDLE_CHANGE_STATUS_FORM, formData(VALID)),
     ).rejects.toThrow(/NEXT_REDIRECT/);
-    expect(redirect).toHaveBeenCalledWith(`/drivers/${DRIVER_ID}?statusChanged=1`);
+    expect(redirect).toHaveBeenCalledWith(`/drivers/${DRIVER_ID}`);
   });
 
   it('does not call the service when the reason is missing', async () => {
@@ -281,11 +282,11 @@ describe('changing status', () => {
 describe('assigning to a machine', () => {
   const VALID = { assetId: 'AST_01JASSET000000000000000000' };
 
-  it('redirects back to this driver with ?assigned=1', async () => {
+  it('redirects back to this driver, with no flag the page never read, after an assignment', async () => {
     await expect(submitAssign(DRIVER_ID, IDLE_ASSIGN_FORM, formData(VALID))).rejects.toThrow(
       /NEXT_REDIRECT/,
     );
-    expect(redirect).toHaveBeenCalledWith(`/drivers/${DRIVER_ID}?assigned=1`);
+    expect(redirect).toHaveBeenCalledWith(`/drivers/${DRIVER_ID}`);
   });
 
   it('reports an absent machine on the asset field, not as a generic failure', async () => {
@@ -334,7 +335,7 @@ describe('ending an assignment', () => {
       expect.anything(),
       expect.any(String),
     );
-    expect(redirect).toHaveBeenCalledWith(`/drivers/${DRIVER_ID}?ended=1`);
+    expect(redirect).toHaveBeenCalledWith(`/drivers/${DRIVER_ID}`);
   });
 
   it('refuses without a session, and calls nothing', async () => {

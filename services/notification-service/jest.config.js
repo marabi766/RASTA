@@ -1,4 +1,5 @@
 const swcOptions = require('../../jest.swc.cjs');
+const disclosureGuard = require('../../jest.disclosure-guard.cjs');
 const swcTransform = { '^.+\.(t|j)s$': ['@swc/jest', swcOptions] };
 
 const setupFiles = [require.resolve('./jest.setup.cjs')];
@@ -24,6 +25,7 @@ module.exports = {
   projects: [
     {
       displayName: 'unit',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: __dirname,
       roots: ['<rootDir>/src'],
       testEnvironment: 'node',
@@ -41,6 +43,7 @@ module.exports = {
       // and `--passWithNoTests` is deliberately absent so that deleting the
       // last test breaks the build rather than passing it.
       displayName: 'integration',
+      setupFilesAfterEnv: [disclosureGuard],
       rootDir: __dirname,
       roots: ['<rootDir>/test'],
       testEnvironment: 'node',

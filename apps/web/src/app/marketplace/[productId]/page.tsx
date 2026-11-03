@@ -1,13 +1,20 @@
 import { redirect } from 'next/navigation';
 import { AppShell, Button, TopBar } from '@/ui';
 import { currentSession } from '@/server/current-session';
-import { tokenWriteRoles } from '@/server/realm-roles';
+import { fetchDemoMode } from '@/server/demo-mode';
 import { canPlaceOrder } from '@/server/place-order';
 import { webServerEnv } from '@/server/env';
 import { mintSubmissionId, submissionBinding } from '@/server/submission';
 import { fetchOffers, fetchProduct, OFFER_SORTS } from '@/server/marketplace';
 import { PortalSidebar } from '@/app/PortalSidebar';
 import { OffersScreen } from './OffersScreen';
+import {
+  actingOrganizationId,
+  actingOrganizationLabel,
+  actingScope,
+  sessionWriteRoles,
+} from '@/server/session-organization';
+import { pageContext, pageParams } from '@/server/page-context';
 
 /**
  * The `/marketplace/[productId]` route — مقایسه پیشنهادها (docs/16 §
@@ -40,7 +47,7 @@ export default async function ProductOffersPage({
     redirect(`/login?returnTo=${encodeURIComponent(`/marketplace/${productId}`)}`);
   }
 
-  const search = await searchParams;
+  const search = await pageParams(session, searchParams);
   const sort = sortOf(search.sort);
 
   const [product, offers] = await Promise.all([
@@ -49,16 +56,19 @@ export default async function ProductOffersPage({
   ]);
 
   // A Route Guard as UX, not as security: offered on the access token's own
-  // roles (`tokenWriteRoles`), the set marketplace-service decides on — not
+  // roles (`sessionWriteRoles`), the set marketplace-service decides on — not
   // `/v1/users/me`, which runs ahead of the token until it is refreshed. A token
   // whose roles cannot be read shows no form, and the service decides again.
-  const roles = tokenWriteRoles(session.accessToken);
+  const roles = sessionWriteRoles(session);
   const canOrder = roles !== null && canPlaceOrder(roles);
+
+  const demoMode = await fetchDemoMode(session);
 
   return (
     <AppShell
+      key={actingScope(session)}
       topBar={
-        <TopBar organizationName={session.organizationId ?? 'بدون سازمان فعال'}>
+        <TopBar organizationName={actingOrganizationLabel(session)}>
           <form method="post" action="/auth/logout">
             <input type="hidden" name="csrf" value={session.csrfToken} />
             <Button type="submit" tone="secondary">
@@ -70,16 +80,18 @@ export default async function ProductOffersPage({
       sidebar={<PortalSidebar session={session} currentHref="/marketplace" />}
     >
       <OffersScreen
+        context={pageContext(session)}
         product={product}
         offers={offers}
         productId={productId}
         sort={sort}
+        demoMode={demoMode}
         ordering={
           canOrder
             ? {
                 csrfToken: session.csrfToken,
                 mintSubmissionId: () => mintSubmissionId(session),
-                organizationId: session.organizationId,
+                organizationId: actingOrganizationId(session),
                 binding: submissionBinding(session),
                 sessionMaxAgeSeconds: webServerEnv().WEB_SESSION_MAX_AGE_SECONDS,
               }

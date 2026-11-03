@@ -14,6 +14,7 @@ import { SUBMISSION_FIELD, mintSubmissionId } from '@/server/submission';
 import type { WebSession } from '@/server/session';
 
 import { IDLE_COMMAND_FORM } from './form-state';
+import { actingAccessToken } from '@/test/session-token';
 
 /**
  * The six commands on a repair order. The order is the assertion: each refusal
@@ -37,6 +38,9 @@ jest.mock('@/server/current-session', () => ({
   missingSessionReason: async () => 'NO_SESSION',
 }));
 jest.mock('next/navigation', () => ({ redirect: (url: string) => redirect(url) }));
+// The provider gate is open here: what it refuses, against a fake gateway, is
+// `app/money-actions-gate.spec.ts`.
+jest.mock('@/server/money-gate', () => ({ mayDispatch: async () => true }));
 jest.mock('@/server/repair-order-commands', () => {
   const actual = jest.requireActual('@/server/repair-order-commands');
   return {
@@ -65,7 +69,7 @@ const SESSION = {
   subject: 'user-1',
   username: 'manager',
   organizationId: 'ORG-DEH-0001',
-  accessToken: 'access-token-value',
+  accessToken: actingAccessToken('ORG-DEH-0001'),
   accessTokenExpiresAt: Math.floor(Date.now() / 1000) + 600,
   refreshToken: 'refresh-token-value',
   csrfToken: 'csrf-token-for-this-session',
