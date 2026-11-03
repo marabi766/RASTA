@@ -1,3 +1,4 @@
+import { ERROR_CODES, MAX_AMOUNT_MINOR } from '@rasta/contracts';
 import { RastaError } from '@rasta/nest-common';
 
 /**
@@ -82,7 +83,7 @@ export function priceOrder(
   let total = 0n;
   let maxLeadTimeDays = 0;
 
-  for (const line of requested) {
+  for (const [index, line] of requested.entries()) {
     if (seen.has(line.offerId)) {
       // Merging them would change the quantity the buyer sees confirmed, and
       // silently passing both would violate the unique index anyway.
@@ -139,8 +140,16 @@ export function priceOrder(
       });
     }
 
+    // Each figure that is stored is bounded before it is stored: the line
+    // total and the running order total both go into a BIGINT column, and a
+    // price and a quantity that are each valid can multiply — or lines that
+    // are each storable can add up — past it (marketplace audit F4). Checked
+    // here, before anything is written, so the refusal is the caller's 422
+    // and not the database's overflow surfacing as a 500.
     const lineTotal = offer.unitPriceMinor * BigInt(line.quantity);
+    if (lineTotal > MAX_AMOUNT_MINOR) throw amountExceedsLimit(`lines[${index}].quantity`);
     total += lineTotal;
+    if (total > MAX_AMOUNT_MINOR) throw amountExceedsLimit('lines');
     maxLeadTimeDays = Math.max(maxLeadTimeDays, offer.leadTimeDays);
 
     lines.push({
@@ -168,6 +177,29 @@ export function priceOrder(
     lines,
     maxLeadTimeDays,
   };
+}
+
+/**
+ * The closed reason (`details[].code`, docs/06 § 6.7) an order is refused for
+ * when a line total or the order total would exceed {@link MAX_AMOUNT_MINOR},
+ * the largest amount any service stores (a PostgreSQL `BIGINT`).
+ */
+export const ORDER_AMOUNT_EXCEEDS_LIMIT = 'ORDER_AMOUNT_EXCEEDS_LIMIT';
+
+const ORDER_AMOUNT_EXCEEDS_LIMIT_MESSAGE =
+  'The order total exceeds the largest amount the platform can record';
+
+/**
+ * Fixed words and the field the caller can change — never the offer's price
+ * or the computed figure, which would turn the refusal into a calculator and
+ * write amounts into the log (S-09).
+ */
+function amountExceedsLimit(path: string): RastaError {
+  return new RastaError(ERROR_CODES.BUSINESS_RULE_VIOLATION, ORDER_AMOUNT_EXCEEDS_LIMIT_MESSAGE, {
+    details: [
+      { path, code: ORDER_AMOUNT_EXCEEDS_LIMIT, message: ORDER_AMOUNT_EXCEEDS_LIMIT_MESSAGE },
+    ],
+  });
 }
 
 /**
