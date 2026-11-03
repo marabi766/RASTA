@@ -825,7 +825,7 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
 
     const need = await author.post(`/v1/projects/${projectId}/needs`, {
       body: {
-        expectedProjectVersion: 1,
+        expectedProjectVersion: (created.body as { version: number }).version,
         title: 'Contractor',
         description: 'Resurfacing works, two kilometres',
       },
@@ -835,7 +835,12 @@ test.describe.serial('a contract, end to end (CON-003)', () => {
       (
         await author.post(
           `/v1/projects/${projectId}/needs/${(need.body as { id: string }).id}/submit`,
-          { body: { expectedProjectVersion: 1, expectedVersion: 1 } },
+          {
+            body: {
+              expectedProjectVersion: (created.body as { version: number }).version,
+              expectedVersion: 1,
+            },
+          },
         )
       ).status,
     ).toBe(200);

@@ -187,7 +187,7 @@ test.describe.serial('the construction project lifecycle', () => {
 
     const need = await systemAdmin.post(`/v1/projects/${projectId}/needs`, {
       body: {
-        expectedProjectVersion: 1,
+        expectedProjectVersion: (created.body as { version: number }).version,
         title: 'Gravel',
         description: 'Base course for two kilometres',
       },
@@ -195,7 +195,12 @@ test.describe.serial('the construction project lifecycle', () => {
     expect(need.status, JSON.stringify(need.body)).toBe(201);
     const submitted = await systemAdmin.post(
       `/v1/projects/${projectId}/needs/${(need.body as { id: string }).id}/submit`,
-      { body: { expectedProjectVersion: 1, expectedVersion: 1 } },
+      {
+        body: {
+          expectedProjectVersion: (created.body as { version: number }).version,
+          expectedVersion: 1,
+        },
+      },
     );
     expect(submitted.status).toBe(200);
 
