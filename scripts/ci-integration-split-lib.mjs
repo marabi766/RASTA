@@ -352,7 +352,9 @@ export const ALLOWED_CONDITIONS = Object.freeze([
  * is refused here without an entry, rather than assumed to need no setup.
  * Measured maxima, in seconds: suites 298, security 309, critical 281,
  * coverage 310, backup drill 92, migration chain 135 (per shard), migration
- * guards 253, trivy-db 5.
+ * guards 253, trivy-db 5. `quality` (2026-11-03): its one limited step is the
+ * unit-step concurrency step (74-87 s in green runs); the rest of the worst run
+ * (2216 s, 2026-11-02) is 2216 - 87 = 2129 s, so ceil(2129 x 1.5 / 60) = 54.
  */
 export const JOB_SETUP_MINUTES = Object.freeze({
   'integration-suites': 8,
@@ -363,6 +365,7 @@ export const JOB_SETUP_MINUTES = Object.freeze({
   'migration-reversibility-chain': 4,
   'migration-guards': 7,
   'trivy-db': 1,
+  quality: 54,
 });
 
 /**

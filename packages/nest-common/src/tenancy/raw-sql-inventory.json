@@ -2380,6 +2380,34 @@
     "decision": "platform-wide: transaction-local timeout, snapshot, planner or savepoint control; no tenant data result"
   },
   {
+    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
+    "line": 29,
+    "hash": "1d4d038793204dded7071b1a6ebc4d2698e73caf564b9848cdb3cdffcb2ec165",
+    "occurrence": 0,
+    "decision": "platform-wide: transaction-local statement timeout bounds starter database work; no tenant data result"
+  },
+  {
+    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
+    "line": 39,
+    "hash": "5b5d369d47528a345a11f2ec672fbb37edb89a6cdfcc7fad946f334f75e59e87",
+    "occurrence": 0,
+    "decision": "platform-wide: bounded durable-start queue claims across buyers; persisted organization and fresh lease token fence every later acknowledgment"
+  },
+  {
+    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
+    "line": 64,
+    "hash": "f412a749f1d872b5102f9df8030ee8cf08a24009e1ee13d8bee06843c6fd4925",
+    "occurrence": 0,
+    "decision": "has bound organization predicate"
+  },
+  {
+    "file": "services/marketplace-service/src/temporal/saga-start.store.ts",
+    "line": 79,
+    "hash": "367ddc1e04369ec30fa59919457805f81c3c9474de5ce970a1e9da8394f28091",
+    "occurrence": 0,
+    "decision": "platform-wide: durable-start backlog exposes aggregate count and oldest age only; no tenant labels, identifiers or amounts leave the database"
+  },
+  {
     "file": "services/notification-service/src/notification/notification.repository.ts",
     "line": 159,
     "hash": "fb249fe3dac5b48761658d7b5fd36538feab40572abb5c8babba21f5db3b29c1",
