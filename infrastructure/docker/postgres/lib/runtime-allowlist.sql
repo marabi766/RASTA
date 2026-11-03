@@ -86,7 +86,8 @@ SELECT policy, class, object, privileges FROM (VALUES
 
   -- audit: 20260908120000_init_audit, 20260910120000_audit_chain_head,
   -- 20261001110000_tender_evidence, 20261001130000_tender_receipt_pending,
-  -- 20261003120000_payment_reconciliation_evidence. Nothing in `public`, and
+  -- 20261003120000_payment_reconciliation_evidence, 20261102100000_rfq_evidence.
+  -- Nothing in `public`, and
   -- nothing on an audit_event partition: the runtime role reaches the rows
   -- through the partitioned table only.
   ('audit', 'schema', 'audit', ARRAY['USAGE']),
@@ -99,6 +100,8 @@ SELECT policy, class, object, privileges FROM (VALUES
   ('audit', 'relation', 'audit.bid_access_evidence', ARRAY['SELECT', 'INSERT']),
   ('audit', 'relation', 'audit.tender_receipt_pending', ARRAY['SELECT', 'INSERT', 'DELETE']),
   ('audit', 'relation', 'audit.payment_reconciliation_evidence', ARRAY['SELECT', 'INSERT']),
+  ('audit', 'relation', 'audit.rfq_receipt_link', ARRAY['SELECT', 'INSERT']),
+  ('audit', 'relation', 'audit.rfq_receipt_pending', ARRAY['SELECT', 'INSERT', 'DELETE']),
   -- 20260909093000_audit_org_hierarchy_projection, 20260910120000_audit_chain_head.
   ('audit', 'type', 'audit.organization_relation_state', ARRAY['USAGE']),
   ('audit', 'type', 'audit.audit_chain_scope', ARRAY['USAGE'])
