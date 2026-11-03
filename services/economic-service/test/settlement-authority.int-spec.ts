@@ -96,6 +96,7 @@ describe('settlement needs settlement authority, whatever the status says (D-083
     // The reconciliation table is frozen; this suite's own rows go with the
     // guard lifted in one owner transaction.
     await owner.$transaction(async (tx) => {
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
       await tx.$executeRawUnsafe(
         'ALTER TABLE settlement_authority_reconciliation DISABLE TRIGGER trg_settlement_authority_reconciliation_frozen',
       );
@@ -170,6 +171,7 @@ describe('settlement needs settlement authority, whatever the status says (D-083
     expect(disputed.status).toBe(200);
     expect(disputed.body.status).toBe('DISPUTED');
     await owner.$transaction(async (tx) => {
+      // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
       await tx.$executeRawUnsafe(
         'ALTER TABLE "transaction" DISABLE TRIGGER trg_transaction_dispute_resolution',
       );
@@ -280,6 +282,7 @@ describe('settlement needs settlement authority, whatever the status says (D-083
     // hold already RELEASED (planted with its guard lifted), SETTLED is still refused.
     await owner
       .$transaction(async (tx) => {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
         await tx.$executeRawUnsafe(
           'ALTER TABLE wallet_hold DISABLE TRIGGER trg_wallet_hold_release_settlement_authority',
         );
@@ -337,6 +340,7 @@ describe('settlement needs settlement authority, whatever the status says (D-083
     // changes nothing.
     for (let run = 0; run < 2; run += 1) {
       await owner.$transaction(async (tx) => {
+        // ISOLATION-ALLOW-UNBOUNDED: DDL cannot carry a WHERE; bounded by this owner transaction.
         await tx.$executeRawUnsafe(
           'ALTER TABLE settlement_authority_reconciliation DISABLE TRIGGER trg_settlement_authority_reconciliation_frozen',
         );
