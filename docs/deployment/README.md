@@ -25,13 +25,17 @@ pnpm db:migrate && pnpm db:seed
 pnpm dev
 ```
 
+Detached Compose alone does not confirm topic provisioning. Use `pnpm infra:up`,
+which waits for the intended `kafka-init` invocation before applying ACLs; see
+[the startup gate and manual check](../12-deployment-architecture.md).
+
 پروفایل‌های اختیاری:
 
 ```bash
-docker compose --profile tools up -d           # Kafka UI، Temporal UI، Mailpit
-docker compose --profile search up -d          # OpenSearch
-docker compose --profile observability up -d   # OTel، Prometheus، Grafana
-docker compose --profile all up -d
+COMPOSE_PROFILES=tools pnpm infra:up           # Kafka UI، Temporal UI، Mailpit
+COMPOSE_PROFILES=search pnpm infra:up          # OpenSearch
+COMPOSE_PROFILES=observability pnpm infra:up   # OTel، Prometheus، Grafana
+COMPOSE_PROFILES=all pnpm infra:up
 ```
 
 **داشبورد محلی شواهد حسابرسی.** با Profile ‏`observability` (یا `all`)، Grafana در `http://localhost:3001` است و داشبورد

@@ -1,3 +1,5 @@
+import { errorEnvelopeProblems } from '@rasta/nest-common';
+import { refusal, type RefusalArea } from '../shared/refusal';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { INestApplication } from '@nestjs/common';
@@ -40,6 +42,26 @@ describe('the committed OpenAPI document', () => {
     'construction-service.openapi.json',
   );
 
+  it('accepts real filter bodies and every listed typed refusal on every published error', () => {
+    expect(
+      errorEnvelopeProblems(buildConstructionOpenApiDocument(app), {
+        refusal: (area, reason) => {
+          const status = refusalStatusOf(reason);
+          return refusal(
+            status === '403'
+              ? 'FORBIDDEN'
+              : status === '409'
+                ? 'CONFLICT'
+                : 'BUSINESS_RULE_VIOLATION',
+            'Refused',
+            area as RefusalArea,
+            [reason],
+          );
+        },
+      }),
+    ).toEqual([]);
+  });
+
   it('matches the generator byte for byte (run `pnpm openapi:generate` after changing the API)', () => {
     const generated = formatDocument(buildConstructionOpenApiDocument(app), committedPath);
     expect(readFileSync(committedPath, 'utf8')).toBe(generated);
@@ -55,7 +77,9 @@ describe('the committed OpenAPI document', () => {
 
     expect(operations.map((o) => o.key).sort()).toEqual(Object.keys(RESPONSE_BODIES).sort());
     for (const { key, operation } of operations) {
-      expect(operation.security).toEqual([{ bearer: [] }]);
+      expect(operation.security).toEqual(
+        key.startsWith('GET /v1/internal/') ? [{ internalToken: [] }] : [{ bearer: [] }],
+      );
       const success = RESPONSE_BODIES[key]?.status;
       expect(operation.responses[success ?? 'missing']).toBeDefined();
       const other = success === '201' ? '200' : '201';

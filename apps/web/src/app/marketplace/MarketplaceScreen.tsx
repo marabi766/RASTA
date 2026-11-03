@@ -1,4 +1,12 @@
-import { Button, EmptyState, ErrorState, NoAccessState, PageHeader, Section } from '@/ui';
+import {
+  Button,
+  EmptyState,
+  ErrorState,
+  NoAccessState,
+  PageHeader,
+  Section,
+  TableScroll,
+} from '@/ui';
 import { DemoModeNotice } from '@/app/DemoModeNotice';
 import type { DemoMode } from '@/lib/demo-mode';
 import { productKindLabel } from '@/lib/labels';
@@ -88,48 +96,50 @@ function Filters({ query }: { query: InContext<ProductSearchQuery> }) {
 
 function ProductRows({ page }: { page: ProductPage }) {
   return (
-    <table className="w-full border-collapse text-sm">
-      <caption className="sr-only">فهرست کالا و خدمت</caption>
-      <thead>
-        <tr className="border-b border-border text-start text-content-muted">
-          <th scope="col" className="p-3 text-start font-medium">
-            نام
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            دسته
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            نوع
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            شروع قیمت
-          </th>
-          <th scope="col" className="p-3 text-start font-medium">
-            تعداد پیشنهاد
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {page.items.map((product) => (
-          <tr key={product.id} className="border-b border-border">
-            <td className="p-3">
-              <a
-                href={`/marketplace/${encodeURIComponent(product.id)}`}
-                className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-              >
-                {product.name}
-              </a>
-            </td>
-            <td className="p-3 text-content-muted">{product.category}</td>
-            <td className="p-3 text-content-muted">{productKindLabel(product.kind)}</td>
-            <td className="p-3">
-              {product.offers.length > 0 ? formatMoney(product.offers[0]!.unitPriceMinor) : '—'}
-            </td>
-            <td className="p-3 text-content-muted">{product.offers.length}</td>
+    <TableScroll label="فهرست کالا و خدمت">
+      <table className="w-full border-collapse text-sm">
+        <caption className="sr-only">فهرست کالا و خدمت</caption>
+        <thead>
+          <tr className="border-b border-border text-start text-content-muted">
+            <th scope="col" className="p-3 text-start font-medium">
+              نام
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              دسته
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              نوع
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              شروع قیمت
+            </th>
+            <th scope="col" className="p-3 text-start font-medium">
+              تعداد پیشنهاد
+            </th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {page.items.map((product) => (
+            <tr key={product.id} className="border-b border-border">
+              <td className="p-3">
+                <a
+                  href={`/marketplace/${encodeURIComponent(product.id)}`}
+                  className="text-accent-on-surface underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                >
+                  {product.name}
+                </a>
+              </td>
+              <td className="p-3 text-content-muted">{product.category}</td>
+              <td className="p-3 text-content-muted">{productKindLabel(product.kind)}</td>
+              <td className="p-3">
+                {product.offers.length > 0 ? formatMoney(product.offers[0]!.unitPriceMinor) : '—'}
+              </td>
+              <td className="p-3 text-content-muted">{product.offers.length}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableScroll>
   );
 }
 

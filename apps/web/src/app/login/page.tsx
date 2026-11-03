@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { readSession, readStoredSessionForLogout } from '@/server/current-session';
 import { safeReturnTo } from '@/server/login-attempt';
+import { PageThemeOwner } from '../PageThemeOwner';
 import { LoginScreen } from './LoginScreen';
 
 /**
@@ -36,6 +37,9 @@ export default async function LoginPage({
   // reaches a link, cookie or redirect unexamined).
   const returnTo = safeReturnTo(params.returnTo);
   return (
-    <LoginScreen reason={typeof reason === 'string' ? reason : undefined} returnTo={returnTo} />
+    <>
+      <PageThemeOwner subject={null} />
+      <LoginScreen reason={typeof reason === 'string' ? reason : undefined} returnTo={returnTo} />
+    </>
   );
 }

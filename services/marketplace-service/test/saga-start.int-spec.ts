@@ -1,3 +1,4 @@
+import { setTenantEligibilityFixture } from '@rasta/testing';
 import { getOrganizationId, runUnscoped } from '@rasta/nest-common';
 import { OrderSagaClient } from '../src/temporal/saga.client';
 import { SagaStartStore, START_BATCH_SIZE } from '../src/temporal/saga-start.store';
@@ -32,10 +33,7 @@ describe('durable saga start delivery (PostgreSQL)', () => {
       prisma.client.order.findUniqueOrThrow({ where: { id } }),
     );
   async function due(id: string): Promise<void> {
-    await prisma.client
-      .$executeRaw`UPDATE "order" SET saga_start_next_attempt_at = clock_timestamp() - interval '1 second',
-      saga_start_claim_expires_at = CASE WHEN saga_start_claim_token IS NULL THEN NULL ELSE clock_timestamp() - interval '1 second' END
-      WHERE id = ${id} AND organization_id IN (${org.buyer}, ${org.other})`;
+    await setTenantEligibilityFixture(prisma, 'sagaStartDueAndExpired', org.buyer, [id]);
   }
 
   beforeEach(() => {

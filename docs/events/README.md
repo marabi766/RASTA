@@ -443,7 +443,7 @@ Retry/DLQ: سیاست پیش‌فرض این سند؛ DLQ روی `rasta.maintena
 | `ORDER_CANCELLED`         | economic (بازگشت) · inventory (آزادسازی) · supplier (امتیاز)              | `orderId`, `reason`, `cancellationCause` (اختیاری، enum بسته، ADR-052 § ۱-پ)                                                    |
 | `ORDER_DISPUTED`          | **economic (توقف تسویه)** · notification · supplier                       | `orderId`, `disputeId`, `reason`                                                                                                |
 | `ORDER_DISPUTE_RESOLVED`  | supplier (امتیاز)                                                         | `orderId`, `disputeId`, `outcome`, `responsibility` (enum بسته، الزامی، ADR-052 § ۱-ب)                                          |
-| `REVIEW_SUBMITTED`        | supplier (امتیاز) · economic (پاداش)                                      | `orderId`, `rating`, `criteria`                                                                                                 |
+| `REVIEW_SUBMITTED`        | supplier (امتیاز) · economic (پاداش)                                      | `orderId`, `rating`, optional `qualityRating` (1–5; Q-56; absent = no quality signal), `submittedAt`                            |
 
 ### رکوردهای حسابرسی — L7-14 (2026-09-25)
 
@@ -552,6 +552,20 @@ Envelope باید سازمان Payload (تأمین‌کننده) باشد و ت�
 > | `RFQ_ISSUED`    | شناسه‌ها و `rfqVersion` (۱)، `productId`, `totalQuantity`, `procurementNature`, `quotationClosingAt`, `invitedSupplierOrganizationIds[]`, `criteriaCount`, `criteriaDigest`, `keyId`, `issuedBy`, `issuedAt` |
 > | `RFQ_CLOSED`    | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `quotationClosingAt`, `trigger` (`SWEEPER` \| `MANUAL`), `closedBy`, `closedAt`, `quotationCount` (ADR-070 § ۹؛ تا PR 8 صفر)                       |
 > | `RFQ_CANCELLED` | `rfqId`, `organizationId`, `aggregationId`, `rfqVersion`, `previousStatus`, `reasonCode` (فهرست بستهٔ `PROCUREMENT_RFQ_CANCELLATION_CODES`، پیش‌فرض `BUYER_REQUEST`), `cancelledBy`, `cancelledAt`           |
+>
+> **COM-007 PR 7 (2026-11-02) — مصرف در `audit-service` (برآمد RFQ-Evidence، گروه `audit-service.rfq-evidence`، موضوع `rasta.procurement.v1`).**
+> همان قواعد `audit-service.tender-evidence`: `QUOTATION_SUBMITTED`/`QUOTATION_REVISED` به `rfq_receipt_link` (الحاقی) می‌روند و پیوستگی
+> زنجیره هنگام درج وارسی می‌شود (پیشین رسید = Genesis یا سر کنونی؛ هر حلقه یک جانشین). Genesis زنجیرهٔ RFQ با برچسب
+> `rasta.quotation.receipt.genesis.v1` ساخته می‌شود (`SealingLabels.receiptGenesis` برش PR 8 باید دقیقاً همین باشد؛ بایت‌ها در
+> `rfq-evidence.spec.ts` سنجاق شده). رسیدی که پیش از پیشینش برسد **نگه داشته می‌شود** (`rfq_receipt_pending`) و در تراکنشِ الحاق پیشینش به
+> ترتیب تخلیه می‌شود؛ شکافِ باز پس از `AUDIT_RFQ_GAP_ALERT_SECONDS` (پیش‌فرض ۳۰۰) با `RastaAuditRfqChainGapOpen` و شمارندهٔ
+> `rfq_chain_gap_overdue` هشدار می‌دهد. دوشاخه‌شدن (`rfq_chain_fork`) و ناسازگاری `tenantId` پاکت با `payload.organizationId`، `aggregateId`
+> با `payload.rfqId`، یا `producer` غیر از `procurement-service` (`rfq_evidence_mismatch`) پذیرفته نمی‌شود (تلاش دوباره، سپس DLQ).
+> Payload خوانده‌شده (ADR-070 § ۹ + قالب `BID_SUBMITTED`): `rfqId`, `quotationId`, `organizationId` (خریدار)، `supplierOrganizationId`, `revision`,
+> `receivedAt`, `contentCommitment`, `ciphertextSha256`, `previousReceipt`, `receipt` — فیلد بیشتر پذیرفته و نگه داشته نمی‌شود. `QUOTATION_WITHDRAWN`
+> و `QUOTATION_ACCESSED` زنجیره را نمی‌افزایند (ردیف ممیزی همان Projector هستند). سرِ زنجیره را فقط
+> `GET /v1/internal/rfq-evidence/{rfqId}/chain` (`@AllowService('procurement-service')`، با توکن امضاشده برای سازمان خریدار؛ جستجو با
+> سازمان و RFQ) می‌دهد.
 
 ## Supplier — `rasta.supplier.v1`
 

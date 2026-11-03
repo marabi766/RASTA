@@ -32,8 +32,8 @@ ensure_role() {
       IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${role}') THEN
         CREATE ROLE ${role} LOGIN CREATEDB;
       END IF;
-    END \$\$;"
-  psql_exec postgres "ALTER ROLE ${role} WITH LOGIN PASSWORD '${password}'"
+    END \$\$;" || return 1
+  psql_exec postgres "ALTER ROLE ${role} WITH LOGIN PASSWORD '${password}'" || return 1
 }
 
 SERVICES=("${RASTA_SERVICES[@]}")
@@ -45,8 +45,20 @@ INFRA_DATABASES=(keycloak temporal temporal_visibility)
 # a role's password (ALTER ROLE … PASSWORD), and a process's argv is readable
 # by every local user while it runs (D-045 follow-up, Codex on #191). `printf`
 # is a shell builtin, so the text is never an argument of any process either.
+#
+# Every call's status is checked explicitly (`|| exit 1`, `|| return 1`), not
+# left to errexit, which a caller's `||` or `if` switches off (#540 r2 R2-1);
+# scripts/service-privilege-split-faults.test.mjs fails each call in turn.
 psql_exec() {
   printf '%s\n' "$2" | psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$1" -f -
+}
+
+# database_exists <database> → prints `1` when it exists, nothing when not; a
+# query that fails is a failure, never "absent" (#540 r2 R2-1: a failed probe
+# read as "absent" went on as if it had answered).
+database_exists() {
+  psql -X -tA -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres \
+    -c "SELECT 1 FROM pg_database WHERE datname='$1'"
 }
 
 echo "==> Creating per-service roles and databases"
@@ -58,18 +70,19 @@ for svc in "${SERVICES[@]}"; do
   # provisions a temporary shadow database to diff against. Production applies
   # migrations with `prisma migrate deploy`, which needs no shadow database and
   # therefore no such privilege — and never runs this script.
-  ensure_role "${role}"
+  ensure_role "${role}" || exit 1
 
   created=false
-  if ! psql -tAc "SELECT 1 FROM pg_database WHERE datname='${db}'" --username "$POSTGRES_USER" postgres | grep -q 1; then
-    psql_exec postgres "CREATE DATABASE ${db} OWNER ${role} ENCODING 'UTF8'"
+  exists="$(database_exists "${db}")" || exit 1
+  if [[ "${exists}" != 1 ]]; then
+    psql_exec postgres "CREATE DATABASE ${db} OWNER ${role} ENCODING 'UTF8'" || exit 1
     created=true
   fi
 
   # Deny cross-service access explicitly rather than relying on defaults.
-  psql_exec postgres "REVOKE ALL ON DATABASE ${db} FROM PUBLIC"
-  psql_exec postgres "GRANT ALL PRIVILEGES ON DATABASE ${db} TO ${role}"
-  psql_exec "${db}" "GRANT ALL ON SCHEMA public TO ${role}"
+  psql_exec postgres "REVOKE ALL ON DATABASE ${db} FROM PUBLIC" || exit 1
+  psql_exec postgres "GRANT ALL PRIVILEGES ON DATABASE ${db} TO ${role}" || exit 1
+  psql_exec "${db}" "GRANT ALL ON SCHEMA public TO ${role}" || exit 1
 
   # Only a database this run created is disposable by construction. One that
   # already existed may hold data somebody needs — this script run against a
@@ -77,7 +90,7 @@ for svc in "${SERVICES[@]}"; do
   # never marked here. An existing *development* volume is marked on purpose,
   # by `pnpm db:mark-disposable` (lib/disposable-marker.bash).
   if [[ "${created}" == true ]]; then
-    mark_disposable_database "${db}"
+    mark_disposable_database "${db}" || exit 1
     echo "    - ${db} (owner ${role}, created, marked disposable)"
   else
     echo "    - ${db} (owner ${role}, already existed, not marked)"
@@ -112,20 +125,20 @@ echo "==> Creating the audit migrator role and its owned schema"
 # CREATEDB for the same local-development reason the service roles have it:
 # `prisma migrate dev` provisions a shadow database. `migrate deploy`, which is
 # what production runs, needs neither.
-ensure_role rasta_audit_migrator
+ensure_role rasta_audit_migrator || exit 1
 
-psql_exec postgres "GRANT CONNECT ON DATABASE rasta_audit TO rasta_audit_migrator"
+psql_exec postgres "GRANT CONNECT ON DATABASE rasta_audit TO rasta_audit_migrator" || exit 1
 
 # Idempotent for a database that already exists from an earlier bootstrap:
 # CREATE SCHEMA IF NOT EXISTS does not set ownership on an existing schema, so
 # the ALTER follows unconditionally and both paths converge on the same state.
-psql_exec rasta_audit "CREATE SCHEMA IF NOT EXISTS audit AUTHORIZATION rasta_audit_migrator"
-psql_exec rasta_audit "ALTER SCHEMA audit OWNER TO rasta_audit_migrator"
+psql_exec rasta_audit "CREATE SCHEMA IF NOT EXISTS audit AUTHORIZATION rasta_audit_migrator" || exit 1
+psql_exec rasta_audit "ALTER SCHEMA audit OWNER TO rasta_audit_migrator" || exit 1
 
 # USAGE only. No CREATE: the runtime role must not be able to add objects it
 # would then own, which is how it would get mutation rights back.
-psql_exec rasta_audit "REVOKE ALL ON SCHEMA audit FROM rasta_audit"
-psql_exec rasta_audit "GRANT USAGE ON SCHEMA audit TO rasta_audit"
+psql_exec rasta_audit "REVOKE ALL ON SCHEMA audit FROM rasta_audit" || exit 1
+psql_exec rasta_audit "GRANT USAGE ON SCHEMA audit TO rasta_audit" || exit 1
 
 # Table-level grants are issued by the migration itself, because the tables do
 # not exist yet and a default-privilege rule here would silently widen to every
@@ -150,9 +163,10 @@ echo "==> Splitting each service's owner from its runtime role"
 # shellcheck source=lib/service-privilege-split.bash
 source "$(dirname "${BASH_SOURCE[0]}")/lib/service-privilege-split.bash"
 for svc in "${PRIVILEGE_SPLIT_SERVICES[@]}"; do
-  split_service_privileges "${svc}" "rasta_${svc}" "$(privilege_split_grants_mode "${svc}")"
+  mode="$(privilege_split_grants_mode "${svc}")" || exit 1
+  split_service_privileges "${svc}" "rasta_${svc}" "${mode}" || exit 1
 done
-split_audit_database_privileges rasta_audit
+split_audit_database_privileges rasta_audit || exit 1
 
 # -----------------------------------------------------------------------------
 # Extensions go into template1, so every database created afterwards inherits
@@ -165,21 +179,22 @@ split_audit_database_privileges rasta_audit
 # -----------------------------------------------------------------------------
 echo "==> Installing extensions into template1"
 for ext in postgis ltree pg_trgm pgcrypto btree_gist; do
-  psql_exec template1 "CREATE EXTENSION IF NOT EXISTS ${ext}"
+  psql_exec template1 "CREATE EXTENSION IF NOT EXISTS ${ext}" || exit 1
   echo "    - ${ext}"
 done
 
 echo "==> Ensuring extensions in already-created service databases"
 for svc in "${SERVICES[@]}"; do
   for ext in postgis ltree pg_trgm pgcrypto btree_gist; do
-    psql_exec "rasta_${svc}" "CREATE EXTENSION IF NOT EXISTS ${ext}"
+    psql_exec "rasta_${svc}" "CREATE EXTENSION IF NOT EXISTS ${ext}" || exit 1
   done
 done
 
 echo "==> Creating infrastructure databases"
 for db in "${INFRA_DATABASES[@]}"; do
-  if ! psql -tAc "SELECT 1 FROM pg_database WHERE datname='${db}'" --username "$POSTGRES_USER" postgres | grep -q 1; then
-    psql_exec postgres "CREATE DATABASE ${db} OWNER ${POSTGRES_USER} ENCODING 'UTF8'"
+  exists="$(database_exists "${db}")" || exit 1
+  if [[ "${exists}" != 1 ]]; then
+    psql_exec postgres "CREATE DATABASE ${db} OWNER ${POSTGRES_USER} ENCODING 'UTF8'" || exit 1
     echo "    - ${db}"
   fi
 done

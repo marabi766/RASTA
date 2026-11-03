@@ -31,6 +31,13 @@
  * between the real call and its answer, when told to.
  */
 import './disposable-broker.mjs';
+import {
+  BROKER_DEFAULT_ALREADY_ABSENT,
+  withBrokerDefault as restoreBrokerDefault,
+} from './broker-default.mjs';
+import { deleteBrokerDefault } from './broker-default-delete.mjs';
+import { connectionFor } from './kafka-acl-lib.mjs';
+import { readFileSync } from 'node:fs';
 import { describe, test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -243,7 +250,7 @@ async function brokerDefault() {
 }
 
 async function setBrokerDefault(bytes) {
-  await kafka('kafka-configs.sh', [
+  const args = [
     '--alter',
     '--entity-type',
     'brokers',
@@ -251,7 +258,13 @@ async function setBrokerDefault(bytes) {
     ...(bytes === undefined
       ? ['--delete-config', 'message.max.bytes']
       : ['--add-config', `message.max.bytes=${bytes}`]),
-  ]);
+  ];
+  if (bytes !== undefined) return kafka('kafka-configs.sh', args);
+  // Incremental DELETE is idempotent and reaches Kafka even when a describe
+  // is stale/absent. It preserves every other broker-default config.
+  return deleteBrokerDefault(
+    connectionFor('admin', process.env, (path) => readFileSync(path, 'utf8')),
+  );
 }
 
 /**
@@ -260,13 +273,7 @@ async function setBrokerDefault(bytes) {
  * re-set, or deleted if there was none — whether `work` passed or threw.
  */
 async function withBrokerDefault(bytes, work) {
-  const before = await brokerDefault();
-  if (bytes !== before) await setBrokerDefault(bytes);
-  try {
-    return await work();
-  } finally {
-    if ((await brokerDefault()) !== before) await setBrokerDefault(before);
-  }
+  return restoreBrokerDefault(bytes, work, { read: brokerDefault, set: setBrokerDefault });
 }
 
 /** Waits until `topic` reports `bytes` as its effective limit. */
@@ -706,6 +713,50 @@ describe('create-topics.sh, max.message.bytes on a real broker', () => {
       });
     });
   });
+
+  // Every caller above uses the same reconciliation boundary; exercise it with
+  // actual broker writes while injecting only the lost response/stale describe.
+  for (const before of [undefined, 1_100_000]) {
+    for (const failure of ['setup', 'work', ...(before === undefined ? ['absence-refusal'] : [])]) {
+      test(`broker restoration after ${failure} with stale describe, original ${before}`, async () => {
+        await withBrokerDefault(before, async () => {
+          let reads = 0;
+          let writes = 0;
+          await assert.rejects(
+            restoreBrokerDefault(
+              3 * MIB,
+              async () => {
+                throw new Error('work failed');
+              },
+              {
+                read: async () => {
+                  reads += 1;
+                  // Snapshot original; stale once, or throughout the refusal window.
+                  if (reads <= 2 || failure === 'absence-refusal') return before;
+                  return brokerDefault();
+                },
+                set: async (value) => {
+                  writes += 1;
+                  const result =
+                    failure === 'absence-refusal' && writes > 1
+                      ? BROKER_DEFAULT_ALREADY_ABSENT
+                      : await setBrokerDefault(value);
+                  if (writes === 1 && failure === 'setup') throw new Error('setup response lost');
+                  return result;
+                },
+                pause: failure === 'absence-refusal' ? async () => {} : undefined,
+              },
+            ),
+            failure === 'absence-refusal'
+              ? /BROKER_DEFAULT restoration UNCONFIRMED/
+              : /setup response lost|work failed/,
+          );
+          assert.equal(writes, failure === 'absence-refusal' ? 21 : 2);
+          assert.equal(await brokerDefault(), failure === 'absence-refusal' ? 3 * MIB : before);
+        });
+      });
+    }
+  }
 
   // ------------------------------------------------ the cluster default, restored (r5 F2)
   test('the cluster default message.max.bytes is put back as it was — an absent override deleted again, an existing one re-set — also when the case fails', async () => {

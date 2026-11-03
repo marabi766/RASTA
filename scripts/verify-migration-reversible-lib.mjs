@@ -1869,6 +1869,9 @@ export const EXPECTED = {
       'bid_access_evidence',
       // 20261001130000_tender_receipt_pending: receipts held until their predecessor arrives.
       'tender_receipt_pending',
+      // 20261102100000_rfq_evidence (COM-007 PR 7): the quotation-receipt chain and its work queue.
+      'rfq_receipt_link',
+      'rfq_receipt_pending',
       // 20261003120000_payment_reconciliation_evidence (D-046): who proposed and
       // approved a payment-reconciliation resolution, on which evidence.
       'payment_reconciliation_evidence',
@@ -1878,6 +1881,11 @@ export const EXPECTED = {
       'tg_tender_receipt_link_no_truncate',
       'tg_bid_access_evidence_append_only',
       'tg_bid_access_evidence_no_truncate',
+      'tg_rfq_receipt_link_append_only',
+      'tg_rfq_receipt_link_no_truncate',
+      // One identity across the placed and the held state (20261102100000_rfq_evidence).
+      'tg_rfq_receipt_link_identity',
+      'tg_rfq_receipt_pending_identity',
       'audit_event_append_only',
       'audit_event_append_only_truncate',
       // AUD-003, and the same asymmetry as above: the row-level trigger is what
@@ -1909,6 +1917,12 @@ export const EXPECTED = {
       'ux_tender_receipt_pending_previous',
       'ux_tender_receipt_pending_receipt',
       'ix_tender_receipt_pending_held',
+      'ux_rfq_receipt_link_receipt',
+      'ux_rfq_receipt_link_previous',
+      'ux_rfq_receipt_link_event',
+      'ux_rfq_receipt_pending_previous',
+      'ux_rfq_receipt_pending_receipt',
+      'ix_rfq_receipt_pending_held',
       'ux_payment_reconciliation_evidence_audit_event',
       'ix_payment_reconciliation_evidence_intent',
     ],
@@ -1923,6 +1937,8 @@ export const EXPECTED = {
       'refuse_mutation',
       'refuse_chain_head_regression',
       'tender_evidence_append_only',
+      'rfq_evidence_append_only',
+      'rfq_receipt_identity_guard',
       'payment_reconciliation_evidence_append_only',
     ],
     constraints: [
@@ -1960,6 +1976,8 @@ export const EXPECTED = {
       'ck_bid_access_evidence_shape',
       'ck_bid_access_evidence_refusal_code',
       'ck_tender_receipt_pending_shape',
+      'ck_rfq_receipt_link_shape',
+      'ck_rfq_receipt_pending_shape',
       // D-046: the version, the allow-listed values and which fields each event carries.
       'ck_payment_reconciliation_evidence_version',
       'ck_payment_reconciliation_evidence_values',
@@ -2304,6 +2322,7 @@ export const EXPECTED = {
       'return_dispatch_release_guard',
     ],
     constraints: [
+      'ck_review_quality_rating',
       'ck_return_request_status',
       'ck_return_request_status_coherent',
       'ck_return_request_version_matches_status',

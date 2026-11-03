@@ -1,0 +1,13 @@
+BEGIN;
+ALTER TABLE "review" DROP CONSTRAINT "fk_review_tenant";
+ALTER TABLE "order_dispute" DROP CONSTRAINT "fk_order_dispute_tenant";
+ALTER TABLE "saga_step" DROP CONSTRAINT "fk_saga_step_tenant";
+ALTER TABLE "order_status_history" DROP CONSTRAINT "fk_order_status_history_tenant";
+ALTER TABLE "fulfillment" DROP CONSTRAINT "fk_fulfillment_tenant";
+ALTER TABLE "order_line" DROP CONSTRAINT "fk_order_line_tenant";
+ALTER TABLE "offer_price_history" DROP CONSTRAINT "fk_offer_price_history_tenant";
+DROP INDEX "uq_review_tenant_order";
+DROP INDEX "uq_order_tenant_id";
+DROP INDEX "uq_offer_tenant_id";
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261102120000_scalar_fk_tenant_policy';
+COMMIT;

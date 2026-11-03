@@ -55,7 +55,13 @@ const PRETTIER = ['--parser', '--stdin-filepath'];
 export const CLI_CONTRACT = Object.freeze({
   // --- apps -----------------------------------------------------------------
   'apps/web/e2e/contract-fixture.ts': { other: ['-X', '-f', '-q', '-v'] },
+  // The build's preload puts itself into every child's NODE_OPTIONS / execArgv (`--require`);
+  // it reads no command line.
+  'apps/web/scripts/capture-next-config.cjs': { other: ['--require'] },
+  'apps/web/scripts/build-supervisor.mjs': { other: ['-axo'] },
   'apps/web/src/app/fonts.ts': { other: ['--font-vazirmatn'] },
+  // Test helper of the build-binding specs: runs the build scripts in a child Node.
+  'apps/web/src/test/build-scripts.ts': { other: ['--input-type', '-e'] },
 
   // --- packages: test fixtures run by their specs ----------------------------
   // The stock-zod oracle's build child (PR #444 r4): its input arrives on stdin.
@@ -72,6 +78,21 @@ export const CLI_CONTRACT = Object.freeze({
   },
 
   // --- scripts ----------------------------------------------------------------
+  // A Git revision is resolved to a verified commit id; raw input is never echoed.
+  'scripts/prepush-scope.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
+  'scripts/prepush-scope-lib.mjs': {
+    other: [
+      '--cached',
+      '--dry',
+      '--end-of-options',
+      '--exclude-standard',
+      '--name-only',
+      '--no-renames',
+      '--others',
+      '--verify',
+      '-z',
+    ],
+  },
   'scripts/aggregation-campaign-accounting.mjs': {
     accepts: { '--reports-manifest': 'path' },
     positionals: ['path'],
@@ -257,7 +278,8 @@ export const CLI_CONTRACT = Object.freeze({
       '-v',
     ],
   },
-  'scripts/check-db-runtime-privileges.mjs': { other: ['-X', '-d', '-q', '-tA', '-v'] },
+  // psqlRows (#540 r2 R2-2): the check's one way to run psql.
+  'scripts/check-db-runtime-privileges-lib.mjs': { other: ['-X', '-d', '-q', '-tA', '-v'] },
   // Docker command lines read from Dockerfiles and compose files, never run.
   'scripts/check-dockerfile-pins-lib.mjs': {
     other: [
@@ -334,6 +356,20 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/ci-image-matrix.mjs': { other: ['--run'] },
   'scripts/ci-integration-split-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
   'scripts/ci-migration-reversibility-lib.mjs': { other: ['--noprofile', '--norc', '-eo'] },
+  // Task 312: the quality-job guard READS the options of the node/pnpm commands it checks; it has no command line.
+  'scripts/ci-node-test-timeouts-lib.mjs': {
+    other: [
+      '--dir',
+      '--enable-source-maps',
+      '--filter',
+      '--import',
+      '--no-warnings',
+      '--test',
+      '--test-timeout',
+      '-C',
+      '-F',
+    ],
+  },
   // Trivy's own options, passed to the pinned trivy binary (download and canary
   // scan), and zstd's (-q -T0 -c to pack; -q -d -c --memory to unpack).
   'scripts/ci-trivy-db-lib.mjs': {
@@ -371,6 +407,10 @@ export const CLI_CONTRACT = Object.freeze({
   'scripts/database-services.mjs': { other: ['-service'] },
   'scripts/disposable-broker.mjs': { positionals: ['script'] },
   'scripts/infra-preflight-lib.mjs': { other: ['-service'] },
+  'scripts/kafka-init-gate.mjs': {
+    positionals: ['enum'],
+    other: ['--all', '--quiet', '--format', '-d'],
+  },
   'scripts/kafka-acl.mjs': { accepts: { '--profile': 'enum' }, positionals: ['enum'] },
   'scripts/kafka-outbox-tables.mjs': { positionals: ['script'] },
   // `temporal workflow` options; the address is TEMPORAL_ADDRESS's, never an argument here.
@@ -551,7 +591,9 @@ export const CLI_CONTRACT = Object.freeze({
   'services/fleet-service/src/fleet/clear-transferred.cli.ts': { positionals: [] },
   'services/fleet-service/src/fleet/drain-check.cli.ts': { positionals: [] },
   'services/identity-service/src/keycloak/projection.cli.ts': { positionals: ['enum'] },
+  'services/identity-service/src/openapi/document.ts': { other: PRETTIER },
   'services/inventory-service/src/openapi/document.ts': { other: PRETTIER },
   'services/notification-service/src/openapi/document.ts': { other: PRETTIER },
+  'services/organization-service/src/openapi/document.ts': { other: PRETTIER },
   'services/procurement-service/src/openapi/document.ts': { other: PRETTIER },
 });

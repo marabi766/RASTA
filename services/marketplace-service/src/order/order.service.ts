@@ -1,5 +1,11 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { RastaError, getContext, getOrganizationId, runUnscoped } from '@rasta/nest-common';
+import {
+  RastaError,
+  getContext,
+  getOrganizationId,
+  runUnscoped,
+  runWithNestedTenantWrite,
+} from '@rasta/nest-common';
 import { PrismaService, type ExtendedPrismaClient } from '../prisma/prisma.service';
 import { EventPublisher, ID_PREFIX, newId } from '../events/publisher';
 import { MARKETPLACE_EVENTS } from '../events/events';
@@ -204,36 +210,44 @@ export class OrderService {
         );
         const nameOf = new Map(productNames.map((row) => [row.id, row.name]));
 
-        await tx.order.create({
-          data: {
-            id: orderId,
-            organizationId: buyerOrganizationId,
-            supplierOrganizationId: priced.supplierOrganizationId,
-            placedBy: actor,
-            status: 'PENDING',
-            sagaStartRequestedAt: createdAt,
-            totalAmountMinor: priced.totalAmountMinor,
-            currency: priced.currency,
-            idempotencyKey,
-            correlationId: context.correlationId,
-            createdBy: actor,
-            promisedDeliveryAt,
-            lines: {
-              create: priced.lines.map((line) => ({
-                id: newId(ID_PREFIX.orderLine),
-                organizationId: buyerOrganizationId,
-                offerId: line.offerId,
-                productId: line.productId,
-                unitPriceMinor: line.unitPriceMinor,
-                quantity: line.quantity,
-                lineTotalMinor: line.lineTotalMinor,
-                currency: line.currency,
-                offerVersion: line.offerVersion,
-                productName: nameOf.get(line.productId) ?? line.productId,
-              })),
-            },
+        await runWithNestedTenantWrite(
+          {
+            relation: 'Order.lines',
+            reason:
+              'Order placement atomically snapshots its buyer-owned priced lines; each line carries the acting buyer',
           },
-        });
+          () =>
+            tx.order.create({
+              data: {
+                id: orderId,
+                organizationId: buyerOrganizationId,
+                supplierOrganizationId: priced.supplierOrganizationId,
+                placedBy: actor,
+                status: 'PENDING',
+                sagaStartRequestedAt: createdAt,
+                totalAmountMinor: priced.totalAmountMinor,
+                currency: priced.currency,
+                idempotencyKey,
+                correlationId: context.correlationId,
+                createdBy: actor,
+                promisedDeliveryAt,
+                lines: {
+                  create: priced.lines.map((line) => ({
+                    id: newId(ID_PREFIX.orderLine),
+                    organizationId: buyerOrganizationId,
+                    offerId: line.offerId,
+                    productId: line.productId,
+                    unitPriceMinor: line.unitPriceMinor,
+                    quantity: line.quantity,
+                    lineTotalMinor: line.lineTotalMinor,
+                    currency: line.currency,
+                    offerVersion: line.offerVersion,
+                    productName: nameOf.get(line.productId) ?? line.productId,
+                  })),
+                },
+              },
+            }),
+        );
 
         await this.repository.consumeAvailability(tx, priced.lines);
 
@@ -694,6 +708,7 @@ export class OrderService {
             orderId: order.id,
             supplierOrganizationId: order.supplierOrganizationId,
             rating: dto.rating,
+            qualityRating: dto.qualityRating ?? null,
             comment: dto.comment ?? null,
             submittedBy: context.userId ?? SERVICE_NAME,
           },
@@ -710,6 +725,7 @@ export class OrderService {
           buyerOrganizationId: order.organizationId,
           supplierOrganizationId: order.supplierOrganizationId,
           rating: dto.rating,
+          ...(dto.qualityRating !== undefined ? { qualityRating: dto.qualityRating } : {}),
           submittedAt: new Date().toISOString(),
         },
       });

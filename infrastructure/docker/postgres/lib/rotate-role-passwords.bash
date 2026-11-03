@@ -58,14 +58,18 @@ role_database() {
 
 rotated=0
 missing=()
+# Every probe and ALTER is checked explicitly (#540 r2 R2-1): a probe that
+# failed read as "role not present", and the run reported success.
+role_list="$(rasta_roles)" || exit 1
 while IFS= read -r role; do
-  if [[ "$(superuser_sql "SELECT 1 FROM pg_roles WHERE rolname = '${role}'")" != "1" ]]; then
+  present="$(superuser_sql "SELECT 1 FROM pg_roles WHERE rolname = '${role}'")" || exit 1
+  if [[ "${present}" != "1" ]]; then
     missing+=("$role")
     continue
   fi
-  superuser_sql "ALTER ROLE ${role} WITH PASSWORD '${ROLE_PASSWORDS[$role]}'"
+  superuser_sql "ALTER ROLE ${role} WITH PASSWORD '${ROLE_PASSWORDS[$role]}'" || exit 1
   rotated=$((rotated + 1))
-done < <(rasta_roles)
+done <<< "${role_list}"
 
 # A volume bootstrapped before the database-side UTC default (review of #214)
 # gets it here: the init scripts never run again on it. Each service database
@@ -73,12 +77,13 @@ done < <(rasta_roles)
 utc_databases=0
 for svc in "${RASTA_SERVICES[@]}"; do
   db="rasta_${svc}"
-  [[ "$(superuser_sql "SELECT 1 FROM pg_database WHERE datname = '${db}'")" == "1" ]] || continue
-  present=()
+  present="$(superuser_sql "SELECT 1 FROM pg_database WHERE datname = '${db}'")" || exit 1
+  [[ "${present}" == "1" ]] || continue
+  here=()
   for role in "rasta_${svc}" "rasta_${svc}_migrator"; do
-    [[ " ${missing[*]} " == *" ${role} "* ]] || present+=("${role}")
+    [[ " ${missing[*]} " == *" ${role} "* ]] || here+=("${role}")
   done
-  ensure_utc_session_defaults "${db}" "${present[@]}"
+  ensure_utc_session_defaults "${db}" "${here[@]}" || exit 1
   # The optional runtime statement_timeout, where POSTGRES_STATEMENT_TIMEOUT_MS_<SVC> asks for it.
   if [[ " ${missing[*]} " != *" rasta_${svc} "* ]]; then
     ensure_runtime_statement_timeout "${svc}" "${db}" "rasta_${svc}" || exit 1
@@ -93,7 +98,7 @@ while IFS= read -r role; do
     --username "$role" --dbname "$(role_database "$role")" -c 'SELECT 1' >/dev/null 2>&1; then
     failed+=("$role")
   fi
-done < <(rasta_roles)
+done <<< "${role_list}"
 
 echo "==> ${rotated} role password(s) re-applied from the environment"
 echo "==> ${utc_databases} service database(s) and their roles default to UTC sessions"

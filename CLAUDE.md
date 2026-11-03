@@ -81,8 +81,8 @@ pnpm infra:up          # بالا آوردن
 pnpm infra:down        # خاموش کردن
 pnpm infra:reset       # ⚠️ حذف حجم‌ها و راه‌اندازی از صفر
 pnpm infra:logs        # دنبال کردن Log
-docker compose --profile tools up -d           # Kafka UI, Temporal UI, Mailpit
-docker compose --profile observability up -d   # OTel, Prometheus, Grafana
+COMPOSE_PROFILES=tools pnpm infra:up           # Kafka UI, Temporal UI, Mailpit
+COMPOSE_PROFILES=observability pnpm infra:up   # OTel, Prometheus, Grafana
 ```
 
 ### پایگاه داده
@@ -116,6 +116,15 @@ pnpm verify     # format:check → lint → typecheck → test → build
 ```
 
 ---
+
+The pre-push gate is being built in stages. `pnpm run prepush:scope --base origin/main`
+prints a selection plan only; it does not run quality checks. Until
+repository-reading tests have enforced input coverage, any changed path
+selects every workspace. Contracts tests hash repository inputs as well. The planner
+invokes only an installed native Turbo binary and refuses missing binaries or
+incomplete dependent closures. Run from the worktree root after
+`pnpm install --frozen-lockfile`; an invalid base or Turbo result refuses selection.
+The executor and CI-parity guard remain follow-up work.
 
 ## Coding Standards
 

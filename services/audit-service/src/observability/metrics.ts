@@ -221,6 +221,24 @@ export const INGESTION_FAILURE_REASONS = {
    * under either identity; a tenant-isolation signal, like `trail_tenant_mismatch`.
    */
   TENDER_EVIDENCE_MISMATCH: 'tender_evidence_mismatch',
+
+  // The RFQ-evidence projection (`rasta.procurement.v1`, COM-007 PR 7): the same three
+  // failures, for a quotation receipt that cannot be placed in its RFQ's chain.
+
+  /** The link's predecessor already has a successor, or its receipt is already recorded. */
+  RFQ_CHAIN_FORK: 'rfq_chain_fork',
+  /**
+   * A receipt held for its predecessor is still waiting after
+   * `AUDIT_RFQ_GAP_ALERT_SECONDS`: counted once per held receipt, so the
+   * ingestion-failure alert fires.
+   */
+  RFQ_CHAIN_GAP_OVERDUE: 'rfq_chain_gap_overdue',
+  /**
+   * A quotation event whose envelope and payload disagree about the tenant, the RFQ or
+   * the producer, or a receipt for an RFQ already held under another organization.
+   * Never stored under either identity; a tenant-isolation signal.
+   */
+  RFQ_EVIDENCE_MISMATCH: 'rfq_evidence_mismatch',
 } as const;
 
 /** Receipts held for a predecessor that has not arrived (sampled, never maintained by inc). */
@@ -241,6 +259,27 @@ export const auditTenderOverdueLinks = new Gauge({
 export const auditTenderPendingOldestAgeSeconds = new Gauge({
   name: 'rasta_audit_tender_pending_oldest_age_seconds',
   help: 'Age in seconds of the oldest bid receipt held for its predecessor',
+  registers: [registry],
+});
+
+/** Quotation receipts held for a predecessor that has not arrived (sampled, never maintained by inc). */
+export const auditRfqPendingLinks = new Gauge({
+  name: 'rasta_audit_rfq_pending_links',
+  help: 'Quotation receipts held until their predecessor arrives',
+  registers: [registry],
+});
+
+/** Quotation receipts held longer than AUDIT_RFQ_GAP_ALERT_SECONDS: an open gap; 0 when none. */
+export const auditRfqOverdueLinks = new Gauge({
+  name: 'rasta_audit_rfq_overdue_links',
+  help: 'Quotation receipts held past the gap alert time for a predecessor that has not arrived',
+  registers: [registry],
+});
+
+/** Age of the oldest held quotation receipt; 0 when none is held. */
+export const auditRfqPendingOldestAgeSeconds = new Gauge({
+  name: 'rasta_audit_rfq_pending_oldest_age_seconds',
+  help: 'Age in seconds of the oldest quotation receipt held for its predecessor',
   registers: [registry],
 });
 

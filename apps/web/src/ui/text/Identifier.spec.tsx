@@ -25,6 +25,40 @@ describe('Identifier', () => {
     expect(container.querySelector('bdi')).toHaveClass('font-mono');
   });
 
+  // Defect 6 of the demo run: «(پایه دوم)» in a monospace cell came out as
+  // disconnected letters. The face is for Latin codes, decided from the value.
+  it.each(['پایه دوم', 'پایه ۲', 'OP-۱۱۵', 'ORD-1 پایه', 'ORD\u200c1'])(
+    'does not use the monospace face for %s',
+    (value) => {
+      const { container } = renderInDirection(<Identifier>{value}</Identifier>, 'rtl');
+      const bdi = container.querySelector('bdi');
+      expect(bdi).not.toHaveClass('font-mono');
+      // Still isolated for bidi.
+      expect(bdi).toHaveAttribute('dir', 'auto');
+    },
+  );
+
+  it.each(['AST-SEED-0001', 'WA320', 'B2', '0123456789', 'ORG_01J9ZK'])(
+    'keeps the monospace face for the Latin code %s',
+    (value) => {
+      const { container } = renderInDirection(<Identifier>{value}</Identifier>, 'rtl');
+      expect(container.querySelector('bdi')).toHaveClass('font-mono');
+    },
+  );
+
+  it('judges the value after its bidi controls are dropped, and refuses what it cannot inspect', () => {
+    const RLO = String.fromCodePoint(0x202e);
+    const latin = renderInDirection(<Identifier>{`WA${RLO}320`}</Identifier>, 'rtl');
+    expect(latin.container.querySelector('bdi')).toHaveClass('font-mono');
+    const element = renderInDirection(
+      <Identifier>
+        <span>ORD-1</span>
+      </Identifier>,
+      'rtl',
+    );
+    expect(element.container.querySelector('bdi')).not.toHaveClass('font-mono');
+  });
+
   it('renders identically inside Persian text', async () => {
     const { container } = renderInDirection(
       <p>
