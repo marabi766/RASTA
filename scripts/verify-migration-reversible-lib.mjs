@@ -1078,6 +1078,16 @@ const TRANSACTION_DISPUTE_RESOLUTION_STEPS = [
 ];
 
 const TRANSACTION_RESOLVED_DISPUTE = '20261022120000_transaction_resolved_dispute';
+/**
+ * Rolled back with it, newest first: both replace its function, so a re-apply
+ * of 20261022120000 alone would leave its own body under them, and the
+ * whole-chain check of the newest one would find the chain changed.
+ */
+const RESOLVED_DISPUTE_DOWNS = [
+  '20261103121000_transaction_settlement_authority',
+  '20261103120000_transaction_dispute_resolution_by_authority',
+  TRANSACTION_RESOLVED_DISPUTE,
+];
 
 /** One lifecycle move of a probe row, as the service writes it: the dispute triggers see a status change. */
 const RSD_MOVE = (id, set) => `UPDATE "transaction" SET ${set} WHERE id = '${id}';`;
@@ -1153,7 +1163,7 @@ END $$;`;
 const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
   {
     label: 'resolved dispute: down to the schema before the column (empty)',
-    runDownScript: [TRANSACTION_RESOLVED_DISPUTE],
+    runDownScript: RESOLVED_DISPUTE_DOWNS,
   },
   {
     label: 'resolved dispute: disputes as the previous release wrote them',
@@ -1214,7 +1224,7 @@ const TRANSACTION_RESOLVED_DISPUTE_STEPS = [
   },
   {
     label: 'resolved dispute: down succeeds over attributed rows',
-    runDownScript: [TRANSACTION_RESOLVED_DISPUTE],
+    runDownScript: RESOLVED_DISPUTE_DOWNS,
   },
   {
     label:
