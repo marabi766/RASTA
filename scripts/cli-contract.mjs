@@ -78,6 +78,21 @@ export const CLI_CONTRACT = Object.freeze({
   },
 
   // --- scripts ----------------------------------------------------------------
+  // A Git revision is resolved to a verified commit id; raw input is never echoed.
+  'scripts/prepush-scope.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
+  'scripts/prepush-scope-lib.mjs': {
+    other: [
+      '--cached',
+      '--dry',
+      '--end-of-options',
+      '--exclude-standard',
+      '--name-only',
+      '--no-renames',
+      '--others',
+      '--verify',
+      '-z',
+    ],
+  },
   'scripts/aggregation-campaign-accounting.mjs': {
     accepts: { '--reports-manifest': 'path' },
     positionals: ['path'],
