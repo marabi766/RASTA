@@ -39,6 +39,8 @@ export { Skeleton } from './state/Skeleton';
 export { Field, controlClassName } from './form/Field';
 export type { FieldControlProps } from './form/Field';
 export { Form, useSchemaForm } from './form/Form';
+export { JalaliDateInput } from './form/JalaliDateInput';
+export type { JalaliDateInputProps } from './form/JalaliDateInput';
 export { MoneyField } from './form/MoneyField';
 export { TextField } from './form/TextField';
 
