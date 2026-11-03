@@ -177,84 +177,19 @@
 }
 
 /*
- * Dark mode, part one: when the operating system asks for it.
+ * Dark mode: when the document asks for it.
+ *
+ * The document asks through `<html data-theme>`, which the root layout renders
+ * from the person's preference cookie (`server/theme.ts`). The operating
+ * system's `prefers-color-scheme` no longer decides anything: the portal is
+ * light by default for everyone, and dark is a choice made with the switch
+ * (owner decision 2026-10-24). So there is exactly one block of dark values,
+ * and nothing that could make a dark-preference device dark on its own.
  *
  * Only tokens are redefined. Nothing below introduces a rule that a light
  * document does not also have, which is what keeps components free of
  * branches. Surfaces stop being pure white and step *up* in lightness as they
  * rise, because in the dark elevation reads as light rather than as shadow.
- *
- * `:not([data-theme='light'])` leaves the door open for an explicit choice
- * later without needing one now.
- *
- * The values are written out twice — here and in the `[data-theme='dark']`
- * block below — because CSS has no way to share a declaration body across a
- * media query and a selector. The alternatives were worse: `light-dark()`
- * would collapse the two into one, but it is unsupported on the older Android
- * browsers docs/16 § 16.2 expects in the field, and an unsupported
- * `light-dark()` does not degrade — it makes the token invalid and the surface
- * disappears. An inline script would need a CSP exception. So: duplication,
- * and `design-tokens.spec.ts` compares the declarations of the two blocks so
- * they cannot drift apart.
- */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    --color-success-surface: oklch(0.29 0.055 152);
-    --color-success-text: oklch(0.84 0.1 152);
-
-    --color-warning-surface: oklch(0.31 0.06 70);
-    --color-warning-text: oklch(0.87 0.11 85);
-
-    --color-danger-surface: oklch(0.31 0.075 27);
-    --color-danger-text: oklch(0.85 0.09 27);
-
-    --color-info-surface: oklch(0.3 0.06 242);
-    --color-info-text: oklch(0.85 0.08 242);
-
-    --color-muted-surface: oklch(0.279 0.011 230);
-    --color-muted-text: oklch(0.869 0.011 230);
-
-    --color-surface-base: oklch(0.169 0.009 230);
-    --color-surface-raised: oklch(0.208 0.01 230);
-    --color-surface-overlay: oklch(0.245 0.011 230);
-    --color-surface-sunken: oklch(0.129 0.008 230);
-
-    --color-content: oklch(0.968 0.005 230);
-    --color-content-muted: oklch(0.775 0.013 230);
-    --color-content-subtle: oklch(0.65 0.014 230);
-    --color-content-inverse: oklch(0.169 0.009 230);
-
-    --color-border: oklch(0.31 0.011 230);
-    --color-border-strong: oklch(0.62 0.014 230);
-    --color-focus: oklch(0.851 0.11 165); /* primary-300 */
-
-    /* The accent moves up the ramp in the dark: the light-mode step is chosen
-     * to carry white text, and here it has to carry near-black on itself. */
-    --color-accent: oklch(0.774 0.132 165); /* primary-400 */
-    --color-accent-hover: oklch(0.851 0.11 165); /* primary-300 */
-    --color-accent-text: oklch(0.269 0.049 165); /* primary-950, on the accent fill */
-    --color-accent-on-surface: oklch(0.851 0.11 165); /* the brand as text or an icon */
-
-    /* The solid semantic colours lift a step: the light-mode values are tuned
-     * against white and go muddy on a dark surface. */
-    --color-success: oklch(0.696 0.148 152);
-    --color-warning: oklch(0.79 0.15 75);
-    --color-danger: oklch(0.68 0.185 27);
-    --color-info: oklch(0.7 0.13 242);
-    --color-muted: oklch(0.65 0.014 230);
-
-    /* A shadow cast by a light source is nearly invisible on a dark surface,
-     * so the same elevation is carried by a deeper, tighter shadow. */
-    --shadow-sm: 0 1px 2px 0 oklch(0 0 0 / 0.4);
-    --shadow-md: 0 4px 10px -2px oklch(0 0 0 / 0.5);
-    --shadow-lg: 0 12px 28px -6px oklch(0 0 0 / 0.6);
-  }
-}
-
-/*
- * Dark mode, part two: when the document asks for it.
- *
- * Identical values to the block above. `design-tokens.spec.ts` enforces that.
  */
 [data-theme='dark'] {
   --color-success-surface: oklch(0.29 0.055 152);
@@ -318,11 +253,12 @@
   /*
    * `color-scheme` is what makes the browser's own furniture — scrollbars,
    * checkboxes, date pickers, the canvas behind the page — follow the theme.
-   * Announcing both means the default tracks the operating system, exactly as
-   * the token blocks above do, and an explicit choice on the document pins it.
+   * It is kept in step with `data-theme` and never announces both: `light dark`
+   * would let a dark-preference device draw native controls dark on a light
+   * page. Light is the default, as it is for the tokens.
    */
   html {
-    color-scheme: light dark;
+    color-scheme: light;
   }
 
   html[data-theme='light'] {

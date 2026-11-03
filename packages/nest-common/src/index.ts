@@ -336,9 +336,11 @@ export {
 } from './openapi/zod-schema';
 export type { JsonSchema } from './openapi/zod-schema';
 export { publishedApiErrorSchema, publishedErrorDetailSchema } from './openapi/api-error';
+export { publishApiErrors, healthProbeErrorSchema } from './openapi/error-document';
 // Conformance checks of a published document against the real error bodies; for tests.
 export {
   errorEnvelopeProblems,
+  probeExceptionProblems,
   httpErrorBodyProblems,
   publishedErrorResponses,
   publishedPathOf,
@@ -354,6 +356,7 @@ export type {
   PublishedDocument,
   PublishedErrorResponse,
   PublishedSchema,
+  PublishedProbeException,
 } from './openapi/published-body';
 
 export { clientFailureCode } from './database/client-failure';

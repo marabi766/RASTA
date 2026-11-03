@@ -34,6 +34,8 @@
     "test:outbox-b2": "node --test --test-timeout=300000 scripts/outbox-b2-lib.test.mjs",
     "test:outbox-provenance-restoration-guard": "node --test --test-timeout=300000 scripts/outbox-provenance-restoration-guard.test.mjs",
     "test:url-parsing-guard": "node --test --test-timeout=300000 scripts/url-parsing-guard.test.mjs",
+    "prepush:scope": "node scripts/prepush-scope.mjs",
+    "test:prepush-scope": "node --test --test-timeout=300000 scripts/prepush-scope.test.mjs",
     "test:unit-step-concurrency": "node --test --test-timeout=540000 --import ./scripts/test-stall-watchdog.mjs scripts/check-unit-step-concurrency.test.mjs scripts/test-stall-watchdog.test.mjs && node scripts/check-unit-step-concurrency.mjs",
     "test:credential-fetch": "node --test --test-timeout=300000 scripts/credential-fetch.test.mjs",
     "test:config-disclosure": "node --test --test-timeout=300000 scripts/config-disclosure.test.mjs scripts/command-disclosure.test.mjs",

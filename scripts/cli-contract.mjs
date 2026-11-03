@@ -78,6 +78,21 @@ export const CLI_CONTRACT = Object.freeze({
   },
 
   // --- scripts ----------------------------------------------------------------
+  // A Git revision is resolved to a verified commit id; raw input is never echoed.
+  'scripts/prepush-scope.mjs': { accepts: { '--base': 'identifier' }, positionals: [] },
+  'scripts/prepush-scope-lib.mjs': {
+    other: [
+      '--cached',
+      '--dry',
+      '--end-of-options',
+      '--exclude-standard',
+      '--name-only',
+      '--no-renames',
+      '--others',
+      '--verify',
+      '-z',
+    ],
+  },
   'scripts/aggregation-campaign-accounting.mjs': {
     accepts: { '--reports-manifest': 'path' },
     positionals: ['path'],
@@ -576,7 +591,9 @@ export const CLI_CONTRACT = Object.freeze({
   'services/fleet-service/src/fleet/clear-transferred.cli.ts': { positionals: [] },
   'services/fleet-service/src/fleet/drain-check.cli.ts': { positionals: [] },
   'services/identity-service/src/keycloak/projection.cli.ts': { positionals: ['enum'] },
+  'services/identity-service/src/openapi/document.ts': { other: PRETTIER },
   'services/inventory-service/src/openapi/document.ts': { other: PRETTIER },
   'services/notification-service/src/openapi/document.ts': { other: PRETTIER },
+  'services/organization-service/src/openapi/document.ts': { other: PRETTIER },
   'services/procurement-service/src/openapi/document.ts': { other: PRETTIER },
 });
